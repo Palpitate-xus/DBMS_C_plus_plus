@@ -1739,24 +1739,40 @@ SortOp::SortOp(OpPtr child, const TableSchema& tbl,
 
 bool SortOp::open() {
     if (!child_->open()) return false;
+    size_t sortIdxPre = tbl_.len;
+    for (size_t i = 0; i < tbl_.len; ++i) {
+        if (tbl_.cols[i].dataName == orderByCol_) { sortIdxPre = i; break; }
+    }
+    // Extract each row's sort value WHILE the child's stored-NULL
+    // binding is still live (the binding is cleared on close).
     std::string row;
-    while (child_->next(row)) buffer_.push_back(std::move(row));
+    std::vector<std::string> preVals;
+    origins_.clear();
+    while (child_->next(row)) {
+        buffer_.push_back(std::move(row));
+        Operator::ScanOrigin org = child_->scanOrigin();
+        origins_.push_back(org);
+        // Rows not traced to a heap scan carry no stored-NULL bitmap:
+        // clear any stale binding so extraction reads raw values.
+        if (!org.engine) StorageEngine::unbindNullRow();
+        else StorageEngine::bindNullRow(org.engine, org.dbname, org.tablename, org.rid, tbl_.len);
+        if (sortIdxPre < tbl_.len)
+            preVals.push_back(StorageEngine::extractColumnValueStatic(
+                buffer_.back(), tbl_, sortIdxPre));
+    }
     if (child_->hasError()) return propagateChildError(child_.get(), "sort child failed");
     child_->close();
 
-    size_t sortIdx = tbl_.len;
-    for (size_t i = 0; i < tbl_.len; ++i) {
-        if (tbl_.cols[i].dataName == orderByCol_) { sortIdx = i; break; }
-    }
+    size_t sortIdx = sortIdxPre;
     if (sortIdx < tbl_.len) {
-        struct Item { std::string s; int64_t n; Date d; double f; bool isNull; };
+        struct Item { std::string s; int64_t n; Date d; double f; bool isNull; size_t originIdx; };
         std::vector<std::pair<std::string, Item>> items;
         const Column& scol = tbl_.cols[sortIdx];
-        for (auto& r : buffer_) {
-            std::string val = StorageEngine::extractColumnValueStatic(r, tbl_, sortIdx);
+        for (size_t ri = 0; ri < buffer_.size(); ++ri) {
+            std::string val = (ri < preVals.size()) ? preVals[ri] : "";
             // PG default: NULLS LAST for ASC, NULLS FIRST for DESC.
             const bool valNull = val.empty() || val == "NULL" || val == "null";
-            Item it{"", 0, {}, 0.0, valNull};
+            Item it{"", 0, {}, 0.0, valNull, ri};
             if (scol.dataType == "char" || scol.isVariableLength) {
                 it.s = val;
             } else if (scol.dataType == "date") {
@@ -1768,7 +1784,7 @@ bool SortOp::open() {
             } else {
                 it.n = val.empty() ? 0 : StorageEngine::parseInt(val);
             }
-            items.emplace_back(std::move(r), it);
+            items.emplace_back(std::move(buffer_[ri]), it);
         }
         std::sort(items.begin(), items.end(), [&](const auto& a, const auto& b) {
             if (a.second.isNull != b.second.isNull)
@@ -1779,7 +1795,12 @@ bool SortOp::open() {
             return asc_ ? (a.second.n < b.second.n) : (b.second.n < a.second.n);
         });
         buffer_.clear();
-        for (auto& it : items) buffer_.push_back(std::move(it.first));
+        sortedOrigins_.clear();
+        for (auto& it : items) {
+            buffer_.push_back(std::move(it.first));
+            sortedOrigins_.push_back(it.second.originIdx < origins_.size()
+                ? origins_[it.second.originIdx] : Operator::ScanOrigin{});
+        }
     }
     pos_ = 0;
     return true;
@@ -1788,6 +1809,16 @@ bool SortOp::open() {
 bool SortOp::next(std::string& outRow) {
     NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     if (pos_ >= buffer_.size()) return false;
+    // Re-bind stored-NULL visibility for the re-emitted row so
+    // downstream projection sees the correct null bitmap.
+    if (pos_ < sortedOrigins_.size()) {
+        const auto& org = sortedOrigins_[pos_];
+        if (org.engine && org.rid != 0)
+            StorageEngine::bindNullRow(org.engine, org.dbname, org.tablename,
+                                       org.rid, tbl_.len);
+        else
+            StorageEngine::unbindNullRow();
+    }
     outRow = buffer_[pos_];
     ++pos_;
     rtInstr_.emitted = true;

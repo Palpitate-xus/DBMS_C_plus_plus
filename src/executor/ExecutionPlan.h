@@ -35,6 +35,18 @@ public:
         return false;
     }
 
+    // Origin of the most recent next() row: the scan node that produced
+    // it (engine + location), for stored-NULL rebinding after buffering
+    // operators (sort, limit) re-emit rows later. Null origin when the
+    // operator does not trace to a heap scan.
+    struct ScanOrigin {
+        StorageEngine* engine = nullptr;
+        std::string dbname;
+        std::string tablename;
+        int64_t rid = 0;
+    };
+    virtual ScanOrigin scanOrigin() const { return ScanOrigin{}; }
+
     bool hasError() const override { return error_; }
     std::string errorMessage() const override { return errorMessage_; }
 
@@ -136,6 +148,13 @@ public:
     bool lastColumnIsNull(size_t colIdx) const override;
     void close() override;
     const std::string& tableName() const { return tablename_; }
+    // RID of the row emitted by the last next() call (0 before first).
+    int64_t lastRid() const { return lastRid_; }
+    ScanOrigin scanOrigin() const override {
+        ScanOrigin o; o.engine = engine_; o.dbname = dbname_;
+        o.tablename = tablename_; o.rid = lastRid_;
+        return o;
+    }
 
 private:
     StorageEngine* engine_;
@@ -304,6 +323,7 @@ public:
     bool lastColumnIsNull(size_t colIdx) const override {
         return child_->lastColumnIsNull(colIdx);
     }
+    ScanOrigin scanOrigin() const override { return child_->scanOrigin(); }
     const std::vector<StorageEngine::Condition>& conditions() const { return conds_; }
 
     // Index condition recheck: apply conditions that the index could not fully evaluate
@@ -576,6 +596,8 @@ private:
     std::string orderByCol_;
     bool asc_;
     std::vector<std::string> buffer_;
+    std::vector<Operator::ScanOrigin> origins_;  // parallel to buffer_ pre-sort
+    std::vector<Operator::ScanOrigin> sortedOrigins_;  // parallel to buffer_ post-sort
     size_t pos_ = 0;
 };
 
@@ -591,6 +613,7 @@ public:
     void close() override;
     Operator* child() const { return child_.get(); }
     size_t limit() const { return limit_; }
+    ScanOrigin scanOrigin() const override { return child_->scanOrigin(); }
 
 private:
     OpPtr child_;

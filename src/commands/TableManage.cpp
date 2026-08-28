@@ -20955,6 +20955,7 @@ std::vector<std::string> StorageEngine::groupAggregate(
     auto readGroupKey = [&](int64_t rid) -> std::string {
         std::string row;
         if (!readRowByRid(pa, rid, row, tbl)) return "";
+        NullRowBinding nbk(this, dbname, tablename, rid, tbl.len);
         std::string key;
         for (size_t idx : groupIdxs) {
             if (!key.empty()) key += "\x01";
@@ -21045,6 +21046,7 @@ std::vector<std::string> StorageEngine::groupAggregate(
             for (int64_t rid : gids) {
                 std::string row;
                 if (!readRowByRid(pa, rid, row, tbl)) continue;
+                NullRowBinding nbD(this, dbname, tablename, rid, tbl.len);
                 if (colIdx >= tbl.len) continue;
                 std::string val = extractColumnValue(row, tbl, colIdx);
                 if (!val.empty()) distinctVals.insert(val);
@@ -21056,6 +21058,7 @@ std::vector<std::string> StorageEngine::groupAggregate(
             for (int64_t rid : gids) {
                 std::string row;
                 if (!readRowByRid(pa, rid, row, tbl)) continue;
+                NullRowBinding nbG(this, dbname, tablename, rid, tbl.len);
                 // Check FILTER condition
                 if (!parsedFilters.empty()) {
                     bool pass = true;
@@ -21474,6 +21477,7 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
             for (int64_t rid : gids) {
                 std::string row;
                 if (!readRowByRid(pa, rid, row, tbl)) continue;
+                NullRowBinding nbD(this, dbname, tablename, rid, tbl.len);
                 if (colIdx >= tbl.len) continue;
                 std::string val = extractColumnValue(row, tbl, colIdx);
                 if (!val.empty()) distinctVals.insert(val);

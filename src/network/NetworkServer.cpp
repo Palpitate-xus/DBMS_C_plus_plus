@@ -759,6 +759,9 @@ std::string commandTagFor(const std::string& sql, const std::vector<std::string>
 QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
     QueryResult result;
     dbms::clearLastDmlResult();
+    // Stored-NULL row bindings must not leak across statements (a sort
+    // rebind from the previous statement would poison extraction here).
+    dbms::StorageEngine::unbindNullRow();
     std::string trimmed = trimText(sql);
     if (trimmed.empty()) {
         result.commandTag.clear();
