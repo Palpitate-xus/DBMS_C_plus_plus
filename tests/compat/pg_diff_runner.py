@@ -86,6 +86,28 @@ def reference_query(sql):
     return rows, state, tag, err.strip()
 
 
+def reference_headers(sql):
+    """Run one statement on reference PG and return its header names.
+
+    Unaligned psql prints the header line (field-sep joined), then the
+    data rows, then a "(N rows)" footer. The header is the FIRST line
+    when the statement produced a footer. Tag-only statements (DDL/DML)
+    print no footer, so [] is returned for them.
+    """
+    proc = subprocess.run(
+        ["docker", "exec", "-i", CONTAINER,
+         "psql", "-U", "postgres", "-d", "postgres",
+         "-v", "ON_ERROR_STOP=0", "-X", "-q", "-A",
+         "-F", "\x1f"],
+        input=sql.encode(), capture_output=True)
+    out = proc.stdout.decode()
+    lines = [ln for ln in out.split("\n") if ln != ""]
+    has_footer = any(re.match(r"^\((0|[1-9][0-9]*) rows?\)$", ln) for ln in lines)
+    if not has_footer or not lines:
+        return []
+    return lines[0].split("\x1f")
+
+
 def reference_multi(statements):
     """Run statements one-by-one, capturing per-statement outcomes."""
     results = []
@@ -103,8 +125,19 @@ def ours_query(client, sock, sql):
     rows = []
     state = None
     message = ""
+    headers = []
     for kind, body in messages:
-        if kind == b"D":
+        if kind == b"T":
+            # RowDescription: per field: name NUL, then table oid (i16),
+            # attr number (i16), type oid (i32), typlen (i16), typmod (i32),
+            # format code (i16).
+            n = int.from_bytes(body[0:2], "big")
+            off = 2
+            for _ in range(n):
+                z = body.index(b"\x00", off)
+                headers.append(body[off:z].decode())
+                off = z + 1 + 18
+        elif kind == b"D":
             # DataRow: int16 ncols, then int32 len + bytes each
             n = int.from_bytes(body[0:2], "big")
             off = 2
@@ -127,7 +160,7 @@ def ours_query(client, sock, sql):
                     state = value
                 elif tag == "M":
                     message = value
-    return rows, state, message
+    return rows, state, message, headers
 
 
 # --------------------------------------------------------------- normalizing
@@ -189,13 +222,14 @@ def run_case(name, stmts, client, sock):
     """Returns list of per-statement diff strings (empty when identical)."""
     ref = reference_multi(stmts)
     diffs = []
+    compare_headers = os.environ.get("PGDIFF_HEADERS", "1") == "1"
 
     ours = []
     for sql in stmts:
-        rows, state, message = ours_query(client, sock, sql)
-        ours.append((rows, state, message))
+        rows, state, message, ohead = ours_query(client, sock, sql)
+        ours.append((rows, state, message, ohead))
 
-    for sql, (rrows, rstate, rtag, rerr), (orows, ostate, omsg) in zip(stmts, ref, ours):
+    for sql, (rrows, rstate, rtag, rerr), (orows, ostate, omsg, ohead) in zip(stmts, ref, ours):
         rstate_n = rstate
         # psql reports bare ERROR without code when the message lacks one;
         # compare presence rather than exact code in that case
@@ -208,6 +242,10 @@ def run_case(name, stmts, client, sock):
                 pass  # both error, code unknown on PG side
             else:
                 diffs.append("%s: sqlstate differs: PG=%r ours=%r" % (sql, rstate_n, ostate))
+        if compare_headers and orows and ohead:
+            rhead = reference_headers(sql)
+            if rhead and rhead != ohead:
+                diffs.append("%s: headers differ\n  PG:   %r\n  ours: %r" % (sql, rhead, ohead))
     return diffs
 
 

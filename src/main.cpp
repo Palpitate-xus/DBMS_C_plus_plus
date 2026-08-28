@@ -5127,18 +5127,36 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             string low2;
             for (char c : expr) low2 += static_cast<char>(tolower(static_cast<unsigned char>(c)));
             {
+                // Only a TRAILING "::type" (cast of the whole expression)
+                // names the output after the type; a cast nested inside
+                // arithmetic ("1.5::numeric(4,2) + 1") leaves the default
+                // "?column?"/literal naming to the rules below.
                 size_t cc3 = string::npos;
                 bool inQ3 = false;
                 for (size_t k3 = 0; k3 + 1 < low2.size(); ++k3) {
                     if (low2[k3] == 39) inQ3 = !inQ3;
                     if (!inQ3 && low2[k3] == ':' && low2[k3 + 1] == ':') cc3 = k3;
                 }
+                bool trailing = false;
                 if (cc3 != string::npos) {
-                    string tn2 = trim(low2.substr(cc3 + 2));
+                    string after = low2.substr(cc3 + 2);
+                    string tn2 = trim(after);
                     size_t sp3 = tn2.find(' ');
-                    if (sp3 != string::npos) tn2 = tn2.substr(0, sp3);
+                    if (sp3 == string::npos) trailing = true;
+                }
+                if (cc3 != string::npos && trailing) {
+                    string tn2 = trim(low2.substr(cc3 + 2));
                     size_t p3 = tn2.find('(');
                     if (p3 != string::npos) tn2 = tn2.substr(0, p3);
+                    static const map<string, string> pgTn3 = {
+                        {"double precision", "float8"}, {"float", "float4"},
+                        {"real", "float4"}, {"int", "int4"}, {"integer", "int4"},
+                        {"bigint", "int8"}, {"smallint", "int2"},
+                        {"decimal", "numeric"}, {"character varying", "varchar"},
+                        {"character", "bpchar"}, {"boolean", "bool"},
+                    };
+                    auto tmap3 = pgTn3.find(trim(tn2));
+                    if (tmap3 != pgTn3.end()) tn2 = tmap3->second;
                     if (!tn2.empty() && tn2.find_first_not_of("abcdefghijklmnopqrstuvwxyz_0123456789") == string::npos) {
                         headers.push_back(tn2); goto headerDone;
                     }
@@ -5156,18 +5174,61 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                         {"bigint", "int8"}, {"smallint", "int2"},
                         {"int2", "int2"}, {"int4", "int4"}, {"int8", "int8"},
                         {"decimal", "numeric"}, {"character varying", "varchar"},
-                        {"character", "bpchar"},
+                        {"character", "bpchar"}, {"boolean", "bool"},
+                        {"numeric", "numeric"},
                         {"bool", "bool"},
                     };
                     size_t p4 = tname.find('(');
                     string tbase = (p4 == string::npos) ? tname : tname.substr(0, p4);
                     auto tmap = pgTn2.find(trim(tbase));
-                    if (tmap != pgTn2.end()) tname = tmap->second;
-                    if (tname.find(' ') == string::npos) { headers.push_back(tname); goto headerDone; }
+                    if (tmap != pgTn2.end()) tbase = tmap->second;
+                    if (tbase.find(' ') == string::npos) { headers.push_back(tbase); goto headerDone; }
                 }
             }
+            // Function-call projection: PG names the column after the
+            // lowercased function name ("to_char", "round", "power");
+            // trim variants map to btrim/ltrim/rtrim, and operator-style
+            // constructs name after the underlying function (timezone for
+            // AT TIME ZONE, overlaps for OVERLAPS).
+            {
+                if (low2.find(" at time zone ") != string::npos)
+                    { headers.push_back("timezone"); goto headerDone; }
+                if (low2.find(" overlaps ") != string::npos)
+                    { headers.push_back("overlaps"); goto headerDone; }
+                // Postfix IS on a function result is an expression.
+                {
+                    size_t isP = low2.rfind(" is null");
+                    if (isP == string::npos) isP = low2.rfind(" is not null");
+                    if (isP != string::npos) { headers.push_back("?column?"); goto headerDone; }
+                }
+                size_t fp = low2.find('(');
+                if (fp != string::npos && fp > 0) {
+                    string fname = low2.substr(0, fp);
+                    bool nameOk2 = !fname.empty();
+                    for (char fc3 : fname)
+                        if (!isalnum(static_cast<unsigned char>(fc3)) && fc3 != '_') { nameOk2 = false; break; }
+                    if (nameOk2 && isalpha(static_cast<unsigned char>(fname[0]))) {
+                        if (fname == "trim") {
+                            if (low2.find("leading") != string::npos) fname = "ltrim";
+                            else if (low2.find("trailing") != string::npos) fname = "rtrim";
+                            else fname = "btrim";
+                        }
+                        { headers.push_back(fname); goto headerDone; }
+                    }
+                }
+                // CASE expression: PG names the column "case".
+                if (low2.compare(0, 4, "case") == 0 &&
+                    (low2.size() == 4 || isspace(static_cast<unsigned char>(low2[4]))))
+                    { headers.push_back("case"); goto headerDone; }
+            }
             bool simple = expr.find(' ') == string::npos;
-            headers.push_back(simple ? expr : "?column?");
+            // PG: a positive numeric literal keeps its text as the name
+            // ("SELECT 5" -> "5"); a NEGATIVE literal or a quoted string
+            // is an expression and becomes "?column?".
+            bool negLit = !expr.empty() && expr[0] == '-';
+            bool strLit = expr.size() >= 2 && ((expr.front() == '\'' && expr.back() == '\'') ||
+                                               (expr.front() == '"' && expr.back() == '"'));
+            headers.push_back((simple && !negLit && !strLit) ? expr : "?column?");
         } else {
             headers.push_back(disp);
         }
@@ -15774,10 +15835,12 @@ if (sql.rfind("backup database", 0) == 0) {
                 for (const auto& ja : joinAggs) cout << ja.func << ' ';
                 cout << '\n';
             } else if (selectAll) {
+                // PG names SELECT * join columns unqualified (bare column
+                // names, left columns then right columns).
                 for (size_t i = 0; i < leftTbl.len; ++i)
-                    cout << leftPrefix << "." << leftTbl.cols[i].dataName << ' ';
+                    cout << leftTbl.cols[i].dataName << ' ';
                 for (size_t i = 0; i < rightTbl.len; ++i)
-                    cout << rightPrefix << "." << rightTbl.cols[i].dataName << ' ';
+                    cout << rightTbl.cols[i].dataName << ' ';
             } else {
                 for (const auto& c : requestedCols) cout << c << ' ';
             }

@@ -1184,7 +1184,10 @@ SQLSTATE。任何差异必须显式加入 allowlist 并注明原因与过期版�
 与 postfix `IS NULL` 解析修复、`NULL = NULL IS NULL` 的比较级 IS 绑定、
 bool_and/bool_or/every 表达式参数聚合以 t/f 渲染、WHERE 中括号表达式
 `(v > 5) IS [NOT] NULL` 的常量折叠语义、输出列命名 `?column?`/cast 列名/类型名
-（`(v+1)::text`→text、`v::text`→v、`CAST(2 AS int)`→int4 的 figure_colname 规则））、
+（`(v+1)::text`→text、`v::text`→v、`CAST(2 AS int)`→int4 的 figure_colname 规则，
+且差分运行器现已逐语句比较 RowDescription 输出列名：函数名列（to_char/round/
+trim→btrim/ltrim）、CASE→case、AT TIME ZONE→timezone、OVERLAPS→overlaps、负数字面量
+与字符串字面量→?column?、JOIN `SELECT *` 的无限定列名等全部对齐））、
 整数/numeric 除法（含 PG `select_div_scale` 的 16/20 位小数规则）、
 CASE 表达式、聚合（sum/count/avg/min/max、GROUP BY、FILTER 子句、
 聚合间算术 `count(*) - count(v)`/`sum(v)/count(*)`/`avg(v)*2` 单行求值）、
