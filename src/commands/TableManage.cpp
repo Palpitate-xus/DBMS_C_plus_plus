@@ -18759,6 +18759,67 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         return "";
     }
     if (expr.funcName == "cast" && expr.funcArgs.size() >= 2) {
+        // Parenthesized/arithmetic operand ("(v + 1)::text"): substitute
+        // column tokens with row values, then evaluate the arithmetic via
+        // the expression evaluator before the type conversion below.
+        {
+            std::string op0 = expr.funcArgs[0];
+            while (op0.size() >= 2 && op0.front() == '(' && op0.back() == ')') {
+                int dP = 0; bool bal = true;
+                for (size_t ip = 0; ip < op0.size(); ++ip) {
+                    if (op0[ip] == '(') ++dP;
+                    else if (op0[ip] == ')') { --dP; if (dP == 0 && ip + 1 != op0.size()) { bal = false; break; } }
+                }
+                if (!bal) break;
+                op0 = op0.substr(1, op0.size() - 2);
+            }
+            bool hasOp = false;
+            {
+                int d5 = 0; bool inQ5 = false;
+                for (char c5 : op0) {
+                    if (c5 == 39) inQ5 = !inQ5;
+                    if (inQ5) continue;
+                    if (c5 == '(') ++d5;
+                    else if (c5 == ')') --d5;
+                    else if (d5 == 0 && (c5 == '+' || c5 == '-' || c5 == '*' || c5 == '/')) { hasOp = true; break; }
+                }
+            }
+            if (hasOp) {
+                std::string synth;
+                std::string tok;
+                auto flushTok5 = [&](bool wantVal) {
+                    if (tok.empty()) return;
+                    bool ident = isalpha((unsigned char)tok[0]) || tok[0] == '_';
+                    for (char c6 : tok)
+                        if (!isalnum((unsigned char)c6) && c6 != '_') { ident = false; break; }
+                    if (wantVal && ident) {
+                        std::string v5 = getVal(tok);
+                        synth += v5;
+                    } else {
+                        synth += tok;
+                    }
+                    tok.clear();
+                };
+                for (char c7 : op0) {
+                    if (isalnum((unsigned char)c7) || c7 == '_') { tok += c7; continue; }
+                    flushTok5(true);
+                    synth += c7;
+                }
+                flushTok5(true);
+                if (!synth.empty()) {
+                    std::string trimmed = synth;
+                    while (!trimmed.empty() && (trimmed.front() == '(' || trimmed.front() == ' ')) trimmed.erase(0, 1);
+                    while (!trimmed.empty() && (trimmed.back() == ')' || trimmed.back() == ' ')) trimmed.pop_back();
+                    auto r5 = dbms::ExprHelper::evalString(trimmed, {}, {}, dbname);
+                    if (r5.ok && !r5.isNull) {
+                        StorageEngine::SelectExpr sub5;
+                        sub5.funcName = "cast";
+                        sub5.funcArgs = {r5.value, expr.funcArgs[1]};
+                        return applyScalarFunc(sub5, rowBuffer, tbl, engine, dbname);
+                    }
+                }
+            }
+        }
         std::string val = getVal(expr.funcArgs[0]);
         std::string targetType = expr.funcArgs[1];
         if (targetType == "char" || targetType == "varchar" || targetType == "text" ||

@@ -1183,7 +1183,8 @@ SQLSTATE。任何差异必须显式加入 allowlist 并注明原因与过期版�
 （含 `NOT NULL`→NULL 三值逻辑、`NULL::text IS NULL` 的 `::` 后缀 cast
 与 postfix `IS NULL` 解析修复、`NULL = NULL IS NULL` 的比较级 IS 绑定、
 bool_and/bool_or/every 表达式参数聚合以 t/f 渲染、WHERE 中括号表达式
-`(v > 5) IS [NOT] NULL` 的常量折叠语义）、
+`(v > 5) IS [NOT] NULL` 的常量折叠语义、输出列命名 `?column?`/cast 列名/类型名
+（`(v+1)::text`→text、`v::text`→v、`CAST(2 AS int)`→int4 的 figure_colname 规则））、
 整数/numeric 除法（含 PG `select_div_scale` 的 16/20 位小数规则）、
 CASE 表达式、聚合（sum/count/avg/min/max、GROUP BY、FILTER 子句、
 聚合间算术 `count(*) - count(v)`/`sum(v)/count(*)`/`avg(v)*2` 单行求值）、

@@ -5126,11 +5126,43 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             // until structured results carry exact headers (P0-02).
             string low2;
             for (char c : expr) low2 += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+            {
+                size_t cc3 = string::npos;
+                bool inQ3 = false;
+                for (size_t k3 = 0; k3 + 1 < low2.size(); ++k3) {
+                    if (low2[k3] == 39) inQ3 = !inQ3;
+                    if (!inQ3 && low2[k3] == ':' && low2[k3 + 1] == ':') cc3 = k3;
+                }
+                if (cc3 != string::npos) {
+                    string tn2 = trim(low2.substr(cc3 + 2));
+                    size_t sp3 = tn2.find(' ');
+                    if (sp3 != string::npos) tn2 = tn2.substr(0, sp3);
+                    size_t p3 = tn2.find('(');
+                    if (p3 != string::npos) tn2 = tn2.substr(0, p3);
+                    if (!tn2.empty() && tn2.find_first_not_of("abcdefghijklmnopqrstuvwxyz_0123456789") == string::npos) {
+                        headers.push_back(tn2); goto headerDone;
+                    }
+                }
+            }
             if (low2.compare(0, 5, "cast(") == 0) {
                 size_t asPos = low2.rfind(" as ");
                 if (asPos != string::npos) {
                     string tname = trim(expr.substr(asPos + 4));
                     if (!tname.empty() && tname.back() == ')') tname.pop_back();
+                    // PG type-oid names: int4/int8/float8-style headers.
+                    static const map<string, string> pgTn2 = {
+                        {"double precision", "float8"}, {"float", "float4"},
+                        {"real", "float4"}, {"int", "int4"}, {"integer", "int4"},
+                        {"bigint", "int8"}, {"smallint", "int2"},
+                        {"int2", "int2"}, {"int4", "int4"}, {"int8", "int8"},
+                        {"decimal", "numeric"}, {"character varying", "varchar"},
+                        {"character", "bpchar"},
+                        {"bool", "bool"},
+                    };
+                    size_t p4 = tname.find('(');
+                    string tbase = (p4 == string::npos) ? tname : tname.substr(0, p4);
+                    auto tmap = pgTn2.find(trim(tbase));
+                    if (tmap != pgTn2.end()) tname = tmap->second;
                     if (tname.find(' ') == string::npos) { headers.push_back(tname); goto headerDone; }
                 }
             }
@@ -16906,7 +16938,20 @@ if (sql.rfind("backup database", 0) == 0) {
                             string tname = (pp == string::npos) ? rhsC : rhsC.substr(0, pp);
                             for (auto& tc2 : tname) tc2 = static_cast<char>(tolower(static_cast<unsigned char>(tc2)));
                             static const set<string> castTypes = {"int","integer","bigint","smallint","text","varchar","char","numeric","decimal","float","double","real","boolean","bool","date","timestamp","timestamptz","time","interval","json","jsonb"};
-                            if (okT && castTypes.count(tname) && !lhsC.empty() && lhsC.find(' ') == string::npos)
+                            bool okLhs = !lhsC.empty();
+                            {
+                                int d4 = 0; bool inQ4 = false;
+                                for (size_t li = 0; li < lhsC.size(); ++li) {
+                                    char lc4 = lhsC[li];
+                                    if (lc4 == 39) inQ4 = !inQ4;
+                                    if (inQ4) continue;
+                                    if (lc4 == '(') ++d4;
+                                    else if (lc4 == ')') --d4;
+                                    else if (d4 == 0 && isspace(static_cast<unsigned char>(lc4))) { okLhs = false; break; }
+                                }
+                                if (d4 != 0) okLhs = false;
+                            }
+                            if (okT && castTypes.count(tname) && okLhs)
                                 itemBase = "cast(" + lhsC + " as " + rhsC + ")" + tail2;
                         }
                     }
@@ -16933,6 +16978,10 @@ if (sql.rfind("backup database", 0) == 0) {
                                     itemBase = (string(iop) == " is null")
                                         ? "is_null(" + operand + ")"
                                         : "is_not_null(" + operand + ")";
+                                    // PG header naming: a postfix IS rewrite is an
+                                    // expression, not a function call — project as
+                                    // "?column?" unless the user gave an alias.
+                                    if (itemAlias.empty()) itemAlias = "?column?";
                                 }
                                 break;
                             }
@@ -16990,6 +17039,22 @@ if (sql.rfind("backup database", 0) == 0) {
                             if (func == "cast") {
                                 auto castArgs = splitFuncArgs(arg);
                                 if (castArgs.size() >= 2) {
+                                    // PG figure_colname: a cast of a bare column
+                                    // reference ("v::text", "CAST(v AS text)")
+                                    // keeps the column's name as the header; a cast
+                                    // of any other expression (literal, arithmetic)
+                                    // names the output after the target type.
+                                    string opName = trim(castArgs[0]);
+                                    bool plainCol = !opName.empty();
+                                    for (size_t oci = 0; oci < opName.size(); ++oci) {
+                                        char oc = opName[oci];
+                                        if (isalnum(static_cast<unsigned char>(oc)) || oc == '_') continue;
+                                        if (oc == '.' && oci > 0 && oci + 1 < opName.size()) continue;
+                                        plainCol = false; break;
+                                    }
+                                    if (plainCol && !isdigit(static_cast<unsigned char>(opName[0]))) {
+                                        headerName = opName;
+                                    } else {
                                     string targetType;
                                     for (char tc : castArgs[1])
                                         targetType += static_cast<char>(tolower(static_cast<unsigned char>(tc)));
@@ -17013,6 +17078,7 @@ if (sql.rfind("backup database", 0) == 0) {
                                     if (tnParen != string::npos) tnBase = tnBase.substr(0, tnParen);
                                     auto tn = pgTypeNames.find(trim(tnBase));
                                     if (tn != pgTypeNames.end()) headerName = tn->second;
+                                    }
                                 }
                             }
                             expr.displayName = itemAlias.empty() ? headerName : itemAlias;
