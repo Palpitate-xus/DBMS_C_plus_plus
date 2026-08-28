@@ -18012,6 +18012,56 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     // (no precedence), for + - * / % on numeric operands.  Operands may be
     // bare columns (row-resolved via getVal), integer/float literals, or
     // quoted strings (string concat for '+').
+    // Aggregate-call operands inside arithmetic items
+    // ("count(*) - count(v)"): resolve each aggregate sub-call once
+    // per evaluation via the engine's aggregate machinery, then let the
+    // normal arithmetic path combine the numeric results.
+    if (expr.funcName == "arith") {
+        bool anyAgg = false;
+        for (const auto& a : expr.funcArgs) {
+            static const char* afns[] = {"count", "sum", "avg", "min", "max",
+                                        "bool_and", "bool_or", "every"};
+            for (const char* fn : afns) {
+                size_t fl = strlen(fn);
+                if (a.size() > fl + 1 && a.compare(0, fl, fn) == 0 && a[fl] == '(' &&
+                    a.back() == ')') { anyAgg = true; break; }
+            }
+            if (anyAgg) break;
+        }
+        if (anyAgg && engine) {
+            dbms::StorageEngine::SelectExpr fixed = expr;
+            for (auto& a : fixed.funcArgs) {
+                static const char* afns2[] = {"count", "sum", "avg", "min", "max",
+                                            "bool_and", "bool_or", "every"};
+                bool done = false;
+                for (const char* fn : afns2) {
+                    if (done) break;
+                    size_t fl = strlen(fn);
+                    if (a.size() <= fl + 1 || a.compare(0, fl, fn) != 0 || a[fl] != '(')
+                        continue;
+                    std::string fnLow(fn);
+                    std::string ar = a.substr(fl + 1, a.size() - fl - 2);
+                    while (!ar.empty() && isspace((unsigned char)ar.front())) ar.erase(0, 1);
+                    while (!ar.empty() && isspace((unsigned char)ar.back())) ar.pop_back();
+                    dbms::StorageEngine::AggItem one;
+                    if (ar == "*") { one.func = "count"; one.arg = "*"; }
+                    else { one.func = fnLow; one.arg = ar; }
+                    auto res = engine->aggregate(dbname, tbl.tablename, {}, {one});
+                    std::string val;
+                    for (const auto& r : res) {
+                        std::string t = r;
+                        while (!t.empty() && (t.back() == ' ' || t.back() == '\n')) t.pop_back();
+                        if (!t.empty()) { val = t; break; }
+                    }
+                    if (val.empty() || val == "NULL") val = "0";
+                    a = val;
+                    done = true;
+                }
+            }
+            return applyScalarFunc(fixed, rowBuffer, tbl, engine, dbname);
+        }
+    }
+
     if (expr.funcName == "arith" && expr.funcArgs.size() == 3) {
         // INTEGER division: int / int truncates toward zero (PG).
         auto isIntType = [](const std::string& dt) {
@@ -20016,6 +20066,30 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
         }
     }
 
+    // Aggregate-arithmetic projection ("count(*) - count(v)"):
+    // every operand is a table-level aggregate, so the result is a
+    // single row regardless of the table's row count (PG semantics).
+    bool allAggArith = !exprs.empty();
+    {
+        static const char* afns3[] = {"count", "sum", "avg", "min", "max",
+                                    "bool_and", "bool_or", "every"};
+        for (const auto& ex : exprs) {
+            bool thisAgg = false;
+            if (ex.isScalar && ex.funcName == "arith") {
+                for (const auto& a : ex.funcArgs) {
+                    for (const char* fn : afns3) {
+                        size_t fl = strlen(fn);
+                        if (a.size() > fl + 1 && a.compare(0, fl, fn) == 0 && a[fl] == '(' &&
+                            a.back() == ')') { thisAgg = true; break; }
+                    }
+                    if (thisAgg) break;
+                }
+            }
+            if (!thisAgg) { allAggArith = false; break; }
+        }
+    }
+    if (allAggArith && matchRows.size() > 1)
+        matchRows.resize(1);
     for (auto& mr : matchRows) {
         if (hasUnnest) {
             // Compute all column values first

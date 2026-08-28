@@ -1184,7 +1184,8 @@ SQLSTATE。任何差异必须显式加入 allowlist 并注明原因与过期版�
 与 postfix `IS NULL` 解析修复、`NULL = NULL IS NULL` 的比较级 IS 绑定、
 bool_and/bool_or/every 表达式参数聚合以 t/f 渲染）、
 整数/numeric 除法（含 PG `select_div_scale` 的 16/20 位小数规则）、
-CASE 表达式、聚合（sum/count/avg/min/max、GROUP BY、FILTER 子句）、
+CASE 表达式、聚合（sum/count/avg/min/max、GROUP BY、FILTER 子句、
+聚合间算术 `count(*) - count(v)`/`sum(v)/count(*)`/`avg(v)*2` 单行求值）、
 显式/隐式类型转换（CAST(x AS t) 前缀语法、`::` 后缀语法、舍入与
 布尔规则）、有状态 DDL/DML 往返、JOIN（inner/left/right/cross 及
 join 上的纯聚合）、子查询（WHERE 标量子查询、IN/NOT IN、HAVING、
