@@ -6379,6 +6379,18 @@ static thread_local size_t g_nullRowNatts = 0;
 static thread_local std::string g_nullRowTable;
 static thread_local std::string g_nullRowDb;
 
+void StorageEngine::bindNullRow(const StorageEngine* eng, const std::string& db,
+                                const std::string& table, int64_t rid, size_t natts) {
+    if (!eng || rid < 0) return;
+    g_nullRowEngine = eng; g_nullRowRid = rid;
+    g_nullRowNatts = natts; g_nullRowTable = table; g_nullRowDb = db;
+}
+
+void StorageEngine::unbindNullRow() {
+    g_nullRowEngine = nullptr; g_nullRowRid = -1;
+    g_nullRowNatts = 0; g_nullRowTable.clear(); g_nullRowDb.clear();
+}
+
 class NullRowBinding {
 public:
     NullRowBinding(const StorageEngine* eng, const std::string& db,

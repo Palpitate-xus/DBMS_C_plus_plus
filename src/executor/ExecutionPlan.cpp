@@ -208,6 +208,9 @@ bool TableScanOp::next(std::string& outRow) {
     lastRid_ = rows_[pos_].first;
     outRow = rows_[pos_].second;
     ++pos_;
+    // Bind stored-NULL visibility for the row handed upstream so
+    // projections see the heap null bitmap instead of zero values.
+    StorageEngine::bindNullRow(engine_, dbname_, tablename_, lastRid_, tbl_.len);
     rtInstr_.emitted = true;
     return true;
 }
@@ -219,6 +222,7 @@ bool TableScanOp::lastColumnIsNull(size_t colIdx) const {
 void TableScanOp::close() {
     rows_.clear();
     lastRid_ = 0;
+    StorageEngine::unbindNullRow();
     statsRecorded_ = false;
 }
 

@@ -910,6 +910,13 @@ public:
                            int64_t rid, size_t colIdx) const;
     static void decodeRid(int64_t rid, uint32_t& pageId, uint16_t& slotId);
 
+    // Stored-NULL row binding: scan-style consumers (TableScanOp) bind
+    // the current row so extractColumnValue[Static] consult the heap
+    // null bitmap for the row being projected. unbind clears it.
+    static void bindNullRow(const StorageEngine* eng, const std::string& db,
+                            const std::string& table, int64_t rid, size_t natts);
+    static void unbindNullRow();
+
     // MVCC ReadView
     struct ReadView {
         ReadView()
