@@ -6368,10 +6368,64 @@ static bool normalizeComposite(const std::string& in, const StorageEngine::Compo
     return true;
 }
 
+// ---------------------------------------------------------------------
+// Stored-NULL row binding: scan loops bind the current row (engine, rid,
+// table) so extractColumnValue can consult the heap null bitmap for the
+// row being projected. Unbound paths keep raw extraction.
+// ---------------------------------------------------------------------
+static thread_local const StorageEngine* g_nullRowEngine = nullptr;
+static thread_local int64_t g_nullRowRid = -1;
+static thread_local size_t g_nullRowNatts = 0;
+static thread_local std::string g_nullRowTable;
+static thread_local std::string g_nullRowDb;
+
+class NullRowBinding {
+public:
+    NullRowBinding(const StorageEngine* eng, const std::string& db,
+                   const std::string& table, int64_t rid, size_t natts) {
+        if (!eng || rid < 0) return;
+        saved_ = (g_nullRowEngine != nullptr);
+        if (saved_) { oldEng_ = g_nullRowEngine; oldRid_ = g_nullRowRid;
+                      oldNatts_ = g_nullRowNatts; oldTable_ = g_nullRowTable; oldDb_ = g_nullRowDb; }
+        g_nullRowEngine = eng; g_nullRowRid = rid;
+        g_nullRowNatts = natts; g_nullRowTable = table; g_nullRowDb = db;
+        active_ = true;
+    }
+    ~NullRowBinding() {
+        if (!active_) return;
+        if (saved_) {
+            g_nullRowEngine = oldEng_; g_nullRowRid = oldRid_;
+            g_nullRowNatts = oldNatts_; g_nullRowTable = oldTable_; g_nullRowDb = oldDb_;
+        } else {
+            g_nullRowEngine = nullptr; g_nullRowRid = -1;
+            g_nullRowNatts = 0; g_nullRowTable.clear(); g_nullRowDb.clear();
+        }
+    }
+private:
+    bool active_ = false;
+    bool saved_ = false;
+    const StorageEngine* oldEng_ = nullptr;
+    int64_t oldRid_ = -1;
+    size_t oldNatts_ = 0;
+    std::string oldTable_;
+    std::string oldDb_;
+};
+
+
 std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer,
                                                      const TableSchema& tbl, size_t colIdx) {
     if (colIdx >= tbl.len) return "";
     const Column& col = tbl.cols[colIdx];
+
+    // Stored-NULL visibility (see NullRowBinding above): when a scan
+    // loop bound the current row, physically-NULL columns read as "".
+    if (g_nullRowEngine && g_nullRowRid >= 0 && colIdx < g_nullRowNatts &&
+        tbl.tablename == g_nullRowTable) {
+        if (g_nullRowEngine->isColumnNullByRid(g_nullRowDb, tbl.tablename,
+                                               g_nullRowRid, colIdx)) {
+            return "";
+        }
+    }
 
     if (col.isVariableLength) {
         // Variable-length column: look up in var offset array
@@ -6492,12 +6546,26 @@ std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer
     }
 }
 
+
 std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
                                                const TableSchema& tbl, size_t colIdx,
                                                const std::string& dbname,
                                                bool computeVirtual) {
     if (colIdx >= tbl.len) return "";
     const Column& col = tbl.cols[colIdx];
+
+    // Stored-NULL visibility: when a scan loop has bound the current
+    // row's identity (rid + engine), consult the heap null bitmap so a
+    // physically-NULL column reads as "" instead of its zero value.
+    // Paths that don't bind a row (constant evaluation, index keys,
+    // condition evaluation) keep the raw behavior.
+    if (g_nullRowEngine && g_nullRowRid >= 0 && colIdx < g_nullRowNatts &&
+        tbl.tablename == g_nullRowTable) {
+        if (g_nullRowEngine->isColumnNullByRid(g_nullRowDb, tbl.tablename,
+                                               g_nullRowRid, colIdx)) {
+            return "";
+        }
+    }
 
     // Compute VIRTUAL generated columns on demand at query time.
     if (computeVirtual && !dbname.empty() && col.generatedKind == 'v' && !col.generatedExpr.empty()) {
@@ -17533,6 +17601,7 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
         std::vector<SortKey> keys;
         for (auto& mr : matchRows) {
             SortKey k{mr.first, {}, {}};
+            NullRowBinding nbS(this, dbname, tbl.tablename, mr.first, tbl.len);
             for (const auto& spec : orderBy) {
                 size_t sortIdx = tbl.len;
                 for (size_t i = 0; i < tbl.len; ++i) {
@@ -20054,6 +20123,7 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
         std::vector<SortKey> keys;
         for (auto& mr : matchRows) {
             SortKey k{mr.first, {}, {}};
+            NullRowBinding nbS(this, dbname, tbl.tablename, mr.first, tbl.len);
             for (const auto& spec : orderBy) {
                 size_t sortIdx = tbl.len;
                 for (size_t i = 0; i < tbl.len; ++i) {
@@ -20152,6 +20222,8 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
     if (allAggArith && matchRows.size() > 1)
         matchRows.resize(1);
     for (auto& mr : matchRows) {
+        // Bind stored-NULL visibility for the row being projected.
+        NullRowBinding nbP(this, dbname, tbl.tablename, mr.first, tbl.len);
         if (hasUnnest) {
             // Compute all column values first
             std::vector<std::string> vals;
@@ -20209,7 +20281,7 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
                 } else {
                     for (size_t i = 0; i < tbl.len; ++i) {
                         if (tbl.cols[i].dataName == expr.colName) {
-                            val = extractColumnValue(mr.second, tbl, i);
+                            val = extractColumnValue(mr.second, tbl, i, dbname);
                             break;
                         }
                     }
@@ -20458,6 +20530,7 @@ std::vector<std::string> StorageEngine::aggregate(
             for (int64_t rid : matchIds) {
                 std::string row;
                 if (!readRowByRid(pa, rid, row, tbl)) continue;
+                NullRowBinding nbD(this, dbname, tablename, rid, tbl.len);
                 // Check FILTER condition
                 if (!filterConds.empty()) {
                     bool pass = true;
@@ -20475,6 +20548,7 @@ std::vector<std::string> StorageEngine::aggregate(
             for (int64_t rid : matchIds) {
                 std::string row;
                 if (!readRowByRid(pa, rid, row, tbl)) continue;
+                NullRowBinding nb(this, dbname, tablename, rid, tbl.len);
                 // Check FILTER condition
                 if (!filterConds.empty()) {
                     bool pass = true;

@@ -1182,7 +1182,8 @@ SQLSTATE。任何差异必须显式加入 allowlist 并注明原因与过期版�
 当前覆盖（69 个用例文件）：算术、字符串函数、布尔/NULL 三值逻辑
 （含 `NOT NULL`→NULL 三值逻辑、`NULL::text IS NULL` 的 `::` 后缀 cast
 与 postfix `IS NULL` 解析修复、`NULL = NULL IS NULL` 的比较级 IS 绑定、
-bool_and/bool_or/every 表达式参数聚合以 t/f 渲染、WHERE 中括号表达式
+bool_and/bool_or/every 表达式参数聚合以 t/f 渲染、存储 NULL 经表达式投影
+（`v::text`/`v + 1` 对物理 NULL 输出 NULL）的 NullRowBinding 机制、WHERE 中括号表达式
 `(v > 5) IS [NOT] NULL` 的常量折叠语义、输出列命名 `?column?`/cast 列名/类型名
 （`(v+1)::text`→text、`v::text`→v、`CAST(2 AS int)`→int4 的 figure_colname 规则，
 且差分运行器现已逐语句比较 RowDescription 输出列名：函数名列（to_char/round/
