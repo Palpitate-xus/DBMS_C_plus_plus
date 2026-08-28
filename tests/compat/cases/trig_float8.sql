@@ -1,0 +1,13 @@
+-- trig/float8 shortest-repr presentation
+SELECT sin(1)
+SELECT cos(1)
+SELECT tan(1)
+SELECT asin(0.5)
+SELECT acos(0.5)
+SELECT atan2(1, 2)
+SELECT degrees(1)
+SELECT radians(90)
+SELECT pi()
+SELECT cot(1)
+SELECT sinh(1)
+SELECT cbrt(28)
