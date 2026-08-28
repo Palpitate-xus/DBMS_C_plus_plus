@@ -975,9 +975,21 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
     static const std::set<std::string> arithOps = {"+", "-", "*", "/", "%", "^"};
     if (arithOps.count(op)) return applyArithmetic(op, l, r);
 
-    // String concatenation
+    // String concatenation; SQL arrays concatenate as arrays (PG ||).
     if (op == "||") {
         if (l.isNull || r.isNull) return ExprValue("text", "", true);
+        auto isArrayTxt = [](const std::string& v) {
+            std::string s = trimStr(v);
+            return s.size() >= 2 && s.front() == 0x7B && s.back() == 0x7D;
+        };
+        if (isArrayTxt(l.value) && isArrayTxt(r.value)) {
+            std::string a = trimStr(l.value), b = trimStr(r.value);
+            std::string inner = a.substr(1, a.size() - 2);
+            std::string add = b.substr(1, b.size() - 2);
+            std::string out = inner;
+            if (!add.empty()) out += (inner.empty() ? "" : ",") + add;
+            return ExprValue("text", std::string(1, 0x7B) + out + std::string(1, 0x7D), false);
+        }
         return ExprValue("text", l.value + r.value, false);
     }
 
@@ -3649,6 +3661,27 @@ void ExprEvaluator::registerBuiltins() {
         return ExprValue("ARRAY", out, false);
     };
     // array_position(arr, elem) — 1-based index of first matching element, NULL if absent
+    // array_dims(arr) — dimensions as PG text, e.g. [1:3].
+    functions_["array_dims"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
+        std::vector<std::string> elems;
+        std::string t = trimStr(a[0].value);
+        if (t.size() >= 2 && t.front() == 0x7B && t.back() == 0x7D) {
+            std::string inner = t.substr(1, t.size() - 2);
+            std::string cur;
+            int d = 0;
+            for (char c : inner) {
+                if (c == 0x7B || c == 0x5B) ++d;
+                else if (c == 0x7D || c == 0x5D) --d;
+                if (c == 44 && d == 0) { elems.push_back(trimStr(cur)); cur.clear(); }
+                else cur += c;
+            }
+            if (!trimStr(cur).empty()) elems.push_back(trimStr(cur));
+        }
+        if (elems.empty()) return ExprValue("text", "", true);
+        return ExprValue("text", "[1:" + std::to_string(elems.size()) + "]", false);
+    };
+
     functions_["array_position"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull) return ExprValue("integer", "", true);
         std::vector<std::string> elems;

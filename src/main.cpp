@@ -684,6 +684,7 @@ static bool isScalarFunc(const string& name) {
                                          "split_part",
                                          "uuid_generate",
                                          "array_get", "array_length", "array_contains",
+                                          "array_position", "array_dims", "cardinality",
                                          "unnest",
                                          "subquery",
                                          "current_user", "session_user"};
