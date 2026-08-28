@@ -696,8 +696,8 @@ static vector<string> splitSelectColumns(const string& s) {
     int parenDepth = 0;
     string current;
     while (i < s.size()) {
-        if (s[i] == '(') parenDepth++;
-        else if (s[i] == ')') parenDepth--;
+        if (s[i] == '(' || s[i] == '[') parenDepth++;
+        else if (s[i] == ')' || s[i] == ']') parenDepth--;
         else if (s[i] == ',' && parenDepth == 0) {
             cols.push_back(trim(current));
             current.clear();
@@ -3958,9 +3958,9 @@ static vector<string> splitTopLevelComma(const string& s) {
             continue;
         }
         if (!inQuote) {
-            if (c == '(') {
+            if (c == '(' || c == '[') {
                 ++parenDepth;
-            } else if (c == ')') {
+            } else if (c == ')' || c == ']') {
                 if (parenDepth > 0) --parenDepth;
             } else if (c == ',' && parenDepth == 0) {
                 parts.push_back(trim(current));
@@ -4961,8 +4961,8 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             char c = cols[i];
             if (c == '\'' ) inStr = !inStr;
             if (!inStr) {
-                if (c == '(') ++depth;
-                else if (c == ')') --depth;
+                if (c == '(' || c == '[') ++depth;
+                else if (c == ')' || c == ']') --depth;
                 else if (c == ',' && depth == 0) {
                     items.push_back(trim(cur));
                     cur.clear();

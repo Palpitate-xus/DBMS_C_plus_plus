@@ -451,6 +451,60 @@ std::vector<std::string> SQLParser::tokenize(const std::string& sql) {
             else prev.clear();
         }
     }
+    // PostgreSQL OVERLAPS: rewrite the row-value form
+    //   (s1, e1) OVERLAPS (s2, e2)
+    // into a plain function call  overlaps(s1, e1, s2, e2)
+    // so the generic expression parser never sees row constructors.
+    {
+        for (size_t i = 0; i < tokens.size(); ++i) {
+            if (toLower(tokens[i]) != "overlaps") continue;
+            if (i == 0 || tokens[i - 1] != ")") continue;
+            size_t depth = 0;
+            size_t ls = i;
+            bool found = false;
+            for (size_t j = i - 1; j-- > 0;) {
+                if (tokens[j] == ")") ++depth;
+                else if (tokens[j] == "(") {
+                    if (depth == 0) { ls = j; found = true; break; }
+                    --depth;
+                }
+            }
+            if (!found) continue;
+            size_t ge = i + 1;
+            if (ge >= tokens.size() || tokens[ge] != "(") continue;
+            depth = 0;
+            size_t re = ge;
+            for (size_t j = ge; j < tokens.size(); ++j) {
+                if (tokens[j] == "(") ++depth;
+                else if (tokens[j] == ")") { --depth; if (depth == 0) { re = j; break; } }
+            }
+            if (re == ge) continue;
+            auto topLevelComma = [&](size_t a, size_t b) -> int {
+                int d = 0, n = 0;
+                for (size_t j = a; j <= b; ++j) {
+                    if (tokens[j] == "(") ++d;
+                    else if (tokens[j] == ")") --d;
+                    else if (tokens[j] == "," && d == 0) ++n;
+                }
+                return n;
+            };
+            if (topLevelComma(ls + 1, i - 2) != 1) continue;
+            if (topLevelComma(ge + 1, re - 1) != 1) continue;
+            std::vector<std::string> out;
+            out.reserve(tokens.size());
+            for (size_t j = 0; j < ls; ++j) out.push_back(tokens[j]);
+            out.push_back("overlaps");
+            out.push_back("(");
+            for (size_t j = ls + 1; j <= i - 2; ++j) out.push_back(tokens[j]);
+            out.push_back(",");
+            for (size_t j = ge + 1; j <= re - 1; ++j) out.push_back(tokens[j]);
+            out.push_back(")");
+            for (size_t j = re + 1; j < tokens.size(); ++j) out.push_back(tokens[j]);
+            tokens = out;
+            break;
+        }
+    }
+
     return tokens;
 }
 
@@ -1298,6 +1352,7 @@ static ExprPtr parseJsonOpExpr(const std::vector<std::string>& tokens, size_t& p
     while (pos < tokens.size()) {
         const std::string& op = tokens[pos];
         if (op != "->" && op != "->>" && op != "#>" && op != "#>>" &&
+            op != "&&" &&
             op != "@>" && op != "<@" && op != "@@") {
             break;
         }

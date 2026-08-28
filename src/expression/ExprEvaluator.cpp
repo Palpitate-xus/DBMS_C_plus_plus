@@ -1032,6 +1032,32 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         if (l.isNull || r.isNull) return ExprValue("boolean", "", true);
         return tsMatch(l.value, r.value);
     }
+    if (op == "&&") {
+        // SQL array overlap: any element (as a set) shared by both sides.
+        if (l.isNull || r.isNull) return ExprValue("boolean", "", true);
+        auto splitElems = [](const std::string& v) {
+            std::vector<std::string> out;
+            std::string t = trimStr(v);
+            if (t.size() >= 2 && t.front() == 0x7B && t.back() == 0x7D) t = t.substr(1, t.size() - 2);
+            std::string cur;
+            int d = 0;
+            for (char c : t) {
+                if (c == 0x7B || c == 0x5B) ++d;
+                else if (c == 0x7D || c == 0x5D) --d;
+                if (c == 44 && d == 0) { out.push_back(trimStr(cur)); cur.clear(); }
+                else cur += c;
+            }
+            if (!trimStr(cur).empty()) out.push_back(trimStr(cur));
+            return out;
+        };
+        auto A = splitElems(l.value);
+        auto B = splitElems(r.value);
+        for (const auto& x : A)
+            for (const auto& y : B)
+                if (x == y) return ExprValue("boolean", "t", false);
+        return ExprValue("boolean", "f", false);
+    }
+
     if (op == "@>" || op == "<@") {
         // Two families share these operators:
         //   SQL arrays '{e1,e2}'  — element containment, recursive
@@ -2641,6 +2667,24 @@ void ExprEvaluator::registerBuiltins() {
     };
 
     // timezone(zone, timestamp) — AT TIME ZONE in function form
+    functions_["overlaps"] = [](const std::vector<ExprValue>& a) {
+        // (s1, e1) OVERLAPS (s2, e2): ISO-format text compares lexicographically.
+        // Swap each pair so start <= end, apply the PG point/interval rules.
+        if (a.size() != 4) return ExprValue("boolean", "", true);
+        for (const auto& v : a) if (v.isNull) return ExprValue("boolean", "", true);
+        size_t s1 = 0, e1 = 1, s2 = 2, e2 = 3;
+        if (a[s1].value > a[e1].value) std::swap(s1, e1);
+        if (a[s2].value > a[e2].value) std::swap(s2, e2);
+        bool p1 = a[s1].value == a[e1].value;
+        bool p2 = a[s2].value == a[e2].value;
+        bool m;
+        if (p1 && p2) m = a[s1].value == a[s2].value;
+        else if (p1)  m = a[s2].value <= a[s1].value && a[s1].value <= a[e2].value;
+        else if (p2)  m = a[s1].value <= a[s2].value && a[s2].value <= a[e1].value;
+        else          m = a[s1].value < a[e2].value && a[s2].value < a[e1].value;
+        return ExprValue("boolean", m ? "t" : "f", false);
+    };
+
     functions_["timezone"] = [](const std::vector<ExprValue>& a) {
         if (a.size() != 2 || a[0].isNull || a[1].isNull) return ExprValue("timestamp", "", true);
         long long offMin = 0;
