@@ -19105,9 +19105,31 @@ if (sql.rfind("backup database", 0) == 0) {
                             nthCol = wf.arg;
                         }
                         if (n <= 0) n = 1;
-                        if (static_cast<size_t>(n) <= partitionSize) {
-                            auto it = rows[partStart + n - 1].find(nthCol);
-                            val = (it != rows[partStart + n - 1].end()) ? it->second : "NULL";
+                        // PG evaluates nth_value over the FRAME.  With ORDER BY
+                        // the default frame ends at the current row (RANGE
+                        // ... CURRENT ROW extends to peers): the nth row must
+                        // lie within partStart..frameEnd, else NULL.
+                        size_t frameEnd = i;
+                        if (wf.hasFrame) {
+                            // Explicit frame: honor ROWS offsets; peer-extension
+                            // only applies to RANGE-style CURRENT ROW ends.
+                            if (wf.frameEndOffset == -1) frameEnd = partEnd;
+                            else if (wf.frameEndOffset > 0) {
+                                frameEnd = i + static_cast<size_t>(wf.frameEndOffset);
+                                if (frameEnd > partEnd) frameEnd = partEnd;
+                            }
+                        } else if (!wf.orderByCol.empty()) {
+                            const string curOrd = rows[i].count(wf.orderByCol) ? rows[i].at(wf.orderByCol) : string();
+                            while (frameEnd + 1 < rows.size() &&
+                                   samePartition(frameEnd + 1, i, wf) &&
+                                   rows[frameEnd + 1].count(wf.orderByCol) &&
+                                   rows[frameEnd + 1].at(wf.orderByCol) == curOrd)
+                                ++frameEnd;
+                        }
+                        size_t nthIdx = partStart + static_cast<size_t>(n) - 1;
+                        if (nthIdx <= frameEnd) {
+                            auto it = rows[nthIdx].find(nthCol);
+                            val = (it != rows[nthIdx].end()) ? it->second : "NULL";
                         } else {
                             val = "NULL";
                         }
