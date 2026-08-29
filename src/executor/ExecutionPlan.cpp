@@ -1835,6 +1835,16 @@ void SortOp::close() {
     buffer_.clear();
 }
 
+bool SortOp::lastColumnIsNull(size_t colIdx) const {
+    // The re-emitted row stored-NULL bit: consult the sort own origin
+    // for the row at pos_ - 1 (the row most recently handed upstream),
+    // not the drained child scan stale lastRid_.
+    if (pos_ == 0 || pos_ - 1 >= sortedOrigins_.size()) return false;
+    const auto& org = sortedOrigins_[pos_ - 1];
+    if (!org.engine || org.rid == 0) return false;
+    return org.engine->isColumnNullByRid(org.dbname, org.tablename, org.rid, colIdx);
+}
+
 // ========================================================================
 // LimitOp / OffsetOp
 // ========================================================================

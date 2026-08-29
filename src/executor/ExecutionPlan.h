@@ -590,6 +590,10 @@ public:
     void close() override;
     Operator* child() const { return child_.get(); }
 
+    // Stored-NULL bit of the most recently re-emitted row, from the sort's
+    // own origin tracking (the child scan is drained and its lastRid_ stale).
+    bool lastColumnIsNull(size_t colIdx) const override;
+
 private:
     OpPtr child_;
     TableSchema tbl_;
