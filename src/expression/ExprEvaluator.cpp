@@ -845,6 +845,44 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
         return ExprValue("timestamp", "", true);
     }
 
+    // PG operator resolution for string/number mixes (SQLSTATE-correct):
+    //   unknown + unknown        -> 42725 operator is not unique
+    //   int + unknown            -> strict int parse of the unknown (22P02)
+    //   numeric + unknown        -> numeric parse of the unknown (22P02)
+    auto isTextyType = [](const std::string& t) {
+        std::string tl = toLower(t);
+        return tl.empty() || tl == "unknown" || tl == "character varying" ||
+               tl == "varchar" || tl.rfind("character", 0) == 0 || tl == "text";
+    };
+    if (isTextyType(l.typeName) && isTextyType(r.typeName)) {
+        throw std::runtime_error("operator is not unique: unknown " + op +
+                                 " unknown (SQLSTATE 42725)");
+    }
+    auto strictIntErr = [](const std::string& v) {
+        throw std::runtime_error(std::string("invalid input syntax for type integer: ") +
+                                 std::string(1, 34) + v + std::string(1, 34) +
+                                 " (SQLSTATE 22P02)");
+    };
+    auto isIntTyped = [](const std::string& t) {
+        std::string tl = toLower(t);
+        return tl == "integer" || tl == "int" || tl == "int2" || tl == "int4" ||
+               tl == "int8" || tl == "bigint" || tl == "smallint";
+    };
+    if (isTextyType(l.typeName) != isTextyType(r.typeName)) {
+        const ExprValue& tv = isTextyType(l.typeName) ? l : r;
+        const ExprValue& ov = isTextyType(l.typeName) ? r : l;
+        if (isIntTyped(ov.typeName)) {
+            auto c2 = [](const std::string& s) {
+                if (s.empty()) return false;
+                size_t i2 = (s[0] == 45 || s[0] == 43) ? 1 : 0;
+                if (i2 == s.size()) return false;
+                for (size_t k2 = i2; k2 < s.size(); ++k2)
+                    if (s[k2] < 48 || s[k2] > 57) return false;
+                return true;
+            };
+            if (!c2(tv.value)) strictIntErr(tv.value);
+        }
+    }
     // Exact arithmetic when either side carries a decimal-capable type
     // (numeric/decimal/float).  Integer op integer stays integer-typed, as
     // in PostgreSQL ("id + 10" on int4 returns int4, not numeric).
@@ -951,6 +989,22 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
         return ExprValue("double precision", oss.str(), false);
     }
 
+    // PG int coercion is strict: an operand that does not fully parse as an
+    // integer (untyped date-like or fraction text) raises 22P02 instead of
+    // being atoi-truncated to a prefix.  Decimal-looking operands were
+    // already routed to the numeric branches above.
+    auto cleanInt = [](const std::string& s) {
+        if (s.empty()) return false;
+        size_t i2 = (s[0] == 45 || s[0] == 43) ? 1 : 0;
+        if (i2 == s.size()) return false;
+        for (size_t k2 = i2; k2 < s.size(); ++k2)
+            if (s[k2] < 48 || s[k2] > 57) return false;
+        return true;
+    };
+    if (!cleanInt(l.value))
+        throw std::runtime_error(std::string("invalid input syntax for type integer: \"") + l.value + "\" (SQLSTATE 22P02)");
+    if (!cleanInt(r.value))
+        throw std::runtime_error(std::string("invalid input syntax for type integer: \"") + r.value + "\" (SQLSTATE 22P02)");
     int64_t a = l.asInt(), b = r.asInt(), res = 0;
     if (op == "+") res = a + b;
     else if (op == "-") res = a - b;

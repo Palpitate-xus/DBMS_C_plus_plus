@@ -818,7 +818,15 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
                 result.errorMessage = msg;
             }
         }
-        if (result.errorMessage.find("syntax") != std::string::npos) {
+        if (result.errorMessage.find("operator is not unique") !=
+                std::string::npos) {
+            // 42725: ambiguous operator resolution (unknown + unknown).
+            result.sqlState = "42725";
+        } else if (result.errorMessage.find("invalid input syntax") != std::string::npos) {
+            // 22P02: strict type-coercion failures (checked before the generic
+            // "syntax" branch below, which would otherwise also match).
+            result.sqlState = "22P02";
+        } else if (result.errorMessage.find("syntax") != std::string::npos) {
             result.sqlState = "42601";
         } else if (result.errorMessage.find(
                        "more than one row returned by a subquery used as an expression")
