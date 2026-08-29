@@ -528,9 +528,19 @@ std::string firstSqlKeyword(const std::string& sql) {
 
 std::vector<std::string> splitProtocolFields(const std::string& line) {
     std::vector<std::string> fields;
-    std::istringstream input(line);
+    // Double-quoted segments are single fields (multi-word column headers
+    // such as a quoted "hello world" arrive as one cell from the producer).
     std::string field;
-    while (input >> field) fields.push_back(std::move(field));
+    bool inDq = false;
+    for (char c : line) {
+        if (c == 34) { inDq = !inDq; continue; }
+        if (!inDq && std::isspace(static_cast<unsigned char>(c))) {
+            if (!field.empty()) { fields.push_back(field); field.clear(); }
+            continue;
+        }
+        field += c;
+    }
+    if (!field.empty()) fields.push_back(field);
     return fields;
 }
 

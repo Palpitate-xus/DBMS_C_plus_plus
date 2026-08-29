@@ -5004,7 +5004,12 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                 if (ch == ')') { if (depth > 0) --depth; continue; }
                 if (depth == 0 && low.compare(ai, 4, " as ") == 0) {
                     string tail = trim(item.substr(ai + 4));
-                    if (!tail.empty() &&
+                    // Quoted alias (AS "hello world"): legal with spaces;
+                    // strip the double quotes for the header cell.
+                    if (tail.size() >= 2 && tail.front() == 34 && tail.back() == 34) {
+                        disp = tail.substr(1, tail.size() - 2);
+                        expr = trim(item.substr(0, ai));
+                    } else if (!tail.empty() &&
                         tail.find_first_of(" ,()+-*/%") == string::npos) {
                         disp = tail;
                         expr = trim(item.substr(0, ai));
@@ -5362,7 +5367,14 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
         // Single row: distinct is a no-op unless the row duplicates itself.
     }
 
-    for (const auto& h : headers) cout << h << ' ';
+    for (const auto& h : headers) {
+        // Multi-word header cells are quoted so the protocol field splitter
+        // keeps them as one cell (P0-02).
+        if (h.find_first_of(" \t") != string::npos)
+            cout << '"' << h << "" << '"' << ' ';
+        else
+            cout << h << ' ';
+    }
     cout << '\n';
     if (multiRowWidth > 0) {
         for (size_t i3 = 0; i3 + multiRowWidth <= values.size(); i3 += multiRowWidth) {
@@ -17064,6 +17076,14 @@ if (sql.rfind("backup database", 0) == 0) {
                         while (after < item.size() &&
                                isspace(static_cast<unsigned char>(item[after]))) ++after;
                         string tail = item.substr(after);
+                        // Quoted alias (AS "hello world"): any text is legal;
+                        // the double quotes are stripped for the header cell.
+                        if (tail.size() >= 2 && tail.front() == 34 &&
+                            tail.back() == 34) {
+                            asPos = ap;
+                            itemAlias = tail.substr(1, tail.size() - 2);
+                            break;
+                        }
                         if (!tail.empty() &&
                             tail.find_first_of(" ,()+-*/%") == string::npos) {
                             asPos = ap;
