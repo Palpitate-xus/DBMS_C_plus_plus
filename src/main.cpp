@@ -293,6 +293,18 @@ static string stripQuotes(const string& s) {
     return s;
 }
 
+// Case-insensitive dictionary order for TEXT sorting, approximating the
+// en_US.utf8 locale PostgreSQL uses by default (primary strength).
+static int ciTextCompare(const string& a, const string& b) {
+    size_t n = min(a.size(), b.size());
+    for (size_t i = 0; i < n; ++i) {
+        unsigned char ca = tolower((unsigned char)a[i]);
+        unsigned char cb = tolower((unsigned char)b[i]);
+        if (ca != cb) return ca < cb ? -1 : 1;
+    }
+    if (a.size() != b.size()) return a.size() < b.size() ? -1 : 1;
+    return 0;
+}
 static pair<set<string>, bool> parseReturningClause(const string& sql, size_t searchStart) {
     size_t retPos = sql.find("returning", searchStart);
     if (retPos == string::npos) return {{}, false};
@@ -3714,7 +3726,7 @@ static void applySetOperationTail(vector<string>& rows, bool hasOrder,
             return cells.empty() ? string() : cells.front();
         };
         auto nullish = [](const string& v) {
-            return v.empty() || v == "NULL" || v == "null";
+            return v == "NULL";
         };
         std::stable_sort(rows.begin(), rows.end(),
             [&](const string& a, const string& b) {
@@ -18513,7 +18525,7 @@ if (sql.rfind("backup database", 0) == 0) {
                             return want < cells.size() ? cells[want] : string();
                         };
                         auto nullish = [](const string& v) {
-                            return v.empty() || v == "NULL" || v == "null";
+                            return v == "NULL";
                         };
                         std::stable_sort(answers.begin(), answers.end(),
                             [&](const string& a, const string& b) {
@@ -18532,7 +18544,7 @@ if (sql.rfind("backup database", 0) == 0) {
                                     try { na_ = dbms::Numeric(va); } catch (...) { numA = false; }
                                     try { nb_ = dbms::Numeric(vb); } catch (...) { numB = false; }
                                     if (numA && numB) cmp = na_ < nb_ ? -1 : (nb_ < na_ ? 1 : 0);
-                                    else cmp = va < vb ? -1 : (vb < va ? 1 : 0);
+                                    else cmp = ciTextCompare(va, vb);
                                     if (cmp != 0) return k.second->ascending ? cmp < 0 : cmp > 0;
                                 }
                                 return false;
@@ -18663,7 +18675,7 @@ if (sql.rfind("backup database", 0) == 0) {
                         return want < cells.size() ? cells[want] : string();
                     };
                     auto nullish = [](const string& v) {
-                        return v.empty() || v == "NULL" || v == "null";
+                        return v == "NULL";
                     };
                     std::stable_sort(answers.begin(), answers.end(),
                         [&](const string& a, const string& b) {
@@ -18682,7 +18694,7 @@ if (sql.rfind("backup database", 0) == 0) {
                                 try { na_ = dbms::Numeric(va); } catch (...) { numA = false; }
                                 try { nb_ = dbms::Numeric(vb); } catch (...) { numB = false; }
                                 if (numA && numB) cmp = na_ < nb_ ? -1 : (nb_ < na_ ? 1 : 0);
-                                else cmp = va < vb ? -1 : (vb < va ? 1 : 0);
+                                else cmp = ciTextCompare(va, vb);
                                 if (cmp != 0) return k.second->ascending ? cmp < 0 : cmp > 0;
                             }
                             return false;
@@ -19658,7 +19670,7 @@ if (sql.rfind("backup database", 0) == 0) {
                     return want < cells.size() ? cells[want] : string();
                 };
                 auto nullish = [](const string& v) {
-                    return v.empty() || v == "NULL" || v == "null";
+                    return v == "NULL";
                 };
                 std::stable_sort(answers.begin(), answers.end(),
                     [&](const string& a, const string& b) {
@@ -19677,7 +19689,7 @@ if (sql.rfind("backup database", 0) == 0) {
                             try { na_ = dbms::Numeric(va); } catch (...) { numA = false; }
                             try { nb_ = dbms::Numeric(vb); } catch (...) { numB = false; }
                             if (numA && numB) cmp = na_ < nb_ ? -1 : (nb_ < na_ ? 1 : 0);
-                            else cmp = va < vb ? -1 : (vb < va ? 1 : 0);
+                            else cmp = ciTextCompare(va, vb);
                             if (cmp != 0) return k.second->ascending ? cmp < 0 : cmp > 0;
                         }
                         return false;

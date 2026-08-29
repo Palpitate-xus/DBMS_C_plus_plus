@@ -18455,8 +18455,9 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             }
             }
             if (v.empty() || v == "NULL" || v == "null") {
-                // SQL NULL propagates through arithmetic and concat.
-                return "";
+                // SQL NULL propagates through arithmetic and concat: emit the
+                // NULL token so the render/wire layers treat it as SQL NULL.
+                return "NULL";
             }
             if (pendingOp == 'C' && accSet) {
                 // SQL concatenation: both sides rendered as text.
@@ -21892,7 +21893,11 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
                 // leading space.
                 if (colPos > 0) row += ' ';
                 auto it = colValues.find(col);
+                // A column absent from this grouping set is NULL in PG (ROLLUP/
+                // CUBE grand-total rows); emit the NULL token so the wire sends
+                // -1 and sorts apply NULLS LAST/FIRST correctly.
                 if (it != colValues.end()) row += it->second;
+                else row += "NULL";
                 ++colPos;
             }
             row += ' ';
