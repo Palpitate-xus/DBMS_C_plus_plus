@@ -17542,8 +17542,11 @@ if (sql.rfind("backup database", 0) == 0) {
                         {
                             static const string ops = "+-*/%|";
                             size_t opCount = 0;
+                            bool inQuote3 = false;
                             for (size_t k = 1; k < arithItem.size(); ++k) {
                                 char ch = arithItem[k];
+                                if (ch == 39) { inQuote3 = !inQuote3; continue; }
+                                if (inQuote3) continue;  // % inside LIKE pattern
                                 if (ops.find(ch) == string::npos) continue;
                                 if (ch == '|' &&
                                     (k + 1 >= arithItem.size() || arithItem[k+1] != '|'))
@@ -17628,12 +17631,63 @@ if (sql.rfind("backup database", 0) == 0) {
                                 if (tbl.cols[i].dataName == item) { found = true; break; }
                             }
                             if (!found) {
+                                // Comparison / LIKE projection items
+                                // ("t = 'abc'", "t LIKE 'a%'"): evaluate
+                                // per-row through the expression evaluator
+                                // instead of rejecting as a column name.
+                                bool isCompareItem = false;
+                                {
+                                    string lowItem2;
+                                    bool inQ2 = false;
+                                    for (char c2 : item) {
+                                        if (c2 == 39) inQ2 = !inQ2;
+                                        lowItem2 += (inQ2 ? c2 : static_cast<char>(tolower(static_cast<unsigned char>(c2))));
+                                    }
+                                    if (lowItem2.find(" like ") != string::npos ||
+                                        lowItem2.find(" ilike ") != string::npos ||
+                                        lowItem2.find(" not like ") != string::npos ||
+                                        lowItem2.find(" not ilike ") != string::npos)
+                                        isCompareItem = true;
+                                    if (!isCompareItem) {
+                                        bool inQ3 = false;
+                                        for (size_t k3 = 0; k3 + 1 < item.size(); ++k3) {
+                                            char c3 = item[k3];
+                                            if (c3 == 39) inQ3 = !inQ3;
+                                            if (inQ3) continue;
+                                            if (c3 == 61 || c3 == 60 || c3 == 62 ||
+                                                (c3 == 33 && item[k3 + 1] == 61)) {
+                                                isCompareItem = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                if (isCompareItem) {
+                                    // The plain-column SelectExpr was already
+                                    // pushed above; convert it in place.
+                                    if (!selectExprs.empty()) {
+                                        auto& expr2 = selectExprs.back();
+                                        expr2.displayName = itemAlias.empty() ? "?column?" : itemAlias;
+                                        expr2.isScalar = true;
+                                        expr2.colName.clear();
+                                        expr2.funcName = "expreval";
+                                        expr2.funcArgs.push_back(item);
+                                    }
+                                    if (!exprTypes.empty()) exprTypes.back() = 3;
+                                    hasScalar = true;
+                                    for (size_t ci2 = 0; ci2 < tbl.len; ++ci2) {
+                                        if (item.find(tbl.cols[ci2].dataName) != string::npos)
+                                            selectCols.insert(tbl.cols[ci2].dataName);
+                                    }
+                                    goto nextProjItem;
+                                }
                                 cout << "Invalid column name " << item << endl;
                                 return true;
                             }
                             selectCols.insert(item);
                         }
                         }
+                        nextProjItem:;
                     }
                 }
             }

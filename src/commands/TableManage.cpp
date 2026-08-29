@@ -18118,6 +18118,22 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     // (no precedence), for + - * / % on numeric operands.  Operands may be
     // bare columns (row-resolved via getVal), integer/float literals, or
     // quoted strings (string concat for '+').
+    // expreval: general per-row expression (comparisons, LIKE) routed here
+    // by the projection parser; evaluate through ExprHelper with the row
+    // bound as column context.
+    if (expr.funcName == "expreval" && !expr.funcArgs.empty()) {
+        std::map<std::string, std::string> rowCtx;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            std::string v = engine && !dbname.empty()
+                ? engine->extractColumnValue(rowBuffer, tbl, i, dbname, true)
+                : StorageEngine::extractColumnValueStatic(rowBuffer, tbl, i);
+            rowCtx[tbl.cols[i].dataName] = v;
+        }
+        auto r2 = dbms::ExprHelper::evalString(
+            expr.funcArgs[0], rowCtx, {}, dbname, std::string());
+        if (!r2.ok) return "";
+        return r2.isNull ? "NULL" : r2.value;
+    }
     // Aggregate-call operands inside arithmetic items
     // ("count(*) - count(v)"): resolve each aggregate sub-call once
     // per evaluation via the engine's aggregate machinery, then let the
