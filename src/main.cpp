@@ -5064,8 +5064,18 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
         }
         if (lowItem == "version()" || lowItem == "version ( )") {
             headers.push_back("version");
-            values.push_back("DBMS-C++ protocol/3.0");
+            // PG-compatible version banner (matches the reference server
+            // shape: PostgreSQL <ver> (<distro>) on <arch>, compiled by ...).
+            values.push_back("PostgreSQL 17.2 (Debian 17.2-1.pgdg120+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 12.2.0-14) 12.2.0, 64-bit");
             continue;
+        }
+        if (lowItem == "user" || lowItem == "current_user" || lowItem == "session_user") {
+            // The bare keyword USER is a PG synonym for CURRENT_USER.
+            if (lowItem == "user") {
+                headers.push_back("user");
+                values.push_back(s.username);
+                continue;
+            }
         }
 
         // UDF call with literal arguments: name(...) where name is a stored
@@ -13597,6 +13607,20 @@ if (sql.rfind("backup database", 0) == 0) {
         }
         string op = tokens[0];
         string name = tokens[1];
+        // DROP ... IF EXISTS: PG skips silently when the object is absent.
+        bool dropIfExists = false;
+        {
+            string lowT1 = tokens[1];
+            for (auto& c : lowT1) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+            if (lowT1 == "if" && tokens.size() >= 4) {
+                string lowT2 = tokens[2];
+                for (auto& c : lowT2) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                if (lowT2 == "exists") {
+                    dropIfExists = true;
+                    name = tokens[3];
+                }
+            }
+        }
         if (op == "temporary") {
             if (tokens.size() < 3 || tokens[1] != "table") {
                 cout << "SQL syntax error" << endl;
@@ -13651,6 +13675,7 @@ if (sql.rfind("backup database", 0) == 0) {
             }
             auto res = g_engine.dropTable(s.currentDB, name);
             if (res == DBStatus::TABLE_NOT_FOUND) {
+                if (dropIfExists) { cout << "Table dropped" << endl; return false; }
                 cout << "Table " << name << " not exist" << endl;
                 return true;
             }
@@ -13682,6 +13707,7 @@ if (sql.rfind("backup database", 0) == 0) {
         if (op == "view") {
             auto res = g_engine.dropView(s.currentDB, name);
             if (res == DBStatus::TABLE_NOT_FOUND) {
+                if (dropIfExists) { cout << "View dropped" << endl; return false; }
                 cout << "View " << name << " not exist" << endl;
                 return true;
             }
@@ -16356,6 +16382,26 @@ if (sql.rfind("backup database", 0) == 0) {
                     }
                 }
             }
+        }
+
+        // information_schema virtual tables (session database): the wire
+        // FROM information_schema.<name> form lands here after the
+        // dbname.tablename split above; currentDB rows only, like PG.
+        if (queryDb == "information_schema" &&
+            (tname == "tables" || tname == "views")) {
+            const std::string& cat = s.currentDB;
+            if (tname == "tables") {
+                cout << "table_catalog table_schema table_name table_type " << endl;
+                for (const auto& t : g_engine.getTableNames(cat))
+                    cout << cat << " public " << t << " BASE TABLE " << endl;
+                for (const auto& v : g_engine.getViewNames(cat))
+                    cout << cat << " public " << v << " VIEW " << endl;
+            } else {
+                cout << "table_catalog table_schema table_name " << endl;
+                for (const auto& v : g_engine.getViewNames(cat))
+                    cout << cat << " public " << v << " " << endl;
+            }
+            return false;
         }
 
         // pg_stat_* virtual tables

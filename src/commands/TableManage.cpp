@@ -17082,6 +17082,21 @@ std::vector<std::string> StorageEngine::queryInformationSchema(
                 }
             }
         }
+    } else if (tablename == "views" || tablename == "VIEWS") {
+        // information_schema.views: one row per view across databases.
+        // Column layout mirrors the tables branch (catalog schema name ...)
+        // so count(*) and table_schema/table_name equality filters work.
+        for (const auto& dbname : getDatabaseNames()) {
+            for (const auto& vname : getViewNames(dbname)) {
+                std::string row = dbname + " " + vname + " VIEW ";
+                bool match = true;
+                for (const auto& c : conds) {
+                    if (c.colName == "table_schema" && c.op == "=" && dbname != c.value) { match = false; }
+                    if (c.colName == "table_name" && c.op == "=" && vname != c.value) { match = false; }
+                }
+                if (match) result.push_back(row);
+            }
+        }
     } else if (tablename == "statistics" || tablename == "STATISTICS") {
         for (const auto& dbname : getDatabaseNames()) {
             for (const auto& tname : getTableNames(dbname)) {
