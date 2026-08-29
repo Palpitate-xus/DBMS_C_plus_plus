@@ -12754,10 +12754,110 @@ StorageEngine::PredicateTruth StorageEngine::compareValues(
 // ========================================================================
 // Helper: evaluate a single condition against a row buffer (page-based)
 // ========================================================================
+static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
+                                    const std::string& rowBuffer,
+                                    const TableSchema& tbl,
+                                    StorageEngine* engine,
+                                    const std::string& dbname);
 bool StorageEngine::evalConditionOnRow(const Condition& cond,
                                         const std::string& rowBuffer, const TableSchema& tbl) {
     if (cond.colName == "__true__") return true;
     if (cond.colName == "__false__") return false;
+
+    // Function-left predicate ("length(v) = 0" captured by parseConditions
+    // as op="scalarexpr"): evaluate the function on this row and compare.
+    // A NULL result is Unknown in three-valued logic, so the row drops.
+    if (cond.op == "scalarexpr") {
+        const std::string& fnText = cond.colName;
+        size_t lp = fnText.find('(');
+        size_t rp = fnText.rfind(')');
+        if (lp == std::string::npos || rp == std::string::npos || rp < lp) return false;
+        StorageEngine::SelectExpr expr;
+        expr.funcName = fnText.substr(0, lp);
+        for (char& ch : expr.funcName)
+            ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
+        std::string argRaw = fnText.substr(lp + 1, rp - lp - 1);
+        size_t depth = 0, start = 0;
+        for (size_t i = 0; i <= argRaw.size(); ++i) {
+            if (i == argRaw.size() || (argRaw[i] == ',' && depth == 0)) {
+                std::string one = argRaw.substr(start, i - start);
+                size_t a = 0, b = one.size();
+                while (a < b && isspace(static_cast<unsigned char>(one[a]))) ++a;
+                while (b > a && isspace(static_cast<unsigned char>(one[b - 1]))) --b;
+                if (a < b) expr.funcArgs.push_back(one.substr(a, b - a));
+                start = i + 1;
+            } else if (argRaw[i] == '(') ++depth;
+            else if (argRaw[i] == ')') --depth;
+        }
+        // Strict-gate replication: a column argument that is physically
+        // NULL makes the function result NULL (three-valued Unknown).
+        if (g_condNullEngine && g_condNullRid >= 0 &&
+            tbl.tablename == g_condNullTable) {
+            for (const auto& arg : expr.funcArgs) {
+                if (arg.empty() || arg.front() == 0x27) continue;
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (tbl.cols[i].dataName != arg) continue;
+                    if (g_condNullEngine->isColumnNullByRid(
+                            g_condNullDb, tbl.tablename, g_condNullRid, i)) {
+                        return false;
+                    }
+                }
+            }
+        }
+        // Extraction-scope NullRowBinding (rid-keyed loops in queryExpr): the
+        // condition runs after the scan, so the scan-time g_condNull* context
+        // is gone but the binding still carries the null bitmap.
+        if (g_nullRowEngine && g_nullRowRid >= 0 &&
+            tbl.tablename == g_nullRowTable) {
+            for (const auto& arg : expr.funcArgs) {
+                if (arg.empty() || arg.front() == 0x27) continue;
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (tbl.cols[i].dataName != arg) continue;
+                    if (i < g_nullRowNatts &&
+                        g_nullRowEngine->isColumnNullByRid(
+                            g_nullRowDb, tbl.tablename, g_nullRowRid, i)) {
+                        return false;
+                    }
+                }
+            }
+        }
+        std::string v = applyScalarFunc(expr, rowBuffer, tbl, nullptr, "");
+        if (v.empty() || v == "NULL" || v == "null") return false;
+        std::string rhs = cond.value;
+        size_t opLen = 0;
+        while (opLen < rhs.size() &&
+               (rhs[opLen] == '<' || rhs[opLen] == '>' ||
+                rhs[opLen] == '=' || rhs[opLen] == '!')) ++opLen;
+        if (opLen == 0) return false;
+        std::string op = rhs.substr(0, opLen);
+        if (op == "<>") op = "!=";
+        std::string lit = rhs.substr(opLen);
+        size_t a = 0, b = lit.size();
+        while (a < b && isspace(static_cast<unsigned char>(lit[a]))) ++a;
+        while (b > a && isspace(static_cast<unsigned char>(lit[b - 1]))) --b;
+        lit = lit.substr(a, b - a);
+        if (lit.size() >= 2 && lit.front() == 0x27 && lit.back() == 0x27)
+            lit = lit.substr(1, lit.size() - 2);
+        bool numOk = true;
+        double lv = 0, rv = 0;
+        try { lv = std::stod(v); rv = std::stod(lit); } catch (...) { numOk = false; }
+        if (numOk) {
+            if (op == "=") return lv == rv;
+            if (op == "!=") return lv != rv;
+            if (op == "<") return lv < rv;
+            if (op == ">") return lv > rv;
+            if (op == "<=") return lv <= rv;
+            if (op == ">=") return lv >= rv;
+            return false;
+        }
+        if (op == "=") return v == lit;
+        if (op == "!=") return v != lit;
+        if (op == "<") return v < lit;
+        if (op == ">") return v > lit;
+        if (op == "<=") return v <= lit;
+        if (op == ">=") return v >= lit;
+        return false;
+    }
 
     // Handle OVERLAPS operator: overlaps:s1,e1,s2,e2
     if (cond.op == "overlaps") {
@@ -14886,6 +14986,37 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
             c.colName = trim(s.substr(6));
             conds.push_back(c);
             continue;
+        }
+        // Function-left predicate (e.g. "length(v) = 0"): the op scan below
+        // starts at position 0 and finds nothing, silently dropping the
+        // condition (every row matched).  Capture it for row-context
+        // evaluation in evalConditionOnRow instead.
+        {
+            size_t opos = 0;
+            while (opos < s.size() && s[opos] != '(' &&
+                   !(s[opos] == '<' || s[opos] == '>' || s[opos] == '=' || s[opos] == '!')) ++opos;
+            if (opos > 0 && opos < s.size() && s[opos] == '(' &&
+                (isalpha(static_cast<unsigned char>(s[0])) || s[0] == '_')) {
+                size_t depth = 0, close = std::string::npos;
+                for (size_t i = opos; i < s.size(); ++i) {
+                    if (s[i] == '(') ++depth;
+                    else if (s[i] == ')') { if (--depth == 0) { close = i; break; } }
+                }
+                size_t after = (close == std::string::npos) ? s.size() : close + 1;
+                while (after < s.size() && isspace(static_cast<unsigned char>(s[after]))) ++after;
+                size_t opLen = 0;
+                while (after + opLen < s.size() &&
+                       (s[after + opLen] == '<' || s[after + opLen] == '>' ||
+                        s[after + opLen] == '=' || s[after + opLen] == '!')) ++opLen;
+                if (opLen > 0) {
+                    c.op = "scalarexpr";
+                    c.colName = s.substr(0, after);
+                    // keep the operator text in front for the evaluator
+                    c.value = s.substr(after, opLen) + " " + s.substr(after + opLen);
+                    conds.push_back(c);
+                    continue;
+                }
+            }
         }
         size_t opEnd = 0;
         while (opEnd < s.size() && (s[opEnd] == '<' || s[opEnd] == '>' || s[opEnd] == '=' || s[opEnd] == '!')) ++opEnd;

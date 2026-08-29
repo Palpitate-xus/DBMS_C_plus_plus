@@ -5816,6 +5816,37 @@ static vector<string> mergeNegPredTokens(const vector<string>& toks) {
     vector<string> out;
     size_t i = 0;
     while (i < toks.size()) {
+        // Glue scalar-function calls ("length" "(" "v" ")" -> "length(v)")
+        // so downstream condition assembly keeps the predicate whole; the
+        // engine's parseConditions recognizes the leading-function form.
+        if (i + 1 < toks.size() && toks[i + 1] == "(" && !toks[i].empty() &&
+            (isalpha(static_cast<unsigned char>(toks[i][0])) || toks[i][0] == '_') &&
+            isScalarFunc(toks[i])) {
+            size_t depth = 1, j = i + 2;
+            while (j < toks.size() && depth > 0) {
+                if (toks[j] == "(") ++depth;
+                else if (toks[j] == ")") --depth;
+                ++j;
+            }
+            string fn = toks[i] + "(";
+            for (size_t k = i + 2; k + 1 < j; ++k) {
+                fn += toks[k];
+                if (k + 2 < j) fn += " ";
+            }
+            fn += ")";
+            // Absorb an immediately-following op-bearing fragment
+            // ("=0", ">=5") so the predicate survives breakDownConditions'
+            // per-token grouping as one condition string "length(v) = 0".
+            if (j < toks.size() && !toks[j].empty() &&
+                (toks[j][0] == '=' || toks[j][0] == '!' ||
+                 toks[j][0] == '<' || toks[j][0] == '>')) {
+                fn += " " + toks[j];
+                ++j;
+            }
+            out.push_back(fn);
+            i = j;
+            continue;
+        }
         // Pre-glued two-token form from normalizeConditionStr:
         //   [col, "notlike'pat'"] / [col, "notbetween..."] etc.
         // (the keyword was glued to the value, so tokenize split col off)
@@ -5876,6 +5907,21 @@ static vector<string> mergeNegPredTokens(const vector<string>& toks) {
 
 static string modifyLogic(const string& logic) {
     if (logic == "(" || logic == ")" || logic == "and" || logic == "or") return logic;
+    // Glued scalar-function call ("length(v)") from mergeNegPredTokens: no
+    // operator of its own; the companion "=0" token carries the predicate.
+    // The generic tail below returns "" for operator-less tokens, which
+    // would shred the predicate.
+    {
+        size_t lp = logic.find('(');
+        if (lp != string::npos && lp > 0 && lp + 1 < logic.size()) {
+            string head = logic.substr(0, lp);
+            bool ident = isalpha(static_cast<unsigned char>(head[0])) || head[0] == '_';
+            for (size_t i = 1; ident && i < head.size(); ++i) {
+                if (!isalnum(static_cast<unsigned char>(head[i])) && head[i] != '_') ident = false;
+            }
+            if (ident && isScalarFunc(head)) return logic;
+        }
+    }
     // Merged single-token predicate forms produced by mergeNegPredTokens:
     //   "notlike<col> <pat>" / "between<col> <lo> <hi>" / "notbetween<col> ..."
     // -- already in the engine's decode form; pass through so the "like"
