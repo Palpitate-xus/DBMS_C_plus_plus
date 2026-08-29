@@ -134,6 +134,14 @@ namespace dbms {
 
 // Forward declarations for row-header helpers used by TableSchema::rowSize().
 static bool usesHeapTupleHeader(uint32_t formatVersion);
+
+// Condition-scope NULL context: forEachRow publishes the current row rid
+// so condition evaluation can consult the stored null bitmap WITHOUT
+// altering extractColumnValueStatic int-sentinel behavior.
+static thread_local const StorageEngine* g_condNullEngine = nullptr;
+static thread_local int64_t g_condNullRid = -1;
+static thread_local std::string g_condNullTable;
+static thread_local std::string g_condNullDb;
 static size_t rowHeaderSize(uint32_t formatVersion, size_t natts);
 static void setPageLsnAndChecksum(char* buf, Lsn lsn);
 
@@ -4282,7 +4290,14 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
             off = htup->t_hoff;
         }
         if (off >= len) return;
+        // Publish the rid for condition evaluation (IS NULL / comparisons)
+        // without touching the extraction-scope null binding.
+        const int64_t condRid = this->encodeRid(pid, sid);
+        g_condNullEngine = this; g_condNullRid = condRid;
+        g_condNullTable = tablename; g_condNullDb = dbname;
         callback(pid, sid, data + off, len - off);
+        g_condNullEngine = nullptr; g_condNullRid = -1;
+        g_condNullTable.clear(); g_condNullDb.clear();
     };
 
     if (tbl.partitionType != TableSchema::PartitionType::None) {
@@ -6379,6 +6394,7 @@ static thread_local int64_t g_nullRowRid = -1;
 static thread_local size_t g_nullRowNatts = 0;
 static thread_local std::string g_nullRowTable;
 static thread_local std::string g_nullRowDb;
+
 
 void StorageEngine::bindNullRow(const StorageEngine* eng, const std::string& db,
                                 const std::string& table, int64_t rid, size_t natts) {
@@ -12784,11 +12800,24 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
 
     std::string val = extractColumnValueStatic(rowBuffer, tbl, ci);
     const Column& col = tbl.cols[ci];
-    if (cond.op == "isnull") return val.empty();
-    if (cond.op == "isnotnull") return !val.empty();
+    // Stored-NULL truth: prefer the bound scan row null bitmap (see
+    // NullRowBinding), which distinguishes NULL from a stored empty string.
+    bool physNull = false;
+    if (g_condNullEngine && g_condNullRid >= 0 &&
+        tbl.tablename == g_condNullTable &&
+        g_condNullEngine->isColumnNullByRid(g_condNullDb, tbl.tablename,
+                                            g_condNullRid, ci)) {
+        physNull = true;
+    }
+    if (cond.op == "isnull") return physNull;
+    if (cond.op == "isnotnull") return !physNull;
+    if (physNull) {
+        // NULL never satisfies scalar comparisons (three-valued logic).
+        return false;
+    }
     if (cond.op == "in" || cond.op == "notin") {
         // cond.value = space-joined literals (built by modifyLogic)
-        if (val.empty()) return false;   // NULL IN (...) -> UNKNOWN (false)
+        if (val.empty()) return false;   // empty never matches IN literals
         bool hit = false;
         std::istringstream iss(cond.value);
         std::string tok;
@@ -12802,10 +12831,10 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         return (cond.op == "in") ? hit : !hit;
     }
 
-    // Three-valued logic: any comparison with NULL yields UNKNOWN (FALSE in WHERE)
-    bool valIsNull = val.empty();
-    bool condIsNull = cond.value.empty();
-    if (valIsNull || condIsNull) return false;
+    // Three-valued logic: NULL yields UNKNOWN (FALSE in WHERE) and is
+    // already handled above via the stored-null bitmap.  An empty extracted
+    // value is a real empty string (storage distinguishes empty from NULL),
+    // so comparisons proceed - including empty = empty.
 
     if (col.dataType == "char" || col.dataType == "uuid" ||
         (col.isVariableLength && col.dataType != "numeric")) {
