@@ -971,11 +971,12 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
 bool ExprEvaluator::likeMatch(const std::string& text, const std::string& pattern) {
     size_t ti = 0, pi = 0, star = std::string::npos, match = 0;
     while (ti < text.size()) {
-        if (pi < pattern.size() && (pattern[pi] == '_' || pattern[pi] == text[ti])) {
-            ++ti; ++pi;
-        } else if (pi < pattern.size() && pattern[pi] == '%') {
+        if (pi < pattern.size() && pattern[pi] == '%') {
+            // wildcard takes precedence over a literal '%' in the TEXT
             star = pi++;
             match = ti;
+        } else if (pi < pattern.size() && (pattern[pi] == '_' || pattern[pi] == text[ti])) {
+            ++ti; ++pi;
         } else if (star != std::string::npos) {
             pi = star + 1;
             ti = ++match;
@@ -1008,6 +1009,27 @@ bool ExprEvaluator::similarToMatch(const std::string& text, const std::string& p
     }
 }
 
+static bool likeMatchEscaped(const std::string& text, const std::string& pattern) {
+    // likeMatch plus 0x01<literal> escape markers (see LIKE ESCAPE).
+    size_t ti = 0, pi = 0, star = std::string::npos, match = 0;
+    while (ti < text.size()) {
+        if (pi + 1 < pattern.size() && pattern[pi] == 1) {
+            if (pattern[pi + 1] != text[ti]) return false;
+            ++ti; pi += 2;
+        } else if (pi < pattern.size() && pattern[pi] == 37) {
+            star = pi++; match = ti;
+        } else if (pi < pattern.size() &&
+                   (pattern[pi] == 95 || pattern[pi] == text[ti])) {
+            ++ti; ++pi;
+        } else if (star != std::string::npos) {
+            pi = star + 1; ti = ++match;
+        } else {
+            return false;
+        }
+    }
+    while (pi < pattern.size() && pattern[pi] == 37) ++pi;
+    return pi == pattern.size();
+}
 static bool similarToMatchEscape(const std::string& text, const std::string& pattern, char esc) {
     // Like similarToMatch but with an explicit SQL ESCAPE character:
     // esc followed by % or _ denotes the literal character.
@@ -1602,6 +1624,32 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
 
     // SIMILAR TO ... ESCAPE / NOT SIMILAR TO ... ESCAPE (parser wraps the
     // three-operand form into a FunctionCallExpr, mirroring LIKE ESCAPE).
+    // LIKE ... ESCAPE / NOT LIKE ... ESCAPE (parser wraps the three-operand
+    // form into a FunctionCallExpr).  esc + wildcard denotes the literal
+    // character; the pattern is normalized into 0x01<char> markers that
+    // likeMatchEscaped handles as exact literals.
+    if (name == "like escape" || name == "not like escape" ||
+        name == "ilike escape" || name == "not ilike escape") {
+        if (args.size() < 3 || args[0].isNull || args[1].isNull) {
+            return ExprValue("boolean", "", true);
+        }
+        char esc = (!args[2].isNull && !args[2].value.empty()) ? args[2].value[0] : 92;
+        std::string pat;
+        const std::string& src = args[1].value;
+        for (size_t i = 0; i < src.size(); ++i) {
+            if (src[i] == esc && i + 1 < src.size() &&
+                (src[i + 1] == 37 || src[i + 1] == 95 || src[i + 1] == esc)) {
+                pat += static_cast<char>(1);
+                pat += src[++i];
+                continue;
+            }
+            pat += src[i];
+        }
+        bool m = likeMatchEscaped(args[0].value, pat);
+        if (name.rfind("not ", 0) == 0) m = !m;
+        return ExprValue("boolean", m ? "t" : "f", false);
+    }
+
     if (name == "similar to escape" || name == "not similar to escape") {
         if (args.size() < 3 || args[0].isNull || args[1].isNull) {
             return ExprValue("boolean", "", true);

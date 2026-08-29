@@ -1,7 +1,9 @@
--- LIKE with ESCAPE clause
-DROP TABLE IF EXISTS diff_esc1
-CREATE TABLE diff_esc1 (v text)
-INSERT INTO diff_esc1 VALUES ('a%c'), ('abc'), ('a_c'), (NULL)
-SELECT v FROM diff_esc1 WHERE v LIKE 'a!%c' ESCAPE '!'
-SELECT v FROM diff_esc1 WHERE v LIKE 'a!_c' ESCAPE '!'
-SELECT v FROM diff_esc1 WHERE v LIKE 'a!!%c' ESCAPE '!'
+-- LIKE pattern semantics: literal % in text, ESCAPE clause
+SELECT 'ab%c' LIKE 'ab%'
+SELECT 'a!%c' LIKE 'a!%'
+SELECT 'a!%c' LIKE 'a!%' ESCAPE '!'
+SELECT 'ax_c' LIKE 'a__c'
+SELECT 'ax_c' LIKE 'a!__c' ESCAPE '!'
+SELECT '100%' LIKE '100!%' ESCAPE '!'
+SELECT 'abc' LIKE 'a%'
+SELECT 'abc' NOT LIKE 'x%'

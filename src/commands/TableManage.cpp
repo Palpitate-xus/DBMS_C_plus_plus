@@ -451,11 +451,12 @@ static bool likeMatch(const std::string& text, const std::string& pattern, bool 
             // matches itself exactly.
             if (p[j + 1] != t[i]) return false;
             ++i; j += 2;
-        } else if (j < p.size() && (p[j] == t[i] || p[j] == '_')) {
-            ++i; ++j;
         } else if (j < p.size() && p[j] == '%') {
+            // wildcard takes precedence over a literal '%' in the TEXT
             starIdx = j++;
             matchIdx = i;
+        } else if (j < p.size() && (p[j] == t[i] || p[j] == '_')) {
+            ++i; ++j;
         } else if (starIdx != std::string::npos) {
             j = starIdx + 1;
             i = ++matchIdx;
