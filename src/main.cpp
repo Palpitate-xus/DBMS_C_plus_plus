@@ -16149,7 +16149,7 @@ if (sql.rfind("backup database", 0) == 0) {
         }
 
         // pg_stat_* virtual tables
-        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || tname == "pg_stat_activity" || tname == "pg_database" || tname == "pg_tables" || tname == "pg_indexes" || tname == "pg_settings" || tname == "pg_roles" || tname == "pg_namespace" || tname == "pg_class" || tname == "pg_type" || tname == "pg_stats" || tname == "pg_statistic") {
+        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || tname == "pg_stat_activity" || tname == "pg_database" || tname == "pg_tables" || tname == "pg_views" || tname == "pg_indexes" || tname == "pg_settings" || tname == "pg_roles" || tname == "pg_namespace" || tname == "pg_class" || tname == "pg_type" || tname == "pg_stats" || tname == "pg_statistic") {
             auto bpStats = g_engine.getBufferPoolStats();
             if (tname == "pg_stat_database") {
                 cout << "datname numbackends blks_read blks_hit tup_returned xact_commit xact_rollback " << endl;
@@ -16263,6 +16263,30 @@ if (sql.rfind("backup database", 0) == 0) {
                 if (queryDb != "information_schema" && queryDb != "pg_catalog") {
                     for (const auto& t : g_engine.getTableNames(queryDb)) {
                         cout << "public " << t << " " << s.username << " " << endl;
+                    }
+                }
+            } else if (tname == "pg_views") {
+                // pg_views(schemaname, viewname, viewowner, definition):
+                // session-database views; the definition is rendered with
+                // internal whitespace collapsed to underscores because the
+                // tabular wire format is space-separated.
+                cout << "schemaname viewname viewowner definition " << endl;
+                {
+                    const std::string viewsDb =
+                        (queryDb == "information_schema" || queryDb == "pg_catalog")
+                            ? std::string(s.currentDB) : queryDb;
+                    for (const auto& v : g_engine.getViewNames(viewsDb)) {
+                        std::string def = g_engine.getViewSQL(viewsDb, v);
+                        size_t marker = def.find("\nBASE_TABLE:");
+                        if (marker != std::string::npos) def.resize(marker);
+                        size_t ck = def.find("WITH_CHECK_OPTION:");
+                        if (ck != std::string::npos) {
+                            def.resize(ck);
+                            while (!def.empty() && (def.back() == '\n' || def.back() == ' ')) def.pop_back();
+                        }
+                        for (char& ch : def)
+                            if (ch == ' ' || ch == '\n' || ch == '\t') ch = '_';
+                        cout << "public " << v << " " << s.username << " " << def << " " << endl;
                     }
                 }
             } else if (tname == "pg_indexes") {

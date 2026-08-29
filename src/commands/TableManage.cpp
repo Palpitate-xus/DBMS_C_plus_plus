@@ -17458,7 +17458,15 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
         return queryPgCatalog(tablename, conditions, selectCols, orderBy);
     }
 
-    if (!tableExists(dbname, tablename)) return result;
+    if (!tableExists(dbname, tablename)) {
+        // Unqualified pg_catalog names (FROM pg_views) resolve through the
+        // same virtual catalog path as qualified pg_catalog.pg_views.
+        if (tablename.size() > 3 && tablename.substr(0, 3) == "pg_") {
+            auto rows = queryPgCatalog(tablename, conditions, selectCols, orderBy);
+            if (!rows.empty()) return rows;
+        }
+        return result;
+    }
     if (transactionContext().inTransaction) {
         if (forUpdate) {
             if (!lockManager_.lockIntentExclusive(tablename)) return result;
