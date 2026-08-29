@@ -16401,18 +16401,110 @@ if (sql.rfind("backup database", 0) == 0) {
         // FROM information_schema.<name> form lands here after the
         // dbname.tablename split above; currentDB rows only, like PG.
         if (queryDb == "information_schema" &&
-            (tname == "tables" || tname == "views")) {
+            (tname == "tables" || tname == "views" || tname == "columns")) {
             const std::string& cat = s.currentDB;
+            std::vector<std::vector<std::string>> catRows;
+            std::vector<std::string> catCols;
             if (tname == "tables") {
-                cout << "table_catalog table_schema table_name table_type " << endl;
+                catCols = {"table_catalog", "table_schema", "table_name", "table_type"};
                 for (const auto& t : g_engine.getTableNames(cat))
-                    cout << cat << " public " << t << " BASE TABLE " << endl;
+                    catRows.push_back({cat, "public", t, "BASE TABLE"});
                 for (const auto& v : g_engine.getViewNames(cat))
-                    cout << cat << " public " << v << " VIEW " << endl;
+                    catRows.push_back({cat, "public", v, "VIEW"});
+            } else if (tname == "views") {
+                catCols = {"table_catalog", "table_schema", "table_name"};
+                for (const auto& v : g_engine.getViewNames(cat))
+                    catRows.push_back({cat, "public", v});
             } else {
-                cout << "table_catalog table_schema table_name " << endl;
-                for (const auto& v : g_engine.getViewNames(cat))
-                    cout << cat << " public " << v << " " << endl;
+                catCols = {"table_catalog", "table_schema", "table_name",
+                           "column_name", "ordinal_position", "data_type"};
+                for (const auto& t : g_engine.getTableNames(cat)) {
+                    auto sch = g_engine.getTableSchema(cat, t);
+                    size_t ord = 1;
+                    for (size_t ci = 0; ci < sch.len; ++ci, ++ord)
+                        catRows.push_back({cat, "public", t,
+                                           sch.cols[ci].dataName,
+                                           std::to_string(ord),
+                                           sch.cols[ci].dataType});
+                }
+            }
+            std::string itemList;
+            {
+                std::string low;
+                for (char c : sql) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                size_t sp = low.find("select ");
+                size_t fp = low.find(" from ");
+                if (sp != string::npos && fp != string::npos && fp > sp)
+                    itemList = sql.substr(sp + 7, fp - sp - 7);
+            }
+            auto splitTopLevel = [](const std::string& s2) {
+                std::vector<std::string> out;
+                std::string cur;
+                int depth = 0; bool inQ = false;
+                for (char c : s2) {
+                    if (c == 39) inQ = !inQ;
+                    if (!inQ) {
+                        if (c == 40) ++depth;
+                        else if (c == 41) --depth;
+                        else if (c == 44 && depth == 0) {
+                            out.push_back(trim(cur)); cur.clear(); continue;
+                        }
+                    }
+                    cur += c;
+                }
+                if (!trim(cur).empty() || !out.empty()) out.push_back(trim(cur));
+                return out;
+            };
+            auto items = splitTopLevel(itemList);
+            bool isCount = false;
+            for (const auto& it2 : items) {
+                std::string l2;
+                for (char c : it2) l2 += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                if (l2 == "count(*)" || l2 == "count(1)" || l2 == "count (*)") { isCount = true; break; }
+            }
+            if (isCount) {
+                cout << "count " << endl;
+                cout << catRows.size() << " " << endl;
+                return false;
+            }
+            std::vector<size_t> idx;
+            std::vector<std::string> outNames;
+            bool allCols = items.size() == 1 &&
+                           items[0].find_first_not_of(" 	*") == string::npos;
+            for (const auto& it2 : items) {
+                std::string nm = trim(it2);
+                bool found = false;
+                for (size_t k = 0; k < catCols.size(); ++k) {
+                    if (nm == catCols[k]) { idx.push_back(k); outNames.push_back(catCols[k]); found = true; break; }
+                }
+                if (!found && !allCols) {
+                    cout << "ERROR: Invalid column name " << nm << endl;
+                    return false;
+                }
+            }
+            if (allCols || idx.empty()) {
+                for (size_t k = 0; k < catCols.size(); ++k) outNames.push_back(catCols[k]);
+            }
+            for (const auto& h : outNames) cout << h << " ";
+            cout << endl;
+            auto emitCell = [](const std::string& v) {
+                if (v.find_first_of(" 	") != std::string::npos) {
+                    std::string q2(1, static_cast<char>(34));
+                    cout << q2 << v << q2 << " ";
+                }
+                else
+                    cout << v << " ";
+            };
+            if (allCols || idx.empty()) {
+                for (const auto& r : catRows) {
+                    for (size_t k = 0; k < r.size(); ++k) emitCell(r[k]);
+                    cout << endl;
+                }
+            } else {
+                for (const auto& r : catRows) {
+                    for (size_t k : idx) emitCell(k < r.size() ? r[k] : "NULL");
+                    cout << endl;
+                }
             }
             return false;
         }

@@ -912,17 +912,24 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
                     // empty cells survive as empty fields.
                     std::vector<std::string> fields;
                     {
+                        // Quote-aware single-space split: a double-quoted
+                        // segment (multi-word data cell like "BASE TABLE")
+                        // stays one field; empty cells (doubled spaces)
+                        // survive as empty fields.
                         const std::string& raw = lines[i];
-                        size_t start = 0;
-                        while (true) {
-                            const size_t sp = raw.find(' ', start);
-                            if (sp == std::string::npos) {
-                                fields.push_back(raw.substr(start));
-                                break;
+                        bool inDq = false;
+                        std::string field;
+                        for (size_t ci = 0; ci < raw.size(); ++ci) {
+                            const char c = raw[ci];
+                            if (c == 34) { inDq = !inDq; continue; }
+                            if (!inDq && c == ' ') {
+                                fields.push_back(field);
+                                field.clear();
+                                continue;
                             }
-                            fields.push_back(raw.substr(start, sp - start));
-                            start = sp + 1;
+                            field += c;
                         }
+                        fields.push_back(field);
                     }
                     if (!fields.empty() && fields.back().empty() &&
                         fields.size() > result.columns.size())
