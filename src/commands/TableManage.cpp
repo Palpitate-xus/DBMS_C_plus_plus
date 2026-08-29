@@ -14891,6 +14891,7 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
         while (opEnd < s.size() && (s[opEnd] == '<' || s[opEnd] == '>' || s[opEnd] == '=' || s[opEnd] == '!')) ++opEnd;
         if (opEnd == 0) continue;
         c.op = s.substr(0, opEnd);
+        if (c.op == "<>") c.op = "!=";  // canonical not-equal
         size_t sp = s.find(' ', opEnd);
         if (sp == std::string::npos) continue;
         c.colName = s.substr(opEnd, sp - opEnd);
@@ -17969,6 +17970,31 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
     return true;
 }
 
+// True when a scalar-function argument names a column whose stored null bit
+// is set for the current row (queried via the condition-scope rid context
+// published by forEachRow).  Distinguishes SQL NULL from a stored empty string.
+static bool scalarArgColumnIsPhysNull(const std::string& arg,
+                                      const TableSchema& tbl,
+                                      StorageEngine* engine,
+                                      const std::string& dbname) {
+    if (arg.empty() || arg.front() == 0x27) return false;  // literal
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].dataName != arg) continue;
+        if (!engine || dbname.empty()) return false;
+        // Condition-scope context (forEachRow scans)...
+        if (g_condNullEngine && g_condNullRid >= 0 &&
+            tbl.tablename == g_condNullTable)
+            return engine->isColumnNullByRid(dbname, tbl.tablename,
+                                             g_condNullRid, i);
+        // ...or the extraction-scope NullRowBinding (rid-keyed agg loops).
+        if (g_nullRowEngine && g_nullRowRid >= 0 && i < g_nullRowNatts &&
+            tbl.tablename == g_nullRowTable)
+            return engine->isColumnNullByRid(g_nullRowDb, tbl.tablename,
+                                             g_nullRowRid, i);
+        return false;
+    }
+    return false;
+}
 static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                                     const std::string& rowBuffer,
                                     const TableSchema& tbl,
@@ -19310,7 +19336,10 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     if (expr.funcName == "coalesce") {
         for (const auto& arg : expr.funcArgs) {
             std::string v = getVal(arg);
-            if (!v.empty()) return v;
+            // Skip only physically-NULL args (stored null bit); an empty
+            // string is a real value and is returned as-is.
+            if (v.empty() && scalarArgColumnIsPhysNull(arg, tbl, engine, dbname)) continue;
+            return v;
         }
         return "";
     }
@@ -20674,6 +20703,12 @@ std::vector<std::string> StorageEngine::aggregate(
                     if (!pass) continue;
                 }
                 if (func == "count") {
+                    // PG count(col) skips only NULL rows; an empty string
+                    // counts.  The stored null bit is the authoritative test.
+                    if (colIdx < tbl.len &&
+                        isColumnNullByRid(dbname, tablename, rid, colIdx)) {
+                        continue;
+                    }
                     if (colName == "*") { count++; continue; }
                     std::string val;
                     if (aggArgExpr) {
@@ -20690,7 +20725,7 @@ std::vector<std::string> StorageEngine::aggregate(
                         if (colIdx >= tbl.len) continue;
                         val = extractColumnValue(row, tbl, colIdx);
                     }
-                    if (!val.empty()) count++;
+                    count++;  // null rows were skipped above; empty strings count
                 } else if (func == "group_concat" || func == "string_agg") {
                     if (colIdx >= tbl.len) continue;
                     std::string val = extractColumnValue(row, tbl, colIdx);
@@ -21173,6 +21208,18 @@ std::vector<std::string> StorageEngine::groupAggregate(
                 }
 
                 if (func == "count") {
+                    // PG count(col) skips only NULL rows; an empty string
+                    // counts.  The stored null bit is the authoritative test.
+                    if (colIdx < tbl.len &&
+                        isColumnNullByRid(dbname, tablename, rid, colIdx)) {
+                        continue;
+                    }
+                    // PG count(col) skips only NULL rows; an empty string
+                    // counts.  The stored null bit is the authoritative test.
+                    if (colIdx < tbl.len &&
+                        isColumnNullByRid(dbname, tablename, rid, colIdx)) {
+                        continue;
+                    }
                     if (colName == "*") { count++; continue; }
                     std::string val;
                     if (aggArgExpr) {
@@ -21189,7 +21236,7 @@ std::vector<std::string> StorageEngine::groupAggregate(
                         if (colIdx >= tbl.len) continue;
                         val = extractColumnValue(row, tbl, colIdx);
                     }
-                    if (!val.empty()) count++;
+                    count++;  // null rows were skipped above; empty strings count
                 } else if (func == "group_concat" || func == "string_agg") {
                     if (colIdx >= tbl.len) continue;
                     std::string val = extractColumnValue(row, tbl, colIdx);
@@ -21602,8 +21649,11 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
                 if (func == "count") {
                     if (colName == "*") { count++; continue; }
                     if (colIdx >= tbl.len) continue;
+                    // PG count(col) skips only NULL rows; empty strings count.
+                    if (isColumnNullByRid(dbname, tablename, rid, colIdx)) continue;
                     std::string val = extractColumnValue(row, tbl, colIdx);
-                    if (!val.empty()) count++;
+                    (void)val;
+                    count++;
                 } else if (func == "group_concat" || func == "string_agg") {
                     if (colIdx >= tbl.len) continue;
                     std::string val = extractColumnValue(row, tbl, colIdx);

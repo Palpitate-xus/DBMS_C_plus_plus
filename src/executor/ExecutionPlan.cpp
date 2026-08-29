@@ -2788,6 +2788,7 @@ bool GroupAggregateOp::open() {
     struct InputRow {
         std::string raw;
         std::vector<std::string> values;
+        std::vector<bool> nulls;
     };
     std::vector<InputRow> input;
     std::string raw;
@@ -2795,8 +2796,10 @@ bool GroupAggregateOp::open() {
         InputRow row;
         row.raw = std::move(raw);
         row.values.reserve(tbl_.len);
+        row.nulls.reserve(tbl_.len);
         for (size_t i = 0; i < tbl_.len; ++i) {
             row.values.push_back(StorageEngine::extractColumnValueStatic(row.raw, tbl_, i));
+            row.nulls.push_back(child_->lastColumnIsNull(i));
         }
         input.push_back(std::move(row));
     }
@@ -2915,7 +2918,11 @@ bool GroupAggregateOp::open() {
             if (func == "count") {
                 if (distinct) {
                     if (!value.empty()) distinctValues.insert(value);
-                } else if (arg == "*" || !value.empty()) {
+                } else if (arg == "*") {
+                    ++count;
+                } else if (argIndex < row.nulls.size() && row.nulls[argIndex]) {
+                    // physically NULL: PG count(col) skips it
+                } else {
                     ++count;
                 }
                 continue;
