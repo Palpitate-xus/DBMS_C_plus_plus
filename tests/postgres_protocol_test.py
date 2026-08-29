@@ -502,8 +502,10 @@ def main():
             sock, "CREATE TABLE dml_ast (id INT DEFAULT 7, name TEXT)"))
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "INSERT INTO dml_ast VALUES (DEFAULT, 'first'), (2, NULL), (NULL, 'null-id')"))
+        # PG sends a -1 length (client NULL) for a stored NULL id; the
+        # planner now propagates the stored null bit to the wire.
         assert data_row_values(simple_query(
-            sock, "SELECT id FROM dml_ast")) == [[b"7"], [b"2"], [b""]]
+            sock, "SELECT id FROM dml_ast")) == [[b"7"], [b"2"], [None]]
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "INSERT INTO dml_ast DEFAULT VALUES"))
         assert data_row_values(simple_query(
