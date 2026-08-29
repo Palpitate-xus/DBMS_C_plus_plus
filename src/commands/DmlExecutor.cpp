@@ -1451,7 +1451,9 @@ bool evaluateValue(const ExprPtr& expr, const std::string& currentDB,
     ExprValue result = evaluator.eval(expr, emptyContext);
     if (result.isUnknown()) return false;
     if (result.isNull) {
-        value.clear();
+        // Explicit NULL travels as the NULL marker string: buildRowBuffer
+        // maps it to the stored null bit, keeping empty string distinct.
+        value = "NULL";
         return true;
     }
     value = result.value;

@@ -13129,7 +13129,7 @@ static std::string buildRowBuffer(const TableSchema& tbl,
     bool hasNull = false;
     for (size_t i = 0; i < tbl.len; ++i) {
         auto it = values.find(tbl.cols[i].dataName);
-        if (it == values.end() || it->second.empty()) {
+        if (it == values.end() || it->second == "NULL") {
             hasNull = true;
             break;
         }
@@ -13140,7 +13140,9 @@ static std::string buildRowBuffer(const TableSchema& tbl,
         auto* header = castHeapHeader(rowBuffer.data());
         for (size_t i = 0; i < tbl.len; ++i) {
             auto it = values.find(tbl.cols[i].dataName);
-            if (it != values.end() && !it->second.empty()) {
+            // An empty-string value is a real empty value (bit set); only the
+            // NULL marker (or an omitted column) leaves the bit clear = NULL.
+            if (it != values.end() && it->second != "NULL") {
                 setNotNull(header, static_cast<int>(i));
             }
         }
@@ -13153,6 +13155,7 @@ static std::string buildRowBuffer(const TableSchema& tbl,
             const Column& col = tbl.cols[i];
             auto it = values.find(col.dataName);
             std::string val = (it != values.end()) ? it->second : "";
+            if (val == "NULL") val.clear();  // marker encodes as empty bytes
             if (col.dataType == "char" || col.dataType == "nchar" ||
                 col.dataType == "binary" || col.dataType == "uuid") {
                 std::memset(&rowBuffer[offset], 0, col.dsize);
@@ -13240,6 +13243,7 @@ static std::string buildRowBuffer(const TableSchema& tbl,
             const Column& col = tbl.cols[i];
             auto it = values.find(col.dataName);
             std::string val = (it != values.end()) ? it->second : "";
+            if (val == "NULL") val.clear();  // marker encodes as empty bytes
             if (col.isVariableLength) {
                 size_t maxLen = col.isArray ? 1024 : col.dsize;
                 if (val.size() > maxLen) val.resize(maxLen);
@@ -13713,10 +13717,13 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         const Column& col = tbl.cols[i];
         auto it = actualValues.find(col.dataName);
         std::string val = (it != actualValues.end()) ? it->second : "";
-        if (!col.isNull && val.empty()) {
+        if (!col.isNull && (val.empty() || val == "NULL")) {
             lockManager_.unlock(tablename);
             return DBStatus::NULL_NOT_ALLOWED;
         }
+        // The NULL marker encodes SQL NULL; type validations below must not
+        // try to parse it as a value.
+        if (val == "NULL") val.clear();
         if (!col.isVariableLength && col.dataType == "date" && !val.empty()) {
             Date d(val.c_str());
             if (d.year == 0) {
