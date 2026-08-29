@@ -65,12 +65,12 @@ static void test_dow_doy_century() {
 
 static void test_epoch() {
     dbms::ExprEvaluator eval;
-    // Unix epoch is exactly 0 seconds since 1970-01-01 00:00:00.
-    assert(callFn(eval, "extract", {F("epoch"), TS("1970-01-01 00:00:00")}).value == "0");
+    // PG renders date_part/extract('epoch', ts) as numeric with scale 6.
+    assert(callFn(eval, "extract", {F("epoch"), TS("1970-01-01 00:00:00")}).value == "0.000000");
     // One day later -> 86400 seconds.
-    assert(callFn(eval, "extract", {F("epoch"), TS("1970-01-02 00:00:00")}).value == "86400");
+    assert(callFn(eval, "extract", {F("epoch"), TS("1970-01-02 00:00:00")}).value == "86400.000000");
     // A specific later instant.
-    assert(callFn(eval, "extract", {F("epoch"), TS("1970-01-01 01:00:00")}).value == "3600");
+    assert(callFn(eval, "extract", {F("epoch"), TS("1970-01-01 01:00:00")}).value == "3600.000000");
     std::cout << "[DATEFN] epoch OK" << std::endl;
 }
 
