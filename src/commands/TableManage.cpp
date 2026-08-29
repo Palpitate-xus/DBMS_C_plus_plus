@@ -18126,6 +18126,35 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         return arg;
     };
 
+    // PG strict functions return NULL when any argument is NULL.  Column
+    // arguments read as empty for physically-NULL values, so consult the
+    // stored null bit before dispatching to the per-function bodies.
+    {
+        static const char* strictFns[] = {
+            "length", "char_length", "character_length", "octet_length",
+            "bit_length", "upper", "lower", "initcap", "btrim", "ltrim",
+            "rtrim", "reverse", "left", "right", "lpad", "rpad",
+            "repeat", "ascii", "chr_code", "md5", "sha256", "hash",
+            "abs", "ceil", "ceiling", "floor", "round", "trunc",
+            "sqrt", "exp", "ln", "log", "power", "sign", "width_bucket",
+            "substring", "substr", "translate", "replace", "split_part",
+            "concat_ws_null", "to_char", "to_date", "to_number",
+            "to_timestamp", "date_trunc", "date_part", "extract_",
+            "age", "justify_days", "justify_hours", "network",
+            "abbrev", "family", "host", "masklen", "set_masklen"
+        };
+        for (const char* sf : strictFns) {
+            if (expr.funcName != sf) continue;
+            for (const auto& arg : expr.funcArgs) {
+                if (getVal(arg).empty() &&
+                    scalarArgColumnIsPhysNull(arg, tbl, engine, dbname)) {
+                    return "NULL";
+                }
+            }
+            break;
+        }
+    }
+
     if ((expr.funcName == "current_user" || expr.funcName == "session_user") && !expr.sessionUser.empty()) {
         return expr.sessionUser;
     }
