@@ -41,14 +41,20 @@ static std::string trimExec(const std::string& value) {
 // Helper: format a raw row buffer into display string
 // ========================================================================
 static std::string formatRow(const std::string& rowBuffer, const TableSchema& tbl,
-                              const std::set<std::string>& selectCols) {
+                              const std::set<std::string>& selectCols,
+                              const Operator* nullMeta = nullptr) {
     std::string rowStr;
     for (size_t i = 0; i < tbl.len; ++i) {
         const Column& col = tbl.cols[i];
         if (!selectCols.empty() && selectCols.find(col.dataName) == selectCols.end())
             continue;
         std::string val = StorageEngine::extractColumnValueStatic(rowBuffer, tbl, i);
-        if (val.empty() && !col.isNull) rowStr += "NULL ";
+        // Stored-null bit wins when the producing scan exposes NULL metadata:
+        // the cell renders as the NULL token, which the wire layer maps to a
+        // true -1 null (PG distinguishes NULL from empty string on the wire).
+        const bool physicallyNull =
+            nullMeta && val.empty() && nullMeta->lastColumnIsNull(i);
+        if (physicallyNull || (val.empty() && !col.isNull)) rowStr += "NULL ";
         else rowStr += val + ' ';
     }
     return rowStr;
@@ -1187,7 +1193,7 @@ bool ProjectOp::next(std::string& outRow) {
         if (child_->hasError()) return propagateChildError(child_.get(), "projection child failed");
         return false;
     }
-    outRow = formatRow(raw, tbl_, selectCols_);
+    outRow = formatRow(raw, tbl_, selectCols_, child_.get());
     rtInstr_.emitted = true;
     return true;
 }
