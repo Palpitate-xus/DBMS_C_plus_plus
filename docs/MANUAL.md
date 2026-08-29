@@ -1187,7 +1187,9 @@ heap null bitmap + NullRowBinding/TableScanOp 绑定：`SELECT *`、`count(v)` N
 `min/avg` 空值语义、`v + 1`/`v::text` NULL 传播、ORDER BY NULLS LAST/FIRST（ASC/DESC）、
 DISTINCT NULL 语义、GROUP BY 空 NULL 组键（groupAggregate 逐行 NullRowBinding）全部与
 PG 一致；语句起始统一 unbindNullRow 防止排序重绑定跨语句泄漏）、pg_views 目录视图
-（schemaname/viewname/viewowner/definition，会话库视图、限定与非限定名一致，definition 内部空白以下划线渲染——表格 wire 格式的已知限制）、WHERE 中括号表达式
+（schemaname/viewname/viewowner/definition，会话库视图、限定与非限定名一致，definition 内部空白以下划线渲染——表格 wire 格式的已知限制）、concat/concat_ws 跳过 NULL 参数（concat(a,NULL,b)→ab、列路径 concat_ws 注册）、
+current_database()/current_schema()/pg_typeof() 会话伪函数、generate_series 选择列 SRF 展开
+（升降序/步长/多列重复）、WHERE 中括号表达式
 `(v > 5) IS [NOT] NULL` 的常量折叠语义、输出列命名 `?column?`/cast 列名/类型名
 （`(v+1)::text`→text、`v::text`→v、`CAST(2 AS int)`→int4 的 figure_colname 规则，
 且差分运行器现已逐语句比较 RowDescription 输出列名：函数名列（to_char/round/
