@@ -38,3 +38,6 @@ tmpidx/
 user.dat
 .vscode
 dist/
+__t_*/
+*.vm
+*.lst

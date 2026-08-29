@@ -17826,10 +17826,6 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
 
     for (auto& mr : matchRows) {
         std::string rowStr;
-        // Bind the stored-NULL visibility context so physically-NULL columns
-        // are distinguishable from empty strings when rendering the row
-        // (the wire layer maps the NULL cell text to a true -1 null).
-        NullRowBinding nbRender(this, dbname, tbl.tablename, mr.first, tbl.len);
         for (size_t i = 0; i < tbl.len; ++i) {
             const Column& col = tbl.cols[i];
             if (!selectCols.empty() && selectCols.find(col.dataName) == selectCols.end())
@@ -17852,7 +17848,7 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
                     }
                 }
             }
-            if (physicallyNull || (val.empty() && !col.isNull)) rowStr += "NULL ";
+            if (val.empty() && (physicallyNull || !col.isNull)) rowStr += "NULL ";
             else rowStr += val + ' ';
         }
         result.push_back(rowStr);
@@ -20354,9 +20350,6 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
             }
         } else {
             std::string rowStr;
-            // Bind stored-NULL visibility so physically-NULL cells render as
-            // the NULL token (the wire layer maps it to a true -1 null).
-            NullRowBinding nbQE(this, dbname, tbl.tablename, mr.first, tbl.len);
             for (const auto& expr : exprs) {
                 std::string val;
                 if (expr.isScalar) {
