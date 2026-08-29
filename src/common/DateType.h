@@ -245,7 +245,23 @@ inline std::string formatTimestampSeconds(int64_t ts) {
     if (ts < 0) return "";
     int64_t dayNum = ts / 86400;
     int64_t sod = ts % 86400;
-    Date d = DISCONV(dayNum);
+    // dayNum is days since 1970-01-01 (Unix epoch); DISCONV uses a
+    // year-0-based count, so convert epoch days to civil date directly
+    // (Howard Hinnant civil_from_days).
+    int64_t z = dayNum - 719163 + 719468;  // convert() days -> epoch days
+    const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    const uint32_t doe = static_cast<uint32_t>(z - era * 146097);
+    const uint32_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    int64_t yy = static_cast<int64_t>(yoe) + era * 400;
+    const uint32_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    const uint32_t mp = (5 * doy + 2) / 153;
+    uint32_t dd = doy - (153 * mp + 2) / 5 + 1;
+    uint32_t mm = mp + (mp < 10 ? 3 : -9);
+    if (mm <= 2) ++yy;
+    Date d;
+    d.year = static_cast<int>(yy);
+    d.month = static_cast<int>(mm);
+    d.day = static_cast<int>(dd);
     if (d.year == 0) return "";
     int h = static_cast<int>(sod / 3600);
     int mn = static_cast<int>((sod % 3600) / 60);

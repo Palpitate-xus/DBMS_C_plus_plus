@@ -26,6 +26,11 @@ SELECT extract(dow from date '2024-03-15')
 SELECT extract(doy from date '2024-03-15')
 SELECT extract(hour from timestamp '2024-03-15 07:30:00')
 SELECT extract(epoch from timestamp '1970-01-02 00:00:00')
+SELECT age(date '2024-01-01', date '2023-06-01')
+SELECT age(timestamp '2024-01-01 12:00:00', timestamp '2023-06-01 10:30:00')
+SELECT age(date '2024-03-15', date '2023-06-01')
+SELECT timestamp '2024-03-15 07:30:00'
+SELECT date_trunc('day', timestamp '2024-03-15 07:30:00')
 DROP TABLE IF EXISTS n14
 CREATE TABLE n14 (a TEXT, b TEXT)
 INSERT INTO n14 VALUES ('x', 'y'), ('x', NULL), (NULL, 'y')

@@ -4488,6 +4488,43 @@ void ExprEvaluator::registerBuiltins() {
     functions_["justify_days"] = [&](const std::vector<ExprValue>& a) -> ExprValue {
         return ExprValue("interval", justifyCommon(a.empty() ? "" : a[0].value, 1), a.empty() || a[0].isNull);
     };
+    // age(ts, ts): PG calendar difference as interval.
+    functions_["age"] = [&](const std::vector<ExprValue>& a) -> ExprValue {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull)
+            return ExprValue("interval", "", true);
+        auto splitTs = [](const std::string& v, long long& Y, long long& Mo,
+                          long long& D, long long& us) {
+            int y = 0, mo = 0, d = 0;
+            if (std::sscanf(v.substr(0, 10).c_str(), "%d-%d-%d", &y, &mo, &d) != 3)
+                return false;
+            Y = y; Mo = mo; D = d;
+            long long h = 0, mi = 0, se = 0, fr = 0;
+            if (v.size() > 11) {
+                std::sscanf(v.substr(11).c_str(), "%lld:%lld:%lld", &h, &mi, &se);
+                size_t dot = v.find(46, 11);
+                if (dot != std::string::npos)
+                    fr = std::strtoll(v.c_str() + dot + 1, nullptr, 10);
+            }
+            us = ((h * 3600 + mi * 60 + se) * 1000000LL) + fr;
+            return true;
+        };
+        long long y1 = 0, m1 = 0, d1 = 0, us1 = 0, y2 = 0, m2 = 0, d2 = 0, us2 = 0;
+        if (!splitTs(a[0].value, y1, m1, d1, us1) ||
+            !splitTs(a[1].value, y2, m2, d2, us2))
+            return ExprValue("interval", "", true);
+        long long months = (y1 * 12 + m1) - (y2 * 12 + m2);
+        long long days = d1 - d2;
+        long long micros = us1 - us2;
+        if (micros < 0) { micros += 86400000000LL; days -= 1; }
+        if (days < 0) {
+            long long py = y1, pm = m1;
+            pm -= 1; if (pm == 0) { pm = 12; py -= 1; }
+            long long nm = pm + 1, ny = py; if (nm > 12) { nm = 1; ny += 1; }
+            long long plen = daysFromCivil(ny, (unsigned)nm, 1) - daysFromCivil(py, (unsigned)pm, 1);
+            days += plen; months -= 1;
+        }
+        return ExprValue("interval", intervalToTextPg(months, days, micros), false);
+    };
     functions_["justify_interval"] = [&](const std::vector<ExprValue>& a) -> ExprValue {
         return ExprValue("interval", justifyCommon(a.empty() ? "" : a[0].value, 2), a.empty() || a[0].isNull);
     };

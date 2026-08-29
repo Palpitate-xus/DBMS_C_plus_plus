@@ -5179,7 +5179,25 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                     size_t sp3 = tn2.find(' ');
                     if (sp3 == string::npos) trailing = true;
                 }
-                if (cc3 != string::npos && trailing) {
+                // Typed literal names the column after the type keyword:
+            // PG: SELECT timestamp '...' -> header 'timestamp'.
+            {
+                static const char* tkws2[] = {"timestamp ", "timestamptz ", "date ", "time ", "interval "};
+                for (const char* kw2 : tkws2) {
+                    size_t kl2 = strlen(kw2);
+                    if (lowItem.compare(0, kl2, kw2) == 0 &&
+                        item.size() > kl2 && item[kl2] == 39) {
+                        // Only a BARE typed literal takes the type name;
+                        // anything after the closing quote is arithmetic and
+                        // PG names such a column ?column?.
+                        size_t cq2 = item.find(39, kl2 + 1);
+                        if (cq2 == string::npos || cq2 + 1 != item.size()) continue;
+                        headers.push_back(disp == item ? string(kw2).substr(0, kl2 - 1) : disp);
+                        goto headerDone;
+                    }
+                }
+            }
+            if (cc3 != string::npos && trailing) {
                     string tn2 = trim(low2.substr(cc3 + 2));
                     size_t p3 = tn2.find('(');
                     if (p3 != string::npos) tn2 = tn2.substr(0, p3);
