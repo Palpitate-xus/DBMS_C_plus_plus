@@ -5515,6 +5515,7 @@ static string normalizeConditionStr(string s) {
         s = s.substr(0, before) + "regexp" + s.substr(after);
         pos = before + 6;
     }
+
     // Normalize OVERLAPS keyword: "(d1,d2) overlaps (d3,d4)" → "(d1,d2)overlaps(d3,d4)"
     pos = 0;
     while ((pos = s.find("overlaps", pos)) != string::npos) {

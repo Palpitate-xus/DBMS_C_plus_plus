@@ -988,8 +988,49 @@ bool ExprEvaluator::likeMatch(const std::string& text, const std::string& patter
 }
 
 bool ExprEvaluator::similarToMatch(const std::string& text, const std::string& pattern) {
-    // SIMILAR TO is LIKE with regex-ish additions; approximate with LIKE for Wave 0
-    return likeMatch(text, pattern);
+    // PG SIMILAR TO: the pattern is a SQL-similar pattern where % and _ are
+    // wildcards and the rest is POSIX-regex, matched against the WHOLE string.
+    // Translate % -> .*, _ -> . (backslash escapes preserved), anchor ^(...)$.
+    std::string tr;
+    for (size_t i = 0; i < pattern.size(); ++i) {
+        char c = pattern[i];
+        if (c == 92 && i + 1 < pattern.size()) { tr += c; tr += pattern[++i]; continue; }
+        if (c == 37) { tr += ".*"; continue; }
+        if (c == 95) { tr += 46; continue; }
+        tr += c;
+    }
+    std::string anchored = "^(" + tr + ")$";
+    try {
+        std::regex re(anchored, std::regex::ECMAScript);
+        return std::regex_search(text, re);
+    } catch (...) {
+        return false;
+    }
+}
+
+static bool similarToMatchEscape(const std::string& text, const std::string& pattern, char esc) {
+    // Like similarToMatch but with an explicit SQL ESCAPE character:
+    // esc followed by % or _ denotes the literal character.
+    std::string tr;
+    for (size_t i = 0; i < pattern.size(); ++i) {
+        char c = pattern[i];
+        if (c == esc && i + 1 < pattern.size() &&
+            (pattern[i + 1] == 37 || pattern[i + 1] == 95 || pattern[i + 1] == esc)) {
+            char nxt = pattern[++i];
+            tr += 91; tr += nxt; tr += 93;  // character class [x]
+            continue;
+        }
+        if (c == 92 && i + 1 < pattern.size()) { tr += c; tr += pattern[++i]; continue; }
+        if (c == 37) { tr += ".*"; continue; }
+        if (c == 95) { tr += 46; continue; }
+        tr += c;
+    }
+    try {
+        std::regex re("^(" + tr + ")$", std::regex::ECMAScript);
+        return std::regex_search(text, re);
+    } catch (...) {
+        return false;
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -1558,6 +1599,18 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
 
     std::vector<ExprValue> args;
     for (const auto& a : e->args) args.push_back(eval(a.get(), ctx));
+
+    // SIMILAR TO ... ESCAPE / NOT SIMILAR TO ... ESCAPE (parser wraps the
+    // three-operand form into a FunctionCallExpr, mirroring LIKE ESCAPE).
+    if (name == "similar to escape" || name == "not similar to escape") {
+        if (args.size() < 3 || args[0].isNull || args[1].isNull) {
+            return ExprValue("boolean", "", true);
+        }
+        char esc = (!args[2].isNull && !args[2].value.empty()) ? args[2].value[0] : 92;
+        bool m = similarToMatchEscape(args[0].value, args[1].value, esc);
+        if (name[0] == 110) m = !m;  // "not ..."
+        return ExprValue("boolean", m ? "t" : "f", false);
+    }
 
     if (name == "make_interval") {
         long long mi_months = 0, mi_days = 0, mi_micros = 0;

@@ -1331,9 +1331,20 @@ static ExprPtr parseRangeExpr(const std::vector<std::string>& tokens, size_t& po
         ++pos;
         if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "to") ++pos;
         auto bin = std::make_unique<BinaryOpExpr>();
-        bin->op = "SIMILAR TO";
+        bin->op = negated ? "NOT SIMILAR TO" : "SIMILAR TO";
         bin->left = std::move(left);
         bin->right = parseConcatExpr(tokens, pos);
+        // ESCAPE clause: wrap into a FunctionCallExpr like the LIKE path.
+        if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "escape") {
+            ++pos;
+            auto esc = parseConcatExpr(tokens, pos);
+            auto wrap = std::make_unique<FunctionCallExpr>();
+            wrap->funcName = bin->op + " ESCAPE";
+            wrap->args.push_back(std::move(bin->left));
+            wrap->args.push_back(std::move(bin->right));
+            wrap->args.push_back(std::move(esc));
+            return wrap;
+        }
         return bin;
     }
 

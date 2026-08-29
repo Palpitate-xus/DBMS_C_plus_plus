@@ -12835,6 +12835,7 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
             }
         }
         if (cond.op == "regexp" && !regexMatch(val, cond.value)) return false;
+        if (cond.op == "notregexp" && regexMatch(val, cond.value)) return false;
         if (cond.op == "contains") {
             auto tokens = tokenizeText(val);
             std::string searchWord = cond.value;
