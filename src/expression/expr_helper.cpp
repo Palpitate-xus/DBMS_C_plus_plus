@@ -205,6 +205,16 @@ ExprEvalResult ExprHelper::evalString(
         ctx.set("current_user", userValue);
         ctx.set("session_user", userValue);
     }
+    // SQL-standard date/time special values, resolvable as bare identifiers
+    // (PG exposes current_date/current_timestamp/localtimestamp both ways).
+    // The evaluator's fixed session clock keeps results deterministic.
+    {
+        ctx.set("current_date", ExprValue("date", "2026-06-20", false));
+        ctx.set("current_timestamp",
+                ExprValue("timestamptz", "2026-06-20 12:00:00", false));
+        ctx.set("localtimestamp",
+                ExprValue("timestamp", "2026-06-20 12:00:00", false));
+    }
 
     ExprEvaluator evaluator;
     evaluator.setCurrentDB(currentDB);
