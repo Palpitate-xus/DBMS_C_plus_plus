@@ -4351,8 +4351,12 @@ void ExprEvaluator::registerBuiltins() {
             Date cur(y, mo, d), jan1(y, 1, 1);
             r = (cur.year != 0 && jan1.year != 0) ? cur.convert() - jan1.convert() + 1 : 0;
         } else if (field == "epoch") {
-            // Seconds since 1970-01-01 00:00:00.
+            // Seconds since 1970-01-01 00:00:00; PG renders date_part('epoch',
+            // ts) as numeric with scale 6 (86400.000000).
             r = parseTimestampToSeconds(src) - parseTimestampToSeconds("1970-01-01 00:00:00");
+            char eb[64];
+            std::snprintf(eb, sizeof(eb), "%.6f", static_cast<double>(r));
+            return ExprValue("numeric", eb, false);
         } else {
             return ExprValue("numeric", "", true);
         }

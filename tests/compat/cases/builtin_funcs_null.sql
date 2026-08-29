@@ -19,6 +19,13 @@ SELECT date '2024-03-15' + 7
 SELECT date '2024-03-15' - 5
 SELECT date '2024-03-15' - date '2024-03-01'
 SELECT '2024-03-15'::date + 7
+SELECT extract(year from date '2024-03-15')
+SELECT extract(month from date '2024-03-15')
+SELECT extract(day from date '2024-03-15')
+SELECT extract(dow from date '2024-03-15')
+SELECT extract(doy from date '2024-03-15')
+SELECT extract(hour from timestamp '2024-03-15 07:30:00')
+SELECT extract(epoch from timestamp '1970-01-02 00:00:00')
 DROP TABLE IF EXISTS n14
 CREATE TABLE n14 (a TEXT, b TEXT)
 INSERT INTO n14 VALUES ('x', 'y'), ('x', NULL), (NULL, 'y')
