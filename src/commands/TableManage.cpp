@@ -18535,8 +18535,29 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         return val.substr(start, len);
     }
     if (expr.funcName == "concat") {
+        // PG concat() skips NULL arguments entirely.
         std::string result;
-        for (const auto& arg : expr.funcArgs) result += getVal(arg);
+        for (const auto& arg : expr.funcArgs) {
+            if (arg == "NULL" || arg == "null") continue;
+            result += getVal(arg);
+        }
+        return result;
+    }
+    if (expr.funcName == "concat_ws" && expr.funcArgs.size() >= 2) {
+        // PG concat_ws(sep, ...): NULL separator -> NULL; NULL args skipped.
+        if (expr.funcArgs[0] == "NULL" || expr.funcArgs[0] == "null") return "";
+        const std::string sep = getVal(expr.funcArgs[0]);
+        std::string result;
+        bool first = true;
+        for (size_t ai = 1; ai < expr.funcArgs.size(); ++ai) {
+            const std::string& arg = expr.funcArgs[ai];
+            if (arg == "NULL" || arg == "null") continue;
+            const std::string v = getVal(arg);
+            if (v.empty()) continue;  // stored-NULL column renders empty
+            if (!first) result += sep;
+            result += v;
+            first = false;
+        }
         return result;
     }
     if (expr.funcName == "abs" && !expr.funcArgs.empty()) {

@@ -672,6 +672,7 @@ static bool isScalarFunc(const string& name) {
                                          "replace", "position", "instr", "strpos", "overlay", "translate",
                                          "power", "sqrt", "mod", "div", "gcd", "lcm", "width_bucket",
                                          "ln", "log", "exp", "random", "rand",
+                                          "concat", "concat_ws", "initcap",
                                          "lpad", "rpad", "reverse", "left", "right", "repeat", "btrim", "ltrim", "rtrim",
                                          "greatest", "least", "if", "iif",
                                          "date_add", "date_sub",
@@ -5027,6 +5028,40 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             values.push_back(s.username);
             continue;
         }
+        if (lowItem.rfind("generate_series", 0) == 0) {
+            // Placeholder row; the SRF expansion below fills the series.
+            headers.push_back("generate_series");
+            values.push_back("");
+            continue;
+        }
+        if (lowItem == "current_database()" || lowItem == "current_database ( )") {
+            headers.push_back("current_database");
+            values.push_back(s.currentDB.empty() ? std::string("postgres") : s.currentDB);
+            continue;
+        }
+        if (lowItem == "current_schema()" || lowItem == "current_schema ( )") {
+            headers.push_back("current_schema");
+            values.push_back("public");
+            continue;
+        }
+        if (lowItem.substr(0, 10) == "pg_typeof(" || lowItem.substr(0, 10) == "pg_typeof (") {
+            // pg_typeof(literal): PG type names for common literal shapes.
+            std::string inner = expr;
+            size_t lp = inner.find('(');
+            size_t rp = inner.rfind(')');
+            std::string arg = (lp != std::string::npos && rp != std::string::npos && rp > lp)
+                ? trim(inner.substr(lp + 1, rp - lp - 1)) : std::string();
+            std::string tn;
+            if (!arg.empty() && arg.front() == 39 && arg.back() == 39) tn = "unknown";
+            else if (!arg.empty() && (arg.find('.') != std::string::npos || arg.find('e') != std::string::npos || arg.find('E') != std::string::npos)) tn = "numeric";
+            else if (!arg.empty() && arg.find_first_not_of("0123456789-+") == std::string::npos) tn = "integer";
+            else if (arg == "true" || arg == "false") tn = "boolean";
+            else if (!arg.empty() && arg.front() == '{') tn = "text[]";
+            else tn = "unknown";
+            headers.push_back("pg_typeof");
+            values.push_back(tn);
+            continue;
+        }
         if (lowItem == "version()" || lowItem == "version ( )") {
             headers.push_back("version");
             values.push_back("DBMS-C++ protocol/3.0");
@@ -5236,14 +5271,81 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
         values.push_back(r.isNull ? "NULL" : r.value);
     }
 
+    size_t multiRowWidth = 0;  // >0 when a set-returning function expanded rows
+    // Set-returning function in the FROM-less select list:
+    // SELECT generate_series(a, b[, step]) expands the single row into
+    // one row per series element (PG SRF-in-select-list semantics).
+    {
+        size_t srfIdx = values.size();
+        int64_t gsStart = 0, gsStop = 0, gsStep = 1;
+        bool hasSrf = false;
+        for (size_t i2 = 0; i2 < items.size() && i2 < values.size(); ++i2) {
+            string it = trim(items[i2]);
+            string low2;
+            for (char c : it) low2 += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+            if (low2.rfind("generate_series", 0) == 0) {
+                size_t lp2 = it.find('(');
+                size_t rp2 = it.rfind(')');
+                if (lp2 != string::npos && rp2 != string::npos && rp2 > lp2 + 1) {
+                    string args = it.substr(lp2 + 1, rp2 - lp2 - 1);
+                    vector<string> av;
+                    string cur;
+                    for (char c : args) {
+                        if (c == ',') { av.push_back(trim(cur)); cur.clear(); }
+                        else cur += c;
+                    }
+                    av.push_back(trim(cur));
+                    if (av.size() >= 2) {
+                        gsStart = strtoll(av[0].c_str(), nullptr, 10);
+                        gsStop = strtoll(av[1].c_str(), nullptr, 10);
+                        gsStep = av.size() >= 3 ? strtoll(av[2].c_str(), nullptr, 10) : 1;
+                        if (gsStep == 0) gsStep = 1;
+                        srfIdx = i2;
+                        hasSrf = true;
+                    }
+                }
+                break;
+            }
+        }
+        if (hasSrf && srfIdx < values.size()) {
+            vector<string> expanded;
+            if (gsStep > 0) {
+                for (int64_t v2 = gsStart; v2 <= gsStop; v2 += gsStep) {
+                    vector<string> row = values;
+                    row[srfIdx] = std::to_string(v2);
+                    for (const auto& cell : row) expanded.push_back(cell);
+                }
+            } else {
+                for (int64_t v2 = gsStart; v2 >= gsStop; v2 += gsStep) {
+                    vector<string> row = values;
+                    row[srfIdx] = std::to_string(v2);
+                    for (const auto& cell : row) expanded.push_back(cell);
+                }
+            }
+            if (!expanded.empty()) {
+                size_t width = values.size();
+                values = std::move(expanded);
+                multiRowWidth = width;
+            }
+        }
+    }
+
     if (isDistinct) {
         // Single row: distinct is a no-op unless the row duplicates itself.
     }
 
     for (const auto& h : headers) cout << h << ' ';
     cout << '\n';
-    for (const auto& v : values) cout << v << ' ';
-    cout << '\n';
+    if (multiRowWidth > 0) {
+        for (size_t i3 = 0; i3 + multiRowWidth <= values.size(); i3 += multiRowWidth) {
+            for (size_t j3 = 0; j3 < multiRowWidth; ++j3)
+                cout << values[i3 + j3] << ' ';
+            cout << '\n';
+        }
+    } else {
+        for (const auto& v : values) cout << v << ' ';
+        cout << '\n';
+    }
     return false;
 }
 

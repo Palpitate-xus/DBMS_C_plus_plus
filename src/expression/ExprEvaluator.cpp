@@ -3246,9 +3246,10 @@ void ExprEvaluator::registerBuiltins() {
     // String functions
     // ------------------------------------------------------------------------
     functions_["concat"] = [](const std::vector<ExprValue>& a) {
+        // PG concat() ignores NULL arguments rather than returning NULL.
         std::string s;
         for (const auto& v : a) {
-            if (v.isNull) return ExprValue("text", "", true);
+            if (v.isNull) continue;
             s += v.value;
         }
         return ExprValue("text", s, false);
