@@ -17826,11 +17826,17 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
 
     for (auto& mr : matchRows) {
         std::string rowStr;
+        // Bind the stored-NULL visibility context so physically-NULL columns
+        // are distinguishable from empty strings when rendering the row
+        // (the wire layer maps the NULL cell text to a true -1 null).
+        NullRowBinding nbRender(this, dbname, tbl.tablename, mr.first, tbl.len);
         for (size_t i = 0; i < tbl.len; ++i) {
             const Column& col = tbl.cols[i];
             if (!selectCols.empty() && selectCols.find(col.dataName) == selectCols.end())
                 continue;
             std::string val = extractColumnValue(mr.second, tbl, i, dbname, true);
+            const bool physicallyNull =
+                isColumnNullByRid(dbname, tbl.tablename, mr.first, i);
             // Apply session timezone for TIMESTAMPTZ columns
             if (timezoneOffsetMinutes != 0 && col.dataType == "timestamptz" && !val.empty()) {
                 // Read raw seconds directly from row buffer (extractColumnValue already formats it)
@@ -17846,7 +17852,7 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
                     }
                 }
             }
-            if (val.empty() && !col.isNull) rowStr += "NULL ";
+            if (physicallyNull || (val.empty() && !col.isNull)) rowStr += "NULL ";
             else rowStr += val + ' ';
         }
         result.push_back(rowStr);
@@ -20348,6 +20354,9 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
             }
         } else {
             std::string rowStr;
+            // Bind stored-NULL visibility so physically-NULL cells render as
+            // the NULL token (the wire layer maps it to a true -1 null).
+            NullRowBinding nbQE(this, dbname, tbl.tablename, mr.first, tbl.len);
             for (const auto& expr : exprs) {
                 std::string val;
                 if (expr.isScalar) {
@@ -20356,6 +20365,10 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
                     for (size_t i = 0; i < tbl.len; ++i) {
                         if (tbl.cols[i].dataName == expr.colName) {
                             val = extractColumnValue(mr.second, tbl, i, dbname);
+                            if (val.empty() &&
+                                isColumnNullByRid(dbname, tbl.tablename, mr.first, i)) {
+                                val = "NULL";
+                            }
                             break;
                         }
                     }
