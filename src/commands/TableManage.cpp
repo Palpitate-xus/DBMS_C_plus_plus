@@ -22062,6 +22062,33 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
             }
             row += ' ';
             for (const auto& item : items) {
+                // grouping(<col>): 1 when the column is absent from this
+                // grouping set (rolled up to NULL by the set semantics), 0
+                // when it is a real grouping column of this row.
+                if (item.func == "grouping" || item.func == "grouping_id") {
+                    // Bitmask over comma-separated arguments: bit for arg i
+                    // is 1 << (n-1-i) (PG: grouping(a,b) -> a=2, b=1), set
+                    // when that column is absent from this grouping set.
+                    std::vector<std::string> gargs;
+                    {
+                        std::stringstream gs_(item.arg);
+                        std::string gp_;
+                        while (std::getline(gs_, gp_, ',')) {
+                            size_t a_ = 0, b_ = gp_.size();
+                            while (a_ < b_ && std::isspace(static_cast<unsigned char>(gp_[a_]))) ++a_;
+                            while (b_ > a_ && std::isspace(static_cast<unsigned char>(gp_[b_ - 1]))) --b_;
+                            gargs.push_back(gp_.substr(a_, b_ - a_));
+                        }
+                    }
+                    int mask = 0;
+                    for (size_t gi_ = 0; gi_ < gargs.size(); ++gi_) {
+                        if (colValues.find(gargs[gi_]) == colValues.end())
+                            mask |= 1 << (gargs.size() - 1 - gi_);
+                    }
+                    row += std::to_string(mask);
+                    row += ' ';
+                    continue;
+                }
                 row += computeAgg(gids, item.func, item.arg, item.filterConds) + ' ';
             }
             result.push_back(row);
