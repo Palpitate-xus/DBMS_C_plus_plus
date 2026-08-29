@@ -10790,6 +10790,96 @@ static bool executeInternal(const string& rawSql, Session& s) {
     g_engine.setRLSUser(effectiveSessionRole(s));
     dbms::setCurrentSession(&s);
     string sql = sqlProcessor(rawSql);
+    // FROM generate_series(a, b[, step]) [AS alias[(col)]]: rewrite into a
+    // UNION ALL derived table so the normal derived-table path serves it.
+    {
+        string lw;
+        lw.reserve(sql.size());
+        bool inStr = false;
+        for (char c : sql) {
+            if (c == 39) inStr = !inStr;
+            lw += (inStr ? c : static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+        }
+        size_t fpos = lw.find(" from generate_series(");
+        if (fpos == string::npos) fpos = lw.find(", generate_series(");
+        if (fpos != string::npos) {
+            size_t lp = sql.find('(', fpos);
+            int depth = 0; size_t rp = string::npos;
+            for (size_t k = lp; k < sql.size(); ++k) {
+                if (sql[k] == '(') ++depth;
+                else if (sql[k] == ')') { --depth; if (depth == 0) { rp = k; break; } }
+            }
+            if (lp != string::npos && rp != string::npos && rp > lp + 1) {
+                string args = sql.substr(lp + 1, rp - lp - 1);
+                vector<string> av;
+                string cur;
+                bool inA = false; int d2 = 0;
+                for (char c : args) {
+                    if (c == 39) inA = !inA;
+                    if (!inA) {
+                        if (c == '(') ++d2;
+                        else if (c == ')') --d2;
+                        else if (c == ',' && d2 == 0) { av.push_back(trim(cur)); cur.clear(); continue; }
+                    }
+                    cur += c;
+                }
+                av.push_back(trim(cur));
+                if (av.size() >= 2) {
+                    long long gs1 = 0, gs2 = 0, gs3 = 1;
+                    bool okArgs = true;
+                    try { gs1 = std::stoll(av[0]); gs2 = std::stoll(av[1]); }
+                    catch (...) { okArgs = false; }
+                    if (okArgs && av.size() >= 3) {
+                        try { gs3 = std::stoll(av[2]); } catch (...) { gs3 = 1; }
+                    }
+                    if (okArgs && gs3 != 0) {
+                        size_t after = rp + 1;
+                        string tail = sql.substr(after);
+                        string lowTail;
+                        for (char c : tail) lowTail += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                        string aliasName = "generate_series", colName;
+                        size_t consumed = 0;  // chars of tail consumed by AS-alias
+                        size_t asP = lowTail.find("as ");
+                        if (asP == 0 || (asP != string::npos && isspace(static_cast<unsigned char>(tail[asP - 1])))) {
+                            string rest = trim(tail.substr(asP + 3));
+                            size_t clp = rest.find('(');
+                            if (clp != string::npos) {
+                                aliasName = trim(rest.substr(0, clp));
+                                size_t crp = rest.find(')', clp);
+                                colName = trim(rest.substr(clp + 1, crp - clp - 1));
+                                consumed = asP + 3 + (crp == string::npos ? rest.size() : crp + 1);
+                            } else {
+                                size_t sp = rest.find_first_of(" ,)");
+                                aliasName = (sp == string::npos) ? rest : rest.substr(0, sp);
+                                consumed = asP + 3 + aliasName.size();
+                            }
+                        }
+                        if (colName.empty()) colName = aliasName == "generate_series" ? "generate_series" : aliasName;
+                        string unionBody;
+                        bool firstU = true;
+                        if (gs3 > 0) {
+                            for (long long v = gs1; v <= gs2; v += gs3) {
+                                if (!firstU) unionBody += " union all ";
+                                unionBody += "select " + std::to_string(v) + " as " + colName;
+                                firstU = false;
+                            }
+                        } else {
+                            for (long long v = gs1; v >= gs2; v += gs3) {
+                                if (!firstU) unionBody += " union all ";
+                                unionBody += "select " + std::to_string(v) + " as " + colName;
+                                firstU = false;
+                            }
+                        }
+                        if (!unionBody.empty()) {
+                            string sep = (sql[fpos] == ',') ? "," : " from ";
+                            string repl = sep + "(" + unionBody + ") as " + aliasName;
+                            sql = sql.substr(0, fpos) + repl + tail.substr(consumed);
+                        }
+                    }
+                }
+            }
+        }
+    }
     // Logical replication DDL must be intercepted before the generic parser
     // maps "CREATE PUBLICATION/REPLICATION SLOT" onto unrelated commands.
     {
