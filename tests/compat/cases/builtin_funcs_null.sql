@@ -15,6 +15,10 @@ SELECT s FROM generate_series(2, 6, 2) AS t(s)
 SELECT sum(i) FROM generate_series(1, 4) AS t(i)
 SELECT i FROM generate_series(1, 5) AS t(i) WHERE i > 2 ORDER BY i DESC
 SELECT count(*) FROM generate_series(1, 100, 10) AS t(i)
+SELECT date '2024-03-15' + 7
+SELECT date '2024-03-15' - 5
+SELECT date '2024-03-15' - date '2024-03-01'
+SELECT '2024-03-15'::date + 7
 DROP TABLE IF EXISTS n14
 CREATE TABLE n14 (a TEXT, b TEXT)
 INSERT INTO n14 VALUES ('x', 'y'), ('x', NULL), (NULL, 'y')

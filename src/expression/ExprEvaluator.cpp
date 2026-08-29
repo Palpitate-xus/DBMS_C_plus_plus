@@ -692,6 +692,28 @@ ExprValue ExprEvaluator::applyComparison(const std::string& op,
 // Arithmetic
 // ----------------------------------------------------------------------------
 
+// Howard Hinnant's civil-date algorithms: days since 1970-01-01 and back.
+static long long daysFromCivil(long long y, unsigned m, unsigned d) {
+    y -= m <= 2;
+    const long long era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = static_cast<unsigned>(y - era * 400);
+    const unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + static_cast<long long>(doe) - 719468;
+}
+static void civilFromDays(long long z, long long& y, long long& m, long long& d) {
+    z += 719468;
+    const long long era = (z >= 0 ? z : z - 146096) / 146097;
+    const unsigned doe = static_cast<unsigned>(z - era * 146097);
+    const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    y = static_cast<long long>(yoe) + era * 400;
+    const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    const unsigned mp = (5 * doy + 2) / 153;
+    d = doy - (153 * mp + 2) / 5 + 1;
+    m = mp + (mp < 10 ? 3 : -9);
+    y += (m <= 2);
+}
+
 ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
                                          const ExprValue& l,
                                          const ExprValue& r) {
@@ -713,6 +735,64 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
                Y >= 1 && Mo >= 1 && Mo <= 12 && D >= 1 && D <= 31;
     };
     std::string lt = toLower(l.typeName), rt = toLower(r.typeName);
+    // date +/- integer days (PG: date '2024-03-15' + 7 -> 2024-03-22) and
+    // date - date -> integer day count (PG: 14).
+    {
+        auto isPureInt = [](const ExprValue& v) {
+            return !v.value.empty() &&
+                   v.value.find_first_not_of("0123456789-+") == std::string::npos &&
+                   v.value != "-" && v.value != "+";
+        };
+        auto looksLikeDateVal = [](const ExprValue& v) {
+            if (v.value.size() < 10) return false;
+            int Y = 0, Mo = 0, D = 0;
+            if (std::sscanf(v.value.substr(0, 10).c_str(), "%d-%d-%d", &Y, &Mo, &D) != 3) return false;
+            return Y >= 1 && Mo >= 1 && Mo <= 12 && D >= 1 && D <= 31;
+        };
+        const bool lDate = (lt == "date");
+        const bool rDate = (rt == "date");
+        const bool lInt = isPureInt(l) && !lDate;
+        const bool rInt = isPureInt(r) && !rDate;
+        if (op == "+" && ((lDate && rInt) || (lInt && rDate))) {
+            const ExprValue& dv = lDate ? l : r;
+            long long days = std::strtoll((lDate ? r : l).value.c_str(), nullptr, 10);
+            std::string base = dv.value.substr(0, 10);
+            int Y = 0, Mo = 0, D = 0;
+            if (std::sscanf(base.c_str(), "%d-%d-%d", &Y, &Mo, &D) == 3) {
+                long long total = daysFromCivil(Y, Mo, D) + days;
+                long long yy2, mm2, dd2;
+                civilFromDays(total, yy2, mm2, dd2);
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "%04lld-%02lld-%02lld", yy2, mm2, dd2);
+                std::string out = buf;
+                if (dv.value.size() > 10) out += dv.value.substr(10);
+                return ExprValue("date", out, false);
+            }
+        }
+        if (op == "-" && lDate && rDate) {
+            int Y1 = 0, M1 = 0, D1 = 0, Y2 = 0, M2 = 0, D2 = 0;
+            if (std::sscanf(l.value.substr(0, 10).c_str(), "%d-%d-%d", &Y1, &M1, &D1) == 3 &&
+                std::sscanf(r.value.substr(0, 10).c_str(), "%d-%d-%d", &Y2, &M2, &D2) == 3) {
+                long long diff = daysFromCivil(Y1, M1, D1) - daysFromCivil(Y2, M2, D2);
+                return ExprValue("int4", std::to_string(diff), false);
+            }
+        }
+        if (op == "-" && lDate && rInt) {
+            long long days = std::strtoll(r.value.c_str(), nullptr, 10);
+            std::string base = l.value.substr(0, 10);
+            int Y = 0, Mo = 0, D = 0;
+            if (std::sscanf(base.c_str(), "%d-%d-%d", &Y, &Mo, &D) == 3) {
+                long long total = daysFromCivil(Y, Mo, D) - days;
+                long long yy2, mm2, dd2;
+                civilFromDays(total, yy2, mm2, dd2);
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "%04lld-%02lld-%02lld", yy2, mm2, dd2);
+                std::string out = buf;
+                if (l.value.size() > 10) out += l.value.substr(10);
+                return ExprValue("date", out, false);
+            }
+        }
+    }
     bool lIv = (lt == "interval"), rIv = (rt == "interval");    if (!lIv && !rIv && (op == "+" || op == "-") && isTsLike(l)) {
         // 'timestamp' + '1 day' style: the untyped operand is an interval
         // literal quoted as a string.

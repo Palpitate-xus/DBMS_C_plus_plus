@@ -90,6 +90,13 @@ ExprEvalResult ExprHelper::evalString(
                             out += 39;
                             out += sql.substr(i + kw.size() + 1, close - i - kw.size() - 1);
                             out += 39;
+                            // Keep the declared type observable downstream:
+                            // date '...' becomes '...'::date so arithmetic
+                            // sees a date-typed operand (PG semantics),
+                            // instead of a bare unknown-type string.
+                            std::string tkw = kw;
+                            while (!tkw.empty() && tkw.back() == ' ') tkw.pop_back();
+                            out += "::" + tkw;
                             i = close + 1;
                             matched = true;
                             break;
