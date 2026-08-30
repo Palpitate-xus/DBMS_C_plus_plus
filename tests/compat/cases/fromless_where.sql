@@ -1,0 +1,7 @@
+-- FROM-less SELECT with WHERE: constant predicate over the single row
+SELECT 1 WHERE 2 NOT IN (NULL, 3);
+SELECT 1 WHERE 2 IN (NULL, 2);
+SELECT 1 WHERE 1 = 1;
+SELECT 1 WHERE 1 = 2;
+SELECT 1 WHERE 2 <> ALL (ARRAY[NULL, 3]);
+SELECT 1 WHERE 2 = ANY (ARRAY[NULL, 2]);

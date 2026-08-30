@@ -5032,10 +5032,173 @@ static std::vector<std::string> runSubQuery(const std::string& rawSql, Session& 
 
 static bool handleFromlessSelect(const string& sql, Session& s) {
     string cols = trim(string(sql.substr(6)));
+    bool suppressDataRow = false;
     bool isDistinct = false;
     if (cols.size() >= 9 && cols.substr(0, 9) == "distinct ") {
         isDistinct = true;
         cols = trim(cols.substr(9));
+    }
+    // WHERE over the constant projection: PG evaluates it as a predicate on
+    // the single computed row and returns no row when UNKNOWN/FALSE.  Detect
+    // a top-level " where " and evaluate the constant predicate here.
+    {
+        bool inStr = false;
+        int depth = 0;
+        size_t whereAt = string::npos;
+        string colsLow;
+        for (char c : cols) colsLow += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        for (size_t i = 0; i < colsLow.size(); ++i) {
+            const char c = colsLow[i];
+            if (c == 0x27) inStr = !inStr;
+            if (!inStr) {
+                if (c == '(' || c == '[') ++depth;
+                else if (c == ')' || c == ']') --depth;
+                else if (depth == 0 && c == 'w' && i + 6 <= colsLow.size() &&
+                         colsLow.compare(i, 5, "where") == 0 &&
+                         (i == 0 || isspace(static_cast<unsigned char>(colsLow[i - 1]))) &&
+                         (i + 5 >= colsLow.size() || isspace(static_cast<unsigned char>(colsLow[i + 5])))) {
+                    whereAt = i;
+                    break;
+                }
+            }
+        }
+        if (whereAt != string::npos) {
+            const string proj = trim(cols.substr(0, whereAt));
+            const string pred = trim(cols.substr(whereAt + 5));
+            cols = proj;
+            auto constEvalPredicate = [](const string& p) -> int {
+                // returns 1 true, 0 false, -1 unknown
+                string s2;
+                for (char c : p) s2 += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                size_t inAt = string::npos; bool neg = false;
+                {
+                    const size_t nAt = s2.find(" not in ");
+                    if (nAt != string::npos) { neg = true; inAt = nAt + 4; }
+                    else inAt = s2.find(" in ");
+                }
+                // Quantified forms over an ARRAY literal (the FROM-less path
+                // receives raw SQL, pre-rewrite): "= any (array[e,...])" and
+                // "<> all (array[e,...])".  NULL elements keep IN/NOT-IN
+                // three-valued semantics.
+                {
+                    const size_t anyAt = s2.find(" any (array");
+                    const size_t allAt = s2.find(" all (array");
+                    const bool isAll = allAt != string::npos &&
+                                      (anyAt == string::npos || allAt < anyAt);
+                    const size_t qAt = isAll ? allAt : anyAt;
+                    if (qAt != string::npos) {
+                        size_t opEnd = qAt;
+                        while (opEnd > 0 && isspace(static_cast<unsigned char>(p[opEnd - 1]))) --opEnd;
+                        size_t opStart = opEnd;
+                        while (opStart > 0) {
+                            const char c = p[opStart - 1];
+                            if (c != '<' && c != '>' && c != '=' && c != '!') break;
+                            --opStart;
+                        }
+                        if (opStart < opEnd) {
+                            const string qop = p.substr(opStart, opEnd - opStart);
+                            const string left = trim(p.substr(0, opStart));
+                            const size_t bOpen = p.find('[', qAt);
+                            const size_t bClose = p.find(']', bOpen);
+                            if (bOpen != string::npos && bClose != string::npos && bClose > bOpen) {
+                                const string elemsRaw = p.substr(bOpen + 1, bClose - bOpen - 1);
+                                vector<string> elems;
+                                string cur;
+                                for (char c : elemsRaw) {
+                                    if (c == ',') { elems.push_back(trim(cur)); cur.clear(); }
+                                    else cur += c;
+                                }
+                                if (!trim(cur).empty()) elems.push_back(trim(cur));
+                                auto isNullTokQ = [](const string& t) {
+                                    string tl;
+                                    for (char c : t) tl += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                                    return tl == "null";
+                                };
+                                bool hit = false, sawNull = false;
+                                for (auto& e : elems) {
+                                    if (isNullTokQ(e)) { sawNull = true; continue; }
+                                    bool num = true;
+                                    double lv = 0, rv = 0;
+                                    try { lv = stod(left); rv = stod(e); } catch (...) { num = false; }
+                                    const bool eq = num ? lv == rv : left == e;
+                                    if (qop == "=" && eq) { hit = true; break; }
+                                    if ((qop == "!=" || qop == "<>") && !eq) { hit = true; break; }
+                                }
+                                if (qop == "=") return hit ? 1 : (sawNull ? -1 : 0);
+                                if (qop == "!=" || qop == "<>") {
+                                    if (isAll) {
+                                        // <> ALL: true iff every element differs and none is NULL
+                                        if (sawNull) return -1;
+                                        return hit ? 1 : 0;
+                                    }
+                                    return hit ? 1 : (sawNull ? -1 : 0);
+                                }
+                            }
+                        }
+                    }
+                }
+                if (inAt != string::npos) {
+                    const size_t ob = p.find('(', inAt);
+                    const size_t cb = p.rfind(')');
+                    if (ob != string::npos && cb != string::npos && cb > ob) {
+                        const string left = trim(p.substr(0, neg ? inAt - 4 : inAt));
+                        string list = p.substr(ob + 1, cb - ob - 1);
+                        vector<string> elems;
+                        string cur;
+                        for (char c : list) {
+                            if (c == ',') { elems.push_back(trim(cur)); cur.clear(); }
+                            else cur += c;
+                        }
+                        if (!trim(cur).empty()) elems.push_back(trim(cur));
+                        auto isNullTok = [](const string& t) {
+                            string tl;
+                            for (char c : t) tl += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                            return tl == "null";
+                        };
+                        bool hit = false, sawNull = false;
+                        for (auto& e : elems) {
+                            if (isNullTok(e)) { sawNull = true; continue; }
+                            if (e == left) { hit = true; break; }
+                        }
+                        if (!neg) return hit ? 1 : (sawNull ? -1 : 0);
+                        if (hit) return 0;
+                        return sawNull ? -1 : 1;
+                    }
+                }
+                static const char* ops[] = {"<=", ">=", "!=", "<>", "=", "<", ">"};
+                for (const char* op : ops) {
+                    const size_t opAt = p.find(op);
+                    if (opAt == string::npos) continue;
+                    const string l = trim(p.substr(0, opAt));
+                    const string r = trim(p.substr(opAt + strlen(op)));
+                    auto isNullTok2 = [](const string& t) {
+                        string tl;
+                        for (char c : t) tl += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                        return tl == "null";
+                    };
+                    if (isNullTok2(l) || isNullTok2(r)) return -1;
+                    bool num = true;
+                    double lv = 0, rv = 0;
+                    try { lv = stod(l); rv = stod(r); } catch (...) { num = false; }
+                    if (num) {
+                        if (op[0] == '=' && !op[1]) return lv == rv ? 1 : 0;
+                        if ((op[0] == '!' || op[0] == '<') && op[1] == '>') return lv != rv ? 1 : 0;
+                        if (op == "<=") return lv <= rv ? 1 : 0;
+                        if (op == ">=") return lv >= rv ? 1 : 0;
+                        if (op == "<") return lv < rv ? 1 : 0;
+                        if (op == ">") return lv > rv ? 1 : 0;
+                    }
+                    return l == r ? 1 : 0;
+                }
+                return -1;
+            };
+            const int verdict = constEvalPredicate(pred);
+            if (verdict != 1) {
+                // Predicate FALSE/UNKNOWN: PG still sends the row description
+                // (and zero data rows).  Suppress the value emission below.
+                suppressDataRow = true;
+            }
+        }
     }
     if (cols.empty()) {
         cout << "SQL syntax error: empty projection" << endl;
@@ -5376,14 +5539,9 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                     (low2.size() == 4 || isspace(static_cast<unsigned char>(low2[4]))))
                     { headers.push_back("case"); goto headerDone; }
             }
-            bool simple = expr.find(' ') == string::npos;
-            // PG: a positive numeric literal keeps its text as the name
-            // ("SELECT 5" -> "5"); a NEGATIVE literal or a quoted string
-            // is an expression and becomes "?column?".
-            bool negLit = !expr.empty() && expr[0] == '-';
-            bool strLit = expr.size() >= 2 && ((expr.front() == '\'' && expr.back() == '\'') ||
-                                               (expr.front() == '"' && expr.back() == '"'));
-            headers.push_back((simple && !negLit && !strLit) ? expr : "?column?");
+            // PG names every unaliased literal projection "?column?"
+            // (verified on reference PG 17: SELECT 5 -> ?column?).
+            headers.push_back("?column?");
         } else {
             headers.push_back(disp);
         }
@@ -5463,6 +5621,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             cout << h << ' ';
     }
     cout << '\n';
+    if (suppressDataRow) return false;
     if (multiRowWidth > 0) {
         for (size_t i3 = 0; i3 + multiRowWidth <= values.size(); i3 += multiRowWidth) {
             for (size_t j3 = 0; j3 < multiRowWidth; ++j3)
