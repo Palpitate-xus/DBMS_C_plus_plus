@@ -12919,16 +12919,27 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         // cond.value = space-joined literals (built by modifyLogic)
         if (val.empty()) return false;   // empty never matches IN literals
         bool hit = false;
+        bool sawNull = false;
         std::istringstream iss(cond.value);
         std::string tok;
         while (iss >> tok) {
+            // A NULL list element makes every non-matching comparison
+            // UNKNOWN; NOT IN over (NULL, x) is therefore UNKNOWN (row
+            // drops) unless a real element matches first (PG semantics).
+            {
+                std::string tl;
+                for (char ch : tok) tl += static_cast<char>(tolower(static_cast<unsigned char>(ch)));
+                if (tl == "null" || tl == "nil") { sawNull = true; continue; }
+            }
             StorageEngine::Condition eq;
             eq.op = "=";
             eq.colName = cond.colName;
             eq.value = tok;
             if (evalConditionOnRow(eq, rowBuffer, tbl)) { hit = true; break; }
         }
-        return (cond.op == "in") ? hit : !hit;
+        if (cond.op == "in") return hit;
+        if (sawNull && !hit) return false;  // UNKNOWN
+        return !hit;
     }
 
     // Three-valued logic: NULL yields UNKNOWN (FALSE in WHERE) and is

@@ -419,6 +419,81 @@ static string sqlProcessor(string raw) {
         }
         raw = out;
     }
+    // Convert ANY/ALL over an ARRAY literal into IN / NOT IN lists with
+    // SQL three-valued semantics (a NULL element makes <> ALL unknown and
+    // = ANY still satisfiable by a non-null match).
+    {
+        auto rewriteQuantifiedArray = [](const string& in) -> string {
+            string low;
+            for (char c : in) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+            string out = in;
+            for (size_t q = 0; ; ) {
+                // An ARRAY[...] literal has already been rewritten to
+                // array_get(array, e1, e2, ...) upstream; accept both forms.
+                const size_t anyPos = low.find(" any (array", q);
+                const size_t allPos = low.find(" all (array", q);
+                bool isAny = true;
+                size_t found = anyPos;
+                if (anyPos == string::npos ||
+                    (allPos != string::npos && allPos < anyPos)) {
+                    found = allPos;
+                    isAny = false;
+                }
+                if (found == string::npos) break;
+                size_t opEnd = found;
+                while (opEnd > 0 && isspace(static_cast<unsigned char>(out[opEnd - 1]))) --opEnd;
+                size_t opStart = opEnd;
+                while (opStart > 0) {
+                    const char c = out[opStart - 1];
+                    if (c != '<' && c != '>' && c != '=' && c != '!') break;
+                    --opStart;
+                }
+                if (opStart == opEnd) { q = found + 1; continue; }
+                const string op = out.substr(opStart, opEnd - opStart);
+                // Element list: either ARRAY[e1,e2] (bracket form) or the
+                // already-rewritten array_get(array, e1, e2) call form.
+                string elems;
+                size_t consumed = 0;
+                const size_t bOpen = out.find('[', found);
+                if (bOpen != string::npos && bOpen > found) {
+                    const size_t bClose = out.find(']', bOpen);
+                    if (bClose == string::npos || bClose < bOpen) { q = found + 1; continue; }
+                    elems = out.substr(bOpen + 1, bClose - bOpen - 1);
+                    consumed = bClose + 1;
+                } else {
+                    const size_t pOpen = out.find('(', found);
+                    if (pOpen == string::npos) { q = found + 1; continue; }
+                    size_t depth = 0, pClose = string::npos;
+                    for (size_t i2 = pOpen; i2 < out.size(); ++i2) {
+                        if (out[i2] == '(') ++depth;
+                        else if (out[i2] == ')') { if (--depth == 0) { pClose = i2; break; } }
+                    }
+                    if (pClose == string::npos) { q = found + 1; continue; }
+                    string args = out.substr(pOpen + 1, pClose - pOpen - 1);
+                    // drop the leading "array," receiver argument
+                    const size_t cm = args.find(',');
+                    if (cm == string::npos) { q = found + 1; continue; }
+                    elems = args.substr(cm + 1);
+                    consumed = pClose + 1;
+                }
+                // keep commas: the engine's IN-list decoder splits on them
+                const string joined = elems;
+                const bool neq = (op == "!=" || op == "<>");
+                string repl;
+                if (isAny && op == "=") {
+                    repl = " in (" + joined + ") ";
+                } else if (!isAny && neq) {
+                    repl = " not in (" + joined + ") ";
+                } else { q = found + 1; continue; }
+                out = out.substr(0, opStart) + repl + out.substr(consumed);
+                low.clear();
+                for (char c : out) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                q = opStart + repl.size();
+            }
+            return out;
+        };
+        raw = rewriteQuantifiedArray(raw);
+    }
     // Convert ANY syntax: expr = any(col) -> array_contains(col, expr)
     // Convert ALL syntax: expr = all(col) -> not array_contains(col, expr) with negation (simplified)
     {
