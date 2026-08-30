@@ -2695,7 +2695,85 @@ static bool handleExplain(const string& sql, Session& s) {
         size_t condEnd = (orderPos != string::npos) ? orderPos
                        : (limitPos != string::npos) ? limitPos
                        : inner.size();
-        const string rawWhere = trim(inner.substr(wherePos + 5, condEnd - wherePos - 5));
+        string rawWhere = trim(inner.substr(wherePos + 5, condEnd - wherePos - 5));
+        // "<col> <op> ANY/ALL (SELECT unnest(ARRAY[e1,...]))" flattens to an
+        // IN / NOT IN literal list with PG NULL semantics (the structured
+        // quantified filter rejects set-returning inner columns and the
+        // legacy fallback misses <> ALL).
+        {
+            string rwLow;
+            for (char c : rawWhere) rwLow += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+            size_t anyAt = rwLow.find(" any (select unnest(array");
+            size_t allAt = rwLow.find(" all (select unnest(array");
+            // sqlProcessor may already have rewritten ARRAY[e1,...] to
+            // array_get(array, e1, ...): accept that form too.
+            {
+                const size_t anyG = rwLow.find(" any (select unnest(array_get(array,");
+                const size_t allG = rwLow.find(" all (select unnest(array_get(array,");
+                if (anyG != string::npos && (anyAt == string::npos || anyG < anyAt)) anyAt = anyG;
+                if (allG != string::npos && (allAt == string::npos || allG < allAt)) allAt = allG;
+            }
+            const bool isAll = allAt != string::npos &&
+                              (anyAt == string::npos || allAt < anyAt);
+            const size_t qAt = isAll ? allAt : anyAt;
+            if (qAt != string::npos) {
+                size_t opEnd = qAt;
+                while (opEnd > 0 && isspace(static_cast<unsigned char>(rawWhere[opEnd - 1]))) --opEnd;
+                size_t opStart = opEnd;
+                while (opStart > 0) {
+                    const char c = rawWhere[opStart - 1];
+                    if (c != '<' && c != '>' && c != '=' && c != '!') break;
+                    --opStart;
+                }
+                if (opStart < opEnd) {
+                    const string qop = rawWhere.substr(opStart, opEnd - opStart);
+                    const string col = trim(rawWhere.substr(0, opStart));
+                    // Element list: bracket form ARRAY[e1,...] or the
+                    // already-rewritten array_get(array, e1, ...) call.
+                    string elems;
+                    size_t after = string::npos;
+                    {
+                        const size_t bOpen = rawWhere.find('[', qAt);
+                        if (bOpen != string::npos) {
+                            const size_t bClose = rawWhere.find(']', bOpen);
+                            if (bClose != string::npos && bClose > bOpen) {
+                                elems = rawWhere.substr(bOpen + 1, bClose - bOpen - 1);
+                                after = bClose;
+                            }
+                        }
+                    }
+                    if (elems.empty()) {
+                        const size_t gOpen = rawWhere.find("array_get(", qAt);
+                        if (gOpen != string::npos) {
+                            size_t depth = 0, gClose = string::npos;
+                            for (size_t i2 = gOpen; i2 < rawWhere.size(); ++i2) {
+                                if (rawWhere[i2] == '(') ++depth;
+                                else if (rawWhere[i2] == ')') { if (--depth == 0) { gClose = i2; break; } }
+                            }
+                            if (gClose != string::npos) {
+                                string args = rawWhere.substr(gOpen + 10, gClose - gOpen - 10);
+                                const size_t cm = args.find(',');
+                                if (cm != string::npos) {
+                                    elems = args.substr(cm + 1);
+                                    after = gClose;
+                                }
+                            }
+                        }
+                    }
+                    // sClose: the ')' closing the quantifier's subquery
+                    const size_t sClose = (after == string::npos) ? string::npos
+                        : rawWhere.find(')', after);
+                    if (!col.empty() && !elems.empty() && sClose != string::npos) {
+                        string repl;
+                        if (qop == "=" && !isAll) repl = col + " in (" + elems + ")";
+                        else if ((qop == "<>" || qop == "!=") && isAll) repl = col + " not in (" + elems + ")";
+                        if (!repl.empty()) {
+                            rawWhere = repl + rawWhere.substr(sClose + 1);
+                        }
+                    }
+                }
+            }
+        }
         structuredQuantified = parseSimpleQuantifiedSubquery(
             rawWhere, s, s.currentDB, tname, quantifiedSubquery);
         if (!structuredQuantified) {
@@ -18199,6 +18277,79 @@ if (sql.rfind("backup database", 0) == 0) {
                                              parseSimpleExistenceSubquery(
                                                  whereClause, s, queryDb, tname,
                                                  existence);
+            // "<col> <op> ANY/ALL (SELECT unnest(ARRAY[e,...]))" flattens to
+            // an IN / NOT IN literal list with PG NULL semantics (the
+            // structured quantified filter rejects set-returning inner
+            // columns and the legacy fallback misses <> ALL).
+            {
+                string rwLow;
+                for (char c : whereClause) rwLow += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                size_t anyAt = rwLow.find(" any (select unnest(array");
+                size_t allAt = rwLow.find(" all (select unnest(array");
+                {
+                    const size_t anyG = rwLow.find(" any (select unnest(array_get(array,");
+                    const size_t allG = rwLow.find(" all (select unnest(array_get(array,");
+                    if (anyG != string::npos && (anyAt == string::npos || anyG < anyAt)) anyAt = anyG;
+                    if (allG != string::npos && (allAt == string::npos || allG < allAt)) allAt = allG;
+                }
+                const bool isAllQ = allAt != string::npos &&
+                                    (anyAt == string::npos || allAt < anyAt);
+                const size_t qAt = isAllQ ? allAt : anyAt;
+                if (qAt != string::npos) {
+                    size_t opEnd = qAt;
+                    while (opEnd > 0 && isspace(static_cast<unsigned char>(whereClause[opEnd - 1]))) --opEnd;
+                    size_t opStart = opEnd;
+                    while (opStart > 0) {
+                        const char c = whereClause[opStart - 1];
+                        if (c != '<' && c != '>' && c != '=' && c != '!') break;
+                        --opStart;
+                    }
+                    if (opStart < opEnd) {
+                        const string qop = whereClause.substr(opStart, opEnd - opStart);
+                        const string col = trim(whereClause.substr(0, opStart));
+                        string elems;
+                        size_t after = string::npos;
+                        {
+                            const size_t bOpen = whereClause.find('[', qAt);
+                            if (bOpen != string::npos) {
+                                const size_t bClose = whereClause.find(']', bOpen);
+                                if (bClose != string::npos && bClose > bOpen) {
+                                    elems = whereClause.substr(bOpen + 1, bClose - bOpen - 1);
+                                    after = bClose;
+                                }
+                            }
+                        }
+                        if (elems.empty()) {
+                            const size_t gOpen = whereClause.find("array_get(", qAt);
+                            if (gOpen != string::npos) {
+                                size_t depth = 0, gClose = string::npos;
+                                for (size_t i2 = gOpen; i2 < whereClause.size(); ++i2) {
+                                    if (whereClause[i2] == '(') ++depth;
+                                    else if (whereClause[i2] == ')') { if (--depth == 0) { gClose = i2; break; } }
+                                }
+                                if (gClose != string::npos) {
+                                    string args = whereClause.substr(gOpen + 10, gClose - gOpen - 10);
+                                    const size_t cm = args.find(',');
+                                    if (cm != string::npos) {
+                                        elems = args.substr(cm + 1);
+                                        after = gClose;
+                                    }
+                                }
+                            }
+                        }
+                        const size_t sClose = (after == string::npos) ? string::npos
+                            : whereClause.find(')', after);
+                        if (!col.empty() && !elems.empty() && sClose != string::npos) {
+                            string repl;
+                            if (qop == "=" && !isAllQ) repl = col + " in (" + elems + ")";
+                            else if ((qop == "<>" || qop == "!=") && isAllQ) repl = col + " not in (" + elems + ")";
+                            if (!repl.empty()) {
+                                whereClause = repl + whereClause.substr(sClose + 1);
+                            }
+                        }
+                    }
+                }
+            }
             const bool structuredQuantified = canUseStructuredSubquery &&
                                               parseSimpleQuantifiedSubquery(
                                                   whereClause, s, queryDb, tname, quantified);
