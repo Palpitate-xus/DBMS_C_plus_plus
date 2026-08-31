@@ -18473,7 +18473,51 @@ if (sql.rfind("backup database", 0) == 0) {
                 if (!ctx.projectionTargets.empty()) return false;
                 plan = dbms::QueryPlanner::buildDisjunctiveSelectPlan(
                     &g_engine, ctx, branches);
-                if (!plan) return false;
+                if (!plan) {
+                    // Bitmap-OR needs an equality index per branch; without
+                    // one, evaluate each branch with its own volcano plan and
+                    // union the results (first-seen dedupe).  Each branch is a
+                    // plain conjunction, so TableScanOp null metadata still
+                    // reaches the projection and NULL cells render as NULL
+                    // instead of the zero-filled fixed-width value.
+                    std::vector<std::string> unionRows;
+                    std::set<std::string> seen;
+                    for (const auto& branch : branches) {
+                        dbms::PlanContext bctx = ctx;
+                        bctx.conds = branch;
+                        dbms::OpPtr branchPlan = dbms::QueryPlanner::buildSelectPlan(
+                            &g_engine, bctx);
+                        if (!branchPlan) return false;
+                        auto branchRun = dbms::QueryPlanner::executePlanChecked(
+                            std::move(branchPlan));
+                        if (!branchRun.ok) {
+                            volcanoExecutionError = true;
+                            cout << "ERROR: " << branchRun.error << endl;
+                            return true;
+                        }
+                        for (auto& r : branchRun.rows) {
+                            if (seen.insert(r).second) unionRows.push_back(std::move(r));
+                        }
+                    }
+                    if (!ctx.orderByCol.empty()) {
+                        TableSchema otbl = g_engine.getTableSchema(ctx.dbname, ctx.tablename);
+                        dbms::OpPtr sortPlan = std::make_unique<dbms::MaterializedRowsOp>(
+                            std::move(unionRows));
+                        sortPlan = std::make_unique<dbms::SortOp>(std::move(sortPlan), otbl,
+                                                                 ctx.orderByCol, ctx.orderByAsc);
+                        auto sortedRun = dbms::QueryPlanner::executePlanChecked(
+                            std::move(sortPlan));
+                        if (!sortedRun.ok) {
+                            volcanoExecutionError = true;
+                            cout << "ERROR: " << sortedRun.error << endl;
+                            return true;
+                        }
+                        outAnswers = std::move(sortedRun.rows);
+                    } else {
+                        outAnswers = std::move(unionRows);
+                    }
+                    return true;
+                }
             } else {
                 // One group (or no groups) is the normal AND/table path.
                 if (!branches.empty()) ctx.conds = std::move(branches.front());

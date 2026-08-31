@@ -296,6 +296,9 @@ public:
     bool open() override;
     bool next(std::string& outRow) override;
     void close() override;
+    // Stored-NULL truth for the row emitted by the last next() call, so the
+    // projection can render NULL (not the zero-filled fixed-width value).
+    bool lastColumnIsNull(size_t colIdx) const override;
 
 private:
     StorageEngine* engine_;
@@ -304,7 +307,9 @@ private:
     std::vector<std::vector<StorageEngine::Condition>> branches_;
     TableSchema tbl_;
     std::vector<std::string> rows_;
+    std::vector<int64_t> rids_;
     size_t pos_ = 0;
+    int64_t lastRid_ = 0;
     bool statsRecorded_ = false;
 };
 

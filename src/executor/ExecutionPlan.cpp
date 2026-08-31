@@ -53,7 +53,8 @@ static std::string formatRow(const std::string& rowBuffer, const TableSchema& tb
         // the cell renders as the NULL token, which the wire layer maps to a
         // true -1 null (PG distinguishes NULL from empty string on the wire).
         const bool physicallyNull =
-            nullMeta && val.empty() && nullMeta->lastColumnIsNull(i);
+            nullMeta && nullMeta->lastColumnIsNull(i) &&
+            (val.empty() || !tbl.cols[i].isVariableLength);
         if (physicallyNull || (val.empty() && !col.isNull)) rowStr += "NULL ";
         else rowStr += val + ' ';
     }
@@ -689,7 +690,9 @@ BitmapOrHeapScanOp::BitmapOrHeapScanOp(
 bool BitmapOrHeapScanOp::open() {
     tbl_ = engine_->getTableSchema(dbname_, tablename_);
     rows_.clear();
+    rids_.clear();
     pos_ = 0;
+    lastRid_ = 0;
     if (branches_.size() < 2) return false;
 
     const auto hashIndexedColumns = engine_->getHashIndexedColumns(dbname_, tablename_);
@@ -752,7 +755,10 @@ bool BitmapOrHeapScanOp::open() {
                 break;
             }
         }
-        if (matches) rows_.push_back(std::move(row));
+        if (matches) {
+            rows_.push_back(std::move(row));
+            rids_.push_back(rid);
+        }
     }
     if (!statsRecorded_) {
         recordTableScan(dbname_, tablename_, rows_.size(), true, false);
@@ -764,14 +770,23 @@ bool BitmapOrHeapScanOp::open() {
 bool BitmapOrHeapScanOp::next(std::string& outRow) {
     NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     if (pos_ >= rows_.size()) return false;
-    outRow = rows_[pos_++];
+    outRow = rows_[pos_];
+    lastRid_ = (pos_ < rids_.size()) ? rids_[pos_] : 0;
+    ++pos_;
     rtInstr_.emitted = true;
     return true;
 }
 
+bool BitmapOrHeapScanOp::lastColumnIsNull(size_t colIdx) const {
+    if (lastRid_ <= 0 || colIdx >= tbl_.len) return false;
+    return engine_->isColumnNullByRid(dbname_, tablename_, lastRid_, colIdx);
+}
+
 void BitmapOrHeapScanOp::close() {
     rows_.clear();
+    rids_.clear();
     pos_ = 0;
+    lastRid_ = 0;
     statsRecorded_ = false;
 }
 

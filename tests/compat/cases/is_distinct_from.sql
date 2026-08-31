@@ -1,0 +1,6 @@
+-- IS [NOT] DISTINCT FROM (null-safe equality)
+DROP TABLE IF EXISTS diff_idf;
+CREATE TABLE diff_idf (a INT, b INT);
+INSERT INTO diff_idf VALUES (1, 1), (1, 2), (1, NULL), (NULL, NULL);
+SELECT a, b FROM diff_idf WHERE a IS NOT DISTINCT FROM b ORDER BY a;
+SELECT a, b FROM diff_idf WHERE a IS DISTINCT FROM b ORDER BY a;
