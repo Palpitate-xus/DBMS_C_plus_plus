@@ -777,6 +777,39 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
                 return ExprValue("int4", std::to_string(diff), false);
             }
         }
+        // timestamp - timestamp -> interval (PG: "1 day 00:30:00").
+        // Only when both sides are timestamp-typed (cast or column), so
+        // unknown/unknown text keeps the 42725 ambiguity error.
+        if (op == "-" && (lt == "timestamp" || lt == "timestamptz" || lt == "datetime") &&
+            (rt == "timestamp" || rt == "timestamptz" || rt == "datetime")) {
+            long long ls = parseTimestampToSeconds(l.value);
+            long long rs = parseTimestampToSeconds(r.value);
+            long long diff = ls - rs;
+            // PG renders the sign on each component:
+            // -1 days -00:30:00
+            long long sgn = (diff < 0) ? -1 : 1;
+            long long au = diff < 0 ? -diff : diff;
+            long long dd = sgn * (au / 86400);
+            long long us = sgn * ((au % 86400) * 1000000LL);
+            if (sgn < 0) {
+                // PG style: sign on each component (-1 days -00:30:00)
+                const char* dunit = "days";
+                char nb[56];
+                std::snprintf(nb, sizeof(nb), "-%lld %s -%02lld:%02lld:%02lld",
+                              au / 86400, dunit, (au % 86400) / 3600,
+                              ((au % 86400) % 3600) / 60, (au % 86400) % 60);
+                std::string s = nb;
+                if (au / 86400 == 0) {
+                    char tb[32];
+                    std::snprintf(tb, sizeof(tb), "-%02lld:%02lld:%02lld",
+                                  (au % 86400) / 3600, ((au % 86400) % 3600) / 60,
+                                  (au % 86400) % 60);
+                    s = tb;
+                }
+                return ExprValue("interval", s, false);
+            }
+            return ExprValue("interval", intervalToText(0, dd, us), false);
+        }
         if (op == "-" && lDate && rInt) {
             long long days = std::strtoll(r.value.c_str(), nullptr, 10);
             std::string base = l.value.substr(0, 10);
