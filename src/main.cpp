@@ -714,6 +714,37 @@ static string sqlProcessor(string raw) {
             }
         }
     }
+    // position(sub in str) -> comma form (PG accepts both; the comma
+    // form is what the argument splitter understands).
+    {
+        string low;
+        for (char c : raw) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        size_t p = 0;
+        while ((p = low.find("position(", p)) != string::npos) {
+            const size_t openAt = p;
+            int depth = 0; size_t close = string::npos;
+            for (size_t i = openAt + 8; i < raw.size(); ++i) {
+                if (raw[i] == '(') ++depth;
+                else if (raw[i] == ')') { if (--depth == 0) { close = i; break; } }
+            }
+            if (close == string::npos) { p = openAt + 9; continue; }
+            string args = raw.substr(openAt + 9, close - openAt - 9);
+            string lowArgs;
+            for (char c : args) lowArgs += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+            const size_t inAt = lowArgs.find(" in ");
+            if (inAt != string::npos) {
+                string sub = args.substr(0, inAt);
+                string str = args.substr(inAt + 4);
+                string repl = "position(" + sub + "," + str + ")";
+                raw = raw.substr(0, openAt) + repl + raw.substr(close + 1);
+                low.clear();
+                for (char c : raw) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                p = openAt + repl.size();
+            } else {
+                p = close + 1;
+            }
+        }
+    }
     // Convert SQL:2008 FETCH FIRST ... ROWS ONLY to LIMIT syntax
     {
         size_t fetchPos = raw.find("fetch first");
@@ -866,7 +897,7 @@ static bool isScalarFunc(const string& name) {
                                          "ln", "log", "exp", "random", "rand",
                                           "concat", "concat_ws", "initcap",
                                          "lpad", "rpad", "reverse", "left", "right", "repeat", "btrim", "ltrim", "rtrim",
-                                         "greatest", "least", "if", "iif",
+                                         "sign", "greatest", "least", "if", "iif",
                                          "date_add", "date_sub",
                                          "datediff", "date_trunc", "date_format",
                                          "age",

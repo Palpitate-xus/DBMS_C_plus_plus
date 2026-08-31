@@ -19070,6 +19070,16 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         }
         return result;
     }
+    if (expr.funcName == "sign" && !expr.funcArgs.empty()) {
+        std::string val = getVal(expr.funcArgs[0]);
+        if (val.empty() || val == "NULL") return "NULL";
+        try {
+            double d = std::stod(val);
+            if (d > 0) return "1";
+            if (d < 0) return "-1";
+            return "0";
+        } catch (...) { return "0"; }
+    }
     if (expr.funcName == "abs" && !expr.funcArgs.empty()) {
         std::string val = getVal(expr.funcArgs[0]);
         try {
@@ -19775,6 +19785,8 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     if (expr.funcName == "position" && expr.funcArgs.size() >= 2) {
         std::string substr = getVal(expr.funcArgs[0]);
         std::string str = getVal(expr.funcArgs[1]);
+        // NULL operand -> NULL (PG semantics), not 0
+        if (substr.empty() || str.empty()) return "NULL";
         size_t pos = str.find(substr);
         return (pos == std::string::npos) ? "0" : std::to_string(pos + 1);
     }
