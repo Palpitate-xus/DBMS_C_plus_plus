@@ -18223,11 +18223,34 @@ if (sql.rfind("backup database", 0) == 0) {
                                 bool isCompareItem = false;
                                 {
                                     string lowItem2;
-                                    bool inQ2 = false;
-                                    for (char c2 : item) {
-                                        if (c2 == 39) inQ2 = !inQ2;
-                                        lowItem2 += (inQ2 ? c2 : static_cast<char>(tolower(static_cast<unsigned char>(c2))));
+                                    {
+                                        // strip redundant outer parens for
+                                        // detection purposes: "(a = b)" is
+                                        // still a comparison item
+                                        string bare = item;
+                                        while (bare.size() > 1 && bare.front() == '(' && bare.back() == ')') {
+                                            int d2 = 0; bool ok2 = true;
+                                            for (size_t k = 1; k + 1 < bare.size(); ++k) {
+                                                if (bare[k] == '(') ++d2;
+                                                else if (bare[k] == ')') { if (d2 == 0) { ok2 = false; break; } --d2; }
+                                            }
+                                            if (!ok2) break;
+                                            bare = bare.substr(1, bare.size() - 2);
+                                        }
+                                        bool inQ2 = false;
+                                        for (char c2 : bare) {
+                                            if (c2 == 39) inQ2 = !inQ2;
+                                            lowItem2 += (inQ2 ? c2 : static_cast<char>(tolower(static_cast<unsigned char>(c2))));
+                                        }
                                     }
+                                    // boolean connectives / is-null make
+                                    // the item a boolean expression too
+                                    if (lowItem2.find(" is null") != string::npos ||
+                                        lowItem2.find(" is not null") != string::npos ||
+                                        lowItem2.find(" or ") != string::npos ||
+                                        lowItem2.find(" and ") != string::npos ||
+                                        lowItem2.rfind("not ", 0) == 0)
+                                        isCompareItem = true;
                                     if (lowItem2.rfind("between", 0) == 0 ||
                                         lowItem2.rfind("notbetween", 0) == 0 ||
                                         lowItem2.find(" between ") != string::npos ||

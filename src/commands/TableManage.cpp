@@ -18417,6 +18417,105 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 : StorageEngine::extractColumnValueStatic(rowBuffer, tbl, i);
             rowCtx[tbl.cols[i].dataName] = v;
         }
+        // Strip redundant outer parens once, up front: "(a = b)" evaluates
+        // like "a = b".
+        std::string evalSrc = expr.funcArgs[0];
+        {
+            std::string es = evalSrc;
+            while (es.size() > 1 && es.front() == '(' && es.back() == ')') {
+                int d2 = 0; bool ok2 = true;
+                for (size_t k = 1; k + 1 < es.size(); ++k) {
+                    if (es[k] == '(') ++d2;
+                    else if (es[k] == ')') { if (d2 == 0) { ok2 = false; break; } --d2; }
+                }
+                if (!ok2) break;
+                es = es.substr(1, es.size() - 2);
+            }
+            while (!es.empty() && isspace(static_cast<unsigned char>(es.front()))) es.erase(0, 1);
+            while (!es.empty() && isspace(static_cast<unsigned char>(es.back()))) es.pop_back();
+            evalSrc = es;
+        }
+        // NOT prefix: negate a boolean expression (NULL stays NULL).
+        {
+            const std::string& src0 = evalSrc;
+            std::string low0;
+            for (char c : src0) low0 += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+            if (low0.rfind("not ", 0) == 0) {
+                dbms::StorageEngine::SelectExpr sub;
+                sub.displayName = "sub";
+                sub.isScalar = true;
+                sub.funcName = "expreval";
+                sub.funcArgs.push_back(src0.substr(4));
+                std::string v = applyScalarFunc(sub, rowBuffer, tbl, engine, dbname);
+                if (v == "t" || v == "true") return "f";
+                if (v == "f" || v == "false" || v == "0") return "t";
+                return "NULL";
+            }
+        }
+        // IS NULL / IS NOT NULL atom: the atomic evaluator does not decode
+        // the postfix form; evaluate directly from rowCtx.
+        {
+            const std::string& src0 = evalSrc;
+            std::string low0;
+            for (char c : src0) low0 += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+            const bool hasConn0 = (low0.find(" or ") != std::string::npos ||
+                                    low0.find(" and ") != std::string::npos);
+            const size_t nn = low0.find(" is not null");
+            const size_t n2 = low0.find(" is null");
+            if ((n2 != std::string::npos || nn != std::string::npos) && !hasConn0) {
+                const bool wantNull = (nn == std::string::npos);
+                const size_t cut = wantNull ? n2 : nn;
+                std::string col = src0.substr(0, cut);
+                while (!col.empty() && isspace(static_cast<unsigned char>(col.back()))) col.pop_back();
+                while (col.size() > 1 && col.front() == '(' && col.back() == ')') col = col.substr(1, col.size() - 2);
+                auto it = rowCtx.find(col);
+                if (it != rowCtx.end()) {
+                    const bool isNull = it->second.empty() || it->second == "NULL";
+                    return (isNull == wantNull) ? "t" : "f";
+                }
+                return "f";
+            }
+        }
+        // Top-level AND: every arm must be true; any false is false; else
+        // NULL if any arm is NULL.
+        {
+            const std::string& src0 = evalSrc;
+            int depth0 = 0; bool inQ0 = false;
+            size_t last0 = 0;
+            std::vector<std::pair<size_t, size_t>> ands;
+            for (size_t i = 0; i + 5 <= src0.size(); ++i) {
+                char c = src0[i];
+                if (c == 39) { inQ0 = !inQ0; continue; }
+                if (inQ0) continue;
+                if (c == '(') ++depth0;
+                else if (c == ')') --depth0;
+                if (depth0 == 0 && src0.compare(i, 5, " and ") == 0 &&
+                    (i == 0 || !isalnum(static_cast<unsigned char>(src0[i - 1])))) {
+                    ands.push_back({last0, i});
+                    last0 = i + 5;
+                    i += 4;
+                }
+            }
+            if (ands.size() == 1) {
+                ands.push_back({last0, src0.size()});
+                bool anyFalse = false, anyNull = false;
+                for (const auto& span : ands) {
+                    std::string arm = src0.substr(span.first, span.second - span.first);
+                    while (arm.size() > 1 && arm.front() == '(' && arm.back() == ')') arm = arm.substr(1, arm.size() - 2);
+                    dbms::StorageEngine::SelectExpr sub;
+                    sub.displayName = "sub";
+                    sub.isScalar = true;
+                    sub.funcName = "expreval";
+                    sub.funcArgs.push_back(arm);
+                    std::string v = applyScalarFunc(sub, rowBuffer, tbl, engine, dbname);
+                    if (v == "f" || v == "false" || v == "0") anyFalse = true;
+                    else if (v == "NULL" || v.empty()) anyNull = true;
+                }
+                if (anyFalse) return "f";
+                if (anyNull) return "NULL";
+                return "t";
+            }
+        }
         // Top-level OR: the atomic expression evaluator only handles single
         // predicates; split top-level " or " arms (quote/paren aware) and
         // combine with SQL three-valued logic.  Parenthesized arms keep their
@@ -18424,7 +18523,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         // an arm itself contains top-level OR (AND arms are atomic or single
         // parenthesized groups evaluated by ExprHelper).
         {
-            const std::string& src = expr.funcArgs[0];
+            const std::string& src = evalSrc;
             int depth = 0; bool inQ = false;
             size_t last = 0;
             std::vector<std::pair<size_t, size_t>> topOrs;
@@ -18472,7 +18571,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         // the whole predicate NULL (not false).  Column references in the
         // expression that resolve to NULL/empty on this row short-circuit.
         {
-            const std::string& atom = expr.funcArgs[0];
+            const std::string& atom = evalSrc;
             std::string lowAtom;
             for (char c : atom) lowAtom += static_cast<char>(tolower(static_cast<unsigned char>(c)));
             const bool isBetween =
@@ -18500,7 +18599,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             }
         }
         auto r2 = dbms::ExprHelper::evalString(
-            expr.funcArgs[0], rowCtx, {}, dbname, std::string());
+            evalSrc, rowCtx, {}, dbname, std::string());
         if (!r2.ok) return "";
         return r2.isNull ? "NULL" : r2.value;
     }
