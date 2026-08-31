@@ -11558,6 +11558,33 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 consumed = asP + 3 + aliasName.size();
                             }
                         }
+                        // PG: a bare table alias (FROM generate_series(1,3) g)
+                        // names BOTH the table and its single column: SELECT g
+                        // resolves, and constant projections like SELECT 1 see
+                        // one row per series element.
+                        if (asP == string::npos && colName.empty()) {
+                            size_t b0 = 0;
+                            while (b0 < tail.size() && isspace(static_cast<unsigned char>(tail[b0]))) ++b0;
+                            if (b0 < tail.size() && tail[b0] != ',') {
+                                size_t be = b0;
+                                while (be < tail.size() &&
+                                       (isalnum(static_cast<unsigned char>(tail[be])) || tail[be] == '_')) ++be;
+                                if (be > b0) {
+                                    string bare = tail.substr(b0, be - b0);
+                                    string lowBare;
+                                    for (char c : bare)
+                                        lowBare += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                                    if (lowBare != "where" && lowBare != "group" && lowBare != "having" &&
+                                        lowBare != "order" && lowBare != "limit" && lowBare != "offset" &&
+                                        lowBare != "join" && lowBare != "on" && lowBare != "union" &&
+                                        lowBare != "window" && lowBare != "as") {
+                                        aliasName = bare;
+                                        colName = bare;
+                                        consumed = be;
+                                    }
+                                }
+                            }
+                        }
                         if (colName.empty()) colName = aliasName == "generate_series" ? "generate_series" : aliasName;
                         string unionBody;
                         bool firstU = true;
@@ -18482,6 +18509,39 @@ if (sql.rfind("backup database", 0) == 0) {
                                         if (item.find(tbl.cols[ci2].dataName) != string::npos)
                                             selectCols.insert(tbl.cols[ci2].dataName);
                                     }
+                                    goto nextProjItem;
+                                }
+                                // Constant projection item over a table
+                                // (SELECT 1 FROM generate_series(1,3) g):
+                                // PG emits one row per input row with the
+                                // constant as the value.  Classify numeric
+                                // and quoted-string literals as scalar items.
+                                bool isConstItem = false;
+                                if (item.size() >= 1 && item[0] == 39 && item.back() == 39 &&
+                                    item.find(39, 1) == item.size() - 1)
+                                    isConstItem = true;
+                                else {
+                                    bool numOk = !item.empty();
+                                    int dotSeen = 0;
+                                    for (size_t ci3 = (item[0] == '-' || item[0] == '+') ? 1 : 0;
+                                         ci3 < item.size(); ++ci3) {
+                                        char c4 = item[ci3];
+                                        if (c4 == '.') { if (++dotSeen > 1) { numOk = false; break; } }
+                                        else if (!isdigit(static_cast<unsigned char>(c4))) { numOk = false; break; }
+                                    }
+                                    isConstItem = numOk;
+                                }
+                                if (isConstItem) {
+                                    if (!selectExprs.empty()) {
+                                        auto& expr3 = selectExprs.back();
+                                        expr3.displayName = itemAlias.empty() ? "?column?" : itemAlias;
+                                        expr3.isScalar = true;
+                                        expr3.colName.clear();
+                                        expr3.funcName = "expreval";
+                                        expr3.funcArgs.push_back(item);
+                                    }
+                                    if (!exprTypes.empty()) exprTypes.back() = 3;
+                                    hasScalar = true;
                                     goto nextProjItem;
                                 }
                                 cout << "Invalid column name " << item << endl;
