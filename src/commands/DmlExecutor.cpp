@@ -3017,8 +3017,47 @@ bool tryDmlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
     SQLParser parser;
     // sql is normalized by the legacy entry point and may have changed the
     // case of string literals.  Parse the original text whenever available so
-    // AST execution preserves user data exactly.
-    const ParseResult parsed = parser.parse(rawSql.empty() ? sql : rawSql);
+    // AST execution preserves user data exactly.  Typed literals
+    // (DATE 'x', TIMESTAMP 'x', TIME 'x') are normalized away first: the
+    // prefix is storage-redundant and the VALUES tokenizer counts the
+    // inner space as a value separator.
+    std::string parseInput = rawSql.empty() ? sql : rawSql;
+    {
+        static const char* tlKw[] = { "timestamp", "date", "time" };
+        for (const char* kw : tlKw) {
+            const size_t kl = std::strlen(kw);
+            std::string low;
+            for (char c : parseInput)
+                low += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            size_t pos = 0;
+            while (true) {
+                size_t hit = std::string::npos;
+                for (size_t i = pos; i + kl + 1 < parseInput.size(); ++i) {
+                    if (low.compare(i, kl, kw) != 0) continue;
+                    if (i > 0 && (std::isalnum(static_cast<unsigned char>(parseInput[i - 1])) ||
+                                  parseInput[i - 1] == '_')) continue;
+                    const size_t ae = i + kl;
+                    if (ae < parseInput.size() &&
+                        (std::isalnum(static_cast<unsigned char>(parseInput[ae])) ||
+                         parseInput[ae] == '_')) continue;
+                    size_t q = ae;
+                    while (q < parseInput.size() &&
+                           std::isspace(static_cast<unsigned char>(parseInput[q]))) ++q;
+                    if (q < parseInput.size() && parseInput[q] == 39) { hit = i; break; }
+                }
+                if (hit == std::string::npos) break;
+                size_t q2 = hit + kl;
+                while (q2 < parseInput.size() &&
+                       std::isspace(static_cast<unsigned char>(parseInput[q2]))) ++q2;
+                parseInput = parseInput.substr(0, hit) + parseInput.substr(q2);
+                pos = hit + 1;
+                low.clear();
+                for (char c : parseInput)
+                    low += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            }
+        }
+    }
+    const ParseResult parsed = parser.parse(parseInput);
     if (!parsed.success || !parsed.stmt) {
         handled = true;
         const char* statementName = parsedCmd == SqlCommand::Update ? "UPDATE" :
