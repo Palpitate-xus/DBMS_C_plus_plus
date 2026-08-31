@@ -765,6 +765,7 @@ static string sqlProcessor(string raw) {
                     if (ae < raw.size() && (isalnum(static_cast<unsigned char>(raw[ae])) || raw[ae] == '_')) continue;
                     size_t q = ae;
                     while (q < raw.size() && isspace(static_cast<unsigned char>(raw[q]))) ++q;
+                    if (q < raw.size() && raw[q] == 39) { hit = i; break; }
                 }
                 if (hit == string::npos) break;
                 size_t q = hit + kl;
@@ -3875,6 +3876,42 @@ static bool buildStructuredSetOperand(const string& rawSql, Session& s,
     string query = trim(rawSql);
     if (query.size() < 6 || query.substr(0, 6) != "select") return false;
     if (query.find('(') != string::npos || query.find(')') != string::npos) return false;
+    // Typed literals (DATE 'x' etc.) in WHERE: strip the storage-redundant
+    // keyword so condition parsing sees the bare quoted literal, matching
+    // the sqlProcessor normalization the full path applies.
+    {
+        static const char* tlKw[] = { "timestamp", "date", "time" };
+        for (const char* kw : tlKw) {
+            const size_t kl = strlen(kw);
+            string low;
+            for (char c : query)
+                low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+            size_t pos = 0;
+            while (true) {
+                size_t hit = string::npos;
+                for (size_t i = pos; i + kl + 1 < query.size(); ++i) {
+                    if (low.compare(i, kl, kw) != 0) continue;
+                    if (i > 0 && (isalnum(static_cast<unsigned char>(query[i - 1])) ||
+                                  query[i - 1] == '_')) continue;
+                    const size_t ae = i + kl;
+                    if (ae < query.size() &&
+                        (isalnum(static_cast<unsigned char>(query[ae])) ||
+                         query[ae] == '_')) continue;
+                    size_t q = ae;
+                    while (q < query.size() && isspace(static_cast<unsigned char>(query[q]))) ++q;
+                    if (q < query.size() && query[q] == 39) { hit = i; break; }
+                }
+                if (hit == string::npos) break;
+                size_t q2 = hit + kl;
+                while (q2 < query.size() && isspace(static_cast<unsigned char>(query[q2]))) ++q2;
+                query = query.substr(0, hit) + query.substr(q2);
+                pos = hit + 1;
+                low.clear();
+                for (char c : query)
+                    low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+            }
+        }
+    }
 
     const size_t fromPos = findTopLevelKeyword(query, "from");
     if (fromPos == string::npos) return false;
