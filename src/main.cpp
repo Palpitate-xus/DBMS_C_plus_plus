@@ -20491,17 +20491,18 @@ if (sql.rfind("backup database", 0) == 0) {
                 for (auto& row : answers) {
                     vector<string> cells;
                     {
-                        size_t start = 0;
-                        bool inDq = false;
+                        std::string acc;
+                        bool inDq2 = false;
                         for (size_t ci = 0; ci < row.size(); ++ci) {
                             const char c = row[ci];
-                            if (c == 34) { inDq = !inDq; continue; }
-                            if (!inDq && c == ' ') {
-                                cells.push_back(row.substr(start, ci - start));
-                                start = ci + 1;
+                            if (c == 34) { inDq2 = !inDq2; continue; }
+                            if (!inDq2 && c == ' ') {
+                                cells.push_back(acc); acc.clear();
+                            } else {
+                                acc += c;
                             }
                         }
-                        cells.push_back(row.substr(start));
+                        cells.push_back(acc);
                     }
                     if (cells.size() < srcIdx.size()) continue;
                     string out;
