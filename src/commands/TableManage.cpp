@@ -19029,13 +19029,20 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         while (b > a && val[b - 1] == ' ') --b;
         return val.substr(a, b - a);
     }
-    if (expr.funcName == "substring" && expr.funcArgs.size() >= 3) {
+    if ((expr.funcName == "substring" || expr.funcName == "substr") &&
+        expr.funcArgs.size() >= 2) {
         std::string val = getVal(expr.funcArgs[0]);
-        int start = std::stoi(expr.funcArgs[1]) - 1; // 1-based to 0-based
-        int len = std::stoi(expr.funcArgs[2]);
+        int start = 0;
+        try { start = std::stoi(expr.funcArgs[1]) - 1; } catch (...) { start = 0; }
         if (start < 0) start = 0;
         if (start >= static_cast<int>(val.size())) return "";
-        return val.substr(start, len);
+        if (expr.funcArgs.size() >= 3) {
+            int len = 0;
+            try { len = std::stoi(expr.funcArgs[2]); } catch (...) { len = 0; }
+            if (len < 0) len = 0;
+            return val.substr(start, len);
+        }
+        return val.substr(start);
     }
     if (expr.funcName == "concat") {
         // PG concat() skips NULL arguments entirely.

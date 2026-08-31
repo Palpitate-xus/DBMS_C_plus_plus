@@ -659,6 +659,61 @@ static string sqlProcessor(string raw) {
             pos = leftStart + replacement.size();
         }
     }
+    // substring(v from a [for b]) -> comma form the scalar evaluator
+    // decodes; substr(...) is the historical alias and is normalized to
+    // substring(...) as well.
+    {
+        string low;
+        for (char c : raw) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        size_t p = 0;
+        while (true) {
+            const size_t s1 = low.find("substring(", p);
+            const size_t s2 = low.find("substr(", p);
+            size_t hit = string::npos;
+            size_t kwLen = 0;
+            if (s1 != string::npos && (s2 == string::npos || s1 <= s2)) { hit = s1; kwLen = 10; }
+            else if (s2 != string::npos) { hit = s2; kwLen = 7; }
+            if (hit == string::npos) break;
+            const size_t openAt = hit;
+            int depth = 0; size_t close = string::npos;
+            for (size_t i = openAt + kwLen - 1; i < raw.size(); ++i) {
+                if (raw[i] == '(') ++depth;
+                else if (raw[i] == ')') { if (--depth == 0) { close = i; break; } }
+            }
+            if (close == string::npos) { p = openAt + kwLen; continue; }
+            string args = raw.substr(openAt + kwLen, close - openAt - kwLen);
+            string lowArgs;
+            for (char c : args) lowArgs += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+            const size_t fAt = lowArgs.find(" from ");
+            string repl;
+            if (fAt != string::npos) {
+                string base = args.substr(0, fAt);
+                string rest = args.substr(fAt + 6);
+                string lo, ln;
+                const size_t forAt = lowArgs.find(" for ", fAt);
+                if (forAt != string::npos) {
+                    lo = rest.substr(0, forAt - (fAt + 6));
+                    ln = rest.substr(forAt - (fAt + 6) + 5);
+                } else {
+                    lo = rest;
+                }
+                repl = "substring(" + base + "," + lo;
+                if (!ln.empty()) repl += "," + ln;
+                repl += ")";
+                if (kwLen == 7) repl += " as substr";
+            } else if (kwLen == 7) {
+                repl = "substring(" + args + ") as substr";
+            }
+            if (!repl.empty()) {
+                raw = raw.substr(0, openAt) + repl + raw.substr(close + 1);
+                low.clear();
+                for (char c : raw) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                p = openAt + repl.size();
+            } else {
+                p = close + 1;
+            }
+        }
+    }
     // Convert SQL:2008 FETCH FIRST ... ROWS ONLY to LIMIT syntax
     {
         size_t fetchPos = raw.find("fetch first");
