@@ -745,6 +745,35 @@ static string sqlProcessor(string raw) {
             }
         }
     }
+    // Typed literals DATE 'x' / TIMESTAMP 'x' / TIME 'x': the type
+    // prefix is storage-redundant (the column declares the type) and
+    // breaks the VALUES splitter, which counts the inner space as a
+    // separator.  Normalize to the bare quoted literal.
+    {
+        static const char* tlKw[] = { "timestamp", "date", "time" };
+        for (const char* kw : tlKw) {
+            const size_t kl = strlen(kw);
+            size_t p = 0;
+            while (true) {
+                string low;
+                for (char c : raw) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                size_t hit = string::npos;
+                for (size_t i = p; i + kl + 1 < raw.size(); ++i) {
+                    if (low.compare(i, kl, kw) != 0) continue;
+                    if (i > 0 && (isalnum(static_cast<unsigned char>(raw[i - 1])) || raw[i - 1] == '_')) continue;
+                    const size_t ae = i + kl;
+                    if (ae < raw.size() && (isalnum(static_cast<unsigned char>(raw[ae])) || raw[ae] == '_')) continue;
+                    size_t q = ae;
+                    while (q < raw.size() && isspace(static_cast<unsigned char>(raw[q]))) ++q;
+                }
+                if (hit == string::npos) break;
+                size_t q = hit + kl;
+                while (q < raw.size() && isspace(static_cast<unsigned char>(raw[q]))) ++q;
+                raw = raw.substr(0, hit) + raw.substr(q);
+                p = hit + 1;
+            }
+        }
+    }
     // Convert SQL:2008 FETCH FIRST ... ROWS ONLY to LIMIT syntax
     {
         size_t fetchPos = raw.find("fetch first");
