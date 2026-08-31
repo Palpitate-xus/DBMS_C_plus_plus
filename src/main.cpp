@@ -5929,27 +5929,56 @@ static string normalizeConditionStr(string s) {
             }
         }
     }
-    // Normalize IS NOT NULL (before IS NULL to avoid partial match)
+    // Normalize IS NOT NULL (before IS NULL to avoid partial match).  Like
+    // IS NULL below, a following and/or connective must stay a separate
+    // token ("a is not null and ..." must not glue into "aisnotnulland").
     pos = 0;
     while ((pos = s.find("is not null", pos)) != string::npos) {
         size_t before = pos;
         while (before > 0 && isspace(static_cast<unsigned char>(s[before - 1]))) before--;
         size_t after = pos + 11;
         while (after < s.size() && isspace(static_cast<unsigned char>(s[after]))) after++;
-        if (before != pos || after != pos + 11) {
+        bool keepSpace = false;
+        if (after < s.size() && s[after] != '(' && s[after] != ')') {
+            size_t wEnd = after;
+            while (wEnd < s.size() && isalpha(static_cast<unsigned char>(s[wEnd]))) ++wEnd;
+            string nw = s.substr(after, wEnd - after);
+            for (auto& ch : nw) ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
+            keepSpace = (nw == "and" || nw == "or");
+        }
+        if (keepSpace) {
+            s = s.substr(0, before) + "isnotnull" + " " + s.substr(after);
+            pos = before + 10;
+        } else if (before != pos || after != pos + 11) {
             s = s.substr(0, before) + "isnotnull" + s.substr(after);
             pos = before + 9;
         } else {
             pos += 11;
         }
     }
-    // Normalize IS NULL
+    // Normalize IS NULL.  Only the spaces between the column and the
+    // keyword are collapsed; a following boolean connective (and/or) or a
+    // paren must stay a separate token, otherwise "a is null and b is null"
+    // glues into "aisnulland" and downstream grouping breaks.
     pos = 0;
     while ((pos = s.find("is null", pos)) != string::npos) {
         size_t before = pos;
         while (before > 0 && isspace(static_cast<unsigned char>(s[before - 1]))) before--;
         size_t after = pos + 7;
         while (after < s.size() && isspace(static_cast<unsigned char>(s[after]))) after++;
+        if (after < s.size() && (s[after] == '(' || s[after] == ')')) {
+            // keep the paren adjacent (historical form "isnull(...")
+        } else {
+            size_t wEnd = after;
+            while (wEnd < s.size() && isalpha(static_cast<unsigned char>(s[wEnd]))) ++wEnd;
+            string nw = s.substr(after, wEnd - after);
+            for (auto& ch : nw) ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
+            if (nw == "and" || nw == "or") {
+                s = s.substr(0, before) + "isnull" + " " + s.substr(after);
+                pos = before + 7;
+                continue;
+            }
+        }
         if (before != pos || after != pos + 7) {
             s = s.substr(0, before) + "isnull" + s.substr(after);
             pos = before + 6;
@@ -6128,6 +6157,23 @@ static vector<string> mergeNegPredTokens(const vector<string>& toks) {
     vector<string> out;
     size_t i = 0;
     while (i < toks.size()) {
+        // IS NULL / IS NOT NULL in tokenized conditions: "a is null" ->
+        // "isnull a" / "a is not null" -> "isnotnull a" so breakDown
+        // grouping keeps each predicate whole (the engine decodes the
+        // isnull/isnotnull prefix forms).
+        if (i + 2 < toks.size() && toks[i + 1] == "is" && toks[i + 2] == "null" &&
+            !toks[i].empty() && toks[i] != "(" && toks[i] != ")") {
+            out.push_back("isnull " + toks[i]);
+            i += 3;
+            continue;
+        }
+        if (i + 3 < toks.size() && toks[i + 1] == "is" && toks[i + 2] == "not" &&
+            toks[i + 3] == "null" &&
+            !toks[i].empty() && toks[i] != "(" && toks[i] != ")") {
+            out.push_back("isnotnull " + toks[i]);
+            i += 4;
+            continue;
+        }
         // Glue scalar-function calls ("length" "(" "v" ")" -> "length(v)")
         // so downstream condition assembly keeps the predicate whole; the
         // engine's parseConditions recognizes the leading-function form.
@@ -6424,6 +6470,10 @@ static vector<vector<string>> breakDownConditions(const vector<string>& tokens) 
 
     struct Frame {
         vector<vector<string>> groups;
+        // connective pending BETWEEN this frame's content and the enclosing
+        // frame ("(A) or (B)": the child frame remembers the "or" so the
+        // close-paren merge can treat its groups as alternatives).
+        string entryOp;
     };
 
     vector<Frame> stack;
@@ -6467,7 +6517,6 @@ static vector<vector<string>> breakDownConditions(const vector<string>& tokens) 
                 }
             }
         } else {
-            // Left side already in groups; just add right as a new group
             cur.groups.push_back({right});
         }
     };
@@ -6481,8 +6530,9 @@ static vector<vector<string>> breakDownConditions(const vector<string>& tokens) 
         if (tok == "and" || tok == "or") {
             opStack.push_back(tok);
         } else if (tok == "(") {
-            stack.push_back(Frame());
-            opStack.clear();
+            Frame nf;
+            if (!opStack.empty()) { nf.entryOp = opStack.back(); opStack.pop_back(); }
+            stack.push_back(std::move(nf));
             operandStack.clear();
         } else if (tok == ")") {
             Frame cur = std::move(stack.back());
@@ -6490,14 +6540,16 @@ static vector<vector<string>> breakDownConditions(const vector<string>& tokens) 
             if (cur.groups.empty() && !operandStack.empty()) {
                 cur.groups.push_back({operandStack.back()});
             }
-            // Merge into parent
             if (stack.empty()) {
                 stack.push_back(std::move(cur));
                 break;
             }
             if (cur.groups.empty()) continue;
+            const bool viaOr = (cur.entryOp == "or");
             if (stack.back().groups.empty()) {
                 stack.back().groups = std::move(cur.groups);
+            } else if (viaOr) {
+                for (auto& g : cur.groups) stack.back().groups.push_back(std::move(g));
             } else {
                 auto old = stack.back().groups;
                 stack.back().groups.clear();
@@ -6510,7 +6562,6 @@ static vector<vector<string>> breakDownConditions(const vector<string>& tokens) 
                 }
             }
             operandStack.clear();
-            opStack.clear();
         } else {
             if (!opStack.empty()) {
                 string op = opStack.back(); opStack.pop_back();

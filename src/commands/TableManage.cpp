@@ -12915,6 +12915,38 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         // NULL never satisfies scalar comparisons (three-valued logic).
         return false;
     }
+    // Column-vs-column predicate ("a = b", produced by the IS [NOT]
+    // DISTINCT FROM rewrite): resolve the right side against this row too;
+    // a physically-NULL right column makes the comparison UNKNOWN.
+    {
+        size_t rci = 0;
+        for (; rci < tbl.len && tbl.cols[rci].dataName != cond.value; ++rci) {}
+        if (rci < tbl.len) {
+            bool rNull = false;
+            if (g_condNullEngine && g_condNullRid >= 0 &&
+                tbl.tablename == g_condNullTable &&
+                g_condNullEngine->isColumnNullByRid(g_condNullDb, tbl.tablename,
+                                                    g_condNullRid, rci)) {
+                rNull = true;
+            }
+            if (rNull) return false;
+            std::string rval = extractColumnValueStatic(rowBuffer, tbl, rci);
+            bool num = true;
+            double lv = 0, rv = 0;
+            try { lv = std::stod(val); rv = std::stod(rval); } catch (...) { num = false; }
+            auto eqOk = [&]() { return num ? lv == rv : val == rval; };
+            auto ltOk = [&]() { return num ? lv < rv : val < rval; };
+            auto gtOk = [&]() { return num ? lv > rv : val > rval; };
+            const std::string& op = cond.op;
+            if (op == "=") return eqOk();
+            if (op == "!=" || op == "<>") return !eqOk();
+            if (op == "<") return ltOk();
+            if (op == ">") return gtOk();
+            if (op == "<=") return !gtOk();
+            if (op == ">=") return !ltOk();
+            return false;
+        }
+    }
     if (cond.op == "in" || cond.op == "notin") {
         // cond.value = space-joined literals (built by modifyLogic)
         if (val.empty()) return false;   // empty never matches IN literals
