@@ -18468,6 +18468,37 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 return "f";
             }
         }
+        // NULL propagation for BETWEEN-style atoms: a NULL operand makes
+        // the whole predicate NULL (not false).  Column references in the
+        // expression that resolve to NULL/empty on this row short-circuit.
+        {
+            const std::string& atom = expr.funcArgs[0];
+            std::string lowAtom;
+            for (char c : atom) lowAtom += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+            const bool isBetween =
+                lowAtom.rfind("between", 0) == 0 || lowAtom.rfind("notbetween", 0) == 0 ||
+                lowAtom.find(" between ") != std::string::npos ||
+                lowAtom.find(" not between ") != std::string::npos;
+            if (isBetween) {
+                std::string colPart;
+                if (lowAtom.rfind("between", 0) == 0) colPart = atom.substr(7);
+                else if (lowAtom.rfind("notbetween", 0) == 0) colPart = atom.substr(10);
+                size_t sp2 = colPart.find(' ');
+                if (sp2 != std::string::npos) colPart = colPart.substr(0, sp2);
+                for (const auto& kv : rowCtx) {
+                    if (!kv.second.empty() && kv.second != "NULL") continue;
+                    if (colPart == kv.first) return "NULL";
+                    size_t at = lowAtom.find(kv.first);
+                    while (at != std::string::npos) {
+                        const bool lb = (at == 0) || !isalnum(static_cast<unsigned char>(lowAtom[at - 1]));
+                        const size_t ae = at + kv.first.size();
+                        const bool rb = (ae >= lowAtom.size()) || !isalnum(static_cast<unsigned char>(lowAtom[ae]));
+                        if (lb && rb) return "NULL";
+                        at = lowAtom.find(kv.first, at + 1);
+                    }
+                }
+            }
+        }
         auto r2 = dbms::ExprHelper::evalString(
             expr.funcArgs[0], rowCtx, {}, dbname, std::string());
         if (!r2.ok) return "";

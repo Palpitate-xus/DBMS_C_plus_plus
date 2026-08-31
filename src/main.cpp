@@ -18228,7 +18228,11 @@ if (sql.rfind("backup database", 0) == 0) {
                                         if (c2 == 39) inQ2 = !inQ2;
                                         lowItem2 += (inQ2 ? c2 : static_cast<char>(tolower(static_cast<unsigned char>(c2))));
                                     }
-                                    if (lowItem2.find(" like ") != string::npos ||
+                                    if (lowItem2.rfind("between", 0) == 0 ||
+                                        lowItem2.rfind("notbetween", 0) == 0 ||
+                                        lowItem2.find(" between ") != string::npos ||
+                                        lowItem2.find(" not between ") != string::npos ||
+                                        lowItem2.find(" like ") != string::npos ||
                                         lowItem2.find(" ilike ") != string::npos ||
                                         lowItem2.find(" not like ") != string::npos ||
                                         lowItem2.find(" not ilike ") != string::npos)
