@@ -18254,9 +18254,49 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 }
             }
         }
+        // String concatenation on columns ("v || 'q'"): PG || is strict
+        // (a NULL operand makes the whole expression NULL); a NULL column
+        // reads as empty, so an empty side folds to empty.
+        {
+            int dep = 0; bool inQ = false; size_t hit = std::string::npos;
+            for (size_t i = 0; i + 1 < arg.size(); ++i) {
+                char c = arg[i];
+                if (c == 39) { inQ = !inQ; continue; }
+                if (inQ) continue;
+                if (c == '(') ++dep; else if (c == ')') --dep;
+                if (dep == 0 && c == '|' && arg[i + 1] == '|' && i > 0) { hit = i; break; }
+            }
+            if (hit != std::string::npos) {
+                std::string lp = trim(arg.substr(0, hit));
+                std::string rp = trim(arg.substr(hit + 2));
+                auto resolve2 = [&](const std::string& piece) -> std::string {
+                    if (piece.size() >= 2 && piece.front() == 39 && piece.back() == 39)
+                        return piece.substr(1, piece.size() - 2);
+                    for (size_t ci = 0; ci < tbl.len; ++ci) {
+                        if (tbl.cols[ci].dataName == piece) {
+                            return (engine && !dbname.empty())
+                                ? engine->extractColumnValue(rowBuffer, tbl, ci, dbname, true)
+                                : StorageEngine::extractColumnValueStatic(rowBuffer, tbl, ci);
+                        }
+                    }
+                    return piece;
+                };
+                std::string lv = resolve2(lp);
+                std::string rv = resolve2(rp);
+                if (lv.empty() || rv.empty()) {
+                    if (scalarArgColumnIsPhysNull(lp, tbl, engine, dbname) ||
+                        scalarArgColumnIsPhysNull(rp, tbl, engine, dbname))
+                        return "NULL";
+                    return "";
+                }
+                return lv + rv;
+            }
+        }
         // Bare arithmetic on a column (e.g. "x - 2.8" as a function argument):
         // fold left-to-right on + - * / % with columns resolved via getVal,
-        // mirroring the engine arith handler semantics.
+        // mirroring the engine arith handler semantics.  A signed operand
+        // ("k * -2", "-2 * k") is valid: the leading sign is stripped for
+        // the containment check but kept for stod.
         {
             static const char* ops[] = { "+", "-", "*", "/", "%" };
             for (const char* op : ops) {
@@ -18264,9 +18304,16 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 if (p == std::string::npos || p == 0) continue;
                 std::string lhs = arg.substr(0, p);
                 std::string rhs = arg.substr(p + 1);
-                if (lhs.find_first_of("+-*/%") != std::string::npos ||
-                    rhs.find_first_of("+-*/%") != std::string::npos ||
-                    lhs.empty() || rhs.empty()) continue;
+                auto stripSign = [](std::string s) {
+                    s = trim(s);
+                    if (!s.empty() && (s[0] == '+' || s[0] == '-')) s.erase(0, 1);
+                    return s;
+                };
+                std::string lchk = stripSign(lhs);
+                std::string rchk = stripSign(rhs);
+                if (lchk.find_first_of("+-*/%") != std::string::npos ||
+                    rchk.find_first_of("+-*/%") != std::string::npos ||
+                    trim(lhs).empty() || trim(rhs).empty()) continue;
                 std::string lv, rv;
                 auto resolve = [&](const std::string& piece, std::string& outv) {
                     std::string tp = trim(piece);
@@ -18320,8 +18367,10 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         for (const char* sf : strictFns) {
             if (expr.funcName != sf) continue;
             for (const auto& arg : expr.funcArgs) {
-                if (getVal(arg).empty() &&
-                    scalarArgColumnIsPhysNull(arg, tbl, engine, dbname)) {
+                const std::string av = getVal(arg);
+                if ((av.empty() &&
+                     scalarArgColumnIsPhysNull(arg, tbl, engine, dbname)) ||
+                    av == "NULL") {
                     return "NULL";
                 }
             }

@@ -1,0 +1,10 @@
+DROP TABLE IF EXISTS diff_arith;
+CREATE TABLE diff_arith (k INT, v VARCHAR(10));
+INSERT INTO diff_arith VALUES (5, 'ab'), (-3, NULL), (0, 'xy');
+SELECT trunc(k / 2.0) FROM diff_arith;
+SELECT round(k / 4.0) FROM diff_arith;
+SELECT abs(k * -2) FROM diff_arith;
+SELECT abs(-2 * k) FROM diff_arith;
+SELECT length(v || 'q') FROM diff_arith;
+SELECT power(k + 1, 2) FROM diff_arith;
+SELECT mod(k + 2, 3) FROM diff_arith;
