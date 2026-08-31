@@ -745,36 +745,6 @@ static string sqlProcessor(string raw) {
             }
         }
     }
-    // Typed literals DATE 'x' / TIMESTAMP 'x' / TIME 'x': the type
-    // prefix is storage-redundant (the column declares the type) and
-    // breaks the VALUES splitter, which counts the inner space as a
-    // separator.  Normalize to the bare quoted literal.
-    {
-        static const char* tlKw[] = { "timestamp", "date", "time" };
-        for (const char* kw : tlKw) {
-            const size_t kl = strlen(kw);
-            size_t p = 0;
-            while (true) {
-                string low;
-                for (char c : raw) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
-                size_t hit = string::npos;
-                for (size_t i = p; i + kl + 1 < raw.size(); ++i) {
-                    if (low.compare(i, kl, kw) != 0) continue;
-                    if (i > 0 && (isalnum(static_cast<unsigned char>(raw[i - 1])) || raw[i - 1] == '_')) continue;
-                    const size_t ae = i + kl;
-                    if (ae < raw.size() && (isalnum(static_cast<unsigned char>(raw[ae])) || raw[ae] == '_')) continue;
-                    size_t q = ae;
-                    while (q < raw.size() && isspace(static_cast<unsigned char>(raw[q]))) ++q;
-                    if (q < raw.size() && raw[q] == 39) { hit = i; break; }
-                }
-                if (hit == string::npos) break;
-                size_t q = hit + kl;
-                while (q < raw.size() && isspace(static_cast<unsigned char>(raw[q]))) ++q;
-                raw = raw.substr(0, hit) + raw.substr(q);
-                p = hit + 1;
-            }
-        }
-    }
     // Convert SQL:2008 FETCH FIRST ... ROWS ONLY to LIMIT syntax
     {
         size_t fetchPos = raw.find("fetch first");
@@ -5667,6 +5637,29 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             }
         }
 
+        // Typed literal item (DATE x, TIME x, TIMESTAMP x): PG
+        // evaluates the value and names the output column after the
+        // type keyword.  Strip the keyword from the expression only;
+        // the header rules below still see the original item text.
+        {
+            string lowIt;
+            for (char c : expr)
+                lowIt += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+            static const char* tl4[] = { "timestamp", "timestamptz", "date", "time" };
+            for (const char* kw4 : tl4) {
+                const size_t kl4 = strlen(kw4);
+                if (lowIt.compare(0, kl4, kw4) != 0) continue;
+                size_t q4 = kl4;
+                while (q4 < expr.size() && isspace(static_cast<unsigned char>(expr[q4]))) ++q4;
+                if (q4 < expr.size() && expr[q4] == 39) {
+                    size_t cq4 = expr.find(39, q4 + 1);
+                    if (cq4 != string::npos && cq4 + 1 == expr.size())
+                        expr = expr.substr(q4);
+                    break;
+                }
+            }
+        }
+
         // Scalar subquery item: (SELECT ...) — evaluate the inner query
         // once and project its first row's first cell (PG semantics: a
         // scalar subquery in the projection list yields one value).
@@ -5732,11 +5725,16 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                 for (const char* kw2 : tkws2) {
                     size_t kl2 = strlen(kw2);
                     if (lowItem.compare(0, kl2, kw2) == 0 &&
-                        item.size() > kl2 && item[kl2] == 39) {
+                        item.size() > kl2) {
                         // Only a BARE typed literal takes the type name;
                         // anything after the closing quote is arithmetic and
                         // PG names such a column ?column?.
-                        size_t cq2 = item.find(39, kl2 + 1);
+                        size_t oq2 = kl2;
+                        while (oq2 < item.size() && isspace(static_cast<unsigned char>(item[oq2]))) ++oq2;
+                        size_t cq2 = string::npos;
+                        if (oq2 < item.size() && item[oq2] == 39)
+                            cq2 = item.find(39, oq2 + 1);
+                        if (cq2 == string::npos || cq2 + 1 != item.size()) continue;
                         if (cq2 == string::npos || cq2 + 1 != item.size()) continue;
                         headers.push_back(disp == item ? string(kw2).substr(0, kl2 - 1) : disp);
                         goto headerDone;
@@ -5963,6 +5961,42 @@ static bool tableHasColumns(const string& dbname, const string& tablename, const
 }
 
 static string normalizeConditionStr(string s) {
+    // Typed literals (DATE 'x', TIME 'x', TIMESTAMP 'x') in predicates:
+    // strip the storage-redundant keyword so the tokenizer sees the bare
+    // quoted literal (the column side already declares the type).
+    {
+        static const char* tlKw[] = { "timestamp", "timestamptz", "date", "time" };
+        for (const char* kw : tlKw) {
+            const size_t kl = strlen(kw);
+            string low;
+            for (char c : s)
+                low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+            size_t pos = 0;
+            while (true) {
+                size_t hit = string::npos;
+                for (size_t i = pos; i + kl + 1 < s.size(); ++i) {
+                    if (low.compare(i, kl, kw) != 0) continue;
+                    if (i > 0 && (isalnum(static_cast<unsigned char>(s[i - 1])) ||
+                                  s[i - 1] == '_')) continue;
+                    const size_t ae = i + kl;
+                    if (ae < s.size() &&
+                        (isalnum(static_cast<unsigned char>(s[ae])) ||
+                         s[ae] == '_')) continue;
+                    size_t q = ae;
+                    while (q < s.size() && isspace(static_cast<unsigned char>(s[q]))) ++q;
+                    if (q < s.size() && s[q] == 39) { hit = i; break; }
+                }
+                if (hit == string::npos) break;
+                size_t q2 = hit + kl;
+                while (q2 < s.size() && isspace(static_cast<unsigned char>(s[q2]))) ++q2;
+                s = s.substr(0, hit) + s.substr(q2);
+                pos = hit + 1;
+                low.clear();
+                for (char c : s)
+                    low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+            }
+        }
+    }
     static const char* ops[] = {"<<", ">>", "<^", ">^", "<@", "&&", ">=", "<=", "!=", "<>", ">", "<", "="};
     for (const char* op : ops) {
         size_t len = strlen(op);
