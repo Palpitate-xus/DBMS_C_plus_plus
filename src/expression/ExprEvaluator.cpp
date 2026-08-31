@@ -4506,8 +4506,32 @@ void ExprEvaluator::registerBuiltins() {
             Date cur(y, mo, d), jan1(y, 1, 1);
             r = (cur.year != 0 && jan1.year != 0) ? cur.convert() - jan1.convert() + 1 : 0;
         } else if (field == "epoch") {
-            // Seconds since 1970-01-01 00:00:00; PG renders date_part('epoch',
-            // ts) as numeric with scale 6 (86400.000000).
+            // For an INTERVAL operand PG returns the total interval in
+            // seconds (months counted as 30 days, days as 86400s).
+            {
+                std::string iv = src;
+                {
+                    std::string lowI;
+                    for (char c : iv)
+                        lowI += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                    if (lowI.rfind("interval ", 0) == 0) {
+                        size_t cut = 8;
+                        while (cut < iv.size() && std::isspace(static_cast<unsigned char>(iv[cut]))) ++cut;
+                        iv = iv.substr(cut);
+                    }
+                }
+                IntervalParts ip = parseIntervalText(iv);
+                if (ip.ok) {
+                    long long us = ip.months * 30LL * 86400000000LL +
+                                   ip.days * 86400000000LL + ip.micros;
+                    char ib[64];
+                    std::snprintf(ib, sizeof(ib), "%.6f",
+                                  static_cast<double>(us) / 1000000.0);
+                    return ExprValue("numeric", ib, false);
+                }
+            }
+            // Timestamp: seconds since 1970-01-01 00:00:00, numeric
+            // scale 6 (86400.000000).
             r = parseTimestampToSeconds(src) - parseTimestampToSeconds("1970-01-01 00:00:00");
             char eb[64];
             std::snprintf(eb, sizeof(eb), "%.6f", static_cast<double>(r));
@@ -4636,6 +4660,16 @@ void ExprEvaluator::registerBuiltins() {
         } else if (mode == 1) { months += days / 30; days %= 30; }
         else { long long nd = micros / 86400000000LL; long long rem = micros % 86400000000LL; days += nd; micros = rem; }
         return intervalToTextPg(months, days, micros);
+    };
+    // isfinite(interval/date/timestamp): false for infinity/NaN.
+    functions_["isfinite"] = [](const std::vector<ExprValue>& a) -> ExprValue {
+        if (a.empty() || a[0].isNull) return ExprValue("bool", "", true);
+        std::string v = a[0].value, lv;
+        for (char c : v)
+            lv += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        bool finite = lv.find("infinity") == std::string::npos &&
+                      lv.find("nan") == std::string::npos;
+        return ExprValue("bool", finite ? "t" : "f", false);
     };
     functions_["justify_hours"] = [&](const std::vector<ExprValue>& a) -> ExprValue {
         return ExprValue("interval", justifyCommon(a.empty() ? "" : a[0].value, 0), a.empty() || a[0].isNull);
