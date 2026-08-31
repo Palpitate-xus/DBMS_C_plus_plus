@@ -18343,6 +18343,27 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         return (isNull == wantNull) ? "t" : "f";
     }
 
+    // IS DISTINCT FROM / IS NOT DISTINCT FROM (null-safe equality): true
+    // when exactly one side is NULL or the values differ; NULL never
+    // propagates (the whole point of the operator).
+    if (expr.funcName == "isdistinct" || expr.funcName == "isnotdistinct") {
+        if (expr.funcArgs.size() < 2) return "f";
+        std::string va = getVal(expr.funcArgs[0]);
+        std::string vb = getVal(expr.funcArgs[1]);
+        bool na = (va == "NULL" || va.empty());
+        bool nb = (vb == "NULL" || vb.empty());
+        bool distinct;
+        if (na && nb) distinct = false;
+        else if (na || nb) distinct = true;
+        else {
+            bool num = true;
+            double da = 0, db2 = 0;
+            try { da = std::stod(va); db2 = std::stod(vb); } catch (...) { num = false; }
+            distinct = num ? (da != db2) : (va != vb);
+        }
+        return (expr.funcName == "isdistinct") == distinct ? "t" : "f";
+    }
+
     // Math functions with PG-exact presentation semantics live in the expression
     // evaluator (float8 shortest-repr, numeric display scales, banker's rounding).
     // Delegate the whole family there; on evaluator failure fall through
@@ -18395,6 +18416,57 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 ? engine->extractColumnValue(rowBuffer, tbl, i, dbname, true)
                 : StorageEngine::extractColumnValueStatic(rowBuffer, tbl, i);
             rowCtx[tbl.cols[i].dataName] = v;
+        }
+        // Top-level OR: the atomic expression evaluator only handles single
+        // predicates; split top-level " or " arms (quote/paren aware) and
+        // combine with SQL three-valued logic.  Parenthesized arms keep their
+        // grouping; recursion handles nested AND via the same path only when
+        // an arm itself contains top-level OR (AND arms are atomic or single
+        // parenthesized groups evaluated by ExprHelper).
+        {
+            const std::string& src = expr.funcArgs[0];
+            int depth = 0; bool inQ = false;
+            size_t last = 0;
+            std::vector<std::pair<size_t, size_t>> topOrs;
+            for (size_t i = 0; i + 4 <= src.size(); ++i) {
+                char c = src[i];
+                if (c == 39) { inQ = !inQ; continue; }
+                if (inQ) continue;
+                if (c == '(') ++depth;
+                else if (c == ')') --depth;
+                if (depth == 0 && src.compare(i, 4, " or ") == 0 &&
+                    (i == 0 || !isalnum(static_cast<unsigned char>(src[i - 1])))) {
+                    topOrs.push_back({last, i});
+                    last = i + 4;
+                    i += 3;
+                }
+            }
+            if (!topOrs.empty()) {
+                topOrs.push_back({last, src.size()});
+                bool anyTrue = false, anyNull = false;
+                for (const auto& span : topOrs) {
+                    std::string arm = src.substr(span.first, span.second - span.first);
+                    // strip one layer of redundant parens
+                    std::string a2 = arm;
+                    while (a2.size() > 1 && a2.front() == '(' && a2.back() == ')') {
+                        int d2 = 0; bool ok2 = true;
+                        for (size_t k = 1; k + 1 < a2.size(); ++k) {
+                            if (a2[k] == '(') ++d2;
+                            else if (a2[k] == ')') { if (d2 == 0) { ok2 = false; break; } --d2; }
+                        }
+                        if (!ok2) break;
+                        a2 = a2.substr(1, a2.size() - 2);
+                    }
+                    auto r3 = dbms::ExprHelper::evalString(a2, rowCtx, {}, dbname, std::string());
+                    if (!r3.ok) { anyNull = true; continue; }
+                    if (r3.isNull) { anyNull = true; continue; }
+                    const std::string& v = r3.value;
+                    if (v == "t" || v == "true" || v == "1") anyTrue = true;
+                }
+                if (anyTrue) return "t";
+                if (anyNull) return "NULL";
+                return "f";
+            }
         }
         auto r2 = dbms::ExprHelper::evalString(
             expr.funcArgs[0], rowCtx, {}, dbname, std::string());

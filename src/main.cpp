@@ -591,6 +591,56 @@ static string sqlProcessor(string raw) {
             while (end < raw.size() && raw[end] != ',' && raw[end] != ')' && raw[end] != ' ' && raw[end] != ';') end++;
             return {end, raw.substr(start, end - start)};
         };
+        // Projection-list occurrences -> scalar function call form.
+        {
+            size_t fromAt = string::npos;
+            {
+                size_t scan = 0;
+                while ((scan = raw.find(" from ", scan)) != string::npos) {
+                    fromAt = scan;
+                    scan += 6;
+                }
+            }
+            const size_t projEnd = (fromAt == string::npos) ? raw.size() : fromAt;
+            string head = raw.substr(0, projEnd);
+            string tail = (fromAt == string::npos) ? string() : raw.substr(fromAt);
+            auto rewriteCalls = [](string h) {
+                for (const char* kw : {"is not distinct from", "is distinct from"}) {
+                    const size_t kl = strlen(kw);
+                    string low;
+                    for (char c : h) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                    size_t p = 0;
+                    while ((p = low.find(kw, p)) != string::npos) {
+                        const bool leftOk = (p == 0) || (!isalnum(static_cast<unsigned char>(h[p - 1])) && h[p - 1] != (char)95);
+                        const size_t after = p + kl;
+                        const bool rightOk = (after >= low.size()) || (!isalnum(static_cast<unsigned char>(low[after])) && low[after] != (char)95);
+                        if (!leftOk || !rightOk) { p += kl; continue; }
+                        size_t le = p;
+                        while (le > 0 && isspace(static_cast<unsigned char>(h[le - 1]))) --le;
+                        size_t ls = le;
+                        while (ls > 0) {
+                            const char c = h[ls - 1];
+                            if (isspace(static_cast<unsigned char>(c))) break;
+                            --ls;
+                        }
+                        size_t rs = after;
+                        while (rs < h.size() && isspace(static_cast<unsigned char>(h[rs]))) ++rs;
+                        size_t re = rs;
+                        while (re < h.size() && !isspace(static_cast<unsigned char>(h[re])) && h[re] != (char)44 && h[re] != (char)41) ++re;
+                        if (ls >= le || rs >= re) { p += kl; continue; }
+                        const string fn = (kl == 20) ? "isnotdistinct" : "isdistinct";
+                        const string call = fn + "(" + h.substr(ls, le - ls) + "," + h.substr(rs, re - rs) + ")";
+                        h = h.substr(0, ls) + call + h.substr(re);
+                        low.clear();
+                        for (char c : h) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                        p = ls + call.size();
+                    }
+                }
+                return h;
+            };
+            head = rewriteCalls(head);
+            raw = head + tail;
+        }
         size_t pos = 0;
         // IS NOT DISTINCT FROM first (longer match)
         while ((pos = raw.find("is not distinct from", pos)) != string::npos) {
@@ -776,6 +826,7 @@ static bool isScalarFunc(const string& name) {
                                          "unnest",
                                          "subquery",
                                          "is_null", "is_not_null",
+                                         "isdistinct", "isnotdistinct",
                                          "current_user", "session_user"};
     return scalars.find(name) != scalars.end();
 }
@@ -17913,6 +17964,7 @@ if (sql.rfind("backup database", 0) == 0) {
                             // projects as the target type's name ("text",
                             // "float8", ...).
                             string headerName = func;
+                            if (func == "isdistinct" || func == "isnotdistinct") headerName = "?column?";
                             if (func == "cast") {
                                 auto castArgs = splitFuncArgs(arg);
                                 if (castArgs.size() >= 2) {
