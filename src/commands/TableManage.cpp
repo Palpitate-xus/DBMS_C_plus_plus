@@ -18651,7 +18651,14 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         }
         auto r2 = dbms::ExprHelper::evalString(
             evalSrc, rowCtx, {}, dbname, std::string());
-        if (!r2.ok) return "";
+        if (!r2.ok) {
+            // PG aborts the statement when a projection expression
+            // errors (e.g. undefined function 42883); surface the
+            // message instead of silently emitting empty cells.
+            if (r2.error.find("(SQLSTATE ") != std::string::npos)
+                throw std::runtime_error(r2.error);
+            return "";
+        }
         return r2.isNull ? "NULL" : r2.value;
     }
     // Aggregate-call operands inside arithmetic items
@@ -20689,6 +20696,34 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             }
             return "null";
         }
+    }
+    // PG 42883: undefined function over table columns aborts the
+    // statement (previously returned empty silently).
+    {
+        std::string sig;
+        for (size_t ai = 0; ai < expr.funcArgs.size(); ++ai) {
+            if (ai) sig += ", ";
+            const std::string& an = expr.funcArgs[ai];
+            bool isCol = false;
+            std::string ct;
+            for (size_t ci = 0; ci < tbl.len; ++ci)
+                if (tbl.cols[ci].dataName == an) { isCol = true; ct = tbl.cols[ci].dataType; break; }
+            if (isCol) {
+                for (auto& ch : ct) ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
+                if (ct == "int" || ct == "int4" || ct == "int2" || ct == "int8" ||
+                    ct == "integer" || ct == "bigint" || ct == "smallint") ct = "integer";
+                else if (ct == "varchar" || ct == "character varying" || ct == "char" || ct == "text") ct = "text";
+                sig += ct;
+            } else if (an.size() >= 2 && an.front() == 39 && an.back() == 39) {
+                sig += "text";
+            } else if (!an.empty() && an.find_first_not_of("0123456789-+") == std::string::npos) {
+                sig += "integer";
+            } else {
+                sig += "unknown";
+            }
+        }
+        throw std::runtime_error(
+            "function " + expr.funcName + "(" + sig + ") does not exist (SQLSTATE 42883)");
     }
     return "";
 }

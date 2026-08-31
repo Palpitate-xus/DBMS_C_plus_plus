@@ -18313,7 +18313,7 @@ if (sql.rfind("backup database", 0) == 0) {
                             hasScalar = true;
                             exprTypes.push_back(3);
                             arithRawText[(size_t)(selectExprs.size() - 1)] = item;
-                        } else {
+                        } else if (func == "count" || func == "sum" || func == "avg" || func == "min" || func == "max" || func == "bool_and" || func == "bool_or" || func == "every" || func == "stddev" || func == "stddev_samp" || func == "stddev_pop" || func == "variance" || func == "var_samp" || func == "var_pop" || func == "array_agg" || func == "string_agg" || func == "json_agg" || func == "jsonb_agg" || func == "bit_and" || func == "bit_or" || func == "xmlagg" || func == "rank" || func == "dense_rank" || func == "percentile_cont" || func == "grouping") {
                             dbms::StorageEngine::AggItem ai;
                             ai.func = func;
                             ai.arg = arg;
@@ -18330,6 +18330,18 @@ if (sql.rfind("backup database", 0) == 0) {
                             expr.isScalar = false;
                             expr.colName = item;
                             selectExprs.push_back(expr);
+                        } else {
+                            // Unknown function: PG raises 42883; route
+                            // to the scalar evaluator so the error surfaces
+                            // instead of silently returning no rows.
+                            dbms::StorageEngine::SelectExpr expr;
+                            expr.displayName = itemAlias.empty() ? func : itemAlias;
+                            expr.isScalar = true;
+                            expr.funcName = func;
+                            expr.funcArgs.push_back(arg);
+                            selectExprs.push_back(expr);
+                            hasScalar = true;
+                            exprTypes.push_back(3);
                         }
                     } else {
                         // Arithmetic projection item ("salary * 2", "a + b"):
