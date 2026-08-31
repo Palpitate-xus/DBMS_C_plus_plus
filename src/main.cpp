@@ -11301,6 +11301,7 @@ static void applySessionTimezoneToAnswers(
         {
             std::string cur;
             for (char c : row) {
+                if (c == 34) continue;
                 if (c == ' ') {
                     if (!cur.empty()) vals.push_back(cur);
                     cur.clear();
@@ -11398,7 +11399,11 @@ static void applySessionTimezoneToAnswers(
         }
         if (changed) {
             std::string out;
-            for (const auto& lv : logical) out += lv + ' ';
+            for (const auto& lv : logical) {
+                if (lv.find(' ') != std::string::npos)
+                    out += "\"" + lv + "\"" + ' ';
+                else out += lv + ' ';
+            }
             row = out;
         }
     }
@@ -20487,17 +20492,25 @@ if (sql.rfind("backup database", 0) == 0) {
                     vector<string> cells;
                     {
                         size_t start = 0;
-                        while (start <= row.size()) {
-                            size_t sp = row.find(' ', start);
-                            if (sp == string::npos) { cells.push_back(row.substr(start)); break; }
-                            cells.push_back(row.substr(start, sp - start));
-                            start = sp + 1;
+                        bool inDq = false;
+                        for (size_t ci = 0; ci < row.size(); ++ci) {
+                            const char c = row[ci];
+                            if (c == 34) { inDq = !inDq; continue; }
+                            if (!inDq && c == ' ') {
+                                cells.push_back(row.substr(start, ci - start));
+                                start = ci + 1;
+                            }
                         }
+                        cells.push_back(row.substr(start));
                     }
                     if (cells.size() < srcIdx.size()) continue;
                     string out;
-                    for (size_t oi = 0; oi < srcIdx.size(); ++oi)
-                        out += cells[srcIdx[oi]] + " ";
+                    for (size_t oi = 0; oi < srcIdx.size(); ++oi) {
+                        const string& cv = cells[srcIdx[oi]];
+                        if (cv.find(' ') != string::npos)
+                            out += "\"" + cv + "\"" + " ";
+                        else out += cv + " ";
+                    }
                     while (!out.empty() && out.back() == ' ') out.pop_back();
                     row = out;
                 }

@@ -59,6 +59,9 @@ def data_rows(stdout):
     notifications are filtered out.
     """
     lines = stdout.splitlines()
+    # Multi-word cells travel double-quoted through the internal row
+    # format (space-separated cells); strip the quotes for display.
+    lines = [ln.replace(chr(34), '') for ln in lines]
     last_header = None
     for i, line in enumerate(lines):
         if line.strip() == "id ts":
