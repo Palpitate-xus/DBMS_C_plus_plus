@@ -6514,7 +6514,14 @@ static string modifyLogic(const string& logic) {
             for (size_t i = 1; ident && i < head.size(); ++i) {
                 if (!isalnum(static_cast<unsigned char>(head[i])) && head[i] != '_') ident = false;
             }
-            if (ident && isScalarFunc(head)) return logic;
+            if (ident) {
+                // Unknown functions must survive too: PG raises 42883
+                // when the predicate is evaluated, so keep the token
+                // intact and let the row evaluator surface the error
+                // (previously the generic tail shredded it, silently
+                // matching every row).
+                return logic;
+            }
         }
     }
     // Merged single-token predicate forms produced by mergeNegPredTokens:

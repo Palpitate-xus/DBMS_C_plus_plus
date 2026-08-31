@@ -19144,6 +19144,16 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             double d = std::stod(val);
             d = std::abs(d);
             if (d == std::floor(d)) return std::to_string(static_cast<int64_t>(d));
+            // PG numeric preserves the input scale: render the shortest
+            // decimal form (std::to_string pads to 6 decimals).
+            std::ostringstream out;
+            out << d;
+            std::string s = out.str();
+            if (s.find(".") != std::string::npos) {
+                while (!s.empty() && s.back() == '0') s.pop_back();
+                if (!s.empty() && s.back() == '.') s.pop_back();
+            }
+            if (!s.empty()) return s;
             return std::to_string(d);
         } catch (...) { return val; }
     }
