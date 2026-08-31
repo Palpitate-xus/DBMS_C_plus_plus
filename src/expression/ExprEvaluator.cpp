@@ -1804,6 +1804,37 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         return ExprValue("boolean", r ? "t" : "f", false);
     }
 
+    // PG 42883: function <name>(<argtypes>) does not exist.
+    {
+        auto pgTypeName = [](const ExprValue& v) -> std::string {
+            std::string t = toLower(v.typeName);
+            if (t.empty() || t == "unknown") {
+                if (!v.value.empty() &&
+                    v.value.find_first_not_of("0123456789-+") == std::string::npos &&
+                    v.value != "-" && v.value != "+")
+                    return "integer";
+                return "unknown";
+            }
+            if (t == "int" || t == "int4" || t == "int2" || t == "int8" ||
+                t == "bigint" || t == "smallint")
+                return "integer";
+            if (t == "numeric" || t == "decimal") return "numeric";
+            if (t == "float" || t == "double" || t == "float8" || t == "float4" ||
+                t == "real")
+                return "double precision";
+            if (t == "varchar" || t == "character varying" || t == "char" ||
+                t == "bpchar" || t == "text")
+                return "text";
+            return t;
+        };
+        std::string sig;
+        for (size_t ai = 0; ai < args.size(); ++ai) {
+            if (ai) sig += ", ";
+            sig += pgTypeName(args[ai]);
+        }
+        throw std::runtime_error(
+            "function " + name + "(" + sig + ") does not exist (SQLSTATE 42883)");
+    }
     return ExprValue{};
 }
 
