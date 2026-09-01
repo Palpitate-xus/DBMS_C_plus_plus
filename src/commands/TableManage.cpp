@@ -21142,7 +21142,7 @@ std::vector<std::string> StorageEngine::aggregate(
         const std::string& func = item.func;
         std::string colName = item.arg;
         bool aggDistinct = false;
-        std::string aggSep = (func == "string_agg" || func == "group_concat")
+        std::string aggSep = (func == "string_agg" || func == "group_concat" || func == "array_agg")
                               ? extractAggSep(colName, aggDistinct) : std::string(",");
         int64_t count = 0, sum = 0;
         bool hasMax = false, hasMin = false;
@@ -21161,6 +21161,7 @@ std::vector<std::string> StorageEngine::aggregate(
         bool groupConcatFirst = true;
         std::vector<std::string> jsonAggVals;
         std::vector<std::string> arrayAggVals;
+std::unordered_set<std::string> arraySeen;
 
         bool isDistinctCount = (func == "count" && colName.size() > 9 && colName.substr(0, 9) == "distinct ");
         std::string actualColName = isDistinctCount ? colName.substr(9) : colName;
@@ -21297,6 +21298,8 @@ std::vector<std::string> StorageEngine::aggregate(
                 } else if (isArrayAgg) {
                     if (colIdx >= tbl.len) continue;
                     std::string val = extractColumnValue(row, tbl, colIdx);
+                    if (aggDistinct && arraySeen.count(val)) continue;
+                    arraySeen.insert(val);
                     arrayAggVals.push_back(val);
                 } else {
                 std::string val;
@@ -21475,7 +21478,37 @@ std::vector<std::string> StorageEngine::aggregate(
             rowResult += json + ' ';
         }
         else if (isArrayAgg) {
-            std::string arr = "{";
+            // PG array_agg(DISTINCT ...) sorts the deduplicated values.
+            if (aggDistinct && !arrayAggVals.empty()) {
+                bool allNum = true;
+                for (const auto& sv : arrayAggVals)
+                    if (sv.empty() || sv.find_first_not_of("0123456789.+-eE") != std::string::npos)
+                        { allNum = false; break; }
+                if (allNum)
+                    std::sort(arrayAggVals.begin(), arrayAggVals.end(),
+                              [](const std::string& a, const std::string& b) {
+                                  double da = 0, db = 0;
+                                  try { da = std::stod(a); db = std::stod(b); } catch (...) {}
+                                  return da < db;
+                              });
+                else std::sort(arrayAggVals.begin(), arrayAggVals.end());
+            }
+            
+            // PG array_agg(DISTINCT ...) sorts the deduplicated values.
+            if (aggDistinct && !arrayAggVals.empty()) {
+            bool allNum = true;
+            for (const auto& sv : arrayAggVals)
+            if (sv.empty() || sv.find_first_not_of("0123456789.+-eE") != std::string::npos)
+            { allNum = false; break; }
+            if (allNum)
+            std::sort(arrayAggVals.begin(), arrayAggVals.end(),
+            [](const std::string& a, const std::string& b) {
+            double da = 0, db = 0;
+            try { da = std::stod(a); db = std::stod(b); } catch (...) {}
+            return da < db;
+            });
+            else std::sort(arrayAggVals.begin(), arrayAggVals.end());
+            }std::string arr = "{";
             bool first = true;
             for (const auto& v : arrayAggVals) {
                 if (!first) arr += ",";
@@ -21672,7 +21705,7 @@ std::vector<std::string> StorageEngine::groupAggregate(
                            const std::vector<std::string>& filterConds = {}) -> std::string {
     std::string colName = colNameP;
     bool aggDistinct = false;
-    std::string aggSep = (func == "string_agg" || func == "group_concat")
+    std::string aggSep = (func == "string_agg" || func == "group_concat" || func == "array_agg")
                           ? extractAggSep(colName, aggDistinct) : std::string(",");
         bool isDistinctCount = (func == "count" && colName.size() > 9 && colName.substr(0, 9) == "distinct ");
         std::string actualColName = isDistinctCount ? colName.substr(9) : colName;
@@ -21740,6 +21773,7 @@ std::vector<std::string> StorageEngine::groupAggregate(
         bool groupConcatFirst = true;
         std::vector<std::string> jsonAggVals;
         std::vector<std::string> arrayAggVals;
+std::unordered_set<std::string> arraySeen;
         // jsonAggFirst is not needed; JSON aggregation uses jsonAggVals directly.
 
         if (isDistinctCount) {
@@ -21815,6 +21849,8 @@ std::vector<std::string> StorageEngine::groupAggregate(
                 } else if (isArrayAgg) {
                     if (colIdx >= tbl.len) continue;
                     std::string val = extractColumnValue(row, tbl, colIdx);
+                    if (aggDistinct && arraySeen.count(val)) continue;
+                    arraySeen.insert(val);
                     arrayAggVals.push_back(val);
                 } else {
                 std::string val;
@@ -21938,7 +21974,22 @@ std::vector<std::string> StorageEngine::groupAggregate(
             return json;
         }
         if (isArrayAgg) {
-            std::string arr = "{";
+            
+            // PG array_agg(DISTINCT ...) sorts the deduplicated values.
+            if (aggDistinct && !arrayAggVals.empty()) {
+            bool allNum = true;
+            for (const auto& sv : arrayAggVals)
+            if (sv.empty() || sv.find_first_not_of("0123456789.+-eE") != std::string::npos)
+            { allNum = false; break; }
+            if (allNum)
+            std::sort(arrayAggVals.begin(), arrayAggVals.end(),
+            [](const std::string& a, const std::string& b) {
+            double da = 0, db = 0;
+            try { da = std::stod(a); db = std::stod(b); } catch (...) {}
+            return da < db;
+            });
+            else std::sort(arrayAggVals.begin(), arrayAggVals.end());
+            }std::string arr = "{";
             bool first = true;
             for (const auto& v : arrayAggVals) {
                 if (!first) arr += ",";
@@ -22124,7 +22175,7 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
                            const std::vector<std::string>& filterConds = {}) -> std::string {
     std::string colName = colNameP;
     bool aggDistinct = false;
-    std::string aggSep = (func == "string_agg" || func == "group_concat")
+    std::string aggSep = (func == "string_agg" || func == "group_concat" || func == "array_agg")
                           ? extractAggSep(colName, aggDistinct) : std::string(",");
         bool isDistinctCount = (func == "count" && colName.size() > 9 && colName.substr(0, 9) == "distinct ");
         std::string actualColName = isDistinctCount ? colName.substr(9) : colName;
@@ -22191,6 +22242,7 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
         bool groupConcatFirst = true;
         std::vector<std::string> jsonAggVals;
         std::vector<std::string> arrayAggVals;
+std::unordered_set<std::string> arraySeen;
 
         if (isDistinctCount) {
             std::set<std::string> distinctVals;
@@ -22239,6 +22291,8 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
                 } else if (isArrayAgg) {
                     if (colIdx >= tbl.len) continue;
                     std::string val = extractColumnValue(row, tbl, colIdx);
+                    if (aggDistinct && arraySeen.count(val)) continue;
+                    arraySeen.insert(val);
                     arrayAggVals.push_back(val);
                 } else {
                     std::string val;
@@ -22317,7 +22371,22 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
             return json;
         }
         if (isArrayAgg) {
-            std::string arr = "{";
+            
+            // PG array_agg(DISTINCT ...) sorts the deduplicated values.
+            if (aggDistinct && !arrayAggVals.empty()) {
+            bool allNum = true;
+            for (const auto& sv : arrayAggVals)
+            if (sv.empty() || sv.find_first_not_of("0123456789.+-eE") != std::string::npos)
+            { allNum = false; break; }
+            if (allNum)
+            std::sort(arrayAggVals.begin(), arrayAggVals.end(),
+            [](const std::string& a, const std::string& b) {
+            double da = 0, db = 0;
+            try { da = std::stod(a); db = std::stod(b); } catch (...) {}
+            return da < db;
+            });
+            else std::sort(arrayAggVals.begin(), arrayAggVals.end());
+            }std::string arr = "{";
             bool first = true;
             for (const auto& v : arrayAggVals) { if (!first) arr += ","; arr += v; first = false; }
             arr += "}";
