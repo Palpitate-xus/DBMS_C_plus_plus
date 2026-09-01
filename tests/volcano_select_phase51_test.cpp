@@ -534,11 +534,11 @@ static void test_window_agg() {
     auto analyticRows = executePlanRows(
         dbms::QueryPlanner::buildSelectPlan(&g_engine, analyticCtx));
     assert((analyticRows == std::vector<std::string>{
-        "1 1 10 10 1 0.0000 0.3333",
-        "2 3 10 20 2 0.5000 1.0000",
-        "3 3 10 20 1 0.5000 1.0000",
-        "4 1 10 10 1 0.0000 0.5000",
-        "5 2 10 20 2 1.0000 1.0000"
+        "1 1 10 10 1 0 0.3333333333333333",
+        "2 3 10 20 2 0.5 1",
+        "3 3 10 20 1 0.5 1",
+        "4 1 10 10 1 0 0.5",
+        "5 2 10 20 2 1 1"
     }));
 
     auto explainPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);

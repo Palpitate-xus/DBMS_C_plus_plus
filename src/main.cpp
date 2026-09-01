@@ -20311,6 +20311,42 @@ if (sql.rfind("backup database", 0) == 0) {
                 }
             }
 
+            // PG emits window rows in (partition, ORDER BY) order:
+            // re-sort the computed rows with the same comparator used
+            // before computation (stable), with SQL NULLS LAST for ASC
+            // (NULLS FIRST for DESC) on the ORDER BY column.
+            std::stable_sort(rows.begin(), rows.end(), [&](const auto& a, const auto& b) {
+                for (const auto& pcol : wf0.partitionByCols) {
+                    auto itA = a.find(pcol);
+                    auto itB = b.find(pcol);
+                    if (itA == a.end() || itB == b.end()) continue;
+                    if (itA->second != itB->second) {
+                        try {
+                            int64_t va = stoll(itA->second);
+                            int64_t vb = stoll(itB->second);
+                            return va < vb;
+                        } catch (...) {
+                            return itA->second < itB->second;
+                        }
+                    }
+                }
+                if (wf0.orderByCol.empty()) return false;
+                bool aNull = a.find(wf0.orderByCol) == a.end();
+                bool bNull = b.find(wf0.orderByCol) == b.end();
+                if (aNull || bNull) {
+                    if (aNull && bNull) return false;
+                    return wf0.orderByAsc ? bNull : aNull;
+                }
+                auto itA = a.find(wf0.orderByCol);
+                auto itB = b.find(wf0.orderByCol);
+                try {
+                    int64_t va = stoll(itA->second);
+                    int64_t vb = stoll(itB->second);
+                    return wf0.orderByAsc ? (va < vb) : (va > vb);
+                } catch (...) {
+                    return wf0.orderByAsc ? (itA->second < itB->second) : (itA->second > itB->second);
+                }
+            });
             // Format results as strings
             vector<string> winAnswers;
             for (const auto& row : rows) {

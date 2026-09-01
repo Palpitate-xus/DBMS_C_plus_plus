@@ -1237,10 +1237,26 @@ static size_t sortColIndex(const TableSchema& tbl, const std::string& name) {
     return tbl.len;
 }
 
-static int compareWindowValue(const std::string& left, const std::string& right) {
+// PG float8 output: shortest representation that round-trips
+// (double digits, trailing zeros trimmed).  percent_rank()/cume_dist()
+// render 0.5 / 0.4, not 0.5000.
+static std::string float8Shortest(double v) {
+    char buf[64];
+    for (int prec = 1; prec <= 17; ++prec) {
+        std::snprintf(buf, sizeof(buf), "%.*g", prec, v);
+        if (std::strtod(buf, nullptr) == v) break;
+    }
+    return buf;
+}
+
+// SQL NULL ordering for window sorts: PostgreSQL default is
+// NULLS LAST for ASC and NULLS FIRST for DESC.  Callers pass the
+// direction so empty (NULL) values land on the PG side.
+static int compareWindowValue(const std::string& left, const std::string& right,
+                             bool nullsLast = true) {
     if (left.empty() && right.empty()) return 0;
-    if (left.empty()) return -1;
-    if (right.empty()) return 1;
+    if (left.empty()) return nullsLast ? 1 : -1;
+    if (right.empty()) return nullsLast ? -1 : 1;
 
     char* leftEnd = nullptr;
     char* rightEnd = nullptr;
@@ -1361,7 +1377,7 @@ bool WindowOp::open() {
                 if (cmp != 0) return cmp < 0;
             }
             if (orderColumn < tbl_.len) {
-                const int cmp = compareWindowValue(leftRow.values[orderColumn], rightRow.values[orderColumn]);
+                const int cmp = compareWindowValue(leftRow.values[orderColumn], rightRow.values[orderColumn], function.orderAscending);
                 if (cmp != 0) return function.orderAscending ? cmp < 0 : cmp > 0;
             }
             return left < right;
@@ -1563,14 +1579,12 @@ bool WindowOp::open() {
                     ? 0.0 : static_cast<double>(rank - 1) /
                         static_cast<double>(partitionEnd - partitionStart - 1);
                 char buffer[64];
-                std::snprintf(buffer, sizeof(buffer), "%.4f", value);
-                computed[rowIndex][functionIndex] = buffer;
+                computed[rowIndex][functionIndex] = float8Shortest(value);
             } else if (function.name == "cume_dist") {
                 const double value = static_cast<double>(peerEnd - partitionStart) /
                     static_cast<double>(std::max<size_t>(1, partitionEnd - partitionStart));
                 char buffer[64];
-                std::snprintf(buffer, sizeof(buffer), "%.4f", value);
-                computed[rowIndex][functionIndex] = buffer;
+                computed[rowIndex][functionIndex] = float8Shortest(value);
             } else {
                 const auto [frameBegin, frameEnd] = frameBounds(position);
                 int64_t count = 0;
@@ -1703,11 +1717,33 @@ bool WindowOp::open() {
     struct OutputRow {
         std::string text;
         std::string sortKey;
+        std::vector<std::string> keys;
     };
     std::vector<OutputRow> output;
     output.reserve(input.size());
-    const size_t finalOrderColumn = finalOrderBy_.empty()
-        ? tbl_.len : windowColumnIndex(tbl_, finalOrderBy_);
+    // PG sorts window output by the window ORDER BY when the query
+    // has no outer ORDER BY: the planner feeds rows through the
+    // window sort.  Use the first window function order as the
+    // final order in that case.
+    bool finalAsc = finalOrderAscending_;
+    // (partition, ORDER BY) fallback sort keys: PG emits window
+    // rows ordered by the window PARTITION BY then ORDER BY when
+    // the query itself has no outer ORDER BY.
+    std::vector<size_t> finalPartitionColumns;
+    size_t finalOrderColumn = tbl_.len;
+    if (finalOrderBy_.empty() && !functions_.empty()) {
+        for (const auto& pc : functions_.front().partitionBy) {
+            const size_t c = windowColumnIndex(tbl_, pc);
+            if (c < tbl_.len) finalPartitionColumns.push_back(c);
+        }
+        if (!functions_.front().orderBy.empty()) {
+            finalOrderColumn = windowColumnIndex(tbl_, functions_.front().orderBy);
+            finalAsc = functions_.front().orderAscending;
+        }
+    } else if (!finalOrderBy_.empty()) {
+        finalOrderColumn = windowColumnIndex(tbl_, finalOrderBy_);
+    }
+    finalOrderAscending_ = finalAsc;
     if (!finalOrderBy_.empty() && finalOrderColumn >= tbl_.len) return false;
     for (size_t rowIndex = 0; rowIndex < input.size(); ++rowIndex) {
         std::string line;
@@ -1727,11 +1763,17 @@ bool WindowOp::open() {
         }
         output.push_back({std::move(line),
                           finalOrderColumn < tbl_.len
-                              ? input[rowIndex].values[finalOrderColumn] : ""});
+                              ? input[rowIndex].values[finalOrderColumn] : "",
+                          input[rowIndex].values});
     }
-    if (finalOrderColumn < tbl_.len) {
+    if (finalOrderColumn < tbl_.len || !finalPartitionColumns.empty()) {
         std::stable_sort(output.begin(), output.end(), [&](const OutputRow& left, const OutputRow& right) {
-            const int cmp = compareWindowValue(left.sortKey, right.sortKey);
+            for (size_t column : finalPartitionColumns) {
+                const int cmp = compareWindowValue(left.keys[column], right.keys[column]);
+                if (cmp != 0) return cmp < 0;
+            }
+            if (finalOrderColumn >= tbl_.len) return false;
+            const int cmp = compareWindowValue(left.sortKey, right.sortKey, finalOrderAscending_);
             return finalOrderAscending_ ? cmp < 0 : cmp > 0;
         });
     }

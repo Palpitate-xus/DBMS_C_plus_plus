@@ -1,0 +1,17 @@
+DROP TABLE IF EXISTS diff_win2;
+CREATE TABLE diff_win2 (id INT, grp VARCHAR(4), v INT);
+INSERT INTO diff_win2 VALUES (1, 'a', 10), (2, 'a', 20), (3, 'b', 30), (4, 'b', 10), (5, 'a', NULL);
+SELECT id, rank() OVER (ORDER BY v), dense_rank() OVER (ORDER BY v) FROM diff_win2;
+SELECT id, row_number() OVER (ORDER BY v) FROM diff_win2;
+SELECT id, percent_rank() OVER (ORDER BY v) FROM diff_win2;
+SELECT id, cume_dist() OVER (ORDER BY v) FROM diff_win2;
+SELECT id, lag(v) OVER (ORDER BY id), lead(v) OVER (ORDER BY id) FROM diff_win2;
+SELECT id, first_value(v) OVER (ORDER BY id) FROM diff_win2;
+SELECT id, last_value(v) OVER (ORDER BY id) FROM diff_win2;
+SELECT id, nth_value(v, 2) OVER (ORDER BY id) FROM diff_win2;
+SELECT id, ntile(2) OVER (ORDER BY id) FROM diff_win2;
+SELECT id, sum(v) OVER (PARTITION BY grp ORDER BY id) FROM diff_win2;
+SELECT id, avg(v) OVER (PARTITION BY grp) FROM diff_win2;
+SELECT id, count(v) OVER (PARTITION BY grp) FROM diff_win2;
+SELECT id, max(v) OVER (PARTITION BY grp ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM diff_win2;
+SELECT id, sum(v) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) FROM diff_win2;
