@@ -3390,7 +3390,8 @@ static bool convertToVolcanoWindowSpec(const WindowFunc& wf,
         "row_number", "rank", "dense_rank", "lag", "lead",
         "sum", "count", "avg", "min", "max",
         "bool_and", "bool_or", "every",
-        "first_value", "last_value", "ntile", "percent_rank", "cume_dist"
+        "first_value", "last_value", "ntile", "percent_rank", "cume_dist",
+        "array_agg"
     };
     if (!supported.count(wf.name)) return false;
 

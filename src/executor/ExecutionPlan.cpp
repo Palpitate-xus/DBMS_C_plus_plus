@@ -1460,7 +1460,12 @@ bool WindowOp::open() {
                 orderColumn < tbl_.len) {
                 double currentKey = 0.0;
                 if (!parseWindowNumber(input[order[position]].values[orderColumn], currentKey)) {
-                    return {groupStartAt[position], groupEndAt[position]};
+                    // NULL current row: PG treats the RANGE frame end as the
+                    // NULL peer group and an UNBOUNDED/PRECEDING start still
+                    // spans all lower rows, so aggregate inputs remain visible
+                    // (min OVER (... RANGE UNBOUNDED PRECEDING AND CURRENT ROW)
+                    // yields the running minimum, not NULL).
+                    return {partitionStart, groupEndAt[position]};
                 }
                 if (!function.orderAscending) currentKey = -currentKey;
                 auto orderedKey = [&](size_t framePosition, double& key) {
@@ -1595,6 +1600,7 @@ bool WindowOp::open() {
                 bool boolValue = function.name == "bool_and" || function.name == "every";
                 bool boolSeen = false;
                 std::string selected;
+                std::vector<std::string> arrayElements;
                 for (size_t framePosition = frameBegin; framePosition < frameEnd; ++framePosition) {
                     if (rowIsExcluded(framePosition, position)) continue;
                     std::string value;
@@ -1647,6 +1653,10 @@ bool WindowOp::open() {
                         else boolValue = boolValue && truthyW;
                         continue;
                     }
+                    if (function.name == "array_agg") {
+                        arrayElements.push_back(value.empty() ? std::string("NULL") : value);
+                        continue;
+                    }
                     if (value.empty()) continue;
                     int64_t number = 0;
                     if (function.name == "sum" || function.name == "avg") {
@@ -1675,7 +1685,15 @@ bool WindowOp::open() {
                         }
                     }
                 }
-                if (function.name == "count") {
+                if (function.name == "array_agg") {
+                    std::string rendered = "{";
+                    for (size_t ei = 0; ei < arrayElements.size(); ++ei) {
+                        if (ei > 0) rendered += ",";
+                        rendered += arrayElements[ei];
+                    }
+                    rendered += "}";
+                    computed[rowIndex][functionIndex] = rendered;
+                } else if (function.name == "count") {
                     computed[rowIndex][functionIndex] = std::to_string(count);
                 } else if (function.name == "sum") {
                     if (count == 0) { computed[rowIndex][functionIndex] = "NULL"; }
