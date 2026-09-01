@@ -4828,6 +4828,75 @@ void ExprEvaluator::registerBuiltins() {
         }
         return ExprValue("interval", intervalToTextPg(months, days, micros), false);
     };
+    // EXISTS (SELECT ... FROM t [WHERE ...]) as a SELECT-list item:
+    // PG returns boolean true/false.  The subquery text arrives as
+    // the single argument; parse the table and conditions, then ask
+    // the storage engine whether any row satisfies them.
+    functions_["exists"] = [&](const std::vector<ExprValue>& a) -> ExprValue {
+        if (a.empty() || a[0].isNull) return ExprValue("boolean", "", true);
+        std::string sub = a[0].value;
+        // the argument arrives wrapped by the caller: strip one
+        // balanced outer paren pair if present
+        while (sub.size() >= 2 && sub.front() == '(' && sub.back() == ')') {
+            int depth = 0; bool bal = true;
+            for (size_t i = 0; i < sub.size(); ++i) {
+                if (sub[i] == '(') ++depth;
+                else if (sub[i] == ')') { --depth; if (depth == 0 && i + 1 != sub.size()) { bal = false; break; } }
+            }
+            if (!bal || depth != 0) break;
+            sub = sub.substr(1, sub.size() - 2);
+        }
+        std::string low;
+        for (char c : sub) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        size_t fp = low.find(" from ");
+        if (fp == std::string::npos) return ExprValue("boolean", "f", false);
+        size_t wp = low.find(" where ");
+        std::string table = trimStr(sub.substr(fp + 6, (wp == std::string::npos ? sub.size() : wp) - fp - 6));
+        size_t sp = table.find_first_of(" ,;)");
+        if (sp != std::string::npos) table = table.substr(0, sp);
+        std::string condRaw;
+        if (wp != std::string::npos) {
+            condRaw = trimStr(sub.substr(wp + 7));
+            // parseConditions expects whitespace-separated tokens:
+            // pad comparison operators with spaces when missing.
+            std::string padded;
+            for (size_t i = 0; i < condRaw.size(); ++i) {
+                char c = condRaw[i];
+                char prev = padded.empty() ? ' ' : padded.back();
+                bool isOp = (c == '=' || c == '<' || c == '>');
+                bool prevIsOp = (prev == '=' || prev == '<' || prev == '>' || prev == '!');
+                if (isOp && prev != ' ' && !prevIsOp) padded += ' ';
+                padded += c;
+                char next = (i + 1 < condRaw.size()) ? condRaw[i + 1] : ' ';
+                bool nextIsOp = (next == '=' || next == '<' || next == '>');
+                if (isOp && next != ' ' && !nextIsOp) padded += ' ';
+            }
+            condRaw = padded;
+        }
+        std::vector<std::string> condTexts;
+        if (!condRaw.empty()) {
+            // parseConditions expects the operator FIRST, glued to
+            // the column name: "id = 1" -> "=id 1".  Split the
+            // (already space-padded) text into three tokens and
+            // re-emit in engine order.
+            std::istringstream iss(condRaw);
+            std::string lhs, op, rhs;
+            iss >> lhs >> op >> rhs;
+            if (!lhs.empty() && !op.empty() && !rhs.empty()) {
+                std::string rest;
+                std::getline(iss, rest);
+                std::string tail = trimStr(rest);
+                if (!tail.empty()) rhs += ' ' + tail;
+                condTexts.push_back(op + lhs + ' ' + rhs);
+            }
+        }
+
+        auto conds = dbms::StorageEngine::parseConditions(condTexts);
+        bool scanFailed = false;
+        bool any = g_engine.anyRowMatches(currentDB_, table, conds, &scanFailed);
+        (void)scanFailed;
+        return ExprValue("boolean", any ? "t" : "f", false);
+    };
     functions_["justify_interval"] = [&](const std::vector<ExprValue>& a) -> ExprValue {
         return ExprValue("interval", justifyCommon(a.empty() ? "" : a[0].value, 2), a.empty() || a[0].isNull);
     };

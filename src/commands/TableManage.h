@@ -1493,6 +1493,11 @@ public:
     bool isConstraintCurrentlyDeferred(const std::string& dbname,
                                        const std::string& tablename,
                                        const std::string& constraintName) const;
+    // EXISTS(subquery) support: does any row of the table satisfy
+    // the parsed conditions?  Delegates to filterRows.
+    bool anyRowMatches(const std::string& dbname, const std::string& tablename,
+                       const std::vector<Condition>& conds, bool* scanFailed = nullptr);
+
 private:
 
     // Evaluate a single row against conditions, returning matching row indices
@@ -1500,6 +1505,7 @@ private:
                                  const std::vector<Condition>& conds,
                                  bool* usedIndex = nullptr,
                                  bool* scanFailed = nullptr);
+
 
 private:
     // Lock ownership is process-wide so independently constructed embedded

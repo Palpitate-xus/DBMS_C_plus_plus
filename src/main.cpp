@@ -5695,6 +5695,21 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
         // single-token name like "1").  Header cells must stay single
         // tokens: the tabular cout format is space-separated.
         if (disp == item) {
+            // EXISTS / NOT EXISTS subqueries name the column
+            // "exists" in PG (figure_colname for SubLink).
+            string lowE;
+            for (char c : expr) lowE += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+            size_t npE = 0;
+            while (npE < lowE.size() && isspace(static_cast<unsigned char>(lowE[npE]))) ++npE;
+            bool notE = lowE.compare(npE, 4, "not ") == 0;
+            size_t exE = npE + (notE ? 4 : 0);
+            if (lowE.compare(exE, 7, "exists") == 0 &&
+                exE + 7 < lowE.size() &&
+                isspace(static_cast<unsigned char>(lowE[exE + 7]))) {
+                headers.push_back("exists");
+                values.push_back(r.value.empty() && r.isNull ? "NULL" : r.value);
+                continue;
+            }
             // ARRAY[...] literal projects as header "array" (PG
             // figure_colname for array constructors).
             string lowA;

@@ -15078,6 +15078,14 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
     return conds;
 }
 
+// EXISTS(subquery): any row of the table satisfying the conditions?
+bool StorageEngine::anyRowMatches(const std::string& dbname,
+                                  const std::string& tablename,
+                                  const std::vector<Condition>& conds,
+                                  bool* scanFailed) {
+    return !filterRows(dbname, tablename, conds, nullptr, scanFailed).empty();
+}
+
 std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                                              const std::string& tablename,
                                              const std::vector<Condition>& conds,
