@@ -1,0 +1,12 @@
+DROP VIEW IF EXISTS diff_gv;
+DROP TABLE IF EXISTS diff_gset;
+CREATE TABLE diff_gset (grp VARCHAR(4), sub VARCHAR(4), v INT);
+INSERT INTO diff_gset VALUES ('a', 'x', 1), ('a', 'y', 2), ('b', 'x', 3);
+SELECT grp, sum(v) FROM diff_gset GROUP BY ROLLUP (grp) ORDER BY grp;
+SELECT grp, sub, sum(v) FROM diff_gset GROUP BY CUBE (grp, sub) ORDER BY grp, sub;
+SELECT grp, sub, sum(v) FROM diff_gset GROUP BY GROUPING SETS ((grp), (sub)) ORDER BY grp, sub;
+SELECT grp, sum(v) FROM diff_gset GROUP BY grp HAVING sum(v) > 2 ORDER BY grp;
+CREATE VIEW diff_gv AS SELECT grp, sum(v) AS s FROM diff_gset GROUP BY grp;
+SELECT grp, s FROM diff_gv ORDER BY grp;
+SELECT grp FROM diff_gv WHERE s > 2 ORDER BY grp;
+DROP VIEW diff_gv;

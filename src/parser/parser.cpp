@@ -38,7 +38,19 @@ static std::string joinSqlTokens(const std::vector<std::string>& tokens) {
             }
             continue;
         }
-        if (!out.empty()) out += ' ';
+        if (!out.empty()) {
+            // Tight SQL reconstruction: no space before '(' / ')' / ',' / ';'
+            // and none after '(' or '.' — keeps stored view SQL executable
+            // ('sum(v)' rather than 'sum ( v )', which downstream derived-
+            // table expansion cannot parse).
+            const std::string& prev = out;
+            const char nextCh = tokens[i].empty() ? ' ' : tokens[i][0];
+            const char lastCh = prev.back();
+            const bool prevIsIdent = std::isalnum(static_cast<unsigned char>(lastCh)) || lastCh == '_';
+            const bool noSpace = nextCh == ')' || nextCh == ',' || nextCh == ';' ||
+                                 (nextCh == '(' && prevIsIdent) || lastCh == '(' || lastCh == '.';
+            if (!noSpace) out += ' ';
+        }
         out += tokens[i];
         ++i;
     }

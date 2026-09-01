@@ -8678,6 +8678,13 @@ static std::vector<std::string> runDerivedSubQuery(const std::string& rawSql, Se
             size_t asPos = item.find(" as ");
             if (asPos != std::string::npos) {
                 outColNames.push_back(trim(item.substr(asPos + 4)));
+            } else if (item.find('(') == std::string::npos) {
+                // PG names an unaliased qualified reference by its attribute:
+                // SELECT jb.bid exposes column "bid".  Derived-table
+                // consumers resolve bare names, so strip the qualifier.
+                size_t dot = item.rfind('.');
+                outColNames.push_back(
+                    dot == std::string::npos ? item : item.substr(dot + 1));
             } else {
                 outColNames.push_back(item);
             }
@@ -17535,8 +17542,23 @@ if (sql.rfind("backup database", 0) == 0) {
                     // View expansion: replace view reference with derived table
                     // Replace FROM viewname with FROM (view_sql) AS __view_name
                     string expanded = rawSql;
-                    string pattern = "from " + tnameOrig;
-                    size_t fp = expanded.find(pattern);
+                    // Case-insensitive FROM match: queries commonly spell
+                    // FROM in upper case, which the literal lowercase pattern
+                    // silently missed; the view then fell through to the
+                    // standalone-execution fallback and lost the outer
+                    // projection (columns after the first went missing).
+                    string lowerRaw = toLower(rawSql);
+                    string pattern = "from " + toLower(tnameOrig);
+                    // Join views: derived-table expansion cannot yet resolve
+                    // qualified projection columns from the inner join
+                    // ("SELECT bid" vs subquery output "jb.bid"), and the
+                    // standalone-execution fallback handles them correctly.
+                    // Keep expansion for single-table views only.
+                    if (lowerRaw.find(" join ") != std::string::npos ||
+                        expandedSql.find(" join ") != std::string::npos) {
+                        pattern.clear();
+                    }
+                    size_t fp = pattern.empty() ? std::string::npos : lowerRaw.find(pattern);
                     if (fp != string::npos) {
                         string subq = "from (" + expandedSql + ") as __view_" + tnameOrig;
                         expanded = expanded.substr(0, fp) + subq + expanded.substr(fp + pattern.size());
