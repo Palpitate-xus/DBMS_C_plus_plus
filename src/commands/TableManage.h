@@ -530,6 +530,7 @@ public:
         std::string func;
         std::string arg;
         std::vector<std::string> filterConds; // FILTER (WHERE ...) conditions
+        std::string orderBy; // inside-call ORDER BY key (string_agg/array_agg input ordering)
     };
 
     // Aggregate query: items = {("count","*"), ("max","score"), ...}

@@ -18186,6 +18186,7 @@ if (sql.rfind("backup database", 0) == 0) {
                     if (lp != string::npos && rp != string::npos && rp > lp) {
                         string func = itemBase.substr(0, lp);
                         string arg = itemBase.substr(lp + 1, rp - lp - 1);
+                        string aggOrderBy;
                         // Aggregate ORDER BY inside the call parens:
                         // sum(v ORDER BY v) - PG orders the input rows
                         // only; the aggregate consumes the plain
@@ -18214,6 +18215,7 @@ if (sql.rfind("backup database", 0) == 0) {
                                 }
                             }
                             if (obA != string::npos) {
+                                aggOrderBy = trim(lowArg.substr(obA));
                                 arg = arg.substr(0, obA);
                                 while (!arg.empty() && (isspace(static_cast<unsigned char>(arg.back())) || arg.back() == ','))
                                     arg.pop_back();
@@ -18381,6 +18383,7 @@ if (sql.rfind("backup database", 0) == 0) {
                             dbms::StorageEngine::AggItem ai;
                             ai.func = func;
                             ai.arg = arg;
+                            ai.orderBy = aggOrderBy;
                             ai.filterConds = filterConds;
                             aggItems.push_back(ai);
                             hasAgg = true;

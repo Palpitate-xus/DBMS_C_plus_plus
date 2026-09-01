@@ -21158,6 +21158,21 @@ std::vector<std::string> StorageEngine::aggregate(
         size_t colIdx = tbl.len;
         std::string groupConcat;
         std::unordered_set<std::string> groupSeen;
+        std::vector<std::pair<std::string, std::string>> groupOrdered;
+        std::vector<std::pair<std::string, std::string>> arrayOrderedVals;
+        size_t orderKeyIdx = tbl.len;
+        bool orderDesc = false;
+        if (!item.orderBy.empty()) {
+            std::string keyCol = item.orderBy;
+            if (keyCol.size() > 5 && keyCol.compare(keyCol.size() - 4, 4, " desc") == 0) {
+                orderDesc = true;
+                keyCol = trim(keyCol.substr(0, keyCol.size() - 4));
+            }
+            if (keyCol.size() > 4 && keyCol.compare(keyCol.size() - 3, 3, " asc") == 0)
+                keyCol = trim(keyCol.substr(0, keyCol.size() - 3));
+            for (size_t i = 0; i < tbl.len; ++i)
+                if (tbl.cols[i].dataName == keyCol) { orderKeyIdx = i; break; }
+        }
         bool groupConcatFirst = true;
         std::vector<std::string> jsonAggVals;
         std::vector<std::string> arrayAggVals;
@@ -21288,6 +21303,11 @@ std::unordered_set<std::string> arraySeen;
                     if (val.empty()) continue;
                     if (aggDistinct && groupSeen.count(val)) continue;
                     groupSeen.insert(val);
+                    if (orderKeyIdx < tbl.len) {
+                        groupOrdered.emplace_back(extractColumnValue(row, tbl, orderKeyIdx), val);
+                        groupConcatFirst = false;
+                        continue;
+                    }
                     if (!groupConcatFirst) groupConcat += aggSep;
                     groupConcat += val;
                     groupConcatFirst = false;
@@ -21300,6 +21320,10 @@ std::unordered_set<std::string> arraySeen;
                     std::string val = extractColumnValue(row, tbl, colIdx);
                     if (aggDistinct && arraySeen.count(val)) continue;
                     arraySeen.insert(val);
+                    if (orderKeyIdx < tbl.len) {
+                        arrayOrderedVals.emplace_back(extractColumnValue(row, tbl, orderKeyIdx), val);
+                        continue;
+                    }
                     arrayAggVals.push_back(val);
                 } else {
                 std::string val;
@@ -21452,6 +21476,20 @@ std::unordered_set<std::string> arraySeen;
             rowResult += avgOut + ' ';
         }
         else if (func == "group_concat" || func == "string_agg") {
+            if (!groupOrdered.empty()) {
+                std::stable_sort(groupOrdered.begin(), groupOrdered.end(),
+                    [&orderDesc](const std::pair<std::string, std::string>& a, const std::pair<std::string, std::string>& b) {
+                        bool na = !a.first.empty() && a.first.find_first_not_of("0123456789.+-eE") == std::string::npos;
+                        bool nb = !b.first.empty() && b.first.find_first_not_of("0123456789.+-eE") == std::string::npos;
+                        bool lt = (na && nb) ? (std::stod(a.first) < std::stod(b.first)) : (a.first < b.first);
+                        return orderDesc ? (!lt && a.first != b.first) : lt;
+                    });
+                groupConcat.clear();
+                for (size_t qi = 0; qi < groupOrdered.size(); ++qi) {
+                    if (qi) groupConcat += aggSep;
+                    groupConcat += groupOrdered[qi].second;
+                }
+            }
             rowResult += (groupConcat.empty() ? "NULL" : groupConcat) + ' ';
         }
         else if (isJsonAgg) {
@@ -21478,6 +21516,17 @@ std::unordered_set<std::string> arraySeen;
             rowResult += json + ' ';
         }
         else if (isArrayAgg) {
+            if (!arrayOrderedVals.empty()) {
+                std::stable_sort(arrayOrderedVals.begin(), arrayOrderedVals.end(),
+                    [&orderDesc](const std::pair<std::string, std::string>& a, const std::pair<std::string, std::string>& b) {
+                        bool na = !a.first.empty() && a.first.find_first_not_of("0123456789.+-eE") == std::string::npos;
+                        bool nb = !b.first.empty() && b.first.find_first_not_of("0123456789.+-eE") == std::string::npos;
+                        bool lt = (na && nb) ? (std::stod(a.first) < std::stod(b.first)) : (a.first < b.first);
+                        return orderDesc ? (!lt && a.first != b.first) : lt;
+                    });
+                arrayAggVals.clear();
+                for (const auto& kv : arrayOrderedVals) arrayAggVals.push_back(kv.second);
+            }
             // PG array_agg(DISTINCT ...) sorts the deduplicated values.
             if (aggDistinct && !arrayAggVals.empty()) {
                 bool allNum = true;
