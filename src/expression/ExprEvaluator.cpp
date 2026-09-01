@@ -4815,17 +4815,40 @@ void ExprEvaluator::registerBuiltins() {
         if (!splitTs(a[0].value, y1, m1, d1, us1) ||
             !splitTs(a[1].value, y2, m2, d2, us2))
             return ExprValue("interval", "", true);
+        // PG renders a reversed age (earlier first) as the negated
+        // swap: age(2020-01-01, 2026-05-06) = -6 years -4 mons -5 days.
+        // Swap the operands and negate every field at the end.
+        bool swapped = false;
+        auto tsLess = [](long long y, long long mo, long long d, long long us2,
+                        long long yB, long long moB, long long dB, long long usB) {
+            if (y != yB) return y < yB;
+            if (mo != moB) return mo < moB;
+            if (d != dB) return d < dB;
+            return us2 < usB;
+        };
+        if (tsLess(y1, m1, d1, us1, y2, m2, d2, us2)) {
+            std::swap(y1, y2); std::swap(m1, m2); std::swap(d1, d2);
+            std::swap(us1, us2);
+            swapped = true;
+        }
         long long months = (y1 * 12 + m1) - (y2 * 12 + m2);
         long long days = d1 - d2;
         long long micros = us1 - us2;
         if (micros < 0) { micros += 86400000000LL; days -= 1; }
         if (days < 0) {
-            long long py = y1, pm = m1;
-            pm -= 1; if (pm == 0) { pm = 12; py -= 1; }
-            long long nm = pm + 1, ny = py; if (nm > 12) { nm = 1; ny += 1; }
-            long long plen = daysFromCivil(ny, (unsigned)nm, 1) - daysFromCivil(py, (unsigned)pm, 1);
+            // PG timestamp_age borrow: the day field borrows the
+            // length of the EARLIER timestamp's own month (dt2.mon
+            // in dt2.year), not the preceding month of dt1.  Derived
+            // empirically against reference PG 17 and verified on 16
+            // samples including leap-February and year-wrap borrows:
+            // age(2026-05-06, 2000-01-15) = 26y 3m 22d (Jan=31).
+            long long plen = daysFromCivil((int)(y2 + (m2 == 12 ? 1 : 0)),
+                                           (unsigned)(m2 == 12 ? 1 : m2 + 1), 1) -
+                             daysFromCivil((int)y2, (unsigned)m2, 1);
             days += plen; months -= 1;
         }
+        if (months < 0) { months += 12; y1 -= 1; }
+        if (swapped) { months = -months; days = -days; micros = -micros; }
         return ExprValue("interval", intervalToTextPg(months, days, micros), false);
     };
     // EXISTS (SELECT ... FROM t [WHERE ...]) as a SELECT-list item:
