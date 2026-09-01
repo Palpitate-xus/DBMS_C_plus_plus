@@ -21164,11 +21164,16 @@ std::vector<std::string> StorageEngine::aggregate(
         bool orderDesc = false;
         if (!item.orderBy.empty()) {
             std::string keyCol = item.orderBy;
-            if (keyCol.size() > 5 && keyCol.compare(keyCol.size() - 4, 4, " desc") == 0) {
+            // the captured clause keeps its leading order-by prefix
+            if (keyCol.size() > 9 && keyCol.compare(0, 8, "order by") == 0)
+                keyCol = trim(keyCol.substr(8));
+            if (keyCol.size() > 4 && keyCol.compare(keyCol.size() - 4, 4, "desc") == 0 &&
+                isspace(static_cast<unsigned char>(keyCol[keyCol.size() - 5]))) {
                 orderDesc = true;
                 keyCol = trim(keyCol.substr(0, keyCol.size() - 4));
             }
-            if (keyCol.size() > 4 && keyCol.compare(keyCol.size() - 3, 3, " asc") == 0)
+            if (keyCol.size() > 3 && keyCol.compare(keyCol.size() - 3, 3, "asc") == 0 &&
+                isspace(static_cast<unsigned char>(keyCol[keyCol.size() - 4])))
                 keyCol = trim(keyCol.substr(0, keyCol.size() - 3));
             for (size_t i = 0; i < tbl.len; ++i)
                 if (tbl.cols[i].dataName == keyCol) { orderKeyIdx = i; break; }
