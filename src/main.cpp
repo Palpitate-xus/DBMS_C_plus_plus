@@ -18186,6 +18186,39 @@ if (sql.rfind("backup database", 0) == 0) {
                     if (lp != string::npos && rp != string::npos && rp > lp) {
                         string func = itemBase.substr(0, lp);
                         string arg = itemBase.substr(lp + 1, rp - lp - 1);
+                        // Aggregate ORDER BY inside the call parens:
+                        // sum(v ORDER BY v) - PG orders the input rows
+                        // only; the aggregate consumes the plain
+                        // argument list.  Strip a trailing ORDER BY
+                        // clause (case-insensitive, outside quotes).
+                        {
+                            string lowArg;
+                            bool qA = false;
+                            for (char cA : arg) {
+                                if (cA == 39) qA = !qA;
+                                lowArg += (qA ? cA : static_cast<char>(tolower(static_cast<unsigned char>(cA))));
+                            }
+                            size_t obA = string::npos;
+                            int depthA = 0; bool qB = false;
+                            for (size_t kA = 0; kA + 8 < lowArg.size(); ++kA) {
+                                char cA = lowArg[kA];
+                                if (cA == 39) qB = !qB;
+                                if (qB) continue;
+                                if (cA == '(') ++depthA;
+                                else if (cA == ')') --depthA;
+                                if (depthA == 0 && kA > 0 && isspace(static_cast<unsigned char>(lowArg[kA - 1])) &&
+                                    lowArg.compare(kA, 8, "order by") == 0 &&
+                                    (kA + 8 >= lowArg.size() || isspace(static_cast<unsigned char>(lowArg[kA + 8])))) {
+                                    obA = kA;
+                                    break;
+                                }
+                            }
+                            if (obA != string::npos) {
+                                arg = arg.substr(0, obA);
+                                while (!arg.empty() && (isspace(static_cast<unsigned char>(arg.back())) || arg.back() == ','))
+                                    arg.pop_back();
+                            }
+                        }
                         // Preprocess cast: "expr as type" → "expr,type"
                         if (func == "cast") {
                             size_t asPos = arg.find(" as ");
