@@ -1,0 +1,18 @@
+DROP TABLE IF EXISTS diff_case;
+CREATE TABLE diff_case (id INT, grp VARCHAR(8), v NUMERIC);
+INSERT INTO diff_case VALUES (1, 'a', 10), (2, 'a', 20), (3, 'b', 30), (4, 'b', NULL);
+SELECT CASE v WHEN 10 THEN 1 WHEN 20 THEN 2 ELSE 0 END FROM diff_case ORDER BY id;
+SELECT CASE grp WHEN 'a' THEN 'A' ELSE 'B' END FROM diff_case ORDER BY id;
+SELECT CASE 2 WHEN 1 THEN 'one' WHEN 2 THEN 'two' END;
+SELECT CASE WHEN v > 15 THEN 'hi' ELSE 'lo' END FROM diff_case ORDER BY id;
+SELECT true AND false, true OR false, NOT true;
+SELECT null::boolean AND true, null::boolean OR true;
+SELECT DISTINCT grp FROM diff_case ORDER BY grp;
+SELECT id FROM diff_case INTERSECT SELECT 3;
+SELECT id FROM diff_case EXCEPT SELECT 3 ORDER BY id;
+SELECT CAST(v AS INT) FROM diff_case WHERE id = 1;
+SELECT '123'::int + 1;
+SELECT 1 || 'x';
+SELECT COALESCE(v, -1) FROM diff_case ORDER BY id;
+SELECT id FROM diff_case WHERE v IS NULL;
+SELECT bool_and(v > 5), bool_or(v > 25) FROM diff_case;

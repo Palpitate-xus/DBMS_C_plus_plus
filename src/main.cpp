@@ -829,6 +829,38 @@ static string normalizeCaseCondition(string s) {
 static string preprocessCaseWhen(string s) {
     size_t pos = 0;
     while (true) {
+        // SIMPLE case ("case <expr> when v1 then r1 ..."): rewrite to
+        // searched form by expanding each WHEN value into
+        // "<expr> = <value>" before the searched-case loop below.
+        size_t simplePos = pos;
+        while (true) {
+            size_t cp = s.find("case ", simplePos);
+            if (cp == string::npos) break;
+            size_t after = cp + 5;
+            if (s.compare(after, 4, "when") == 0) { simplePos = cp + 5; continue; }
+            size_t firstWhen = s.find(" when ", after);
+            if (firstWhen == string::npos) { simplePos = cp + 5; continue; }
+            size_t endPos2 = s.find(" end", firstWhen);
+            if (endPos2 == string::npos) { simplePos = cp + 5; continue; }
+            string operand = trim(s.substr(after, firstWhen - after));
+            string body = s.substr(firstWhen + 6, endPos2 - firstWhen - 6);
+            string rebuilt;
+            size_t cur = 0;
+            while (cur < body.size()) {
+                size_t thenPos2 = body.find("then", cur);
+                if (thenPos2 == string::npos) { rebuilt += body.substr(cur); break; }
+                string val = trim(body.substr(cur, thenPos2 - cur));
+                size_t nextWhen2 = body.find("when", thenPos2 + 4);
+                string tail;
+                if (nextWhen2 == string::npos) tail = body.substr(thenPos2 + 4);
+                else tail = body.substr(thenPos2 + 4, nextWhen2 - thenPos2 - 4);
+                rebuilt += "when " + operand + " = " + val + " then " + trim(tail) + " ";
+                if (nextWhen2 == string::npos) break;
+                cur = nextWhen2 + 4;
+            }
+            s = s.substr(0, cp) + "case " + trim(rebuilt) + s.substr(endPos2 + 1);
+            simplePos = cp + 4;
+        }
         size_t casePos = s.find("case when", pos);
         if (casePos == string::npos) break;
         size_t endPos = s.find("end", casePos);
@@ -18265,6 +18297,9 @@ if (sql.rfind("backup database", 0) == 0) {
                             // "float8", ...).
                             string headerName = func;
                             if (func == "isdistinct" || func == "isnotdistinct") headerName = "?column?";
+                            // PG names every CASE expression column "case"
+                            // (figure_colname for CaseExpr).
+                            if (func == "case_when") headerName = "case";;
                             if (func == "cast") {
                                 auto castArgs = splitFuncArgs(arg);
                                 if (castArgs.size() >= 2) {
