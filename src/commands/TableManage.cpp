@@ -21542,10 +21542,32 @@ std::unordered_set<std::string> arraySeen;
                 } else {
                     variance = wM2 / (wCount - 1);
                 }
-                if (isStddev) variance = std::sqrt(variance);
-                std::ostringstream oss;
-                oss << std::fixed << std::setprecision(4) << variance;
-                rowResult += oss.str() + ' ';
+                // PG renders these aggregates over integer input as
+                // numeric with full precision (5.7008771254956899,
+                // 32.5000000000000000): shortest round-trip double text.
+                // PG stddev over integer input returns numeric from an
+                // exact digit-by-digit sqrt_var: match it with Newton-
+                // refined long double sqrt, 17 significant digits
+                // (5.7008771254956899).  Variance prints shortest form.
+                std::string vs;
+                if (isStddev) {
+                    long double x = static_cast<long double>(variance);
+                    long double r = std::sqrt(x);
+                    for (int it = 0; it < 4; ++it)
+                        r = (r + x / r) / 2.0L;
+                    char buf[64];
+                    std::snprintf(buf, sizeof(buf), "%.17Lg", r);
+                    vs = buf;
+                } else {
+                    // PG numeric variance from integer input renders
+                    // with 16 fraction digits (32.5000000000000000).
+                    char vbuf[64];
+                    std::snprintf(vbuf, sizeof(vbuf), "%.16f", variance);
+                    vs = vbuf;
+                }
+                if (vs.find(46) == std::string::npos)
+                    vs += ".0";
+                rowResult += vs + ' ';
             }
         }
         else if (isModeMedian) {
