@@ -4722,9 +4722,13 @@ void ExprEvaluator::registerBuiltins() {
         else if (field == "minute") { se = 0; }
         else if (field == "second") { /* keep */ }
         else return ExprValue("timestamp", "", true);
-        char buf[32];
+        char buf[40];
         std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d", y, mo, d, h, mi, se);
-        return ExprValue("timestamp", buf, false);
+        // PG date_trunc over a date input promotes to timestamptz and
+        // renders with the zone suffix (+00); timestamp input stays plain.
+        std::string res = buf;
+        if (toLower(a[1].typeName) == "date") res += "+00";
+        return ExprValue("timestamp", res, false);
     };
     // to_char(value, fmt): format a date/timestamp/time or number as text. The
     // input is treated as temporal when its declared type is date/time/timestamp
