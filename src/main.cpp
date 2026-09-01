@@ -5701,7 +5701,16 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             for (char c : expr) lowA += static_cast<char>(tolower(static_cast<unsigned char>(c)));
             size_t npA = 0;
             while (npA < lowA.size() && isspace(static_cast<unsigned char>(lowA[npA]))) ++npA;
-            if (lowA.compare(npA, 6, "array") == 0) {
+            bool endsBracketA = !lowA.empty() && lowA.back() == ']';
+            bool hasCatA = lowA.find("||") != string::npos ||
+                            lowA.find("@>") != string::npos ||
+                            lowA.find("<@") != string::npos ||
+                            lowA.find("&&") != string::npos;
+            if ((lowA.compare(npA, 6, "array[") == 0 ||
+                 (lowA.compare(npA, 5, "array") == 0 && npA + 5 < lowA.size() &&
+                  isspace(static_cast<unsigned char>(lowA[npA + 5])) &&
+                  lowA.find("[", npA) != string::npos)) &&
+                endsBracketA && !hasCatA) {
                 headers.push_back("array");
                 values.push_back(r.value.empty() && r.isNull ? "NULL" : r.value);
                 continue;
@@ -5799,6 +5808,10 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             // constructs name after the underlying function (timezone for
             // AT TIME ZONE, overlaps for OVERLAPS).
             {
+                // JSON operator applied to a function result is a plain
+                // expression: PG names it ?column? (not after the function).
+                if (low2.find("->") != string::npos || low2.find("#>") != string::npos)
+                    { headers.push_back("?column?"); goto headerDone; }
                 if (low2.find(" at time zone ") != string::npos)
                     { headers.push_back("timezone"); goto headerDone; }
                 if (low2.find(" overlaps ") != string::npos)
