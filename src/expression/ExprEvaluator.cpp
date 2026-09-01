@@ -873,7 +873,11 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
         if (rIv) {
             IntervalParts iv = parseIntervalText(r.value);
             if (!iv.ok || !isTsLike(l)) return ExprValue("timestamp", "", true);
-            return ExprValue("timestamp", timestampShift(l.value, iv, op == "+"), false);
+            std::string shifted = timestampShift(l.value, iv, op == "+");
+            // PG date +/- interval promotes to timestamp: a bare date
+            // result renders with 00:00:00 (2026-02-28 00:00:00).
+            if (shifted.size() == 10) shifted += " 00:00:00";
+            return ExprValue("timestamp", shifted, false);
         }
         return ExprValue("timestamp", "", true);
     }
@@ -3465,6 +3469,23 @@ void ExprEvaluator::registerBuiltins() {
     functions_["mod"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull)
             return ExprValue("integer", "", true);
+        bool frac = a[0].value.find('.') != std::string::npos ||
+                    a[1].value.find('.') != std::string::npos;
+        if (frac) {
+            // PG mod(numeric, numeric) keeps the exact decimal scale:
+            // mod(10.5, 3) = 1.5.  fmod with the larger fraction count.
+            double x = a[0].asDouble(), y = a[1].asDouble();
+            if (y == 0) return ExprValue("numeric", "", true);
+            double m = std::fmod(x, y);
+            size_t d0 = a[0].value.find('.');
+            size_t d1 = a[1].value.find('.');
+            size_t s0 = (d0 == std::string::npos) ? 0 : a[0].value.size() - d0 - 1;
+            size_t s1 = (d1 == std::string::npos) ? 0 : a[1].value.size() - d1 - 1;
+            size_t sc = s0 > s1 ? s0 : s1;
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%.*f", (int)sc, m);
+            return ExprValue("numeric", buf, false);
+        }
         int64_t b = a[1].asInt();
         if (b == 0) return ExprValue("integer", "", true);
         return ExprValue("integer", std::to_string(a[0].asInt() % b), false);
