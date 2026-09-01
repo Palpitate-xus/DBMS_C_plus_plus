@@ -1246,6 +1246,10 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
             std::string path = r.value;
             if (path.size() >= 2 && path.front() == '\'' && path.back() == '\'')
                 path = path.substr(1, path.size() - 2);
+            // PG accepts the array-literal path form {a,b} as well as
+            // bare a,b; strip the braces.
+            if (path.size() >= 2 && path.front() == '{' && path.back() == '}')
+                path = path.substr(1, path.size() - 2);
             std::vector<std::string> steps;
             std::string curStep;
             for (char pc : path) {

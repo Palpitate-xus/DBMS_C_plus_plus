@@ -1501,7 +1501,11 @@ static ExprPtr parseCastExpr(const std::vector<std::string>& tokens, size_t& pos
                 || tokens[pos] == "*" || tokens[pos] == "/" || tokens[pos] == "%"
                 || tokens[pos] == "^" || tokens[pos] == "=" || tokens[pos] == "<"
                 || tokens[pos] == ">" || tokens[pos] == "<=" || tokens[pos] == ">="
-                || tokens[pos] == "<>" || tokens[pos] == "!=") {
+                || tokens[pos] == "<>" || tokens[pos] == "!="
+                || tokens[pos] == "->" || tokens[pos] == "->>"
+                || tokens[pos] == "#>" || tokens[pos] == "#>>"
+                || tokens[pos] == "@>" || tokens[pos] == "<@"
+                || tokens[pos] == "&&" || tokens[pos] == "@@") {
                 break;
             }
             if (tokens[pos] == "(") {
