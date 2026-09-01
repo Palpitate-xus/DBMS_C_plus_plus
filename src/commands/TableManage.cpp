@@ -34,6 +34,7 @@
 #include <atomic>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 
 extern dbms::Config g_config;
 
@@ -21087,6 +21088,35 @@ static std::string evalAggArgExpr(const std::string& expr, GetVal getVal) {
     return s;
 }
 
+// string_agg(expr, sep): strip the second top-level argument (the
+// separator literal) from an aggregate argument and return it; PG
+// string_agg joins accumulated values with it.
+static std::string extractAggSep(std::string& arg, bool& isDistinct) {
+    std::string sep = ",";
+    isDistinct = false;
+    if (arg.size() > 9 && arg.compare(0, 9, "distinct ") == 0) {
+        isDistinct = true;
+        arg = trim(arg.substr(9));
+    }
+    int d = 0; bool q = false;
+    for (size_t k = 0; k < arg.size(); ++k) {
+        char c = arg[k];
+        if (c == 39) { q = !q; continue; }
+        if (q) continue;
+        if (c == '(') ++d;
+        else if (c == ')') --d;
+        else if (c == ',' && d == 0) {
+            std::string t = trim(arg.substr(k + 1));
+            if (t.size() >= 2 && t.front() == 39 && t.back() == 39)
+                t = t.substr(1, t.size() - 2);
+            sep = t;
+            arg = trim(arg.substr(0, k));
+            break;
+        }
+    }
+    return sep;
+}
+
 std::vector<std::string> StorageEngine::aggregate(
     const std::string& dbname, const std::string& tablename,
     const std::vector<std::string>& conditions,
@@ -21110,7 +21140,10 @@ std::vector<std::string> StorageEngine::aggregate(
     std::string rowResult;
     for (const auto& item : items) {
         const std::string& func = item.func;
-        const std::string& colName = item.arg;
+        std::string colName = item.arg;
+        bool aggDistinct = false;
+        std::string aggSep = (func == "string_agg" || func == "group_concat")
+                              ? extractAggSep(colName, aggDistinct) : std::string(",");
         int64_t count = 0, sum = 0;
         bool hasMax = false, hasMin = false;
         std::string maxStr, minStr;
@@ -21124,6 +21157,7 @@ std::vector<std::string> StorageEngine::aggregate(
         int64_t exactCount = 0;
         size_t colIdx = tbl.len;
         std::string groupConcat;
+        std::unordered_set<std::string> groupSeen;
         bool groupConcatFirst = true;
         std::vector<std::string> jsonAggVals;
         std::vector<std::string> arrayAggVals;
@@ -21251,7 +21285,9 @@ std::vector<std::string> StorageEngine::aggregate(
                     if (colIdx >= tbl.len) continue;
                     std::string val = extractColumnValue(row, tbl, colIdx);
                     if (val.empty()) continue;
-                    if (!groupConcatFirst) groupConcat += ",";
+                    if (aggDistinct && groupSeen.count(val)) continue;
+                    groupSeen.insert(val);
+                    if (!groupConcatFirst) groupConcat += aggSep;
                     groupConcat += val;
                     groupConcatFirst = false;
                 } else if (isJsonAgg) {
@@ -21632,8 +21668,12 @@ std::vector<std::string> StorageEngine::groupAggregate(
 
     // Helper: compute aggregate for a group
     auto computeAgg = [&](const std::vector<int64_t>& gids,
-                           const std::string& func, const std::string& colName,
+                           const std::string& func, const std::string& colNameP,
                            const std::vector<std::string>& filterConds = {}) -> std::string {
+    std::string colName = colNameP;
+    bool aggDistinct = false;
+    std::string aggSep = (func == "string_agg" || func == "group_concat")
+                          ? extractAggSep(colName, aggDistinct) : std::string(",");
         bool isDistinctCount = (func == "count" && colName.size() > 9 && colName.substr(0, 9) == "distinct ");
         std::string actualColName = isDistinctCount ? colName.substr(9) : colName;
         bool isJsonAgg = (func == "json_agg" || func == "jsonb_agg");
@@ -21696,6 +21736,7 @@ std::vector<std::string> StorageEngine::groupAggregate(
         int64_t maxInt = 0, minInt = 0;
         Date maxDate, minDate;
         std::string groupConcat;
+        std::unordered_set<std::string> groupSeen;
         bool groupConcatFirst = true;
         std::vector<std::string> jsonAggVals;
         std::vector<std::string> arrayAggVals;
@@ -21762,7 +21803,9 @@ std::vector<std::string> StorageEngine::groupAggregate(
                     if (colIdx >= tbl.len) continue;
                     std::string val = extractColumnValue(row, tbl, colIdx);
                     if (val.empty()) continue;
-                    if (!groupConcatFirst) groupConcat += ",";
+                    if (aggDistinct && groupSeen.count(val)) continue;
+                    groupSeen.insert(val);
+                    if (!groupConcatFirst) groupConcat += aggSep;
                     groupConcat += val;
                     groupConcatFirst = false;
                 } else if (isJsonAgg) {
@@ -22077,8 +22120,12 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
 
     // Reuse the aggregate implementation for HAVING-style filters.
     auto computeAgg = [&](const std::vector<int64_t>& gids,
-                           const std::string& func, const std::string& colName,
+                           const std::string& func, const std::string& colNameP,
                            const std::vector<std::string>& filterConds = {}) -> std::string {
+    std::string colName = colNameP;
+    bool aggDistinct = false;
+    std::string aggSep = (func == "string_agg" || func == "group_concat")
+                          ? extractAggSep(colName, aggDistinct) : std::string(",");
         bool isDistinctCount = (func == "count" && colName.size() > 9 && colName.substr(0, 9) == "distinct ");
         std::string actualColName = isDistinctCount ? colName.substr(9) : colName;
         bool isJsonAgg = (func == "json_agg" || func == "jsonb_agg");
@@ -22140,6 +22187,7 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
         int64_t maxInt = 0, minInt = 0;
         Date maxDate, minDate;
         std::string groupConcat;
+        std::unordered_set<std::string> groupSeen;
         bool groupConcatFirst = true;
         std::vector<std::string> jsonAggVals;
         std::vector<std::string> arrayAggVals;
@@ -22179,7 +22227,9 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
                     if (colIdx >= tbl.len) continue;
                     std::string val = extractColumnValue(row, tbl, colIdx);
                     if (val.empty()) continue;
-                    if (!groupConcatFirst) groupConcat += ",";
+                    if (aggDistinct && groupSeen.count(val)) continue;
+                    groupSeen.insert(val);
+                    if (!groupConcatFirst) groupConcat += aggSep;
                     groupConcat += val;
                     groupConcatFirst = false;
                 } else if (isJsonAgg) {
