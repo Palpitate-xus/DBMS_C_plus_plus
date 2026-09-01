@@ -133,7 +133,7 @@ ExprEvalResult ExprHelper::evalString(
     // Unwrap typed literals before parsing: date '2026-08-15' -> '2026-08-15'.
     std::string sql = extractFixed.empty() ? exprSql : extractFixed;
     {
-        static const std::string kws[] = {"date ", "timestamp ", "time ", "numeric ", "int ", "text "};
+        static const std::string kws[] = {"date ", "timestamp ", "timestamptz ", "interval ", "boolean ", "time ", "numeric ", "int ", "text "};
         std::string out;
         out.reserve(sql.size());
         for (size_t i = 0; i < sql.size();) {

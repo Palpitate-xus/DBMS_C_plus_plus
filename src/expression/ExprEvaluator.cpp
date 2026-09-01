@@ -3027,11 +3027,27 @@ void ExprEvaluator::registerBuiltins() {
         if (a.size() != 2 || a[0].isNull || a[1].isNull) return ExprValue("timestamp", "", true);
         long long offMin = 0;
         if (!parseTimeZoneOffset(a[0].value, offMin)) return ExprValue("timestamp", "", true);
+        const std::string inTn = toLower(a[1].typeName);
         IntervalParts shift;
         shift.micros = offMin * 60000000LL;
         std::string out = timestampShift(a[1].value, shift, true);
         if (out.empty()) return ExprValue("timestamp", "", true);
-        return ExprValue("timestamp", out, false);
+        // PG: timezone(zone, timestamptz) -> timestamp (local wall time);
+        //     timezone(zone, timestamp)  -> timestamptz (attach the zone
+        //     offset to the result render).  Untyped literals keep the
+        //     plain render (PG misc behavior).
+        if (inTn.find("timestamptz") != std::string::npos ||
+            inTn != "timestamp") {
+            return ExprValue("timestamp", out, false);
+        }
+        char ob[8];
+        long long ah = offMin / 60, am = offMin % 60;
+        // PG renders whole-hour offsets without minutes (+00, +09).
+        if (ah < 0 && am == 0) snprintf(ob, sizeof ob, "-%02lld", -ah);
+        else if (ah >= 0 && am == 0) snprintf(ob, sizeof ob, "+%02lld", ah);
+        else if (ah < 0) snprintf(ob, sizeof ob, "-%02lld:%02lld", -ah, am);
+        else snprintf(ob, sizeof ob, "+%02lld:%02lld", ah, am);
+        return ExprValue("timestamptz", out + ob, false);
     };
 
     // ------------------ full-text search ------------------
@@ -4786,7 +4802,7 @@ void ExprEvaluator::registerBuiltins() {
         // Unwrap typed literals: date '...' / timestamp '...' / numeric '...'
         std::string vval = a[0].value;
         {
-            static const char* kws[] = {"date ", "timestamp ", "time ", "numeric ", "int ", "text "};
+            static const char* kws[] = {"date ", "timestamp ", "timestamptz ", "interval ", "boolean ", "time ", "numeric ", "int ", "text "};
             for (const char* kw : kws) {
                 std::string kwd(kw);
                 if (vval.size() > kwd.size()) {
@@ -4813,6 +4829,31 @@ void ExprEvaluator::registerBuiltins() {
             bool looksTime = v.size() >= 5 && v[2] == ':' &&
                              std::isdigit(static_cast<unsigned char>(v[0]));
             temporal = looksDate || looksTime;
+        }
+        // Interval input: format HH24/MI/SS from the interval parts
+        // (PG renders interval time-of-day fields).
+        if (tn == "interval") {
+            IntervalParts ip = parseIntervalText(vval);
+            {
+                long long totalSecs = ip.micros / 1000000LL;
+                long long hh = totalSecs / 3600;
+                long long mm = (totalSecs % 3600) / 60;
+                long long ss = totalSecs % 60;
+                std::string out;
+                for (size_t fi = 0; fi < fmt.size(); ++fi) {
+                    if (fmt.compare(fi, 4, "HH24") == 0) {
+                        char b[8]; snprintf(b, sizeof b, "%02lld", hh); out += b; fi += 3; continue;
+                    }
+                    if (fmt.compare(fi, 2, "MI") == 0) {
+                        char b[8]; snprintf(b, sizeof b, "%02lld", mm); out += b; fi += 1; continue;
+                    }
+                    if (fmt.compare(fi, 2, "SS") == 0) {
+                        char b[8]; snprintf(b, sizeof b, "%02lld", ss); out += b; fi += 1; continue;
+                    }
+                    out += fmt[fi];
+                }
+                return ExprValue("text", out, false);
+            }
         }
         if (temporal) return ExprValue("text", formatDateTime(v, fmt), false);
         return ExprValue("text", formatNumeric(a[0].asDouble(), fmt), false);
