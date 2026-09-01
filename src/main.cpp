@@ -911,6 +911,7 @@ static bool isScalarFunc(const string& name) {
                                           "array_position", "array_dims", "cardinality",
                                          "unnest",
                                          "subquery",
+                         "exists",
                                          "is_null", "is_not_null",
                                          "isdistinct", "isnotdistinct",
                                          "current_user", "session_user"};
@@ -18387,7 +18388,15 @@ if (sql.rfind("backup database", 0) == 0) {
                             // for per-group evaluation; the plain aggregate
                             // path cannot express the arithmetic tail.
                             dbms::StorageEngine::SelectExpr expr;
-                            expr.displayName = itemAlias.empty() ? "?column?" : itemAlias;
+                            // EXISTS/NOT EXISTS subqueries name the column
+                            // "exists" in PG even when unaliased.
+                            string lowItemE;
+                            for (char cE : item) lowItemE += static_cast<char>(tolower(static_cast<unsigned char>(cE)));
+                            size_t exE = lowItemE.find("exists");
+                            bool wordE = exE != string::npos &&
+                                          (exE == 0 || !isalnum(static_cast<unsigned char>(lowItemE[exE - 1]))) &&
+                                          (exE + 7 >= lowItemE.size() || !isalnum(static_cast<unsigned char>(lowItemE[exE + 7])));
+                            expr.displayName = itemAlias.empty() ? (wordE ? "exists" : "?column?") : itemAlias;
                             expr.isScalar = true;
                             expr.funcName = "arith";
                             selectExprs.push_back(expr);
