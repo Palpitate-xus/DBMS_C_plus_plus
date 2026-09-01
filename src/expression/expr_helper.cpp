@@ -130,6 +130,7 @@ ExprEvalResult ExprHelper::evalString(
         }
     }
 
+
     // Unwrap typed literals before parsing: date '2026-08-15' -> '2026-08-15'.
     std::string sql = extractFixed.empty() ? exprSql : extractFixed;
     {

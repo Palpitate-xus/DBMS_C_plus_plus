@@ -5695,6 +5695,17 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
         // single-token name like "1").  Header cells must stay single
         // tokens: the tabular cout format is space-separated.
         if (disp == item) {
+            // ARRAY[...] literal projects as header "array" (PG
+            // figure_colname for array constructors).
+            string lowA;
+            for (char c : expr) lowA += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+            size_t npA = 0;
+            while (npA < lowA.size() && isspace(static_cast<unsigned char>(lowA[npA]))) ++npA;
+            if (lowA.compare(npA, 6, "array") == 0) {
+                headers.push_back("array");
+                values.push_back(r.value.empty() && r.isNull ? "NULL" : r.value);
+                continue;
+            }
             // CAST target type names the column (PG: cast(1 as text) ->
             // "text"); multi-word type names fall back to "?column?"
             // until structured results carry exact headers (P0-02).

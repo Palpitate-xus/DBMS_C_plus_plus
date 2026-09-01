@@ -4363,6 +4363,11 @@ void ExprEvaluator::registerBuiltins() {
     functions_["json_extract_path_text"] = jsonExtractTextFn;
     functions_["jsonb_extract_path_text"] = jsonExtractTextFn;
 
+    // Operator forms: json -> key / json -> idx (rewritten from the
+    // arrow syntax in expr_helper) share the path machinery.
+    functions_["json_get"] = jsonExtractFn;
+    functions_["json_get_text"] = jsonExtractTextFn;
+
     // ------------------------------------------------------------------------
     // Regular expression functions (std::regex, ECMAScript dialect)
     // ------------------------------------------------------------------------
