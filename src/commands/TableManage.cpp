@@ -9094,7 +9094,10 @@ DBStatus StorageEngine::createGiSTIndex(const std::string& dbname,
         // For single scalar values, min=max=val.
         // For multi-value (array), min=min element, max=max element.
         // For text, we store the value itself (prefix containment).
-        out << rid << ' ' << val << ' ' << val << '\n';
+        if (!val.empty()) {
+            out << rid << ' ' << std::quoted(val) << ' '
+                << std::quoted(val) << '\n';
+        }
     })) return DBStatus::IO_ERROR;
     if (!index_file::writeAtomically(path, out.str())) return DBStatus::IO_ERROR;
     return DBStatus::OK;
@@ -9114,38 +9117,151 @@ bool StorageEngine::hasGiSTIndex(const std::string& dbname,
     return std::filesystem::exists(giSTIndexPath(dbname, tablename, colname));
 }
 
-// The GiST sidecar stores textual low/high bounds, but numeric columns
-// must compare numerically: "51" must not sort after "100".  When both
-// sides parse fully as doubles the numeric order wins; otherwise the
-// textual (lexicographic) order used for text keys applies.
-static bool gistEntryOverlaps(const std::string& lo, const std::string& hi,
-                              const std::string& entryLo, const std::string& entryHi) {
-    char *pl = nullptr, *ph = nullptr, *pel = nullptr, *peh = nullptr;
-    double dl = std::strtod(lo.c_str(), &pl);
-    double dh = std::strtod(hi.c_str(), &ph);
-    double del = std::strtod(entryLo.c_str(), &pel);
-    double deh = std::strtod(entryHi.c_str(), &peh);
-    const bool numeric = pl == lo.c_str() + lo.size() && !lo.empty() &&
-                         ph == hi.c_str() + hi.size() && !hi.empty() &&
-                         pel == entryLo.c_str() + entryLo.size() && !entryLo.empty() &&
-                         peh == entryHi.c_str() + entryHi.size() && !entryHi.empty();
-    if (numeric) return !(dh < dl || deh < del);   // range intersect
-    return !(entryHi < lo || entryLo > hi);        // textual overlap
+enum class GistKeyOrdering { Text, ExactNumeric, FloatingPoint };
+
+static GistKeyOrdering gistKeyOrdering(const Column& column) {
+    std::string typeName = column.dataType;
+    std::transform(typeName.begin(), typeName.end(), typeName.begin(),
+                   [](unsigned char c) {
+                       return static_cast<char>(std::tolower(c));
+                   });
+    if (typeName == "float" || typeName == "float4" ||
+        typeName == "real" || typeName == "double" ||
+        typeName == "float8" || typeName == "double precision") {
+        return GistKeyOrdering::FloatingPoint;
+    }
+    if (typeName == "tinyint" || typeName == "smallint" ||
+        typeName == "int" || typeName == "integer" ||
+        typeName == "bigint" || typeName == "int2" ||
+        typeName == "int4" || typeName == "int8" ||
+        typeName == "numeric" || typeName == "decimal" ||
+        typeName == "smallserial" || typeName == "serial" ||
+        typeName == "bigserial" ||
+        typeName.find(" unsigned") != std::string::npos) {
+        return GistKeyOrdering::ExactNumeric;
+    }
+    const TypeEntry* type =
+        TypeRegistry::instance().findType(column.dataType);
+    if (!type || type->category != TypeCategory::Numeric) {
+        return GistKeyOrdering::Text;
+    }
+    return type->canonicalName == "real" ||
+                   type->canonicalName == "double precision"
+        ? GistKeyOrdering::FloatingPoint
+        : GistKeyOrdering::ExactNumeric;
 }
 
-static bool gistEntryContained(const std::string& lo, const std::string& hi,
-                               const std::string& entryLo, const std::string& entryHi) {
-    char *pl = nullptr, *ph = nullptr, *pel = nullptr, *peh = nullptr;
-    double dl = std::strtod(lo.c_str(), &pl);
-    double dh = std::strtod(hi.c_str(), &ph);
-    double del = std::strtod(entryLo.c_str(), &pel);
-    double deh = std::strtod(entryHi.c_str(), &peh);
-    const bool numeric = pl == lo.c_str() + lo.size() && !lo.empty() &&
-                         ph == hi.c_str() + hi.size() && !hi.empty() &&
-                         pel == entryLo.c_str() + entryLo.size() && !entryLo.empty() &&
-                         peh == entryHi.c_str() + entryHi.size() && !entryHi.empty();
-    if (numeric) return dl <= del && deh <= dh;
-    return lo <= entryLo && entryHi <= hi;
+static bool gistCompare(GistKeyOrdering ordering, const std::string& left,
+                        const std::string& right, int& comparison) {
+    if (ordering == GistKeyOrdering::Text) {
+        comparison = left < right ? -1 : (left > right ? 1 : 0);
+        return true;
+    }
+    if (ordering == GistKeyOrdering::FloatingPoint) {
+        double lhs = 0.0;
+        double rhs = 0.0;
+        if (!parseFiniteDouble(left, lhs) ||
+            !parseFiniteDouble(right, rhs)) {
+            return false;
+        }
+        comparison = lhs < rhs ? -1 : (lhs > rhs ? 1 : 0);
+        return true;
+    }
+    if (trim(left).empty() || trim(right).empty()) return false;
+    try {
+        const Numeric lhs(left);
+        const Numeric rhs(right);
+        if (!lhs.isFinite() || !rhs.isFinite()) return false;
+        comparison = lhs < rhs ? -1 : (lhs > rhs ? 1 : 0);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+static bool gistHighIsUnbounded(const std::string& high) {
+    // GiSTScanOp uses a lone DEL byte as +infinity. A DEL suffix on a longer
+    // text key is handled separately as a prefix ceiling.
+    return high.empty() || high == "\x7f";
+}
+
+static bool gistValueExceedsHigh(GistKeyOrdering ordering,
+                                 const std::string& value,
+                                 const std::string& high) {
+    if (gistHighIsUnbounded(high)) return false;
+    if (ordering == GistKeyOrdering::Text && high.back() == '\x7f') {
+        // prefix + DEL is the planner's inclusive prefix ceiling. UTF-8
+        // continuation bytes can sort above ASCII DEL, so a raw string
+        // comparison would incorrectly discard valid non-ASCII suffixes.
+        const std::string prefix = high.substr(0, high.size() - 1);
+        if (value.compare(0, prefix.size(), prefix) == 0) return false;
+        int comparison = 0;
+        return gistCompare(ordering, value, prefix, comparison) &&
+               comparison > 0;
+    }
+    int comparison = 0;
+    return gistCompare(ordering, value, high, comparison) &&
+           comparison > 0;
+}
+
+static bool gistQueryRangeIsValid(GistKeyOrdering ordering,
+                                  const std::string& low,
+                                  const std::string& high) {
+    const bool hasLow = !low.empty();
+    const bool hasHigh = !gistHighIsUnbounded(high);
+    int comparison = 0;
+    if (hasLow && !gistCompare(ordering, low, low, comparison)) return false;
+    const bool prefixHigh = ordering == GistKeyOrdering::Text &&
+                            hasHigh && high.back() == '\x7f';
+    if (hasHigh && !prefixHigh &&
+        !gistCompare(ordering, high, high, comparison)) {
+        return false;
+    }
+    return !hasLow || !hasHigh ||
+           !gistValueExceedsHigh(ordering, low, high);
+}
+
+static bool gistEntryRangeIsValid(GistKeyOrdering ordering,
+                                  const std::string& entryLow,
+                                  const std::string& entryHigh) {
+    if (entryLow.empty() || entryHigh.empty()) return false;
+    int comparison = 0;
+    return gistCompare(ordering, entryLow, entryHigh, comparison) &&
+           comparison <= 0;
+}
+
+static bool gistEntryOverlaps(GistKeyOrdering ordering,
+                              const std::string& low,
+                              const std::string& high,
+                              const std::string& entryLow,
+                              const std::string& entryHigh) {
+    int comparison = 0;
+    if (!low.empty() &&
+        (!gistCompare(ordering, entryHigh, low, comparison) ||
+         comparison < 0)) {
+        return false;
+    }
+    if (gistValueExceedsHigh(ordering, entryLow, high)) {
+        return false;
+    }
+    return true;
+}
+
+static bool gistEntryContained(GistKeyOrdering ordering,
+                               const std::string& low,
+                               const std::string& high,
+                               const std::string& entryLow,
+                               const std::string& entryHigh) {
+    int comparison = 0;
+    if (!low.empty() &&
+        (!gistCompare(ordering, low, entryLow, comparison) ||
+         comparison > 0)) {
+        return false;
+    }
+    if (gistValueExceedsHigh(ordering, entryHigh, high)) {
+        return false;
+    }
+    return true;
 }
 
 std::vector<int64_t> StorageEngine::giSTSearchOverlap(const std::string& dbname,
@@ -9154,47 +9270,82 @@ std::vector<int64_t> StorageEngine::giSTSearchOverlap(const std::string& dbname,
                                                        const std::string& low,
                                                        const std::string& high) const {
     std::vector<int64_t> result;
-    auto path = giSTIndexPath(dbname, tablename, colname);
-    std::error_code pathError;
-    if (!std::filesystem::is_regular_file(path, pathError) || pathError)
-        return result;
-    if (specializedIndexesNeedHeapFallback(dbname, tablename)) {
-        const TableSchema table = getTableSchema(dbname, tablename);
-        size_t columnIndex = table.len;
-        for (size_t i = 0; i < table.len; ++i) {
-            if (table.cols[i].dataName == colname) {
-                columnIndex = i;
-                break;
-            }
+    const TableSchema table = getTableSchema(dbname, tablename);
+    size_t columnIndex = table.len;
+    for (size_t i = 0; i < table.len; ++i) {
+        if (table.cols[i].dataName == colname) {
+            columnIndex = i;
+            break;
         }
-        if (columnIndex >= table.len) return result;
+    }
+    if (columnIndex >= table.len) return result;
+    const GistKeyOrdering ordering =
+        gistKeyOrdering(table.cols[columnIndex]);
+    if (!gistQueryRangeIsValid(ordering, low, high)) return result;
+
+    const auto scanHeap = [&]() -> std::vector<int64_t> {
+        result.clear();
+        bool valuesValid = true;
         const bool scanned = forEachRow(
             dbname, tablename,
             [&](uint32_t pageId, uint16_t slotId,
                 const char* data, size_t length) {
+                if (!valuesValid) return;
                 const std::string value =
                     const_cast<StorageEngine*>(this)->extractColumnValue(
                         std::string(data, length), table, columnIndex,
                         dbname, true);
-                if (gistEntryOverlaps(low, high, value, value)) {
+                if (value.empty()) return;
+                if (!gistEntryRangeIsValid(ordering, value, value)) {
+                    valuesValid = false;
+                    return;
+                }
+                if (gistEntryOverlaps(
+                        ordering, low, high, value, value)) {
                     result.push_back(encodeRid(pageId, slotId));
                 }
             });
-        if (!scanned) result.clear();
+        if (!scanned || !valuesValid) result.clear();
         return result;
+    };
+
+    auto path = giSTIndexPath(dbname, tablename, colname);
+    std::error_code pathError;
+    const bool isIndexFile =
+        std::filesystem::is_regular_file(path, pathError);
+    if (specializedIndexesNeedHeapFallback(dbname, tablename)) {
+        return scanHeap();
     }
+    if (pathError) return scanHeap();
+    if (!isIndexFile) return result;
     std::ifstream in(path);
-    if (!in) return result;
+    if (!in) return scanHeap();
+    bool valid = true;
+    std::unordered_set<int64_t> seenRids;
     std::string line;
     while (std::getline(in, line)) {
         std::stringstream ss(line);
-        int64_t rid;
+        int64_t rid = -1;
         std::string entryLow, entryHigh;
-        if (!(ss >> rid >> entryLow >> entryHigh)) continue;
+        if (!(ss >> rid >> std::quoted(entryLow) >>
+              std::quoted(entryHigh))) {
+            valid = false;
+            break;
+        }
+        ss >> std::ws;
+        if (!ss.eof() || rid <= 0 || !seenRids.insert(rid).second ||
+            !gistEntryRangeIsValid(
+                ordering, entryLow, entryHigh)) {
+            valid = false;
+            break;
+        }
         // Overlap: entry range [entryLow, entryHigh] intersects [low, high]
-        // (numeric when both sides are numeric literals, textual otherwise)
-        if (gistEntryOverlaps(low, high, entryLow, entryHigh)) result.push_back(rid);
+        if (gistEntryOverlaps(
+                ordering, low, high, entryLow, entryHigh)) {
+            result.push_back(rid);
+        }
     }
+    if (!valid || in.bad()) return scanHeap();
     return result;
 }
 
@@ -9204,47 +9355,82 @@ std::vector<int64_t> StorageEngine::giSTSearchContainedBy(const std::string& dbn
                                                            const std::string& low,
                                                            const std::string& high) const {
     std::vector<int64_t> result;
-    auto path = giSTIndexPath(dbname, tablename, colname);
-    std::error_code pathError;
-    if (!std::filesystem::is_regular_file(path, pathError) || pathError)
-        return result;
-    if (specializedIndexesNeedHeapFallback(dbname, tablename)) {
-        const TableSchema table = getTableSchema(dbname, tablename);
-        size_t columnIndex = table.len;
-        for (size_t i = 0; i < table.len; ++i) {
-            if (table.cols[i].dataName == colname) {
-                columnIndex = i;
-                break;
-            }
+    const TableSchema table = getTableSchema(dbname, tablename);
+    size_t columnIndex = table.len;
+    for (size_t i = 0; i < table.len; ++i) {
+        if (table.cols[i].dataName == colname) {
+            columnIndex = i;
+            break;
         }
-        if (columnIndex >= table.len) return result;
+    }
+    if (columnIndex >= table.len) return result;
+    const GistKeyOrdering ordering =
+        gistKeyOrdering(table.cols[columnIndex]);
+    if (!gistQueryRangeIsValid(ordering, low, high)) return result;
+
+    const auto scanHeap = [&]() -> std::vector<int64_t> {
+        result.clear();
+        bool valuesValid = true;
         const bool scanned = forEachRow(
             dbname, tablename,
             [&](uint32_t pageId, uint16_t slotId,
                 const char* data, size_t length) {
+                if (!valuesValid) return;
                 const std::string value =
                     const_cast<StorageEngine*>(this)->extractColumnValue(
                         std::string(data, length), table, columnIndex,
                         dbname, true);
-                if (gistEntryContained(low, high, value, value)) {
+                if (value.empty()) return;
+                if (!gistEntryRangeIsValid(ordering, value, value)) {
+                    valuesValid = false;
+                    return;
+                }
+                if (gistEntryContained(
+                        ordering, low, high, value, value)) {
                     result.push_back(encodeRid(pageId, slotId));
                 }
             });
-        if (!scanned) result.clear();
+        if (!scanned || !valuesValid) result.clear();
         return result;
+    };
+
+    auto path = giSTIndexPath(dbname, tablename, colname);
+    std::error_code pathError;
+    const bool isIndexFile =
+        std::filesystem::is_regular_file(path, pathError);
+    if (specializedIndexesNeedHeapFallback(dbname, tablename)) {
+        return scanHeap();
     }
+    if (pathError) return scanHeap();
+    if (!isIndexFile) return result;
     std::ifstream in(path);
-    if (!in) return result;
+    if (!in) return scanHeap();
+    bool valid = true;
+    std::unordered_set<int64_t> seenRids;
     std::string line;
     while (std::getline(in, line)) {
         std::stringstream ss(line);
-        int64_t rid;
+        int64_t rid = -1;
         std::string entryLow, entryHigh;
-        if (!(ss >> rid >> entryLow >> entryHigh)) continue;
+        if (!(ss >> rid >> std::quoted(entryLow) >>
+              std::quoted(entryHigh))) {
+            valid = false;
+            break;
+        }
+        ss >> std::ws;
+        if (!ss.eof() || rid <= 0 || !seenRids.insert(rid).second ||
+            !gistEntryRangeIsValid(
+                ordering, entryLow, entryHigh)) {
+            valid = false;
+            break;
+        }
         // Contained by: entry range is fully within [low, high]
-        // (numeric when both sides are numeric literals, textual otherwise)
-        if (gistEntryContained(low, high, entryLow, entryHigh)) result.push_back(rid);
+        if (gistEntryContained(
+                ordering, low, high, entryLow, entryHigh)) {
+            result.push_back(rid);
+        }
     }
+    if (!valid || in.bad()) return scanHeap();
     return result;
 }
 
