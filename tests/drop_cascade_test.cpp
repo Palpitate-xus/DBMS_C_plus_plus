@@ -7,7 +7,10 @@
 #include "catalog/type_registry.h"
 #include <cassert>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
+#include <string>
 #include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
@@ -128,10 +131,77 @@ static void test_drop_removes_named_table_sidecars() {
     std::cout << "[DROP-CASCADE] DROP removes named sidecars OK" << std::endl;
 }
 
+static void test_drop_purges_authorization_state() {
+    std::string db = testDbPath("drop_authorization");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    dbms::TableSchema reusable;
+    reusable.tablename = "reusable_acl";
+    reusable.append(dbms::makeIntColumn("id", false, 2));
+    assert(g_engine.createTable(db, reusable) == dbms::DBStatus::OK);
+
+    dbms::TableSchema survivor = reusable;
+    survivor.tablename = "survivor_acl";
+    assert(g_engine.createTable(db, survivor) == dbms::DBStatus::OK);
+
+    g_engine.grant(db, "reusable_acl", "alice",
+                   dbms::StorageEngine::TablePrivilege::Select, {}, true,
+                   "owner");
+    g_engine.grant(db, "reusable_acl", "bob",
+                   dbms::StorageEngine::TablePrivilege::Select, {}, false,
+                   "alice");
+    g_engine.grant(db, "survivor_acl", "carol",
+                   dbms::StorageEngine::TablePrivilege::Select, {}, true,
+                   "owner");
+    assert(g_engine.hasPermission(
+        db, "reusable_acl", "alice",
+        dbms::StorageEngine::TablePrivilege::Select));
+    assert(g_engine.hasPermission(
+        db, "reusable_acl", "bob",
+        dbms::StorageEngine::TablePrivilege::Select));
+    assert(g_engine.hasGrantOption(
+        db, "reusable_acl", "alice",
+        dbms::StorageEngine::TablePrivilege::Select));
+
+    assert(g_engine.dropTable(db, "reusable_acl") == dbms::DBStatus::OK);
+    assert(g_engine.createTable(db, reusable) == dbms::DBStatus::OK);
+    assert(!g_engine.hasPermission(
+        db, "reusable_acl", "alice",
+        dbms::StorageEngine::TablePrivilege::Select));
+    assert(!g_engine.hasPermission(
+        db, "reusable_acl", "bob",
+        dbms::StorageEngine::TablePrivilege::Select));
+    assert(!g_engine.hasGrantOption(
+        db, "reusable_acl", "alice",
+        dbms::StorageEngine::TablePrivilege::Select));
+
+    // Grants belonging to other relations remain intact in both files.
+    assert(g_engine.hasPermission(
+        db, "survivor_acl", "carol",
+        dbms::StorageEngine::TablePrivilege::Select));
+    assert(g_engine.hasGrantOption(
+        db, "survivor_acl", "carol",
+        dbms::StorageEngine::TablePrivilege::Select));
+    std::ifstream chain(fs::path(db) / ".grant_chain");
+    const std::string chainContents{
+        std::istreambuf_iterator<char>(chain),
+        std::istreambuf_iterator<char>()};
+    assert(chainContents.find(" reusable_acl ") == std::string::npos);
+    assert(chainContents.find(" survivor_acl ") != std::string::npos);
+
+    assert(g_engine.dropTable(db, "reusable_acl") == dbms::DBStatus::OK);
+    assert(g_engine.dropTable(db, "survivor_acl") == dbms::DBStatus::OK);
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[DROP-CASCADE] DROP purges authorization state OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_drop_table_cascade_removes_dependents();
     test_drop_removes_named_table_sidecars();
+    test_drop_purges_authorization_state();
     std::cout << "[DROP-CASCADE] all passed" << std::endl;
     return 0;
 }

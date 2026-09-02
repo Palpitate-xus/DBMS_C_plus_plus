@@ -11793,6 +11793,9 @@ DBStatus StorageEngine::createTable(const std::string& dbname,
     return createTable(dbname, t, error);
 }
 
+static std::filesystem::path grantChainPath(
+    const std::filesystem::path& dbPath);
+
 DBStatus StorageEngine::dropTable(const std::string& dbname,
                                    const std::string& tablename) {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
@@ -11802,6 +11805,69 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
     // Keep the schema readable until every physical path has been resolved;
     // custom tablespace paths are derived from the schema itself.
     const auto relationRoot = relationDir(dbname, tablename);
+
+    // ACLs live in database-wide files.  Leaving entries keyed by a dropped
+    // name would grant them to an unrelated table that later reuses that
+    // name.  Prepare both rewrites before publishing either, and restore the
+    // first if the second cannot be written.
+    struct FilteredAuthorizationFile {
+        std::filesystem::path path;
+        std::string original;
+        std::string filtered;
+        bool changed = false;
+    };
+    std::array<FilteredAuthorizationFile, 2> authorizationFiles = {{
+        {permPath(dbname), {}, {}, false},
+        {grantChainPath(dbPath(dbname)), {}, {}, false}
+    }};
+    for (auto& file : authorizationFiles) {
+        std::error_code authorizationError;
+        if (!std::filesystem::exists(file.path, authorizationError)) {
+            if (authorizationError) {
+                lockManager_.unlock(tablename);
+                return DBStatus::IO_ERROR;
+            }
+            continue;
+        }
+        std::ifstream input(file.path);
+        if (!input) {
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
+        }
+        std::ostringstream retained;
+        std::string line;
+        while (std::getline(input, line)) {
+            file.original += line + '\n';
+            std::istringstream fields(line);
+            std::string principal;
+            std::string object;
+            fields >> principal >> object;
+            if (!fields || object != tablename) retained << line << '\n';
+            else file.changed = true;
+        }
+        if (input.bad()) {
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
+        }
+        file.filtered = retained.str();
+    }
+    size_t rewrittenAuthorizationFiles = 0;
+    for (; rewrittenAuthorizationFiles < authorizationFiles.size();
+         ++rewrittenAuthorizationFiles) {
+        const auto& file = authorizationFiles[rewrittenAuthorizationFiles];
+        if (!file.changed) continue;
+        if (index_file::writeAtomically(file.path, file.filtered)) continue;
+        for (size_t rollback = 0;
+             rollback < rewrittenAuthorizationFiles; ++rollback) {
+            const auto& prior = authorizationFiles[rollback];
+            if (prior.changed) {
+                index_file::writeAtomically(prior.path, prior.original);
+            }
+        }
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
+    }
+
     std::filesystem::remove(paramsPath(dbname, tablename));
     std::filesystem::remove(dataPath(dbname, tablename));
     std::filesystem::remove(indexPath(dbname, tablename));
