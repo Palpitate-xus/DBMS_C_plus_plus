@@ -1753,8 +1753,9 @@ static bool isRelationPhysicalFileName(const std::string& name,
         name.rfind(tablename + ".", 0) != 0) {
         return false;
     }
-    const std::array<std::string, 9> suffixes = {
-        ".dt", ".fsm", ".vm", ".idx", ".hidx", ".fti", ".gin", ".gist", ".brin"};
+    const std::array<std::string, 10> suffixes = {
+        ".dt", ".fsm", ".vm", ".idx", ".hidx", ".bidx", ".fti",
+        ".gin", ".gist", ".brin"};
     for (const auto& suffix : suffixes) {
         if (name.size() >= suffix.size() &&
             name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
@@ -4200,6 +4201,13 @@ bool StorageEngine::flushDatabaseCaches(const std::string& dbname, bool heapPage
             ok = false;
         }
     }
+    for (const auto& [key, index] : bloomIndexCache_) {
+        if (key.rfind(hashPrefix, 0) == 0 && index &&
+            !flushWalLoggedIndex(index->filePath(), index->hasDirtyData(),
+                                 [&] { return index->flush(); })) {
+            ok = false;
+        }
+    }
     if (heapPages) {
         for (const auto& [key, allocator] : toastPageAllocators_) {
             if (key.rfind(toastPrefix, 0) == 0 && allocator && !allocator->flush()) {
@@ -4236,9 +4244,23 @@ void StorageEngine::closeDatabaseCaches(const std::string& dbname) {
     eraseTableCaches(vmCache_);
     eraseTableCaches(pkIndexCache_);
     eraseTableCaches(secondaryIndexCache_);
-    eraseTableCaches(hashIndexCache_);
     eraseTableCaches(secidxLinesCache_);
     eraseTableCaches(hashidxLinesCache_);
+    for (auto it = hashIndexCache_.begin(); it != hashIndexCache_.end();) {
+        if (it->first.rfind(dbname + ".", 0) == 0) {
+            it = hashIndexCache_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto it = bloomIndexCache_.begin();
+         it != bloomIndexCache_.end();) {
+        if (it->first.rfind(dbname + ".", 0) == 0) {
+            it = bloomIndexCache_.erase(it);
+        } else {
+            ++it;
+        }
+    }
     exclusionCache_.erase(dbname);
     {
         std::lock_guard<std::mutex> lock(schemaCacheMutex_);
@@ -4344,6 +4366,7 @@ void StorageEngine::pruneMissingDatabaseCaches() {
     for (const auto& [key, _] : pkIndexCache_) collectDatabase(key, '/');
     for (const auto& [key, _] : secondaryIndexCache_) collectDatabase(key, '/');
     for (const auto& [key, _] : hashIndexCache_) collectDatabase(key, '.');
+    for (const auto& [key, _] : bloomIndexCache_) collectDatabase(key, '.');
     for (const auto& [key, _] : toastPageAllocators_) collectDatabase(key, ':');
     for (const auto& [key, _] : toastIndexes_) collectDatabase(key, ':');
     for (const auto& [key, _] : spGiSTCache_) collectDatabase(key, '/');
@@ -16178,6 +16201,23 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
         recordSsiIndexPredicate(dbname, tablename, condition, tbl);
     }
 
+    // During an overlapping transaction an index contains only the current
+    // version's RID, while an older snapshot may need the superseded heap
+    // version.  Use the heap until every transaction on this database has
+    // finished; after that, the current-version indexes are complete again.
+    bool indexesAreSnapshotComplete = true;
+    {
+        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        for (const auto& [transactionId, activeDatabase] :
+             activeTransactionDatabases_) {
+            (void)transactionId;
+            if (activeDatabase == dbname) {
+                indexesAreSnapshotComplete = false;
+                break;
+            }
+        }
+    }
+
     // Helper: a column with a non-binary collation cannot use binary indexes
     // for equality/range lookup because the index keys are stored binary.
     auto columnNeedsCollation = [&](const std::string& colName) -> bool {
@@ -16217,6 +16257,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
         }
     };
 
+    if (indexesAreSnapshotComplete) {
     // Try full-text index for CONTAINS conditions
     for (const auto& c : conds) {
         if (c.op == "contains") {
@@ -16412,6 +16453,8 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                 return ids;
             }
         }
+    }
+
     }
 
     // Full table scan via page iterator.
@@ -17536,8 +17579,9 @@ DBStatus StorageEngine::update(const std::string& dbname,
 
     // For each matching row, read old data, update, write back, update indexes
     // Pre-update row images keyed by rid: AFTER UPDATE triggers expose OLD
-    // from these (the on-disk row already holds NEW by then).
+    // from these.  Transactional updates keep OLD and NEW at separate RIDs.
     std::map<int64_t, std::map<std::string, std::string>> oldImages;
+    std::map<int64_t, int64_t> newVersionRids;
     for (int64_t rid : matchIds) {
         std::string row;
         if (!readRowByRid(pa, rid, row, tbl)) continue;
@@ -17553,11 +17597,6 @@ DBStatus StorageEngine::update(const std::string& dbname,
         for (size_t i = 0; i < tbl.len; ++i) {
             oldLogicalValues[tbl.cols[i].dataName] =
                 extractColumnValue(resolvedOldRow, tbl, i, dbname, true);
-        }
-
-        // Log for transaction rollback (before modification)
-        if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
-            logTxnUpdate(tablename, rid, row);
         }
 
         oldImages.emplace(rid, oldLogicalValues);
@@ -17823,6 +17862,13 @@ DBStatus StorageEngine::update(const std::string& dbname,
         uint32_t pageId; uint16_t slotId;
         decodeRid(rid, pageId, slotId);
 
+        const size_t deferredEntryStart =
+            transactionContext().inTransaction
+                ? transactionContext()
+                      .deferredChecks[transactionContext().currentTxnId]
+                      .size()
+                : 0;
+
         // Check CHECK constraints before writing; collect deferrable deferred checks for commit-time validation.
         std::vector<size_t> deferredCheckCols;
         for (size_t i = 0; i < tbl.len; ++i) {
@@ -18079,136 +18125,312 @@ DBStatus StorageEngine::update(const std::string& dbname,
             lockManager_.unlock(tablename);
             return DBStatus::IO_ERROR;
         }
+
+        // Log only after every trigger/constraint/cascade has succeeded and
+        // immediately before the main row mutation.  Besides avoiding an
+        // undo record for a row that was never changed, this preserves true
+        // reverse mutation order when a cascading action logged its own rows.
+        std::optional<size_t> updateLogIndex;
+        if (transactionContext().inTransaction &&
+            dbname == transactionContext().txnDB) {
+            logTxnUpdate(tablename, rid, row);
+            updateLogIndex = transactionContext().txnLog.size() - 1;
+        }
         newRow = buildRowBuffer(tbl, storedRowValues, updateTxnId);
         strippedNewRow = stripRowHeader(newRow, tbl.formatVersion, tbl.len);
 
-        if (!lockManager_.pageLockExclusive(dbname, tablename, pageId)) {
-            deleteToastForRow(dbname, tablename, strippedNewRow);
-            if (transactionContext().inTransaction) {
-                lockManager_.unlock(tablename);
-                rollbackTransaction();
-            } else {
-                lockManager_.unlockAll();
-                lockManager_.unlockAllGaps();
-            }
-            return DBStatus::LOCK_CONFLICT;
-        }
-        char* pageBuf = pa->fetchPage(pageId);
         int64_t actualRid = rid;
-        if (!pageBuf) {
-            deleteToastForRow(dbname, tablename, strippedNewRow);
-            lockManager_.pageUnlock(dbname, tablename, pageId);
-            lockManager_.unlock(tablename);
-            return DBStatus::IO_ERROR;
-        }
-        {
-            PageWrapper page(pageBuf, pa->pageSize(), tbl.formatVersion);
-            walPageImage(dbname, tablename, pageId, pageBuf, pa->pageSize(), true);
-            // Mark old row as updated (xmax) for PostgreSQL-style tuples.
-            if (usesHeapTupleHeader(tbl.formatVersion) && transactionContext().inTransaction && dbname == transactionContext().txnDB) {
-                const char* oldData = nullptr;
-                size_t oldLen = 0;
-                if (page.read(slotId, oldData, oldLen)) {
-                    std::string mutableOld(oldData, oldLen);
-                    setRowXmax(mutableOld.data(), mutableOld.size(), tbl.formatVersion, transactionContext().currentTxnId);
-                    uint16_t dummySlot = slotId;
-                    page.update(slotId, mutableOld.data(), mutableOld.size(), dummySlot);
-                }
-            }
-            uint16_t newSlotId = slotId;
-            bool usedHot = false;
+        const bool versionedUpdate =
+            usesHeapTupleHeader(tbl.formatVersion) &&
+            transactionContext().inTransaction &&
+            dbname == transactionContext().txnDB;
 
-            // Attempt HOT update for PostgreSQL-style tuples when no indexed column changes.
-            if (usesHeapTupleHeader(tbl.formatVersion) && transactionContext().inTransaction && dbname == transactionContext().txnDB) {
-                const auto transitionChangesIndex = [](const IndexTransition& transition) {
-                    return transition.oldEntry.included != transition.newEntry.included ||
-                           transition.oldEntry.key != transition.newEntry.key;
-                };
-                bool indexesAffected = std::any_of(
-                    secondaryIndexTransitions.begin(),
-                    secondaryIndexTransitions.end(), transitionChangesIndex);
-                indexesAffected = indexesAffected || std::any_of(
-                    compositeIndexTransitions.begin(),
-                    compositeIndexTransitions.end(), transitionChangesIndex);
-                for (const auto& kv : oldIdxVals) {
-                    if (kv.second != valueFromRowMap(rowValues, kv.first)) {
-                        indexesAffected = true;
-                        break;
+        if (versionedUpdate) {
+            if (!updateLogIndex ||
+                *updateLogIndex >= transactionContext().txnLog.size() ||
+                transactionContext().txnLog[*updateLogIndex].op !=
+                    TxnLogEntry::Op::Update ||
+                transactionContext().txnLog[*updateLogIndex].rowIdx != rid) {
+                deleteToastForRow(dbname, tablename, strippedNewRow);
+                lockManager_.unlock(tablename);
+                const DBStatus rollbackStatus = rollbackTransaction();
+                return rollbackStatus == DBStatus::OK
+                    ? DBStatus::IO_ERROR : rollbackStatus;
+            }
+
+            // Insert NEW first.  Other snapshots reject its uncommitted xmin,
+            // while the writer can see it immediately.  OLD remains intact
+            // until its xmax/ctid are changed below.
+            auto tryInsertVersion = [&](uint32_t candidate, bool& inserted,
+                                        uint16_t& insertedSlot) -> DBStatus {
+                if (!lockManager_.pageLockExclusive(
+                        dbname, tablename, candidate)) {
+                    return DBStatus::LOCK_CONFLICT;
+                }
+                char* buffer = pa->fetchPage(candidate);
+                if (!buffer) {
+                    lockManager_.pageUnlock(dbname, tablename, candidate);
+                    return DBStatus::IO_ERROR;
+                }
+                PageWrapper page(buffer, pa->pageSize(), tbl.formatVersion);
+                if (!page.isValid()) {
+                    pa->unpinPage(candidate);
+                    lockManager_.pageUnlock(dbname, tablename, candidate);
+                    return DBStatus::CORRUPTED_DATA;
+                }
+                if (page.canFit(newRow.size())) {
+                    walPageImage(dbname, tablename, candidate, buffer,
+                                 pa->pageSize(), true);
+                    if (page.insert(newRow.data(), newRow.size(), insertedSlot)) {
+                        const char* insertedData = nullptr;
+                        size_t insertedLength = 0;
+                        bool finalized = page.read(
+                            insertedSlot, insertedData, insertedLength);
+                        if (finalized) {
+                            std::string mutableNew(insertedData, insertedLength);
+                            setRowCtid(
+                                mutableNew.data(), mutableNew.size(),
+                                tbl.formatVersion,
+                                ItemPointer{
+                                    candidate,
+                                    static_cast<OffsetNumber>(insertedSlot + 1)});
+                            finalized = page.update(
+                                insertedSlot, mutableNew.data(),
+                                mutableNew.size());
+                        }
+                        if (!finalized) {
+                            page.remove(insertedSlot);
+                        } else {
+                            inserted = true;
+                        }
+                        pa->markDirty(candidate);
+                        const Lsn lsn = walPageImage(
+                            dbname, tablename, candidate, buffer,
+                            pa->pageSize(), false);
+                        if (lsn != INVALID_LSN) {
+                            setPageLsnAndChecksum(buffer, lsn);
+                            pa->markDirty(candidate);
+                        }
+                        const size_t freePercent =
+                            page.freeSpace() * 100 / pa->pageSize();
+                        getFSM(dbname, tablename)->setFreePercent(
+                            candidate, static_cast<uint8_t>(freePercent));
+                        getVM(dbname, tablename)->setAllVisible(candidate, false);
                     }
                 }
-                if (!indexesAffected && !tbl.hasPrimaryKey()) {
-                    // Try to insert new version on the same page and redirect old line pointer.
-                    if (page.canFit(newRow.size())) {
-                        if (page.insert(newRow.data(), newRow.size(), newSlotId)) {
-                            ItemPointer newCtid{ pageId, static_cast<OffsetNumber>(newSlotId + 1) };
-                            const char* oldData = nullptr;
-                            size_t oldLen = 0;
-                            if (page.read(slotId, oldData, oldLen)) {
-                                std::string mutableOld(oldData, oldLen);
-                                setRowXmax(mutableOld.data(), mutableOld.size(), tbl.formatVersion, transactionContext().currentTxnId);
-                                setRowCtid(mutableOld.data(), mutableOld.size(), tbl.formatVersion, newCtid);
-                                uint16_t dummySlot = slotId;
-                                page.update(slotId, mutableOld.data(), mutableOld.size(), dummySlot);
-                                page.redirect(slotId, newSlotId);
+                pa->unpinPage(candidate);
+                lockManager_.pageUnlock(dbname, tablename, candidate);
+                return DBStatus::OK;
+            };
+
+            uint32_t newPageId = 0;
+            uint16_t newSlotId = 0;
+            bool inserted = false;
+            DBStatus insertStatus = DBStatus::OK;
+            const uint32_t pageCount = pa->numPages();
+            for (uint32_t candidate = 1;
+                 candidate < pageCount && !inserted; ++candidate) {
+                insertStatus = tryInsertVersion(
+                    candidate, inserted, newSlotId);
+                if (insertStatus != DBStatus::OK) break;
+                if (inserted) newPageId = candidate;
+            }
+            if (insertStatus == DBStatus::OK && !inserted) {
+                newPageId = pa->allocPage();
+                if (newPageId == 0) {
+                    insertStatus = DBStatus::IO_ERROR;
+                } else {
+                    insertStatus = tryInsertVersion(
+                        newPageId, inserted, newSlotId);
+                    if (insertStatus == DBStatus::OK && !inserted)
+                        insertStatus = DBStatus::INVALID_VALUE;
+                }
+            }
+            if (insertStatus != DBStatus::OK) {
+                // NEW never became reachable, so remove its external values
+                // directly.  Abort the transaction to undo earlier rows from
+                // the same multi-row UPDATE statement.
+                deleteToastForRow(dbname, tablename, strippedNewRow);
+                transactionContext().txnLog.erase(
+                    transactionContext().txnLog.begin() +
+                    static_cast<std::ptrdiff_t>(*updateLogIndex));
+                lockManager_.unlock(tablename);
+                const DBStatus rollbackStatus = rollbackTransaction();
+                return rollbackStatus == DBStatus::OK
+                    ? insertStatus : rollbackStatus;
+            }
+
+            actualRid = encodeRid(newPageId, newSlotId);
+            TxnLogEntry& updateLog =
+                transactionContext().txnLog[*updateLogIndex];
+            updateLog.previousRowIdx = rid;
+            updateLog.rowIdx = actualRid;
+
+            // Retire OLD without overwriting its body.  Keeping it as a
+            // normal line pointer is essential: redirecting it now would make
+            // snapshots that predate this update follow NEW incorrectly.
+            DBStatus retireStatus = DBStatus::OK;
+            if (!lockManager_.pageLockExclusive(dbname, tablename, pageId)) {
+                retireStatus = DBStatus::LOCK_CONFLICT;
+            } else {
+                char* oldPageBuffer = pa->fetchPage(pageId);
+                if (!oldPageBuffer) {
+                    retireStatus = DBStatus::IO_ERROR;
+                } else {
+                    PageWrapper oldPage(
+                        oldPageBuffer, pa->pageSize(), tbl.formatVersion);
+                    const char* oldData = nullptr;
+                    size_t oldLength = 0;
+                    if (!oldPage.isValid() ||
+                        !oldPage.read(slotId, oldData, oldLength) ||
+                        stripRowHeader(oldData, oldLength, tbl.formatVersion,
+                                       tbl.len) != row) {
+                        retireStatus = DBStatus::CORRUPTED_DATA;
+                    } else {
+                        walPageImage(dbname, tablename, pageId,
+                                     oldPageBuffer, pa->pageSize(), true);
+                        std::string mutableOld(oldData, oldLength);
+                        setRowXmax(
+                            mutableOld.data(), mutableOld.size(),
+                            tbl.formatVersion,
+                            transactionContext().currentTxnId);
+                        setRowCtid(
+                            mutableOld.data(), mutableOld.size(),
+                            tbl.formatVersion,
+                            ItemPointer{
+                                newPageId,
+                                static_cast<OffsetNumber>(newSlotId + 1)});
+                        auto* oldHeader = castHeapHeader(mutableOld.data());
+                        oldHeader->t_infomask |= HEAP_UPDATED;
+                        oldHeader->t_infomask &= ~(
+                            HEAP_XMAX_COMMITTED | HEAP_XMAX_INVALID |
+                            HEAP_XMAX_EXCL_LOCK | HEAP_XMAX_KEYSHR_LOCK |
+                            HEAP_XMAX_LOCK_ONLY | HEAP_XMAX_IS_MULTI);
+                        if (!oldPage.update(
+                                slotId, mutableOld.data(),
+                                mutableOld.size())) {
+                            retireStatus = DBStatus::IO_ERROR;
+                        } else {
+                            pa->markDirty(pageId);
+                            const Lsn lsn = walPageImage(
+                                dbname, tablename, pageId, oldPageBuffer,
+                                pa->pageSize(), false);
+                            if (lsn != INVALID_LSN) {
+                                setPageLsnAndChecksum(oldPageBuffer, lsn);
+                                pa->markDirty(pageId);
                             }
-                            usedHot = true;
+                            getVM(dbname, tablename)->setAllVisible(
+                                pageId, false);
                         }
                     }
-                }
-            }
-
-            if (!usedHot) {
-                // Mark old row as updated (xmax) for PostgreSQL-style tuples.
-                if (usesHeapTupleHeader(tbl.formatVersion) && transactionContext().inTransaction && dbname == transactionContext().txnDB) {
-                    const char* oldData = nullptr;
-                    size_t oldLen = 0;
-                    if (page.read(slotId, oldData, oldLen)) {
-                        std::string mutableOld(oldData, oldLen);
-                        setRowXmax(mutableOld.data(), mutableOld.size(), tbl.formatVersion, transactionContext().currentTxnId);
-                        uint16_t dummySlot = slotId;
-                        page.update(slotId, mutableOld.data(), mutableOld.size(), dummySlot);
-                    }
-                }
-                if (!page.update(slotId, newRow.data(), newRow.size(), newSlotId)) {
-                    // prepareToastValues() may already have allocated chunks;
-                    // remove only the new row's chunks and retain the old row.
-                    deleteToastForRow(dbname, tablename, strippedNewRow);
                     pa->unpinPage(pageId);
-                    lockManager_.pageUnlock(dbname, tablename, pageId);
-                    lockManager_.unlock(tablename);
-                    return DBStatus::INVALID_VALUE;
                 }
+                lockManager_.pageUnlock(dbname, tablename, pageId);
+            }
+            if (retireStatus != DBStatus::OK) {
+                lockManager_.unlock(tablename);
+                const DBStatus rollbackStatus = rollbackTransaction();
+                return rollbackStatus == DBStatus::OK
+                    ? retireStatus : rollbackStatus;
             }
 
-            // Set ctid of the new (or updated) row to point to itself.
-            if (usesHeapTupleHeader(tbl.formatVersion)) {
-                const char* finalData = nullptr;
-                size_t finalLen = 0;
-                if (page.read(newSlotId, finalData, finalLen)) {
-                    std::string mutableFinal(finalData, finalLen);
-                    ItemPointer selfCtid{ pageId, static_cast<OffsetNumber>(newSlotId + 1) };
-                    setRowCtid(mutableFinal.data(), mutableFinal.size(), tbl.formatVersion, selfCtid);
-                    page.update(newSlotId, mutableFinal.data(), mutableFinal.size());
-                }
+            // Commit durability needs both sides of a cross-page version
+            // chain, irrespective of whether SSI bookkeeping is enabled.
+            transactionContext().txnWrittenPages.insert(
+                ssiPageKey(dbname, tablename, pageId));
+            transactionContext().txnWrittenPages.insert(
+                ssiPageKey(dbname, tablename, newPageId));
+            if (transactionContext().txnIsolationLevel ==
+                IsolationLevel::SERIALIZABLE) {
+                const std::string newRidKey =
+                    ssiRidKey(dbname, tablename, actualRid);
+                transactionContext().txnWrittenRids.insert(newRidKey);
+                std::lock_guard<std::mutex> ssiLock(ssiMutex_);
+                ssiWriteSets_[transactionContext().currentTxnId].insert(
+                    newRidKey);
+                ssiWritePages_[transactionContext().currentTxnId].insert(
+                    ssiPageKey(dbname, tablename, newPageId));
             }
-
+        } else {
+            // Autocommit callers do not own an xid.  Preserve the existing
+            // single-version update behavior for them.
+            if (!lockManager_.pageLockExclusive(
+                    dbname, tablename, pageId)) {
+                deleteToastForRow(dbname, tablename, strippedNewRow);
+                lockManager_.unlockAll();
+                lockManager_.unlockAllGaps();
+                return DBStatus::LOCK_CONFLICT;
+            }
+            char* pageBuffer = pa->fetchPage(pageId);
+            if (!pageBuffer) {
+                deleteToastForRow(dbname, tablename, strippedNewRow);
+                lockManager_.pageUnlock(dbname, tablename, pageId);
+                lockManager_.unlock(tablename);
+                return DBStatus::IO_ERROR;
+            }
+            PageWrapper page(pageBuffer, pa->pageSize(), tbl.formatVersion);
+            walPageImage(dbname, tablename, pageId, pageBuffer,
+                         pa->pageSize(), true);
+            uint16_t newSlotId = slotId;
+            if (!page.update(
+                    slotId, newRow.data(), newRow.size(), newSlotId)) {
+                deleteToastForRow(dbname, tablename, strippedNewRow);
+                pa->unpinPage(pageId);
+                lockManager_.pageUnlock(dbname, tablename, pageId);
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
+            }
+            actualRid = encodeRid(pageId, newSlotId);
+            const char* finalData = nullptr;
+            size_t finalLength = 0;
+            if (!page.read(newSlotId, finalData, finalLength)) {
+                pa->unpinPage(pageId);
+                lockManager_.pageUnlock(dbname, tablename, pageId);
+                lockManager_.unlock(tablename);
+                return DBStatus::IO_ERROR;
+            }
+            std::string mutableFinal(finalData, finalLength);
+            setRowCtid(
+                mutableFinal.data(), mutableFinal.size(), tbl.formatVersion,
+                ItemPointer{
+                    pageId, static_cast<OffsetNumber>(newSlotId + 1)});
+            if (!page.update(
+                    newSlotId, mutableFinal.data(), mutableFinal.size())) {
+                pa->unpinPage(pageId);
+                lockManager_.pageUnlock(dbname, tablename, pageId);
+                lockManager_.unlock(tablename);
+                return DBStatus::IO_ERROR;
+            }
             pa->markDirty(pageId);
-            Lsn lsn = walPageImage(dbname, tablename, pageId, pageBuf, pa->pageSize(), false);
+            const Lsn lsn = walPageImage(
+                dbname, tablename, pageId, pageBuffer,
+                pa->pageSize(), false);
             if (lsn != INVALID_LSN) {
-                setPageLsnAndChecksum(pageBuf, lsn);
+                setPageLsnAndChecksum(pageBuffer, lsn);
                 pa->markDirty(pageId);
             }
-            size_t freePct = page.freeSpace() * 100 / pa->pageSize();
-            getFSM(dbname, tablename)->setFreePercent(pageId, static_cast<uint8_t>(freePct));
+            const size_t freePercent =
+                page.freeSpace() * 100 / pa->pageSize();
+            getFSM(dbname, tablename)->setFreePercent(
+                pageId, static_cast<uint8_t>(freePercent));
             getVM(dbname, tablename)->setAllVisible(pageId, false);
             pa->unpinPage(pageId);
             lockManager_.pageUnlock(dbname, tablename, pageId);
-            if (newSlotId != slotId) {
-                actualRid = encodeRid(pageId, newSlotId);
-                // Update the last txnLog entry with the new rid since the row moved
-                if (transactionContext().inTransaction && dbname == transactionContext().txnDB && !transactionContext().txnLog.empty()) {
-                    transactionContext().txnLog.back().rowIdx = actualRid;
+        }
+        newVersionRids[rid] = actualRid;
+
+        if (versionedUpdate) {
+            auto& deferred = transactionContext().deferredChecks[
+                transactionContext().currentTxnId];
+            for (size_t deferredIndex = deferredEntryStart;
+                 deferredIndex < deferred.size(); ++deferredIndex) {
+                DeferredCheck& check = deferred[deferredIndex];
+                if (check.dbname != dbname ||
+                    check.tablename != tablename) {
+                    continue;
                 }
+                if (check.rid == rid) check.rid = actualRid;
+                if (check.exceptRid == rid) check.exceptRid = actualRid;
             }
         }
 
@@ -18377,7 +18599,10 @@ DBStatus StorageEngine::update(const std::string& dbname,
             if (trg.forEachRow) {
                 for (int64_t rid : matchIds) {
                     std::string oldRow, newRow;
-                    if (!readRowByRid(pa, rid, newRow, tbl)) continue;
+                    auto newRid = newVersionRids.find(rid);
+                    const int64_t triggerRid =
+                        newRid == newVersionRids.end() ? rid : newRid->second;
+                    if (!readRowByRid(pa, triggerRid, newRow, tbl)) continue;
                     std::map<std::string, std::string> newValues;
                     for (size_t i = 0; i < tbl.len; ++i) {
                         newValues[tbl.cols[i].dataName] =
@@ -25092,7 +25317,9 @@ bool StorageEngine::redoXactAbort(uint64_t xid) {
 // ========================================================================
 
 struct PreparedTransactionRecord {
-    static constexpr int CURRENT_FORMAT = 2;
+    static constexpr int CURRENT_FORMAT = 3;
+    static constexpr int MINIMUM_FORMAT = 2;
+    int format = 0;
     uint64_t txnId = 0;
     std::string dbname;
     IsolationLevel isolation = IsolationLevel::REPEATABLE_READ;
@@ -25101,6 +25328,7 @@ struct PreparedTransactionRecord {
         std::string tableName;
         int64_t rowIdx = 0;
         std::string rowData;
+        int64_t previousRowIdx = -1;
     };
     std::vector<LogEntry> log;
     std::vector<LockManager::PreparedLockInfo> locks;
@@ -25647,7 +25875,8 @@ bool StorageEngine::recoverAllDatabases() {
                 const std::string filename = canonicalPath.filename().string();
                 const std::string extension = canonicalPath.extension().string();
                 const bool isIndexFile = extension == ".idx" ||
-                    extension == ".hidx" || extension == ".fti" ||
+                    extension == ".hidx" || extension == ".bidx" ||
+                    extension == ".fti" ||
                     extension == ".gin" || extension == ".gist" ||
                     extension == ".spgist" || extension == ".brin" ||
                     extension.rfind(".idx_", 0) == 0;
@@ -27949,6 +28178,277 @@ DBStatus StorageEngine::commitTransaction() {
     return DBStatus::OK;
 }
 
+bool StorageEngine::undoVersionedUpdate(const TxnLogEntry& entry) {
+    if (entry.op != TxnLogEntry::Op::Update ||
+        entry.previousRowIdx < 0 || entry.rowIdx < 0 ||
+        entry.previousRowIdx == entry.rowIdx ||
+        transactionContext().txnDB.empty()) {
+        return false;
+    }
+
+    const std::string& dbname = transactionContext().txnDB;
+    const std::string& tablename = entry.tableName;
+    PageAllocator* pa = getPageAllocator(dbname, tablename);
+    const TableSchema tbl = getTableSchema(dbname, tablename);
+    if (!pa || !usesHeapTupleHeader(tbl.formatVersion)) return false;
+
+    // Capture both logical images before changing the heap.  This also keeps
+    // TOAST values available while every index key is reconstructed.
+    std::string currentRow;
+    if (!readRowByRid(pa, entry.rowIdx, currentRow, tbl)) return false;
+
+    struct IndexUndoEntry {
+        std::string name;
+        EvaluatedIndexEntry current;
+        EvaluatedIndexEntry previous;
+    };
+    std::vector<IndexUndoEntry> secondaryEntries;
+    for (const auto& metadata : getIndexMetadata(dbname, tablename)) {
+        IndexUndoEntry undo;
+        undo.name = metadata.name;
+        if (!secondaryIndexEntryFromBuffer(
+                *this, metadata, tbl, currentRow, dbname, undo.current) ||
+            !secondaryIndexEntryFromBuffer(
+                *this, metadata, tbl, entry.rowData, dbname,
+                undo.previous)) {
+            return false;
+        }
+        secondaryEntries.push_back(std::move(undo));
+    }
+
+    std::vector<IndexUndoEntry> compositeEntries;
+    for (const auto& metadata : getCompositeIndexes(dbname, tablename)) {
+        IndexUndoEntry undo;
+        undo.name = metadata.name;
+        if (!compositeIndexEntryFromBuffer(
+                *this, metadata, tbl, currentRow, dbname, undo.current) ||
+            !compositeIndexEntryFromBuffer(
+                *this, metadata, tbl, entry.rowData, dbname,
+                undo.previous)) {
+            return false;
+        }
+        compositeEntries.push_back(std::move(undo));
+    }
+
+    auto columnIndex = [&](const std::string& columnName) {
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].dataName == columnName) return i;
+        }
+        return tbl.len;
+    };
+    std::map<std::string, std::pair<std::string, std::string>> hashValues;
+    for (const auto& columnName : getHashIndexedColumns(dbname, tablename)) {
+        const size_t index = columnIndex(columnName);
+        if (index >= tbl.len) return false;
+        hashValues[columnName] = {
+            extractColumnValue(currentRow, tbl, index, dbname, true),
+            extractColumnValue(entry.rowData, tbl, index, dbname, true)};
+    }
+    std::map<std::string, std::pair<std::string, std::string>> bloomValues;
+    for (const auto& columnName : getBloomIndexedColumns(dbname, tablename)) {
+        const size_t index = columnIndex(columnName);
+        if (index >= tbl.len) return false;
+        bloomValues[columnName] = {
+            extractColumnValue(currentRow, tbl, index, dbname, true),
+            extractColumnValue(entry.rowData, tbl, index, dbname, true)};
+    }
+
+    uint32_t previousPageId = 0;
+    uint16_t previousSlotId = 0;
+    decodeRid(entry.previousRowIdx, previousPageId, previousSlotId);
+    uint32_t currentPageId = 0;
+    uint16_t currentSlotId = 0;
+    decodeRid(entry.rowIdx, currentPageId, currentSlotId);
+
+    auto finishPageMutation = [&](uint32_t pageId, char* pageBuffer,
+                                  PageWrapper& page) {
+        pa->markDirty(pageId);
+        const Lsn lsn = walPageImage(
+            dbname, tablename, pageId, pageBuffer, pa->pageSize(), false);
+        if (lsn != INVALID_LSN) {
+            setPageLsnAndChecksum(pageBuffer, lsn);
+            pa->markDirty(pageId);
+        }
+        const size_t freePercent =
+            page.freeSpace() * 100 / pa->pageSize();
+        getFSM(dbname, tablename)->setFreePercent(
+            pageId, static_cast<uint8_t>(freePercent));
+        getVM(dbname, tablename)->setAllVisible(pageId, false);
+    };
+
+    // Restore OLD in its original slot, preserving its xmin and null bitmap.
+    if (!lockManager_.pageLockExclusive(
+            dbname, tablename, previousPageId)) {
+        return false;
+    }
+    char* previousPageBuffer = pa->fetchPage(previousPageId);
+    if (!previousPageBuffer) {
+        lockManager_.pageUnlock(dbname, tablename, previousPageId);
+        return false;
+    }
+    bool heapOk = false;
+    {
+        PageWrapper page(
+            previousPageBuffer, pa->pageSize(), tbl.formatVersion);
+        const char* tuple = nullptr;
+        size_t tupleLength = 0;
+        if (page.isValid() &&
+            page.read(previousSlotId, tuple, tupleLength) &&
+            tupleLength >= rowHeaderSize(tbl.formatVersion, tbl.len)) {
+            std::string restored = replaceRowData(
+                std::string(tuple, tupleLength), entry.rowData,
+                tbl.formatVersion, tbl.len);
+            auto* header = castHeapHeader(restored.data());
+            header->t_fields.t_xmax = 0;
+            header->t_infomask &= ~(
+                HEAP_XMAX_COMMITTED | HEAP_XMAX_INVALID |
+                HEAP_XMAX_EXCL_LOCK | HEAP_XMAX_KEYSHR_LOCK |
+                HEAP_XMAX_LOCK_ONLY | HEAP_XMAX_IS_MULTI |
+                HEAP_UPDATED);
+            setRowCtid(
+                restored.data(), restored.size(), tbl.formatVersion,
+                ItemPointer{
+                    previousPageId,
+                    static_cast<OffsetNumber>(previousSlotId + 1)});
+            walPageImage(dbname, tablename, previousPageId,
+                         previousPageBuffer, pa->pageSize(), true);
+            uint16_t restoredSlot = previousSlotId;
+            heapOk = page.update(
+                previousSlotId, restored.data(), restored.size(),
+                restoredSlot) && restoredSlot == previousSlotId;
+            if (heapOk) {
+                finishPageMutation(
+                    previousPageId, previousPageBuffer, page);
+            }
+        }
+    }
+    pa->unpinPage(previousPageId);
+    lockManager_.pageUnlock(dbname, tablename, previousPageId);
+    if (!heapOk) return false;
+
+    // NEW is an aborted physical version after rollback and can be removed
+    // immediately; no snapshot is allowed to observe its xmin.
+    if (!lockManager_.pageLockExclusive(dbname, tablename, currentPageId)) {
+        return false;
+    }
+    char* currentPageBuffer = pa->fetchPage(currentPageId);
+    if (!currentPageBuffer) {
+        lockManager_.pageUnlock(dbname, tablename, currentPageId);
+        return false;
+    }
+    heapOk = false;
+    {
+        PageWrapper page(
+            currentPageBuffer, pa->pageSize(), tbl.formatVersion);
+        const char* tuple = nullptr;
+        size_t tupleLength = 0;
+        if (page.isValid() &&
+            page.read(currentSlotId, tuple, tupleLength) &&
+            tupleLength >= rowHeaderSize(tbl.formatVersion, tbl.len) &&
+            stripRowHeader(tuple, tupleLength, tbl.formatVersion, tbl.len) ==
+                currentRow) {
+            walPageImage(dbname, tablename, currentPageId,
+                         currentPageBuffer, pa->pageSize(), true);
+            heapOk = page.remove(currentSlotId);
+            if (heapOk) {
+                finishPageMutation(currentPageId, currentPageBuffer, page);
+            }
+        }
+    }
+    pa->unpinPage(currentPageId);
+    lockManager_.pageUnlock(dbname, tablename, currentPageId);
+    if (!heapOk || !pa->flush()) return false;
+
+    bool indexesOk = true;
+    if (BPTree* index = getPKIndex(dbname, tablename); index) {
+        const std::string currentKey = extractPKValue(currentRow, tbl, dbname);
+        const std::string previousKey =
+            extractPKValue(entry.rowData, tbl, dbname);
+        if (!currentKey.empty() && !index->remove(currentKey)) {
+            indexesOk = false;
+        }
+        if (!previousKey.empty() &&
+            !index->insert(previousKey, entry.previousRowIdx)) {
+            indexesOk = false;
+        }
+        if (!index->flush()) indexesOk = false;
+    }
+
+    for (const auto& undo : secondaryEntries) {
+        BPTree* index = getSecondaryIndex(dbname, tablename, undo.name);
+        if (!index) {
+            indexesOk = false;
+            continue;
+        }
+        if (undo.current.included && !undo.current.key.empty() &&
+            !index->removeMulti(undo.current.key, entry.rowIdx)) {
+            indexesOk = false;
+        }
+        if (undo.previous.included && !undo.previous.key.empty() &&
+            !index->insertMulti(
+                undo.previous.key, entry.previousRowIdx)) {
+            indexesOk = false;
+        }
+        if (!index->flush()) indexesOk = false;
+    }
+    for (const auto& undo : compositeEntries) {
+        BPTree* index = getCompositeIndexTree(
+            dbname, tablename, undo.name);
+        if (!index) {
+            indexesOk = false;
+            continue;
+        }
+        if (undo.current.included && !undo.current.key.empty() &&
+            !index->removeMulti(undo.current.key, entry.rowIdx)) {
+            indexesOk = false;
+        }
+        if (undo.previous.included && !undo.previous.key.empty() &&
+            !index->insertMulti(
+                undo.previous.key, entry.previousRowIdx)) {
+            indexesOk = false;
+        }
+        if (!index->flush()) indexesOk = false;
+    }
+    for (const auto& [columnName, values] : hashValues) {
+        HashIndex* index = getHashIndex(dbname, tablename, columnName);
+        if (!index) {
+            indexesOk = false;
+            continue;
+        }
+        if (!values.first.empty() &&
+            !index->remove(values.first, entry.rowIdx)) {
+            indexesOk = false;
+        }
+        if (!values.second.empty() &&
+            !index->insert(values.second, entry.previousRowIdx)) {
+            indexesOk = false;
+        }
+        if (!index->flush()) indexesOk = false;
+    }
+    for (const auto& [columnName, values] : bloomValues) {
+        BloomIndex* index = getBloomIndex(dbname, tablename, columnName);
+        if (!index) {
+            indexesOk = false;
+            continue;
+        }
+        if (!values.first.empty() &&
+            !index->remove(values.first, entry.rowIdx)) {
+            indexesOk = false;
+        }
+        if (!values.second.empty() &&
+            !index->insert(values.second, entry.previousRowIdx)) {
+            indexesOk = false;
+        }
+        if (!index->flush()) indexesOk = false;
+    }
+
+    // Only NEW-only external objects are unreachable after the heap/index
+    // undo.  OLD objects remain referenced by the restored tuple.
+    deleteToastForRowExcept(
+        dbname, tablename, currentRow, entry.rowData);
+    return indexesOk;
+}
+
 DBStatus StorageEngine::rollbackTransaction() {
     if (!transactionContext().inTransaction) return DBStatus::OK;
     lockManager_.setResourceNamespace(transactionContext().txnDB);
@@ -27984,14 +28484,10 @@ DBStatus StorageEngine::rollbackTransaction() {
         clogOk = clog->flush();
     }
 
-    // Remove from active set (aborted, not committed)
+    // Keep the xid in the active set until physical/index undo is complete.
+    // Otherwise a concurrent reader may re-enable an index while it still
+    // points at the aborted NEW version.
     bool noActiveTransactions = false;
-    {
-        std::lock_guard<std::mutex> lock(globalTxnMutex_);
-        activeTransactions_.erase(transactionContext().currentTxnId);
-        activeTransactionDatabases_.erase(transactionContext().currentTxnId);
-        noActiveTransactions = activeTransactions_.empty();
-    }
 
     // Replay txnLog in reverse order to undo changes
     for (auto it = transactionContext().txnLog.rbegin(); it != transactionContext().txnLog.rend(); ++it) {
@@ -28097,6 +28593,10 @@ DBStatus StorageEngine::rollbackTransaction() {
                 }
             }
         } else if (it->op == TxnLogEntry::Op::Update) {
+            if (it->previousRowIdx >= 0) {
+                if (!undoVersionedUpdate(*it)) rowUndoOk = false;
+                continue;
+            }
             // Undo UPDATE: restore old row data
             uint32_t pageId; uint16_t slotId;
             decodeRid(it->rowIdx, pageId, slotId);
@@ -28373,6 +28873,15 @@ DBStatus StorageEngine::rollbackTransaction() {
         abortWalOk = false;
     }
 
+    // The heap and every current-version index now agree again, so readers
+    // may stop treating this xid as a source of snapshot-incomplete indexes.
+    {
+        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        activeTransactions_.erase(transactionContext().currentTxnId);
+        activeTransactionDatabases_.erase(transactionContext().currentTxnId);
+        noActiveTransactions = activeTransactions_.empty();
+    }
+
     transactionContext().deferredChecks.erase(transactionContext().currentTxnId);
     transactionContext().txnLog.clear();
     // Logical decoding: rollback discards buffered changes — subscribers
@@ -28578,9 +29087,11 @@ static bool readPreparedRecord(const std::filesystem::path& path,
                 size_t consumed = 0;
                 const long long format = std::stoll(value, &consumed);
                 if (hasFormat || consumed != value.size() ||
-                    format != PreparedTransactionRecord::CURRENT_FORMAT) {
+                    format < PreparedTransactionRecord::MINIMUM_FORMAT ||
+                    format > PreparedTransactionRecord::CURRENT_FORMAT) {
                     return false;
                 }
+                record.format = static_cast<int>(format);
                 hasFormat = true;
             } else if (line.rfind("TXN_ID ", 0) == 0) {
                 if (hasTxnId) return false;
@@ -28650,6 +29161,7 @@ static bool readPreparedRecord(const std::filesystem::path& path,
                 lock.dbname = record.dbname;
                 record.locks.push_back(std::move(lock));
             } else if (line.rfind("LOG ", 0) == 0) {
+                if (!hasFormat) return false;
                 size_t pos = 4;
                 const size_t opEnd = line.find(' ', pos);
                 if (opEnd == std::string::npos) return false;
@@ -28667,8 +29179,22 @@ static bool readPreparedRecord(const std::filesystem::path& path,
                 else if (op == "DELETE") entry.op = PreparedTransactionRecord::LogEntry::Op::Delete;
                 else return false;
                 entry.tableName = table;
-                entry.rowIdx = std::stoll(line.substr(pos, ridEnd - pos));
-                const std::string hex = line.substr(ridEnd + 1);
+                const std::string rowRid = line.substr(pos, ridEnd - pos);
+                size_t consumed = 0;
+                entry.rowIdx = std::stoll(rowRid, &consumed);
+                if (consumed != rowRid.size()) return false;
+                pos = ridEnd + 1;
+                if (record.format >= 3) {
+                    const size_t previousRidEnd = line.find(' ', pos);
+                    if (previousRidEnd == std::string::npos) return false;
+                    const std::string previousRid =
+                        line.substr(pos, previousRidEnd - pos);
+                    consumed = 0;
+                    entry.previousRowIdx = std::stoll(previousRid, &consumed);
+                    if (consumed != previousRid.size()) return false;
+                    pos = previousRidEnd + 1;
+                }
+                const std::string hex = line.substr(pos);
                 if (hex.size() % 2 != 0) return false;
                 for (size_t i = 0; i < hex.size(); i += 2) {
                     const auto nibble = [](char c) -> int {
@@ -28770,7 +29296,8 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
         if (entry.op == TxnLogEntry::Op::Insert) prepared << "INSERT";
         else if (entry.op == TxnLogEntry::Op::Update) prepared << "UPDATE";
         else if (entry.op == TxnLogEntry::Op::Delete) prepared << "DELETE";
-        prepared << " " << entry.tableName << " " << entry.rowIdx << " ";
+        prepared << " " << entry.tableName << " " << entry.rowIdx << " "
+                 << entry.previousRowIdx << " ";
         for (unsigned char c : entry.rowData) {
             char buf[3];
             snprintf(buf, sizeof(buf), "%02x", c);
@@ -28794,12 +29321,10 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
         return DBStatus::LOCK_CONFLICT;
     }
 
-    // Remove from active set (prepared txns are not active for ReadView)
-    {
-        std::lock_guard<std::mutex> lock(globalTxnMutex_);
-        activeTransactions_.erase(transactionContext().currentTxnId);
-        activeTransactionDatabases_.erase(transactionContext().currentTxnId);
-    }
+    // Keep a prepared xid in the global active set.  Its backend-local state
+    // is suspended below, but its heap versions remain in progress until
+    // COMMIT/ROLLBACK PREPARED.  Recovery registers prepared xids the same
+    // way after a restart.
 
     // Clear transaction state but KEEP locks (2PC semantics)
     transactionContext().txnLog.clear();
@@ -28933,6 +29458,7 @@ DBStatus StorageEngine::rollbackPrepared(const std::string& xid) {
         restored.tableName = entry.tableName;
         restored.rowIdx = entry.rowIdx;
         restored.rowData = entry.rowData;
+        restored.previousRowIdx = entry.previousRowIdx;
         transactionContext().txnLog.push_back(std::move(restored));
     }
 
@@ -29078,6 +29604,10 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                 pa->unpinPage(pageId);
             }
         } else if (entry.op == TxnLogEntry::Op::Update) {
+            if (entry.previousRowIdx >= 0) {
+                if (!undoVersionedUpdate(entry)) rowUndoOk = false;
+                continue;
+            }
             uint32_t pageId; uint16_t slotId;
             decodeRid(entry.rowIdx, pageId, slotId);
             char* pageBuf = pa->fetchPage(pageId);

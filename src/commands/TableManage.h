@@ -1561,10 +1561,15 @@ private:
         std::string tableName;
         int64_t rowIdx;
         std::string rowData;
+        // UPDATE stores the new tuple in rowIdx and keeps the superseded
+        // physical version at previousRowIdx until vacuum.  Older log entries
+        // (and INSERT/DELETE) leave this at -1.
+        int64_t previousRowIdx = -1;
     };
     void logTxnInsert(const std::string& tableName, int64_t rowIdx);
     void logTxnUpdate(const std::string& tableName, int64_t rowIdx, const std::string& oldRowData);
     void logTxnDelete(const std::string& tableName, int64_t rowIdx, const std::string& oldRowData);
+    bool undoVersionedUpdate(const TxnLogEntry& entry);
     struct SsiIndexPredicate;
     struct SsiIndexKey;
     void recordSsiIndexPredicate(const std::string& dbname, const std::string& tablename,
