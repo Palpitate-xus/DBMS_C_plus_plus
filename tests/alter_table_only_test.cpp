@@ -138,6 +138,13 @@ static void test_rename_preserves_table_sidecars() {
            dbms::DBStatus::OK);
     assert(g_engine.enableRowLevelSecurity(db, "configured") ==
            dbms::DBStatus::OK);
+    g_engine.grant(
+        db, "configured", "configured_reader",
+        dbms::StorageEngine::TablePrivilege::Select, {}, true, "owner");
+    g_engine.grant(
+        db, "configured", "downstream_reader",
+        dbms::StorageEngine::TablePrivilege::Select, {}, false,
+        "configured_reader");
     const auto oldParams = fs::path(db) / "configured.params";
     const auto oldPolicies = fs::path(db) / "configured.rls";
     const auto oldTruncate = fs::path(db) / "configured.truncate_state";
@@ -162,6 +169,23 @@ static void test_rename_preserves_table_sidecars() {
     assert(policies.front().name == "visible_rows");
     assert(policies.front().usingExpr == "id > 0");
     assert(g_engine.getTableSchema(db, "renamed").rowLevelSecurity);
+    assert(g_engine.hasPermission(
+        db, "renamed", "configured_reader",
+        dbms::StorageEngine::TablePrivilege::Select));
+    assert(g_engine.hasPermission(
+        db, "renamed", "downstream_reader",
+        dbms::StorageEngine::TablePrivilege::Select));
+    assert(g_engine.hasGrantOption(
+        db, "renamed", "configured_reader",
+        dbms::StorageEngine::TablePrivilege::Select));
+    assert(!g_engine.hasPermission(
+        db, "configured", "configured_reader",
+        dbms::StorageEngine::TablePrivilege::Select));
+    // The downstream grant is still linked to its grantor under the new
+    // object name, so REVOKE without CASCADE must be rejected.
+    assert(!g_engine.revoke(
+        db, "renamed", "configured_reader",
+        dbms::StorageEngine::TablePrivilege::Select, {}, false, true));
 
     {
         dbms::StorageEngine restarted;
@@ -171,6 +195,9 @@ static void test_rename_preserves_table_sidecars() {
         assert(policies.size() == 1);
         assert(policies.front().name == "visible_rows");
         assert(restarted.getTableSchema(db, "renamed").rowLevelSecurity);
+        assert(restarted.hasPermission(
+            db, "renamed", "configured_reader",
+            dbms::StorageEngine::TablePrivilege::Select));
     }
 
     cleanup(db);

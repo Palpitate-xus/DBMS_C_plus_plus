@@ -13228,32 +13228,74 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
         for (const auto& k : keysToRemove) hashIndexCache_.erase(k);
     }
 
-    // Update permissions file
-    {
-        std::filesystem::path pp = permPath(dbname);
-        if (std::filesystem::exists(pp)) {
-            std::ifstream ifs(pp);
-            std::vector<std::string> lines;
-            std::string line;
-            while (std::getline(ifs, line)) {
-                if (!line.empty()) {
-                    std::stringstream ss(line);
-                    std::string user, t;
-                    ss >> user >> t;
-                    if (t == oldName) {
-                        size_t pos = line.find(oldName);
-                        if (pos != std::string::npos) line.replace(pos, oldName.size(), newName);
-                    }
-                    lines.push_back(line);
-                }
-            }
-            std::ofstream ofs(pp);
-            for (size_t i = 0; i < lines.size(); ++i) {
-                if (i > 0) ofs << '\n';
-                ofs << lines[i];
-            }
-            if (!lines.empty()) ofs << '\n';
+    // Permission and grant-chain records use the relation name as their
+    // second whitespace-delimited field.  Replacing an arbitrary substring
+    // can corrupt a grantee whose name happens to contain the old table name,
+    // while omitting the grant chain breaks later REVOKE ... CASCADE.
+    struct RenamedAuthorizationFile {
+        std::filesystem::path path;
+        std::string original;
+        std::string renamed;
+        bool changed = false;
+    };
+    std::array<RenamedAuthorizationFile, 2> authorizationFiles = {{
+        {permPath(dbname), {}, {}, false},
+        {grantChainPath(dbPath(dbname)), {}, {}, false}
+    }};
+    for (auto& file : authorizationFiles) {
+        std::error_code authorizationError;
+        if (!std::filesystem::exists(file.path, authorizationError)) {
+            if (!authorizationError) continue;
+            lockManager_.unlock(oldName);
+            lockManager_.unlock(newName);
+            return DBStatus::IO_ERROR;
         }
+        std::ifstream input(file.path);
+        if (!input) {
+            lockManager_.unlock(oldName);
+            lockManager_.unlock(newName);
+            return DBStatus::IO_ERROR;
+        }
+        std::ostringstream rewritten;
+        std::string line;
+        while (std::getline(input, line)) {
+            file.original += line + '\n';
+            std::istringstream fields(line);
+            std::string principal;
+            std::string object;
+            fields >> principal >> object;
+            if (!fields || object != oldName) {
+                rewritten << line << '\n';
+                continue;
+            }
+            std::string remainder;
+            std::getline(fields, remainder);
+            rewritten << principal << ' ' << newName << remainder << '\n';
+            file.changed = true;
+        }
+        if (input.bad()) {
+            lockManager_.unlock(oldName);
+            lockManager_.unlock(newName);
+            return DBStatus::IO_ERROR;
+        }
+        file.renamed = rewritten.str();
+    }
+    size_t rewrittenAuthorizationFiles = 0;
+    for (; rewrittenAuthorizationFiles < authorizationFiles.size();
+         ++rewrittenAuthorizationFiles) {
+        const auto& file = authorizationFiles[rewrittenAuthorizationFiles];
+        if (!file.changed) continue;
+        if (index_file::writeAtomically(file.path, file.renamed)) continue;
+        for (size_t rollback = 0;
+             rollback < rewrittenAuthorizationFiles; ++rollback) {
+            const auto& prior = authorizationFiles[rollback];
+            if (prior.changed) {
+                index_file::writeAtomically(prior.path, prior.original);
+            }
+        }
+        lockManager_.unlock(oldName);
+        lockManager_.unlock(newName);
+        return DBStatus::IO_ERROR;
     }
 
     // Update stats file
