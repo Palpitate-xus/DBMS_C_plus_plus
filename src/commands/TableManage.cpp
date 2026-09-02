@@ -109,6 +109,7 @@ static bool isSessionTempPhysicalName(const std::string& name) {
 static constexpr const char* kPhysicalBackupMarker = ".dbms_physical_backup";
 
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <ctime>
 #include <cstdint>
@@ -126,6 +127,7 @@ static constexpr const char* kPhysicalBackupMarker = ".dbms_physical_backup";
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <sys/file.h>
 #include <unistd.h>
 #include <vector>
 #include <cwctype>
@@ -9262,6 +9264,55 @@ namespace {
 constexpr size_t TOAST_CHUNK_HEADER_SIZE = sizeof(uint64_t) + sizeof(uint32_t) +
                                            sizeof(uint8_t) + sizeof(uint64_t);
 constexpr uint8_t TOAST_FLAG_COMPRESSED = 0x01;
+constexpr uint32_t TOAST_COUNTER_MAGIC = 0x31444954u;  // 'TID1'
+constexpr uint32_t TOAST_COUNTER_VERSION = 1;
+constexpr size_t TOAST_COUNTER_LEGACY_SIZE = sizeof(uint64_t);
+constexpr size_t TOAST_COUNTER_PAYLOAD_SIZE = sizeof(uint32_t) * 2 + sizeof(uint64_t);
+constexpr size_t TOAST_COUNTER_SIZE = TOAST_COUNTER_PAYLOAD_SIZE + sizeof(uint64_t);
+
+class ToastCounterFileLock {
+public:
+    explicit ToastCounterFileLock(const std::filesystem::path& counterPath) {
+        std::filesystem::path lockPath = counterPath;
+        lockPath += ".lock";
+        fd_ = ::open(lockPath.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+        if (fd_ < 0) return;
+        while (::flock(fd_, LOCK_EX) != 0) {
+            if (errno == EINTR) continue;
+            ::close(fd_);
+            fd_ = -1;
+            return;
+        }
+    }
+
+    ~ToastCounterFileLock() {
+        if (fd_ >= 0) {
+            (void)::flock(fd_, LOCK_UN);
+            (void)::close(fd_);
+        }
+    }
+
+    ToastCounterFileLock(const ToastCounterFileLock&) = delete;
+    ToastCounterFileLock& operator=(const ToastCounterFileLock&) = delete;
+    bool ok() const { return fd_ >= 0; }
+
+private:
+    int fd_ = -1;
+};
+
+static uint64_t toastCounterChecksum(const char* data, size_t size) {
+    uint64_t hash = 1469598103934665603ULL;
+    for (size_t i = 0; i < size; ++i) {
+        hash ^= static_cast<unsigned char>(data[i]);
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+template <typename T>
+static void appendToastCounter(std::string& bytes, const T& value) {
+    bytes.append(reinterpret_cast<const char*>(&value), sizeof(value));
+}
 
 static std::string compressToastPayload(const std::string& data, uint8_t& flags) {
     flags = 0;
@@ -9340,15 +9391,57 @@ void StorageEngine::closeAllToast() {
 
 uint64_t StorageEngine::allocToastId(const std::string& dbname, const std::string& tablename) {
     auto metaPath = toastMetaPath(dbname, tablename);
+    ToastCounterFileLock counterLock(metaPath);
+    if (!counterLock.ok()) return 0;
+
     uint64_t nextId = 1;
-    if (std::filesystem::exists(metaPath)) {
+    std::error_code ec;
+    const bool exists = std::filesystem::exists(metaPath, ec);
+    if (ec) return 0;
+    if (exists) {
+        const uintmax_t fileSize = std::filesystem::file_size(metaPath, ec);
+        if (ec || (fileSize != TOAST_COUNTER_LEGACY_SIZE &&
+                   fileSize != TOAST_COUNTER_SIZE)) {
+            return 0;
+        }
         std::ifstream ifs(metaPath, std::ios::binary);
-        if (ifs) ifs.read(reinterpret_cast<char*>(&nextId), sizeof(nextId));
+        if (!ifs) return 0;
+        std::string bytes(static_cast<size_t>(fileSize), '\0');
+        if (!ifs.read(bytes.data(), static_cast<std::streamsize>(bytes.size())) ||
+            ifs.peek() != std::char_traits<char>::eof()) {
+            return 0;
+        }
+        if (bytes.size() == TOAST_COUNTER_LEGACY_SIZE) {
+            std::memcpy(&nextId, bytes.data(), sizeof(nextId));
+        } else {
+            uint32_t magic = 0;
+            uint32_t version = 0;
+            uint64_t storedChecksum = 0;
+            std::memcpy(&magic, bytes.data(), sizeof(magic));
+            std::memcpy(&version, bytes.data() + sizeof(magic), sizeof(version));
+            std::memcpy(&nextId, bytes.data() + sizeof(magic) + sizeof(version),
+                        sizeof(nextId));
+            std::memcpy(&storedChecksum, bytes.data() + TOAST_COUNTER_PAYLOAD_SIZE,
+                        sizeof(storedChecksum));
+            if (magic != TOAST_COUNTER_MAGIC || version != TOAST_COUNTER_VERSION ||
+                storedChecksum != toastCounterChecksum(bytes.data(),
+                                                       TOAST_COUNTER_PAYLOAD_SIZE)) {
+                return 0;
+            }
+        }
     }
+    if (nextId == 0 || nextId == std::numeric_limits<uint64_t>::max()) return 0;
+
     uint64_t allocated = nextId;
-    nextId++;
-    std::ofstream ofs(metaPath, std::ios::binary);
-    if (ofs) ofs.write(reinterpret_cast<const char*>(&nextId), sizeof(nextId));
+    ++nextId;
+    std::string bytes;
+    bytes.reserve(TOAST_COUNTER_SIZE);
+    appendToastCounter(bytes, TOAST_COUNTER_MAGIC);
+    appendToastCounter(bytes, TOAST_COUNTER_VERSION);
+    appendToastCounter(bytes, nextId);
+    const uint64_t checksum = toastCounterChecksum(bytes.data(), bytes.size());
+    appendToastCounter(bytes, checksum);
+    if (!index_file::writeAtomically(metaPath, bytes)) return 0;
     return allocated;
 }
 
@@ -9358,6 +9451,7 @@ static std::string toastIndexKey(uint64_t toastId, uint32_t seq) {
 
 bool StorageEngine::writeToast(const std::string& dbname, const std::string& tablename,
                                uint64_t toastId, const std::string& data) {
+    if (toastId == 0) return false;
     PageAllocator* pa = getToastPageAllocator(dbname, tablename);
     BPTree* idx = getToastIndex(dbname, tablename);
     if (!pa || !idx) return false;
@@ -9598,7 +9692,8 @@ bool StorageEngine::prepareToastValues(const std::string& dbname, const std::str
         if (it == values.end()) continue;
         if (it->second.size() > threshold) {
             uint64_t toastId = allocToastId(dbname, tablename);
-            if (!writeToast(dbname, tablename, toastId, it->second)) return false;
+            if (toastId == 0 || !writeToast(dbname, tablename, toastId, it->second))
+                return false;
             it->second = std::string(TOAST_PREFIX) + std::to_string(toastId);
         }
     }
@@ -9855,7 +9950,8 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
         if (!toastIdx.open()) return failCreate("could not initialize TOAST index");
         toastIdx.close();
         // Ensure toast metadata file exists.
-        allocToastId(dbname, tblWithVersion.tablename);
+        if (allocToastId(dbname, tblWithVersion.tablename) == 0)
+            return failCreate("could not initialize TOAST metadata");
     }
 
     // Create B+ tree index if table has primary key
@@ -10271,7 +10367,10 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
         BPTree toastIdx(toastIndexPath(dbname, tablename));
         toastIdx.open();
         toastIdx.close();
-        allocToastId(dbname, tablename);
+        if (allocToastId(dbname, tablename) == 0) {
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
+        }
     }
 
     lockManager_.unlock(tablename);
@@ -10518,7 +10617,10 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
         BPTree toastIdx(toastIndexPath(dbname, tablename));
         toastIdx.open();
         toastIdx.close();
-        allocToastId(dbname, tablename);
+        if (allocToastId(dbname, tablename) == 0) {
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
+        }
     }
 
     lockManager_.unlock(tablename);

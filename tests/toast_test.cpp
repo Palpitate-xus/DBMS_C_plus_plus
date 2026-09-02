@@ -2,9 +2,13 @@
 
 #include "TableManage.h"
 #include "Config.h"
+#include <atomic>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <cassert>
+#include <thread>
+#include <vector>
 
 dbms::Config g_config;
 
@@ -29,6 +33,36 @@ int main() {
         // Verify TOAST relation and index files were created.
         assert(std::filesystem::exists(std::filesystem::path(dbname) / "t.toast.dt"));
         assert(std::filesystem::exists(std::filesystem::path(dbname) / "t.toast.idx"));
+
+        const auto metaPath = std::filesystem::path(dbname) / "t.toastmeta";
+        assert(std::filesystem::file_size(metaPath) == 24);
+        std::ifstream metaIn(metaPath, std::ios::binary);
+        const std::string validMeta((std::istreambuf_iterator<char>(metaIn)),
+                                    std::istreambuf_iterator<char>());
+        assert(validMeta.size() == 24);
+
+        // A truncated or checksum-corrupt allocator state must not silently
+        // restart at ID 1 and overwrite an existing external value.
+        {
+            std::ofstream out(metaPath, std::ios::binary | std::ios::trunc);
+            out.write(validMeta.data(), 7);
+        }
+        assert(engine.insert(dbname, "t", {{"payload", std::string(10000, 'x')}})
+               == DBStatus::IO_ERROR);
+        {
+            std::string corrupt = validMeta;
+            corrupt.back() ^= 1;
+            std::ofstream out(metaPath, std::ios::binary | std::ios::trunc);
+            out.write(corrupt.data(), static_cast<std::streamsize>(corrupt.size()));
+        }
+        assert(engine.insert(dbname, "t", {{"payload", std::string(10000, 'y')}})
+               == DBStatus::IO_ERROR);
+        {
+            std::ofstream out(metaPath, std::ios::binary | std::ios::trunc);
+            out.write(validMeta.data(), static_cast<std::streamsize>(validMeta.size()));
+        }
+        assert(engine.query(dbname, "t", {}, {"payload"}).empty());
+        std::cout << "[TOAST] corrupt ID allocator fails closed OK\n";
 
         std::string largeValue(10000, 'a');
 
@@ -74,6 +108,36 @@ int main() {
         rows = engine.query(dbname, "t", {}, {"payload"});
         assert(rows.empty());
         std::cout << "[TOAST] delete large value OK\n";
+
+        TableSchema concurrent;
+        concurrent.tablename = "tc";
+        concurrent.formatVersion = 2;
+        concurrent.append(makeVarCharColumn("payload", false, 12000, false));
+        assert(engine.createTable(dbname, concurrent) == DBStatus::OK);
+
+        constexpr int workerCount = 12;
+        std::atomic<int> ready{0};
+        std::atomic<bool> start{false};
+        std::atomic<bool> failed{false};
+        std::vector<std::thread> workers;
+        for (int worker = 0; worker < workerCount; ++worker) {
+            workers.emplace_back([&, worker] {
+                std::string payload(10000, '\0');
+                for (size_t i = 0; i < payload.size(); ++i)
+                    payload[i] = static_cast<char>('!' + ((i * 17 + worker * 29) % 90));
+                ready.fetch_add(1, std::memory_order_release);
+                while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+                if (engine.insert(dbname, "tc", {{"payload", payload}}) != DBStatus::OK)
+                    failed.store(true, std::memory_order_release);
+            });
+        }
+        while (ready.load(std::memory_order_acquire) != workerCount)
+            std::this_thread::yield();
+        start.store(true, std::memory_order_release);
+        for (auto& worker : workers) worker.join();
+        assert(!failed.load(std::memory_order_acquire));
+        assert(engine.query(dbname, "tc", {}, {"payload"}).size() == workerCount);
+        std::cout << "[TOAST] concurrent ID allocation unique OK\n";
     }
 
     // Cleanup
