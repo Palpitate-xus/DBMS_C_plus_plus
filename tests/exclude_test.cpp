@@ -2,6 +2,7 @@
 #include "commands/TableManage.h"
 #include "parser/parser.h"
 #include "Session.h"
+#include "catalog/CatalogService.h"
 #include "catalog/type_registry.h"
 #include <cassert>
 #include <filesystem>
@@ -91,6 +92,56 @@ static void test_exclude_drop_table_cleanup() {
     std::cout << "[EXCLUDE] drop table cleanup OK" << std::endl;
 }
 
+static void test_exclude_survives_table_rename() {
+    const std::string db = testDbPath("exclude_rename_t");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE TABLE t (id INT PRIMARY KEY, room VARCHAR(10), "
+        "CONSTRAINT no_dup_room EXCLUDE (room WITH =))", s));
+    assert(g_engine.insert(
+               db, "t", {{"id", "1"}, {"room", "101"}}) ==
+           dbms::DBStatus::OK);
+
+    assert(!ddl.executeSql("ALTER TABLE t RENAME TO renamed_t", s));
+    assert(g_engine.getExclusionConstraints(db, "t").empty());
+    const auto renamedConstraints =
+        g_engine.getExclusionConstraints(db, "renamed_t");
+    assert(renamedConstraints.size() == 1);
+    assert(renamedConstraints[0].name == "no_dup_room");
+    assert(g_engine.insert(
+               db, "renamed_t", {{"id", "2"}, {"room", "101"}}) ==
+           dbms::DBStatus::INVALID_VALUE);
+
+    // The renamed metadata is durable and the abandoned name is safe to
+    // reuse without inheriting the old table's constraint.
+    {
+        dbms::StorageEngine restarted;
+        const auto persisted =
+            restarted.getExclusionConstraints(db, "renamed_t");
+        assert(persisted.size() == 1 && persisted[0].name == "no_dup_room");
+        assert(restarted.insert(
+                   db, "renamed_t", {{"id", "3"}, {"room", "101"}}) ==
+               dbms::DBStatus::INVALID_VALUE);
+    }
+    assert(!ddl.executeSql(
+        "CREATE TABLE t (id INT PRIMARY KEY, room VARCHAR(10))", s));
+    assert(g_engine.insert(
+               db, "t", {{"id", "1"}, {"room", "101"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(
+               db, "t", {{"id", "2"}, {"room", "101"}}) ==
+           dbms::DBStatus::OK);
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[EXCLUDE] table rename preserves constraint OK" << std::endl;
+}
+
 static void test_alter_exclude_typed_bridge() {
     std::string db = testDbPath("exclude_alter_t");
     cleanup(db);
@@ -139,6 +190,7 @@ int main() {
     test_exclude_equality();
     test_exclude_range_overlap();
     test_exclude_drop_table_cleanup();
+    test_exclude_survives_table_rename();
     test_alter_exclude_typed_bridge();
     std::cout << "[EXCLUDE] all passed" << std::endl;
     return 0;

@@ -12938,6 +12938,37 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
     }
     closeDatabaseCaches(dbname);
 
+    const std::vector<ExclusionConstraint> originalExclusions =
+        getExclusionConstraints(dbname, "");
+    std::vector<ExclusionConstraint> renamedExclusions = originalExclusions;
+    bool exclusionsChanged = false;
+    for (auto& exclusion : renamedExclusions) {
+        if (exclusion.tableName != oldName) continue;
+        exclusion.tableName = newName;
+        exclusionsChanged = true;
+    }
+    std::string originalExclusionBytes;
+    std::string renamedExclusionBytes;
+    auto serializeExclusions = [&](const std::vector<ExclusionConstraint>& values,
+                                   std::string& bytes) {
+        std::ostringstream output(std::ios::out | std::ios::binary);
+        const size_t count = values.size();
+        output.write(reinterpret_cast<const char*>(&count), sizeof(size_t));
+        for (const auto& exclusion : values) {
+            writeExclusion(output, exclusion);
+        }
+        if (!output) return false;
+        bytes = output.str();
+        return true;
+    };
+    if (exclusionsChanged &&
+        (!serializeExclusions(originalExclusions, originalExclusionBytes) ||
+         !serializeExclusions(renamedExclusions, renamedExclusionBytes))) {
+        lockManager_.unlock(oldName);
+        lockManager_.unlock(newName);
+        return DBStatus::IO_ERROR;
+    }
+
     TableSchema renamedSchema = getTableSchema(dbname, oldName);
     renamedSchema.tablename = newName;
 
@@ -13413,6 +13444,26 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
         lockManager_.unlock(newName);
         return DBStatus::IO_ERROR;
     }
+
+    if (exclusionsChanged &&
+        !index_file::writeAtomically(
+            exclusionPath(dbname), renamedExclusionBytes)) {
+        // The exclusion publish can fail after replacing its target. Restore
+        // it and the already-published inbound FK schemas as one metadata
+        // unit so callers never observe a half-renamed dependency graph.
+        index_file::writeAtomically(
+            exclusionPath(dbname), originalExclusionBytes);
+        for (const auto& rewrite : referencingSchemaRewrites) {
+            index_file::writeAtomically(
+                schemaPath(dbname, rewrite.tableName), rewrite.original);
+            invalidateCatalogSchema(dbname, rewrite.tableName);
+        }
+        invalidateExclusionCache(dbname);
+        lockManager_.unlock(oldName);
+        lockManager_.unlock(newName);
+        return DBStatus::IO_ERROR;
+    }
+    if (exclusionsChanged) invalidateExclusionCache(dbname);
 
     lockManager_.unlock(oldName);
     lockManager_.unlock(newName);
