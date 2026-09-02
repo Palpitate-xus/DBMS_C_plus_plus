@@ -8,6 +8,7 @@
 #include <chrono>
 #include <filesystem>
 #include <iostream>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -118,6 +119,77 @@ void test_commit_clog_failure_is_irrevocable() {
     std::cout << "[PREPARED-TXN] durable COMMIT survives CLOG publication failure OK\n";
 }
 
+void test_terminal_metadata_cleanup_is_idempotent() {
+    const std::string db = testDbPath("prepared_terminal_cleanup");
+    cleanup(db);
+    {
+        dbms::StorageEngine engine;
+        assert(engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+        dbms::TableSchema table;
+        table.tablename = "accounts";
+        table.append(dbms::makeIntColumn("id", false, 2, true));
+        assert(engine.createTable(db, table) == dbms::DBStatus::OK);
+
+        const std::filesystem::path preparedDir =
+            std::filesystem::path("info") / ".prepared";
+        const auto terminalCounts = [&](uint64_t xid) {
+            size_t commits = 0;
+            size_t aborts = 0;
+            dbms::WALManager* wal = engine.getWAL(db);
+            assert(wal);
+            for (dbms::Lsn lsn = wal->earliestAvailableLsn();;) {
+                const auto record = wal->ReadRecord(lsn);
+                if (!record || record->header.xl_tot_len == 0) break;
+                if (record->rmid() == dbms::RM_XACT_ID &&
+                    record->header.xl_xid == xid) {
+                    if (record->info() == dbms::XLOG_XACT_COMMIT) ++commits;
+                    if (record->info() == dbms::XLOG_XACT_ABORT) ++aborts;
+                }
+                lsn += record->header.xl_tot_len;
+            }
+            return std::make_pair(commits, aborts);
+        };
+
+        assert(engine.beginTransaction(db) == dbms::DBStatus::OK);
+        assert(engine.insert(db, "accounts", {{"id", "10"}}) ==
+               dbms::DBStatus::OK);
+        const uint64_t committedXid = engine.currentTxnId();
+        assert(engine.prepareTransaction("retained_commit") ==
+               dbms::DBStatus::OK);
+        assert(::chmod(preparedDir.c_str(), 0500) == 0);
+        assert(engine.commitPrepared("retained_commit") == dbms::DBStatus::OK);
+        assert(::chmod(preparedDir.c_str(), 0700) == 0);
+        assert(std::filesystem::exists(preparedDir / "retained_commit"));
+        assert(engine.listPreparedTransactions().empty());
+        assert(engine.rollbackPrepared("retained_commit") ==
+               dbms::DBStatus::INVALID_VALUE);
+        assert(!std::filesystem::exists(preparedDir / "retained_commit"));
+        assert((terminalCounts(committedXid) ==
+                std::pair<size_t, size_t>{1, 0}));
+        assert(engine.query(db, "accounts", {"=id 10"}, {"id"}).size() == 1);
+
+        assert(engine.beginTransaction(db) == dbms::DBStatus::OK);
+        assert(engine.insert(db, "accounts", {{"id", "11"}}) ==
+               dbms::DBStatus::OK);
+        const uint64_t abortedXid = engine.currentTxnId();
+        assert(engine.prepareTransaction("retained_abort") ==
+               dbms::DBStatus::OK);
+        assert(::chmod(preparedDir.c_str(), 0500) == 0);
+        assert(engine.rollbackPrepared("retained_abort") == dbms::DBStatus::OK);
+        assert(::chmod(preparedDir.c_str(), 0700) == 0);
+        assert(std::filesystem::exists(preparedDir / "retained_abort"));
+        assert(engine.listPreparedTransactions().empty());
+        assert(engine.commitPrepared("retained_abort") ==
+               dbms::DBStatus::INVALID_VALUE);
+        assert(!std::filesystem::exists(preparedDir / "retained_abort"));
+        assert((terminalCounts(abortedXid) ==
+                std::pair<size_t, size_t>{0, 1}));
+        assert(engine.query(db, "accounts", {"=id 11"}, {"id"}).empty());
+    }
+    cleanup(db);
+    std::cout << "[PREPARED-TXN] terminal metadata cleanup is idempotent OK\n";
+}
+
 int runPreparedRestartWorker() {
     const std::string db = testDbPath("prepared_restart");
     dbms::StorageEngine source;
@@ -201,6 +273,7 @@ int main(int argc, char** argv) {
     cleanupAllTestData();
     test_cross_backend_prepare_completion();
     test_commit_clog_failure_is_irrevocable();
+    test_terminal_metadata_cleanup_is_idempotent();
     test_prepared_survives_engine_restart(argv[0]);
     finalCleanupTestData();
     return 0;

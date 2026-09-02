@@ -31237,6 +31237,61 @@ static bool readPreparedRecord(const std::filesystem::path& path,
            record.dbname != "." && record.dbname != "..";
 }
 
+enum class PreparedTerminalState {
+    InDoubt,
+    Committed,
+    Aborted,
+    Corrupt
+};
+
+static PreparedTerminalState preparedTerminalState(
+    const StorageEngine& engine, const std::string& dbname, uint64_t xid) {
+    if (CommitLog* clog = engine.getCommitLog(dbname); clog) {
+        const CommitLog::Status status = clog->getStatus(xid);
+        if (status == CommitLog::Status::Committed) {
+            return PreparedTerminalState::Committed;
+        }
+        if (status == CommitLog::Status::Aborted) {
+            return PreparedTerminalState::Aborted;
+        }
+    }
+
+    // CLOG can legitimately be unavailable immediately after a durable
+    // terminal record.  Consult retained WAL so stale prepared metadata is
+    // not mistaken for an in-doubt transaction in that window.
+    WALManager* wal = engine.getWAL(dbname);
+    if (!wal) return PreparedTerminalState::InDoubt;
+    PreparedTerminalState result = PreparedTerminalState::InDoubt;
+    for (Lsn lsn = wal->earliestAvailableLsn();;) {
+        const auto record = wal->ReadRecord(lsn);
+        if (!record || record->header.xl_tot_len == 0) break;
+        if (record->rmid() == RM_XACT_ID &&
+            (record->info() == XLOG_XACT_COMMIT ||
+             record->info() == XLOG_XACT_ABORT)) {
+            if (record->data.size() < sizeof(uint64_t)) {
+                return PreparedTerminalState::Corrupt;
+            }
+            uint64_t recordXid = 0;
+            std::memcpy(&recordXid, record->data.data(), sizeof(recordXid));
+            if (recordXid != record->header.xl_xid) {
+                return PreparedTerminalState::Corrupt;
+            }
+            if (recordXid == xid) {
+                const PreparedTerminalState next =
+                    record->info() == XLOG_XACT_COMMIT
+                        ? PreparedTerminalState::Committed
+                        : PreparedTerminalState::Aborted;
+                if (result != PreparedTerminalState::InDoubt) {
+                    return PreparedTerminalState::Corrupt;
+                }
+                result = next;
+            }
+        }
+        lsn += record->header.xl_tot_len;
+    }
+    return result;
+}
+
 DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
     if (!transactionContext().inTransaction) return DBStatus::INVALID_VALUE;
     if (!validPreparedXid(xid)) return DBStatus::INVALID_VALUE;
@@ -31399,6 +31454,22 @@ DBStatus StorageEngine::commitPrepared(const std::string& xid) {
     if (!readPreparedRecord(pfile, record)) return DBStatus::CORRUPTED_DATA;
     const uint64_t savedTxnId = record.txnId;
     const std::string& savedDB = record.dbname;
+    if (!databaseExists(savedDB)) return DBStatus::CORRUPTED_DATA;
+
+    const PreparedTerminalState priorState =
+        preparedTerminalState(*this, savedDB, savedTxnId);
+    if (priorState == PreparedTerminalState::Corrupt) {
+        return DBStatus::CORRUPTED_DATA;
+    }
+    if (priorState != PreparedTerminalState::InDoubt) {
+        lockManager_.releasePreparedLocks(savedTxnId);
+        if (!removePreparedFileDurably(pfile)) {
+            std::cerr << "[2PC] could not remove terminal prepared metadata: "
+                      << pfile << std::endl;
+        }
+        return priorState == PreparedTerminalState::Committed
+            ? DBStatus::OK : DBStatus::INVALID_VALUE;
+    }
 
     std::set<std::string> specializedTables;
     for (const auto& entry : record.log) {
@@ -31521,7 +31592,14 @@ DBStatus StorageEngine::commitPrepared(const std::string& xid) {
     transactionContext().databaseSharedLock.reset();
     transactionContext().databaseTxnMutex.reset();
 
-    return removePreparedFileDurably(pfile) ? DBStatus::OK : DBStatus::IO_ERROR;
+    if (!removePreparedFileDurably(pfile)) {
+        // The COMMIT decision is already durable.  Recovery recognizes the
+        // terminal WAL record and removes stale metadata; reporting a
+        // retryable error here could generate a duplicate terminal record.
+        std::cerr << "[2PC] committed with prepared metadata retained for recovery: "
+                  << pfile << std::endl;
+    }
+    return DBStatus::OK;
 }
 
 DBStatus StorageEngine::rollbackPrepared(const std::string& xid) {
@@ -31534,6 +31612,22 @@ DBStatus StorageEngine::rollbackPrepared(const std::string& xid) {
     if (!readPreparedRecord(pfile, record)) return DBStatus::CORRUPTED_DATA;
     const uint64_t savedTxnId = record.txnId;
     const std::string& savedDB = record.dbname;
+    if (!databaseExists(savedDB)) return DBStatus::CORRUPTED_DATA;
+
+    const PreparedTerminalState priorState =
+        preparedTerminalState(*this, savedDB, savedTxnId);
+    if (priorState == PreparedTerminalState::Corrupt) {
+        return DBStatus::CORRUPTED_DATA;
+    }
+    if (priorState != PreparedTerminalState::InDoubt) {
+        lockManager_.releasePreparedLocks(savedTxnId);
+        if (!removePreparedFileDurably(pfile)) {
+            std::cerr << "[2PC] could not remove terminal prepared metadata: "
+                      << pfile << std::endl;
+        }
+        return priorState == PreparedTerminalState::Aborted
+            ? DBStatus::OK : DBStatus::INVALID_VALUE;
+    }
 
     std::set<std::string> specializedTables;
     for (const auto& entry : record.log) {
@@ -31577,7 +31671,11 @@ DBStatus StorageEngine::rollbackPrepared(const std::string& xid) {
     DBStatus res = rollbackTransaction();
     if (res != DBStatus::OK) return res;
     lockManager_.releasePreparedLocks(savedTxnId);
-    return removePreparedFileDurably(pfile) ? DBStatus::OK : DBStatus::IO_ERROR;
+    if (!removePreparedFileDurably(pfile)) {
+        std::cerr << "[2PC] aborted with prepared metadata retained for recovery: "
+                  << pfile << std::endl;
+    }
+    return DBStatus::OK;
 }
 
 std::vector<std::string> StorageEngine::listPreparedTransactions() const {
@@ -31586,6 +31684,16 @@ std::vector<std::string> StorageEngine::listPreparedTransactions() const {
     if (!std::filesystem::exists(pdir)) return result;
     for (const auto& entry : std::filesystem::directory_iterator(pdir)) {
         if (entry.is_regular_file()) {
+            PreparedTransactionRecord record;
+            if (readPreparedRecord(entry.path(), record) &&
+                databaseExists(record.dbname)) {
+                const PreparedTerminalState state = preparedTerminalState(
+                    *this, record.dbname, record.txnId);
+                if (state == PreparedTerminalState::Committed ||
+                    state == PreparedTerminalState::Aborted) {
+                    continue;
+                }
+            }
             result.push_back(entry.path().filename().string());
         }
     }
