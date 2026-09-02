@@ -12885,15 +12885,63 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
         }
     }
 
-    // Rename data, forks, PK index and sequence files.
-    std::filesystem::rename(dataPath(dbname, oldName), dataPath(dbname, newName));
-    if (std::filesystem::exists(fsmPath(dbname, oldName)))
-        std::filesystem::rename(fsmPath(dbname, oldName), fsmPath(dbname, newName));
-    if (std::filesystem::exists(vmPath(dbname, oldName)))
-        std::filesystem::rename(vmPath(dbname, oldName), vmPath(dbname, newName));
-    if (std::filesystem::exists(indexPath(dbname, oldName))) {
-        std::filesystem::rename(indexPath(dbname, oldName), indexPath(dbname, newName));
+    // Rename every physical relation fork as one reversible batch.  A
+    // partitioned table has no parent .dt file, and encrypted/TOAST heaps
+    // carry companion files that must move with the same prefix.  Keeping the
+    // boundary shared with tablespace migration and DROP also covers DEFAULT
+    // partitions, subpartitions, every index access method, and TDE sidecars.
+    const auto relationRoot = relationDir(dbname, oldName);
+    std::vector<std::pair<std::filesystem::path,
+                          std::filesystem::path>> physicalRenamePlan;
+    std::error_code renameError;
+    for (std::filesystem::directory_iterator it(
+             relationRoot,
+             std::filesystem::directory_options::skip_permission_denied,
+             renameError), end;
+         !renameError && it != end; it.increment(renameError)) {
+        const std::string filename = it->path().filename().string();
+        if (!isRelationPhysicalFileName(filename, oldName)) continue;
+        const auto destination =
+            relationRoot / (newName + filename.substr(oldName.size()));
+        if (std::filesystem::exists(destination, renameError) || renameError) {
+            if (!renameError) renameError = std::make_error_code(
+                std::errc::file_exists);
+            break;
+        }
+        physicalRenamePlan.emplace_back(it->path(), destination);
     }
+
+    std::vector<std::pair<std::filesystem::path,
+                          std::filesystem::path>> physicallyRenamed;
+    if (!renameError) {
+        for (const auto& move : physicalRenamePlan) {
+            std::filesystem::rename(move.first, move.second, renameError);
+            if (renameError) break;
+            physicallyRenamed.push_back(move);
+        }
+    }
+    if (renameError) {
+        std::error_code rollbackError;
+        for (auto it = physicallyRenamed.rbegin();
+             it != physicallyRenamed.rend(); ++it) {
+            std::filesystem::rename(
+                it->second, it->first, rollbackError);
+            rollbackError.clear();
+        }
+        std::filesystem::remove(schemaPath(dbname, newName), rollbackError);
+        if (renamedSpecializedIndexesWereDirty) {
+            rollbackError.clear();
+            std::filesystem::remove(
+                specializedIndexDirtyPath(*this, dbname, newName),
+                rollbackError);
+        }
+        invalidateCatalogSchema(dbname, newName);
+        lockManager_.unlock(oldName);
+        lockManager_.unlock(newName);
+        return DBStatus::IO_ERROR;
+    }
+
+    // Sequence state is catalog metadata rather than a relation fork.
     if (std::filesystem::exists(seqPath(dbname, oldName))) {
         std::filesystem::rename(seqPath(dbname, oldName), seqPath(dbname, newName));
         {

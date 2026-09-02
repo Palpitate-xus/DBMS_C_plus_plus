@@ -11,6 +11,7 @@
 #include "catalog/type_registry.h"
 #include "executor/ExecutionPlan.h"
 #include "storage/PageAllocator.h"
+#include "storage/PageCrypto.h"
 #include <cassert>
 #include <filesystem>
 #include <iostream>
@@ -401,6 +402,103 @@ static void test_drop_removes_partition_storage() {
     std::cout << "[PART] DROP removes partition storage OK" << std::endl;
 }
 
+static std::string incompressiblePayload(size_t length) {
+    std::string payload;
+    payload.reserve(length);
+    uint32_t state = 0x12345678u;
+    for (size_t index = 0; index < length; ++index) {
+        state = state * 1664525u + 1013904223u;
+        payload.push_back(static_cast<char>(33 + state % 90));
+    }
+    return payload;
+}
+
+static void test_rename_preserves_partition_storage() {
+    std::string db = testDbPath("part_rename_storage");
+    cleanup(db);
+    dbms::PageCrypto::disable();
+    assert(dbms::PageCrypto::enable(std::string(64, '8')));
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    auto tbl = makeSchema(
+        "old_events", {"id int", "bucket int", "tag text", "payload text"});
+    tbl.partitionType = dbms::TableSchema::PartitionType::Range;
+    tbl.partitionKey = "bucket";
+    tbl.rangePartitions = {{"low", "10"}, {"high", "20"}};
+    tbl.defaultPartitionName = "overflow";
+    tbl.subPartitionType = dbms::TableSchema::PartitionType::Hash;
+    tbl.subPartitionKey = "tag";
+    tbl.subHashPartitions = 2;
+    assert(g_engine.createTable(db, tbl) == dbms::DBStatus::OK);
+
+    const std::string payload = incompressiblePayload(9000);
+    assert(g_engine.insert(
+               db, "old_events",
+               {{"id", "1"}, {"bucket", "5"}, {"tag", "left"},
+                {"payload", payload}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(
+               db, "old_events",
+               {{"id", "2"}, {"bucket", "25"}, {"tag", "right"},
+                {"payload", "inline"}}) == dbms::DBStatus::OK);
+    assert(g_engine.checkpoint(db));
+
+    const std::vector<std::string> partitions = {"low", "high", "overflow"};
+    std::vector<std::filesystem::path> oldFiles;
+    std::vector<std::filesystem::path> newFiles;
+    for (const auto& partition : partitions) {
+        for (size_t sub = 0; sub < tbl.subHashPartitions; ++sub) {
+            const std::string suffix = "#" + partition + "#sp" +
+                std::to_string(sub) + ".dt";
+            const auto oldHeap =
+                std::filesystem::path(db) / ("old_events" + suffix);
+            const auto newHeap =
+                std::filesystem::path(db) / ("new_events" + suffix);
+            oldFiles.push_back(oldHeap);
+            oldFiles.emplace_back(oldHeap.string() + ".tde");
+            newFiles.push_back(newHeap);
+            newFiles.emplace_back(newHeap.string() + ".tde");
+        }
+    }
+    for (const char* suffix : {
+             ".toastmeta", ".toast.dt", ".toast.dt.tde",
+             ".toast.idx", ".toast.idx.tde"}) {
+        oldFiles.emplace_back(
+            std::filesystem::path(db) /
+            (std::string("old_events") + suffix));
+        newFiles.emplace_back(
+            std::filesystem::path(db) /
+            (std::string("new_events") + suffix));
+    }
+    for (const auto& path : oldFiles) {
+        assert(std::filesystem::is_regular_file(path));
+    }
+
+    assert(g_engine.alterTableRenameTable(
+               db, "old_events", "new_events") == dbms::DBStatus::OK);
+    assert(!g_engine.tableExists(db, "old_events"));
+    assert(g_engine.tableExists(db, "new_events"));
+    for (const auto& path : oldFiles) assert(!std::filesystem::exists(path));
+    for (const auto& path : newFiles) {
+        assert(std::filesystem::is_regular_file(path));
+    }
+
+    auto rows = g_engine.query(db, "new_events", {"=id 1"}, {"payload"});
+    assert(rows.size() == 1);
+    assert(rows.front().find(payload) != std::string::npos);
+    {
+        dbms::StorageEngine reopened;
+        rows = reopened.query(
+            db, "new_events", {"=id 2"}, {"payload"});
+        assert(rows.size() == 1);
+        assert(rows.front().find("inline") != std::string::npos);
+    }
+
+    assert(g_engine.dropTable(db, "new_events") == dbms::DBStatus::OK);
+    cleanup(db);
+    dbms::PageCrypto::disable();
+    std::cout << "[PART] RENAME preserves partition storage OK" << std::endl;
+}
+
 // Partition page images must replay into the physical partition fork.  The
 // parent heap is intentionally empty and must stay empty across startup.
 static void test_partition_wal_routing() {
@@ -456,6 +554,7 @@ int main() {
     test_hash_partitioning();
     test_subpartitioning();
     test_drop_removes_partition_storage();
+    test_rename_preserves_partition_storage();
     test_partition_wal_routing();
     std::cout << "[PART] all passed" << std::endl;
     return 0;
