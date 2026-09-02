@@ -5312,20 +5312,12 @@ std::vector<std::string> StorageEngine::getIndexedColumns(const std::string& dbn
     std::vector<std::string> cols;
     for (const std::string& line : readSecidxLines(dbname, tablename)) {
         if (line.size() > 2 && line[0] == 'C' && line[1] == ':') {
-            // Composite index: C:name:col1:col2:...[:INCLUDE:...]
-            size_t pos = 2;
-            size_t next = line.find(':', pos);
-            if (next != std::string::npos) pos = next + 1;
-            while (pos < line.size()) {
-                next = line.find(':', pos);
-                std::string cname = (next == std::string::npos) ? line.substr(pos) : line.substr(pos, next - pos);
-                if (!cname.empty()) {
-                    if (cname == "INCLUDE") break; // stop at INCLUDE marker
-                    cols.push_back(cname);
-                }
-                if (next == std::string::npos) break;
-                pos = next + 1;
-            }
+            // Composite indexes have their own physical tree and are
+            // maintained through getCompositeIndexes().  Treating their
+            // component names as standalone indexes creates phantom files
+            // and can insert the same RID twice when a real single-column
+            // index exists on one of those columns.
+            continue;
         } else if (line.substr(0, 5) == "EXPR:") {
             // Expression index: extract expression name
             size_t incPos = line.find(":INCLUDE:");

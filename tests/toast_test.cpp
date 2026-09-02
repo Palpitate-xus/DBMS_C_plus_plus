@@ -268,6 +268,17 @@ int main() {
             engine.getSecondaryIndex(dbname, "logical_index", "payload");
         assert(payloadIndex != nullptr);
         assert(payloadIndex->searchMulti(indexedA).size() == 1);
+        assert(engine.createCompositeIndex(
+                   dbname, "logical_index", {"payload", "tag"},
+                   "overlapping_payload_tag") == DBStatus::OK);
+        assert(engine.getIndexedColumns(dbname, "logical_index") ==
+               std::vector<std::string>{"payload"});
+        BPTree* overlappingComposite = engine.getCompositeIndexTree(
+            dbname, "logical_index", "overlapping_payload_tag");
+        assert(overlappingComposite != nullptr);
+        assert(overlappingComposite->searchMulti(
+                   indexedA + '\x01' + "first").size() == 1);
+        assert(payloadIndex->searchMulti(indexedA).size() == 1);
         assert(engine.query(dbname, "logical_index",
                             {"=payload " + indexedA}, {"id"}).size() == 1);
 
@@ -275,6 +286,10 @@ int main() {
                              {"=id 1"}) == DBStatus::OK);
         assert(payloadIndex->searchMulti(indexedA).empty());
         assert(payloadIndex->searchMulti(indexedB).size() == 1);
+        assert(overlappingComposite->searchMulti(
+                   indexedA + '\x01' + "first").empty());
+        assert(overlappingComposite->searchMulti(
+                   indexedB + '\x01' + "first").size() == 1);
 
         assert(engine.beginTransaction(dbname) == DBStatus::OK);
         assert(engine.update(dbname, "logical_index", {{"payload", indexedC}},
@@ -283,6 +298,10 @@ int main() {
         assert(engine.rollbackTransaction() == DBStatus::OK);
         assert(payloadIndex->searchMulti(indexedB).size() == 1);
         assert(payloadIndex->searchMulti(indexedC).empty());
+        assert(overlappingComposite->searchMulti(
+                   indexedB + '\x01' + "first").size() == 1);
+        assert(overlappingComposite->searchMulti(
+                   indexedC + '\x01' + "first").empty());
 
         assert(engine.beginTransaction(dbname) == DBStatus::OK);
         assert(engine.savepoint("before_large_update") == DBStatus::OK);
@@ -297,11 +316,17 @@ int main() {
         assert(engine.remove(dbname, "logical_index", {"=id 1"}) ==
                DBStatus::OK);
         assert(payloadIndex->searchMulti(indexedB).empty());
+        assert(overlappingComposite->searchMulti(
+                   indexedB + '\x01' + "first").empty());
         assert(engine.rollbackTransaction() == DBStatus::OK);
         assert(payloadIndex->searchMulti(indexedB).size() == 1);
+        assert(overlappingComposite->searchMulti(
+                   indexedB + '\x01' + "first").size() == 1);
         assert(engine.remove(dbname, "logical_index", {"=id 1"}) ==
                DBStatus::OK);
         assert(payloadIndex->searchMulti(indexedB).empty());
+        assert(overlappingComposite->searchMulti(
+                   indexedB + '\x01' + "first").empty());
         std::cout << "[TOAST] logical constraints + index maintenance OK\n";
 
         TableSchema logicalComposite;
