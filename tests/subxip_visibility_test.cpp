@@ -142,6 +142,8 @@ int main() {
         // Old aborted inserts stay invisible; old committed inserts remain.
         resetTuple(5);
         assert(!rv.isVisible(buf, sizeof(buf), 2));
+        setXminCommitted(castHeapHeader(buf));
+        assert(!rv.isVisible(buf, sizeof(buf), 2));
         resetTuple(6);
         assert(rv.isVisible(buf, sizeof(buf), 2));
 
@@ -160,6 +162,8 @@ int main() {
         // DELETE hides it. A delete active/new at snapshot time does not hide
         // the row even if it commits later and gains a hint.
         resetTuple(6, 5);
+        assert(rv.isVisible(buf, sizeof(buf), 2));
+        setXmaxCommitted(castHeapHeader(buf));
         assert(rv.isVisible(buf, sizeof(buf), 2));
         resetTuple(6, 7);
         assert(!rv.isVisible(buf, sizeof(buf), 2));

@@ -454,13 +454,16 @@ bool StorageEngine::ReadView::isVisible(const char* rowBuffer, size_t len, uint3
         xminVisible = false; // subtransaction in progress
     } else if (xmin >= lowLimitId) {
         xminVisible = false;
-    } else if (xminComm) {
-        // A commit hint proves outcome, but only after the snapshot boundary
-        // checks above prove the transaction belongs to this snapshot.
-        xminVisible = true;
     } else if (commitLog) {
+        // CLOG is authoritative when it is available.  PITR can deliberately
+        // change a transaction that committed on the source timeline into an
+        // aborted transaction on the restored timeline, while heap pages may
+        // still carry the old committed hint bit.
         auto s = commitLog->getStatus(static_cast<TxnId>(xmin));
         xminVisible = (s == CommitLog::Status::Committed);
+    } else if (xminComm) {
+        // Legacy callers without a CLOG may still use the tuple hint.
+        xminVisible = true;
     } else {
         xminVisible = true; // fallback
     }
@@ -478,12 +481,14 @@ bool StorageEngine::ReadView::isVisible(const char* rowBuffer, size_t len, uint3
         xmaxVisible = true; // prepared/in-progress delete is not committed
     } else if (xmax >= lowLimitId) {
         xmaxVisible = true;
+    } else if (commitLog) {
+        // As with xmin, a restored timeline's CLOG overrides stale source-
+        // timeline commit hints left in the heap tuple.
+        auto s = commitLog->getStatus(static_cast<TxnId>(xmax));
+        xmaxVisible = (s != CommitLog::Status::Committed);
     } else if (xmaxComm) {
         // The delete committed and was no longer active at snapshot time.
         xmaxVisible = false;
-    } else if (commitLog) {
-        auto s = commitLog->getStatus(static_cast<TxnId>(xmax));
-        xmaxVisible = (s != CommitLog::Status::Committed);
     } else {
         xmaxVisible = true;
     }
@@ -25580,10 +25585,19 @@ bool StorageEngine::recoverAllDatabases() {
     // while in-progress/aborted snapshots restore the pre-DDL database.
     // DDL snapshots hold the database-wide exclusive transaction lock while
     // alive, so restoring one cannot erase a concurrent committed transaction.
+    struct RecoveryForkState {
+        uint64_t targetEpoch = 0;
+        uint32_t sourceTimeline = 0;
+        uint32_t targetTimeline = 0;
+    };
+
     std::map<std::string, std::set<uint64_t>> committedXidsByDb;
     std::map<std::string, std::set<uint64_t>> abortedXidsByDb;
+    std::map<std::string, std::set<uint64_t>> pitrExcludedXidsByDb;
     std::map<std::string, std::set<uint64_t>> preparedWalXidsByDb;
     std::map<std::string, std::map<uint64_t, uint8_t>> xactWalStateByDb;
+    std::map<std::string, uint64_t> recoveryTargetsByDb;
+    std::map<std::string, RecoveryForkState> recoveryForksByDb;
     std::set<std::pair<std::string, uint64_t>> inDoubtPreparedXids;
     std::map<std::pair<std::string, uint64_t>, std::filesystem::path> preparedFiles;
     std::map<std::pair<std::string, uint64_t>,
@@ -25609,8 +25623,138 @@ bool StorageEngine::recoverAllDatabases() {
             dbname = entry.path().filename().string();
         } catch (...) { continue; }
         if (!isDatabaseDirectory(dbname)) continue;
+
+        const auto walPath = dbPath(dbname) / "pg_wal";
+        const auto targetPath = walPath / "recovery_target";
+        const auto forkPath = walPath / "recovery_fork";
+        std::error_code targetError;
+        bool hasTarget =
+            std::filesystem::exists(targetPath, targetError);
+        if (targetError) {
+            std::cerr << "[recovery] cannot inspect PITR target for "
+                      << dbname << std::endl;
+            return false;
+        }
+        uint64_t targetEpoch = 0;
+        if (hasTarget) {
+            if (!std::filesystem::is_regular_file(targetPath, targetError) ||
+                targetError) {
+                std::cerr << "[recovery] PITR target is not a regular file for "
+                          << dbname << std::endl;
+                return false;
+            }
+            std::ifstream targetInput(targetPath);
+            std::string targetToken;
+            std::string trailingToken;
+            if (!(targetInput >> targetToken) ||
+                (targetInput >> trailingToken) || targetInput.bad() ||
+                targetToken.empty() ||
+                !std::all_of(targetToken.begin(), targetToken.end(),
+                             [](unsigned char c) {
+                                 return std::isdigit(c) != 0;
+                             })) {
+                std::cerr << "[recovery] invalid PITR target for "
+                          << dbname << std::endl;
+                return false;
+            }
+            try {
+                size_t consumed = 0;
+                targetEpoch = std::stoull(targetToken, &consumed);
+                if (consumed != targetToken.size() || targetEpoch == 0)
+                    throw std::invalid_argument("invalid target");
+            } catch (...) {
+                std::cerr << "[recovery] invalid PITR target for "
+                          << dbname << std::endl;
+                return false;
+            }
+        }
+
         WALManager* wal = getWAL(dbname);
-        if (!wal || wal->currentWriteLsn() == 0) continue;
+        if (!wal) {
+            std::cerr << "[recovery] cannot open WAL for " << dbname
+                      << std::endl;
+            return false;
+        }
+
+        std::error_code forkError;
+        const bool hasFork = std::filesystem::exists(forkPath, forkError);
+        if (forkError) {
+            std::cerr << "[recovery] cannot inspect PITR fork state for "
+                      << dbname << std::endl;
+            return false;
+        }
+        if (hasFork) {
+            if (!std::filesystem::is_regular_file(forkPath, forkError) ||
+                forkError) {
+                std::cerr << "[recovery] PITR fork state is not a regular file for "
+                          << dbname << std::endl;
+                return false;
+            }
+            std::ifstream forkInput(forkPath);
+            std::string magic;
+            std::string trailingToken;
+            uint64_t forkTarget = 0;
+            uint64_t sourceTimeline = 0;
+            uint64_t targetTimeline = 0;
+            if (!(forkInput >> magic >> forkTarget >> sourceTimeline >>
+                  targetTimeline) ||
+                (forkInput >> trailingToken) || forkInput.bad() ||
+                magic != "DBMS_PITR_FORK_V1" || forkTarget == 0 ||
+                sourceTimeline == 0 ||
+                sourceTimeline > std::numeric_limits<uint32_t>::max() ||
+                targetTimeline <= sourceTimeline ||
+                targetTimeline > std::numeric_limits<uint32_t>::max()) {
+                std::cerr << "[recovery] invalid PITR fork state for "
+                          << dbname << std::endl;
+                return false;
+            }
+            RecoveryForkState forkState{
+                forkTarget, static_cast<uint32_t>(sourceTimeline),
+                static_cast<uint32_t>(targetTimeline)};
+            if (hasTarget && targetEpoch != forkState.targetEpoch) {
+                std::cerr << "[recovery] PITR target and fork state disagree for "
+                          << dbname << std::endl;
+                return false;
+            }
+
+            if (wal->timelineId() == forkState.targetTimeline) {
+                // Recovery reached the durable timeline switch and crashed
+                // while consuming its marker(s).  Heap, CLOG and indexes were
+                // flushed before the switch, so only idempotent cleanup is
+                // left; replaying the abandoned source timeline would revive
+                // transactions beyond the target.
+                if (hasTarget && !removePreparedFileDurably(targetPath)) {
+                    std::cerr << "[recovery] failed to consume completed PITR target for "
+                              << dbname << std::endl;
+                    return false;
+                }
+                if (!removePreparedFileDurably(forkPath)) {
+                    std::cerr << "[recovery] failed to clear completed PITR fork state for "
+                              << dbname << std::endl;
+                    return false;
+                }
+                hasTarget = false;
+                targetEpoch = 0;
+            } else if (!hasTarget ||
+                       wal->timelineId() != forkState.sourceTimeline) {
+                std::cerr << "[recovery] PITR fork state has an unexpected timeline for "
+                          << dbname << std::endl;
+                return false;
+            } else {
+                recoveryForksByDb.emplace(dbname, forkState);
+            }
+        }
+
+        if (hasTarget) recoveryTargetsByDb.emplace(dbname, targetEpoch);
+
+        if (wal->currentWriteLsn() == 0) {
+            if (hasTarget) {
+                std::cerr << "[recovery] PITR target has no recoverable WAL for "
+                          << dbname << std::endl;
+                return false;
+            }
+            continue;
+        }
         Lsn lsn = wal->earliestAvailableLsn();
         while (true) {
             auto recOpt = wal->ReadRecord(lsn);
@@ -25648,8 +25792,22 @@ bool StorageEngine::recoverAllDatabases() {
                         return false;
                     }
                     walState |= 0x02;
-                    committedXidsByDb[dbname].insert(xid);
-                    abortedXidsByDb[dbname].erase(xid);
+                    const uint64_t targetEpoch =
+                        recoveryTargetsByDb.count(dbname)
+                            ? recoveryTargetsByDb[dbname]
+                            : 0;
+                    const uint64_t commitEpoch = commitEpochOf(rec);
+                    const bool excludedByTarget =
+                        targetEpoch != 0 && commitEpoch != 0 &&
+                        commitEpoch > targetEpoch;
+                    if (excludedByTarget) {
+                        pitrExcludedXidsByDb[dbname].insert(xid);
+                        committedXidsByDb[dbname].erase(xid);
+                        abortedXidsByDb[dbname].insert(xid);
+                    } else {
+                        committedXidsByDb[dbname].insert(xid);
+                        abortedXidsByDb[dbname].erase(xid);
+                    }
                     preparedWalXidsByDb[dbname].erase(xid);
                 } else {
                     // A normal transaction whose CLOG publication failed
@@ -25858,25 +26016,26 @@ bool StorageEngine::recoverAllDatabases() {
         if (wal->currentWriteLsn() == 0) continue; // no WAL
 
         // A persisted PITR target (written by pitrRestore in the previous
-        // process) gates this database's commit replay. It is consumed and
-        // removed after a successful recovery so subsequent restarts are
-        // normal crash recoveries.
-        {
-            const auto targetPath = dbPath(dbname) / "pg_wal" / "recovery_target";
-            std::error_code tec;
-            if (std::filesystem::exists(targetPath, tec) && !tec) {
-                std::ifstream ifs(targetPath);
-                uint64_t target = 0;
-                if (ifs >> target && target != 0) {
-                    recoveryTargetEpoch_.store(target);
-                    std::cerr << "[recovery] " << dbname
-                              << ": PITR target epoch " << target << std::endl;
-                }
-            }
+        // process) gates this database's commit replay. Target parsing and
+        // validation happened before the transaction-state pre-scan.
+        const uint64_t recoveryTarget =
+            recoveryTargetsByDb.count(dbname)
+                ? recoveryTargetsByDb.at(dbname)
+                : 0;
+        if (recoveryTarget != 0) {
+            recoveryTargetEpoch_.store(recoveryTarget);
+            std::cerr << "[recovery] " << dbname
+                      << ": PITR target epoch " << recoveryTarget << std::endl;
         }
 
         auto checkpointLsnOpt = wal->findLastCheckpointLsn();
-        Lsn redoLsn = checkpointLsnOpt.value_or(wal->earliestAvailableLsn());
+        // The newest archived checkpoint may itself be later than a PITR
+        // target. Start from the oldest retained WAL in target mode so every
+        // post-target transaction still has its before-image available for
+        // undo. Ordinary crash recovery keeps the checkpoint fast path.
+        Lsn redoLsn = recoveryTarget != 0
+            ? wal->earliestAvailableLsn()
+            : checkpointLsnOpt.value_or(wal->earliestAvailableLsn());
         const auto preparedForDatabase = inDoubtPreparedXids.lower_bound(
             {dbname, 0});
         const bool preservePreparedIndexState =
@@ -25900,9 +26059,20 @@ bool StorageEngine::recoverAllDatabases() {
                     if (rec.data.size() >= sizeof(uint64_t)) {
                         uint64_t xid = 0;
                         std::memcpy(&xid, rec.data.data(), sizeof(xid));
-                        committedXids.insert(xid);
                         CommitLog* clog = getCommitLog(dbname);
-                        if (clog) clog->setStatus(xid, CommitLog::Status::Committed);
+                        if (pitrExcludedXidsByDb[dbname].count(xid)) {
+                            committedXids.erase(xid);
+                            if (clog) {
+                                clog->setStatus(
+                                    xid, CommitLog::Status::Aborted);
+                            }
+                        } else {
+                            committedXids.insert(xid);
+                            if (clog) {
+                                clog->setStatus(
+                                    xid, CommitLog::Status::Committed);
+                            }
+                        }
                     }
                 } else if (rmid == RM_XACT_ID && info == XLOG_XACT_ABORT) {
                     if (rec.data.size() >= sizeof(uint64_t)) {
@@ -25921,15 +26091,16 @@ bool StorageEngine::recoverAllDatabases() {
                 if (rec.header.xl_xid != 0 &&
                     (rmid == RM_HEAP_ID || rmid == RM_INDEX_ID) &&
                     !committedXidsByDb[dbname].count(rec.header.xl_xid) &&
-                    !abortedXidsByDb[dbname].count(rec.header.xl_xid) &&
-                    !inDoubtPreparedXids.count(
-                        {dbname, rec.header.xl_xid})) {
+                    ((!abortedXidsByDb[dbname].count(rec.header.xl_xid) &&
+                      !inDoubtPreparedXids.count(
+                          {dbname, rec.header.xl_xid})) ||
+                     pitrExcludedXidsByDb[dbname].count(
+                         rec.header.xl_xid))) {
                     needsIndexRebuild = true;
                 }
                 lsn += rec.header.xl_tot_len;
             }
         }
-
         // Make the visibility decisions durable before replaying heap/index
         // images. Recovery must fail closed if CLOG cannot be persisted.
         if (CommitLog* clog = getCommitLog(dbname); clog && !clog->flush()) {
@@ -25937,14 +26108,6 @@ bool StorageEngine::recoverAllDatabases() {
                       << dbname << std::endl;
             return false;
         }
-        // PITR target is single-use: a successful visibility decision
-        // consumes it so later restarts replay normally.
-        recoveryTargetEpoch_.store(0);
-        {
-            std::error_code rmEc;
-            std::filesystem::remove(dbPath(dbname) / "pg_wal" / "recovery_target", rmEc);
-        }
-
         // Pass 2: replay committed/non-transactional images in WAL order.
         // Uncommitted before-images are intentionally deferred to the reverse
         // pass below. If one transaction changes a page more than once, its
@@ -26189,7 +26352,101 @@ bool StorageEngine::recoverAllDatabases() {
                     std::ofstream(dtPath, std::ios::binary).close();
                 }
             }
-        } catch (...) {}
+        } catch (const std::exception& error) {
+            std::cerr << "[recovery] failed to reset unlogged tables for "
+                      << dbname << ": " << error.what() << std::endl;
+            return false;
+        } catch (...) {
+            std::cerr << "[recovery] failed to reset unlogged tables for "
+                      << dbname << std::endl;
+            return false;
+        }
+
+        // A recovery target is single-use, but the source timeline still
+        // contains COMMIT records beyond that target.  Fork a new timeline
+        // before consuming the target so later crash recovery cannot replay
+        // those records and resurrect discarded rows.  The durable fork
+        // marker makes both sides of the two-file transition retryable.
+        if (recoveryTarget != 0) {
+            const auto targetPath =
+                dbPath(dbname) / "pg_wal" / "recovery_target";
+            const auto forkPath =
+                dbPath(dbname) / "pg_wal" / "recovery_fork";
+            RecoveryForkState forkState;
+            if (const auto existing = recoveryForksByDb.find(dbname);
+                existing != recoveryForksByDb.end()) {
+                forkState = existing->second;
+            } else {
+                const uint32_t sourceTimeline = wal->timelineId();
+                uint32_t highestTimeline = sourceTimeline;
+                std::error_code timelineError;
+                for (const auto& entry : std::filesystem::directory_iterator(
+                         targetPath.parent_path(),
+                         std::filesystem::directory_options::skip_permission_denied,
+                         timelineError)) {
+                    if (timelineError) break;
+                    std::error_code entryError;
+                    if (!entry.is_regular_file(entryError) || entryError)
+                        continue;
+                    const std::string name = entry.path().filename().string();
+                    if (name.size() != 24) continue;
+                    try {
+                        size_t consumed = 0;
+                        const unsigned long parsed = std::stoul(
+                            name.substr(0, 8), &consumed, 16);
+                        if (consumed == 8 &&
+                            parsed <= std::numeric_limits<uint32_t>::max()) {
+                            highestTimeline = std::max(
+                                highestTimeline,
+                                static_cast<uint32_t>(parsed));
+                        }
+                    } catch (...) {
+                        continue;
+                    }
+                }
+                if (timelineError ||
+                    highestTimeline == std::numeric_limits<uint32_t>::max()) {
+                    std::cerr << "[recovery] cannot allocate a PITR timeline for "
+                              << dbname << std::endl;
+                    return false;
+                }
+                forkState = {recoveryTarget, sourceTimeline,
+                             static_cast<uint32_t>(highestTimeline + 1)};
+            }
+            if (forkState.targetEpoch != recoveryTarget ||
+                wal->timelineId() != forkState.sourceTimeline) {
+                std::cerr << "[recovery] PITR fork state changed unexpectedly for "
+                          << dbname << std::endl;
+                return false;
+            }
+            std::ostringstream forkContents;
+            forkContents << "DBMS_PITR_FORK_V1\n"
+                         << forkState.targetEpoch << ' '
+                         << forkState.sourceTimeline << ' '
+                         << forkState.targetTimeline << '\n';
+            if (!index_file::writeAtomically(forkPath,
+                                             forkContents.str())) {
+                std::cerr << "[recovery] failed to persist PITR fork state for "
+                          << dbname << std::endl;
+                return false;
+            }
+            if (!wal->setTimeline(forkState.targetTimeline)) {
+                std::cerr << "[recovery] failed to fork WAL timeline for "
+                          << dbname << std::endl;
+                return false;
+            }
+            if (!removePreparedFileDurably(targetPath)) {
+                std::cerr << "[recovery] failed to consume PITR target for "
+                          << dbname << std::endl;
+                return false;
+            }
+            if (!removePreparedFileDurably(forkPath)) {
+                std::cerr << "[recovery] failed to clear PITR fork state for "
+                          << dbname << std::endl;
+                return false;
+            }
+            recoveryTargetEpoch_.store(0);
+        }
     }
     return true;
 }
@@ -26644,13 +26901,10 @@ bool StorageEngine::pitrRestore(const std::string& dbname,
     // actually replays) sees it — the restore command runs in a different
     // process than the roll-forward.
     const auto targetPath = walDir / "recovery_target";
-    {
-        std::ofstream ofs(targetPath, std::ios::trunc);
-        ofs << targetEpoch << "\n";
-        if (!ofs) {
-            std::cerr << "[pitr] cannot persist recovery target" << std::endl;
-            return false;
-        }
+    if (!index_file::writeAtomically(
+            targetPath, std::to_string(targetEpoch) + "\n")) {
+        std::cerr << "[pitr] cannot persist recovery target" << std::endl;
+        return false;
     }
     std::cerr << "[pitr] restored " << copied
               << " archived segment(s) for " << dbname
