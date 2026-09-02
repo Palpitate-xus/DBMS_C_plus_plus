@@ -6034,6 +6034,27 @@ static bool tableHasColumns(const string& dbname, const string& tablename, const
 }
 
 static string normalizeConditionStr(string s) {
+    // PG 22012: division by a literal zero in a WHERE/HAVING/ON
+    // predicate is an immediate query error.  The raw text still
+    // carries "/ 0" here (later stages rewrite it away), so scan
+    // now: a '/' followed (after optional spaces) by a standalone
+    // '0'.  Throwing lets the wire turn this into SQLSTATE 22012
+    // with PG's exact message; // comment guards skip.
+    {
+        string low;
+        for (char c : s) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        size_t p = 0;
+        while ((p = low.find('/', p)) != string::npos) {
+            if (p > 0 && low[p - 1] == '/') { p += 2; continue; }
+            size_t a = p + 1;
+            while (a < low.size() && isspace(static_cast<unsigned char>(low[a]))) ++a;
+            bool zeroLit = a < low.size() && low[a] == '0' &&
+                           (a + 1 >= low.size() ||
+                            !isalnum(static_cast<unsigned char>(low[a + 1])));
+            if (zeroLit) throw std::runtime_error("division by zero");
+            ++p;
+        }
+    }
     // Typed literals (DATE 'x', TIME 'x', TIMESTAMP 'x') in predicates:
     // strip the storage-redundant keyword so the tokenizer sees the bare
     // quoted literal (the column side already declares the type).
