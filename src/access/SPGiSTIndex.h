@@ -13,6 +13,8 @@ struct SPGiSTNode {
     double minX = 0, minY = 0, maxX = 0, maxY = 0;
     std::vector<std::pair<std::string, int64_t>> points; // ("x,y", rid)
     std::unique_ptr<SPGiSTNode> children[4]; // NW, NE, SW, SE
+    std::string unsplittableCoordinate;
+    bool cannotSplit = false;
     static constexpr size_t MAX_LEAF_POINTS = 16;
 
     bool isLeaf() const {

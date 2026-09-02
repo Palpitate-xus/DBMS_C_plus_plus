@@ -8,6 +8,29 @@ void SPGiSTNode::split() {
     if (!isLeaf() || points.size() <= MAX_LEAF_POINTS) return;
     double midX = (minX + maxX) * 0.5;
     double midY = (minY + maxY) * 0.5;
+    const bool xCanShrink = midX > minX && midX < maxX;
+    const bool yCanShrink = midY > minY && midY < maxY;
+    if (!xCanShrink && !yCanShrink) {
+        cannotSplit = true;
+        return;
+    }
+
+    // A quadtree cannot separate multiple entries at exactly the same
+    // coordinate. Keeping them in one leaf avoids creating one new level for
+    // every duplicate insert.
+    bool identicalCoordinates = true;
+    for (size_t i = 1; i < points.size(); ++i) {
+        if (points[i].first != points[0].first) {
+            identicalCoordinates = false;
+            break;
+        }
+    }
+    if (identicalCoordinates) {
+        unsplittableCoordinate = points[0].first;
+        return;
+    }
+    unsplittableCoordinate.clear();
+
     children[0] = std::make_unique<SPGiSTNode>();
     children[0]->minX = minX; children[0]->minY = midY;
     children[0]->maxX = midX; children[0]->maxY = maxY;
@@ -51,8 +74,12 @@ void SPGiSTIndex::insertRecursive(SPGiSTNode* node, double x, double y, int64_t 
     if (node->isLeaf()) {
         std::ostringstream oss;
         oss << x << "," << y;
-        node->points.push_back({oss.str(), rid});
-        if (node->points.size() > SPGiSTNode::MAX_LEAF_POINTS) {
+        const std::string key = oss.str();
+        node->points.push_back({key, rid});
+        if (node->points.size() > SPGiSTNode::MAX_LEAF_POINTS &&
+            !node->cannotSplit &&
+            (node->unsplittableCoordinate.empty() ||
+             node->unsplittableCoordinate != key)) {
             node->split();
         }
         return;

@@ -43,10 +43,24 @@ static void test_within_uses_exact_distance() {
     assert(index.searchWithin(0.0, 0.0, -1.0).empty());
 }
 
+static void test_duplicate_points_do_not_create_unbounded_depth() {
+    SPGiSTIndex index(-1.0, -1.0, 1.0, 1.0);
+    constexpr int duplicateCount = 20000;
+    for (int rid = 0; rid < duplicateCount; ++rid) {
+        index.insert(0.25, -0.25, rid);
+    }
+
+    assert(index.size() == duplicateCount);
+    const auto matches = index.searchEquals(0.25, -0.25);
+    assert(matches.size() == duplicateCount);
+}
+
 int main() {
     test_missing_remove_preserves_size();
     test_within_uses_exact_distance();
+    test_duplicate_points_do_not_create_unbounded_depth();
     std::cout << "[SPGIST] missing remove accounting OK\n";
     std::cout << "[SPGIST] exact radius filtering OK\n";
+    std::cout << "[SPGIST] duplicate-point depth guard OK\n";
     return 0;
 }
