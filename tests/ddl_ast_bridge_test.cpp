@@ -76,6 +76,70 @@ static void test_create_table_registers_in_catalog() {
     std::cout << "[DDL] CREATE TABLE registers in catalog OK" << std::endl;
 }
 
+static void test_alter_table_rename_updates_catalog() {
+    std::string db = testDbPath("ddl_bridge_rename_catalog");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE rename_source (id INT)", s));
+
+    dbms::Oid originalOid = dbms::INVALID_OID;
+    {
+        dbms::CatalogManager& initialCatalog =
+            g_engine.catalogService().get(db);
+        const auto* initialPublic =
+            initialCatalog.findNamespaceByName("public");
+        assert(initialPublic != nullptr);
+        const auto* original = initialCatalog.findClassByName(
+            "rename_source", initialPublic->oid);
+        assert(original != nullptr);
+        originalOid = original->oid;
+    }
+
+    // Relation names share a catalog namespace with indexes.  Storage alone
+    // cannot see this collision, so the catalog rejection must roll the
+    // physical rename back to its original name.
+    assert(!ddl.executeSql(
+        "CREATE INDEX rename_collision ON rename_source (id)", s));
+    assert(ddl.executeSql(
+        "ALTER TABLE rename_source RENAME TO rename_collision", s));
+    assert(g_engine.tableExists(db, "rename_source"));
+    assert(!g_engine.tableExists(db, "rename_collision"));
+    // Snapshot rollback evicts the catalog cache, so reacquire it before
+    // inspecting the restored state.
+    dbms::CatalogManager& cat = g_engine.catalogService().get(db);
+    const auto* nsPublic = cat.findNamespaceByName("public");
+    assert(nsPublic != nullptr);
+    const auto* original = cat.findClassByName(
+        "rename_source", nsPublic->oid);
+    assert(original != nullptr && original->oid == originalOid);
+
+    assert(!ddl.executeSql(
+        "ALTER TABLE rename_source RENAME TO rename_target", s));
+    assert(!g_engine.tableExists(db, "rename_source"));
+    assert(g_engine.tableExists(db, "rename_target"));
+    assert(cat.findClassByName("rename_source", nsPublic->oid) == nullptr);
+    const auto* renamed = cat.findClassByName("rename_target", nsPublic->oid);
+    assert(renamed != nullptr && renamed->oid == originalOid);
+
+    // The rename must survive a catalog cache reload, not merely update the
+    // current process's name index.
+    g_engine.catalogService().evict(db);
+    dbms::CatalogManager& reloaded = g_engine.catalogService().get(db);
+    const auto* reloadedPublic = reloaded.findNamespaceByName("public");
+    assert(reloadedPublic != nullptr);
+    assert(reloaded.findClassByName("rename_source", reloadedPublic->oid) == nullptr);
+    renamed = reloaded.findClassByName("rename_target", reloadedPublic->oid);
+    assert(renamed != nullptr && renamed->oid == originalOid);
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[DDL] ALTER TABLE RENAME updates catalog OK" << std::endl;
+}
+
 static void test_create_index_sequence() {
     std::string db = testDbPath("ddl_bridge_t2");
     cleanup(db);
@@ -415,6 +479,7 @@ int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_create_drop_table();
     test_create_table_registers_in_catalog();
+    test_alter_table_rename_updates_catalog();
     test_create_index_sequence();
     test_drop_index_uses_sql_name();
     test_create_database_schema();

@@ -753,6 +753,30 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 }
                 status = g_engine.alterTableRenameTable(s.currentDB, tableName, sub.newName);
                 if (!alterStatusOk(status, "Table")) return true;
+                try {
+                    dbms::CatalogManager& catalog =
+                        g_engine.catalogService().get(s.currentDB);
+                    const auto qualifiedName =
+                        dbms::CatalogService::logicalName(tableName);
+                    const std::string schemaName = qualifiedName.schema.empty()
+                        ? "public"
+                        : qualifiedName.schema;
+                    const auto* relation = catalog.resolveRelation(
+                        qualifiedName.name, {schemaName});
+                    if (relation) {
+                        const dbms::Oid relationOid = relation->oid;
+                        if (!catalog.renameClass(relationOid, sub.newName) ||
+                            !catalog.persistAll()) {
+                            std::cout << "ALTER TABLE RENAME catalog update failed"
+                                      << std::endl;
+                            return true;
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    std::cerr << "ALTER TABLE RENAME catalog update failed: "
+                              << e.what() << std::endl;
+                    return true;
+                }
                 break;
             case AlterTableStmt::Action::AlterColumn: {
                 if (sub.name.empty()) {
