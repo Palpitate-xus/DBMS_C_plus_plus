@@ -2268,11 +2268,31 @@ bool ParallelGroupAggregateOp::open() {
         return tbl_.len;
     };
     std::vector<size_t> setIndices;
+    // PG allows GROUP BY over expressions (v % 2, id / 10 ...).
+    // A spec that is not a table column is evaluated per row via
+    // the expression helper; a sentinel marks such positions.
+    std::vector<bool> isExprKey;
     for (const auto& name : groupByCols_) {
         const size_t index = columnIndex(name);
-        if (index >= tbl_.len) return false;
-        setIndices.push_back(index);
+        if (index >= tbl_.len) {
+            isExprKey.push_back(true);
+            setIndices.push_back(static_cast<size_t>(-1));
+        } else {
+            isExprKey.push_back(false);
+            setIndices.push_back(index);
+        }
     }
+    auto rowValueMap = [&](size_t rowId) {
+        std::map<std::string, std::string> row;
+        for (size_t ci = 0; ci < tbl_.len; ++ci)
+            row[tbl_.cols[ci].dataName] = input[rowId].values[ci];
+        return row;
+    };
+    auto groupKeyValue = [&](size_t rowId, size_t keyPos) -> std::string {
+        if (!isExprKey[keyPos]) return input[rowId].values[setIndices[keyPos]];
+        const auto r = dbms::ExprHelper::evalString(groupByCols_[keyPos], rowValueMap(rowId));
+        return r.ok ? r.value : std::string();
+    };
 
     // ---- parallel partition into local group buckets ----
     using Buckets = std::map<std::string, std::vector<size_t>>;
@@ -2298,8 +2318,8 @@ bool ParallelGroupAggregateOp::open() {
                 auto& buckets = localB[static_cast<size_t>(w)];
                 for (size_t rowId = begin; rowId < end; ++rowId) {
                     std::string key;
-                    for (size_t index : setIndices) {
-                        const auto& value = input[rowId].values[index];
+                    for (size_t ki = 0; ki < setIndices.size(); ++ki) {
+                        const auto& value = groupKeyValue(rowId, ki);
                         key += std::to_string(value.size()) + ":" + value + "|";
                     }
                     buckets[key].push_back(rowId);
@@ -2310,8 +2330,8 @@ bool ParallelGroupAggregateOp::open() {
     } else {
         for (size_t rowId = 0; rowId < n; ++rowId) {
             std::string key;
-            for (size_t index : setIndices) {
-                const auto& value = input[rowId].values[index];
+            for (size_t ki = 0; ki < setIndices.size(); ++ki) {
+                const auto& value = groupKeyValue(rowId, ki);
                 key += std::to_string(value.size()) + ":" + value + "|";
             }
             localB[0][key].push_back(rowId);
@@ -2513,10 +2533,10 @@ bool ParallelGroupAggregateOp::open() {
     for (const auto& group : groups) {
         std::vector<std::string> values;
         values.reserve(groupByCols_.size() + items_.size());
-        for (const auto& column : groupByCols_) {
+        for (size_t gi = 0; gi < groupByCols_.size(); ++gi) {
             values.push_back(group.second.empty()
-                ? "NULL"
-                : input[group.second.front()].values[columnIndex(column)]);
+                ? std::string("NULL")
+                : groupKeyValue(group.second.front(), gi));
         }
         for (const auto& item : items_) values.push_back(computeAggregate(group.second, item));
         std::string output;
@@ -2889,10 +2909,31 @@ bool GroupAggregateOp::open() {
         }
         return tbl_.len;
     };
+    // GROUP BY expressions: non-column keys are evaluated per row
+    // (same semantics as GroupAggregateOp).
+    std::vector<size_t> setIndices;
+    std::vector<bool> isExprKey;
     for (const auto& name : groupByCols_) {
         const size_t index = columnIndex(name);
-        if (index >= tbl_.len) return false;
+        if (index >= tbl_.len) {
+            isExprKey.push_back(true);
+            setIndices.push_back(static_cast<size_t>(-1));
+        } else {
+            isExprKey.push_back(false);
+            setIndices.push_back(index);
+        }
     }
+    auto rowValueMap = [&](size_t rowId) {
+        std::map<std::string, std::string> row;
+        for (size_t ci = 0; ci < tbl_.len; ++ci)
+            row[tbl_.cols[ci].dataName] = input[rowId].values[ci];
+        return row;
+    };
+    auto groupKeyValue = [&](size_t rowId, size_t keyPos) -> std::string {
+        if (!isExprKey[keyPos]) return input[rowId].values[setIndices[keyPos]];
+        const auto r = dbms::ExprHelper::evalString(groupByCols_[keyPos], rowValueMap(rowId));
+        return r.ok ? r.value : std::string();
+    };
 
     static const std::set<std::string> supported = {
         "count", "sum", "avg", "min", "max", "bool_and", "bool_or", "every"
@@ -3089,18 +3130,23 @@ bool GroupAggregateOp::open() {
 
     for (const auto& groupingSet : effectiveSets) {
         std::vector<size_t> setIndices;
+        std::vector<size_t> setKeyPos;
         for (const auto& name : groupingSet) {
+            size_t keyPos = static_cast<size_t>(-1);
+            for (size_t gp = 0; gp < groupByCols_.size(); ++gp)
+                if (groupByCols_[gp] == name) { keyPos = gp; break; }
             const size_t index = columnIndex(name);
-            if (index >= tbl_.len) return false;
+            if (index >= tbl_.len && keyPos == static_cast<size_t>(-1)) return false;
             setIndices.push_back(index);
+            setKeyPos.push_back(keyPos);
         }
 
         std::map<std::string, std::vector<size_t>> groups;
         if (setIndices.empty()) groups[""] = {};
         for (size_t rowId = 0; rowId < input.size(); ++rowId) {
             std::string key;
-            for (size_t index : setIndices) {
-                const auto& value = input[rowId].values[index];
+            for (size_t ki = 0; ki < setIndices.size(); ++ki) {
+                const auto& value = groupKeyValue(rowId, setKeyPos[ki]);
                 key += std::to_string(value.size()) + ":" + value + "|";
             }
             groups[key].push_back(rowId);
@@ -3110,12 +3156,12 @@ bool GroupAggregateOp::open() {
             if (!havingPasses(group.second)) continue;
             std::vector<std::string> values;
             values.reserve(groupByCols_.size() + items_.size());
-            for (const auto& column : groupByCols_) {
-                auto setIt = std::find(groupingSet.begin(), groupingSet.end(), column);
+            for (size_t gi = 0; gi < groupByCols_.size(); ++gi) {
+                auto setIt = std::find(groupingSet.begin(), groupingSet.end(), groupByCols_[gi]);
                 if (setIt == groupingSet.end() || group.second.empty()) {
                     values.push_back("NULL");
                 } else {
-                    values.push_back(input[group.second.front()].values[columnIndex(column)]);
+                    values.push_back(groupKeyValue(group.second.front(), gi));
                 }
             }
             for (const auto& item : items_) values.push_back(computeAggregate(group.second, item));

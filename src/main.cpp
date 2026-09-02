@@ -19047,7 +19047,26 @@ if (sql.rfind("backup database", 0) == 0) {
         vector<string> answers;
         if (!groupByCols.empty()) {
             if (forUpdate) { cout << "FOR UPDATE not supported with GROUP BY" << endl; return true; }
-            for (const auto& gc : groupByCols) cout << gc << ' ';
+            // Header for group keys: PG uses the SELECT-list alias for
+            // expression keys ("v % 2 AS parity" -> "parity"), "?column?"
+            // for an unaliased expression, and the plain column name for
+            // real columns.  Printing the raw expression text here made the
+            // protocol layer space-split it into phantom columns.
+            for (const auto& gc : groupByCols) {
+                string header = gc;
+                bool isExpr = gc.find_first_of("+-*/%") != string::npos;
+                for (const auto& itemRaw : splitSelectColumns(columns)) {
+                    string it2 = trim(itemRaw);
+                    size_t ap2 = toLower(it2).rfind(" as ");
+                    if (ap2 == string::npos) continue;
+                    if (trim(it2.substr(0, ap2)) == gc) {
+                        header = trim(it2.substr(ap2 + 4));
+                        isExpr = false;
+                        break;
+                    }
+                }
+                cout << (isExpr ? string("?column?") : header) << ' ';
+            }
             vector<dbms::StorageEngine::AggItem> pureAgg;
             for (const auto& it : aggItems) {
                 if (!it.func.empty()) pureAgg.push_back(it);
@@ -19095,11 +19114,35 @@ if (sql.rfind("backup database", 0) == 0) {
                 }
             }
             cout << '\n';
+            // GROUP BY over expressions: the select list projects the
+            // computed key as a scalar arith item ("v % 2 as parity").
+            // Such items are group-key projections — allow them through.
+            bool arithGroupKeyOnly = true;
+            {
+                // Every scalar item must be a projection of a GROUP BY
+                // expression: its text (alias stripped) must equal a group
+                // spec.  Computed straight from the SELECT list, which is
+                // the authoritative projection text.
+                size_t scalarSeen = 0;
+                for (const auto& itemRaw : splitSelectColumns(columns)) {
+                    string it3 = trim(itemRaw);
+                    size_t ap3 = toLower(it3).rfind(" as ");
+                    string body3 = ap3 == string::npos ? it3 : trim(it3.substr(0, ap3));
+                    if (body3.find('(') != string::npos ||
+                        body3.find_first_of("+-*/%") == string::npos) continue;
+                    ++scalarSeen;
+                    if (find(groupByCols.begin(), groupByCols.end(), body3) == groupByCols.end()) {
+                        arithGroupKeyOnly = false;
+                        break;
+                    }
+                }
+                if (scalarSeen == 0) arithGroupKeyOnly = false;
+            }
             bool canUseVolcanoGroup = !noWait && !skipLocked &&
-                                      !hasWindow && !hasScalar &&
+                                      !hasWindow && (!hasScalar || arithGroupKeyOnly) &&
                                       distinctOnCols.empty() &&
-                                      exprOrderBySpecs.empty() &&
-                                      orderBySpecs.empty();
+                                      (exprOrderBySpecs.empty() || arithGroupKeyOnly) &&
+                                      (orderBySpecs.empty() || arithGroupKeyOnly);
             vector<vector<string>> volcanoGroupConditions;
             if (canUseVolcanoGroup && !condTokens.empty()) {
                 vector<string> condCopy = condTokens;
@@ -19121,8 +19164,11 @@ if (sql.rfind("backup database", 0) == 0) {
             static const set<string> volcanoAggregateFunctions = {
                 "count", "sum", "avg", "min", "max", "bool_and", "bool_or", "every"
             };
+            // GROUP BY expressions (v % 2, id / 10): HashAggOp evaluates
+            // non-column keys per row, so they stay eligible here.
             for (const auto& col : groupByCols) {
-                if (!hasColumn(col)) canUseVolcanoGroup = false;
+                if (col.find_first_of("+-*/%") == string::npos && !hasColumn(col))
+                    canUseVolcanoGroup = false;
             }
             for (const auto& item : pureAgg) {
                 string func = toLower(trim(item.func));
@@ -19147,7 +19193,15 @@ if (sql.rfind("backup database", 0) == 0) {
                 size_t lp = item.find('(');
                 size_t rp = item.rfind(')');
                 if (lp == string::npos || rp == string::npos || rp <= lp) {
-                    if (!isGroupColumn(item)) canUseVolcanoGroup = false;
+                    // Group-key expressions project the computed key: accept
+                    // when the item (minus its AS alias) matches a GROUP BY
+                    // spec or is itself an arithmetic expression.
+                    string body = item;
+                    size_t asAt = toLower(body).rfind(" as ");
+                    if (asAt != string::npos) body = trim(body.substr(0, asAt));
+                    const bool groupMatch = isGroupColumn(item) || isGroupColumn(body) ||
+                        body.find_first_of("+-*/%") != string::npos;
+                    if (!groupMatch) canUseVolcanoGroup = false;
                     continue;
                 }
                 string func = toLower(trim(item.substr(0, lp)));
