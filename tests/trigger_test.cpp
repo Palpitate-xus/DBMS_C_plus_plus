@@ -4,7 +4,9 @@
 #include "catalog/type_registry.h"
 #include <atomic>
 #include <cassert>
+#include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <thread>
 #include <vector>
@@ -20,6 +22,30 @@ static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
     s.permission = 1;
     s.currentDB = db;
+}
+
+static std::string readBytes(const fs::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    assert(in);
+    return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+
+static void writeBytes(const fs::path& path, const std::string& bytes) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    assert(out);
+    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    assert(out);
+}
+
+template <typename T>
+static void appendNative(std::string& bytes, const T& value) {
+    bytes.append(reinterpret_cast<const char*>(&value), sizeof(value));
+}
+
+static void appendLegacyString(std::string& bytes, const std::string& value) {
+    const size_t length = value.size();
+    appendNative(bytes, length);
+    bytes.append(value);
 }
 
 static void test_create_trigger_before_insert() {
@@ -168,6 +194,115 @@ static void test_concurrent_trigger_creates_do_not_lose_updates() {
     std::cout << "[TRIGGER] concurrent metadata updates serialized OK" << std::endl;
 }
 
+static void test_legacy_trigger_metadata_is_migrated() {
+    const std::string db = testDbPath("trigger_legacy");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    const dbms::StorageEngine::Trigger legacy{
+        "legacy_trigger", "after", "insert", "t", "select 1", "",
+        true, true, {"new new_rows"}};
+    std::string bytes;
+    const size_t count = 1;
+    appendNative(bytes, count);
+    appendLegacyString(bytes, legacy.name);
+    appendLegacyString(bytes, legacy.timing);
+    appendLegacyString(bytes, legacy.event);
+    appendLegacyString(bytes, legacy.tableName);
+    appendLegacyString(bytes, legacy.action);
+    appendLegacyString(bytes, legacy.whenCondition);
+    const uint8_t forEachRow = 1;
+    const uint8_t enabled = 1;
+    appendNative(bytes, forEachRow);
+    appendNative(bytes, enabled);
+    const size_t transitionCount = legacy.transitions.size();
+    appendNative(bytes, transitionCount);
+    appendLegacyString(bytes, legacy.transitions.front());
+    const fs::path metadata = fs::path(db) / ".triggers";
+    writeBytes(metadata, bytes);
+
+    std::vector<dbms::StorageEngine::Trigger> loaded;
+    assert(g_engine.tryGetAllTriggers(db, loaded));
+    assert(loaded.size() == 1);
+    assert(loaded[0].name == legacy.name);
+    assert(loaded[0].transitions == legacy.transitions);
+
+    // The first successful mutation rewrites legacy metadata to TRG2.
+    assert(g_engine.disableTrigger(db, legacy.name) == dbms::DBStatus::OK);
+    const std::string migrated = readBytes(metadata);
+    assert(migrated.size() >= sizeof(uint32_t));
+    uint32_t magic = 0;
+    std::memcpy(&magic, migrated.data(), sizeof(magic));
+    assert(magic == 0x32475254u);
+
+    cleanup(db);
+    std::cout << "[TRIGGER] legacy metadata migration OK" << std::endl;
+}
+
+static void test_corrupt_trigger_metadata_fails_closed() {
+    const std::string db = testDbPath("trigger_corrupt");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE t (id INT PRIMARY KEY, value INT)", s));
+    const dbms::StorageEngine::Trigger trigger{
+        "trg", "after", "insert", "t", "select 1", "", true, true, {}};
+    assert(g_engine.createTrigger(db, trigger) == dbms::DBStatus::OK);
+
+    const fs::path metadata = fs::path(db) / ".triggers";
+    const std::string valid = readBytes(metadata);
+    assert(valid.size() > sizeof(uint64_t));
+    std::string corrupt = valid;
+    corrupt.back() ^= static_cast<char>(0x5a);
+    writeBytes(metadata, corrupt);
+
+    std::vector<dbms::StorageEngine::Trigger> loaded{trigger};
+    assert(!g_engine.tryGetAllTriggers(db, loaded));
+    assert(loaded.empty());
+    loaded.push_back(trigger);
+    assert(!g_engine.tryGetTriggers(db, "t", "after", "insert", loaded));
+    assert(loaded.empty());
+    assert(g_engine.createTrigger(db, {
+        "second", "after", "insert", "t", "select 2", "", true, true, {}}) ==
+        dbms::DBStatus::CORRUPTED_DATA);
+    assert(g_engine.dropTrigger(db, trigger.name) == dbms::DBStatus::CORRUPTED_DATA);
+    assert(g_engine.disableTrigger(db, trigger.name) == dbms::DBStatus::CORRUPTED_DATA);
+    assert(g_engine.alterTableRenameTable(db, "t", "renamed") ==
+           dbms::DBStatus::CORRUPTED_DATA);
+    assert(g_engine.tableExists(db, "t"));
+    assert(!g_engine.tableExists(db, "renamed"));
+    assert(readBytes(metadata) == corrupt);
+
+    // All data-changing paths validate a single trigger snapshot before they
+    // scan or modify rows, so corruption cannot cause partially applied DML.
+    g_engine.setTriggerExecutor([](const std::string&) { return false; });
+    assert(g_engine.insert(db, "t", {{"id", "1"}, {"value", "10"}}) ==
+           dbms::DBStatus::CORRUPTED_DATA);
+    writeBytes(metadata, valid);
+    assert(g_engine.insert(db, "t", {{"id", "1"}, {"value", "10"}}) ==
+           dbms::DBStatus::OK);
+    writeBytes(metadata, corrupt);
+    assert(g_engine.update(db, "t", {{"value", "11"}}, {"=id 1"}) ==
+           dbms::DBStatus::CORRUPTED_DATA);
+    assert(g_engine.remove(db, "t", {"=id 1"}) ==
+           dbms::DBStatus::CORRUPTED_DATA);
+    writeBytes(metadata, valid);
+    const auto rows = g_engine.query(db, "t", {"=id 1"}, {});
+    assert(rows.size() == 1);
+
+    writeBytes(metadata, valid.substr(0, valid.size() - 1));
+    assert(!g_engine.tryGetAllTriggers(db, loaded));
+    assert(loaded.empty());
+    writeBytes(metadata, valid);
+    g_engine.setTriggerExecutor({});
+
+    cleanup(db);
+    std::cout << "[TRIGGER] corrupt metadata fails closed OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_create_trigger_before_insert();
@@ -176,6 +311,8 @@ int main() {
     test_create_trigger_statement_level();
     test_trigger_metadata_failures_preserve_old_state();
     test_concurrent_trigger_creates_do_not_lose_updates();
+    test_legacy_trigger_metadata_is_migrated();
+    test_corrupt_trigger_metadata_fails_closed();
     std::cout << "[TRIGGER] all passed" << std::endl;
     return 0;
 }

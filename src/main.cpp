@@ -3741,13 +3741,12 @@ static vector<map<string, string>> collectViewRows(Session& s,
 }
 
 static bool executeInsteadOfTrigger(Session& s, const string& viewname,
-                                     const string& event,
+                                     const vector<dbms::StorageEngine::Trigger>& triggers,
                                      const map<string, string>& newValues,
                                      const map<string, string>& oldValues,
                                      bool* actionFailed = nullptr) {
     if (actionFailed) *actionFailed = false;
     if (!g_engine.viewExists(s.currentDB, viewname)) return false;
-    auto triggers = g_engine.getTriggers(s.currentDB, viewname, "instead of", event);
     if (triggers.empty()) return false;
     for (const auto& trg : triggers) {
         // An INSTEAD OF trigger consumes the view DML even when its WHEN
@@ -13010,7 +13009,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
         // Check for INSTEAD OF triggers on view (takes precedence over base table rewriting)
         if (!g_engine.tableExists(s.currentDB, resolvedName) &&
             g_engine.viewExists(s.currentDB, tname)) {
-            auto viewTriggers = g_engine.getTriggers(s.currentDB, tname, "instead of", "insert");
+            vector<dbms::StorageEngine::Trigger> viewTriggers;
+            if (!g_engine.tryGetTriggers(s.currentDB, tname, "instead of", "insert",
+                                         viewTriggers)) {
+                cout << "Trigger metadata is corrupt or unreadable" << endl;
+                return true;
+            }
             size_t valuesPos = sql.find("values");
             if (!viewTriggers.empty() && valuesPos != string::npos) {
                 size_t firstValStart = sql.find('(', valuesPos);
@@ -13065,7 +13069,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         for (size_t i = 0; i < columns.size(); ++i) {
                             newValues[columns[i]] = trim(values[i]);
                         }
-                        executeInsteadOfTrigger(s, tname, "insert", newValues, {}, &triggerFailed);
+                        executeInsteadOfTrigger(s, tname, viewTriggers,
+                                                newValues, {}, &triggerFailed);
                         if (triggerFailed) {
                             cout << "INSTEAD OF INSERT trigger action failed" << endl;
                             return true;
@@ -13587,6 +13592,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
             string ioResolved = resolveTableName(s, ioTname);
             if (!g_engine.tableExists(s.currentDB, ioResolved) &&
                 g_engine.viewExists(s.currentDB, ioTname)) {
+                vector<dbms::StorageEngine::Trigger> viewTriggers;
+                if (!g_engine.tryGetTriggers(s.currentDB, ioTname, "instead of", "delete",
+                                             viewTriggers)) {
+                    cout << "Trigger metadata is corrupt or unreadable" << endl;
+                    return true;
+                }
                 string whereClause;
                 if (wherePos != string::npos) {
                     whereClause = trim(delRest.substr(wherePos + 5));
@@ -13594,13 +13605,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 auto oldRows = collectViewRows(s, ioTname, whereClause);
                 bool triggerFailed = false;
                 for (const auto& oldValues : oldRows) {
-                    executeInsteadOfTrigger(s, ioTname, "delete", {}, oldValues, &triggerFailed);
+                    executeInsteadOfTrigger(s, ioTname, viewTriggers,
+                                            {}, oldValues, &triggerFailed);
                     if (triggerFailed) {
                         cout << "INSTEAD OF DELETE trigger action failed" << endl;
                         return true;
                     }
                 }
-                if (!g_engine.getTriggers(s.currentDB, ioTname, "instead of", "delete").empty()) {
+                if (!viewTriggers.empty()) {
                     cout << "INSTEAD OF DELETE trigger executed on view " << ioTname
                          << " (" << oldRows.size() << " row(s))" << endl;
                     return false;
@@ -13830,6 +13842,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
             string ioResolved = resolveTableName(s, tname);
             if (!g_engine.tableExists(s.currentDB, ioResolved) &&
                 g_engine.viewExists(s.currentDB, tname)) {
+                vector<dbms::StorageEngine::Trigger> viewTriggers;
+                if (!g_engine.tryGetTriggers(s.currentDB, tname, "instead of", "update",
+                                             viewTriggers)) {
+                    cout << "Trigger metadata is corrupt or unreadable" << endl;
+                    return true;
+                }
                 size_t wherePos = findTopLevelKeyword(sql, "where", setPos);
                 size_t fromPos = findTopLevelKeyword(sql, "from", setPos);
                 size_t setEnd = sql.size();
@@ -13847,13 +13865,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 for (const auto& oldRow : oldRows) {
                     map<string, string> newValues = oldRow;
                     for (const auto& kv : updates) newValues[kv.first] = kv.second;
-                    executeInsteadOfTrigger(s, tname, "update", newValues, oldRow, &triggerFailed);
+                    executeInsteadOfTrigger(s, tname, viewTriggers,
+                                            newValues, oldRow, &triggerFailed);
                     if (triggerFailed) {
                         cout << "INSTEAD OF UPDATE trigger action failed" << endl;
                         return true;
                     }
                 }
-                if (!g_engine.getTriggers(s.currentDB, tname, "instead of", "update").empty()) {
+                if (!viewTriggers.empty()) {
                     cout << "INSTEAD OF UPDATE trigger executed on view " << tname
                          << " (" << oldRows.size() << " row(s))" << endl;
                     return false;
@@ -15162,7 +15181,11 @@ if (sql.rfind("backup database", 0) == 0) {
         }
         if (rest == "triggers") {
             if (!checkDB(s)) return true;
-            auto triggers = g_engine.getAllTriggers(s.currentDB);
+            vector<dbms::StorageEngine::Trigger> triggers;
+            if (!g_engine.tryGetAllTriggers(s.currentDB, triggers)) {
+                cout << "Trigger metadata is corrupt or unreadable" << endl;
+                return true;
+            }
             if (triggers.empty()) {
                 cout << "No triggers" << endl;
                 return false;

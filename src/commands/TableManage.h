@@ -1076,6 +1076,9 @@ public:
     DBStatus disableTrigger(const std::string& dbname, const std::string& trgName);
     std::vector<Trigger> getTriggers(const std::string& dbname, const std::string& tablename,
                                       const std::string& timing, const std::string& event) const;
+    bool tryGetTriggers(const std::string& dbname, const std::string& tablename,
+                        const std::string& timing, const std::string& event,
+                        std::vector<Trigger>& result) const;
     // Per-firing EXECUTE FUNCTION context (NEW/OLD/TG_* values) that fire
     // sites stage before invoking triggerExecutor_; consumed and cleared by
     // the executor for UDF-dispatched actions.
@@ -1084,6 +1087,8 @@ public:
     TriggerCtx& getExecFunctionCtxMut() const { return execFunctionCtx_; }
     void clearExecFunctionCtx() const { execFunctionCtx_ = TriggerCtx{}; }
     std::vector<Trigger> getAllTriggers(const std::string& dbname) const;
+    bool tryGetAllTriggers(const std::string& dbname,
+                           std::vector<Trigger>& result) const;
 
     // Trigger executor callback: action SQL -> success/failure
     using TriggerExecutor = std::function<bool(const std::string& actionSql)>;
@@ -1443,8 +1448,8 @@ private:
 
     // Trigger helpers
     std::filesystem::path triggerPath(const std::string& dbname) const;
-    void writeTrigger(std::ostream& out, const Trigger& trg) const;
-    Trigger readTrigger(std::istream& in) const;
+    bool loadTriggers(const std::string& dbname,
+                      std::vector<Trigger>& triggers) const;
     DBStatus persistTriggers(const std::string& dbname,
                              const std::vector<Trigger>& triggers) const;
     TriggerExecutor triggerExecutor_;

@@ -1196,6 +1196,11 @@ StorageEngine::StorageEngine()
             throw std::runtime_error(
                 "SQL statistics are corrupt or cannot be locked for database " + dbname);
         }
+        std::vector<Trigger> triggers;
+        if (!loadTriggers(dbname, triggers)) {
+            throw std::runtime_error(
+                "trigger metadata is corrupt or unreadable for database " + dbname);
+        }
     }
     // Keep trigger WHEN semantics available for direct StorageEngine users
     // (unit tests and embedded callers) as well as the interactive frontend.
@@ -6648,98 +6653,309 @@ std::string StorageEngine::buildCompositeKey(const std::string& rowBuffer,
 // ========================================================================
 // Trigger support
 // ========================================================================
+namespace {
+
+constexpr uint32_t TRIGGER_FILE_MAGIC = 0x32475254u;  // 'TRG2'
+constexpr uint32_t TRIGGER_FILE_VERSION = 1;
+constexpr size_t MAX_TRIGGER_COUNT = 10000;
+constexpr size_t MAX_TRIGGER_STRING = 100000;
+constexpr size_t MAX_TRIGGER_TRANSITIONS = 64;
+constexpr size_t MAX_TRIGGER_TRANSITION_STRING = 256;
+constexpr uintmax_t MAX_TRIGGER_FILE_SIZE = 64ULL * 1024 * 1024;
+
+uint64_t triggerMetadataChecksum(const char* data, size_t size) {
+    uint64_t hash = 1469598103934665603ULL;
+    for (size_t i = 0; i < size; ++i) {
+        hash ^= static_cast<unsigned char>(data[i]);
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+template <typename T>
+void appendTriggerPod(std::string& bytes, const T& value) {
+    bytes.append(reinterpret_cast<const char*>(&value), sizeof(value));
+}
+
+class TriggerMetadataReader {
+public:
+    TriggerMetadataReader(const std::string& bytes, size_t limit)
+        : bytes_(bytes), limit_(std::min(limit, bytes.size())) {}
+
+    template <typename T>
+    bool read(T& value) {
+        if (position_ > limit_ || limit_ - position_ < sizeof(value)) return false;
+        std::memcpy(&value, bytes_.data() + position_, sizeof(value));
+        position_ += sizeof(value);
+        return true;
+    }
+
+    bool readString(std::string& value, size_t length, size_t maximum) {
+        if (length > maximum || length > remaining()) return false;
+        value.assign(bytes_.data() + position_, length);
+        position_ += length;
+        return true;
+    }
+
+    size_t remaining() const {
+        return position_ <= limit_ ? limit_ - position_ : 0;
+    }
+
+private:
+    const std::string& bytes_;
+    size_t limit_ = 0;
+    size_t position_ = 0;
+};
+
+bool validTriggerRecord(const StorageEngine::Trigger& trigger) {
+    if (trigger.name.empty() || trigger.tableName.empty() ||
+        trigger.timing.empty() || trigger.event.empty() ||
+        trigger.name.size() > MAX_TRIGGER_STRING ||
+        trigger.timing.size() > MAX_TRIGGER_STRING ||
+        trigger.event.size() > MAX_TRIGGER_STRING ||
+        trigger.tableName.size() > MAX_TRIGGER_STRING ||
+        trigger.action.size() > MAX_TRIGGER_STRING ||
+        trigger.whenCondition.size() > MAX_TRIGGER_STRING ||
+        trigger.transitions.size() > MAX_TRIGGER_TRANSITIONS) {
+        return false;
+    }
+    return std::all_of(trigger.transitions.begin(), trigger.transitions.end(),
+        [](const std::string& transition) {
+            return transition.size() <= MAX_TRIGGER_TRANSITION_STRING;
+        });
+}
+
+std::vector<StorageEngine::Trigger> filterTriggers(
+        const std::vector<StorageEngine::Trigger>& all,
+        const std::string& table, const std::string& timing,
+        const std::string& event) {
+    std::vector<StorageEngine::Trigger> result;
+    for (const auto& trigger : all) {
+        if (trigger.tableName == table && trigger.timing == timing &&
+            trigger.event == event && trigger.enabled) {
+            result.push_back(trigger);
+        }
+    }
+    return result;
+}
+
+}  // namespace
+
 std::filesystem::path StorageEngine::triggerPath(const std::string& dbname) const {
     return dbPath(dbname) / ".triggers";
 }
 
-void StorageEngine::writeTrigger(std::ostream& out, const Trigger& trg) const {
-    size_t n = trg.name.size();
-    out.write(reinterpret_cast<const char*>(&n), sizeof(size_t));
-    out.write(trg.name.data(), static_cast<std::streamsize>(n));
-    n = trg.timing.size();
-    out.write(reinterpret_cast<const char*>(&n), sizeof(size_t));
-    out.write(trg.timing.data(), static_cast<std::streamsize>(n));
-    n = trg.event.size();
-    out.write(reinterpret_cast<const char*>(&n), sizeof(size_t));
-    out.write(trg.event.data(), static_cast<std::streamsize>(n));
-    n = trg.tableName.size();
-    out.write(reinterpret_cast<const char*>(&n), sizeof(size_t));
-    out.write(trg.tableName.data(), static_cast<std::streamsize>(n));
-    n = trg.action.size();
-    out.write(reinterpret_cast<const char*>(&n), sizeof(size_t));
-    out.write(trg.action.data(), static_cast<std::streamsize>(n));
-    n = trg.whenCondition.size();
-    out.write(reinterpret_cast<const char*>(&n), sizeof(size_t));
-    out.write(trg.whenCondition.data(), static_cast<std::streamsize>(n));
-    char forEachRow = trg.forEachRow ? 1 : 0;
-    out.write(&forEachRow, sizeof(char));
-    char enabled = trg.enabled ? 1 : 0;
-    out.write(&enabled, sizeof(char));
-    // Transition table specs ("new <name>" / "old <name>"): count-prefixed.
-    size_t tn = trg.transitions.size();
-    out.write(reinterpret_cast<const char*>(&tn), sizeof(size_t));
-    for (const auto& t : trg.transitions) {
-        size_t m = t.size();
-        out.write(reinterpret_cast<const char*>(&m), sizeof(size_t));
-        out.write(t.data(), static_cast<std::streamsize>(m));
-    }
-}
+bool StorageEngine::loadTriggers(
+        const std::string& dbname, std::vector<Trigger>& triggers) const {
+    triggers.clear();
+    const auto path = triggerPath(dbname);
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec)) return !ec;
+    const uintmax_t fileSize = std::filesystem::file_size(path, ec);
+    if (ec || fileSize == 0 || fileSize > MAX_TRIGGER_FILE_SIZE) return false;
 
-StorageEngine::Trigger StorageEngine::readTrigger(std::istream& in) const {
-    Trigger trg;
-    auto readStr = [&](std::string& s) -> bool {
-        size_t n = 0;
-        in.read(reinterpret_cast<char*>(&n), sizeof(size_t));
-        if (!in || n > 100000) return false;
-        s.resize(n);
-        in.read(s.data(), static_cast<std::streamsize>(n));
-        return static_cast<bool>(in);
-    };
-    if (!readStr(trg.name) || !readStr(trg.timing) || !readStr(trg.event) ||
-        !readStr(trg.tableName) || !readStr(trg.action) ||
-        !readStr(trg.whenCondition)) {
-        return {};
-    }
-    char forEachRow = 0;
-    in.read(&forEachRow, sizeof(char));
-    if (!in) return {};
-    trg.forEachRow = (forEachRow != 0);
-    char enabled = 0;
-    in.read(&enabled, sizeof(char));
-    if (!in) return {};
-    trg.enabled = (enabled != 0);
-    // Transition table specs; older sidecars without this block simply
-    // leave the vector empty (read fails at EOF, tolerated).
-    size_t tn = 0;
-    in.read(reinterpret_cast<char*>(&tn), sizeof(size_t));
-    if (in && tn <= 64) {
-        for (size_t i = 0; i < tn && in; ++i) {
-            size_t m = 0;
-            in.read(reinterpret_cast<char*>(&m), sizeof(size_t));
-            if (!in || m > 256) break;
-            std::string spec(m, '\0');
-            in.read(spec.data(), static_cast<std::streamsize>(m));
-            if (in) trg.transitions.push_back(spec);
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+    try {
+        std::string bytes(static_cast<size_t>(fileSize), '\0');
+        if (!in.read(bytes.data(), static_cast<std::streamsize>(bytes.size())) ||
+            in.peek() != std::char_traits<char>::eof()) {
+            return false;
         }
+
+        std::vector<Trigger> parsed;
+        std::unordered_set<std::string> names;
+        uint32_t firstWord = 0;
+        if (bytes.size() >= sizeof(firstWord))
+            std::memcpy(&firstWord, bytes.data(), sizeof(firstWord));
+
+        if (firstWord == TRIGGER_FILE_MAGIC) {
+            if (bytes.size() < sizeof(uint32_t) * 3 + sizeof(uint64_t)) return false;
+            const size_t payloadSize = bytes.size() - sizeof(uint64_t);
+            uint64_t storedChecksum = 0;
+            std::memcpy(&storedChecksum, bytes.data() + payloadSize,
+                        sizeof(storedChecksum));
+            if (storedChecksum != triggerMetadataChecksum(bytes.data(), payloadSize))
+                return false;
+
+            TriggerMetadataReader reader(bytes, payloadSize);
+            uint32_t magic = 0;
+            uint32_t version = 0;
+            uint32_t count = 0;
+            if (!reader.read(magic) || !reader.read(version) || !reader.read(count) ||
+                magic != TRIGGER_FILE_MAGIC || version != TRIGGER_FILE_VERSION ||
+                count > MAX_TRIGGER_COUNT) {
+                return false;
+            }
+            parsed.reserve(count);
+            for (uint32_t i = 0; i < count; ++i) {
+                Trigger trigger;
+                auto readString = [&](std::string& value, size_t maximum) {
+                    uint32_t length = 0;
+                    return reader.read(length) &&
+                           reader.readString(value, length, maximum);
+                };
+                if (!readString(trigger.name, MAX_TRIGGER_STRING) ||
+                    !readString(trigger.timing, MAX_TRIGGER_STRING) ||
+                    !readString(trigger.event, MAX_TRIGGER_STRING) ||
+                    !readString(trigger.tableName, MAX_TRIGGER_STRING) ||
+                    !readString(trigger.action, MAX_TRIGGER_STRING) ||
+                    !readString(trigger.whenCondition, MAX_TRIGGER_STRING)) {
+                    return false;
+                }
+                uint8_t forEachRow = 0;
+                uint8_t enabled = 0;
+                uint32_t transitionCount = 0;
+                if (!reader.read(forEachRow) || !reader.read(enabled) ||
+                    forEachRow > 1 || enabled > 1 ||
+                    !reader.read(transitionCount) ||
+                    transitionCount > MAX_TRIGGER_TRANSITIONS) {
+                    return false;
+                }
+                trigger.forEachRow = (forEachRow != 0);
+                trigger.enabled = (enabled != 0);
+                trigger.transitions.reserve(transitionCount);
+                for (uint32_t j = 0; j < transitionCount; ++j) {
+                    std::string transition;
+                    if (!readString(transition, MAX_TRIGGER_TRANSITION_STRING)) return false;
+                    trigger.transitions.push_back(std::move(transition));
+                }
+                if (!validTriggerRecord(trigger) || !names.insert(trigger.name).second)
+                    return false;
+                parsed.push_back(std::move(trigger));
+            }
+            if (reader.remaining() != 0) return false;
+            triggers = std::move(parsed);
+            return true;
+        }
+
+        // Legacy native-size_t layout.  It had no checksum, so require an
+        // exact structural parse and reject any partial record or suffix.
+        TriggerMetadataReader reader(bytes, bytes.size());
+        size_t count = 0;
+        if (!reader.read(count) || count > MAX_TRIGGER_COUNT) return false;
+        parsed.reserve(count);
+        for (size_t i = 0; i < count; ++i) {
+            Trigger trigger;
+            auto readString = [&](std::string& value, size_t maximum) {
+                size_t length = 0;
+                return reader.read(length) &&
+                       reader.readString(value, length, maximum);
+            };
+            if (!readString(trigger.name, MAX_TRIGGER_STRING) ||
+                !readString(trigger.timing, MAX_TRIGGER_STRING) ||
+                !readString(trigger.event, MAX_TRIGGER_STRING) ||
+                !readString(trigger.tableName, MAX_TRIGGER_STRING) ||
+                !readString(trigger.action, MAX_TRIGGER_STRING) ||
+                !readString(trigger.whenCondition, MAX_TRIGGER_STRING)) {
+                return false;
+            }
+            uint8_t forEachRow = 0;
+            uint8_t enabled = 0;
+            if (!reader.read(forEachRow) || !reader.read(enabled) ||
+                forEachRow > 1 || enabled > 1) {
+                return false;
+            }
+            trigger.forEachRow = (forEachRow != 0);
+            trigger.enabled = (enabled != 0);
+
+            // Very old one-record sidecars ended after the flags.  This is
+            // unambiguous only for the final record.
+            if (!(i + 1 == count && reader.remaining() == 0)) {
+                size_t transitionCount = 0;
+                if (!reader.read(transitionCount) ||
+                    transitionCount > MAX_TRIGGER_TRANSITIONS) {
+                    return false;
+                }
+                trigger.transitions.reserve(transitionCount);
+                for (size_t j = 0; j < transitionCount; ++j) {
+                    std::string transition;
+                    if (!readString(transition, MAX_TRIGGER_TRANSITION_STRING))
+                        return false;
+                    trigger.transitions.push_back(std::move(transition));
+                }
+            }
+            if (!validTriggerRecord(trigger) || !names.insert(trigger.name).second)
+                return false;
+            parsed.push_back(std::move(trigger));
+        }
+        if (reader.remaining() != 0) return false;
+        triggers = std::move(parsed);
+        return true;
+    } catch (const std::bad_alloc&) {
+        triggers.clear();
+        return false;
+    } catch (const std::length_error&) {
+        triggers.clear();
+        return false;
     }
-    return trg;
 }
 
 DBStatus StorageEngine::persistTriggers(
         const std::string& dbname, const std::vector<Trigger>& triggers) const {
-    if (triggers.size() > 10000) return DBStatus::INVALID_VALUE;
-    std::ostringstream serialized(std::ios::out | std::ios::binary);
-    const size_t count = triggers.size();
-    serialized.write(reinterpret_cast<const char*>(&count), sizeof(count));
-    for (const auto& trigger : triggers) writeTrigger(serialized, trigger);
-    if (!serialized) return DBStatus::IO_ERROR;
-    return persistMetadata(triggerPath(dbname), serialized.str());
+    if (triggers.size() > MAX_TRIGGER_COUNT) return DBStatus::INVALID_VALUE;
+    try {
+        std::unordered_set<std::string> names;
+        std::string bytes;
+        const size_t payloadLimit =
+            static_cast<size_t>(MAX_TRIGGER_FILE_SIZE) - sizeof(uint64_t);
+        auto appendPod = [&](const auto& value) {
+            if (bytes.size() > payloadLimit ||
+                sizeof(value) > payloadLimit - bytes.size()) {
+                return false;
+            }
+            appendTriggerPod(bytes, value);
+            return true;
+        };
+        auto appendString = [&](const std::string& value) {
+            const uint32_t length = static_cast<uint32_t>(value.size());
+            if (!appendPod(length) || value.size() > payloadLimit - bytes.size())
+                return false;
+            bytes.append(value);
+            return true;
+        };
+
+        const uint32_t count = static_cast<uint32_t>(triggers.size());
+        if (!appendPod(TRIGGER_FILE_MAGIC) || !appendPod(TRIGGER_FILE_VERSION) ||
+            !appendPod(count)) {
+            return DBStatus::INVALID_VALUE;
+        }
+        for (const auto& trigger : triggers) {
+            if (!validTriggerRecord(trigger) || !names.insert(trigger.name).second)
+                return DBStatus::INVALID_VALUE;
+            if (!appendString(trigger.name) || !appendString(trigger.timing) ||
+                !appendString(trigger.event) || !appendString(trigger.tableName) ||
+                !appendString(trigger.action) ||
+                !appendString(trigger.whenCondition)) {
+                return DBStatus::INVALID_VALUE;
+            }
+            const uint8_t forEachRow = trigger.forEachRow ? 1 : 0;
+            const uint8_t enabled = trigger.enabled ? 1 : 0;
+            const uint32_t transitionCount =
+                static_cast<uint32_t>(trigger.transitions.size());
+            if (!appendPod(forEachRow) || !appendPod(enabled) ||
+                !appendPod(transitionCount)) {
+                return DBStatus::INVALID_VALUE;
+            }
+            for (const auto& transition : trigger.transitions) {
+                if (!appendString(transition)) return DBStatus::INVALID_VALUE;
+            }
+        }
+        const uint64_t checksum = triggerMetadataChecksum(bytes.data(), bytes.size());
+        appendTriggerPod(bytes, checksum);
+        return persistMetadata(triggerPath(dbname), bytes);
+    } catch (const std::bad_alloc&) {
+        return DBStatus::IO_ERROR;
+    } catch (const std::length_error&) {
+        return DBStatus::IO_ERROR;
+    }
 }
 
 DBStatus StorageEngine::createTrigger(const std::string& dbname, const Trigger& trg) {
     std::lock_guard<std::recursive_mutex> triggerLock(cacheMutex_);
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    auto existing = getAllTriggers(dbname);
+    std::vector<Trigger> existing;
+    if (!loadTriggers(dbname, existing)) return DBStatus::CORRUPTED_DATA;
     for (const auto& t : existing) {
         if (t.name == trg.name) return DBStatus::OK; // already exists
     }
@@ -6750,7 +6966,8 @@ DBStatus StorageEngine::createTrigger(const std::string& dbname, const Trigger& 
 DBStatus StorageEngine::dropTrigger(const std::string& dbname, const std::string& trgName) {
     std::lock_guard<std::recursive_mutex> triggerLock(cacheMutex_);
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    auto existing = getAllTriggers(dbname);
+    std::vector<Trigger> existing;
+    if (!loadTriggers(dbname, existing)) return DBStatus::CORRUPTED_DATA;
     const auto newEnd = std::remove_if(existing.begin(), existing.end(),
         [&](const Trigger& trigger) { return trigger.name == trgName; });
     if (newEnd == existing.end()) return DBStatus::TABLE_NOT_FOUND;
@@ -6761,36 +6978,43 @@ DBStatus StorageEngine::dropTrigger(const std::string& dbname, const std::string
 std::vector<StorageEngine::Trigger> StorageEngine::getTriggers(
     const std::string& dbname, const std::string& tablename,
     const std::string& timing, const std::string& event) const {
-    std::lock_guard<std::recursive_mutex> triggerLock(cacheMutex_);
     std::vector<Trigger> result;
-    auto all = getAllTriggers(dbname);
-    for (const auto& t : all) {
-        if (t.tableName == tablename && t.timing == timing && t.event == event && t.enabled) {
-            result.push_back(t);
-        }
-    }
+    if (!tryGetTriggers(dbname, tablename, timing, event, result)) return {};
     return result;
 }
 
-std::vector<StorageEngine::Trigger> StorageEngine::getAllTriggers(const std::string& dbname) const {
+bool StorageEngine::tryGetTriggers(
+        const std::string& dbname, const std::string& tablename,
+        const std::string& timing, const std::string& event,
+        std::vector<Trigger>& result) const {
     std::lock_guard<std::recursive_mutex> triggerLock(cacheMutex_);
-    std::vector<Trigger> result;
-    std::ifstream in(triggerPath(dbname), std::ios::binary);
-    if (!in) return result;
-    size_t count = 0;
-    in.read(reinterpret_cast<char*>(&count), sizeof(size_t));
-    if (!in || count > 10000) return result;
-    for (size_t i = 0; i < count && in; ++i) {
-        Trigger t = readTrigger(in);
-        if (!t.name.empty()) result.push_back(std::move(t));
+    std::vector<Trigger> all;
+    if (!loadTriggers(dbname, all)) {
+        result.clear();
+        return false;
     }
+    result = filterTriggers(all, tablename, timing, event);
+    return true;
+}
+
+std::vector<StorageEngine::Trigger> StorageEngine::getAllTriggers(
+        const std::string& dbname) const {
+    std::vector<Trigger> result;
+    if (!tryGetAllTriggers(dbname, result)) return {};
     return result;
+}
+
+bool StorageEngine::tryGetAllTriggers(
+        const std::string& dbname, std::vector<Trigger>& result) const {
+    std::lock_guard<std::recursive_mutex> triggerLock(cacheMutex_);
+    return loadTriggers(dbname, result);
 }
 
 DBStatus StorageEngine::enableTrigger(const std::string& dbname, const std::string& trgName) {
     std::lock_guard<std::recursive_mutex> triggerLock(cacheMutex_);
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    auto existing = getAllTriggers(dbname);
+    std::vector<Trigger> existing;
+    if (!loadTriggers(dbname, existing)) return DBStatus::CORRUPTED_DATA;
     bool found = false;
     for (auto& trigger : existing) {
         if (trigger.name == trgName) {
@@ -6805,7 +7029,8 @@ DBStatus StorageEngine::enableTrigger(const std::string& dbname, const std::stri
 DBStatus StorageEngine::disableTrigger(const std::string& dbname, const std::string& trgName) {
     std::lock_guard<std::recursive_mutex> triggerLock(cacheMutex_);
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    auto existing = getAllTriggers(dbname);
+    std::vector<Trigger> existing;
+    if (!loadTriggers(dbname, existing)) return DBStatus::CORRUPTED_DATA;
     bool found = false;
     for (auto& trigger : existing) {
         if (trigger.name == trgName) {
@@ -11058,6 +11283,12 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
         lockManager_.unlock(firstLock);
         return DBStatus::LOCK_CONFLICT;
     }
+    std::vector<Trigger> renamedTriggers;
+    if (!loadTriggers(dbname, renamedTriggers)) {
+        lockManager_.unlock(oldName);
+        lockManager_.unlock(newName);
+        return DBStatus::CORRUPTED_DATA;
+    }
     closeDatabaseCaches(dbname);
 
     TableSchema renamedSchema = getTableSchema(dbname, oldName);
@@ -11307,24 +11538,22 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
         }
     }
 
-    // Update trigger file
-    {
-        std::filesystem::path tp = triggerPath(dbname);
-        if (std::filesystem::exists(tp)) {
-            auto triggers = getAllTriggers(dbname);
-            bool changed = false;
-            for (auto& t : triggers) {
-                if (t.tableName == oldName) {
-                    t.tableName = newName;
-                    changed = true;
-                }
-            }
-            if (changed) {
-                std::ofstream out(tp, std::ios::binary | std::ios::trunc);
-                size_t count = triggers.size();
-                out.write(reinterpret_cast<const char*>(&count), sizeof(size_t));
-                for (const auto& t : triggers) writeTrigger(out, t);
-            }
+    // Update trigger metadata with the same atomic persistence path used by
+    // CREATE/DROP TRIGGER.  Metadata was validated before any rename work so
+    // a corrupt sidecar cannot be mistaken for an empty trigger list.
+    bool triggersChanged = false;
+    for (auto& trigger : renamedTriggers) {
+        if (trigger.tableName == oldName) {
+            trigger.tableName = newName;
+            triggersChanged = true;
+        }
+    }
+    if (triggersChanged) {
+        const DBStatus status = persistTriggers(dbname, renamedTriggers);
+        if (status != DBStatus::OK) {
+            lockManager_.unlock(oldName);
+            lockManager_.unlock(newName);
+            return status;
         }
     }
 
@@ -13807,6 +14036,11 @@ DBStatus StorageEngine::insert(const std::string& dbname,
     if (!lockManager_.lockIntentExclusive(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
+    std::vector<Trigger> operationTriggers;
+    if (triggerExecutor_ && !tryGetAllTriggers(dbname, operationTriggers)) {
+        lockManager_.unlock(tablename);
+        return DBStatus::CORRUPTED_DATA;
+    }
 
     // Deferrable UNIQUE/FK constraints currently deferred: their checks are
     // queued after the row lands (rid known).
@@ -14228,7 +14462,8 @@ DBStatus StorageEngine::insert(const std::string& dbname,
     // BEFORE triggers execute before the actual write and can modify NEW column values
     // via "SET col = val" or "NEW.col = val" assignments in the trigger action.
     if (triggerExecutor_) {
-        auto beforeInsertTriggers = getTriggers(dbname, tablename, "before", "insert");
+        auto beforeInsertTriggers = filterTriggers(
+            operationTriggers, tablename, "before", "insert");
         for (const auto& trg : beforeInsertTriggers) {
             if (!trg.enabled) continue;
             if (!trg.forEachRow) continue;  // statement-level BEFORE not yet supported
@@ -14904,7 +15139,8 @@ DBStatus StorageEngine::insert(const std::string& dbname,
 
     // Fire AFTER INSERT triggers
     if (triggerExecutor_) {
-        auto triggers = getTriggers(dbname, tablename, "after", "insert");
+        auto triggers = filterTriggers(
+            operationTriggers, tablename, "after", "insert");
         for (const auto& trg : triggers) {
             // Evaluate WHEN condition if present
             if (!trg.whenCondition.empty() && whenEvaluator_) {
@@ -15549,6 +15785,11 @@ DBStatus StorageEngine::remove(const std::string& dbname,
     if (!lockManager_.lockIntentExclusive(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
+    std::vector<Trigger> operationTriggers;
+    if (triggerExecutor_ && !tryGetAllTriggers(dbname, operationTriggers)) {
+        lockManager_.unlock(tablename);
+        return DBStatus::CORRUPTED_DATA;
+    }
     PageAllocator* pa = getPageAllocator(dbname, tablename);
 
     const bool enforceRls = shouldEnforceRLS(tbl, StorageEngine::getRLSUser());
@@ -15889,7 +16130,8 @@ DBStatus StorageEngine::remove(const std::string& dbname,
     // They cannot modify the row (deletion is immutable) but can perform side effects
     // such as logging to an audit table or raising an error to abort the delete.
     if (triggerExecutor_) {
-        auto beforeDeleteTriggers = getTriggers(dbname, tablename, "before", "delete");
+        auto beforeDeleteTriggers = filterTriggers(
+            operationTriggers, tablename, "before", "delete");
         for (const auto& trg : beforeDeleteTriggers) {
             if (!trg.enabled) continue;
             if (trg.forEachRow) {
@@ -16143,7 +16385,8 @@ DBStatus StorageEngine::remove(const std::string& dbname,
 
     // Fire AFTER DELETE triggers
     if (triggerExecutor_) {
-        auto triggers = getTriggers(dbname, tablename, "after", "delete");
+        auto triggers = filterTriggers(
+            operationTriggers, tablename, "after", "delete");
         for (const auto& trg : triggers) {
             if (trg.forEachRow) {
                 for (const auto& row : rowsToDelete) {
@@ -16407,6 +16650,11 @@ DBStatus StorageEngine::update(const std::string& dbname,
 
     if (!lockManager_.lockIntentExclusive(tablename)) return DBStatus::LOCK_CONFLICT;
 
+    std::vector<Trigger> operationTriggers;
+    if (triggerExecutor_ && !tryGetAllTriggers(dbname, operationTriggers)) {
+        lockManager_.unlock(tablename);
+        return DBStatus::CORRUPTED_DATA;
+    }
     PageAllocator* pa = getPageAllocator(dbname, tablename);
 
     const bool enforceRls = shouldEnforceRLS(tbl, StorageEngine::getRLSUser());
@@ -16588,7 +16836,8 @@ DBStatus StorageEngine::update(const std::string& dbname,
         // BEFORE UPDATE triggers have access to both OLD (current row) and NEW (pending update) values.
         // They can modify NEW column values via "SET col = val" in the trigger action.
         if (triggerExecutor_) {
-            auto beforeUpdateTriggers = getTriggers(dbname, tablename, "before", "update");
+            auto beforeUpdateTriggers = filterTriggers(
+                operationTriggers, tablename, "before", "update");
             // Build OLD values map from the current row buffer
             std::map<std::string, std::string> oldRowValues;
             for (size_t i = 0; i < tbl.len; ++i) {
@@ -17270,7 +17519,8 @@ DBStatus StorageEngine::update(const std::string& dbname,
 
     // Fire AFTER UPDATE triggers
     if (triggerExecutor_) {
-        auto triggers = getTriggers(dbname, tablename, "after", "update");
+        auto triggers = filterTriggers(
+            operationTriggers, tablename, "after", "update");
         for (const auto& trg : triggers) {
             if (trg.forEachRow) {
                 for (int64_t rid : matchIds) {
