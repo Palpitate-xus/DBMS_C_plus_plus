@@ -25562,6 +25562,12 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
 
     // Assign transaction ID and create ReadView (if needed).
     transactionContext().currentTxnId = TxnIdGenerator::instance().nextTxId();
+    if (transactionContext().currentTxnId == 0) {
+        context.databaseExclusiveLock.reset();
+        context.databaseSharedLock.reset();
+        context.databaseTxnMutex.reset();
+        return DBStatus::IO_ERROR;
+    }
     {
         std::lock_guard<std::mutex> lock(globalTxnMutex_);
         activeTransactions_.insert(transactionContext().currentTxnId);
