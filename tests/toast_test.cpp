@@ -212,6 +212,26 @@ int main() {
         assert(sawSource && sawLiteral);
         std::cout << "[TOAST] marker-shaped user value round-trip OK\n";
 
+        // Values above a declared VARCHAR limit used to bypass the normal
+        // inline truncation path simply by being large enough for TOAST.
+        TableSchema bounded;
+        bounded.tablename = "bounded";
+        bounded.formatVersion = 2;
+        bounded.append(makeVarCharColumn("payload", false, 3000, false));
+        assert(engine.createTable(dbname, bounded) == DBStatus::OK);
+        const std::string atLimit = makeIncompressiblePayload(3000, 0x55667788u);
+        const std::string aboveLimit = makeIncompressiblePayload(3001, 0x55667788u);
+        assert(engine.insert(dbname, "bounded", {{"payload", aboveLimit}})
+               == DBStatus::INVALID_VALUE);
+        assert(engine.insert(dbname, "bounded", {{"payload", atLimit}})
+               == DBStatus::OK);
+        assert(engine.update(dbname, "bounded", {{"payload", aboveLimit}}, {})
+               == DBStatus::INVALID_VALUE);
+        rows = engine.query(dbname, "bounded", {}, {"payload"});
+        assert(rows.size() == 1);
+        assert(rows[0].find(atLimit) != std::string::npos);
+        std::cout << "[TOAST] declared variable-width limit enforced OK\n";
+
         TableSchema corruptGap;
         corruptGap.tablename = "corrupt_gap";
         corruptGap.formatVersion = 2;

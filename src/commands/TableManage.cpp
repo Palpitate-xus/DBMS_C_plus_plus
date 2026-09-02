@@ -581,6 +581,20 @@ static bool normalizePointColumns(const TableSchema& table,
     return true;
 }
 
+static bool variableColumnWidthsValid(
+    const TableSchema& table,
+    const std::map<std::string, std::string>& values) {
+    for (size_t i = 0; i < table.len; ++i) {
+        const Column& column = table.cols[i];
+        if (!column.isVariableLength) continue;
+        const auto value = values.find(column.dataName);
+        if (value == values.end() || value->second == "NULL") continue;
+        const size_t maxLength = column.isArray ? 1024 : column.dsize;
+        if (value->second.size() > maxLength) return false;
+    }
+    return true;
+}
+
 // Build a column-name -> data-type map from a TableSchema for expression eval.
 static std::map<std::string, std::string> buildTypeHints(const dbms::TableSchema& tbl) {
     std::map<std::string, std::string> hints;
@@ -14441,6 +14455,10 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
+    if (!variableColumnWidthsValid(tbl, actualValues)) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
 
     // Check primary key uniqueness using B+ tree index
     if (tbl.hasPrimaryKey()) {
@@ -14921,6 +14939,10 @@ DBStatus StorageEngine::insert(const std::string& dbname,
     // BEFORE triggers and generated expressions can replace POINT values
     // after the initial input pass; validate their final row image too.
     if (!normalizePointColumns(tbl, actualValues)) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
+    if (!variableColumnWidthsValid(tbl, actualValues)) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
@@ -16996,6 +17018,11 @@ DBStatus StorageEngine::update(const std::string& dbname,
                             if (col.isUnsigned && num < 0) return DBStatus::INVALID_VALUE;
                         }
                     }
+                    const size_t maxLength = col.isArray ? 1024 : col.dsize;
+                    if (col.isVariableLength && storeVal != "NULL" &&
+                        storeVal.size() > maxLength) {
+                        return DBStatus::INVALID_VALUE;
+                    }
                     prepared[i] = storeVal;
                     break;
                 }
@@ -17331,6 +17358,10 @@ DBStatus StorageEngine::update(const std::string& dbname,
         }
 
         if (!normalizePointColumns(tbl, rowValues)) {
+            lockManager_.unlock(tablename);
+            return DBStatus::INVALID_VALUE;
+        }
+        if (!variableColumnWidthsValid(tbl, rowValues)) {
             lockManager_.unlock(tablename);
             return DBStatus::INVALID_VALUE;
         }
