@@ -2045,14 +2045,66 @@ std::filesystem::path StorageEngine::tableListPath(const std::string& dbname) co
     return dbPath(dbname) / "tlist.lst";
 }
 
+static int comparePartitionValues(const TableSchema& table,
+                                  const std::string& left,
+                                  const std::string& right,
+                                  bool leftIsBound,
+                                  bool rightIsBound) {
+    auto sentinel = [](const std::string& value, bool isBound) {
+        if (!isBound) return 0;
+        std::string normalized = trim(value);
+        std::transform(normalized.begin(), normalized.end(),
+                       normalized.begin(), [](unsigned char byte) {
+                           return static_cast<char>(std::toupper(byte));
+                       });
+        if (normalized == "MINVALUE") return -1;
+        if (normalized == "MAXVALUE") return 1;
+        return 0;
+    };
+    const int leftSentinel = sentinel(left, leftIsBound);
+    const int rightSentinel = sentinel(right, rightIsBound);
+    if (leftSentinel || rightSentinel) {
+        if (leftSentinel == rightSentinel) return 0;
+        if (leftSentinel == -1 || rightSentinel == 1) return -1;
+        return 1;
+    }
+
+    const Column* keyColumn = nullptr;
+    for (size_t index = 0; index < table.len; ++index) {
+        if (table.cols[index].dataName == table.partitionKey) {
+            keyColumn = &table.cols[index];
+            break;
+        }
+    }
+    if (keyColumn) {
+        const auto equal = StorageEngine::compareValues(
+            *keyColumn, left, false, right, false, "=");
+        if (equal == StorageEngine::PredicateTruth::True) return 0;
+        const auto less = StorageEngine::compareValues(
+            *keyColumn, left, false, right, false, "<");
+        if (less == StorageEngine::PredicateTruth::True) return -1;
+        const auto greater = StorageEngine::compareValues(
+            *keyColumn, left, false, right, false, ">");
+        if (greater == StorageEngine::PredicateTruth::True) return 1;
+    }
+
+    // Some legacy schemas store abbreviated timestamp bounds such as a year.
+    // Retain a deterministic fallback for those catalogs while using typed
+    // ordering whenever both values are valid for the partition key.
+    return left.compare(right);
+}
+
 std::string StorageEngine::getPartitionName(const TableSchema& tbl, const std::string& keyVal) const {
     if (tbl.partitionType == TableSchema::PartitionType::None) return "";
     if (tbl.partitionType == TableSchema::PartitionType::Range) {
         for (const auto& rp : tbl.rangePartitions) {
-            if (keyVal < rp.second) return rp.first;
+            if (comparePartitionValues(
+                    tbl, keyVal, rp.second, false, true) < 0) {
+                return rp.first;
+            }
         }
         if (!tbl.defaultPartitionName.empty()) return tbl.defaultPartitionName;
-        return tbl.rangePartitions.empty() ? "" : tbl.rangePartitions.back().first;
+        return "";
     }
     if (tbl.partitionType == TableSchema::PartitionType::List) {
         for (const auto& lp : tbl.listPartitions) {
@@ -2091,33 +2143,26 @@ std::vector<std::string> StorageEngine::getTargetPartitions(
         if (c.colName != tbl.partitionKey) continue;
         if (tbl.partitionType == TableSchema::PartitionType::Range) {
             if (c.op == "=") {
-                result.push_back(getPartitionName(tbl, c.value));
-            } else if (c.op == "<") {
-                for (const auto& rp : tbl.rangePartitions) {
-                    if (rp.second > c.value) result.push_back(rp.first);
-                }
-            } else if (c.op == "<=") {
-                for (const auto& rp : tbl.rangePartitions) {
-                    if (rp.second >= c.value) result.push_back(rp.first);
-                }
-            } else if (c.op == ">") {
-                for (const auto& rp : tbl.rangePartitions) {
-                    if (rp.second <= c.value) result.push_back(rp.first);
-                }
-                if (!tbl.rangePartitions.empty()) result.push_back(tbl.rangePartitions.back().first);
-            } else if (c.op == ">=") {
-                for (const auto& rp : tbl.rangePartitions) {
-                    if (rp.second < c.value) result.push_back(rp.first);
-                }
-                if (!tbl.rangePartitions.empty()) result.push_back(tbl.rangePartitions.back().first);
+                const std::string partition =
+                    getPartitionName(tbl, c.value);
+                if (!partition.empty()) result.push_back(partition);
             }
+            // A range predicate can intersect several intervals.  The schema
+            // currently persists only each upper bound, not the declared
+            // lower bound, so proving a narrower set is unsafe.  An empty
+            // result deliberately selects all leaves and the normal predicate
+            // recheck filters them without false negatives.
         } else if (tbl.partitionType == TableSchema::PartitionType::List) {
             if (c.op == "=") {
-                result.push_back(getPartitionName(tbl, c.value));
+                const std::string partition =
+                    getPartitionName(tbl, c.value);
+                if (!partition.empty()) result.push_back(partition);
             }
         } else if (tbl.partitionType == TableSchema::PartitionType::Hash) {
             if (c.op == "=") {
-                result.push_back(getPartitionName(tbl, c.value));
+                const std::string partition =
+                    getPartitionName(tbl, c.value);
+                if (!partition.empty()) result.push_back(partition);
             }
         }
     }
@@ -2205,9 +2250,27 @@ DBStatus StorageEngine::attachPartition(const std::string& dbname,
             };
             unquote(lowerBound);
             unquote(upperBound);
-            // Insert in sorted position (lower bound ascending)
+            if (comparePartitionValues(
+                    tbl, lowerBound, upperBound, true, true) >= 0) {
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
+            }
+            // Routing is driven by the persisted upper bounds, so maintain
+            // their typed order.  Comparing an existing upper bound to the
+            // new lower bound inserted contiguous ranges in reverse order
+            // when both values were equal.
             auto it = tbl.rangePartitions.begin();
-            while (it != tbl.rangePartitions.end() && it->second < lowerBound) ++it;
+            while (it != tbl.rangePartitions.end() &&
+                   comparePartitionValues(
+                       tbl, it->second, upperBound, true, true) < 0) {
+                ++it;
+            }
+            if (it != tbl.rangePartitions.end() &&
+                comparePartitionValues(
+                    tbl, it->second, upperBound, true, true) == 0) {
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
+            }
             tbl.rangePartitions.insert(it, {partitionName, upperBound});
         }
     } else if (tbl.partitionType == TableSchema::PartitionType::List) {

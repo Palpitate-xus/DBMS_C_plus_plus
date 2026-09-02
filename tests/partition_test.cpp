@@ -31,6 +31,9 @@ static dbms::TableSchema makeSchema(const std::string& tname, const std::vector<
         std::string ctype = (sp == std::string::npos) ? "" : def.substr(sp + 1);
         dbms::Column col;
         if (ctype == "int") col = dbms::makeIntColumn(cname, true, 2);
+        else if (ctype == "date") col = dbms::makeDateColumn(cname, true);
+        else if (ctype == "timestamp") col = dbms::makeTimestampColumn(cname, true);
+        else if (ctype == "text") col = dbms::makeTextColumn(cname, true);
         else if (ctype == "varchar") col = dbms::makeVarCharColumn(cname, true, 20);
         else col = dbms::makeVarCharColumn(cname, true, 20);
         tbl.append(col);
@@ -53,6 +56,17 @@ static std::map<std::string, std::string> readRowKeyedById(const std::string& db
 static size_t rowCount(const std::string& db, const std::string& tbl) {
     size_t n = 0;
     g_engine.forEachRow(db, tbl, [&](uint32_t, uint16_t, const char*, size_t) { ++n; });
+    return n;
+}
+
+static size_t rowCountInPartitions(
+    const std::string& db, const std::string& tbl,
+    const std::vector<std::string>& partitions) {
+    size_t n = 0;
+    assert(g_engine.forEachRow(
+        db, tbl,
+        [&](uint32_t, uint16_t, const char*, size_t) { ++n; },
+        nullptr, partitions));
     return n;
 }
 
@@ -122,6 +136,7 @@ static void test_range_partitioning() {
     assert(res == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "logs", {{"id", "5"}, {"yr", "2150"}}) == dbms::DBStatus::OK);
     assert(rowCount(db, "logs") == 5);
+    assert(rowCountInPartitions(db, "logs", {"p4"}) == 1);
 
     // DETACH removes the partition from routing.
     res = g_engine.detachPartition(db, "logs", "p4");
@@ -188,6 +203,98 @@ static void test_range_default_partition() {
 
     cleanup(db);
     std::cout << "[PART] range default partition OK" << std::endl;
+}
+
+static void test_typed_range_routing_and_predicates() {
+    std::string db = testDbPath("part_range_typed");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    auto tbl = makeSchema("numbers", {"id int", "value int"});
+    tbl.partitionType = dbms::TableSchema::PartitionType::Range;
+    tbl.partitionKey = "value";
+    tbl.rangePartitions = {{"lt10", "10"}, {"lt100", "100"}};
+    tbl.defaultPartitionName = "overflow";
+    assert(g_engine.createTable(db, tbl) == dbms::DBStatus::OK);
+
+    for (const auto& [id, value] :
+         std::vector<std::pair<std::string, std::string>>{
+             {"1", "2"}, {"2", "10"}, {"3", "20"}, {"4", "100"}}) {
+        assert(g_engine.insert(
+                   db, "numbers", {{"id", id}, {"value", value}}) ==
+               dbms::DBStatus::OK);
+    }
+    assert(rowCountInPartitions(db, "numbers", {"lt10"}) == 1);
+    assert(rowCountInPartitions(db, "numbers", {"lt100"}) == 2);
+    assert(rowCountInPartitions(db, "numbers", {"overflow"}) == 1);
+
+    assert(g_engine.query(db, "numbers", {"<value 10"}, {"id"}).size() == 1);
+    assert(g_engine.query(db, "numbers", {"<=value 10"}, {"id"}).size() == 2);
+    assert(g_engine.query(db, "numbers", {">value 10"}, {"id"}).size() == 2);
+    assert(g_engine.query(db, "numbers", {">=value 10"}, {"id"}).size() == 3);
+    assert(g_engine.query(db, "numbers", {"=value 20"}, {"id"}).size() == 1);
+
+    auto finite = makeSchema("finite", {"id int", "value int"});
+    finite.partitionType = dbms::TableSchema::PartitionType::Range;
+    finite.partitionKey = "value";
+    finite.rangePartitions = {{"lt10", "10"}};
+    assert(g_engine.createTable(db, finite) == dbms::DBStatus::OK);
+    assert(g_engine.insert(
+               db, "finite", {{"id", "1"}, {"value", "10"}}) ==
+           dbms::DBStatus::INVALID_VALUE);
+
+    // Date ordering must not depend on zero padding or separator spelling.
+    auto dates = makeSchema("dates", {"id int", "value date"});
+    dates.partitionType = dbms::TableSchema::PartitionType::Range;
+    dates.partitionKey = "value";
+    dates.rangePartitions = {
+        {"before_february", "2024/2/1"}, {"later", "2025-1-1"}};
+    assert(g_engine.createTable(db, dates) == dbms::DBStatus::OK);
+    assert(g_engine.insert(
+               db, "dates", {{"id", "1"}, {"value", "2024-01-31"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(
+               db, "dates", {{"id", "2"}, {"value", "2024-10-01"}}) ==
+           dbms::DBStatus::OK);
+    assert(rowCountInPartitions(
+               db, "dates", {"before_february"}) == 1);
+    assert(rowCountInPartitions(db, "dates", {"later"}) == 1);
+
+    // MAXVALUE is special only in catalog bounds.  The same text in a row is
+    // an ordinary collatable value and sorts before the literal upper bound N.
+    auto words = makeSchema("words", {"id int", "value text"});
+    words.partitionType = dbms::TableSchema::PartitionType::Range;
+    words.partitionKey = "value";
+    words.rangePartitions = {{"before_n", "N"}, {"remainder", "MAXVALUE"}};
+    assert(g_engine.createTable(db, words) == dbms::DBStatus::OK);
+    assert(g_engine.insert(
+               db, "words", {{"id", "1"}, {"value", "MAXVALUE"}}) ==
+           dbms::DBStatus::OK);
+    assert(rowCountInPartitions(db, "words", {"before_n"}) == 1);
+
+    // Contiguous ATTACH operations used to compare the existing upper bound
+    // to the new lower bound, reversing adjacent ranges with equal endpoints.
+    auto attached = makeSchema("attached", {"id int", "value int"});
+    attached.partitionType = dbms::TableSchema::PartitionType::Range;
+    attached.partitionKey = "value";
+    assert(g_engine.createTable(db, attached) == dbms::DBStatus::OK);
+    assert(g_engine.attachPartition(
+               db, "attached", "lt10", "FOR VALUES FROM (0) TO (10)") ==
+           dbms::DBStatus::OK);
+    assert(g_engine.attachPartition(
+               db, "attached", "lt100", "FOR VALUES FROM (10) TO (100)") ==
+           dbms::DBStatus::OK);
+    const auto attachedSchema = g_engine.getTableSchema(db, "attached");
+    assert(attachedSchema.rangePartitions.size() == 2);
+    assert(attachedSchema.rangePartitions[0].first == "lt10");
+    assert(attachedSchema.rangePartitions[1].first == "lt100");
+    assert(g_engine.insert(
+               db, "attached", {{"id", "1"}, {"value", "20"}}) ==
+           dbms::DBStatus::OK);
+    assert(rowCountInPartitions(db, "attached", {"lt100"}) == 1);
+
+    cleanup(db);
+    std::cout << "[PART] typed range routing and predicates OK" << std::endl;
 }
 
 // Hash-partitioned table: rows distribute across p0/p1/p2/p3.
@@ -293,6 +400,7 @@ int main() {
     test_range_partitioning();
     test_list_partitioning();
     test_range_default_partition();
+    test_typed_range_routing_and_predicates();
     test_hash_partitioning();
     test_subpartitioning();
     test_partition_wal_routing();
