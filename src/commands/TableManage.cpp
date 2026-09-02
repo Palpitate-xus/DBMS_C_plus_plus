@@ -30864,6 +30864,13 @@ DBStatus StorageEngine::rollbackTransaction() {
     rollbackContext.readView = savedRollbackReadView;
     rollbackContext.txnIsolationLevel = savedRollbackIsolation;
 
+    // PREPARE and statement-level cache pressure can publish uncommitted
+    // index generations before rollback.  Persist every heap/index undo as
+    // one boundary before advertising ABORT; otherwise a new backend can
+    // reopen the pre-rollback B-tree/hash sidecars even though this backend's
+    // in-memory indexes are correct.
+    const bool undoFlushOk = flushDatabaseCaches(rollbackDb);
+
     // Write WAL ABORT marker after undo.
     WALManager* wal = getWAL(transactionContext().txnDB);
     bool abortWalOk = true;
@@ -30961,7 +30968,7 @@ DBStatus StorageEngine::rollbackTransaction() {
     // rollback so concurrent transactions cannot observe reused values.
     flushDeferredSequences();
     return snapshotRestoreOk && rowUndoOk && ddlUndoOk &&
-                   specializedUndoOk && clogOk && abortWalOk
+                   specializedUndoOk && undoFlushOk && clogOk && abortWalOk
         ? DBStatus::OK : DBStatus::IO_ERROR;
 }
 

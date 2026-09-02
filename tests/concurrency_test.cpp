@@ -123,14 +123,35 @@ static void test_insert_rollback_cleans_all_indexes() {
     assert(bloom->search("10").empty());
     assert(composite->allValues().empty());
 
+    // PREPARE publishes the transaction's dirty indexes for hand-off.
+    // ROLLBACK PREPARED must persist the inverse changes before returning.
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "rollback_t", {{"id", "3"}, {"a", "9"}, {"b", "11"},
+                                               {"payload", payload}}) == dbms::DBStatus::OK);
+    assert(g_engine.prepareTransaction("index_insert_rollback") ==
+           dbms::DBStatus::OK);
+    assert(g_engine.rollbackPrepared("index_insert_rollback") ==
+           dbms::DBStatus::OK);
+
     // Verify the on-disk index/heap state after reopening the database.
     {
         dbms::StorageEngine reopened;
         assert(reopened.query(db, "rollback_t", {}, {"id"}).empty());
+        auto* reopenedPrimary = reopened.getPKIndex(db, "rollback_t");
         auto* reopenedHash = reopened.getHashIndex(db, "rollback_t", "b");
+        int64_t staleRid = -1;
+        assert(reopenedPrimary && !reopenedPrimary->search("3", staleRid));
         assert(reopenedHash && reopenedHash->search("9").empty());
         auto* reopenedBloom = reopened.getBloomIndex(db, "rollback_t", "b");
         assert(reopenedBloom && reopenedBloom->search("9").empty());
+        assert(reopenedHash->search("11").empty());
+        assert(reopenedBloom->search("11").empty());
+        auto* reopenedSecondary = reopened.getSecondaryIndex(
+            db, "rollback_t", "a");
+        auto* reopenedComposite = reopened.getCompositeIndexTree(
+            db, "rollback_t", "ab_idx");
+        assert(reopenedSecondary && reopenedSecondary->searchMulti("9").empty());
+        assert(reopenedComposite && reopenedComposite->allValues().empty());
     }
     cleanup(db);
     std::cout << "[CONCURRENCY] INSERT rollback cleans secondary/composite/hash/bloom/TOAST state OK" << std::endl;
@@ -226,14 +247,32 @@ static void test_update_delete_rollback_cleans_all_indexes() {
     assert(bloom->search("9").size() == 1);
     assert(composite->allValues() == originalCompositeValues);
 
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.remove(db, "rollback_t", {"=id 1"}) == dbms::DBStatus::OK);
+    assert(g_engine.prepareTransaction("index_delete_rollback") ==
+           dbms::DBStatus::OK);
+    assert(g_engine.rollbackPrepared("index_delete_rollback") ==
+           dbms::DBStatus::OK);
+
     {
         dbms::StorageEngine reopened;
         auto reopenedRows = reopened.query(db, "rollback_t", {"=id 1"}, {"payload"});
         assert(reopenedRows.size() == 1 && reopenedRows[0].find(originalPayload) != std::string::npos);
+        auto* reopenedPrimary = reopened.getPKIndex(db, "rollback_t");
         auto* reopenedHash = reopened.getHashIndex(db, "rollback_t", "b");
+        int64_t restoredRid = -1;
+        assert(reopenedPrimary && reopenedPrimary->search("1", restoredRid));
         assert(reopenedHash && reopenedHash->search("9").size() == 1);
         auto* reopenedBloom = reopened.getBloomIndex(db, "rollback_t", "b");
         assert(reopenedBloom && reopenedBloom->search("9").size() == 1);
+        auto* reopenedSecondary = reopened.getSecondaryIndex(
+            db, "rollback_t", "a");
+        auto* reopenedComposite = reopened.getCompositeIndexTree(
+            db, "rollback_t", "ab_idx");
+        assert(reopenedSecondary &&
+               reopenedSecondary->searchMulti("7").size() == 1);
+        assert(reopenedComposite &&
+               reopenedComposite->allValues() == originalCompositeValues);
     }
     cleanup(db);
     std::cout << "[CONCURRENCY] UPDATE/DELETE rollback restores indexes including bloom and TOAST OK" << std::endl;
