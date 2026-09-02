@@ -1297,6 +1297,8 @@ private:
     void pruneMissingDatabaseCaches();
     bool rebuildIndexesAfterRecovery(const std::string& dbname,
                                      bool preservePreparedState);
+    bool resetUnloggedTableAfterRecovery(const std::string& dbname,
+                                         const std::string& tablename);
 
     // Free Space Map + Visibility Map (fork files)
     mutable std::map<std::string, std::unique_ptr<FreeSpaceMap>> fsmCache_;

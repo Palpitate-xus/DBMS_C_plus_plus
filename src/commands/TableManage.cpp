@@ -128,6 +128,7 @@ static constexpr const char* kPhysicalBackupMarker = ".dbms_physical_backup";
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <string>
 #include <sys/file.h>
 #include <unistd.h>
@@ -1752,15 +1753,22 @@ std::filesystem::path StorageEngine::vmPath(const std::string& dbname,
 // identical boundaries and never confuse table "t" with table "t2".
 static bool isRelationPhysicalFileName(const std::string& name,
                                         const std::string& tablename) {
+    static constexpr std::string_view tdeSuffix = ".tde";
+    if (name.size() > tdeSuffix.size() &&
+        name.compare(name.size() - tdeSuffix.size(), tdeSuffix.size(),
+                     tdeSuffix) == 0) {
+        return isRelationPhysicalFileName(
+            name.substr(0, name.size() - tdeSuffix.size()), tablename);
+    }
     if (name == tablename + ".toast") return true;
     if (name.rfind(tablename + "#", 0) != 0 &&
         name.rfind(tablename + "_", 0) != 0 &&
         name.rfind(tablename + ".", 0) != 0) {
         return false;
     }
-    const std::array<std::string, 10> suffixes = {
+    const std::array<std::string, 11> suffixes = {
         ".dt", ".fsm", ".vm", ".idx", ".hidx", ".bidx", ".fti",
-        ".gin", ".gist", ".brin"};
+        ".gin", ".gist", ".spgist", ".brin"};
     for (const auto& suffix : suffixes) {
         if (name.size() >= suffix.size() &&
             name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
@@ -25320,6 +25328,260 @@ bool StorageEngine::redoXactAbort(uint64_t xid) {
     return true;
 }
 
+bool StorageEngine::resetUnloggedTableAfterRecovery(
+    const std::string& dbname, const std::string& tablename) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    try {
+        const TableSchema table = getTableSchema(dbname, tablename);
+        if (!table.isUnlogged) return true;
+
+        // Several simplified access methods use their physical sidecar as
+        // the only definition catalog. Capture every definition before
+        // removing stale row identifiers.
+        const auto secondaryIndexes = getIndexMetadata(dbname, tablename);
+        const auto compositeIndexes = getCompositeIndexes(dbname, tablename);
+        const auto hashColumns = getHashIndexedColumns(dbname, tablename);
+        const auto bloomColumns = getBloomIndexedColumns(dbname, tablename);
+        const auto fullTextColumns =
+            getFullTextIndexedColumns(dbname, tablename);
+        const auto ginColumns = getGinIndexedColumns(dbname, tablename);
+        const auto gistColumns = getGiSTIndexedColumns(dbname, tablename);
+        const auto spgistColumns =
+            getSPGiSTIndexedColumns(dbname, tablename);
+        const auto brinColumns = getBrinIndexedColumns(dbname, tablename);
+
+        // These access methods currently use the index file itself as their
+        // durable definition.  Leave the old file in place until the empty
+        // replacement has been published atomically below.  If recovery is
+        // interrupted, the next startup can still discover the definition
+        // and retry the reset instead of silently losing the index.
+        std::set<std::filesystem::path> definitionBearingIndexes;
+        for (const auto& column : fullTextColumns) {
+            definitionBearingIndexes.insert(
+                fullTextIndexPath(dbname, tablename, column));
+        }
+        for (const auto& column : ginColumns) {
+            definitionBearingIndexes.insert(
+                ginIndexPath(dbname, tablename, column));
+        }
+        for (const auto& column : gistColumns) {
+            definitionBearingIndexes.insert(
+                giSTIndexPath(dbname, tablename, column));
+        }
+        for (const auto& column : spgistColumns) {
+            definitionBearingIndexes.insert(
+                spGiSTIndexPath(dbname, tablename, column));
+        }
+        for (const auto& column : brinColumns) {
+            definitionBearingIndexes.insert(
+                brinIndexPath(dbname, tablename, column));
+        }
+
+        const std::string tableKey = dbname + "/" + tablename;
+        const std::string secondaryPrefix = tableKey + "/";
+        const std::string auxiliaryPrefix =
+            dbname + "." + tablename + ".";
+        pageAllocators_.erase(tableKey);
+        fsmCache_.erase(tableKey);
+        vmCache_.erase(tableKey);
+        pkIndexCache_.erase(tableKey);
+        secidxLinesCache_.erase(tableKey);
+        hashidxLinesCache_.erase(tableKey);
+        for (auto it = secondaryIndexCache_.begin();
+             it != secondaryIndexCache_.end();) {
+            if (it->first.rfind(secondaryPrefix, 0) == 0)
+                it = secondaryIndexCache_.erase(it);
+            else
+                ++it;
+        }
+        for (auto it = hashIndexCache_.begin();
+             it != hashIndexCache_.end();) {
+            if (it->first.rfind(auxiliaryPrefix, 0) == 0)
+                it = hashIndexCache_.erase(it);
+            else
+                ++it;
+        }
+        for (auto it = bloomIndexCache_.begin();
+             it != bloomIndexCache_.end();) {
+            if (it->first.rfind(auxiliaryPrefix, 0) == 0)
+                it = bloomIndexCache_.erase(it);
+            else
+                ++it;
+        }
+        const std::string toastKey = dbname + ":" + tablename;
+        toastPageAllocators_.erase(toastKey);
+        toastIndexes_.erase(toastKey);
+        {
+            std::lock_guard<std::mutex> lock(spGiSTMutex_);
+            for (auto it = spGiSTCache_.begin();
+                 it != spGiSTCache_.end();) {
+                if (it->first.rfind(secondaryPrefix, 0) == 0)
+                    it = spGiSTCache_.erase(it);
+                else
+                    ++it;
+            }
+        }
+
+        const auto relationRoot = relationDir(dbname, tablename);
+        std::error_code fileError;
+        if (!std::filesystem::is_directory(relationRoot, fileError) ||
+            fileError) {
+            return false;
+        }
+        std::vector<std::filesystem::path> staleFiles;
+        for (const auto& entry : std::filesystem::directory_iterator(
+                 relationRoot,
+                 std::filesystem::directory_options::skip_permission_denied,
+                 fileError)) {
+            if (fileError) break;
+            if (isRelationPhysicalFileName(
+                    entry.path().filename().string(), tablename) &&
+                definitionBearingIndexes.count(entry.path()) == 0) {
+                staleFiles.push_back(entry.path());
+            }
+        }
+        if (fileError) return false;
+        for (const auto& path : staleFiles) {
+            fileError.clear();
+            std::filesystem::remove_all(path, fileError);
+            if (fileError) return false;
+        }
+
+        const auto createEmptyHeap = [&](const std::filesystem::path& path,
+                                         size_t rowSize) {
+            PageAllocator pages(
+                path.string(), rowSize,
+                pageSizeForFormatVersion(table.formatVersion),
+                table.formatVersion);
+            if (!pages.open() || !pages.flush()) return false;
+            pages.close();
+            return true;
+        };
+        std::set<std::string> partitionNames;
+        if (table.partitionType == TableSchema::PartitionType::None) {
+            if (!createEmptyHeap(
+                    dataPath(dbname, tablename), table.rowSize())) {
+                return false;
+            }
+        } else if (table.partitionType == TableSchema::PartitionType::Range) {
+            for (const auto& partition : table.rangePartitions)
+                partitionNames.insert(partition.first);
+        } else if (table.partitionType == TableSchema::PartitionType::List) {
+            for (const auto& partition : table.listPartitions)
+                partitionNames.insert(partition.first);
+        } else if (table.partitionType == TableSchema::PartitionType::Hash) {
+            for (size_t i = 0; i < table.hashPartitions; ++i)
+                partitionNames.insert("p" + std::to_string(i));
+        }
+        if (!table.defaultPartitionName.empty())
+            partitionNames.insert(table.defaultPartitionName);
+        for (const auto& partition : partitionNames) {
+            if (!createEmptyHeap(
+                    partitionDataPath(dbname, tablename, partition),
+                    table.rowSize())) {
+                return false;
+            }
+            if (table.subPartitionType ==
+                TableSchema::PartitionType::Hash) {
+                for (size_t i = 0; i < table.subHashPartitions; ++i) {
+                    if (!createEmptyHeap(
+                            partitionDataPath(
+                                dbname, tablename, partition,
+                                "sp" + std::to_string(i)),
+                            table.rowSize())) {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        const bool hasVariableLength = std::any_of(
+            table.cols, table.cols + table.len,
+            [](const Column& column) { return column.isVariableLength; });
+        if (hasVariableLength) {
+            PageAllocator toastPages(
+                toastDataPath(dbname, tablename).string(), 0, 8192,
+                DATA_FILE_FORMAT_VERSION);
+            if (!toastPages.open() || !toastPages.flush()) return false;
+            toastPages.close();
+            BPTree toastIndex(toastIndexPath(dbname, tablename));
+            if (!toastIndex.open() || !toastIndex.flush()) return false;
+            toastIndex.close();
+            if (!persistToastCounter(
+                    toastMetaPath(dbname, tablename), 1)) {
+                return false;
+            }
+        }
+
+        if (reindex(dbname, tablename) != DBStatus::OK) return false;
+        if (table.hasPrimaryKey()) {
+            BPTree* index = getPKIndex(dbname, tablename);
+            if (!index || !index->flush()) return false;
+        }
+        for (const auto& metadata : secondaryIndexes) {
+            BPTree* index = getSecondaryIndex(
+                dbname, tablename, metadata.name);
+            if (!index || !index->flush()) return false;
+        }
+        for (const auto& metadata : compositeIndexes) {
+            BPTree* index = getCompositeIndexTree(
+                dbname, tablename, metadata.name);
+            if (!index || !index->flush()) return false;
+        }
+        for (const auto& column : hashColumns) {
+            HashIndex* index = getHashIndex(dbname, tablename, column);
+            if (!index) return false;
+            index->clear();
+            if (!index->flush()) return false;
+        }
+        for (const auto& column : bloomColumns) {
+            BloomIndex* index = getBloomIndex(dbname, tablename, column);
+            if (!index) return false;
+            index->clear();
+            if (!index->flush()) return false;
+        }
+        for (const auto& column : fullTextColumns) {
+            if (createFullTextIndex(dbname, tablename, column) !=
+                DBStatus::OK) {
+                return false;
+            }
+        }
+        for (const auto& column : ginColumns) {
+            if (createGinIndex(dbname, tablename, column) != DBStatus::OK)
+                return false;
+        }
+        for (const auto& column : gistColumns) {
+            if (createGiSTIndex(dbname, tablename, column) != DBStatus::OK)
+                return false;
+        }
+        for (const auto& column : spgistColumns) {
+            if (createSPGiSTIndex(dbname, tablename, column) !=
+                DBStatus::OK) {
+                return false;
+            }
+        }
+        for (const auto& column : brinColumns) {
+            if (createBrinIndex(dbname, tablename, column, 64) !=
+                DBStatus::OK) {
+                return false;
+            }
+        }
+
+        dbms::resetRuntimeTableStats(dbname, tablename);
+        resetDeadTupleCount(dbname, tablename);
+        return true;
+    } catch (const std::exception& error) {
+        std::cerr << "[recovery] unlogged table reset failed for "
+                  << dbname << "/" << tablename << ": "
+                  << error.what() << std::endl;
+        return false;
+    } catch (...) {
+        std::cerr << "[recovery] unlogged table reset failed for "
+                  << dbname << "/" << tablename << std::endl;
+        return false;
+    }
+}
+
 bool StorageEngine::rebuildIndexesAfterRecovery(
     const std::string& dbname, bool preservePreparedState) {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
@@ -26013,7 +26275,37 @@ bool StorageEngine::recoverAllDatabases() {
 
         WALManager* wal = getWAL(dbname);
         if (!wal) continue;
-        if (wal->currentWriteLsn() == 0) continue; // no WAL
+        const auto resetUnloggedTables = [&]() -> bool {
+            try {
+                for (const auto& tableName : getTableNames(dbname)) {
+                    const TableSchema table =
+                        getTableSchema(dbname, tableName);
+                    if (table.isUnlogged &&
+                        !resetUnloggedTableAfterRecovery(
+                            dbname, tableName)) {
+                        std::cerr
+                            << "[recovery] failed to reset unlogged table "
+                            << dbname << "/" << tableName << std::endl;
+                        return false;
+                    }
+                }
+                return true;
+            } catch (const std::exception& error) {
+                std::cerr
+                    << "[recovery] failed to enumerate unlogged tables for "
+                    << dbname << ": " << error.what() << std::endl;
+                return false;
+            } catch (...) {
+                std::cerr
+                    << "[recovery] failed to enumerate unlogged tables for "
+                    << dbname << std::endl;
+                return false;
+            }
+        };
+        if (wal->currentWriteLsn() == 0) {
+            if (!resetUnloggedTables()) return false;
+            continue; // no WAL to replay
+        }
 
         // A persisted PITR target (written by pitrRestore in the previous
         // process) gates this database's commit replay. Target parsing and
@@ -26339,28 +26631,10 @@ bool StorageEngine::recoverAllDatabases() {
             return false;
         }
 
-        // Truncate UNLOGGED tables (PG semantics)
-        try {
-            auto tnames = getTableNames(dbname);
-            for (const auto& tn : tnames) {
-                TableSchema ts = getTableSchema(dbname, tn);
-                if (ts.isUnlogged) {
-                    std::filesystem::path dtPath = dataPath(dbname, tn);
-                    std::filesystem::path idxPath = indexPath(dbname, tn);
-                    if (std::filesystem::exists(dtPath)) std::filesystem::remove(dtPath);
-                    if (std::filesystem::exists(idxPath)) std::filesystem::remove(idxPath);
-                    std::ofstream(dtPath, std::ios::binary).close();
-                }
-            }
-        } catch (const std::exception& error) {
-            std::cerr << "[recovery] failed to reset unlogged tables for "
-                      << dbname << ": " << error.what() << std::endl;
-            return false;
-        } catch (...) {
-            std::cerr << "[recovery] failed to reset unlogged tables for "
-                      << dbname << std::endl;
-            return false;
-        }
+        // UNLOGGED rows are discarded after a restart, but their index
+        // definitions remain. Reset every heap/index/TOAST fork together so
+        // no access method can retain a stale RID into the new empty heap.
+        if (!resetUnloggedTables()) return false;
 
         // A recovery target is single-use, but the source timeline still
         // contains COMMIT records beyond that target.  Fork a new timeline
