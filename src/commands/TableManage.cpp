@@ -11825,6 +11825,48 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
     // custom tablespace paths are derived from the schema itself.
     const auto relationRoot = relationDir(dbname, tablename);
 
+    // The runtime inheritance graph is keyed by relation names. Retaining an
+    // edge after either endpoint is dropped makes a later same-name table
+    // inherit an unrelated predecessor's children.
+    const auto inheritancePath =
+        std::filesystem::path(dbPath(dbname)) / ".inherits";
+    std::string originalInheritance;
+    std::string filteredInheritance;
+    bool inheritanceChanged = false;
+    std::error_code inheritanceError;
+    if (std::filesystem::exists(inheritancePath, inheritanceError)) {
+        std::ifstream input(inheritancePath);
+        if (!input) {
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
+        }
+        std::ostringstream retained;
+        std::string line;
+        while (std::getline(input, line)) {
+            originalInheritance += line + '\n';
+            const size_t separator = line.find('|');
+            if (separator == std::string::npos) {
+                retained << line << '\n';
+                continue;
+            }
+            const std::string parent = line.substr(0, separator);
+            const std::string child = line.substr(separator + 1);
+            if (parent == tablename || child == tablename) {
+                inheritanceChanged = true;
+                continue;
+            }
+            retained << line << '\n';
+        }
+        if (input.bad()) {
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
+        }
+        filteredInheritance = retained.str();
+    } else if (inheritanceError) {
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
+    }
+
     // ACLs live in database-wide files.  Leaving entries keyed by a dropped
     // name would grant them to an unrelated table that later reuses that
     // name.  Prepare both rewrites before publishing either, and restore the
@@ -11886,11 +11928,28 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
         lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
     }
+    if (inheritanceChanged &&
+        !index_file::writeAtomically(
+            inheritancePath, filteredInheritance)) {
+        index_file::writeAtomically(
+            inheritancePath, originalInheritance);
+        for (const auto& file : authorizationFiles) {
+            if (file.changed) {
+                index_file::writeAtomically(file.path, file.original);
+            }
+        }
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
+    }
     if (!removeTableStatistics(statsPath(dbname), tablename)) {
         for (const auto& file : authorizationFiles) {
             if (file.changed) {
                 index_file::writeAtomically(file.path, file.original);
             }
+        }
+        if (inheritanceChanged) {
+            index_file::writeAtomically(
+                inheritancePath, originalInheritance);
         }
         lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
@@ -11912,6 +11971,9 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
     std::filesystem::remove(fsmPath(dbname, tablename));
     std::filesystem::remove(vmPath(dbname, tablename));
     std::filesystem::remove(rlsPath(dbname, tablename));
+    std::filesystem::remove(
+        std::filesystem::path(dbPath(dbname)) /
+        ("." + tablename + ".inherits"));
     removeSeq(dbname, tablename);
     // Remove TOAST data (legacy directory + proper relation/index)
     auto tdir = toastDir(dbname, tablename);

@@ -136,11 +136,41 @@ static void test_table_rename_updates_inheritance_graph() {
     std::cout << "[INHERIT] table rename preserves graph OK" << std::endl;
 }
 
+static void test_drop_removes_inheritance_edges() {
+    const std::string db = testDbPath("inh_drop");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    assert(!ddl.executeSql("CREATE TABLE parent (id INT)", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE child (payload INT) INHERITS (parent)", s));
+    assert(!ddl.executeSql("DROP TABLE child", s));
+    assert(g_engine.getInheritedChildren(db, "parent").empty());
+
+    // Reusing the child's name without INHERITS must not resurrect the old
+    // edge. Dropping the parent must likewise detach a surviving child.
+    assert(!ddl.executeSql("CREATE TABLE child (id INT, payload INT)", s));
+    assert(g_engine.getInheritedChildren(db, "parent").empty());
+    assert(!ddl.executeSql("ALTER TABLE child INHERIT parent", s));
+    assert(!ddl.executeSql("DROP TABLE parent", s));
+    assert(g_engine.getInheritedChildren(db, "parent").empty());
+    assert(g_engine.tableExists(db, "child"));
+    assert(!ddl.executeSql("CREATE TABLE parent (id INT)", s));
+    assert(g_engine.getInheritedChildren(db, "parent").empty());
+
+    cleanup(db);
+    std::cout << "[INHERIT] DROP removes graph edges OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_inherit_parser();
     test_inherit_execution();
     test_table_rename_updates_inheritance_graph();
+    test_drop_removes_inheritance_edges();
     std::cout << "[INHERIT] all passed" << std::endl;
     return 0;
 }
