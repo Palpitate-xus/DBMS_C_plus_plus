@@ -4632,6 +4632,26 @@ static std::string ssiRidKey(const std::string& dbname,
     return dbname + "\x1f" + tablename + "\x1f" + std::to_string(rid);
 }
 
+class ActiveReferentialRows {
+public:
+    ActiveReferentialRows(std::set<std::string>& active,
+                          std::vector<std::string> rows)
+        : active_(active), rows_(std::move(rows)) {
+        for (const auto& row : rows_) active_.insert(row);
+    }
+
+    ~ActiveReferentialRows() {
+        for (const auto& row : rows_) active_.erase(row);
+    }
+
+    ActiveReferentialRows(const ActiveReferentialRows&) = delete;
+    ActiveReferentialRows& operator=(const ActiveReferentialRows&) = delete;
+
+private:
+    std::set<std::string>& active_;
+    std::vector<std::string> rows_;
+};
+
 static std::string ssiRelationKey(const std::string& dbname,
                                   const std::string& tablename) {
     return dbname + "\x1f" + tablename;
@@ -17343,11 +17363,23 @@ DBStatus StorageEngine::insertDefaultValues(const std::string& dbname,
     return insert(dbname, tablename, actualValues, insertedRows);
 }
 
-DBStatus StorageEngine::remove(const std::string& dbname,
-                                const std::string& tablename,
-                                const std::vector<std::string>& conditions,
-                                std::vector<std::map<std::string, std::string>>* deletedRows,
-                                const DeleteMatcher& deleteMatcher) {
+DBStatus StorageEngine::remove(
+    const std::string& dbname, const std::string& tablename,
+    const std::vector<std::string>& conditions,
+    std::vector<std::map<std::string, std::string>>* deletedRows,
+    const DeleteMatcher& deleteMatcher) {
+    ReferentialActionContext referentialContext;
+    return removeInternal(dbname, tablename, conditions, deletedRows,
+                          deleteMatcher, nullptr, referentialContext);
+}
+
+DBStatus StorageEngine::removeInternal(
+    const std::string& dbname, const std::string& tablename,
+    const std::vector<std::string>& conditions,
+    std::vector<std::map<std::string, std::string>>* deletedRows,
+    const DeleteMatcher& deleteMatcher,
+    const std::set<int64_t>* exactRids,
+    ReferentialActionContext& referentialContext) {
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
         transactionContext().hasWrite = true;
     }
@@ -17363,10 +17395,13 @@ DBStatus StorageEngine::remove(const std::string& dbname,
     }
     PageAllocator* pa = getPageAllocator(dbname, tablename);
 
-    const bool enforceRls = shouldEnforceRLS(tbl, StorageEngine::getRLSUser());
-    auto conds = parseConditions(conditions);
+    const bool enforceRls = exactRids == nullptr &&
+        shouldEnforceRLS(tbl, StorageEngine::getRLSUser());
     std::set<int64_t> toDelete;
-    if (enforceRls) {
+    if (exactRids) {
+        toDelete = *exactRids;
+    } else if (enforceRls) {
+        auto conds = parseConditions(conditions);
         const bool scanOk = forEachVisibleRow(
             dbname, tablename, "DELETE",
             [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
@@ -17381,6 +17416,7 @@ DBStatus StorageEngine::remove(const std::string& dbname,
             return DBStatus::INVALID_VALUE;
         }
     } else {
+        auto conds = parseConditions(conditions);
         bool scanFailed = false;
         toDelete = filterRows(dbname, tablename, conds, nullptr, &scanFailed);
         if (scanFailed) {
@@ -17393,7 +17429,7 @@ DBStatus StorageEngine::remove(const std::string& dbname,
     // storage operation.  Keep the final target-row selection inside the
     // storage boundary so RLS, row locks, FK actions, indexes and RETURNING
     // continue to use the same delete path as ordinary DELETE.
-    if (deleteMatcher && !toDelete.empty()) {
+    if (!exactRids && deleteMatcher && !toDelete.empty()) {
         std::set<int64_t> filteredIds;
         for (int64_t rid : toDelete) {
             std::string row;
@@ -17408,10 +17444,27 @@ DBStatus StorageEngine::remove(const std::string& dbname,
         toDelete.swap(filteredIds);
     }
 
+    // A cyclic CASCADE can point back to a row already being deleted by an
+    // ancestor action. Skip only those active physical rows; the guard removes
+    // them again when this call unwinds, so a later independent statement is
+    // unaffected.
+    std::vector<std::string> activeDeleteKeys;
+    for (auto it = toDelete.begin(); it != toDelete.end();) {
+        const std::string key = ssiRidKey(dbname, tablename, *it);
+        if (referentialContext.activeDeletes.count(key)) {
+            it = toDelete.erase(it);
+        } else {
+            activeDeleteKeys.push_back(key);
+            ++it;
+        }
+    }
+
     if (toDelete.empty()) {
         lockManager_.unlock(tablename);
         return DBStatus::OK;
     }
+    ActiveReferentialRows activeDeleteGuard(
+        referentialContext.activeDeletes, std::move(activeDeleteKeys));
 
     // Acquire row-level exclusive locks on rows to be deleted
     for (int64_t rid : toDelete) {
@@ -17461,6 +17514,41 @@ DBStatus StorageEngine::remove(const std::string& dbname,
                 bool dependencyScanFailed = false;
 
                 auto allTables = getTableNames(dbname);
+                // The exact RIDs collected below stay meaningful only while
+                // writers are excluded from every referencing relation. Take
+                // those relation locks before the scan so a concurrent UPDATE
+                // cannot change the FK or recycle a slot between discovery and
+                // the referential action.
+                std::set<std::string> cascadeTables;
+                for (const auto& otherTable : allTables) {
+                    if (otherTable == tablename) continue;
+                    const TableSchema otherTbl =
+                        getTableSchema(dbname, otherTable);
+                    for (size_t fi = 0; fi < otherTbl.fkLen; ++fi) {
+                        if (otherTbl.fks[fi].refTable == tablename) {
+                            cascadeTables.insert(otherTable);
+                            break;
+                        }
+                    }
+                }
+                std::vector<std::string> sortedTables(
+                    cascadeTables.begin(), cascadeTables.end());
+                std::sort(sortedTables.begin(), sortedTables.end());
+                std::vector<std::string> acquiredTables;
+                for (const auto& tableName : sortedTables) {
+                    if (!lockManager_.lockIntentExclusive(tableName)) {
+                        for (const auto& acquired : acquiredTables) {
+                            lockManager_.unlock(acquired);
+                        }
+                        lockManager_.unlock(tablename);
+                        if (transactionContext().inTransaction) {
+                            rollbackTransaction();
+                        }
+                        return DBStatus::LOCK_CONFLICT;
+                    }
+                    acquiredTables.push_back(tableName);
+                }
+
                 for (const auto& otherTable : allTables) {
                     if (dependencyScanFailed) break;
                     if (otherTable == tablename) continue;
@@ -17519,32 +17607,19 @@ DBStatus StorageEngine::remove(const std::string& dbname,
                 }
 
                 if (dependencyScanFailed) {
+                    for (const auto& acquired : acquiredTables) {
+                        lockManager_.unlock(acquired);
+                    }
                     lockManager_.unlock(tablename);
                     return DBStatus::IO_ERROR;
                 }
 
                 if (!restrictTables.empty()) {
+                    for (const auto& acquired : acquiredTables) {
+                        lockManager_.unlock(acquired);
+                    }
                     lockManager_.unlock(tablename);
                     return DBStatus::INVALID_VALUE;
-                }
-
-                // Collect tables that need locks for cascade/setnull
-                std::set<std::string> cascadeTables;
-                for (const auto& ca : cascadeActions) cascadeTables.insert(ca.table);
-                for (const auto& sa : setNullActions) cascadeTables.insert(sa.table);
-
-                // Acquire locks on referenced tables in alphabetical order
-                std::vector<std::string> sortedTables(cascadeTables.begin(), cascadeTables.end());
-                std::sort(sortedTables.begin(), sortedTables.end());
-                std::vector<std::string> acquiredTables;
-                for (const auto& t : sortedTables) {
-                    if (!lockManager_.lockIntentExclusive(t)) {
-                        for (const auto& acquired : acquiredTables) lockManager_.unlock(acquired);
-                        lockManager_.unlock(tablename);
-                        if (transactionContext().inTransaction) rollbackTransaction();
-                        return DBStatus::LOCK_CONFLICT;
-                    }
-                    acquiredTables.push_back(t);
                 }
 
                 // Publish every affected relation as unsafe before changing
@@ -17567,119 +17642,63 @@ DBStatus StorageEngine::remove(const std::string& dbname,
                     return DBStatus::IO_ERROR;
                 }
 
-                // Apply SET NULL: set FK column to NULL
+                // Merge actions by child relation and exact physical row. A
+                // single child row may match multiple composite constraints;
+                // applying one logical UPDATE avoids duplicate trigger firings
+                // and, for MVCC, multiple successor versions of the same RID.
+                using ReferentialValues =
+                    std::map<std::string, std::string>;
+                std::map<std::string, std::set<int64_t>> cascadeRows;
+                std::map<std::string,
+                         std::map<ReferentialValues, std::set<int64_t>>>
+                    setNullRows;
+                for (const auto& ca : cascadeActions) {
+                    cascadeRows[ca.table].insert(ca.rid);
+                }
                 for (const auto& sa : setNullActions) {
-                    TableSchema otbl = getTableSchema(dbname, sa.table);
-                    PageAllocator* opa = getPageAllocator(dbname, sa.table);
-                    std::string row;
-                    if (!readRowByRid(opa, sa.rid, row, otbl)) continue;
-
-                    // Save old values for index update
-                    std::string oldPK = extractPKValue(row, otbl);
-                    std::map<std::string, std::string> oldIdxVals;
-                    auto indexedCols = getIndexedColumns(dbname, sa.table);
-                    for (const auto& ic : indexedCols) {
-                        size_t ici = otbl.len;
-                        for (size_t i = 0; i < otbl.len; ++i) {
-                            if (otbl.cols[i].dataName == ic) { ici = i; break; }
-                        }
-                        if (ici < otbl.len) oldIdxVals[ic] = extractColumnValue(row, otbl, ici);
-                    }
-
-                    // Set FK columns to NULL: rebuild row buffer
-                    {
-                        std::map<std::string, std::string> rowValues;
-                        for (size_t i = 0; i < otbl.len; ++i) {
-                            rowValues[otbl.cols[i].dataName] = extractColumnValue(row, otbl, i);
-                        }
-                        for (size_t ci : sa.colIndices) {
-                            rowValues[otbl.cols[ci].dataName] = "";
-                        }
-                        std::string newRow = buildRowBuffer(otbl, rowValues, transactionContext().currentTxnId);
-                        uint32_t pid; uint16_t sid;
-                        decodeRid(sa.rid, pid, sid);
-                        char* pbuf = opa->fetchPage(pid);
-                        if (pbuf) {
-                            PageWrapper page(pbuf, opa->pageSize(), otbl.formatVersion);
-                            uint16_t newSlotId = sid;
-                            page.update(sid, newRow.data(), newRow.size(), newSlotId);
-                            pa->markDirty(pid);
-                            opa->unpinPage(pid);
+                    TableSchema child = getTableSchema(dbname, sa.table);
+                    ReferentialValues nullValues;
+                    for (const size_t columnIndex : sa.colIndices) {
+                        if (columnIndex < child.len) {
+                            nullValues[child.cols[columnIndex].dataName] = "";
                         }
                     }
-
-                    // Update PK index if PK changed (it didn't)
-                    // Update secondary indexes if indexed column was changed
-                    for (const auto& kv : oldIdxVals) {
-                        const std::string& ic = kv.first;
-                        size_t ici = otbl.len;
-                        for (size_t i = 0; i < otbl.len; ++i) {
-                            if (otbl.cols[i].dataName == ic) { ici = i; break; }
-                        }
-                        if (ici >= otbl.len) continue;
-                        bool isFkCol = false;
-                        for (size_t ci : sa.colIndices) {
-                            if (ci == ici) { isFkCol = true; break; }
-                        }
-                        if (!isFkCol) continue;
-                        BPTree* sidx = getSecondaryIndex(dbname, sa.table, ic);
-                        if (!sidx) continue;
-                        std::string newVal = extractColumnValue(row, otbl, ici);
-                        if (kv.second != newVal) {
-                            if (!kv.second.empty()) sidx->removeMulti(kv.second, sa.rid);
-                            if (!newVal.empty()) sidx->insertMulti(newVal, sa.rid);
+                    if (!nullValues.empty()) {
+                        setNullRows[sa.table][nullValues].insert(sa.rid);
+                    }
+                }
+                // DELETE CASCADE wins for a row that is reached through
+                // another FK configured as SET NULL.
+                for (auto& [tableName, groups] : setNullRows) {
+                    const auto cascadeIt = cascadeRows.find(tableName);
+                    if (cascadeIt == cascadeRows.end()) continue;
+                    for (auto& [values, rows] : groups) {
+                        (void)values;
+                        for (const int64_t rid : cascadeIt->second) {
+                            rows.erase(rid);
                         }
                     }
                 }
 
-                // Apply CASCADE: delete referencing rows
-                for (const auto& ca : cascadeActions) {
-                    TableSchema otbl = getTableSchema(dbname, ca.table);
-                    PageAllocator* opa = getPageAllocator(dbname, ca.table);
-
-                    // Log for transaction rollback
-                    if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
-                        std::string row;
-                        if (readRowByRid(opa, ca.rid, row, otbl)) {
-                            logTxnDelete(ca.table, ca.rid, row);
-                        }
+                DBStatus actionStatus = DBStatus::OK;
+                for (const auto& [tableName, groups] : setNullRows) {
+                    for (const auto& [values, rows] : groups) {
+                        if (rows.empty()) continue;
+                        actionStatus = updateInternal(
+                            dbname, tableName, values, {}, nullptr,
+                            UpdateResolver{}, UpdateMatcher{}, &rows,
+                            referentialContext);
+                        if (actionStatus != DBStatus::OK) break;
                     }
-
-                    // Delete via tombstone
-                    uint32_t pid; uint16_t sid;
-                    decodeRid(ca.rid, pid, sid);
-                    char* pbuf = opa->fetchPage(pid);
-                    if (pbuf) {
-                        PageWrapper page(pbuf, opa->pageSize(), otbl.formatVersion);
-                        page.remove(sid);
-                        pa->markDirty(pid);
-                        opa->unpinPage(pid);
-                    }
-
-                    // Remove from PK index
-                    BPTree* pidx = getPKIndex(dbname, ca.table);
-                    if (pidx) {
-                        std::string row;
-                        if (readRowByRid(opa, ca.rid, row, otbl)) {
-                            std::string pkVal = extractPKValue(row, otbl);
-                            if (!pkVal.empty()) pidx->remove(pkVal);
-                        }
-                    }
-
-                    // Remove from secondary indexes
-                    auto indexedCols = getIndexedColumns(dbname, ca.table);
-                    for (const auto& ic : indexedCols) {
-                        size_t ici = otbl.len;
-                        for (size_t i = 0; i < otbl.len; ++i) {
-                            if (otbl.cols[i].dataName == ic) { ici = i; break; }
-                        }
-                        if (ici >= otbl.len) continue;
-                        BPTree* sidx = getSecondaryIndex(dbname, ca.table, ic);
-                        if (!sidx) continue;
-                        std::string row;
-                        if (!readRowByRid(opa, ca.rid, row, otbl)) continue;
-                        std::string val = extractColumnValue(row, otbl, ici);
-                        if (!val.empty()) sidx->removeMulti(val, ca.rid);
+                    if (actionStatus != DBStatus::OK) break;
+                }
+                if (actionStatus == DBStatus::OK) {
+                    for (const auto& [tableName, rows] : cascadeRows) {
+                        if (rows.empty()) continue;
+                        actionStatus = removeInternal(
+                            dbname, tableName, {}, nullptr, DeleteMatcher{},
+                            &rows, referentialContext);
+                        if (actionStatus != DBStatus::OK) break;
                     }
                 }
 
@@ -17694,6 +17713,10 @@ DBStatus StorageEngine::remove(const std::string& dbname,
                 // Release locks on referenced tables
                 for (const auto& t : sortedTables) {
                     lockManager_.unlock(t);
+                }
+                if (actionStatus != DBStatus::OK) {
+                    lockManager_.unlock(tablename);
+                    return actionStatus;
                 }
                 if (!cascadeSpecializedIndexesOk) {
                     lockManager_.unlock(tablename);
@@ -18167,16 +18190,28 @@ DBStatus StorageEngine::remove(const std::string& dbname,
     return DBStatus::OK;
 }
 
-DBStatus StorageEngine::update(const std::string& dbname,
-                                const std::string& tablename,
-                                const std::map<std::string, std::string>& updates,
-                                const std::vector<std::string>& conditions,
-                                std::vector<std::map<std::string, std::string>>* updatedRows,
-                                const std::function<bool(
-                                    const std::map<std::string, std::string>&,
-                                    std::map<std::string, std::string>&)>& updateResolver,
-                                const std::function<bool(
-                                    const std::map<std::string, std::string>&)>& updateMatcher) {
+DBStatus StorageEngine::update(
+    const std::string& dbname, const std::string& tablename,
+    const std::map<std::string, std::string>& updates,
+    const std::vector<std::string>& conditions,
+    std::vector<std::map<std::string, std::string>>* updatedRows,
+    const UpdateResolver& updateResolver,
+    const UpdateMatcher& updateMatcher) {
+    ReferentialActionContext referentialContext;
+    return updateInternal(dbname, tablename, updates, conditions, updatedRows,
+                          updateResolver, updateMatcher, nullptr,
+                          referentialContext);
+}
+
+DBStatus StorageEngine::updateInternal(
+    const std::string& dbname, const std::string& tablename,
+    const std::map<std::string, std::string>& updates,
+    const std::vector<std::string>& conditions,
+    std::vector<std::map<std::string, std::string>>* updatedRows,
+    const UpdateResolver& updateResolver,
+    const UpdateMatcher& updateMatcher,
+    const std::set<int64_t>* exactRids,
+    ReferentialActionContext& referentialContext) {
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
         transactionContext().hasWrite = true;
     }
@@ -18341,11 +18376,14 @@ DBStatus StorageEngine::update(const std::string& dbname,
     }
     PageAllocator* pa = getPageAllocator(dbname, tablename);
 
-    const bool enforceRls = shouldEnforceRLS(tbl, StorageEngine::getRLSUser());
-    auto conds = parseConditions(conditions);
+    const bool enforceRls = exactRids == nullptr &&
+        shouldEnforceRLS(tbl, StorageEngine::getRLSUser());
     std::set<int64_t> matchIds;
     bool scanFailed = false;
-    if (enforceRls) {
+    if (exactRids) {
+        matchIds = *exactRids;
+    } else if (enforceRls) {
+        auto conds = parseConditions(conditions);
         const bool scanOk = forEachVisibleRow(
             dbname, tablename, "UPDATE",
             [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
@@ -18360,6 +18398,7 @@ DBStatus StorageEngine::update(const std::string& dbname,
             return DBStatus::INVALID_VALUE;
         }
     } else {
+        auto conds = parseConditions(conditions);
         if (conds.empty()) {
             if (!forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char*, size_t) {
                 matchIds.insert(encodeRid(pid, sid));
@@ -18373,7 +18412,7 @@ DBStatus StorageEngine::update(const std::string& dbname,
         }
     }
 
-    if (updateMatcher && !matchIds.empty()) {
+    if (!exactRids && updateMatcher && !matchIds.empty()) {
         std::set<int64_t> filteredIds;
         for (const int64_t rid : matchIds) {
             std::string row;
@@ -18388,10 +18427,24 @@ DBStatus StorageEngine::update(const std::string& dbname,
         matchIds.swap(filteredIds);
     }
 
+    std::vector<std::string> activeUpdateKeys;
+    for (auto it = matchIds.begin(); it != matchIds.end();) {
+        const std::string key = ssiRidKey(dbname, tablename, *it);
+        if (referentialContext.activeDeletes.count(key) ||
+            referentialContext.activeUpdates.count(key)) {
+            it = matchIds.erase(it);
+        } else {
+            activeUpdateKeys.push_back(key);
+            ++it;
+        }
+    }
+
     if (matchIds.empty()) {
         lockManager_.unlock(tablename);
         return DBStatus::OK;
     }
+    ActiveReferentialRows activeUpdateGuard(
+        referentialContext.activeUpdates, std::move(activeUpdateKeys));
 
     // Acquire row-level exclusive locks on rows to be updated
     for (int64_t rid : matchIds) {
@@ -18650,7 +18703,11 @@ DBStatus StorageEngine::update(const std::string& dbname,
             return DBStatus::INVALID_VALUE;
         }
 
-        if (!rowPassesRLS(this, dbname, tablename, tbl, "UPDATE", rowValues,
+        // Referential actions execute with relation-owner semantics. Applying
+        // the caller's RLS policy here could silently leave a dangling FK even
+        // though the parent mutation succeeds.
+        if (!exactRids &&
+            !rowPassesRLS(this, dbname, tablename, tbl, "UPDATE", rowValues,
                           updateTypeHints, true)) {
             lockManager_.unlock(tablename);
             return DBStatus::INVALID_VALUE;
@@ -18794,9 +18851,40 @@ DBStatus StorageEngine::update(const std::string& dbname,
                 }
             }
 
+            std::vector<std::string> sortedTables;
+            std::vector<std::string> acquiredTables;
             if (!oldPKVals.empty()) {
                 auto allTables = getTableNames(dbname);
                 bool dependencyScanFailed = false;
+                std::set<std::string> referencingTables;
+                for (const auto& otherTable : allTables) {
+                    if (otherTable == tablename) continue;
+                    const TableSchema otherTbl =
+                        getTableSchema(dbname, otherTable);
+                    for (size_t fi = 0; fi < otherTbl.fkLen; ++fi) {
+                        if (otherTbl.fks[fi].refTable == tablename) {
+                            referencingTables.insert(otherTable);
+                            break;
+                        }
+                    }
+                }
+                sortedTables.assign(
+                    referencingTables.begin(), referencingTables.end());
+                std::sort(sortedTables.begin(), sortedTables.end());
+                for (const auto& tableName : sortedTables) {
+                    if (!lockManager_.lockIntentExclusive(tableName)) {
+                        for (const auto& acquired : acquiredTables) {
+                            lockManager_.unlock(acquired);
+                        }
+                        lockManager_.unlock(tablename);
+                        if (transactionContext().inTransaction) {
+                            rollbackTransaction();
+                        }
+                        return DBStatus::LOCK_CONFLICT;
+                    }
+                    acquiredTables.push_back(tableName);
+                }
+
                 for (const auto& otherTable : allTables) {
                     if (dependencyScanFailed) break;
                     if (otherTable == tablename) continue;
@@ -18860,31 +18948,20 @@ DBStatus StorageEngine::update(const std::string& dbname,
                     }
                 }
                 if (dependencyScanFailed) {
+                    for (const auto& acquired : acquiredTables) {
+                        lockManager_.unlock(acquired);
+                    }
                     lockManager_.unlock(tablename);
                     return DBStatus::IO_ERROR;
                 }
             }
 
             if (!restrictTables.empty()) {
+                for (const auto& acquired : acquiredTables) {
+                    lockManager_.unlock(acquired);
+                }
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
-            }
-
-            // Acquire locks on referenced tables in alphabetical order
-            std::set<std::string> affectedTables;
-            for (const auto& ca : updateCascadeActions) affectedTables.insert(ca.table);
-            for (const auto& sa : updateSetNullActions) affectedTables.insert(sa.table);
-            std::vector<std::string> sortedTables(affectedTables.begin(), affectedTables.end());
-            std::sort(sortedTables.begin(), sortedTables.end());
-            std::vector<std::string> acquiredTables;
-            for (const auto& t : sortedTables) {
-                if (!lockManager_.lockIntentExclusive(t)) {
-                    for (const auto& acquired : acquiredTables) lockManager_.unlock(acquired);
-                    lockManager_.unlock(tablename);
-                    if (transactionContext().inTransaction) rollbackTransaction();
-                    return DBStatus::LOCK_CONFLICT;
-                }
-                acquiredTables.push_back(t);
             }
 
             bool cascadeMarkersOk =
@@ -18903,67 +18980,49 @@ DBStatus StorageEngine::update(const std::string& dbname,
                 return DBStatus::IO_ERROR;
             }
 
-            // Apply ON UPDATE SET NULL
+            using ReferentialValues = std::map<std::string, std::string>;
+            std::map<std::string,
+                     std::map<int64_t, ReferentialValues>> rowUpdates;
             for (const auto& sa : updateSetNullActions) {
-                TableSchema otbl = getTableSchema(dbname, sa.table);
-                PageAllocator* opa = getPageAllocator(dbname, sa.table);
-                std::string oRow;
-                if (!readRowByRid(opa, sa.rid, oRow, otbl)) continue;
-
-                // Transaction log
-                if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
-                    logTxnUpdate(sa.table, sa.rid, oRow);
+                TableSchema child = getTableSchema(dbname, sa.table);
+                auto& values = rowUpdates[sa.table][sa.rid];
+                for (const size_t columnIndex : sa.colIndices) {
+                    if (columnIndex < child.len) {
+                        values[child.cols[columnIndex].dataName] = "";
+                    }
                 }
-
-                // Rebuild row with FK columns set to NULL
-                std::map<std::string, std::string> oRowVals;
-                for (size_t i = 0; i < otbl.len; ++i) {
-                    oRowVals[otbl.cols[i].dataName] = extractColumnValue(oRow, otbl, i);
-                }
-                for (size_t ci : sa.colIndices) {
-                    oRowVals[otbl.cols[ci].dataName] = "";
-                }
-                std::string newORow = buildRowBuffer(otbl, oRowVals, transactionContext().currentTxnId);
-                uint32_t opid; uint16_t osid;
-                decodeRid(sa.rid, opid, osid);
-                char* obuf = opa->fetchPage(opid);
-                if (obuf) {
-                    PageWrapper opage(obuf, opa->pageSize(), otbl.formatVersion);
-                    opage.update(osid, newORow.data(), newORow.size());
-                    opa->markDirty(opid);
-                    opa->unpinPage(opid);
+            }
+            for (const auto& ca : updateCascadeActions) {
+                auto& values = rowUpdates[ca.table][ca.rid];
+                for (const auto& [column, value] : ca.newFkVals) {
+                    values[column] = value;
                 }
             }
 
-            // Apply ON UPDATE CASCADE: update referencing rows' FK values
-            for (const auto& ca : updateCascadeActions) {
-                TableSchema otbl = getTableSchema(dbname, ca.table);
-                PageAllocator* opa = getPageAllocator(dbname, ca.table);
-                std::string oRow;
-                if (!readRowByRid(opa, ca.rid, oRow, otbl)) continue;
+            // Group rows that receive the same logical assignment. This keeps
+            // one statement-level DML call per assignment while retaining the
+            // exact RID identity discovered by the FK scan.
+            std::map<std::string,
+                     std::map<ReferentialValues, std::set<int64_t>>>
+                groupedUpdates;
+            for (const auto& [tableName, rows] : rowUpdates) {
+                for (const auto& [rid, values] : rows) {
+                    if (!values.empty()) {
+                        groupedUpdates[tableName][values].insert(rid);
+                    }
+                }
+            }
 
-                // Transaction log
-                if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
-                    logTxnUpdate(ca.table, ca.rid, oRow);
+            DBStatus actionStatus = DBStatus::OK;
+            for (const auto& [tableName, groups] : groupedUpdates) {
+                for (const auto& [values, rows] : groups) {
+                    actionStatus = updateInternal(
+                        dbname, tableName, values, {}, nullptr,
+                        UpdateResolver{}, UpdateMatcher{}, &rows,
+                        referentialContext);
+                    if (actionStatus != DBStatus::OK) break;
                 }
-
-                std::map<std::string, std::string> oRowVals;
-                for (size_t i = 0; i < otbl.len; ++i) {
-                    oRowVals[otbl.cols[i].dataName] = extractColumnValue(oRow, otbl, i);
-                }
-                for (const auto& kv : ca.newFkVals) {
-                    oRowVals[kv.first] = kv.second;
-                }
-                std::string newORow = buildRowBuffer(otbl, oRowVals, transactionContext().currentTxnId);
-                uint32_t opid; uint16_t osid;
-                decodeRid(ca.rid, opid, osid);
-                char* obuf = opa->fetchPage(opid);
-                if (obuf) {
-                    PageWrapper opage(obuf, opa->pageSize(), otbl.formatVersion);
-                    opage.update(osid, newORow.data(), newORow.size());
-                    opa->markDirty(opid);
-                    opa->unpinPage(opid);
-                }
+                if (actionStatus != DBStatus::OK) break;
             }
 
             bool cascadeSpecializedIndexesOk = true;
@@ -18975,6 +19034,10 @@ DBStatus StorageEngine::update(const std::string& dbname,
             }
             for (const auto& t : sortedTables) {
                 lockManager_.unlock(t);
+            }
+            if (actionStatus != DBStatus::OK) {
+                lockManager_.unlock(tablename);
+                return actionStatus;
             }
             if (!cascadeSpecializedIndexesOk) {
                 lockManager_.unlock(tablename);

@@ -1540,6 +1540,32 @@ private:
                                  bool* usedIndex = nullptr,
                                  bool* scanFailed = nullptr);
 
+    // Referential actions already know the physical rows selected while the
+    // referenced relation is locked. Keep that identity inside the storage
+    // layer: matching again by column values could update/delete unrelated
+    // duplicate rows, while bypassing the normal DML path would omit WAL,
+    // indexes, TOAST, triggers and transaction undo.
+    struct ReferentialActionContext {
+        std::set<std::string> activeDeletes;
+        std::set<std::string> activeUpdates;
+    };
+    DBStatus removeInternal(
+        const std::string& dbname, const std::string& tablename,
+        const std::vector<std::string>& conditions,
+        std::vector<std::map<std::string, std::string>>* deletedRows,
+        const DeleteMatcher& deleteMatcher,
+        const std::set<int64_t>* exactRids,
+        ReferentialActionContext& referentialContext);
+    DBStatus updateInternal(
+        const std::string& dbname, const std::string& tablename,
+        const std::map<std::string, std::string>& updates,
+        const std::vector<std::string>& conditions,
+        std::vector<std::map<std::string, std::string>>* updatedRows,
+        const UpdateResolver& updateResolver,
+        const UpdateMatcher& updateMatcher,
+        const std::set<int64_t>* exactRids,
+        ReferentialActionContext& referentialContext);
+
 
 private:
     // Lock ownership is process-wide so independently constructed embedded
