@@ -5153,6 +5153,89 @@ bool StorageEngine::readVisibleRowByRid(const std::string& dbname, PageAllocator
     return visible;
 }
 
+bool StorageEngine::readCurrentRowByRid(
+    const std::string& dbname, const std::string& tablename,
+    int64_t startRid, const TableSchema& tbl, int64_t& currentRid,
+    std::string& rowBuffer, bool& readFailed) const {
+    readFailed = false;
+    rowBuffer.clear();
+    PageAllocator* allocator = getPageAllocator(dbname, tablename);
+    if (!allocator) {
+        readFailed = true;
+        return false;
+    }
+
+    ReadView autocommitView;
+    const ReadView* view = nullptr;
+    if (transactionContext().inTransaction) {
+        view = &transactionContext().readView;
+    } else {
+        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        autocommitView.creatorTxnId = 0;
+        autocommitView.lowLimitId =
+            TxnIdGenerator::instance().maxCommittedTxId() + 1;
+        autocommitView.upLimitId = activeTransactions_.empty()
+            ? autocommitView.lowLimitId : *activeTransactions_.begin();
+        autocommitView.activeTxnIds = activeTransactions_;
+        autocommitView.commitLog = getCommitLog(dbname);
+        view = &autocommitView;
+    }
+
+    currentRid = startRid;
+    std::set<int64_t> visited;
+    for (size_t hop = 0; hop < 64; ++hop) {
+        if (!visited.insert(currentRid).second) {
+            readFailed = true;
+            return false;
+        }
+        uint32_t pageId = 0;
+        uint16_t slotId = 0;
+        decodeRid(currentRid, pageId, slotId);
+        char* buffer = allocator->fetchPage(pageId);
+        if (!buffer) {
+            readFailed = true;
+            return false;
+        }
+        PageWrapper page(buffer, allocator->pageSize(), tbl.formatVersion);
+        const char* data = nullptr;
+        size_t length = 0;
+        if (!page.isValid()) {
+            allocator->unpinPage(pageId);
+            readFailed = true;
+            return false;
+        }
+        if (!page.read(slotId, data, length)) {
+            allocator->unpinPage(pageId);
+            return false;
+        }
+
+        const bool visible = !usesHeapTupleHeader(tbl.formatVersion) ||
+            !view || view->isVisible(data, length, tbl.formatVersion);
+        if (visible) {
+            rowBuffer = stripRowHeader(
+                data, length, tbl.formatVersion, tbl.len);
+            allocator->unpinPage(pageId);
+            return true;
+        }
+        if (!usesHeapTupleHeader(tbl.formatVersion) ||
+            length < sizeof(HeapTupleHeaderData)) {
+            allocator->unpinPage(pageId);
+            readFailed = usesHeapTupleHeader(tbl.formatVersion);
+            return false;
+        }
+
+        const ItemPointer next = getCtid(castHeapHeader(data));
+        allocator->unpinPage(pageId);
+        if (next.pageId == 0 || next.offset == 0) return false;
+        const int64_t nextRid = encodeRid(
+            next.pageId, static_cast<uint16_t>(next.offset - 1));
+        if (nextRid == currentRid) return false;
+        currentRid = nextRid;
+    }
+    readFailed = true;
+    return false;
+}
+
 bool StorageEngine::readIndexedRowByRid(const std::string& dbname,
                                         const std::string& tablename,
                                         int64_t rid, std::string& rowBuffer,
@@ -7949,26 +8032,46 @@ bool StorageEngine::isConstraintCurrentlyDeferred(const std::string& dbname,
 
 bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
     if (dc.kind == DeferredCheck::Kind::Unique) {
-        // Count rows whose uniqueCol equals payloadValue; the queued row
-        // itself is excluded via exceptRid. Any remaining row means a
-        // violation.
-        TableSchema tbl = getTableSchema(dc.dbname, dc.tablename);
+        // Re-read the row at commit time. It may have been updated again or
+        // deleted since this check was queued, so the captured payload/RID is
+        // not authoritative for the transaction's final state.
+        if (!tableExists(dc.dbname, dc.tablename)) return true;
+        const TableSchema tbl = getTableSchema(dc.dbname, dc.tablename);
         int colIdx = -1;
         for (size_t i = 0; i < tbl.len; ++i) {
             if (tbl.cols[i].dataName == dc.uniqueCol) { colIdx = static_cast<int>(i); break; }
         }
-        if (colIdx < 0) return true;
+        if (colIdx < 0) return false;
+
+        int64_t currentRid = dc.rid;
+        std::string currentRow;
+        bool readFailed = false;
+        if (!readCurrentRowByRid(
+                dc.dbname, dc.tablename, dc.rid, tbl, currentRid,
+                currentRow, readFailed)) {
+            // A deleted row no longer participates in the constraint. I/O or
+            // corrupt-page failures must not be mistaken for an empty table.
+            return !readFailed;
+        }
+        const std::string payloadValue =
+            const_cast<StorageEngine*>(this)->extractColumnValue(
+                currentRow, tbl, static_cast<size_t>(colIdx), dc.dbname);
+        // NULL values are distinct for ordinary UNIQUE constraints.
+        if (payloadValue.empty()) return true;
+
         int matches = 0;
-        forEachRow(dc.dbname, dc.tablename,
-                   [&](uint32_t pageId, uint16_t slot, const char* data, size_t len) {
+        const bool scanOk = forEachRow(
+            dc.dbname, dc.tablename,
+            [&](uint32_t pageId, uint16_t slot, const char* data, size_t len) {
+            if (matches > 0) return;
             const int64_t rid = encodeRid(pageId, slot);
-            if (dc.exceptRid >= 0 && rid == dc.exceptRid) return;
+            if (rid == currentRid) return;
             std::string row(data, len);
             if (const_cast<StorageEngine*>(this)->extractColumnValue(
                     row, tbl, static_cast<size_t>(colIdx), dc.dbname)
-                    == dc.payloadValue) ++matches;
+                    == payloadValue) ++matches;
         });
-        return matches <= 0;
+        return scanOk && matches == 0;
     }
     if (dc.kind == DeferredCheck::Kind::Exclude) {
         // Re-run the exclusion conflict scan at commit time against the
@@ -8023,20 +8126,48 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
         return !conflict;
     }
     if (dc.kind == DeferredCheck::Kind::ForeignKey) {
-        // The referenced key must exist by commit time.
-        if (!tableExists(dc.dbname, dc.refTable)) return false;
-        const TableSchema refTbl = getTableSchema(dc.dbname, dc.refTable);
-        const std::vector<std::string> payloadValues =
-            dc.fkPayloadValues.empty()
-                ? std::vector<std::string>{dc.payloadValue}
-                : dc.fkPayloadValues;
+        // Validate the local row's final version. A stale queued payload can
+        // otherwise reject a value fixed later in the same transaction, and
+        // an inserted-then-deleted child would still require a parent.
+        if (!tableExists(dc.dbname, dc.tablename)) return true;
+        const TableSchema localTbl =
+            getTableSchema(dc.dbname, dc.tablename);
+        int64_t currentRid = dc.rid;
+        std::string currentRow;
+        bool readFailed = false;
+        if (!readCurrentRowByRid(
+                dc.dbname, dc.tablename, dc.rid, localTbl, currentRid,
+                currentRow, readFailed)) {
+            return !readFailed;
+        }
+
+        const std::vector<std::string> localNames =
+            dc.fkLocalCols.empty()
+                ? std::vector<std::string>{dc.uniqueCol}
+                : dc.fkLocalCols;
         const std::vector<std::string> referencedNames =
             dc.fkRefCols.empty()
                 ? std::vector<std::string>{dc.refCol}
                 : dc.fkRefCols;
-        if (payloadValues.empty() ||
-            payloadValues.size() != referencedNames.size()) {
+        if (localNames.empty() ||
+            localNames.size() != referencedNames.size()) {
             return false;
+        }
+
+        std::vector<std::string> payloadValues;
+        payloadValues.reserve(localNames.size());
+        for (const auto& name : localNames) {
+            size_t columnIndex = localTbl.len;
+            for (size_t candidate = 0; candidate < localTbl.len; ++candidate) {
+                if (localTbl.cols[candidate].dataName == name) {
+                    columnIndex = candidate;
+                    break;
+                }
+            }
+            if (columnIndex >= localTbl.len) return false;
+            payloadValues.push_back(
+                const_cast<StorageEngine*>(this)->extractColumnValue(
+                    currentRow, localTbl, columnIndex, dc.dbname));
         }
         if (std::any_of(
                 payloadValues.begin(), payloadValues.end(),
@@ -8044,6 +8175,9 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
             return true;
         }
 
+        // The referenced key must exist by commit time.
+        if (!tableExists(dc.dbname, dc.refTable)) return false;
+        const TableSchema refTbl = getTableSchema(dc.dbname, dc.refTable);
         std::vector<size_t> referencedColumns;
         referencedColumns.reserve(referencedNames.size());
         for (const auto& name : referencedNames) {
@@ -17183,6 +17317,7 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             check.refTable = fk.refTable;
             check.refCol = fk.refCols.empty() ? "" : fk.refCols.front();
             check.fkPayloadValues = e.values;
+            check.fkLocalCols = fk.colNames;
             check.fkRefCols = fk.refCols;
             transactionContext()
                 .deferredChecks[transactionContext().currentTxnId]
@@ -19602,6 +19737,7 @@ DBStatus StorageEngine::updateInternal(
                     check.refTable = foreignKey.refTable;
                     check.refCol = foreignKey.refCols.front();
                     check.fkPayloadValues = localValues;
+                    check.fkLocalCols = foreignKey.colNames;
                     check.fkRefCols = foreignKey.refCols;
                     pendingDeferredForeignKeyChecks.push_back(
                         std::move(check));

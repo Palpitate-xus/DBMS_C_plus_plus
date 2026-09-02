@@ -145,6 +145,19 @@ static void test_fk_deferred_update() {
     assert(g_engine.update(db, "child", {{"pid", "401"}}, {"=id 1"}) ==
            DBStatus::OK);
     assert(g_engine.commitTransaction() == DBStatus::INVALID_VALUE);
+
+    assert(g_engine.beginTransaction(db) == DBStatus::OK);
+    assert(g_engine.update(db, "child", {{"pid", "999"}}, {"=id 1"}) ==
+           DBStatus::OK);
+    assert(g_engine.update(db, "child", {{"pid", "400"}}, {"=id 1"}) ==
+           DBStatus::OK);
+    assert(g_engine.commitTransaction() == DBStatus::OK);
+
+    assert(g_engine.beginTransaction(db) == DBStatus::OK);
+    assert(g_engine.insert(db, "child", {{"id", "4"}, {"pid", "999"}}) ==
+           DBStatus::OK);
+    assert(g_engine.remove(db, "child", {"=id 4"}) == DBStatus::OK);
+    assert(g_engine.commitTransaction() == DBStatus::OK);
     std::cout << "[DEFER] FK deferred updates rechecked at commit OK" << std::endl;
 }
 
@@ -172,6 +185,15 @@ static void test_composite_fk_deferred() {
                db, "composite_child", {{"b", "40"}}, {"=id 1"}) ==
            DBStatus::OK);
     assert(g_engine.commitTransaction() == DBStatus::INVALID_VALUE);
+
+    assert(g_engine.beginTransaction(db) == DBStatus::OK);
+    assert(g_engine.update(
+               db, "composite_child", {{"b", "40"}}, {"=id 1"}) ==
+           DBStatus::OK);
+    assert(g_engine.update(
+               db, "composite_child", {{"b", "30"}}, {"=id 1"}) ==
+           DBStatus::OK);
+    assert(g_engine.commitTransaction() == DBStatus::OK);
     std::cout << "[DEFER] composite FK insert/update commit checks OK" << std::endl;
 }
 
@@ -208,6 +230,19 @@ static void test_unique_deferred_update_violation() {
     assert(g_engine.update(db, "uniq", {{"tag", "c"}}, {"=id 1"})
                == DBStatus::OK);
     assert(g_engine.commitTransaction() == DBStatus::INVALID_VALUE);
+
+    assert(g_engine.beginTransaction(db) == DBStatus::OK);
+    assert(g_engine.update(db, "uniq", {{"tag", "c"}}, {"=id 1"}) ==
+           DBStatus::OK);
+    assert(g_engine.update(db, "uniq", {{"tag", "fixed"}}, {"=id 1"}) ==
+           DBStatus::OK);
+    assert(g_engine.commitTransaction() == DBStatus::OK);
+
+    assert(g_engine.beginTransaction(db) == DBStatus::OK);
+    assert(g_engine.insert(db, "uniq", {{"id", "23"}, {"tag", "c"}}) ==
+           DBStatus::OK);
+    assert(g_engine.remove(db, "uniq", {"=id 23"}) == DBStatus::OK);
+    assert(g_engine.commitTransaction() == DBStatus::OK);
     std::cout << "[DEFER] UNIQUE deferred conflicting update rejected OK"
               << std::endl;
 }

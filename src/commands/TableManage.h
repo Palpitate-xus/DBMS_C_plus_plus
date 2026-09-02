@@ -967,9 +967,14 @@ public:
                              const ReadView* readView = nullptr) const;
     bool readRowByRid(PageAllocator* pa, int64_t rid, std::string& rowBuffer, const TableSchema& tbl) const;
     bool readVisibleRowByRid(const std::string& dbname, PageAllocator* pa, int64_t rid,
-                              std::string& rowBuffer, const TableSchema& tbl,
-                              const ReadView* readView = nullptr,
-                              bool* readFailed = nullptr) const;
+                             std::string& rowBuffer, const TableSchema& tbl,
+                             const ReadView* readView = nullptr,
+                             bool* readFailed = nullptr) const;
+    bool readCurrentRowByRid(const std::string& dbname,
+                             const std::string& tablename,
+                             int64_t startRid, const TableSchema& tbl,
+                             int64_t& currentRid, std::string& rowBuffer,
+                             bool& readFailed) const;
     // Direct index fetch with the same page-lock and MVCC boundary as a heap
     // scan. The executor uses this instead of scanning all heap rows per RID.
     bool readIndexedRowByRid(const std::string& dbname, const std::string& tablename,
@@ -1493,9 +1498,10 @@ private:
                                 bool* scanFailed = nullptr) const;
 
     // Deferred constraint helpers. kind "check" evaluates the column CHECK
-    // expression of colIdx; "unique" re-checks that payloadValue is unique
-    // across tablename's column uniqueCol (excluding row exceptRid);
-    // "fk" verifies the referenced key payload exists in refTable.
+    // expression of colIdx; "unique" re-checks the row's final value in
+    // uniqueCol; "fk" verifies the row's final local-key values exist in
+    // refTable. Captured payload fields are retained for diagnostics and
+    // compatibility with older single-column queue producers.
     struct DeferredCheck {
         enum class Kind { Check, Unique, ForeignKey, Exclude };
         Kind kind = Kind::Check;
@@ -1519,6 +1525,7 @@ private:
         // Composite FK payload. The singular fields above remain populated
         // by older single-column call sites.
         std::vector<std::string> fkPayloadValues;
+        std::vector<std::string> fkLocalCols;
         std::vector<std::string> fkRefCols;
     };
     bool runDeferredCheck(const DeferredCheck& dc) const;
