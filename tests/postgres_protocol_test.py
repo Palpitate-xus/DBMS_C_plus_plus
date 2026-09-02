@@ -154,6 +154,20 @@ def data_row_values(messages):
     return values
 
 
+def wait_for_disconnect(sock, timeout=2.0):
+    deadline = time.time() + timeout
+    sock.settimeout(0.1)
+    while time.time() < deadline:
+        try:
+            if sock.recv(1) == b"":
+                return True
+        except (ConnectionResetError, BrokenPipeError):
+            return True
+        except socket.timeout:
+            pass
+    return False
+
+
 def setting_value(messages, name):
     for row in data_row_values(messages):
         if row and row[0] == name.encode():
@@ -440,6 +454,8 @@ def main():
         with open(os.path.join(work_dir, "pg_hba.conf"), "w", encoding="utf-8") as hba:
             hba.write("host all alice 127.0.0.1/32 scram-sha-256\n"
                       "host all +analyst 127.0.0.1/32 scram-sha-256\n")
+        with open(os.path.join(work_dir, "dbms.conf"), "w", encoding="utf-8") as config:
+            config.write("max_connections=1\n")
 
         probe = socket.socket()
         probe.bind(("127.0.0.1", 0))
@@ -471,6 +487,30 @@ def main():
                 time.sleep(0.05)
 
         startup(sock, "alice", "info")
+
+        # max_connections must control the live accept path at startup and
+        # after SET GLOBAL, not just the value exposed through pg_settings.
+        limited_sock = socket.socket()
+        limited_sock.connect(("127.0.0.1", port))
+        assert wait_for_disconnect(limited_sock), "startup max_connections was ignored"
+        limited_sock.close()
+
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "SET GLOBAL max_connections = 2"))
+        second_sock = socket.socket()
+        second_sock.settimeout(SOCKET_TIMEOUT)
+        second_sock.connect(("127.0.0.1", port))
+        startup(second_sock, "alice", "info")
+        runtime_limited_sock = socket.socket()
+        runtime_limited_sock.connect(("127.0.0.1", port))
+        assert wait_for_disconnect(runtime_limited_sock), \
+            "runtime max_connections was ignored"
+        runtime_limited_sock.close()
+        second_sock.sendall(typed(b"X"))
+        second_sock.close()
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "SET GLOBAL max_connections = 64"))
+
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "CREATE ROLE analyst"))
         assert any(kind == b"C" for kind, _ in simple_query(

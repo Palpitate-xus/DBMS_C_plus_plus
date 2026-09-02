@@ -135,6 +135,13 @@ static void syncPlannerCostModel(const dbms::Config& cfg) {
     dbms::QueryPlanner::setCostModel(cm);
 }
 
+static void syncConnectionRuntimeConfig(const dbms::Config& cfg) {
+    dbms::getServerStats().maxConnections.store(cfg.maxConnections,
+                                                std::memory_order_release);
+    dbms::ConnectionPool::instance().configure(
+        cfg.poolMode, cfg.poolSize, cfg.maxClientConnections);
+}
+
 static bool installReloadedConfig(const dbms::Config& next) {
     if (!next.validate() ||
         !dbms::setSqlStatsMaxEntries(next.sqlStatsMaxEntries)) {
@@ -145,6 +152,7 @@ static bool installReloadedConfig(const dbms::Config& next) {
     g_checkpointInterval = next.checkpointInterval;
     dbms::QueryPlanner::setParallelWorkers(next.maxParallelWorkersPerGather);
     syncPlannerCostModel(next);
+    syncConnectionRuntimeConfig(next);
     invalidatePlanCacheForConfigChange();
     return true;
 }
@@ -1801,8 +1809,7 @@ static bool applyConfigParam(const string& param, const string& val, bool isGlob
     g_checkpointInterval = g_config.checkpointInterval;
     dbms::QueryPlanner::setParallelWorkers(g_config.maxParallelWorkersPerGather);
     syncPlannerCostModel(g_config);
-    dbms::ConnectionPool::instance().configure(g_config.poolMode, g_config.poolSize,
-                                               g_config.maxClientConnections);
+    syncConnectionRuntimeConfig(g_config);
     invalidatePlanCacheForConfigChange();
     if (!g_config.save("dbms.conf")) {
         g_config = previous;
@@ -1811,8 +1818,7 @@ static bool applyConfigParam(const string& param, const string& val, bool isGlob
         g_checkpointInterval = previous.checkpointInterval;
         dbms::QueryPlanner::setParallelWorkers(previous.maxParallelWorkersPerGather);
         syncPlannerCostModel(previous);
-        dbms::ConnectionPool::instance().configure(previous.poolMode, previous.poolSize,
-                                                   previous.maxClientConnections);
+        syncConnectionRuntimeConfig(previous);
         s.statementTimeoutMs = previousSessionStatementTimeoutMs;
         s.defaultStatementTimeoutMs = previousSessionDefaultStatementTimeoutMs;
         s.lockTimeoutMs = previousSessionLockTimeoutMs;
@@ -21409,8 +21415,7 @@ int main(int argc, char* argv[]) {
     g_engine.getLockManager().setDeadlockTimeout(g_config.deadlockTimeoutMs);
     dbms::QueryPlanner::setParallelWorkers(g_config.maxParallelWorkersPerGather);
     syncPlannerCostModel(g_config);
-    dbms::ConnectionPool::instance().configure(g_config.poolMode, g_config.poolSize,
-                                               g_config.maxClientConnections);
+    syncConnectionRuntimeConfig(g_config);
     // TDE: load the keyring before any data file opens.
     if (!g_config.tdeKeyring.empty()) {
         std::string tdeError;
