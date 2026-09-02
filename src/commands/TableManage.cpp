@@ -2026,6 +2026,7 @@ DBStatus StorageEngine::detachPartition(const std::string& dbname,
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
+    const TableSchema table = getTableSchema(dbname, tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     if (tbl.partitionType == TableSchema::PartitionType::None) {
@@ -11014,80 +11015,24 @@ DBStatus StorageEngine::truncateTable(const std::string& dbname,
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
 
-    TableSchema tbl = getTableSchema(dbname, tablename);
+    const auto finish = [&](DBStatus status) {
+        lockManager_.unlock(tablename);
+        return status;
+    };
 
-    // Remove and recreate data file + forks
-    std::filesystem::remove(dataPath(dbname, tablename));
-    std::filesystem::remove(fsmPath(dbname, tablename));
-    std::filesystem::remove(vmPath(dbname, tablename));
-    {
-        auto pa = std::make_unique<PageAllocator>(dataPath(dbname, tablename).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
-        pa->open();
-        pa->close();
-    }
-
-    // Remove and recreate primary key index
-    if (tbl.hasPrimaryKey()) {
-        std::filesystem::remove(indexPath(dbname, tablename));
-        BPTree idx(indexPath(dbname, tablename));
-        idx.open();
-        idx.close();
-    }
-
-    // Remove and recreate secondary indexes
-    auto idxMeta = getIndexMetadata(dbname, tablename);
-    for (const auto& meta : idxMeta) {
-        std::filesystem::remove(relationDir(dbname, tablename) / (tablename + ".idx_" + meta.name));
-    }
-    auto hashIdx = getHashIndexedColumns(dbname, tablename);
-    for (const auto& col : hashIdx) {
-        std::filesystem::remove(hashIndexPath(dbname, tablename, col));
-    }
-    auto bloomIdxCols = getBloomIndexedColumns(dbname, tablename);
-    for (const auto& col : bloomIdxCols) {
-        std::filesystem::remove(bloomIndexPath(dbname, tablename, col));
-    }
-    auto compIdx = getCompositeIndexes(dbname, tablename);
-    for (const auto& ci : compIdx) {
-        std::filesystem::remove(relationDir(dbname, tablename) / (tablename + ".idx_" + ci.name));
-    }
-    auto ftCols = getFullTextIndexedColumns(dbname, tablename);
-    for (const auto& col : ftCols) {
-        std::filesystem::remove(fullTextIndexPath(dbname, tablename, col));
-    }
-    auto ginCols = getGinIndexedColumns(dbname, tablename);
-    for (const auto& col : ginCols) {
-        std::filesystem::remove(ginIndexPath(dbname, tablename, col));
-    }
-    auto gistCols = getGiSTIndexedColumns(dbname, tablename);
-    for (const auto& col : gistCols) {
-        std::filesystem::remove(giSTIndexPath(dbname, tablename, col));
-    }
-    auto brinCols = getBrinIndexedColumns(dbname, tablename);
-    for (const auto& col : brinCols) {
-        std::filesystem::remove(brinIndexPath(dbname, tablename, col));
-    }
-
-    // Clear caches
-    std::string key = dbname + "/" + tablename;
-    pkIndexCache_.erase(key);
-    pageAllocators_.erase(key);
-    fsmCache_.erase(key);
-    vmCache_.erase(key);
-    secondaryIndexCache_.erase(key);
-    hashIndexCache_.erase(key);
-
-    // Reset auto-increment sequences
-    for (size_t i = 0; i < tbl.len; ++i) {
-        if (tbl.cols[i].isAutoIncrement) {
-            writeNextSeq(dbname, tablename, tbl.cols[i].dataName, 1);
-        }
+    // Heap tuples and every RID-bearing auxiliary structure form one
+    // physical identity.  Rebuild them together so no index or TOAST fork
+    // can retain references into the pre-TRUNCATE heap.
+    if (!resetTableStorage(dbname, tablename)) {
+        return finish(DBStatus::IO_ERROR);
     }
 
     // Clear statistics
     auto spath = statsPath(dbname);
-    if (std::filesystem::exists(spath)) {
+    std::error_code statsError;
+    if (std::filesystem::exists(spath, statsError)) {
         std::ifstream ifs(spath);
+        if (!ifs) return finish(DBStatus::IO_ERROR);
         std::vector<std::string> lines;
         std::string line;
         while (std::getline(ifs, line)) {
@@ -11098,17 +11043,22 @@ DBStatus StorageEngine::truncateTable(const std::string& dbname,
                 if (t != tablename) lines.push_back(line);
             }
         }
-        std::ofstream ofs(spath);
-        for (size_t i = 0; i < lines.size(); ++i) {
-            if (i > 0) ofs << '\n';
-            ofs << lines[i];
+        if (ifs.bad()) return finish(DBStatus::IO_ERROR);
+        std::ostringstream serialized;
+        for (const auto& retained : lines) serialized << retained << '\n';
+        if (!index_file::writeAtomically(spath, serialized.str())) {
+            return finish(DBStatus::IO_ERROR);
         }
-        if (!lines.empty()) ofs << '\n';
     }
+    if (statsError) return finish(DBStatus::IO_ERROR);
 
-    lockManager_.unlock(tablename);
-    dbms::resetRuntimeTableStats(dbname, tablename);
-    return DBStatus::OK;
+    for (size_t i = 0; i < table.len; ++i) {
+        if (table.cols[i].isAutoIncrement) {
+            writeNextSeq(
+                dbname, tablename, table.cols[i].dataName, 1);
+        }
+    }
+    return finish(DBStatus::OK);
 }
 
 DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
@@ -25328,12 +25278,11 @@ bool StorageEngine::redoXactAbort(uint64_t xid) {
     return true;
 }
 
-bool StorageEngine::resetUnloggedTableAfterRecovery(
+bool StorageEngine::resetTableStorage(
     const std::string& dbname, const std::string& tablename) {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     try {
         const TableSchema table = getTableSchema(dbname, tablename);
-        if (!table.isUnlogged) return true;
 
         // Several simplified access methods use their physical sidecar as
         // the only definition catalog. Capture every definition before
@@ -25571,12 +25520,12 @@ bool StorageEngine::resetUnloggedTableAfterRecovery(
         resetDeadTupleCount(dbname, tablename);
         return true;
     } catch (const std::exception& error) {
-        std::cerr << "[recovery] unlogged table reset failed for "
+        std::cerr << "[storage] table reset failed for "
                   << dbname << "/" << tablename << ": "
                   << error.what() << std::endl;
         return false;
     } catch (...) {
-        std::cerr << "[recovery] unlogged table reset failed for "
+        std::cerr << "[storage] table reset failed for "
                   << dbname << "/" << tablename << std::endl;
         return false;
     }
@@ -26281,8 +26230,7 @@ bool StorageEngine::recoverAllDatabases() {
                     const TableSchema table =
                         getTableSchema(dbname, tableName);
                     if (table.isUnlogged &&
-                        !resetUnloggedTableAfterRecovery(
-                            dbname, tableName)) {
+                        !resetTableStorage(dbname, tableName)) {
                         std::cerr
                             << "[recovery] failed to reset unlogged table "
                             << dbname << "/" << tableName << std::endl;
