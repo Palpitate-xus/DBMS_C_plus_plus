@@ -1779,6 +1779,146 @@ static bool isRelationPhysicalFileName(const std::string& name,
            name.rfind(tablename + ".idx_", 0) == 0;
 }
 
+namespace {
+
+constexpr uint32_t TRUNCATE_STATE_MAGIC = 0x314e5254u;  // 'TRN1'
+constexpr uint32_t TRUNCATE_STATE_VERSION = 1;
+constexpr size_t TRUNCATE_STATE_PAYLOAD_SIZE =
+    sizeof(uint32_t) * 2 + sizeof(uint64_t);
+constexpr size_t TRUNCATE_STATE_SIZE =
+    TRUNCATE_STATE_PAYLOAD_SIZE + sizeof(uint64_t);
+
+enum class TruncateStateRead { Missing, Valid, Invalid };
+
+std::filesystem::path truncateStatePath(const StorageEngine& engine,
+                                        const std::string& dbname,
+                                        const std::string& tablename) {
+    return engine.dbPath(dbname) / (tablename + ".truncate_state");
+}
+
+uint64_t truncateStateChecksum(const char* data, size_t size) {
+    uint64_t hash = 1469598103934665603ULL;
+    for (size_t i = 0; i < size; ++i) {
+        hash ^= static_cast<unsigned char>(data[i]);
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+template <typename T>
+void appendTruncateState(std::string& bytes, const T& value) {
+    bytes.append(reinterpret_cast<const char*>(&value), sizeof(value));
+}
+
+bool persistTruncateState(const StorageEngine& engine,
+                          const std::string& dbname,
+                          const std::string& tablename,
+                          Lsn truncateLsn) {
+    if (truncateLsn == INVALID_LSN) return false;
+    std::string bytes;
+    bytes.reserve(TRUNCATE_STATE_SIZE);
+    appendTruncateState(bytes, TRUNCATE_STATE_MAGIC);
+    appendTruncateState(bytes, TRUNCATE_STATE_VERSION);
+    appendTruncateState(bytes, truncateLsn);
+    const uint64_t checksum =
+        truncateStateChecksum(bytes.data(), bytes.size());
+    appendTruncateState(bytes, checksum);
+    return index_file::writeAtomically(
+        truncateStatePath(engine, dbname, tablename), bytes);
+}
+
+TruncateStateRead readTruncateState(const StorageEngine& engine,
+                                    const std::string& dbname,
+                                    const std::string& tablename,
+                                    Lsn& truncateLsn) {
+    truncateLsn = INVALID_LSN;
+    const auto path = truncateStatePath(engine, dbname, tablename);
+    std::error_code error;
+    const bool exists = std::filesystem::exists(path, error);
+    if (error) return TruncateStateRead::Invalid;
+    if (!exists) return TruncateStateRead::Missing;
+    if (!std::filesystem::is_regular_file(path, error) || error ||
+        std::filesystem::file_size(path, error) != TRUNCATE_STATE_SIZE ||
+        error) {
+        return TruncateStateRead::Invalid;
+    }
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return TruncateStateRead::Invalid;
+    std::string bytes(TRUNCATE_STATE_SIZE, '\0');
+    input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    if (!input || input.peek() != std::char_traits<char>::eof()) {
+        return TruncateStateRead::Invalid;
+    }
+    uint32_t magic = 0;
+    uint32_t version = 0;
+    uint64_t storedLsn = 0;
+    uint64_t storedChecksum = 0;
+    size_t offset = 0;
+    std::memcpy(&magic, bytes.data() + offset, sizeof(magic));
+    offset += sizeof(magic);
+    std::memcpy(&version, bytes.data() + offset, sizeof(version));
+    offset += sizeof(version);
+    std::memcpy(&storedLsn, bytes.data() + offset, sizeof(storedLsn));
+    offset += sizeof(storedLsn);
+    std::memcpy(
+        &storedChecksum, bytes.data() + offset, sizeof(storedChecksum));
+    if (magic != TRUNCATE_STATE_MAGIC ||
+        version != TRUNCATE_STATE_VERSION || storedLsn == INVALID_LSN ||
+        storedChecksum != truncateStateChecksum(
+            bytes.data(), TRUNCATE_STATE_PAYLOAD_SIZE)) {
+        return TruncateStateRead::Invalid;
+    }
+    truncateLsn = storedLsn;
+    return TruncateStateRead::Valid;
+}
+
+bool decodeTruncateWalPayload(const std::vector<char>& data,
+                              std::string& tablename) {
+    tablename.clear();
+    if (data.size() < sizeof(uint32_t)) return false;
+    uint32_t length = 0;
+    std::memcpy(&length, data.data(), sizeof(length));
+    if (length == 0 || length >= MAX_TABLE_NAME_LEN ||
+        length > data.size() - sizeof(length)) {
+        return false;
+    }
+    tablename.assign(data.data() + sizeof(length), length);
+    if (!validStoredIdentifier(tablename, MAX_TABLE_NAME_LEN)) return false;
+    const size_t consumed = sizeof(length) + length;
+    if (data.size() - consumed > 7) return false;
+    return std::all_of(
+        data.begin() + static_cast<std::ptrdiff_t>(consumed), data.end(),
+        [](char byte) { return byte == 0; });
+}
+
+bool decodeHeapWalTableName(const XLogRecord& record,
+                            std::string& tablename) {
+    tablename.clear();
+    if (record.rmid() != RM_HEAP_ID ||
+        record.data.size() < sizeof(uint32_t)) {
+        return false;
+    }
+    uint32_t length = 0;
+    std::memcpy(&length, record.data.data(), sizeof(length));
+    if (length == 0 || length >= MAX_TABLE_NAME_LEN ||
+        length > record.data.size() - sizeof(length)) {
+        return false;
+    }
+    tablename.assign(record.data.data() + sizeof(length), length);
+    return validStoredIdentifier(tablename, MAX_TABLE_NAME_LEN);
+}
+
+bool syncDirectoryDurably(const std::filesystem::path& path) {
+    const int descriptor =
+        ::open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (descriptor < 0) return false;
+    const bool synced = ::fsync(descriptor) == 0;
+    const bool closed = ::close(descriptor) == 0;
+    return synced && closed;
+}
+
+}  // namespace
+
 std::filesystem::path StorageEngine::tableListPath(const std::string& dbname) const {
     return dbPath(dbname) / "tlist.lst";
 }
@@ -10752,6 +10892,7 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
                  secondaryIndexMetaPath(dbname, tbl.tablename),
                  hashIndexMetaPath(dbname, tbl.tablename),
                  namedIndexMetaPath(*this, dbname, tbl.tablename),
+                 truncateStatePath(*this, dbname, tbl.tablename),
                  fsmPath(dbname, tbl.tablename), vmPath(dbname, tbl.tablename),
                  toastMetaPath(dbname, tbl.tablename),
                  toastDataPath(dbname, tbl.tablename), toastIndexPath(dbname, tbl.tablename)}) {
@@ -10805,6 +10946,16 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
         [&](int*) {
             if (!createCompleted) cleanupFailedCreate();
         });
+
+    {
+        std::error_code staleStateError;
+        std::filesystem::remove(
+            truncateStatePath(*this, dbname, tbl.tablename),
+            staleStateError);
+        if (staleStateError) {
+            return failCreate("could not remove stale truncate state");
+        }
+    }
 
     {
         std::ofstream out(schemaPath(dbname, tblWithVersion.tablename), std::ios::binary);
@@ -10934,6 +11085,8 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
     std::filesystem::remove(hashIndexMetaPath(dbname, tablename));
     invalidateHashidxCache(dbname, tablename);
     std::filesystem::remove(namedIndexMetaPath(*this, dbname, tablename));
+    std::filesystem::remove(
+        truncateStatePath(*this, dbname, tablename));
     std::filesystem::remove(fsmPath(dbname, tablename));
     std::filesystem::remove(vmPath(dbname, tablename));
     removeSeq(dbname, tablename);
@@ -11013,16 +11166,34 @@ DBStatus StorageEngine::truncateTable(const std::string& dbname,
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
+    const TableSchema table = getTableSchema(dbname, tablename);
 
     const auto finish = [&](DBStatus status) {
         lockManager_.unlock(tablename);
         return status;
     };
 
+    Lsn truncateLsn = INVALID_LSN;
+    const bool walLogged =
+        !table.isUnlogged && !table.isTemporary &&
+        !isSessionTempPhysicalName(tablename);
+    if (walLogged) {
+        truncateLsn = walSmgrTruncate(dbname, tablename);
+        WALManager* wal = getWAL(dbname);
+        if (truncateLsn == INVALID_LSN || !wal ||
+            !wal->XLogFlush(truncateLsn)) {
+            return finish(DBStatus::IO_ERROR);
+        }
+    }
+
     // Heap tuples and every RID-bearing auxiliary structure form one
     // physical identity.  Rebuild them together so no index or TOAST fork
     // can retain references into the pre-TRUNCATE heap.
     if (!resetTableStorage(dbname, tablename)) {
+        return finish(DBStatus::IO_ERROR);
+    }
+    if (walLogged && !persistTruncateState(
+                         *this, dbname, tablename, truncateLsn)) {
         return finish(DBStatus::IO_ERROR);
     }
 
@@ -25182,6 +25353,25 @@ Lsn StorageEngine::walCheckpoint(const std::string& dbname, uint64_t nextXid) {
                            transactionContext().inTransaction ? transactionContext().currentTxnId : 0, payload);
 }
 
+Lsn StorageEngine::walSmgrTruncate(const std::string& dbname,
+                                   const std::string& tablename) {
+    WALManager* wal = getWAL(dbname);
+    if (!wal || tablename.empty() ||
+        tablename.size() >= MAX_TABLE_NAME_LEN) {
+        return INVALID_LSN;
+    }
+    const uint32_t length = static_cast<uint32_t>(tablename.size());
+    std::vector<char> payload;
+    payload.reserve(sizeof(length) + tablename.size());
+    payload.insert(payload.end(), reinterpret_cast<const char*>(&length),
+                   reinterpret_cast<const char*>(&length) + sizeof(length));
+    payload.insert(payload.end(), tablename.begin(), tablename.end());
+    // TRUNCATE is currently an immediate storage operation (the SQL DDL
+    // bridge commits first), so its redo boundary is non-transactional.
+    return wal->XLogInsert(
+        RM_SMGR_ID, XLOG_SMGR_TRUNCATE, 0, payload);
+}
+
 Lsn StorageEngine::walCatalogChange(const std::string& dbname, uint8_t info,
                                     const std::string& objType,
                                     const std::string& objName) {
@@ -25510,6 +25700,7 @@ bool StorageEngine::resetTableStorage(
                 return false;
             }
         }
+        if (!syncDirectoryDurably(relationRoot)) return false;
 
         dbms::resetRuntimeTableStats(dbname, tablename);
         resetDeadTupleCount(dbname, tablename);
@@ -26280,6 +26471,7 @@ bool StorageEngine::recoverAllDatabases() {
         // Pass 1: collect committed transaction IDs and update CLOG.
         std::set<uint64_t> committedXids = committedXidsByDb[dbname];
         std::vector<Lsn> redoRecordLsns;
+        std::map<std::string, Lsn> latestTruncateLsns;
         bool needsIndexRebuild = false;
         {
             Lsn lsn = redoLsn;
@@ -26322,6 +26514,18 @@ bool StorageEngine::recoverAllDatabases() {
                         std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
                         lastCheckpointLsns_[dbname] = lsn;
                     }
+                } else if (rmid == RM_SMGR_ID &&
+                           info == XLOG_SMGR_TRUNCATE) {
+                    std::string tableName;
+                    if (rec.header.xl_xid != 0 ||
+                        !decodeTruncateWalPayload(rec.data, tableName)) {
+                        std::cerr
+                            << "[recovery] malformed TRUNCATE WAL record in "
+                            << dbname << " at LSN " << lsn << std::endl;
+                        return false;
+                    }
+                    latestTruncateLsns[tableName] = lsn;
+                    needsIndexRebuild = true;
                 }
                 if (rec.header.xl_xid != 0 &&
                     (rmid == RM_HEAP_ID || rmid == RM_INDEX_ID) &&
@@ -26343,6 +26547,35 @@ bool StorageEngine::recoverAllDatabases() {
                       << dbname << std::endl;
             return false;
         }
+
+        // A truncate record is write-ahead of the multi-file reset.  The
+        // durable sidecar is published only after every heap/index/TOAST
+        // file and the relation directory have been synced.  Missing or
+        // older state therefore means startup must finish the interrupted
+        // reset before applying records newer than the truncate boundary.
+        for (const auto& [tableName, truncateLsn] : latestTruncateLsns) {
+            if (!tableExists(dbname, tableName)) continue;
+            Lsn appliedLsn = INVALID_LSN;
+            const TruncateStateRead state = readTruncateState(
+                *this, dbname, tableName, appliedLsn);
+            if (state == TruncateStateRead::Invalid) {
+                std::cerr << "[recovery] invalid TRUNCATE state for "
+                          << dbname << "/" << tableName << std::endl;
+                return false;
+            }
+            if (state == TruncateStateRead::Missing ||
+                appliedLsn < truncateLsn) {
+                if (!resetTableStorage(dbname, tableName) ||
+                    !persistTruncateState(
+                        *this, dbname, tableName, truncateLsn)) {
+                    std::cerr
+                        << "[recovery] could not complete TRUNCATE for "
+                        << dbname << "/" << tableName << std::endl;
+                    return false;
+                }
+            }
+        }
+
         // Pass 2: replay committed/non-transactional images in WAL order.
         // Uncommitted before-images are intentionally deferred to the reverse
         // pass below. If one transaction changes a page more than once, its
@@ -26353,6 +26586,20 @@ bool StorageEngine::recoverAllDatabases() {
             const uint8_t rmid = rec.rmid();
             const uint8_t info = rec.info();
             const uint64_t recXid = rec.header.xl_xid;
+            if (rmid == RM_HEAP_ID) {
+                std::string tableName;
+                if (!decodeHeapWalTableName(rec, tableName)) {
+                    std::cerr << "[recovery] " << dbname << " LSN "
+                              << recordLsn
+                              << ": malformed heap relation name\n";
+                    return false;
+                }
+                const auto truncate = latestTruncateLsns.find(tableName);
+                if (truncate != latestTruncateLsns.end() &&
+                    recordLsn <= truncate->second) {
+                    return true;
+                }
+            }
             bool shouldApply = false;
             if (undoUncommitted) {
                 shouldApply = recXid != 0 && !committedXids.count(recXid) &&

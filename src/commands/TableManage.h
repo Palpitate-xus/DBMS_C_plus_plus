@@ -1339,6 +1339,8 @@ private:
     Lsn walXactAbort(const std::string& dbname, uint64_t xid);
     Lsn walXactPrepare(const std::string& dbname, uint64_t xid);
     Lsn walCheckpoint(const std::string& dbname, uint64_t nextXid);
+    Lsn walSmgrTruncate(const std::string& dbname,
+                        const std::string& tablename);
     Lsn walIndexFileImage(const std::string& dbname,
                           const std::filesystem::path& indexPath,
                           const std::vector<char>& image,
