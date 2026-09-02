@@ -11857,8 +11857,7 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
     if (std::filesystem::exists(relationRoot)) {
         for (const auto& entry : std::filesystem::directory_iterator(relationRoot)) {
             const std::string filename = entry.path().filename().string();
-            if (filename.rfind(tablename + "_", 0) == 0 ||
-                filename.rfind(tablename + ".idx_", 0) == 0) {
+            if (isRelationPhysicalFileName(filename, tablename)) {
                 std::filesystem::remove_all(entry.path());
             }
         }

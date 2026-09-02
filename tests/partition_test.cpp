@@ -349,6 +349,58 @@ static void test_subpartitioning() {
     std::cout << "[PART] sub-partitioning OK" << std::endl;
 }
 
+static void test_drop_removes_partition_storage() {
+    std::string db = testDbPath("part_drop_storage");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    auto tbl = makeSchema("dropme", {"id int", "bucket int", "tag text"});
+    tbl.partitionType = dbms::TableSchema::PartitionType::Range;
+    tbl.partitionKey = "bucket";
+    tbl.rangePartitions = {{"low", "10"}, {"high", "20"}};
+    tbl.defaultPartitionName = "overflow";
+    tbl.subPartitionType = dbms::TableSchema::PartitionType::Hash;
+    tbl.subPartitionKey = "tag";
+    tbl.subHashPartitions = 2;
+    assert(g_engine.createTable(db, tbl) == dbms::DBStatus::OK);
+
+    const std::vector<std::string> partitions = {"low", "high", "overflow"};
+    std::vector<std::filesystem::path> relationFiles;
+    for (const auto& partition : partitions) {
+        for (size_t sub = 0; sub < tbl.subHashPartitions; ++sub) {
+            const auto heap = std::filesystem::path(db) /
+                ("dropme#" + partition + "#sp" + std::to_string(sub) +
+                 ".dt");
+            relationFiles.push_back(heap);
+            relationFiles.emplace_back(heap.string() + ".tde");
+        }
+    }
+    for (const auto& path : relationFiles) {
+        assert(std::filesystem::is_regular_file(path));
+    }
+    assert(g_engine.insert(
+               db, "dropme",
+               {{"id", "1"}, {"bucket", "5"}, {"tag", "left"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(
+               db, "dropme",
+               {{"id", "2"}, {"bucket", "25"}, {"tag", "right"}}) ==
+           dbms::DBStatus::OK);
+
+    assert(g_engine.dropTable(db, "dropme") == dbms::DBStatus::OK);
+    for (const auto& path : relationFiles) {
+        assert(!std::filesystem::exists(path));
+    }
+
+    // Reusing the relation name must start with empty partition heaps rather
+    // than reopening tuples left behind by the dropped table.
+    assert(g_engine.createTable(db, tbl) == dbms::DBStatus::OK);
+    assert(rowCount(db, "dropme") == 0);
+
+    cleanup(db);
+    std::cout << "[PART] DROP removes partition storage OK" << std::endl;
+}
+
 // Partition page images must replay into the physical partition fork.  The
 // parent heap is intentionally empty and must stay empty across startup.
 static void test_partition_wal_routing() {
@@ -403,6 +455,7 @@ int main() {
     test_typed_range_routing_and_predicates();
     test_hash_partitioning();
     test_subpartitioning();
+    test_drop_removes_partition_storage();
     test_partition_wal_routing();
     std::cout << "[PART] all passed" << std::endl;
     return 0;
