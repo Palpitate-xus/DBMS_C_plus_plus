@@ -79,6 +79,9 @@ public:
     // All affected publication files are updated atomically as a batch.
     bool renameTable(const std::string& dbname, const std::string& oldName,
                      const std::string& newName, std::string& error);
+    // Remove explicit membership for a relation that is being dropped.
+    bool removeTable(const std::string& dbname, const std::string& tableName,
+                     std::string& error);
     // Does this publication stream changes of (dbname, table)?
     bool publishes(const std::string& dbname, const std::string& table) const;
 

@@ -148,6 +148,32 @@ static void test_publication_tracks_table_rename() {
     assert(!ddl.executeSql("CREATE TABLE published_t (id INT)", s));
     assert(!publications.publishes(db, "published_t"));
 
+    assert(!ddl.executeSql("DROP TABLE renamed_t", s));
+    assert(!publications.publishes(db, "renamed_t"));
+    const auto afterDrop = publications.list(db);
+    assert(afterDrop.size() == 1 && afterDrop[0].tables.empty());
+    assert(!ddl.executeSql("CREATE TABLE renamed_t (id INT)", s));
+    assert(!publications.publishes(db, "renamed_t"));
+
+    Publication allTables;
+    allTables.name = "rename_all_pub";
+    allTables.owner = "admin";
+    allTables.publishAllTables = true;
+    assert(publications.create(db, allTables, error));
+    assert(publications.publishes(db, "renamed_t"));
+    assert(!ddl.executeSql("DROP TABLE renamed_t", s));
+    const auto afterAllTablesDrop = publications.list(db);
+    const auto allTablesEntry = std::find_if(
+        afterAllTablesDrop.begin(), afterAllTablesDrop.end(),
+        [](const Publication& candidate) {
+            return candidate.name == "rename_all_pub";
+        });
+    assert(allTablesEntry != afterAllTablesDrop.end());
+    assert(allTablesEntry->publishAllTables && allTablesEntry->tables.empty());
+    assert(!ddl.executeSql("CREATE TABLE renamed_t (id INT)", s));
+    assert(publications.publishes(db, "renamed_t"));
+
+    assert(publications.drop(db, "rename_all_pub", error));
     assert(publications.drop(db, "rename_pub", error));
     assert(g_engine.dropDatabase(db) == DBStatus::OK);
     cleanupTestDb("logical_pub_rename");

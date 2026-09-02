@@ -11797,21 +11797,33 @@ static std::filesystem::path grantChainPath(
     const std::filesystem::path& dbPath);
 
 static bool removeTableStatistics(const std::filesystem::path& path,
-                                  const std::string& tablename) {
+                                  const std::string& tablename,
+                                  std::string* original = nullptr,
+                                  bool* existed = nullptr) {
     std::error_code error;
-    if (!std::filesystem::exists(path, error)) return !error;
-    std::ifstream input(path);
+    if (!std::filesystem::exists(path, error)) {
+        if (original) original->clear();
+        if (existed) *existed = false;
+        return !error;
+    }
+    std::ifstream input(path, std::ios::binary);
     if (!input) return false;
+    std::string before((std::istreambuf_iterator<char>(input)),
+                       std::istreambuf_iterator<char>());
+    if (input.bad()) return false;
+    if (original) *original = before;
+    if (existed) *existed = true;
+
+    std::istringstream lines(before);
     std::ostringstream retained;
     std::string line;
-    while (std::getline(input, line)) {
+    while (std::getline(lines, line)) {
         if (line.empty()) continue;
         std::istringstream fields(line);
         std::string storedTable;
         fields >> storedTable;
         if (storedTable != tablename) retained << line << '\n';
     }
-    if (input.bad()) return false;
     return index_file::writeAtomically(path, retained.str());
 }
 
@@ -11941,7 +11953,11 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
         lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
     }
-    if (!removeTableStatistics(statsPath(dbname), tablename)) {
+    std::string originalStatistics;
+    bool statisticsExisted = false;
+    if (!removeTableStatistics(
+            statsPath(dbname), tablename, &originalStatistics,
+            &statisticsExisted)) {
         for (const auto& file : authorizationFiles) {
             if (file.changed) {
                 index_file::writeAtomically(file.path, file.original);
@@ -11951,6 +11967,31 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
             index_file::writeAtomically(
                 inheritancePath, originalInheritance);
         }
+        if (statisticsExisted) {
+            index_file::writeAtomically(
+                statsPath(dbname), originalStatistics);
+        }
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
+    }
+    std::string publicationError;
+    if (!PublicationCatalog::instance().removeTable(
+            dbname, tablename, publicationError)) {
+        for (const auto& file : authorizationFiles) {
+            if (file.changed) {
+                index_file::writeAtomically(file.path, file.original);
+            }
+        }
+        if (inheritanceChanged) {
+            index_file::writeAtomically(
+                inheritancePath, originalInheritance);
+        }
+        if (statisticsExisted) {
+            index_file::writeAtomically(
+                statsPath(dbname), originalStatistics);
+        }
+        std::cerr << "[publication] table drop failed: "
+                  << publicationError << std::endl;
         lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
     }
