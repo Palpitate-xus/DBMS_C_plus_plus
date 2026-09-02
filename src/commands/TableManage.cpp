@@ -5477,39 +5477,26 @@ std::vector<StorageEngine::CompositeIndexInfo> StorageEngine::getCompositeIndexe
     std::vector<CompositeIndexInfo> result;
     for (const std::string& line : readSecidxLines(dbname, tablename)) {
         if (line.size() > 2 && line[0] == 'C' && line[1] == ':') {
-            size_t pos = 2;
-            size_t next = line.find(':', pos);
-            if (next == std::string::npos) continue;
+            const size_t nameEnd = line.find(':', 2);
+            if (nameEnd == std::string::npos) continue;
             CompositeIndexInfo info;
-            info.name = line.substr(pos, next - pos);
-            pos = next + 1;
-            while (pos < line.size()) {
-                next = line.find(':', pos);
-                std::string cname = (next == std::string::npos) ? line.substr(pos) : line.substr(pos, next - pos);
-                if (!cname.empty()) {
-                    if (cname == "INCLUDE") {
-                        // Skip INCLUDE columns for composite index info
-                        if (next != std::string::npos) pos = next + 1;
-                        while (pos < line.size()) {
-                            next = line.find(':', pos);
-                            std::string inc = (next == std::string::npos) ? line.substr(pos) : line.substr(pos, next - pos);
-                            if (inc.empty()) break;
-                            if (next != std::string::npos) pos = next + 1;
-                            else { pos = line.size(); break; }
-                        }
-                        continue;
-                    }
-                    if (cname == "WHERE") {
-                        // Remainder is WHERE condition
-                        if (next != std::string::npos) {
-                            info.whereCondition = line.substr(next + 1);
-                        }
-                        break;
-                    }
-                    info.columns.push_back(cname);
-                }
-                if (next == std::string::npos) break;
-                pos = next + 1;
+            info.name = line.substr(2, nameEnd - 2);
+
+            const size_t includePos = line.find(":INCLUDE:", nameEnd);
+            const size_t wherePos = line.find(":WHERE:", nameEnd);
+            const size_t columnsEnd = std::min(
+                includePos != std::string::npos ? includePos : line.size(),
+                wherePos != std::string::npos ? wherePos : line.size());
+            std::stringstream columns(line.substr(
+                nameEnd + 1, columnsEnd - nameEnd - 1));
+            std::string column;
+            while (std::getline(columns, column, ':')) {
+                column = trim(column);
+                if (!column.empty()) info.columns.push_back(column);
+            }
+
+            if (wherePos != std::string::npos) {
+                info.whereCondition = line.substr(wherePos + 7);
             }
             if (!info.columns.empty()) result.push_back(std::move(info));
         }
@@ -7781,6 +7768,27 @@ static std::string evalExpr(const std::string& val, const std::string& exprFunc)
     return val;
 }
 
+struct EvaluatedIndexEntry {
+    std::string name;
+    bool included = false;
+    std::string key;
+};
+
+static bool partialIndexIncludes(
+    const std::string& predicate,
+    const TableSchema& table,
+    const std::map<std::string, std::string>& values,
+    const std::string& dbname,
+    bool& included) {
+    included = true;
+    if (predicate.empty()) return true;
+
+    std::string error;
+    included = dbms::ExprHelper::evalBool(
+        predicate, values, buildTypeHints(table), &error, dbname);
+    return error.empty();
+}
+
 static bool expressionIndexEntry(
     const StorageEngine::IndexMetadata& metadata,
     const TableSchema& table,
@@ -7817,16 +7825,9 @@ static bool expressionIndexEntry(
     }
     if (!columnExists) return false;
 
-    if (!metadata.whereCondition.empty()) {
-        std::string error;
-        included = dbms::ExprHelper::evalBool(
-            metadata.whereCondition, values, buildTypeHints(table),
-            &error, dbname);
-        if (!error.empty()) return false;
-        if (!included) return true;
-    } else {
-        included = true;
-    }
+    if (!partialIndexIncludes(metadata.whereCondition, table, values,
+                              dbname, included)) return false;
+    if (!included) return true;
 
     const std::string value = valueFromRowMap(values, columnName);
     if (value.empty()) {
@@ -7837,21 +7838,92 @@ static bool expressionIndexEntry(
     return true;
 }
 
-static bool expressionIndexEntryFromBuffer(
-    StorageEngine& engine,
+static bool secondaryIndexEntry(
     const StorageEngine::IndexMetadata& metadata,
     const TableSchema& table,
-    const std::string& rowBuffer,
+    const std::map<std::string, std::string>& values,
     const std::string& dbname,
-    bool& included,
-    std::string& key) {
+    EvaluatedIndexEntry& entry) {
+    entry = {};
+    entry.name = metadata.name;
+    if (metadata.isExpression) {
+        return expressionIndexEntry(metadata, table, values, dbname,
+                                    entry.included, entry.key);
+    }
+
+    bool columnExists = false;
+    for (size_t i = 0; i < table.len; ++i) {
+        if (table.cols[i].dataName == metadata.name) {
+            columnExists = true;
+            break;
+        }
+    }
+    if (!columnExists ||
+        !partialIndexIncludes(metadata.whereCondition, table, values,
+                              dbname, entry.included)) {
+        return false;
+    }
+    if (!entry.included) return true;
+    entry.key = valueFromRowMap(values, metadata.name);
+    if (entry.key.empty()) entry.included = false;
+    return true;
+}
+
+static bool compositeIndexEntry(
+    const StorageEngine::CompositeIndexInfo& metadata,
+    const TableSchema& table,
+    const std::map<std::string, std::string>& values,
+    const std::string& dbname,
+    EvaluatedIndexEntry& entry) {
+    entry = {};
+    entry.name = metadata.name;
+    if (!partialIndexIncludes(metadata.whereCondition, table, values,
+                              dbname, entry.included)) {
+        return false;
+    }
+    if (!entry.included) return true;
+    entry.key = buildCompositeKeyFromRowMap(values, table, metadata.columns);
+    if (entry.key.empty()) entry.included = false;
+    return true;
+}
+
+static std::map<std::string, std::string> indexRowValuesFromBuffer(
+    StorageEngine& engine,
+    const TableSchema& table,
+    const std::string& rowBuffer,
+    const std::string& dbname) {
     std::map<std::string, std::string> values;
     for (size_t i = 0; i < table.len; ++i) {
         values[table.cols[i].dataName] = engine.extractColumnValue(
             rowBuffer, table, i, dbname, true);
     }
-    return expressionIndexEntry(
-        metadata, table, values, dbname, included, key);
+    return values;
+}
+
+static bool secondaryIndexEntryFromBuffer(
+    StorageEngine& engine,
+    const StorageEngine::IndexMetadata& metadata,
+    const TableSchema& table,
+    const std::string& rowBuffer,
+    const std::string& dbname,
+    EvaluatedIndexEntry& entry) {
+    const auto values = indexRowValuesFromBuffer(
+        engine, table, rowBuffer, dbname);
+    return secondaryIndexEntry(
+        metadata, table, values, dbname, entry);
+}
+
+static bool compositeIndexEntryFromBuffer(
+    StorageEngine& engine,
+    const StorageEngine::CompositeIndexInfo& metadata,
+    const TableSchema& table,
+    const std::string& rowBuffer,
+    const std::string& dbname,
+    EvaluatedIndexEntry& entry) {
+    const auto values = indexRowValuesFromBuffer(
+        engine, table, rowBuffer, dbname);
+    return compositeIndexEntry(
+        metadata, table, values, dbname, entry);
 }
 
 DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string& tablename,
@@ -7905,10 +7977,20 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
         return DBStatus::INVALID_VALUE;
     }
 
-    // Parse WHERE condition for partial index
-    std::vector<Condition> whereConds;
-    if (!whereCondition.empty()) {
-        whereConds = parseConditions(std::vector<std::string>{whereCondition});
+    IndexMetadata candidateMetadata;
+    candidateMetadata.name = isExpression ? expression : actualColname;
+    candidateMetadata.isExpression = isExpression;
+    candidateMetadata.exprFunc = exprFunc;
+    candidateMetadata.whereCondition = whereCondition;
+    std::map<std::string, std::string> nullValues;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        nullValues[tbl.cols[i].dataName] = "";
+    }
+    bool ignoredMembership = false;
+    if (!partialIndexIncludes(whereCondition, tbl, nullValues, dbname,
+                              ignoredMembership)) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
     }
 
     // Already indexed? If direction differs, drop and recreate
@@ -7947,24 +8029,29 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
         std::filesystem::remove(secondaryIndexPath(dbname, tablename, physicalIndexKey), error);
     };
 
+    bool entriesValid = true;
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
+        if (!entriesValid) return;
         std::string row(data, len);
-        // Partial index: skip rows not matching WHERE condition
-        bool match = true;
-        for (const auto& wc : whereConds) {
-            if (!evalConditionOnRow(wc, row, tbl)) { match = false; break; }
+        EvaluatedIndexEntry entry;
+        if (!secondaryIndexEntryFromBuffer(
+                *this, candidateMetadata, tbl, row, dbname, entry)) {
+            entriesValid = false;
+            return;
         }
-        if (!match) return;
-        std::string val = extractColumnValue(row, tbl, colIdx);
-        if (!val.empty()) {
-            if (isExpression) val = evalExpr(val, exprFunc);
-            idx->insertMulti(val, encodeRid(pageId, slotId));
+        if (entry.included && !entry.key.empty()) {
+            idx->insertMulti(entry.key, encodeRid(pageId, slotId));
         }
     })) {
         discardPhysicalIndex();
         lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
+    }
+    if (!entriesValid) {
+        discardPhysicalIndex();
+        lockManager_.unlock(tablename);
+        return DBStatus::CORRUPTED_DATA;
     }
 
     // Record in metadata
@@ -8133,10 +8220,19 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
         }
     }
 
-    // Parse WHERE condition for partial index
-    std::vector<Condition> whereConds;
-    if (!whereCondition.empty()) {
-        whereConds = parseConditions(std::vector<std::string>{whereCondition});
+    CompositeIndexInfo candidateMetadata;
+    candidateMetadata.name = indexName;
+    candidateMetadata.columns = colnames;
+    candidateMetadata.whereCondition = whereCondition;
+    std::map<std::string, std::string> nullValues;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        nullValues[tbl.cols[i].dataName] = "";
+    }
+    bool ignoredMembership = false;
+    if (!partialIndexIncludes(whereCondition, tbl, nullValues, dbname,
+                              ignoredMembership)) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
     }
 
     // Build index from existing data
@@ -8157,23 +8253,29 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
                                 (tablename + ".idx_" + indexName), error);
     };
 
+    bool entriesValid = true;
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
+        if (!entriesValid) return;
         std::string row(data, len);
-        // Partial index: skip rows not matching WHERE condition
-        bool match = true;
-        for (const auto& wc : whereConds) {
-            if (!evalConditionOnRow(wc, row, tbl)) { match = false; break; }
+        EvaluatedIndexEntry entry;
+        if (!compositeIndexEntryFromBuffer(
+                *this, candidateMetadata, tbl, row, dbname, entry)) {
+            entriesValid = false;
+            return;
         }
-        if (!match) return;
-        std::string key = buildCompositeKey(row, tbl, colnames);
-        if (!key.empty()) {
-            idx->insertMulti(key, encodeRid(pageId, slotId));
+        if (entry.included && !entry.key.empty()) {
+            idx->insertMulti(entry.key, encodeRid(pageId, slotId));
         }
     })) {
         discardPhysicalIndex();
         lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
+    }
+    if (!entriesValid) {
+        discardPhysicalIndex();
+        lockManager_.unlock(tablename);
+        return DBStatus::CORRUPTED_DATA;
     }
 
     // Record in metadata: C:indexName:col1:col2:...:INCLUDE:inc1,inc2[:WHERE:cond]
@@ -8294,11 +8396,14 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
             }
         })) return DBStatus::IO_ERROR;
 
-    // 2. Rebuild secondary indexes
-    auto singleCols = getIndexedColumns(dbname, tablename);
-    for (const auto& colname : singleCols) {
-        std::filesystem::path idxPath = secondaryIndexPath(dbname, tablename, colname);
-        std::string cacheKey = dbname + "/" + tablename + "/" + colname;
+    // 2. Rebuild ordinary and expression secondary indexes.  Partial-index
+    // membership is recomputed from each row rather than inferred from the
+    // indexed key alone.
+    for (const auto& metadata : getIndexMetadata(dbname, tablename)) {
+        std::filesystem::path idxPath = secondaryIndexPath(
+            dbname, tablename, metadata.name);
+        std::string cacheKey =
+            dbname + "/" + tablename + "/" + metadata.name;
         {
             auto it = secondaryIndexCache_.find(cacheKey);
             if (it != secondaryIndexCache_.end()) {
@@ -8307,67 +8412,28 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
             }
         }
         std::filesystem::remove(idxPath);
-        BPTree* idx = getSecondaryIndex(dbname, tablename, colname);
+        BPTree* idx = getSecondaryIndex(
+            dbname, tablename, metadata.name);
         if (!idx) return DBStatus::IO_ERROR;
-        size_t colIdx = tbl.len;
-        for (size_t i = 0; i < tbl.len; ++i) {
-            if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
-        }
-        if (colIdx >= tbl.len) return DBStatus::INVALID_VALUE;
+        bool metadataValid = true;
         if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                            const char* data, size_t len) {
+            if (!metadataValid) return;
             std::string row(data, len);
-            std::string val = extractColumnValue(row, tbl, colIdx);
-            if (!val.empty()) {
-                idx->insertMulti(val, encodeRid(pageId, slotId));
+            EvaluatedIndexEntry entry;
+            if (!secondaryIndexEntryFromBuffer(
+                    *this, metadata, tbl, row, dbname, entry)) {
+                metadataValid = false;
+                return;
+            }
+            if (entry.included && !entry.key.empty()) {
+                idx->insertMulti(entry.key, encodeRid(pageId, slotId));
             }
         })) return DBStatus::IO_ERROR;
-    }
-
-    // 3. Rebuild expression indexes from their logical source values.
-    for (const auto& metadata : getIndexMetadata(dbname, tablename)) {
-        if (!metadata.isExpression) continue;
-        const std::filesystem::path expressionPath =
-            secondaryIndexPath(dbname, tablename, metadata.name);
-        const std::string cacheKey =
-            dbname + "/" + tablename + "/" + metadata.name;
-        {
-            auto cached = secondaryIndexCache_.find(cacheKey);
-            if (cached != secondaryIndexCache_.end()) {
-                cached->second->close();
-                secondaryIndexCache_.erase(cached);
-            }
-        }
-        std::filesystem::remove(expressionPath);
-        BPTree* index = getSecondaryIndex(
-            dbname, tablename, metadata.name);
-        if (!index) return DBStatus::IO_ERROR;
-        bool metadataValid = true;
-        if (!forEachRow(
-                dbname, tablename,
-                [&](uint32_t pageId, uint16_t slotId,
-                    const char* data, size_t len) {
-                    if (!metadataValid) return;
-                    const std::string row(data, len);
-                    bool included = false;
-                    std::string key;
-                    if (!expressionIndexEntryFromBuffer(
-                            *this, metadata, tbl, row, dbname,
-                            included, key)) {
-                        metadataValid = false;
-                        return;
-                    }
-                    if (included && !key.empty()) {
-                        index->insertMulti(
-                            key, encodeRid(pageId, slotId));
-                    }
-                })) {
-            return DBStatus::IO_ERROR;
-        }
         if (!metadataValid) return DBStatus::CORRUPTED_DATA;
     }
 
-    // 4. Rebuild composite indexes
+    // 3. Rebuild composite indexes
     auto compIdxs = getCompositeIndexes(dbname, tablename);
     for (const auto& ci : compIdxs) {
         std::filesystem::path p = relationDir(dbname, tablename) / (tablename + ".idx_" + ci.name);
@@ -8382,14 +8448,22 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
         std::filesystem::remove(p);
         BPTree* idx = getCompositeIndexTree(dbname, tablename, ci.name);
         if (!idx) return DBStatus::IO_ERROR;
+        bool metadataValid = true;
         if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                            const char* data, size_t len) {
+            if (!metadataValid) return;
             std::string row(data, len);
-            std::string key = buildCompositeKey(row, tbl, ci.columns);
-            if (!key.empty()) {
-                idx->insertMulti(key, encodeRid(pageId, slotId));
+            EvaluatedIndexEntry entry;
+            if (!compositeIndexEntryFromBuffer(
+                    *this, ci, tbl, row, dbname, entry)) {
+                metadataValid = false;
+                return;
+            }
+            if (entry.included && !entry.key.empty()) {
+                idx->insertMulti(entry.key, encodeRid(pageId, slotId));
             }
         })) return DBStatus::IO_ERROR;
+        if (!metadataValid) return DBStatus::CORRUPTED_DATA;
     }
 
     return DBStatus::OK;
@@ -13654,6 +13728,19 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
     if (cond.colName == "__true__") return true;
     if (cond.colName == "__false__") return false;
 
+    // Compact execution conditions put the operator first
+    // ("=UPPER(name) ALICE").  Preserve that representation for index
+    // matching, but route a function-shaped left operand through the same
+    // scalar evaluator used by infix predicates during a heap fallback.
+    if (cond.op != "scalarexpr" &&
+        cond.colName.find('(') != std::string::npos) {
+        Condition scalarCondition;
+        scalarCondition.op = "scalarexpr";
+        scalarCondition.colName = cond.colName;
+        scalarCondition.value = cond.op + " " + cond.value;
+        return evalConditionOnRow(scalarCondition, rowBuffer, tbl);
+    }
+
     StorageEngine* valueEngine = nullptr;
     std::string valueDb;
     if (g_condNullEngine && tbl.tablename == g_condNullTable) {
@@ -15162,22 +15249,28 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         return DBStatus::INVALID_VALUE;
     }
 
-    struct ExpressionIndexValue {
-        std::string name;
-        bool included = false;
-        std::string key;
-    };
-    std::vector<ExpressionIndexValue> expressionIndexValues;
+    // Compute all B-tree keys and partial-index memberships from the final
+    // logical row.  The physical image may replace large values with TOAST
+    // markers and must never be used for a predicate or key.
+    std::vector<EvaluatedIndexEntry> secondaryIndexValues;
     for (const auto& metadata : getIndexMetadata(dbname, tablename)) {
-        if (!metadata.isExpression) continue;
-        ExpressionIndexValue entry;
-        entry.name = metadata.name;
-        if (!expressionIndexEntry(metadata, tbl, actualValues, dbname,
-                                  entry.included, entry.key)) {
+        EvaluatedIndexEntry entry;
+        if (!secondaryIndexEntry(
+                metadata, tbl, actualValues, dbname, entry)) {
             lockManager_.unlock(tablename);
             return DBStatus::CORRUPTED_DATA;
         }
-        expressionIndexValues.push_back(std::move(entry));
+        secondaryIndexValues.push_back(std::move(entry));
+    }
+    std::vector<EvaluatedIndexEntry> compositeIndexValues;
+    for (const auto& metadata : getCompositeIndexes(dbname, tablename)) {
+        EvaluatedIndexEntry entry;
+        if (!compositeIndexEntry(
+                metadata, tbl, actualValues, dbname, entry)) {
+            lockManager_.unlock(tablename);
+            return DBStatus::CORRUPTED_DATA;
+        }
+        compositeIndexValues.push_back(std::move(entry));
     }
 
     // Keep the logical row image intact for constraints, index keys and
@@ -15572,29 +15665,18 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                 idx->remove(pkVal);
             }
         }
-        for (const auto& colname : getIndexedColumns(dbname, tablename)) {
-            size_t colIdx = tbl.len;
-            for (size_t i = 0; i < tbl.len; ++i) {
-                if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
-            }
-            if (colIdx >= tbl.len) continue;
-            if (BPTree* idx = getSecondaryIndex(dbname, tablename, colname); idx) {
-                const std::string val = valueFromRowMap(actualValues, colname);
-                if (!val.empty()) idx->removeMulti(val, rid);
-            }
-        }
-        for (const auto& entry : expressionIndexValues) {
+        for (const auto& entry : secondaryIndexValues) {
             if (!entry.included || entry.key.empty()) continue;
             if (BPTree* idx = getSecondaryIndex(
                     dbname, tablename, entry.name); idx) {
                 idx->removeMulti(entry.key, rid);
             }
         }
-        for (const auto& ci : getCompositeIndexes(dbname, tablename)) {
-            if (BPTree* idx = getCompositeIndexTree(dbname, tablename, ci.name); idx) {
-                const std::string key =
-                    buildCompositeKeyFromRowMap(actualValues, tbl, ci.columns);
-                if (!key.empty()) idx->removeMulti(key, rid);
+        for (const auto& entry : compositeIndexValues) {
+            if (!entry.included || entry.key.empty()) continue;
+            if (BPTree* idx = getCompositeIndexTree(
+                    dbname, tablename, entry.name); idx) {
+                idx->removeMulti(entry.key, rid);
             }
         }
         for (const auto& colname : getHashIndexedColumns(dbname, tablename)) {
@@ -15665,24 +15747,8 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             return abortIndexUpdate();
         }
     }
-    // Update secondary indexes.
-    {
-        auto indexedCols = getIndexedColumns(dbname, tablename);
-        for (const auto& colname : indexedCols) {
-            size_t colIdx = tbl.len;
-            for (size_t i = 0; i < tbl.len; ++i) {
-                if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
-            }
-            if (colIdx >= tbl.len) return abortIndexUpdate();
-            BPTree* secIdx = getSecondaryIndex(dbname, tablename, colname);
-            std::string val = valueFromRowMap(actualValues, colname);
-            if (!secIdx || (!val.empty() && !secIdx->insertMulti(val, rid))) {
-                return abortIndexUpdate();
-            }
-        }
-    }
-    // Update expression indexes.
-    for (const auto& entry : expressionIndexValues) {
+    // Update ordinary and expression secondary indexes.
+    for (const auto& entry : secondaryIndexValues) {
         BPTree* idx = getSecondaryIndex(dbname, tablename, entry.name);
         if (!idx || (entry.included && !entry.key.empty() &&
                      !idx->insertMulti(entry.key, rid))) {
@@ -15690,15 +15756,12 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         }
     }
     // Update composite indexes.
-    {
-        auto compIdxs = getCompositeIndexes(dbname, tablename);
-        for (const auto& ci : compIdxs) {
-            BPTree* cidx = getCompositeIndexTree(dbname, tablename, ci.name);
-            std::string key =
-                buildCompositeKeyFromRowMap(actualValues, tbl, ci.columns);
-            if (!cidx || (!key.empty() && !cidx->insertMulti(key, rid))) {
-                return abortIndexUpdate();
-            }
+    for (const auto& entry : compositeIndexValues) {
+        BPTree* index = getCompositeIndexTree(
+            dbname, tablename, entry.name);
+        if (!index || (entry.included && !entry.key.empty() &&
+                       !index->insertMulti(entry.key, rid))) {
+            return abortIndexUpdate();
         }
     }
     // Update hash indexes.
@@ -16067,6 +16130,16 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
         return ids;
     };
     TableSchema tbl = getTableSchema(dbname, tablename);
+    const auto secondaryMetadata = getIndexMetadata(dbname, tablename);
+    const auto hasCompleteSecondaryIndex = [&](const std::string& columnName) {
+        return std::any_of(
+            secondaryMetadata.begin(), secondaryMetadata.end(),
+            [&](const IndexMetadata& metadata) {
+                return !metadata.isExpression &&
+                       metadata.name == columnName &&
+                       metadata.whereCondition.empty();
+            });
+    };
 
     // Record logical index predicates independently of the physical access
     // path.  Range conditions may still use a heap scan today, but their
@@ -16169,7 +16242,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                     for (int64_t v : vals) ids.insert(v);
                 }
                 // Fallback to B+ tree secondary index
-                if (ids.empty()) {
+                if (ids.empty() && hasCompleteSecondaryIndex(c.colName)) {
                     BPTree* secIdx = getSecondaryIndex(dbname, tablename, c.colName);
                     if (secIdx) {
                         auto vals = secIdx->searchMulti(c.value);
@@ -16178,9 +16251,12 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                 }
                 // Try expression index (e.g. UPPER(name) = 'FOO')
                 if (ids.empty()) {
-                    auto metaList = getIndexMetadata(dbname, tablename);
-                    for (const auto& meta : metaList) {
-                        if (!meta.isExpression) continue;
+                    for (const auto& meta : secondaryMetadata) {
+                        // A partial index is only a subset.  Until predicate
+                        // implication is proven, using it as a complete
+                        // equality source could silently omit matching rows.
+                        if (!meta.isExpression ||
+                            !meta.whereCondition.empty()) continue;
                         // Normalize: compare uppercase versions
                         std::string queryExpr = c.colName;
                         std::string idxExpr = meta.name;
@@ -16756,27 +16832,36 @@ DBStatus StorageEngine::remove(const std::string& dbname,
         }
     }
 
-    struct ExpressionIndexValue {
-        std::string name;
-        bool included = false;
-        std::string key;
-    };
-    std::vector<std::vector<ExpressionIndexValue>> deleteExpressionValues(
+    std::vector<std::vector<EvaluatedIndexEntry>> deleteSecondaryValues(
         logicalRowsToDelete.size());
     const auto deleteIndexMetadata = getIndexMetadata(dbname, tablename);
     for (size_t rowIndex = 0; rowIndex < logicalRowsToDelete.size(); ++rowIndex) {
         if (logicalRowsToDelete[rowIndex].empty()) continue;
         for (const auto& metadata : deleteIndexMetadata) {
-            if (!metadata.isExpression) continue;
-            ExpressionIndexValue entry;
-            entry.name = metadata.name;
-            if (!expressionIndexEntryFromBuffer(
+            EvaluatedIndexEntry entry;
+            if (!secondaryIndexEntryFromBuffer(
                     *this, metadata, tbl, logicalRowsToDelete[rowIndex],
-                    dbname, entry.included, entry.key)) {
+                    dbname, entry)) {
                 lockManager_.unlock(tablename);
                 return DBStatus::CORRUPTED_DATA;
             }
-            deleteExpressionValues[rowIndex].push_back(std::move(entry));
+            deleteSecondaryValues[rowIndex].push_back(std::move(entry));
+        }
+    }
+    std::vector<std::vector<EvaluatedIndexEntry>> deleteCompositeValues(
+        logicalRowsToDelete.size());
+    const auto deleteCompositeMetadata = getCompositeIndexes(dbname, tablename);
+    for (size_t rowIndex = 0; rowIndex < logicalRowsToDelete.size(); ++rowIndex) {
+        if (logicalRowsToDelete[rowIndex].empty()) continue;
+        for (const auto& metadata : deleteCompositeMetadata) {
+            EvaluatedIndexEntry entry;
+            if (!compositeIndexEntryFromBuffer(
+                    *this, metadata, tbl, logicalRowsToDelete[rowIndex],
+                    dbname, entry)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::CORRUPTED_DATA;
+            }
+            deleteCompositeValues[rowIndex].push_back(std::move(entry));
         }
     }
 
@@ -16954,33 +17039,13 @@ DBStatus StorageEngine::remove(const std::string& dbname,
         }
     }
 
-    // Remove from secondary indexes
-    {
-        auto indexedCols = getIndexedColumns(dbname, tablename);
-        for (const auto& colname : indexedCols) {
-            size_t colIdx = tbl.len;
-            for (size_t i = 0; i < tbl.len; ++i) {
-                if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
-            }
-            if (colIdx >= tbl.len) continue;
-            BPTree* secIdx = getSecondaryIndex(dbname, tablename, colname);
-            if (!secIdx) continue;
-            size_t rowIndex = 0;
-            for (int64_t rid : toDelete) {
-                const auto& row = logicalRowsToDelete[rowIndex++];
-                if (row.empty()) continue;
-                std::string val = extractColumnValue(row, tbl, colIdx);
-                if (!val.empty()) secIdx->removeMulti(val, rid);
-            }
-        }
-    }
-    // Remove from expression indexes using the logical OLD images captured
-    // before TOAST cleanup.
+    // Remove ordinary and expression secondary entries from the logical OLD
+    // images captured before TOAST cleanup.
     {
         size_t rowIndex = 0;
         for (int64_t rid : toDelete) {
-            if (rowIndex >= deleteExpressionValues.size()) break;
-            for (const auto& entry : deleteExpressionValues[rowIndex]) {
+            if (rowIndex >= deleteSecondaryValues.size()) break;
+            for (const auto& entry : deleteSecondaryValues[rowIndex]) {
                 if (!entry.included || entry.key.empty()) continue;
                 if (BPTree* index = getSecondaryIndex(
                         dbname, tablename, entry.name); index) {
@@ -16990,19 +17055,19 @@ DBStatus StorageEngine::remove(const std::string& dbname,
             ++rowIndex;
         }
     }
-    // Remove from composite indexes
+    // Remove from composite indexes.
     {
-        auto compIdxs = getCompositeIndexes(dbname, tablename);
-        for (const auto& ci : compIdxs) {
-            BPTree* cidx = getCompositeIndexTree(dbname, tablename, ci.name);
-            if (!cidx) continue;
-            size_t rowIndex = 0;
-            for (int64_t rid : toDelete) {
-                const auto& row = logicalRowsToDelete[rowIndex++];
-                if (row.empty()) continue;
-                std::string key = buildCompositeKey(row, tbl, ci.columns);
-                if (!key.empty()) cidx->removeMulti(key, rid);
+        size_t rowIndex = 0;
+        for (int64_t rid : toDelete) {
+            if (rowIndex >= deleteCompositeValues.size()) break;
+            for (const auto& entry : deleteCompositeValues[rowIndex]) {
+                if (!entry.included || entry.key.empty()) continue;
+                if (BPTree* index = getCompositeIndexTree(
+                        dbname, tablename, entry.name); index) {
+                    index->removeMulti(entry.key, rid);
+                }
             }
+            ++rowIndex;
         }
     }
     // Remove from hash indexes
@@ -17435,16 +17500,9 @@ DBStatus StorageEngine::update(const std::string& dbname,
     }
 
     // Pre-fetch indexed column lists (hoisted out of the per-row loop)
-    auto indexedCols = getIndexedColumns(dbname, tablename);
     auto hashIndexedCols = getHashIndexedColumns(dbname, tablename);
-    auto expressionIndexMetadata = getIndexMetadata(dbname, tablename);
-    expressionIndexMetadata.erase(
-        std::remove_if(expressionIndexMetadata.begin(),
-                       expressionIndexMetadata.end(),
-                       [](const IndexMetadata& metadata) {
-                           return !metadata.isExpression;
-                       }),
-        expressionIndexMetadata.end());
+    const auto secondaryIndexMetadata = getIndexMetadata(dbname, tablename);
+    const auto compositeIndexMetadata = getCompositeIndexes(dbname, tablename);
 
     // For each matching row, read old data, update, write back, update indexes
     // Pre-update row images keyed by rid: AFTER UPDATE triggers expose OLD
@@ -17476,15 +17534,6 @@ DBStatus StorageEngine::update(const std::string& dbname,
         // Save old PK and indexed column values before modification
         std::string oldPK = tbl.buildPKValue(oldLogicalValues);
         std::map<std::string, std::string> oldIdxVals;
-        for (const auto& colname : indexedCols) {
-            size_t colIdx = tbl.len;
-            for (size_t i = 0; i < tbl.len; ++i) {
-                if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
-            }
-            if (colIdx < tbl.len) {
-                oldIdxVals[colname] = valueFromRowMap(oldLogicalValues, colname);
-            }
-        }
         // Also save hash-indexed column values
         for (const auto& colname : hashIndexedCols) {
             size_t colIdx = tbl.len;
@@ -17700,27 +17749,37 @@ DBStatus StorageEngine::update(const std::string& dbname,
             return DBStatus::INVALID_VALUE;
         }
 
-        struct ExpressionIndexTransition {
-            std::string name;
-            bool oldIncluded = false;
-            bool newIncluded = false;
-            std::string oldKey;
-            std::string newKey;
+        struct IndexTransition {
+            EvaluatedIndexEntry oldEntry;
+            EvaluatedIndexEntry newEntry;
         };
-        std::vector<ExpressionIndexTransition> expressionIndexTransitions;
-        for (const auto& metadata : expressionIndexMetadata) {
-            ExpressionIndexTransition transition;
-            transition.name = metadata.name;
-            if (!expressionIndexEntry(
+        std::vector<IndexTransition> secondaryIndexTransitions;
+        for (const auto& metadata : secondaryIndexMetadata) {
+            IndexTransition transition;
+            if (!secondaryIndexEntry(
                     metadata, tbl, oldLogicalValues, dbname,
-                    transition.oldIncluded, transition.oldKey) ||
-                !expressionIndexEntry(
+                    transition.oldEntry) ||
+                !secondaryIndexEntry(
                     metadata, tbl, rowValues, dbname,
-                    transition.newIncluded, transition.newKey)) {
+                    transition.newEntry)) {
                 lockManager_.unlock(tablename);
                 return DBStatus::CORRUPTED_DATA;
             }
-            expressionIndexTransitions.push_back(std::move(transition));
+            secondaryIndexTransitions.push_back(std::move(transition));
+        }
+        std::vector<IndexTransition> compositeIndexTransitions;
+        for (const auto& metadata : compositeIndexMetadata) {
+            IndexTransition transition;
+            if (!compositeIndexEntry(
+                    metadata, tbl, oldLogicalValues, dbname,
+                    transition.oldEntry) ||
+                !compositeIndexEntry(
+                    metadata, tbl, rowValues, dbname,
+                    transition.newEntry)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::CORRUPTED_DATA;
+            }
+            compositeIndexTransitions.push_back(std::move(transition));
         }
 
         // Build a validation image before allocating TOAST chunks.  All
@@ -18031,16 +18090,18 @@ DBStatus StorageEngine::update(const std::string& dbname,
 
             // Attempt HOT update for PostgreSQL-style tuples when no indexed column changes.
             if (usesHeapTupleHeader(tbl.formatVersion) && transactionContext().inTransaction && dbname == transactionContext().txnDB) {
-                // Expression indexes can depend on a partial predicate as
-                // well as their source column.  Conservatively disable HOT
-                // whenever one exists so no derived key can go stale.
-                bool indexesAffected = !expressionIndexTransitions.empty();
+                const auto transitionChangesIndex = [](const IndexTransition& transition) {
+                    return transition.oldEntry.included != transition.newEntry.included ||
+                           transition.oldEntry.key != transition.newEntry.key;
+                };
+                bool indexesAffected = std::any_of(
+                    secondaryIndexTransitions.begin(),
+                    secondaryIndexTransitions.end(), transitionChangesIndex);
+                indexesAffected = indexesAffected || std::any_of(
+                    compositeIndexTransitions.begin(),
+                    compositeIndexTransitions.end(), transitionChangesIndex);
                 for (const auto& kv : oldIdxVals) {
-                    size_t colIdx = tbl.len;
-                    for (size_t i = 0; i < tbl.len; ++i) {
-                        if (tbl.cols[i].dataName == kv.first) { colIdx = i; break; }
-                    }
-                    if (colIdx < tbl.len && colUpdates.find(colIdx) != colUpdates.end()) {
+                    if (kv.second != valueFromRowMap(rowValues, kv.first)) {
                         indexesAffected = true;
                         break;
                     }
@@ -18141,51 +18202,29 @@ DBStatus StorageEngine::update(const std::string& dbname,
             }
         }
 
-        // Update secondary indexes if indexed columns were updated or RID changed
-        for (const auto& kv : oldIdxVals) {
-            const std::string& colname = kv.first;
-            const std::string& oldVal = kv.second;
-            size_t colIdx = tbl.len;
-            for (size_t i = 0; i < tbl.len; ++i) {
-                if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
-            }
-            if (colIdx >= tbl.len) continue;
-            BPTree* secIdx = getSecondaryIndex(dbname, tablename, colname);
-            if (!secIdx) continue;
-            std::string newVal = valueFromRowMap(rowValues, colname);
-            bool colChanged = (colUpdates.find(colIdx) != colUpdates.end());
-            if (colChanged && oldVal != newVal) {
-                if (!oldVal.empty()) secIdx->removeMulti(oldVal, rid);
-                if (!newVal.empty()) secIdx->insert(newVal, actualRid);
-            } else if (actualRid != rid && !newVal.empty()) {
-                // RID changed: update index entry with new RID
-                secIdx->removeMulti(newVal, rid);
-                secIdx->insertMulti(newVal, actualRid);
-            }
-        }
-
-        // Maintain derived keys and partial-index membership from the
-        // logical OLD/NEW images computed before the heap mutation.
-        for (const auto& transition : expressionIndexTransitions) {
-            BPTree* expressionIndex = getSecondaryIndex(
-                dbname, tablename, transition.name);
-            if (!expressionIndex) continue;
+        // Maintain ordinary/expression keys and partial-index membership from
+        // the logical OLD/NEW images computed before the heap mutation.
+        for (const auto& transition : secondaryIndexTransitions) {
+            BPTree* index = getSecondaryIndex(
+                dbname, tablename, transition.newEntry.name);
+            if (!index) continue;
             const bool keyChanged =
-                transition.oldIncluded != transition.newIncluded ||
-                transition.oldKey != transition.newKey;
+                transition.oldEntry.included != transition.newEntry.included ||
+                transition.oldEntry.key != transition.newEntry.key;
             if (keyChanged) {
-                if (transition.oldIncluded && !transition.oldKey.empty()) {
-                    expressionIndex->removeMulti(transition.oldKey, rid);
+                if (transition.oldEntry.included &&
+                    !transition.oldEntry.key.empty()) {
+                    index->removeMulti(transition.oldEntry.key, rid);
                 }
-                if (transition.newIncluded && !transition.newKey.empty()) {
-                    expressionIndex->insertMulti(
-                        transition.newKey, actualRid);
+                if (transition.newEntry.included &&
+                    !transition.newEntry.key.empty()) {
+                    index->insertMulti(
+                        transition.newEntry.key, actualRid);
                 }
-            } else if (actualRid != rid && transition.newIncluded &&
-                       !transition.newKey.empty()) {
-                expressionIndex->removeMulti(transition.newKey, rid);
-                expressionIndex->insertMulti(
-                    transition.newKey, actualRid);
+            } else if (actualRid != rid && transition.newEntry.included &&
+                       !transition.newEntry.key.empty()) {
+                index->removeMulti(transition.newEntry.key, rid);
+                index->insertMulti(transition.newEntry.key, actualRid);
             }
         }
 
@@ -18197,30 +18236,28 @@ DBStatus StorageEngine::update(const std::string& dbname,
             recordSsiIndexKeys(dbname, tablename, strippedNewRow, tbl);
         }
 
-        // Update composite indexes
-        auto compIdxs = getCompositeIndexes(dbname, tablename);
-        for (const auto& ci : compIdxs) {
-            bool anyColChanged = false;
-            for (const auto& cname : ci.columns) {
-                size_t colIdx = tbl.len;
-                for (size_t i = 0; i < tbl.len; ++i) {
-                    if (tbl.cols[i].dataName == cname) { colIdx = i; break; }
+        // Update composite indexes, including predicate-only transitions.
+        for (const auto& transition : compositeIndexTransitions) {
+            BPTree* index = getCompositeIndexTree(
+                dbname, tablename, transition.newEntry.name);
+            if (!index) continue;
+            const bool keyChanged =
+                transition.oldEntry.included != transition.newEntry.included ||
+                transition.oldEntry.key != transition.newEntry.key;
+            if (keyChanged) {
+                if (transition.oldEntry.included &&
+                    !transition.oldEntry.key.empty()) {
+                    index->removeMulti(transition.oldEntry.key, rid);
                 }
-                if (colUpdates.find(colIdx) != colUpdates.end()) { anyColChanged = true; break; }
-            }
-            if (!anyColChanged && actualRid == rid) continue;
-            BPTree* cidx = getCompositeIndexTree(dbname, tablename, ci.name);
-            if (!cidx) continue;
-            std::string newKey =
-                buildCompositeKeyFromRowMap(rowValues, tbl, ci.columns);
-            std::string oldKey =
-                buildCompositeKeyFromRowMap(oldLogicalValues, tbl, ci.columns);
-            if (oldKey != newKey) {
-                if (!oldKey.empty()) cidx->removeMulti(oldKey, rid);
-                if (!newKey.empty()) cidx->insertMulti(newKey, actualRid);
-            } else if (actualRid != rid && !newKey.empty()) {
-                cidx->removeMulti(newKey, rid);
-                cidx->insertMulti(newKey, actualRid);
+                if (transition.newEntry.included &&
+                    !transition.newEntry.key.empty()) {
+                    index->insertMulti(
+                        transition.newEntry.key, actualRid);
+                }
+            } else if (actualRid != rid && transition.newEntry.included &&
+                       !transition.newEntry.key.empty()) {
+                index->removeMulti(transition.newEntry.key, rid);
+                index->insertMulti(transition.newEntry.key, actualRid);
             }
         }
 
@@ -27223,9 +27260,8 @@ DBStatus StorageEngine::rollbackTransaction() {
             // Read row data before removing so index entries can be cleaned up.
             std::string insertedRow;
             std::string pkVal;
-            std::map<std::string, std::string> secIdxVals;
-            std::map<std::string, std::string> expressionIdxVals;
-            std::map<std::string, std::string> compositeIdxVals;
+            std::vector<EvaluatedIndexEntry> secondaryIdxVals;
+            std::vector<EvaluatedIndexEntry> compositeIdxVals;
             std::map<std::string, std::string> hashIdxVals;
             {
                 std::string row;
@@ -27233,36 +27269,26 @@ DBStatus StorageEngine::rollbackTransaction() {
                     insertedRow = row;
                     pkVal = extractPKValue(
                         row, tbl, transactionContext().txnDB);
-                    auto indexedCols = getIndexedColumns(transactionContext().txnDB, it->tableName);
-                    for (const auto& colname : indexedCols) {
-                        size_t colIdx = tbl.len;
-                        for (size_t i = 0; i < tbl.len; ++i) {
-                            if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
-                        }
-                        if (colIdx < tbl.len) {
-                            secIdxVals[colname] = extractColumnValue(
-                                row, tbl, colIdx, transactionContext().txnDB);
-                        }
-                    }
                     for (const auto& metadata : getIndexMetadata(
                              transactionContext().txnDB, it->tableName)) {
-                        if (!metadata.isExpression) continue;
-                        bool included = false;
-                        std::string key;
-                        if (!expressionIndexEntryFromBuffer(
+                        EvaluatedIndexEntry entry;
+                        if (!secondaryIndexEntryFromBuffer(
                                 *this, metadata, tbl, row,
-                                transactionContext().txnDB, included, key)) {
+                                transactionContext().txnDB, entry)) {
                             rowUndoOk = false;
                             continue;
                         }
-                        if (included && !key.empty()) {
-                            expressionIdxVals[metadata.name] = std::move(key);
-                        }
+                        secondaryIdxVals.push_back(std::move(entry));
                     }
                     for (const auto& ci : getCompositeIndexes(transactionContext().txnDB, it->tableName)) {
-                        std::string key = buildCompositeKey(
-                            row, tbl, ci.columns, transactionContext().txnDB);
-                        if (!key.empty()) compositeIdxVals[ci.name] = key;
+                        EvaluatedIndexEntry entry;
+                        if (!compositeIndexEntryFromBuffer(
+                                *this, ci, tbl, row,
+                                transactionContext().txnDB, entry)) {
+                            rowUndoOk = false;
+                            continue;
+                        }
+                        compositeIdxVals.push_back(std::move(entry));
                     }
                     for (const auto& colname : getHashIndexedColumns(transactionContext().txnDB, it->tableName)) {
                         size_t colIdx = tbl.len;
@@ -27302,24 +27328,20 @@ DBStatus StorageEngine::rollbackTransaction() {
                 pkIdx->remove(pkVal);
             }
             // Remove from secondary indexes
-            for (const auto& kv : secIdxVals) {
-                BPTree* secIdx = getSecondaryIndex(transactionContext().txnDB, it->tableName, kv.first);
-                if (secIdx && !kv.second.empty()) {
-                    secIdx->removeMulti(kv.second, it->rowIdx);
+            for (const auto& entry : secondaryIdxVals) {
+                if (!entry.included || entry.key.empty()) continue;
+                BPTree* index = getSecondaryIndex(
+                    transactionContext().txnDB, it->tableName, entry.name);
+                if (index) {
+                    index->removeMulti(entry.key, it->rowIdx);
                 }
             }
-            for (const auto& kv : expressionIdxVals) {
-                BPTree* expressionIndex = getSecondaryIndex(
-                    transactionContext().txnDB, it->tableName, kv.first);
-                if (expressionIndex && !kv.second.empty()) {
-                    expressionIndex->removeMulti(kv.second, it->rowIdx);
-                }
-            }
-            for (const auto& kv : compositeIdxVals) {
-                BPTree* compositeIdx = getCompositeIndexTree(
-                    transactionContext().txnDB, it->tableName, kv.first);
-                if (compositeIdx && !kv.second.empty()) {
-                    compositeIdx->removeMulti(kv.second, it->rowIdx);
+            for (const auto& entry : compositeIdxVals) {
+                if (!entry.included || entry.key.empty()) continue;
+                BPTree* index = getCompositeIndexTree(
+                    transactionContext().txnDB, it->tableName, entry.name);
+                if (index) {
+                    index->removeMulti(entry.key, it->rowIdx);
                 }
             }
             for (const auto& kv : hashIdxVals) {
@@ -27409,66 +27431,60 @@ DBStatus StorageEngine::rollbackTransaction() {
                     it->rowData, tbl, transactionContext().txnDB);
                 if (!pkVal.empty()) pkIdx->insert(pkVal, it->rowIdx);
             }
-            auto indexedCols = getIndexedColumns(transactionContext().txnDB, it->tableName);
-            for (const auto& colname : indexedCols) {
-                size_t colIdx = tbl.len;
-                for (size_t i = 0; i < tbl.len; ++i) {
-                    if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
-                }
-                if (colIdx >= tbl.len) continue;
-                BPTree* secIdx = getSecondaryIndex(transactionContext().txnDB, it->tableName, colname);
-                if (!secIdx) continue;
-                if (foundCurrent) {
-                    std::string currentVal = extractColumnValue(
-                        currentRow, tbl, colIdx, transactionContext().txnDB);
-                    if (!currentVal.empty()) secIdx->removeMulti(currentVal, it->rowIdx);
-                }
-                std::string val = extractColumnValue(
-                    it->rowData, tbl, colIdx, transactionContext().txnDB);
-                if (!val.empty()) secIdx->insertMulti(val, it->rowIdx);
-            }
             for (const auto& metadata : getIndexMetadata(
                      transactionContext().txnDB, it->tableName)) {
-                if (!metadata.isExpression) continue;
-                BPTree* expressionIndex = getSecondaryIndex(
+                BPTree* index = getSecondaryIndex(
                     transactionContext().txnDB, it->tableName, metadata.name);
-                if (!expressionIndex) {
+                if (!index) {
                     rowUndoOk = false;
                     continue;
                 }
                 if (foundCurrent) {
-                    bool included = false;
-                    std::string key;
-                    if (!expressionIndexEntryFromBuffer(
+                    EvaluatedIndexEntry entry;
+                    if (!secondaryIndexEntryFromBuffer(
                             *this, metadata, tbl, currentRow,
-                            transactionContext().txnDB, included, key)) {
+                            transactionContext().txnDB, entry)) {
                         rowUndoOk = false;
-                    } else if (included && !key.empty()) {
-                        expressionIndex->removeMulti(key, it->rowIdx);
+                    } else if (entry.included && !entry.key.empty()) {
+                        index->removeMulti(entry.key, it->rowIdx);
                     }
                 }
-                bool included = false;
-                std::string key;
-                if (!expressionIndexEntryFromBuffer(
+                EvaluatedIndexEntry entry;
+                if (!secondaryIndexEntryFromBuffer(
                         *this, metadata, tbl, it->rowData,
-                        transactionContext().txnDB, included, key)) {
+                        transactionContext().txnDB, entry)) {
                     rowUndoOk = false;
-                } else if (included && !key.empty()) {
-                    expressionIndex->insertMulti(key, it->rowIdx);
+                } else if (entry.included && !entry.key.empty() &&
+                           !index->insertMulti(entry.key, it->rowIdx)) {
+                    rowUndoOk = false;
                 }
             }
             for (const auto& ci : getCompositeIndexes(transactionContext().txnDB, it->tableName)) {
-                BPTree* compositeIdx = getCompositeIndexTree(
+                BPTree* index = getCompositeIndexTree(
                     transactionContext().txnDB, it->tableName, ci.name);
-                if (!compositeIdx) continue;
-                if (foundCurrent) {
-                    std::string currentKey = buildCompositeKey(
-                        currentRow, tbl, ci.columns, transactionContext().txnDB);
-                    if (!currentKey.empty()) compositeIdx->removeMulti(currentKey, it->rowIdx);
+                if (!index) {
+                    rowUndoOk = false;
+                    continue;
                 }
-                std::string oldKey = buildCompositeKey(
-                    it->rowData, tbl, ci.columns, transactionContext().txnDB);
-                if (!oldKey.empty()) compositeIdx->insertMulti(oldKey, it->rowIdx);
+                if (foundCurrent) {
+                    EvaluatedIndexEntry entry;
+                    if (!compositeIndexEntryFromBuffer(
+                            *this, ci, tbl, currentRow,
+                            transactionContext().txnDB, entry)) {
+                        rowUndoOk = false;
+                    } else if (entry.included && !entry.key.empty()) {
+                        index->removeMulti(entry.key, it->rowIdx);
+                    }
+                }
+                EvaluatedIndexEntry entry;
+                if (!compositeIndexEntryFromBuffer(
+                        *this, ci, tbl, it->rowData,
+                        transactionContext().txnDB, entry)) {
+                    rowUndoOk = false;
+                } else if (entry.included && !entry.key.empty() &&
+                           !index->insertMulti(entry.key, it->rowIdx)) {
+                    rowUndoOk = false;
+                }
             }
             for (const auto& colname : getHashIndexedColumns(transactionContext().txnDB, it->tableName)) {
                 size_t colIdx = tbl.len;
@@ -27533,45 +27549,37 @@ DBStatus StorageEngine::rollbackTransaction() {
                     it->rowData, tbl, transactionContext().txnDB);
                 if (!pkVal.empty()) pkIdx->insert(pkVal, it->rowIdx);
             }
-            auto indexedCols = getIndexedColumns(transactionContext().txnDB, it->tableName);
-            for (const auto& colname : indexedCols) {
-                size_t colIdx = tbl.len;
-                for (size_t i = 0; i < tbl.len; ++i) {
-                    if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
-                }
-                if (colIdx >= tbl.len) continue;
-                BPTree* secIdx = getSecondaryIndex(transactionContext().txnDB, it->tableName, colname);
-                if (!secIdx) continue;
-                std::string val = extractColumnValue(
-                    it->rowData, tbl, colIdx, transactionContext().txnDB);
-                if (!val.empty()) secIdx->insertMulti(val, it->rowIdx);
-            }
             for (const auto& metadata : getIndexMetadata(
                      transactionContext().txnDB, it->tableName)) {
-                if (!metadata.isExpression) continue;
-                bool included = false;
-                std::string key;
-                if (!expressionIndexEntryFromBuffer(
+                EvaluatedIndexEntry entry;
+                if (!secondaryIndexEntryFromBuffer(
                         *this, metadata, tbl, it->rowData,
-                        transactionContext().txnDB, included, key)) {
+                        transactionContext().txnDB, entry)) {
                     rowUndoOk = false;
                     continue;
                 }
-                if (!included || key.empty()) continue;
-                BPTree* expressionIndex = getSecondaryIndex(
+                if (!entry.included || entry.key.empty()) continue;
+                BPTree* index = getSecondaryIndex(
                     transactionContext().txnDB, it->tableName, metadata.name);
-                if (!expressionIndex ||
-                    !expressionIndex->insertMulti(key, it->rowIdx)) {
+                if (!index ||
+                    !index->insertMulti(entry.key, it->rowIdx)) {
                     rowUndoOk = false;
                 }
             }
             for (const auto& ci : getCompositeIndexes(transactionContext().txnDB, it->tableName)) {
-                BPTree* compositeIdx = getCompositeIndexTree(
+                EvaluatedIndexEntry entry;
+                if (!compositeIndexEntryFromBuffer(
+                        *this, ci, tbl, it->rowData,
+                        transactionContext().txnDB, entry)) {
+                    rowUndoOk = false;
+                    continue;
+                }
+                if (!entry.included || entry.key.empty()) continue;
+                BPTree* index = getCompositeIndexTree(
                     transactionContext().txnDB, it->tableName, ci.name);
-                if (!compositeIdx) continue;
-                std::string key = buildCompositeKey(
-                    it->rowData, tbl, ci.columns, transactionContext().txnDB);
-                if (!key.empty()) compositeIdx->insertMulti(key, it->rowIdx);
+                if (!index || !index->insertMulti(entry.key, it->rowIdx)) {
+                    rowUndoOk = false;
+                }
             }
             for (const auto& colname : getHashIndexedColumns(transactionContext().txnDB, it->tableName)) {
                 size_t colIdx = tbl.len;
@@ -28251,49 +28259,40 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                     if (!pkVal.empty()) pkIdx->remove(pkVal);
                 }
             }
-            auto indexedCols = getIndexedColumns(transactionContext().txnDB, entry.tableName);
-            for (const auto& colname : indexedCols) {
-                size_t colIdx = tbl.len;
-                for (size_t j = 0; j < tbl.len; ++j) {
-                    if (tbl.cols[j].dataName == colname) { colIdx = j; break; }
-                }
-                if (colIdx >= tbl.len) continue;
-                BPTree* secIdx = getSecondaryIndex(transactionContext().txnDB, entry.tableName, colname);
-                if (!secIdx) continue;
-                if (!insertedRow.empty()) {
-                    std::string val = extractColumnValue(
-                        insertedRow, tbl, colIdx, transactionContext().txnDB);
-                    if (!val.empty()) secIdx->removeMulti(val, entry.rowIdx);
-                }
-            }
             for (const auto& metadata : getIndexMetadata(
                      transactionContext().txnDB, entry.tableName)) {
-                if (!metadata.isExpression || insertedRow.empty()) continue;
-                bool included = false;
-                std::string key;
-                if (!expressionIndexEntryFromBuffer(
+                if (insertedRow.empty()) continue;
+                EvaluatedIndexEntry indexEntry;
+                if (!secondaryIndexEntryFromBuffer(
                         *this, metadata, tbl, insertedRow,
-                        transactionContext().txnDB, included, key)) {
+                        transactionContext().txnDB, indexEntry)) {
                     rowUndoOk = false;
                     continue;
                 }
-                if (!included || key.empty()) continue;
-                BPTree* expressionIndex = getSecondaryIndex(
+                if (!indexEntry.included || indexEntry.key.empty()) continue;
+                BPTree* index = getSecondaryIndex(
                     transactionContext().txnDB, entry.tableName,
                     metadata.name);
-                if (!expressionIndex ||
-                    !expressionIndex->removeMulti(key, entry.rowIdx)) {
+                if (!index ||
+                    !index->removeMulti(indexEntry.key, entry.rowIdx)) {
                     rowUndoOk = false;
                 }
             }
             for (const auto& ci : getCompositeIndexes(transactionContext().txnDB, entry.tableName)) {
                 if (insertedRow.empty()) continue;
-                std::string key = buildCompositeKey(
-                    insertedRow, tbl, ci.columns, transactionContext().txnDB);
-                if (key.empty()) continue;
-                BPTree* compositeIdx = getCompositeIndexTree(
+                EvaluatedIndexEntry indexEntry;
+                if (!compositeIndexEntryFromBuffer(
+                        *this, ci, tbl, insertedRow,
+                        transactionContext().txnDB, indexEntry)) {
+                    rowUndoOk = false;
+                    continue;
+                }
+                if (!indexEntry.included || indexEntry.key.empty()) continue;
+                BPTree* index = getCompositeIndexTree(
                     transactionContext().txnDB, entry.tableName, ci.name);
-                if (compositeIdx) compositeIdx->removeMulti(key, entry.rowIdx);
+                if (!index || !index->removeMulti(indexEntry.key, entry.rowIdx)) {
+                    rowUndoOk = false;
+                }
             }
             for (const auto& colname : getHashIndexedColumns(transactionContext().txnDB, entry.tableName)) {
                 if (insertedRow.empty()) continue;
@@ -28411,71 +28410,71 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                     entry.rowData, tbl, transactionContext().txnDB);
                 if (!newPk.empty()) pkIdx->insert(newPk, entry.rowIdx);
             }
-            auto indexedCols = getIndexedColumns(transactionContext().txnDB, entry.tableName);
-            for (const auto& colname : indexedCols) {
-                size_t colIdx = tbl.len;
-                for (size_t j = 0; j < tbl.len; ++j) {
-                    if (tbl.cols[j].dataName == colname) { colIdx = j; break; }
-                }
-                if (colIdx >= tbl.len) continue;
-                BPTree* secIdx = getSecondaryIndex(transactionContext().txnDB, entry.tableName, colname);
-                if (!secIdx) continue;
-                if (foundCurrent) {
-                    std::string currentVal = extractColumnValue(
-                        currentRow, tbl, colIdx, transactionContext().txnDB);
-                    if (!currentVal.empty()) secIdx->removeMulti(currentVal, entry.rowIdx);
-                }
-                std::string val = extractColumnValue(
-                    entry.rowData, tbl, colIdx, transactionContext().txnDB);
-                if (!val.empty()) secIdx->insertMulti(val, entry.rowIdx);
-            }
             for (const auto& metadata : getIndexMetadata(
                      transactionContext().txnDB, entry.tableName)) {
-                if (!metadata.isExpression) continue;
-                BPTree* expressionIndex = getSecondaryIndex(
+                BPTree* index = getSecondaryIndex(
                     transactionContext().txnDB, entry.tableName,
                     metadata.name);
-                if (!expressionIndex) {
+                if (!index) {
                     rowUndoOk = false;
                     continue;
                 }
                 if (foundCurrent) {
-                    bool included = false;
-                    std::string key;
-                    if (!expressionIndexEntryFromBuffer(
+                    EvaluatedIndexEntry indexEntry;
+                    if (!secondaryIndexEntryFromBuffer(
                             *this, metadata, tbl, currentRow,
-                            transactionContext().txnDB, included, key)) {
+                            transactionContext().txnDB, indexEntry)) {
                         rowUndoOk = false;
-                    } else if (included && !key.empty() &&
-                               !expressionIndex->removeMulti(
-                                   key, entry.rowIdx)) {
+                    } else if (indexEntry.included &&
+                               !indexEntry.key.empty() &&
+                               !index->removeMulti(
+                                   indexEntry.key, entry.rowIdx)) {
                         rowUndoOk = false;
                     }
                 }
-                bool included = false;
-                std::string key;
-                if (!expressionIndexEntryFromBuffer(
+                EvaluatedIndexEntry indexEntry;
+                if (!secondaryIndexEntryFromBuffer(
                         *this, metadata, tbl, entry.rowData,
-                        transactionContext().txnDB, included, key)) {
+                        transactionContext().txnDB, indexEntry)) {
                     rowUndoOk = false;
-                } else if (included && !key.empty() &&
-                           !expressionIndex->insertMulti(
-                               key, entry.rowIdx)) {
+                } else if (indexEntry.included &&
+                           !indexEntry.key.empty() &&
+                           !index->insertMulti(
+                               indexEntry.key, entry.rowIdx)) {
                     rowUndoOk = false;
                 }
             }
             for (const auto& ci : getCompositeIndexes(transactionContext().txnDB, entry.tableName)) {
-                BPTree* compositeIdx = getCompositeIndexTree(
+                BPTree* index = getCompositeIndexTree(
                     transactionContext().txnDB, entry.tableName, ci.name);
-                if (!compositeIdx) continue;
-                if (foundCurrent) {
-                    std::string currentKey = buildCompositeKey(
-                        currentRow, tbl, ci.columns, transactionContext().txnDB);
-                    if (!currentKey.empty()) compositeIdx->removeMulti(currentKey, entry.rowIdx);
+                if (!index) {
+                    rowUndoOk = false;
+                    continue;
                 }
-                std::string oldKey = buildCompositeKey(
-                    entry.rowData, tbl, ci.columns, transactionContext().txnDB);
-                if (!oldKey.empty()) compositeIdx->insertMulti(oldKey, entry.rowIdx);
+                if (foundCurrent) {
+                    EvaluatedIndexEntry indexEntry;
+                    if (!compositeIndexEntryFromBuffer(
+                            *this, ci, tbl, currentRow,
+                            transactionContext().txnDB, indexEntry)) {
+                        rowUndoOk = false;
+                    } else if (indexEntry.included &&
+                               !indexEntry.key.empty() &&
+                               !index->removeMulti(
+                                   indexEntry.key, entry.rowIdx)) {
+                        rowUndoOk = false;
+                    }
+                }
+                EvaluatedIndexEntry indexEntry;
+                if (!compositeIndexEntryFromBuffer(
+                        *this, ci, tbl, entry.rowData,
+                        transactionContext().txnDB, indexEntry)) {
+                    rowUndoOk = false;
+                } else if (indexEntry.included &&
+                           !indexEntry.key.empty() &&
+                           !index->insertMulti(
+                               indexEntry.key, entry.rowIdx)) {
+                    rowUndoOk = false;
+                }
             }
             for (const auto& colname : getHashIndexedColumns(transactionContext().txnDB, entry.tableName)) {
                 size_t colIdx = tbl.len;
@@ -28534,46 +28533,39 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                     entry.rowData, tbl, transactionContext().txnDB);
                 if (!pkVal.empty()) pkIdx->insert(pkVal, entry.rowIdx);
             }
-            auto indexedCols = getIndexedColumns(transactionContext().txnDB, entry.tableName);
-            for (const auto& colname : indexedCols) {
-                size_t colIdx = tbl.len;
-                for (size_t j = 0; j < tbl.len; ++j) {
-                    if (tbl.cols[j].dataName == colname) { colIdx = j; break; }
-                }
-                if (colIdx >= tbl.len) continue;
-                BPTree* secIdx = getSecondaryIndex(transactionContext().txnDB, entry.tableName, colname);
-                if (!secIdx) continue;
-                std::string val = extractColumnValue(
-                    entry.rowData, tbl, colIdx, transactionContext().txnDB);
-                if (!val.empty()) secIdx->insertMulti(val, entry.rowIdx);
-            }
             for (const auto& metadata : getIndexMetadata(
                      transactionContext().txnDB, entry.tableName)) {
-                if (!metadata.isExpression) continue;
-                bool included = false;
-                std::string key;
-                if (!expressionIndexEntryFromBuffer(
+                EvaluatedIndexEntry indexEntry;
+                if (!secondaryIndexEntryFromBuffer(
                         *this, metadata, tbl, entry.rowData,
-                        transactionContext().txnDB, included, key)) {
+                        transactionContext().txnDB, indexEntry)) {
                     rowUndoOk = false;
                     continue;
                 }
-                if (!included || key.empty()) continue;
-                BPTree* expressionIndex = getSecondaryIndex(
+                if (!indexEntry.included || indexEntry.key.empty()) continue;
+                BPTree* index = getSecondaryIndex(
                     transactionContext().txnDB, entry.tableName,
                     metadata.name);
-                if (!expressionIndex ||
-                    !expressionIndex->insertMulti(key, entry.rowIdx)) {
+                if (!index ||
+                    !index->insertMulti(indexEntry.key, entry.rowIdx)) {
                     rowUndoOk = false;
                 }
             }
             for (const auto& ci : getCompositeIndexes(transactionContext().txnDB, entry.tableName)) {
-                BPTree* compositeIdx = getCompositeIndexTree(
+                EvaluatedIndexEntry indexEntry;
+                if (!compositeIndexEntryFromBuffer(
+                        *this, ci, tbl, entry.rowData,
+                        transactionContext().txnDB, indexEntry)) {
+                    rowUndoOk = false;
+                    continue;
+                }
+                if (!indexEntry.included || indexEntry.key.empty()) continue;
+                BPTree* index = getCompositeIndexTree(
                     transactionContext().txnDB, entry.tableName, ci.name);
-                if (!compositeIdx) continue;
-                std::string key = buildCompositeKey(
-                    entry.rowData, tbl, ci.columns, transactionContext().txnDB);
-                if (!key.empty()) compositeIdx->insertMulti(key, entry.rowIdx);
+                if (!index ||
+                    !index->insertMulti(indexEntry.key, entry.rowIdx)) {
+                    rowUndoOk = false;
+                }
             }
             for (const auto& colname : getHashIndexedColumns(transactionContext().txnDB, entry.tableName)) {
                 size_t colIdx = tbl.len;
