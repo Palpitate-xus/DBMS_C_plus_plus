@@ -17814,6 +17814,24 @@ if (sql.rfind("backup database", 0) == 0) {
                         auto it = aliasToExpr.find(gc);
                         if (it != aliasToExpr.end()) gc = it->second;
                     }
+                    // PG semantics: GROUP BY <ordinal> references the N-th
+                    // SELECT-list item.  Resolve the ordinal to that item's
+                    // text (alias stripped) so expression grouping applies.
+                    for (auto& gc : groupByCols) {
+                        if (gc.empty() || gc.find_first_not_of("0123456789") != string::npos) continue;
+                        long n = 0;
+                        try { n = stol(gc); } catch (...) { continue; }
+                        if (n <= 0) continue;
+                        auto items = splitSelectColumns(selList);
+                        if (static_cast<size_t>(n) > items.size()) continue;
+                        string pick = trim(items[static_cast<size_t>(n) - 1]);
+                        string pickLower;
+                        for (char ch : pick)
+                            pickLower += static_cast<char>(tolower(static_cast<unsigned char>(ch)));
+                        size_t pp = pickLower.rfind(" as ");
+                        if (pp != string::npos) pick = trim(pick.substr(0, pp));
+                        gc = pick;
+                    }
                 }
             }
         }
