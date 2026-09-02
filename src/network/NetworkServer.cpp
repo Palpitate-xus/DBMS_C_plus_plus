@@ -2158,10 +2158,6 @@ bool startServer(int port, bool allowPlaintext) {
             g_stats.rejectedConnections++;
             continue;
         }
-        struct ClientSlotGuard {
-            ~ClientSlotGuard() { ConnectionPool::instance().releaseClientSlot(); }
-        } clientSlotGuard;
-
         std::string clientHost = inet_ntoa(clientAddr.sin_addr);
         clientHost += ":" + std::to_string(ntohs(clientAddr.sin_port));
 
@@ -2182,7 +2178,10 @@ bool startServer(int port, bool allowPlaintext) {
             worker->done = done;
             worker->thread = std::thread([clientFd, &tlsCtx, allowPlaintext, clientHost, done]() {
                 struct SlotGuard {
-                    ~SlotGuard() { releaseConnectionSlot(); }
+                    ~SlotGuard() {
+                        ConnectionPool::instance().releaseClientSlot();
+                        releaseConnectionSlot();
+                    }
                 } slotGuard;
                 SecureSocket socket;
                 if (!establishClientTransport(clientFd, tlsCtx, allowPlaintext, socket)) {
@@ -2203,6 +2202,7 @@ bool startServer(int port, bool allowPlaintext) {
             unregisterClientFd(clientFd);
             ::shutdown(clientFd, SHUT_RDWR);
             ::close(clientFd);
+            pool.releaseClientSlot();
             releaseConnectionSlot();
             std::cerr << "Failed to create client worker" << std::endl;
             acceptLoopHealthy = false;

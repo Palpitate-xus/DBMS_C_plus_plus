@@ -1,4 +1,5 @@
 #include "NetworkServer.h"
+#include "network/ConnectionPool.h"
 
 #include <arpa/inet.h>
 #include <cassert>
@@ -44,6 +45,24 @@ bool waitForServer(int port, int& clientFd) {
     return false;
 }
 
+bool waitForClientCount(int expected) {
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        if (dbms::ConnectionPool::instance().stats().clientConnections == expected) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;
+}
+
+bool waitForRejectedConnections(int minimum) {
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        if (dbms::getServerStats().rejectedConnections.load() >= minimum) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;
+}
+
 } // namespace
 
 int main() {
@@ -55,6 +74,7 @@ int main() {
     int lifecyclePortFd = -1;
     const int lifecyclePort = reservePort(lifecyclePortFd);
     ::close(lifecyclePortFd);
+    dbms::ConnectionPool::instance().configure("session", 4, 1);
 
     bool serverResult = false;
     std::thread server([&] {
@@ -63,6 +83,24 @@ int main() {
 
     int clientFd = -1;
     assert(waitForServer(lifecyclePort, clientFd));
+    assert(waitForClientCount(1));
+
+    const int rejectedBefore =
+        dbms::getServerStats().rejectedConnections.load();
+    int rejectedFd = -1;
+    assert(waitForServer(lifecyclePort, rejectedFd));
+    assert(waitForRejectedConnections(rejectedBefore + 1));
+    assert(dbms::ConnectionPool::instance().stats().clientConnections == 1);
+    ::close(rejectedFd);
+
+    ::shutdown(clientFd, SHUT_RDWR);
+    ::close(clientFd);
+    clientFd = -1;
+    assert(waitForClientCount(0));
+
+    // Releasing the first worker makes the capacity available again.
+    assert(waitForServer(lifecyclePort, clientFd));
+    assert(waitForClientCount(1));
     dbms::requestServerShutdown();
     ::shutdown(clientFd, SHUT_RDWR);
     ::close(clientFd);
@@ -71,7 +109,9 @@ int main() {
     assert(serverResult);
     assert(dbms::serverShutdownRequested());
     assert(dbms::getServerStats().activeConnections.load() == 0);
+    assert(dbms::ConnectionPool::instance().stats().clientConnections == 0);
     std::cout << "[NETWORK LIFECYCLE] occupied-port failure is reported\n";
     std::cout << "[NETWORK LIFECYCLE] graceful shutdown joins workers\n";
+    std::cout << "[NETWORK LIFECYCLE] client limit covers worker lifetime\n";
     return 0;
 }
