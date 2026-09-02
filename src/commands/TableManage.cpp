@@ -26132,6 +26132,38 @@ static uint64_t commitEpochOf(const XLogRecord& rec) {
     return epoch;
 }
 
+static bool decodeXactWalRecord(const XLogRecord& record, uint64_t& xid) {
+    if (record.rmid() != RM_XACT_ID) return false;
+    const auto encodedDataSize = [](size_t logicalSize) {
+        const size_t total = sizeof(XLogRecHeader) + logicalSize;
+        return ((total + MAXALIGN - 1) / MAXALIGN) * MAXALIGN -
+               sizeof(XLogRecHeader);
+    };
+    const uint8_t info = record.info();
+    size_t logicalSize = sizeof(uint64_t);
+    if (info == XLOG_XACT_COMMIT) {
+        // v1 stores xid only; v2 appends the commit epoch used by PITR.
+        if (record.data.size() == encodedDataSize(sizeof(uint64_t) * 2)) {
+            logicalSize = sizeof(uint64_t) * 2;
+        } else if (record.data.size() != encodedDataSize(sizeof(uint64_t))) {
+            return false;
+        }
+    } else if (info == XLOG_XACT_ABORT || info == XLOG_XACT_PREPARE) {
+        if (record.data.size() != encodedDataSize(sizeof(uint64_t))) {
+            return false;
+        }
+    } else {
+        return false;
+    }
+    if (!std::all_of(
+            record.data.begin() + static_cast<std::ptrdiff_t>(logicalSize),
+            record.data.end(), [](char byte) { return byte == '\0'; })) {
+        return false;
+    }
+    std::memcpy(&xid, record.data.data(), sizeof(xid));
+    return xid != 0 && record.header.xl_xid == xid;
+}
+
 Lsn StorageEngine::walXactAbort(const std::string& dbname, uint64_t xid) {
     WALManager* wal = getWAL(dbname);
     if (!wal) return INVALID_LSN;
@@ -26970,20 +27002,11 @@ bool StorageEngine::recoverAllDatabases() {
             auto recOpt = wal->ReadRecord(lsn);
             if (!recOpt || recOpt->header.xl_tot_len == 0) break;
             const XLogRecord& rec = *recOpt;
-            if (rec.rmid() == RM_XACT_ID &&
-                (rec.info() == XLOG_XACT_PREPARE ||
-                 rec.info() == XLOG_XACT_COMMIT ||
-                 rec.info() == XLOG_XACT_ABORT)) {
-                if (rec.data.size() < sizeof(uint64_t)) {
-                    std::cerr << "[recovery] malformed transaction WAL record in "
-                              << dbname << std::endl;
-                    return false;
-                }
+            if (rec.rmid() == RM_XACT_ID) {
                 uint64_t xid = 0;
-                std::memcpy(&xid, rec.data.data(), sizeof(xid));
-                if (xid == 0) {
-                    std::cerr << "[recovery] transaction WAL record has xid 0 in "
-                              << dbname << std::endl;
+                if (!decodeXactWalRecord(rec, xid)) {
+                    std::cerr << "[recovery] malformed transaction WAL record in "
+                              << dbname << " at LSN " << lsn << std::endl;
                     return false;
                 }
                 auto& walState = xactWalStateByDb[dbname][xid];
@@ -27299,11 +27322,16 @@ bool StorageEngine::recoverAllDatabases() {
                 redoRecordLsns.push_back(lsn);
                 uint8_t rmid = rec.rmid();
                 uint8_t info = rec.info();
-                if (rmid == RM_XACT_ID && info == XLOG_XACT_COMMIT) {
-                    if (rec.data.size() >= sizeof(uint64_t)) {
-                        uint64_t xid = 0;
-                        std::memcpy(&xid, rec.data.data(), sizeof(xid));
-                        CommitLog* clog = getCommitLog(dbname);
+                if (rmid == RM_XACT_ID) {
+                    uint64_t xid = 0;
+                    if (!decodeXactWalRecord(rec, xid)) {
+                        std::cerr
+                            << "[recovery] malformed transaction WAL record in "
+                            << dbname << " at LSN " << lsn << std::endl;
+                        return false;
+                    }
+                    CommitLog* clog = getCommitLog(dbname);
+                    if (info == XLOG_XACT_COMMIT) {
                         if (pitrExcludedXidsByDb[dbname].count(xid)) {
                             committedXids.erase(xid);
                             if (clog) {
@@ -27317,14 +27345,11 @@ bool StorageEngine::recoverAllDatabases() {
                                     xid, CommitLog::Status::Committed);
                             }
                         }
-                    }
-                } else if (rmid == RM_XACT_ID && info == XLOG_XACT_ABORT) {
-                    if (rec.data.size() >= sizeof(uint64_t)) {
-                        uint64_t xid = 0;
-                        std::memcpy(&xid, rec.data.data(), sizeof(xid));
+                    } else if (info == XLOG_XACT_ABORT) {
                         committedXids.erase(xid);
-                        CommitLog* clog = getCommitLog(dbname);
-                        if (clog) clog->setStatus(xid, CommitLog::Status::Aborted);
+                        if (clog) {
+                            clog->setStatus(xid, CommitLog::Status::Aborted);
+                        }
                     }
                 } else if (rmid == RM_CHECKPOINT_ID) {
                     {
@@ -31268,12 +31293,8 @@ static PreparedTerminalState preparedTerminalState(
         if (record->rmid() == RM_XACT_ID &&
             (record->info() == XLOG_XACT_COMMIT ||
              record->info() == XLOG_XACT_ABORT)) {
-            if (record->data.size() < sizeof(uint64_t)) {
-                return PreparedTerminalState::Corrupt;
-            }
             uint64_t recordXid = 0;
-            std::memcpy(&recordXid, record->data.data(), sizeof(recordXid));
-            if (recordXid != record->header.xl_xid) {
+            if (!decodeXactWalRecord(*record, recordXid)) {
                 return PreparedTerminalState::Corrupt;
             }
             if (recordXid == xid) {

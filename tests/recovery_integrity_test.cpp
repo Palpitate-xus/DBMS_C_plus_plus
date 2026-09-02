@@ -78,6 +78,20 @@ static void appendHeapImageRecord(const std::string& dbname,
     assert(wal.XLogFlush(lsn));
 }
 
+static void appendXactRecord(const std::string& dbname, uint8_t info,
+                             uint64_t headerXid, uint64_t payloadXid,
+                             bool trailingByte = false) {
+    WALManager wal(std::filesystem::path(dbname) / "pg_wal");
+    assert(wal.ensureOpen());
+    std::vector<char> payload(
+        reinterpret_cast<const char*>(&payloadXid),
+        reinterpret_cast<const char*>(&payloadXid) + sizeof(payloadXid));
+    if (trailingByte) payload.push_back('!');
+    const Lsn lsn = wal.XLogInsert(RM_XACT_ID, info, headerXid, payload);
+    assert(lsn != INVALID_LSN);
+    assert(wal.XLogFlush(lsn));
+}
+
 static void expectRecoveryFailure() {
     bool failedClosed = false;
     try {
@@ -177,15 +191,35 @@ int main() {
     const std::string malformedDb = "recovery_integrity_malformed_db";
     const std::string unsafeDb = "recovery_integrity_unsafe_db";
     const std::string malformedHeapDb = "recovery_integrity_malformed_heap_db";
+    const std::string mismatchedXactDb =
+        "recovery_integrity_mismatched_xact_db";
+    const std::string malformedXactDb =
+        "recovery_integrity_malformed_xact_db";
     std::filesystem::remove_all(malformedDb);
     std::filesystem::remove_all(unsafeDb);
     std::filesystem::remove_all(malformedHeapDb);
+    std::filesystem::remove_all(mismatchedXactDb);
+    std::filesystem::remove_all(malformedXactDb);
     std::filesystem::remove_all(".txnid");
 
     test_wal_record_chain_and_corrupt_length();
     std::cout << "[RECOVERY INTEGRITY] WAL length/chain corruption fails closed OK\n";
     test_heap_image_boundaries();
     std::cout << "[RECOVERY INTEGRITY] heap image checksum boundary encoded OK\n";
+
+    setupDatabase(mismatchedXactDb);
+    appendXactRecord(
+        mismatchedXactDb, XLOG_XACT_COMMIT, 41, 42);
+    expectRecoveryFailure();
+    std::cout << "[RECOVERY INTEGRITY] transaction header/payload xid mismatch fails closed OK\n";
+    std::filesystem::remove_all(mismatchedXactDb);
+
+    setupDatabase(malformedXactDb);
+    appendXactRecord(
+        malformedXactDb, XLOG_XACT_ABORT, 43, 43, true);
+    expectRecoveryFailure();
+    std::cout << "[RECOVERY INTEGRITY] transaction payload suffix fails closed OK\n";
+    std::filesystem::remove_all(malformedXactDb);
 
     setupDatabase(malformedHeapDb);
     std::vector<char> invalidPage(PgPage::PAGE_SIZE, 0);
@@ -224,6 +258,8 @@ int main() {
     std::filesystem::remove_all(malformedDb);
     std::filesystem::remove_all(unsafeDb);
     std::filesystem::remove_all(malformedHeapDb);
+    std::filesystem::remove_all(mismatchedXactDb);
+    std::filesystem::remove_all(malformedXactDb);
     std::filesystem::remove_all(".txnid");
     std::cout << "[RECOVERY INTEGRITY] all passed\n";
     return 0;
