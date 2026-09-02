@@ -18393,6 +18393,91 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         return expr.sessionUser;
     }
 
+    // EXISTS / NOT EXISTS subquery in a projection item, evaluated
+    // per row over a real table ("SELECT EXISTS (SELECT 1 FROM t
+    // WHERE ...) FROM u").  funcArgs[0] carries the full inner SQL;
+    // uncorrelated inner references resolve against the inner table.
+    if (expr.funcName == "exists_sub" && engine && !expr.funcArgs.empty()) {
+        std::string low;
+        for (char ch : expr.funcArgs[0])
+            low += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        size_t fpos = low.find(" from ");
+        if (fpos == std::string::npos) return "f";
+        size_t rest = fpos + 6;
+        while (rest < low.size() && std::isspace(static_cast<unsigned char>(low[rest]))) ++rest;
+        size_t tend = rest;
+        while (tend < low.size() &&
+               (std::isalnum(static_cast<unsigned char>(low[tend])) || low[tend] == '_')) ++tend;
+        std::string innerTbl = expr.funcArgs[0].substr(rest, tend - rest);
+        if (innerTbl.empty()) return "f";
+        std::string whereSql;
+        size_t wpos = low.find(" where ");
+        if (wpos != std::string::npos) {
+            size_t wstart = wpos + 7;
+            size_t wend = low.size();
+            for (size_t kw = wstart; kw + 1 < low.size(); ++kw) {
+                if (low.compare(kw, 7, " group ") == 0 ||
+                    low.compare(kw, 7, " order ") == 0 ||
+                    low.compare(kw, 7, " limit ") == 0)
+                    { wend = kw; break; }
+            }
+            whereSql = expr.funcArgs[0].substr(wstart, wend - wstart);
+        }
+        std::vector<StorageEngine::Condition> conds;
+        if (!whereSql.empty()) {
+            std::string w = whereSql;
+            for (auto& ch : w)
+                if (ch == '\t' || ch == '\n') ch = ' ';
+            std::string wl;
+            for (char ch : w) wl += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            std::vector<std::string> parts;
+            size_t start = 0;
+            while (true) {
+                size_t ap = wl.find(" and ", start);
+                if (ap == std::string::npos) { parts.push_back(w.substr(start)); break; }
+                parts.push_back(w.substr(start, ap - start));
+                start = ap + 5;
+            }
+            for (const auto& p : parts) {
+                std::string pt = p;
+                while (!pt.empty() && std::isspace(static_cast<unsigned char>(pt.front()))) pt.erase(0, 1);
+                while (!pt.empty() && std::isspace(static_cast<unsigned char>(pt.back()))) pt.pop_back();
+                if (pt.empty()) continue;
+                static const char* ops9[] = {">=", "<=", "<>", "!=", "=", ">", "<"};
+                for (const char* op9 : ops9) {
+                    size_t op = pt.find(op9);
+                    if (op == std::string::npos || op == 0) continue;
+                    StorageEngine::Condition c;
+                    c.colName = pt.substr(0, op);
+                    while (!c.colName.empty() && std::isspace(static_cast<unsigned char>(c.colName.back())))
+                        c.colName.pop_back();
+                    std::string val = pt.substr(op + std::strlen(op9));
+                    while (!val.empty() && std::isspace(static_cast<unsigned char>(val.front()))) val.erase(0, 1);
+                    if (val.size() >= 2 && val.front() == '\'' && val.back() == '\'')
+                        val = val.substr(1, val.size() - 2);
+                    c.op = (std::string(op9) == "!=" ? "<>" : op9);
+                    c.value = val;
+                    if (!c.colName.empty() && !val.empty()) conds.push_back(c);
+                    break;
+                }
+            }
+            if (conds.size() != parts.size()) conds.clear();
+        }
+        bool anyRow = false;
+        TableSchema innerSch = engine->getTableSchema(dbname, innerTbl);
+        engine->forEachRow(dbname, innerTbl, [&](uint32_t, uint16_t, const char* data, size_t len) {
+            if (conds.empty() && whereSql.empty()) { anyRow = true; return false; }
+            std::string row(data, len);
+            for (const auto& c : conds)
+                if (!StorageEngine::evalConditionOnRow(c, row, innerSch))
+                    return true;
+            anyRow = true;
+            return false;
+        });
+        bool negate = expr.funcArgs.size() > 1 && expr.funcArgs[1] == "not";
+        return (negate ? !anyRow : anyRow) ? "t" : "f";
+    }
+
     // Internal IS NULL / IS NOT NULL forms (rewritten from postfix syntax
     // by the projection router).
     if (expr.funcName == "is_null" || expr.funcName == "is_not_null") {

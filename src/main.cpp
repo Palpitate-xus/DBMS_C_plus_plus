@@ -18507,13 +18507,40 @@ if (sql.rfind("backup database", 0) == 0) {
                             bool wordE = exE != string::npos &&
                                           (exE == 0 || !isalnum(static_cast<unsigned char>(lowItemE[exE - 1]))) &&
                                           (exE + 7 >= lowItemE.size() || !isalnum(static_cast<unsigned char>(lowItemE[exE + 7])));
-                            expr.displayName = itemAlias.empty() ? (wordE ? "exists" : "?column?") : itemAlias;
+                            // PG figure_colname: positive EXISTS names the
+                            // column "exists"; NOT EXISTS is a negation, so
+                            // unaliased it falls back to "?column?".
+                            size_t npE2 = 0;
+                            while (npE2 < lowItemE.size() && isspace(static_cast<unsigned char>(lowItemE[npE2]))) ++npE2;
+                            bool notE2 = lowItemE.compare(npE2, 4, "not ") == 0;
+                            expr.displayName = itemAlias.empty()
+                                                   ? (wordE && !notE2 ? "exists" : "?column?")
+                                                   : itemAlias;
                             expr.isScalar = true;
-                            expr.funcName = "arith";
+                            // A bare EXISTS/NOT EXISTS subquery (nothing but
+                            // the sublink in the item) evaluates per row as a
+                            // boolean: route to the engine's exists_sub.
+                            bool bareExists = wordE;
+                            if (bareExists) {
+                                size_t exStart = npE2 + (notE2 ? 4 : 0);
+                                bareExists = lowItemE.compare(exStart, 6, "exists") == 0 &&
+                                             isspace(static_cast<unsigned char>(lowItemE[exStart + 6]));
+                                if (bareExists) {
+                                    size_t pE = lowItemE.find('(', exStart);
+                                    bareExists = pE != string::npos && lowItemE.back() == ')';
+                                    if (bareExists) {
+                                        expr.funcName = "exists_sub";
+                                        expr.funcArgs.push_back(item.substr(pE + 1, item.size() - pE - 2));
+                                        if (notE2) expr.funcArgs.push_back("not");
+                                    }
+                                }
+                            }
+                            if (!bareExists) expr.funcName = "arith";
                             selectExprs.push_back(expr);
                             hasScalar = true;
                             exprTypes.push_back(3);
-                            arithRawText[(size_t)(selectExprs.size() - 1)] = item;
+                            if (!bareExists)
+                                arithRawText[(size_t)(selectExprs.size() - 1)] = item;
                         } else if (func == "count" || func == "sum" || func == "avg" || func == "min" || func == "max" || func == "bool_and" || func == "bool_or" || func == "every" || func == "stddev" || func == "stddev_samp" || func == "stddev_pop" || func == "variance" || func == "var_samp" || func == "var_pop" || func == "array_agg" || func == "string_agg" || func == "json_agg" || func == "jsonb_agg" || func == "bit_and" || func == "bit_or" || func == "xmlagg" || func == "rank" || func == "dense_rank" || func == "percentile_cont" || func == "grouping") {
                             dbms::StorageEngine::AggItem ai;
                             ai.func = func;
