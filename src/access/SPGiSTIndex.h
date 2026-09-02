@@ -60,6 +60,9 @@ private:
                                double qminX, double qminY,
                                double qmaxX, double qmaxY,
                                std::vector<int64_t>& out) const;
+    void searchWithinRecursive(const SPGiSTNode* node,
+                               double cx, double cy, double radius,
+                               std::vector<int64_t>& out) const;
 };
 
 } // namespace dbms

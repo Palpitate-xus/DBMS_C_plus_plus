@@ -136,14 +136,42 @@ std::vector<int64_t> SPGiSTIndex::searchAbove(double y) const {
 
 std::vector<int64_t> SPGiSTIndex::searchWithin(double cx, double cy, double radius) const {
     std::vector<int64_t> result;
-    searchRegionRecursive(&root_, cx - radius, cy - radius, cx + radius, cy + radius, result);
-    // Post-filter by exact distance
-    std::vector<int64_t> filtered;
-    for (int64_t rid : result) {
-        // Note: exact distance filtering would need row lookup; keep all in region for simplicity
-        filtered.push_back(rid);
+    if (radius < 0.0 || std::isnan(radius)) return result;
+    searchWithinRecursive(&root_, cx, cy, radius, result);
+    return result;
+}
+
+void SPGiSTIndex::searchWithinRecursive(const SPGiSTNode* node,
+                                        double cx, double cy, double radius,
+                                        std::vector<int64_t>& out) const {
+    if (!node) return;
+
+    const double dx = cx < node->minX ? node->minX - cx
+                      : cx > node->maxX ? cx - node->maxX : 0.0;
+    const double dy = cy < node->minY ? node->minY - cy
+                      : cy > node->maxY ? cy - node->maxY : 0.0;
+    if (std::hypot(dx, dy) > radius) return;
+
+    if (node->isLeaf()) {
+        for (const auto& point : node->points) {
+            const size_t comma = point.first.find(',');
+            if (comma == std::string::npos) continue;
+            try {
+                const double px = std::stod(point.first.substr(0, comma));
+                const double py = std::stod(point.first.substr(comma + 1));
+                if (std::hypot(px - cx, py - cy) <= radius) {
+                    out.push_back(point.second);
+                }
+            } catch (...) {
+                continue;
+            }
+        }
+        return;
     }
-    return filtered;
+
+    for (const auto& child : node->children) {
+        searchWithinRecursive(child.get(), cx, cy, radius, out);
+    }
 }
 
 void SPGiSTIndex::searchRegionRecursive(const SPGiSTNode* node,
