@@ -114,10 +114,44 @@ static void test_inherit_execution() {
     std::cout << "[INHERIT] execution OK" << std::endl;
 }
 
+static void test_table_rename_updates_inheritance_graph() {
+    const std::string db = testDbPath("inh_rename");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    assert(!ddl.executeSql("CREATE TABLE parent (id INT)", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE child (payload INT) INHERITS (parent)", s));
+    auto children = g_engine.getInheritedChildren(db, "parent");
+    assert(children == std::vector<std::string>{"child"});
+
+    assert(!ddl.executeSql("ALTER TABLE parent RENAME TO renamed_parent", s));
+    assert(g_engine.getInheritedChildren(db, "parent").empty());
+    children = g_engine.getInheritedChildren(db, "renamed_parent");
+    assert(children == std::vector<std::string>{"child"});
+
+    assert(!ddl.executeSql("ALTER TABLE child RENAME TO renamed_child", s));
+    children = g_engine.getInheritedChildren(db, "renamed_parent");
+    assert(children == std::vector<std::string>{"renamed_child"});
+
+    {
+        dbms::StorageEngine restarted;
+        children = restarted.getInheritedChildren(db, "renamed_parent");
+        assert(children == std::vector<std::string>{"renamed_child"});
+    }
+
+    cleanup(db);
+    std::cout << "[INHERIT] table rename preserves graph OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_inherit_parser();
     test_inherit_execution();
+    test_table_rename_updates_inheritance_graph();
     std::cout << "[INHERIT] all passed" << std::endl;
     return 0;
 }

@@ -12969,6 +12969,52 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
         return DBStatus::IO_ERROR;
     }
 
+    const std::filesystem::path inheritancePath =
+        std::filesystem::path(dbPath(dbname)) / ".inherits";
+    std::string originalInheritanceBytes;
+    std::string renamedInheritanceBytes;
+    bool inheritanceChanged = false;
+    std::error_code inheritanceError;
+    if (std::filesystem::exists(inheritancePath, inheritanceError)) {
+        std::ifstream input(inheritancePath);
+        if (!input) {
+            lockManager_.unlock(oldName);
+            lockManager_.unlock(newName);
+            return DBStatus::IO_ERROR;
+        }
+        std::ostringstream rewritten;
+        std::string line;
+        while (std::getline(input, line)) {
+            originalInheritanceBytes += line + '\n';
+            const size_t separator = line.find('|');
+            if (separator == std::string::npos) {
+                rewritten << line << '\n';
+                continue;
+            }
+            std::string parent = line.substr(0, separator);
+            std::string child = line.substr(separator + 1);
+            if (parent == oldName) {
+                parent = newName;
+                inheritanceChanged = true;
+            }
+            if (child == oldName) {
+                child = newName;
+                inheritanceChanged = true;
+            }
+            rewritten << parent << '|' << child << '\n';
+        }
+        if (input.bad()) {
+            lockManager_.unlock(oldName);
+            lockManager_.unlock(newName);
+            return DBStatus::IO_ERROR;
+        }
+        renamedInheritanceBytes = rewritten.str();
+    } else if (inheritanceError) {
+        lockManager_.unlock(oldName);
+        lockManager_.unlock(newName);
+        return DBStatus::IO_ERROR;
+    }
+
     TableSchema renamedSchema = getTableSchema(dbname, oldName);
     renamedSchema.tablename = newName;
 
@@ -13464,6 +13510,26 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
         return DBStatus::IO_ERROR;
     }
     if (exclusionsChanged) invalidateExclusionCache(dbname);
+
+    if (inheritanceChanged &&
+        !index_file::writeAtomically(
+            inheritancePath, renamedInheritanceBytes)) {
+        index_file::writeAtomically(
+            inheritancePath, originalInheritanceBytes);
+        if (exclusionsChanged) {
+            index_file::writeAtomically(
+                exclusionPath(dbname), originalExclusionBytes);
+            invalidateExclusionCache(dbname);
+        }
+        for (const auto& rewrite : referencingSchemaRewrites) {
+            index_file::writeAtomically(
+                schemaPath(dbname, rewrite.tableName), rewrite.original);
+            invalidateCatalogSchema(dbname, rewrite.tableName);
+        }
+        lockManager_.unlock(oldName);
+        lockManager_.unlock(newName);
+        return DBStatus::IO_ERROR;
+    }
 
     lockManager_.unlock(oldName);
     lockManager_.unlock(newName);
