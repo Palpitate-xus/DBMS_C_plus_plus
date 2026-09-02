@@ -10,6 +10,7 @@
 #include "commands/TableManage.h"
 #include "catalog/type_registry.h"
 #include "executor/ExecutionPlan.h"
+#include "storage/PageAllocator.h"
 #include <cassert>
 #include <filesystem>
 #include <iostream>
@@ -209,12 +210,59 @@ static void test_subpartitioning() {
     std::cout << "[PART] sub-partitioning OK" << std::endl;
 }
 
+// Partition page images must replay into the physical partition fork.  The
+// parent heap is intentionally empty and must stay empty across startup.
+static void test_partition_wal_routing() {
+    std::string db = testDbPath("part_wal");
+    cleanup(db);
+    {
+        dbms::StorageEngine writer;
+        assert(writer.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+        auto tbl = makeSchema("walpart", {"id int", "yr int"});
+        tbl.partitionType = dbms::TableSchema::PartitionType::Range;
+        tbl.partitionKey = "yr";
+        tbl.rangePartitions = {{"old", "2020"}, {"new", "MAXVALUE"}};
+        assert(writer.createTable(db, tbl) == dbms::DBStatus::OK);
+        assert(writer.insert(db, "walpart", {{"id", "1"}, {"yr", "2019"}}) ==
+               dbms::DBStatus::OK);
+        assert(writer.insert(db, "walpart", {{"id", "2"}, {"yr", "2024"}}) ==
+               dbms::DBStatus::OK);
+
+        auto* parent = writer.getPageAllocator(db, "walpart");
+        assert(parent && parent->numPages() == 1);
+    }
+
+    // Model loss of both partition heaps after WAL reached disk.  Recovery
+    // must reconstruct each file from its own fork images; merely preserving
+    // the already-flushed files would not exercise redo routing.
+    assert(std::filesystem::remove(
+        std::filesystem::path(db) / "walpart#old.dt"));
+    assert(std::filesystem::remove(
+        std::filesystem::path(db) / "walpart#new.dt"));
+
+    {
+        dbms::StorageEngine reopened;
+        auto* reopenedParent = reopened.getPageAllocator(db, "walpart");
+        assert(reopenedParent && reopenedParent->numPages() == 1);
+        size_t count = 0;
+        assert(reopened.forEachRow(
+            db, "walpart",
+            [&](uint32_t, uint16_t, const char*, size_t) { ++count; }));
+        assert(count == 2);
+    }
+
+    cleanup(db);
+    std::cout << "[PART] WAL partition routing OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_range_partitioning();
     test_list_partitioning();
     test_hash_partitioning();
     test_subpartitioning();
+    test_partition_wal_routing();
     std::cout << "[PART] all passed" << std::endl;
     return 0;
 }

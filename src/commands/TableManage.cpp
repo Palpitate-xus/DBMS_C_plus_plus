@@ -1738,6 +1738,97 @@ std::filesystem::path StorageEngine::partitionDataPath(const std::string& dbname
     return relationDir(dbname, tablename) / (tablename + "#" + partitionName + "#" + subPartitionName + ".dt");
 }
 
+namespace {
+
+struct PartitionLeaf {
+    std::string partition;
+    std::string subPartition;
+};
+
+std::vector<PartitionLeaf> partitionLeaves(const TableSchema& table) {
+    std::vector<std::string> partitions;
+    if (table.partitionType == TableSchema::PartitionType::Range) {
+        for (const auto& entry : table.rangePartitions) {
+            partitions.push_back(entry.first);
+        }
+    } else if (table.partitionType == TableSchema::PartitionType::List) {
+        for (const auto& entry : table.listPartitions) {
+            partitions.push_back(entry.first);
+        }
+    } else if (table.partitionType == TableSchema::PartitionType::Hash) {
+        for (size_t index = 0; index < table.hashPartitions; ++index) {
+            partitions.push_back("p" + std::to_string(index));
+        }
+    }
+    if (!table.defaultPartitionName.empty() &&
+        std::find(partitions.begin(), partitions.end(),
+                  table.defaultPartitionName) == partitions.end()) {
+        partitions.push_back(table.defaultPartitionName);
+    }
+
+    std::vector<PartitionLeaf> leaves;
+    for (const auto& partition : partitions) {
+        if (table.subPartitionType == TableSchema::PartitionType::Hash) {
+            for (size_t index = 0; index < table.subHashPartitions; ++index) {
+                leaves.push_back(
+                    {partition, "sp" + std::to_string(index)});
+            }
+        } else {
+            leaves.push_back({partition, ""});
+        }
+    }
+    return leaves;
+}
+
+// Heap WAL already carries a 32-bit fork number.  Derive a stable non-zero
+// physical-partition identity from both path components instead of recording
+// a local page as a parent-table page.  A collision is always detected by
+// resolving against the complete schema and therefore fails closed.
+uint32_t partitionForkNumber(const std::string& partition,
+                             const std::string& subPartition) {
+    uint32_t hash = 2166136261u;
+    const auto add = [&](unsigned char byte, uint32_t& value) {
+        value ^= byte;
+        value *= 16777619u;
+    };
+    for (unsigned char byte : partition) add(byte, hash);
+    add(0xffu, hash);
+    for (unsigned char byte : subPartition) add(byte, hash);
+    return hash == 0 ? 1u : hash;
+}
+
+bool resolvePartitionFork(const TableSchema& table, uint32_t forkNum,
+                          PartitionLeaf& resolved, bool& collision) {
+    collision = false;
+    bool found = false;
+    for (const auto& leaf : partitionLeaves(table)) {
+        if (partitionForkNumber(leaf.partition, leaf.subPartition) != forkNum) {
+            continue;
+        }
+        if (found) {
+            collision = true;
+            return false;
+        }
+        resolved = leaf;
+        found = true;
+    }
+    return found;
+}
+
+bool partitionForkIsUnique(const TableSchema& table,
+                           const std::string& partition,
+                           const std::string& subPartition) {
+    const uint32_t forkNum =
+        partitionForkNumber(partition, subPartition);
+    PartitionLeaf resolved;
+    bool collision = false;
+    return resolvePartitionFork(table, forkNum, resolved, collision) &&
+           !collision && resolved.partition == partition &&
+           resolved.subPartition == subPartition;
+}
+
+}  // namespace
+
 std::filesystem::path StorageEngine::fsmPath(const std::string& dbname,
                                                const std::string& tablename) const {
     return relationDir(dbname, tablename) / (tablename + ".fsm");
@@ -16272,6 +16363,15 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             return DBStatus::INVALID_VALUE;
         }
     }
+    const uint32_t heapFork = targetPartition.empty()
+        ? 0
+        : partitionForkNumber(targetPartition, targetSubPartition);
+    if (!targetPartition.empty() &&
+        !partitionForkIsUnique(
+            tbl, targetPartition, targetSubPartition)) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
 
     // All checks that operate directly on logical SQL values have passed.
     // Allocate external values only now, and make every failure before the
@@ -16365,7 +16465,8 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                 PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
                 if (page.canFit(actualRowSize) &&
                     pageFitsWithFillfactor(page, actualRowSize, pa->pageSize(), fillfactor)) {
-                    walPageImage(dbname, tablename, candidate, buf, pa->pageSize(), true);
+                    walPageImage(dbname, tablename, candidate, buf,
+                                 pa->pageSize(), true, heapFork);
                     if (page.insert(rowBuffer.data(), actualRowSize, slotId)) {
                         pageId = candidate;
                         inserted = true;
@@ -16393,7 +16494,8 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
             if (page.canFit(actualRowSize) &&
                 pageFitsWithFillfactor(page, actualRowSize, pa->pageSize(), fillfactor)) {
-                walPageImage(dbname, tablename, pid, buf, pa->pageSize(), true);
+                walPageImage(dbname, tablename, pid, buf, pa->pageSize(),
+                             true, heapFork);
                 if (page.insert(rowBuffer.data(), actualRowSize, slotId)) {
                     pageId = pid;
                     inserted = true;
@@ -16423,7 +16525,8 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                 return failBeforeHeapInsert(DBStatus::IO_ERROR);
             }
             PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
-            walPageImage(dbname, tablename, pageId, buf, pa->pageSize(), true);
+            walPageImage(dbname, tablename, pageId, buf, pa->pageSize(),
+                         true, heapFork);
             if (!page.insert(rowBuffer.data(), actualRowSize, slotId)) {
                 pa->unpinPage(pageId);
                 lockManager_.pageUnlock(dbname, tablename, pageId);
@@ -16561,10 +16664,12 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         deleteRowToast(dbname, tablename, rid);
         if (char* pageBuf = pa->fetchPage(pageId)) {
             PageWrapper page(pageBuf, pa->pageSize(), tbl.formatVersion);
-            walPageImage(dbname, tablename, pageId, pageBuf, pa->pageSize(), true);
+            walPageImage(dbname, tablename, pageId, pageBuf,
+                         pa->pageSize(), true, heapFork);
             page.remove(slotId);
             pa->markDirty(pageId);
-            Lsn lsn = walPageImage(dbname, tablename, pageId, pageBuf, pa->pageSize(), false);
+            Lsn lsn = walPageImage(dbname, tablename, pageId, pageBuf,
+                                   pa->pageSize(), false, heapFork);
             if (lsn != INVALID_LSN) {
                 setPageLsnAndChecksum(pageBuf, lsn);
                 pa->markDirty(pageId);
@@ -16601,7 +16706,8 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                 setRowCtid(mutableRow.data(), mutableRow.size(), tbl.formatVersion, selfCtid);
                 page.update(slotId, mutableRow.data(), mutableRow.size());
                 pa->markDirty(pageId);
-                Lsn lsn = walPageImage(dbname, tablename, pageId, buf, pa->pageSize(), false);
+                Lsn lsn = walPageImage(dbname, tablename, pageId, buf,
+                                       pa->pageSize(), false, heapFork);
                 if (lsn != INVALID_LSN) {
                     setPageLsnAndChecksum(buf, lsn);
                     pa->markDirty(pageId);
@@ -26035,7 +26141,10 @@ void StorageEngine::closeAllWALs() {
     walManagers_.clear();
 }
 
-static std::vector<char> encodeHeapPayload(const std::string& tableName, uint32_t pageId, uint16_t slotId) {
+static std::vector<char> encodeHeapPayload(const std::string& tableName,
+                                           uint32_t pageId,
+                                           uint32_t forkNum,
+                                           uint16_t slotId) {
     std::vector<char> payload;
     uint32_t nameLen = static_cast<uint32_t>(tableName.size());
     payload.reserve(sizeof(uint32_t) + nameLen + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint16_t));
@@ -26044,7 +26153,6 @@ static std::vector<char> encodeHeapPayload(const std::string& tableName, uint32_
     payload.insert(payload.end(), tableName.begin(), tableName.end());
     payload.insert(payload.end(), reinterpret_cast<const char*>(&pageId),
                    reinterpret_cast<const char*>(&pageId) + sizeof(pageId));
-    uint32_t forkNum = 0;
     payload.insert(payload.end(), reinterpret_cast<const char*>(&forkNum),
                    reinterpret_cast<const char*>(&forkNum) + sizeof(forkNum));
     payload.insert(payload.end(), reinterpret_cast<const char*>(&slotId),
@@ -26054,7 +26162,7 @@ static std::vector<char> encodeHeapPayload(const std::string& tableName, uint32_
 
 Lsn StorageEngine::walPageImage(const std::string& dbname, const std::string& tablename,
                                 uint32_t pageId, const char* pageBuf, size_t pageSize,
-                                bool beforeImage) {
+                                bool beforeImage, uint32_t forkNum) {
     if (!usesHeapTupleHeader(getTableSchema(dbname, tablename).formatVersion)) {
         return INVALID_LSN;
     }
@@ -26070,7 +26178,8 @@ Lsn StorageEngine::walPageImage(const std::string& dbname, const std::string& ta
     // so they keep their exact before/after pairing and are not deduped.
     char pageKey[32];
     std::snprintf(pageKey, sizeof(pageKey), "%u", pageId);
-    const std::string key = tablename + "/" + pageKey;
+    const std::string key = tablename + "/" + std::to_string(forkNum) +
+                            "/" + pageKey;
     if (beforeImage && xid != 0) {
         auto& logged = transactionContext().txnLoggedBeforePages;
         auto it = logged.find(key);
@@ -26083,7 +26192,8 @@ Lsn StorageEngine::walPageImage(const std::string& dbname, const std::string& ta
             it->second = xid;
         }
     }
-    std::vector<char> payload = encodeHeapPayload(tablename, pageId, 0);
+    std::vector<char> payload =
+        encodeHeapPayload(tablename, pageId, forkNum, 0);
     uint32_t pageLen = static_cast<uint32_t>(pageSize);
     payload.insert(payload.end(), reinterpret_cast<const char*>(&pageLen),
                    reinterpret_cast<const char*>(&pageLen) + sizeof(pageLen));
@@ -26270,8 +26380,55 @@ void StorageEngine::markPageDirtyAndLsn(PageAllocator* pa, uint32_t pageId, Lsn 
 
 bool StorageEngine::redoPageImage(const std::string& dbname, const std::string& tablename,
                                   uint32_t pageId, const char* pageData, size_t pageLen,
-                                  Lsn recordLsn, bool force) {
-    PageAllocator* pa = getPageAllocator(dbname, tablename);
+                                  Lsn recordLsn, bool force,
+                                  uint32_t forkNum) {
+    const TableSchema table = getTableSchema(dbname, tablename);
+    PageAllocator* pa = nullptr;
+    if (forkNum == 0) {
+        // Older releases incorrectly emitted partition page images as fork
+        // zero.  A partitioned parent never owns data pages, so replaying
+        // those legacy records would pollute its otherwise-empty heap.
+        if (table.partitionType != TableSchema::PartitionType::None) {
+            return true;
+        }
+        pa = getPageAllocator(dbname, tablename);
+    } else {
+        if (table.partitionType == TableSchema::PartitionType::None) {
+            return false;
+        }
+        PartitionLeaf leaf;
+        bool collision = false;
+        if (!resolvePartitionFork(table, forkNum, leaf, collision)) {
+            if (collision) {
+                std::cerr << "[recovery] partition fork collision for "
+                          << dbname << "/" << tablename << std::endl;
+                return false;
+            }
+            // WAL for a durably detached partition can remain in retained
+            // segments.  As with a dropped relation, it has no replay target.
+            return true;
+        }
+        std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+        const std::string physicalName = tablename + "#" + leaf.partition +
+            (leaf.subPartition.empty() ? "" : "#" + leaf.subPartition);
+        const std::string key = dbname + "/" + physicalName;
+        auto cached = pageAllocators_.find(key);
+        if (cached != pageAllocators_.end()) {
+            pa = cached->second.get();
+        } else {
+            const std::filesystem::path path = leaf.subPartition.empty()
+                ? partitionDataPath(dbname, tablename, leaf.partition)
+                : partitionDataPath(dbname, tablename, leaf.partition,
+                                    leaf.subPartition);
+            auto allocator = std::make_unique<PageAllocator>(
+                path.string(), table.rowSize(),
+                pageSizeForFormatVersion(table.formatVersion),
+                table.formatVersion);
+            if (!allocator->open()) return false;
+            pa = allocator.get();
+            pageAllocators_[key] = std::move(allocator);
+        }
+    }
     if (!pa) return false;
     if (pageId == 0 || pa->pageSize() != pageLen || !pageData) return false;
     PgPage image(const_cast<char*>(pageData));
@@ -27598,9 +27755,8 @@ bool StorageEngine::recoverAllDatabases() {
                 [&, force, recordLsn](const std::string& tableName, uint32_t blockNum,
                                       uint32_t forkNum, const char* pageData,
                                       size_t pageLen) {
-                    (void)forkNum;
                     return redoPageImage(dbname, tableName, blockNum, pageData,
-                                         pageLen, recordLsn, force);
+                                         pageLen, recordLsn, force, forkNum);
                 },
                 [](const std::string&, uint32_t, uint32_t, uint16_t,
                    const char*, size_t) { return true; },

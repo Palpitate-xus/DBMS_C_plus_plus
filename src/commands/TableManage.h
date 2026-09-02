@@ -1344,7 +1344,7 @@ private:
     // Helpers to emit WAL records for heap operations.
     Lsn walPageImage(const std::string& dbname, const std::string& tablename,
                      uint32_t pageId, const char* pageBuf, size_t pageSize,
-                     bool beforeImage);
+                     bool beforeImage, uint32_t forkNum = 0);
     Lsn walXactCommit(const std::string& dbname, uint64_t xid);
     Lsn walXactAbort(const std::string& dbname, uint64_t xid);
     Lsn walXactPrepare(const std::string& dbname, uint64_t xid);
@@ -1362,7 +1362,7 @@ private:
     // Redo a single WAL record.
     bool redoPageImage(const std::string& dbname, const std::string& tablename,
                        uint32_t pageId, const char* pageData, size_t pageLen,
-                       Lsn recordLsn, bool force);
+                       Lsn recordLsn, bool force, uint32_t forkNum = 0);
     bool redoXactCommit(uint64_t xid);
     bool redoXactAbort(uint64_t xid);
     bool redoIndexFileImage(const std::filesystem::path& indexPath,
