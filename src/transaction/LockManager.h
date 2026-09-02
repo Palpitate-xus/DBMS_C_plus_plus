@@ -39,6 +39,11 @@ public:
     [[nodiscard]] bool lockIntentShared(const std::string& table);
     // Acquire intent exclusive lock (used before row-level exclusive locks).
     [[nodiscard]] bool lockIntentExclusive(const std::string& table);
+    // Completion of a prepared transaction may need to mutate a relation
+    // while that same xid owns a suspended table lock. Borrow a local IX
+    // token without releasing the durable prepared ownership.
+    [[nodiscard]] bool lockIntentExclusiveForPrepared(
+        const std::string& table, uint64_t txnId);
     // Acquire metadata lock (used for DDL operations like ALTER TABLE / DROP TABLE).
     [[nodiscard]] bool lockMetadata(const std::string& table);
 

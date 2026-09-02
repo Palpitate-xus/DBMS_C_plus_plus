@@ -1297,6 +1297,16 @@ private:
     void pruneMissingDatabaseCaches();
     bool rebuildIndexesAfterRecovery(const std::string& dbname,
                                      bool preservePreparedState);
+    bool rebuildSpecializedIndexes(const std::string& dbname,
+                                   const std::string& tablename,
+                                   bool clearDirtyState = true);
+    bool rebuildAllSpecializedIndexes(const std::string& dbname);
+    bool markSpecializedIndexesBeforeMutation(
+        const std::string& dbname, const std::string& tablename);
+    bool maintainSpecializedIndexesAfterMutation(
+        const std::string& dbname, const std::string& tablename);
+    bool specializedIndexesNeedHeapFallback(
+        const std::string& dbname, const std::string& tablename) const;
     bool resetTableStorage(const std::string& dbname,
                            const std::string& tablename);
 
@@ -1694,6 +1704,10 @@ private:
         ReadView readView;
         IsolationLevel txnIsolationLevel = IsolationLevel::REPEATABLE_READ;
         std::vector<TxnLogEntry> txnLog;
+        // Full-text/GIN/GiST/SP-GiST/BRIN are file-rewrite access methods.
+        // Defer their rebuild to the transaction boundary so concurrent
+        // snapshots never overwrite one another's sidecar state.
+        std::set<std::string> specializedIndexTables;
         std::vector<std::function<bool()>> ddlUndoActions;
         struct SavepointState {
             size_t txnLogSize = 0;

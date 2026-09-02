@@ -732,6 +732,63 @@ bool LockManager::lockIntentExclusive(const std::string& table) {
     return acquireLock(table, LockMode::IntentExclusive);
 }
 
+bool LockManager::lockIntentExclusiveForPrepared(
+    const std::string& table, uint64_t txnId) {
+    if (txnId == 0) return false;
+    const std::thread::id self = std::this_thread::get_id();
+    bool hasPreparedOwnership = false;
+    {
+        std::lock_guard<std::mutex> guard(globalMutex_);
+        auto stateIt = locks_.find(resourceKey(table));
+        if (stateIt == locks_.end() ||
+            !stateIt->second.suspendedTransactions.count(txnId)) {
+            // Most DML releases its statement-level table token before
+            // PREPARE, so there may be no suspended table ownership to
+            // borrow. Fall through to ordinary acquisition below.
+        } else {
+            hasPreparedOwnership = true;
+            auto& state = stateIt->second;
+            auto held = state.holderCounts.find(self);
+            if (held != state.holderCounts.end()) {
+                ++held->second;
+                return true;
+            }
+            if (!state.holders.empty()) return false;
+            for (const auto& [preparedTxnId, mode] :
+                 state.suspendedTransactions) {
+                (void)mode;
+                if (preparedTxnId != txnId) return false;
+            }
+
+            // A prepared shared token can be upgraded only when this is the
+            // sole prepared owner. Keep the advisory descriptor open so a
+            // failed completion remains locked and retryable.
+            if (state.processLockFd >= 0 &&
+                state.processLockMode != LockMode::Exclusive) {
+                if (::flock(state.processLockFd, LOCK_EX | LOCK_NB) != 0) {
+                    return false;
+                }
+                state.processLockMode = LockMode::Exclusive;
+            } else if (state.processLockFd < 0 &&
+                       !threadSettings().resourceNamespace.empty()) {
+                return false;
+            }
+
+            state.mtx.lock();
+            ++state.intentExclusiveCount;
+            state.holders.push_back(self);
+            state.holderModes[self] = LockMode::IntentExclusive;
+            state.holderCounts[self] = 1;
+            removeWaitEdges(self);
+            return true;
+        }
+    }
+    if (!hasPreparedOwnership) {
+        return acquireLock(table, LockMode::IntentExclusive);
+    }
+    return false;
+}
+
 bool LockManager::lockMetadata(const std::string& table) {
     return acquireLock(table, LockMode::Metadata);
 }

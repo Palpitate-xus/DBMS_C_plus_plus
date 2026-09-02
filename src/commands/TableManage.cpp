@@ -121,6 +121,7 @@ static constexpr const char* kPhysicalBackupMarker = ".dbms_physical_backup";
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <locale>
 #include <memory>
 #include <optional>
@@ -1796,6 +1797,24 @@ std::filesystem::path truncateStatePath(const StorageEngine& engine,
     return engine.dbPath(dbname) / (tablename + ".truncate_state");
 }
 
+std::filesystem::path specializedIndexDirtyPath(
+    const StorageEngine& engine, const std::string& dbname,
+    const std::string& tablename) {
+    return engine.dbPath(dbname) /
+           (tablename + ".specialized_index_dirty");
+}
+
+bool specializedIndexesAreDirty(const StorageEngine& engine,
+                                const std::string& dbname,
+                                const std::string& tablename) {
+    std::error_code error;
+    const bool exists = std::filesystem::exists(
+        specializedIndexDirtyPath(engine, dbname, tablename), error);
+    // Metadata I/O errors must disable the access method rather than allow a
+    // stale sidecar to become a complete source of candidate rows.
+    return error || exists;
+}
+
 uint64_t truncateStateChecksum(const char* data, size_t size) {
     uint64_t hash = 1469598103934665603ULL;
     for (size_t i = 0; i < size; ++i) {
@@ -1915,6 +1934,18 @@ bool syncDirectoryDurably(const std::filesystem::path& path) {
     const bool synced = ::fsync(descriptor) == 0;
     const bool closed = ::close(descriptor) == 0;
     return synced && closed;
+}
+
+bool clearSpecializedIndexDirty(const StorageEngine& engine,
+                                const std::string& dbname,
+                                const std::string& tablename) {
+    const auto path = specializedIndexDirtyPath(engine, dbname, tablename);
+    std::error_code error;
+    const bool exists = std::filesystem::exists(path, error);
+    if (error) return false;
+    if (!exists) return true;
+    if (!std::filesystem::remove(path, error) || error) return false;
+    return syncDirectoryDurably(path.parent_path());
 }
 
 }  // namespace
@@ -8730,16 +8761,56 @@ bool StorageEngine::hasFullTextIndex(const std::string& dbname,
     return std::filesystem::exists(fullTextIndexPath(dbname, tablename, colname));
 }
 
+bool StorageEngine::specializedIndexesNeedHeapFallback(
+    const std::string& dbname, const std::string& tablename) const {
+    if (specializedIndexesAreDirty(*this, dbname, tablename)) return true;
+    std::lock_guard<std::mutex> lock(globalTxnMutex_);
+    return std::any_of(
+        activeTransactionDatabases_.begin(),
+        activeTransactionDatabases_.end(),
+        [&](const auto& active) { return active.second == dbname; });
+}
+
 std::vector<int64_t> StorageEngine::fullTextSearch(const std::string& dbname,
                                                      const std::string& tablename,
                                                      const std::string& colname,
                                                      const std::string& word) const {
     std::vector<int64_t> result;
     auto path = fullTextIndexPath(dbname, tablename, colname);
-    std::ifstream in(path);
-    if (!in) return result;
+    std::error_code pathError;
+    if (!std::filesystem::is_regular_file(path, pathError) || pathError)
+        return result;
     std::string searchWord = word;
     for (char& c : searchWord) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (specializedIndexesNeedHeapFallback(dbname, tablename)) {
+        const TableSchema table = getTableSchema(dbname, tablename);
+        size_t columnIndex = table.len;
+        for (size_t i = 0; i < table.len; ++i) {
+            if (table.cols[i].dataName == colname) {
+                columnIndex = i;
+                break;
+            }
+        }
+        if (columnIndex >= table.len) return result;
+        const bool scanned = forEachRow(
+            dbname, tablename,
+            [&](uint32_t pageId, uint16_t slotId,
+                const char* data, size_t length) {
+                const std::string value =
+                    const_cast<StorageEngine*>(this)->extractColumnValue(
+                        std::string(data, length), table, columnIndex,
+                        dbname, true);
+                const auto tokens = tokenizeText(value);
+                if (std::find(tokens.begin(), tokens.end(), searchWord) !=
+                    tokens.end()) {
+                    result.push_back(encodeRid(pageId, slotId));
+                }
+            });
+        if (!scanned) result.clear();
+        return result;
+    }
+    std::ifstream in(path);
+    if (!in) return result;
     std::string line;
     while (std::getline(in, line)) {
         size_t sp = line.find(' ');
@@ -8913,6 +8984,36 @@ std::vector<int64_t> StorageEngine::ginSearch(const std::string& dbname,
                                                const std::string& key) const {
     std::vector<int64_t> result;
     auto path = ginIndexPath(dbname, tablename, colname);
+    std::error_code pathError;
+    if (!std::filesystem::is_regular_file(path, pathError) || pathError)
+        return result;
+    if (specializedIndexesNeedHeapFallback(dbname, tablename)) {
+        const TableSchema table = getTableSchema(dbname, tablename);
+        size_t columnIndex = table.len;
+        for (size_t i = 0; i < table.len; ++i) {
+            if (table.cols[i].dataName == colname) {
+                columnIndex = i;
+                break;
+            }
+        }
+        if (columnIndex >= table.len) return result;
+        const bool scanned = forEachRow(
+            dbname, tablename,
+            [&](uint32_t pageId, uint16_t slotId,
+                const char* data, size_t length) {
+                const std::string value =
+                    const_cast<StorageEngine*>(this)->extractColumnValue(
+                        std::string(data, length), table, columnIndex,
+                        dbname, true);
+                const auto keys = extractGinKeys(
+                    value, table.cols[columnIndex].dataType);
+                if (std::find(keys.begin(), keys.end(), key) != keys.end()) {
+                    result.push_back(encodeRid(pageId, slotId));
+                }
+            });
+        if (!scanned) result.clear();
+        return result;
+    }
     std::ifstream in(path);
     if (!in) return result;
     std::string line;
@@ -9054,6 +9155,34 @@ std::vector<int64_t> StorageEngine::giSTSearchOverlap(const std::string& dbname,
                                                        const std::string& high) const {
     std::vector<int64_t> result;
     auto path = giSTIndexPath(dbname, tablename, colname);
+    std::error_code pathError;
+    if (!std::filesystem::is_regular_file(path, pathError) || pathError)
+        return result;
+    if (specializedIndexesNeedHeapFallback(dbname, tablename)) {
+        const TableSchema table = getTableSchema(dbname, tablename);
+        size_t columnIndex = table.len;
+        for (size_t i = 0; i < table.len; ++i) {
+            if (table.cols[i].dataName == colname) {
+                columnIndex = i;
+                break;
+            }
+        }
+        if (columnIndex >= table.len) return result;
+        const bool scanned = forEachRow(
+            dbname, tablename,
+            [&](uint32_t pageId, uint16_t slotId,
+                const char* data, size_t length) {
+                const std::string value =
+                    const_cast<StorageEngine*>(this)->extractColumnValue(
+                        std::string(data, length), table, columnIndex,
+                        dbname, true);
+                if (gistEntryOverlaps(low, high, value, value)) {
+                    result.push_back(encodeRid(pageId, slotId));
+                }
+            });
+        if (!scanned) result.clear();
+        return result;
+    }
     std::ifstream in(path);
     if (!in) return result;
     std::string line;
@@ -9076,6 +9205,34 @@ std::vector<int64_t> StorageEngine::giSTSearchContainedBy(const std::string& dbn
                                                            const std::string& high) const {
     std::vector<int64_t> result;
     auto path = giSTIndexPath(dbname, tablename, colname);
+    std::error_code pathError;
+    if (!std::filesystem::is_regular_file(path, pathError) || pathError)
+        return result;
+    if (specializedIndexesNeedHeapFallback(dbname, tablename)) {
+        const TableSchema table = getTableSchema(dbname, tablename);
+        size_t columnIndex = table.len;
+        for (size_t i = 0; i < table.len; ++i) {
+            if (table.cols[i].dataName == colname) {
+                columnIndex = i;
+                break;
+            }
+        }
+        if (columnIndex >= table.len) return result;
+        const bool scanned = forEachRow(
+            dbname, tablename,
+            [&](uint32_t pageId, uint16_t slotId,
+                const char* data, size_t length) {
+                const std::string value =
+                    const_cast<StorageEngine*>(this)->extractColumnValue(
+                        std::string(data, length), table, columnIndex,
+                        dbname, true);
+                if (gistEntryContained(low, high, value, value)) {
+                    result.push_back(encodeRid(pageId, slotId));
+                }
+            });
+        if (!scanned) result.clear();
+        return result;
+    }
     std::ifstream in(path);
     if (!in) return result;
     std::string line;
@@ -9169,7 +9326,86 @@ std::vector<int64_t> StorageEngine::spGiSTSearch(const std::string& dbname,
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::vector<int64_t> result;
     auto path = spGiSTIndexPath(dbname, tablename, colname);
-    if (!std::filesystem::exists(path)) return result;
+    std::error_code pathError;
+    if (!std::filesystem::is_regular_file(path, pathError) || pathError)
+        return result;
+
+    const auto searchIndex = [&](SPGiSTIndex& index) {
+        // Parse value as "x,y" for point, or "x" / "y" for directional
+        // queries.
+        if (op == "=") {
+            double qx = 0.0, qy = 0.0;
+            std::string canonical;
+            if (normalizePointLiteral(value, canonical, &qx, &qy))
+                result = index.searchEquals(qx, qy);
+        } else if (op == "<<") {
+            double x = 0.0;
+            if (parseFiniteDouble(value, x)) result = index.searchLeftOf(x);
+        } else if (op == ">>") {
+            double x = 0.0;
+            if (parseFiniteDouble(value, x)) result = index.searchRightOf(x);
+        } else if (op == "<^") {
+            double y = 0.0;
+            if (parseFiniteDouble(value, y)) result = index.searchBelow(y);
+        } else if (op == ">^") {
+            double y = 0.0;
+            if (parseFiniteDouble(value, y)) result = index.searchAbove(y);
+        } else if (op == "<@") {
+            // Contained within circle: "cx,cy,radius".
+            double cx = 0.0, cy = 0.0, radius = 0.0;
+            const size_t comma1 = value.find(',');
+            const size_t comma2 = value.find(
+                ',', comma1 == std::string::npos ? 0 : comma1 + 1);
+            if (comma1 != std::string::npos &&
+                comma2 != std::string::npos &&
+                value.find(',', comma2 + 1) == std::string::npos &&
+                parseFiniteDouble(value.substr(0, comma1), cx) &&
+                parseFiniteDouble(
+                    value.substr(comma1 + 1, comma2 - comma1 - 1), cy) &&
+                parseFiniteDouble(value.substr(comma2 + 1), radius) &&
+                radius >= 0.0) {
+                result = index.searchWithin(cx, cy, radius);
+            }
+        }
+    };
+
+    if (specializedIndexesNeedHeapFallback(dbname, tablename)) {
+        const TableSchema table = getTableSchema(dbname, tablename);
+        size_t columnIndex = table.len;
+        for (size_t i = 0; i < table.len; ++i) {
+            if (table.cols[i].dataName == colname) {
+                columnIndex = i;
+                break;
+            }
+        }
+        if (columnIndex >= table.len ||
+            table.cols[columnIndex].dataType != "point") {
+            return result;
+        }
+        SPGiSTIndex heapIndex(-1e9, -1e9, 1e9, 1e9);
+        bool valid = true;
+        const bool scanned = forEachRow(
+            dbname, tablename,
+            [&](uint32_t pageId, uint16_t slotId,
+                const char* data, size_t length) {
+                if (!valid) return;
+                const std::string point =
+                    const_cast<StorageEngine*>(this)->extractColumnValue(
+                        std::string(data, length), table, columnIndex,
+                        dbname, true);
+                if (point.empty()) return;
+                double x = 0.0, y = 0.0;
+                std::string canonical;
+                if (!normalizePointLiteral(point, canonical, &x, &y)) {
+                    valid = false;
+                    return;
+                }
+                heapIndex.insert(x, y, encodeRid(pageId, slotId));
+            });
+        if (!scanned || !valid) return result;
+        searchIndex(heapIndex);
+        return result;
+    }
 
     // Build or retrieve cached quadtree
     std::string cacheKey = dbname + "/" + tablename + "/" + colname;
@@ -9215,38 +9451,7 @@ std::vector<int64_t> StorageEngine::spGiSTSearch(const std::string& dbname,
 
     if (!idx) return result;
 
-    // Parse value as "x,y" for point, or "x" / "y" for directional queries
-    if (op == "=") {
-        double qx = 0.0, qy = 0.0;
-        std::string canonical;
-        if (!normalizePointLiteral(value, canonical, &qx, &qy)) return result;
-        result = idx->searchEquals(qx, qy);
-    } else if (op == "<<") {
-        double x = 0.0;
-        if (parseFiniteDouble(value, x)) result = idx->searchLeftOf(x);
-    } else if (op == ">>") {
-        double x = 0.0;
-        if (parseFiniteDouble(value, x)) result = idx->searchRightOf(x);
-    } else if (op == "<^") {
-        double y = 0.0;
-        if (parseFiniteDouble(value, y)) result = idx->searchBelow(y);
-    } else if (op == ">^") {
-        double y = 0.0;
-        if (parseFiniteDouble(value, y)) result = idx->searchAbove(y);
-    } else if (op == "<@") {
-        // contained within circle: "cx,cy,radius"
-        double cx = 0.0, cy = 0.0, r = 0.0;
-        const size_t c1 = value.find(',');
-        const size_t c2 = value.find(',', c1 == std::string::npos ? 0 : c1 + 1);
-        if (c1 == std::string::npos || c2 == std::string::npos ||
-            value.find(',', c2 + 1) != std::string::npos ||
-            !parseFiniteDouble(value.substr(0, c1), cx) ||
-            !parseFiniteDouble(value.substr(c1 + 1, c2 - c1 - 1), cy) ||
-            !parseFiniteDouble(value.substr(c2 + 1), r) || r < 0.0) {
-            return result;
-        }
-        result = idx->searchWithin(cx, cy, r);
-    }
+    searchIndex(*idx);
     return result;
 }
 
@@ -9440,6 +9645,50 @@ std::vector<std::pair<uint32_t, uint32_t>> StorageEngine::brinSearchRange(
     const std::string& op, const std::string& value) const {
     std::vector<std::pair<uint32_t, uint32_t>> result;
     auto path = brinIndexPath(dbname, tablename, colname);
+    std::error_code pathError;
+    if (!std::filesystem::is_regular_file(path, pathError) || pathError)
+        return result;
+    if (specializedIndexesNeedHeapFallback(dbname, tablename)) {
+        const TableSchema table = getTableSchema(dbname, tablename);
+        size_t columnIndex = table.len;
+        for (size_t i = 0; i < table.len; ++i) {
+            if (table.cols[i].dataName == colname) {
+                columnIndex = i;
+                break;
+            }
+        }
+        if (columnIndex >= table.len) return result;
+        std::set<uint32_t> matchingPages;
+        const bool scanned = forEachRow(
+            dbname, tablename,
+            [&](uint32_t pageId, uint16_t, const char* data, size_t length) {
+                const std::string row(data, length);
+                const std::string candidate =
+                    const_cast<StorageEngine*>(this)->extractColumnValue(
+                    row, table, columnIndex, dbname, true);
+                bool matches = false;
+                if (op == "=") matches = candidate == value;
+                else if (op == "<") matches = candidate < value;
+                else if (op == "<=") matches = candidate <= value;
+                else if (op == ">") matches = candidate > value;
+                else if (op == ">=") matches = candidate >= value;
+                if (matches) matchingPages.insert(pageId);
+            });
+        if (!scanned || matchingPages.empty()) return result;
+        uint32_t rangeStart = *matchingPages.begin();
+        uint32_t rangeEnd = rangeStart;
+        for (auto it = std::next(matchingPages.begin());
+             it != matchingPages.end(); ++it) {
+            if (*it == rangeEnd + 1) {
+                rangeEnd = *it;
+            } else {
+                result.push_back({rangeStart, rangeEnd});
+                rangeStart = rangeEnd = *it;
+            }
+        }
+        result.push_back({rangeStart, rangeEnd});
+        return result;
+    }
     std::ifstream in(path, std::ios::binary);
     if (!in) return result;
     const std::string data((std::istreambuf_iterator<char>(in)),
@@ -9498,6 +9747,154 @@ std::vector<std::string> StorageEngine::getBrinIndexedColumns(const std::string&
         }
     }
     return result;
+}
+
+bool StorageEngine::rebuildSpecializedIndexes(
+    const std::string& dbname, const std::string& tablename,
+    bool clearDirtyState) {
+    lockManager_.setResourceNamespace(dbname);
+    if (!lockManager_.lockIntentExclusive(tablename)) return false;
+    const auto finish = [&](bool result) {
+        lockManager_.unlock(tablename);
+        return result;
+    };
+
+    try {
+        if (!tableExists(dbname, tablename)) return finish(false);
+        // These simplified access methods use their sidecar filename as the
+        // durable definition. Capture all names before replacing any file.
+        const auto fullTextColumns =
+            getFullTextIndexedColumns(dbname, tablename);
+        const auto ginColumns = getGinIndexedColumns(dbname, tablename);
+        const auto gistColumns = getGiSTIndexedColumns(dbname, tablename);
+        const auto spgistColumns =
+            getSPGiSTIndexedColumns(dbname, tablename);
+        const auto brinColumns = getBrinIndexedColumns(dbname, tablename);
+        if (fullTextColumns.empty() && ginColumns.empty() &&
+            gistColumns.empty() && spgistColumns.empty() &&
+            brinColumns.empty()) {
+            return finish(!clearDirtyState || clearSpecializedIndexDirty(
+                *this, dbname, tablename));
+        }
+
+        // Publish invalidity before replacing the first sidecar. Readers use
+        // snapshot-aware heap candidates while this file exists instead of
+        // trusting a mixed generation.
+        if (!index_file::writeAtomically(
+                specializedIndexDirtyPath(*this, dbname, tablename),
+                "DBMS_SPECIALIZED_INDEX_DIRTY_V1\n")) {
+            return finish(false);
+        }
+
+        bool rebuilt = true;
+        for (const auto& column : fullTextColumns) {
+            if (createFullTextIndex(dbname, tablename, column) !=
+                DBStatus::OK) {
+                rebuilt = false;
+                break;
+            }
+        }
+        for (const auto& column : ginColumns) {
+            if (rebuilt && createGinIndex(dbname, tablename, column) !=
+                               DBStatus::OK) {
+                rebuilt = false;
+            }
+        }
+        for (const auto& column : gistColumns) {
+            if (rebuilt && createGiSTIndex(dbname, tablename, column) !=
+                               DBStatus::OK) {
+                rebuilt = false;
+            }
+        }
+        for (const auto& column : spgistColumns) {
+            if (rebuilt && createSPGiSTIndex(dbname, tablename, column) !=
+                               DBStatus::OK) {
+                rebuilt = false;
+            }
+        }
+        for (const auto& column : brinColumns) {
+            if (rebuilt && createBrinIndex(
+                               dbname, tablename, column, 64) !=
+                               DBStatus::OK) {
+                rebuilt = false;
+            }
+        }
+        if (!rebuilt) return finish(false);
+        return finish(!clearDirtyState || clearSpecializedIndexDirty(
+            *this, dbname, tablename));
+    } catch (const std::exception& error) {
+        std::cerr << "[index] specialized index rebuild failed for "
+                  << dbname << "/" << tablename << ": "
+                  << error.what() << std::endl;
+        return finish(false);
+    } catch (...) {
+        std::cerr << "[index] specialized index rebuild failed for "
+                  << dbname << "/" << tablename << std::endl;
+        return finish(false);
+    }
+}
+
+bool StorageEngine::rebuildAllSpecializedIndexes(
+    const std::string& dbname) {
+    try {
+        for (const auto& tableName : getTableNames(dbname)) {
+            if (!rebuildSpecializedIndexes(dbname, tableName)) return false;
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool StorageEngine::markSpecializedIndexesBeforeMutation(
+    const std::string& dbname, const std::string& tablename) {
+    try {
+        const auto dirtyPath =
+            specializedIndexDirtyPath(*this, dbname, tablename);
+        std::error_code error;
+        const bool alreadyDirty = std::filesystem::exists(dirtyPath, error);
+        if (error) return false;
+
+        bool hasSpecializedIndex = alreadyDirty;
+        if (!hasSpecializedIndex) {
+            hasSpecializedIndex =
+                !getFullTextIndexedColumns(dbname, tablename).empty() ||
+                !getGinIndexedColumns(dbname, tablename).empty() ||
+                !getGiSTIndexedColumns(dbname, tablename).empty() ||
+                !getSPGiSTIndexedColumns(dbname, tablename).empty() ||
+                !getBrinIndexedColumns(dbname, tablename).empty();
+        }
+        if (!hasSpecializedIndex) return true;
+
+        if (transactionContext().inTransaction &&
+            transactionContext().txnDB == dbname) {
+            transactionContext().specializedIndexTables.insert(tablename);
+        }
+        if (alreadyDirty) return true;
+
+        // This durable marker is the cross-backend publication barrier. It
+        // must reach disk before the heap changes, otherwise another process
+        // could trust a stale sidecar during the subsequent rebuild window.
+        return index_file::writeAtomically(
+            dirtyPath, "DBMS_SPECIALIZED_INDEX_DIRTY_V1\n");
+    } catch (const std::exception& error) {
+        std::cerr << "[index] could not mark specialized indexes dirty for "
+                  << dbname << "/" << tablename << ": "
+                  << error.what() << std::endl;
+        return false;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool StorageEngine::maintainSpecializedIndexesAfterMutation(
+    const std::string& dbname, const std::string& tablename) {
+    if (transactionContext().inTransaction &&
+        transactionContext().txnDB == dbname) {
+        transactionContext().specializedIndexTables.insert(tablename);
+        return true;
+    }
+    return rebuildSpecializedIndexes(dbname, tablename);
 }
 
 bool StorageEngine::databaseExists(const std::string& dbname) const {
@@ -10893,6 +11290,8 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
                  hashIndexMetaPath(dbname, tbl.tablename),
                  namedIndexMetaPath(*this, dbname, tbl.tablename),
                  truncateStatePath(*this, dbname, tbl.tablename),
+                 specializedIndexDirtyPath(
+                     *this, dbname, tbl.tablename),
                  fsmPath(dbname, tbl.tablename), vmPath(dbname, tbl.tablename),
                  toastMetaPath(dbname, tbl.tablename),
                  toastDataPath(dbname, tbl.tablename), toastIndexPath(dbname, tbl.tablename)}) {
@@ -10954,6 +11353,14 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
             staleStateError);
         if (staleStateError) {
             return failCreate("could not remove stale truncate state");
+        }
+        staleStateError.clear();
+        std::filesystem::remove(
+            specializedIndexDirtyPath(*this, dbname, tbl.tablename),
+            staleStateError);
+        if (staleStateError) {
+            return failCreate(
+                "could not remove stale specialized-index state");
         }
     }
 
@@ -11087,6 +11494,8 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
     std::filesystem::remove(namedIndexMetaPath(*this, dbname, tablename));
     std::filesystem::remove(
         truncateStatePath(*this, dbname, tablename));
+    std::filesystem::remove(
+        specializedIndexDirtyPath(*this, dbname, tablename));
     std::filesystem::remove(fsmPath(dbname, tablename));
     std::filesystem::remove(vmPath(dbname, tablename));
     removeSeq(dbname, tablename);
@@ -12008,7 +12417,7 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
         }
     }
 
-    // Rename GIN/GiST/BRIN index files if exists
+    // Rename GIN/GiST/SP-GiST/BRIN index files if present.
     {
         std::filesystem::path oldIdx = ginIndexPath(dbname, tablename, oldName);
         std::filesystem::path newIdx = ginIndexPath(dbname, tablename, newName);
@@ -12018,6 +12427,20 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
         std::filesystem::path oldIdx = giSTIndexPath(dbname, tablename, oldName);
         std::filesystem::path newIdx = giSTIndexPath(dbname, tablename, newName);
         if (std::filesystem::exists(oldIdx)) std::filesystem::rename(oldIdx, newIdx);
+    }
+    {
+        std::filesystem::path oldIdx =
+            spGiSTIndexPath(dbname, tablename, oldName);
+        std::filesystem::path newIdx =
+            spGiSTIndexPath(dbname, tablename, newName);
+        if (std::filesystem::exists(oldIdx)) {
+            std::filesystem::rename(oldIdx, newIdx);
+        }
+        std::lock_guard<std::mutex> guard(spGiSTMutex_);
+        spGiSTCache_.erase(
+            dbname + "/" + tablename + "/" + oldName);
+        spGiSTCache_.erase(
+            dbname + "/" + tablename + "/" + newName);
     }
     {
         std::filesystem::path oldIdx = brinIndexPath(dbname, tablename, oldName);
@@ -12106,6 +12529,20 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
         lockManager_.unlock(oldName);
         lockManager_.unlock(newName);
         return DBStatus::CORRUPTED_DATA;
+    }
+    std::error_code dirtyStateError;
+    const bool renamedSpecializedIndexesWereDirty =
+        std::filesystem::exists(
+            specializedIndexDirtyPath(*this, dbname, oldName),
+            dirtyStateError);
+    if (dirtyStateError ||
+        (renamedSpecializedIndexesWereDirty &&
+         !index_file::writeAtomically(
+             specializedIndexDirtyPath(*this, dbname, newName),
+             "DBMS_SPECIALIZED_INDEX_DIRTY_V1\n"))) {
+        lockManager_.unlock(oldName);
+        lockManager_.unlock(newName);
+        return DBStatus::IO_ERROR;
     }
     closeDatabaseCaches(dbname);
 
@@ -12235,7 +12672,7 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
         if (std::filesystem::exists(oldIdx)) std::filesystem::rename(oldIdx, newIdx);
     }
 
-    // Rename GIN/GiST/BRIN indexes
+    // Rename GIN/GiST/SP-GiST/BRIN indexes.
     auto ginCols = getGinIndexedColumns(dbname, oldName);
     for (const auto& c : ginCols) {
         std::filesystem::path oldIdx = ginIndexPath(dbname, oldName, c);
@@ -12248,11 +12685,37 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
         std::filesystem::path newIdx = giSTIndexPath(dbname, newName, c);
         if (std::filesystem::exists(oldIdx)) std::filesystem::rename(oldIdx, newIdx);
     }
+    auto spgistCols = getSPGiSTIndexedColumns(dbname, oldName);
+    for (const auto& c : spgistCols) {
+        std::filesystem::path oldIdx =
+            spGiSTIndexPath(dbname, oldName, c);
+        std::filesystem::path newIdx =
+            spGiSTIndexPath(dbname, newName, c);
+        if (std::filesystem::exists(oldIdx)) {
+            std::filesystem::rename(oldIdx, newIdx);
+        }
+    }
+    {
+        std::lock_guard<std::mutex> guard(spGiSTMutex_);
+        for (const auto& c : spgistCols) {
+            spGiSTCache_.erase(dbname + "/" + oldName + "/" + c);
+            spGiSTCache_.erase(dbname + "/" + newName + "/" + c);
+        }
+    }
     auto brinCols = getBrinIndexedColumns(dbname, oldName);
     for (const auto& c : brinCols) {
         std::filesystem::path oldIdx = brinIndexPath(dbname, oldName, c);
         std::filesystem::path newIdx = brinIndexPath(dbname, newName, c);
         if (std::filesystem::exists(oldIdx)) std::filesystem::rename(oldIdx, newIdx);
+    }
+
+    // The new-name marker was published before any sidecar moved, so direct
+    // readers under either spelling could not trust a stale generation during
+    // the rename. The old-name marker is now obsolete.
+    if (renamedSpecializedIndexesWereDirty &&
+        !clearSpecializedIndexDirty(*this, dbname, oldName)) {
+        std::cerr << "[index] stale old-name marker retained after table rename: "
+                  << dbname << "/" << oldName << std::endl;
     }
 
     // Rename TOAST directory and meta
@@ -15657,6 +16120,9 @@ DBStatus StorageEngine::insert(const std::string& dbname,
     if (!pa) {
         return failBeforeHeapInsert(DBStatus::IO_ERROR);
     }
+    if (!markSpecializedIndexesBeforeMutation(dbname, tablename)) {
+        return failBeforeHeapInsert(DBStatus::IO_ERROR);
+    }
     uint32_t pageId = 0;
     uint16_t slotId = 0;
     {
@@ -15890,6 +16356,11 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             pa->unpinPage(pageId);
         }
         lockManager_.pageUnlock(dbname, tablename, pageId);
+        // A specialized rebuild may have published some replacement files
+        // before failing. Rebuild once more from the reverted heap; if the
+        // underlying I/O error persists, its dirty marker keeps reads on the
+        // safe heap-scan path.
+        (void)rebuildSpecializedIndexes(dbname, tablename);
         lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
     };
@@ -15980,6 +16451,15 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                 return abortIndexUpdate();
             }
         }
+    }
+    // Partition INSERT uses a statement-local allocator, whereas the
+    // whole-table specialized builders reopen partition files. Publish its
+    // dirty pages first so that scan observes the tuple just indexed above.
+    if (partPa && !partPa->flush()) {
+        return abortIndexUpdate();
+    }
+    if (!maintainSpecializedIndexesAfterMutation(dbname, tablename)) {
+        return abortIndexUpdate();
     }
     // Logical decoding: buffer the change for streaming at commit.
     if (PublicationCatalog::instance().publishes(dbname, tablename)) {
@@ -16881,6 +17361,26 @@ DBStatus StorageEngine::remove(const std::string& dbname,
                     acquiredTables.push_back(t);
                 }
 
+                // Publish every affected relation as unsafe before changing
+                // the first heap tuple. This includes the parent so a later
+                // marker I/O error cannot strand already-applied cascades.
+                bool cascadeMarkersOk =
+                    markSpecializedIndexesBeforeMutation(
+                        dbname, tablename);
+                for (const auto& tableName : sortedTables) {
+                    if (!markSpecializedIndexesBeforeMutation(
+                            dbname, tableName)) {
+                        cascadeMarkersOk = false;
+                    }
+                }
+                if (!cascadeMarkersOk) {
+                    for (const auto& acquired : acquiredTables) {
+                        lockManager_.unlock(acquired);
+                    }
+                    lockManager_.unlock(tablename);
+                    return DBStatus::IO_ERROR;
+                }
+
                 // Apply SET NULL: set FK column to NULL
                 for (const auto& sa : setNullActions) {
                     TableSchema otbl = getTableSchema(dbname, sa.table);
@@ -16997,9 +17497,21 @@ DBStatus StorageEngine::remove(const std::string& dbname,
                     }
                 }
 
+                bool cascadeSpecializedIndexesOk = true;
+                for (const auto& tableName : sortedTables) {
+                    if (!maintainSpecializedIndexesAfterMutation(
+                            dbname, tableName)) {
+                        cascadeSpecializedIndexesOk = false;
+                    }
+                }
+
                 // Release locks on referenced tables
                 for (const auto& t : sortedTables) {
                     lockManager_.unlock(t);
+                }
+                if (!cascadeSpecializedIndexesOk) {
+                    lockManager_.unlock(tablename);
+                    return DBStatus::IO_ERROR;
                 }
             }
         }
@@ -17173,6 +17685,10 @@ DBStatus StorageEngine::remove(const std::string& dbname,
     // Delete TOAST entries only after BEFORE DELETE triggers succeed.  Keep
     // old chunks until COMMIT in an explicit transaction so rollback can
     // restore the logged tuple and its external values.
+    if (!markSpecializedIndexesBeforeMutation(dbname, tablename)) {
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
+    }
     if (!(transactionContext().inTransaction && dbname == transactionContext().txnDB)) {
         for (int64_t rid : toDelete) {
             deleteRowToast(dbname, tablename, rid);
@@ -17320,6 +17836,10 @@ DBStatus StorageEngine::remove(const std::string& dbname,
                 ++bidx_i;
             }
         }
+    }
+    if (!maintainSpecializedIndexesAfterMutation(dbname, tablename)) {
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
     }
     // Logical decoding: buffer the deletes (old images) for streaming at
     // commit.
@@ -18181,6 +18701,22 @@ DBStatus StorageEngine::update(const std::string& dbname,
                 acquiredTables.push_back(t);
             }
 
+            bool cascadeMarkersOk =
+                markSpecializedIndexesBeforeMutation(dbname, tablename);
+            for (const auto& tableName : sortedTables) {
+                if (!markSpecializedIndexesBeforeMutation(
+                        dbname, tableName)) {
+                    cascadeMarkersOk = false;
+                }
+            }
+            if (!cascadeMarkersOk) {
+                for (const auto& acquired : acquiredTables) {
+                    lockManager_.unlock(acquired);
+                }
+                lockManager_.unlock(tablename);
+                return DBStatus::IO_ERROR;
+            }
+
             // Apply ON UPDATE SET NULL
             for (const auto& sa : updateSetNullActions) {
                 TableSchema otbl = getTableSchema(dbname, sa.table);
@@ -18244,14 +18780,29 @@ DBStatus StorageEngine::update(const std::string& dbname,
                 }
             }
 
+            bool cascadeSpecializedIndexesOk = true;
+            for (const auto& tableName : sortedTables) {
+                if (!maintainSpecializedIndexesAfterMutation(
+                        dbname, tableName)) {
+                    cascadeSpecializedIndexesOk = false;
+                }
+            }
             for (const auto& t : sortedTables) {
                 lockManager_.unlock(t);
+            }
+            if (!cascadeSpecializedIndexesOk) {
+                lockManager_.unlock(tablename);
+                return DBStatus::IO_ERROR;
             }
         }
 
         // Allocate new external values only after every pre-write check has
         // passed.  The old chunks remain reachable through txnLog until
         // COMMIT; rollback removes only chunks referenced by the new row.
+        if (!markSpecializedIndexesBeforeMutation(dbname, tablename)) {
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
+        }
         std::map<std::string, std::string> storedRowValues = rowValues;
         if (!prepareToastValues(dbname, tablename, tbl, storedRowValues)) {
             lockManager_.unlock(tablename);
@@ -18721,6 +19272,16 @@ DBStatus StorageEngine::update(const std::string& dbname,
         }
     }
 
+    if (!maintainSpecializedIndexesAfterMutation(dbname, tablename)) {
+        lockManager_.unlock(tablename);
+        if (transactionContext().inTransaction &&
+            transactionContext().txnDB == dbname) {
+            const DBStatus rollbackStatus = rollbackTransaction();
+            return rollbackStatus == DBStatus::OK
+                ? DBStatus::IO_ERROR : rollbackStatus;
+        }
+        return DBStatus::IO_ERROR;
+    }
     lockManager_.unlock(tablename);
 
     // Fire AFTER UPDATE triggers
@@ -25700,6 +26261,9 @@ bool StorageEngine::resetTableStorage(
                 return false;
             }
         }
+        if (!clearSpecializedIndexDirty(*this, dbname, tablename)) {
+            return false;
+        }
         if (!syncDirectoryDurably(relationRoot)) return false;
 
         dbms::resetRuntimeTableStats(dbname, tablename);
@@ -26410,6 +26974,11 @@ bool StorageEngine::recoverAllDatabases() {
 
         WALManager* wal = getWAL(dbname);
         if (!wal) continue;
+        const auto preparedForDatabase = inDoubtPreparedXids.lower_bound(
+            {dbname, 0});
+        const bool preservePreparedIndexState =
+            preparedForDatabase != inDoubtPreparedXids.end() &&
+            preparedForDatabase->first == dbname;
         const auto resetUnloggedTables = [&]() -> bool {
             try {
                 for (const auto& tableName : getTableNames(dbname)) {
@@ -26438,6 +27007,13 @@ bool StorageEngine::recoverAllDatabases() {
         };
         if (wal->currentWriteLsn() == 0) {
             if (!resetUnloggedTables()) return false;
+            if (!preservePreparedIndexState &&
+                !rebuildAllSpecializedIndexes(dbname)) {
+                std::cerr
+                    << "[recovery] failed to rebuild specialized indexes for "
+                    << dbname << std::endl;
+                return false;
+            }
             continue; // no WAL to replay
         }
 
@@ -26462,12 +27038,6 @@ bool StorageEngine::recoverAllDatabases() {
         Lsn redoLsn = recoveryTarget != 0
             ? wal->earliestAvailableLsn()
             : checkpointLsnOpt.value_or(wal->earliestAvailableLsn());
-        const auto preparedForDatabase = inDoubtPreparedXids.lower_bound(
-            {dbname, 0});
-        const bool preservePreparedIndexState =
-            preparedForDatabase != inDoubtPreparedXids.end() &&
-            preparedForDatabase->first == dbname;
-
         // Pass 1: collect committed transaction IDs and update CLOG.
         std::set<uint64_t> committedXids = committedXidsByDb[dbname];
         std::vector<Lsn> redoRecordLsns;
@@ -26825,6 +27395,18 @@ bool StorageEngine::recoverAllDatabases() {
         // definitions remain. Reset every heap/index/TOAST fork together so
         // no access method can retain a stale RID into the new empty heap.
         if (!resetUnloggedTables()) return false;
+        // Specialized indexes are derivable whole-file sidecars and do not
+        // emit per-row WAL. Rebuild them on every startup to close both an
+        // interrupted replacement and a crash after heap WAL became durable.
+        // An in-doubt prepared xid can own a suspended table lock, so leave
+        // its phase-one sidecar state untouched until phase two decides it.
+        if (!preservePreparedIndexState &&
+            !rebuildAllSpecializedIndexes(dbname)) {
+            std::cerr
+                << "[recovery] failed to rebuild specialized indexes for "
+                << dbname << std::endl;
+            return false;
+        }
 
         // A recovery target is single-use, but the source timeline still
         // contains COMMIT records beyond that target.  Fork a new timeline
@@ -28308,6 +28890,8 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
         if (createBrinIndex(dbname, tablename, column, 64) != DBStatus::OK)
             return failRewrite();
     }
+    if (!clearSpecializedIndexDirty(*this, dbname, tablename))
+        return failRewrite();
 
     if (!flushDatabaseCaches(dbname)) return failRewrite();
     std::error_code cleanupError;
@@ -28709,6 +29293,7 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
     captureCatalogSnapshot();
 
     transactionContext().txnLog.clear();
+    transactionContext().specializedIndexTables.clear();
     transactionContext().snapshotImported = false;
     transactionContext().hasRead = false;
     transactionContext().hasWrite = false;
@@ -28955,6 +29540,65 @@ DBStatus StorageEngine::commitTransaction() {
         }
     }
 
+    // Full-text, GIN, GiST, SP-GiST and BRIN use whole-file sidecars.  Rebuild
+    // each relation once at the transaction boundary instead of once per row.
+    // Hold an outer IX token through visibility publication: in this lock
+    // manager IX is physically exclusive, so another writer cannot change the
+    // heap between the snapshot scan and this transaction becoming visible.
+    auto& committingContext = transactionContext();
+    for (const auto& entry : committingContext.txnLog) {
+        committingContext.specializedIndexTables.insert(entry.tableName);
+    }
+    for (const auto& tableName : committingContext.specializedIndexTables) {
+        if (!tableExists(committingContext.txnDB, tableName)) continue;
+        if (!lockManager_.lockIntentExclusive(tableName)) {
+            rollbackTransaction();
+            return DBStatus::LOCK_CONFLICT;
+        }
+    }
+    if (!committingContext.specializedIndexTables.empty()) {
+        const ReadView savedReadView = committingContext.readView;
+        const IsolationLevel savedIsolation =
+            committingContext.txnIsolationLevel;
+        {
+            std::lock_guard<std::mutex> lock(globalTxnMutex_);
+            committingContext.readView.creatorTxnId =
+                committingContext.currentTxnId;
+            committingContext.readView.lowLimitId =
+                TxnIdGenerator::instance().maxCommittedTxId() + 1;
+            committingContext.readView.upLimitId =
+                activeTransactions_.empty()
+                    ? committingContext.readView.lowLimitId
+                    : *activeTransactions_.begin();
+            committingContext.readView.activeTxnIds = activeTransactions_;
+            committingContext.readView.activeTxnIds.erase(
+                committingContext.currentTxnId);
+            committingContext.readView.subTxnIds.clear();
+            committingContext.readView.commitLog =
+                getCommitLog(committingContext.txnDB);
+        }
+        // The maintenance scan is an implementation detail, not a new user
+        // predicate read that participates in SSI conflict detection.
+        committingContext.txnIsolationLevel = IsolationLevel::READ_COMMITTED;
+        bool specializedIndexesOk = true;
+        for (const auto& tableName :
+             committingContext.specializedIndexTables) {
+            if (!tableExists(committingContext.txnDB, tableName)) continue;
+            if (!rebuildSpecializedIndexes(
+                    committingContext.txnDB, tableName,
+                    /*clearDirtyState=*/false)) {
+                specializedIndexesOk = false;
+                break;
+            }
+        }
+        committingContext.readView = savedReadView;
+        committingContext.txnIsolationLevel = savedIsolation;
+        if (!specializedIndexesOk) {
+            rollbackTransaction();
+            return DBStatus::IO_ERROR;
+        }
+    }
+
     // A transaction is not durable until its COMMIT record is present and
     // flushed. Fail closed before publishing CLOG visibility: otherwise a
     // WAL/fsync error could expose committed rows that crash recovery cannot
@@ -29052,6 +29696,21 @@ DBStatus StorageEngine::commitTransaction() {
         }
     }
 
+    // The new sidecars are safe to publish only after CLOG makes the matching
+    // heap generation visible. A retained marker is harmless (queries scan
+    // the heap and startup repairs it), so a cleanup failure must not turn an
+    // already-durable COMMIT into an apparent rollback.
+    for (const auto& tableName :
+         committingContext.specializedIndexTables) {
+        if (!tableExists(committingDb, tableName)) continue;
+        if (!clearSpecializedIndexDirty(
+                *this, committingDb, tableName)) {
+            std::cerr
+                << "[index] committed with specialized-index marker retained for "
+                << committingDb << "/" << tableName << std::endl;
+        }
+    }
+
     // Do not reclaim UPDATE/DELETE values at commit.  A snapshot predating
     // this commit can still need those values; removing them here makes that
     // snapshot observe a broken row.  VACUUM TOAST waits for active snapshots
@@ -29081,6 +29740,7 @@ DBStatus StorageEngine::commitTransaction() {
         ssiInEdges_.clear();
     }
     transactionContext().txnLog.clear();
+    transactionContext().specializedIndexTables.clear();
     // Logical decoding: rollback discards buffered changes — subscribers
     // never see uncommitted work.
     transactionContext().txnLogicalChanges.clear();
@@ -29386,6 +30046,24 @@ bool StorageEngine::undoVersionedUpdate(const TxnLogEntry& entry) {
 DBStatus StorageEngine::rollbackTransaction() {
     if (!transactionContext().inTransaction) return DBStatus::OK;
     lockManager_.setResourceNamespace(transactionContext().txnDB);
+
+    auto& rollbackContext = transactionContext();
+    for (const auto& entry : rollbackContext.txnLog) {
+        rollbackContext.specializedIndexTables.insert(entry.tableName);
+    }
+    // Serialize whole-file access-method repair with every table writer and
+    // retain these outer lock tokens until the aborted xid leaves the active
+    // set.  The helper takes/relinquishes only a nested token.
+    std::set<std::string> specializedLockedTables;
+    bool specializedLocksOk = true;
+    for (const auto& tableName : rollbackContext.specializedIndexTables) {
+        if (!tableExists(rollbackContext.txnDB, tableName)) continue;
+        if (lockManager_.lockIntentExclusive(tableName)) {
+            specializedLockedTables.insert(tableName);
+        } else {
+            specializedLocksOk = false;
+        }
+    }
 
     const std::string rollbackDb = transactionContext().txnDB;
     const bool preserveBackup = transactionContext().preserveBackupOnRollback;
@@ -29796,6 +30474,50 @@ DBStatus StorageEngine::rollbackTransaction() {
     }
     transactionContext().ddlUndoActions.clear();
 
+    // A commit attempt can already have rebuilt these sidecars with the
+    // transaction's NEW versions before a later durability step fails.  Once
+    // heap/DDL undo is complete, derive them again from a fresh view that
+    // excludes this now-aborted xid.
+    for (const auto& tableName :
+         rollbackContext.specializedIndexTables) {
+        if (!tableExists(rollbackDb, tableName) ||
+            specializedLockedTables.count(tableName)) {
+            continue;
+        }
+        if (lockManager_.lockIntentExclusive(tableName)) {
+            specializedLockedTables.insert(tableName);
+        } else {
+            specializedLocksOk = false;
+        }
+    }
+    const ReadView savedRollbackReadView = rollbackContext.readView;
+    const IsolationLevel savedRollbackIsolation =
+        rollbackContext.txnIsolationLevel;
+    {
+        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        rollbackContext.readView.creatorTxnId = 0;
+        rollbackContext.readView.lowLimitId =
+            TxnIdGenerator::instance().maxCommittedTxId() + 1;
+        rollbackContext.readView.upLimitId = activeTransactions_.empty()
+            ? rollbackContext.readView.lowLimitId
+            : *activeTransactions_.begin();
+        rollbackContext.readView.activeTxnIds = activeTransactions_;
+        rollbackContext.readView.subTxnIds.clear();
+        rollbackContext.readView.commitLog = getCommitLog(rollbackDb);
+    }
+    rollbackContext.txnIsolationLevel = IsolationLevel::READ_COMMITTED;
+    bool specializedUndoOk = specializedLocksOk;
+    for (const auto& tableName :
+         rollbackContext.specializedIndexTables) {
+        if (!tableExists(rollbackDb, tableName)) continue;
+        if (!specializedLockedTables.count(tableName) ||
+            !rebuildSpecializedIndexes(rollbackDb, tableName)) {
+            specializedUndoOk = false;
+        }
+    }
+    rollbackContext.readView = savedRollbackReadView;
+    rollbackContext.txnIsolationLevel = savedRollbackIsolation;
+
     // Write WAL ABORT marker after undo.
     WALManager* wal = getWAL(transactionContext().txnDB);
     bool abortWalOk = true;
@@ -29818,6 +30540,7 @@ DBStatus StorageEngine::rollbackTransaction() {
 
     transactionContext().deferredChecks.erase(transactionContext().currentTxnId);
     transactionContext().txnLog.clear();
+    transactionContext().specializedIndexTables.clear();
     // Logical decoding: rollback discards buffered changes — subscribers
     // never see uncommitted work.
     transactionContext().txnLogicalChanges.clear();
@@ -29891,7 +30614,8 @@ DBStatus StorageEngine::rollbackTransaction() {
     // Sequences are non-transactional: persist advanced counters even on
     // rollback so concurrent transactions cannot observe reused values.
     flushDeferredSequences();
-    return snapshotRestoreOk && rowUndoOk && ddlUndoOk && clogOk && abortWalOk
+    return snapshotRestoreOk && rowUndoOk && ddlUndoOk &&
+                   specializedUndoOk && clogOk && abortWalOk
         ? DBStatus::OK : DBStatus::IO_ERROR;
 }
 
@@ -30262,6 +30986,7 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
 
     // Clear transaction state but KEEP locks (2PC semantics)
     transactionContext().txnLog.clear();
+    transactionContext().specializedIndexTables.clear();
     transactionContext().snapshotImported = false;
     transactionContext().hasRead = false;
     transactionContext().hasWrite = false;
@@ -30321,20 +31046,101 @@ DBStatus StorageEngine::commitPrepared(const std::string& xid) {
     const uint64_t savedTxnId = record.txnId;
     const std::string& savedDB = record.dbname;
 
+    std::set<std::string> specializedTables;
+    for (const auto& entry : record.log) {
+        specializedTables.insert(entry.tableName);
+    }
+    lockManager_.setResourceNamespace(savedDB);
+    for (const auto& tableName : specializedTables) {
+        if (!tableExists(savedDB, tableName)) continue;
+        if (!lockManager_.lockIntentExclusiveForPrepared(
+                tableName, savedTxnId)) {
+            lockManager_.unlockAll();
+            return DBStatus::LOCK_CONFLICT;
+        }
+    }
+
+    // PREPARE deliberately left the old whole-file sidecars in place while
+    // its xid stayed globally active.  Build the future committed generation
+    // now, using a temporary view in which the prepared xid is the creator.
+    auto& completionContext = transactionContext();
+    const ReadView savedReadView = completionContext.readView;
+    const IsolationLevel savedIsolation =
+        completionContext.txnIsolationLevel;
+    completionContext.currentTxnId = savedTxnId;
+    completionContext.txnDB = savedDB;
+    completionContext.inTransaction = true;
+    completionContext.txnIsolationLevel = IsolationLevel::READ_COMMITTED;
+    {
+        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        completionContext.readView.creatorTxnId = savedTxnId;
+        completionContext.readView.lowLimitId =
+            TxnIdGenerator::instance().maxCommittedTxId() + 1;
+        completionContext.readView.upLimitId = activeTransactions_.empty()
+            ? completionContext.readView.lowLimitId
+            : *activeTransactions_.begin();
+        completionContext.readView.activeTxnIds = activeTransactions_;
+        completionContext.readView.activeTxnIds.erase(savedTxnId);
+        completionContext.readView.subTxnIds.clear();
+        completionContext.readView.commitLog = getCommitLog(savedDB);
+    }
+    bool specializedIndexesOk = true;
+    for (const auto& tableName : specializedTables) {
+        if (!tableExists(savedDB, tableName)) continue;
+        if (!rebuildSpecializedIndexes(
+                savedDB, tableName, /*clearDirtyState=*/false)) {
+            specializedIndexesOk = false;
+            break;
+        }
+    }
+    completionContext.readView = savedReadView;
+    completionContext.txnIsolationLevel = savedIsolation;
+    completionContext.currentTxnId = 0;
+    completionContext.inTransaction = false;
+    completionContext.hasRead = false;
+    completionContext.hasWrite = false;
+    completionContext.txnDB.clear();
+    if (!specializedIndexesOk) {
+        lockManager_.unlockAll();
+        return DBStatus::IO_ERROR;
+    }
+
     // WAL COMMIT PREPARED marker. Keep the prepared transaction durable and
     // retryable if WAL insertion or fsync fails.
-    if (!flushDatabaseCaches(savedDB)) return DBStatus::IO_ERROR;
+    if (!flushDatabaseCaches(savedDB)) {
+        lockManager_.unlockAll();
+        return DBStatus::IO_ERROR;
+    }
     WALManager* wal = getWAL(savedDB);
-    if (!wal) return DBStatus::IO_ERROR;
+    if (!wal) {
+        lockManager_.unlockAll();
+        return DBStatus::IO_ERROR;
+    }
     Lsn commitLsn = walXactCommit(savedDB, savedTxnId);
     if (commitLsn == INVALID_LSN || !wal->XLogFlush(commitLsn)) {
+        lockManager_.unlockAll();
         return DBStatus::IO_ERROR;
     }
 
     CommitLog* clog = getCommitLog(savedDB);
-    if (!clog) return DBStatus::IO_ERROR;
+    if (!clog) {
+        lockManager_.unlockAll();
+        return DBStatus::IO_ERROR;
+    }
     clog->setStatus(savedTxnId, CommitLog::Status::Committed);
-    if (!clog->flush()) return DBStatus::IO_ERROR;
+    if (!clog->flush()) {
+        lockManager_.unlockAll();
+        return DBStatus::IO_ERROR;
+    }
+
+    for (const auto& tableName : specializedTables) {
+        if (!tableExists(savedDB, tableName)) continue;
+        if (!clearSpecializedIndexDirty(*this, savedDB, tableName)) {
+            std::cerr
+                << "[index] committed prepared transaction with marker retained for "
+                << savedDB << "/" << tableName << std::endl;
+        }
+    }
 
     // Normal commit logic
     TxnIdGenerator::instance().notifyCommit(savedTxnId);
@@ -30345,9 +31151,11 @@ DBStatus StorageEngine::commitPrepared(const std::string& xid) {
     }
 
     transactionContext().txnLog.clear();
+    transactionContext().specializedIndexTables.clear();
     transactionContext().savepoints.clear();
     std::error_code backupEc;
     std::filesystem::remove_all(transactionBackupPath(savedDB, savedTxnId), backupEc);
+    lockManager_.unlockAll();
     lockManager_.releasePreparedLocks(savedTxnId);
     transactionContext().currentTxnId = 0;
     transactionContext().inTransaction = false;
@@ -30372,6 +31180,20 @@ DBStatus StorageEngine::rollbackPrepared(const std::string& xid) {
     const uint64_t savedTxnId = record.txnId;
     const std::string& savedDB = record.dbname;
 
+    std::set<std::string> specializedTables;
+    for (const auto& entry : record.log) {
+        specializedTables.insert(entry.tableName);
+    }
+    lockManager_.setResourceNamespace(savedDB);
+    for (const auto& tableName : specializedTables) {
+        if (!tableExists(savedDB, tableName)) continue;
+        if (!lockManager_.lockIntentExclusiveForPrepared(
+                tableName, savedTxnId)) {
+            lockManager_.unlockAll();
+            return DBStatus::LOCK_CONFLICT;
+        }
+    }
+
     // Temporarily restore state and use normal rollback
     transactionContext().currentTxnId = savedTxnId;
     transactionContext().txnDB = savedDB;
@@ -30379,6 +31201,7 @@ DBStatus StorageEngine::rollbackPrepared(const std::string& xid) {
     transactionContext().txnIsolationLevel = record.isolation;
     transactionContext().inTransaction = true;
     transactionContext().txnLog.clear();
+    transactionContext().specializedIndexTables.clear();
     transactionContext().txnLog.reserve(record.log.size());
     for (const auto& entry : record.log) {
         TxnLogEntry restored;
