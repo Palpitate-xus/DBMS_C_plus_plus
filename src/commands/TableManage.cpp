@@ -8211,13 +8211,22 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
         return scanOk && found;
     }
     // CHECK constraint evaluation
-    TableSchema tbl = getTableSchema(dc.dbname, dc.tablename);
+    if (!tableExists(dc.dbname, dc.tablename)) return true;
+    const TableSchema tbl = getTableSchema(dc.dbname, dc.tablename);
     if (dc.colIdx >= tbl.len) return true;
     const Column& col = tbl.cols[dc.colIdx];
     if (col.checkExpr.empty()) return true;
-    PageAllocator* pa = getPageAllocator(dc.dbname, dc.tablename);
+
+    int64_t currentRid = dc.rid;
     std::string row;
-    if (!readRowByRid(pa, dc.rid, row, tbl)) return true;
+    bool readFailed = false;
+    if (!readCurrentRowByRid(
+            dc.dbname, dc.tablename, dc.rid, tbl, currentRid, row,
+            readFailed)) {
+        // Deleted rows no longer need validation, while storage failures
+        // must fail closed instead of silently bypassing the constraint.
+        return !readFailed;
+    }
     std::map<std::string, std::string> rowValues;
     for (size_t i = 0; i < tbl.len; ++i) {
         rowValues[tbl.cols[i].dataName] =

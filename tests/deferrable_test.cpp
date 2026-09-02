@@ -19,6 +19,11 @@ static void setupSession(Session& s, const std::string& db) {
     s.currentDB = db;
 }
 
+static std::string trimRight(const std::string& value) {
+    const size_t end = value.find_last_not_of(" \t\n\r");
+    return end == std::string::npos ? "" : value.substr(0, end + 1);
+}
+
 static void test_immediate_check_still_fails_at_insert() {
     std::string db = testDbPath("deferrable_t1");
     cleanup(db);
@@ -165,6 +170,44 @@ static void test_deferred_check_on_update() {
     std::cout << "[DEFERRABLE] deferred check on update blocks commit OK" << std::endl;
 }
 
+static void test_deferred_check_uses_final_row() {
+    std::string db = testDbPath("deferrable_t8");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE t (id INT PRIMARY KEY, price INT, "
+        "CONSTRAINT chk_price CHECK (price > 0) DEFERRABLE INITIALLY DEFERRED)",
+        s));
+    assert(g_engine.insert(db, "t", {{"id", "1"}, {"price", "10"}}) ==
+           dbms::DBStatus::OK);
+
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.update(db, "t", {{"price", "0"}}, {"=id 1"}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.update(db, "t", {{"price", "20"}}, {"=id 1"}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.commitTransaction() == dbms::DBStatus::OK);
+
+    auto rows = g_engine.query(db, "t", {"=id 1"}, {"price"});
+    assert(rows.size() == 1 && trimRight(rows[0]) == "20");
+
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "t", {{"id", "2"}, {"price", "0"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.remove(db, "t", {"=id 2"}) == dbms::DBStatus::OK);
+    assert(g_engine.commitTransaction() == dbms::DBStatus::OK);
+    assert(g_engine.query(db, "t", {"=id 2"}, {"price"}).empty());
+
+    cleanup(db);
+    std::cout << "[DEFERRABLE] deferred check validates final row state OK"
+              << std::endl;
+}
+
 static void test_ddl_implicit_commit_failure_is_propagated() {
     std::string db = testDbPath("deferrable_t7");
     std::string targetDb = testDbPath("implicit_commit_target");
@@ -203,6 +246,7 @@ int main() {
     test_set_constraints_immediate_via_engine();
     test_set_constraints_all_deferred_via_engine();
     test_deferred_check_on_update();
+    test_deferred_check_uses_final_row();
     test_ddl_implicit_commit_failure_is_propagated();
     std::cout << "[DEFERRABLE] all passed" << std::endl;
     return 0;

@@ -1498,10 +1498,10 @@ private:
                                 bool* scanFailed = nullptr) const;
 
     // Deferred constraint helpers. kind "check" evaluates the column CHECK
-    // expression of colIdx; "unique" re-checks the row's final value in
-    // uniqueCol; "fk" verifies the row's final local-key values exist in
-    // refTable. Captured payload fields are retained for diagnostics and
-    // compatibility with older single-column queue producers.
+    // expression of colIdx against the row's final version; "unique"
+    // re-checks the final value in uniqueCol; "fk" verifies the final local
+    // key values exist in refTable. Captured payload fields are retained for
+    // diagnostics and compatibility with older single-column queue producers.
     struct DeferredCheck {
         enum class Kind { Check, Unique, ForeignKey, Exclude };
         Kind kind = Kind::Check;
