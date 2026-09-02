@@ -1,12 +1,46 @@
 #include "SPGiSTIndex.h"
+#include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace dbms {
 
+namespace {
+
+void collectPoints(const SPGiSTNode* node, std::vector<SPGiSTPointEntry>& out) {
+    if (!node) return;
+    if (node->isLeaf()) {
+        out.insert(out.end(), node->points.begin(), node->points.end());
+        return;
+    }
+    for (const auto& child : node->children) collectPoints(child.get(), out);
+}
+
+std::pair<double, double> expandInterval(double low, double high, double value) {
+    if (value >= low && value <= high) return {low, high};
+
+    long double width = static_cast<long double>(high) - low;
+    if (!(width > 0.0L)) width = 1.0L;
+    const long double lowest = std::numeric_limits<double>::lowest();
+    const long double highest = std::numeric_limits<double>::max();
+    if (value < low) {
+        const long double grown = static_cast<long double>(high) - width * 2.0L;
+        low = static_cast<double>(std::max(lowest,
+            std::min(static_cast<long double>(value), grown)));
+    } else {
+        const long double grown = static_cast<long double>(low) + width * 2.0L;
+        high = static_cast<double>(std::min(highest,
+            std::max(static_cast<long double>(value), grown)));
+    }
+    return {low, high};
+}
+
+}  // namespace
+
 void SPGiSTNode::split() {
     if (!isLeaf() || points.size() <= MAX_LEAF_POINTS) return;
-    double midX = (minX + maxX) * 0.5;
-    double midY = (minY + maxY) * 0.5;
+    double midX = minX * 0.5 + maxX * 0.5;
+    double midY = minY * 0.5 + maxY * 0.5;
     const bool xCanShrink = midX > minX && midX < maxX;
     const bool yCanShrink = midY > minY && midY < maxY;
     if (!xCanShrink && !yCanShrink) {
@@ -53,6 +87,8 @@ void SPGiSTNode::split() {
 
 SPGiSTIndex::SPGiSTIndex(double worldMinX, double worldMinY,
                          double worldMaxX, double worldMaxY) {
+    if (worldMinX > worldMaxX) std::swap(worldMinX, worldMaxX);
+    if (worldMinY > worldMaxY) std::swap(worldMinY, worldMaxY);
     root_.minX = worldMinX;
     root_.minY = worldMinY;
     root_.maxX = worldMaxX;
@@ -60,6 +96,28 @@ SPGiSTIndex::SPGiSTIndex(double worldMinX, double worldMinY,
 }
 
 void SPGiSTIndex::insert(double x, double y, int64_t rid) {
+    if (x < root_.minX || x > root_.maxX ||
+        y < root_.minY || y > root_.maxY) {
+        // Node bounds are used for pruning.  Keeping an out-of-range point in
+        // a boundary child would make range/radius scans skip a real match.
+        // Expand geometrically and rebuild so every descendant bound remains
+        // truthful.
+        std::vector<SPGiSTPointEntry> existing;
+        existing.reserve(size_);
+        collectPoints(&root_, existing);
+        const auto xBounds = expandInterval(root_.minX, root_.maxX, x);
+        const auto yBounds = expandInterval(root_.minY, root_.maxY, y);
+        root_.minX = xBounds.first;
+        root_.maxX = xBounds.second;
+        root_.minY = yBounds.first;
+        root_.maxY = yBounds.second;
+        root_.points.clear();
+        for (auto& child : root_.children) child.reset();
+        root_.hasUnsplittableCoordinate = false;
+        root_.cannotSplit = false;
+        for (const auto& point : existing)
+            insertRecursive(&root_, point.x, point.y, point.rid);
+    }
     insertRecursive(&root_, x, y, rid);
     ++size_;
 }

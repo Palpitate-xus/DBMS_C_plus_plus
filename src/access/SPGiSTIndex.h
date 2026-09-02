@@ -29,8 +29,10 @@ struct SPGiSTNode {
         return !children[0] && !children[1] && !children[2] && !children[3];
     }
     int quadrant(double x, double y) const {
-        double midX = (minX + maxX) * 0.5;
-        double midY = (minY + maxY) * 0.5;
+        // Halving before addition avoids overflowing when both finite bounds
+        // are close to DBL_MAX with the same sign.
+        double midX = minX * 0.5 + maxX * 0.5;
+        double midY = minY * 0.5 + maxY * 0.5;
         if (x <= midX && y >= midY) return 0; // NW
         if (x >= midX && y >= midY) return 1; // NE
         if (x <= midX && y <= midY) return 2; // SW

@@ -74,14 +74,32 @@ static void test_nearby_coordinates_remain_distinct() {
     assert(index.searchEquals(x1, y1) == std::vector<int64_t>{101});
 }
 
+static void test_world_bounds_expand_without_false_negatives() {
+    SPGiSTIndex index(-10.0, -10.0, 10.0, 10.0);
+    index.insert(0.0, 0.0, 1);
+    index.insert(100.0, 5.0, 2);
+    index.insert(-250.0, -20.0, 3);
+    index.insert(4.0, 300.0, 4);
+
+    assert(index.size() == 4);
+    assert(index.searchWithin(100.0, 5.0, 0.0) == std::vector<int64_t>{2});
+    assert(index.searchWithin(-250.0, -20.0, 0.0) == std::vector<int64_t>{3});
+    assert(index.searchWithin(4.0, 300.0, 0.0) == std::vector<int64_t>{4});
+    assert(index.searchRightOf(50.0) == std::vector<int64_t>{2});
+    assert(index.searchLeftOf(-100.0) == std::vector<int64_t>{3});
+    assert(index.searchAbove(200.0) == std::vector<int64_t>{4});
+}
+
 int main() {
     test_missing_remove_preserves_size();
     test_within_uses_exact_distance();
     test_duplicate_points_do_not_create_unbounded_depth();
     test_nearby_coordinates_remain_distinct();
+    test_world_bounds_expand_without_false_negatives();
     std::cout << "[SPGIST] missing remove accounting OK\n";
     std::cout << "[SPGIST] exact radius filtering OK\n";
     std::cout << "[SPGIST] duplicate-point depth guard OK\n";
     std::cout << "[SPGIST] full-precision coordinates OK\n";
+    std::cout << "[SPGIST] dynamic world bounds OK\n";
     return 0;
 }
