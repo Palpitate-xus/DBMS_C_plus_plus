@@ -766,6 +766,119 @@ std::string commandTagFor(const std::string& sql, const std::vector<std::string>
     return tag.empty() ? "OK" : tag;
 }
 
+namespace {
+// PG 42883 pre-check: an unknown function referenced in a WHERE
+// clause is an immediate error ("function nosuchfn(integer) does
+// not exist").  Scans the statement's WHERE region for fn(...) -
+// shaped tokens; when the name is not a known scalar/aggregate and
+// not a column of the FROM table, the first argument's type is
+// resolved from the table schema (int -> integer, text/varchar ->
+// text, else unknown) and PG's exact message is returned.  Empty
+// string means no violation found.
+std::string whereUnknownFunctionError(const std::string& sql,
+                                       const std::string& dbname) {
+    static const char* known[] = {
+        "length", "char_length", "character_length", "octet_length",
+        "bit_length", "upper", "lower", "initcap", "btrim", "ltrim",
+        "rtrim", "reverse", "left", "right", "lpad", "rpad",
+        "repeat", "ascii", "chr", "md5", "sha256", "hash",
+        "abs", "ceil", "ceiling", "floor", "round", "trunc",
+        "sqrt", "exp", "ln", "log", "power", "pow", "sign",
+        "width_bucket", "substring", "substr", "translate", "replace",
+        "split_part", "concat", "concat_ws", "coalesce", "nullif",
+        "greatest", "least", "to_char", "to_date", "to_number",
+        "to_timestamp", "date_trunc", "date_part", "extract",
+        "age", "justify_days", "justify_hours", "now", "current_date",
+        "current_time", "current_timestamp", "random", "mod", "cbrt",
+        "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "cot",
+        "degrees", "radians", "pi", "sinh", "cosh", "tanh",
+        "asinh", "acosh", "atanh", "div", "count", "sum", "avg",
+        "min", "max", "string_agg", "array_agg", "bool_and", "bool_or",
+        "every", "stddev", "variance", "position", "trim", "overlay",
+        "starts_with", "encode", "decode", "format", "uuid", "gen_random_uuid",
+        "unnest", "array_lower", "array_upper", "array_length", "cardinality",
+        "row_number", "rank", "dense_rank", "ntile", "lag", "lead",
+        "first_value", "last_value", "nth_value"
+    };
+    std::string low;
+    for (char c : sql) low += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    size_t wpos = low.find(" where ");
+    if (wpos == std::string::npos) return "";
+    size_t wend = low.size();
+    for (size_t kw = wpos; kw + 1 < low.size(); ++kw) {
+        if (low.compare(kw, 8, " group b") == 0 ||
+            low.compare(kw, 8, " order b") == 0 ||
+            low.compare(kw, 7, " limit ") == 0)
+            { wend = kw; break; }
+    }
+    // FROM table for type resolution (first table after ' from ').
+    std::string table;
+    {
+        size_t fpos = low.find(" from ");
+        if (fpos != std::string::npos && fpos < wpos) {
+            size_t rest = fpos + 6;
+            while (rest < low.size() && std::isspace(static_cast<unsigned char>(low[rest]))) ++rest;
+            size_t tend = rest;
+            while (tend < low.size() &&
+                   (std::isalnum(static_cast<unsigned char>(low[tend])) || low[tend] == '_')) ++tend;
+            table = sql.substr(rest, tend - rest);
+        }
+    }
+    for (size_t p = wpos + 7; p < wend; ++p) {
+        if (!std::isalpha(static_cast<unsigned char>(low[p])) && low[p] != '_') continue;
+        size_t start = p;
+        while (p < wend && (std::isalnum(static_cast<unsigned char>(low[p])) || low[p] == '_')) ++p;
+        size_t np = p;
+        while (np < wend && std::isspace(static_cast<unsigned char>(low[np]))) ++np;
+        if (np >= wend || low[np] != '(') continue;
+        std::string fn = low.substr(start, p - start);
+        // IN / EXISTS / ANY / ALL are predicate keywords, not calls.
+        static const char* kw47[] = { "in", "not", "and", "or", "exists",
+                                      "any", "all", "between", "like",
+                                      "isnull", "notnull", "case", "when",
+                                      "then", "else", "end", "null", "true",
+                                      "false", "cast", "interval" };
+        bool isKw = false;
+        for (const char* k : kw47)
+            if (fn == k) { isKw = true; break; }
+        if (isKw) continue;
+        bool isKnown = false;
+        for (const char* k : known)
+            if (fn == k) { isKnown = true; break; }
+        if (isKnown) continue;
+        // Unknown name called as a function: resolve first arg type.
+        size_t argStart = np + 1;
+        while (argStart < wend && std::isspace(static_cast<unsigned char>(low[argStart]))) ++argStart;
+        size_t argEnd = argStart;
+        while (argEnd < wend &&
+               (std::isalnum(static_cast<unsigned char>(low[argEnd])) || low[argEnd] == '_')) ++argEnd;
+        std::string arg = low.substr(argStart, argEnd - argStart);
+        std::string type = "unknown";
+        if (!arg.empty() && !table.empty()) {
+            dbms::StorageEngine& eng = g_engine;
+            dbms::TableSchema sch = eng.getTableSchema(dbname, table);
+            for (size_t ci = 0; ci < sch.len; ++ci) {
+                if (sch.cols[ci].dataName != arg) continue;
+                std::string dt = sch.cols[ci].dataType;
+                for (auto& ch : dt) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                if (dt.find("int") != std::string::npos) type = "integer";
+                else if (dt.find("varchar") != std::string::npos ||
+                         dt.find("character varying") != std::string::npos)
+                    type = "character varying";
+                else if (dt.find("char") != std::string::npos)
+                    type = "character";
+                else if (dt.find("text") != std::string::npos) type = "text";
+                else if (dt.find("numeric") != std::string::npos || dt.find("decimal") != std::string::npos)
+                    type = "numeric";
+                break;
+            }
+        }
+        return "function " + fn + "(" + type + ") does not exist";
+    }
+    return "";
+}
+}  // namespace
+
 QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
     QueryResult result;
     dbms::clearLastDmlResult();
@@ -780,6 +893,16 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
 
     bool executionError = false;
     std::string outputText;
+    // PG 42883: unknown function in WHERE fails before execution.
+    {
+        std::string ufErr = whereUnknownFunctionError(sql, session.currentDB);
+        if (!ufErr.empty()) {
+            result.error = true;
+            result.errorMessage = ufErr;
+            result.sqlState = "42883";
+            return result;
+        }
+    }
     auto start = std::chrono::steady_clock::now();
     {
         std::ostringstream output;
