@@ -26327,43 +26327,302 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
                                    const std::string& tablename) {
     if (!databaseExists(dbname) || !tableExists(dbname, tablename)) return 0;
 
-    TableSchema tbl = getTableSchema(dbname, tablename);
-    std::set<uint64_t> activeToastIds;
-
-    // Collect all toast IDs referenced by live rows.  Do not delete anything
-    // if the heap scan is incomplete: an I/O failure must not turn live toast
-    // files into false orphans.
-    if (!forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
-        std::string row(data, len);
-        for (size_t i = 0; i < tbl.len; ++i) {
-            if (!tbl.cols[i].isVariableLength) continue;
-            std::string val = extractColumnValue(row, tbl, i);
-            uint64_t toastId = 0;
-            if (parseToastMarker(val, toastId)) {
-                activeToastIds.insert(toastId);
-            }
-        }
-    })) return 0;
-
-    // Scan toast directory and remove orphaned files
-    auto tdir = toastDir(dbname, tablename);
-    if (!std::filesystem::exists(tdir)) return 0;
-
-    size_t removed = 0;
-    for (const auto& entry : std::filesystem::directory_iterator(tdir)) {
-        std::string fname = entry.path().filename().string();
-        if (fname.size() < 5 || fname.substr(fname.size() - 4) != ".dat") continue;
-        try {
-            uint64_t toastId = static_cast<uint64_t>(std::stoull(fname.substr(0, fname.size() - 4)));
-            if (activeToastIds.find(toastId) == activeToastIds.end()) {
-                std::filesystem::remove(entry.path());
-                ++removed;
-            }
-        } catch (...) {
-            // skip non-numeric filenames
+    // UPDATE can replace a tuple in place, so its old TOAST marker is no
+    // longer discoverable by scanning the current heap.  An older snapshot
+    // may still need that value, however.  Defer reclamation while any
+    // transaction on this database is active; a transaction that begins
+    // after this check cannot see versions retired by an earlier commit.
+    {
+        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        for (const auto& [transactionId, activeDatabase] :
+             activeTransactionDatabases_) {
+            (void)transactionId;
+            if (activeDatabase == dbname) return 0;
         }
     }
-    return removed;
+    if (!lockManager_.lockExclusive(tablename)) return 0;
+    std::unique_ptr<int, std::function<void(int*)>> tableLockGuard(
+        reinterpret_cast<int*>(1),
+        [&](int*) { lockManager_.unlock(tablename); });
+
+    const TableSchema tbl = getTableSchema(dbname, tablename);
+    std::set<uint64_t> activeToastIds;
+
+    // A tuple can be invisible to the vacuuming transaction while an older
+    // snapshot can still read it.  Scan every physical live slot, rather than
+    // forEachRow's MVCC-visible subset, so TOAST is never reclaimed ahead of
+    // the heap tuple that references it.
+    std::vector<std::filesystem::path> heapRelations;
+    if (tbl.partitionType == TableSchema::PartitionType::None) {
+        heapRelations.push_back(dataPath(dbname, tablename));
+    } else {
+        std::vector<std::string> partitionNames;
+        if (tbl.partitionType == TableSchema::PartitionType::Range) {
+            for (const auto& partition : tbl.rangePartitions)
+                partitionNames.push_back(partition.first);
+        } else if (tbl.partitionType == TableSchema::PartitionType::List) {
+            for (const auto& partition : tbl.listPartitions)
+                partitionNames.push_back(partition.first);
+        } else if (tbl.partitionType == TableSchema::PartitionType::Hash) {
+            for (size_t i = 0; i < tbl.hashPartitions; ++i)
+                partitionNames.push_back("p" + std::to_string(i));
+        }
+        if (!tbl.defaultPartitionName.empty() &&
+            std::find(partitionNames.begin(), partitionNames.end(),
+                      tbl.defaultPartitionName) == partitionNames.end()) {
+            partitionNames.push_back(tbl.defaultPartitionName);
+        }
+        for (const auto& partition : partitionNames) {
+            if (tbl.subPartitionType == TableSchema::PartitionType::Hash) {
+                for (size_t i = 0; i < tbl.subHashPartitions; ++i) {
+                    heapRelations.push_back(partitionDataPath(
+                        dbname, tablename, partition,
+                        "sp" + std::to_string(i)));
+                }
+            } else {
+                heapRelations.push_back(partitionDataPath(
+                    dbname, tablename, partition));
+            }
+        }
+    }
+
+    auto collectReferences = [&](PageAllocator& allocator) -> bool {
+        const uint32_t pageCount = allocator.numPages();
+        for (uint32_t pageId = 1; pageId < pageCount; ++pageId) {
+            if (!lockManager_.pageLockShared(dbname, tablename, pageId))
+                return false;
+            char* buffer = allocator.fetchPage(pageId);
+            if (!buffer) {
+                lockManager_.pageUnlock(dbname, tablename, pageId);
+                return false;
+            }
+            PageWrapper page(buffer, allocator.pageSize(), tbl.formatVersion);
+            bool valid = page.isValid();
+            if (valid) {
+                page.forEachLive([&](uint16_t, const char* tuple, size_t length) {
+                    if (!valid || length < sizeof(HeapTupleHeaderData)) {
+                        valid = false;
+                        return;
+                    }
+                    const auto* header = castHeapHeader(tuple);
+                    const size_t minimumHeader = rowHeaderSize(
+                        tbl.formatVersion, tbl.len);
+                    if (header->t_hoff < minimumHeader ||
+                        header->t_hoff > length) {
+                        valid = false;
+                        return;
+                    }
+                    const std::string row(
+                        tuple + header->t_hoff, length - header->t_hoff);
+                    for (size_t i = 0; i < tbl.len; ++i) {
+                        if (!tbl.cols[i].isVariableLength) continue;
+                        uint64_t toastId = 0;
+                        if (parseToastMarker(
+                                extractColumnValueStatic(row, tbl, i),
+                                toastId)) {
+                            activeToastIds.insert(toastId);
+                        }
+                    }
+                });
+            }
+            allocator.unpinPage(pageId);
+            lockManager_.pageUnlock(dbname, tablename, pageId);
+            if (!valid) return false;
+        }
+        return true;
+    };
+
+    for (const auto& relation : heapRelations) {
+        std::error_code pathError;
+        if (!std::filesystem::exists(relation, pathError)) {
+            // DEFAULT partitions are created lazily and may have no file yet.
+            if (!pathError && !tbl.defaultPartitionName.empty() &&
+                relation.string().find("#" + tbl.defaultPartitionName) !=
+                    std::string::npos) {
+                continue;
+            }
+            return 0;
+        }
+        if (pathError || !std::filesystem::is_regular_file(relation, pathError) ||
+            pathError) {
+            return 0;
+        }
+        if (tbl.partitionType == TableSchema::PartitionType::None) {
+            PageAllocator* allocator = getPageAllocator(dbname, tablename);
+            if (!allocator || !collectReferences(*allocator)) return 0;
+        } else {
+            PageAllocator allocator(
+                relation.string(), tbl.rowSize(),
+                pageSizeForFormatVersion(tbl.formatVersion),
+                tbl.formatVersion);
+            if (!allocator.open() || !collectReferences(allocator)) return 0;
+            allocator.close();
+        }
+    }
+
+    const auto toastHeapPath = toastDataPath(dbname, tablename);
+    const auto toastTreePath = toastIndexPath(dbname, tablename);
+    std::error_code toastPathError;
+    const bool heapExists = std::filesystem::exists(
+        toastHeapPath, toastPathError);
+    if (toastPathError) return 0;
+    const bool indexExists = std::filesystem::exists(
+        toastTreePath, toastPathError);
+    if (toastPathError || heapExists != indexExists) return 0;
+    if (!heapExists) return 0;
+    if (!std::filesystem::is_regular_file(toastHeapPath, toastPathError) ||
+        toastPathError ||
+        !std::filesystem::is_regular_file(toastTreePath, toastPathError) ||
+        toastPathError) {
+        return 0;
+    }
+
+    PageAllocator* toastPages = getToastPageAllocator(dbname, tablename);
+    BPTree* toastIndex = getToastIndex(dbname, tablename);
+    if (!toastPages || !toastIndex) return 0;
+
+    struct ToastChunkRef {
+        uint64_t toastId = 0;
+        uint32_t sequence = 0;
+        uint32_t pageId = 0;
+        uint16_t slotId = 0;
+        int64_t rid = -1;
+        std::string key;
+    };
+    std::map<uint64_t, std::vector<ToastChunkRef>> chunksById;
+    std::set<std::string> seenKeys;
+    std::vector<int64_t> heapRids;
+    bool toastValid = true;
+    const uint32_t toastPageCount = toastPages->numPages();
+    for (uint32_t pageId = 1; pageId < toastPageCount; ++pageId) {
+        if (!lockManager_.pageLockShared(
+                dbname, tablename + ".toast", pageId)) {
+            return 0;
+        }
+        char* buffer = toastPages->fetchPage(pageId);
+        if (!buffer) {
+            lockManager_.pageUnlock(
+                dbname, tablename + ".toast", pageId);
+            return 0;
+        }
+        PageWrapper page(
+            buffer, toastPages->pageSize(), DATA_FILE_FORMAT_VERSION);
+        toastValid = page.isValid();
+        if (toastValid) {
+            page.forEachLive([&](uint16_t slotId, const char* row,
+                                 size_t rowLength) {
+                if (!toastValid || rowLength < TOAST_CHUNK_HEADER_SIZE) {
+                    toastValid = false;
+                    return;
+                }
+                uint64_t toastId = 0;
+                uint32_t sequence = 0;
+                std::memcpy(&toastId, row, sizeof(toastId));
+                std::memcpy(&sequence, row + sizeof(toastId),
+                            sizeof(sequence));
+                if (toastId == 0) {
+                    toastValid = false;
+                    return;
+                }
+                const std::string key = toastIndexKey(toastId, sequence);
+                const int64_t rid = encodeRid(pageId, slotId);
+                int64_t indexedRid = -1;
+                if (!seenKeys.insert(key).second ||
+                    !toastIndex->search(key, indexedRid) ||
+                    indexedRid != rid) {
+                    toastValid = false;
+                    return;
+                }
+                chunksById[toastId].push_back(
+                    {toastId, sequence, pageId, slotId, rid, key});
+                heapRids.push_back(rid);
+            });
+        }
+        toastPages->unpinPage(pageId);
+        lockManager_.pageUnlock(dbname, tablename + ".toast", pageId);
+        if (!toastValid) return 0;
+    }
+
+    auto indexedRids = toastIndex->allValues();
+    std::sort(heapRids.begin(), heapRids.end());
+    std::sort(indexedRids.begin(), indexedRids.end());
+    if (heapRids != indexedRids) return 0;
+
+    // A referenced object must have a contiguous sequence beginning at zero.
+    // If it is corrupt, fail closed instead of deleting unrelated objects.
+    for (uint64_t toastId : activeToastIds) {
+        auto it = chunksById.find(toastId);
+        if (it == chunksById.end()) return 0;
+        auto& chunks = it->second;
+        std::sort(chunks.begin(), chunks.end(),
+                  [](const ToastChunkRef& left,
+                     const ToastChunkRef& right) {
+                      return left.sequence < right.sequence;
+                  });
+        for (size_t i = 0; i < chunks.size(); ++i) {
+            if (chunks[i].sequence != i) return 0;
+        }
+    }
+
+    size_t removedObjects = 0;
+    for (auto& [toastId, chunks] : chunksById) {
+        if (activeToastIds.count(toastId) != 0) continue;
+        bool removedObject = true;
+        for (const auto& chunk : chunks) {
+            if (!lockManager_.pageLockExclusive(
+                    dbname, tablename + ".toast", chunk.pageId)) {
+                removedObject = false;
+                break;
+            }
+            char* buffer = toastPages->fetchPage(chunk.pageId);
+            if (!buffer) {
+                lockManager_.pageUnlock(
+                    dbname, tablename + ".toast", chunk.pageId);
+                removedObject = false;
+                break;
+            }
+            PageWrapper page(
+                buffer, toastPages->pageSize(), DATA_FILE_FORMAT_VERSION);
+            const char* row = nullptr;
+            size_t rowLength = 0;
+            uint64_t storedId = 0;
+            uint32_t storedSequence = 0;
+            const bool sameChunk =
+                page.read(chunk.slotId, row, rowLength) &&
+                rowLength >= TOAST_CHUNK_HEADER_SIZE;
+            if (sameChunk) {
+                std::memcpy(&storedId, row, sizeof(storedId));
+                std::memcpy(&storedSequence, row + sizeof(storedId),
+                            sizeof(storedSequence));
+            }
+            if (!sameChunk || storedId != chunk.toastId ||
+                storedSequence != chunk.sequence ||
+                !page.remove(chunk.slotId)) {
+                toastPages->unpinPage(chunk.pageId);
+                lockManager_.pageUnlock(
+                    dbname, tablename + ".toast", chunk.pageId);
+                removedObject = false;
+                break;
+            }
+            toastPages->markDirty(chunk.pageId);
+            if (!toastIndex->removeMulti(chunk.key, chunk.rid)) {
+                page.restore(chunk.slotId);
+                toastPages->markDirty(chunk.pageId);
+                toastPages->unpinPage(chunk.pageId);
+                lockManager_.pageUnlock(
+                    dbname, tablename + ".toast", chunk.pageId);
+                removedObject = false;
+                break;
+            }
+            toastPages->unpinPage(chunk.pageId);
+            lockManager_.pageUnlock(
+                dbname, tablename + ".toast", chunk.pageId);
+        }
+        if (!removedObject) break;
+        ++removedObjects;
+    }
+    if (!toastPages->flush() || !toastIndex->flush()) return 0;
+    return removedObjects;
 }
 
 // ========================================================================
@@ -27630,15 +27889,10 @@ DBStatus StorageEngine::commitTransaction() {
         }
     }
 
-    // Old UPDATE/DELETE row versions retain TOAST markers until the commit
-    // record is durable.  They are no longer reachable after COMMIT, so
-    // reclaim their chunks now; a cleanup failure only leaves garbage for
-    // VACUUM TOAST and cannot invalidate the committed row.
-    for (const auto& entry : transactionContext().txnLog) {
-        if (entry.op == TxnLogEntry::Op::Update || entry.op == TxnLogEntry::Op::Delete) {
-            deleteToastForRow(committingDb, entry.tableName, entry.rowData);
-        }
-    }
+    // Do not reclaim UPDATE/DELETE values at commit.  A snapshot predating
+    // this commit can still need those values; removing them here makes that
+    // snapshot observe a broken row.  VACUUM TOAST waits for active snapshots
+    // and then reclaims objects no current physical tuple references.
 
     // Update max committed txId
     TxnIdGenerator::instance().notifyCommit(transactionContext().currentTxnId);
