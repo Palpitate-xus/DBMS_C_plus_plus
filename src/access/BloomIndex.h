@@ -74,7 +74,7 @@ private:
 
     void addKeyBits(const std::string& key);
     bool probeKeyBits(const std::string& key) const;
-    void rebuildBitsLocked();
+    void rebuildBitsLocked(size_t sizingEntryCount = 0);
     void sizeBitsLocked(size_t entryCount);
     bool loadFromFile();
     bool saveToFile();

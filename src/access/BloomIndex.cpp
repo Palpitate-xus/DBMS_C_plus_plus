@@ -1,5 +1,6 @@
 #include "access/BloomIndex.h"
 
+#include <algorithm>
 #include <cstring>
 #include <limits>
 #include <new>
@@ -99,8 +100,8 @@ bool BloomIndex::probeKeyBits(const std::string& key) const {
     return true;
 }
 
-void BloomIndex::rebuildBitsLocked() {
-    sizeBitsLocked(entries_.size());
+void BloomIndex::rebuildBitsLocked(size_t sizingEntryCount) {
+    sizeBitsLocked(std::max(entries_.size(), sizingEntryCount));
     for (const auto& kv : entries_) addKeyBits(kv.first);
 }
 
@@ -234,14 +235,21 @@ bool BloomIndex::insert(const std::string& key, int64_t rid) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!loaded_) return false;
     entries_[key].push_back(rid);
-    // Rebuild only when the entry count crosses the sizing of the bit
-    // array; otherwise flipping bits in place is enough.
+    // Grow geometrically.  Sizing the array to exactly the current entry
+    // count would make every subsequent distinct key rebuild and re-hash the
+    // complete index, turning bulk index construction into O(n^2) work.
     if (m_ == 0) {
-        rebuildBitsLocked();
+        rebuildBitsLocked(16);
     } else {
         const uint64_t want = static_cast<uint64_t>(entries_.size() + 8) * bitsPerEntry_;
         if (want > m_) {
-            rebuildBitsLocked();
+            size_t growthTarget = entries_.size();
+            if (growthTarget < 16) {
+                growthTarget = 16;
+            } else if (growthTarget <= std::numeric_limits<size_t>::max() / 2) {
+                growthTarget *= 2;
+            }
+            rebuildBitsLocked(growthTarget);
         } else {
             addKeyBits(key);
         }

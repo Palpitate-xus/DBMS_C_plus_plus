@@ -131,6 +131,35 @@ static void test_bloom_no_false_negatives_many_keys() {
     std::cout << "[BLOOM] no false negatives (2000 keys) OK" << std::endl;
 }
 
+static void test_bloom_grows_geometrically() {
+    const std::string idx = "/tmp/bloom_index_growth.bidx";
+    cleanup(idx);
+
+    dbms::BloomIndex b(idx);
+    assert(b.open());
+    uint32_t previousBits = b.bitCount();
+    size_t resizeCount = 0;
+    for (int i = 0; i < 4096; ++i) {
+        const std::string key = "growth-key-" + std::to_string(i);
+        assert(b.insert(key, i));
+        if (b.bitCount() != previousBits) {
+            previousBits = b.bitCount();
+            ++resizeCount;
+        }
+    }
+
+    // Geometric growth needs logarithmically many full re-hashes.  Exact
+    // sizing used to resize essentially once per inserted key.
+    assert(resizeCount < 16);
+    for (int i = 0; i < 4096; i += 113)
+        assert(b.search("growth-key-" + std::to_string(i)) ==
+               std::vector<int64_t>{i});
+    assert(b.close());
+    cleanup(idx);
+    std::cout << "[BLOOM] geometric growth OK (" << resizeCount
+              << " rebuilds for 4096 keys)" << std::endl;
+}
+
 static void test_bloom_rejects_malformed_lengths_and_layout() {
     const std::string idx = "/tmp/bloom_index_malformed.bidx";
     cleanup(idx);
@@ -286,6 +315,7 @@ int main() {
     cleanupAllTestData();
     test_bloom_unit();
     test_bloom_no_false_negatives_many_keys();
+    test_bloom_grows_geometrically();
     test_bloom_rejects_malformed_lengths_and_layout();
     test_engine_bloom_lifecycle();
     std::cout << "[BLOOM] all tests passed" << std::endl;
