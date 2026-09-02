@@ -123,6 +123,20 @@ static void test_fk_autocommit_rejects_missing_parent() {
     std::cout << "[DEFER] FK autocommit missing parent rejected OK" << std::endl;
 }
 
+static void test_fk_deferred_update() {
+    assert(g_engine.beginTransaction(db) == DBStatus::OK);
+    assert(g_engine.update(db, "child", {{"pid", "400"}}, {"=id 1"}) ==
+           DBStatus::OK);
+    assert(g_engine.insert(db, "parent", {{"id", "400"}}) == DBStatus::OK);
+    assert(g_engine.commitTransaction() == DBStatus::OK);
+
+    assert(g_engine.beginTransaction(db) == DBStatus::OK);
+    assert(g_engine.update(db, "child", {{"pid", "401"}}, {"=id 1"}) ==
+           DBStatus::OK);
+    assert(g_engine.commitTransaction() == DBStatus::INVALID_VALUE);
+    std::cout << "[DEFER] FK deferred updates rechecked at commit OK" << std::endl;
+}
+
 static void test_unique_deferred_single_insert() {
     assert(g_engine.beginTransaction(db) == DBStatus::OK);
     assert(g_engine.insert(db, "uniq", {{"id", "20"}, {"tag", "solo"}})
@@ -215,6 +229,7 @@ int main() {
     test_fk_deferred_ok();
     test_fk_deferred_violation();
     test_fk_autocommit_rejects_missing_parent();
+    test_fk_deferred_update();
     test_unique_deferred_single_insert();
     test_unique_autocommit_rejects_duplicate();
     test_unique_deferred_swap();

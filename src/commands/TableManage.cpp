@@ -19480,6 +19480,7 @@ DBStatus StorageEngine::updateInternal(
         // A user-visible UPDATE of foreign-key columns must not create a
         // dangling reference. Internal ON UPDATE/DELETE actions carry exact
         // RIDs and are validated by the parent operation that generated them.
+        std::vector<DeferredCheck> pendingDeferredForeignKeyChecks;
         if (!exactRids) {
             for (size_t foreignKeyIndex = 0;
                  foreignKeyIndex < tbl.fkLen; ++foreignKeyIndex) {
@@ -19520,7 +19521,26 @@ DBStatus StorageEngine::updateInternal(
                     transactionContext().inTransaction &&
                     isConstraintCurrentlyDeferred(
                         dbname, tablename, foreignKey.name)) {
-                    continue;
+                    // The current deferred-check record stores one referenced
+                    // value. Composite keys fall through to the immediate
+                    // integrity check until their commit representation is
+                    // extended.
+                    if (foreignKey.colNames.size() == 1) {
+                        DeferredCheck check;
+                        check.kind = DeferredCheck::Kind::ForeignKey;
+                        check.dbname = dbname;
+                        check.tablename = tablename;
+                        check.rid = rid;
+                        check.constraintName = foreignKey.name;
+                        check.colIdx = 0;
+                        check.uniqueCol = foreignKey.colNames.front();
+                        check.payloadValue = localValues.front();
+                        check.refTable = foreignKey.refTable;
+                        check.refCol = foreignKey.refCols.front();
+                        pendingDeferredForeignKeyChecks.push_back(
+                            std::move(check));
+                        continue;
+                    }
                 }
                 if (!tableExists(dbname, foreignKey.refTable)) {
                     lockManager_.unlock(tablename);
@@ -20254,6 +20274,14 @@ DBStatus StorageEngine::updateInternal(
             for (auto& check : pendingDeferredUniqueChecks) {
                 check.rid = actualRid;
                 check.exceptRid = actualRid;
+                deferred.push_back(std::move(check));
+            }
+        }
+        if (!pendingDeferredForeignKeyChecks.empty()) {
+            auto& deferred = transactionContext().deferredChecks[
+                transactionContext().currentTxnId];
+            for (auto& check : pendingDeferredForeignKeyChecks) {
+                check.rid = actualRid;
                 deferred.push_back(std::move(check));
             }
         }
