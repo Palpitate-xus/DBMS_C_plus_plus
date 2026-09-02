@@ -18424,6 +18424,63 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             whereSql = expr.funcArgs[0].substr(wstart, wend - wstart);
         }
         std::vector<StorageEngine::Condition> conds;
+        TableSchema innerSch = engine->getTableSchema(dbname, innerTbl);
+        // Correlation: resolve identifier sides against the OUTER row
+        // when they are not inner-table columns.  "outer.col" (qualifier =
+        // outer table) and bare "col" (only in outer) both substitute the
+        // outer row's literal value; "inner.col" keeps the bare name.
+        auto isIdentifier = [](const std::string& s) {
+            if (s.empty()) return false;
+            for (char ch : s)
+                if (!(std::isalnum(static_cast<unsigned char>(ch)) || ch == '_' || ch == '.')) return false;
+            return true;
+        };
+        auto inInner = [&](const std::string& col) {
+            for (size_t i = 0; i < innerSch.len; ++i)
+                if (innerSch.cols[i].dataName == col) return true;
+            return false;
+        };
+        auto inOuter = [&](const std::string& col) {
+            for (size_t i = 0; i < tbl.len; ++i)
+                if (tbl.cols[i].dataName == col) return true;
+            return false;
+        };
+        auto resolveSide = [&](std::string& side, bool& sideIsColumn) {
+            sideIsColumn = false;
+            if (!isIdentifier(side)) return;
+            std::string qualifier, name = side;
+            size_t dot = side.find('.');
+            if (dot != std::string::npos) {
+                qualifier = side.substr(0, dot);
+                name = side.substr(dot + 1);
+                std::string qLow;
+                for (char ch : qualifier) qLow += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                std::string innerLow;
+                for (char ch : innerTbl) innerLow += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                std::string outerLow;
+                for (char ch : tbl.tablename) outerLow += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                if (qLow == innerLow) { side = name; sideIsColumn = true; return; }
+                if (qLow == outerLow && inOuter(name)) {
+                    for (size_t i = 0; i < tbl.len; ++i)
+                        if (tbl.cols[i].dataName == name) {
+                            side = engine ? engine->extractColumnValue(rowBuffer, tbl, i, dbname, true)
+                                          : StorageEngine::extractColumnValueStatic(rowBuffer, tbl, i);
+                            return;
+                        }
+                }
+                side.clear();  // unknown qualifier
+                return;
+            }
+            if (inInner(name)) { sideIsColumn = true; return; }
+            if (inOuter(name)) {
+                for (size_t i = 0; i < tbl.len; ++i)
+                    if (tbl.cols[i].dataName == name) {
+                        side = engine ? engine->extractColumnValue(rowBuffer, tbl, i, dbname, true)
+                                      : StorageEngine::extractColumnValueStatic(rowBuffer, tbl, i);
+                        return;
+                    }
+            }
+        };
         if (!whereSql.empty()) {
             std::string w = whereSql;
             for (auto& ch : w)
@@ -18455,6 +18512,9 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     while (!val.empty() && std::isspace(static_cast<unsigned char>(val.front()))) val.erase(0, 1);
                     if (val.size() >= 2 && val.front() == '\'' && val.back() == '\'')
                         val = val.substr(1, val.size() - 2);
+                    bool lhsIsColumn = false;
+                    resolveSide(c.colName, lhsIsColumn);
+                    resolveSide(val, lhsIsColumn);
                     c.op = (std::string(op9) == "!=" ? "<>" : op9);
                     c.value = val;
                     if (!c.colName.empty() && !val.empty()) conds.push_back(c);
@@ -18464,7 +18524,6 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             if (conds.size() != parts.size()) conds.clear();
         }
         bool anyRow = false;
-        TableSchema innerSch = engine->getTableSchema(dbname, innerTbl);
         engine->forEachRow(dbname, innerTbl, [&](uint32_t, uint16_t, const char* data, size_t len) {
             if (conds.empty() && whereSql.empty()) { anyRow = true; return false; }
             std::string row(data, len);
