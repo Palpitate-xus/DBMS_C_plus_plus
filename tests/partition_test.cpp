@@ -9,6 +9,7 @@
 
 #include "commands/TableManage.h"
 #include "catalog/type_registry.h"
+#include "executor/ExecutionPlan.h"
 #include <cassert>
 #include <filesystem>
 #include <iostream>
@@ -64,6 +65,8 @@ static void test_range_partitioning() {
     tbl.partitionType = dbms::TableSchema::PartitionType::Range;
     tbl.partitionKey = "yr";
     tbl.rangePartitions = {{"p1", "2020"}, {"p2", "2025"}, {"p3", "MAXVALUE"}};
+    tbl.cols[0].isPrimaryKey = true;
+    tbl.pkColIndices = {0};
     assert(g_engine.createTable(db, tbl) == dbms::DBStatus::OK);
 
     assert(g_engine.insert(db, "logs", {{"id", "1"}, {"yr", "2018"}}) == dbms::DBStatus::OK);
@@ -75,6 +78,43 @@ static void test_range_partitioning() {
     auto rows = readRowKeyedById(db, "logs");
     assert(rows["1"] == "2018");
     assert(rows["3"] == "2030");
+
+    // Every physical partition starts at the same local page/slot pair.  The
+    // current row-addressed UPDATE/DELETE implementation cannot retain that
+    // identity, so it must reject the operation instead of reporting a
+    // successful no-op or targeting an unrelated tuple.
+    auto matches = g_engine.query(db, "logs", {"=id 2"}, {});
+    assert(matches.size() == 1);
+    dbms::PlanContext planContext;
+    planContext.dbname = db;
+    planContext.tablename = "logs";
+    planContext.conds = {{"=", "id", "2"}};
+    auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, planContext);
+    const std::string explain =
+        dbms::QueryPlanner::explain(plan, &g_engine, db);
+    assert(explain.find("Index Scan") == std::string::npos);
+    assert(plan->open());
+    std::string plannedRow;
+    assert(plan->next(plannedRow));
+    assert(!plan->next(plannedRow));
+    plan->close();
+    assert(g_engine.update(db, "logs", {{"id", "20"}}, {"=id 2"}) ==
+           dbms::DBStatus::INVALID_VALUE);
+    rows = readRowKeyedById(db, "logs");
+    assert(rows["2"] == "2022");
+    assert(rows.count("20") == 0);
+    assert(g_engine.remove(db, "logs", {"=id 1"}) ==
+           dbms::DBStatus::INVALID_VALUE);
+    assert(rowCount(db, "logs") == 4);
+
+    // Transaction undo has the same parent-only row locator limitation.
+    // Reject before the sequence/WAL/heap state changes rather than accepting
+    // an INSERT that ROLLBACK cannot remove.
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "logs", {{"id", "6"}, {"yr", "2019"}}) ==
+           dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+    assert(rowCount(db, "logs") == 4);
 
     // ATTACH a new range partition and insert into it.
     auto res = g_engine.attachPartition(db, "logs", "p4", "FOR VALUES FROM (2100) TO (2200)");

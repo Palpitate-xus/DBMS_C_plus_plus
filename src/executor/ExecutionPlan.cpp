@@ -3362,7 +3362,14 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
                         if (ic == c.colName) { hasSecIdx = true; break; }
                     }
                 }
-                if (isPK || hasSecIdx) {
+                // Parent indexes currently store page/slot only.  Partition
+                // heaps reuse those local addresses, so an index fetch cannot
+                // identify which physical heap owns the RID.  Keep SELECT on
+                // the partition-aware sequential scan until partitioned index
+                // row locators are implemented.
+                const bool partitioned =
+                    tbl.partitionType != TableSchema::PartitionType::None;
+                if (!partitioned && (isPK || hasSecIdx)) {
                     // Every indexed path must recheck the heap tuple under
                     // the same lock/MVCC boundary. A visibility-map-backed
                     // index-only scan is not implemented yet.

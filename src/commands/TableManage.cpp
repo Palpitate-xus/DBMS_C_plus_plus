@@ -15547,6 +15547,17 @@ DBStatus StorageEngine::insert(const std::string& dbname,
     if (!lockManager_.lockIntentExclusive(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
+    // A partition-local tuple locator is not represented in TxnLogEntry yet:
+    // every partition starts at page 1/slot 0, so transaction rollback would
+    // address the empty parent heap (or an unrelated partition row).  Reject
+    // this unsupported path before defaults, sequences, triggers, TOAST, WAL,
+    // or heap state can change.  Autocommit INSERT routing remains supported.
+    if (tbl.partitionType != TableSchema::PartitionType::None &&
+        transactionContext().inTransaction &&
+        dbname == transactionContext().txnDB) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
     std::vector<Trigger> operationTriggers;
     if (triggerExecutor_ && !tryGetAllTriggers(dbname, operationTriggers)) {
         lockManager_.unlock(tablename);
@@ -17388,6 +17399,15 @@ DBStatus StorageEngine::removeInternal(
     if (!lockManager_.lockIntentExclusive(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
+    // UPDATE/DELETE currently consume a parent-table RID after predicate
+    // scanning.  Such a RID has no partition identity, so proceeding can
+    // silently report success while touching no row, or target a different
+    // partition that happens to reuse the same page/slot.  Fail explicitly
+    // until row locators carry the physical partition.
+    if (tbl.partitionType != TableSchema::PartitionType::None) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
     std::vector<Trigger> operationTriggers;
     if (triggerExecutor_ && !tryGetAllTriggers(dbname, operationTriggers)) {
         lockManager_.unlock(tablename);
@@ -18219,6 +18239,11 @@ DBStatus StorageEngine::updateInternal(
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
+    // See removeInternal(): the current UPDATE machinery re-opens every RID
+    // through the parent heap and cannot safely identify a partition tuple.
+    if (tbl.partitionType != TableSchema::PartitionType::None) {
+        return DBStatus::INVALID_VALUE;
+    }
 
     // Validate columns and pre-check values. The same preparation function is
     // reused for row-dependent UPDATE expressions so all update entry points
