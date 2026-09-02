@@ -82,6 +82,20 @@ int main() {
     // Table ownership is sufficient; superuser/admin status is not required.
     s.permission = 0;
     assert(!ddl.executeSql("TRUNCATE TABLE identity_table", s));
+    assert(g_engine.insert(db, "identity_table", {{"msg", "c"}}) ==
+           dbms::DBStatus::OK);
+    const auto continuedIdentityRows =
+        g_engine.query(db, "identity_table", {}, {"id"});
+    assert(continuedIdentityRows.size() == 1 &&
+           continuedIdentityRows.front().find("2") == 0);
+    assert(!ddl.executeSql(
+        "TRUNCATE TABLE identity_table CONTINUE IDENTITY", s));
+    assert(g_engine.insert(db, "identity_table", {{"msg", "d"}}) ==
+           dbms::DBStatus::OK);
+    const auto explicitContinueRows =
+        g_engine.query(db, "identity_table", {}, {"id"});
+    assert(explicitContinueRows.size() == 1 &&
+           explicitContinueRows.front().find("3") == 0);
 
     cleanup(db);
     std::cout << "[TRUNCATE] typed multi-table/restrict/cascade/identity OK" << std::endl;

@@ -2026,7 +2026,6 @@ DBStatus StorageEngine::detachPartition(const std::string& dbname,
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
-    const TableSchema table = getTableSchema(dbname, tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     if (tbl.partitionType == TableSchema::PartitionType::None) {
@@ -11052,12 +11051,8 @@ DBStatus StorageEngine::truncateTable(const std::string& dbname,
     }
     if (statsError) return finish(DBStatus::IO_ERROR);
 
-    for (size_t i = 0; i < table.len; ++i) {
-        if (table.cols[i].isAutoIncrement) {
-            writeNextSeq(
-                dbname, tablename, table.cols[i].dataName, 1);
-        }
-    }
+    // SQL defaults to CONTINUE IDENTITY. DdlExecutor invokes
+    // resetSequence() separately only for an explicit RESTART IDENTITY.
     return finish(DBStatus::OK);
 }
 
