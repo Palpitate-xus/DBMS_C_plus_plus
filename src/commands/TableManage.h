@@ -1445,6 +1445,8 @@ private:
     std::filesystem::path triggerPath(const std::string& dbname) const;
     void writeTrigger(std::ostream& out, const Trigger& trg) const;
     Trigger readTrigger(std::istream& in) const;
+    DBStatus persistTriggers(const std::string& dbname,
+                             const std::vector<Trigger>& triggers) const;
     TriggerExecutor triggerExecutor_;
     mutable TriggerCtx execFunctionCtx_;
     WhenConditionEvaluator whenEvaluator_;

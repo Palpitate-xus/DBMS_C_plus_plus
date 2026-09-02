@@ -6725,41 +6725,43 @@ StorageEngine::Trigger StorageEngine::readTrigger(std::istream& in) const {
     return trg;
 }
 
+DBStatus StorageEngine::persistTriggers(
+        const std::string& dbname, const std::vector<Trigger>& triggers) const {
+    if (triggers.size() > 10000) return DBStatus::INVALID_VALUE;
+    std::ostringstream serialized(std::ios::out | std::ios::binary);
+    const size_t count = triggers.size();
+    serialized.write(reinterpret_cast<const char*>(&count), sizeof(count));
+    for (const auto& trigger : triggers) writeTrigger(serialized, trigger);
+    if (!serialized) return DBStatus::IO_ERROR;
+    return persistMetadata(triggerPath(dbname), serialized.str());
+}
+
 DBStatus StorageEngine::createTrigger(const std::string& dbname, const Trigger& trg) {
+    std::lock_guard<std::recursive_mutex> triggerLock(cacheMutex_);
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto existing = getAllTriggers(dbname);
     for (const auto& t : existing) {
         if (t.name == trg.name) return DBStatus::OK; // already exists
     }
     existing.push_back(trg);
-    std::ofstream out(triggerPath(dbname), std::ios::binary | std::ios::trunc);
-    size_t count = existing.size();
-    out.write(reinterpret_cast<const char*>(&count), sizeof(size_t));
-    for (const auto& t : existing) writeTrigger(out, t);
-    return DBStatus::OK;
+    return persistTriggers(dbname, existing);
 }
 
 DBStatus StorageEngine::dropTrigger(const std::string& dbname, const std::string& trgName) {
+    std::lock_guard<std::recursive_mutex> triggerLock(cacheMutex_);
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto existing = getAllTriggers(dbname);
-    bool found = false;
-    {
-        std::ofstream out(triggerPath(dbname), std::ios::binary | std::ios::trunc);
-        size_t count = 0;
-        for (const auto& t : existing) {
-            if (t.name != trgName) ++count;
-        }
-        out.write(reinterpret_cast<const char*>(&count), sizeof(size_t));
-        for (const auto& t : existing) {
-            if (t.name != trgName) writeTrigger(out, t);
-            else found = true;
-        }
-    }
-    return found ? DBStatus::OK : DBStatus::TABLE_NOT_FOUND;
+    const auto newEnd = std::remove_if(existing.begin(), existing.end(),
+        [&](const Trigger& trigger) { return trigger.name == trgName; });
+    if (newEnd == existing.end()) return DBStatus::TABLE_NOT_FOUND;
+    existing.erase(newEnd, existing.end());
+    return persistTriggers(dbname, existing);
 }
 
 std::vector<StorageEngine::Trigger> StorageEngine::getTriggers(
     const std::string& dbname, const std::string& tablename,
     const std::string& timing, const std::string& event) const {
+    std::lock_guard<std::recursive_mutex> triggerLock(cacheMutex_);
     std::vector<Trigger> result;
     auto all = getAllTriggers(dbname);
     for (const auto& t : all) {
@@ -6771,6 +6773,7 @@ std::vector<StorageEngine::Trigger> StorageEngine::getTriggers(
 }
 
 std::vector<StorageEngine::Trigger> StorageEngine::getAllTriggers(const std::string& dbname) const {
+    std::lock_guard<std::recursive_mutex> triggerLock(cacheMutex_);
     std::vector<Trigger> result;
     std::ifstream in(triggerPath(dbname), std::ios::binary);
     if (!in) return result;
@@ -6785,33 +6788,33 @@ std::vector<StorageEngine::Trigger> StorageEngine::getAllTriggers(const std::str
 }
 
 DBStatus StorageEngine::enableTrigger(const std::string& dbname, const std::string& trgName) {
+    std::lock_guard<std::recursive_mutex> triggerLock(cacheMutex_);
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto existing = getAllTriggers(dbname);
     bool found = false;
-    {
-        std::ofstream out(triggerPath(dbname), std::ios::binary | std::ios::trunc);
-        size_t count = existing.size();
-        out.write(reinterpret_cast<const char*>(&count), sizeof(size_t));
-        for (auto& t : existing) {
-            if (t.name == trgName) { t.enabled = true; found = true; }
-            writeTrigger(out, t);
+    for (auto& trigger : existing) {
+        if (trigger.name == trgName) {
+            trigger.enabled = true;
+            found = true;
         }
     }
-    return found ? DBStatus::OK : DBStatus::TABLE_NOT_FOUND;
+    if (!found) return DBStatus::TABLE_NOT_FOUND;
+    return persistTriggers(dbname, existing);
 }
 
 DBStatus StorageEngine::disableTrigger(const std::string& dbname, const std::string& trgName) {
+    std::lock_guard<std::recursive_mutex> triggerLock(cacheMutex_);
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto existing = getAllTriggers(dbname);
     bool found = false;
-    {
-        std::ofstream out(triggerPath(dbname), std::ios::binary | std::ios::trunc);
-        size_t count = existing.size();
-        out.write(reinterpret_cast<const char*>(&count), sizeof(size_t));
-        for (auto& t : existing) {
-            if (t.name == trgName) { t.enabled = false; found = true; }
-            writeTrigger(out, t);
+    for (auto& trigger : existing) {
+        if (trigger.name == trgName) {
+            trigger.enabled = false;
+            found = true;
         }
     }
-    return found ? DBStatus::OK : DBStatus::TABLE_NOT_FOUND;
+    if (!found) return DBStatus::TABLE_NOT_FOUND;
+    return persistTriggers(dbname, existing);
 }
 
 // ========================================================================
