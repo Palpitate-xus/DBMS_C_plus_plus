@@ -8706,6 +8706,7 @@ DBStatus StorageEngine::dropDatabase(const std::string& dbname) {
 }
 
 constexpr int32_t SCHEMA_FORMAT_VERSION = 0x44420009;  // "DB" + 64-byte identifier fields
+constexpr int32_t MAX_PERSISTED_COLUMN_SIZE = 65535;
 
 void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     // Write format version marker
@@ -8917,6 +8918,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
         tbl.cols[i].dataName = readFixedString(in, MAX_COL_NAME_LEN);
         int32_t dsize = 0;
         in.read(reinterpret_cast<char*>(&dsize), 4);
+        if (!in || dsize < 0 || dsize > MAX_PERSISTED_COLUMN_SIZE) return {};
         tbl.cols[i].dsize = static_cast<size_t>(dsize);
         if (hasDefault) {
             tbl.cols[i].defaultValue = readFixedString(in, MAX_COL_NAME_LEN);
