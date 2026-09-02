@@ -248,9 +248,7 @@ void testRollbackActions(StorageEngine& engine) {
     assert(primaryMissing(engine, "grandchild", "2000"));
     assert(engine.rollbackTransaction() == DBStatus::OK);
     primaryRid(engine, "parent", "2");
-    // DELETE rollback's generic Bloom restoration is covered separately; the
-    // FK regression here verifies heap, PK, B-tree, hash and composite undo.
-    assertIndexedParent(engine, "cascade_child", "200", "2", false);
+    assertIndexedParent(engine, "cascade_child", "200", "2");
     assertIndexedParent(engine, "nullable_child", "201", "2");
     primaryRid(engine, "grandchild", "2000");
     std::cout << "[FOREIGN KEY ACTION] transactional rollback cascade OK\n";

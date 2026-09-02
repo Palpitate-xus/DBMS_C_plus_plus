@@ -12,6 +12,7 @@
 // ============================================================================
 
 #include "access/BPTree.h"
+#include "access/BloomIndex.h"
 #include "access/HashIndex.h"
 #include "test_utils.h"
 #include "catalog/type_registry.h"
@@ -90,11 +91,15 @@ static void test_insert_rollback_cleans_all_indexes() {
     assert(g_engine.createIndex(db, "rollback_t", "a") == dbms::DBStatus::OK);
     assert(g_engine.createCompositeIndex(db, "rollback_t", {"a", "b"}, "ab_idx") == dbms::DBStatus::OK);
     assert(g_engine.createHashIndex(db, "rollback_t", "b") == dbms::DBStatus::OK);
+    assert(g_engine.createBloomIndex(db, "rollback_t", "b") == dbms::DBStatus::OK);
 
     const std::string payload(10000, 'x');
+    auto* bloom = g_engine.getBloomIndex(db, "rollback_t", "b");
+    assert(bloom);
     assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "rollback_t", {{"id", "1"}, {"a", "7"}, {"b", "9"},
                                                {"payload", payload}}) == dbms::DBStatus::OK);
+    assert(bloom->search("9").size() == 1);
     assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
 
     assert(g_engine.query(db, "rollback_t", {"=id 1"}, {"id"}).empty());
@@ -102,6 +107,7 @@ static void test_insert_rollback_cleans_all_indexes() {
     assert(g_engine.query(db, "rollback_t", {"=b 9"}, {"id"}).empty());
     auto* hash = g_engine.getHashIndex(db, "rollback_t", "b");
     assert(hash && hash->search("9").empty());
+    assert(bloom->search("9").empty());
     auto* composite = g_engine.getCompositeIndexTree(db, "rollback_t", "ab_idx");
     assert(composite && composite->allValues().empty());
 
@@ -109,10 +115,12 @@ static void test_insert_rollback_cleans_all_indexes() {
     assert(g_engine.savepoint("before_insert") == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "rollback_t", {{"id", "2"}, {"a", "8"}, {"b", "10"},
                                                {"payload", payload}}) == dbms::DBStatus::OK);
+    assert(bloom->search("10").size() == 1);
     assert(g_engine.rollbackToSavepoint("before_insert") == dbms::DBStatus::OK);
     assert(g_engine.commitTransaction() == dbms::DBStatus::OK);
     assert(g_engine.query(db, "rollback_t", {}, {"id"}).empty());
     assert(hash->search("10").empty());
+    assert(bloom->search("10").empty());
     assert(composite->allValues().empty());
 
     // Verify the on-disk index/heap state after reopening the database.
@@ -121,9 +129,11 @@ static void test_insert_rollback_cleans_all_indexes() {
         assert(reopened.query(db, "rollback_t", {}, {"id"}).empty());
         auto* reopenedHash = reopened.getHashIndex(db, "rollback_t", "b");
         assert(reopenedHash && reopenedHash->search("9").empty());
+        auto* reopenedBloom = reopened.getBloomIndex(db, "rollback_t", "b");
+        assert(reopenedBloom && reopenedBloom->search("9").empty());
     }
     cleanup(db);
-    std::cout << "[CONCURRENCY] INSERT rollback cleans secondary/composite/hash/TOAST state OK" << std::endl;
+    std::cout << "[CONCURRENCY] INSERT rollback cleans secondary/composite/hash/bloom/TOAST state OK" << std::endl;
 }
 
 // UPDATE/DELETE rollback must restore the heap tuple, every index access
@@ -147,14 +157,17 @@ static void test_update_delete_rollback_cleans_all_indexes() {
     assert(g_engine.createIndex(db, "rollback_t", "a") == dbms::DBStatus::OK);
     assert(g_engine.createCompositeIndex(db, "rollback_t", {"a", "b"}, "ab_idx") == dbms::DBStatus::OK);
     assert(g_engine.createHashIndex(db, "rollback_t", "b") == dbms::DBStatus::OK);
+    assert(g_engine.createBloomIndex(db, "rollback_t", "b") == dbms::DBStatus::OK);
 
     const std::string originalPayload(10000, 'x');
     const std::string updatedPayload(10000, 'y');
     assert(g_engine.insert(db, "rollback_t", {{"id", "1"}, {"a", "7"}, {"b", "9"},
                                                {"payload", originalPayload}}) == dbms::DBStatus::OK);
     auto* hash = g_engine.getHashIndex(db, "rollback_t", "b");
+    auto* bloom = g_engine.getBloomIndex(db, "rollback_t", "b");
     auto* composite = g_engine.getCompositeIndexTree(db, "rollback_t", "ab_idx");
-    assert(hash && composite);
+    assert(hash && bloom && composite);
+    assert(bloom->search("9").size() == 1);
     const auto originalCompositeValues = composite->allValues();
     assert(originalCompositeValues.size() == 1);
 
@@ -162,6 +175,8 @@ static void test_update_delete_rollback_cleans_all_indexes() {
     assert(g_engine.update(db, "rollback_t",
                            {{"a", "8"}, {"b", "10"}, {"payload", updatedPayload}},
                            {"=id 1"}) == dbms::DBStatus::OK);
+    assert(bloom->search("9").empty());
+    assert(bloom->search("10").size() == 1);
     assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
     auto rows = g_engine.query(db, "rollback_t", {"=id 1"}, {"a", "b", "payload"});
     assert(rows.size() == 1 && rows[0].find("7") != std::string::npos &&
@@ -170,6 +185,8 @@ static void test_update_delete_rollback_cleans_all_indexes() {
     assert(g_engine.query(db, "rollback_t", {"=b 10"}, {"id"}).empty());
     assert(hash->search("10").empty());
     assert(hash->search("9").size() == 1);
+    assert(bloom->search("10").empty());
+    assert(bloom->search("9").size() == 1);
     assert(composite->allValues() == originalCompositeValues);
 
     assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
@@ -177,28 +194,36 @@ static void test_update_delete_rollback_cleans_all_indexes() {
     assert(g_engine.update(db, "rollback_t",
                            {{"a", "11"}, {"b", "12"}, {"payload", updatedPayload}},
                            {"=id 1"}) == dbms::DBStatus::OK);
+    assert(bloom->search("9").empty());
+    assert(bloom->search("12").size() == 1);
     assert(g_engine.rollbackToSavepoint("before_update") == dbms::DBStatus::OK);
     assert(g_engine.commitTransaction() == dbms::DBStatus::OK);
     assert(g_engine.query(db, "rollback_t", {"=a 11"}, {"id"}).empty());
     assert(g_engine.query(db, "rollback_t", {"=b 12"}, {"id"}).empty());
     assert(hash->search("12").empty());
+    assert(bloom->search("12").empty());
+    assert(bloom->search("9").size() == 1);
     assert(composite->allValues() == originalCompositeValues);
 
     assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
     assert(g_engine.remove(db, "rollback_t", {"=id 1"}) == dbms::DBStatus::OK);
+    assert(bloom->search("9").empty());
     assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
     assert(g_engine.query(db, "rollback_t", {"=id 1"}, {"payload"}).size() == 1);
     assert(hash->search("9").size() == 1);
+    assert(bloom->search("9").size() == 1);
     assert(composite->allValues() == originalCompositeValues);
 
     assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
     assert(g_engine.savepoint("before_delete") == dbms::DBStatus::OK);
     assert(g_engine.remove(db, "rollback_t", {"=id 1"}) == dbms::DBStatus::OK);
+    assert(bloom->search("9").empty());
     assert(g_engine.rollbackToSavepoint("before_delete") == dbms::DBStatus::OK);
     assert(g_engine.commitTransaction() == dbms::DBStatus::OK);
     rows = g_engine.query(db, "rollback_t", {"=id 1"}, {"payload"});
     assert(rows.size() == 1 && rows[0].find(originalPayload) != std::string::npos);
     assert(hash->search("9").size() == 1);
+    assert(bloom->search("9").size() == 1);
     assert(composite->allValues() == originalCompositeValues);
 
     {
@@ -207,9 +232,11 @@ static void test_update_delete_rollback_cleans_all_indexes() {
         assert(reopenedRows.size() == 1 && reopenedRows[0].find(originalPayload) != std::string::npos);
         auto* reopenedHash = reopened.getHashIndex(db, "rollback_t", "b");
         assert(reopenedHash && reopenedHash->search("9").size() == 1);
+        auto* reopenedBloom = reopened.getBloomIndex(db, "rollback_t", "b");
+        assert(reopenedBloom && reopenedBloom->search("9").size() == 1);
     }
     cleanup(db);
-    std::cout << "[CONCURRENCY] UPDATE/DELETE rollback restores indexes and TOAST OK" << std::endl;
+    std::cout << "[CONCURRENCY] UPDATE/DELETE rollback restores indexes including bloom and TOAST OK" << std::endl;
 }
 
 // Test 2: WAL 顺序写入性能

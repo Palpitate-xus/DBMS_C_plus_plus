@@ -30325,6 +30325,7 @@ DBStatus StorageEngine::rollbackTransaction() {
         : transactionContext().ddlUndoActions.size();
     bool snapshotRestoreOk = true;
     bool rowUndoOk = true;
+    std::set<BloomIndex*> bloomUndoIndexes;
 
     // A DDL snapshot may have been taken in the middle of an explicit outer
     // transaction. Restore it before row undo so the row log can replay from
@@ -30365,6 +30366,7 @@ DBStatus StorageEngine::rollbackTransaction() {
             std::vector<EvaluatedIndexEntry> secondaryIdxVals;
             std::vector<EvaluatedIndexEntry> compositeIdxVals;
             std::map<std::string, std::string> hashIdxVals;
+            std::map<std::string, std::string> bloomIdxVals;
             {
                 std::string row;
                 if (readRowByRid(pa, it->rowIdx, row, tbl)) {
@@ -30401,6 +30403,24 @@ DBStatus StorageEngine::rollbackTransaction() {
                             std::string value = extractColumnValue(
                                 row, tbl, colIdx, transactionContext().txnDB);
                             if (!value.empty()) hashIdxVals[colname] = value;
+                        }
+                    }
+                    for (const auto& colname : getBloomIndexedColumns(
+                             transactionContext().txnDB, it->tableName)) {
+                        size_t colIdx = tbl.len;
+                        for (size_t i = 0; i < tbl.len; ++i) {
+                            if (tbl.cols[i].dataName == colname) {
+                                colIdx = i;
+                                break;
+                            }
+                        }
+                        if (colIdx < tbl.len) {
+                            std::string value = extractColumnValue(
+                                row, tbl, colIdx,
+                                transactionContext().txnDB);
+                            if (!value.empty()) {
+                                bloomIdxVals[colname] = std::move(value);
+                            }
                         }
                     }
                 }
@@ -30452,6 +30472,16 @@ DBStatus StorageEngine::rollbackTransaction() {
                 if (hashIdx && !kv.second.empty()) {
                     hashIdx->remove(kv.second, it->rowIdx);
                 }
+            }
+            for (const auto& [columnName, value] : bloomIdxVals) {
+                BloomIndex* bloomIdx = getBloomIndex(
+                    transactionContext().txnDB, it->tableName, columnName);
+                if (!bloomIdx) {
+                    rowUndoOk = false;
+                    continue;
+                }
+                bloomUndoIndexes.insert(bloomIdx);
+                if (!bloomIdx->remove(value, it->rowIdx)) rowUndoOk = false;
             }
         } else if (it->op == TxnLogEntry::Op::Update) {
             if (it->previousRowIdx >= 0) {
@@ -30610,6 +30640,42 @@ DBStatus StorageEngine::rollbackTransaction() {
                     it->rowData, tbl, colIdx, transactionContext().txnDB);
                 if (!oldVal.empty()) hashIdx->insert(oldVal, it->rowIdx);
             }
+            for (const auto& colname : getBloomIndexedColumns(
+                     transactionContext().txnDB, it->tableName)) {
+                size_t colIdx = tbl.len;
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (tbl.cols[i].dataName == colname) {
+                        colIdx = i;
+                        break;
+                    }
+                }
+                if (colIdx >= tbl.len) {
+                    rowUndoOk = false;
+                    continue;
+                }
+                BloomIndex* bloomIdx = getBloomIndex(
+                    transactionContext().txnDB, it->tableName, colname);
+                if (!bloomIdx) {
+                    rowUndoOk = false;
+                    continue;
+                }
+                bloomUndoIndexes.insert(bloomIdx);
+                if (foundCurrent) {
+                    const std::string currentVal = extractColumnValue(
+                        currentRow, tbl, colIdx,
+                        transactionContext().txnDB);
+                    if (!currentVal.empty() &&
+                        !bloomIdx->remove(currentVal, it->rowIdx)) {
+                        rowUndoOk = false;
+                    }
+                }
+                const std::string oldVal = extractColumnValue(
+                    it->rowData, tbl, colIdx, transactionContext().txnDB);
+                if (!oldVal.empty() &&
+                    !bloomIdx->insert(oldVal, it->rowIdx)) {
+                    rowUndoOk = false;
+                }
+            }
             if (foundCurrent) {
                 // Index cleanup needs the logical new values, so reclaim the
                 // superseded chunks only after every stale key is removed.
@@ -30700,7 +30766,38 @@ DBStatus StorageEngine::rollbackTransaction() {
                     it->rowData, tbl, colIdx, transactionContext().txnDB);
                 if (!value.empty()) hashIdx->insert(value, it->rowIdx);
             }
+            for (const auto& colname : getBloomIndexedColumns(
+                     transactionContext().txnDB, it->tableName)) {
+                size_t colIdx = tbl.len;
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (tbl.cols[i].dataName == colname) {
+                        colIdx = i;
+                        break;
+                    }
+                }
+                if (colIdx >= tbl.len) {
+                    rowUndoOk = false;
+                    continue;
+                }
+                BloomIndex* bloomIdx = getBloomIndex(
+                    transactionContext().txnDB, it->tableName, colname);
+                const std::string value = extractColumnValue(
+                    it->rowData, tbl, colIdx,
+                    transactionContext().txnDB);
+                if (!bloomIdx) {
+                    rowUndoOk = false;
+                    continue;
+                }
+                bloomUndoIndexes.insert(bloomIdx);
+                if (!value.empty() &&
+                    !bloomIdx->insert(value, it->rowIdx)) {
+                    rowUndoOk = false;
+                }
+            }
         }
+    }
+    for (BloomIndex* index : bloomUndoIndexes) {
+        if (!index->flush()) rowUndoOk = false;
     }
 
     // DDL wrappers register CREATE undo actions in the outer transaction.
@@ -31519,6 +31616,7 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
     }
 
     bool rowUndoOk = true;
+    std::set<BloomIndex*> bloomUndoIndexes;
     // Undo entries from end back to savepoint
     for (size_t i = transactionContext().txnLog.size(); i > txnLogSpIdx; --i) {
         auto& entry = transactionContext().txnLog[i - 1];
@@ -31583,6 +31681,35 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                 HashIndex* hashIdx = getHashIndex(
                     transactionContext().txnDB, entry.tableName, colname);
                 if (hashIdx && !value.empty()) hashIdx->remove(value, entry.rowIdx);
+            }
+            for (const auto& colname : getBloomIndexedColumns(
+                     transactionContext().txnDB, entry.tableName)) {
+                if (insertedRow.empty()) continue;
+                size_t colIdx = tbl.len;
+                for (size_t j = 0; j < tbl.len; ++j) {
+                    if (tbl.cols[j].dataName == colname) {
+                        colIdx = j;
+                        break;
+                    }
+                }
+                if (colIdx >= tbl.len) {
+                    rowUndoOk = false;
+                    continue;
+                }
+                const std::string value = extractColumnValue(
+                    insertedRow, tbl, colIdx,
+                    transactionContext().txnDB);
+                BloomIndex* bloomIdx = getBloomIndex(
+                    transactionContext().txnDB, entry.tableName, colname);
+                if (!bloomIdx) {
+                    rowUndoOk = false;
+                    continue;
+                }
+                bloomUndoIndexes.insert(bloomIdx);
+                if (!value.empty() &&
+                    !bloomIdx->remove(value, entry.rowIdx)) {
+                    rowUndoOk = false;
+                }
             }
             if (!insertedRow.empty()) {
                 // Preserve external values until every logical index key has
@@ -31775,6 +31902,43 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                     entry.rowData, tbl, colIdx, transactionContext().txnDB);
                 if (!oldVal.empty()) hashIdx->insert(oldVal, entry.rowIdx);
             }
+            for (const auto& colname : getBloomIndexedColumns(
+                     transactionContext().txnDB, entry.tableName)) {
+                size_t colIdx = tbl.len;
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (tbl.cols[i].dataName == colname) {
+                        colIdx = i;
+                        break;
+                    }
+                }
+                if (colIdx >= tbl.len) {
+                    rowUndoOk = false;
+                    continue;
+                }
+                BloomIndex* bloomIdx = getBloomIndex(
+                    transactionContext().txnDB, entry.tableName, colname);
+                if (!bloomIdx) {
+                    rowUndoOk = false;
+                    continue;
+                }
+                bloomUndoIndexes.insert(bloomIdx);
+                if (foundCurrent) {
+                    const std::string currentVal = extractColumnValue(
+                        currentRow, tbl, colIdx,
+                        transactionContext().txnDB);
+                    if (!currentVal.empty() &&
+                        !bloomIdx->remove(currentVal, entry.rowIdx)) {
+                        rowUndoOk = false;
+                    }
+                }
+                const std::string oldVal = extractColumnValue(
+                    entry.rowData, tbl, colIdx,
+                    transactionContext().txnDB);
+                if (!oldVal.empty() &&
+                    !bloomIdx->insert(oldVal, entry.rowIdx)) {
+                    rowUndoOk = false;
+                }
+            }
             if (foundCurrent) {
                 deleteToastForRowExcept(transactionContext().txnDB,
                                         entry.tableName, currentRow,
@@ -31861,7 +32025,38 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                     entry.rowData, tbl, colIdx, transactionContext().txnDB);
                 if (!value.empty()) hashIdx->insert(value, entry.rowIdx);
             }
+            for (const auto& colname : getBloomIndexedColumns(
+                     transactionContext().txnDB, entry.tableName)) {
+                size_t colIdx = tbl.len;
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (tbl.cols[i].dataName == colname) {
+                        colIdx = i;
+                        break;
+                    }
+                }
+                if (colIdx >= tbl.len) {
+                    rowUndoOk = false;
+                    continue;
+                }
+                BloomIndex* bloomIdx = getBloomIndex(
+                    transactionContext().txnDB, entry.tableName, colname);
+                const std::string value = extractColumnValue(
+                    entry.rowData, tbl, colIdx,
+                    transactionContext().txnDB);
+                if (!bloomIdx) {
+                    rowUndoOk = false;
+                    continue;
+                }
+                bloomUndoIndexes.insert(bloomIdx);
+                if (!value.empty() &&
+                    !bloomIdx->insert(value, entry.rowIdx)) {
+                    rowUndoOk = false;
+                }
+            }
         }
+    }
+    for (BloomIndex* index : bloomUndoIndexes) {
+        if (!index->flush()) rowUndoOk = false;
     }
     transactionContext().txnLog.resize(txnLogSpIdx);
 
