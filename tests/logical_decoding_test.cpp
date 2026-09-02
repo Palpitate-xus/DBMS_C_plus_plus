@@ -115,6 +115,45 @@ static void test_publication_catalog() {
     std::cout << "[LOGICAL] publication catalog OK" << std::endl;
 }
 
+static void test_publication_tracks_table_rename() {
+    const std::string db = testDbPath("logical_pub_rename");
+    if (g_engine.databaseExists(db)) g_engine.dropDatabase(db);
+    cleanupTestDb("logical_pub_rename");
+    assert(g_engine.createDatabase(db, "utf8") == DBStatus::OK);
+
+    Session s;
+    s.currentDB = db;
+    s.username = "admin";
+    s.permission = 1;
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE published_t (id INT)", s));
+
+    Publication pub;
+    pub.name = "rename_pub";
+    pub.owner = "admin";
+    pub.tables = {"published_t"};
+    std::string error;
+    auto& publications = PublicationCatalog::instance();
+    assert(publications.create(db, pub, error));
+
+    assert(!ddl.executeSql(
+        "ALTER TABLE published_t RENAME TO renamed_t", s));
+    assert(!publications.publishes(db, "published_t"));
+    assert(publications.publishes(db, "renamed_t"));
+    const auto persisted = publications.list(db);
+    assert(persisted.size() == 1);
+    assert(persisted[0].tables == std::vector<std::string>{"renamed_t"});
+
+    // Reusing the old relation name must not subscribe an unrelated table.
+    assert(!ddl.executeSql("CREATE TABLE published_t (id INT)", s));
+    assert(!publications.publishes(db, "published_t"));
+
+    assert(publications.drop(db, "rename_pub", error));
+    assert(g_engine.dropDatabase(db) == DBStatus::OK);
+    cleanupTestDb("logical_pub_rename");
+    std::cout << "[LOGICAL] publication follows table rename OK" << std::endl;
+}
+
 static void test_change_store() {
     auto& store = LogicalChangeStore::instance();
     LogicalChangeBatch b1;
@@ -239,6 +278,7 @@ static void test_end_to_end_streaming() {
 int main() {
     test_output_plugins();
     test_publication_catalog();
+    test_publication_tracks_table_rename();
     test_change_store();
     test_end_to_end_streaming();
     std::cout << "[LOGICAL] all tests passed" << std::endl;

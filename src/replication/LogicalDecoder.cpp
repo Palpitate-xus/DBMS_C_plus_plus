@@ -1,4 +1,5 @@
 #include "replication/LogicalDecoder.h"
+#include "access/IndexFileUtil.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -197,6 +198,83 @@ std::vector<Publication> PublicationCatalog::list(const std::string& dbname) con
     std::sort(pubs.begin(), pubs.end(),
               [](const Publication& a, const Publication& b) { return a.name < b.name; });
     return pubs;
+}
+
+bool PublicationCatalog::renameTable(const std::string& dbname,
+                                     const std::string& oldName,
+                                     const std::string& newName,
+                                     std::string& error) {
+    error.clear();
+    std::lock_guard<std::mutex> lock(mutex_);
+    struct PublicationRewrite {
+        fs::path path;
+        std::string original;
+        std::string renamed;
+    };
+    std::vector<PublicationRewrite> rewrites;
+    std::error_code filesystemError;
+    if (!fs::is_directory(dbname, filesystemError)) {
+        if (!filesystemError) return true;
+        error = "cannot inspect publication directory";
+        return false;
+    }
+    for (fs::directory_iterator it(dbname, filesystemError), end;
+         !filesystemError && it != end; it.increment(filesystemError)) {
+        const std::string filename = it->path().filename().string();
+        if (filename.size() <= 12 ||
+            filename.substr(filename.size() - 12) != ".publication") {
+            continue;
+        }
+        std::ifstream input(it->path(), std::ios::binary);
+        if (!input) {
+            error = "cannot read publication file";
+            return false;
+        }
+        std::string original((std::istreambuf_iterator<char>(input)),
+                             std::istreambuf_iterator<char>());
+        if (input.bad()) {
+            error = "cannot read publication file";
+            return false;
+        }
+        Publication publication = parsePublicationFile(
+            filename.substr(0, filename.size() - 12), original);
+        bool changed = false;
+        for (auto& table : publication.tables) {
+            if (table != oldName) continue;
+            table = newName;
+            changed = true;
+        }
+        if (!changed) continue;
+        std::vector<std::string> uniqueTables;
+        for (const auto& table : publication.tables) {
+            if (std::find(uniqueTables.begin(), uniqueTables.end(), table) ==
+                uniqueTables.end()) {
+                uniqueTables.push_back(table);
+            }
+        }
+        publication.tables = std::move(uniqueTables);
+        rewrites.push_back(
+            {it->path(), std::move(original), serializePublication(publication)});
+    }
+    if (filesystemError) {
+        error = "cannot inspect publication directory";
+        return false;
+    }
+
+    for (size_t rewriteIndex = 0;
+         rewriteIndex < rewrites.size(); ++rewriteIndex) {
+        const auto& rewrite = rewrites[rewriteIndex];
+        if (index_file::writeAtomically(rewrite.path, rewrite.renamed)) continue;
+        // A directory fsync can fail after the target was replaced; include
+        // the current file in the restoration set.
+        for (size_t rollback = 0; rollback <= rewriteIndex; ++rollback) {
+            index_file::writeAtomically(
+                rewrites[rollback].path, rewrites[rollback].original);
+        }
+        error = "cannot persist renamed publication membership";
+        return false;
+    }
+    return true;
 }
 
 bool PublicationCatalog::publishes(const std::string& dbname,

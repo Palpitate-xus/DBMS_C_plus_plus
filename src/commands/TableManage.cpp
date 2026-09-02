@@ -13593,6 +13593,30 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
         return DBStatus::IO_ERROR;
     }
 
+    std::string publicationError;
+    if (!PublicationCatalog::instance().renameTable(
+            dbname, oldName, newName, publicationError)) {
+        if (inheritanceChanged) {
+            index_file::writeAtomically(
+                inheritancePath, originalInheritanceBytes);
+        }
+        if (exclusionsChanged) {
+            index_file::writeAtomically(
+                exclusionPath(dbname), originalExclusionBytes);
+            invalidateExclusionCache(dbname);
+        }
+        for (const auto& rewrite : referencingSchemaRewrites) {
+            index_file::writeAtomically(
+                schemaPath(dbname, rewrite.tableName), rewrite.original);
+            invalidateCatalogSchema(dbname, rewrite.tableName);
+        }
+        std::cerr << "[publication] table rename failed: "
+                  << publicationError << std::endl;
+        lockManager_.unlock(oldName);
+        lockManager_.unlock(newName);
+        return DBStatus::IO_ERROR;
+    }
+
     lockManager_.unlock(oldName);
     lockManager_.unlock(newName);
     return DBStatus::OK;
