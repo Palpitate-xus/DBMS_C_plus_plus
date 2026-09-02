@@ -5104,7 +5104,8 @@ DBStatus StorageEngine::createHashIndex(const std::string& dbname,
         std::string row(data, len);
         for (size_t i = 0; i < tbl.len; ++i) {
             if (tbl.cols[i].dataName == colname) {
-                std::string val = extractColumnValue(row, tbl, i);
+                std::string val = extractColumnValue(
+                    row, tbl, i, dbname, true);
                 if (!val.empty()) {
                     hidx->insert(val, encodeRid(pageId, slotId));
                 }
@@ -5232,7 +5233,8 @@ DBStatus StorageEngine::createBloomIndex(const std::string& dbname,
         std::string row(data, len);
         for (size_t i = 0; i < tbl.len; ++i) {
             if (tbl.cols[i].dataName == colname) {
-                std::string val = extractColumnValue(row, tbl, i);
+                std::string val = extractColumnValue(
+                    row, tbl, i, dbname, true);
                 if (!val.empty()) {
                     bidx->insert(val, encodeRid(pageId, slotId));
                 }
@@ -8511,7 +8513,8 @@ DBStatus StorageEngine::createFullTextIndex(const std::string& dbname,
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
         std::string row(data, len);
-        std::string val = extractColumnValue(row, tbl, colIdx);
+        std::string val = extractColumnValue(
+            row, tbl, colIdx, dbname, true);
         auto tokens = tokenizeText(val);
         int64_t rid = encodeRid(pageId, slotId);
         for (const auto& tok : tokens) {
@@ -8685,7 +8688,8 @@ DBStatus StorageEngine::createGinIndex(const std::string& dbname,
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
         std::string row(data, len);
-        std::string val = extractColumnValue(row, tbl, colIdx);
+        std::string val = extractColumnValue(
+            row, tbl, colIdx, dbname, true);
         auto keys = extractGinKeys(val, tbl.cols[colIdx].dataType);
         int64_t rid = encodeRid(pageId, slotId);
         for (const auto& k : keys) {
@@ -8803,7 +8807,8 @@ DBStatus StorageEngine::createGiSTIndex(const std::string& dbname,
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
         std::string row(data, len);
-        std::string val = extractColumnValue(row, tbl, colIdx);
+        std::string val = extractColumnValue(
+            row, tbl, colIdx, dbname, true);
         int64_t rid = encodeRid(pageId, slotId);
         // For GiST we store each row's value range.
         // For single scalar values, min=max=val.
@@ -8948,7 +8953,8 @@ DBStatus StorageEngine::createSPGiSTIndex(const std::string& dbname,
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
         std::string row(data, len);
-        std::string val = extractColumnValue(row, tbl, colIdx);
+        std::string val = extractColumnValue(
+            row, tbl, colIdx, dbname, true);
         int64_t rid = encodeRid(pageId, slotId);
         out << rid << ' ' << val << '\n';
     })) return DBStatus::IO_ERROR;
@@ -9168,7 +9174,8 @@ DBStatus StorageEngine::createBrinIndex(const std::string& dbname,
                     if (len <= MVCC_HEADER_SIZE) return;
                     std::string row = stripRowHeader(data, len, t.formatVersion, t.len);
                     if (row.empty()) return;
-                    std::string val = extractColumnValue(row, t, colIdx);
+                    std::string val = extractColumnValue(
+                        row, t, colIdx, dbname, true);
                     if (!hasValue) {
                         rangeMin = rangeMax = std::move(val);
                         hasValue = true;
@@ -9204,8 +9211,10 @@ DBStatus StorageEngine::createBrinIndex(const std::string& dbname,
                 if (!ppa->open() || !scanAllocator(*ppa, t)) return false;
             }
         } else {
-            auto pa = std::make_unique<PageAllocator>(dataPath(dbname, actualTableName).string(), t.rowSize(), pageSizeForFormatVersion(t.formatVersion), t.formatVersion);
-            if (!pa->open() || !scanAllocator(*pa, t)) return false;
+            // Use the shared allocator so CREATE INDEX observes dirty heap
+            // pages that have not reached the relation file yet.
+            PageAllocator* pa = getPageAllocator(dbname, actualTableName);
+            if (!pa || !scanAllocator(*pa, t)) return false;
         }
         return true;
     };

@@ -3,10 +3,13 @@
 #include "TableManage.h"
 #include "Config.h"
 #include "BPTree.h"
+#include "HashIndex.h"
+#include "BloomIndex.h"
 #include "PageAllocator.h"
 #include "PageWrapper.h"
 #include "ExecutionPlan.h"
 #include <atomic>
+#include <cctype>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -396,6 +399,61 @@ int main() {
         assert(lateTree != nullptr);
         assert(lateTree->searchMulti(latePayload).size() == 1);
         std::cout << "[TOAST] index build + reindex logical values OK\n";
+
+        // Every auxiliary access method must build from the SQL value, not
+        // from the compact TOAST marker stored in the heap tuple.
+        TableSchema auxiliaryIndexes;
+        auxiliaryIndexes.tablename = "auxiliary_indexes";
+        auxiliaryIndexes.formatVersion = 2;
+        auxiliaryIndexes.append(makeIntColumn("id", false, 4, true));
+        auxiliaryIndexes.append(
+            makeVarCharColumn("payload", false, 10000, false));
+        assert(engine.createTable(dbname, auxiliaryIndexes) == DBStatus::OK);
+        std::string auxiliaryPayload =
+            makeIncompressiblePayload(9000, 0x98765432u);
+        assert(engine.insert(dbname, "auxiliary_indexes",
+                             {{"id", "1"}, {"payload", auxiliaryPayload}}) ==
+               DBStatus::OK);
+        assert(engine.createHashIndex(
+                   dbname, "auxiliary_indexes", "payload") == DBStatus::OK);
+        assert(engine.createBloomIndex(
+                   dbname, "auxiliary_indexes", "payload") == DBStatus::OK);
+        assert(engine.createFullTextIndex(
+                   dbname, "auxiliary_indexes", "payload") == DBStatus::OK);
+        assert(engine.createGinIndex(
+                   dbname, "auxiliary_indexes", "payload") == DBStatus::OK);
+        assert(engine.createGiSTIndex(
+                   dbname, "auxiliary_indexes", "payload") == DBStatus::OK);
+        assert(engine.createBrinIndex(
+                   dbname, "auxiliary_indexes", "payload", 64) == DBStatus::OK);
+
+        HashIndex* auxiliaryHash = engine.getHashIndex(
+            dbname, "auxiliary_indexes", "payload");
+        BloomIndex* auxiliaryBloom = engine.getBloomIndex(
+            dbname, "auxiliary_indexes", "payload");
+        assert(auxiliaryHash != nullptr);
+        assert(auxiliaryBloom != nullptr);
+        assert(auxiliaryHash->search(auxiliaryPayload).size() == 1);
+        assert(auxiliaryBloom->search(auxiliaryPayload).size() == 1);
+
+        std::string auxiliaryToken = auxiliaryPayload;
+        for (char& ch : auxiliaryToken) {
+            ch = static_cast<char>(
+                std::tolower(static_cast<unsigned char>(ch)));
+        }
+        assert(engine.fullTextSearch(
+                   dbname, "auxiliary_indexes", "payload", auxiliaryToken)
+                   .size() == 1);
+        assert(engine.ginSearch(
+                   dbname, "auxiliary_indexes", "payload", auxiliaryToken)
+                   .size() == 1);
+        assert(engine.giSTSearchOverlap(
+                   dbname, "auxiliary_indexes", "payload",
+                   auxiliaryPayload, auxiliaryPayload).size() == 1);
+        assert(!engine.brinSearchRange(
+                    dbname, "auxiliary_indexes", "payload", "=",
+                    auxiliaryPayload).empty());
+        std::cout << "[TOAST] auxiliary index builders use logical values OK\n";
 
         TableSchema corruptGap;
         corruptGap.tablename = "corrupt_gap";
