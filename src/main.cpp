@@ -17830,7 +17830,42 @@ if (sql.rfind("backup database", 0) == 0) {
                             pickLower += static_cast<char>(tolower(static_cast<unsigned char>(ch)));
                         size_t pp = pickLower.rfind(" as ");
                         if (pp != string::npos) pick = trim(pick.substr(0, pp));
+                        // PG 42803: an aggregate function is not a legal
+                        // GROUP BY target, whether written directly or via
+                        // an ordinal reference.
+                        static const char* aggFns[] = {
+                            "count", "sum", "avg", "min", "max",
+                            "string_agg", "array_agg", "json_agg", "jsonb_agg",
+                            "bool_and", "bool_or", "every", "stddev", "variance"
+                        };
+                        bool pickIsAgg = false;
+                        for (const char* fn : aggFns) {
+                            string call = string(fn) + "(";
+                            if (pickLower.rfind(call, 0) == 0) { pickIsAgg = true; break; }
+                        }
+                        if (pickIsAgg) {
+                            cout << "ERROR:  aggregate functions are not allowed in GROUP BY" << endl;
+                            return true;
+                        }
                         gc = pick;
+                    }
+                }
+                // Direct aggregate references (GROUP BY sum(v)) are equally
+                // illegal in PG - same 42803.
+                for (const auto& gc : groupByCols) {
+                    string lc;
+                    for (char ch : gc)
+                        lc += static_cast<char>(tolower(static_cast<unsigned char>(ch)));
+                    static const char* aggFns2[] = {
+                        "count(", "sum(", "avg(", "min(", "max(",
+                        "string_agg(", "array_agg(", "json_agg(", "jsonb_agg(",
+                        "bool_and(", "bool_or(", "every(", "stddev(", "variance("
+                    };
+                    for (const char* fn : aggFns2) {
+                        if (lc.rfind(fn, 0) == 0) {
+                            cout << "ERROR:  aggregate functions are not allowed in GROUP BY" << endl;
+                            return true;
+                        }
                     }
                 }
             }

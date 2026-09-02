@@ -828,7 +828,12 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
                 result.errorMessage = msg;
             }
         }
-        if (result.errorMessage.find("operator is not unique") !=
+        if (result.errorMessage.find(
+                       "aggregate functions are not allowed in GROUP BY") !=
+                   std::string::npos) {
+            // 42803: grouping column references an aggregate.
+            result.sqlState = "42803";
+        } else if (result.errorMessage.find("operator is not unique") !=
                 std::string::npos) {
             // 42725: ambiguous operator resolution (unknown + unknown).
             result.sqlState = "42725";
