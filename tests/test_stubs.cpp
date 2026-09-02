@@ -30,4 +30,13 @@ bool execute(const std::string& sql, Session& session) {
 // Stubs for DdlExecutor.cpp helpers that live in main.cpp
 bool checkAdmin(const Session& s) { (void)s; return true; }
 bool checkDB(const Session& s) { (void)s; return s.currentDB.empty() ? false : true; }
-std::string resolveTableName(Session& s, const std::string& name) { (void)s; return name; }
+std::string resolveTableName(Session& s, const std::string& name) {
+    const size_t dot = name.find('.');
+    if (dot != std::string::npos && dot > 0 && dot + 1 < name.size()) {
+        const std::string schema = name.substr(0, dot);
+        if (g_engine.schemaExists(s.currentDB, schema)) {
+            return schema + "__" + name.substr(dot + 1);
+        }
+    }
+    return name;
+}

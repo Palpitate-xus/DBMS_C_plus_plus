@@ -140,6 +140,36 @@ static void test_alter_table_rename_updates_catalog() {
     std::cout << "[DDL] ALTER TABLE RENAME updates catalog OK" << std::endl;
 }
 
+static void test_schema_qualified_rename_preserves_schema() {
+    const std::string db = testDbPath("ddl_bridge_schema_rename");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE SCHEMA analytics", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE analytics.rename_source (id INT)", s));
+    assert(g_engine.tableExists(db, "analytics__rename_source"));
+
+    assert(!ddl.executeSql(
+        "ALTER TABLE analytics.rename_source RENAME TO rename_target", s));
+    assert(!g_engine.tableExists(db, "analytics__rename_source"));
+    assert(g_engine.tableExists(db, "analytics__rename_target"));
+    assert(!g_engine.tableExists(db, "rename_target"));
+
+    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
+    const auto* analytics = catalog.findNamespaceByName("analytics");
+    assert(analytics != nullptr);
+    assert(catalog.findClassByName("rename_source", analytics->oid) == nullptr);
+    assert(catalog.findClassByName("rename_target", analytics->oid) != nullptr);
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[DDL] schema-qualified RENAME preserves schema OK" << std::endl;
+}
+
 static void test_create_index_sequence() {
     std::string db = testDbPath("ddl_bridge_t2");
     cleanup(db);
@@ -480,6 +510,7 @@ int main() {
     test_create_drop_table();
     test_create_table_registers_in_catalog();
     test_alter_table_rename_updates_catalog();
+    test_schema_qualified_rename_preserves_schema();
     test_create_index_sequence();
     test_drop_index_uses_sql_name();
     test_create_database_schema();

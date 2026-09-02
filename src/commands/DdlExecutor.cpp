@@ -746,18 +746,22 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 }
                 if (!alterStatusOk(status, "Constraint")) return true;
                 break;
-            case AlterTableStmt::Action::RenameTable:
+            case AlterTableStmt::Action::RenameTable: {
                 if (sub.newName.empty()) {
                     std::cout << "SQL syntax error: RENAME TO requires a table name" << std::endl;
                     return true;
                 }
-                status = g_engine.alterTableRenameTable(s.currentDB, tableName, sub.newName);
+                const auto qualifiedName =
+                    dbms::CatalogService::logicalName(tableName);
+                const std::string physicalNewName = qualifiedName.schema.empty()
+                    ? sub.newName
+                    : qualifiedName.schema + "__" + sub.newName;
+                status = g_engine.alterTableRenameTable(
+                    s.currentDB, tableName, physicalNewName);
                 if (!alterStatusOk(status, "Table")) return true;
                 try {
                     dbms::CatalogManager& catalog =
                         g_engine.catalogService().get(s.currentDB);
-                    const auto qualifiedName =
-                        dbms::CatalogService::logicalName(tableName);
                     const std::string schemaName = qualifiedName.schema.empty()
                         ? "public"
                         : qualifiedName.schema;
@@ -778,6 +782,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     return true;
                 }
                 break;
+            }
             case AlterTableStmt::Action::AlterColumn: {
                 if (sub.name.empty()) {
                     std::cout << "SQL syntax error: ALTER COLUMN requires a name" << std::endl;
