@@ -150,6 +150,85 @@ static thread_local std::string g_condNullDb;
 static size_t rowHeaderSize(uint32_t formatVersion, size_t natts);
 static void setPageLsnAndChecksum(char* buf, Lsn lsn);
 
+// Resolved rows are transient executor values, not on-disk tuples.  The disk
+// format uses 16-bit variable-column offsets because a heap page is only 8 KiB,
+// but de-TOASTing several columns can legitimately produce more than 64 KiB.
+// Keep the legacy array as an unmistakable sentinel and follow it with 32-bit
+// offsets so executor-side extraction never truncates or wraps those values.
+static constexpr uint16_t RESOLVED_TOAST_SENTINEL =
+    std::numeric_limits<uint16_t>::max();
+static constexpr uint32_t RESOLVED_TOAST_MAGIC = 0x31525654u;  // 'TVR1'
+
+static bool resolvedToastEntry(const std::string& rowBuffer,
+                               const TableSchema& tbl,
+                               size_t wantedVarIndex,
+                               uint32_t* wantedOffset,
+                               uint32_t* wantedLength) {
+    const size_t varCount = tbl.varColCount();
+    if (varCount == 0 || wantedVarIndex >= varCount) return false;
+    const size_t fixedSize = tbl.fixedDataSize();
+    if (varCount > (std::numeric_limits<size_t>::max() - fixedSize) / 4)
+        return false;
+    const size_t legacyEnd = fixedSize + varCount * 4;
+    if (legacyEnd > rowBuffer.size()) return false;
+
+    uint16_t sentinelOffset = 0;
+    uint16_t sentinelLength = 0;
+    std::memcpy(&sentinelOffset, rowBuffer.data() + fixedSize,
+                sizeof(sentinelOffset));
+    std::memcpy(&sentinelLength,
+                rowBuffer.data() + fixedSize + sizeof(sentinelOffset),
+                sizeof(sentinelLength));
+    if (sentinelOffset != RESOLVED_TOAST_SENTINEL ||
+        sentinelLength != RESOLVED_TOAST_SENTINEL) {
+        return false;
+    }
+
+    constexpr size_t headerSize = sizeof(uint32_t) * 2;
+    if (legacyEnd > rowBuffer.size() ||
+        rowBuffer.size() - legacyEnd < headerSize) {
+        return false;
+    }
+    uint32_t magic = 0;
+    uint32_t storedCount = 0;
+    std::memcpy(&magic, rowBuffer.data() + legacyEnd, sizeof(magic));
+    std::memcpy(&storedCount, rowBuffer.data() + legacyEnd + sizeof(magic),
+                sizeof(storedCount));
+    if (magic != RESOLVED_TOAST_MAGIC || storedCount != varCount ||
+        varCount > (std::numeric_limits<size_t>::max() - legacyEnd - headerSize) / 8) {
+        return false;
+    }
+
+    const size_t entriesStart = legacyEnd + headerSize;
+    const size_t dataStart = entriesStart + varCount * 8;
+    if (dataStart > rowBuffer.size()) return false;
+    uint64_t expectedOffset = dataStart;
+    uint32_t selectedOffset = 0;
+    uint32_t selectedLength = 0;
+    for (size_t i = 0; i < varCount; ++i) {
+        uint32_t offset = 0;
+        uint32_t length = 0;
+        const size_t entryPos = entriesStart + i * 8;
+        std::memcpy(&offset, rowBuffer.data() + entryPos, sizeof(offset));
+        std::memcpy(&length, rowBuffer.data() + entryPos + sizeof(offset),
+                    sizeof(length));
+        if (offset != expectedOffset ||
+            static_cast<uint64_t>(length) > rowBuffer.size() - offset) {
+            return false;
+        }
+        expectedOffset += length;
+        if (expectedOffset > rowBuffer.size()) return false;
+        if (i == wantedVarIndex) {
+            selectedOffset = offset;
+            selectedLength = length;
+        }
+    }
+    if (expectedOffset != rowBuffer.size()) return false;
+    if (wantedOffset) *wantedOffset = selectedOffset;
+    if (wantedLength) *wantedLength = selectedLength;
+    return true;
+}
+
 // Global active transaction tracking
 std::mutex StorageEngine::globalTxnMutex_;
 std::set<uint64_t> StorageEngine::activeTransactions_;
@@ -6550,6 +6629,12 @@ std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer
     if (col.isVariableLength) {
         // Variable-length column: look up in var offset array
         size_t varIdx = tbl.getVarColIndex(colIdx);
+        uint32_t resolvedOffset = 0;
+        uint32_t resolvedLength = 0;
+        if (resolvedToastEntry(rowBuffer, tbl, varIdx, &resolvedOffset,
+                               &resolvedLength)) {
+            return rowBuffer.substr(resolvedOffset, resolvedLength);
+        }
         size_t fixedSize = tbl.fixedDataSize();
         size_t arrPos = fixedSize + varIdx * 4;
         if (arrPos + 4 > rowBuffer.size()) return "";
@@ -6705,10 +6790,20 @@ std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
     }
 
     std::string val = extractColumnValueStatic(rowBuffer, tbl, colIdx);
+    uint32_t ignoredResolvedOffset = 0;
+    uint32_t ignoredResolvedLength = 0;
+    if (col.isVariableLength &&
+        resolvedToastEntry(rowBuffer, tbl, 0, &ignoredResolvedOffset,
+                           &ignoredResolvedLength)) {
+        return val;
+    }
     if (!dbname.empty() && col.isVariableLength) {
         uint64_t toastId = 0;
         if (parseToastMarker(val, toastId)) {
-            return readToast(dbname, tbl.tablename, toastId);
+            std::string resolved;
+            if (!readToast(dbname, tbl.tablename, toastId, col.dsize, resolved))
+                return "";
+            return resolved;
         }
     }
     return val;
@@ -9636,6 +9731,19 @@ static void appendToastCounter(std::string& bytes, const T& value) {
     bytes.append(reinterpret_cast<const char*>(&value), sizeof(value));
 }
 
+static bool persistToastCounter(const std::filesystem::path& path,
+                                uint64_t nextId) {
+    if (nextId == 0) return false;
+    std::string bytes;
+    bytes.reserve(TOAST_COUNTER_SIZE);
+    appendToastCounter(bytes, TOAST_COUNTER_MAGIC);
+    appendToastCounter(bytes, TOAST_COUNTER_VERSION);
+    appendToastCounter(bytes, nextId);
+    const uint64_t checksum = toastCounterChecksum(bytes.data(), bytes.size());
+    appendToastCounter(bytes, checksum);
+    return index_file::writeAtomically(path, bytes);
+}
+
 static std::string compressToastPayload(const std::string& data, uint8_t& flags) {
     flags = 0;
     if (data.empty() || data.size() > std::numeric_limits<uLong>::max()) return data;
@@ -9756,14 +9864,7 @@ uint64_t StorageEngine::allocToastId(const std::string& dbname, const std::strin
 
     uint64_t allocated = nextId;
     ++nextId;
-    std::string bytes;
-    bytes.reserve(TOAST_COUNTER_SIZE);
-    appendToastCounter(bytes, TOAST_COUNTER_MAGIC);
-    appendToastCounter(bytes, TOAST_COUNTER_VERSION);
-    appendToastCounter(bytes, nextId);
-    const uint64_t checksum = toastCounterChecksum(bytes.data(), bytes.size());
-    appendToastCounter(bytes, checksum);
-    if (!index_file::writeAtomically(metaPath, bytes)) return 0;
+    if (!persistToastCounter(metaPath, nextId)) return 0;
     return allocated;
 }
 
@@ -9842,27 +9943,41 @@ bool StorageEngine::writeToast(const std::string& dbname, const std::string& tab
     return true;
 }
 
-std::string StorageEngine::readToast(const std::string& dbname, const std::string& tablename,
-                                      uint64_t toastId) {
+bool StorageEngine::readToast(const std::string& dbname,
+                              const std::string& tablename,
+                              uint64_t toastId,
+                              size_t maxSize,
+                              std::string& data) {
+    data.clear();
+    if (toastId == 0 || maxSize == 0) return false;
+    maxSize = std::min(maxSize,
+                       static_cast<size_t>(std::numeric_limits<uint16_t>::max()));
     PageAllocator* pa = getToastPageAllocator(dbname, tablename);
     BPTree* idx = getToastIndex(dbname, tablename);
-    if (!pa || !idx) return "";
+    if (!pa || !idx) return false;
 
     std::string result;
     uint8_t flags = 0;
     uint64_t originalSize = 0;
+    size_t maxChunks = 0;
+    size_t previousPayloadSize = 0;
     for (uint32_t seq = 0;; ++seq) {
         int64_t rid = -1;
-        if (!idx->search(toastIndexKey(toastId, seq), rid)) break;
+        if (!idx->search(toastIndexKey(toastId, seq), rid)) {
+            if (seq == 0) return false;
+            break;
+        }
+        if (seq > 0 && previousPayloadSize != TOAST_CHUNK_SIZE) return false;
         uint32_t pid = 0;
         uint16_t slotId = 0;
         decodeRid(rid, pid, slotId);
 
-        if (!lockManager_.pageLockShared(dbname, tablename + ".toast", pid)) return "";
+        if (!lockManager_.pageLockShared(dbname, tablename + ".toast", pid))
+            return false;
         char* buf = pa->fetchPage(pid);
         if (!buf) {
             lockManager_.pageUnlock(dbname, tablename + ".toast", pid);
-            break;
+            return false;
         }
         PageWrapper page(buf, pa->pageSize(), DATA_FILE_FORMAT_VERSION);
         const char* row = nullptr;
@@ -9870,7 +9985,7 @@ std::string StorageEngine::readToast(const std::string& dbname, const std::strin
         if (!page.read(slotId, row, rowLen) || rowLen < TOAST_CHUNK_HEADER_SIZE) {
             pa->unpinPage(pid);
             lockManager_.pageUnlock(dbname, tablename + ".toast", pid);
-            break;
+            return false;
         }
         uint64_t storedToastId = 0;
         uint32_t storedSeq = 0;
@@ -9885,37 +10000,91 @@ std::string StorageEngine::readToast(const std::string& dbname, const std::strin
         if (storedToastId != toastId || storedSeq != seq) {
             pa->unpinPage(pid);
             lockManager_.pageUnlock(dbname, tablename + ".toast", pid);
-            break;
+            return false;
         }
         if (seq == 0) {
             if (storedFlags != 0 && storedFlags != TOAST_FLAG_COMPRESSED) {
                 pa->unpinPage(pid);
                 lockManager_.pageUnlock(dbname, tablename + ".toast", pid);
-                return "";
+                return false;
             }
             flags = storedFlags;
             originalSize = storedOriginalSize;
+            if (originalSize == 0 || originalSize > maxSize ||
+                originalSize > std::numeric_limits<size_t>::max()) {
+                pa->unpinPage(pid);
+                lockManager_.pageUnlock(dbname, tablename + ".toast", pid);
+                return false;
+            }
+            maxChunks = static_cast<size_t>(originalSize / TOAST_CHUNK_SIZE) +
+                        (originalSize % TOAST_CHUNK_SIZE != 0 ? 1 : 0);
         } else if (storedFlags != flags || storedOriginalSize != originalSize) {
             pa->unpinPage(pid);
             lockManager_.pageUnlock(dbname, tablename + ".toast", pid);
-            return "";
+            return false;
         }
-        result.append(row + TOAST_CHUNK_HEADER_SIZE, rowLen - TOAST_CHUNK_HEADER_SIZE);
+        const size_t payloadSize = rowLen - TOAST_CHUNK_HEADER_SIZE;
+        if (payloadSize == 0 || payloadSize > TOAST_CHUNK_SIZE ||
+            seq >= maxChunks || payloadSize > originalSize - result.size()) {
+            pa->unpinPage(pid);
+            lockManager_.pageUnlock(dbname, tablename + ".toast", pid);
+            return false;
+        }
+        result.append(row + TOAST_CHUNK_HEADER_SIZE, payloadSize);
+        previousPayloadSize = payloadSize;
         pa->unpinPage(pid);
         lockManager_.pageUnlock(dbname, tablename + ".toast", pid);
+
+        if (flags == 0) {
+            if (result.size() == originalSize) {
+                int64_t unexpectedRid = -1;
+                if (seq != std::numeric_limits<uint32_t>::max() &&
+                    idx->search(toastIndexKey(toastId, seq + 1), unexpectedRid)) {
+                    return false;
+                }
+                data = std::move(result);
+                return true;
+            }
+            if (static_cast<size_t>(seq) + 1 >= maxChunks) return false;
+        } else {
+            // writeToast only chooses compression when it strictly shrinks
+            // the value.  This also bounds memory while walking a corrupt
+            // index that invents arbitrarily many chunk keys.
+            if (result.size() >= originalSize) return false;
+        }
     }
-    if (flags != TOAST_FLAG_COMPRESSED) return result;
-    if (originalSize > std::numeric_limits<uLongf>::max() ||
-        result.size() > std::numeric_limits<uLong>::max()) return "";
+    if (flags != TOAST_FLAG_COMPRESSED || result.empty() ||
+        originalSize > std::numeric_limits<uInt>::max() ||
+        result.size() > std::numeric_limits<uInt>::max()) {
+        return false;
+    }
 
     std::string decompressed(static_cast<size_t>(originalSize), '\0');
-    uLongf decompressedSize = static_cast<uLongf>(originalSize);
-    const int status = uncompress(
-        reinterpret_cast<Bytef*>(decompressed.data()), &decompressedSize,
-        reinterpret_cast<const Bytef*>(result.data()), static_cast<uLong>(result.size()));
-    if (status != Z_OK) return "";
-    decompressed.resize(static_cast<size_t>(decompressedSize));
-    return decompressed;
+    z_stream stream{};
+    stream.next_in = reinterpret_cast<Bytef*>(result.data());
+    stream.avail_in = static_cast<uInt>(result.size());
+    stream.next_out = reinterpret_cast<Bytef*>(decompressed.data());
+    stream.avail_out = static_cast<uInt>(decompressed.size());
+    if (inflateInit(&stream) != Z_OK) return false;
+    const int status = inflate(&stream, Z_FINISH);
+    const bool valid = status == Z_STREAM_END && stream.avail_in == 0 &&
+                       stream.total_in == result.size() &&
+                       stream.total_out == originalSize;
+    inflateEnd(&stream);
+    if (!valid) return false;
+    data = std::move(decompressed);
+    return true;
+}
+
+std::string StorageEngine::readToast(const std::string& dbname,
+                                     const std::string& tablename,
+                                     uint64_t toastId) {
+    std::string data;
+    if (!readToast(dbname, tablename, toastId,
+                   std::numeric_limits<uint16_t>::max(), data)) {
+        return "";
+    }
+    return data;
 }
 
 void StorageEngine::deleteToast(const std::string& dbname, const std::string& tablename,
@@ -9945,15 +10114,17 @@ void StorageEngine::deleteToast(const std::string& dbname, const std::string& ta
 }
 
 bool StorageEngine::parseToastMarker(const std::string& val, uint64_t& toastId) {
-    size_t prefixLen = strlen(TOAST_PREFIX);
+    const size_t prefixLen = strlen(TOAST_PREFIX);
     if (val.size() <= prefixLen) return false;
-    if (val.substr(0, prefixLen) != TOAST_PREFIX) return false;
-    try {
-        toastId = static_cast<uint64_t>(std::stoull(val.substr(prefixLen)));
-        return true;
-    } catch (...) {
+    if (val.compare(0, prefixLen, TOAST_PREFIX) != 0) return false;
+    uint64_t parsed = 0;
+    const char* begin = val.data() + prefixLen;
+    const char* end = val.data() + val.size();
+    const auto converted = std::from_chars(begin, end, parsed, 10);
+    if (converted.ec != std::errc{} || converted.ptr != end || parsed == 0)
         return false;
-    }
+    toastId = parsed;
+    return true;
 }
 
 void StorageEngine::deleteRowToast(const std::string& dbname, const std::string& tablename,
@@ -10012,7 +10183,12 @@ bool StorageEngine::prepareToastValues(const std::string& dbname, const std::str
         if (!col.isVariableLength) continue;
         auto it = values.find(col.dataName);
         if (it == values.end()) continue;
-        if (it->second.size() > threshold) {
+        uint64_t apparentToastId = 0;
+        // A user value can legitimately look like an internal marker.  Store
+        // it externally as data even when it is short, otherwise a later read
+        // aliases another row's value (or an arbitrary missing toast ID).
+        if (it->second.size() > threshold ||
+            parseToastMarker(it->second, apparentToastId)) {
             uint64_t toastId = allocToastId(dbname, tablename);
             if (toastId == 0 || !writeToast(dbname, tablename, toastId, it->second))
                 return false;
@@ -10026,30 +10202,91 @@ std::string StorageEngine::resolveToastValues(const std::string& dbname,
                                               const std::string& tablename,
                                               const std::string& rowBuffer,
                                               const TableSchema& tbl) {
-    std::string result = rowBuffer;
+    return resolveToastValues(dbname, tablename, rowBuffer, tbl, nullptr);
+}
+
+std::string StorageEngine::resolveToastValues(const std::string& dbname,
+                                              const std::string& tablename,
+                                              const std::string& rowBuffer,
+                                              const TableSchema& tbl,
+                                              bool* ok) {
+    if (ok) *ok = true;
+    if (tbl.varColCount() == 0) return rowBuffer;
+
+    // Never recursively interpret a literal such as "__TOAST__1" that was
+    // itself retrieved from TOAST and placed in an already-resolved row.
+    uint32_t ignoredOffset = 0;
+    uint32_t ignoredLength = 0;
+    if (resolvedToastEntry(rowBuffer, tbl, 0, &ignoredOffset, &ignoredLength))
+        return rowBuffer;
+
+    std::vector<std::string> values;
+    values.reserve(tbl.varColCount());
+    bool foundMarker = false;
     for (size_t i = 0; i < tbl.len; ++i) {
         if (!tbl.cols[i].isVariableLength) continue;
-        std::string val = extractColumnValueStatic(result, tbl, i);
+        std::string val = extractColumnValueStatic(rowBuffer, tbl, i);
         uint64_t toastId = 0;
         if (parseToastMarker(val, toastId)) {
-            std::string resolved = readToast(dbname, tablename, toastId);
-            if (!resolved.empty()) {
-                // Replace the marker in the row buffer with the resolved value.
-                size_t varIdx = tbl.getVarColIndex(i);
-                size_t fixedSize = tbl.fixedDataSize();
-                size_t arrPos = fixedSize + varIdx * 4;
-                uint16_t dataOffset = 0;
-                std::memcpy(&dataOffset, result.data() + arrPos, sizeof(uint16_t));
-                std::string marker = result.substr(dataOffset, val.size());
-                if (marker == val) {
-                    result.replace(dataOffset, val.size(), resolved);
-                    // Update length in var offset array.
-                    uint16_t newLen = static_cast<uint16_t>(resolved.size());
-                    std::memcpy(result.data() + arrPos + 2, &newLen, sizeof(uint16_t));
-                }
+            std::string resolved;
+            if (!readToast(dbname, tablename, toastId, tbl.cols[i].dsize,
+                           resolved)) {
+                if (ok) *ok = false;
+                return rowBuffer;
             }
+            val = std::move(resolved);
+            foundMarker = true;
         }
+        values.push_back(std::move(val));
     }
+    if (!foundMarker) return rowBuffer;
+
+    const size_t fixedSize = tbl.fixedDataSize();
+    const size_t varCount = values.size();
+    if (fixedSize > rowBuffer.size() ||
+        varCount > (std::numeric_limits<size_t>::max() - fixedSize) / 4) {
+        if (ok) *ok = false;
+        return rowBuffer;
+    }
+    const size_t legacyArraySize = varCount * 4;
+    constexpr size_t resolvedHeaderSize = sizeof(uint32_t) * 2;
+    if (varCount > (std::numeric_limits<size_t>::max() - fixedSize -
+                    legacyArraySize - resolvedHeaderSize) / 8) {
+        if (ok) *ok = false;
+        return rowBuffer;
+    }
+    const size_t entriesSize = varCount * 8;
+    const size_t dataStart = fixedSize + legacyArraySize +
+                             resolvedHeaderSize + entriesSize;
+    uint64_t totalSize = dataStart;
+    for (const auto& value : values) totalSize += value.size();
+    if (totalSize > std::numeric_limits<uint32_t>::max() ||
+        totalSize > std::numeric_limits<size_t>::max()) {
+        if (ok) *ok = false;
+        return rowBuffer;
+    }
+
+    std::string result;
+    result.reserve(static_cast<size_t>(totalSize));
+    result.append(rowBuffer.data(), fixedSize);
+    result.append(legacyArraySize, '\0');
+    std::memcpy(result.data() + fixedSize, &RESOLVED_TOAST_SENTINEL,
+                sizeof(RESOLVED_TOAST_SENTINEL));
+    std::memcpy(result.data() + fixedSize + sizeof(RESOLVED_TOAST_SENTINEL),
+                &RESOLVED_TOAST_SENTINEL, sizeof(RESOLVED_TOAST_SENTINEL));
+    result.append(reinterpret_cast<const char*>(&RESOLVED_TOAST_MAGIC),
+                  sizeof(RESOLVED_TOAST_MAGIC));
+    const uint32_t storedCount = static_cast<uint32_t>(varCount);
+    result.append(reinterpret_cast<const char*>(&storedCount), sizeof(storedCount));
+
+    uint32_t valueOffset = static_cast<uint32_t>(dataStart);
+    for (const auto& value : values) {
+        const uint32_t valueLength = static_cast<uint32_t>(value.size());
+        result.append(reinterpret_cast<const char*>(&valueOffset), sizeof(valueOffset));
+        result.append(reinterpret_cast<const char*>(&valueLength), sizeof(valueLength));
+        valueOffset += valueLength;
+    }
+    for (const auto& value : values) result.append(value);
     return result;
 }
 
@@ -10271,8 +10508,9 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
         BPTree toastIdx(toastIndexPath(dbname, tblWithVersion.tablename).string());
         if (!toastIdx.open()) return failCreate("could not initialize TOAST index");
         toastIdx.close();
-        // Ensure toast metadata file exists.
-        if (allocToastId(dbname, tblWithVersion.tablename) == 0)
+        // Initialize the next-ID state without consuming ID 1 merely for
+        // creating the relation.
+        if (!persistToastCounter(toastMetaPath(dbname, tblWithVersion.tablename), 1))
             return failCreate("could not initialize TOAST metadata");
     }
 
@@ -13195,6 +13433,21 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
     if (cond.colName == "__true__") return true;
     if (cond.colName == "__false__") return false;
 
+    StorageEngine* valueEngine = nullptr;
+    std::string valueDb;
+    if (g_condNullEngine && tbl.tablename == g_condNullTable) {
+        valueEngine = const_cast<StorageEngine*>(g_condNullEngine);
+        valueDb = g_condNullDb;
+    } else if (g_nullRowEngine && tbl.tablename == g_nullRowTable) {
+        valueEngine = const_cast<StorageEngine*>(g_nullRowEngine);
+        valueDb = g_nullRowDb;
+    }
+    const auto extractValue = [&](size_t columnIndex) {
+        return valueEngine
+            ? valueEngine->extractColumnValue(rowBuffer, tbl, columnIndex, valueDb)
+            : extractColumnValueStatic(rowBuffer, tbl, columnIndex);
+    };
+
     // Function-left predicate ("length(v) = 0" captured by parseConditions
     // as op="scalarexpr"): evaluate the function on this row and compare.
     // A NULL result is Unknown in three-valued logic, so the row drops.
@@ -13252,7 +13505,7 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
                 }
             }
         }
-        std::string v = applyScalarFunc(expr, rowBuffer, tbl, nullptr, "");
+        std::string v = applyScalarFunc(expr, rowBuffer, tbl, valueEngine, valueDb);
         if (v.empty() || v == "NULL" || v == "null") return false;
         std::string rhs = cond.value;
         size_t opLen = 0;
@@ -13315,10 +13568,10 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
             size_t s2i = findCol(parts[2]);
             size_t e2i = findCol(parts[3]);
             if (s1i < tbl.len && e1i < tbl.len && s2i < tbl.len && e2i < tbl.len) {
-                std::string s1 = extractColumnValueStatic(rowBuffer, tbl, s1i);
-                std::string e1 = extractColumnValueStatic(rowBuffer, tbl, e1i);
-                std::string s2 = extractColumnValueStatic(rowBuffer, tbl, s2i);
-                std::string e2 = extractColumnValueStatic(rowBuffer, tbl, e2i);
+                std::string s1 = extractValue(s1i);
+                std::string e1 = extractValue(e1i);
+                std::string s2 = extractValue(s2i);
+                std::string e2 = extractValue(e2i);
                 return (s1 < e2) && (s2 < e1);
             }
         }
@@ -13329,7 +13582,7 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
     for (; ci < tbl.len && tbl.cols[ci].dataName != cond.colName; ++ci) {}
     if (ci >= tbl.len) return false;
 
-    std::string val = extractColumnValueStatic(rowBuffer, tbl, ci);
+    std::string val = extractValue(ci);
     const Column& col = tbl.cols[ci];
     // Stored-NULL truth: prefer the bound scan row null bitmap (see
     // NullRowBinding), which distinguishes NULL from a stored empty string.
@@ -13361,7 +13614,7 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
                 rNull = true;
             }
             if (rNull) return false;
-            std::string rval = extractColumnValueStatic(rowBuffer, tbl, rci);
+            std::string rval = extractValue(rci);
             bool num = true;
             double lv = 0, rv = 0;
             try { lv = std::stod(val); rv = std::stod(rval); } catch (...) { num = false; }
@@ -18268,7 +18521,14 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
     // Resolve TOAST markers in matched rows so downstream formatting sees
     // actual values instead of __TOAST__ markers.
     for (auto& mr : matchRows) {
-        mr.second = resolveToastValues(dbname, tablename, mr.second, tbl);
+        bool toastOk = false;
+        std::string resolved = resolveToastValues(
+            dbname, tablename, mr.second, tbl, &toastOk);
+        if (!toastOk) {
+            lockManager_.unlock(tablename);
+            return result;
+        }
+        mr.second = std::move(resolved);
     }
 
     // Row-level locks within transaction

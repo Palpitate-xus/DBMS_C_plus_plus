@@ -99,18 +99,24 @@ bool TableScanOp::open() {
     tbl_ = engine_->getTableSchema(dbname_, tablename_);
     rows_.clear();
     lastRid_ = 0;
+    bool toastFailed = false;
     const auto appendRow = [&](uint32_t pageId, uint16_t slotId,
                                const char* data, size_t len) {
         std::string row(data, len);
-        row = engine_->resolveToastValues(dbname_, tablename_, row, tbl_);
+        bool toastOk = false;
+        row = engine_->resolveToastValues(dbname_, tablename_, row, tbl_, &toastOk);
+        if (!toastOk) {
+            toastFailed = true;
+            return;
+        }
         rows_.emplace_back(StorageEngine::encodeRid(pageId, slotId), std::move(row));
     };
     const bool scanOk = engine_->rlsAppliesTo(dbname_, tablename_)
         ? engine_->forEachVisibleRow(dbname_, tablename_, "SELECT", appendRow)
         : engine_->forEachRow(dbname_, tablename_, appendRow);
-    if (!scanOk) {
+    if (!scanOk || toastFailed) {
         rows_.clear();
-        setError("table scan failed");
+        setError(toastFailed ? "TOAST value read failed" : "table scan failed");
         return false;
     }
     pos_ = 0;
@@ -251,12 +257,20 @@ bool ParallelTableScanOp::open() {
     pos_ = 0;
     usedParallelWorkers_ = false;
     lastRid_ = 0;
+    bool toastFailed = false;
 
-    auto appendSequential = [this]() {
+    auto appendSequential = [this, &toastFailed]() {
         return engine_->forEachRow(dbname_, tablename_,
-            [this](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
+            [this, &toastFailed](uint32_t pageId, uint16_t slotId,
+                                 const char* data, size_t len) {
                 std::string row(data, len);
-                row = engine_->resolveToastValues(dbname_, tablename_, row, tbl_);
+                bool toastOk = false;
+                row = engine_->resolveToastValues(
+                    dbname_, tablename_, row, tbl_, &toastOk);
+                if (!toastOk) {
+                    toastFailed = true;
+                    return;
+                }
                 rows_.emplace_back(StorageEngine::encodeRid(pageId, slotId), std::move(row));
         });
     };
@@ -271,8 +285,10 @@ bool ParallelTableScanOp::open() {
     // threads.  Partitioned relations also need their existing routing path.
     if (workers_ <= 1 || engine_->inTransaction() ||
         tbl_.partitionType != TableSchema::PartitionType::None) {
-        if (!appendSequential()) {
-            setError("parallel scan fallback failed");
+        if (!appendSequential() || toastFailed) {
+            rows_.clear();
+            setError(toastFailed ? "TOAST value read failed"
+                                 : "parallel scan fallback failed");
             return false;
         }
         recordScan();
@@ -328,7 +344,15 @@ bool ParallelTableScanOp::open() {
     }
     for (auto& part : local) {
         for (auto& row : part) {
-            row.second = engine_->resolveToastValues(dbname_, tablename_, row.second, tbl_);
+            bool toastOk = false;
+            row.second = engine_->resolveToastValues(
+                dbname_, tablename_, row.second, tbl_, &toastOk);
+            if (!toastOk) {
+                rows_.clear();
+                usedParallelWorkers_ = false;
+                setError("TOAST value read failed");
+                return false;
+            }
             rows_.push_back(std::move(row));
         }
     }
@@ -415,7 +439,13 @@ bool IndexScanOp::next(std::string& outRow) {
             }
             continue;
         }
-        outRow = engine_->resolveToastValues(dbname_, tablename_, row, tbl_);
+        bool toastOk = false;
+        outRow = engine_->resolveToastValues(
+            dbname_, tablename_, row, tbl_, &toastOk);
+        if (!toastOk) {
+            setError("TOAST value read failed");
+            return false;
+        }
         rtInstr_.emitted = true;
     return true;
     }
@@ -535,7 +565,15 @@ bool BitmapHeapScanOp::open() {
             }
             continue;
         }
-        rows_.push_back(engine_->resolveToastValues(dbname_, tablename_, row, tbl_));
+        bool toastOk = false;
+        row = engine_->resolveToastValues(
+            dbname_, tablename_, row, tbl_, &toastOk);
+        if (!toastOk) {
+            rows_.clear();
+            setError("TOAST value read failed");
+            return false;
+        }
+        rows_.push_back(std::move(row));
     }
     if (!statsRecorded_) {
         recordTableScan(dbname_, tablename_, rows_.size(), true, false);
@@ -741,7 +779,14 @@ bool BitmapOrHeapScanOp::open() {
             }
             continue;
         }
-        row = engine_->resolveToastValues(dbname_, tablename_, row, tbl_);
+        bool toastOk = false;
+        row = engine_->resolveToastValues(
+            dbname_, tablename_, row, tbl_, &toastOk);
+        if (!toastOk) {
+            rows_.clear();
+            setError("TOAST value read failed");
+            return false;
+        }
 
         bool matches = false;
         for (const auto& branch : branches_) {
@@ -2601,10 +2646,16 @@ bool ParallelHashJoinOp::open() {
             threads.emplace_back([this, &shards, &failed, w, begin, end]() {
                 auto& shard = shards[static_cast<size_t>(w)];
                 if (!engine_->forEachRowPageRange(dbname_, rightTable_, begin, end,
-                        [this, &shard](uint32_t pageId, uint16_t slotId,
-                                       const char* data, size_t len) {
+                        [this, &shard, &failed](uint32_t pageId, uint16_t slotId,
+                                               const char* data, size_t len) {
                             std::string row(data, len);
-                            row = engine_->resolveToastValues(dbname_, rightTable_, row, rightTbl_);
+                            bool toastOk = false;
+                            row = engine_->resolveToastValues(
+                                dbname_, rightTable_, row, rightTbl_, &toastOk);
+                            if (!toastOk) {
+                                failed.store(true, std::memory_order_relaxed);
+                                return;
+                            }
                             std::string key = extractJoinKey(row, rightTbl_, rightCol_);
                             shard[key].emplace_back(
                                 StorageEngine::encodeRid(pageId, slotId), std::move(row));

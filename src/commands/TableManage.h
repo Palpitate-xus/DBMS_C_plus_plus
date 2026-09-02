@@ -1227,6 +1227,8 @@ public:
     uint64_t allocToastId(const std::string& dbname, const std::string& tablename);
     bool writeToast(const std::string& dbname, const std::string& tablename, uint64_t toastId, const std::string& data);
     std::string readToast(const std::string& dbname, const std::string& tablename, uint64_t toastId);
+    bool readToast(const std::string& dbname, const std::string& tablename,
+                   uint64_t toastId, size_t maxSize, std::string& data);
     void deleteToast(const std::string& dbname, const std::string& tablename, uint64_t toastId);
     void deleteRowToast(const std::string& dbname, const std::string& tablename, int64_t rid);
     void deleteToastForRow(const std::string& dbname, const std::string& tablename,
@@ -1247,6 +1249,9 @@ public:
     // Resolve TOAST markers in a row buffer back to their actual values.
     std::string resolveToastValues(const std::string& dbname, const std::string& tablename,
                                    const std::string& rowBuffer, const TableSchema& tbl);
+    std::string resolveToastValues(const std::string& dbname, const std::string& tablename,
+                                   const std::string& rowBuffer, const TableSchema& tbl,
+                                   bool* ok);
 
     // ========================================================================
     // Tablespace management

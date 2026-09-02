@@ -2,11 +2,17 @@
 
 #include "TableManage.h"
 #include "Config.h"
+#include "BPTree.h"
+#include "PageAllocator.h"
+#include "PageWrapper.h"
+#include "ExecutionPlan.h"
 #include <atomic>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <cassert>
+#include <limits>
 #include <thread>
 #include <vector>
 
@@ -14,11 +20,33 @@ dbms::Config g_config;
 
 using namespace dbms;
 
+static std::string makeIncompressiblePayload(size_t size, uint32_t seed) {
+    static constexpr char alphabet[] =
+        "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    std::string value(size, '\0');
+    uint32_t state = seed;
+    for (char& ch : value) {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        ch = alphabet[state % (sizeof(alphabet) - 1)];
+    }
+    return value;
+}
+
 int main() {
     std::string dbname = "toast_db";
     std::filesystem::remove_all(dbname);
     std::filesystem::remove_all(dbname + ".txn_backup");
     std::filesystem::remove_all(".txnid");
+
+    uint64_t markerId = 0;
+    assert(StorageEngine::parseToastMarker("__TOAST__42", markerId));
+    assert(markerId == 42);
+    assert(!StorageEngine::parseToastMarker("__TOAST__0", markerId));
+    assert(!StorageEngine::parseToastMarker("__TOAST__-1", markerId));
+    assert(!StorageEngine::parseToastMarker("__TOAST__+1", markerId));
+    assert(!StorageEngine::parseToastMarker("__TOAST__1junk", markerId));
 
     {
         StorageEngine engine;
@@ -27,7 +55,7 @@ int main() {
         TableSchema tbl;
         tbl.tablename = "t";
         tbl.formatVersion = 2;
-        tbl.append(makeVarCharColumn("payload", false, 10000, false));
+        tbl.append(makeVarCharColumn("payload", false, 12000, false));
         assert(engine.createTable(dbname, tbl) == DBStatus::OK);
 
         // Verify TOAST relation and index files were created.
@@ -138,6 +166,138 @@ int main() {
         assert(!failed.load(std::memory_order_acquire));
         assert(engine.query(dbname, "tc", {}, {"payload"}).size() == workerCount);
         std::cout << "[TOAST] concurrent ID allocation unique OK\n";
+
+        // De-TOASTing is an executor-only operation.  Two values can exceed
+        // the on-page 16-bit offset range after expansion and must still be
+        // extracted independently without wrapping the second offset.
+        TableSchema wide;
+        wide.tablename = "wide";
+        wide.formatVersion = 2;
+        wide.append(makeVarCharColumn("left_value", false, 65535, false));
+        wide.append(makeVarCharColumn("right_value", false, 65535, false));
+        assert(engine.createTable(dbname, wide) == DBStatus::OK);
+        const std::string leftValue = makeIncompressiblePayload(40000, 0x12345678u);
+        const std::string rightValue = makeIncompressiblePayload(40000, 0x9abcdef0u);
+        assert(engine.insert(dbname, "wide",
+                             {{"left_value", leftValue}, {"right_value", rightValue}})
+               == DBStatus::OK);
+        rows = engine.query(dbname, "wide", {}, {"left_value", "right_value"});
+        assert(rows.size() == 1);
+        assert(rows[0].find(leftValue) != std::string::npos);
+        assert(rows[0].find(rightValue) != std::string::npos);
+        assert(engine.query(dbname, "wide", {"=right_value " + rightValue},
+                            {"left_value"}).size() == 1);
+        std::cout << "[TOAST] multi-column expansion + predicate OK\n";
+
+        // User data that has the internal marker spelling must round-trip as
+        // literal text rather than aliasing toast ID 1 from another row.
+        TableSchema markerTable;
+        markerTable.tablename = "marker_literal";
+        markerTable.formatVersion = 2;
+        markerTable.append(makeVarCharColumn("payload", false, 10000, false));
+        assert(engine.createTable(dbname, markerTable) == DBStatus::OK);
+        const std::string markerSource = makeIncompressiblePayload(9000, 0x2468ace0u);
+        assert(engine.insert(dbname, "marker_literal", {{"payload", markerSource}})
+               == DBStatus::OK);
+        assert(engine.insert(dbname, "marker_literal", {{"payload", "__TOAST__1"}})
+               == DBStatus::OK);
+        rows = engine.query(dbname, "marker_literal", {}, {"payload"});
+        assert(rows.size() == 2);
+        bool sawSource = false;
+        bool sawLiteral = false;
+        for (const auto& row : rows) {
+            sawSource |= row.find(markerSource) != std::string::npos;
+            sawLiteral |= row == "__TOAST__1 ";
+        }
+        assert(sawSource && sawLiteral);
+        std::cout << "[TOAST] marker-shaped user value round-trip OK\n";
+
+        TableSchema corruptGap;
+        corruptGap.tablename = "corrupt_gap";
+        corruptGap.formatVersion = 2;
+        corruptGap.append(makeVarCharColumn("payload", false, 12000, false));
+        assert(engine.createTable(dbname, corruptGap) == DBStatus::OK);
+        assert(engine.insert(dbname, "corrupt_gap",
+                             {{"payload", makeIncompressiblePayload(10000, 0x13579bdfu)}})
+               == DBStatus::OK);
+
+        TableSchema corruptSize = corruptGap;
+        corruptSize.tablename = "corrupt_size";
+        assert(engine.createTable(dbname, corruptSize) == DBStatus::OK);
+        assert(engine.insert(dbname, "corrupt_size",
+                             {{"payload", makeIncompressiblePayload(10000, 0x10203040u)}})
+               == DBStatus::OK);
+    }
+
+    // Removing an interior chunk must not turn the prefix into a valid value.
+    // The stored original length makes this detectable even for an
+    // uncompressed payload.
+    int64_t missingChunkRid = -1;
+    {
+        BPTree index(std::filesystem::path(dbname) / "corrupt_gap.toast.idx");
+        assert(index.open());
+        assert(index.search("T1:1", missingChunkRid));
+    }
+    {
+        uint32_t pageId = 0;
+        uint16_t slotId = 0;
+        StorageEngine::decodeRid(missingChunkRid, pageId, slotId);
+        PageAllocator pages((std::filesystem::path(dbname) /
+                             "corrupt_gap.toast.dt").string(),
+                            0, 8192, 2);
+        assert(pages.open());
+        char* buffer = pages.fetchPage(pageId);
+        assert(buffer != nullptr);
+        PageWrapper page(buffer, pages.pageSize(), 2);
+        assert(page.remove(slotId));
+        page.writeChecksum();
+        pages.markDirty(pageId);
+        pages.unpinPage(pageId);
+        assert(pages.flush());
+    }
+
+    // A forged decompressed length is bounded by the column's declared
+    // maximum before allocating the destination buffer.
+    {
+        const auto indexPath = std::filesystem::path(dbname) /
+                               "corrupt_size.toast.idx";
+        BPTree index(indexPath);
+        assert(index.open());
+        int64_t firstRid = -1;
+        assert(index.search("T1:0", firstRid));
+        uint32_t pageId = 0;
+        uint16_t slotId = 0;
+        StorageEngine::decodeRid(firstRid, pageId, slotId);
+
+        PageAllocator pages((std::filesystem::path(dbname) /
+                             "corrupt_size.toast.dt").string(),
+                            0, 8192, 2);
+        assert(pages.open());
+        char* buffer = pages.fetchPage(pageId);
+        assert(buffer != nullptr);
+        PageWrapper page(buffer, pages.pageSize(), 2);
+        const char* chunk = nullptr;
+        size_t chunkLength = 0;
+        assert(page.read(slotId, chunk, chunkLength));
+        constexpr size_t originalSizeOffset = sizeof(uint64_t) +
+                                              sizeof(uint32_t) + sizeof(uint8_t);
+        assert(chunkLength >= originalSizeOffset + sizeof(uint64_t));
+        const uint64_t forgedSize = std::numeric_limits<uint64_t>::max();
+        std::memcpy(const_cast<char*>(chunk) + originalSizeOffset,
+                    &forgedSize, sizeof(forgedSize));
+        page.writeChecksum();
+        pages.markDirty(pageId);
+        pages.unpinPage(pageId);
+        assert(pages.flush());
+    }
+
+    {
+        StorageEngine engine;
+        assert(engine.query(dbname, "corrupt_gap", {}, {"payload"}).empty());
+        assert(engine.query(dbname, "corrupt_size", {}, {"payload"}).empty());
+        TableScanOp corruptScan(&engine, dbname, "corrupt_gap");
+        assert(!corruptScan.open());
+        std::cout << "[TOAST] corrupt chunk metadata fails closed OK\n";
     }
 
     // Cleanup
