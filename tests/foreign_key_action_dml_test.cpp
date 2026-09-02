@@ -90,6 +90,23 @@ void createFixture(StorageEngine& engine) {
            DBStatus::OK);
     assert(engine.createHashIndex(kDatabase, "grandchild", "child_id") ==
            DBStatus::OK);
+
+    TableSchema compositeParent;
+    compositeParent.tablename = "composite_parent";
+    compositeParent.formatVersion = 2;
+    compositeParent.append(makeIntColumn("a", false, 4, true));
+    compositeParent.append(makeIntColumn("b", false, 4, true));
+    compositeParent.pkColIndices = {0, 1};
+    assert(engine.createTable(kDatabase, compositeParent) == DBStatus::OK);
+
+    TableSchema compositeChild = keyedTable("composite_child");
+    compositeChild.append(makeIntColumn("parent_a", false, 4, false));
+    compositeChild.append(makeIntColumn("parent_b", false, 4, false));
+    assert(engine.createTable(kDatabase, compositeChild) == DBStatus::OK);
+    assert(engine.alterTableAddFKConstraint(
+               kDatabase, "composite_child", "composite_child_parent_fk",
+               {"parent_a", "parent_b"}, "composite_parent", {"a", "b"},
+               "restrict", "restrict") == DBStatus::OK);
 }
 
 void insertFamily(StorageEngine& engine, const std::string& parentId,
@@ -204,6 +221,40 @@ void testAutocommitActions(StorageEngine& engine) {
     insertFamily(engine, "1", "100", "101", "1000");
     assertIndexedParent(engine, "cascade_child", "100", "1");
     assertIndexedParent(engine, "nullable_child", "101", "1");
+
+    assert(engine.update(
+               kDatabase, "cascade_child", {{"parent_id", "999"}},
+               {"=id 100"}) == DBStatus::INVALID_VALUE);
+    assert(rowById(engine, "cascade_child", "100").at("parent_id") == "1");
+    assertIndexedParent(engine, "cascade_child", "100", "1");
+    assert(engine.insert(kDatabase, "parent", {{"id", "3"}}) == DBStatus::OK);
+    assert(engine.update(
+               kDatabase, "cascade_child", {{"parent_id", "3"}},
+               {"=id 100"}) == DBStatus::OK);
+    assert(engine.update(
+               kDatabase, "cascade_child", {{"parent_id", "1"}},
+               {"=id 100"}) == DBStatus::OK);
+
+    assert(engine.insert(
+               kDatabase, "composite_parent", {{"a", "7"}, {"b", "8"}}) ==
+           DBStatus::OK);
+    assert(engine.insert(
+               kDatabase, "composite_child",
+               {{"id", "700"}, {"parent_a", "7"}, {"parent_b", "8"}}) ==
+           DBStatus::OK);
+    assert(engine.update(
+               kDatabase, "composite_child", {{"parent_b", "9"}},
+               {"=id 700"}) == DBStatus::INVALID_VALUE);
+    assert(rowById(engine, "composite_child", "700").at("parent_b") == "8");
+    assert(engine.insert(
+               kDatabase, "composite_parent", {{"a", "7"}, {"b", "9"}}) ==
+           DBStatus::OK);
+    assert(engine.update(
+               kDatabase, "composite_child", {{"parent_b", "9"}},
+               {"=id 700"}) == DBStatus::OK);
+    assert(engine.update(
+               kDatabase, "composite_child", {{"parent_b", "8"}},
+               {"=id 700"}) == DBStatus::OK);
 
     assert(engine.update(
                kDatabase, "parent", {{"id", "10"}}, {"=id 1"}) ==

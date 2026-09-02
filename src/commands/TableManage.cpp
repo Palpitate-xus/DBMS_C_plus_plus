@@ -19477,6 +19477,120 @@ DBStatus StorageEngine::updateInternal(
             }
         }
 
+        // A user-visible UPDATE of foreign-key columns must not create a
+        // dangling reference. Internal ON UPDATE/DELETE actions carry exact
+        // RIDs and are validated by the parent operation that generated them.
+        if (!exactRids) {
+            for (size_t foreignKeyIndex = 0;
+                 foreignKeyIndex < tbl.fkLen; ++foreignKeyIndex) {
+                const ForeignKey& foreignKey = tbl.fks[foreignKeyIndex];
+                if (foreignKey.colNames.empty() ||
+                    foreignKey.colNames.size() != foreignKey.refCols.size()) {
+                    lockManager_.unlock(tablename);
+                    return DBStatus::CORRUPTED_DATA;
+                }
+
+                bool changed = false;
+                bool hasNull = false;
+                std::vector<std::string> localValues;
+                localValues.reserve(foreignKey.colNames.size());
+                for (const auto& columnName : foreignKey.colNames) {
+                    bool columnExists = false;
+                    for (size_t columnIndex = 0;
+                         columnIndex < tbl.len; ++columnIndex) {
+                        if (tbl.cols[columnIndex].dataName == columnName) {
+                            columnExists = true;
+                            break;
+                        }
+                    }
+                    if (!columnExists) {
+                        lockManager_.unlock(tablename);
+                        return DBStatus::CORRUPTED_DATA;
+                    }
+                    const std::string oldValue =
+                        valueFromRowMap(oldLogicalValues, columnName);
+                    const std::string newValue =
+                        valueFromRowMap(rowValues, columnName);
+                    changed = changed || oldValue != newValue;
+                    hasNull = hasNull || newValue.empty();
+                    localValues.push_back(newValue);
+                }
+                if (!changed || hasNull) continue;
+                if (!foreignKey.name.empty() &&
+                    transactionContext().inTransaction &&
+                    isConstraintCurrentlyDeferred(
+                        dbname, tablename, foreignKey.name)) {
+                    continue;
+                }
+                if (!tableExists(dbname, foreignKey.refTable)) {
+                    lockManager_.unlock(tablename);
+                    return DBStatus::TABLE_NOT_FOUND;
+                }
+
+                const TableSchema referenced =
+                    getTableSchema(dbname, foreignKey.refTable);
+                std::vector<size_t> referencedColumns;
+                referencedColumns.reserve(foreignKey.refCols.size());
+                for (const auto& columnName : foreignKey.refCols) {
+                    size_t columnIndex = referenced.len;
+                    for (size_t candidate = 0;
+                         candidate < referenced.len; ++candidate) {
+                        if (referenced.cols[candidate].dataName == columnName) {
+                            columnIndex = candidate;
+                            break;
+                        }
+                    }
+                    if (columnIndex >= referenced.len) {
+                        lockManager_.unlock(tablename);
+                        return DBStatus::CORRUPTED_DATA;
+                    }
+                    referencedColumns.push_back(columnIndex);
+                }
+
+                bool found = false;
+                // A row may update both its referenced key and its
+                // self-reference in one statement.
+                if (foreignKey.refTable == tablename) {
+                    found = true;
+                    for (size_t valueIndex = 0;
+                         valueIndex < referencedColumns.size(); ++valueIndex) {
+                        const std::string& referencedName =
+                            referenced.cols[referencedColumns[valueIndex]].dataName;
+                        if (valueFromRowMap(rowValues, referencedName) !=
+                            localValues[valueIndex]) {
+                            found = false;
+                            break;
+                        }
+                    }
+                }
+
+                const bool scanOk = found || forEachRow(
+                    dbname, foreignKey.refTable,
+                    [&](uint32_t, uint16_t, const char* data, size_t length) {
+                        if (found) return;
+                        const std::string referencedRow(data, length);
+                        for (size_t valueIndex = 0;
+                             valueIndex < referencedColumns.size(); ++valueIndex) {
+                            if (extractColumnValue(
+                                    referencedRow, referenced,
+                                    referencedColumns[valueIndex], dbname) !=
+                                localValues[valueIndex]) {
+                                return;
+                            }
+                        }
+                        found = true;
+                    });
+                if (!scanOk) {
+                    lockManager_.unlock(tablename);
+                    return DBStatus::IO_ERROR;
+                }
+                if (!found) {
+                    lockManager_.unlock(tablename);
+                    return DBStatus::INVALID_VALUE;
+                }
+            }
+        }
+
         // UPDATE must enforce the same key constraints as INSERT.  Validate
         // against the final row image (including generated columns and
         // BEFORE-trigger changes) before mutating the heap or indexes.
