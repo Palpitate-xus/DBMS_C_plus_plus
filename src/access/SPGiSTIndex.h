@@ -7,13 +7,21 @@
 
 namespace dbms {
 
+struct SPGiSTPointEntry {
+    double x = 0;
+    double y = 0;
+    int64_t rid = 0;
+};
+
 // Simple quadtree-based SP-GiST index for POINT type
 // Each node covers a rectangular region and splits into 4 quadrants
 struct SPGiSTNode {
     double minX = 0, minY = 0, maxX = 0, maxY = 0;
-    std::vector<std::pair<std::string, int64_t>> points; // ("x,y", rid)
+    std::vector<SPGiSTPointEntry> points;
     std::unique_ptr<SPGiSTNode> children[4]; // NW, NE, SW, SE
-    std::string unsplittableCoordinate;
+    double unsplittableX = 0;
+    double unsplittableY = 0;
+    bool hasUnsplittableCoordinate = false;
     bool cannotSplit = false;
     static constexpr size_t MAX_LEAF_POINTS = 16;
 

@@ -1,6 +1,5 @@
 #include "SPGiSTIndex.h"
 #include <cmath>
-#include <sstream>
 
 namespace dbms {
 
@@ -20,16 +19,18 @@ void SPGiSTNode::split() {
     // every duplicate insert.
     bool identicalCoordinates = true;
     for (size_t i = 1; i < points.size(); ++i) {
-        if (points[i].first != points[0].first) {
+        if (points[i].x != points[0].x || points[i].y != points[0].y) {
             identicalCoordinates = false;
             break;
         }
     }
     if (identicalCoordinates) {
-        unsplittableCoordinate = points[0].first;
+        unsplittableX = points[0].x;
+        unsplittableY = points[0].y;
+        hasUnsplittableCoordinate = true;
         return;
     }
-    unsplittableCoordinate.clear();
+    hasUnsplittableCoordinate = false;
 
     children[0] = std::make_unique<SPGiSTNode>();
     children[0]->minX = minX; children[0]->minY = midY;
@@ -44,14 +45,7 @@ void SPGiSTNode::split() {
     children[3]->minX = midX; children[3]->minY = minY;
     children[3]->maxX = maxX; children[3]->maxY = midY;
     for (const auto& p : points) {
-        double x, y;
-        size_t comma = p.first.find(',');
-        if (comma == std::string::npos) continue;
-        try {
-            x = std::stod(p.first.substr(0, comma));
-            y = std::stod(p.first.substr(comma + 1));
-        } catch (...) { continue; }
-        int q = quadrant(x, y);
+        int q = quadrant(p.x, p.y);
         children[q]->points.push_back(p);
     }
     points.clear();
@@ -72,14 +66,11 @@ void SPGiSTIndex::insert(double x, double y, int64_t rid) {
 
 void SPGiSTIndex::insertRecursive(SPGiSTNode* node, double x, double y, int64_t rid) {
     if (node->isLeaf()) {
-        std::ostringstream oss;
-        oss << x << "," << y;
-        const std::string key = oss.str();
-        node->points.push_back({key, rid});
+        node->points.push_back({x, y, rid});
         if (node->points.size() > SPGiSTNode::MAX_LEAF_POINTS &&
             !node->cannotSplit &&
-            (node->unsplittableCoordinate.empty() ||
-             node->unsplittableCoordinate != key)) {
+            (!node->hasUnsplittableCoordinate ||
+             node->unsplittableX != x || node->unsplittableY != y)) {
             node->split();
         }
         return;
@@ -96,11 +87,9 @@ void SPGiSTIndex::remove(double x, double y, int64_t rid) {
 
 bool SPGiSTIndex::removeRecursive(SPGiSTNode* node, double x, double y, int64_t rid) {
     if (node->isLeaf()) {
-        std::ostringstream oss;
-        oss << x << "," << y;
         auto& pts = node->points;
         for (auto it = pts.begin(); it != pts.end(); ++it) {
-            if (it->first == oss.str() && it->second == rid) {
+            if (it->x == x && it->y == y && it->rid == rid) {
                 pts.erase(it);
                 return true;
             }
@@ -122,12 +111,9 @@ std::vector<int64_t> SPGiSTIndex::searchEquals(double x, double y) const {
 
 void SPGiSTIndex::searchEqualsRecursive(const SPGiSTNode* node, double x, double y,
                                         std::vector<int64_t>& out) const {
-    std::ostringstream oss;
-    oss << x << "," << y;
-    std::string key = oss.str();
     if (node->isLeaf()) {
         for (const auto& p : node->points) {
-            if (p.first == key) out.push_back(p.second);
+            if (p.x == x && p.y == y) out.push_back(p.rid);
         }
         return;
     }
@@ -181,16 +167,8 @@ void SPGiSTIndex::searchWithinRecursive(const SPGiSTNode* node,
 
     if (node->isLeaf()) {
         for (const auto& point : node->points) {
-            const size_t comma = point.first.find(',');
-            if (comma == std::string::npos) continue;
-            try {
-                const double px = std::stod(point.first.substr(0, comma));
-                const double py = std::stod(point.first.substr(comma + 1));
-                if (std::hypot(px - cx, py - cy) <= radius) {
-                    out.push_back(point.second);
-                }
-            } catch (...) {
-                continue;
+            if (std::hypot(point.x - cx, point.y - cy) <= radius) {
+                out.push_back(point.rid);
             }
         }
         return;
@@ -212,15 +190,9 @@ void SPGiSTIndex::searchRegionRecursive(const SPGiSTNode* node,
     }
     if (node->isLeaf()) {
         for (const auto& p : node->points) {
-            double px, py;
-            size_t comma = p.first.find(',');
-            if (comma == std::string::npos) continue;
-            try {
-                px = std::stod(p.first.substr(0, comma));
-                py = std::stod(p.first.substr(comma + 1));
-            } catch (...) { continue; }
-            if (px >= qminX && px <= qmaxX && py >= qminY && py <= qmaxY) {
-                out.push_back(p.second);
+            if (p.x >= qminX && p.x <= qmaxX &&
+                p.y >= qminY && p.y <= qmaxY) {
+                out.push_back(p.rid);
             }
         }
         return;
