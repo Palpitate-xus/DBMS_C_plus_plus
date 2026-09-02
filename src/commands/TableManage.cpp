@@ -9077,12 +9077,15 @@ std::vector<std::string> StorageEngine::getSPGiSTIndexedColumns(const std::strin
     auto dir = relationDir(dbname, tablename);
     if (!std::filesystem::exists(dir)) return result;
     std::string prefix = tablename + "_";
+    const std::string suffix = ".spgist";
     for (const auto& entry : std::filesystem::directory_iterator(dir)) {
         if (!entry.is_regular_file()) continue;
         std::string name = entry.path().filename().string();
-        if (name.size() > 8 && name.substr(name.size() - 8) == ".spgist" &&
+        if (name.size() > prefix.size() + suffix.size() &&
+            name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0 &&
             name.substr(0, prefix.size()) == prefix) {
-            std::string colname = name.substr(prefix.size(), name.size() - prefix.size() - 8);
+            std::string colname = name.substr(
+                prefix.size(), name.size() - prefix.size() - suffix.size());
             result.push_back(colname);
         }
     }
@@ -26370,83 +26373,544 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
                                  const std::string& tablename) {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname) || !tableExists(dbname, tablename)) return 0;
+    // VACUUM is not transaction-safe and PostgreSQL rejects it inside an
+    // explicit transaction.  Rewriting here would otherwise escape rollback.
+    if (transactionContext().inTransaction) return 0;
     if (!lockManager_.lockExclusive(tablename)) return 0;
+    std::unique_ptr<int, std::function<void(int*)>> tableLockGuard(
+        reinterpret_cast<int*>(1),
+        [&](int*) { lockManager_.unlock(tablename); });
 
-    TableSchema tbl = getTableSchema(dbname, tablename);
-    std::vector<std::map<std::string, std::string>> rows;
+    const TableSchema tbl = getTableSchema(dbname, tablename);
+    const std::string tableKey = dbname + "/" + tablename;
+    const std::string secondaryPrefix = tableKey + "/";
+    const std::string hashPrefix = dbname + "." + tablename + ".";
 
-    // Collect all live rows before removing any physical relation files.
-    if (!forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
-        std::string row(data, len);
-        std::map<std::string, std::string> values;
-        for (size_t i = 0; i < tbl.len; ++i) {
-            values[tbl.cols[i].dataName] = extractColumnValue(row, tbl, i);
+    struct RewriteRelation {
+        std::filesystem::path path;
+        std::vector<std::string> tuples;
+    };
+    std::vector<RewriteRelation> relations;
+    const auto addRelation = [&](const std::filesystem::path& path) {
+        if (std::none_of(relations.begin(), relations.end(),
+                         [&](const RewriteRelation& relation) {
+                             return relation.path == path;
+                         })) {
+            relations.push_back({path, {}});
         }
-        rows.push_back(std::move(values));
-    })) {
-        lockManager_.unlock(tablename);
-        return 0;
-    }
+    };
 
-    std::string key = dbname + "/" + tablename;
-    // Evict caches so new files will be created
-    pageAllocators_.erase(key);
-    pkIndexCache_.erase(key);
-    secondaryIndexCache_.erase(key);
-    hashIndexCache_.erase(key);
-
-    // Remove old data file + fork files
-    std::filesystem::remove(dataPath(dbname, tablename));
-    std::filesystem::remove(fsmPath(dbname, tablename));
-    std::filesystem::remove(vmPath(dbname, tablename));
-    // Remove all index files for this table
-    std::filesystem::remove(indexPath(dbname, tablename)); // PK index .idx
-    auto indexedCols = getIndexedColumns(dbname, tablename);
-    for (const auto& colname : indexedCols) {
-        std::filesystem::remove(secondaryIndexPath(dbname, tablename, colname));
-        std::filesystem::remove(hashIndexPath(dbname, tablename, colname));
-    }
-    // Remove any named secondary index meta files
-    std::filesystem::path dbDir = dbPath(dbname);
-    for (const auto& entry : std::filesystem::directory_iterator(dbDir)) {
-        std::string fname = entry.path().filename().string();
-        if (fname.size() > tablename.size() + 1 &&
-            fname.substr(0, tablename.size() + 1) == tablename + "_") {
-            auto endsWith = [](const std::string& s, const std::string& suffix) {
-                return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
-            };
-            if (endsWith(fname, ".idx") || endsWith(fname, ".hidx") ||
-                endsWith(fname, ".fti") || endsWith(fname, ".secidx") ||
-                endsWith(fname, ".hashidx")) {
-                std::filesystem::remove(entry.path());
+    if (tbl.partitionType == TableSchema::PartitionType::None) {
+        addRelation(dataPath(dbname, tablename));
+    } else {
+        std::vector<std::string> partitionNames;
+        if (tbl.partitionType == TableSchema::PartitionType::Range) {
+            for (const auto& partition : tbl.rangePartitions)
+                partitionNames.push_back(partition.first);
+        } else if (tbl.partitionType == TableSchema::PartitionType::List) {
+            for (const auto& partition : tbl.listPartitions)
+                partitionNames.push_back(partition.first);
+        } else if (tbl.partitionType == TableSchema::PartitionType::Hash) {
+            for (size_t i = 0; i < tbl.hashPartitions; ++i)
+                partitionNames.push_back("p" + std::to_string(i));
+        }
+        if (!tbl.defaultPartitionName.empty() &&
+            std::find(partitionNames.begin(), partitionNames.end(),
+                      tbl.defaultPartitionName) == partitionNames.end()) {
+            partitionNames.push_back(tbl.defaultPartitionName);
+        }
+        for (const auto& partition : partitionNames) {
+            if (tbl.subPartitionType == TableSchema::PartitionType::Hash) {
+                for (size_t i = 0; i < tbl.subHashPartitions; ++i) {
+                    addRelation(partitionDataPath(
+                        dbname, tablename, partition,
+                        "sp" + std::to_string(i)));
+                }
+            } else {
+                addRelation(partitionDataPath(
+                    dbname, tablename, partition));
             }
         }
     }
+    if (relations.empty()) {
+        return 0;
+    }
 
-    // Re-create empty data file via getPageAllocator (lazy creation)
+    // Capture access-method definitions while their files still exist.  Some
+    // simplified access methods currently use the sidecar itself as their
+    // catalog, so deleting first would lose the information needed to rebuild.
+    const auto secondaryIndexes = getIndexMetadata(dbname, tablename);
+    const auto compositeIndexes = getCompositeIndexes(dbname, tablename);
+    const auto hashColumns = getHashIndexedColumns(dbname, tablename);
+    const auto bloomColumns = getBloomIndexedColumns(dbname, tablename);
+    const auto fullTextColumns = getFullTextIndexedColumns(dbname, tablename);
+    const auto ginColumns = getGinIndexedColumns(dbname, tablename);
+    const auto gistColumns = getGiSTIndexedColumns(dbname, tablename);
+    const auto spgistColumns = getSPGiSTIndexedColumns(dbname, tablename);
+    const auto brinColumns = getBrinIndexedColumns(dbname, tablename);
+
+    ReadView readView;
     {
-        auto pa = std::make_unique<PageAllocator>(dataPath(dbname, tablename).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
-        pa->open();
-        pageAllocators_[key] = std::move(pa);
+        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        readView.creatorTxnId = 0;
+        readView.lowLimitId = TxnIdGenerator::instance().maxCommittedTxId() + 1;
+        readView.upLimitId = activeTransactions_.empty()
+            ? readView.lowLimitId : *activeTransactions_.begin();
+        readView.activeTxnIds = activeTransactions_;
+        readView.subTxnIds.clear();
+        readView.commitLog = getCommitLog(dbname);
     }
 
-    // Release exclusive lock before re-inserting (insert acquires its own lock)
-    lockManager_.unlock(tablename);
+    // Read full tuples, not reconstructed SQL maps.  This preserves the null
+    // bitmap, exact binary encodings and existing TOAST object identifiers.
+    auto scanRelation = [&](RewriteRelation& relation,
+                            PageAllocator& allocator) -> bool {
+        const uint32_t pageCount = allocator.numPages();
+        for (uint32_t pageId = 1; pageId < pageCount; ++pageId) {
+            if (!lockManager_.pageLockShared(dbname, tablename, pageId))
+                return false;
+            char* buffer = allocator.fetchPage(pageId);
+            if (!buffer) {
+                lockManager_.pageUnlock(dbname, tablename, pageId);
+                return false;
+            }
+            PageWrapper page(buffer, allocator.pageSize(), tbl.formatVersion);
+            bool valid = page.isValid();
+            if (valid) {
+                page.forEachLive([&](uint16_t, const char* tuple, size_t length) {
+                    if (!valid) return;
+                    if (length < sizeof(HeapTupleHeaderData)) {
+                        valid = false;
+                        return;
+                    }
+                    const auto* header = castHeapHeader(tuple);
+                    const size_t minimumHeader = rowHeaderSize(
+                        tbl.formatVersion, tbl.len);
+                    if (header->t_hoff < minimumHeader ||
+                        header->t_hoff > length) {
+                        valid = false;
+                        return;
+                    }
+                    if (readView.isVisible(
+                            tuple, length, tbl.formatVersion)) {
+                        relation.tuples.emplace_back(tuple, length);
+                    }
+                });
+            }
+            allocator.unpinPage(pageId);
+            lockManager_.pageUnlock(dbname, tablename, pageId);
+            if (!valid) return false;
+        }
+        return true;
+    };
 
-    // Re-insert all rows (this rebuilds PK and secondary indexes)
-    for (const auto& values : rows) {
-        insert(dbname, tablename, values);
+    size_t rowCount = 0;
+    for (auto& relation : relations) {
+        std::error_code existsError;
+        if (!std::filesystem::is_regular_file(relation.path, existsError) ||
+            existsError) {
+            return 0;
+        }
+        if (tbl.partitionType == TableSchema::PartitionType::None) {
+            PageAllocator* allocator = getPageAllocator(dbname, tablename);
+            if (!allocator || !scanRelation(relation, *allocator)) {
+                return 0;
+            }
+        } else {
+            PageAllocator allocator(
+                relation.path.string(), tbl.rowSize(),
+                pageSizeForFormatVersion(tbl.formatVersion),
+                tbl.formatVersion);
+            if (!allocator.open() || !scanRelation(relation, allocator)) {
+                return 0;
+            }
+            if (!allocator.flush()) {
+                return 0;
+            }
+            allocator.close();
+        }
+        rowCount += relation.tuples.size();
     }
 
-    // Reset dead tuple count
-    auto dtKey = std::make_pair(dbname, tablename);
-    std::lock_guard<std::mutex> lock(deadTupleMutex_);
-    deadTupleCounts_[dtKey] = 0;
+    // Make the backup a faithful image of every cached relation fork.
+    if (!flushDatabaseCaches(dbname)) {
+        return 0;
+    }
+    if (auto it = fsmCache_.find(tableKey); it != fsmCache_.end() && it->second)
+        it->second->flush();
+    if (auto it = vmCache_.find(tableKey); it != vmCache_.end() && it->second)
+        it->second->flush();
+    for (const auto& column : bloomColumns) {
+        BloomIndex* index = getBloomIndex(dbname, tablename, column);
+        if (!index || !index->flush()) {
+            return 0;
+        }
+    }
 
-    // Clean up orphaned TOAST entries
-    vacuumToast(dbname, tablename);
+    std::set<std::filesystem::path> physicalPaths;
+    for (const auto& relation : relations) physicalPaths.insert(relation.path);
+    physicalPaths.insert(fsmPath(dbname, tablename));
+    physicalPaths.insert(vmPath(dbname, tablename));
+    physicalPaths.insert(indexPath(dbname, tablename));
+    for (const auto& index : secondaryIndexes) {
+        physicalPaths.insert(secondaryIndexPath(
+            dbname, tablename, index.name));
+    }
+    for (const auto& index : compositeIndexes) {
+        physicalPaths.insert(relationDir(dbname, tablename) /
+                             (tablename + ".idx_" + index.name));
+    }
+    for (const auto& column : hashColumns)
+        physicalPaths.insert(hashIndexPath(dbname, tablename, column));
+    for (const auto& column : bloomColumns)
+        physicalPaths.insert(bloomIndexPath(dbname, tablename, column));
+    for (const auto& column : fullTextColumns)
+        physicalPaths.insert(fullTextIndexPath(dbname, tablename, column));
+    for (const auto& column : ginColumns)
+        physicalPaths.insert(ginIndexPath(dbname, tablename, column));
+    for (const auto& column : gistColumns)
+        physicalPaths.insert(giSTIndexPath(dbname, tablename, column));
+    for (const auto& column : spgistColumns)
+        physicalPaths.insert(spGiSTIndexPath(dbname, tablename, column));
+    for (const auto& column : brinColumns)
+        physicalPaths.insert(brinIndexPath(dbname, tablename, column));
+    // TDE keeps authentication/encryption state beside each protected file.
+    // It must participate in the same backup/swap boundary as its owner.
+    std::vector<std::filesystem::path> tdeSidecars;
+    for (const auto& path : physicalPaths) {
+        const auto sidecar = std::filesystem::path(path.string() + ".tde");
+        tdeSidecars.push_back(sidecar);
+    }
+    physicalPaths.insert(tdeSidecars.begin(), tdeSidecars.end());
 
-    return rows.size();
+    const auto relationRoot = relationDir(dbname, tablename);
+    std::filesystem::path backupDirectory;
+    std::error_code fileError;
+    for (size_t attempt = 0; attempt < 1000; ++attempt) {
+        const auto candidate = relationRoot /
+            ("." + tablename + ".vacuum_full_backup." +
+             std::to_string(attempt));
+        if (std::filesystem::create_directory(candidate, fileError)) {
+            backupDirectory = candidate;
+            break;
+        }
+        if (fileError) {
+            fileError.clear();
+            if (!std::filesystem::exists(candidate)) break;
+        }
+    }
+    if (backupDirectory.empty()) {
+        return 0;
+    }
+
+    std::vector<std::pair<std::filesystem::path, std::filesystem::path>> backups;
+    size_t backupNumber = 0;
+    bool backupValid = true;
+    for (const auto& path : physicalPaths) {
+        fileError.clear();
+        if (!std::filesystem::exists(path, fileError)) {
+            if (fileError) {
+                backupValid = false;
+                break;
+            }
+            continue;
+        }
+        if (!std::filesystem::is_regular_file(path, fileError) || fileError) {
+            backupValid = false;
+            break;
+        }
+        const auto backup = backupDirectory /
+            (std::to_string(backupNumber++) + ".bak");
+        if (!std::filesystem::copy_file(path, backup,
+                                         std::filesystem::copy_options::none,
+                                         fileError) || fileError) {
+            backupValid = false;
+            break;
+        }
+        backups.emplace_back(path, backup);
+    }
+    if (!backupValid) {
+        std::error_code cleanupError;
+        std::filesystem::remove_all(backupDirectory, cleanupError);
+        return 0;
+    }
+
+    const auto evictTableCaches = [&]() {
+        pageAllocators_.erase(tableKey);
+        fsmCache_.erase(tableKey);
+        vmCache_.erase(tableKey);
+        pkIndexCache_.erase(tableKey);
+        secidxLinesCache_.erase(tableKey);
+        hashidxLinesCache_.erase(tableKey);
+        for (auto it = secondaryIndexCache_.begin();
+             it != secondaryIndexCache_.end();) {
+            if (it->first.rfind(secondaryPrefix, 0) == 0)
+                it = secondaryIndexCache_.erase(it);
+            else
+                ++it;
+        }
+        for (auto it = hashIndexCache_.begin();
+             it != hashIndexCache_.end();) {
+            if (it->first.rfind(hashPrefix, 0) == 0)
+                it = hashIndexCache_.erase(it);
+            else
+                ++it;
+        }
+        for (auto it = bloomIndexCache_.begin();
+             it != bloomIndexCache_.end();) {
+            if (it->first.rfind(hashPrefix, 0) == 0)
+                it = bloomIndexCache_.erase(it);
+            else
+                ++it;
+        }
+        std::lock_guard<std::mutex> lock(spGiSTMutex_);
+        for (auto it = spGiSTCache_.begin(); it != spGiSTCache_.end();) {
+            if (it->first.rfind(secondaryPrefix, 0) == 0)
+                it = spGiSTCache_.erase(it);
+            else
+                ++it;
+        }
+    };
+
+    std::map<std::string, std::unique_ptr<PageAllocator>> destinations;
+    bool mutationStarted = false;
+    const auto restoreBackup = [&]() {
+        evictTableCaches();
+        bool restored = true;
+        for (const auto& path : physicalPaths) {
+            std::error_code removeError;
+            std::filesystem::remove(path, removeError);
+            if (removeError) restored = false;
+        }
+        for (const auto& [target, backup] : backups) {
+            std::error_code restoreError;
+            if (!std::filesystem::copy_file(
+                    backup, target,
+                    std::filesystem::copy_options::overwrite_existing,
+                    restoreError) || restoreError) {
+                restored = false;
+            }
+        }
+        if (restored) {
+            std::error_code cleanupError;
+            std::filesystem::remove_all(backupDirectory, cleanupError);
+        } else {
+            std::cerr << "[vacuum full] restore failed; recovery copies remain in "
+                      << backupDirectory << std::endl;
+        }
+        return restored;
+    };
+    const auto failRewrite = [&]() -> size_t {
+        // Close private rewrite descriptors before restoring their paths;
+        // otherwise a destructor flush could race the restored files.
+        destinations.clear();
+        if (mutationStarted) restoreBackup();
+        else {
+            std::error_code cleanupError;
+            std::filesystem::remove_all(backupDirectory, cleanupError);
+        }
+        return 0;
+    };
+
+    try {
+        evictTableCaches();
+        mutationStarted = true;
+        for (const auto& path : physicalPaths) {
+        fileError.clear();
+        std::filesystem::remove(path, fileError);
+        if (fileError) return failRewrite();
+        }
+
+    // Create one fresh heap per physical partition and copy visible tuples to
+    // the same partition.  No SQL INSERT is executed, so triggers, sequences,
+    // constraints and TOAST allocation are not spuriously invoked.
+    for (const auto& relation : relations) {
+        auto allocator = std::make_unique<PageAllocator>(
+            relation.path.string(), tbl.rowSize(),
+            pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
+        if (!allocator->open()) return failRewrite();
+        destinations.emplace(relation.path.string(), std::move(allocator));
+    }
+
+    const auto appendTuple = [&](PageAllocator& allocator,
+                                 const std::string& sourceTuple) -> bool {
+        std::string tuple = sourceTuple;
+        for (uint32_t pageId = 1; pageId < allocator.numPages(); ++pageId) {
+            char* buffer = allocator.fetchPage(pageId);
+            if (!buffer) return false;
+            PageWrapper page(buffer, allocator.pageSize(), tbl.formatVersion);
+            uint16_t slotId = 0;
+            bool inserted = false;
+            if (page.canFit(tuple.size()) &&
+                page.insert(tuple.data(), tuple.size(), slotId)) {
+                setRowCtid(tuple.data(), tuple.size(), tbl.formatVersion,
+                           ItemPointer{pageId,
+                                       static_cast<OffsetNumber>(slotId + 1)});
+                uint16_t updatedSlot = slotId;
+                inserted = page.update(slotId, tuple.data(), tuple.size(),
+                                       updatedSlot) && updatedSlot == slotId;
+                if (inserted) {
+                    allocator.markDirty(pageId);
+                } else {
+                    page.remove(slotId);
+                    allocator.markDirty(pageId);
+                }
+            }
+            allocator.unpinPage(pageId);
+            if (inserted) return true;
+        }
+
+        const uint32_t pageId = allocator.allocPage();
+        if (pageId == 0) return false;
+        char* buffer = allocator.fetchPage(pageId);
+        if (!buffer) return false;
+        PageWrapper page(buffer, allocator.pageSize(), tbl.formatVersion);
+        uint16_t slotId = 0;
+        bool inserted = page.insert(tuple.data(), tuple.size(), slotId);
+        if (inserted) {
+            setRowCtid(tuple.data(), tuple.size(), tbl.formatVersion,
+                       ItemPointer{pageId,
+                                   static_cast<OffsetNumber>(slotId + 1)});
+            uint16_t updatedSlot = slotId;
+            inserted = page.update(slotId, tuple.data(), tuple.size(),
+                                   updatedSlot) && updatedSlot == slotId;
+            if (inserted) {
+                allocator.markDirty(pageId);
+            } else {
+                page.remove(slotId);
+                allocator.markDirty(pageId);
+            }
+        }
+        allocator.unpinPage(pageId);
+        return inserted;
+    };
+
+    for (const auto& relation : relations) {
+        auto destination = destinations.find(relation.path.string());
+        if (destination == destinations.end()) return failRewrite();
+        for (const auto& tuple : relation.tuples) {
+            if (!appendTuple(*destination->second, tuple))
+                return failRewrite();
+        }
+    }
+    for (auto& [_, allocator] : destinations) {
+        if (!allocator->flush()) return failRewrite();
+        allocator->close();
+    }
+    destinations.clear();
+
+    // Rebuild every RID-bearing access method before making the new heap
+    // observable.  The physical backups make any failure recoverable.
+    if (reindex(dbname, tablename) != DBStatus::OK)
+        return failRewrite();
+
+    bool auxiliaryValid = true;
+    for (const auto& column : hashColumns) {
+        HashIndex* index = getHashIndex(dbname, tablename, column);
+        if (!index) return failRewrite();
+        index->clear();
+        if (!forEachRow(dbname, tablename,
+                [&](uint32_t pageId, uint16_t slotId,
+                    const char* data, size_t length) {
+                    if (!auxiliaryValid) return;
+                    const std::string row(data, length);
+                    size_t columnIndex = tbl.len;
+                    for (size_t i = 0; i < tbl.len; ++i) {
+                        if (tbl.cols[i].dataName == column) {
+                            columnIndex = i;
+                            break;
+                        }
+                    }
+                    if (columnIndex >= tbl.len) {
+                        auxiliaryValid = false;
+                        return;
+                    }
+                    const std::string value = extractColumnValue(
+                        row, tbl, columnIndex, dbname, true);
+                    if (!value.empty() &&
+                        !index->insert(value, encodeRid(pageId, slotId))) {
+                        auxiliaryValid = false;
+                    }
+                }) || !auxiliaryValid || !index->flush()) {
+            return failRewrite();
+        }
+    }
+    for (const auto& column : bloomColumns) {
+        BloomIndex* index = getBloomIndex(dbname, tablename, column);
+        if (!index) return failRewrite();
+        index->clear();
+        auxiliaryValid = true;
+        if (!forEachRow(dbname, tablename,
+                [&](uint32_t pageId, uint16_t slotId,
+                    const char* data, size_t length) {
+                    if (!auxiliaryValid) return;
+                    const std::string row(data, length);
+                    size_t columnIndex = tbl.len;
+                    for (size_t i = 0; i < tbl.len; ++i) {
+                        if (tbl.cols[i].dataName == column) {
+                            columnIndex = i;
+                            break;
+                        }
+                    }
+                    if (columnIndex >= tbl.len) {
+                        auxiliaryValid = false;
+                        return;
+                    }
+                    const std::string value = extractColumnValue(
+                        row, tbl, columnIndex, dbname, true);
+                    if (!value.empty() &&
+                        !index->insert(value, encodeRid(pageId, slotId))) {
+                        auxiliaryValid = false;
+                    }
+                }) || !auxiliaryValid || !index->flush()) {
+            return failRewrite();
+        }
+    }
+    for (const auto& column : fullTextColumns) {
+        if (createFullTextIndex(dbname, tablename, column) != DBStatus::OK)
+            return failRewrite();
+    }
+    for (const auto& column : ginColumns) {
+        if (createGinIndex(dbname, tablename, column) != DBStatus::OK)
+            return failRewrite();
+    }
+    for (const auto& column : gistColumns) {
+        if (createGiSTIndex(dbname, tablename, column) != DBStatus::OK)
+            return failRewrite();
+    }
+    for (const auto& column : spgistColumns) {
+        if (createSPGiSTIndex(dbname, tablename, column) != DBStatus::OK)
+            return failRewrite();
+    }
+    for (const auto& column : brinColumns) {
+        if (createBrinIndex(dbname, tablename, column, 64) != DBStatus::OK)
+            return failRewrite();
+    }
+
+    if (!flushDatabaseCaches(dbname)) return failRewrite();
+    std::error_code cleanupError;
+    std::filesystem::remove_all(backupDirectory, cleanupError);
+    if (cleanupError) {
+        std::cerr << "[vacuum full] could not remove completed backup "
+                  << backupDirectory << ": " << cleanupError.message()
+                  << std::endl;
+    }
+
+    {
+        const auto deadTupleKey = std::make_pair(dbname, tablename);
+        std::lock_guard<std::mutex> lock(deadTupleMutex_);
+        deadTupleCounts_[deadTupleKey] = 0;
+    }
+        return rowCount;
+    } catch (const std::exception& error) {
+        std::cerr << "[vacuum full] rewrite failed: " << error.what()
+                  << std::endl;
+        return failRewrite();
+    } catch (...) {
+        std::cerr << "[vacuum full] rewrite failed with an unknown error"
+                  << std::endl;
+        return failRewrite();
+    }
 }
 
 // ========================================================================
