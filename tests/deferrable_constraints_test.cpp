@@ -53,6 +53,13 @@ static void setup() {
         "  tag VARCHAR(20), "
         "  CONSTRAINT uniq_tag_key UNIQUE (tag) DEFERRABLE INITIALLY DEFERRED)", s));
     assert(!ddl.executeSql(
+        "CREATE TABLE immediate_uniq ("
+        "  id INT PRIMARY KEY, "
+        "  tag VARCHAR(20) UNIQUE)", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE immediate_composite ("
+        "  id INT PRIMARY KEY, a INT, b INT, UNIQUE (a, b))", s));
+    assert(!ddl.executeSql(
         "CREATE TABLE excl ("
         "  id INT PRIMARY KEY, "
         "  rng INT, "
@@ -130,6 +137,15 @@ static void test_unique_deferred_swap() {
     std::cout << "[DEFER] UNIQUE deferred key swap commit OK" << std::endl;
 }
 
+static void test_unique_deferred_update_violation() {
+    assert(g_engine.beginTransaction(db) == DBStatus::OK);
+    assert(g_engine.update(db, "uniq", {{"tag", "c"}}, {"=id 1"})
+               == DBStatus::OK);
+    assert(g_engine.commitTransaction() == DBStatus::INVALID_VALUE);
+    std::cout << "[DEFER] UNIQUE deferred conflicting update rejected OK"
+              << std::endl;
+}
+
 static void test_unique_deferred_violation() {
     assert(g_engine.beginTransaction(db) == DBStatus::OK);
     assert(g_engine.insert(db, "uniq", {{"id", "10"}, {"tag", "dup"}}) == DBStatus::OK);
@@ -137,6 +153,34 @@ static void test_unique_deferred_violation() {
     // Duplicate never resolved -> COMMIT must fail.
     assert(g_engine.commitTransaction() == DBStatus::INVALID_VALUE);
     std::cout << "[DEFER] UNIQUE deferred duplicate commit rejected OK" << std::endl;
+}
+
+static void test_immediate_unique_updates() {
+    assert(g_engine.insert(
+               db, "immediate_uniq", {{"id", "1"}, {"tag", "a"}})
+               == DBStatus::OK);
+    assert(g_engine.insert(
+               db, "immediate_uniq", {{"id", "2"}, {"tag", "b"}})
+               == DBStatus::OK);
+    assert(g_engine.update(
+               db, "immediate_uniq", {{"tag", "a"}}, {"=id 2"})
+               == DBStatus::DUPLICATE_KEY);
+    assert(g_engine.update(
+               db, "immediate_uniq", {{"id", "1"}}, {"=id 2"})
+               == DBStatus::DUPLICATE_KEY);
+    assert(g_engine.insert(
+               db, "immediate_composite",
+               {{"id", "1"}, {"a", "10"}, {"b", "20"}})
+               == DBStatus::OK);
+    assert(g_engine.insert(
+               db, "immediate_composite",
+               {{"id", "2"}, {"a", "10"}, {"b", "30"}})
+               == DBStatus::OK);
+    assert(g_engine.update(
+               db, "immediate_composite", {{"b", "20"}}, {"=id 2"})
+               == DBStatus::DUPLICATE_KEY);
+    std::cout << "[DEFER] immediate UNIQUE, composite UNIQUE and PRIMARY KEY updates reject duplicates OK"
+              << std::endl;
 }
 
 static void test_set_constraints_immediate() {
@@ -158,6 +202,8 @@ int main() {
     test_fk_deferred_violation();
     test_unique_deferred_single_insert();
     test_unique_deferred_swap();
+    test_immediate_unique_updates();
+    test_unique_deferred_update_violation();
     test_unique_deferred_violation();
     test_set_constraints_immediate();
     std::cout << "[DEFER] all tests passed" << std::endl;

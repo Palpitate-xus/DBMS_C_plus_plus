@@ -19476,8 +19476,122 @@ DBStatus StorageEngine::updateInternal(
             }
         }
 
-        // Check if PK changed and apply ON UPDATE foreign key actions
+        // UPDATE must enforce the same key constraints as INSERT.  Validate
+        // against the final row image (including generated columns and
+        // BEFORE-trigger changes) before mutating the heap or indexes.
+        std::vector<DeferredCheck> pendingDeferredUniqueChecks;
+        const auto validateUniqueUpdate = [&](
+                const std::vector<size_t>& columns,
+                const std::string& constraintName) -> DBStatus {
+            if (columns.empty()) return DBStatus::OK;
+            std::vector<std::string> oldValues;
+            std::vector<std::string> newValues;
+            oldValues.reserve(columns.size());
+            newValues.reserve(columns.size());
+            for (const size_t columnIndex : columns) {
+                if (columnIndex >= tbl.len) return DBStatus::CORRUPTED_DATA;
+                const std::string& columnName = tbl.cols[columnIndex].dataName;
+                const std::string oldValue =
+                    valueFromRowMap(oldLogicalValues, columnName);
+                const std::string newValue =
+                    valueFromRowMap(rowValues, columnName);
+                // UNIQUE treats NULL values as distinct.  The legacy row
+                // representation exposes SQL NULL as an empty value here.
+                if (newValue.empty()) return DBStatus::OK;
+                oldValues.push_back(oldValue);
+                newValues.push_back(newValue);
+            }
+            if (oldValues == newValues) return DBStatus::OK;
+
+            if (columns.size() == 1 &&
+                transactionContext().inTransaction &&
+                isConstraintCurrentlyDeferred(
+                    dbname, tablename, constraintName)) {
+                DeferredCheck check;
+                check.kind = DeferredCheck::Kind::Unique;
+                check.dbname = dbname;
+                check.tablename = tablename;
+                check.rid = rid;
+                check.constraintName = constraintName;
+                check.colIdx = columns.front();
+                check.uniqueCol = tbl.cols[columns.front()].dataName;
+                check.payloadValue = newValues.front();
+                check.exceptRid = rid;
+                pendingDeferredUniqueChecks.push_back(std::move(check));
+                return DBStatus::OK;
+            }
+
+            bool duplicate = false;
+            const bool scanOk = forEachRow(
+                dbname, tablename,
+                [&](uint32_t otherPage, uint16_t otherSlot,
+                    const char* data, size_t length) {
+                    if (duplicate ||
+                        encodeRid(otherPage, otherSlot) == rid) {
+                        return;
+                    }
+                    const std::string otherRow(data, length);
+                    for (size_t valueIndex = 0;
+                         valueIndex < columns.size(); ++valueIndex) {
+                        if (extractColumnValue(
+                                otherRow, tbl, columns[valueIndex], dbname) !=
+                            newValues[valueIndex]) {
+                            return;
+                        }
+                    }
+                    duplicate = true;
+                });
+            if (!scanOk) return DBStatus::IO_ERROR;
+            return duplicate ? DBStatus::DUPLICATE_KEY : DBStatus::OK;
+        };
+
+        for (size_t columnIndex = 0; columnIndex < tbl.len; ++columnIndex) {
+            if (!tbl.cols[columnIndex].isUnique) continue;
+            const std::string constraintName =
+                tablename + "_" + tbl.cols[columnIndex].dataName + "_key";
+            const DBStatus uniqueStatus = validateUniqueUpdate(
+                {columnIndex}, constraintName);
+            if (uniqueStatus != DBStatus::OK) {
+                lockManager_.unlock(tablename);
+                return uniqueStatus;
+            }
+        }
+        for (size_t constraintIndex = 0;
+             constraintIndex < tbl.uniqueConstraints.size();
+             ++constraintIndex) {
+            const auto& columns = tbl.uniqueConstraints[constraintIndex];
+            std::string constraintName;
+            if (constraintIndex < tbl.uniqueConstraintNames.size()) {
+                constraintName = tbl.uniqueConstraintNames[constraintIndex];
+            }
+            if (constraintName.empty() && !columns.empty() &&
+                columns.front() < tbl.len) {
+                constraintName = tablename + "_" +
+                    tbl.cols[columns.front()].dataName + "_key";
+            }
+            const DBStatus uniqueStatus =
+                validateUniqueUpdate(columns, constraintName);
+            if (uniqueStatus != DBStatus::OK) {
+                lockManager_.unlock(tablename);
+                return uniqueStatus;
+            }
+        }
+
+        // Check if PK changed and apply ON UPDATE foreign key actions.
         std::string newPK = tbl.buildPKValue(rowValues);
+        if (tbl.hasPrimaryKey() && oldPK != newPK && !newPK.empty()) {
+            BPTree* primaryIndex = getPKIndex(dbname, tablename);
+            if (!primaryIndex) {
+                lockManager_.unlock(tablename);
+                return DBStatus::IO_ERROR;
+            }
+            int64_t existingRid = -1;
+            if (primaryIndex->search(newPK, existingRid) &&
+                existingRid != rid) {
+                lockManager_.unlock(tablename);
+                return DBStatus::DUPLICATE_KEY;
+            }
+        }
         if (!oldPK.empty() && oldPK != newPK) {
             // Collect all referencing rows and their ON UPDATE actions
             struct UpdateCascadeAction { std::string table; int64_t rid; std::map<std::string, std::string> newFkVals; };
@@ -20017,6 +20131,15 @@ DBStatus StorageEngine::updateInternal(
                 }
                 if (check.rid == rid) check.rid = actualRid;
                 if (check.exceptRid == rid) check.exceptRid = actualRid;
+            }
+        }
+        if (!pendingDeferredUniqueChecks.empty()) {
+            auto& deferred = transactionContext().deferredChecks[
+                transactionContext().currentTxnId];
+            for (auto& check : pendingDeferredUniqueChecks) {
+                check.rid = actualRid;
+                check.exceptRid = actualRid;
+                deferred.push_back(std::move(check));
             }
         }
 
