@@ -626,6 +626,15 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
     std::string ta = toLower(a.typeName);
     std::string tb = toLower(b.typeName);
 
+    // Boolean columns are commonly supplied by storage as "true"/"false",
+    // while SQL boolean literals are represented internally as "t"/"f".
+    // Compare their logical values instead of their different spellings.
+    if (ta == "boolean" && tb == "boolean") {
+        const bool ba = a.asBool();
+        const bool bb = b.asBool();
+        return (ba > bb) - (ba < bb);
+    }
+
     // Exact numeric comparison for explicit numeric/decimal types.
     if (isNumericTypeName(a.typeName) || isNumericTypeName(b.typeName)) {
         auto na = tryParseNumeric(a.value);
