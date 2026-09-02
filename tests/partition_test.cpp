@@ -158,6 +158,38 @@ static void test_list_partitioning() {
     std::cout << "[PART] list partitioning OK" << std::endl;
 }
 
+// RANGE DEFAULT is a physical leaf too: inserts routed past the final bound
+// must remain visible to full scans and partition-pruned reads.
+static void test_range_default_partition() {
+    std::string db = testDbPath("part_range_default");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    auto tbl = makeSchema("measurements", {"id int", "bucket int"});
+    tbl.partitionType = dbms::TableSchema::PartitionType::Range;
+    tbl.partitionKey = "bucket";
+    tbl.rangePartitions = {{"bounded", "20"}};
+    tbl.defaultPartitionName = "fallback";
+    assert(g_engine.createTable(db, tbl) == dbms::DBStatus::OK);
+    assert(std::filesystem::is_regular_file(
+        std::filesystem::path(db) / "measurements#fallback.dt"));
+
+    assert(g_engine.insert(
+               db, "measurements", {{"id", "1"}, {"bucket", "10"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(
+               db, "measurements", {{"id", "2"}, {"bucket", "30"}}) ==
+           dbms::DBStatus::OK);
+    assert(rowCount(db, "measurements") == 2);
+    const auto fallbackRows =
+        g_engine.query(db, "measurements", {"=bucket 30"}, {"id"});
+    assert(fallbackRows.size() == 1);
+    assert(fallbackRows.front().find('2') != std::string::npos);
+
+    cleanup(db);
+    std::cout << "[PART] range default partition OK" << std::endl;
+}
+
 // Hash-partitioned table: rows distribute across p0/p1/p2/p3.
 static void test_hash_partitioning() {
     std::string db = testDbPath("part_hash");
@@ -260,6 +292,7 @@ int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_range_partitioning();
     test_list_partitioning();
+    test_range_default_partition();
     test_hash_partitioning();
     test_subpartitioning();
     test_partition_wal_routing();

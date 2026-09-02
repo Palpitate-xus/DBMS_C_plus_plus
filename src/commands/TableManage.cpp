@@ -4834,64 +4834,45 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
     };
 
     if (tbl.partitionType != TableSchema::PartitionType::None) {
-        // Partitioned table: iterate over target partition files (or all if empty)
-        std::vector<std::string> partNames = targetPartitions;
-        if (partNames.empty()) {
-            if (tbl.partitionType == TableSchema::PartitionType::Range) {
-                for (const auto& rp : tbl.rangePartitions) partNames.push_back(rp.first);
-            } else if (tbl.partitionType == TableSchema::PartitionType::List) {
-                for (const auto& lp : tbl.listPartitions) partNames.push_back(lp.first);
-                if (!tbl.defaultPartitionName.empty()) partNames.push_back(tbl.defaultPartitionName);
-            } else if (tbl.partitionType == TableSchema::PartitionType::Hash) {
-                for (size_t i = 0; i < tbl.hashPartitions; ++i) partNames.push_back("p" + std::to_string(i));
+        // Iterate physical leaves, including RANGE/LIST DEFAULT partitions
+        // and hash subpartitions.  targetPartitions contains top-level names
+        // produced by pruning, so all of a selected partition's leaves remain
+        // visible.
+        for (const auto& leaf : partitionLeaves(tbl)) {
+            if (!targetPartitions.empty() &&
+                std::find(targetPartitions.begin(), targetPartitions.end(),
+                          leaf.partition) == targetPartitions.end()) {
+                continue;
             }
-        }
-        for (const auto& pname : partNames) {
-            if (tbl.subPartitionType != TableSchema::PartitionType::None) {
-                std::vector<std::string> subNames;
-                if (tbl.subPartitionType == TableSchema::PartitionType::Hash) {
-                    for (size_t i = 0; i < tbl.subHashPartitions; ++i) subNames.push_back("sp" + std::to_string(i));
+            const auto path = leaf.subPartition.empty()
+                ? partitionDataPath(dbname, tablename, leaf.partition)
+                : partitionDataPath(dbname, tablename, leaf.partition,
+                                    leaf.subPartition);
+            auto ppa = std::make_unique<PageAllocator>(
+                path.string(), tbl.rowSize(),
+                pageSizeForFormatVersion(tbl.formatVersion),
+                tbl.formatVersion);
+            if (!ppa->open()) return false;
+            const uint32_t pageCount = ppa->numPages();
+            for (uint32_t pageId = 1; pageId < pageCount; ++pageId) {
+                if (!lockManager_.pageLockShared(
+                        dbname, tablename, pageId)) return false;
+                char* buffer = ppa->fetchPage(pageId);
+                if (!buffer) {
+                    lockManager_.pageUnlock(dbname, tablename, pageId);
+                    return false;
                 }
-                for (const auto& spname : subNames) {
-                    auto ppa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, pname, spname).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
-                    if (!ppa->open()) return false;
-                    uint32_t np = ppa->numPages();
-                    for (uint32_t pid = 1; pid < np; ++pid) {
-                        if (!lockManager_.pageLockShared(dbname, tablename, pid)) return false;
-                        char* buf = ppa->fetchPage(pid);
-                        if (!buf) {
-                            lockManager_.pageUnlock(dbname, tablename, pid);
-                            return false;
-                        }
-                        PageWrapper page(buf, ppa->pageSize(), tbl.formatVersion);
-                        page.forEachLive([&emitRow, pid](uint16_t sid, const char* data, size_t len) {
-                            emitRow(pid, sid, data, len);
-                        });
-                        ppa->unpinPage(pid);
-                        lockManager_.pageUnlock(dbname, tablename, pid);
-                    }
-                    ppa->close();
-                }
-            } else {
-                auto ppa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, pname).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
-                if (!ppa->open()) return false;
-                uint32_t np = ppa->numPages();
-                for (uint32_t pid = 1; pid < np; ++pid) {
-                    if (!lockManager_.pageLockShared(dbname, tablename, pid)) return false;
-                    char* buf = ppa->fetchPage(pid);
-                    if (!buf) {
-                        lockManager_.pageUnlock(dbname, tablename, pid);
-                        return false;
-                    }
-                    PageWrapper page(buf, ppa->pageSize(), tbl.formatVersion);
-                    page.forEachLive([&emitRow, pid](uint16_t sid, const char* data, size_t len) {
-                        emitRow(pid, sid, data, len);
+                PageWrapper page(
+                    buffer, ppa->pageSize(), tbl.formatVersion);
+                page.forEachLive(
+                    [&emitRow, pageId](uint16_t slotId, const char* data,
+                                       size_t length) {
+                        emitRow(pageId, slotId, data, length);
                     });
-                    ppa->unpinPage(pid);
-                    lockManager_.pageUnlock(dbname, tablename, pid);
-                }
-                ppa->close();
+                ppa->unpinPage(pageId);
+                lockManager_.pageUnlock(dbname, tablename, pageId);
             }
+            ppa->close();
         }
         return true;
     }
@@ -11599,25 +11580,13 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
         std::filesystem::remove_all(toastDir(dbname, tbl.tablename), ec);
         ec.clear();
 
-        if (tblWithVersion.partitionType == TableSchema::PartitionType::Range) {
-            for (const auto& p : tblWithVersion.rangePartitions) {
-                std::filesystem::remove(relationRoot /
-                    (tbl.tablename + "#" + p.first + ".dt"), ec);
-                ec.clear();
-            }
-        } else if (tblWithVersion.partitionType == TableSchema::PartitionType::List) {
-            for (const auto& p : tblWithVersion.listPartitions) {
-                std::filesystem::remove(relationRoot /
-                    (tbl.tablename + "#" + p.first + ".dt"), ec);
-                ec.clear();
-            }
-        } else if (tblWithVersion.partitionType == TableSchema::PartitionType::Hash) {
-            for (size_t i = 0; i < tblWithVersion.hashPartitions; ++i) {
-                std::filesystem::remove(
-                    relationRoot /
-                    (tbl.tablename + "#p" + std::to_string(i) + ".dt"), ec);
-                ec.clear();
-            }
+        for (const auto& leaf : partitionLeaves(tblWithVersion)) {
+            const std::string suffix = "#" + leaf.partition +
+                (leaf.subPartition.empty()
+                     ? "" : "#" + leaf.subPartition);
+            std::filesystem::remove(
+                relationRoot / (tbl.tablename + suffix + ".dt"), ec);
+            ec.clear();
         }
 
         std::vector<std::string> names = getTableNames(dbname);
@@ -11683,27 +11652,15 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
     };
     // Initialize page-based data file(s) via PageAllocator
     if (tblWithVersion.partitionType != TableSchema::PartitionType::None) {
-        if (tblWithVersion.partitionType == TableSchema::PartitionType::Range) {
-            for (const auto& rp : tblWithVersion.rangePartitions) {
-                if (!initializeHeap(partitionDataPath(dbname, tblWithVersion.tablename, rp.first),
-                                    tblWithVersion.rowSize())) {
-                    return failCreate("could not initialize table partition");
-                }
-            }
-        } else if (tblWithVersion.partitionType == TableSchema::PartitionType::List) {
-            for (const auto& lp : tblWithVersion.listPartitions) {
-                if (!initializeHeap(partitionDataPath(dbname, tblWithVersion.tablename, lp.first),
-                                    tblWithVersion.rowSize())) {
-                    return failCreate("could not initialize table partition");
-                }
-            }
-        } else if (tblWithVersion.partitionType == TableSchema::PartitionType::Hash) {
-            for (size_t i = 0; i < tblWithVersion.hashPartitions; ++i) {
-                if (!initializeHeap(partitionDataPath(dbname, tblWithVersion.tablename,
-                                                      "p" + std::to_string(i)),
-                                    tblWithVersion.rowSize())) {
-                    return failCreate("could not initialize table partition");
-                }
+        for (const auto& leaf : partitionLeaves(tblWithVersion)) {
+            const auto path = leaf.subPartition.empty()
+                ? partitionDataPath(
+                      dbname, tblWithVersion.tablename, leaf.partition)
+                : partitionDataPath(
+                      dbname, tblWithVersion.tablename, leaf.partition,
+                      leaf.subPartition);
+            if (!initializeHeap(path, tblWithVersion.rowSize())) {
+                return failCreate("could not initialize table partition");
             }
         }
     } else {
