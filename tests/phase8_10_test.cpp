@@ -93,8 +93,11 @@ static void test_large_object() {
     assert(loMgr.write(lo, 0, "Hello World"));
     assert(loMgr.read(lo) == "Hello World");
     assert(loMgr.write(lo, 6, "DBMS"));
-    assert(loMgr.read(lo).rfind("DBMS") != std::string::npos);
-    assert(loMgr.size(lo) >= 9);
+    assert(loMgr.read(lo) == "Hello DBMSd");
+    assert(loMgr.size(lo) == 11);
+    assert(loMgr.write(lo, 11, "!"));
+    assert(loMgr.read(lo) == "Hello DBMSd!");
+    assert(loMgr.size(lo) == 12);
     assert(loMgr.truncate(lo, 5));
     assert(loMgr.size(lo) == 5);
     assert(loMgr.drop(lo));

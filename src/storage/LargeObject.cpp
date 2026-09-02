@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 
 namespace dbms {
 
@@ -20,13 +21,26 @@ bool LargeObjectManager::write(int loId, size_t offset, const std::string& data)
     auto path = loPath(loId);
     std::filesystem::create_directories(std::filesystem::path(path).parent_path());
 
-    std::fstream fs(path, std::ios::in | std::ios::out | std::ios::binary | std::ios::trunc);
+    if (offset > static_cast<size_t>(std::numeric_limits<std::streamoff>::max()) ||
+        data.size() > static_cast<size_t>(std::numeric_limits<std::streamsize>::max()) ||
+        data.size() > std::numeric_limits<size_t>::max() - offset) {
+        return false;
+    }
+
+    std::fstream fs(path, std::ios::in | std::ios::out | std::ios::binary);
     if (!fs) {
-        fs.open(path, std::ios::out | std::ios::binary);
+        std::ofstream create(path, std::ios::binary);
+        if (!create) return false;
+        create.close();
+        fs.open(path, std::ios::in | std::ios::out | std::ios::binary);
         if (!fs) return false;
     }
+
     fs.seekp(static_cast<std::streamoff>(offset));
+    if (!fs) return false;
     fs.write(data.data(), static_cast<std::streamsize>(data.size()));
+    fs.flush();
+    if (!fs) return false;
 
     size_t end = offset + data.size();
     if (end > sizes_[loId]) sizes_[loId] = end;
