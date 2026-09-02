@@ -125,6 +125,14 @@ static void test_unique_deferred_single_insert() {
     std::cout << "[DEFER] UNIQUE deferred non-conflicting commit OK" << std::endl;
 }
 
+static void test_unique_autocommit_rejects_duplicate() {
+    assert(g_engine.insert(db, "uniq", {{"id", "21"}, {"tag", "autocommit"}})
+               == DBStatus::OK);
+    assert(g_engine.insert(db, "uniq", {{"id", "22"}, {"tag", "autocommit"}})
+               == DBStatus::DUPLICATE_KEY);
+    std::cout << "[DEFER] UNIQUE autocommit duplicate rejected OK" << std::endl;
+}
+
 static void test_unique_deferred_swap() {
     assert(g_engine.insert(db, "uniq", {{"id", "1"}, {"tag", "a"}}) == DBStatus::OK);
     assert(g_engine.insert(db, "uniq", {{"id", "2"}, {"tag", "b"}}) == DBStatus::OK);
@@ -201,6 +209,7 @@ int main() {
     test_fk_deferred_ok();
     test_fk_deferred_violation();
     test_unique_deferred_single_insert();
+    test_unique_autocommit_rejects_duplicate();
     test_unique_deferred_swap();
     test_immediate_unique_updates();
     test_unique_deferred_update_violation();

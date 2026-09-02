@@ -16281,7 +16281,8 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                     }
                 }
             }
-            if (isConstraintCurrentlyDeferred(dbname, tablename, cname)) {
+            if (transactionContext().inTransaction &&
+                isConstraintCurrentlyDeferred(dbname, tablename, cname)) {
                 deferredUniqueCols.push_back(i);
                 continue;
             }
@@ -16322,7 +16323,7 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             std::string cname;
             if (uci < tbl.uniqueConstraintNames.size()) cname = tbl.uniqueConstraintNames[uci];
             if (cname.empty()) cname = tablename + "_" + tbl.cols[uc[0]].dataName + "_key";
-            if (uc.size() == 1 &&
+            if (uc.size() == 1 && transactionContext().inTransaction &&
                 isConstraintCurrentlyDeferred(dbname, tablename, cname)) {
                 deferredUniqueCols.push_back(uc[0]);
                 continue;
