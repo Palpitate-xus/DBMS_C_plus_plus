@@ -1495,8 +1495,7 @@ private:
     // Deferred constraint helpers. kind "check" evaluates the column CHECK
     // expression of colIdx; "unique" re-checks that payloadValue is unique
     // across tablename's column uniqueCol (excluding row exceptRid);
-    // "fk" verifies the referenced key payloadValue exists in refTable's
-    // column refCol.
+    // "fk" verifies the referenced key payload exists in refTable.
     struct DeferredCheck {
         enum class Kind { Check, Unique, ForeignKey, Exclude };
         Kind kind = Kind::Check;
@@ -1517,6 +1516,10 @@ private:
         // are followed), so no row image needs capturing here.
         std::vector<std::pair<std::string, std::string>> excludeElements;
         std::string excludeWhere;
+        // Composite FK payload. The singular fields above remain populated
+        // by older single-column call sites.
+        std::vector<std::string> fkPayloadValues;
+        std::vector<std::string> fkRefCols;
     };
     bool runDeferredCheck(const DeferredCheck& dc) const;
 

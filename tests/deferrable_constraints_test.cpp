@@ -48,6 +48,15 @@ static void setup() {
         "  CONSTRAINT child_pid_fkey FOREIGN KEY (pid) REFERENCES parent(id) "
         "  DEFERRABLE INITIALLY DEFERRED)", s));
     assert(!ddl.executeSql(
+        "CREATE TABLE composite_parent ("
+        "  a INT, b INT, PRIMARY KEY (a, b))", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE composite_child ("
+        "  id INT PRIMARY KEY, a INT, b INT, "
+        "  CONSTRAINT composite_child_fkey FOREIGN KEY (a, b) "
+        "  REFERENCES composite_parent(a, b) "
+        "  DEFERRABLE INITIALLY DEFERRED)", s));
+    assert(!ddl.executeSql(
         "CREATE TABLE uniq ("
         "  id INT PRIMARY KEY, "
         "  tag VARCHAR(20), "
@@ -67,6 +76,8 @@ static void setup() {
         "  DEFERRABLE INITIALLY DEFERRED)", s));
     // Constraint metadata must be recorded for the deferred paths.
     assert(g_engine.isConstraintCurrentlyDeferred(db, "child", "child_pid_fkey"));
+    assert(g_engine.isConstraintCurrentlyDeferred(
+        db, "composite_child", "composite_child_fkey"));
     assert(g_engine.isConstraintCurrentlyDeferred(db, "uniq", "uniq_tag_key"));
     assert(g_engine.isConstraintCurrentlyDeferred(db, "excl", "excl_rng_key"));
 }
@@ -135,6 +146,33 @@ static void test_fk_deferred_update() {
            DBStatus::OK);
     assert(g_engine.commitTransaction() == DBStatus::INVALID_VALUE);
     std::cout << "[DEFER] FK deferred updates rechecked at commit OK" << std::endl;
+}
+
+static void test_composite_fk_deferred() {
+    assert(g_engine.beginTransaction(db) == DBStatus::OK);
+    assert(g_engine.insert(
+               db, "composite_child", {{"id", "1"}, {"a", "10"}, {"b", "20"}}) ==
+           DBStatus::OK);
+    assert(g_engine.insert(
+               db, "composite_parent", {{"a", "10"}, {"b", "20"}}) ==
+           DBStatus::OK);
+    assert(g_engine.commitTransaction() == DBStatus::OK);
+
+    assert(g_engine.beginTransaction(db) == DBStatus::OK);
+    assert(g_engine.update(
+               db, "composite_child", {{"b", "30"}}, {"=id 1"}) ==
+           DBStatus::OK);
+    assert(g_engine.insert(
+               db, "composite_parent", {{"a", "10"}, {"b", "30"}}) ==
+           DBStatus::OK);
+    assert(g_engine.commitTransaction() == DBStatus::OK);
+
+    assert(g_engine.beginTransaction(db) == DBStatus::OK);
+    assert(g_engine.update(
+               db, "composite_child", {{"b", "40"}}, {"=id 1"}) ==
+           DBStatus::OK);
+    assert(g_engine.commitTransaction() == DBStatus::INVALID_VALUE);
+    std::cout << "[DEFER] composite FK insert/update commit checks OK" << std::endl;
 }
 
 static void test_unique_deferred_single_insert() {
@@ -230,6 +268,7 @@ int main() {
     test_fk_deferred_violation();
     test_fk_autocommit_rejects_missing_parent();
     test_fk_deferred_update();
+    test_composite_fk_deferred();
     test_unique_deferred_single_insert();
     test_unique_autocommit_rejects_duplicate();
     test_unique_deferred_swap();

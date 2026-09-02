@@ -8025,27 +8025,56 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
     if (dc.kind == DeferredCheck::Kind::ForeignKey) {
         // The referenced key must exist by commit time.
         if (!tableExists(dc.dbname, dc.refTable)) return false;
-        TableSchema refTbl = getTableSchema(dc.dbname, dc.refTable);
-        int refColIdx = -1;
-        for (size_t i = 0; i < refTbl.len; ++i) {
-            if (refTbl.cols[i].dataName == dc.refCol) { refColIdx = static_cast<int>(i); break; }
+        const TableSchema refTbl = getTableSchema(dc.dbname, dc.refTable);
+        const std::vector<std::string> payloadValues =
+            dc.fkPayloadValues.empty()
+                ? std::vector<std::string>{dc.payloadValue}
+                : dc.fkPayloadValues;
+        const std::vector<std::string> referencedNames =
+            dc.fkRefCols.empty()
+                ? std::vector<std::string>{dc.refCol}
+                : dc.fkRefCols;
+        if (payloadValues.empty() ||
+            payloadValues.size() != referencedNames.size()) {
+            return false;
         }
-        if (refColIdx < 0) return false;
-        BPTree* refIdx = getPKIndex(dc.dbname, dc.refTable);
-        if (refIdx) {
-            int64_t dummy;
-            return refIdx->search(dc.payloadValue, dummy);
+        if (std::any_of(
+                payloadValues.begin(), payloadValues.end(),
+                [](const std::string& value) { return value.empty(); })) {
+            return true;
         }
+
+        std::vector<size_t> referencedColumns;
+        referencedColumns.reserve(referencedNames.size());
+        for (const auto& name : referencedNames) {
+            size_t columnIndex = refTbl.len;
+            for (size_t candidate = 0; candidate < refTbl.len; ++candidate) {
+                if (refTbl.cols[candidate].dataName == name) {
+                    columnIndex = candidate;
+                    break;
+                }
+            }
+            if (columnIndex >= refTbl.len) return false;
+            referencedColumns.push_back(columnIndex);
+        }
+
         bool found = false;
-        forEachRow(dc.dbname, dc.refTable,
-                   [&](uint32_t, uint16_t, const char* data, size_t len) {
-            if (found) return;
-            std::string row(data, len);
-            if (const_cast<StorageEngine*>(this)->extractColumnValue(
-                    row, refTbl, static_cast<size_t>(refColIdx), dc.dbname)
-                    == dc.payloadValue) found = true;
-        });
-        return found;
+        const bool scanOk = forEachRow(
+            dc.dbname, dc.refTable,
+            [&](uint32_t, uint16_t, const char* data, size_t len) {
+                if (found) return;
+                const std::string row(data, len);
+                for (size_t valueIndex = 0;
+                     valueIndex < referencedColumns.size(); ++valueIndex) {
+                    if (const_cast<StorageEngine*>(this)->extractColumnValue(
+                            row, refTbl, referencedColumns[valueIndex],
+                            dc.dbname) != payloadValues[valueIndex]) {
+                        return;
+                    }
+                }
+                found = true;
+            });
+        return scanOk && found;
     }
     // CHECK constraint evaluation
     TableSchema tbl = getTableSchema(dc.dbname, dc.tablename);
@@ -16180,7 +16209,10 @@ DBStatus StorageEngine::insert(const std::string& dbname,
 
     // Deferrable UNIQUE/FK constraints currently deferred: their checks are
     // queued after the row lands (rid known).
-    struct DeferredFkEntry { size_t fkIndex; std::string value; };
+    struct DeferredFkEntry {
+        size_t fkIndex;
+        std::vector<std::string> values;
+    };
     std::vector<size_t> deferredUniqueCols;
     std::vector<DeferredFkEntry> deferredFkEntries;
 
@@ -16809,7 +16841,9 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             isConstraintCurrentlyDeferred(dbname, tablename, fk.name)) {
             DeferredFkEntry e;
             e.fkIndex = fi;
-            if (fk.colNames.size() == 1) e.value = actualValues[fk.colNames[0]];
+            for (const auto& columnName : fk.colNames) {
+                e.values.push_back(actualValues[columnName]);
+            }
             deferredFkEntries.push_back(std::move(e));
             continue;
         }
@@ -17086,9 +17120,16 @@ DBStatus StorageEngine::insert(const std::string& dbname,
     // Queue deferred CHECK constraints for commit-time validation.
     if (transactionContext().inTransaction && !deferredCheckCols.empty()) {
         for (size_t ci : deferredCheckCols) {
-            transactionContext().deferredChecks[transactionContext().currentTxnId].push_back(
-                    {DeferredCheck::Kind::Check, dbname, tablename, rid,
-                     tbl.cols[ci].checkConstraintName, ci, "", "", -1, "", ""});
+            DeferredCheck check;
+            check.kind = DeferredCheck::Kind::Check;
+            check.dbname = dbname;
+            check.tablename = tablename;
+            check.rid = rid;
+            check.constraintName = tbl.cols[ci].checkConstraintName;
+            check.colIdx = ci;
+            transactionContext()
+                .deferredChecks[transactionContext().currentTxnId]
+                .push_back(std::move(check));
         }
     }
     // Queue deferred UNIQUE violations for commit-time validation. The queued
@@ -17110,21 +17151,42 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                     }
                 }
             }
-            transactionContext().deferredChecks[transactionContext().currentTxnId].push_back(
-                    {DeferredCheck::Kind::Unique, dbname, tablename, rid, cname, ci,
-                     tbl.cols[ci].dataName, vit->second, rid, "", ""});
+            DeferredCheck check;
+            check.kind = DeferredCheck::Kind::Unique;
+            check.dbname = dbname;
+            check.tablename = tablename;
+            check.rid = rid;
+            check.constraintName = cname;
+            check.colIdx = ci;
+            check.uniqueCol = tbl.cols[ci].dataName;
+            check.payloadValue = vit->second;
+            check.exceptRid = rid;
+            transactionContext()
+                .deferredChecks[transactionContext().currentTxnId]
+                .push_back(std::move(check));
         }
     }
-    // Queue deferred FK existence checks (single-column FKs).
+    // Queue deferred FK existence checks after the row has a stable RID.
     if (transactionContext().inTransaction && !deferredFkEntries.empty()) {
         for (const auto& e : deferredFkEntries) {
             if (e.fkIndex >= tbl.fkLen) continue;
             const ForeignKey& fk = tbl.fks[e.fkIndex];
-            transactionContext().deferredChecks[transactionContext().currentTxnId].push_back(
-                    {DeferredCheck::Kind::ForeignKey, dbname, tablename, rid,
-                     fk.name, 0, fk.colNames.empty() ? "" : fk.colNames[0],
-                     e.value, -1, fk.refTable,
-                     fk.refCols.empty() ? "" : fk.refCols[0]});
+            DeferredCheck check;
+            check.kind = DeferredCheck::Kind::ForeignKey;
+            check.dbname = dbname;
+            check.tablename = tablename;
+            check.rid = rid;
+            check.constraintName = fk.name;
+            check.colIdx = 0;
+            check.uniqueCol = fk.colNames.empty() ? "" : fk.colNames.front();
+            check.payloadValue = e.values.empty() ? "" : e.values.front();
+            check.refTable = fk.refTable;
+            check.refCol = fk.refCols.empty() ? "" : fk.refCols.front();
+            check.fkPayloadValues = e.values;
+            check.fkRefCols = fk.refCols;
+            transactionContext()
+                .deferredChecks[transactionContext().currentTxnId]
+                .push_back(std::move(check));
         }
     }
 
@@ -19437,9 +19499,16 @@ DBStatus StorageEngine::updateInternal(
         }
         if (transactionContext().inTransaction && !deferredCheckCols.empty()) {
             for (size_t ci : deferredCheckCols) {
-                transactionContext().deferredChecks[transactionContext().currentTxnId].push_back(
-                    {DeferredCheck::Kind::Check, dbname, tablename, rid,
-                     tbl.cols[ci].checkConstraintName, ci, "", "", -1, "", ""});
+                DeferredCheck check;
+                check.kind = DeferredCheck::Kind::Check;
+                check.dbname = dbname;
+                check.tablename = tablename;
+                check.rid = rid;
+                check.constraintName = tbl.cols[ci].checkConstraintName;
+                check.colIdx = ci;
+                transactionContext()
+                    .deferredChecks[transactionContext().currentTxnId]
+                    .push_back(std::move(check));
             }
         }
 
@@ -19521,26 +19590,22 @@ DBStatus StorageEngine::updateInternal(
                     transactionContext().inTransaction &&
                     isConstraintCurrentlyDeferred(
                         dbname, tablename, foreignKey.name)) {
-                    // The current deferred-check record stores one referenced
-                    // value. Composite keys fall through to the immediate
-                    // integrity check until their commit representation is
-                    // extended.
-                    if (foreignKey.colNames.size() == 1) {
-                        DeferredCheck check;
-                        check.kind = DeferredCheck::Kind::ForeignKey;
-                        check.dbname = dbname;
-                        check.tablename = tablename;
-                        check.rid = rid;
-                        check.constraintName = foreignKey.name;
-                        check.colIdx = 0;
-                        check.uniqueCol = foreignKey.colNames.front();
-                        check.payloadValue = localValues.front();
-                        check.refTable = foreignKey.refTable;
-                        check.refCol = foreignKey.refCols.front();
-                        pendingDeferredForeignKeyChecks.push_back(
-                            std::move(check));
-                        continue;
-                    }
+                    DeferredCheck check;
+                    check.kind = DeferredCheck::Kind::ForeignKey;
+                    check.dbname = dbname;
+                    check.tablename = tablename;
+                    check.rid = rid;
+                    check.constraintName = foreignKey.name;
+                    check.colIdx = 0;
+                    check.uniqueCol = foreignKey.colNames.front();
+                    check.payloadValue = localValues.front();
+                    check.refTable = foreignKey.refTable;
+                    check.refCol = foreignKey.refCols.front();
+                    check.fkPayloadValues = localValues;
+                    check.fkRefCols = foreignKey.refCols;
+                    pendingDeferredForeignKeyChecks.push_back(
+                        std::move(check));
+                    continue;
                 }
                 if (!tableExists(dbname, foreignKey.refTable)) {
                     lockManager_.unlock(tablename);
