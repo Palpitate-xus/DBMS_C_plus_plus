@@ -146,8 +146,9 @@ private:
 
     bool readFromDisk(uint32_t pageId, char* buf, bool* fullPageRead = nullptr);
     bool writeToDisk(uint32_t pageId, const char* buf);
-    void readTdeRecord(uint32_t pageId, uint8_t record[PageCrypto::kRecordSize]);
-    void writeTdeRecord(uint32_t pageId, const uint8_t record[PageCrypto::kRecordSize]);
+    bool readTdeRecord(uint32_t pageId, uint8_t record[PageCrypto::kRecordSize]);
+    bool writeTdeRecord(uint32_t pageId,
+                        const uint8_t record[PageCrypto::kRecordSize]);
     bool flushUnlocked();
     std::optional<size_t> evictFrame();
     // Fast path: pin a cached page; waits on an in-flight load of it.

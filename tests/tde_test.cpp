@@ -14,6 +14,7 @@
 // ============================================================================
 
 #include "storage/PageCrypto.h"
+#include "storage/BufferPool.h"
 #include "storage/PageAllocator.h"
 #include "storage/PageWrapper.h"
 #include "storage/PgPage.h"
@@ -190,10 +191,74 @@ static void test_engine_at_rest() {
     std::cout << "[TDE] engine at-rest encryption OK" << std::endl;
 }
 
+static void test_sidecar_io_failures() {
+    const fs::path dataFile = fs::temp_directory_path() / "tde_sidecar_failure.dt";
+    const fs::path sidecar = fs::path(dataFile.string() + ".tde");
+    fs::remove(dataFile);
+    fs::remove_all(sidecar);
+    assert(PageCrypto::enable(std::string(64, '7')));
+
+    // Encrypted storage cannot open when its envelope path is unusable.
+    assert(fs::create_directory(sidecar));
+    {
+        BufferPool pool(dataFile.string(), 2, kPage);
+        assert(!pool.open());
+        assert(!pool.isOpen());
+    }
+    fs::remove_all(sidecar);
+    fs::remove(dataFile);
+
+    // A sidecar write error must fail the flush and retain the dirty page.
+    std::error_code ec;
+    fs::create_symlink("/dev/full", sidecar, ec);
+    assert(!ec);
+    {
+        BufferPool pool(dataFile.string(), 2, kPage);
+        assert(pool.open());
+        char* page = pool.fetchPage(1);
+        assert(page);
+        std::memset(page, 0x5a, kPage);
+        pool.markDirty(1);
+        pool.unpinPage(1);
+        assert(!pool.flush());
+        const auto frames = pool.getFrameInfo();
+        assert(frames.size() == 1 && frames[0].dirty);
+        pool.close();
+    }
+    fs::remove(sidecar);
+    fs::remove(dataFile);
+
+    // A partial envelope is corruption, not a plaintext-page marker.
+    {
+        BufferPool pool(dataFile.string(), 2, kPage);
+        assert(pool.open());
+        char* page = pool.fetchPage(1);
+        assert(page);
+        std::memset(page, 0x33, kPage);
+        pool.markDirty(1);
+        pool.unpinPage(1);
+        assert(pool.flush());
+        pool.close();
+    }
+    fs::resize_file(sidecar, PageCrypto::kRecordSize + 8);
+    {
+        BufferPool pool(dataFile.string(), 2, kPage);
+        assert(pool.open());
+        assert(pool.fetchPage(1) == nullptr);
+        pool.close();
+    }
+
+    fs::remove(dataFile);
+    fs::remove(sidecar);
+    PageCrypto::disable();
+    std::cout << "[TDE] sidecar I/O failures fail closed OK" << std::endl;
+}
+
 int main() {
     test_seal_open();
     test_keyring();
     test_engine_at_rest();
+    test_sidecar_io_failures();
     PageCrypto::disable();
     std::cout << "[TDE] all tests passed" << std::endl;
     return 0;

@@ -2,6 +2,7 @@
 #include "storage/PageCrypto.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <unistd.h>
 
@@ -31,26 +32,46 @@ bool BufferPool::open() {
     // TDE sidecar for the page envelopes.  Absent sidecar = database not
     // (yet) encrypted; it is created lazily on the first sealed write.
     tdeFd_ = ::open((filename_ + ".tde").c_str(), O_RDWR | O_CREAT, 0600);
+    if (tdeFd_ < 0 && PageCrypto::enabled()) {
+        ::close(fd_);
+        fd_ = -1;
+        return false;
+    }
     return true;
 }
 
 // Read one sidecar record.  Returns an all-zero record for pageIds beyond
 // the sidecar EOF (plaintext pages of a database not yet encrypted).
-void BufferPool::readTdeRecord(uint32_t pageId, uint8_t record[PageCrypto::kRecordSize]) {
+bool BufferPool::readTdeRecord(uint32_t pageId,
+                               uint8_t record[PageCrypto::kRecordSize]) {
     PageCrypto::clearRecord(record);
-    if (tdeFd_ < 0) return;
+    if (tdeFd_ < 0) return false;
     const off_t off = static_cast<off_t>(pageId) * PageCrypto::kRecordSize;
     uint8_t buf[PageCrypto::kRecordSize];
-    const ssize_t n = ::pread(tdeFd_, buf, sizeof(buf), off);
-    if (n == static_cast<ssize_t>(sizeof(buf)))
-        std::memcpy(record, buf, sizeof(buf));
+    ssize_t n = -1;
+    do {
+        n = ::pread(tdeFd_, buf, sizeof(buf), off);
+    } while (n < 0 && errno == EINTR);
+    if (n == 0) return true;
+    if (n != static_cast<ssize_t>(sizeof(buf))) return false;
+    std::memcpy(record, buf, sizeof(buf));
+    return true;
 }
 
-void BufferPool::writeTdeRecord(uint32_t pageId,
-                                const uint8_t record[PageCrypto::kRecordSize]) {
-    if (tdeFd_ < 0) return;
+bool BufferPool::writeTdeRecord(
+    uint32_t pageId, const uint8_t record[PageCrypto::kRecordSize]) {
+    if (tdeFd_ < 0) return false;
     const off_t off = static_cast<off_t>(pageId) * PageCrypto::kRecordSize;
-    (void)::pwrite(tdeFd_, record, PageCrypto::kRecordSize, off);
+    size_t written = 0;
+    while (written < PageCrypto::kRecordSize) {
+        const ssize_t n = ::pwrite(tdeFd_, record + written,
+                                   PageCrypto::kRecordSize - written,
+                                   off + static_cast<off_t>(written));
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return false;
+        written += static_cast<size_t>(n);
+    }
+    return true;
 }
 
 void BufferPool::close() {
@@ -170,7 +191,7 @@ bool BufferPool::readFromDisk(uint32_t pageId, char* buf, bool* fullPageRead) {
     // rewritten.
     if (pageId != 0 && PageCrypto::enabled()) {
         uint8_t record[PageCrypto::kRecordSize];
-        readTdeRecord(pageId, record);
+        if (!readTdeRecord(pageId, record)) return false;
         if (!PageCrypto::isPlaintextRecord(record) &&
             !PageCrypto::openPage(pageId, buf, pageSize_, record)) {
             return false;  // MAC mismatch: tampering or wrong key
@@ -193,17 +214,24 @@ bool BufferPool::writeToDisk(uint32_t pageId, const char* buf) {
         sealed.assign(buf, buf + pageSize_);
         if (PageCrypto::sealPage(pageId, sealed.data(), pageSize_, record)) {
             toWrite = sealed.data();
-            writeTdeRecord(pageId, record);
+            if (!writeTdeRecord(pageId, record)) return false;
         } else {
             // Could not seal (e.g. empty page): mark the sidecar record as
             // plaintext so loads skip decryption.
             PageCrypto::clearRecord(record);
-            writeTdeRecord(pageId, record);
+            if (!writeTdeRecord(pageId, record)) return false;
         }
     }
     off_t offset = static_cast<off_t>(pageId) * pageSize_;
-    ssize_t n = ::pwrite(fd_, toWrite, pageSize_, offset);
-    return n == static_cast<ssize_t>(pageSize_);
+    size_t written = 0;
+    while (written < pageSize_) {
+        const ssize_t n = ::pwrite(fd_, toWrite + written, pageSize_ - written,
+                                   offset + static_cast<off_t>(written));
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return false;
+        written += static_cast<size_t>(n);
+    }
+    return true;
 }
 
 std::optional<size_t> BufferPool::evictFrame() {
@@ -472,6 +500,7 @@ bool BufferPool::flushUnlocked() {
         }
     }
     if (::fsync(fd_) != 0) ok = false;
+    if (PageCrypto::enabled() && (tdeFd_ < 0 || ::fsync(tdeFd_) != 0)) ok = false;
     if (!ok) return false;
     for (size_t index : writtenFrames) {
         frames_[index].dirty = false;
@@ -491,6 +520,7 @@ bool BufferPool::flushPage(uint32_t pageId) {
     Frame& frame = frames_[it->second];
     if (!frame.dirty) return true;
     if (!writeToDisk(pageId, frame.data.data())) return false;
+    if (PageCrypto::enabled() && (tdeFd_ < 0 || ::fsync(tdeFd_) != 0)) return false;
     frame.dirty = false;
     return true;
 }
