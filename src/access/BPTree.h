@@ -142,7 +142,7 @@ private:
                       const std::string& endKey, std::vector<int64_t>& out) const;
 
     static void serializeNode(char* buf, const Node& node, uint16_t order);
-    static void deserializeNode(const char* buf, Node& node, uint16_t order);
+    static bool deserializeNode(const char* buf, Node& node, uint16_t order);
 
     static std::string normalizeKey(const std::string& s);
 };

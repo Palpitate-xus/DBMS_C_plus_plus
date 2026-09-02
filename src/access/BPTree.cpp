@@ -12,6 +12,17 @@ namespace dbms {
 
 static_assert(BP_KEY_LEN >= 4, "BP_KEY_LEN too small");
 
+namespace {
+constexpr size_t kMaxLeafKeys =
+    (BP_PAGE_SIZE - 3 - sizeof(uint32_t)) / (BP_KEY_LEN + sizeof(int64_t));
+constexpr size_t kMaxInternalKeys =
+    (BP_PAGE_SIZE - 3 - sizeof(uint32_t)) / (BP_KEY_LEN + sizeof(uint32_t));
+constexpr size_t kMaxNodeOrder =
+    kMaxLeafKeys < kMaxInternalKeys ? kMaxLeafKeys : kMaxInternalKeys;
+static_assert(kMaxNodeOrder >= 2 && kMaxNodeOrder <= UINT16_MAX,
+              "invalid B+ tree page layout");
+}  // namespace
+
 // Index buffer-pool frame count. Overridable with DBMS_INDEX_BUFFER_FRAMES.
 static size_t indexBufferFrameCount() {
     static const size_t frames = [] {
@@ -70,9 +81,13 @@ void BPTree::serializeNode(char* buf, const Node& node, uint16_t /*order*/) {
     }
 }
 
-void BPTree::deserializeNode(const char* buf, Node& node, uint16_t /*order*/) {
+bool BPTree::deserializeNode(const char* buf, Node& node, uint16_t order) {
     node.isLeaf = static_cast<uint8_t>(buf[0]);
     std::memcpy(&node.numKeys, buf + 1, sizeof(uint16_t));
+    if (node.isLeaf > 1 || node.numKeys > order ||
+        node.numKeys > (node.isLeaf ? kMaxLeafKeys : kMaxInternalKeys)) {
+        return false;
+    }
     node.keys.clear();
     node.values.clear();
     node.children.clear();
@@ -101,6 +116,7 @@ void BPTree::deserializeNode(const char* buf, Node& node, uint16_t /*order*/) {
             pos += sizeof(uint32_t);
         }
     }
+    return std::is_sorted(node.keys.begin(), node.keys.end());
 }
 
 // ========================================================================
@@ -133,12 +149,14 @@ bool BPTree::open() {
             bp_->close();
             return false;
         }
+        if (header_.rootPage != 0 && !readNode(header_.rootPage)) {
+            bp_->close();
+            return false;
+        }
     } else {
         header_.rootPage = 0;
         header_.nextFreePage = 1;
-        size_t maxLeaf = (BP_PAGE_SIZE - 7) / (BP_KEY_LEN + 8);
-        size_t maxInternal = (BP_PAGE_SIZE - 7 - 4) / (BP_KEY_LEN + 4);
-        header_.order = static_cast<uint16_t>(std::min(size_t(100), std::min(maxLeaf, maxInternal)));
+        header_.order = static_cast<uint16_t>(std::min(size_t(100), kMaxNodeOrder));
         if (header_.order < 2) header_.order = 2;
         if (!writeHeader()) {
             bp_->close();
@@ -175,11 +193,20 @@ bool BPTree::writeHeader() {
 
 bool BPTree::readHeader() {
     if (!bp_ || !bp_->isOpen()) return false;
+    std::error_code ec;
+    const uintmax_t fileSize = std::filesystem::file_size(filePath_, ec);
+    if (ec || fileSize < BP_PAGE_SIZE || fileSize % BP_PAGE_SIZE != 0) return false;
+    const uintmax_t pageCount = fileSize / BP_PAGE_SIZE;
     char* buf = bp_->fetchPage(0);
     if (!buf) return false;
     std::memcpy(&header_, buf, sizeof(FileHeader));
     bp_->unpinPage(0);
-    if (header_.order < 2 || header_.order > 1000) return false;
+    if (header_.order < 2 || header_.order > kMaxNodeOrder ||
+        header_.nextFreePage < 1 || header_.nextFreePage > pageCount ||
+        (header_.rootPage != 0 &&
+         (header_.rootPage >= header_.nextFreePage || header_.rootPage >= pageCount))) {
+        return false;
+    }
     return true;
 }
 
@@ -202,7 +229,20 @@ uint32_t BPTree::allocPage() {
 }
 
 bool BPTree::writeNode(uint32_t pageNum, const Node& node) {
-    if (!bp_ || !bp_->isOpen()) return false;
+    if (!bp_ || !bp_->isOpen() || pageNum == 0 ||
+        pageNum >= header_.nextFreePage || node.isLeaf > 1 ||
+        node.numKeys != node.keys.size() || node.numKeys > header_.order ||
+        !std::is_sorted(node.keys.begin(), node.keys.end())) {
+        return false;
+    }
+    if ((node.isLeaf &&
+         (node.numKeys > kMaxLeafKeys || node.values.size() != node.numKeys ||
+          (node.nextLeaf != 0 && node.nextLeaf >= header_.nextFreePage))) ||
+        (!node.isLeaf &&
+         (node.numKeys > kMaxInternalKeys ||
+          node.children.size() != static_cast<size_t>(node.numKeys) + 1))) {
+        return false;
+    }
     char* buf = bp_->fetchPage(pageNum);
     if (!buf) return false;
     serializeNode(buf, node, header_.order);
@@ -270,7 +310,10 @@ void BPTree::dropNodeFromCache(uint32_t pageNum) {
 }
 
 std::optional<BPTree::Node> BPTree::readNode(uint32_t pageNum) const {
-    if (!bp_ || !bp_->isOpen()) return std::nullopt;
+    if (!bp_ || !bp_->isOpen() || pageNum == 0 ||
+        pageNum >= header_.nextFreePage) {
+        return std::nullopt;
+    }
     // Hot nodes (root, upper internal levels) are hit by nearly every
     // descent; serving them from the node cache skips the whole-page
     // deserialize (order-many heap allocations) per level.
@@ -278,8 +321,21 @@ std::optional<BPTree::Node> BPTree::readNode(uint32_t pageNum) const {
     Node node;
     char* buf = const_cast<BufferPool*>(bp_.get())->fetchPage(pageNum);
     if (!buf) return std::nullopt;
-    deserializeNode(buf, node, header_.order);
+    const bool valid = deserializeNode(buf, node, header_.order);
     bp_->unpinPage(pageNum);
+    if (!valid) return std::nullopt;
+    if (node.isLeaf) {
+        if (node.nextLeaf != 0 &&
+            (node.nextLeaf >= header_.nextFreePage || node.nextLeaf == pageNum)) {
+            return std::nullopt;
+        }
+    } else {
+        for (const uint32_t child : node.children) {
+            if (child == 0 || child >= header_.nextFreePage || child == pageNum) {
+                return std::nullopt;
+            }
+        }
+    }
     cacheNode(pageNum, node);
     return node;
 }

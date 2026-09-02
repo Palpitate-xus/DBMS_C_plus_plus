@@ -173,10 +173,66 @@ static void test_btree_split_and_range() {
     std::cout << "[BPTREE] root split/search/range OK" << std::endl;
 }
 
+static void test_btree_corruption_rejection() {
+    const std::string idx = "/tmp/btree_corruption_test.idx";
+    const auto createTree = [&] {
+        cleanup(idx);
+        dbms::BPTree tree(idx);
+        assert(tree.open());
+        assert(tree.insert("key", 7));
+        assert(tree.flush());
+        tree.close();
+    };
+
+    createTree();
+    {
+        std::fstream file(idx, std::ios::in | std::ios::out | std::ios::binary);
+        assert(file);
+        const uint16_t impossibleKeyCount = UINT16_MAX;
+        file.seekp(static_cast<std::streamoff>(dbms::BP_PAGE_SIZE + 1));
+        file.write(reinterpret_cast<const char*>(&impossibleKeyCount),
+                   sizeof(impossibleKeyCount));
+        file.flush();
+        assert(file);
+    }
+    {
+        dbms::BPTree tree(idx);
+        assert(!tree.open());
+    }
+
+    createTree();
+    {
+        std::fstream file(idx, std::ios::in | std::ios::out | std::ios::binary);
+        assert(file);
+        const uint16_t impossibleOrder = 1000;
+        file.seekp(static_cast<std::streamoff>(sizeof(uint32_t) * 2));
+        file.write(reinterpret_cast<const char*>(&impossibleOrder),
+                   sizeof(impossibleOrder));
+        file.flush();
+        assert(file);
+    }
+    {
+        dbms::BPTree tree(idx);
+        assert(!tree.open());
+    }
+
+    createTree();
+    fs::resize_file(idx, dbms::BP_PAGE_SIZE + 16);
+    {
+        dbms::BPTree tree(idx);
+        assert(!tree.open());
+    }
+
+    cleanup(idx);
+    cleanup(idx + ".tde");
+    std::cout << "[BPTREE] malformed pages/header/truncation rejected OK" << std::endl;
+}
+
 int main() {
     test_hash_persistence_and_corruption();
     test_storage_engine_gin_brin();
     test_btree_split_and_range();
+    test_btree_corruption_rejection();
     std::cout << "[ACCESS] all passed" << std::endl;
     return 0;
 }
