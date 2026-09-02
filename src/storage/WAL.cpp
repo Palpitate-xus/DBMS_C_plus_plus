@@ -426,27 +426,44 @@ bool WALManager::persistTimeline() {
 bool WALManager::setTimeline(uint32_t tli) {
     if (tli == 0) return false;
     if (!ensureOpen()) return false;
+    if (tli == timelineId_) return true;
+
+    // Timeline changes are metadata commits.  Serialize the persisted
+    // timeline switch with appenders before changing any in-memory path
+    // state; otherwise another manager can append to the old timeline while
+    // this instance already reports the new one.
+    std::lock_guard<std::mutex> processLock(*dirMutex_);
+    const int walLock = acquireWalFileLock();
+    if (walLock < 0) return false;
+
     const uint32_t previousTli = timelineId_;
     timelineId_ = tli;
     // Segment filenames embed the timeline; cached fd/path state must be
     // rebuilt and the tail state re-derived after the switch.
     closeWriteFd();
     earliestSegValid_ = false;
-    if (persistTimeline()) {
-        std::lock_guard<std::mutex> processLock(*dirMutex_);
-        const int walLock = acquireWalFileLock();
-        if (walLock >= 0) {
-            if (!refreshCurrentLsnFromDisk() || !scanWalTail()) {
-                timelineId_ = previousTli;
-                releaseWalFileLock(walLock);
-                return false;
-            }
-            lastSyncedLsn_ = currentLsn_;
-            releaseWalFileLock(walLock);
-        }
+
+    if (persistTimeline() && refreshCurrentLsnFromDisk() && scanWalTail()) {
+        lastSyncedLsn_ = currentLsn_;
+        releaseWalFileLock(walLock);
         return true;
     }
+
+    // A failed switch must not leave the durable timeline file pointing at a
+    // timeline that this manager rejected.  Best-effort restoration keeps a
+    // retry on the old timeline safe; if restoration itself fails, mark this
+    // manager unusable so no caller can append through inconsistent state.
     timelineId_ = previousTli;
+    earliestSegValid_ = false;
+    const bool restored = persistTimeline() &&
+                          refreshCurrentLsnFromDisk() &&
+                          scanWalTail();
+    if (restored) {
+        lastSyncedLsn_ = currentLsn_;
+    } else {
+        open_ = false;
+    }
+    releaseWalFileLock(walLock);
     return false;
 }
 

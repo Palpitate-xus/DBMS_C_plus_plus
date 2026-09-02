@@ -91,9 +91,60 @@ int main() {
         assert(wal.pendingArchiveSegments().empty());
     }
 
+    // A target timeline with a malformed segment must not leave the durable
+    // timeline selector pointing at the rejected stream.
+    const std::filesystem::path corruptDir = "wal_timeline_corrupt";
+    std::filesystem::remove_all(corruptDir);
+    {
+        WALManager wal(corruptDir);
+        assert(wal.ensureOpen());
+        const std::vector<char> payload{'o', 'k'};
+        const Lsn first = wal.XLogInsert(RM_SMGR_ID, XLOG_SMGR_CREATE,
+                                         0, payload);
+        assert(first != INVALID_LSN);
+        assert(wal.XLogFlush(wal.currentWriteLsn()));
+
+        std::ofstream malformed(
+            corruptDir / "000000020000000000000000",
+            std::ios::binary | std::ios::trunc);
+        malformed.put('x');
+        malformed.close();
+        assert(!wal.setTimeline(2));
+        assert(wal.timelineId() == 1);
+
+        const Lsn second = wal.XLogInsert(RM_SMGR_ID, XLOG_SMGR_CREATE,
+                                          0, payload);
+        assert(second != INVALID_LSN);
+        assert(wal.XLogFlush(wal.currentWriteLsn()));
+    }
+    {
+        WALManager reopened(corruptDir);
+        assert(reopened.ensureOpen());
+        assert(reopened.timelineId() == 1);
+    }
+
+    // Failure to acquire the cross-process WAL lock is an actual switch
+    // failure, not a successful in-memory timeline change.
+    const std::filesystem::path lockFailureDir = "wal_timeline_lock_failure";
+    std::filesystem::remove_all(lockFailureDir);
+    {
+        WALManager wal(lockFailureDir);
+        assert(wal.ensureOpen());
+        assert(std::filesystem::create_directory(lockFailureDir / "wal.lock"));
+        assert(!wal.setTimeline(2));
+        assert(wal.timelineId() == 1);
+    }
+    {
+        WALManager reopened(lockFailureDir);
+        assert(reopened.ensureOpen());
+        assert(reopened.timelineId() == 1);
+    }
+
     // Cleanup
     std::filesystem::remove_all(dbname);
     std::filesystem::remove_all(dbname + ".txn_backup");
+    std::filesystem::remove_all(corruptDir);
+    std::filesystem::remove_all(lockFailureDir);
     std::filesystem::remove_all(".txnid");
 
     std::cout << "[WAL TIMELINE ARCHIVE] all passed\n";
