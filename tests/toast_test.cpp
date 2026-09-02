@@ -232,6 +232,123 @@ int main() {
         assert(rows[0].find(atLimit) != std::string::npos);
         std::cout << "[TOAST] declared variable-width limit enforced OK\n";
 
+        // Constraints, triggers and indexes operate on the SQL value, not
+        // the compact __TOAST__<id> reference stored in the heap tuple.
+        TableSchema logicalIndex;
+        logicalIndex.tablename = "logical_index";
+        logicalIndex.formatVersion = 2;
+        logicalIndex.append(makeIntColumn("id", false, 4, true));
+        Column indexedPayload =
+            makeVarCharColumn("payload", false, 12000, false);
+        indexedPayload.isUnique = true;
+        indexedPayload.checkExpr = "length(payload) >= 8000";
+        indexedPayload.checkConstraintName = "logical_payload_length";
+        logicalIndex.append(indexedPayload);
+        logicalIndex.append(makeVarCharColumn("tag", false, 32, false));
+        assert(engine.createTable(dbname, logicalIndex) == DBStatus::OK);
+
+        const std::string indexedA =
+            makeIncompressiblePayload(9000, 0x11112222u);
+        const std::string indexedB =
+            makeIncompressiblePayload(9000, 0x33334444u);
+        const std::string indexedC =
+            makeIncompressiblePayload(9000, 0x55556666u);
+        assert(engine.insert(dbname, "logical_index",
+                             {{"id", "1"}, {"payload", indexedA},
+                              {"tag", "first"}}) == DBStatus::OK);
+        assert(engine.insert(dbname, "logical_index",
+                             {{"id", "2"}, {"payload", indexedA},
+                              {"tag", "duplicate"}}) ==
+               DBStatus::DUPLICATE_KEY);
+        assert(engine.insert(dbname, "logical_index",
+                             {{"id", "3"}, {"payload", "too short"},
+                              {"tag", "short"}}) == DBStatus::INVALID_VALUE);
+
+        BPTree* payloadIndex =
+            engine.getSecondaryIndex(dbname, "logical_index", "payload");
+        assert(payloadIndex != nullptr);
+        assert(payloadIndex->searchMulti(indexedA).size() == 1);
+        assert(engine.query(dbname, "logical_index",
+                            {"=payload " + indexedA}, {"id"}).size() == 1);
+
+        assert(engine.update(dbname, "logical_index", {{"payload", indexedB}},
+                             {"=id 1"}) == DBStatus::OK);
+        assert(payloadIndex->searchMulti(indexedA).empty());
+        assert(payloadIndex->searchMulti(indexedB).size() == 1);
+
+        assert(engine.beginTransaction(dbname) == DBStatus::OK);
+        assert(engine.update(dbname, "logical_index", {{"payload", indexedC}},
+                             {"=id 1"}) == DBStatus::OK);
+        assert(payloadIndex->searchMulti(indexedC).size() == 1);
+        assert(engine.rollbackTransaction() == DBStatus::OK);
+        assert(payloadIndex->searchMulti(indexedB).size() == 1);
+        assert(payloadIndex->searchMulti(indexedC).empty());
+
+        assert(engine.beginTransaction(dbname) == DBStatus::OK);
+        assert(engine.savepoint("before_large_update") == DBStatus::OK);
+        assert(engine.update(dbname, "logical_index", {{"payload", indexedC}},
+                             {"=id 1"}) == DBStatus::OK);
+        assert(engine.rollbackToSavepoint("before_large_update") == DBStatus::OK);
+        assert(engine.commitTransaction() == DBStatus::OK);
+        assert(payloadIndex->searchMulti(indexedB).size() == 1);
+        assert(payloadIndex->searchMulti(indexedC).empty());
+
+        assert(engine.beginTransaction(dbname) == DBStatus::OK);
+        assert(engine.remove(dbname, "logical_index", {"=id 1"}) ==
+               DBStatus::OK);
+        assert(payloadIndex->searchMulti(indexedB).empty());
+        assert(engine.rollbackTransaction() == DBStatus::OK);
+        assert(payloadIndex->searchMulti(indexedB).size() == 1);
+        assert(engine.remove(dbname, "logical_index", {"=id 1"}) ==
+               DBStatus::OK);
+        assert(payloadIndex->searchMulti(indexedB).empty());
+        std::cout << "[TOAST] logical constraints + index maintenance OK\n";
+
+        TableSchema logicalComposite;
+        logicalComposite.tablename = "logical_composite";
+        logicalComposite.formatVersion = 2;
+        logicalComposite.append(makeIntColumn("id", false, 4, true));
+        logicalComposite.append(
+            makeVarCharColumn("payload", false, 12000, false));
+        logicalComposite.append(makeVarCharColumn("tag", false, 32, false));
+        assert(engine.createTable(dbname, logicalComposite) == DBStatus::OK);
+        assert(engine.createCompositeIndex(
+                   dbname, "logical_composite", {"payload", "tag"},
+                   "logical_payload_tag") == DBStatus::OK);
+        assert(engine.insert(dbname, "logical_composite",
+                             {{"id", "1"}, {"payload", indexedA},
+                              {"tag", "first"}}) == DBStatus::OK);
+        BPTree* compositeIndex = engine.getCompositeIndexTree(
+            dbname, "logical_composite", "logical_payload_tag");
+        assert(compositeIndex != nullptr);
+        assert(compositeIndex->searchMulti(
+                   indexedA + '\x01' + "first").size() == 1);
+
+        // Building or rebuilding an index over existing rows must de-TOAST
+        // scan values as well.
+        TableSchema lateIndex;
+        lateIndex.tablename = "late_index";
+        lateIndex.formatVersion = 2;
+        lateIndex.append(makeIntColumn("id", false, 4, true));
+        lateIndex.append(makeVarCharColumn("payload", false, 12000, false));
+        assert(engine.createTable(dbname, lateIndex) == DBStatus::OK);
+        const std::string latePayload =
+            makeIncompressiblePayload(9000, 0x77778888u);
+        assert(engine.insert(dbname, "late_index",
+                             {{"id", "1"}, {"payload", latePayload}}) ==
+               DBStatus::OK);
+        assert(engine.createIndex(dbname, "late_index", "payload") ==
+               DBStatus::OK);
+        BPTree* lateTree =
+            engine.getSecondaryIndex(dbname, "late_index", "payload");
+        assert(lateTree != nullptr);
+        assert(lateTree->searchMulti(latePayload).size() == 1);
+        assert(engine.reindex(dbname, "late_index") == DBStatus::OK);
+        lateTree = engine.getSecondaryIndex(dbname, "late_index", "payload");
+        assert(lateTree != nullptr);
+        assert(lateTree->searchMulti(latePayload).size() == 1);
+        std::cout << "[TOAST] index build + reindex logical values OK\n";
+
         TableSchema corruptGap;
         corruptGap.tablename = "corrupt_gap";
         corruptGap.formatVersion = 2;

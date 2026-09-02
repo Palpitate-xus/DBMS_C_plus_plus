@@ -806,6 +806,9 @@ public:
     // Build composite key from row buffer
     static std::string buildCompositeKey(const std::string& rowBuffer, const TableSchema& tbl,
                                           const std::vector<std::string>& colNames);
+    std::string buildCompositeKey(const std::string& rowBuffer, const TableSchema& tbl,
+                                  const std::vector<std::string>& colNames,
+                                  const std::string& dbname);
 
     // Full-text index (simplified inverted index)
     DBStatus createFullTextIndex(const std::string& dbname, const std::string& tablename,
@@ -977,6 +980,8 @@ public:
 
     // Schema helpers (public for execution plan use)
     static std::string extractPKValue(const std::string& rowBuffer, const TableSchema& tbl);
+    std::string extractPKValue(const std::string& rowBuffer, const TableSchema& tbl,
+                               const std::string& dbname);
 
     // Index access (public for execution plan)
     BPTree* getPKIndex(const std::string& dbname, const std::string& tablename) const;

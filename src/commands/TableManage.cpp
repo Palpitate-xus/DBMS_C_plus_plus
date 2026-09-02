@@ -595,6 +595,33 @@ static bool variableColumnWidthsValid(
     return true;
 }
 
+static std::string valueFromRowMap(
+    const std::map<std::string, std::string>& values,
+    const std::string& columnName) {
+    const auto value = values.find(columnName);
+    return value == values.end() ? std::string() : value->second;
+}
+
+static std::string buildCompositeKeyFromRowMap(
+    const std::map<std::string, std::string>& values,
+    const TableSchema& table,
+    const std::vector<std::string>& columnNames) {
+    std::string key;
+    for (const auto& columnName : columnNames) {
+        bool found = false;
+        for (size_t i = 0; i < table.len; ++i) {
+            if (table.cols[i].dataName == columnName) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) continue;
+        if (!key.empty()) key += '\x01';
+        key += valueFromRowMap(values, columnName);
+    }
+    return key;
+}
+
 // Build a column-name -> data-type map from a TableSchema for expression eval.
 static std::map<std::string, std::string> buildTypeHints(const dbms::TableSchema& tbl) {
     std::map<std::string, std::string> hints;
@@ -4822,7 +4849,27 @@ bool StorageEngine::isColumnNullByRid(const std::string& dbname,
 }
 
 std::string StorageEngine::extractPKValue(const std::string& rowBuffer, const TableSchema& tbl) {
+    if (g_condNullEngine && tbl.tablename == g_condNullTable) {
+        std::map<std::string, std::string> values;
+        auto* engine = const_cast<StorageEngine*>(g_condNullEngine);
+        for (size_t i = 0; i < tbl.len; ++i) {
+            values[tbl.cols[i].dataName] =
+                engine->extractColumnValue(rowBuffer, tbl, i, g_condNullDb);
+        }
+        return tbl.buildPKValue(values);
+    }
     return tbl.buildPKValue(rowBuffer);
+}
+
+std::string StorageEngine::extractPKValue(const std::string& rowBuffer,
+                                          const TableSchema& tbl,
+                                          const std::string& dbname) {
+    std::map<std::string, std::string> values;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        values[tbl.cols[i].dataName] =
+            extractColumnValue(rowBuffer, tbl, i, dbname);
+    }
+    return tbl.buildPKValue(values);
 }
 
 BPTree* StorageEngine::getPKIndex(const std::string& dbname, const std::string& tablename) const {
@@ -6784,11 +6831,23 @@ std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
         }
     }
 
+    StorageEngine* valueEngine = this;
+    std::string valueDb = dbname;
+    if (valueDb.empty() && g_condNullEngine && tbl.tablename == g_condNullTable) {
+        valueEngine = const_cast<StorageEngine*>(g_condNullEngine);
+        valueDb = g_condNullDb;
+    } else if (valueDb.empty() && g_nullRowEngine &&
+               tbl.tablename == g_nullRowTable) {
+        valueEngine = const_cast<StorageEngine*>(g_nullRowEngine);
+        valueDb = g_nullRowDb;
+    }
+
     // Compute VIRTUAL generated columns on demand at query time.
-    if (computeVirtual && !dbname.empty() && col.generatedKind == 'v' && !col.generatedExpr.empty()) {
+    if (computeVirtual && !valueDb.empty() && col.generatedKind == 'v' && !col.generatedExpr.empty()) {
         std::map<std::string, std::string> rowValues;
         for (size_t i = 0; i < tbl.len; ++i) {
-            rowValues[tbl.cols[i].dataName] = extractColumnValueStatic(rowBuffer, tbl, i);
+            rowValues[tbl.cols[i].dataName] =
+                valueEngine->extractColumnValue(rowBuffer, tbl, i, valueDb, false);
         }
         // Compute all VIRTUAL columns in column order so later columns can reference earlier ones.
         auto typeHints = buildTypeHints(tbl);
@@ -6796,7 +6855,8 @@ std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
             const Column& vc = tbl.cols[i];
             if (vc.generatedKind != 'v' || vc.generatedExpr.empty()) continue;
             bool ok = false;
-            std::string computed = evalExpressionSql(vc.generatedExpr, rowValues, typeHints, dbname, &ok);
+            std::string computed = evalExpressionSql(
+                vc.generatedExpr, rowValues, typeHints, valueDb, &ok);
             if (ok) rowValues[vc.dataName] = computed;
         }
         auto it = rowValues.find(col.dataName);
@@ -6811,11 +6871,12 @@ std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
                            &ignoredResolvedLength)) {
         return val;
     }
-    if (!dbname.empty() && col.isVariableLength) {
+    if (!valueDb.empty() && col.isVariableLength) {
         uint64_t toastId = 0;
         if (parseToastMarker(val, toastId)) {
             std::string resolved;
-            if (!readToast(dbname, tbl.tablename, toastId, col.dsize, resolved))
+            if (!valueEngine->readToast(
+                    valueDb, tbl.tablename, toastId, col.dsize, resolved))
                 return "";
             return resolved;
         }
@@ -6834,10 +6895,26 @@ std::string StorageEngine::buildCompositeKey(const std::string& rowBuffer,
         }
         if (colIdx < tbl.len) {
             if (!key.empty()) key += '\x01';
-            key += extractColumnValueStatic(rowBuffer, tbl, colIdx);
+            if (g_condNullEngine && tbl.tablename == g_condNullTable) {
+                key += const_cast<StorageEngine*>(g_condNullEngine)->extractColumnValue(
+                    rowBuffer, tbl, colIdx, g_condNullDb);
+            } else {
+                key += extractColumnValueStatic(rowBuffer, tbl, colIdx);
+            }
         }
     }
     return key;
+}
+
+std::string StorageEngine::buildCompositeKey(
+    const std::string& rowBuffer, const TableSchema& tbl,
+    const std::vector<std::string>& colNames, const std::string& dbname) {
+    std::map<std::string, std::string> values;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        values[tbl.cols[i].dataName] =
+            extractColumnValue(rowBuffer, tbl, i, dbname);
+    }
+    return buildCompositeKeyFromRowMap(values, tbl, colNames);
 }
 
 // ========================================================================
@@ -7414,7 +7491,9 @@ bool StorageEngine::checkExclusionConflict(const std::string& dbname, const std:
     TableSchema tbl = getTableSchema(dbname, tablename);
     std::map<std::string, std::string> newValues;
     for (size_t i = 0; i < tbl.len; ++i) {
-        newValues[tbl.cols[i].dataName] = extractColumnValueStatic(newRowBuffer, tbl, i);
+        newValues[tbl.cols[i].dataName] =
+            const_cast<StorageEngine*>(this)->extractColumnValue(
+                newRowBuffer, tbl, i, dbname);
     }
     // If the new row doesn't satisfy the partial predicate, no conflict.
     if (!ec.wherePredicate.empty()) {
@@ -7441,7 +7520,9 @@ bool StorageEngine::checkExclusionConflict(const std::string& dbname, const std:
         std::string row(data, len);
         std::map<std::string, std::string> oldValues;
         for (size_t i = 0; i < tbl.len; ++i) {
-            oldValues[tbl.cols[i].dataName] = extractColumnValueStatic(row, tbl, i);
+            oldValues[tbl.cols[i].dataName] =
+                const_cast<StorageEngine*>(this)->extractColumnValue(
+                    row, tbl, i, dbname);
         }
         if (!ec.wherePredicate.empty()) {
             std::string err;
@@ -7537,7 +7618,8 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
             int64_t rid = (static_cast<int64_t>(pageId) << 16) | slot;
             if (dc.exceptRid >= 0 && rid == dc.exceptRid) return;
             std::string row(data, len);
-            if (extractColumnValueStatic(row, tbl, static_cast<size_t>(colIdx))
+            if (const_cast<StorageEngine*>(this)->extractColumnValue(
+                    row, tbl, static_cast<size_t>(colIdx), dc.dbname)
                     == dc.payloadValue) ++matches;
         });
         return matches <= 0;
@@ -7613,7 +7695,8 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
                    [&](uint32_t, uint16_t, const char* data, size_t len) {
             if (found) return;
             std::string row(data, len);
-            if (extractColumnValueStatic(row, refTbl, static_cast<size_t>(refColIdx))
+            if (const_cast<StorageEngine*>(this)->extractColumnValue(
+                    row, refTbl, static_cast<size_t>(refColIdx), dc.dbname)
                     == dc.payloadValue) found = true;
         });
         return found;
@@ -7628,7 +7711,9 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
     if (!readRowByRid(pa, dc.rid, row, tbl)) return true;
     std::map<std::string, std::string> rowValues;
     for (size_t i = 0; i < tbl.len; ++i) {
-        rowValues[tbl.cols[i].dataName] = extractColumnValueStatic(row, tbl, i);
+        rowValues[tbl.cols[i].dataName] =
+            const_cast<StorageEngine*>(this)->extractColumnValue(
+                row, tbl, i, dc.dbname);
     }
     std::string err;
     return dbms::ExprHelper::evalBool(col.checkExpr, rowValues, buildTypeHints(tbl), &err, dc.dbname);
@@ -8124,7 +8209,7 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
     if (tbl.hasPrimaryKey() && !forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                            const char* data, size_t len) {
             std::string row(data, len);
-            std::string pkVal = tbl.buildPKValue(row);
+            std::string pkVal = extractPKValue(row, tbl);
             if (!pkVal.empty()) {
                 pkIdx->insert(pkVal, encodeRid(pageId, slotId));
             }
@@ -12331,7 +12416,7 @@ DBStatus StorageEngine::alterTableAddPrimaryKey(const std::string& dbname,
         if (!forEachRow(dbname, tablename,
                        [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
                            std::string row(data, len);
-                           std::string pkVal = tbl.buildPKValue(row);
+                           std::string pkVal = extractPKValue(row, tbl);
                            if (!pkVal.empty()) pkIdx->insert(pkVal, encodeRid(pageId, slotId));
                        })) {
             lockManager_.unlock(tablename);
@@ -14955,15 +15040,17 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         return DBStatus::INVALID_VALUE;
     }
 
-    // TOAST: offload large variable-length values to external storage
-    if (!prepareToastValues(dbname, tablename, tbl, actualValues)) {
+    // Keep the logical row image intact for constraints, index keys and
+    // triggers.  Only the physical row image contains TOAST references.
+    std::map<std::string, std::string> storedValues = actualValues;
+    if (!prepareToastValues(dbname, tablename, tbl, storedValues)) {
         lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
     }
 
     // Build row buffer
     uint64_t creatorTxnId = transactionContext().inTransaction ? transactionContext().currentTxnId : 0;
-    std::string rowBuffer = buildRowBuffer(tbl, actualValues, creatorTxnId);
+    std::string rowBuffer = buildRowBuffer(tbl, storedValues, creatorTxnId);
     std::string strippedRow = stripRowHeader(rowBuffer, tbl.formatVersion, tbl.len);
 
     // Check CHECK constraints before writing; collect deferrable deferred checks for commit-time validation.
@@ -15339,7 +15426,7 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             lockManager_.unlock(tablename);
             return DBStatus::LOCK_CONFLICT;
         }
-        const std::string pkVal = extractPKValue(strippedRow, tbl);
+        const std::string pkVal = tbl.buildPKValue(actualValues);
         if (tbl.hasPrimaryKey()) {
             if (BPTree* idx = getPKIndex(dbname, tablename); idx && !pkVal.empty()) {
                 idx->remove(pkVal);
@@ -15352,13 +15439,14 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             }
             if (colIdx >= tbl.len) continue;
             if (BPTree* idx = getSecondaryIndex(dbname, tablename, colname); idx) {
-                const std::string val = extractColumnValue(strippedRow, tbl, colIdx);
+                const std::string val = valueFromRowMap(actualValues, colname);
                 if (!val.empty()) idx->removeMulti(val, rid);
             }
         }
         for (const auto& ci : getCompositeIndexes(dbname, tablename)) {
             if (BPTree* idx = getCompositeIndexTree(dbname, tablename, ci.name); idx) {
-                const std::string key = buildCompositeKey(strippedRow, tbl, ci.columns);
+                const std::string key =
+                    buildCompositeKeyFromRowMap(actualValues, tbl, ci.columns);
                 if (!key.empty()) idx->removeMulti(key, rid);
             }
         }
@@ -15369,7 +15457,7 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             }
             if (colIdx >= tbl.len) continue;
             if (HashIndex* idx = getHashIndex(dbname, tablename, colname); idx) {
-                const std::string val = extractColumnValue(strippedRow, tbl, colIdx);
+                const std::string val = valueFromRowMap(actualValues, colname);
                 if (!val.empty()) idx->remove(val, rid);
             }
         }
@@ -15425,7 +15513,7 @@ DBStatus StorageEngine::insert(const std::string& dbname,
     // Update B+ tree PK index.
     {
         BPTree* idx = getPKIndex(dbname, tablename);
-        std::string pkVal = extractPKValue(strippedRow, tbl);
+        std::string pkVal = tbl.buildPKValue(actualValues);
         if (tbl.hasPrimaryKey() && !pkVal.empty() && (!idx || !idx->insert(pkVal, rid))) {
             return abortIndexUpdate();
         }
@@ -15440,7 +15528,7 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             }
             if (colIdx >= tbl.len) return abortIndexUpdate();
             BPTree* secIdx = getSecondaryIndex(dbname, tablename, colname);
-            std::string val = extractColumnValue(strippedRow, tbl, colIdx);
+            std::string val = valueFromRowMap(actualValues, colname);
             if (!secIdx || (!val.empty() && !secIdx->insertMulti(val, rid))) {
                 return abortIndexUpdate();
             }
@@ -15451,7 +15539,8 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         auto compIdxs = getCompositeIndexes(dbname, tablename);
         for (const auto& ci : compIdxs) {
             BPTree* cidx = getCompositeIndexTree(dbname, tablename, ci.name);
-            std::string key = buildCompositeKey(strippedRow, tbl, ci.columns);
+            std::string key =
+                buildCompositeKeyFromRowMap(actualValues, tbl, ci.columns);
             if (!cidx || (!key.empty() && !cidx->insertMulti(key, rid))) {
                 return abortIndexUpdate();
             }
@@ -15467,7 +15556,7 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             }
             if (colIdx >= tbl.len) return abortIndexUpdate();
             HashIndex* hidx = getHashIndex(dbname, tablename, colname);
-            std::string val = extractColumnValue(strippedRow, tbl, colIdx);
+            std::string val = valueFromRowMap(actualValues, colname);
             if (!hidx || (!val.empty() && !hidx->insert(val, rid))) {
                 return abortIndexUpdate();
             }
@@ -15483,7 +15572,7 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             }
             if (colIdx >= tbl.len) return abortIndexUpdate();
             BloomIndex* bidx = getBloomIndex(dbname, tablename, colname);
-            std::string val = extractColumnValue(strippedRow, tbl, colIdx);
+            std::string val = valueFromRowMap(actualValues, colname);
             if (!bidx || (!val.empty() && !bidx->insert(val, rid))) {
                 return abortIndexUpdate();
             }
@@ -16250,10 +16339,12 @@ DBStatus StorageEngine::remove(const std::string& dbname,
                 std::map<std::string, std::string> pkVals;
                 if (!tbl.pkColIndices.empty()) {
                     for (size_t pki : tbl.pkColIndices) {
-                        pkVals[tbl.cols[pki].dataName] = extractColumnValue(row, tbl, pki);
+                        pkVals[tbl.cols[pki].dataName] =
+                            extractColumnValue(row, tbl, pki, dbname);
                     }
                 } else {
-                    pkVals[tbl.cols[pkIdx].dataName] = extractPKValue(row, tbl);
+                    pkVals[tbl.cols[pkIdx].dataName] =
+                        extractColumnValue(row, tbl, pkIdx, dbname);
                 }
                 if (!pkVals.empty()) deletedPKRows.push_back(std::move(pkVals));
             }
@@ -16490,12 +16581,32 @@ DBStatus StorageEngine::remove(const std::string& dbname,
         }
     }
 
+    // Resolve every OLD image while its external chunks still exist.  The
+    // physical rows remain available for transaction undo and TOAST cleanup;
+    // constraints, triggers and every index access method use these logical
+    // copies even after the external chunks have been reclaimed.
+    std::vector<std::string> logicalRowsToDelete;
+    logicalRowsToDelete.reserve(rowsToDelete.size());
+    for (const auto& row : rowsToDelete) {
+        if (row.empty()) {
+            logicalRowsToDelete.emplace_back();
+            continue;
+        }
+        bool resolved = false;
+        logicalRowsToDelete.push_back(
+            resolveToastValues(dbname, tablename, row, tbl, &resolved));
+        if (!resolved) {
+            lockManager_.unlock(tablename);
+            return DBStatus::CORRUPTED_DATA;
+        }
+    }
+
     // DELETE RETURNING observes the target OLD rows before tombstones are
     // installed.  BEFORE DELETE triggers cannot mutate OLD, so capture maps
     // here and never re-query a row after DELETE.
     if (deletedRows) {
         deletedRows->clear();
-        for (const auto& row : rowsToDelete) {
+        for (const auto& row : logicalRowsToDelete) {
             if (row.empty()) continue;
             std::map<std::string, std::string> values;
             for (size_t i = 0; i < tbl.len; ++i) {
@@ -16515,7 +16626,7 @@ DBStatus StorageEngine::remove(const std::string& dbname,
         for (const auto& trg : beforeDeleteTriggers) {
             if (!trg.enabled) continue;
             if (trg.forEachRow) {
-                for (const auto& row : rowsToDelete) {
+                for (const auto& row : logicalRowsToDelete) {
                     if (row.empty()) continue;
                     std::map<std::string, std::string> oldValues;
                     for (size_t i = 0; i < tbl.len; ++i) {
@@ -16657,7 +16768,7 @@ DBStatus StorageEngine::remove(const std::string& dbname,
     // Remove from PK index
     BPTree* pkIdx = getPKIndex(dbname, tablename);
     if (pkIdx) {
-        for (const auto& row : rowsToDelete) {
+        for (const auto& row : logicalRowsToDelete) {
             if (row.empty()) continue;
             std::string pkVal = extractPKValue(row, tbl);
             if (!pkVal.empty()) pkIdx->remove(pkVal);
@@ -16677,7 +16788,7 @@ DBStatus StorageEngine::remove(const std::string& dbname,
             if (!secIdx) continue;
             size_t rowIndex = 0;
             for (int64_t rid : toDelete) {
-                const auto& row = rowsToDelete[rowIndex++];
+                const auto& row = logicalRowsToDelete[rowIndex++];
                 if (row.empty()) continue;
                 std::string val = extractColumnValue(row, tbl, colIdx);
                 if (!val.empty()) secIdx->removeMulti(val, rid);
@@ -16692,7 +16803,7 @@ DBStatus StorageEngine::remove(const std::string& dbname,
             if (!cidx) continue;
             size_t rowIndex = 0;
             for (int64_t rid : toDelete) {
-                const auto& row = rowsToDelete[rowIndex++];
+                const auto& row = logicalRowsToDelete[rowIndex++];
                 if (row.empty()) continue;
                 std::string key = buildCompositeKey(row, tbl, ci.columns);
                 if (!key.empty()) cidx->removeMulti(key, rid);
@@ -16712,8 +16823,10 @@ DBStatus StorageEngine::remove(const std::string& dbname,
             if (!hidx) continue;
             size_t hidx_i = 0;
             for (int64_t rid : toDelete) {
-                if (hidx_i < rowsToDelete.size() && !rowsToDelete[hidx_i].empty()) {
-                    std::string val = extractColumnValue(rowsToDelete[hidx_i], tbl, colIdx);
+                if (hidx_i < logicalRowsToDelete.size() &&
+                    !logicalRowsToDelete[hidx_i].empty()) {
+                    std::string val = extractColumnValue(
+                        logicalRowsToDelete[hidx_i], tbl, colIdx);
                     if (!val.empty()) hidx->remove(val, rid);
                 }
                 ++hidx_i;
@@ -16733,8 +16846,10 @@ DBStatus StorageEngine::remove(const std::string& dbname,
             if (!bidx) continue;
             size_t bidx_i = 0;
             for (int64_t rid : toDelete) {
-                if (bidx_i < rowsToDelete.size() && !rowsToDelete[bidx_i].empty()) {
-                    std::string val = extractColumnValue(rowsToDelete[bidx_i], tbl, colIdx);
+                if (bidx_i < logicalRowsToDelete.size() &&
+                    !logicalRowsToDelete[bidx_i].empty()) {
+                    std::string val = extractColumnValue(
+                        logicalRowsToDelete[bidx_i], tbl, colIdx);
                     if (!val.empty()) bidx->remove(val, rid);
                 }
                 ++bidx_i;
@@ -16748,12 +16863,13 @@ DBStatus StorageEngine::remove(const std::string& dbname,
         if (txn.inTransaction) {
             size_t di = 0;
             for (int64_t rid : toDelete) {
-                if (di < rowsToDelete.size() && !rowsToDelete[di].empty()) {
+                if (di < logicalRowsToDelete.size() &&
+                    !logicalRowsToDelete[di].empty()) {
                     std::string rendered;
                     for (size_t i = 0; i < tbl.len; ++i) {
                         if (i) rendered += '|';
-                        rendered += extractColumnValue(rowsToDelete[di], tbl, i,
-                                                       dbname, true);
+                        rendered += extractColumnValue(
+                            logicalRowsToDelete[di], tbl, i, dbname, true);
                     }
                     txn.txnLogicalChanges.push_back({tablename, 2, rendered, ""});
                 }
@@ -16769,7 +16885,7 @@ DBStatus StorageEngine::remove(const std::string& dbname,
             operationTriggers, tablename, "after", "delete");
         for (const auto& trg : triggers) {
             if (trg.forEachRow) {
-                for (const auto& row : rowsToDelete) {
+                for (const auto& row : logicalRowsToDelete) {
                     if (row.empty()) continue;
                     std::map<std::string, std::string> oldValues;
                     for (size_t i = 0; i < tbl.len; ++i) {
@@ -17128,20 +17244,27 @@ DBStatus StorageEngine::update(const std::string& dbname,
         std::string row;
         if (!readRowByRid(pa, rid, row, tbl)) continue;
 
+        bool resolvedOldRowOk = false;
+        const std::string resolvedOldRow = resolveToastValues(
+            dbname, tablename, row, tbl, &resolvedOldRowOk);
+        if (!resolvedOldRowOk) {
+            lockManager_.unlock(tablename);
+            return DBStatus::CORRUPTED_DATA;
+        }
+        std::map<std::string, std::string> oldLogicalValues;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            oldLogicalValues[tbl.cols[i].dataName] =
+                extractColumnValue(resolvedOldRow, tbl, i, dbname, true);
+        }
+
         // Log for transaction rollback (before modification)
         if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
             logTxnUpdate(tablename, rid, row);
         }
 
-        {
-            std::map<std::string, std::string> img;
-            for (size_t i = 0; i < tbl.len; ++i) {
-                img[tbl.cols[i].dataName] = extractColumnValue(row, tbl, i);
-            }
-            oldImages.emplace(rid, std::move(img));
-        }
+        oldImages.emplace(rid, oldLogicalValues);
         // Save old PK and indexed column values before modification
-        std::string oldPK = extractPKValue(row, tbl);
+        std::string oldPK = tbl.buildPKValue(oldLogicalValues);
         std::map<std::string, std::string> oldIdxVals;
         for (const auto& colname : indexedCols) {
             size_t colIdx = tbl.len;
@@ -17149,7 +17272,7 @@ DBStatus StorageEngine::update(const std::string& dbname,
                 if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
             }
             if (colIdx < tbl.len) {
-                oldIdxVals[colname] = extractColumnValue(row, tbl, colIdx);
+                oldIdxVals[colname] = valueFromRowMap(oldLogicalValues, colname);
             }
         }
         // Also save hash-indexed column values
@@ -17159,7 +17282,7 @@ DBStatus StorageEngine::update(const std::string& dbname,
                 if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
             }
             if (colIdx < tbl.len) {
-                oldIdxVals[colname] = extractColumnValue(row, tbl, colIdx);
+                oldIdxVals[colname] = valueFromRowMap(oldLogicalValues, colname);
             }
         }
         // Also save bloom-indexed column values
@@ -17169,16 +17292,12 @@ DBStatus StorageEngine::update(const std::string& dbname,
                 if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
             }
             if (colIdx < tbl.len) {
-                oldIdxVals[colname] = extractColumnValue(row, tbl, colIdx);
+                oldIdxVals[colname] = valueFromRowMap(oldLogicalValues, colname);
             }
         }
 
         // Rebuild row buffer with updates
-        std::map<std::string, std::string> rowValues;
-        for (size_t i = 0; i < tbl.len; ++i) {
-            rowValues[tbl.cols[i].dataName] =
-                extractColumnValue(row, tbl, i, dbname, true);
-        }
+        std::map<std::string, std::string> rowValues = oldLogicalValues;
         if (updateResolver) {
             std::map<std::string, std::string> effectiveUpdates = updates;
             if (!updateResolver(rowValues, effectiveUpdates)) {
@@ -17228,11 +17347,10 @@ DBStatus StorageEngine::update(const std::string& dbname,
         if (triggerExecutor_) {
             auto beforeUpdateTriggers = filterTriggers(
                 operationTriggers, tablename, "before", "update");
-            // Build OLD values map from the current row buffer
-            std::map<std::string, std::string> oldRowValues;
-            for (size_t i = 0; i < tbl.len; ++i) {
-                oldRowValues[tbl.cols[i].dataName] = extractColumnValue(row, tbl, i);
-            }
+            // BEFORE triggers must see the logical OLD image, never the
+            // physical TOAST reference stored in the heap tuple.
+            const std::map<std::string, std::string>& oldRowValues =
+                oldLogicalValues;
             for (const auto& trg : beforeUpdateTriggers) {
                 if (!trg.enabled) continue;
                 if (!trg.forEachRow) continue;
@@ -17442,7 +17560,7 @@ DBStatus StorageEngine::update(const std::string& dbname,
         }
 
         // Check if PK changed and apply ON UPDATE foreign key actions
-        std::string newPK = extractPKValue(strippedNewRow, tbl);
+        std::string newPK = tbl.buildPKValue(rowValues);
         if (!oldPK.empty() && oldPK != newPK) {
             // Collect all referencing rows and their ON UPDATE actions
             struct UpdateCascadeAction { std::string table; int64_t rid; std::map<std::string, std::string> newFkVals; };
@@ -17455,14 +17573,19 @@ DBStatus StorageEngine::update(const std::string& dbname,
             std::map<std::string, std::string> oldPKVals;
             if (!tbl.pkColIndices.empty()) {
                 for (size_t pki : tbl.pkColIndices) {
-                    oldPKVals[tbl.cols[pki].dataName] = extractColumnValue(row, tbl, pki);
+                    oldPKVals[tbl.cols[pki].dataName] =
+                        valueFromRowMap(oldLogicalValues, tbl.cols[pki].dataName);
                 }
             } else {
                 size_t pkIdxCol = tbl.len;
                 for (size_t i = 0; i < tbl.len; ++i) {
                     if (tbl.cols[i].isPrimaryKey) { pkIdxCol = i; break; }
                 }
-                if (pkIdxCol < tbl.len) oldPKVals[tbl.cols[pkIdxCol].dataName] = extractColumnValue(row, tbl, pkIdxCol);
+                if (pkIdxCol < tbl.len) {
+                    oldPKVals[tbl.cols[pkIdxCol].dataName] =
+                        valueFromRowMap(oldLogicalValues,
+                                        tbl.cols[pkIdxCol].dataName);
+                }
             }
 
             if (!oldPKVals.empty()) {
@@ -17629,11 +17752,12 @@ DBStatus StorageEngine::update(const std::string& dbname,
         // Allocate new external values only after every pre-write check has
         // passed.  The old chunks remain reachable through txnLog until
         // COMMIT; rollback removes only chunks referenced by the new row.
-        if (!prepareToastValues(dbname, tablename, tbl, rowValues)) {
+        std::map<std::string, std::string> storedRowValues = rowValues;
+        if (!prepareToastValues(dbname, tablename, tbl, storedRowValues)) {
             lockManager_.unlock(tablename);
             return DBStatus::IO_ERROR;
         }
-        newRow = buildRowBuffer(tbl, rowValues, updateTxnId);
+        newRow = buildRowBuffer(tbl, storedRowValues, updateTxnId);
         strippedNewRow = stripRowHeader(newRow, tbl.formatVersion, tbl.len);
 
         if (!lockManager_.pageLockExclusive(dbname, tablename, pageId)) {
@@ -17771,7 +17895,6 @@ DBStatus StorageEngine::update(const std::string& dbname,
         // Update PK index if PK was updated or RID changed
         BPTree* pkIdx = getPKIndex(dbname, tablename);
         if (pkIdx) {
-            std::string newPK = extractPKValue(strippedNewRow, tbl);
             if (oldPK != newPK) {
                 if (!oldPK.empty()) pkIdx->remove(oldPK);
                 if (!newPK.empty()) pkIdx->insert(newPK, actualRid);
@@ -17793,7 +17916,7 @@ DBStatus StorageEngine::update(const std::string& dbname,
             if (colIdx >= tbl.len) continue;
             BPTree* secIdx = getSecondaryIndex(dbname, tablename, colname);
             if (!secIdx) continue;
-            std::string newVal = extractColumnValue(strippedNewRow, tbl, colIdx);
+            std::string newVal = valueFromRowMap(rowValues, colname);
             bool colChanged = (colUpdates.find(colIdx) != colUpdates.end());
             if (colChanged && oldVal != newVal) {
                 if (!oldVal.empty()) secIdx->removeMulti(oldVal, rid);
@@ -17827,8 +17950,10 @@ DBStatus StorageEngine::update(const std::string& dbname,
             if (!anyColChanged && actualRid == rid) continue;
             BPTree* cidx = getCompositeIndexTree(dbname, tablename, ci.name);
             if (!cidx) continue;
-            std::string newKey = buildCompositeKey(strippedNewRow, tbl, ci.columns);
-            std::string oldKey = buildCompositeKey(row, tbl, ci.columns);
+            std::string newKey =
+                buildCompositeKeyFromRowMap(rowValues, tbl, ci.columns);
+            std::string oldKey =
+                buildCompositeKeyFromRowMap(oldLogicalValues, tbl, ci.columns);
             if (oldKey != newKey) {
                 if (!oldKey.empty()) cidx->removeMulti(oldKey, rid);
                 if (!newKey.empty()) cidx->insertMulti(newKey, actualRid);
@@ -17850,7 +17975,7 @@ DBStatus StorageEngine::update(const std::string& dbname,
             if (!hidx) continue;
             auto itOld = oldIdxVals.find(colname);
             std::string oldVal = (itOld != oldIdxVals.end()) ? itOld->second : "";
-            std::string newVal = extractColumnValue(strippedNewRow, tbl, colIdx);
+            std::string newVal = valueFromRowMap(rowValues, colname);
             bool colChanged = (colUpdates.find(colIdx) != colUpdates.end());
             if (colChanged && oldVal != newVal) {
                 if (!oldVal.empty()) hidx->remove(oldVal, rid);
@@ -17873,7 +17998,7 @@ DBStatus StorageEngine::update(const std::string& dbname,
             if (!bidx) continue;
             auto itOld = oldIdxVals.find(colname);
             std::string oldVal = (itOld != oldIdxVals.end()) ? itOld->second : "";
-            std::string newVal = extractColumnValue(strippedNewRow, tbl, colIdx);
+            std::string newVal = valueFromRowMap(rowValues, colname);
             bool colChanged = (colUpdates.find(colIdx) != colUpdates.end());
             if (colChanged && oldVal != newVal) {
                 if (!oldVal.empty()) bidx->remove(oldVal, rid);
@@ -17927,7 +18052,8 @@ DBStatus StorageEngine::update(const std::string& dbname,
                     if (!readRowByRid(pa, rid, newRow, tbl)) continue;
                     std::map<std::string, std::string> newValues;
                     for (size_t i = 0; i < tbl.len; ++i) {
-                        newValues[tbl.cols[i].dataName] = extractColumnValue(newRow, tbl, i);
+                        newValues[tbl.cols[i].dataName] =
+                            extractColumnValue(newRow, tbl, i, dbname, true);
                     }
                     const std::map<std::string, std::string>* oldImage = nullptr;
                     auto oit = oldImages.find(rid);
@@ -26075,7 +26201,8 @@ void StorageEngine::recordSsiIndexKeys(const std::string& dbname,
     if (tbl.pkColIndices.size() == 1) {
         const size_t columnIndex = tbl.pkColIndices.front();
         if (columnIndex < tbl.len) {
-            const std::string value = extractColumnValueStatic(rowData, tbl, columnIndex);
+            const std::string value = extractColumnValue(
+                rowData, tbl, columnIndex, dbname);
             if (!value.empty()) {
                 keys.emplace_back("pk:" + tbl.cols[columnIndex].dataName, value);
             }
@@ -26092,7 +26219,8 @@ void StorageEngine::recordSsiIndexKeys(const std::string& dbname,
             }
         }
         if (columnIndex >= tbl.len) continue;
-        const std::string value = extractColumnValueStatic(rowData, tbl, columnIndex);
+        const std::string value = extractColumnValue(
+            rowData, tbl, columnIndex, dbname);
         if (!value.empty()) keys.emplace_back("idx:" + columnName, value);
     }
 
@@ -26840,7 +26968,8 @@ DBStatus StorageEngine::rollbackTransaction() {
                 std::string row;
                 if (readRowByRid(pa, it->rowIdx, row, tbl)) {
                     insertedRow = row;
-                    pkVal = extractPKValue(row, tbl);
+                    pkVal = extractPKValue(
+                        row, tbl, transactionContext().txnDB);
                     auto indexedCols = getIndexedColumns(transactionContext().txnDB, it->tableName);
                     for (const auto& colname : indexedCols) {
                         size_t colIdx = tbl.len;
@@ -26848,11 +26977,13 @@ DBStatus StorageEngine::rollbackTransaction() {
                             if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
                         }
                         if (colIdx < tbl.len) {
-                            secIdxVals[colname] = extractColumnValue(row, tbl, colIdx);
+                            secIdxVals[colname] = extractColumnValue(
+                                row, tbl, colIdx, transactionContext().txnDB);
                         }
                     }
                     for (const auto& ci : getCompositeIndexes(transactionContext().txnDB, it->tableName)) {
-                        std::string key = buildCompositeKey(row, tbl, ci.columns);
+                        std::string key = buildCompositeKey(
+                            row, tbl, ci.columns, transactionContext().txnDB);
                         if (!key.empty()) compositeIdxVals[ci.name] = key;
                     }
                     for (const auto& colname : getHashIndexedColumns(transactionContext().txnDB, it->tableName)) {
@@ -26861,7 +26992,8 @@ DBStatus StorageEngine::rollbackTransaction() {
                             if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
                         }
                         if (colIdx < tbl.len) {
-                            std::string value = extractColumnValue(row, tbl, colIdx);
+                            std::string value = extractColumnValue(
+                                row, tbl, colIdx, transactionContext().txnDB);
                             if (!value.empty()) hashIdxVals[colname] = value;
                         }
                     }
@@ -26931,20 +27063,18 @@ DBStatus StorageEngine::rollbackTransaction() {
                     currentRow = stripRowHeader(currentData, currentLen, tbl.formatVersion, tbl.len);
                     foundCurrent = true;
                 } else if (!got) {
-                    std::string targetPk = extractPKValue(it->rowData, tbl);
+                    std::string targetPk = extractPKValue(
+                        it->rowData, tbl, transactionContext().txnDB);
                     page.forEachLive([&]([[maybe_unused]] uint16_t sid, const char* data, size_t len) {
                         if (foundCurrent || len <= rowHeaderSize(tbl.formatVersion, tbl.len)) return;
                         std::string rowData = stripRowHeader(data, len, tbl.formatVersion, tbl.len);
-                        std::string pk = extractPKValue(rowData, tbl);
+                        std::string pk = extractPKValue(
+                            rowData, tbl, transactionContext().txnDB);
                         if (pk == targetPk) {
                             currentRow = rowData;
                             foundCurrent = true;
                         }
                     });
-                }
-                if (foundCurrent) {
-                    deleteToastForRowExcept(transactionContext().txnDB, it->tableName,
-                                            currentRow, it->rowData);
                 }
                 // Restore old row data
                 if (got && currentLen >= rowHeaderSize(tbl.formatVersion, tbl.len)) {
@@ -26954,12 +27084,14 @@ DBStatus StorageEngine::rollbackTransaction() {
                     setRowXmax(fullRow.data(), fullRow.size(), tbl.formatVersion, 0);
                     page.update(slotId, fullRow.data(), fullRow.size());
                 } else if (!got) {
-                    std::string targetPk = extractPKValue(it->rowData, tbl);
+                    std::string targetPk = extractPKValue(
+                        it->rowData, tbl, transactionContext().txnDB);
                     bool restored = false;
                     page.forEachLive([&]([[maybe_unused]] uint16_t sid, const char* data, size_t len) {
                         if (restored || len <= rowHeaderSize(tbl.formatVersion, tbl.len)) return;
                         std::string rowData = stripRowHeader(data, len, tbl.formatVersion, tbl.len);
-                        std::string pk = extractPKValue(rowData, tbl);
+                        std::string pk = extractPKValue(
+                            rowData, tbl, transactionContext().txnDB);
                         if (pk == targetPk) {
                             std::string fullRow = replaceRowData(
                                 std::string(data, len), it->rowData, tbl.formatVersion, tbl.len);
@@ -26984,10 +27116,12 @@ DBStatus StorageEngine::rollbackTransaction() {
             BPTree* pkIdx = getPKIndex(transactionContext().txnDB, it->tableName);
             if (pkIdx) {
                 if (foundCurrent) {
-                    std::string currentPk = extractPKValue(currentRow, tbl);
+                    std::string currentPk = extractPKValue(
+                        currentRow, tbl, transactionContext().txnDB);
                     if (!currentPk.empty()) pkIdx->remove(currentPk);
                 }
-                std::string pkVal = extractPKValue(it->rowData, tbl);
+                std::string pkVal = extractPKValue(
+                    it->rowData, tbl, transactionContext().txnDB);
                 if (!pkVal.empty()) pkIdx->insert(pkVal, it->rowIdx);
             }
             auto indexedCols = getIndexedColumns(transactionContext().txnDB, it->tableName);
@@ -27000,10 +27134,12 @@ DBStatus StorageEngine::rollbackTransaction() {
                 BPTree* secIdx = getSecondaryIndex(transactionContext().txnDB, it->tableName, colname);
                 if (!secIdx) continue;
                 if (foundCurrent) {
-                    std::string currentVal = extractColumnValue(currentRow, tbl, colIdx);
+                    std::string currentVal = extractColumnValue(
+                        currentRow, tbl, colIdx, transactionContext().txnDB);
                     if (!currentVal.empty()) secIdx->removeMulti(currentVal, it->rowIdx);
                 }
-                std::string val = extractColumnValue(it->rowData, tbl, colIdx);
+                std::string val = extractColumnValue(
+                    it->rowData, tbl, colIdx, transactionContext().txnDB);
                 if (!val.empty()) secIdx->insertMulti(val, it->rowIdx);
             }
             for (const auto& ci : getCompositeIndexes(transactionContext().txnDB, it->tableName)) {
@@ -27011,10 +27147,12 @@ DBStatus StorageEngine::rollbackTransaction() {
                     transactionContext().txnDB, it->tableName, ci.name);
                 if (!compositeIdx) continue;
                 if (foundCurrent) {
-                    std::string currentKey = buildCompositeKey(currentRow, tbl, ci.columns);
+                    std::string currentKey = buildCompositeKey(
+                        currentRow, tbl, ci.columns, transactionContext().txnDB);
                     if (!currentKey.empty()) compositeIdx->removeMulti(currentKey, it->rowIdx);
                 }
-                std::string oldKey = buildCompositeKey(it->rowData, tbl, ci.columns);
+                std::string oldKey = buildCompositeKey(
+                    it->rowData, tbl, ci.columns, transactionContext().txnDB);
                 if (!oldKey.empty()) compositeIdx->insertMulti(oldKey, it->rowIdx);
             }
             for (const auto& colname : getHashIndexedColumns(transactionContext().txnDB, it->tableName)) {
@@ -27027,11 +27165,20 @@ DBStatus StorageEngine::rollbackTransaction() {
                     transactionContext().txnDB, it->tableName, colname);
                 if (!hashIdx) continue;
                 if (foundCurrent) {
-                    std::string currentVal = extractColumnValue(currentRow, tbl, colIdx);
+                    std::string currentVal = extractColumnValue(
+                        currentRow, tbl, colIdx, transactionContext().txnDB);
                     if (!currentVal.empty()) hashIdx->remove(currentVal, it->rowIdx);
                 }
-                std::string oldVal = extractColumnValue(it->rowData, tbl, colIdx);
+                std::string oldVal = extractColumnValue(
+                    it->rowData, tbl, colIdx, transactionContext().txnDB);
                 if (!oldVal.empty()) hashIdx->insert(oldVal, it->rowIdx);
+            }
+            if (foundCurrent) {
+                // Index cleanup needs the logical new values, so reclaim the
+                // superseded chunks only after every stale key is removed.
+                deleteToastForRowExcept(transactionContext().txnDB,
+                                        it->tableName, currentRow,
+                                        it->rowData);
             }
         } else if (it->op == TxnLogEntry::Op::Delete) {
             // Undo DELETE: restore the row by clearing tombstone and writing back old data
@@ -27067,7 +27214,8 @@ DBStatus StorageEngine::rollbackTransaction() {
             // Re-add to indexes
             BPTree* pkIdx = getPKIndex(transactionContext().txnDB, it->tableName);
             if (pkIdx) {
-                std::string pkVal = extractPKValue(it->rowData, tbl);
+                std::string pkVal = extractPKValue(
+                    it->rowData, tbl, transactionContext().txnDB);
                 if (!pkVal.empty()) pkIdx->insert(pkVal, it->rowIdx);
             }
             auto indexedCols = getIndexedColumns(transactionContext().txnDB, it->tableName);
@@ -27079,14 +27227,16 @@ DBStatus StorageEngine::rollbackTransaction() {
                 if (colIdx >= tbl.len) continue;
                 BPTree* secIdx = getSecondaryIndex(transactionContext().txnDB, it->tableName, colname);
                 if (!secIdx) continue;
-                std::string val = extractColumnValue(it->rowData, tbl, colIdx);
+                std::string val = extractColumnValue(
+                    it->rowData, tbl, colIdx, transactionContext().txnDB);
                 if (!val.empty()) secIdx->insertMulti(val, it->rowIdx);
             }
             for (const auto& ci : getCompositeIndexes(transactionContext().txnDB, it->tableName)) {
                 BPTree* compositeIdx = getCompositeIndexTree(
                     transactionContext().txnDB, it->tableName, ci.name);
                 if (!compositeIdx) continue;
-                std::string key = buildCompositeKey(it->rowData, tbl, ci.columns);
+                std::string key = buildCompositeKey(
+                    it->rowData, tbl, ci.columns, transactionContext().txnDB);
                 if (!key.empty()) compositeIdx->insertMulti(key, it->rowIdx);
             }
             for (const auto& colname : getHashIndexedColumns(transactionContext().txnDB, it->tableName)) {
@@ -27098,7 +27248,8 @@ DBStatus StorageEngine::rollbackTransaction() {
                 HashIndex* hashIdx = getHashIndex(
                     transactionContext().txnDB, it->tableName, colname);
                 if (!hashIdx) continue;
-                std::string value = extractColumnValue(it->rowData, tbl, colIdx);
+                std::string value = extractColumnValue(
+                    it->rowData, tbl, colIdx, transactionContext().txnDB);
                 if (!value.empty()) hashIdx->insert(value, it->rowIdx);
             }
         }
@@ -27756,13 +27907,12 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
         if (entry.op == TxnLogEntry::Op::Insert) {
             // Remove from indexes first (row still exists)
             std::string insertedRow;
-            if (readRowByRid(pa, entry.rowIdx, insertedRow, tbl)) {
-                deleteRowToast(transactionContext().txnDB, entry.tableName, entry.rowIdx);
-            }
+            readRowByRid(pa, entry.rowIdx, insertedRow, tbl);
             BPTree* pkIdx = getPKIndex(transactionContext().txnDB, entry.tableName);
             if (pkIdx) {
                 if (!insertedRow.empty()) {
-                    std::string pkVal = extractPKValue(insertedRow, tbl);
+                    std::string pkVal = extractPKValue(
+                        insertedRow, tbl, transactionContext().txnDB);
                     if (!pkVal.empty()) pkIdx->remove(pkVal);
                 }
             }
@@ -27776,13 +27926,15 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                 BPTree* secIdx = getSecondaryIndex(transactionContext().txnDB, entry.tableName, colname);
                 if (!secIdx) continue;
                 if (!insertedRow.empty()) {
-                    std::string val = extractColumnValue(insertedRow, tbl, colIdx);
+                    std::string val = extractColumnValue(
+                        insertedRow, tbl, colIdx, transactionContext().txnDB);
                     if (!val.empty()) secIdx->removeMulti(val, entry.rowIdx);
                 }
             }
             for (const auto& ci : getCompositeIndexes(transactionContext().txnDB, entry.tableName)) {
                 if (insertedRow.empty()) continue;
-                std::string key = buildCompositeKey(insertedRow, tbl, ci.columns);
+                std::string key = buildCompositeKey(
+                    insertedRow, tbl, ci.columns, transactionContext().txnDB);
                 if (key.empty()) continue;
                 BPTree* compositeIdx = getCompositeIndexTree(
                     transactionContext().txnDB, entry.tableName, ci.name);
@@ -27795,10 +27947,17 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                     if (tbl.cols[j].dataName == colname) { colIdx = j; break; }
                 }
                 if (colIdx >= tbl.len) continue;
-                std::string value = extractColumnValue(insertedRow, tbl, colIdx);
+                std::string value = extractColumnValue(
+                    insertedRow, tbl, colIdx, transactionContext().txnDB);
                 HashIndex* hashIdx = getHashIndex(
                     transactionContext().txnDB, entry.tableName, colname);
                 if (hashIdx && !value.empty()) hashIdx->remove(value, entry.rowIdx);
+            }
+            if (!insertedRow.empty()) {
+                // Preserve external values until every logical index key has
+                // been removed from the access methods.
+                deleteRowToast(transactionContext().txnDB, entry.tableName,
+                               entry.rowIdx);
             }
             // Then remove the row from page
             uint32_t pageId; uint16_t slotId;
@@ -27836,20 +27995,18 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                     currentRow = stripRowHeader(currentData, currentLen, tbl.formatVersion, tbl.len);
                     foundCurrent = true;
                 } else {
-                    std::string targetPk = extractPKValue(entry.rowData, tbl);
+                    std::string targetPk = extractPKValue(
+                        entry.rowData, tbl, transactionContext().txnDB);
                     page.forEachLive([&]([[maybe_unused]] uint16_t sid, const char* data, size_t len) {
                         if (foundCurrent || len <= rowHeaderSize(tbl.formatVersion, tbl.len)) return;
                         std::string rowData = stripRowHeader(data, len, tbl.formatVersion, tbl.len);
-                        std::string pk = extractPKValue(rowData, tbl);
+                        std::string pk = extractPKValue(
+                            rowData, tbl, transactionContext().txnDB);
                         if (pk == targetPk) {
                             currentRow = rowData;
                             foundCurrent = true;
                         }
                     });
-                }
-                if (foundCurrent) {
-                    deleteToastForRowExcept(transactionContext().txnDB, entry.tableName,
-                                            currentRow, entry.rowData);
                 }
                 // Restore old row data
                 if (page.read(slotId, currentData, currentLen) && currentLen >= rowHeaderSize(tbl.formatVersion, tbl.len)) {
@@ -27859,12 +28016,14 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                     setRowXmax(fullRow.data(), fullRow.size(), tbl.formatVersion, 0);
                     page.update(slotId, fullRow.data(), fullRow.size());
                 } else {
-                    std::string targetPk = extractPKValue(entry.rowData, tbl);
+                    std::string targetPk = extractPKValue(
+                        entry.rowData, tbl, transactionContext().txnDB);
                     bool restored = false;
                     page.forEachLive([&]([[maybe_unused]] uint16_t sid, const char* data, size_t len) {
                         if (restored || len <= rowHeaderSize(tbl.formatVersion, tbl.len)) return;
                         std::string rowData = stripRowHeader(data, len, tbl.formatVersion, tbl.len);
-                        std::string pk = extractPKValue(rowData, tbl);
+                        std::string pk = extractPKValue(
+                            rowData, tbl, transactionContext().txnDB);
                         if (pk == targetPk) {
                             std::string fullRow = replaceRowData(
                                 std::string(data, len), entry.rowData, tbl.formatVersion, tbl.len);
@@ -27889,10 +28048,12 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
             BPTree* pkIdx = getPKIndex(transactionContext().txnDB, entry.tableName);
             if (pkIdx) {
                 if (foundCurrent) {
-                    std::string currentPk = extractPKValue(currentRow, tbl);
+                    std::string currentPk = extractPKValue(
+                        currentRow, tbl, transactionContext().txnDB);
                     if (!currentPk.empty()) pkIdx->remove(currentPk);
                 }
-                std::string newPk = extractPKValue(entry.rowData, tbl);
+                std::string newPk = extractPKValue(
+                    entry.rowData, tbl, transactionContext().txnDB);
                 if (!newPk.empty()) pkIdx->insert(newPk, entry.rowIdx);
             }
             auto indexedCols = getIndexedColumns(transactionContext().txnDB, entry.tableName);
@@ -27905,10 +28066,12 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                 BPTree* secIdx = getSecondaryIndex(transactionContext().txnDB, entry.tableName, colname);
                 if (!secIdx) continue;
                 if (foundCurrent) {
-                    std::string currentVal = extractColumnValue(currentRow, tbl, colIdx);
+                    std::string currentVal = extractColumnValue(
+                        currentRow, tbl, colIdx, transactionContext().txnDB);
                     if (!currentVal.empty()) secIdx->removeMulti(currentVal, entry.rowIdx);
                 }
-                std::string val = extractColumnValue(entry.rowData, tbl, colIdx);
+                std::string val = extractColumnValue(
+                    entry.rowData, tbl, colIdx, transactionContext().txnDB);
                 if (!val.empty()) secIdx->insertMulti(val, entry.rowIdx);
             }
             for (const auto& ci : getCompositeIndexes(transactionContext().txnDB, entry.tableName)) {
@@ -27916,10 +28079,12 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                     transactionContext().txnDB, entry.tableName, ci.name);
                 if (!compositeIdx) continue;
                 if (foundCurrent) {
-                    std::string currentKey = buildCompositeKey(currentRow, tbl, ci.columns);
+                    std::string currentKey = buildCompositeKey(
+                        currentRow, tbl, ci.columns, transactionContext().txnDB);
                     if (!currentKey.empty()) compositeIdx->removeMulti(currentKey, entry.rowIdx);
                 }
-                std::string oldKey = buildCompositeKey(entry.rowData, tbl, ci.columns);
+                std::string oldKey = buildCompositeKey(
+                    entry.rowData, tbl, ci.columns, transactionContext().txnDB);
                 if (!oldKey.empty()) compositeIdx->insertMulti(oldKey, entry.rowIdx);
             }
             for (const auto& colname : getHashIndexedColumns(transactionContext().txnDB, entry.tableName)) {
@@ -27932,11 +28097,18 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                     transactionContext().txnDB, entry.tableName, colname);
                 if (!hashIdx) continue;
                 if (foundCurrent) {
-                    std::string currentVal = extractColumnValue(currentRow, tbl, colIdx);
+                    std::string currentVal = extractColumnValue(
+                        currentRow, tbl, colIdx, transactionContext().txnDB);
                     if (!currentVal.empty()) hashIdx->remove(currentVal, entry.rowIdx);
                 }
-                std::string oldVal = extractColumnValue(entry.rowData, tbl, colIdx);
+                std::string oldVal = extractColumnValue(
+                    entry.rowData, tbl, colIdx, transactionContext().txnDB);
                 if (!oldVal.empty()) hashIdx->insert(oldVal, entry.rowIdx);
+            }
+            if (foundCurrent) {
+                deleteToastForRowExcept(transactionContext().txnDB,
+                                        entry.tableName, currentRow,
+                                        entry.rowData);
             }
         } else if (entry.op == TxnLogEntry::Op::Delete) {
             uint32_t pageId; uint16_t slotId;
@@ -27968,7 +28140,8 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
             }
             BPTree* pkIdx = getPKIndex(transactionContext().txnDB, entry.tableName);
             if (pkIdx) {
-                std::string pkVal = extractPKValue(entry.rowData, tbl);
+                std::string pkVal = extractPKValue(
+                    entry.rowData, tbl, transactionContext().txnDB);
                 if (!pkVal.empty()) pkIdx->insert(pkVal, entry.rowIdx);
             }
             auto indexedCols = getIndexedColumns(transactionContext().txnDB, entry.tableName);
@@ -27980,14 +28153,16 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                 if (colIdx >= tbl.len) continue;
                 BPTree* secIdx = getSecondaryIndex(transactionContext().txnDB, entry.tableName, colname);
                 if (!secIdx) continue;
-                std::string val = extractColumnValue(entry.rowData, tbl, colIdx);
+                std::string val = extractColumnValue(
+                    entry.rowData, tbl, colIdx, transactionContext().txnDB);
                 if (!val.empty()) secIdx->insertMulti(val, entry.rowIdx);
             }
             for (const auto& ci : getCompositeIndexes(transactionContext().txnDB, entry.tableName)) {
                 BPTree* compositeIdx = getCompositeIndexTree(
                     transactionContext().txnDB, entry.tableName, ci.name);
                 if (!compositeIdx) continue;
-                std::string key = buildCompositeKey(entry.rowData, tbl, ci.columns);
+                std::string key = buildCompositeKey(
+                    entry.rowData, tbl, ci.columns, transactionContext().txnDB);
                 if (!key.empty()) compositeIdx->insertMulti(key, entry.rowIdx);
             }
             for (const auto& colname : getHashIndexedColumns(transactionContext().txnDB, entry.tableName)) {
@@ -27999,7 +28174,8 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                 HashIndex* hashIdx = getHashIndex(
                     transactionContext().txnDB, entry.tableName, colname);
                 if (!hashIdx) continue;
-                std::string value = extractColumnValue(entry.rowData, tbl, colIdx);
+                std::string value = extractColumnValue(
+                    entry.rowData, tbl, colIdx, transactionContext().txnDB);
                 if (!value.empty()) hashIdx->insert(value, entry.rowIdx);
             }
         }
