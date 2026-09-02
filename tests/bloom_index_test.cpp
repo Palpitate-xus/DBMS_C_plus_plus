@@ -14,9 +14,11 @@
 #include "Session.h"
 #include <cassert>
 #include <cstdio>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
@@ -25,6 +27,24 @@ namespace fs = std::filesystem;
 
 static void cleanup(const std::string& p) {
     if (fs::exists(p)) fs::remove(p);
+}
+
+static void write_u32(std::ostream& out, uint32_t value) {
+    for (int i = 0; i < 4; ++i)
+        out.put(static_cast<char>((value >> (8 * i)) & 0xff));
+}
+
+static void write_u64(std::ostream& out, uint64_t value) {
+    for (int i = 0; i < 8; ++i)
+        out.put(static_cast<char>((value >> (8 * i)) & 0xff));
+}
+
+static void write_bloom_header(std::ostream& out, uint32_t bits,
+                               uint32_t hashes, uint32_t entries) {
+    write_u32(out, 0x314D4C42u);  // 'BLM1'
+    write_u32(out, bits);
+    write_u32(out, hashes);
+    write_u32(out, entries);
 }
 
 static void test_bloom_unit() {
@@ -111,6 +131,86 @@ static void test_bloom_no_false_negatives_many_keys() {
     std::cout << "[BLOOM] no false negatives (2000 keys) OK" << std::endl;
 }
 
+static void test_bloom_rejects_malformed_lengths_and_layout() {
+    const std::string idx = "/tmp/bloom_index_malformed.bidx";
+    cleanup(idx);
+
+    // Counts must be validated against bytes remaining before reserving from
+    // them.  A corrupt RID count must fail without changing object settings.
+    {
+        std::ofstream out(idx, std::ios::binary | std::ios::trunc);
+        write_bloom_header(out, 64, 5, 1);
+        write_u32(out, 1);
+        out.put('x');
+        write_u32(out, std::numeric_limits<uint32_t>::max());
+    }
+    {
+        dbms::BloomIndex b(idx, 128, 7);
+        assert(!b.open());
+        assert(b.hashCount() == 7);
+        assert(b.size() == 0);
+    }
+
+    // Duplicate keys make the entry count ambiguous and used to overwrite
+    // the first RID list silently.
+    {
+        std::ofstream out(idx, std::ios::binary | std::ios::trunc);
+        write_bloom_header(out, 64, 7, 2);
+        for (uint64_t rid : {1ULL, 2ULL}) {
+            write_u32(out, 1);
+            out.put('x');
+            write_u32(out, 1);
+            write_u64(out, rid);
+        }
+    }
+    {
+        dbms::BloomIndex b(idx);
+        assert(!b.open());
+    }
+
+    // Empty RID lists cannot be produced by the index API and violate the
+    // exact side-map invariant.
+    {
+        std::ofstream out(idx, std::ios::binary | std::ios::trunc);
+        write_bloom_header(out, 64, 7, 1);
+        write_u32(out, 1);
+        out.put('x');
+        write_u32(out, 0);
+    }
+    {
+        dbms::BloomIndex b(idx);
+        assert(!b.open());
+    }
+
+    // Do not silently accept torn/concatenated files or malformed bit counts.
+    {
+        std::ofstream out(idx, std::ios::binary | std::ios::trunc);
+        write_bloom_header(out, 0, 7, 0);
+        out.put('!');
+    }
+    {
+        dbms::BloomIndex b(idx);
+        assert(!b.open());
+    }
+    {
+        std::ofstream out(idx, std::ios::binary | std::ios::trunc);
+        write_bloom_header(out, 1, 7, 0);
+    }
+    {
+        dbms::BloomIndex b(idx);
+        assert(!b.open());
+    }
+
+    cleanup(idx);
+    fs::create_directory(idx);
+    {
+        dbms::BloomIndex b(idx);
+        assert(!b.open());
+    }
+    cleanup(idx);
+    std::cout << "[BLOOM] malformed length/layout rejection OK" << std::endl;
+}
+
 static void test_engine_bloom_lifecycle() {
     const std::string db = testDbPath("bloom_storage");
     cleanupTestDb("bloom_storage");
@@ -186,6 +286,7 @@ int main() {
     cleanupAllTestData();
     test_bloom_unit();
     test_bloom_no_false_negatives_many_keys();
+    test_bloom_rejects_malformed_lengths_and_layout();
     test_engine_bloom_lifecycle();
     std::cout << "[BLOOM] all tests passed" << std::endl;
     return 0;

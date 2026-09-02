@@ -1,6 +1,9 @@
 #include "access/BloomIndex.h"
 
 #include <cstring>
+#include <limits>
+#include <new>
+#include <stdexcept>
 
 namespace dbms {
 
@@ -27,8 +30,13 @@ struct Reader {
     const std::string& buf;
     size_t pos = 0;
     bool ok = true;
+
+    size_t remaining() const {
+        return pos <= buf.size() ? buf.size() - pos : 0;
+    }
+
     uint32_t u32() {
-        if (pos + 4 > buf.size()) { ok = false; return 0; }
+        if (!ok || remaining() < 4) { ok = false; return 0; }
         uint32_t v = 0;
         for (int i = 0; i < 4; ++i)
             v |= static_cast<uint32_t>(static_cast<unsigned char>(buf[pos + i])) << (8 * i);
@@ -36,7 +44,7 @@ struct Reader {
         return v;
     }
     uint64_t u64() {
-        if (pos + 8 > buf.size()) { ok = false; return 0; }
+        if (!ok || remaining() < 8) { ok = false; return 0; }
         uint64_t v = 0;
         for (int i = 0; i < 8; ++i)
             v |= static_cast<uint64_t>(static_cast<unsigned char>(buf[pos + i])) << (8 * i);
@@ -44,7 +52,7 @@ struct Reader {
         return v;
     }
     std::string bytes(size_t n) {
-        if (pos + n > buf.size()) { ok = false; return {}; }
+        if (!ok || n > remaining()) { ok = false; return {}; }
         std::string s = buf.substr(pos, n);
         pos += n;
         return s;
@@ -99,56 +107,90 @@ void BloomIndex::rebuildBitsLocked() {
 bool BloomIndex::loadFromFile() {
     std::ifstream in(filePath_, std::ios::binary);
     if (!in) {
-        // Absent file: start empty (create path).
+        std::error_code ec;
+        const bool exists = std::filesystem::exists(filePath_, ec);
+        if (ec || exists) return false;
+
+        // Genuinely absent file: start empty (create path).
+        entries_.clear();
+        bits_.clear();
+        m_ = 0;
         loaded_ = true;
+        dirty_ = false;
         return true;
     }
-    std::string buf((std::istreambuf_iterator<char>(in)),
-                    std::istreambuf_iterator<char>());
-    Reader r{buf};
-    if (r.u32() != kBloomMagic) return false;
-    const uint32_t m = r.u32();
-    const uint32_t k = r.u32();
-    const uint32_t count = r.u32();
-    if (k == 0 || k > 32) return false;
-    k_ = k;
-    entries_.clear();
-    for (uint32_t i = 0; i < count && r.ok; ++i) {
-        const uint32_t keyLen = r.u32();
-        if (!r.ok) break;
-        std::string key = r.bytes(keyLen);
-        const uint32_t ridCount = r.u32();
-        if (!r.ok) break;
-        std::vector<int64_t> rids;
-        rids.reserve(ridCount);
-        for (uint32_t j = 0; j < ridCount && r.ok; ++j) rids.push_back(static_cast<int64_t>(r.u64()));
-        if (!r.ok) break;
-        entries_[std::move(key)] = std::move(rids);
-    }
-    if (!r.ok) return false;
-    rebuildBitsLocked();
-    if (m_ != m) {
-        // Bit array derived from entry count; keep the loaded size when it is
-        // larger so probes stay stable across saves.
-        if (m > m_) {
-            const uint32_t words = (m + 63) / 64;
-            bits_.resize(words, 0);
-            m_ = static_cast<uint32_t>(words) * 64;
-            rebuildBitsLocked();
+
+    try {
+        std::string buf((std::istreambuf_iterator<char>(in)),
+                        std::istreambuf_iterator<char>());
+        if (in.bad()) return false;
+
+        Reader r{buf};
+        if (r.u32() != kBloomMagic) return false;
+        const uint32_t persistedBits = r.u32();
+        const uint32_t parsedHashes = r.u32();
+        const uint32_t count = r.u32();
+        if (!r.ok || parsedHashes == 0 || parsedHashes > 32) return false;
+        if ((persistedBits % 64) != 0 || (count != 0 && persistedBits == 0)) return false;
+
+        // Every entry needs keyLen, ridCount and at least one RID.  Check the
+        // cheapest global bound before allocating anything from file counts.
+        constexpr size_t kMinEntryBytes = 4 + 4 + 8;
+        if (count > r.remaining() / kMinEntryBytes) return false;
+
+        std::map<std::string, std::vector<int64_t>> parsedEntries;
+        for (uint32_t i = 0; i < count; ++i) {
+            const uint32_t keyLen = r.u32();
+            if (!r.ok || keyLen > r.remaining()) return false;
+            std::string key = r.bytes(keyLen);
+            const uint32_t ridCount = r.u32();
+            if (!r.ok || ridCount == 0 || ridCount > r.remaining() / 8) return false;
+
+            std::vector<int64_t> rids;
+            rids.reserve(ridCount);
+            for (uint32_t j = 0; j < ridCount; ++j)
+                rids.push_back(static_cast<int64_t>(r.u64()));
+            if (!r.ok) return false;
+
+            if (!parsedEntries.emplace(std::move(key), std::move(rids)).second)
+                return false;
         }
+
+        // A canonical index file has no ignored suffix.  Accepting one makes
+        // torn writes and incompatible future layouts look valid.
+        if (!r.ok || r.remaining() != 0) return false;
+
+        k_ = parsedHashes;
+        entries_ = std::move(parsedEntries);
+        // The serialized bit count is metadata only: bits themselves are not
+        // persisted.  Rebuild from the validated entries instead of resizing
+        // from an attacker-controlled value.
+        rebuildBitsLocked();
+    } catch (const std::bad_alloc&) {
+        return false;
+    } catch (const std::length_error&) {
+        return false;
+    } catch (const std::ios_base::failure&) {
+        return false;
     }
+
     loaded_ = true;
     dirty_ = false;
     return true;
 }
 
 bool BloomIndex::saveToFile() {
+    if (entries_.size() > std::numeric_limits<uint32_t>::max()) return false;
     std::string buf;
     putU32(buf, kBloomMagic);
     putU32(buf, m_);
     putU32(buf, k_);
     putU32(buf, static_cast<uint32_t>(entries_.size()));
     for (const auto& kv : entries_) {
+        if (kv.first.size() > std::numeric_limits<uint32_t>::max() ||
+            kv.second.empty() ||
+            kv.second.size() > std::numeric_limits<uint32_t>::max())
+            return false;
         putU32(buf, static_cast<uint32_t>(kv.first.size()));
         buf += kv.first;
         putU32(buf, static_cast<uint32_t>(kv.second.size()));
