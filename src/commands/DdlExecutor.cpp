@@ -2764,7 +2764,10 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
             std::cout << "NOTICE: table \"" << tname << "\" does not exist, skipping" << std::endl;
             return false;
         }
-        std::cout << "Table " << tname << " not found" << std::endl;
+        // PG: DROP TABLE on a missing table reports
+        // table "x" does not exist (SQLSTATE 42P01 via the wire
+        // layer's relation mapping).
+        std::cout << "ERROR:  table \"" << tname << "\" does not exist" << std::endl;
         return true;
     }
 

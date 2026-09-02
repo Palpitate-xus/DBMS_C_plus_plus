@@ -825,6 +825,17 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
                     }
                 }
                 if (!stripped) msg = trimText(msg);
+                // PG wording for missing relations: the CLI reports
+                // "Table X not exist"; the wire rewrites it to PG's
+                // relation "x" does not exist so clients see the same
+                // message shape as reference PG.
+                if (msg.rfind("Table ", 0) == 0 &&
+                    msg.find(" not exist") != std::string::npos) {
+                    std::string rel = msg.substr(6, msg.size() - 6 - 10);
+                    for (auto& ch : rel)
+                        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                    msg = "relation \"" + rel + "\" does not exist";
+                }
                 result.errorMessage = msg;
             }
         }
@@ -833,6 +844,13 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
                    std::string::npos) {
             // 42803: grouping column references an aggregate.
             result.sqlState = "42803";
+        } else if (result.errorMessage.find("does not exist") !=
+                           std::string::npos &&
+                       (result.errorMessage.rfind("relation ", 0) == 0 ||
+                        result.errorMessage.rfind("table ", 0) == 0)) {
+            // 42P01: undefined table/relation reference (SELECT uses
+            // "relation", DROP TABLE uses "table").
+            result.sqlState = "42P01";
         } else if (result.errorMessage.find("operator is not unique") !=
                 std::string::npos) {
             // 42725: ambiguous operator resolution (unknown + unknown).
