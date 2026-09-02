@@ -404,11 +404,12 @@ bool StorageEngine::ReadView::isVisible(uint64_t rowTxnId) const {
     // must remain invisible until COMMIT PREPARED.
     if (activeTxnIds.count(rowTxnId)) return false;
     if (subTxnIds.count(rowTxnId)) return false;
-    if (rowTxnId < upLimitId) return true;       // all older xids committed
     if (rowTxnId >= lowLimitId) return false;    // all newer xids not started
 
-    // For xids in [upLimitId, lowLimitId) that are no longer active,
-    // consult CLOG to distinguish committed vs aborted.
+    // Snapshot xmin only proves that an older xid is no longer active; it
+    // does not prove that it committed. Consult CLOG for every non-current
+    // xid below xmax so an old aborted INSERT cannot become visible merely
+    // because newer transactions advanced the snapshot horizon.
     if (commitLog) {
         auto status = commitLog->getStatus(static_cast<TxnId>(rowTxnId));
         if (status == CommitLog::Status::Committed) return true;
@@ -418,7 +419,7 @@ bool StorageEngine::ReadView::isVisible(uint64_t rowTxnId) const {
         return false;
     }
 
-    // Fallback: assume committed for xids that left the active set
+    // Legacy callers without a CLOG retain the snapshot-only fallback.
     return true;
 }
 
@@ -441,7 +442,7 @@ bool StorageEngine::ReadView::isVisible(const char* rowBuffer, size_t len, uint3
 
     // --- xmin visibility ---
     bool xminVisible = false;
-    if (xmin == 0 || xminComm) {
+    if (xmin == 0) {
         xminVisible = true;
     } else if (xminInv) {
         xminVisible = false;
@@ -451,10 +452,12 @@ bool StorageEngine::ReadView::isVisible(const char* rowBuffer, size_t len, uint3
         xminVisible = false; // transaction is still in progress
     } else if (subTxnIds.count(xmin)) {
         xminVisible = false; // subtransaction in progress
-    } else if (xmin < upLimitId) {
-        xminVisible = true;
     } else if (xmin >= lowLimitId) {
         xminVisible = false;
+    } else if (xminComm) {
+        // A commit hint proves outcome, but only after the snapshot boundary
+        // checks above prove the transaction belongs to this snapshot.
+        xminVisible = true;
     } else if (commitLog) {
         auto s = commitLog->getStatus(static_cast<TxnId>(xmin));
         xminVisible = (s == CommitLog::Status::Committed);
@@ -473,14 +476,11 @@ bool StorageEngine::ReadView::isVisible(const char* rowBuffer, size_t len, uint3
         xmaxVisible = false; // current tx deleted it
     } else if (activeTxnIds.count(xmax) || subTxnIds.count(xmax)) {
         xmaxVisible = true; // prepared/in-progress delete is not committed
-    } else if (xmaxComm) {
-        xmaxVisible = false;
-    } else if (xmax < upLimitId) {
-        xmaxVisible = false;
     } else if (xmax >= lowLimitId) {
         xmaxVisible = true;
-    } else if (activeTxnIds.count(xmax)) {
-        xmaxVisible = true;
+    } else if (xmaxComm) {
+        // The delete committed and was no longer active at snapshot time.
+        xmaxVisible = false;
     } else if (commitLog) {
         auto s = commitLog->getStatus(static_cast<TxnId>(xmax));
         xmaxVisible = (s != CommitLog::Status::Committed);

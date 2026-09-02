@@ -3,6 +3,7 @@
 #include "HeapTupleHeader.h"
 #include "Config.h"
 #include <cassert>
+#include <cstring>
 #include <filesystem>
 #include <iostream>
 
@@ -102,8 +103,77 @@ int main() {
         clog.setStatus(21, CommitLog::Status::Aborted);
         assert(!rv.isVisible(21));
 
+        // Being older than snapshot xmin means "finished", not "committed".
+        clog.setStatus(5, CommitLog::Status::Aborted);
+        clog.setStatus(6, CommitLog::Status::Committed);
+        assert(!rv.isVisible(5));
+        assert(rv.isVisible(6));
+
         std::filesystem::remove_all(clogDir);
         std::cout << "[SUBXIP] CLOG visibility is fail-closed OK\n";
+    }
+
+    // Test 5: tuple visibility combines CLOG outcome with snapshot timing.
+    {
+        const std::string clogDir = "__t_tuple_visibility_clog";
+        std::filesystem::remove_all(clogDir);
+        CommitLog clog(clogDir);
+        clog.setStatus(5, CommitLog::Status::Aborted);
+        clog.setStatus(6, CommitLog::Status::Committed);
+        clog.setStatus(7, CommitLog::Status::Committed);
+        clog.setStatus(20, CommitLog::Status::Committed);
+        clog.setStatus(120, CommitLog::Status::Committed);
+
+        StorageEngine::ReadView rv;
+        rv.creatorTxnId = 1;
+        rv.upLimitId = 10;
+        rv.lowLimitId = 100;
+        rv.commitLog = &clog;
+
+        alignas(8) char buf[128] = {};
+        auto resetTuple = [&](uint32_t xmin, uint32_t xmax = 0) {
+            std::memset(buf, 0, sizeof(buf));
+            auto* header = castHeapHeader(buf);
+            initHeapTupleHeader(header, xmin, 2, false, false);
+            header->t_fields.t_xmax = xmax;
+            return header;
+        };
+
+        // Old aborted inserts stay invisible; old committed inserts remain.
+        resetTuple(5);
+        assert(!rv.isVisible(buf, sizeof(buf), 2));
+        resetTuple(6);
+        assert(rv.isVisible(buf, sizeof(buf), 2));
+
+        // Outcome hints cannot make transactions that were active or had not
+        // started at snapshot creation visible retroactively.
+        auto* header = resetTuple(20);
+        setXminCommitted(header);
+        rv.activeTxnIds = {20};
+        assert(!rv.isVisible(buf, sizeof(buf), 2));
+        rv.activeTxnIds.clear();
+        header = resetTuple(120);
+        setXminCommitted(header);
+        assert(!rv.isVisible(buf, sizeof(buf), 2));
+
+        // An aborted old DELETE leaves its row visible; a committed old
+        // DELETE hides it. A delete active/new at snapshot time does not hide
+        // the row even if it commits later and gains a hint.
+        resetTuple(6, 5);
+        assert(rv.isVisible(buf, sizeof(buf), 2));
+        resetTuple(6, 7);
+        assert(!rv.isVisible(buf, sizeof(buf), 2));
+        header = resetTuple(6, 20);
+        setXmaxCommitted(header);
+        rv.activeTxnIds = {20};
+        assert(rv.isVisible(buf, sizeof(buf), 2));
+        rv.activeTxnIds.clear();
+        header = resetTuple(6, 120);
+        setXmaxCommitted(header);
+        assert(rv.isVisible(buf, sizeof(buf), 2));
+
+        std::filesystem::remove_all(clogDir);
+        std::cout << "[SUBXIP] tuple outcome and snapshot timing OK\n";
     }
 
     std::cout << "[SUBXIP] all passed\n";
