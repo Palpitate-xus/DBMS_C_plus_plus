@@ -17314,6 +17314,13 @@ DBStatus StorageEngine::update(const std::string& dbname,
                                 return DBStatus::INVALID_VALUE;
                             storeVal = canon;
                         }
+                    } else if (col.dataType == "boolean") {
+                        if (!kv.second.empty() && kv.second != "1" &&
+                            kv.second != "0" && kv.second != "true" &&
+                            kv.second != "false" && kv.second != "TRUE" &&
+                            kv.second != "FALSE") {
+                            return DBStatus::INVALID_VALUE;
+                        }
                     } else if (!col.isArray && TypeRegistry::instance().findType(col.dataType) == nullptr) {
                         CompositeType ct = getCompositeType(dbname, col.dataType);
                         if (!ct.name.empty() && !kv.second.empty()) {
