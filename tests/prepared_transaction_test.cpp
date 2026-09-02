@@ -1,4 +1,6 @@
 #include "commands/TableManage.h"
+#include "storage/CommitLog.h"
+#include "storage/WAL.h"
 #include "test_utils.h"
 
 #include <algorithm>
@@ -57,6 +59,63 @@ void test_cross_backend_prepare_completion() {
 
     cleanup(db);
     std::cout << "[PREPARED-TXN] cross-backend commit/rollback and lock ownership OK\n";
+}
+
+void test_commit_clog_failure_is_irrevocable() {
+    const std::string db = testDbPath("prepared_clog_failure");
+    cleanup(db);
+    uint64_t xid = 0;
+    {
+        dbms::StorageEngine engine;
+        assert(engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+        dbms::TableSchema table;
+        table.tablename = "accounts";
+        table.append(dbms::makeIntColumn("id", false, 2, true));
+        assert(engine.createTable(db, table) == dbms::DBStatus::OK);
+
+        assert(engine.beginTransaction(db) == dbms::DBStatus::OK);
+        assert(engine.insert(db, "accounts", {{"id", "3"}}) ==
+               dbms::DBStatus::OK);
+        xid = engine.currentTxnId();
+        assert(engine.prepareTransaction("prepared_clog_failure") ==
+               dbms::DBStatus::OK);
+
+        (void)engine.getCommitLog(db);
+        std::error_code error;
+        std::filesystem::remove_all(
+            std::filesystem::path(db) / "pg_xact", error);
+        assert(!error);
+        assert(engine.commitPrepared("prepared_clog_failure") ==
+               dbms::DBStatus::OK);
+        assert(engine.listPreparedTransactions().empty());
+        assert(engine.query(db, "accounts", {"=id 3"}, {"id"}).size() == 1);
+
+        size_t commitRecords = 0;
+        size_t abortRecords = 0;
+        dbms::WALManager* wal = engine.getWAL(db);
+        assert(wal);
+        for (dbms::Lsn lsn = wal->earliestAvailableLsn();;) {
+            const auto record = wal->ReadRecord(lsn);
+            if (!record || record->header.xl_tot_len == 0) break;
+            if (record->rmid() == dbms::RM_XACT_ID &&
+                record->header.xl_xid == xid) {
+                if (record->info() == dbms::XLOG_XACT_COMMIT) ++commitRecords;
+                if (record->info() == dbms::XLOG_XACT_ABORT) ++abortRecords;
+            }
+            lsn += record->header.xl_tot_len;
+        }
+        assert(commitRecords == 1);
+        assert(abortRecords == 0);
+
+        dbms::StorageEngine recovered;
+        assert(recovered.query(db, "accounts", {"=id 3"}, {"id"}).size() == 1);
+        dbms::CommitLog* recoveredClog = recovered.getCommitLog(db);
+        assert(recoveredClog);
+        assert(recoveredClog->getStatus(xid) ==
+               dbms::CommitLog::Status::Committed);
+    }
+    cleanup(db);
+    std::cout << "[PREPARED-TXN] durable COMMIT survives CLOG publication failure OK\n";
 }
 
 int runPreparedRestartWorker() {
@@ -141,6 +200,7 @@ int main(int argc, char** argv) {
     }
     cleanupAllTestData();
     test_cross_backend_prepare_completion();
+    test_commit_clog_failure_is_irrevocable();
     test_prepared_survives_engine_restart(argv[0]);
     finalCleanupTestData();
     return 0;

@@ -27020,13 +27020,11 @@ bool StorageEngine::recoverAllDatabases() {
                     }
                     preparedWalXidsByDb[dbname].erase(xid);
                 } else {
-                    // A normal transaction whose CLOG publication failed
-                    // emits COMMIT WAL first and ABORT WAL after undo. That
-                    // terminal ABORT is intentional. A prepared transaction
-                    // is different: PREPARE -> COMMIT -> ABORT would make its
-                    // durable second phase ambiguous and must fail closed.
+                    // PREPARE -> ABORT is a valid two-phase decision.  Once a
+                    // COMMIT record is durable, however, no later ABORT is
+                    // legal for either a normal or a prepared transaction.
                     if ((walState & 0x04) != 0 ||
-                        ((walState & 0x02) != 0 && (walState & 0x01) != 0)) {
+                        (walState & 0x02) != 0) {
                         std::cerr << "[recovery] contradictory ABORT WAL for "
                               << dbname << ":" << xid << std::endl;
                         return false;
@@ -29932,16 +29930,19 @@ DBStatus StorageEngine::commitTransaction() {
         }
     }
 
-    // Update and durably publish CLOG before clearing transaction state. WAL
-    // alone is sufficient to reconstruct status after a crash, but the live
-    // backend must never report a successful commit after CLOG persistence
-    // failed.
+    // COMMIT became irrevocable when its WAL record was flushed above.  CLOG
+    // is the live visibility cache and recovery can reconstruct it from WAL;
+    // a CLOG write failure must therefore never route through rollback and
+    // append a contradictory ABORT record for the same xid.
     CommitLog* clog = getCommitLog(transactionContext().txnDB);
     if (clog) {
         clog->setStatus(transactionContext().currentTxnId, CommitLog::Status::Committed);
         if (!clog->flush()) {
-            rollbackTransaction();
-            return DBStatus::IO_ERROR;
+            std::cerr
+                << "[CLOG] COMMIT WAL is durable but CLOG publication failed for "
+                << committingDb << ":" << committingTxnId
+                << "; treating the transaction as committed and relying on WAL recovery"
+                << std::endl;
         }
     }
 
@@ -31476,14 +31477,15 @@ DBStatus StorageEngine::commitPrepared(const std::string& xid) {
     }
 
     CommitLog* clog = getCommitLog(savedDB);
-    if (!clog) {
-        lockManager_.unlockAll();
-        return DBStatus::IO_ERROR;
-    }
-    clog->setStatus(savedTxnId, CommitLog::Status::Committed);
-    if (!clog->flush()) {
-        lockManager_.unlockAll();
-        return DBStatus::IO_ERROR;
+    if (clog) {
+        clog->setStatus(savedTxnId, CommitLog::Status::Committed);
+        if (!clog->flush()) {
+            std::cerr
+                << "[CLOG] COMMIT PREPARED WAL is durable but CLOG publication failed for "
+                << savedDB << ":" << savedTxnId
+                << "; treating the transaction as committed and relying on WAL recovery"
+                << std::endl;
+        }
     }
 
     for (const auto& tableName : specializedTables) {

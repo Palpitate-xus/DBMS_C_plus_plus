@@ -1,4 +1,5 @@
 #include "storage/CommitLog.h"
+#include "storage/WAL.h"
 #include "TableManage.h"
 #include "Config.h"
 #include <iostream>
@@ -89,11 +90,10 @@ int main() {
         return 1;
     }
 
-    // A COMMIT WAL record must not be reported as a successful live commit
-    // when CLOG cannot be durably published. The engine must undo the row,
-    // append an ABORT record after the already-written COMMIT, and leave no
-    // active transaction behind. Recovery uses the later ABORT to avoid
-    // replaying the failed commit.
+    // Once COMMIT WAL is durable, a later CLOG publication failure cannot
+    // reverse the decision.  The live backend keeps the committed status in
+    // memory and startup reconstructs the missing CLOG from the sole terminal
+    // WAL record; no contradictory ABORT may be appended.
     const std::string failureDb = "clog_commit_failure_db";
     std::filesystem::remove_all(failureDb);
     if (engine.createDatabase(failureDb) != DBStatus::OK) return 1;
@@ -103,16 +103,37 @@ int main() {
     if (engine.createTable(failureDb, failureTable) != DBStatus::OK) return 1;
     if (engine.beginTransaction(failureDb) != DBStatus::OK) return 1;
     if (engine.insert(failureDb, "t", {{"id", "1"}}) != DBStatus::OK) return 1;
+    const uint64_t failureXid = engine.currentTxnId();
     (void)engine.getCommitLog(failureDb); // materialize the in-memory CLOG
     std::filesystem::remove_all(std::filesystem::path(failureDb) / "pg_xact");
-    if (engine.commitTransaction() != DBStatus::IO_ERROR) return 1;
+    if (engine.commitTransaction() != DBStatus::OK) return 1;
     if (engine.inTransaction()) return 1;
-    if (!engine.query(failureDb, "t", {"=id 1"}, {"id"}).empty()) return 1;
+    if (engine.query(failureDb, "t", {"=id 1"}, {"id"}).size() != 1) return 1;
+
+    size_t commitRecords = 0;
+    size_t abortRecords = 0;
+    WALManager* failureWal = engine.getWAL(failureDb);
+    if (!failureWal) return 1;
+    for (Lsn lsn = failureWal->earliestAvailableLsn();;) {
+        const auto record = failureWal->ReadRecord(lsn);
+        if (!record || record->header.xl_tot_len == 0) break;
+        if (record->rmid() == RM_XACT_ID &&
+            record->header.xl_xid == failureXid) {
+            if (record->info() == XLOG_XACT_COMMIT) ++commitRecords;
+            if (record->info() == XLOG_XACT_ABORT) ++abortRecords;
+        }
+        lsn += record->header.xl_tot_len;
+    }
+    if (commitRecords != 1 || abortRecords != 0) return 1;
     {
         StorageEngine recovered;
-        if (!recovered.query(failureDb, "t", {"=id 1"}, {"id"}).empty()) return 1;
+        if (recovered.query(failureDb, "t", {"=id 1"}, {"id"}).size() != 1) return 1;
+        CommitLog* recoveredClog = recovered.getCommitLog(failureDb);
+        if (!recoveredClog ||
+            recoveredClog->getStatus(failureXid) !=
+                CommitLog::Status::Committed) return 1;
     }
-    std::cout << "[CLOG INTEGRATION TEST] commit persistence failure fails closed\n";
+    std::cout << "[CLOG INTEGRATION TEST] durable COMMIT survives CLOG publication failure\n";
 
     std::cout << "[CLOG INTEGRATION TEST] passed\n";
 
