@@ -7950,8 +7950,8 @@ bool StorageEngine::isConstraintCurrentlyDeferred(const std::string& dbname,
 bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
     if (dc.kind == DeferredCheck::Kind::Unique) {
         // Count rows whose uniqueCol equals payloadValue; the queued row
-        // itself is excluded via exceptRid. More than one remaining row
-        // (the queued one plus a pre-existing other) means a violation.
+        // itself is excluded via exceptRid. Any remaining row means a
+        // violation.
         TableSchema tbl = getTableSchema(dc.dbname, dc.tablename);
         int colIdx = -1;
         for (size_t i = 0; i < tbl.len; ++i) {
@@ -7961,7 +7961,7 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
         int matches = 0;
         forEachRow(dc.dbname, dc.tablename,
                    [&](uint32_t pageId, uint16_t slot, const char* data, size_t len) {
-            int64_t rid = (static_cast<int64_t>(pageId) << 16) | slot;
+            const int64_t rid = encodeRid(pageId, slot);
             if (dc.exceptRid >= 0 && rid == dc.exceptRid) return;
             std::string row(data, len);
             if (const_cast<StorageEngine*>(this)->extractColumnValue(

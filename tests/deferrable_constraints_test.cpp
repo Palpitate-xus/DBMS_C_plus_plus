@@ -110,6 +110,14 @@ static void test_fk_deferred_violation() {
     std::cout << "[DEFER] FK deferred missing-parent commit rejected OK" << std::endl;
 }
 
+static void test_unique_deferred_single_insert() {
+    assert(g_engine.beginTransaction(db) == DBStatus::OK);
+    assert(g_engine.insert(db, "uniq", {{"id", "20"}, {"tag", "solo"}})
+               == DBStatus::OK);
+    assert(g_engine.commitTransaction() == DBStatus::OK);
+    std::cout << "[DEFER] UNIQUE deferred non-conflicting commit OK" << std::endl;
+}
+
 static void test_unique_deferred_swap() {
     assert(g_engine.insert(db, "uniq", {{"id", "1"}, {"tag", "a"}}) == DBStatus::OK);
     assert(g_engine.insert(db, "uniq", {{"id", "2"}, {"tag", "b"}}) == DBStatus::OK);
@@ -148,6 +156,7 @@ int main() {
     test_exclude_immediate_rejects();
     test_fk_deferred_ok();
     test_fk_deferred_violation();
+    test_unique_deferred_single_insert();
     test_unique_deferred_swap();
     test_unique_deferred_violation();
     test_set_constraints_immediate();
