@@ -12892,7 +12892,7 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
     // partitions, subpartitions, every index access method, and TDE sidecars.
     const auto relationRoot = relationDir(dbname, oldName);
     std::vector<std::pair<std::filesystem::path,
-                          std::filesystem::path>> physicalRenamePlan;
+                          std::filesystem::path>> renamePlan;
     std::error_code renameError;
     for (std::filesystem::directory_iterator it(
              relationRoot,
@@ -12908,13 +12908,38 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
                 std::errc::file_exists);
             break;
         }
-        physicalRenamePlan.emplace_back(it->path(), destination);
+        renamePlan.emplace_back(it->path(), destination);
+    }
+
+    // These sidecars live in the database catalog directory even when the
+    // table itself uses another tablespace.  Losing them silently resets
+    // storage options or RLS policy, while a stale truncate marker is no
+    // longer associated with the renamed relation.
+    const std::array<std::pair<std::filesystem::path,
+                               std::filesystem::path>, 3> sidecars = {{
+        {paramsPath(dbname, oldName), paramsPath(dbname, newName)},
+        {rlsPath(dbname, oldName), rlsPath(dbname, newName)},
+        {truncateStatePath(*this, dbname, oldName),
+         truncateStatePath(*this, dbname, newName)}
+    }};
+    for (const auto& sidecar : sidecars) {
+        if (renameError) break;
+        const bool sourceExists =
+            std::filesystem::exists(sidecar.first, renameError);
+        if (renameError || !sourceExists) continue;
+        if (std::filesystem::exists(sidecar.second, renameError) ||
+            renameError) {
+            if (!renameError) renameError = std::make_error_code(
+                std::errc::file_exists);
+            break;
+        }
+        renamePlan.push_back(sidecar);
     }
 
     std::vector<std::pair<std::filesystem::path,
                           std::filesystem::path>> physicallyRenamed;
     if (!renameError) {
-        for (const auto& move : physicalRenamePlan) {
+        for (const auto& move : renamePlan) {
             std::filesystem::rename(move.first, move.second, renameError);
             if (renameError) break;
             physicallyRenamed.push_back(move);

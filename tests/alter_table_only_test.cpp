@@ -111,6 +111,72 @@ static void test_set_tablespace() {
     std::cout << "[ALTER_ONLY] SET TABLESPACE OK" << std::endl;
 }
 
+static void test_rename_preserves_table_sidecars() {
+    std::string db = testDbPath("alter_rename_sidecars");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    dbms::TableSchema table;
+    table.tablename = "configured";
+    table.append(dbms::makeIntColumn("id", false, 2));
+    assert(g_engine.createTable(db, table) == dbms::DBStatus::OK);
+    assert(g_engine.setStorageParams(
+               db, "configured",
+               {{"fillfactor", "73"}, {"column_statistics:id", "250"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "configured", {{"id", "1"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.truncateTable(db, "configured") ==
+           dbms::DBStatus::OK);
+
+    dbms::StorageEngine::RowPolicy policy;
+    policy.name = "visible_rows";
+    policy.cmd = "SELECT";
+    policy.usingExpr = "id > 0";
+    policy.roles = {"PUBLIC"};
+    assert(g_engine.createPolicy(db, "configured", policy) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.enableRowLevelSecurity(db, "configured") ==
+           dbms::DBStatus::OK);
+    const auto oldParams = fs::path(db) / "configured.params";
+    const auto oldPolicies = fs::path(db) / "configured.rls";
+    const auto oldTruncate = fs::path(db) / "configured.truncate_state";
+    assert(fs::is_regular_file(oldParams));
+    assert(fs::is_regular_file(oldPolicies));
+    assert(fs::is_regular_file(oldTruncate));
+
+    assert(g_engine.alterTableRenameTable(
+               db, "configured", "renamed") == dbms::DBStatus::OK);
+    assert(!fs::exists(oldParams));
+    assert(!fs::exists(oldPolicies));
+    assert(!fs::exists(oldTruncate));
+    assert(fs::is_regular_file(fs::path(db) / "renamed.params"));
+    assert(fs::is_regular_file(fs::path(db) / "renamed.rls"));
+    assert(fs::is_regular_file(fs::path(db) / "renamed.truncate_state"));
+
+    auto params = g_engine.getStorageParams(db, "renamed");
+    assert(params["fillfactor"] == "73");
+    assert(params["column_statistics:id"] == "250");
+    auto policies = g_engine.getPolicies(db, "renamed");
+    assert(policies.size() == 1);
+    assert(policies.front().name == "visible_rows");
+    assert(policies.front().usingExpr == "id > 0");
+    assert(g_engine.getTableSchema(db, "renamed").rowLevelSecurity);
+
+    {
+        dbms::StorageEngine restarted;
+        params = restarted.getStorageParams(db, "renamed");
+        assert(params["fillfactor"] == "73");
+        policies = restarted.getPolicies(db, "renamed");
+        assert(policies.size() == 1);
+        assert(policies.front().name == "visible_rows");
+        assert(restarted.getTableSchema(db, "renamed").rowLevelSecurity);
+    }
+
+    cleanup(db);
+    std::cout << "[ALTER_ONLY] RENAME preserves table sidecars OK" << std::endl;
+}
+
 static void test_typed_security_partition_and_trigger_actions() {
     std::string db = testDbPath("alter_typed_actions");
     cleanup(db);
@@ -189,6 +255,7 @@ int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_only_parser();
     test_set_tablespace();
+    test_rename_preserves_table_sidecars();
     test_typed_security_partition_and_trigger_actions();
     std::cout << "[ALTER_ONLY] all passed" << std::endl;
     return 0;
