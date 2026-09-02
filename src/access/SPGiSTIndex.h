@@ -53,7 +53,7 @@ private:
     size_t size_ = 0;
 
     void insertRecursive(SPGiSTNode* node, double x, double y, int64_t rid);
-    void removeRecursive(SPGiSTNode* node, double x, double y, int64_t rid);
+    bool removeRecursive(SPGiSTNode* node, double x, double y, int64_t rid);
     void searchEqualsRecursive(const SPGiSTNode* node, double x, double y,
                                std::vector<int64_t>& out) const;
     void searchRegionRecursive(const SPGiSTNode* node,

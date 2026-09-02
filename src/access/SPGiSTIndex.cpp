@@ -62,11 +62,12 @@ void SPGiSTIndex::insertRecursive(SPGiSTNode* node, double x, double y, int64_t 
 }
 
 void SPGiSTIndex::remove(double x, double y, int64_t rid) {
-    removeRecursive(&root_, x, y, rid);
-    --size_;
+    if (removeRecursive(&root_, x, y, rid)) {
+        --size_;
+    }
 }
 
-void SPGiSTIndex::removeRecursive(SPGiSTNode* node, double x, double y, int64_t rid) {
+bool SPGiSTIndex::removeRecursive(SPGiSTNode* node, double x, double y, int64_t rid) {
     if (node->isLeaf()) {
         std::ostringstream oss;
         oss << x << "," << y;
@@ -74,15 +75,16 @@ void SPGiSTIndex::removeRecursive(SPGiSTNode* node, double x, double y, int64_t 
         for (auto it = pts.begin(); it != pts.end(); ++it) {
             if (it->first == oss.str() && it->second == rid) {
                 pts.erase(it);
-                return;
+                return true;
             }
         }
-        return;
+        return false;
     }
     int q = node->quadrant(x, y);
     if (node->children[q]) {
-        removeRecursive(node->children[q].get(), x, y, rid);
+        return removeRecursive(node->children[q].get(), x, y, rid);
     }
+    return false;
 }
 
 std::vector<int64_t> SPGiSTIndex::searchEquals(double x, double y) const {
