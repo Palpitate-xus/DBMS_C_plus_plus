@@ -92,6 +92,29 @@ int main() {
         assert(engine.query(dbname, "t", {}, {"payload"}).empty());
         std::cout << "[TOAST] corrupt ID allocator fails closed OK\n";
 
+        // A rejected row must not allocate external chunks before logical
+        // constraints have accepted it.
+        TableSchema rejected;
+        rejected.tablename = "rejected";
+        rejected.formatVersion = 2;
+        Column rejectedPayload =
+            makeVarCharColumn("payload", false, 12000, false);
+        rejectedPayload.checkExpr = "length(payload) < 100";
+        rejectedPayload.checkConstraintName = "short_payload_only";
+        rejected.append(rejectedPayload);
+        assert(engine.createTable(dbname, rejected) == DBStatus::OK);
+        const std::string rejectedLarge =
+            makeIncompressiblePayload(9000, 0xabcdef01u);
+        assert(engine.insert(dbname, "rejected", {{"payload", rejectedLarge}})
+               == DBStatus::INVALID_VALUE);
+        BPTree rejectedToastIndex(
+            std::filesystem::path(dbname) / "rejected.toast.idx");
+        assert(rejectedToastIndex.open());
+        int64_t leakedRid = -1;
+        assert(!rejectedToastIndex.search("T1:0", leakedRid));
+        assert(engine.query(dbname, "rejected", {}, {"payload"}).empty());
+        std::cout << "[TOAST] rejected insert leaves no chunks OK\n";
+
         std::string largeValue(10000, 'a');
 
         // Insert a row with a large value that exceeds the TOAST threshold.

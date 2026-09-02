@@ -10206,6 +10206,13 @@ bool StorageEngine::writeToast(const std::string& dbname, const std::string& tab
                     pa->markDirty(pid);
                     int64_t rid = encodeRid(pid, slotId);
                     inserted = idx->insert(toastIndexKey(toastId, seq), rid);
+                    if (!inserted) {
+                        // The chunk is unreachable without its index entry.
+                        // Remove it before trying another page so a failed
+                        // index write cannot leak an orphan tuple.
+                        page.remove(slotId);
+                        pa->markDirty(pid);
+                    }
                 }
             }
             pa->unpinPage(pid);
@@ -10225,6 +10232,10 @@ bool StorageEngine::writeToast(const std::string& dbname, const std::string& tab
                 pa->markDirty(pid);
                 int64_t rid = encodeRid(pid, slotId);
                 inserted = idx->insert(toastIndexKey(toastId, seq), rid);
+                if (!inserted) {
+                    page.remove(slotId);
+                    pa->markDirty(pid);
+                }
             }
             pa->unpinPage(pid);
             lockManager_.pageUnlock(dbname, tablename + ".toast", pid);
@@ -10473,6 +10484,12 @@ bool StorageEngine::prepareToastValues(const std::string& dbname, const std::str
                                        const TableSchema& tbl,
                                        std::map<std::string, std::string>& values) {
     size_t threshold = toastThreshold(tbl.formatVersion);
+    std::vector<uint64_t> allocatedIds;
+    const auto discardAllocated = [&]() {
+        for (auto it = allocatedIds.rbegin(); it != allocatedIds.rend(); ++it) {
+            deleteToast(dbname, tablename, *it);
+        }
+    };
     for (size_t i = 0; i < tbl.len; ++i) {
         const Column& col = tbl.cols[i];
         if (!col.isVariableLength) continue;
@@ -10485,8 +10502,15 @@ bool StorageEngine::prepareToastValues(const std::string& dbname, const std::str
         if (it->second.size() > threshold ||
             parseToastMarker(it->second, apparentToastId)) {
             uint64_t toastId = allocToastId(dbname, tablename);
-            if (toastId == 0 || !writeToast(dbname, tablename, toastId, it->second))
+            if (toastId == 0) {
+                discardAllocated();
                 return false;
+            }
+            allocatedIds.push_back(toastId);
+            if (!writeToast(dbname, tablename, toastId, it->second)) {
+                discardAllocated();
+                return false;
+            }
             it->second = std::string(TOAST_PREFIX) + std::to_string(toastId);
         }
     }
@@ -15273,19 +15297,6 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         compositeIndexValues.push_back(std::move(entry));
     }
 
-    // Keep the logical row image intact for constraints, index keys and
-    // triggers.  Only the physical row image contains TOAST references.
-    std::map<std::string, std::string> storedValues = actualValues;
-    if (!prepareToastValues(dbname, tablename, tbl, storedValues)) {
-        lockManager_.unlock(tablename);
-        return DBStatus::IO_ERROR;
-    }
-
-    // Build row buffer
-    uint64_t creatorTxnId = transactionContext().inTransaction ? transactionContext().currentTxnId : 0;
-    std::string rowBuffer = buildRowBuffer(tbl, storedValues, creatorTxnId);
-    std::string strippedRow = stripRowHeader(rowBuffer, tbl.formatVersion, tbl.len);
-
     // Check CHECK constraints before writing; collect deferrable deferred checks for commit-time validation.
     std::vector<size_t> deferredCheckCols;
     for (size_t i = 0; i < tbl.len; ++i) {
@@ -15306,26 +15317,8 @@ DBStatus StorageEngine::insert(const std::string& dbname,
     // Check EXCLUDE constraints before writing.  DEFERRABLE EXCLUDE
     // constraints currently deferred skip the immediate scan and queue a
     // commit-time re-check instead.
-    auto excludeConstraints = getExclusionConstraints(dbname, tablename);
+    const auto excludeConstraints = getExclusionConstraints(dbname, tablename);
     std::vector<const ExclusionConstraint*> deferredExcludes;
-    for (const auto& ec : excludeConstraints) {
-        // Deferring only matters inside a transaction; in autocommit there
-        // is no later commit point, so check immediately either way.
-        if (!ec.name.empty() && transactionContext().inTransaction &&
-            isConstraintCurrentlyDeferred(dbname, tablename, ec.name)) {
-            deferredExcludes.push_back(&ec);
-            continue;
-        }
-        bool scanFailed = false;
-        if (checkExclusionConflict(dbname, tablename, ec, strippedRow, -1, &scanFailed)) {
-            lockManager_.unlock(tablename);
-            return DBStatus::INVALID_VALUE;
-        }
-        if (scanFailed) {
-            lockManager_.unlock(tablename);
-            return DBStatus::IO_ERROR;
-        }
-    }
 
     // Check gap lock conflict (if any transaction holds a gap lock covering PK)
     if (tbl.hasPrimaryKey()) {
@@ -15409,13 +15402,6 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         }
     }
 
-    // Check if row fits in a page (page capacity = PAGE_SIZE - header - slot)
-    constexpr size_t MAX_ROW_SIZE = PgPage::PAGE_SIZE - sizeof(PgPage::PageHeaderData) - sizeof(PgPage::ItemIdData);
-    if (rowBuffer.size() > MAX_ROW_SIZE) {
-        lockManager_.unlock(tablename);
-        return DBStatus::INVALID_VALUE;
-    }
-
     // Determine target partition for partitioned tables
     std::string targetPartition;
     std::string targetSubPartition;
@@ -15440,29 +15426,69 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         }
     }
 
+    // All checks that operate directly on logical SQL values have passed.
+    // Allocate external values only now, and make every failure before the
+    // heap tuple becomes reachable clean up those allocations.
+    std::map<std::string, std::string> storedValues = actualValues;
+    if (!prepareToastValues(dbname, tablename, tbl, storedValues)) {
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
+    }
+    const uint64_t creatorTxnId = transactionContext().inTransaction
+        ? transactionContext().currentTxnId : 0;
+    std::string rowBuffer = buildRowBuffer(tbl, storedValues, creatorTxnId);
+    std::string strippedRow = stripRowHeader(
+        rowBuffer, tbl.formatVersion, tbl.len);
+    const auto failBeforeHeapInsert = [&](DBStatus status) {
+        deleteToastForRow(dbname, tablename, strippedRow);
+        lockManager_.unlock(tablename);
+        return status;
+    };
+
+    // EXCLUDE operates on a row buffer, so evaluate it after building the
+    // compact physical image.  A rejection still owns and removes its TOAST
+    // values through failBeforeHeapInsert().
+    for (const auto& ec : excludeConstraints) {
+        if (!ec.name.empty() && transactionContext().inTransaction &&
+            isConstraintCurrentlyDeferred(dbname, tablename, ec.name)) {
+            deferredExcludes.push_back(&ec);
+            continue;
+        }
+        bool scanFailed = false;
+        if (checkExclusionConflict(
+                dbname, tablename, ec, strippedRow, -1, &scanFailed)) {
+            return failBeforeHeapInsert(DBStatus::INVALID_VALUE);
+        }
+        if (scanFailed) return failBeforeHeapInsert(DBStatus::IO_ERROR);
+    }
+
+    // Check if row fits in a page (page capacity = PAGE_SIZE - header - slot)
+    constexpr size_t MAX_ROW_SIZE = PgPage::PAGE_SIZE -
+        sizeof(PgPage::PageHeaderData) - sizeof(PgPage::ItemIdData);
+    if (rowBuffer.size() > MAX_ROW_SIZE) {
+        return failBeforeHeapInsert(DBStatus::INVALID_VALUE);
+    }
+
     // Write row into page-based storage
     PageAllocator* pa = nullptr;
     std::unique_ptr<PageAllocator> partPa;
     if (!targetPartition.empty() && !targetSubPartition.empty()) {
         partPa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, targetPartition, targetSubPartition).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
         if (!partPa->open()) {
-            lockManager_.unlock(tablename);
-            return DBStatus::INVALID_VALUE;
+            return failBeforeHeapInsert(DBStatus::INVALID_VALUE);
         }
         pa = partPa.get();
     } else if (!targetPartition.empty()) {
         partPa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, targetPartition).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
         if (!partPa->open()) {
-            lockManager_.unlock(tablename);
-            return DBStatus::INVALID_VALUE;
+            return failBeforeHeapInsert(DBStatus::INVALID_VALUE);
         }
         pa = partPa.get();
     } else {
         pa = getPageAllocator(dbname, tablename);
     }
     if (!pa) {
-        lockManager_.unlock(tablename);
-        return DBStatus::IO_ERROR;
+        return failBeforeHeapInsert(DBStatus::IO_ERROR);
     }
     uint32_t pageId = 0;
     uint16_t slotId = 0;
@@ -15479,14 +15505,12 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             uint32_t candidate = fsm->findPage(minPercent, 1);
             if (candidate > 0 && candidate < numPages) {
                 if (!lockManager_.pageLockExclusive(dbname, tablename, candidate)) {
-                    lockManager_.unlock(tablename);
-                    return DBStatus::LOCK_CONFLICT;
+                    return failBeforeHeapInsert(DBStatus::LOCK_CONFLICT);
                 }
                 char* buf = pa->fetchPage(candidate);
                 if (!buf) {
                     lockManager_.pageUnlock(dbname, tablename, candidate);
-                    lockManager_.unlock(tablename);
-                    return DBStatus::IO_ERROR;
+                    return failBeforeHeapInsert(DBStatus::IO_ERROR);
                 }
                 PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
                 if (page.canFit(actualRowSize) &&
@@ -15509,14 +15533,12 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         // Fallback: sequential scan
         for (uint32_t pid = 1; pid < numPages && !inserted; ++pid) {
             if (!lockManager_.pageLockExclusive(dbname, tablename, pid)) {
-                lockManager_.unlock(tablename);
-                return DBStatus::LOCK_CONFLICT;
+                return failBeforeHeapInsert(DBStatus::LOCK_CONFLICT);
             }
             char* buf = pa->fetchPage(pid);
             if (!buf) {
                 lockManager_.pageUnlock(dbname, tablename, pid);
-                lockManager_.unlock(tablename);
-                return DBStatus::IO_ERROR;
+                return failBeforeHeapInsert(DBStatus::IO_ERROR);
             }
             PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
             if (page.canFit(actualRowSize) &&
@@ -15540,26 +15562,22 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         if (!inserted) {
             pageId = pa->allocPage();
             if (pageId == 0) {
-                lockManager_.unlock(tablename);
-                return DBStatus::IO_ERROR;
+                return failBeforeHeapInsert(DBStatus::IO_ERROR);
             }
             if (!lockManager_.pageLockExclusive(dbname, tablename, pageId)) {
-                lockManager_.unlock(tablename);
-                return DBStatus::LOCK_CONFLICT;
+                return failBeforeHeapInsert(DBStatus::LOCK_CONFLICT);
             }
             char* buf = pa->fetchPage(pageId);
             if (!buf) {
                 lockManager_.pageUnlock(dbname, tablename, pageId);
-                lockManager_.unlock(tablename);
-                return DBStatus::IO_ERROR;
+                return failBeforeHeapInsert(DBStatus::IO_ERROR);
             }
             PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
             walPageImage(dbname, tablename, pageId, buf, pa->pageSize(), true);
             if (!page.insert(rowBuffer.data(), actualRowSize, slotId)) {
                 pa->unpinPage(pageId);
                 lockManager_.pageUnlock(dbname, tablename, pageId);
-                lockManager_.unlock(tablename);
-                return DBStatus::INVALID_VALUE;
+                return failBeforeHeapInsert(DBStatus::INVALID_VALUE);
             }
             pa->markDirty(pageId);
             size_t freePct = page.freeSpace() * 100 / pa->pageSize();
