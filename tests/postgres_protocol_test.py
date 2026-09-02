@@ -1271,6 +1271,22 @@ def main():
         assert udf_nop_rows == [[b"8"]], udf_nop_rows
         const_rows = data_row_values(simple_query(sock, "SELECT 1 + 1"))
         assert const_rows == [[b"2"]], const_rows
+        constant_predicates = {
+            "SELECT 1 WHERE 1 = 1": [[b"1"]],
+            "SELECT 1 WHERE 1 != 2": [[b"1"]],
+            "SELECT 1 WHERE 1 <> 2": [[b"1"]],
+            "SELECT 1 WHERE 1 <= 1": [[b"1"]],
+            "SELECT 1 WHERE 2 >= 1": [[b"1"]],
+            "SELECT 1 WHERE 1 < 2": [[b"1"]],
+            "SELECT 1 WHERE 2 > 1": [[b"1"]],
+            "SELECT 1 WHERE 2 <= 1": [],
+            "SELECT 1 WHERE 1 >= 2": [],
+            "SELECT 1 WHERE 'a' < 'b'": [[b"1"]],
+            "SELECT 1 WHERE 'b' <= 'a'": [],
+        }
+        for query, expected in constant_predicates.items():
+            actual = data_row_values(simple_query(sock, query))
+            assert actual == expected, (query, actual)
         neg_rows = data_row_values(simple_query(sock, "SELECT -5"))
         assert neg_rows == [[b"-5"]], neg_rows
         mixed_rows = data_row_values(simple_query(

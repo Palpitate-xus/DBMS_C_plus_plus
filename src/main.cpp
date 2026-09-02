@@ -5450,12 +5450,12 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                         return sawNull ? -1 : 1;
                     }
                 }
-                static const char* ops[] = {"<=", ">=", "!=", "<>", "=", "<", ">"};
-                for (const char* op : ops) {
+                static const string ops[] = {"<=", ">=", "!=", "<>", "=", "<", ">"};
+                for (const string& op : ops) {
                     const size_t opAt = p.find(op);
                     if (opAt == string::npos) continue;
                     const string l = trim(p.substr(0, opAt));
-                    const string r = trim(p.substr(opAt + strlen(op)));
+                    const string r = trim(p.substr(opAt + op.size()));
                     auto isNullTok2 = [](const string& t) {
                         string tl;
                         for (char c : t) tl += static_cast<char>(tolower(static_cast<unsigned char>(c)));
@@ -5466,14 +5466,19 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                     double lv = 0, rv = 0;
                     try { lv = stod(l); rv = stod(r); } catch (...) { num = false; }
                     if (num) {
-                        if (op[0] == '=' && !op[1]) return lv == rv ? 1 : 0;
-                        if ((op[0] == '!' || op[0] == '<') && op[1] == '>') return lv != rv ? 1 : 0;
+                        if (op == "=") return lv == rv ? 1 : 0;
+                        if (op == "!=" || op == "<>") return lv != rv ? 1 : 0;
                         if (op == "<=") return lv <= rv ? 1 : 0;
                         if (op == ">=") return lv >= rv ? 1 : 0;
                         if (op == "<") return lv < rv ? 1 : 0;
                         if (op == ">") return lv > rv ? 1 : 0;
                     }
-                    return l == r ? 1 : 0;
+                    if (op == "=") return l == r ? 1 : 0;
+                    if (op == "!=" || op == "<>") return l != r ? 1 : 0;
+                    if (op == "<=") return l <= r ? 1 : 0;
+                    if (op == ">=") return l >= r ? 1 : 0;
+                    if (op == "<") return l < r ? 1 : 0;
+                    if (op == ">") return l > r ? 1 : 0;
                 }
                 return -1;
             };
