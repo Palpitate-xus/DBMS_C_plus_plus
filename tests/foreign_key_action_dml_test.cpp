@@ -22,11 +22,14 @@ namespace fs = std::filesystem;
 namespace {
 
 constexpr const char* kDatabase = "foreign_key_action_dml_db";
+constexpr const char* kRenameDatabase = "foreign_key_rename_db";
 const std::string kPayload(5000, 'p');
 
 void cleanup() {
     std::error_code error;
     fs::remove_all(kDatabase, error);
+    error.clear();
+    fs::remove_all(kRenameDatabase, error);
     error.clear();
     fs::remove_all("info/.prepared", error);
     error.clear();
@@ -254,6 +257,59 @@ void testRollbackActions(StorageEngine& engine) {
     std::cout << "[FOREIGN KEY ACTION] transactional rollback cascade OK\n";
 }
 
+void createRenameFixture(StorageEngine& engine) {
+    assert(engine.createDatabase(kRenameDatabase) == DBStatus::OK);
+    assert(engine.createTable(kRenameDatabase, keyedTable("parent")) ==
+           DBStatus::OK);
+
+    TableSchema child = keyedTable("child");
+    child.append(makeIntColumn("parent_id", false, 4, false));
+    assert(engine.createTable(kRenameDatabase, child) == DBStatus::OK);
+    assert(engine.alterTableAddFKConstraint(
+               kRenameDatabase, "child", "child_parent_fk", {"parent_id"},
+               "parent", {"id"}, "cascade", "cascade") == DBStatus::OK);
+
+    assert(engine.insert(kRenameDatabase, "parent", {{"id", "1"}}) ==
+           DBStatus::OK);
+    assert(engine.alterTableRenameTable(
+               kRenameDatabase, "parent", "renamed_parent") == DBStatus::OK);
+
+    const TableSchema childAfterRename =
+        engine.getTableSchema(kRenameDatabase, "child");
+    assert(childAfterRename.fkLen == 1);
+    assert(childAfterRename.fks[0].refTable == "renamed_parent");
+    assert(engine.insert(
+               kRenameDatabase, "child",
+               {{"id", "10"}, {"parent_id", "1"}}) == DBStatus::OK);
+    assert(engine.insert(
+               kRenameDatabase, "child",
+               {{"id", "11"}, {"parent_id", "999"}}) ==
+           DBStatus::INVALID_VALUE);
+
+    assert(engine.remove(
+               kRenameDatabase, "renamed_parent", {"=id 1"}) ==
+           DBStatus::OK);
+    int64_t childRid = -1;
+    assert(!engine.getPKIndex(kRenameDatabase, "child")->search(
+        "10", childRid));
+    std::cout << "[FOREIGN KEY ACTION] parent rename keeps FK actions OK\n";
+}
+
+void testRenamedReferenceAfterRestart() {
+    StorageEngine restarted;
+    const TableSchema child =
+        restarted.getTableSchema(kRenameDatabase, "child");
+    assert(child.fkLen == 1);
+    assert(child.fks[0].refTable == "renamed_parent");
+    assert(restarted.insert(
+               kRenameDatabase, "renamed_parent", {{"id", "2"}}) ==
+           DBStatus::OK);
+    assert(restarted.insert(
+               kRenameDatabase, "child",
+               {{"id", "20"}, {"parent_id", "2"}}) == DBStatus::OK);
+    std::cout << "[FOREIGN KEY ACTION] renamed FK persists across restart OK\n";
+}
+
 } // namespace
 
 int main() {
@@ -266,7 +322,9 @@ int main() {
         engine.getLockManager().unlockAllGaps();
         testAutocommitActions(engine);
         testRollbackActions(engine);
+        createRenameFixture(engine);
     }
+    testRenamedReferenceAfterRestart();
     cleanup();
     std::cout << "[FOREIGN KEY ACTION] all passed\n";
     return 0;

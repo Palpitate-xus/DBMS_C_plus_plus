@@ -12941,6 +12941,51 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
     TableSchema renamedSchema = getTableSchema(dbname, oldName);
     renamedSchema.tablename = newName;
 
+    // Foreign keys persist the referenced relation by name.  Rename every
+    // inbound reference (and a possible self-reference) together with the
+    // parent, otherwise valid child writes fail as soon as the old name is
+    // removed and referential actions can no longer find their target.
+    for (size_t fkIndex = 0; fkIndex < renamedSchema.fkLen; ++fkIndex) {
+        if (renamedSchema.fks[fkIndex].refTable == oldName) {
+            renamedSchema.fks[fkIndex].refTable = newName;
+        }
+    }
+    struct ReferencingSchemaRewrite {
+        std::string tableName;
+        std::string original;
+        std::string renamed;
+    };
+    std::vector<ReferencingSchemaRewrite> referencingSchemaRewrites;
+    auto serializeSchema = [&](const TableSchema& schema,
+                               std::string& bytes) {
+        std::ostringstream output(std::ios::out | std::ios::binary);
+        writeSchema(output, schema);
+        if (!output) return false;
+        bytes = output.str();
+        return true;
+    };
+    for (const auto& tableName : getTableNames(dbname)) {
+        if (tableName == oldName) continue;
+        const TableSchema originalSchema = getTableSchema(dbname, tableName);
+        TableSchema updatedSchema = originalSchema;
+        bool changed = false;
+        for (size_t fkIndex = 0; fkIndex < updatedSchema.fkLen; ++fkIndex) {
+            if (updatedSchema.fks[fkIndex].refTable != oldName) continue;
+            updatedSchema.fks[fkIndex].refTable = newName;
+            changed = true;
+        }
+        if (!changed) continue;
+        ReferencingSchemaRewrite rewrite;
+        rewrite.tableName = tableName;
+        if (!serializeSchema(originalSchema, rewrite.original) ||
+            !serializeSchema(updatedSchema, rewrite.renamed)) {
+            lockManager_.unlock(oldName);
+            lockManager_.unlock(newName);
+            return DBStatus::IO_ERROR;
+        }
+        referencingSchemaRewrites.push_back(std::move(rewrite));
+    }
+
     // Publish a temporary new schema first. Path helpers use the schema's
     // tablespace, so both old and new relation paths remain resolvable while
     // physical files are being renamed.
@@ -13343,6 +13388,30 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
             lockManager_.unlock(newName);
             return status;
         }
+    }
+
+    size_t publishedReferencingSchemas = 0;
+    for (; publishedReferencingSchemas < referencingSchemaRewrites.size();
+         ++publishedReferencingSchemas) {
+        const auto& rewrite =
+            referencingSchemaRewrites[publishedReferencingSchemas];
+        if (index_file::writeAtomically(
+                schemaPath(dbname, rewrite.tableName), rewrite.renamed)) {
+            invalidateCatalogSchema(dbname, rewrite.tableName);
+            continue;
+        }
+        // writeAtomically can report a directory-fsync failure after rename,
+        // so restore the current target as well as every earlier one.
+        for (size_t rollback = 0;
+             rollback <= publishedReferencingSchemas; ++rollback) {
+            const auto& prior = referencingSchemaRewrites[rollback];
+            index_file::writeAtomically(
+                schemaPath(dbname, prior.tableName), prior.original);
+            invalidateCatalogSchema(dbname, prior.tableName);
+        }
+        lockManager_.unlock(oldName);
+        lockManager_.unlock(newName);
+        return DBStatus::IO_ERROR;
     }
 
     lockManager_.unlock(oldName);
