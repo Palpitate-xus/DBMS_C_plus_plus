@@ -16805,7 +16805,7 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             }
         }
         if (hasNull) continue;
-        if (!fk.name.empty() &&
+        if (!fk.name.empty() && transactionContext().inTransaction &&
             isConstraintCurrentlyDeferred(dbname, tablename, fk.name)) {
             DeferredFkEntry e;
             e.fkIndex = fi;

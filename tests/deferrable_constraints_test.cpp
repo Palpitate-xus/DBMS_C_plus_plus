@@ -117,6 +117,12 @@ static void test_fk_deferred_violation() {
     std::cout << "[DEFER] FK deferred missing-parent commit rejected OK" << std::endl;
 }
 
+static void test_fk_autocommit_rejects_missing_parent() {
+    assert(g_engine.insert(db, "child", {{"id", "3"}, {"pid", "300"}})
+               == DBStatus::INVALID_VALUE);
+    std::cout << "[DEFER] FK autocommit missing parent rejected OK" << std::endl;
+}
+
 static void test_unique_deferred_single_insert() {
     assert(g_engine.beginTransaction(db) == DBStatus::OK);
     assert(g_engine.insert(db, "uniq", {{"id", "20"}, {"tag", "solo"}})
@@ -208,6 +214,7 @@ int main() {
     test_exclude_immediate_rejects();
     test_fk_deferred_ok();
     test_fk_deferred_violation();
+    test_fk_autocommit_rejects_missing_parent();
     test_unique_deferred_single_insert();
     test_unique_autocommit_rejects_duplicate();
     test_unique_deferred_swap();
