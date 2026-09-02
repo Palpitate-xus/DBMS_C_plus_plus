@@ -130,6 +130,7 @@ BPTree::~BPTree() {
 }
 
 bool BPTree::open() {
+    std::unique_lock<std::shared_mutex> treeLock(treeMutex_);
     if (bp_ && bp_->isOpen()) return true;
     if (!bp_) bp_ = std::make_unique<BufferPool>(filePath_.string(), indexBufferFrameCount());
     // A (re)open may see a different on-disk tree (e.g. after clear or
@@ -167,6 +168,7 @@ bool BPTree::open() {
 }
 
 void BPTree::close() {
+    std::unique_lock<std::shared_mutex> treeLock(treeMutex_);
     {
         std::unique_lock<std::shared_mutex> lock(nodeCacheMutex_);
         nodeCache_.clear();
@@ -178,6 +180,7 @@ void BPTree::close() {
 }
 
 bool BPTree::flush() {
+    std::shared_lock<std::shared_mutex> treeLock(treeMutex_);
     return bp_ && bp_->isOpen() && bp_->flush();
 }
 
@@ -380,6 +383,7 @@ size_t upperBoundIdx(const std::vector<std::string>& keys, size_t count,
 } // namespace
 
 bool BPTree::search(const std::string& key, int64_t& value) const {
+    std::shared_lock<std::shared_mutex> treeLock(treeMutex_);
     if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return false;
     return searchNode(header_.rootPage, normalizeKey(key), value);
 }
@@ -410,8 +414,8 @@ bool BPTree::searchNode(uint32_t pageNum, const std::string& key, int64_t& value
 // Insert
 // ========================================================================
 bool BPTree::insert(const std::string& key, int64_t value) {
+    std::unique_lock<std::shared_mutex> treeLock(treeMutex_);
     if (!bp_ || !bp_->isOpen()) return false;
-    std::lock_guard<std::recursive_mutex> lock(writeMutex_);
     const std::string normalizedKey = normalizeKey(key);
     if (header_.rootPage == 0) {
         // Create root leaf
@@ -430,7 +434,7 @@ bool BPTree::insert(const std::string& key, int64_t value) {
 
     // Check if key already exists
     int64_t dummy;
-    if (search(normalizedKey, dummy)) return false;
+    if (searchNode(header_.rootPage, normalizedKey, dummy)) return false;
 
     auto rootOpt = readNode(header_.rootPage);
     if (!rootOpt) return false;
@@ -457,6 +461,7 @@ bool BPTree::insert(const std::string& key, int64_t value) {
 // Multi-value search (for secondary indexes with duplicate keys)
 // ========================================================================
 std::vector<int64_t> BPTree::searchMulti(const std::string& key) const {
+    std::shared_lock<std::shared_mutex> treeLock(treeMutex_);
     std::vector<int64_t> results;
     if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return results;
     const std::string normalizedKey = normalizeKey(key);
@@ -489,8 +494,8 @@ std::vector<int64_t> BPTree::searchMulti(const std::string& key) const {
 }
 
 bool BPTree::insertMulti(const std::string& key, int64_t value) {
+    std::unique_lock<std::shared_mutex> treeLock(treeMutex_);
     if (!bp_ || !bp_->isOpen()) return false;
-    std::lock_guard<std::recursive_mutex> lock(writeMutex_);
     const std::string normalizedKey = normalizeKey(key);
     if (header_.rootPage == 0) {
         uint32_t root = allocPage();
@@ -614,14 +619,14 @@ bool BPTree::splitChild(uint32_t parentPage, int childIdx, uint32_t childPage) {
 // Remove (simplified: no merging, just remove key from leaf)
 // ========================================================================
 bool BPTree::remove(const std::string& key) {
+    std::unique_lock<std::shared_mutex> treeLock(treeMutex_);
     if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return false;
-    std::lock_guard<std::recursive_mutex> lock(writeMutex_);
     return removeFromNode(header_.rootPage, normalizeKey(key), std::nullopt);
 }
 
 bool BPTree::removeMulti(const std::string& key, int64_t value) {
+    std::unique_lock<std::shared_mutex> treeLock(treeMutex_);
     if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return false;
-    std::lock_guard<std::recursive_mutex> lock(writeMutex_);
     return removeFromNode(header_.rootPage, normalizeKey(key), value);
 }
 
@@ -660,6 +665,7 @@ bool BPTree::removeFromNode(uint32_t pageNum, const std::string& key,
 // Range scan
 // ========================================================================
 std::vector<int64_t> BPTree::rangeScan(const std::string& startKey, const std::string& endKey) const {
+    std::shared_lock<std::shared_mutex> treeLock(treeMutex_);
     std::vector<int64_t> result;
     if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return result;
     const std::string normalizedStart = normalizeKey(startKey);
@@ -690,7 +696,14 @@ bool BPTree::collectRange(uint32_t pageNum, const std::string& startKey,
 }
 
 std::vector<int64_t> BPTree::allValues() const {
-    return rangeScan("", std::string(BP_KEY_LEN, '\xFF'));
+    std::shared_lock<std::shared_mutex> treeLock(treeMutex_);
+    std::vector<int64_t> result;
+    if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return result;
+    if (!collectRange(header_.rootPage, normalizeKey(""),
+                      std::string(BP_KEY_LEN, '\xFF'), result)) {
+        return {};
+    }
+    return result;
 }
 
 } // namespace dbms

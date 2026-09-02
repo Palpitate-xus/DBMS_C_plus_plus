@@ -63,10 +63,14 @@ public:
     // variable-width order of the SQL literals.
     static std::string normalizeKeyForComparison(const std::string& key);
 
-    bool isOpen() const { return bp_ != nullptr && bp_->isOpen(); }
+    bool isOpen() const {
+        std::shared_lock<std::shared_mutex> lock(treeMutex_);
+        return bp_ != nullptr && bp_->isOpen();
+    }
 
     const std::filesystem::path& filePath() const { return filePath_; }
     bool hasDirtyPages() const {
+        std::shared_lock<std::shared_mutex> lock(treeMutex_);
         if (!bp_ || !bp_->isOpen()) return false;
         for (const auto& frame : bp_->getFrameInfo()) {
             if (frame.dirty) return true;
@@ -74,23 +78,30 @@ public:
         return false;
     }
 
-    uint32_t rootPage() const { return header_.rootPage; }
+    uint32_t rootPage() const {
+        std::shared_lock<std::shared_mutex> lock(treeMutex_);
+        return header_.rootPage;
+    }
 
     // Buffer pool stats
-    size_t cacheHits() const { return bp_ ? bp_->hits() : 0; }
-    size_t cacheMisses() const { return bp_ ? bp_->misses() : 0; }
+    size_t cacheHits() const {
+        std::shared_lock<std::shared_mutex> lock(treeMutex_);
+        return bp_ ? bp_->hits() : 0;
+    }
+    size_t cacheMisses() const {
+        std::shared_lock<std::shared_mutex> lock(treeMutex_);
+        return bp_ ? bp_->misses() : 0;
+    }
 
 private:
     std::filesystem::path filePath_;
     std::unique_ptr<BufferPool> bp_;
 
-    // Serializes node mutations. The tree deserializes whole nodes, mutates
-    // them locally and writes them back, so two writers could otherwise
-    // interleave their read-modify-write cycles and lose entries. Insert
-    // paths hold the table intent lock only, which does not exclude other
-    // writers inside this process. Recursive so public mutators may call the
-    // locked public search() internally.
-    mutable std::recursive_mutex writeMutex_;
+    // Writers serialize whole nodes directly into buffer-pool frames, so
+    // readers must not deserialize those frames concurrently. Shared tree
+    // locking permits parallel lookups while excluding every mutation and
+    // open/close transition.
+    mutable std::shared_mutex treeMutex_;
 
     struct FileHeader {
         uint32_t rootPage = 0;      // page number of root node

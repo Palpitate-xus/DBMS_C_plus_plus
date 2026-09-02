@@ -40,6 +40,7 @@ done
 
 # Core tests: concurrency, storage, buffer pool, WAL, indexes, pooling.
 CORE_TESTS=(
+    bptree_concurrency_test
     concurrency_test
     lock_manager_concurrency_test
     cross_backend_lock_test
