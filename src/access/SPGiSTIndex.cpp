@@ -183,25 +183,37 @@ void SPGiSTIndex::searchEqualsRecursive(const SPGiSTNode* node, double x, double
 
 std::vector<int64_t> SPGiSTIndex::searchLeftOf(double x) const {
     std::vector<int64_t> result;
-    searchRegionRecursive(&root_, root_.minX, root_.minY, x, root_.maxY, result);
+    const double strictMax = std::nextafter(x,
+        -std::numeric_limits<double>::infinity());
+    searchRegionRecursive(&root_, root_.minX, root_.minY,
+                          strictMax, root_.maxY, result);
     return result;
 }
 
 std::vector<int64_t> SPGiSTIndex::searchRightOf(double x) const {
     std::vector<int64_t> result;
-    searchRegionRecursive(&root_, x, root_.minY, root_.maxX, root_.maxY, result);
+    const double strictMin = std::nextafter(x,
+        std::numeric_limits<double>::infinity());
+    searchRegionRecursive(&root_, strictMin, root_.minY,
+                          root_.maxX, root_.maxY, result);
     return result;
 }
 
 std::vector<int64_t> SPGiSTIndex::searchBelow(double y) const {
     std::vector<int64_t> result;
-    searchRegionRecursive(&root_, root_.minX, root_.minY, root_.maxX, y, result);
+    const double strictMax = std::nextafter(y,
+        -std::numeric_limits<double>::infinity());
+    searchRegionRecursive(&root_, root_.minX, root_.minY,
+                          root_.maxX, strictMax, result);
     return result;
 }
 
 std::vector<int64_t> SPGiSTIndex::searchAbove(double y) const {
     std::vector<int64_t> result;
-    searchRegionRecursive(&root_, root_.minX, y, root_.maxX, root_.maxY, result);
+    const double strictMin = std::nextafter(y,
+        std::numeric_limits<double>::infinity());
+    searchRegionRecursive(&root_, root_.minX, strictMin,
+                          root_.maxX, root_.maxY, result);
     return result;
 }
 
