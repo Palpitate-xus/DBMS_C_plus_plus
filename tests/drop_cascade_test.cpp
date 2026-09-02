@@ -78,9 +78,60 @@ static void test_drop_table_cascade_removes_dependents() {
     std::cout << "[DROP-CASCADE] CASCADE removes dependents OK" << std::endl;
 }
 
+static void test_drop_removes_named_table_sidecars() {
+    std::string db = testDbPath("drop_sidecars");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    dbms::TableSchema table;
+    table.tablename = "reusable";
+    table.append(dbms::makeIntColumn("id", false, 2));
+    table.append(dbms::makeVarCharColumn("tag", false, 64));
+    assert(g_engine.createTable(db, table) == dbms::DBStatus::OK);
+    assert(g_engine.setStorageParams(
+               db, "reusable", {{"fillfactor", "61"}}) ==
+           dbms::DBStatus::OK);
+
+    dbms::StorageEngine::RowPolicy policy;
+    policy.name = "old_policy";
+    policy.cmd = "SELECT";
+    policy.usingExpr = "id > 0";
+    assert(g_engine.createPolicy(db, "reusable", policy) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.createBloomIndex(db, "reusable", "tag") ==
+           dbms::DBStatus::OK);
+
+    const auto paramsPath = fs::path(db) / "reusable.params";
+    const auto policyPath = fs::path(db) / "reusable.rls";
+    const auto bloomMetaPath = fs::path(db) / "reusable.bloomidx";
+    assert(fs::is_regular_file(paramsPath));
+    assert(fs::is_regular_file(policyPath));
+    assert(fs::is_regular_file(bloomMetaPath));
+
+    assert(g_engine.dropTable(db, "reusable") == dbms::DBStatus::OK);
+    assert(!fs::exists(paramsPath));
+    assert(!fs::exists(policyPath));
+    assert(!fs::exists(bloomMetaPath));
+
+    // A new relation with the same name must not inherit any definition from
+    // the dropped object.
+    assert(g_engine.createTable(db, table) == dbms::DBStatus::OK);
+    assert(g_engine.getStorageParams(db, "reusable").empty());
+    assert(g_engine.getPolicies(db, "reusable").empty());
+    assert(g_engine.getBloomIndexedColumns(db, "reusable").empty());
+    assert(g_engine.createBloomIndex(db, "reusable", "tag") ==
+           dbms::DBStatus::OK);
+
+    assert(g_engine.dropTable(db, "reusable") == dbms::DBStatus::OK);
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[DROP-CASCADE] DROP removes named sidecars OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_drop_table_cascade_removes_dependents();
+    test_drop_removes_named_table_sidecars();
     std::cout << "[DROP-CASCADE] all passed" << std::endl;
     return 0;
 }

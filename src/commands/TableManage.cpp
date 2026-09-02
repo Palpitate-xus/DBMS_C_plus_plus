@@ -11802,12 +11802,14 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
     // Keep the schema readable until every physical path has been resolved;
     // custom tablespace paths are derived from the schema itself.
     const auto relationRoot = relationDir(dbname, tablename);
+    std::filesystem::remove(paramsPath(dbname, tablename));
     std::filesystem::remove(dataPath(dbname, tablename));
     std::filesystem::remove(indexPath(dbname, tablename));
     std::filesystem::remove(secondaryIndexMetaPath(dbname, tablename));
     invalidateSecidxCache(dbname, tablename);
     std::filesystem::remove(hashIndexMetaPath(dbname, tablename));
     invalidateHashidxCache(dbname, tablename);
+    std::filesystem::remove(bloomIndexMetaPath(dbname, tablename));
     std::filesystem::remove(namedIndexMetaPath(*this, dbname, tablename));
     std::filesystem::remove(
         truncateStatePath(*this, dbname, tablename));
@@ -11815,6 +11817,7 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
         specializedIndexDirtyPath(*this, dbname, tablename));
     std::filesystem::remove(fsmPath(dbname, tablename));
     std::filesystem::remove(vmPath(dbname, tablename));
+    std::filesystem::remove(rlsPath(dbname, tablename));
     removeSeq(dbname, tablename);
     // Remove TOAST data (legacy directory + proper relation/index)
     auto tdir = toastDir(dbname, tablename);
