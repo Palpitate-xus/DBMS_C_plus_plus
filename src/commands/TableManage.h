@@ -1295,6 +1295,8 @@ private:
     bool flushDatabaseCaches(const std::string& dbname, bool heapPages = true);
     void closeDatabaseCaches(const std::string& dbname);
     void pruneMissingDatabaseCaches();
+    bool rebuildIndexesAfterRecovery(const std::string& dbname,
+                                     bool preservePreparedState);
 
     // Free Space Map + Visibility Map (fork files)
     mutable std::map<std::string, std::unique_ptr<FreeSpaceMap>> fsmCache_;
@@ -1321,8 +1323,9 @@ private:
     // whole-file WAL image pair (before/after) is written at most once per
     // epoch per file — the physical flush at commit already puts the entries
     // on disk, so repeating the image every commit only duplicated megabytes
-    // into the WAL (measured: ~120KB WAL per 40-byte INSERT).  The image
-    // remains the crash-corruption baseline for the epoch.
+    // into the WAL (measured: ~120KB WAL per 40-byte INSERT). Recovery
+    // validates legacy images but rebuilds abandoned index state from heap;
+    // an epoch baseline must never overwrite a later committed physical file.
     mutable uint64_t indexImageEpoch_ = 1;
     mutable std::map<std::string, uint64_t> indexImageWrittenEpoch_;
 

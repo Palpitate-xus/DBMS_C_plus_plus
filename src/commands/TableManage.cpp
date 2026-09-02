@@ -4147,9 +4147,12 @@ bool StorageEngine::flushDatabaseCaches(const std::string& dbname, bool heapPage
         // epoch per file.  The physical flush below already puts committed
         // entries on disk at commit time (index consistency after kill -9
         // rides on that flush — verified by the barrier kill-storm), so the
-        // image is a corruption-recovery baseline, not the primary
-        // durability mechanism.  Repeating it every commit made WAL volume
-        // grow with index size per transaction (~120KB per INSERT).
+        // image is an integrity snapshot, not the primary durability
+        // mechanism. Recovery validates these legacy images but cannot
+        // blindly replay an epoch baseline over later commits; an abandoned
+        // transaction instead triggers a rebuild from the recovered heap.
+        // Repeating the image every commit made WAL volume grow with index
+        // size per transaction (~120KB per INSERT).
         const std::string pathKey = path.string();
         const bool needImage =
             indexImageWrittenEpoch_.find(pathKey) == indexImageWrittenEpoch_.end() ||
@@ -25312,6 +25315,177 @@ bool StorageEngine::redoXactAbort(uint64_t xid) {
     return true;
 }
 
+bool StorageEngine::rebuildIndexesAfterRecovery(
+    const std::string& dbname, bool preservePreparedState) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    try {
+        const auto tableNames = getTableNames(dbname);
+
+        // The TOAST B+ tree is fully derivable from the live chunk headers.
+        // Rebuild it before user indexes because their logical keys may need
+        // de-TOASTing while REINDEX scans the heap.
+        for (const auto& tableName : tableNames) {
+            const TableSchema table = getTableSchema(dbname, tableName);
+            if (table.isUnlogged) continue;
+
+            const auto dataFile = toastDataPath(dbname, tableName);
+            std::error_code fileError;
+            const bool hasToastData =
+                std::filesystem::exists(dataFile, fileError);
+            if (fileError) return false;
+            if (!hasToastData) continue;
+            if (!std::filesystem::is_regular_file(dataFile, fileError) ||
+                fileError) return false;
+
+            const std::string toastKey = dbname + ":" + tableName;
+            if (auto cached = toastIndexes_.find(toastKey);
+                cached != toastIndexes_.end()) {
+                cached->second->close();
+                toastIndexes_.erase(cached);
+            }
+            std::filesystem::remove(toastIndexPath(dbname, tableName),
+                                    fileError);
+            if (fileError) return false;
+
+            PageAllocator* pages = getToastPageAllocator(dbname, tableName);
+            BPTree* index = getToastIndex(dbname, tableName);
+            if (!pages || !index) return false;
+
+            bool valid = true;
+            std::set<std::string> seenKeys;
+            for (uint32_t pageId = 1;
+                 valid && pageId < pages->numPages(); ++pageId) {
+                char* buffer = pages->fetchPage(pageId);
+                if (!buffer) return false;
+                PageWrapper page(buffer, pages->pageSize(),
+                                 DATA_FILE_FORMAT_VERSION);
+                valid = page.isValid();
+                if (valid) {
+                    page.forEachLive(
+                        [&](uint16_t slotId, const char* row, size_t length) {
+                            if (!valid) return;
+                            if (length <= TOAST_CHUNK_HEADER_SIZE) {
+                                valid = false;
+                                return;
+                            }
+                            uint64_t toastId = 0;
+                            uint32_t sequence = 0;
+                            uint8_t flags = 0;
+                            uint64_t originalSize = 0;
+                            std::memcpy(&toastId, row, sizeof(toastId));
+                            std::memcpy(&sequence, row + sizeof(toastId),
+                                        sizeof(sequence));
+                            std::memcpy(&flags,
+                                        row + sizeof(toastId) + sizeof(sequence),
+                                        sizeof(flags));
+                            std::memcpy(
+                                &originalSize,
+                                row + sizeof(toastId) + sizeof(sequence) +
+                                    sizeof(flags),
+                                sizeof(originalSize));
+                            const std::string key =
+                                toastIndexKey(toastId, sequence);
+                            if (toastId == 0 || originalSize == 0 ||
+                                (flags != 0 &&
+                                 flags != TOAST_FLAG_COMPRESSED) ||
+                                !seenKeys.insert(key).second ||
+                                !index->insert(
+                                    key, encodeRid(pageId, slotId))) {
+                                valid = false;
+                            }
+                        });
+                }
+                pages->unpinPage(pageId);
+            }
+            if (!valid || !index->flush()) return false;
+        }
+
+        // PREPARE flushes the transaction's future index state before making
+        // the prepared record durable.  Ordinary readers bypass indexes while
+        // that xid remains active, and phase two expects the flushed state in
+        // order to commit or reverse it.  Do not replace it with a snapshot
+        // that intentionally hides the prepared versions.
+        if (preservePreparedState) return true;
+
+        for (const auto& tableName : tableNames) {
+            const TableSchema table = getTableSchema(dbname, tableName);
+            if (table.isUnlogged) continue;
+
+            const auto hashColumns =
+                getHashIndexedColumns(dbname, tableName);
+            const auto bloomColumns =
+                getBloomIndexedColumns(dbname, tableName);
+
+            if (reindex(dbname, tableName) != DBStatus::OK) return false;
+
+            const auto findColumn = [&](const std::string& columnName) {
+                for (size_t i = 0; i < table.len; ++i) {
+                    if (table.cols[i].dataName == columnName) return i;
+                }
+                return table.len;
+            };
+            const auto populate = [&](auto* index,
+                                      const std::string& columnName) {
+                if (!index) return false;
+                const size_t columnIndex = findColumn(columnName);
+                if (columnIndex >= table.len) return false;
+                index->clear();
+                bool indexValid = true;
+                const bool scanOk = forEachRow(
+                    dbname, tableName,
+                    [&](uint32_t pageId, uint16_t slotId,
+                        const char* data, size_t length) {
+                        if (!indexValid) return;
+                        const std::string row(data, length);
+                        const std::string value = extractColumnValue(
+                            row, table, columnIndex, dbname, true);
+                        if (!value.empty() &&
+                            !index->insert(value,
+                                           encodeRid(pageId, slotId))) {
+                            indexValid = false;
+                        }
+                    });
+                return scanOk && indexValid && index->flush();
+            };
+
+            for (const auto& columnName : hashColumns) {
+                if (!populate(getHashIndex(dbname, tableName, columnName),
+                              columnName)) {
+                    return false;
+                }
+            }
+            for (const auto& columnName : bloomColumns) {
+                if (!populate(getBloomIndex(dbname, tableName, columnName),
+                              columnName)) {
+                    return false;
+                }
+            }
+        }
+
+        // REINDEX leaves its B+ tree pages dirty in their buffer pools.  A
+        // recovery rebuild must persist them directly, without generating a
+        // fresh set of recovery WAL images on every startup.
+        const std::string tablePrefix = dbname + "/";
+        for (const auto& [key, index] : pkIndexCache_) {
+            if (key.rfind(tablePrefix, 0) == 0 && index && !index->flush())
+                return false;
+        }
+        for (const auto& [key, index] : secondaryIndexCache_) {
+            if (key.rfind(tablePrefix, 0) == 0 && index && !index->flush())
+                return false;
+        }
+        return true;
+    } catch (const std::exception& error) {
+        std::cerr << "[recovery] index rebuild failed for database "
+                  << dbname << ": " << error.what() << std::endl;
+        return false;
+    } catch (...) {
+        std::cerr << "[recovery] index rebuild failed for database "
+                  << dbname << std::endl;
+        return false;
+    }
+}
+
 // ========================================================================
 // WAL crash recovery (page-image redo)
 // ========================================================================
@@ -25703,10 +25877,16 @@ bool StorageEngine::recoverAllDatabases() {
 
         auto checkpointLsnOpt = wal->findLastCheckpointLsn();
         Lsn redoLsn = checkpointLsnOpt.value_or(wal->earliestAvailableLsn());
+        const auto preparedForDatabase = inDoubtPreparedXids.lower_bound(
+            {dbname, 0});
+        const bool preservePreparedIndexState =
+            preparedForDatabase != inDoubtPreparedXids.end() &&
+            preparedForDatabase->first == dbname;
 
         // Pass 1: collect committed transaction IDs and update CLOG.
         std::set<uint64_t> committedXids = committedXidsByDb[dbname];
         std::vector<Lsn> redoRecordLsns;
+        bool needsIndexRebuild = false;
         {
             Lsn lsn = redoLsn;
             while (true) {
@@ -25737,6 +25917,14 @@ bool StorageEngine::recoverAllDatabases() {
                         std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
                         lastCheckpointLsns_[dbname] = lsn;
                     }
+                }
+                if (rec.header.xl_xid != 0 &&
+                    (rmid == RM_HEAP_ID || rmid == RM_INDEX_ID) &&
+                    !committedXidsByDb[dbname].count(rec.header.xl_xid) &&
+                    !abortedXidsByDb[dbname].count(rec.header.xl_xid) &&
+                    !inDoubtPreparedXids.count(
+                        {dbname, rec.header.xl_xid})) {
+                    needsIndexRebuild = true;
                 }
                 lsn += rec.header.xl_tot_len;
             }
@@ -25883,10 +26071,13 @@ bool StorageEngine::recoverAllDatabases() {
                 if (filename.empty() || !isIndexFile) {
                     return fail("path is not an index relation");
                 }
-                if (!redoIndexFileImage(indexPath, p,
-                                        static_cast<size_t>(imageLen))) {
-                    return fail("index image write failed");
-                }
+                // Indexes are derived data and commit/prepare fsyncs them
+                // before publishing the terminal WAL record.  An image is a
+                // checkpoint-epoch baseline rather than a per-transaction
+                // state: replaying it can overwrite commits made later in the
+                // same epoch.  Validate every applicable legacy image here,
+                // retain the newest physical file for terminal transactions,
+                // and rebuild below if an abandoned xid may have dirtied it.
                 return true;
             }
 
@@ -25931,6 +26122,20 @@ bool StorageEngine::recoverAllDatabases() {
                 }
             }
         }
+        if (recoveryOk) {
+            // A loser's full-page before-image can predate a later committed
+            // transaction on the same heap page. The reverse undo pass
+            // necessarily restores that older image, so replay winners once
+            // more in WAL order to retain every later durable commit.
+            for (Lsn recordLsn : redoRecordLsns) {
+                auto recOpt = wal->ReadRecord(recordLsn);
+                if (!recOpt ||
+                    !applyImageRecord(*recOpt, recordLsn, false)) {
+                    recoveryOk = false;
+                    break;
+                }
+            }
+        }
         if (!recoveryOk) {
             std::cerr << "[recovery] startup aborted for database " << dbname
                       << " because WAL replay was incomplete\n";
@@ -25956,8 +26161,19 @@ bool StorageEngine::recoverAllDatabases() {
         // Flush recovered pages.
         for (const auto& [key, pa] : pageAllocators_) {
             if (key.rfind(dbname + "/", 0) == 0) {
-                pa->flush();
+                if (!pa->flush()) {
+                    std::cerr << "[recovery] failed to flush recovered heap for "
+                              << key << std::endl;
+                    return false;
+                }
             }
+        }
+        if (needsIndexRebuild &&
+            !rebuildIndexesAfterRecovery(
+                dbname, preservePreparedIndexState)) {
+            std::cerr << "[recovery] failed to rebuild indexes for database "
+                      << dbname << std::endl;
+            return false;
         }
 
         // Truncate UNLOGGED tables (PG semantics)

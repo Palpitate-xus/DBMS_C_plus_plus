@@ -90,10 +90,32 @@ int64_t assertCurrentState(StorageEngine& engine,
     return primaryRid;
 }
 
+void assertDocumentBody(StorageEngine& engine,
+                        const std::string& database,
+                        const std::string& expected) {
+    const TableSchema table =
+        engine.getTableSchema(database, "documents");
+    size_t count = 0;
+    assert(engine.forEachRow(
+        database, "documents",
+        [&](uint32_t, uint16_t, const char* data, size_t length) {
+            ++count;
+            const std::string row(data, length);
+            assert(engine.extractColumnValue(
+                       row, table, 0, database, true) == "1");
+            assert(engine.extractColumnValue(
+                       row, table, 1, database, true) == expected);
+        }));
+    assert(count == 1);
+}
+
 } // namespace
 
 int main() {
     const std::string database = "mvcc_update_db";
+    const std::string initialBody(5000, 'a');
+    const std::string committedBody(5000, 'b');
+    const std::string abandonedBody(5000, 'c');
     std::filesystem::remove_all(database);
     std::filesystem::remove_all(database + ".txn_backup");
     std::filesystem::remove_all(".txnid");
@@ -267,7 +289,65 @@ int main() {
         assert(engine.commitPrepared("mvcc_update_commit") == DBStatus::OK);
         assertCurrentState(engine, database, table,
                            "prepared-commit-tag", "prepared-commit-value");
+
+        // A derived TOAST B+ tree must follow the same recovery rules as
+        // user indexes.  Keep multiple generations so an epoch baseline is
+        // necessarily older than the final committed value.
+        TableSchema documents;
+        documents.tablename = "documents";
+        documents.formatVersion = 2;
+        documents.append(makeIntColumn("id", false, 4, true));
+        documents.append(makeTextColumn("body", false));
+        assert(engine.createTable(database, documents) == DBStatus::OK);
+        assert(engine.insert(database, "documents",
+                             {{"id", "1"}, {"body", initialBody}}) ==
+               DBStatus::OK);
+        assert(engine.beginTransaction(database) == DBStatus::OK);
+        assert(engine.update(database, "documents",
+                             {{"body", committedBody}}, {"=id 1"}) ==
+               DBStatus::OK);
+        assert(engine.commitTransaction() == DBStatus::OK);
+        assertDocumentBody(engine, database, committedBody);
         std::cout << "[MVCC UPDATE] concurrent snapshots preserve row versions OK\n";
+    }
+
+    // Recovery must not let an earlier aborted transaction's full-page
+    // before-image erase the committed savepoint/2PC updates that followed
+    // it on the same heap page.
+    {
+        StorageEngine reopened;
+        const TableSchema table =
+            reopened.getTableSchema(database, "accounts");
+        assertCurrentState(reopened, database, table,
+                           "prepared-commit-tag", "prepared-commit-value");
+        assertDocumentBody(reopened, database, committedBody);
+    }
+
+    // Simulate a process disappearing with dirty heap and index buffers.  Its
+    // unterminated xid forces recovery to derive every index from the restored
+    // heap, including the TOAST chunk index.
+    {
+        StorageEngine abandoned;
+        assert(abandoned.beginTransaction(database) == DBStatus::OK);
+        assert(abandoned.update(database, "accounts",
+                                {{"tag", "abandoned-tag"},
+                                 {"value", "abandoned-value"}},
+                                {"=id 1"}) == DBStatus::OK);
+        assert(abandoned.update(database, "documents",
+                                {{"body", abandonedBody}}, {"=id 1"}) ==
+               DBStatus::OK);
+        assertDocumentBody(abandoned, database, abandonedBody);
+        // Deliberately omit COMMIT/ROLLBACK.
+    }
+    {
+        StorageEngine recovered;
+        const TableSchema table =
+            recovered.getTableSchema(database, "accounts");
+        assertCurrentState(recovered, database, table,
+                           "prepared-commit-tag", "prepared-commit-value");
+        assertDocumentBody(recovered, database, committedBody);
+        assert(recovered.query(database, "accounts",
+                               {"=tag abandoned-tag"}, {"value"}).empty());
     }
 
     std::filesystem::remove_all(database);
