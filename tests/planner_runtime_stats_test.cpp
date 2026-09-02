@@ -57,6 +57,8 @@ int main() {
     insertRows(db, "right_side", 10);
     assert(g_engine.analyzeTable(db, "left_side"));
     assert(g_engine.analyzeTable(db, "right_side"));
+    assert(g_engine.getTableRowCount(db, "left_side") == 100);
+    assert(g_engine.getTableRowCount(db, "right_side") == 10);
 
     // With no exact process-local scan evidence, the planner falls back to
     // durable physical counts and selects hash join for 100 x 10.
@@ -85,9 +87,14 @@ int main() {
         explainPlan, &g_engine, db);
     assert(explain.find("rows=1") != std::string::npos);
 
-    // Recreating a same-name relation must not inherit the old estimate.
+    // Recreating a same-name relation must not inherit either the process
+    // estimate or the durable ANALYZE rows from the dropped object.
+    const auto leftSchema = g_engine.getTableSchema(db, "left_side");
     assert(g_engine.dropTable(db, "left_side") == dbms::DBStatus::OK);
     assert(!dbms::getRuntimeLiveRowEstimate(db, "left_side", rows));
+    assert(g_engine.createTable(db, leftSchema) == dbms::DBStatus::OK);
+    assert(g_engine.getTableRowCount(db, "left_side") == 0);
+    assert(g_engine.getTableRowCount(db, "right_side") == 10);
 
     cleanup(db);
     dbms::resetRuntimeStats();

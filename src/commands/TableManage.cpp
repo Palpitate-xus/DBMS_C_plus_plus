@@ -11796,6 +11796,25 @@ DBStatus StorageEngine::createTable(const std::string& dbname,
 static std::filesystem::path grantChainPath(
     const std::filesystem::path& dbPath);
 
+static bool removeTableStatistics(const std::filesystem::path& path,
+                                  const std::string& tablename) {
+    std::error_code error;
+    if (!std::filesystem::exists(path, error)) return !error;
+    std::ifstream input(path);
+    if (!input) return false;
+    std::ostringstream retained;
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.empty()) continue;
+        std::istringstream fields(line);
+        std::string storedTable;
+        fields >> storedTable;
+        if (storedTable != tablename) retained << line << '\n';
+    }
+    if (input.bad()) return false;
+    return index_file::writeAtomically(path, retained.str());
+}
+
 DBStatus StorageEngine::dropTable(const std::string& dbname,
                                    const std::string& tablename) {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
@@ -11862,6 +11881,15 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
             const auto& prior = authorizationFiles[rollback];
             if (prior.changed) {
                 index_file::writeAtomically(prior.path, prior.original);
+            }
+        }
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
+    }
+    if (!removeTableStatistics(statsPath(dbname), tablename)) {
+        for (const auto& file : authorizationFiles) {
+            if (file.changed) {
+                index_file::writeAtomically(file.path, file.original);
             }
         }
         lockManager_.unlock(tablename);
@@ -11991,30 +12019,9 @@ DBStatus StorageEngine::truncateTable(const std::string& dbname,
         return finish(DBStatus::IO_ERROR);
     }
 
-    // Clear statistics
-    auto spath = statsPath(dbname);
-    std::error_code statsError;
-    if (std::filesystem::exists(spath, statsError)) {
-        std::ifstream ifs(spath);
-        if (!ifs) return finish(DBStatus::IO_ERROR);
-        std::vector<std::string> lines;
-        std::string line;
-        while (std::getline(ifs, line)) {
-            if (!line.empty()) {
-                std::stringstream ss(line);
-                std::string t;
-                ss >> t;
-                if (t != tablename) lines.push_back(line);
-            }
-        }
-        if (ifs.bad()) return finish(DBStatus::IO_ERROR);
-        std::ostringstream serialized;
-        for (const auto& retained : lines) serialized << retained << '\n';
-        if (!index_file::writeAtomically(spath, serialized.str())) {
-            return finish(DBStatus::IO_ERROR);
-        }
+    if (!removeTableStatistics(statsPath(dbname), tablename)) {
+        return finish(DBStatus::IO_ERROR);
     }
-    if (statsError) return finish(DBStatus::IO_ERROR);
 
     // SQL defaults to CONTINUE IDENTITY. DdlExecutor invokes
     // resetSequence() separately only for an explicit RESTART IDENTITY.
