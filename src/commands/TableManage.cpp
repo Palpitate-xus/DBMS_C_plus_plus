@@ -26,8 +26,10 @@
 #include "HashIndex.h"
 #include "BloomIndex.h"
 #include "SPGiSTIndex.h"
+#include <charconv>
 #include <cmath>
 #include <cctype>
+#include <iomanip>
 #include <limits>
 #include <mutex>
 #include <thread>
@@ -416,6 +418,88 @@ static std::string trim(const std::string& s) {
     size_t b = s.size();
     while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
     return s.substr(a, b - a);
+}
+
+static bool parseFiniteDouble(const std::string& input, double& value) {
+    const std::string token = trim(input);
+    if (token.empty()) return false;
+    try {
+        size_t consumed = 0;
+        value = std::stod(token, &consumed);
+        return consumed == token.size() && std::isfinite(value);
+    } catch (...) {
+        return false;
+    }
+}
+
+static std::string formatPointCoordinate(double value) {
+    char buffer[64];
+    const auto converted = std::to_chars(
+        buffer, buffer + sizeof(buffer), value, std::chars_format::general);
+    if (converted.ec == std::errc())
+        return std::string(buffer, converted.ptr);
+
+    // libstdc++ implementations with incomplete floating-point to_chars
+    // support still get a lossless fallback.
+    std::ostringstream out;
+    out << std::setprecision(std::numeric_limits<double>::max_digits10) << value;
+    return out.str();
+}
+
+static bool normalizePointLiteral(const std::string& input, std::string& output,
+                                  double* parsedX = nullptr,
+                                  double* parsedY = nullptr) {
+    std::string value = trim(input);
+    if (value.size() >= 2 && value.front() == '\'' && value.back() == '\'')
+        value = trim(value.substr(1, value.size() - 2));
+
+    if (value.size() >= 5) {
+        std::string prefix = value.substr(0, 5);
+        for (char& ch : prefix)
+            ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        if (prefix == "point" &&
+            (value.size() == 5 || value[5] == '(' ||
+             std::isspace(static_cast<unsigned char>(value[5])))) {
+            value = trim(value.substr(5));
+            if (value.size() < 2 || value.front() != '(' || value.back() != ')')
+                return false;
+        }
+    }
+    if ((!value.empty() && value.front() == '(') ||
+        (!value.empty() && value.back() == ')')) {
+        if (value.size() < 2 || value.front() != '(' || value.back() != ')')
+            return false;
+        value = trim(value.substr(1, value.size() - 2));
+    }
+
+    const size_t comma = value.find(',');
+    if (comma == std::string::npos || value.find(',', comma + 1) != std::string::npos)
+        return false;
+    double x = 0.0;
+    double y = 0.0;
+    if (!parseFiniteDouble(value.substr(0, comma), x) ||
+        !parseFiniteDouble(value.substr(comma + 1), y)) {
+        return false;
+    }
+    output = formatPointCoordinate(x) + "," + formatPointCoordinate(y);
+    if (parsedX) *parsedX = x;
+    if (parsedY) *parsedY = y;
+    return true;
+}
+
+static bool normalizePointColumns(const TableSchema& table,
+                                  std::map<std::string, std::string>& values) {
+    for (size_t i = 0; i < table.len; ++i) {
+        const Column& column = table.cols[i];
+        if (column.dataType != "point") continue;
+        auto value = values.find(column.dataName);
+        if (value == values.end() || value->second.empty() || value->second == "NULL")
+            continue;
+        std::string canonical;
+        if (!normalizePointLiteral(value->second, canonical)) return false;
+        value->second = std::move(canonical);
+    }
+    return true;
 }
 
 // Build a column-name -> data-type map from a TableSchema for expression eval.
@@ -5584,9 +5668,7 @@ static bool isGeometricTextType(const std::string& dt) {
 }
 
 static std::string geoFmtNum(double v) {
-    std::ostringstream oss;
-    oss << v;
-    return oss.str();
+    return formatPointCoordinate(v);
 }
 
 static std::string geoFmtPoint(double x, double y) {
@@ -5622,8 +5704,9 @@ static bool extractGeoNumbers(const std::string& in, std::vector<double>& nums,
                 ++i;
             try {
                 size_t consumed = 0;
-                double v = std::stod(in.substr(start, i - start), &consumed);
-                if (consumed == 0) return false;
+                const std::string token = in.substr(start, i - start);
+                double v = std::stod(token, &consumed);
+                if (consumed != token.size() || !std::isfinite(v)) return false;
                 nums.push_back(v);
             } catch (...) { return false; }
         } else {
@@ -6520,9 +6603,7 @@ std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer
         double x = 0.0, y = 0.0;
         std::memcpy(&x, rowBuffer.data() + offset, sizeof(double));
         std::memcpy(&y, rowBuffer.data() + offset + sizeof(double), sizeof(double));
-        std::ostringstream oss;
-        oss << x << "," << y;
-        return oss.str();
+        return formatPointCoordinate(x) + "," + formatPointCoordinate(y);
     } else if (col.dataType == "inet" || col.dataType == "cidr") {
         // Format: 1B family | 1B prefix_len | 1B is_cidr | 1B reserved | 16B addr
         uint8_t family = static_cast<uint8_t>(rowBuffer[offset]);
@@ -8461,13 +8542,15 @@ std::vector<std::string> StorageEngine::getGiSTIndexedColumns(const std::string&
 DBStatus StorageEngine::createSPGiSTIndex(const std::string& dbname,
                                            const std::string& tablename,
                                            const std::string& colname) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t colIdx = tbl.len;
     for (size_t i = 0; i < tbl.len; ++i) {
         if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
     }
-    if (colIdx >= tbl.len) return DBStatus::INVALID_VALUE;
+    if (colIdx >= tbl.len || tbl.cols[colIdx].dataType != "point")
+        return DBStatus::INVALID_VALUE;
 
     auto path = spGiSTIndexPath(dbname, tablename, colname);
     std::ostringstream out;
@@ -8480,6 +8563,10 @@ DBStatus StorageEngine::createSPGiSTIndex(const std::string& dbname,
         out << rid << ' ' << val << '\n';
     })) return DBStatus::IO_ERROR;
     if (!index_file::writeAtomically(path, out.str())) return DBStatus::IO_ERROR;
+    {
+        std::lock_guard<std::mutex> lock(spGiSTMutex_);
+        spGiSTCache_.erase(dbname + "/" + tablename + "/" + colname);
+    }
     return DBStatus::OK;
 }
 
@@ -8520,24 +8607,32 @@ std::vector<int64_t> StorageEngine::spGiSTSearch(const std::string& dbname,
         } else {
             auto newIdx = std::make_unique<SPGiSTIndex>(-1e9, -1e9, 1e9, 1e9);
             std::ifstream in(path);
-            if (in) {
-                std::string line;
-                while (std::getline(in, line)) {
-                    std::stringstream ss(line);
-                    int64_t rid;
-                    std::string pt;
-                    if (!(ss >> rid >> pt)) continue;
-                    double x = 0, y = 0;
-                    size_t comma = pt.find(',');
-                    if (comma != std::string::npos) {
-                        try {
-                            x = std::stod(pt.substr(0, comma));
-                            y = std::stod(pt.substr(comma + 1));
-                        } catch (...) { continue; }
-                    }
-                    newIdx->insert(x, y, rid);
+            if (!in) return result;
+            bool valid = true;
+            std::unordered_set<int64_t> seenRids;
+            std::string line;
+            while (std::getline(in, line)) {
+                std::stringstream ss(line);
+                int64_t rid = 0;
+                std::string point;
+                if (!(ss >> rid >> point)) {
+                    valid = false;
+                    break;
                 }
+                ss >> std::ws;
+                if (!ss.eof() || !seenRids.insert(rid).second) {
+                    valid = false;
+                    break;
+                }
+                double x = 0.0, y = 0.0;
+                std::string canonical;
+                if (!normalizePointLiteral(point, canonical, &x, &y)) {
+                    valid = false;
+                    break;
+                }
+                newIdx->insert(x, y, rid);
             }
+            if (!valid || in.bad()) return result;
             idx = newIdx.get();
             spGiSTCache_[cacheKey] = std::move(newIdx);
         }
@@ -8547,34 +8642,33 @@ std::vector<int64_t> StorageEngine::spGiSTSearch(const std::string& dbname,
 
     // Parse value as "x,y" for point, or "x" / "y" for directional queries
     if (op == "=") {
-        double qx = 0, qy = 0;
-        size_t comma = value.find(',');
-        if (comma != std::string::npos) {
-            try {
-                qx = std::stod(value.substr(0, comma));
-                qy = std::stod(value.substr(comma + 1));
-            } catch (...) { return result; }
-        }
+        double qx = 0.0, qy = 0.0;
+        std::string canonical;
+        if (!normalizePointLiteral(value, canonical, &qx, &qy)) return result;
         result = idx->searchEquals(qx, qy);
     } else if (op == "<<") {
-        try { result = idx->searchLeftOf(std::stod(value)); } catch (...) {}
+        double x = 0.0;
+        if (parseFiniteDouble(value, x)) result = idx->searchLeftOf(x);
     } else if (op == ">>") {
-        try { result = idx->searchRightOf(std::stod(value)); } catch (...) {}
+        double x = 0.0;
+        if (parseFiniteDouble(value, x)) result = idx->searchRightOf(x);
     } else if (op == "<^") {
-        try { result = idx->searchBelow(std::stod(value)); } catch (...) {}
+        double y = 0.0;
+        if (parseFiniteDouble(value, y)) result = idx->searchBelow(y);
     } else if (op == ">^") {
-        try { result = idx->searchAbove(std::stod(value)); } catch (...) {}
+        double y = 0.0;
+        if (parseFiniteDouble(value, y)) result = idx->searchAbove(y);
     } else if (op == "<@") {
         // contained within circle: "cx,cy,radius"
-        double cx = 0, cy = 0, r = 0;
-        size_t c1 = value.find(',');
-        size_t c2 = value.rfind(',');
-        if (c1 != std::string::npos && c2 != std::string::npos && c2 > c1) {
-            try {
-                cx = std::stod(value.substr(0, c1));
-                cy = std::stod(value.substr(c1 + 1, c2 - c1 - 1));
-                r = std::stod(value.substr(c2 + 1));
-            } catch (...) { return result; }
+        double cx = 0.0, cy = 0.0, r = 0.0;
+        const size_t c1 = value.find(',');
+        const size_t c2 = value.find(',', c1 == std::string::npos ? 0 : c1 + 1);
+        if (c1 == std::string::npos || c2 == std::string::npos ||
+            value.find(',', c2 + 1) != std::string::npos ||
+            !parseFiniteDouble(value.substr(0, c1), cx) ||
+            !parseFiniteDouble(value.substr(c1 + 1, c2 - c1 - 1), cy) ||
+            !parseFiniteDouble(value.substr(c2 + 1), r) || r < 0.0) {
+            return result;
         }
         result = idx->searchWithin(cx, cy, r);
     }
@@ -13479,20 +13573,36 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         if (cond.op == "="  && nv != nc) return false;
         if (cond.op == "!=" && nv == nc) return false;
     } else if (col.dataType == "point") {
-        // Parse POINT value format: "x,y"
-        auto parsePoint = [](const std::string& s) -> std::pair<double, double> {
-            double x = 0.0, y = 0.0;
-            if (!s.empty()) {
-                size_t comma = s.find(',');
-                if (comma != std::string::npos) {
-                    try { x = std::stod(s.substr(0, comma)); } catch (...) {}
-                    try { y = std::stod(s.substr(comma + 1)); } catch (...) {}
-                }
+        double px = 0.0, py = 0.0;
+        std::string canonicalPoint;
+        if (!normalizePointLiteral(val, canonicalPoint, &px, &py)) return false;
+        if (cond.op == "<@") {
+            // contained within circle: "cx,cy,radius"
+            std::string circle = trim(cond.value);
+            if (circle.size() >= 2 && circle.front() == '\'' && circle.back() == '\'')
+                circle = trim(circle.substr(1, circle.size() - 2));
+            const size_t firstComma = circle.find(',');
+            const size_t secondComma = circle.find(',', firstComma == std::string::npos
+                                                             ? 0 : firstComma + 1);
+            if (firstComma == std::string::npos || secondComma == std::string::npos ||
+                circle.find(',', secondComma + 1) != std::string::npos) {
+                return false;
             }
-            return {x, y};
-        };
-        auto [px, py] = parsePoint(val);
-        auto [cx, cy] = parsePoint(cond.value);
+            double cx = 0.0, cy = 0.0, radius = 0.0;
+            if (!parseFiniteDouble(circle.substr(0, firstComma), cx) ||
+                !parseFiniteDouble(
+                    circle.substr(firstComma + 1, secondComma - firstComma - 1), cy) ||
+                !parseFiniteDouble(circle.substr(secondComma + 1), radius) ||
+                radius < 0.0) {
+                return false;
+            }
+            if (std::hypot(px - cx, py - cy) > radius) return false;
+            return true;
+        }
+
+        double cx = 0.0, cy = 0.0;
+        std::string canonicalCondition;
+        if (!normalizePointLiteral(cond.value, canonicalCondition, &cx, &cy)) return false;
         if (cond.op == "=") {
             if (px != cx || py != cy) return false;
         } else if (cond.op == "!=") {
@@ -13505,28 +13615,10 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
             if (!(py < cy)) return false;
         } else if (cond.op == ">^") {
             if (!(py > cy)) return false;
-        } else if (cond.op == "<@") {
-            // contained within circle: "cx,cy,radius"
-            double cx2 = 0, cy2 = 0, radius = 0;
-            std::string v = cond.value;
-            if (v.size() >= 2 && v.front() == '\'' && v.back() == '\'')
-                v = v.substr(1, v.size() - 2);
-            size_t c1 = v.find(',');
-            size_t c2 = v.rfind(',');
-            if (c1 != std::string::npos && c2 != std::string::npos && c2 > c1) {
-                try {
-                    cx2 = std::stod(v.substr(0, c1));
-                    cy2 = std::stod(v.substr(c1 + 1, c2 - c1 - 1));
-                    radius = std::stod(v.substr(c2 + 1));
-                } catch (...) {}
-            }
-            double dx = px - cx2, dy = py - cy2;
-            double dist = std::sqrt(dx * dx + dy * dy);
-            if (!(dist <= radius)) return false;
         } else {
             // Fallback to string comparison for other operators
-            if (cond.op == "<"  && !(val <  cond.value)) return false;
-            if (cond.op == ">"  && !(val >  cond.value)) return false;
+            if (cond.op == "<"  && !(canonicalPoint < canonicalCondition)) return false;
+            if (cond.op == ">"  && !(canonicalPoint > canonicalCondition)) return false;
         }
     } else if (col.dataType == "inet" || col.dataType == "cidr") {
         // Parse INET from string representation: "192.168.1.1" or "192.168.1.0/24"
@@ -13695,19 +13787,8 @@ static std::string buildRowBuffer(const TableSchema& tbl,
             } else if (col.dataType == "point") {
                 double x = 0.0, y = 0.0;
                 if (!val.empty()) {
-                    std::string clean = val;
-                    // Strip POINT( prefix and ) suffix
-                    if (clean.size() > 6 && clean.substr(0, 6) == "point(") {
-                        clean = clean.substr(6);
-                        if (!clean.empty() && clean.back() == ')') clean.pop_back();
-                    } else if (clean.front() == '(' && clean.back() == ')') {
-                        clean = clean.substr(1, clean.size() - 2);
-                    }
-                    size_t comma = clean.find(',');
-                    if (comma != std::string::npos) {
-                        try { x = std::stod(trim(clean.substr(0, comma))); } catch (...) {}
-                        try { y = std::stod(trim(clean.substr(comma + 1))); } catch (...) {}
-                    }
+                    std::string canonical;
+                    normalizePointLiteral(val, canonical, &x, &y);
                 }
                 std::memcpy(&rowBuffer[offset], &x, sizeof(double));
                 std::memcpy(&rowBuffer[offset + sizeof(double)], &y, sizeof(double));
@@ -13785,6 +13866,15 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                 } else if (col.dataType == "double" || col.dataType == "decimal" || col.dataType == "numeric") {
                     double num = val.empty() ? 0.0 : std::stod(val);
                     std::memcpy(&fixedData[fixedOff], &num, sizeof(double));
+                } else if (col.dataType == "point") {
+                    double x = 0.0, y = 0.0;
+                    if (!val.empty()) {
+                        std::string canonical;
+                        normalizePointLiteral(val, canonical, &x, &y);
+                    }
+                    std::memcpy(&fixedData[fixedOff], &x, sizeof(double));
+                    std::memcpy(&fixedData[fixedOff + sizeof(double)], &y,
+                                sizeof(double));
                 } else if (col.dataType == "boolean") {
                     int8_t bval = val.empty() ? INT8_MIN :
                         (val == "1" || val == "true" || val == "TRUE") ? 1 :
@@ -14089,6 +14179,14 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         int64_t nextVal = readNextSeq(dbname, tablename, col.dataName);
         actualValues[col.dataName] = std::to_string(nextVal);
         writeNextSeq(dbname, tablename, col.dataName, nextVal + 1);
+    }
+
+    // Canonicalize packed POINT values before uniqueness/index checks.  The
+    // prior writer silently turned malformed input into (0,0), and its
+    // default stream precision could make distinct coordinates share a key.
+    if (!normalizePointColumns(tbl, actualValues)) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
     }
 
     // Check primary key uniqueness using B+ tree index
@@ -14565,6 +14663,13 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                 }
             }
         }
+    }
+
+    // BEFORE triggers and generated expressions can replace POINT values
+    // after the initial input pass; validate their final row image too.
+    if (!normalizePointColumns(tbl, actualValues)) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
     }
 
     // RLS WITH CHECK is evaluated after defaults, generated values and
@@ -16561,6 +16666,11 @@ DBStatus StorageEngine::update(const std::string& dbname,
                                 return DBStatus::INVALID_VALUE;
                             storeVal = canon;
                         }
+                    } else if (col.dataType == "point") {
+                        if (!kv.second.empty()) {
+                            if (!normalizePointLiteral(kv.second, storeVal))
+                                return DBStatus::INVALID_VALUE;
+                        }
                     } else if (col.dataType == "uuid") {
                         if (!kv.second.empty()) {
                             std::string canon;
@@ -16965,6 +17075,11 @@ DBStatus StorageEngine::update(const std::string& dbname,
                 std::string computed = evalExpressionSql(col.generatedExpr, rowValues, updateTypeHints2, dbname, &ok);
                 if (ok) rowValues[col.dataName] = computed;
             }
+        }
+
+        if (!normalizePointColumns(tbl, rowValues)) {
+            lockManager_.unlock(tablename);
+            return DBStatus::INVALID_VALUE;
         }
 
         if (!rowPassesRLS(this, dbname, tablename, tbl, "UPDATE", rowValues,

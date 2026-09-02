@@ -96,6 +96,7 @@ SPGiSTIndex::SPGiSTIndex(double worldMinX, double worldMinY,
 }
 
 void SPGiSTIndex::insert(double x, double y, int64_t rid) {
+    if (!std::isfinite(x) || !std::isfinite(y)) return;
     if (x < root_.minX || x > root_.maxX ||
         y < root_.minY || y > root_.maxY) {
         // Node bounds are used for pruning.  Keeping an out-of-range point in
@@ -138,6 +139,7 @@ void SPGiSTIndex::insertRecursive(SPGiSTNode* node, double x, double y, int64_t 
 }
 
 void SPGiSTIndex::remove(double x, double y, int64_t rid) {
+    if (!std::isfinite(x) || !std::isfinite(y)) return;
     if (removeRecursive(&root_, x, y, rid)) {
         --size_;
     }
@@ -163,6 +165,7 @@ bool SPGiSTIndex::removeRecursive(SPGiSTNode* node, double x, double y, int64_t 
 
 std::vector<int64_t> SPGiSTIndex::searchEquals(double x, double y) const {
     std::vector<int64_t> result;
+    if (!std::isfinite(x) || !std::isfinite(y)) return result;
     searchEqualsRecursive(&root_, x, y, result);
     return result;
 }
@@ -183,6 +186,7 @@ void SPGiSTIndex::searchEqualsRecursive(const SPGiSTNode* node, double x, double
 
 std::vector<int64_t> SPGiSTIndex::searchLeftOf(double x) const {
     std::vector<int64_t> result;
+    if (!std::isfinite(x)) return result;
     const double strictMax = std::nextafter(x,
         -std::numeric_limits<double>::infinity());
     searchRegionRecursive(&root_, root_.minX, root_.minY,
@@ -192,6 +196,7 @@ std::vector<int64_t> SPGiSTIndex::searchLeftOf(double x) const {
 
 std::vector<int64_t> SPGiSTIndex::searchRightOf(double x) const {
     std::vector<int64_t> result;
+    if (!std::isfinite(x)) return result;
     const double strictMin = std::nextafter(x,
         std::numeric_limits<double>::infinity());
     searchRegionRecursive(&root_, strictMin, root_.minY,
@@ -201,6 +206,7 @@ std::vector<int64_t> SPGiSTIndex::searchRightOf(double x) const {
 
 std::vector<int64_t> SPGiSTIndex::searchBelow(double y) const {
     std::vector<int64_t> result;
+    if (!std::isfinite(y)) return result;
     const double strictMax = std::nextafter(y,
         -std::numeric_limits<double>::infinity());
     searchRegionRecursive(&root_, root_.minX, root_.minY,
@@ -210,6 +216,7 @@ std::vector<int64_t> SPGiSTIndex::searchBelow(double y) const {
 
 std::vector<int64_t> SPGiSTIndex::searchAbove(double y) const {
     std::vector<int64_t> result;
+    if (!std::isfinite(y)) return result;
     const double strictMin = std::nextafter(y,
         std::numeric_limits<double>::infinity());
     searchRegionRecursive(&root_, root_.minX, strictMin,
@@ -219,7 +226,8 @@ std::vector<int64_t> SPGiSTIndex::searchAbove(double y) const {
 
 std::vector<int64_t> SPGiSTIndex::searchWithin(double cx, double cy, double radius) const {
     std::vector<int64_t> result;
-    if (radius < 0.0 || std::isnan(radius)) return result;
+    if (!std::isfinite(cx) || !std::isfinite(cy) ||
+        !std::isfinite(radius) || radius < 0.0) return result;
     searchWithinRecursive(&root_, cx, cy, radius, result);
     return result;
 }

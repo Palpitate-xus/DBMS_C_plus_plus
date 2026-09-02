@@ -12,6 +12,7 @@
 #include "catalog/type_registry.h"
 #include <cassert>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include "test_utils.h"
@@ -136,14 +137,72 @@ static void test_point_still_works() {
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
     dbms::DdlExecutor ddl;
-    assert(!ddl.executeSql("CREATE TABLE g (id INT PRIMARY KEY, p POINT)", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE g (id INT PRIMARY KEY, p POINT, note VARCHAR(20))", s));
 
-    // point keeps its binary representation; "x,y" round-trips.
-    assert(g_engine.insert(db, "g", {{"id","1"}, {"p","3,4"}}) == dbms::DBStatus::OK);
+    // POINT must retain both coordinates even when the tuple also has a
+    // variable-length column (the mixed-layout writer previously treated it
+    // as an integer).  max_digits10 keeps adjacent doubles distinct.
+    const std::string p1 =
+        "1.0000000000000002,2.0000000000000004";
+    const std::string p2 =
+        "1.0000000000000004,2.000000000000001";
+    assert(g_engine.insert(db, "g", {{"id","1"}, {"p","3,4"}, {"note","a"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "g", {{"id","2"}, {"p",p2}, {"note","b"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "g", {{"id","3"}, {"p","0,0"}, {"note","c"}}) ==
+           dbms::DBStatus::OK);
     assert(fetchOne(db, "g", {"=id 1"}, "p") == "3,4");
+    assert(fetchOne(db, "g", {"=id 2"}, "p") == p2);
+
+    assert(g_engine.update(db, "g", {{"p", "POINT (" + p1 + ")"}}, {"=id 1"}) ==
+           dbms::DBStatus::OK);
+    assert(fetchOne(db, "g", {"=id 1"}, "p") == p1);
+    assert(g_engine.update(db, "g", {{"p", "3,4 trailing"}}, {"=id 2"}) ==
+           dbms::DBStatus::INVALID_VALUE);
+    assert(fetchOne(db, "g", {"=id 2"}, "p") == p2);
+
+    for (const std::string invalid :
+         {"missing-comma", "1oops,2", "nan,2", "1,2,3"}) {
+        assert(g_engine.insert(db, "g", {{"id","4"}, {"p",invalid}}) ==
+               dbms::DBStatus::INVALID_VALUE);
+    }
+
+    // This implementation's SP-GiST opclass is POINT-only.
+    assert(g_engine.createSPGiSTIndex(db, "g", "id") ==
+           dbms::DBStatus::INVALID_VALUE);
+    assert(!ddl.executeSql("CREATE INDEX g_p_spgist ON g USING SPGIST (p)", s));
+
+    const fs::path sidecar = fs::path(db) / "g_p.spgist";
+    std::ifstream input(sidecar, std::ios::binary);
+    assert(input);
+    const std::string validSidecar{
+        std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    assert(validSidecar.find(p1) != std::string::npos);
+    assert(validSidecar.find(p2) != std::string::npos);
+
+    // A malformed sidecar is rejected and, crucially, is not cached as an
+    // empty valid tree; restoring the file makes the next lookup succeed.
+    {
+        std::ofstream broken(sidecar, std::ios::binary | std::ios::trunc);
+        broken << "not-a-rid not-a-point\n";
+    }
+    assert(g_engine.spGiSTSearch(db, "g", "p", "=", p1).empty());
+    {
+        std::ofstream restored(sidecar, std::ios::binary | std::ios::trunc);
+        restored.write(validSidecar.data(),
+                       static_cast<std::streamsize>(validSidecar.size()));
+        assert(restored);
+    }
+    assert(g_engine.spGiSTSearch(db, "g", "p", "=", p1).size() == 1);
+    assert(g_engine.spGiSTSearch(db, "g", "p", "=", p2).size() == 1);
+    // Invalid predicates must not be interpreted as the origin.
+    assert(g_engine.spGiSTSearch(db, "g", "p", "=", "not-a-point").empty());
+    assert(g_engine.spGiSTSearch(db, "g", "p", "=", "0,0 trailing").empty());
 
     cleanup(db);
-    std::cout << "[GEO] point binary unaffected OK" << std::endl;
+    std::cout << "[GEO] point validation/precision/SP-GiST reload OK" << std::endl;
 }
 
 int main() {

@@ -6,6 +6,7 @@
 #include <cassert>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 
 using dbms::SPGiSTIndex;
 
@@ -104,6 +105,22 @@ static void test_directional_searches_are_strict() {
     assert(index.searchAbove(5.0) == std::vector<int64_t>{5});
 }
 
+static void test_nonfinite_coordinates_are_rejected() {
+    SPGiSTIndex index(-10.0, -10.0, 10.0, 10.0);
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double infinity = std::numeric_limits<double>::infinity();
+    index.insert(nan, 1.0, 1);
+    index.insert(1.0, infinity, 2);
+    assert(index.size() == 0);
+
+    index.insert(1.0, 2.0, 3);
+    index.remove(nan, 2.0, 3);
+    assert(index.size() == 1);
+    assert(index.searchEquals(nan, 2.0).empty());
+    assert(index.searchLeftOf(infinity).empty());
+    assert(index.searchWithin(1.0, 2.0, infinity).empty());
+}
+
 int main() {
     test_missing_remove_preserves_size();
     test_within_uses_exact_distance();
@@ -111,11 +128,13 @@ int main() {
     test_nearby_coordinates_remain_distinct();
     test_world_bounds_expand_without_false_negatives();
     test_directional_searches_are_strict();
+    test_nonfinite_coordinates_are_rejected();
     std::cout << "[SPGIST] missing remove accounting OK\n";
     std::cout << "[SPGIST] exact radius filtering OK\n";
     std::cout << "[SPGIST] duplicate-point depth guard OK\n";
     std::cout << "[SPGIST] full-precision coordinates OK\n";
     std::cout << "[SPGIST] dynamic world bounds OK\n";
     std::cout << "[SPGIST] strict directional predicates OK\n";
+    std::cout << "[SPGIST] non-finite coordinate rejection OK\n";
     return 0;
 }

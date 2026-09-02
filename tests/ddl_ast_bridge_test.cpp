@@ -159,9 +159,12 @@ static void test_drop_index_uses_sql_name() {
     Session s;
     setupSession(s, db);
     dbms::DdlExecutor ddl;
-    assert(!ddl.executeSql("CREATE TABLE drop_idx_tbl (id INT, value INT)", s));
-    assert(g_engine.insert(db, "drop_idx_tbl", {{"id", "1"}, {"value", "10"}}) == dbms::DBStatus::OK);
-    assert(g_engine.insert(db, "drop_idx_tbl", {{"id", "2"}, {"value", "20"}}) == dbms::DBStatus::OK);
+    assert(!ddl.executeSql(
+        "CREATE TABLE drop_idx_tbl (id INT, value INT, location POINT)", s));
+    assert(g_engine.insert(db, "drop_idx_tbl",
+        {{"id", "1"}, {"value", "10"}, {"location", "1,1"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "drop_idx_tbl",
+        {{"id", "2"}, {"value", "20"}, {"location", "2,2"}}) == dbms::DBStatus::OK);
     assert(!ddl.executeSql("CREATE INDEX idx_drop_value ON drop_idx_tbl (value)", s));
 
     auto named = g_engine.getNamedIndex(db, "drop_idx_tbl", "idx_drop_value");
@@ -190,7 +193,8 @@ static void test_drop_index_uses_sql_name() {
     assert(!ddl.executeSql("CREATE INDEX idx_gin ON drop_idx_tbl USING GIN (value)", s));
     assert(!ddl.executeSql("CREATE INDEX idx_gist ON drop_idx_tbl (id) USING GiST", s));
     assert(!ddl.executeSql("CREATE INDEX idx_brin ON drop_idx_tbl USING BRIN (id)", s));
-    assert(!ddl.executeSql("CREATE INDEX idx_spgist ON drop_idx_tbl USING SPGIST (id)", s));
+    assert(!ddl.executeSql(
+        "CREATE INDEX idx_spgist ON drop_idx_tbl USING SPGIST (location)", s));
     assert(g_engine.getNamedIndex(db, "drop_idx_tbl", "idx_gin")->accessMethod == "gin");
     assert(g_engine.getNamedIndex(db, "drop_idx_tbl", "idx_gist")->accessMethod == "gist");
     assert(g_engine.getNamedIndex(db, "drop_idx_tbl", "idx_brin")->accessMethod == "brin");
