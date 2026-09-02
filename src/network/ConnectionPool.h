@@ -61,7 +61,9 @@ public:
 
     Mode mode() const { return mode_; }
     int poolSize() const { return poolSize_; }
-    int maxClientConnections() const { return maxClientConnections_; }
+    int maxClientConnections() const {
+        return maxClientConnections_.load(std::memory_order_acquire);
+    }
     const std::string& modeName() const { return modeName_; }
 
     // Reserve a slot for an incoming client connection (separate from the
@@ -115,7 +117,7 @@ private:
     std::condition_variable cv_;
     Mode mode_ = Mode::Session;
     int poolSize_ = 16;
-    int maxClientConnections_ = 0;  // 0 = unlimited
+    std::atomic<int> maxClientConnections_{0};  // 0 = unlimited
     std::string modeName_ = "session";
 
     struct Entry {

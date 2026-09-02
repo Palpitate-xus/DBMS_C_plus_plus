@@ -1,6 +1,7 @@
 #include "network/ConnectionPool.h"
 
 #include <algorithm>
+#include <limits>
 
 namespace dbms {
 
@@ -22,13 +23,15 @@ void ConnectionPool::configure(const std::string& poolMode, int poolSize,
         modeName_ = "session";
     }
     if (poolSize >= 1) poolSize_ = poolSize;
-    maxClientConnections_ = std::max(0, maxClientConnections);
+    maxClientConnections_.store(std::max(0, maxClientConnections),
+                                std::memory_order_release);
 }
 
 bool ConnectionPool::tryReserveClientSlot() {
-    if (maxClientConnections_ == 0) return true;  // unlimited
+    const int limit = maxClientConnections_.load(std::memory_order_acquire);
     int current = clientConnections_.load(std::memory_order_relaxed);
-    while (current < maxClientConnections_) {
+    while ((limit == 0 || current < limit) &&
+           current < std::numeric_limits<int>::max()) {
         if (clientConnections_.compare_exchange_weak(current, current + 1,
                                                      std::memory_order_acq_rel,
                                                      std::memory_order_relaxed)) {
@@ -39,7 +42,12 @@ bool ConnectionPool::tryReserveClientSlot() {
 }
 
 void ConnectionPool::releaseClientSlot() {
-    clientConnections_.fetch_sub(1, std::memory_order_acq_rel);
+    int current = clientConnections_.load(std::memory_order_relaxed);
+    while (current > 0 &&
+           !clientConnections_.compare_exchange_weak(current, current - 1,
+                                                     std::memory_order_acq_rel,
+                                                     std::memory_order_relaxed)) {
+    }
 }
 
 std::shared_ptr<BackendContext> ConnectionPool::acquire(const std::string& user,
@@ -145,7 +153,7 @@ ConnectionPool::Stats ConnectionPool::stats() const {
     Stats s;
     s.mode = modeName_;
     s.poolSize = poolSize_;
-    s.maxClientConnections = maxClientConnections_;
+    s.maxClientConnections = maxClientConnections_.load(std::memory_order_acquire);
     s.clientConnections = clientConnections_.load(std::memory_order_relaxed);
     s.waitingRenters = waitingRenters_;
     s.totalRents = totalRents_.load(std::memory_order_relaxed);

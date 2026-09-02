@@ -154,7 +154,17 @@ static void test_client_limit() {
     // 0 disables the limit entirely.
     pool.configure("session", 4, 0);
     for (int i = 0; i < 10; ++i) assert(pool.tryReserveClientSlot());
+    assert(pool.stats().clientConnections == 10);
     for (int i = 0; i < 10; ++i) pool.releaseClientSlot();
+    assert(pool.stats().clientConnections == 0);
+
+    // A mismatched release must not poison a later finite-limit check.
+    pool.releaseClientSlot();
+    assert(pool.stats().clientConnections == 0);
+    pool.configure("session", 4, 1);
+    assert(pool.tryReserveClientSlot());
+    assert(!pool.tryReserveClientSlot());
+    pool.releaseClientSlot();
     std::cout << "[POOL] client limit accounting OK" << std::endl;
 }
 
