@@ -7,6 +7,7 @@
 #include "parser/parser.h"
 #include "catalog/CatalogService.h"
 #include "catalog/systables.h"
+#include "access/IndexFileUtil.h"
 #include "common/logs.h"
 #include "common/scram_sha256.h"
 #include "permissions.h"
@@ -1095,22 +1096,128 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     std::cout << "INHERIT requires a parent table" << std::endl;
                     return true;
                 }
-                auto path = std::filesystem::path(g_engine.dbPath(s.currentDB)) /
-                            ("." + tableName + ".inherits");
-                std::vector<std::string> parents;
-                if (std::filesystem::exists(path)) {
-                    std::ifstream in(path);
-                    std::string parent;
-                    while (std::getline(in, parent)) if (!parent.empty()) parents.push_back(parent);
+                if (!g_engine.tableExists(s.currentDB, tableName)) {
+                    std::cout << "Table " << stmt->tableName
+                              << " not found" << std::endl;
+                    return true;
                 }
+                const std::string parentName =
+                    resolveTableName(s, sub.parentTable);
+                if (!g_engine.tableExists(s.currentDB, parentName)) {
+                    std::cout << "Parent table " << sub.parentTable
+                              << " not found" << std::endl;
+                    return true;
+                }
+                if (parentName == tableName) {
+                    std::cout << "A table cannot inherit from itself" << std::endl;
+                    return true;
+                }
+
                 if (sub.action == AlterTableStmt::Action::Inherit) {
-                    if (std::find(parents.begin(), parents.end(), sub.parentTable) == parents.end())
-                        parents.push_back(sub.parentTable);
-                } else {
-                    parents.erase(std::remove(parents.begin(), parents.end(), sub.parentTable), parents.end());
+                    const TableSchema childSchema =
+                        g_engine.getTableSchema(s.currentDB, tableName);
+                    const TableSchema parentSchema =
+                        g_engine.getTableSchema(s.currentDB, parentName);
+                    for (size_t parentColumn = 0;
+                         parentColumn < parentSchema.len; ++parentColumn) {
+                        const Column& expected = parentSchema.cols[parentColumn];
+                        const Column* actual = nullptr;
+                        for (size_t childColumn = 0;
+                             childColumn < childSchema.len; ++childColumn) {
+                            if (childSchema.cols[childColumn].dataName ==
+                                expected.dataName) {
+                                actual = &childSchema.cols[childColumn];
+                                break;
+                            }
+                        }
+                        if (!actual || actual->dataType != expected.dataType ||
+                            actual->dsize != expected.dsize ||
+                            actual->isVariableLength != expected.isVariableLength ||
+                            actual->isArray != expected.isArray) {
+                            std::cout << "Child table has no compatible inherited column "
+                                      << expected.dataName << std::endl;
+                            return true;
+                        }
+                    }
+
+                    // Adding parent -> child is cyclic if parent is already
+                    // reachable below child in the persisted graph.
+                    std::vector<std::string> pending{tableName};
+                    std::set<std::string> visited;
+                    while (!pending.empty()) {
+                        const std::string current = pending.back();
+                        pending.pop_back();
+                        if (!visited.insert(current).second) continue;
+                        for (const auto& descendant :
+                             g_engine.getInheritedChildren(
+                                 s.currentDB, current)) {
+                            if (descendant == parentName) {
+                                std::cout << "Inheritance cycle is not allowed"
+                                          << std::endl;
+                                return true;
+                            }
+                            pending.push_back(descendant);
+                        }
+                    }
                 }
-                std::ofstream out(path, std::ios::trunc);
-                for (const auto& parent : parents) out << parent << '\n';
+
+                const auto path =
+                    std::filesystem::path(g_engine.dbPath(s.currentDB)) /
+                    ".inherits";
+                std::ostringstream rewritten;
+                bool edgeFound = false;
+                bool graphChanged = false;
+                std::error_code inheritanceError;
+                if (std::filesystem::exists(path, inheritanceError)) {
+                    std::ifstream input(path);
+                    if (!input) {
+                        std::cout << "Could not read inheritance metadata"
+                                  << std::endl;
+                        return true;
+                    }
+                    std::string line;
+                    while (std::getline(input, line)) {
+                        const size_t separator = line.find('|');
+                        if (separator == std::string::npos) {
+                            rewritten << line << '\n';
+                            continue;
+                        }
+                        const std::string storedParent =
+                            line.substr(0, separator);
+                        const std::string storedChild =
+                            line.substr(separator + 1);
+                        if (storedParent == parentName &&
+                            storedChild == tableName) {
+                            edgeFound = true;
+                            if (sub.action ==
+                                AlterTableStmt::Action::NoInherit) {
+                                graphChanged = true;
+                                continue;
+                            }
+                        }
+                        rewritten << line << '\n';
+                    }
+                    if (input.bad()) {
+                        std::cout << "Could not read inheritance metadata"
+                                  << std::endl;
+                        return true;
+                    }
+                } else if (inheritanceError) {
+                    std::cout << "Could not inspect inheritance metadata"
+                              << std::endl;
+                    return true;
+                }
+                if (sub.action == AlterTableStmt::Action::Inherit &&
+                    !edgeFound) {
+                    rewritten << parentName << '|' << tableName << '\n';
+                    graphChanged = true;
+                }
+                if (graphChanged &&
+                    !index_file::writeAtomically(path, rewritten.str())) {
+                    std::cout << "Could not persist inheritance metadata"
+                              << std::endl;
+                    return true;
+                }
                 break;
             }
             case AlterTableStmt::Action::Owner:

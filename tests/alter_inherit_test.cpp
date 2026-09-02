@@ -12,7 +12,6 @@
 #include "catalog/type_registry.h"
 #include <cassert>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
 #include "test_utils.h"
 
@@ -65,7 +64,7 @@ static void test_inherit_parser() {
     std::cout << "[INHERIT] parser OK" << std::endl;
 }
 
-// Verify INHERIT creates the .<table>.inherits file (via main.cpp execution path).
+// Verify ALTER TABLE INHERIT/NO INHERIT updates the graph consumed by DML.
 static void test_inherit_execution() {
     std::string db = testDbPath("inh_exec");
     cleanup(db);
@@ -74,41 +73,31 @@ static void test_inherit_execution() {
     dbms::DdlExecutor ddl;
 
     assert(!ddl.executeSql("CREATE TABLE p1 (a INT)", s));
-    assert(!ddl.executeSql("CREATE TABLE child (c INT)", s));
+    assert(!ddl.executeSql("CREATE TABLE child (a INT, c INT)", s));
 
-    // The ALTER TABLE INHERIT path lives in main.cpp legacy dispatch.
-    // Here we verify the engine-level inherits file operations:
-    std::filesystem::path inhPath = fs::path(db) / (".child.inherits");
+    assert(!ddl.executeSql("ALTER TABLE child INHERIT p1", s));
+    assert(g_engine.getInheritedChildren(db, "p1") ==
+           std::vector<std::string>{"child"});
+    assert(!fs::exists(fs::path(db) / ".child.inherits"));
 
-    // Simulate what main.cpp does for INHERIT
     {
-        std::ofstream ofs(inhPath, std::ios::app);
-        ofs << "p1\n";
-    }
-    assert(fs::exists(inhPath));
-
-    // Simulate what main.cpp does for NO INHERIT p1
-    {
-        std::ifstream ifs(inhPath);
-        std::vector<std::string> parents;
-        std::string line;
-        while (std::getline(ifs, line)) {
-            if (!line.empty() && line != "p1") parents.push_back(line);
-        }
-        std::ofstream out(inhPath, std::ios::trunc);
-        for (auto& p : parents) out << p << "\n";
+        dbms::StorageEngine restarted;
+        assert(restarted.getInheritedChildren(db, "p1") ==
+               std::vector<std::string>{"child"});
     }
 
-    // Verify p1 removed
-    {
-        std::ifstream ifs(inhPath);
-        std::string line;
-        bool found = false;
-        while (std::getline(ifs, line)) {
-            if (line == "p1") found = true;
-        }
-        assert(!found);
-    }
+    assert(!ddl.executeSql("ALTER TABLE child NO INHERIT p1", s));
+    assert(g_engine.getInheritedChildren(db, "p1").empty());
+    assert(ddl.executeSql("ALTER TABLE child INHERIT missing_parent", s));
+    assert(ddl.executeSql("ALTER TABLE missing_child INHERIT p1", s));
+    assert(ddl.executeSql("ALTER TABLE child INHERIT child", s));
+    assert(!ddl.executeSql("CREATE TABLE incompatible (c INT)", s));
+    assert(ddl.executeSql("ALTER TABLE incompatible INHERIT p1", s));
+
+    assert(!ddl.executeSql("CREATE TABLE cycle_a (a INT)", s));
+    assert(!ddl.executeSql("CREATE TABLE cycle_b (a INT)", s));
+    assert(!ddl.executeSql("ALTER TABLE cycle_b INHERIT cycle_a", s));
+    assert(ddl.executeSql("ALTER TABLE cycle_a INHERIT cycle_b", s));
 
     cleanup(db);
     std::cout << "[INHERIT] execution OK" << std::endl;
