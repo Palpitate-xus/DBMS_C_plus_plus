@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <deque>
 #include <filesystem>
@@ -9,6 +11,7 @@
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "BufferPool.h"
@@ -143,14 +146,41 @@ private:
 
     uint32_t allocPage();
 
-    bool insertNonFull(uint32_t pageNum, const std::string& key, int64_t value);
+    enum class SearchResult { Found, NotFound, Error };
+    enum class RemoveResult { Removed, NotFound, Error };
+
+    // A valid order>=2 B+ tree backed by 32-bit page numbers cannot approach
+    // this depth.  A fixed path avoids allocating a hash table on every point
+    // lookup while still rejecting cycles and maliciously deep chains.
+    static constexpr size_t kMaxTraversalDepth = 64;
+    struct TraversalPath {
+        std::array<uint32_t, kMaxTraversalDepth> pages{};
+        size_t length = 0;
+
+        bool visit(uint32_t page) {
+            if (length >= pages.size()) return false;
+            if (std::find(pages.begin(), pages.begin() + length, page) !=
+                pages.begin() + length) {
+                return false;
+            }
+            pages[length++] = page;
+            return true;
+        }
+        void clear() { length = 0; }
+    };
+
+    bool insertNonFull(uint32_t pageNum, const std::string& key, int64_t value,
+                       TraversalPath& visited);
     bool splitChild(uint32_t parentPage, int childIdx, uint32_t childPage);
 
-    bool removeFromNode(uint32_t pageNum, const std::string& key,
-                        const std::optional<int64_t>& value);
-    bool searchNode(uint32_t pageNum, const std::string& key, int64_t& value) const;
+    RemoveResult removeFromNode(uint32_t pageNum, const std::string& key,
+                                const std::optional<int64_t>& value,
+                                std::unordered_set<uint32_t>& visited);
+    SearchResult searchNode(uint32_t pageNum, const std::string& key, int64_t& value,
+                            TraversalPath& visited) const;
     bool collectRange(uint32_t pageNum, const std::string& startKey,
-                      const std::string& endKey, std::vector<int64_t>& out) const;
+                      const std::string& endKey, std::vector<int64_t>& out,
+                      std::unordered_set<uint32_t>& visited) const;
 
     static void serializeNode(char* buf, const Node& node, uint16_t order);
     static bool deserializeNode(const char* buf, Node& node, uint16_t order);

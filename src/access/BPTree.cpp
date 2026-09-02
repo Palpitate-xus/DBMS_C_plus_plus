@@ -385,29 +385,34 @@ size_t upperBoundIdx(const std::vector<std::string>& keys, size_t count,
 bool BPTree::search(const std::string& key, int64_t& value) const {
     std::shared_lock<std::shared_mutex> treeLock(treeMutex_);
     if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return false;
-    return searchNode(header_.rootPage, normalizeKey(key), value);
+    TraversalPath visited;
+    return searchNode(header_.rootPage, normalizeKey(key), value, visited) ==
+           SearchResult::Found;
 }
 
-bool BPTree::searchNode(uint32_t pageNum, const std::string& key, int64_t& value) const {
+BPTree::SearchResult BPTree::searchNode(
+        uint32_t pageNum, const std::string& key, int64_t& value,
+        TraversalPath& visited) const {
+    if (!visited.visit(pageNum)) return SearchResult::Error;
     auto nodeOpt = readNode(pageNum);
-    if (!nodeOpt) return false;
+    if (!nodeOpt) return SearchResult::Error;
     Node node = std::move(*nodeOpt);
     if (node.isLeaf) {
         const size_t i = lowerBoundIdx(node.keys, node.numKeys, key);
         if (i < node.numKeys && node.keys[i] == key) {
             value = node.values[i];
-            return true;
+            return SearchResult::Found;
         }
-        return false;
+        return SearchResult::NotFound;
     }
     // Internal node: separators are the smallest key of the right subtree,
     // so an equal key lives to the right — descend past every separator
     // that is <= key (upper bound).
     const size_t i = upperBoundIdx(node.keys, node.numKeys, key);
     if (i < node.children.size()) {
-        return searchNode(node.children[i], key, value);
+        return searchNode(node.children[i], key, value, visited);
     }
-    return false;
+    return SearchResult::Error;
 }
 
 // ========================================================================
@@ -434,7 +439,10 @@ bool BPTree::insert(const std::string& key, int64_t value) {
 
     // Check if key already exists
     int64_t dummy;
-    if (searchNode(header_.rootPage, normalizedKey, dummy)) return false;
+    TraversalPath visited;
+    const SearchResult existing = searchNode(header_.rootPage, normalizedKey,
+                                             dummy, visited);
+    if (existing != SearchResult::NotFound) return false;
 
     auto rootOpt = readNode(header_.rootPage);
     if (!rootOpt) return false;
@@ -454,7 +462,8 @@ bool BPTree::insert(const std::string& key, int64_t value) {
         if (!writeHeader()) return false;
         // Re-read root after split
     }
-    return insertNonFull(header_.rootPage, normalizedKey, value);
+    visited.clear();
+    return insertNonFull(header_.rootPage, normalizedKey, value, visited);
 }
 
 // ========================================================================
@@ -465,8 +474,10 @@ std::vector<int64_t> BPTree::searchMulti(const std::string& key) const {
     std::vector<int64_t> results;
     if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return results;
     const std::string normalizedKey = normalizeKey(key);
+    std::unordered_set<uint32_t> visited;
     auto nodeOpt = readNode(header_.rootPage);
     if (!nodeOpt) return results;
+    visited.insert(header_.rootPage);
     Node node = std::move(*nodeOpt);
     while (!node.isLeaf) {
         // Descend to the leftmost possible leaf for this key.  Equal keys
@@ -474,7 +485,9 @@ std::vector<int64_t> BPTree::searchMulti(const std::string& key) const {
         // at the rightmost equal separator and silently miss earlier rows.
         const size_t i = lowerBoundIdx(node.keys, node.numKeys, normalizedKey);
         if (i >= node.children.size()) return results;
-        auto next = readNode(node.children[i]);
+        const uint32_t nextPage = node.children[i];
+        if (!visited.insert(nextPage).second) return {};
+        auto next = readNode(nextPage);
         if (!next) return {};
         node = std::move(*next);
     }
@@ -486,8 +499,9 @@ std::vector<int64_t> BPTree::searchMulti(const std::string& key) const {
             }
         }
         if (node.nextLeaf == 0) break;
+        if (!visited.insert(node.nextLeaf).second) return {};
         auto next = readNode(node.nextLeaf);
-        if (!next) return {};
+        if (!next || !next->isLeaf) return {};
         node = std::move(*next);
     }
     return results;
@@ -510,6 +524,12 @@ bool BPTree::insertMulti(const std::string& key, int64_t value) {
         header_.rootPage = root;
         return writeHeader();
     }
+    int64_t ignored = 0;
+    TraversalPath visited;
+    if (searchNode(header_.rootPage, normalizedKey, ignored, visited) ==
+        SearchResult::Error) {
+        return false;
+    }
     auto rootOpt = readNode(header_.rootPage);
     if (!rootOpt) return false;
     Node root = std::move(*rootOpt);
@@ -526,10 +546,13 @@ bool BPTree::insertMulti(const std::string& key, int64_t value) {
         header_.rootPage = newRoot;
         if (!writeHeader()) return false;
     }
-    return insertNonFull(header_.rootPage, normalizedKey, value);
+    visited.clear();
+    return insertNonFull(header_.rootPage, normalizedKey, value, visited);
 }
 
-bool BPTree::insertNonFull(uint32_t pageNum, const std::string& key, int64_t value) {
+bool BPTree::insertNonFull(uint32_t pageNum, const std::string& key, int64_t value,
+                           TraversalPath& visited) {
+    if (!visited.visit(pageNum)) return false;
     auto nodeOpt = readNode(pageNum);
     if (!nodeOpt) return false;
     Node node = std::move(*nodeOpt);
@@ -559,7 +582,7 @@ bool BPTree::insertNonFull(uint32_t pageNum, const std::string& key, int64_t val
         if (j >= node.children.size()) return false;
         childPage = node.children[j];
     }
-    return insertNonFull(childPage, key, value);
+    return insertNonFull(childPage, key, value, visited);
 }
 
 bool BPTree::splitChild(uint32_t parentPage, int childIdx, uint32_t childPage) {
@@ -621,19 +644,26 @@ bool BPTree::splitChild(uint32_t parentPage, int childIdx, uint32_t childPage) {
 bool BPTree::remove(const std::string& key) {
     std::unique_lock<std::shared_mutex> treeLock(treeMutex_);
     if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return false;
-    return removeFromNode(header_.rootPage, normalizeKey(key), std::nullopt);
+    std::unordered_set<uint32_t> visited;
+    return removeFromNode(header_.rootPage, normalizeKey(key), std::nullopt,
+                          visited) == RemoveResult::Removed;
 }
 
 bool BPTree::removeMulti(const std::string& key, int64_t value) {
     std::unique_lock<std::shared_mutex> treeLock(treeMutex_);
     if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return false;
-    return removeFromNode(header_.rootPage, normalizeKey(key), value);
+    std::unordered_set<uint32_t> visited;
+    return removeFromNode(header_.rootPage, normalizeKey(key), value,
+                          visited) == RemoveResult::Removed;
 }
 
-bool BPTree::removeFromNode(uint32_t pageNum, const std::string& key,
-                            const std::optional<int64_t>& value) {
+BPTree::RemoveResult BPTree::removeFromNode(
+        uint32_t pageNum, const std::string& key,
+        const std::optional<int64_t>& value,
+        std::unordered_set<uint32_t>& visited) {
+    if (!visited.insert(pageNum).second) return RemoveResult::Error;
     auto nodeOpt = readNode(pageNum);
-    if (!nodeOpt) return false;
+    if (!nodeOpt) return RemoveResult::Error;
     Node node = std::move(*nodeOpt);
     if (node.isLeaf) {
         // Duplicate keys (multi-value indexes) can carry several RIDs; scan
@@ -644,11 +674,12 @@ bool BPTree::removeFromNode(uint32_t pageNum, const std::string& key,
                 node.keys.erase(node.keys.begin() + i);
                 node.values.erase(node.values.begin() + i);
                 node.numKeys--;
-                return writeNode(pageNum, node);
+                return writeNode(pageNum, node) ? RemoveResult::Removed
+                                                : RemoveResult::Error;
             }
             ++i;
         }
-        return false;
+        return RemoveResult::NotFound;
     }
     // Equal separator keys can span multiple leaves after a split. Start at
     // the leftmost possible child and visit every child whose separator is
@@ -656,9 +687,11 @@ bool BPTree::removeFromNode(uint32_t pageNum, const std::string& key,
     const size_t first = lowerBoundIdx(node.keys, node.numKeys, key);
     for (size_t i = first; i < node.children.size(); ++i) {
         if (i > first && node.keys[i - 1] != key) break;
-        if (removeFromNode(node.children[i], key, value)) return true;
+        const RemoveResult result = removeFromNode(node.children[i], key, value,
+                                                   visited);
+        if (result != RemoveResult::NotFound) return result;
     }
-    return false;
+    return RemoveResult::NotFound;
 }
 
 // ========================================================================
@@ -670,12 +703,16 @@ std::vector<int64_t> BPTree::rangeScan(const std::string& startKey, const std::s
     if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return result;
     const std::string normalizedStart = normalizeKey(startKey);
     const std::string normalizedEnd = normalizeKey(endKey);
-    if (!collectRange(header_.rootPage, normalizedStart, normalizedEnd, result)) return {};
+    std::unordered_set<uint32_t> visited;
+    if (!collectRange(header_.rootPage, normalizedStart, normalizedEnd, result,
+                      visited)) return {};
     return result;
 }
 
 bool BPTree::collectRange(uint32_t pageNum, const std::string& startKey,
-                          const std::string& endKey, std::vector<int64_t>& out) const {
+                          const std::string& endKey, std::vector<int64_t>& out,
+                          std::unordered_set<uint32_t>& visited) const {
+    if (!visited.insert(pageNum).second) return false;
     auto nodeOpt = readNode(pageNum);
     if (!nodeOpt) return false;
     Node node = std::move(*nodeOpt);
@@ -690,7 +727,7 @@ bool BPTree::collectRange(uint32_t pageNum, const std::string& startKey,
     }
     // Internal node: visit all children that might contain keys in range
     for (size_t i = 0; i < node.children.size(); ++i) {
-        if (!collectRange(node.children[i], startKey, endKey, out)) return false;
+        if (!collectRange(node.children[i], startKey, endKey, out, visited)) return false;
     }
     return true;
 }
@@ -699,8 +736,9 @@ std::vector<int64_t> BPTree::allValues() const {
     std::shared_lock<std::shared_mutex> treeLock(treeMutex_);
     std::vector<int64_t> result;
     if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return result;
+    std::unordered_set<uint32_t> visited;
     if (!collectRange(header_.rootPage, normalizeKey(""),
-                      std::string(BP_KEY_LEN, '\xFF'), result)) {
+                      std::string(BP_KEY_LEN, '\xFF'), result, visited)) {
         return {};
     }
     return result;
