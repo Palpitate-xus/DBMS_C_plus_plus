@@ -1626,7 +1626,8 @@ private:
         // (and INSERT/DELETE) leave this at -1.
         int64_t previousRowIdx = -1;
     };
-    void logTxnInsert(const std::string& tableName, int64_t rowIdx);
+    void logTxnInsert(const std::string& tableName, int64_t rowIdx,
+                      const std::string& rowData);
     void logTxnUpdate(const std::string& tableName, int64_t rowIdx, const std::string& oldRowData);
     void logTxnDelete(const std::string& tableName, int64_t rowIdx, const std::string& oldRowData);
     bool undoVersionedUpdate(const TxnLogEntry& entry);

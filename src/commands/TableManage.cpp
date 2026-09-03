@@ -18040,7 +18040,7 @@ DBStatus StorageEngine::insertInternal(
 
     // Log for transaction rollback
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
-        logTxnInsert(tablename, rid);
+        logTxnInsert(tablename, rid, strippedRow);
     }
 
     // Index writes are part of the INSERT atomicity boundary.  A failed
@@ -31639,14 +31639,14 @@ void StorageEngine::recordSsiIndexKeys(const std::string& dbname,
     }
 }
 
-void StorageEngine::logTxnInsert(const std::string& tableName, int64_t rowIdx) {
-    transactionContext().txnLog.push_back({TxnLogEntry::Op::Insert, tableName, rowIdx, ""});
+void StorageEngine::logTxnInsert(const std::string& tableName, int64_t rowIdx,
+                                 const std::string& rowData) {
+    transactionContext().txnLog.push_back(
+        {TxnLogEntry::Op::Insert, tableName, rowIdx, rowData});
     if (transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE) {
         TableSchema tbl = getTableSchema(transactionContext().txnDB, tableName);
-        std::string row;
-        if (readRowByRid(getPageAllocator(transactionContext().txnDB, tableName), rowIdx, row, tbl)) {
-            recordSsiIndexKeys(transactionContext().txnDB, tableName, row, tbl);
-        }
+        recordSsiIndexKeys(
+            transactionContext().txnDB, tableName, rowData, tbl);
         std::string key = ssiRidKey(transactionContext().txnDB, tableName, rowIdx);
         std::string relation = ssiRelationKey(transactionContext().txnDB, tableName);
         uint32_t pageId = 0;
@@ -32889,127 +32889,247 @@ DBStatus StorageEngine::rollbackTransaction() {
             uint32_t pageId; uint16_t slotId;
             decodeRid(it->rowIdx, pageId, slotId);
             // Read row data before removing so index entries can be cleaned up.
-            std::string insertedRow;
+            // INSERT records carry the physical row payload so index cleanup
+            // does not depend on successfully re-reading a damaged heap page.
+            std::string insertedRow = it->rowData;
             std::string pkVal;
             std::vector<EvaluatedIndexEntry> secondaryIdxVals;
             std::vector<EvaluatedIndexEntry> compositeIdxVals;
             std::map<std::string, std::string> hashIdxVals;
             std::map<std::string, std::string> bloomIdxVals;
-            {
-                std::string row;
-                if (readRowByRid(pa, it->rowIdx, row, tbl)) {
-                    insertedRow = row;
-                    pkVal = extractPKValue(
-                        row, tbl, transactionContext().txnDB);
-                    for (const auto& metadata : getIndexMetadata(
-                             transactionContext().txnDB, it->tableName)) {
-                        EvaluatedIndexEntry entry;
-                        if (!secondaryIndexEntryFromBuffer(
-                                *this, metadata, tbl, row,
-                                transactionContext().txnDB, entry)) {
-                            rowUndoOk = false;
-                            continue;
-                        }
-                        secondaryIdxVals.push_back(std::move(entry));
+            std::string heapRow;
+            if (readRowByRid(pa, it->rowIdx, heapRow, tbl)) {
+                insertedRow = std::move(heapRow);
+            } else {
+                rowUndoOk = false;
+            }
+            if (insertedRow.empty()) {
+                rowUndoOk = false;
+            } else {
+                pkVal = extractPKValue(
+                    insertedRow, tbl, transactionContext().txnDB);
+                for (const auto& metadata : getIndexMetadata(
+                         transactionContext().txnDB, it->tableName)) {
+                    EvaluatedIndexEntry entry;
+                    if (!secondaryIndexEntryFromBuffer(
+                            *this, metadata, tbl, insertedRow,
+                            transactionContext().txnDB, entry)) {
+                        rowUndoOk = false;
+                        continue;
                     }
-                    for (const auto& ci : getCompositeIndexes(transactionContext().txnDB, it->tableName)) {
-                        EvaluatedIndexEntry entry;
-                        if (!compositeIndexEntryFromBuffer(
-                                *this, ci, tbl, row,
-                                transactionContext().txnDB, entry)) {
-                            rowUndoOk = false;
-                            continue;
-                        }
-                        compositeIdxVals.push_back(std::move(entry));
+                    secondaryIdxVals.push_back(std::move(entry));
+                }
+                for (const auto& ci : getCompositeIndexes(
+                         transactionContext().txnDB, it->tableName)) {
+                    EvaluatedIndexEntry entry;
+                    if (!compositeIndexEntryFromBuffer(
+                            *this, ci, tbl, insertedRow,
+                            transactionContext().txnDB, entry)) {
+                        rowUndoOk = false;
+                        continue;
                     }
-                    for (const auto& colname : getHashIndexedColumns(transactionContext().txnDB, it->tableName)) {
-                        size_t colIdx = tbl.len;
-                        for (size_t i = 0; i < tbl.len; ++i) {
-                            if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
-                        }
-                        if (colIdx < tbl.len) {
-                            std::string value = extractColumnValue(
-                                row, tbl, colIdx, transactionContext().txnDB);
-                            if (!value.empty()) hashIdxVals[colname] = value;
+                    compositeIdxVals.push_back(std::move(entry));
+                }
+                for (const auto& colname : getHashIndexedColumns(
+                         transactionContext().txnDB, it->tableName)) {
+                    size_t colIdx = tbl.len;
+                    for (size_t i = 0; i < tbl.len; ++i) {
+                        if (tbl.cols[i].dataName == colname) {
+                            colIdx = i;
+                            break;
                         }
                     }
-                    for (const auto& colname : getBloomIndexedColumns(
-                             transactionContext().txnDB, it->tableName)) {
-                        size_t colIdx = tbl.len;
-                        for (size_t i = 0; i < tbl.len; ++i) {
-                            if (tbl.cols[i].dataName == colname) {
-                                colIdx = i;
-                                break;
-                            }
+                    if (colIdx < tbl.len) {
+                        std::string value = extractColumnValue(
+                            insertedRow, tbl, colIdx,
+                            transactionContext().txnDB);
+                        if (!value.empty()) hashIdxVals[colname] = value;
+                    } else {
+                        rowUndoOk = false;
+                    }
+                }
+                for (const auto& colname : getBloomIndexedColumns(
+                         transactionContext().txnDB, it->tableName)) {
+                    size_t colIdx = tbl.len;
+                    for (size_t i = 0; i < tbl.len; ++i) {
+                        if (tbl.cols[i].dataName == colname) {
+                            colIdx = i;
+                            break;
                         }
-                        if (colIdx < tbl.len) {
-                            std::string value = extractColumnValue(
-                                row, tbl, colIdx,
-                                transactionContext().txnDB);
-                            if (!value.empty()) {
-                                bloomIdxVals[colname] = std::move(value);
-                            }
+                    }
+                    if (colIdx < tbl.len) {
+                        std::string value = extractColumnValue(
+                            insertedRow, tbl, colIdx,
+                            transactionContext().txnDB);
+                        if (!value.empty()) {
+                            bloomIdxVals[colname] = std::move(value);
                         }
+                    } else {
+                        rowUndoOk = false;
                     }
                 }
             }
             if (!insertedRow.empty()) {
                 deleteRowToast(transactionContext().txnDB, it->tableName, it->rowIdx);
             }
-            char* pageBuf = pa->fetchPage(pageId);
-            if (pageBuf) {
-                PageWrapper page(pageBuf, pa->pageSize(), tbl.formatVersion);
-                walPageImage(transactionContext().txnDB, it->tableName, pageId,
-                             pageBuf, pa->pageSize(), true);
-                page.remove(slotId);
-                pa->markDirty(pageId);
-                Lsn lsn = walPageImage(transactionContext().txnDB, it->tableName,
-                                       pageId, pageBuf, pa->pageSize(), false);
-                if (lsn != INVALID_LSN) {
-                    setPageLsnAndChecksum(pageBuf, lsn);
-                    pa->markDirty(pageId);
+            if (!pa) {
+                rowUndoOk = false;
+            } else {
+                char* pageBuf = pa->fetchPage(pageId);
+                if (!pageBuf) {
+                    rowUndoOk = false;
+                } else {
+                    PageWrapper page(
+                        pageBuf, pa->pageSize(), tbl.formatVersion);
+                    const char* currentData = nullptr;
+                    size_t currentLength = 0;
+                    if (!page.isValid() ||
+                        !page.read(slotId, currentData, currentLength)) {
+                        rowUndoOk = false;
+                    } else {
+                        const Lsn beforeLsn = walPageImage(
+                            transactionContext().txnDB, it->tableName,
+                            pageId, pageBuf, pa->pageSize(), true);
+                        std::vector<char> stagedPage(
+                            pageBuf, pageBuf + pa->pageSize());
+                        PageWrapper staged(
+                            stagedPage.data(), pa->pageSize(),
+                            tbl.formatVersion);
+                        if (beforeLsn == INVALID_LSN ||
+                            !staged.remove(slotId)) {
+                            rowUndoOk = false;
+                        } else {
+                            const Lsn lsn = walPageImage(
+                                transactionContext().txnDB, it->tableName,
+                                pageId, stagedPage.data(), pa->pageSize(),
+                                false);
+                            WALManager* wal = getWAL(
+                                transactionContext().txnDB);
+                            if (lsn == INVALID_LSN || !wal ||
+                                !wal->XLogFlush(lsn)) {
+                                rowUndoOk = false;
+                            } else {
+                                std::memcpy(
+                                    pageBuf, stagedPage.data(),
+                                    pa->pageSize());
+                                setPageLsnAndChecksum(pageBuf, lsn);
+                                pa->markDirty(pageId);
+                                const size_t freePercent =
+                                    staged.freeSpace() * 100 / pa->pageSize();
+                                getFSM(
+                                    transactionContext().txnDB,
+                                    it->tableName)->setFreePercent(
+                                        pageId,
+                                        static_cast<uint8_t>(freePercent));
+                                getVM(
+                                    transactionContext().txnDB,
+                                    it->tableName)->setAllVisible(
+                                        pageId, false);
+                                if (!pa->flush()) rowUndoOk = false;
+                            }
+                        }
+                    }
+                    pa->unpinPage(pageId);
                 }
-                pa->flush();
-                pa->unpinPage(pageId);
             }
             // Remove from PK index
-            BPTree* pkIdx = getPKIndex(transactionContext().txnDB, it->tableName);
-            if (pkIdx && !pkVal.empty()) {
-                pkIdx->remove(pkVal);
+            if (tbl.hasPrimaryKey()) {
+                BPTree* pkIdx = getPKIndex(
+                    transactionContext().txnDB, it->tableName);
+                if (pkVal.empty() || !pkIdx ||
+                    (!pkIdx->isOpen() && !pkIdx->open())) {
+                    rowUndoOk = false;
+                } else {
+                    int64_t indexedRid = -1;
+                    if (pkIdx->search(pkVal, indexedRid)) {
+                        if (indexedRid != it->rowIdx ||
+                            !pkIdx->remove(pkVal)) {
+                            rowUndoOk = false;
+                        }
+                    }
+                }
             }
             // Remove from secondary indexes
             for (const auto& entry : secondaryIdxVals) {
                 if (!entry.included || entry.key.empty()) continue;
                 BPTree* index = getSecondaryIndex(
                     transactionContext().txnDB, it->tableName, entry.name);
-                if (index) {
-                    index->removeMulti(entry.key, it->rowIdx);
+                if (!index || (!index->isOpen() && !index->open())) {
+                    rowUndoOk = false;
+                    continue;
+                }
+                while (true) {
+                    const auto rids = index->searchMulti(entry.key);
+                    if (std::find(rids.begin(), rids.end(), it->rowIdx) ==
+                        rids.end()) {
+                        break;
+                    }
+                    if (!index->removeMulti(entry.key, it->rowIdx)) {
+                        rowUndoOk = false;
+                        break;
+                    }
                 }
             }
             for (const auto& entry : compositeIdxVals) {
                 if (!entry.included || entry.key.empty()) continue;
                 BPTree* index = getCompositeIndexTree(
                     transactionContext().txnDB, it->tableName, entry.name);
-                if (index) {
-                    index->removeMulti(entry.key, it->rowIdx);
+                if (!index || (!index->isOpen() && !index->open())) {
+                    rowUndoOk = false;
+                    continue;
+                }
+                while (true) {
+                    const auto rids = index->searchMulti(entry.key);
+                    if (std::find(rids.begin(), rids.end(), it->rowIdx) ==
+                        rids.end()) {
+                        break;
+                    }
+                    if (!index->removeMulti(entry.key, it->rowIdx)) {
+                        rowUndoOk = false;
+                        break;
+                    }
                 }
             }
             for (const auto& kv : hashIdxVals) {
                 HashIndex* hashIdx = getHashIndex(
                     transactionContext().txnDB, it->tableName, kv.first);
-                if (hashIdx && !kv.second.empty()) {
-                    hashIdx->remove(kv.second, it->rowIdx);
+                if (!hashIdx ||
+                    (!hashIdx->isOpen() && !hashIdx->open())) {
+                    rowUndoOk = false;
+                    continue;
+                }
+                while (true) {
+                    const auto rids = hashIdx->search(kv.second);
+                    if (std::find(rids.begin(), rids.end(), it->rowIdx) ==
+                        rids.end()) {
+                        break;
+                    }
+                    if (!hashIdx->remove(kv.second, it->rowIdx)) {
+                        rowUndoOk = false;
+                        break;
+                    }
                 }
             }
             for (const auto& [columnName, value] : bloomIdxVals) {
                 BloomIndex* bloomIdx = getBloomIndex(
                     transactionContext().txnDB, it->tableName, columnName);
-                if (!bloomIdx) {
+                if (!bloomIdx ||
+                    (!bloomIdx->isOpen() && !bloomIdx->open())) {
                     rowUndoOk = false;
                     continue;
                 }
                 bloomUndoIndexes.insert(bloomIdx);
-                if (!bloomIdx->remove(value, it->rowIdx)) rowUndoOk = false;
+                while (true) {
+                    const auto rids = bloomIdx->search(value);
+                    if (std::find(rids.begin(), rids.end(), it->rowIdx) ==
+                        rids.end()) {
+                        break;
+                    }
+                    if (!bloomIdx->remove(value, it->rowIdx)) {
+                        rowUndoOk = false;
+                        break;
+                    }
+                }
             }
         } else if (it->op == TxnLogEntry::Op::Update) {
             if (it->previousRowIdx >= 0) {
@@ -33423,9 +33543,20 @@ DBStatus StorageEngine::rollbackTransaction() {
     // Sequences are non-transactional: persist advanced counters even on
     // rollback so concurrent transactions cannot observe reused values.
     flushDeferredSequences();
-    return snapshotRestoreOk && rowUndoOk && ddlUndoOk &&
-                   specializedUndoOk && undoFlushOk && clogOk && abortWalOk
-        ? DBStatus::OK : DBStatus::IO_ERROR;
+    const bool rollbackOk = snapshotRestoreOk && rowUndoOk && ddlUndoOk &&
+                            specializedUndoOk && undoFlushOk && clogOk &&
+                            abortWalOk;
+    if (!rollbackOk) {
+        std::cerr << "[transaction] rollback incomplete for " << rollbackDb
+                  << " (snapshot=" << snapshotRestoreOk
+                  << ", rows=" << rowUndoOk
+                  << ", ddl=" << ddlUndoOk
+                  << ", specialized_indexes=" << specializedUndoOk
+                  << ", flush=" << undoFlushOk
+                  << ", clog=" << clogOk
+                  << ", wal=" << abortWalOk << ")" << std::endl;
+    }
+    return rollbackOk ? DBStatus::OK : DBStatus::IO_ERROR;
 }
 
 bool StorageEngine::restoreTransactionBackup(const std::string& dbname) {
