@@ -17327,7 +17327,10 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             stageExecFunctionCtx(*this, trg.name, trg.timing,
                               "INSERT", trg.tableName,
                               trg.forEachRow, &actualValues, nullptr, &tbl);
-            triggerExecutor_(action);
+            if (triggerExecutor_(action)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::IO_ERROR;
+            }
             // Parse "SET col = val" assignments from action and apply to actualValues
             {
                 size_t searchPos = 0;
