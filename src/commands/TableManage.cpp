@@ -17314,25 +17314,6 @@ DBStatus StorageEngine::insertInternal(
         }
     }
 
-    // Compute generated columns (STORED only; VIRTUAL are computed at query time).
-    for (size_t i = 0; i < tbl.len; ++i) {
-        const Column& col = tbl.cols[i];
-        if (col.generatedExpr.empty()) continue;
-        if (col.generatedKind == 'v') continue;
-        auto it = actualValues.find(col.dataName);
-        if (it != actualValues.end() && !it->second.empty()) {
-            // GENERATED ALWAYS AS ... STORED does not accept user-supplied values.
-            lockManager_.unlock(tablename);
-            return DBStatus::INVALID_VALUE;
-        }
-        bool ok = false;
-        std::string computed = evalExpressionSql(col.generatedExpr, actualValues, typeHints, dbname, &ok);
-        if (ok) {
-            actualValues[col.dataName] = computed;
-        }
-    }
-
-
     // Fire BEFORE INSERT triggers (row-level)
     // BEFORE triggers execute before the actual write and can modify NEW column values
     // via "SET col = val" or "NEW.col = val" assignments in the trigger action.
@@ -17443,6 +17424,24 @@ DBStatus StorageEngine::insertInternal(
                 }
             }
         }
+    }
+
+    // BEFORE INSERT triggers own the final NEW values of base columns.
+    // Compute stored generated columns only after every such trigger has run,
+    // so heap data, constraints, RETURNING, and every index derive from the
+    // same row image. A catalog expression that cannot be evaluated must not
+    // silently turn into a NULL/empty stored value.
+    for (size_t i = 0; i < tbl.len; ++i) {
+        const Column& col = tbl.cols[i];
+        if (col.generatedExpr.empty() || col.generatedKind == 'v') continue;
+        bool ok = false;
+        const std::string computed = evalExpressionSql(
+            col.generatedExpr, actualValues, typeHints, dbname, &ok);
+        if (!ok) {
+            lockManager_.unlock(tablename);
+            return DBStatus::INVALID_VALUE;
+        }
+        actualValues[col.dataName] = computed;
     }
 
     // BEFORE triggers and generated expressions can replace POINT values
