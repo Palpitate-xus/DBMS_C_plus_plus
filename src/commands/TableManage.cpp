@@ -13504,12 +13504,20 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
     }
 
     // 1. Collect all live rows BEFORE mutating the schema.
-    std::vector<std::map<std::string, std::string>> rows;
-    if (!forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
+    std::vector<SqlRow> rows;
+    if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
+                                          const char* data, size_t len) {
         std::string row(data, len);
-        std::map<std::string, std::string> values;
+        SqlRow values;
+        const int64_t rid = encodeRid(pageId, slotId);
         for (size_t i = 0; i < tbl.len; ++i) {
-            values[tbl.cols[i].dataName] = extractColumnValue(row, tbl, i);
+            if (tbl.cols[i].generatedKind != 'v' && tbl.cols[i].isNull &&
+                isColumnNullByRid(dbname, tablename, rid, i)) {
+                values[tbl.cols[i].dataName] = std::nullopt;
+            } else {
+                values[tbl.cols[i].dataName] =
+                    extractColumnValue(row, tbl, i, dbname, true);
+            }
         }
         rows.push_back(std::move(values));
     })) {
@@ -13521,7 +13529,8 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
     //    value cannot be represented in the new type (no data loss on failure).
     for (const auto& values : rows) {
         auto it = values.find(colName);
-        if (it != values.end() && !valueConvertibleToType(it->second, newCol.dataType)) {
+        if (it != values.end() && it->second &&
+            !valueConvertibleToType(*it->second, newCol.dataType)) {
             lockManager_.unlock(tablename);
             return DBStatus::INVALID_VALUE;
         }
@@ -13591,7 +13600,8 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
     // 6. Re-insert all rows: re-encodes the target column under its new type and
     //    rebuilds PK + secondary indexes from the surviving meta files.
     for (const auto& values : rows) {
-        insert(dbname, tablename, values);
+        const DBStatus status = insertRow(dbname, tablename, values);
+        if (status != DBStatus::OK) return status;
     }
 
     return DBStatus::OK;

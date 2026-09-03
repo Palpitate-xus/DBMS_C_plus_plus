@@ -147,9 +147,8 @@ static void test_varchar_to_int_rejected() {
     std::cout << "[ALTERTYPE] varchar->int (non-numeric) rejected OK" << std::endl;
 }
 
-// Unknown column rejected; NULL (empty) text values round-trip through the
-// rewrite. (Note: the INF NULL sentinel only survives in 8-byte integers, so a
-// VARCHAR source column is used here to exercise faithful NULL round-tripping.)
+// Unknown column rejected; SQL NULL and a non-NULL empty string remain
+// distinct through the rewrite.
 static void test_unknown_col_and_null() {
     std::string db = testDbPath("act_misc");
     cleanup(db);
@@ -159,16 +158,39 @@ static void test_unknown_col_and_null() {
     assert(!ddl.executeSql("CREATE TABLE t (id INT, s VARCHAR(10))", s));
     assert(g_engine.insert(db, "t", {{"id", "1"}, {"s", "hi"}}) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "t", {{"id", "2"}}) == dbms::DBStatus::OK);  // s NULL
+    assert(g_engine.insert(db, "t", {{"id", "3"}, {"s", ""}}) == dbms::DBStatus::OK);
 
     dbms::Column ghost = dbms::makeIntColumn("ghost", true, 3);
     assert(g_engine.alterTableAlterColumnType(db, "t", "ghost", ghost) == dbms::DBStatus::INVALID_VALUE);
 
-    // Widen s to a larger VARCHAR: NULL/empty round-trips as empty.
+    // Widen s to a larger VARCHAR: display text is empty for both rows, but
+    // the tuple bitmap must retain their different SQL states.
     dbms::Column wider = dbms::makeVarCharColumn("s", true, 50);
     assert(g_engine.alterTableAlterColumnType(db, "t", "s", wider) == dbms::DBStatus::OK);
     auto rows = readRowsByKey(db, "t", "id");
     assert(rows["1"]["s"] == "hi");
-    assert(rows["2"]["s"].empty());  // still NULL/empty
+    assert(rows["2"]["s"].empty());
+    assert(rows["3"]["s"].empty());
+    const dbms::TableSchema schema = g_engine.getTableSchema(db, "t");
+    bool foundNull = false;
+    bool foundEmpty = false;
+    assert(g_engine.forEachRow(
+        db, "t",
+        [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
+            const std::string row(data, len);
+            const std::string id =
+                g_engine.extractColumnValue(row, schema, 0, db, true);
+            const int64_t rid =
+                dbms::StorageEngine::encodeRid(pageId, slotId);
+            if (id == "2") {
+                foundNull = true;
+                assert(g_engine.isColumnNullByRid(db, "t", rid, 1));
+            } else if (id == "3") {
+                foundEmpty = true;
+                assert(!g_engine.isColumnNullByRid(db, "t", rid, 1));
+            }
+        }));
+    assert(foundNull && foundEmpty);
     cleanup(db);
     std::cout << "[ALTERTYPE] unknown-col + null round-trip OK" << std::endl;
 }
