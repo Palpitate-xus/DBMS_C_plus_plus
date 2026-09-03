@@ -1620,7 +1620,8 @@ private:
         enum class Op { Insert, Update, Delete } op;
         std::string tableName;
         int64_t rowIdx;
-        std::string rowData;
+        std::string rowData;     // INSERT/DELETE image or UPDATE OLD image
+        std::string newRowData;  // UPDATE NEW image
         // UPDATE stores the new tuple in rowIdx and keeps the superseded
         // physical version at previousRowIdx until vacuum.  Older log entries
         // (and INSERT/DELETE) leave this at -1.
