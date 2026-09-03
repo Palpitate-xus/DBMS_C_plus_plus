@@ -7322,14 +7322,12 @@ std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer
     } else if (col.dataType == "float") {
         float val = 0.0f;
         std::memcpy(&val, rowBuffer.data() + offset, sizeof(float));
-        if (val == 0.0f) return "";
         std::ostringstream oss;
         oss << val;
         return oss.str();
     } else if (col.dataType == "double" || col.dataType == "decimal" || col.dataType == "numeric") {
         double val = 0.0;
         std::memcpy(&val, rowBuffer.data() + offset, sizeof(double));
-        if (val == 0.0) return "";
         std::ostringstream oss;
         oss << val;
         return oss.str();
@@ -7415,7 +7413,8 @@ std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
     // Paths that don't bind a row (constant evaluation, index keys,
     // condition evaluation) keep the raw behavior.
     if (g_nullRowEngine && g_nullRowRid >= 0 && colIdx < g_nullRowNatts &&
-        tbl.tablename == g_nullRowTable) {
+        tbl.tablename == g_nullRowTable &&
+        (col.generatedKind != 'v' || !computeVirtual)) {
         if (g_nullRowEngine->isColumnNullByRid(g_nullRowDb, tbl.tablename,
                                                g_nullRowRid, colIdx)) {
             return "";
@@ -17862,6 +17861,16 @@ DBStatus StorageEngine::insertInternal(
     std::string rowBuffer = buildRowBuffer(tbl, storedValues, creatorTxnId);
     std::string strippedRow = stripRowHeader(
         rowBuffer, tbl.formatVersion, tbl.len);
+    const auto insertedColumnIsNull = [&](size_t columnIndex) {
+        if (columnIndex >= tbl.len ||
+            tbl.cols[columnIndex].generatedKind == 'v' ||
+            !usesHeapTupleHeader(tbl.formatVersion) ||
+            rowBuffer.size() < sizeof(HeapTupleHeaderData)) {
+            return false;
+        }
+        return dbms::isNull(castHeapHeader(rowBuffer.data()),
+                            static_cast<int>(columnIndex));
+    };
     const auto failBeforeHeapInsert = [&](DBStatus status) {
         deleteToastForRow(dbname, tablename, strippedRow);
         lockManager_.unlock(tablename);
@@ -18342,7 +18351,10 @@ DBStatus StorageEngine::insertInternal(
             std::string rendered;
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (i) rendered += '|';
-                rendered += extractColumnValue(strippedRow, tbl, i, dbname, true);
+                if (!insertedColumnIsNull(i)) {
+                    rendered += extractColumnValue(
+                        strippedRow, tbl, i, dbname, true);
+                }
             }
             txn.txnLogicalChanges.push_back({tablename, 0, "", rendered});
         }
@@ -18355,8 +18367,12 @@ DBStatus StorageEngine::insertInternal(
     if (insertedRows) {
         std::map<std::string, std::string> returnedValues;
         for (size_t i = 0; i < tbl.len; ++i) {
-            returnedValues[tbl.cols[i].dataName] =
-                extractColumnValue(strippedRow, tbl, i, dbname, true);
+            if (insertedColumnIsNull(i)) {
+                returnedValues[tbl.cols[i].dataName].clear();
+            } else {
+                returnedValues[tbl.cols[i].dataName] =
+                    extractColumnValue(strippedRow, tbl, i, dbname, true);
+            }
         }
         insertedRows->push_back(std::move(returnedValues));
     }
@@ -19493,15 +19509,20 @@ DBStatus StorageEngine::removeInternal(
     }
 
     // Pre-read row data for index removal (before tombstone)
+    const std::vector<int64_t> rowRids(toDelete.begin(), toDelete.end());
     std::vector<std::string> rowsToDelete;
+    std::vector<std::vector<bool>> nullColumnsToDelete;
     rowsToDelete.reserve(toDelete.size());
-    for (int64_t rid : toDelete) {
+    nullColumnsToDelete.reserve(toDelete.size());
+    for (int64_t rid : rowRids) {
         std::string row;
-        if (!readRowByRid(pa, rid, row, tbl)) {
+        std::vector<bool> nullColumns;
+        if (!readRowByRid(pa, rid, row, tbl, &nullColumns)) {
             lockManager_.unlock(tablename);
             return DBStatus::IO_ERROR;
         }
         rowsToDelete.push_back(std::move(row));
+        nullColumnsToDelete.push_back(std::move(nullColumns));
     }
 
     // Resolve every OLD image while its external chunks still exist.  The
@@ -19523,12 +19544,29 @@ DBStatus StorageEngine::removeInternal(
             return DBStatus::CORRUPTED_DATA;
         }
     }
+    const auto deletedColumnValue = [&](size_t rowIndex, size_t columnIndex,
+                                        bool computeVirtual = false) {
+        if (rowIndex >= logicalRowsToDelete.size() ||
+            columnIndex >= tbl.len) {
+            return std::string{};
+        }
+        if (!(computeVirtual && tbl.cols[columnIndex].generatedKind == 'v') &&
+            rowIndex < nullColumnsToDelete.size() &&
+            columnIndex < nullColumnsToDelete[rowIndex].size() &&
+            nullColumnsToDelete[rowIndex][columnIndex]) {
+            return std::string{};
+        }
+        return extractColumnValue(logicalRowsToDelete[rowIndex], tbl,
+                                  columnIndex, dbname, computeVirtual);
+    };
 
     std::vector<std::vector<EvaluatedIndexEntry>> deleteSecondaryValues(
         logicalRowsToDelete.size());
     const auto deleteIndexMetadata = getIndexMetadata(dbname, tablename);
     for (size_t rowIndex = 0; rowIndex < logicalRowsToDelete.size(); ++rowIndex) {
         if (logicalRowsToDelete[rowIndex].empty()) continue;
+        NullRowBinding nullBinding(
+            this, dbname, tablename, rowRids[rowIndex], tbl.len);
         for (const auto& metadata : deleteIndexMetadata) {
             EvaluatedIndexEntry entry;
             if (!secondaryIndexEntryFromBuffer(
@@ -19545,6 +19583,8 @@ DBStatus StorageEngine::removeInternal(
     const auto deleteCompositeMetadata = getCompositeIndexes(dbname, tablename);
     for (size_t rowIndex = 0; rowIndex < logicalRowsToDelete.size(); ++rowIndex) {
         if (logicalRowsToDelete[rowIndex].empty()) continue;
+        NullRowBinding nullBinding(
+            this, dbname, tablename, rowRids[rowIndex], tbl.len);
         for (const auto& metadata : deleteCompositeMetadata) {
             EvaluatedIndexEntry entry;
             if (!compositeIndexEntryFromBuffer(
@@ -19562,11 +19602,14 @@ DBStatus StorageEngine::removeInternal(
     // here and never re-query a row after DELETE.
     if (deletedRows) {
         deletedRows->clear();
-        for (const auto& row : logicalRowsToDelete) {
+        for (size_t rowIndex = 0;
+             rowIndex < logicalRowsToDelete.size(); ++rowIndex) {
+            const auto& row = logicalRowsToDelete[rowIndex];
             if (row.empty()) continue;
             std::map<std::string, std::string> values;
             for (size_t i = 0; i < tbl.len; ++i) {
-                values[tbl.cols[i].dataName] = extractColumnValue(row, tbl, i, dbname, true);
+                values[tbl.cols[i].dataName] =
+                    deletedColumnValue(rowIndex, i, true);
             }
             deletedRows->push_back(std::move(values));
         }
@@ -19582,11 +19625,14 @@ DBStatus StorageEngine::removeInternal(
         for (const auto& trg : beforeDeleteTriggers) {
             if (!trg.enabled) continue;
             if (trg.forEachRow) {
-                for (const auto& row : logicalRowsToDelete) {
+                for (size_t rowIndex = 0;
+                     rowIndex < logicalRowsToDelete.size(); ++rowIndex) {
+                    const auto& row = logicalRowsToDelete[rowIndex];
                     if (row.empty()) continue;
                     std::map<std::string, std::string> oldValues;
                     for (size_t i = 0; i < tbl.len; ++i) {
-                        oldValues[tbl.cols[i].dataName] = extractColumnValue(row, tbl, i);
+                        oldValues[tbl.cols[i].dataName] =
+                            deletedColumnValue(rowIndex, i);
                     }
                     // Evaluate WHEN condition if present
                     if (!trg.whenCondition.empty() && whenEvaluator_) {
@@ -19859,8 +19905,7 @@ DBStatus StorageEngine::removeInternal(
                     return DBStatus::CORRUPTED_DATA;
                 }
                 if (!logicalRowsToDelete[hidx_i].empty()) {
-                    std::string val = extractColumnValue(
-                        logicalRowsToDelete[hidx_i], tbl, colIdx);
+                    std::string val = deletedColumnValue(hidx_i, colIdx);
                     if (!val.empty() && !hidx->remove(val, rid)) {
                         lockManager_.unlock(tablename);
                         return DBStatus::IO_ERROR;
@@ -19894,8 +19939,7 @@ DBStatus StorageEngine::removeInternal(
                     return DBStatus::CORRUPTED_DATA;
                 }
                 if (!logicalRowsToDelete[bidx_i].empty()) {
-                    std::string val = extractColumnValue(
-                        logicalRowsToDelete[bidx_i], tbl, colIdx);
+                    std::string val = deletedColumnValue(bidx_i, colIdx);
                     if (!val.empty()) {
                         const auto indexedRids = bidx->search(val);
                         if (std::find(indexedRids.begin(), indexedRids.end(),
@@ -19926,8 +19970,7 @@ DBStatus StorageEngine::removeInternal(
                     std::string rendered;
                     for (size_t i = 0; i < tbl.len; ++i) {
                         if (i) rendered += '|';
-                        rendered += extractColumnValue(
-                            logicalRowsToDelete[di], tbl, i, dbname, true);
+                        rendered += deletedColumnValue(di, i, true);
                     }
                     txn.txnLogicalChanges.push_back({tablename, 2, rendered, ""});
                 }
@@ -19943,11 +19986,14 @@ DBStatus StorageEngine::removeInternal(
             operationTriggers, tablename, "after", "delete");
         for (const auto& trg : triggers) {
             if (trg.forEachRow) {
-                for (const auto& row : logicalRowsToDelete) {
+                for (size_t rowIndex = 0;
+                     rowIndex < logicalRowsToDelete.size(); ++rowIndex) {
+                    const auto& row = logicalRowsToDelete[rowIndex];
                     if (row.empty()) continue;
                     std::map<std::string, std::string> oldValues;
                     for (size_t i = 0; i < tbl.len; ++i) {
-                        oldValues[tbl.cols[i].dataName] = extractColumnValue(row, tbl, i);
+                        oldValues[tbl.cols[i].dataName] =
+                            deletedColumnValue(rowIndex, i);
                     }
                     // Evaluate WHEN condition if present
                     if (!trg.whenCondition.empty() && whenEvaluator_) {
@@ -20025,11 +20071,14 @@ DBStatus StorageEngine::removeInternal(
                         if (spec.rfind("old ", 0) != 0) continue;
                         std::string name = trim(spec.substr(4));
                         std::vector<std::map<std::string, std::string>> rows;
-                        for (const auto& row : rowsToDelete) {
+                        for (size_t rowIndex = 0;
+                             rowIndex < logicalRowsToDelete.size(); ++rowIndex) {
+                            const auto& row = logicalRowsToDelete[rowIndex];
                             if (row.empty()) continue;
                             std::map<std::string, std::string> m;
                             for (size_t i = 0; i < tbl.len; ++i) {
-                                m[tbl.cols[i].dataName] = extractColumnValue(row, tbl, i);
+                                m[tbl.cols[i].dataName] =
+                                    deletedColumnValue(rowIndex, i);
                             }
                             rows.push_back(std::move(m));
                         }
@@ -20493,8 +20542,14 @@ DBStatus StorageEngine::updateInternal(
         }
         std::map<std::string, std::string> oldLogicalValues;
         for (size_t i = 0; i < tbl.len; ++i) {
-            oldLogicalValues[tbl.cols[i].dataName] =
-                extractColumnValue(resolvedOldRow, tbl, i, dbname, true);
+            if (tbl.cols[i].generatedKind != 'v' &&
+                i < oldNullColumns.size() && oldNullColumns[i]) {
+                oldLogicalValues[tbl.cols[i].dataName].clear();
+            } else {
+                oldLogicalValues[tbl.cols[i].dataName] =
+                    extractColumnValue(
+                        resolvedOldRow, tbl, i, dbname, true);
+            }
         }
 
         oldImages.emplace(rid, oldLogicalValues);
@@ -20790,6 +20845,14 @@ DBStatus StorageEngine::updateInternal(
                 }
             }
             return values;
+        };
+        const auto newColumnIsNull = [&](size_t columnIndex) {
+            return columnIndex < tbl.len &&
+                tbl.cols[columnIndex].generatedKind != 'v' &&
+                (assignedNullColumnIndices.count(columnIndex) != 0 ||
+                (columnIndex < oldNullColumns.size() &&
+                 oldNullColumns[columnIndex] &&
+                 assignedColumnIndices.count(columnIndex) == 0));
         };
 
         // Referential actions execute with relation-owner semantics. Applying
@@ -22023,8 +22086,11 @@ DBStatus StorageEngine::updateInternal(
                 std::string oldRendered, newRendered;
                 for (size_t i = 0; i < tbl.len; ++i) {
                     if (i) { oldRendered += '|'; newRendered += '|'; }
-                    oldRendered += extractColumnValue(row, tbl, i, dbname, true);
-                    newRendered += extractColumnValue(strippedNewRow, tbl, i, dbname, true);
+                    oldRendered += oldLogicalValues[tbl.cols[i].dataName];
+                    if (!newColumnIsNull(i)) {
+                        newRendered += extractColumnValue(
+                            strippedNewRow, tbl, i, dbname, true);
+                    }
                 }
                 txn.txnLogicalChanges.push_back(
                     {tablename, 1, oldRendered, newRendered});
@@ -22038,8 +22104,13 @@ DBStatus StorageEngine::updateInternal(
         if (updatedRows) {
             std::map<std::string, std::string> values;
             for (size_t i = 0; i < tbl.len; ++i) {
-                values[tbl.cols[i].dataName] =
-                    extractColumnValue(strippedNewRow, tbl, i, dbname, true);
+                if (newColumnIsNull(i)) {
+                    values[tbl.cols[i].dataName].clear();
+                } else {
+                    values[tbl.cols[i].dataName] =
+                        extractColumnValue(
+                            strippedNewRow, tbl, i, dbname, true);
+                }
             }
             updatedRows->push_back(std::move(values));
         }
@@ -22072,6 +22143,8 @@ DBStatus StorageEngine::updateInternal(
                         return DBStatus::IO_ERROR;
                     }
                     std::map<std::string, std::string> newValues;
+                    NullRowBinding nullBinding(
+                        this, dbname, tbl.tablename, triggerRid, tbl.len);
                     for (size_t i = 0; i < tbl.len; ++i) {
                         newValues[tbl.cols[i].dataName] =
                             extractColumnValue(newRow, tbl, i, dbname, true);
@@ -22947,6 +23020,8 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
             std::set<std::string> seen;
             std::vector<std::pair<int64_t, std::string>> deduped;
             for (auto& mr : matchRows) {
+                NullRowBinding nullBinding(
+                    this, dbname, tbl.tablename, mr.first, tbl.len);
                 std::string key;
                 for (size_t idx : distinctIdxs) {
                     if (!key.empty()) key += "\x01";
@@ -22959,6 +23034,8 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
     }
 
     for (auto& mr : matchRows) {
+        NullRowBinding nullBinding(
+            this, dbname, tbl.tablename, mr.first, tbl.len);
         std::string rowStr;
         for (size_t i = 0; i < tbl.len; ++i) {
             const Column& col = tbl.cols[i];
