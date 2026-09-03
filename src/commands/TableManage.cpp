@@ -557,6 +557,24 @@ static std::string formatPointCoordinate(double value) {
     return formatFloatingValue(value);
 }
 
+static std::string canonicalColumnKeyValue(const Column& column,
+                                           const std::string& value) {
+    if (value.empty() || value == "NULL") return {};
+    if (column.dataType == "float") {
+        float parsed = 0.0f;
+        if (!parseFloatLiteral(value, parsed)) return value;
+        // IEEE -0 and +0 compare equal even though their display forms and
+        // bit patterns differ. Index/constraint keys must therefore merge.
+        return parsed == 0.0f ? "0" : formatFloatingValue(parsed);
+    }
+    if (column.dataType == "double" || column.dataType == "decimal") {
+        double parsed = 0.0;
+        if (!parseDoubleLiteral(value, parsed)) return value;
+        return parsed == 0.0 ? "0" : formatFloatingValue(parsed);
+    }
+    return value;
+}
+
 template <typename Floating>
 static int compareFloatingValues(Floating left, Floating right) {
     const bool leftNaN = std::isnan(left);
@@ -653,22 +671,35 @@ static std::string valueFromRowMap(
     return value == values.end() ? std::string() : value->second;
 }
 
+static std::string canonicalKeyValueFromRowMap(
+    const std::map<std::string, std::string>& values,
+    const TableSchema& table, const std::string& columnName) {
+    for (size_t i = 0; i < table.len; ++i) {
+        if (table.cols[i].dataName == columnName) {
+            return canonicalColumnKeyValue(
+                table.cols[i], valueFromRowMap(values, columnName));
+        }
+    }
+    return {};
+}
+
 static std::string buildCompositeKeyFromRowMap(
     const std::map<std::string, std::string>& values,
     const TableSchema& table,
     const std::vector<std::string>& columnNames) {
     std::string key;
     for (const auto& columnName : columnNames) {
-        bool found = false;
+        const Column* column = nullptr;
         for (size_t i = 0; i < table.len; ++i) {
             if (table.cols[i].dataName == columnName) {
-                found = true;
+                column = &table.cols[i];
                 break;
             }
         }
-        if (!found) continue;
+        if (!column) continue;
         if (!key.empty()) key += '\x01';
-        key += valueFromRowMap(values, columnName);
+        key += canonicalColumnKeyValue(
+            *column, valueFromRowMap(values, columnName));
     }
     return key;
 }
@@ -5721,8 +5752,9 @@ DBStatus StorageEngine::createHashIndex(const std::string& dbname,
         std::string row(data, len);
         for (size_t i = 0; i < tbl.len; ++i) {
             if (tbl.cols[i].dataName == colname) {
-                std::string val = extractColumnValue(
-                    row, tbl, i, dbname, true);
+                std::string val = canonicalColumnKeyValue(
+                    tbl.cols[i], extractColumnValue(
+                                     row, tbl, i, dbname, true));
                 if (!val.empty()) {
                     hidx->insert(val, encodeRid(pageId, slotId));
                 }
@@ -5850,8 +5882,9 @@ DBStatus StorageEngine::createBloomIndex(const std::string& dbname,
         std::string row(data, len);
         for (size_t i = 0; i < tbl.len; ++i) {
             if (tbl.cols[i].dataName == colname) {
-                std::string val = extractColumnValue(
-                    row, tbl, i, dbname, true);
+                std::string val = canonicalColumnKeyValue(
+                    tbl.cols[i], extractColumnValue(
+                                     row, tbl, i, dbname, true));
                 if (!val.empty()) {
                     bidx->insert(val, encodeRid(pageId, slotId));
                 }
@@ -8238,9 +8271,10 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
             // corrupt-page failures must not be mistaken for an empty table.
             return !readFailed;
         }
-        const std::string payloadValue =
+        const std::string payloadValue = canonicalColumnKeyValue(
+            tbl.cols[static_cast<size_t>(colIdx)],
             const_cast<StorageEngine*>(this)->extractColumnValue(
-                currentRow, tbl, static_cast<size_t>(colIdx), dc.dbname);
+                currentRow, tbl, static_cast<size_t>(colIdx), dc.dbname));
         // NULL values are distinct for ordinary UNIQUE constraints.
         if (payloadValue.empty()) return true;
 
@@ -8252,9 +8286,13 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
             const int64_t rid = encodeRid(pageId, slot);
             if (rid == currentRid) return;
             std::string row(data, len);
-            if (const_cast<StorageEngine*>(this)->extractColumnValue(
-                    row, tbl, static_cast<size_t>(colIdx), dc.dbname)
-                    == payloadValue) ++matches;
+            if (canonicalColumnKeyValue(
+                    tbl.cols[static_cast<size_t>(colIdx)],
+                    const_cast<StorageEngine*>(this)->extractColumnValue(
+                        row, tbl, static_cast<size_t>(colIdx), dc.dbname)) ==
+                payloadValue) {
+                ++matches;
+            }
         });
         return scanOk && matches == 0;
     }
@@ -8433,7 +8471,11 @@ std::string TableSchema::buildPKValue(const std::string& rowBuffer) const {
     std::string key;
     if (!pkColIndices.empty()) {
         for (size_t idx : pkColIndices) {
-            if (idx < len) key += StorageEngine::extractColumnValueStatic(rowBuffer, *this, idx) + "\x01";
+            if (idx < len) {
+                key += canonicalColumnKeyValue(
+                    cols[idx], StorageEngine::extractColumnValueStatic(
+                                   rowBuffer, *this, idx)) + "\x01";
+            }
         }
     } else {
         // Collect all columns marked as primary key (composite PK support)
@@ -8441,7 +8483,9 @@ std::string TableSchema::buildPKValue(const std::string& rowBuffer) const {
         for (size_t i = 0; i < len; ++i) {
             if (cols[i].isPrimaryKey) {
                 if (!first) key += "\x01";
-                key += StorageEngine::extractColumnValueStatic(rowBuffer, *this, i);
+                key += canonicalColumnKeyValue(
+                    cols[i], StorageEngine::extractColumnValueStatic(
+                                 rowBuffer, *this, i));
                 first = false;
             }
         }
@@ -8455,7 +8499,9 @@ std::string TableSchema::buildPKValue(const std::map<std::string, std::string>& 
         for (size_t idx : pkColIndices) {
             if (idx < len) {
                 auto it = values.find(cols[idx].dataName);
-                key += (it != values.end() ? it->second : "") + "\x01";
+                key += canonicalColumnKeyValue(
+                    cols[idx], it != values.end() ? it->second : "") +
+                    "\x01";
             }
         }
     } else {
@@ -8464,7 +8510,8 @@ std::string TableSchema::buildPKValue(const std::map<std::string, std::string>& 
             if (cols[i].isPrimaryKey) {
                 if (!first) key += "\x01";
                 auto it = values.find(cols[i].dataName);
-                key += (it != values.end() ? it->second : "");
+                key += canonicalColumnKeyValue(
+                    cols[i], it != values.end() ? it->second : "");
                 first = false;
             }
         }
@@ -8575,20 +8622,21 @@ static bool secondaryIndexEntry(
                                     entry.included, entry.key);
     }
 
-    bool columnExists = false;
+    const Column* column = nullptr;
     for (size_t i = 0; i < table.len; ++i) {
         if (table.cols[i].dataName == metadata.name) {
-            columnExists = true;
+            column = &table.cols[i];
             break;
         }
     }
-    if (!columnExists ||
+    if (!column ||
         !partialIndexIncludes(metadata.whereCondition, table, values,
                               dbname, entry.included)) {
         return false;
     }
     if (!entry.included) return true;
-    entry.key = valueFromRowMap(values, metadata.name);
+    entry.key = canonicalColumnKeyValue(
+        *column, valueFromRowMap(values, metadata.name));
     if (entry.key.empty()) entry.included = false;
     return true;
 }
@@ -12844,7 +12892,9 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
         if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                            const char* data, size_t len) {
             std::string row(data, len);
-            std::string value = extractColumnValue(row, rebuilt, colIdx, dbname);
+            std::string value = canonicalColumnKeyValue(
+                rebuilt.cols[colIdx],
+                extractColumnValue(row, rebuilt, colIdx, dbname));
             if (!value.empty()) hidx->insert(value, encodeRid(pageId, slotId));
         })) return DBStatus::IO_ERROR;
         if (!hidx->close() || !hidx->open()) return DBStatus::IO_ERROR;
@@ -12863,7 +12913,9 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
         if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                                const char* data, size_t len) {
             std::string row(data, len);
-            std::string value = extractColumnValue(row, rebuilt, colIdx, dbname);
+            std::string value = canonicalColumnKeyValue(
+                rebuilt.cols[colIdx],
+                extractColumnValue(row, rebuilt, colIdx, dbname));
             if (!value.empty()) bidx->insert(value, encodeRid(pageId, slotId));
         })) return DBStatus::IO_ERROR;
         if (!bidx->close() || !bidx->open()) return DBStatus::IO_ERROR;
@@ -13092,7 +13144,9 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
         if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                            const char* data, size_t len) {
             std::string row(data, len);
-            std::string value = extractColumnValue(row, rebuilt, colIdx, dbname);
+            std::string value = canonicalColumnKeyValue(
+                rebuilt.cols[colIdx],
+                extractColumnValue(row, rebuilt, colIdx, dbname));
             if (!value.empty()) hidx->insert(value, encodeRid(pageId, slotId));
         })) return DBStatus::IO_ERROR;
         if (!hidx->close() || !hidx->open()) return DBStatus::IO_ERROR;
@@ -17212,7 +17266,10 @@ DBStatus StorageEngine::insertInternal(
             const Column& col = tbl.cols[i];
             if (!col.isUnique) continue;
             const auto value = actualValues.find(col.dataName);
-            if (value == actualValues.end() || value->second.empty()) continue;
+            if (value == actualValues.end()) continue;
+            const std::string candidateKey =
+                canonicalColumnKeyValue(col, value->second);
+            if (candidateKey.empty()) continue;
             std::string constraintName =
                 tablename + "_" + col.dataName + "_key";
             for (size_t uniqueIndex = 0;
@@ -17239,15 +17296,16 @@ DBStatus StorageEngine::insertInternal(
             BPTree* index = getSecondaryIndex(
                 dbname, tablename, col.dataName);
             if (index && index->isOpen()) {
-                duplicate = !index->searchMulti(value->second).empty();
+                duplicate = !index->searchMulti(candidateKey).empty();
             } else if (!forEachRow(
                            dbname, tablename,
                            [&](uint32_t, uint16_t, const char* data,
                                size_t length) {
                                if (duplicate) return;
-                               duplicate = extractColumnValue(
-                                   std::string(data, length), tbl, i,
-                                   dbname) == value->second;
+                               duplicate = canonicalColumnKeyValue(
+                                   col, extractColumnValue(
+                                            std::string(data, length), tbl,
+                                            i, dbname)) == candidateKey;
                            })) {
                 return DBStatus::IO_ERROR;
             }
@@ -17281,11 +17339,13 @@ DBStatus StorageEngine::insertInternal(
                 if (columnIndex >= tbl.len) return DBStatus::CORRUPTED_DATA;
                 const auto value = actualValues.find(
                     tbl.cols[columnIndex].dataName);
-                if (value == actualValues.end() || value->second.empty()) {
+                if (value == actualValues.end() || value->second.empty() ||
+                    value->second == "NULL") {
                     containsNull = true;
                     break;
                 }
-                compositeKey += value->second + "\x01";
+                compositeKey += canonicalColumnKeyValue(
+                    tbl.cols[columnIndex], value->second) + "\x01";
             }
             if (containsNull) continue;
 
@@ -17298,8 +17358,11 @@ DBStatus StorageEngine::insertInternal(
                         const std::string row(data, length);
                         std::string existingKey;
                         for (const size_t columnIndex : columns) {
-                            const std::string value = extractColumnValue(
-                                row, tbl, columnIndex, dbname);
+                            const std::string value =
+                                canonicalColumnKeyValue(
+                                    tbl.cols[columnIndex],
+                                    extractColumnValue(
+                                        row, tbl, columnIndex, dbname));
                             if (value.empty()) return;
                             existingKey += value + "\x01";
                         }
@@ -17356,6 +17419,7 @@ DBStatus StorageEngine::insertInternal(
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }
+            actualValues[col.dataName] = formatFloatingValue(parsed);
         }
         if (col.dataType == "numeric" && !val.empty()) {
             try { Numeric numeric(val); (void)numeric; } catch (...) {
@@ -17368,6 +17432,7 @@ DBStatus StorageEngine::insertInternal(
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }
+            actualValues[col.dataName] = formatFloatingValue(parsed);
         }
         if (!col.isVariableLength && col.dataType == "boolean" && !val.empty()) {
             if (val != "1" && val != "0" && val != "true" && val != "false" && val != "TRUE" && val != "FALSE") {
@@ -18203,7 +18268,8 @@ DBStatus StorageEngine::insertInternal(
             }
             if (colIdx >= tbl.len) continue;
             if (HashIndex* idx = getHashIndex(dbname, tablename, colname); idx) {
-                const std::string val = valueFromRowMap(actualValues, colname);
+                const std::string val = canonicalKeyValueFromRowMap(
+                    actualValues, tbl, colname);
                 if (!val.empty()) idx->remove(val, rid);
             }
         }
@@ -18215,7 +18281,8 @@ DBStatus StorageEngine::insertInternal(
             if (colIdx >= tbl.len) continue;
             if (BloomIndex* idx = getBloomIndex(
                     dbname, tablename, colname); idx) {
-                const std::string val = valueFromRowMap(actualValues, colname);
+                const std::string val = canonicalKeyValueFromRowMap(
+                    actualValues, tbl, colname);
                 if (!val.empty()) idx->remove(val, rid);
             }
         }
@@ -18324,7 +18391,8 @@ DBStatus StorageEngine::insertInternal(
             }
             if (colIdx >= tbl.len) return abortIndexUpdate();
             HashIndex* hidx = getHashIndex(dbname, tablename, colname);
-            std::string val = valueFromRowMap(actualValues, colname);
+            std::string val = canonicalKeyValueFromRowMap(
+                actualValues, tbl, colname);
             if (!hidx || (!val.empty() && !hidx->insert(val, rid))) {
                 return abortIndexUpdate();
             }
@@ -18340,7 +18408,8 @@ DBStatus StorageEngine::insertInternal(
             }
             if (colIdx >= tbl.len) return abortIndexUpdate();
             BloomIndex* bidx = getBloomIndex(dbname, tablename, colname);
-            std::string val = valueFromRowMap(actualValues, colname);
+            std::string val = canonicalKeyValueFromRowMap(
+                actualValues, tbl, colname);
             if (!bidx || (!val.empty() && !bidx->insert(val, rid))) {
                 return abortIndexUpdate();
             }
@@ -18822,30 +18891,37 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
         if (c.op == "=") {
             // Non-binary collation requires collation-aware comparison; skip binary indexes.
             if (columnNeedsCollation(c.colName)) continue;
+            const Column* searchColumn = nullptr;
             bool hasPK = false;
             for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].dataName == c.colName) {
+                    searchColumn = &tbl.cols[i];
+                }
                 if (tbl.cols[i].isPrimaryKey && tbl.cols[i].dataName == c.colName) {
                     hasPK = true; break;
                 }
             }
+            const std::string searchValue = searchColumn
+                ? canonicalColumnKeyValue(*searchColumn, c.value)
+                : c.value;
             if (hasPK) {
                 BPTree* idx = getPKIndex(dbname, tablename);
                 if (idx) {
                     int64_t val = -1;
-                    if (idx->search(c.value, val)) ids.insert(val);
+                    if (idx->search(searchValue, val)) ids.insert(val);
                 }
             } else {
                 // Try hash index first (O(1) equality lookup)
                 HashIndex* hidx = getHashIndex(dbname, tablename, c.colName);
                 if (hidx) {
-                    auto vals = hidx->search(c.value);
+                    auto vals = hidx->search(searchValue);
                     for (int64_t v : vals) ids.insert(v);
                 }
                 // Fallback to B+ tree secondary index
                 if (ids.empty() && hasCompleteSecondaryIndex(c.colName)) {
                     BPTree* secIdx = getSecondaryIndex(dbname, tablename, c.colName);
                     if (secIdx) {
-                        auto vals = secIdx->searchMulti(c.value);
+                        auto vals = secIdx->searchMulti(searchValue);
                         for (int64_t v : vals) ids.insert(v);
                     }
                 }
@@ -19918,7 +19994,9 @@ DBStatus StorageEngine::removeInternal(
                     return DBStatus::CORRUPTED_DATA;
                 }
                 if (!logicalRowsToDelete[hidx_i].empty()) {
-                    std::string val = deletedColumnValue(hidx_i, colIdx);
+                    std::string val = canonicalColumnKeyValue(
+                        tbl.cols[colIdx],
+                        deletedColumnValue(hidx_i, colIdx));
                     if (!val.empty() && !hidx->remove(val, rid)) {
                         lockManager_.unlock(tablename);
                         return DBStatus::IO_ERROR;
@@ -19952,7 +20030,9 @@ DBStatus StorageEngine::removeInternal(
                     return DBStatus::CORRUPTED_DATA;
                 }
                 if (!logicalRowsToDelete[bidx_i].empty()) {
-                    std::string val = deletedColumnValue(bidx_i, colIdx);
+                    std::string val = canonicalColumnKeyValue(
+                        tbl.cols[colIdx],
+                        deletedColumnValue(bidx_i, colIdx));
                     if (!val.empty()) {
                         const auto indexedRids = bidx->search(val);
                         if (std::find(indexedRids.begin(), indexedRids.end(),
@@ -20265,6 +20345,7 @@ DBStatus StorageEngine::updateInternal(
                             if (!parseFloatLiteral(kv.second, parsed)) {
                                 return DBStatus::INVALID_VALUE;
                             }
+                            storeVal = formatFloatingValue(parsed);
                         }
                     } else if (col.dataType == "double" ||
                                col.dataType == "decimal") {
@@ -20273,6 +20354,7 @@ DBStatus StorageEngine::updateInternal(
                             if (!parseDoubleLiteral(kv.second, parsed)) {
                                 return DBStatus::INVALID_VALUE;
                             }
+                            storeVal = formatFloatingValue(parsed);
                         }
                     } else if (col.dataType == "numeric") {
                         if (!kv.second.empty()) {
@@ -20576,7 +20658,8 @@ DBStatus StorageEngine::updateInternal(
                 if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
             }
             if (colIdx < tbl.len) {
-                oldIdxVals[colname] = valueFromRowMap(oldLogicalValues, colname);
+                oldIdxVals[colname] = canonicalKeyValueFromRowMap(
+                    oldLogicalValues, tbl, colname);
             }
         }
         // Also save bloom-indexed column values
@@ -20586,7 +20669,8 @@ DBStatus StorageEngine::updateInternal(
                 if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
             }
             if (colIdx < tbl.len) {
-                oldIdxVals[colname] = valueFromRowMap(oldLogicalValues, colname);
+                oldIdxVals[colname] = canonicalKeyValueFromRowMap(
+                    oldLogicalValues, tbl, colname);
             }
         }
 
@@ -21141,15 +21225,18 @@ DBStatus StorageEngine::updateInternal(
             for (const size_t columnIndex : columns) {
                 if (columnIndex >= tbl.len) return DBStatus::CORRUPTED_DATA;
                 const std::string& columnName = tbl.cols[columnIndex].dataName;
-                const std::string oldValue =
-                    valueFromRowMap(oldLogicalValues, columnName);
-                const std::string newValue =
+                const std::string rawNewValue =
                     valueFromRowMap(rowValues, columnName);
                 // UNIQUE treats NULL values as distinct.  The legacy row
                 // representation exposes SQL NULL as an empty value here.
-                if (newValue.empty()) return DBStatus::OK;
-                oldValues.push_back(oldValue);
-                newValues.push_back(newValue);
+                if (rawNewValue.empty() || rawNewValue == "NULL") {
+                    return DBStatus::OK;
+                }
+                oldValues.push_back(canonicalColumnKeyValue(
+                    tbl.cols[columnIndex],
+                    valueFromRowMap(oldLogicalValues, columnName)));
+                newValues.push_back(canonicalColumnKeyValue(
+                    tbl.cols[columnIndex], rawNewValue));
             }
             if (oldValues == newValues) return DBStatus::OK;
 
@@ -21183,9 +21270,11 @@ DBStatus StorageEngine::updateInternal(
                     const std::string otherRow(data, length);
                     for (size_t valueIndex = 0;
                          valueIndex < columns.size(); ++valueIndex) {
-                        if (extractColumnValue(
-                                otherRow, tbl, columns[valueIndex], dbname) !=
-                            newValues[valueIndex]) {
+                        if (canonicalColumnKeyValue(
+                                tbl.cols[columns[valueIndex]],
+                                extractColumnValue(
+                                    otherRow, tbl, columns[valueIndex],
+                                    dbname)) != newValues[valueIndex]) {
                             return;
                         }
                     }
@@ -22027,7 +22116,8 @@ DBStatus StorageEngine::updateInternal(
             }
             auto itOld = oldIdxVals.find(colname);
             std::string oldVal = (itOld != oldIdxVals.end()) ? itOld->second : "";
-            std::string newVal = valueFromRowMap(rowValues, colname);
+            std::string newVal = canonicalKeyValueFromRowMap(
+                rowValues, tbl, colname);
             // Generated columns and BEFORE triggers can change an indexed
             // value even when that column was absent from the user's SET
             // list. The logical OLD/NEW images are the source of truth.
@@ -22069,7 +22159,8 @@ DBStatus StorageEngine::updateInternal(
             }
             auto itOld = oldIdxVals.find(colname);
             std::string oldVal = (itOld != oldIdxVals.end()) ? itOld->second : "";
-            std::string newVal = valueFromRowMap(rowValues, colname);
+            std::string newVal = canonicalKeyValueFromRowMap(
+                rowValues, tbl, colname);
             if (oldVal != newVal) {
                 if (!oldVal.empty() &&
                     (!containsIndexRid(bidx->search(oldVal), rid) ||
@@ -29356,8 +29447,9 @@ bool StorageEngine::rebuildIndexesAfterRecovery(
                         const char* data, size_t length) {
                         if (!indexValid) return;
                         const std::string row(data, length);
-                        const std::string value = extractColumnValue(
-                            row, table, columnIndex, dbname, true);
+                        const std::string value = canonicalColumnKeyValue(
+                            table.cols[columnIndex], extractColumnValue(
+                                row, table, columnIndex, dbname, true));
                         if (!value.empty() &&
                             !index->insert(value,
                                            encodeRid(pageId, slotId))) {
@@ -31773,8 +31865,9 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
                         auxiliaryValid = false;
                         return;
                     }
-                    const std::string value = extractColumnValue(
-                        row, tbl, columnIndex, dbname, true);
+                    const std::string value = canonicalColumnKeyValue(
+                        tbl.cols[columnIndex], extractColumnValue(
+                            row, tbl, columnIndex, dbname, true));
                     if (!value.empty() &&
                         !index->insert(value, encodeRid(pageId, slotId))) {
                         auxiliaryValid = false;
@@ -31804,8 +31897,9 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
                         auxiliaryValid = false;
                         return;
                     }
-                    const std::string value = extractColumnValue(
-                        row, tbl, columnIndex, dbname, true);
+                    const std::string value = canonicalColumnKeyValue(
+                        tbl.cols[columnIndex], extractColumnValue(
+                            row, tbl, columnIndex, dbname, true));
                     if (!value.empty() &&
                         !index->insert(value, encodeRid(pageId, slotId))) {
                         auxiliaryValid = false;
@@ -31914,10 +32008,12 @@ void StorageEngine::recordSsiIndexPredicate(const std::string& dbname,
     if (getSecondaryIndex(dbname, tablename, condition.colName)) {
         indexNames.push_back("idx:" + condition.colName);
     }
-    if (indexNames.empty() || condition.value.empty()) return;
+    const std::string predicateValue = canonicalColumnKeyValue(
+        tbl.cols[columnIndex], condition.value);
+    if (indexNames.empty() || predicateValue.empty()) return;
 
     const SsiIndexPredicate predicateBase{
-        dbname, tablename, "", condition.op, condition.value};
+        dbname, tablename, "", condition.op, predicateValue};
     std::lock_guard<std::mutex> lock(ssiMutex_);
     for (const auto& indexName : indexNames) {
         SsiIndexPredicate predicate = predicateBase;
@@ -31940,8 +32036,9 @@ void StorageEngine::recordSsiIndexKeys(const std::string& dbname,
     if (tbl.pkColIndices.size() == 1) {
         const size_t columnIndex = tbl.pkColIndices.front();
         if (columnIndex < tbl.len) {
-            const std::string value = extractColumnValue(
-                rowData, tbl, columnIndex, dbname);
+            const std::string value = canonicalColumnKeyValue(
+                tbl.cols[columnIndex], extractColumnValue(
+                    rowData, tbl, columnIndex, dbname));
             if (!value.empty()) {
                 keys.emplace_back("pk:" + tbl.cols[columnIndex].dataName, value);
             }
@@ -31958,8 +32055,9 @@ void StorageEngine::recordSsiIndexKeys(const std::string& dbname,
             }
         }
         if (columnIndex >= tbl.len) continue;
-        const std::string value = extractColumnValue(
-            rowData, tbl, columnIndex, dbname);
+        const std::string value = canonicalColumnKeyValue(
+            tbl.cols[columnIndex], extractColumnValue(
+                rowData, tbl, columnIndex, dbname));
         if (!value.empty()) keys.emplace_back("idx:" + columnName, value);
     }
 
@@ -32131,8 +32229,9 @@ bool StorageEngine::restoreDeletedRowIndexes(
             ok = false;
             continue;
         }
-        const std::string value = extractColumnValue(
-            rowData, tbl, columnIndex, dbname);
+        const std::string value = canonicalColumnKeyValue(
+            tbl.cols[columnIndex], extractColumnValue(
+                rowData, tbl, columnIndex, dbname));
         if (value.empty()) continue;
         HashIndex* index = getHashIndex(dbname, tablename, columnName);
         if (!index) {
@@ -32157,8 +32256,9 @@ bool StorageEngine::restoreDeletedRowIndexes(
             ok = false;
             continue;
         }
-        const std::string value = extractColumnValue(
-            rowData, tbl, columnIndex, dbname);
+        const std::string value = canonicalColumnKeyValue(
+            tbl.cols[columnIndex], extractColumnValue(
+                rowData, tbl, columnIndex, dbname));
         if (value.empty()) continue;
         BloomIndex* index = getBloomIndex(dbname, tablename, columnName);
         if (!index) {
@@ -33015,8 +33115,12 @@ bool StorageEngine::undoVersionedUpdate(const TxnLogEntry& entry) {
             continue;
         }
         hashValues[columnName] = {
-            extractColumnValue(currentRow, tbl, index, dbname, true),
-            extractColumnValue(entry.rowData, tbl, index, dbname, true)};
+            canonicalColumnKeyValue(
+                tbl.cols[index], extractColumnValue(
+                    currentRow, tbl, index, dbname, true)),
+            canonicalColumnKeyValue(
+                tbl.cols[index], extractColumnValue(
+                    entry.rowData, tbl, index, dbname, true))};
     }
     std::map<std::string, std::pair<std::string, std::string>> bloomValues;
     for (const auto& columnName : getBloomIndexedColumns(dbname, tablename)) {
@@ -33026,8 +33130,12 @@ bool StorageEngine::undoVersionedUpdate(const TxnLogEntry& entry) {
             continue;
         }
         bloomValues[columnName] = {
-            extractColumnValue(currentRow, tbl, index, dbname, true),
-            extractColumnValue(entry.rowData, tbl, index, dbname, true)};
+            canonicalColumnKeyValue(
+                tbl.cols[index], extractColumnValue(
+                    currentRow, tbl, index, dbname, true)),
+            canonicalColumnKeyValue(
+                tbl.cols[index], extractColumnValue(
+                    entry.rowData, tbl, index, dbname, true))};
     }
 
     uint32_t previousPageId = 0;
@@ -33401,9 +33509,10 @@ DBStatus StorageEngine::rollbackTransaction() {
                         }
                     }
                     if (colIdx < tbl.len) {
-                        std::string value = extractColumnValue(
-                            insertedRow, tbl, colIdx,
-                            transactionContext().txnDB);
+                        std::string value = canonicalColumnKeyValue(
+                            tbl.cols[colIdx], extractColumnValue(
+                                insertedRow, tbl, colIdx,
+                                transactionContext().txnDB));
                         if (!value.empty()) hashIdxVals[colname] = value;
                     } else {
                         rowUndoOk = false;
@@ -33419,9 +33528,10 @@ DBStatus StorageEngine::rollbackTransaction() {
                         }
                     }
                     if (colIdx < tbl.len) {
-                        std::string value = extractColumnValue(
-                            insertedRow, tbl, colIdx,
-                            transactionContext().txnDB);
+                        std::string value = canonicalColumnKeyValue(
+                            tbl.cols[colIdx], extractColumnValue(
+                                insertedRow, tbl, colIdx,
+                                transactionContext().txnDB));
                         if (!value.empty()) {
                             bloomIdxVals[colname] = std::move(value);
                         }
@@ -33741,12 +33851,16 @@ DBStatus StorageEngine::rollbackTransaction() {
                     transactionContext().txnDB, it->tableName, colname);
                 if (!hashIdx) continue;
                 if (foundCurrent) {
-                    std::string currentVal = extractColumnValue(
-                        currentRow, tbl, colIdx, transactionContext().txnDB);
+                    std::string currentVal = canonicalColumnKeyValue(
+                        tbl.cols[colIdx], extractColumnValue(
+                            currentRow, tbl, colIdx,
+                            transactionContext().txnDB));
                     if (!currentVal.empty()) hashIdx->remove(currentVal, it->rowIdx);
                 }
-                std::string oldVal = extractColumnValue(
-                    it->rowData, tbl, colIdx, transactionContext().txnDB);
+                std::string oldVal = canonicalColumnKeyValue(
+                    tbl.cols[colIdx], extractColumnValue(
+                        it->rowData, tbl, colIdx,
+                        transactionContext().txnDB));
                 if (!oldVal.empty()) hashIdx->insert(oldVal, it->rowIdx);
             }
             for (const auto& colname : getBloomIndexedColumns(
@@ -33770,16 +33884,19 @@ DBStatus StorageEngine::rollbackTransaction() {
                 }
                 bloomUndoIndexes.insert(bloomIdx);
                 if (foundCurrent) {
-                    const std::string currentVal = extractColumnValue(
-                        currentRow, tbl, colIdx,
-                        transactionContext().txnDB);
+                    const std::string currentVal = canonicalColumnKeyValue(
+                        tbl.cols[colIdx], extractColumnValue(
+                            currentRow, tbl, colIdx,
+                            transactionContext().txnDB));
                     if (!currentVal.empty() &&
                         !bloomIdx->remove(currentVal, it->rowIdx)) {
                         rowUndoOk = false;
                     }
                 }
-                const std::string oldVal = extractColumnValue(
-                    it->rowData, tbl, colIdx, transactionContext().txnDB);
+                const std::string oldVal = canonicalColumnKeyValue(
+                    tbl.cols[colIdx], extractColumnValue(
+                        it->rowData, tbl, colIdx,
+                        transactionContext().txnDB));
                 if (!oldVal.empty() &&
                     !bloomIdx->insert(oldVal, it->rowIdx)) {
                     rowUndoOk = false;
@@ -34896,8 +35013,10 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                     rowUndoOk = false;
                     continue;
                 }
-                std::string value = extractColumnValue(
-                    insertedRow, tbl, colIdx, transactionContext().txnDB);
+                std::string value = canonicalColumnKeyValue(
+                    tbl.cols[colIdx], extractColumnValue(
+                        insertedRow, tbl, colIdx,
+                        transactionContext().txnDB));
                 HashIndex* hashIdx = getHashIndex(
                     transactionContext().txnDB, entry.tableName, colname);
                 if (!value.empty() &&
@@ -34919,9 +35038,10 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                     rowUndoOk = false;
                     continue;
                 }
-                const std::string value = extractColumnValue(
-                    insertedRow, tbl, colIdx,
-                    transactionContext().txnDB);
+                const std::string value = canonicalColumnKeyValue(
+                    tbl.cols[colIdx], extractColumnValue(
+                        insertedRow, tbl, colIdx,
+                        transactionContext().txnDB));
                 BloomIndex* bloomIdx = getBloomIndex(
                     transactionContext().txnDB, entry.tableName, colname);
                 if (!bloomIdx ||
@@ -35163,12 +35283,16 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                     transactionContext().txnDB, entry.tableName, colname);
                 if (!hashIdx) continue;
                 if (foundCurrent) {
-                    std::string currentVal = extractColumnValue(
-                        currentRow, tbl, colIdx, transactionContext().txnDB);
+                    std::string currentVal = canonicalColumnKeyValue(
+                        tbl.cols[colIdx], extractColumnValue(
+                            currentRow, tbl, colIdx,
+                            transactionContext().txnDB));
                     if (!currentVal.empty()) hashIdx->remove(currentVal, entry.rowIdx);
                 }
-                std::string oldVal = extractColumnValue(
-                    entry.rowData, tbl, colIdx, transactionContext().txnDB);
+                std::string oldVal = canonicalColumnKeyValue(
+                    tbl.cols[colIdx], extractColumnValue(
+                        entry.rowData, tbl, colIdx,
+                        transactionContext().txnDB));
                 if (!oldVal.empty()) hashIdx->insert(oldVal, entry.rowIdx);
             }
             for (const auto& colname : getBloomIndexedColumns(
@@ -35192,17 +35316,19 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                 }
                 bloomUndoIndexes.insert(bloomIdx);
                 if (foundCurrent) {
-                    const std::string currentVal = extractColumnValue(
-                        currentRow, tbl, colIdx,
-                        transactionContext().txnDB);
+                    const std::string currentVal = canonicalColumnKeyValue(
+                        tbl.cols[colIdx], extractColumnValue(
+                            currentRow, tbl, colIdx,
+                            transactionContext().txnDB));
                     if (!currentVal.empty() &&
                         !bloomIdx->remove(currentVal, entry.rowIdx)) {
                         rowUndoOk = false;
                     }
                 }
-                const std::string oldVal = extractColumnValue(
-                    entry.rowData, tbl, colIdx,
-                    transactionContext().txnDB);
+                const std::string oldVal = canonicalColumnKeyValue(
+                    tbl.cols[colIdx], extractColumnValue(
+                        entry.rowData, tbl, colIdx,
+                        transactionContext().txnDB));
                 if (!oldVal.empty() &&
                     !bloomIdx->insert(oldVal, entry.rowIdx)) {
                     rowUndoOk = false;
