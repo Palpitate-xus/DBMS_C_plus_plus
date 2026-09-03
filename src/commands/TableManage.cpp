@@ -14758,10 +14758,19 @@ DBStatus StorageEngine::alterTableAddPrimaryKey(const std::string& dbname,
 
     // Resolve the named columns to indices.
     std::vector<size_t> colIndices;
+    std::set<size_t> distinctColumns;
     for (const auto& cname : colNames) {
         bool found = false;
         for (size_t i = 0; i < tbl.len; ++i) {
-            if (tbl.cols[i].dataName == cname) { colIndices.push_back(i); found = true; break; }
+            if (tbl.cols[i].dataName == cname) {
+                if (!distinctColumns.insert(i).second) {
+                    lockManager_.unlock(tablename);
+                    return DBStatus::INVALID_VALUE;
+                }
+                colIndices.push_back(i);
+                found = true;
+                break;
+            }
         }
         if (!found) {
             lockManager_.unlock(tablename);
@@ -14775,20 +14784,31 @@ DBStatus StorageEngine::alterTableAddPrimaryKey(const std::string& dbname,
 
     // Validate existing data: every PK column must be non-NULL and the tuple of
     // PK columns must be unique across all rows.
-    std::set<std::string> seen;
+    std::set<std::vector<std::string>> seen;
     bool violation = false;
     if (!forEachRow(dbname, tablename,
-               [&](uint32_t, uint16_t, const char* data, size_t len) {
+               [&](uint32_t pageId, uint16_t slotId,
+                   const char* data, size_t len) {
                    if (violation) return;
-                   std::string row(data, len);
-                   std::string key;
+                   const int64_t rid = encodeRid(pageId, slotId);
+                   const std::string row(data, len);
+                   std::vector<std::string> key;
+                   key.reserve(colIndices.size());
                    for (size_t ci : colIndices) {
-                       std::string v = extractColumnValue(row, tbl, ci);
-                       if (v.empty()) { violation = true; return; }  // NULL in PK column
-                       key += v;
-                       key += '\x01';
+                       if (tbl.cols[ci].isNull &&
+                           isColumnNullByRid(
+                               dbname, tablename, rid, ci)) {
+                           violation = true;
+                           return;
+                       }
+                       key.push_back(canonicalColumnKeyValue(
+                           tbl.cols[ci],
+                           extractColumnValue(
+                               row, tbl, ci, dbname)));
                    }
-                   if (!seen.insert(key).second) violation = true;  // duplicate key
+                   if (!seen.insert(std::move(key)).second) {
+                       violation = true;
+                   }
                })) {
         lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;

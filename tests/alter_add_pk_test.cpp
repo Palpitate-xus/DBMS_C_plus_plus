@@ -98,6 +98,26 @@ static void test_add_pk_null_data() {
     std::cout << "[ADDPK] NULL-data rejection OK" << std::endl;
 }
 
+static void test_add_pk_accepts_empty_string_value() {
+    std::string db = testDbPath("addpk_empty_string");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE t (code VARCHAR(10), n INT)", s));
+
+    assert(g_engine.insert(db, "t", {{"code", ""}, {"n", "1"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.alterTableAddPrimaryKey(db, "t", "t_pkey", {"code"}) ==
+           dbms::DBStatus::OK);
+    const dbms::TableSchema table = g_engine.getTableSchema(db, "t");
+    assert(table.pkColIndices.size() == 1);
+    assert(colIsPk(table, "code"));
+
+    cleanup(db);
+    std::cout << "[ADDPK] empty string is a valid PK value OK" << std::endl;
+}
+
 static void test_add_pk_rejections() {
     std::string db = testDbPath("addpk_rej");
     cleanup(db);
@@ -112,6 +132,7 @@ static void test_add_pk_rejections() {
     // Unknown column on a PK-less table -> reject.
     assert(!ddl.executeSql("CREATE TABLE u (a INT, b INT)", s));
     assert(g_engine.alterTableAddPrimaryKey(db, "u", "u_pk", {"nope"}) == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.alterTableAddPrimaryKey(db, "u", "u_pk", {"a", "a"}) == dbms::DBStatus::INVALID_VALUE);
 
     // Missing table -> TABLE_NOT_FOUND.
     assert(g_engine.alterTableAddPrimaryKey(db, "ghost", "g_pk", {"a"}) == dbms::DBStatus::TABLE_NOT_FOUND);
@@ -152,7 +173,7 @@ static void test_drop_pk() {
     // PK enforced before drop.
     assert(g_engine.insert(db, "t", {{"id", "1"}, {"name", "dup"}}) != dbms::DBStatus::OK);
 
-    // Drop the PK (constraint name is not persisted; any name drops it).
+    // Drop the PK by its persisted default constraint name.
     assert(g_engine.alterTableDropConstraint(db, "t", "t_pkey") == dbms::DBStatus::OK);
     dbms::TableSchema tbl = g_engine.getTableSchema(db, "t");
     assert(tbl.pkColIndices.empty());
@@ -173,6 +194,7 @@ int main() {
     test_add_pk_success();
     test_add_pk_duplicate_data();
     test_add_pk_null_data();
+    test_add_pk_accepts_empty_string_value();
     test_add_pk_rejections();
     test_add_pk_composite();
     test_drop_pk();
