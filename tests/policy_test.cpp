@@ -7,6 +7,7 @@
 #include "catalog/CatalogService.h"
 #include "catalog/type_registry.h"
 #include "utils/permissions.h"
+#include <algorithm>
 #include <cassert>
 #include <filesystem>
 #include <iostream>
@@ -155,6 +156,7 @@ static void test_rls_visible_source_scan() {
                             std::stoi(g_engine.extractColumnValue(row, target, 1, db, true)));
     });
     assert(values.size() == 2);
+    std::sort(values.begin(), values.end());
     assert(values[0] == std::make_pair(1, 10));
     assert(values[1] == std::make_pair(2, 0));
 
