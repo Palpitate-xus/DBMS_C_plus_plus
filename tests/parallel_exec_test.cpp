@@ -226,6 +226,40 @@ int main() {
         "merge_l", "merge_r", "k", "k", 4);
     assert(sorted(runPlan(&nullParallelFallback)) == hashDuplicateRows);
 
+    assert(!ddl.executeSql(
+        "CREATE TABLE nested_l (id INT, k VARCHAR(20))", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE nested_r (id INT, k VARCHAR(20))", s));
+    assert(g_engine.insert(db, "nested_l", {{"id", "1"}, {"k", "alpha"}}) ==
+           DBStatus::OK);
+    assert(g_engine.insert(db, "nested_l", {{"id", "2"}, {"k", "beta"}}) ==
+           DBStatus::OK);
+    assert(g_engine.insert(db, "nested_r", {{"id", "10"}, {"k", "alpha"}}) ==
+           DBStatus::OK);
+    assert(g_engine.insert(db, "nested_r", {{"id", "20"}, {"k", "beta"}}) ==
+           DBStatus::OK);
+    assert(g_engine.insert(db, "nested_r", {{"id", "30"}, {"k", "other"}}) ==
+           DBStatus::OK);
+    auto textHashLeft = std::make_unique<dbms::TableScanOp>(
+        &g_engine, db, "nested_l");
+    auto textHashRight = std::make_unique<dbms::TableScanOp>(
+        &g_engine, db, "nested_r");
+    dbms::HashJoinOp textHash(
+        &g_engine, db, std::move(textHashLeft), std::move(textHashRight),
+        "nested_l", "nested_r", "k", "k");
+    auto textHashRows = sorted(runPlan(&textHash));
+    assert(textHashRows.size() == 2);
+
+    auto textNestedLeft = std::make_unique<dbms::TableScanOp>(
+        &g_engine, db, "nested_l");
+    auto textNestedRight = std::make_unique<dbms::TableScanOp>(
+        &g_engine, db, "nested_r");
+    dbms::NestedLoopJoinOp textNested(
+        &g_engine, db, std::move(textNestedLeft), std::move(textNestedRight),
+        "nested_l", "nested_r", "k", "k");
+    assert(sorted(runPlan(&textNested)) == textHashRows);
+    std::cout << "[PAR] nested-loop variable-length keys OK" << std::endl;
+
     // ------------------------------------------------------------------
     // 4. GatherMerge: per-worker sorted runs merge globally.
     // ------------------------------------------------------------------

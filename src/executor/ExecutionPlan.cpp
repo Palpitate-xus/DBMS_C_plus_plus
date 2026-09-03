@@ -2304,56 +2304,14 @@ bool NestedLoopJoinOp::next(std::string& outRow) {
             if (curLeftKeyNull_ || right_->lastColumnIsNull(rightColIdx_)) {
                 continue;
             }
-            // Find column offsets
-            size_t leftOff = 0;
-            for (size_t i = 0; i < leftTbl_.len; ++i) {
-                if (leftTbl_.cols[i].dataName == leftCol_) break;
-                leftOff += leftTbl_.cols[i].dsize;
-            }
-            size_t rightOff = 0;
-            for (size_t i = 0; i < rightTbl_.len; ++i) {
-                if (rightTbl_.cols[i].dataName == rightCol_) break;
-                rightOff += rightTbl_.cols[i].dsize;
-            }
-            // Find column types
-            const Column* lc = nullptr;
-            for (size_t i = 0; i < leftTbl_.len; ++i) {
-                if (leftTbl_.cols[i].dataName == leftCol_) { lc = &leftTbl_.cols[i]; break; }
-            }
-            const Column* rc = nullptr;
-            for (size_t i = 0; i < rightTbl_.len; ++i) {
-                if (rightTbl_.cols[i].dataName == rightCol_) { rc = &rightTbl_.cols[i]; break; }
-            }
-            if (!lc || !rc) continue;
-
-            bool match = false;
-            if (lc->dataType == "char") {
-                std::string lv(lc->dsize, '\0'), rv(rc->dsize, '\0');
-                std::memcpy(lv.data(), curLeftRow_.data() + leftOff, lc->dsize);
-                std::memcpy(rv.data(), rightRow.data() + rightOff, rc->dsize);
-                auto n = lv.find('\0'); if (n != std::string::npos) lv.resize(n);
-                n = rv.find('\0'); if (n != std::string::npos) rv.resize(n);
-                match = (lv == rv);
-            } else if (lc->dataType == "date") {
-                Date ld, rd;
-                std::memcpy(&ld, curLeftRow_.data() + leftOff, DATE_SIZE);
-                std::memcpy(&rd, rightRow.data() + rightOff, DATE_SIZE);
-                match = (ld == rd);
-            } else if (lc->dataType == "timestamp") {
-                int64_t lv = 0, rv = 0;
-                std::memcpy(&lv, curLeftRow_.data() + leftOff, TIMESTAMP_SIZE);
-                std::memcpy(&rv, rightRow.data() + rightOff, TIMESTAMP_SIZE);
-                match = (lv == rv);
-            } else {
-                int64_t lv = 0, rv = 0;
-                std::memcpy(&lv, curLeftRow_.data() + leftOff, lc->dsize);
-                std::memcpy(&rv, rightRow.data() + rightOff, rc->dsize);
-                match = (lv == rv);
-            }
-            if (match) {
+            const std::string leftKey = StorageEngine::extractColumnValueStatic(
+                curLeftRow_, leftTbl_, leftColIdx_);
+            const std::string rightKey = StorageEngine::extractColumnValueStatic(
+                rightRow, rightTbl_, rightColIdx_);
+            if (leftKey == rightKey) {
                 outRow = curLeftRow_ + rightRow;
                 rtInstr_.emitted = true;
-    return true;
+                return true;
             }
         }
         right_->close();
