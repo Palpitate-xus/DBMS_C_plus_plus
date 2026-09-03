@@ -18875,7 +18875,7 @@ DBStatus StorageEngine::insertInternal(
         std::map<std::string, std::string> returnedValues;
         for (size_t i = 0; i < tbl.len; ++i) {
             if (insertedColumnIsNull(i)) {
-                returnedValues[tbl.cols[i].dataName].clear();
+                returnedValues[tbl.cols[i].dataName] = "NULL";
             } else {
                 returnedValues[tbl.cols[i].dataName] =
                     extractColumnValue(strippedRow, tbl, i, dbname, true);
@@ -20122,8 +20122,13 @@ DBStatus StorageEngine::removeInternal(
             if (row.empty()) continue;
             std::map<std::string, std::string> values;
             for (size_t i = 0; i < tbl.len; ++i) {
-                values[tbl.cols[i].dataName] =
-                    deletedColumnValue(rowIndex, i, true);
+                const bool physicallyNull =
+                    tbl.cols[i].generatedKind != 'v' &&
+                    rowIndex < nullColumnsToDelete.size() &&
+                    i < nullColumnsToDelete[rowIndex].size() &&
+                    nullColumnsToDelete[rowIndex][i];
+                values[tbl.cols[i].dataName] = physicallyNull
+                    ? "NULL" : deletedColumnValue(rowIndex, i, true);
             }
             deletedRows->push_back(std::move(values));
         }
@@ -22650,7 +22655,7 @@ DBStatus StorageEngine::updateInternal(
             std::map<std::string, std::string> values;
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (newColumnIsNull(i)) {
-                    values[tbl.cols[i].dataName].clear();
+                    values[tbl.cols[i].dataName] = "NULL";
                 } else {
                     values[tbl.cols[i].dataName] =
                         extractColumnValue(

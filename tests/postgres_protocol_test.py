@@ -598,6 +598,19 @@ def main():
         assert [field[3] for field in returning_expr_fields] == [23, 25], returning_expr
         assert any(kind == b"C" and body == b"INSERT 0 1\0"
                    for kind, body in returning_expr), returning_expr
+        returning_empty = simple_query(
+            sock, "INSERT INTO dml_ast VALUES (12, '') "
+            "RETURNING name, name || '-x' AS tagged")
+        assert data_row_values(returning_empty) == [[b"", b"-x"]], returning_empty
+        returning_empty_update = simple_query(
+            sock, "UPDATE dml_ast SET name = '' WHERE id = 12 "
+            "RETURNING name, name || '-u' AS tagged")
+        assert data_row_values(returning_empty_update) == [
+            [b"", b"-u"]], returning_empty_update
+        returning_empty_delete = simple_query(
+            sock, "DELETE FROM dml_ast WHERE id = 12 RETURNING name")
+        assert data_row_values(returning_empty_delete) == [
+            [b""]], returning_empty_delete
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "CREATE TABLE dml_copy (id INT, name TEXT)"))
         returning_select = simple_query(

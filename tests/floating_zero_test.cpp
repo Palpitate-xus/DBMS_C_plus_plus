@@ -52,8 +52,8 @@ int main() {
                            &insertedRows) ==
            dbms::DBStatus::OK);
     assert(insertedRows.size() == 1);
-    assert(insertedRows.front().at("float_value").empty());
-    assert(insertedRows.front().at("double_value").empty());
+    assert(insertedRows.front().at("float_value") == "NULL");
+    assert(insertedRows.front().at("double_value") == "NULL");
     int64_t nullRid = -1;
     assert(g_engine.getPKIndex(database, "fixed_values")->search("3", nullRid));
     assert(g_engine.isColumnNullByRid(database, "fixed_values", nullRid, 1));
@@ -72,8 +72,8 @@ int main() {
                             {"double_value", "NULL"}},
                            {"=id 4"}, &updatedRows) == dbms::DBStatus::OK);
     assert(updatedRows.size() == 1);
-    assert(updatedRows.front().at("float_value").empty());
-    assert(updatedRows.front().at("double_value").empty());
+    assert(updatedRows.front().at("float_value") == "NULL");
+    assert(updatedRows.front().at("double_value") == "NULL");
 
     // DISTINCT must keep a real zero separate from the NULL group.
     assert(g_engine.query(database, "fixed_values", {}, {"id"}, {}, false,
@@ -84,8 +84,8 @@ int main() {
     assert(g_engine.remove(database, "fixed_values", {"=id 3"},
                            &deletedRows) == dbms::DBStatus::OK);
     assert(deletedRows.size() == 1);
-    assert(deletedRows.front().at("float_value").empty());
-    assert(deletedRows.front().at("double_value").empty());
+    assert(deletedRows.front().at("float_value") == "NULL");
+    assert(deletedRows.front().at("double_value") == "NULL");
 
     // Tables containing variable-length columns use a separate row builder;
     // their fixed floating-point fields must preserve zero as well.

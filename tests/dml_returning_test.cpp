@@ -185,8 +185,8 @@ int main() {
     assert(result.rows.empty());
 
     // A nullable component of a composite UNIQUE key is not a conflict with
-    // another NULL-containing key (the storage format represents NULL as an
-    // empty value).
+    // another NULL-containing key. The direct storage API uses an explicit
+    // NULL marker so a real empty string remains an ordinary value.
     dbms::TableSchema nullableUnique = table;
     nullableUnique.tablename = "nullable_unique";
     nullableUnique.cols[0].isNull = true;
@@ -194,9 +194,9 @@ int main() {
     nullableUnique.uniqueConstraints = {{0, 1}};
     assert(g_engine.createTable(db, nullableUnique) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "nullable_unique",
-                           {{"id", "1"}, {"name", ""}}) == dbms::DBStatus::OK);
+                           {{"id", "1"}, {"name", "NULL"}}) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "nullable_unique",
-                           {{"id", "1"}, {"name", ""}}) == dbms::DBStatus::OK);
+                           {{"id", "1"}, {"name", "NULL"}}) == dbms::DBStatus::OK);
 
     assert(!runDml("INSERT INTO ret VALUES (3, 'inserted') RETURNING id, name", session));
     result = dbms::takeLastDmlResult();
@@ -249,6 +249,55 @@ int main() {
     assert(result.commandTag == "DELETE 1");
     assert((result.rows[0] == std::vector<std::string>{"8", "expr-deleted"}));
     assert(g_engine.query(db, "ret", {}, {}, {}).empty());
+
+    // RETURNING must distinguish a stored empty string from physical NULL
+    // for direct projections and expression evaluation on every DML kind.
+    dbms::TableSchema emptyReturning;
+    emptyReturning.tablename = "empty_returning";
+    dbms::Column emptyId = id;
+    emptyId.isPrimaryKey = true;
+    emptyId.isNull = false;
+    emptyReturning.append(emptyId);
+    dbms::Column requiredText = name;
+    requiredText.dataName = "required_text";
+    requiredText.isNull = false;
+    emptyReturning.append(requiredText);
+    dbms::Column optionalText = name;
+    optionalText.dataName = "optional_text";
+    optionalText.isNull = true;
+    emptyReturning.append(optionalText);
+    assert(g_engine.createTable(db, emptyReturning) == dbms::DBStatus::OK);
+
+    assert(!runDml(
+        "INSERT INTO empty_returning VALUES (1, '', '') "
+        "RETURNING required_text, optional_text, "
+        "required_text || '-x' AS tagged", session));
+    result = dbms::takeLastDmlResult();
+    assert(result.available);
+    assert((result.rows == std::vector<std::vector<std::string>>{
+        {"", "", "-x"}}));
+
+    assert(!runDml(
+        "INSERT INTO empty_returning VALUES (2, 'value', NULL) "
+        "RETURNING required_text, optional_text, "
+        "optional_text || '-x' AS tagged", session));
+    result = dbms::takeLastDmlResult();
+    assert((result.rows == std::vector<std::vector<std::string>>{
+        {"value", "NULL", "NULL"}}));
+
+    assert(!runDml(
+        "UPDATE empty_returning SET required_text = '', optional_text = '' "
+        "WHERE id = 2 RETURNING required_text, optional_text, "
+        "optional_text || '-x' AS tagged", session));
+    result = dbms::takeLastDmlResult();
+    assert((result.rows == std::vector<std::vector<std::string>>{
+        {"", "", "-x"}}));
+
+    assert(!runDml(
+        "DELETE FROM empty_returning WHERE id = 1 "
+        "RETURNING required_text, optional_text", session));
+    result = dbms::takeLastDmlResult();
+    assert((result.rows == std::vector<std::vector<std::string>>{{"", ""}}));
 
     cleanup(db);
     std::cout << "[DML-RETURNING] INSERT SELECT and storage-boundary RETURNING OK" << std::endl;

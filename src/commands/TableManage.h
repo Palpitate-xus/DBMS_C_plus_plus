@@ -457,6 +457,8 @@ public:
         const std::map<std::string, std::string>&)>;
     using DeleteMatcher = std::function<bool(
         const std::map<std::string, std::string>&)>;
+    // Optional mutation row images use the same boundary convention as DML
+    // input: physical SQL NULL is "NULL"; a stored empty string stays empty.
     DBStatus insert(const std::string& dbname, const std::string& tablename,
                     const std::map<std::string, std::string>& values,
                     std::vector<std::map<std::string, std::string>>* insertedRows = nullptr);

@@ -977,7 +977,8 @@ RowContext returningContext(const std::map<std::string, std::string>& source,
     for (size_t i = 0; i < table.len; ++i) {
         const Column& column = table.cols[i];
         const auto it = source.find(column.dataName);
-        const bool isNull = it == source.end() || it->second.empty();
+        const bool isNull =
+            it == source.end() || it->second == "NULL";
         context.set(column.dataName,
                     ExprValue(column.dataType, isNull ? "" : it->second, isNull));
     }
@@ -1452,7 +1453,8 @@ bool publishReturning(const std::vector<ReturningProjection>& projections,
             std::string value;
             if (projection.expression == nullptr) {
                 const auto it = source.find(projection.column);
-                value = it == source.end() || it->second.empty() ? "NULL" : it->second;
+                value = it == source.end() || it->second == "NULL"
+                    ? "NULL" : it->second;
             } else {
                 std::string typeName;
                 if (!evaluateReturningExpression(projection.expression, source, table,
