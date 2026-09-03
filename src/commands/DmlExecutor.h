@@ -25,6 +25,9 @@ struct DmlResult {
     // that the protocol layer should infer metadata from the relation/name.
     std::vector<std::string> columnTypes;
     std::vector<std::vector<std::string>> rows;
+    // Per-cell SQL NULL metadata.  Text equal to "NULL" remains a four-byte
+    // value; only a true entry here is sent as a protocol NULL.
+    std::vector<std::vector<bool>> nulls;
     std::string commandTag;
 };
 

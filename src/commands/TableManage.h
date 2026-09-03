@@ -450,6 +450,16 @@ public:
                                      const std::string& colKey) const;
 
     // Data operations
+    // SQL-facing mutation values keep NULL separate from both an empty
+    // string and the ordinary four-character text "NULL".  A missing key
+    // still means DEFAULT (INSERT) or leave unchanged (UPDATE).
+    using SqlCell = std::optional<std::string>;
+    using SqlRow = std::map<std::string, SqlCell>;
+    using SqlUpdateResolver = std::function<bool(
+        const SqlRow&, SqlRow&)>;
+    using SqlUpdateMatcher = std::function<bool(const SqlRow&)>;
+    using SqlDeleteMatcher = std::function<bool(const SqlRow&)>;
+
     using UpdateResolver = std::function<bool(
         const std::map<std::string, std::string>&,
         std::map<std::string, std::string>&)>;
@@ -462,6 +472,10 @@ public:
     DBStatus insert(const std::string& dbname, const std::string& tablename,
                     const std::map<std::string, std::string>& values,
                     std::vector<std::map<std::string, std::string>>* insertedRows = nullptr);
+    DBStatus insertRow(const std::string& dbname,
+                       const std::string& tablename,
+                       const SqlRow& values,
+                       std::vector<SqlRow>* insertedRows = nullptr);
     // INSERT INTO t DEFAULT VALUES — uses column defaults or NULL.
     DBStatus insertDefaultValues(const std::string& dbname,
                                  const std::string& tablename,
@@ -473,10 +487,22 @@ public:
                     std::vector<std::map<std::string, std::string>>* updatedRows = nullptr,
                     const UpdateResolver& updateResolver = {},
                     const UpdateMatcher& updateMatcher = {});
+    DBStatus updateRows(const std::string& dbname,
+                        const std::string& tablename,
+                        const SqlRow& updates,
+                        const std::vector<std::string>& conditions,
+                        std::vector<SqlRow>* updatedRows = nullptr,
+                        const SqlUpdateResolver& updateResolver = {},
+                        const SqlUpdateMatcher& updateMatcher = {});
     DBStatus remove(const std::string& dbname, const std::string& tablename,
                     const std::vector<std::string>& conditions,
                     std::vector<std::map<std::string, std::string>>* deletedRows = nullptr,
                     const DeleteMatcher& deleteMatcher = {});
+    DBStatus removeRows(const std::string& dbname,
+                        const std::string& tablename,
+                        const std::vector<std::string>& conditions,
+                        std::vector<SqlRow>* deletedRows = nullptr,
+                        const SqlDeleteMatcher& deleteMatcher = {});
     struct OrderBySpec {
         std::string colName;
         bool ascending = true;
@@ -1572,21 +1598,23 @@ private:
     DBStatus insertInternal(
         const std::string& dbname, const std::string& tablename,
         const std::map<std::string, std::string>& values,
-        std::vector<std::map<std::string, std::string>>* insertedRows);
+        const std::set<std::string>& nullColumns,
+        std::vector<SqlRow>* insertedRows);
     DBStatus removeInternal(
         const std::string& dbname, const std::string& tablename,
         const std::vector<std::string>& conditions,
-        std::vector<std::map<std::string, std::string>>* deletedRows,
-        const DeleteMatcher& deleteMatcher,
+        std::vector<SqlRow>* deletedRows,
+        const SqlDeleteMatcher& deleteMatcher,
         const std::set<int64_t>* exactRids,
         ReferentialActionContext& referentialContext);
     DBStatus updateInternal(
         const std::string& dbname, const std::string& tablename,
         const std::map<std::string, std::string>& updates,
+        const std::set<std::string>& updateNullColumns,
         const std::vector<std::string>& conditions,
-        std::vector<std::map<std::string, std::string>>* updatedRows,
-        const UpdateResolver& updateResolver,
-        const UpdateMatcher& updateMatcher,
+        std::vector<SqlRow>* updatedRows,
+        const SqlUpdateResolver& updateResolver,
+        const SqlUpdateMatcher& updateMatcher,
         const std::set<int64_t>* exactRids,
         ReferentialActionContext& referentialContext);
 

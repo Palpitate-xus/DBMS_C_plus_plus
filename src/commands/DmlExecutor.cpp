@@ -46,6 +46,17 @@ void clearLastDmlResult() {
 
 namespace {
 
+using SqlCell = StorageEngine::SqlCell;
+using SqlRow = StorageEngine::SqlRow;
+
+std::map<std::string, std::string> logicalValues(const SqlRow& row) {
+    std::map<std::string, std::string> values;
+    for (const auto& [column, value] : row) {
+        values[column] = value.value_or(std::string{});
+    }
+    return values;
+}
+
 class InsertStatementScope {
 public:
     InsertStatementScope(StorageEngine& engine, const std::string& database)
@@ -218,6 +229,8 @@ bool checkInsertColumns(Session& s, const std::string& table,
     return true;
 }
 
+bool evaluateValue(const ExprPtr& expr, const std::string& currentDB,
+                   SqlCell& value);
 bool evaluateValue(const ExprPtr& expr, const std::string& currentDB,
                    std::string& value);
 bool referencesColumn(const Expr* expr);
@@ -395,7 +408,7 @@ bool buildConflictUpdatePlan(const InsertStmt& stmt, const TableSchema& table,
                              const std::string& currentDB,
                              std::vector<std::string>& targetColumns,
                              const std::string& targetTable,
-                             std::map<std::string, std::string>& updates,
+                             SqlRow& updates,
                              std::map<std::string, const Expr*>& expressionUpdates,
                              std::map<std::string, std::set<std::string>>& expressionSources,
                              std::set<std::string>& whereExcludedColumns) {
@@ -426,7 +439,7 @@ bool buildConflictUpdatePlan(const InsertStmt& stmt, const TableSchema& table,
             continue;
         }
 
-        std::string value;
+        SqlCell value;
         if (!evaluateValue(expr, currentDB, value)) return false;
         updates[column] = std::move(value);
     }
@@ -985,18 +998,36 @@ RowContext returningContext(const std::map<std::string, std::string>& source,
     return context;
 }
 
-RowContext updateContext(const std::map<std::string, std::string>& source,
+RowContext returningContext(const SqlRow& source,
+                            const TableSchema& table) {
+    RowContext context;
+    for (size_t i = 0; i < table.len; ++i) {
+        const Column& column = table.cols[i];
+        const auto it = source.find(column.dataName);
+        const bool isNull = it == source.end() || !it->second;
+        context.set(
+            column.dataName,
+            ExprValue(column.dataType,
+                      isNull ? std::string{} : *it->second, isNull));
+    }
+    return context;
+}
+
+RowContext updateContext(const SqlRow& source,
                          const TableSchema& table,
                          const std::string& targetTable) {
     RowContext context;
     for (size_t i = 0; i < table.len; ++i) {
         const Column& column = table.cols[i];
         const auto it = source.find(column.dataName);
-        const bool isNull = it == source.end() || it->second.empty();
-        const ExprValue value(column.dataType,
-                              isNull ? std::string{} : it->second, isNull);
+        const bool isNull = it == source.end() || !it->second;
+        const ExprValue value(
+            column.dataType,
+            isNull ? std::string{} : *it->second, isNull);
         context.set(column.dataName, value);
-        if (!targetTable.empty()) context.set(targetTable + "." + column.dataName, value);
+        if (!targetTable.empty()) {
+            context.set(targetTable + "." + column.dataName, value);
+        }
     }
     return context;
 }
@@ -1385,25 +1416,26 @@ bool evaluateStructuredExpression(
 }
 
 bool evaluateUpdateExpression(const Expr* expression,
-                              const std::map<std::string, std::string>& source,
+                              const SqlRow& source,
                               const TableSchema& table,
                               const std::string& targetTable,
                               const std::string& currentDB,
-                              std::string& value) {
+                              SqlCell& value) {
     ExprEvaluator evaluator;
     evaluator.setCurrentDB(currentDB);
     const ExprValue result = evaluator.eval(
         expression, updateContext(source, table, targetTable));
     if (result.isUnknown() || result.typeName == "unknown") return false;
     if (result.isNull) {
-        value.clear();
+        value = std::nullopt;
         return true;
     }
-    value = result.value;
+    std::string evaluated = result.value;
     if (result.typeName == "boolean") {
-        if (value == "t") value = "1";
-        else if (value == "f") value = "0";
+        if (evaluated == "t") evaluated = "1";
+        else if (evaluated == "f") evaluated = "0";
     }
+    value = std::move(evaluated);
     return true;
 }
 
@@ -1429,6 +1461,27 @@ bool evaluateReturningExpression(const Expr* expression,
     return true;
 }
 
+bool evaluateReturningExpression(const Expr* expression,
+                                 const SqlRow& source,
+                                 const TableSchema& table,
+                                 const std::string& currentDB,
+                                 std::string& value,
+                                 bool& isNull,
+                                 std::string& typeName) {
+    ExprEvaluator evaluator;
+    evaluator.setCurrentDB(currentDB);
+    const ExprValue result = evaluator.eval(
+        expression, returningContext(source, table));
+    if (!result.isNull &&
+        (result.isUnknown() || result.typeName == "unknown")) {
+        return false;
+    }
+    isNull = result.isNull;
+    value = isNull ? std::string{} : result.value;
+    typeName = result.typeName;
+    return true;
+}
+
 bool publishReturning(const std::vector<ReturningProjection>& projections,
                       const TableSchema& table,
                       const std::string& currentDB,
@@ -1437,6 +1490,8 @@ bool publishReturning(const std::vector<ReturningProjection>& projections,
     g_lastDmlResult.available = true;
     g_lastDmlResult.columns.clear();
     g_lastDmlResult.columnTypes.clear();
+    g_lastDmlResult.rows.clear();
+    g_lastDmlResult.nulls.clear();
     for (const auto& projection : projections) {
         g_lastDmlResult.columns.push_back(projection.name);
         g_lastDmlResult.columnTypes.push_back(projection.typeName);
@@ -1445,9 +1500,12 @@ bool publishReturning(const std::vector<ReturningProjection>& projections,
         ? "INSERT 0 " + std::to_string(rows.size())
         : command + " " + std::to_string(rows.size());
     g_lastDmlResult.rows.reserve(rows.size());
+    g_lastDmlResult.nulls.reserve(rows.size());
     for (const auto& source : rows) {
         std::vector<std::string> row;
+        std::vector<bool> nulls;
         row.reserve(projections.size());
+        nulls.reserve(projections.size());
         for (size_t i = 0; i < projections.size(); ++i) {
             const auto& projection = projections[i];
             std::string value;
@@ -1467,8 +1525,66 @@ bool publishReturning(const std::vector<ReturningProjection>& projections,
                 }
             }
             row.push_back(std::move(value));
+            nulls.push_back(row.back() == "NULL");
         }
         g_lastDmlResult.rows.push_back(std::move(row));
+        g_lastDmlResult.nulls.push_back(std::move(nulls));
+    }
+    return true;
+}
+
+
+bool publishReturning(const std::vector<ReturningProjection>& projections,
+                      const TableSchema& table,
+                      const std::string& currentDB,
+                      const std::vector<SqlRow>& rows,
+                      const std::string& command) {
+    g_lastDmlResult.available = true;
+    g_lastDmlResult.columns.clear();
+    g_lastDmlResult.columnTypes.clear();
+    g_lastDmlResult.rows.clear();
+    g_lastDmlResult.nulls.clear();
+    for (const auto& projection : projections) {
+        g_lastDmlResult.columns.push_back(projection.name);
+        g_lastDmlResult.columnTypes.push_back(projection.typeName);
+    }
+    g_lastDmlResult.commandTag = command == "INSERT"
+        ? "INSERT 0 " + std::to_string(rows.size())
+        : command + " " + std::to_string(rows.size());
+    g_lastDmlResult.rows.reserve(rows.size());
+    g_lastDmlResult.nulls.reserve(rows.size());
+    for (const auto& source : rows) {
+        std::vector<std::string> row;
+        std::vector<bool> nulls;
+        row.reserve(projections.size());
+        nulls.reserve(projections.size());
+        for (size_t i = 0; i < projections.size(); ++i) {
+            const auto& projection = projections[i];
+            std::string value;
+            bool isNull = false;
+            if (projection.expression == nullptr) {
+                const auto it = source.find(projection.column);
+                isNull = it == source.end() || !it->second;
+                value = isNull ? "NULL" : *it->second;
+            } else {
+                std::string typeName;
+                if (!evaluateReturningExpression(
+                        projection.expression, source, table, currentDB,
+                        value, isNull, typeName)) {
+                    std::cout << "RETURNING expression evaluation failed"
+                              << std::endl;
+                    return false;
+                }
+                if (!typeName.empty() && typeName != "unknown") {
+                    g_lastDmlResult.columnTypes[i] = typeName;
+                }
+                if (isNull) value = "NULL";
+            }
+            row.push_back(std::move(value));
+            nulls.push_back(isNull);
+        }
+        g_lastDmlResult.rows.push_back(std::move(row));
+        g_lastDmlResult.nulls.push_back(std::move(nulls));
     }
     return true;
 }
@@ -1518,7 +1634,7 @@ bool referencesColumn(const Expr* expr) {
 }
 
 bool evaluateValue(const ExprPtr& expr, const std::string& currentDB,
-                   std::string& value) {
+                   SqlCell& value) {
     if (referencesColumn(expr.get())) return false;
     ExprEvaluator evaluator;
     evaluator.setCurrentDB(currentDB);
@@ -1526,70 +1642,71 @@ bool evaluateValue(const ExprPtr& expr, const std::string& currentDB,
     ExprValue result = evaluator.eval(expr, emptyContext);
     if (result.isUnknown()) return false;
     if (result.isNull) {
-        // Explicit NULL travels as the NULL marker string: buildRowBuffer
-        // maps it to the stored null bit, keeping empty string distinct.
-        value = "NULL";
+        value = std::nullopt;
         return true;
     }
-    value = result.value;
+    std::string evaluated = result.value;
     // ExprEvaluator uses PostgreSQL-style t/f internally, while the storage
     // validator accepts the canonical on-disk boolean spellings 1/0.
     if (result.typeName == "boolean") {
-        if (value == "t") value = "1";
-        else if (value == "f") value = "0";
+        if (evaluated == "t") evaluated = "1";
+        else if (evaluated == "f") evaluated = "0";
     }
+    value = std::move(evaluated);
     return true;
 }
 
-bool evaluateConflictExpression(const Expr* expr, const TableSchema& table,
-                                const std::map<std::string, std::string>& values,
-                                const std::string& currentDB,
-                                std::string& value,
-                                const std::map<std::string, std::string>* targetRow = nullptr,
-                                const std::string& targetTable = {}) {
+bool evaluateValue(const ExprPtr& expr, const std::string& currentDB,
+                   std::string& value) {
+    SqlCell typedValue;
+    if (!evaluateValue(expr, currentDB, typedValue)) return false;
+    value = typedValue ? *typedValue : "NULL";
+    return true;
+}
+
+bool evaluateConflictExpression(
+    const Expr* expr, const TableSchema& table, const SqlRow& values,
+    const std::string& currentDB, SqlCell& value,
+    const std::map<std::string, std::string>* targetRow = nullptr,
+    const std::string& targetTable = {}) {
     ExprEvaluator evaluator;
     evaluator.setCurrentDB(currentDB);
     RowContext context;
     for (size_t i = 0; i < table.len; ++i) {
         const std::string& column = table.cols[i].dataName;
-        const auto it = values.find(column);
-        std::string targetValue;
-        bool hasTargetValue = false;
+        const auto excluded = values.find(column);
         if (targetRow) {
-            const auto targetIt = targetRow->find(column);
-            if (targetIt != targetRow->end()) {
-                targetValue = targetIt->second;
-                hasTargetValue = true;
-            }
-        }
-        if (targetRow) {
-            context.set(column,
-                        ExprValue(table.cols[i].dataType,
-                                  targetValue,
-                                  !hasTargetValue || targetValue.empty()));
+            const auto target = targetRow->find(column);
+            const bool targetNull =
+                target == targetRow->end() || target->second.empty();
+            const ExprValue targetValue(
+                table.cols[i].dataType,
+                targetNull ? std::string{} : target->second, targetNull);
+            context.set(column, targetValue);
             if (!targetTable.empty()) {
-                context.set(targetTable + "." + column,
-                            ExprValue(table.cols[i].dataType,
-                                      targetValue,
-                                      !hasTargetValue || targetValue.empty()));
+                context.set(targetTable + "." + column, targetValue);
             }
         }
-        context.set("excluded." + column,
-                    ExprValue(table.cols[i].dataType,
-                              it == values.end() ? std::string{} : it->second,
-                              it == values.end() || it->second.empty()));
+        const bool excludedNull =
+            excluded == values.end() || !excluded->second;
+        context.set(
+            "excluded." + column,
+            ExprValue(table.cols[i].dataType,
+                      excludedNull ? std::string{} : *excluded->second,
+                      excludedNull));
     }
     const ExprValue result = evaluator.eval(expr, context);
     if (result.isUnknown()) return false;
     if (result.isNull) {
-        value.clear();
+        value = std::nullopt;
         return true;
     }
-    value = result.value;
+    std::string evaluated = result.value;
     if (result.typeName == "boolean") {
-        if (value == "t") value = "1";
-        else if (value == "f") value = "0";
+        if (evaluated == "t") evaluated = "1";
+        else if (evaluated == "f") evaluated = "0";
     }
+    value = std::move(evaluated);
     return true;
 }
 
@@ -1748,7 +1865,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
     const bool ignoreDuplicate = lower(stmt.conflictAction) == "do nothing";
     const bool conflictUpdate = lower(stmt.conflictAction) == "do update";
     std::vector<std::string> conflictTarget;
-    std::map<std::string, std::string> conflictUpdates;
+    SqlRow conflictUpdates;
     std::map<std::string, const Expr*> conflictExpressionUpdates;
     std::map<std::string, std::set<std::string>> conflictExpressionSources;
     std::set<std::string> conflictWhereExcludedColumns;
@@ -1905,7 +2022,8 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
     // expression is outside this executor's supported evaluator, the legacy
     // path must receive the untouched statement without a partially inserted
     // prefix.
-    std::vector<std::map<std::string, std::string>> pendingRows;
+    std::vector<SqlRow> pendingRows;
+    std::vector<SqlRow> sqlInsertedRows;
     pendingRows.reserve(stmt.values.size());
     for (const auto& row : stmt.values) {
         if (row.size() != columns.size()) {
@@ -1913,10 +2031,10 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
             return true;
         }
 
-        std::map<std::string, std::string> values;
+        SqlRow values;
         for (size_t i = 0; i < row.size(); ++i) {
             if (isDefaultValue(row[i])) continue;
-            std::string value;
+            SqlCell value;
             if (!evaluateValue(row[i], s.currentDB, value)) {
                 // Returning false lets the legacy path retain ownership of
                 // expression forms not yet supported by ExprEvaluator.
@@ -1972,9 +2090,9 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
     }
     int inserted = 0;
     for (const auto& values : pendingRows) {
-        const DBStatus status = g_engine.insert(
+        const DBStatus status = g_engine.insertRow(
             s.currentDB, resolvedTable, values,
-            stmt.returning.empty() ? nullptr : &insertedRows);
+            stmt.returning.empty() ? nullptr : &sqlInsertedRows);
         if (status == DBStatus::DUPLICATE_KEY) {
             if (ignoreDuplicate) {
                 if (conflictTarget.empty()) continue;
@@ -1983,11 +2101,12 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
                 bool targetValueUnavailable = false;
                 for (const auto& targetColumn : conflictTarget) {
                     const auto targetValue = values.find(targetColumn);
-                    if (targetValue == values.end() || targetValue->second.empty()) {
+                    if (targetValue == values.end() || !targetValue->second ||
+                        targetValue->second->empty()) {
                         targetValueUnavailable = true;
                         break;
                     }
-                    targetValues[targetColumn] = targetValue->second;
+                    targetValues[targetColumn] = *targetValue->second;
                 }
                 std::map<std::string, std::string> targetRow;
                 bool targetScanFailed = false;
@@ -2012,12 +2131,14 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
                 conditions.reserve(conflictTarget.size());
                 for (const auto& targetColumn : conflictTarget) {
                     const auto targetValue = values.find(targetColumn);
-                    if (targetValue == values.end() || targetValue->second.empty()) {
+                    if (targetValue == values.end() || !targetValue->second ||
+                        targetValue->second->empty()) {
                         std::cout << "ON CONFLICT target value is unavailable" << std::endl;
                         return true;
                     }
-                    targetValues[targetColumn] = targetValue->second;
-                    conditions.push_back("=" + targetColumn + " " + targetValue->second);
+                    targetValues[targetColumn] = *targetValue->second;
+                    conditions.push_back(
+                        "=" + targetColumn + " " + *targetValue->second);
                 }
                 if (stmt.conflictWhere) {
                     std::map<std::string, std::string> targetRow;
@@ -2032,23 +2153,23 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
                         std::cout << "ON CONFLICT target scan failed" << std::endl;
                         return true;
                     }
-                    std::string whereValue;
+                    SqlCell whereValue;
                     if (!evaluateConflictExpression(stmt.conflictWhere.get(), table,
                                                      values, s.currentDB, whereValue,
                                                      &targetRow, requestedTable)) {
                         std::cout << "ON CONFLICT WHERE evaluation failed" << std::endl;
                         return true;
                     }
-                    if (whereValue.empty() || whereValue == "0" ||
-                        lower(whereValue) == "false") {
+                    if (!whereValue || whereValue->empty() ||
+                        *whereValue == "0" || lower(*whereValue) == "false") {
                         // PostgreSQL treats a false/NULL conflict WHERE as
                         // "do not update" for this conflicting input row.
                         continue;
                     }
                 }
-                std::map<std::string, std::string> rowConflictUpdates = conflictUpdates;
+                SqlRow rowConflictUpdates = conflictUpdates;
                 for (const auto& [updateColumn, expression] : conflictExpressionUpdates) {
-                    std::string value;
+                    SqlCell value;
                     if (!evaluateConflictExpression(expression, table, values,
                                                     s.currentDB, value)) {
                         std::cout << "ON CONFLICT expression evaluation failed" << std::endl;
@@ -2056,8 +2177,8 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
                     }
                     rowConflictUpdates[updateColumn] = std::move(value);
                 }
-                std::vector<std::map<std::string, std::string>> updatedRows;
-                const DBStatus updateStatus = g_engine.update(
+                std::vector<SqlRow> updatedRows;
+                const DBStatus updateStatus = g_engine.updateRows(
                     s.currentDB, resolvedTable, rowConflictUpdates, conditions,
                     &updatedRows);
                 if (updateStatus != DBStatus::OK || updatedRows.size() != 1) {
@@ -2065,8 +2186,9 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
                     return true;
                 }
                 if (!stmt.returning.empty()) {
-                    insertedRows.insert(insertedRows.end(), updatedRows.begin(),
-                                        updatedRows.end());
+                    sqlInsertedRows.insert(sqlInsertedRows.end(),
+                                           updatedRows.begin(),
+                                           updatedRows.end());
                 }
                 ++inserted;
                 continue;
@@ -2084,7 +2206,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
     std::cout << inserted << " row(s) inserted" << std::endl;
     if (!stmt.returning.empty()) {
         if (!publishReturning(returningProjections, table, s.currentDB,
-                              insertedRows, "INSERT")) return true;
+                              sqlInsertedRows, "INSERT")) return true;
         printReturningRows(g_lastDmlResult);
     }
     if (inserted > 0) g_engine.analyzeTable(s.currentDB, resolvedTable);
@@ -2474,7 +2596,7 @@ bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
         return dot == std::string::npos ? requestedTable : requestedTable.substr(dot + 1);
     }();
     std::vector<std::string> columns;
-    std::map<std::string, std::string> updates;
+    SqlRow updates;
     std::map<std::string, const Expr*> expressionUpdates;
     for (const auto& [rawColumn, expr] : stmt.setClauses) {
         const std::string column = identifier(rawColumn);
@@ -2494,7 +2616,7 @@ bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
             expressionUpdates[column] = expr.get();
             continue;
         }
-        std::string value;
+        SqlCell value;
         if (!evaluateValue(expr, s.currentDB, value)) {
             fallback = true;
             return false;
@@ -2525,14 +2647,14 @@ bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
         fallback = true;
         return false;
     }
-    std::vector<std::map<std::string, std::string>> updatedRows;
-    StorageEngine::UpdateResolver updateResolver;
+    std::vector<SqlRow> updatedRows;
+    StorageEngine::SqlUpdateResolver updateResolver;
     if (!expressionUpdates.empty()) {
         updateResolver = [&, targetQualifier](
-                             const std::map<std::string, std::string>& oldValues,
-                             std::map<std::string, std::string>& effectiveUpdates) {
+                             const SqlRow& oldValues,
+                             SqlRow& effectiveUpdates) {
             for (const auto& [column, expression] : expressionUpdates) {
-                std::string value;
+                SqlCell value;
                 if (!evaluateUpdateExpression(expression, oldValues, table,
                                               targetQualifier, s.currentDB, value)) {
                     return false;
@@ -2542,7 +2664,7 @@ bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
             return true;
         };
     }
-    const DBStatus status = g_engine.update(
+    const DBStatus status = g_engine.updateRows(
         s.currentDB, resolvedTable, updates, conditions,
         stmt.returning.empty() ? nullptr : &updatedRows, updateResolver);
     if (status != DBStatus::OK) {
@@ -2923,12 +3045,13 @@ bool executeDeleteUsingJoin(const DeleteStmt& stmt, Session& s, bool& fallback) 
         fallback = true;
         return false;
     }
-    std::vector<std::map<std::string, std::string>> deletedRows;
-    const StorageEngine::DeleteMatcher deleteMatcher = [matchedTargets](
-        const std::map<std::string, std::string>& oldValues) {
-        return matchedTargets.find(rowValueKey(oldValues)) != matchedTargets.end();
+    std::vector<SqlRow> deletedRows;
+    const StorageEngine::SqlDeleteMatcher deleteMatcher = [matchedTargets](
+        const SqlRow& oldValues) {
+        return matchedTargets.find(rowValueKey(logicalValues(oldValues))) !=
+            matchedTargets.end();
     };
-    const DBStatus status = g_engine.remove(
+    const DBStatus status = g_engine.removeRows(
         s.currentDB, resolvedTable, {},
         stmt.returning.empty() ? nullptr : &deletedRows, deleteMatcher);
     if (status != DBStatus::OK) {
@@ -3048,12 +3171,13 @@ bool executeDeleteUsing(const DeleteStmt& stmt, Session& s, bool& fallback) {
         fallback = true;
         return false;
     }
-    std::vector<std::map<std::string, std::string>> deletedRows;
-    const StorageEngine::DeleteMatcher deleteMatcher = [matchedTargets](
-        const std::map<std::string, std::string>& oldValues) {
-        return matchedTargets.find(rowValueKey(oldValues)) != matchedTargets.end();
+    std::vector<SqlRow> deletedRows;
+    const StorageEngine::SqlDeleteMatcher deleteMatcher = [matchedTargets](
+        const SqlRow& oldValues) {
+        return matchedTargets.find(rowValueKey(logicalValues(oldValues))) !=
+            matchedTargets.end();
     };
-    const DBStatus status = g_engine.remove(
+    const DBStatus status = g_engine.removeRows(
         s.currentDB, resolvedTable, {},
         stmt.returning.empty() ? nullptr : &deletedRows, deleteMatcher);
     if (status != DBStatus::OK) {
@@ -3100,8 +3224,8 @@ bool executeDelete(const DeleteStmt& stmt, Session& s, bool& fallback) {
         fallback = true;
         return false;
     }
-    std::vector<std::map<std::string, std::string>> deletedRows;
-    const DBStatus status = g_engine.remove(
+    std::vector<SqlRow> deletedRows;
+    const DBStatus status = g_engine.removeRows(
         s.currentDB, resolvedTable, conditions,
         stmt.returning.empty() ? nullptr : &deletedRows);
     if (status != DBStatus::OK) {

@@ -446,13 +446,22 @@ bool PostgresProtocol::sendDataRow(const std::vector<std::string>& values) {
 
 bool PostgresProtocol::sendDataRow(const std::vector<std::string>& values,
                                    const std::vector<PgColumnDescription>& columns) {
+    return sendDataRow(values, columns, {});
+}
+
+bool PostgresProtocol::sendDataRow(
+    const std::vector<std::string>& values,
+    const std::vector<PgColumnDescription>& columns,
+    const std::vector<bool>& nulls) {
     if (values.size() > std::numeric_limits<uint16_t>::max()) return false;
     if (columns.size() != values.size()) return false;
+    if (!nulls.empty() && nulls.size() != values.size()) return false;
     std::vector<uint8_t> body;
     appendUInt16(body, static_cast<uint16_t>(values.size()));
     for (size_t i = 0; i < values.size(); ++i) {
         const auto& value = values[i];
-        if (value == "NULL") {
+        const bool isNull = nulls.empty() ? value == "NULL" : nulls[i];
+        if (isNull) {
             appendInt32(body, -1);
         } else {
             std::vector<uint8_t> encoded;

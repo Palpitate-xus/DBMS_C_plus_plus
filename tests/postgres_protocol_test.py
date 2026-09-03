@@ -611,6 +611,40 @@ def main():
             sock, "DELETE FROM dml_ast WHERE id = 12 RETURNING name")
         assert data_row_values(returning_empty_delete) == [
             [b""]], returning_empty_delete
+        returning_null_text = simple_query(
+            sock, "INSERT INTO dml_ast VALUES (13, 'NULL') "
+            "RETURNING name, name IS NULL")
+        assert data_row_values(returning_null_text) == [
+            [b"NULL", b"f"]], returning_null_text
+        returning_sql_null = simple_query(
+            sock, "INSERT INTO dml_ast VALUES (14, NULL) "
+            "RETURNING name, name IS NULL")
+        assert data_row_values(returning_sql_null) == [
+            [None, b"t"]], returning_sql_null
+        returning_null_text_update = simple_query(
+            sock, "UPDATE dml_ast SET name = upper('null') WHERE id = 14 "
+            "RETURNING name, name IS NULL")
+        assert data_row_values(returning_null_text_update) == [
+            [b"NULL", b"f"]], returning_null_text_update
+        returning_sql_null_update = simple_query(
+            sock, "UPDATE dml_ast SET name = NULL WHERE id = 13 "
+            "RETURNING name, name IS NULL")
+        assert data_row_values(returning_sql_null_update) == [
+            [None, b"t"]], returning_sql_null_update
+        selected_null_text = simple_query(
+            sock, "SELECT id FROM dml_ast WHERE name = 'NULL'")
+        assert data_row_values(selected_null_text) == [
+            [b"14"]], selected_null_text
+        returning_null_text_delete = simple_query(
+            sock, "DELETE FROM dml_ast WHERE id = 14 "
+            "RETURNING name, name IS NULL")
+        assert data_row_values(returning_null_text_delete) == [
+            [b"NULL", b"f"]], returning_null_text_delete
+        returning_sql_null_delete = simple_query(
+            sock, "DELETE FROM dml_ast WHERE id = 13 "
+            "RETURNING name, name IS NULL")
+        assert data_row_values(returning_sql_null_delete) == [
+            [None, b"t"]], returning_sql_null_delete
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "CREATE TABLE dml_copy (id INT, name TEXT)"))
         returning_select = simple_query(

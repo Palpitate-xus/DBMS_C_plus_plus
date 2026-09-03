@@ -247,6 +247,7 @@ struct QueryResult {
     std::vector<std::string> columnTypes;
     std::vector<PgColumnDescription> columnDescriptions;
     std::vector<std::vector<std::string>> rows;
+    std::vector<std::vector<bool>> nulls;
     std::string commandTag;
 };
 
@@ -1054,6 +1055,7 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
         result.columns = structuredDml.columns;
         result.columnTypes = structuredDml.columnTypes;
         result.rows = structuredDml.rows;
+        result.nulls = structuredDml.nulls;
         result.columnDescriptions = describeProtocolColumns(result, sql, session);
         result.commandTag = structuredDml.commandTag;
         dbms::recordQueryExecution(sql, elapsedMs, session.currentDB, true,
@@ -1410,10 +1412,13 @@ void sendQueryResult(PostgresProtocol& protocol, const QueryResult& result,
             for (const auto& name : result.columns) columns.push_back(PgColumnDescription{name});
         }
         protocol.sendRowDescription(columns);
-        for (const auto& row : result.rows) {
+        for (size_t rowIndex = 0; rowIndex < result.rows.size(); ++rowIndex) {
+            const auto& row = result.rows[rowIndex];
             std::vector<std::string> normalized = row;
             normalized.resize(result.columns.size());
-            protocol.sendDataRow(normalized);
+            const std::vector<bool> nulls = rowIndex < result.nulls.size()
+                ? result.nulls[rowIndex] : std::vector<bool>{};
+            protocol.sendDataRow(normalized, columns, nulls);
         }
     }
     protocol.sendCommandComplete(result.commandTag);
@@ -1907,10 +1912,15 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                                              : std::min(remaining, static_cast<size_t>(maxRows));
                 bool rowsSent = true;
                 for (size_t i = 0; i < batchSize; ++i) {
-                    const auto& row = result.rows[portalState.rowOffset + i];
+                    const size_t rowIndex = portalState.rowOffset + i;
+                    const auto& row = result.rows[rowIndex];
                     std::vector<std::string> normalized = row;
                     normalized.resize(columns.size());
-                    if (!protocol.sendDataRow(normalized, columns)) {
+                    const std::vector<bool> nulls =
+                        rowIndex < result.nulls.size()
+                            ? result.nulls[rowIndex]
+                            : std::vector<bool>{};
+                    if (!protocol.sendDataRow(normalized, columns, nulls)) {
                         protocol.sendErrorResponse("ERROR", "0A000", "binary result type is not supported");
                         extendedQueryError = true;
                         rowsSent = false;

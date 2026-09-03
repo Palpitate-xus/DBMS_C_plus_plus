@@ -59,6 +59,52 @@ std::string dbms::sqlstateForDBStatus(DBStatus res) {
     }
 }
 
+namespace {
+
+using SqlRow = dbms::StorageEngine::SqlRow;
+
+SqlRow sqlRowFromLegacy(
+    const std::map<std::string, std::string>& values) {
+    SqlRow result;
+    for (const auto& [column, value] : values) {
+        if (value == "NULL") result[column] = std::nullopt;
+        else result[column] = value;
+    }
+    return result;
+}
+
+std::map<std::string, std::string> legacyRowFromSql(
+    const SqlRow& values) {
+    std::map<std::string, std::string> result;
+    for (const auto& [column, value] : values) {
+        result[column] = value ? *value : "NULL";
+    }
+    return result;
+}
+
+void splitSqlRow(const SqlRow& source,
+                 std::map<std::string, std::string>& values,
+                 std::set<std::string>& nullColumns) {
+    values.clear();
+    nullColumns.clear();
+    for (const auto& [column, value] : source) {
+        values[column] = value.value_or(std::string{});
+        if (!value) nullColumns.insert(column);
+    }
+}
+
+SqlRow joinSqlRow(const std::map<std::string, std::string>& values,
+                  const std::set<std::string>& nullColumns) {
+    SqlRow result;
+    for (const auto& [column, value] : values) {
+        if (nullColumns.count(column) != 0) result[column] = std::nullopt;
+        else result[column] = value;
+    }
+    return result;
+}
+
+}  // namespace
+
 static std::string escapeString(const std::string& s) {
     std::string r;
     for (char c : s) {
@@ -559,7 +605,7 @@ static std::string formatPointCoordinate(double value) {
 
 static std::string canonicalColumnKeyValue(const Column& column,
                                            const std::string& value) {
-    if (value.empty() || value == "NULL") return {};
+    if (value.empty()) return {};
     if (column.dataType == "float") {
         float parsed = 0.0f;
         if (!parseFloatLiteral(value, parsed)) return value;
@@ -636,12 +682,16 @@ static bool normalizePointLiteral(const std::string& input, std::string& output,
 }
 
 static bool normalizePointColumns(const TableSchema& table,
-                                  std::map<std::string, std::string>& values) {
+                                  std::map<std::string, std::string>& values,
+                                  const std::set<std::string>* nullColumns = nullptr) {
     for (size_t i = 0; i < table.len; ++i) {
         const Column& column = table.cols[i];
         if (column.dataType != "point") continue;
         auto value = values.find(column.dataName);
-        if (value == values.end() || value->second.empty() || value->second == "NULL")
+        const bool isNull = value != values.end() &&
+            (nullColumns ? nullColumns->count(column.dataName) != 0
+                         : value->second == "NULL");
+        if (value == values.end() || value->second.empty() || isNull)
             continue;
         std::string canonical;
         if (!normalizePointLiteral(value->second, canonical)) return false;
@@ -652,12 +702,16 @@ static bool normalizePointColumns(const TableSchema& table,
 
 static bool variableColumnWidthsValid(
     const TableSchema& table,
-    const std::map<std::string, std::string>& values) {
+    const std::map<std::string, std::string>& values,
+    const std::set<std::string>* nullColumns = nullptr) {
     for (size_t i = 0; i < table.len; ++i) {
         const Column& column = table.cols[i];
         if (!column.isVariableLength) continue;
         const auto value = values.find(column.dataName);
-        if (value == values.end() || value->second == "NULL") continue;
+        const bool isNull = value != values.end() &&
+            (nullColumns ? nullColumns->count(column.dataName) != 0
+                         : value->second == "NULL");
+        if (value == values.end() || isNull) continue;
         const size_t maxLength = column.isArray ? 1024 : column.dsize;
         if (value->second.size() > maxLength) return false;
     }
@@ -743,6 +797,27 @@ static std::string evalExpressionSql(
     }
     if (ok) *ok = true;
     return res.isNull ? "" : res.value;
+}
+
+// Mutation callers need the evaluator's NULL bit as well as its text.  A
+// string result equal to "NULL" is ordinary data and must not be folded into
+// SQL NULL at this boundary.
+static bool evalExpressionSqlValue(
+    const std::string& exprSql,
+    const std::map<std::string, std::string>& row,
+    const std::map<std::string, std::string>& typeHints,
+    const std::string& currentDB,
+    std::string& value,
+    bool& isNull) {
+    value.clear();
+    isNull = false;
+    if (exprSql.empty()) return false;
+    const auto result = dbms::ExprHelper::evalString(
+        exprSql, row, typeHints, currentDB);
+    if (!result.ok) return false;
+    isNull = result.isNull;
+    if (!isNull) value = result.value;
+    return true;
 }
 
 static bool likeMatch(const std::string& text, const std::string& pattern, bool foldCase = false) {
@@ -2672,7 +2747,8 @@ std::string StorageEngine::getViewCheckOption(const std::string& dbname,
 // Forward declaration for validateViewCheckOption
 static std::string buildRowBuffer(const TableSchema& tbl,
                                   const std::map<std::string, std::string>& values,
-                                  uint64_t creatorTxnId);
+                                  uint64_t creatorTxnId,
+                                  const std::set<size_t>* explicitNullColumns = nullptr);
 
 // ========================================================================
 // PostgreSQL HeapTupleHeader row format
@@ -17160,11 +17236,19 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
 // ========================================================================
 static std::string buildRowBuffer(const TableSchema& tbl,
                                    const std::map<std::string, std::string>& values,
-                                   uint64_t creatorTxnId) {
+                                   uint64_t creatorTxnId,
+                                   const std::set<size_t>* explicitNullColumns) {
+    const auto columnIsNull = [&](size_t columnIndex) {
+        const auto value = values.find(tbl.cols[columnIndex].dataName);
+        if (value == values.end()) return true;
+        if (explicitNullColumns) {
+            return explicitNullColumns->count(columnIndex) != 0;
+        }
+        return value->second == "NULL";
+    };
     bool hasNull = false;
     for (size_t i = 0; i < tbl.len; ++i) {
-        auto it = values.find(tbl.cols[i].dataName);
-        if (it == values.end() || it->second == "NULL") {
+        if (columnIsNull(i)) {
             hasNull = true;
             break;
         }
@@ -17174,10 +17258,9 @@ static std::string buildRowBuffer(const TableSchema& tbl,
     if (hasNull) {
         auto* header = castHeapHeader(rowBuffer.data());
         for (size_t i = 0; i < tbl.len; ++i) {
-            auto it = values.find(tbl.cols[i].dataName);
             // An empty-string value is a real empty value (bit set); only the
-            // NULL marker (or an omitted column) leaves the bit clear = NULL.
-            if (it != values.end() && it->second != "NULL") {
+            // explicit NULL state (or an omitted column) leaves the bit clear.
+            if (!columnIsNull(i)) {
                 setNotNull(header, static_cast<int>(i));
             }
         }
@@ -17190,7 +17273,7 @@ static std::string buildRowBuffer(const TableSchema& tbl,
             const Column& col = tbl.cols[i];
             auto it = values.find(col.dataName);
             std::string val = (it != values.end()) ? it->second : "";
-            if (val == "NULL") val.clear();  // marker encodes as empty bytes
+            if (columnIsNull(i)) val.clear();
             if (col.dataType == "char" || col.dataType == "nchar" ||
                 col.dataType == "binary" || col.dataType == "uuid") {
                 std::memset(&rowBuffer[offset], 0, col.dsize);
@@ -17269,7 +17352,7 @@ static std::string buildRowBuffer(const TableSchema& tbl,
             const Column& col = tbl.cols[i];
             auto it = values.find(col.dataName);
             std::string val = (it != values.end()) ? it->second : "";
-            if (val == "NULL") val.clear();  // marker encodes as empty bytes
+            if (columnIsNull(i)) val.clear();
             if (col.isVariableLength) {
                 size_t maxLen = col.isArray ? 1024 : col.dsize;
                 if (val.size() > maxLen) val.resize(maxLen);
@@ -17552,6 +17635,25 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                                 const std::string& tablename,
                                 const std::map<std::string, std::string>& values,
                                 std::vector<std::map<std::string, std::string>>* insertedRows) {
+    std::vector<SqlRow> typedRows;
+    const DBStatus status = insertRow(
+        dbname, tablename, sqlRowFromLegacy(values),
+        insertedRows ? &typedRows : nullptr);
+    if (insertedRows) {
+        for (const auto& row : typedRows) {
+            insertedRows->push_back(legacyRowFromSql(row));
+        }
+    }
+    return status;
+}
+
+DBStatus StorageEngine::insertRow(const std::string& dbname,
+                                   const std::string& tablename,
+                                   const SqlRow& sqlValues,
+                                   std::vector<SqlRow>* insertedRows) {
+    std::map<std::string, std::string> values;
+    std::set<std::string> nullColumns;
+    splitSqlRow(sqlValues, values, nullColumns);
     // A transaction owns one database lock, read view, commit log and undo
     // stream. Writing another database with its transaction ID would leave
     // that database's heap/index changes outside both commit and rollback.
@@ -17568,7 +17670,8 @@ DBStatus StorageEngine::insert(const std::string& dbname,
     const size_t returnedRowStart = insertedRows ? insertedRows->size() : 0;
     if (!transactionContext().inTransaction) {
         const DBStatus status =
-            insertInternal(dbname, tablename, values, insertedRows);
+            insertInternal(dbname, tablename, values, nullColumns,
+                           insertedRows);
         if (status != DBStatus::OK && insertedRows) {
             insertedRows->resize(returnedRowStart);
         }
@@ -17587,7 +17690,7 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         savepoint(statementSavepoint) == DBStatus::OK;
 
     const DBStatus insertStatus =
-        insertInternal(dbname, tablename, values, insertedRows);
+        insertInternal(dbname, tablename, values, nullColumns, insertedRows);
     if (insertStatus != DBStatus::OK) {
         DBStatus rollbackStatus = DBStatus::OK;
         if (transactionContext().inTransaction && hasStatementSavepoint) {
@@ -17616,7 +17719,8 @@ DBStatus StorageEngine::insertInternal(
                                 const std::string& dbname,
                                 const std::string& tablename,
                                 const std::map<std::string, std::string>& values,
-                                std::vector<std::map<std::string, std::string>>* insertedRows) {
+                                const std::set<std::string>& nullColumns,
+                                std::vector<SqlRow>* insertedRows) {
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
         transactionContext().hasWrite = true;
     }
@@ -17657,6 +17761,7 @@ DBStatus StorageEngine::insertInternal(
 
     // Apply DEFAULT values
     std::map<std::string, std::string> actualValues = values;
+    std::set<std::string> actualNullColumns = nullColumns;
     auto typeHints = buildTypeHints(tbl);
 
     // Reject user-supplied values for GENERATED ALWAYS columns.
@@ -17676,13 +17781,18 @@ DBStatus StorageEngine::insertInternal(
         // NULL represented by an empty value.  Only an omitted column receives
         // its DEFAULT; this is required to distinguish DEFAULT from NULL.
         if (it == actualValues.end() && !col.defaultValue.empty()) {
-            bool ok = false;
-            std::string computed = evalExpressionSql(col.defaultValue, actualValues, typeHints, dbname, &ok);
-            if (ok) {
+            std::string computed;
+            bool computedNull = false;
+            if (evalExpressionSqlValue(col.defaultValue, actualValues,
+                                       typeHints, dbname, computed,
+                                       computedNull)) {
                 actualValues[col.dataName] = computed;
+                if (computedNull) actualNullColumns.insert(col.dataName);
+                else actualNullColumns.erase(col.dataName);
             } else {
                 // Fall back to raw string for simple literal defaults.
                 actualValues[col.dataName] = col.defaultValue;
+                actualNullColumns.erase(col.dataName);
             }
         }
     }
@@ -17695,13 +17805,14 @@ DBStatus StorageEngine::insertInternal(
         if (it != actualValues.end()) continue;
         int64_t nextVal = readNextSeq(dbname, tablename, col.dataName);
         actualValues[col.dataName] = std::to_string(nextVal);
+        actualNullColumns.erase(col.dataName);
         writeNextSeq(dbname, tablename, col.dataName, nextVal + 1);
     }
 
     // Canonicalize packed POINT values before uniqueness/index checks.  The
     // prior writer silently turned malformed input into (0,0), and its
     // default stream precision could make distinct coordinates share a key.
-    if (!normalizePointColumns(tbl, actualValues)) {
+    if (!normalizePointColumns(tbl, actualValues, &actualNullColumns)) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
@@ -17740,7 +17851,8 @@ DBStatus StorageEngine::insertInternal(
             const Column& col = tbl.cols[i];
             if (!col.isUnique) continue;
             const auto value = actualValues.find(col.dataName);
-            if (value == actualValues.end() || value->second == "NULL") {
+            if (value == actualValues.end() ||
+                actualNullColumns.count(col.dataName) != 0) {
                 continue;
             }
             const std::string candidateKey =
@@ -17826,7 +17938,8 @@ DBStatus StorageEngine::insertInternal(
                 const auto value = actualValues.find(
                     tbl.cols[columnIndex].dataName);
                 if (value == actualValues.end() ||
-                    value->second == "NULL") {
+                    actualNullColumns.count(
+                        tbl.cols[columnIndex].dataName) != 0) {
                     containsNull = true;
                     break;
                 }
@@ -17876,7 +17989,8 @@ DBStatus StorageEngine::insertInternal(
         const Column& col = tbl.cols[i];
         auto it = actualValues.find(col.dataName);
         const bool hasValue = it != actualValues.end();
-        const bool isNullMarker = hasValue && it->second == "NULL";
+        const bool isNullMarker = hasValue &&
+            actualNullColumns.count(col.dataName) != 0;
         std::string val = hasValue ? it->second : "";
         if (enforceNotNull && !col.isNull &&
             (!hasValue || isNullMarker)) {
@@ -18098,7 +18212,7 @@ DBStatus StorageEngine::insertInternal(
     if (inputValidation != DBStatus::OK) return inputValidation;
     // Width is measured on the canonical SQL value. In particular BIT
     // literals may enter as B'1010' but are stored as the bare bit string.
-    if (!variableColumnWidthsValid(tbl, actualValues)) {
+    if (!variableColumnWidthsValid(tbl, actualValues, &actualNullColumns)) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
@@ -18175,12 +18289,10 @@ DBStatus StorageEngine::insertInternal(
                         }
                     }
                     std::string val = rawVal;
-                    bool evaluated = false;
-                    std::string evaluatedVal = evalExpressionSql(rawVal, actualValues,
-                                                                  typeHints, dbname, &evaluated);
-                    if (evaluated) {
-                        val = evaluatedVal;
-                    }
+                    bool evaluatedNull = false;
+                    const bool evaluated = evalExpressionSqlValue(
+                        rawVal, actualValues, typeHints, dbname, val,
+                        evaluatedNull);
                     // Strip surrounding quotes
                     if (!evaluated && val.size() >= 2 &&
                         ((val.front() == '\'' && val.back() == '\'') ||
@@ -18190,6 +18302,11 @@ DBStatus StorageEngine::insertInternal(
                     for (size_t i = 0; i < tbl.len; ++i) {
                         if (tbl.cols[i].dataName == assignment.column) {
                             actualValues[assignment.column] = val;
+                            if (evaluated && evaluatedNull) {
+                                actualNullColumns.insert(assignment.column);
+                            } else {
+                                actualNullColumns.erase(assignment.column);
+                            }
                             break;
                         }
                     }
@@ -18206,14 +18323,17 @@ DBStatus StorageEngine::insertInternal(
     for (size_t i = 0; i < tbl.len; ++i) {
         const Column& col = tbl.cols[i];
         if (col.generatedExpr.empty() || col.generatedKind == 'v') continue;
-        bool ok = false;
-        const std::string computed = evalExpressionSql(
-            col.generatedExpr, actualValues, typeHints, dbname, &ok);
-        if (!ok) {
+        std::string computed;
+        bool computedNull = false;
+        if (!evalExpressionSqlValue(col.generatedExpr, actualValues,
+                                    typeHints, dbname, computed,
+                                    computedNull)) {
             lockManager_.unlock(tablename);
             return DBStatus::INVALID_VALUE;
         }
         actualValues[col.dataName] = computed;
+        if (computedNull) actualNullColumns.insert(col.dataName);
+        else actualNullColumns.erase(col.dataName);
     }
 
     const DBStatus finalValidation = validateRowValues(true);
@@ -18221,11 +18341,11 @@ DBStatus StorageEngine::insertInternal(
 
     // BEFORE triggers and generated expressions can replace POINT values
     // after the initial input pass; validate their final row image too.
-    if (!normalizePointColumns(tbl, actualValues)) {
+    if (!normalizePointColumns(tbl, actualValues, &actualNullColumns)) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
-    if (!variableColumnWidthsValid(tbl, actualValues)) {
+    if (!variableColumnWidthsValid(tbl, actualValues, &actualNullColumns)) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
@@ -18309,7 +18429,8 @@ DBStatus StorageEngine::insertInternal(
         bool hasNull = false;
         for (const auto& colName : fk.colNames) {
             auto it = actualValues.find(colName);
-            if (it == actualValues.end() || it->second.empty()) {
+            if (it == actualValues.end() ||
+                actualNullColumns.count(colName) != 0) {
                 hasNull = true;
                 break;
             }
@@ -18420,7 +18541,8 @@ DBStatus StorageEngine::insertInternal(
     std::string targetSubPartition;
     if (tbl.partitionType != TableSchema::PartitionType::None) {
         auto pit = actualValues.find(tbl.partitionKey);
-        if (pit != actualValues.end() && !pit->second.empty()) {
+        if (pit != actualValues.end() &&
+            actualNullColumns.count(tbl.partitionKey) == 0) {
             targetPartition = getPartitionName(tbl, pit->second);
         }
         if (targetPartition.empty()) {
@@ -18430,7 +18552,8 @@ DBStatus StorageEngine::insertInternal(
     }
     if (tbl.subPartitionType != TableSchema::PartitionType::None) {
         auto spit = actualValues.find(tbl.subPartitionKey);
-        if (spit != actualValues.end() && !spit->second.empty()) {
+        if (spit != actualValues.end() &&
+            actualNullColumns.count(tbl.subPartitionKey) == 0) {
             targetSubPartition = getSubPartitionName(tbl, spit->second);
         }
         if (targetSubPartition.empty()) {
@@ -18458,7 +18581,15 @@ DBStatus StorageEngine::insertInternal(
     }
     const uint64_t creatorTxnId = transactionContext().inTransaction
         ? transactionContext().currentTxnId : 0;
-    std::string rowBuffer = buildRowBuffer(tbl, storedValues, creatorTxnId);
+    std::set<size_t> physicalNullColumns;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (storedValues.find(tbl.cols[i].dataName) == storedValues.end() ||
+            actualNullColumns.count(tbl.cols[i].dataName) != 0) {
+            physicalNullColumns.insert(i);
+        }
+    }
+    std::string rowBuffer = buildRowBuffer(
+        tbl, storedValues, creatorTxnId, &physicalNullColumns);
     std::string strippedRow = stripRowHeader(
         rowBuffer, tbl.formatVersion, tbl.len);
     const auto insertedColumnIsNull = [&](size_t columnIndex) {
@@ -18684,7 +18815,10 @@ DBStatus StorageEngine::insertInternal(
     if (transactionContext().inTransaction && !deferredUniqueCols.empty()) {
         for (size_t ci : deferredUniqueCols) {
             auto vit = actualValues.find(tbl.cols[ci].dataName);
-            if (vit == actualValues.end() || vit->second == "NULL") continue;
+            if (vit == actualValues.end() ||
+                actualNullColumns.count(tbl.cols[ci].dataName) != 0) {
+                continue;
+            }
             std::string cname = tablename + "_" + tbl.cols[ci].dataName + "_key";
             for (size_t ui = 0; ui < tbl.uniqueConstraints.size(); ++ui) {
                 for (size_t uj = 0; uj < tbl.uniqueConstraints[ui].size(); ++uj) {
@@ -18969,10 +19103,10 @@ DBStatus StorageEngine::insertInternal(
     // generated columns have been applied, but before AFTER triggers run.
     // Capture the logical values here so callers do not need a second query.
     if (insertedRows) {
-        std::map<std::string, std::string> returnedValues;
+        SqlRow returnedValues;
         for (size_t i = 0; i < tbl.len; ++i) {
             if (insertedColumnIsNull(i)) {
-                returnedValues[tbl.cols[i].dataName] = "NULL";
+                returnedValues[tbl.cols[i].dataName] = std::nullopt;
             } else {
                 returnedValues[tbl.cols[i].dataName] =
                     extractColumnValue(strippedRow, tbl, i, dbname, true);
@@ -19677,6 +19811,29 @@ DBStatus StorageEngine::remove(
     const std::vector<std::string>& conditions,
     std::vector<std::map<std::string, std::string>>* deletedRows,
     const DeleteMatcher& deleteMatcher) {
+    SqlDeleteMatcher typedMatcher;
+    if (deleteMatcher) {
+        typedMatcher = [deleteMatcher](const SqlRow& row) {
+            return deleteMatcher(legacyRowFromSql(row));
+        };
+    }
+    std::vector<SqlRow> typedRows;
+    const DBStatus status = removeRows(
+        dbname, tablename, conditions,
+        deletedRows ? &typedRows : nullptr, typedMatcher);
+    if (deletedRows) {
+        for (const auto& row : typedRows) {
+            deletedRows->push_back(legacyRowFromSql(row));
+        }
+    }
+    return status;
+}
+
+DBStatus StorageEngine::removeRows(
+    const std::string& dbname, const std::string& tablename,
+    const std::vector<std::string>& conditions,
+    std::vector<SqlRow>* deletedRows,
+    const SqlDeleteMatcher& deleteMatcher) {
     if (transactionContext().inTransaction &&
         dbname != transactionContext().txnDB) {
         return DBStatus::INVALID_VALUE;
@@ -19687,10 +19844,10 @@ DBStatus StorageEngine::remove(
     // a later child failure cannot leave earlier cascades or SET NULL actions
     // applied on their own.
     const bool ownsTransaction = !transactionContext().inTransaction;
-    const std::vector<std::map<std::string, std::string>> originalDeletedRows =
+    const std::vector<SqlRow> originalDeletedRows =
         deletedRows
             ? *deletedRows
-            : std::vector<std::map<std::string, std::string>>{};
+            : std::vector<SqlRow>{};
     std::string statementSavepoint;
     bool hasStatementSavepoint = false;
     if (ownsTransaction) {
@@ -19749,8 +19906,8 @@ DBStatus StorageEngine::remove(
 DBStatus StorageEngine::removeInternal(
     const std::string& dbname, const std::string& tablename,
     const std::vector<std::string>& conditions,
-    std::vector<std::map<std::string, std::string>>* deletedRows,
-    const DeleteMatcher& deleteMatcher,
+    std::vector<SqlRow>* deletedRows,
+    const SqlDeleteMatcher& deleteMatcher,
     const std::set<int64_t>* exactRids,
     ReferentialActionContext& referentialContext) {
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
@@ -19823,10 +19980,15 @@ DBStatus StorageEngine::removeInternal(
                 lockManager_.unlock(tablename);
                 return DBStatus::IO_ERROR;
             }
-            std::map<std::string, std::string> rowValues;
+            SqlRow rowValues;
             for (size_t i = 0; i < tbl.len; ++i) {
-                rowValues[tbl.cols[i].dataName] =
-                    extractColumnValue(row, tbl, i, dbname, true);
+                if (tbl.cols[i].isNull &&
+                    isColumnNullByRid(dbname, tablename, rid, i)) {
+                    rowValues[tbl.cols[i].dataName] = std::nullopt;
+                } else {
+                    rowValues[tbl.cols[i].dataName] =
+                        extractColumnValue(row, tbl, i, dbname, true);
+                }
             }
             if (deleteMatcher(rowValues)) filteredIds.insert(rid);
         }
@@ -20038,8 +20200,7 @@ DBStatus StorageEngine::removeInternal(
                 // single child row may match multiple composite constraints;
                 // applying one logical UPDATE avoids duplicate trigger firings
                 // and, for MVCC, multiple successor versions of the same RID.
-                using ReferentialValues =
-                    std::map<std::string, std::string>;
+                using ReferentialValues = SqlRow;
                 std::map<std::string, std::set<int64_t>> cascadeRows;
                 std::map<std::string,
                          std::map<ReferentialValues, std::set<int64_t>>>
@@ -20053,7 +20214,7 @@ DBStatus StorageEngine::removeInternal(
                     for (const size_t columnIndex : sa.colIndices) {
                         if (columnIndex < child.len) {
                             nullValues[child.cols[columnIndex].dataName] =
-                                "NULL";
+                                std::nullopt;
                         }
                     }
                     if (!nullValues.empty()) {
@@ -20077,9 +20238,13 @@ DBStatus StorageEngine::removeInternal(
                 for (const auto& [tableName, groups] : setNullRows) {
                     for (const auto& [values, rows] : groups) {
                         if (rows.empty()) continue;
+                        std::map<std::string, std::string> rawValues;
+                        std::set<std::string> nullColumns;
+                        splitSqlRow(values, rawValues, nullColumns);
                         actionStatus = updateInternal(
-                            dbname, tableName, values, {}, nullptr,
-                            UpdateResolver{}, UpdateMatcher{}, &rows,
+                            dbname, tableName, rawValues, nullColumns, {},
+                            nullptr, SqlUpdateResolver{}, SqlUpdateMatcher{},
+                            &rows,
                             referentialContext);
                         if (actionStatus != DBStatus::OK) break;
                     }
@@ -20089,7 +20254,8 @@ DBStatus StorageEngine::removeInternal(
                     for (const auto& [tableName, rows] : cascadeRows) {
                         if (rows.empty()) continue;
                         actionStatus = removeInternal(
-                            dbname, tableName, {}, nullptr, DeleteMatcher{},
+                            dbname, tableName, {}, nullptr,
+                            SqlDeleteMatcher{},
                             &rows, referentialContext);
                         if (actionStatus != DBStatus::OK) break;
                     }
@@ -20217,15 +20383,19 @@ DBStatus StorageEngine::removeInternal(
              rowIndex < logicalRowsToDelete.size(); ++rowIndex) {
             const auto& row = logicalRowsToDelete[rowIndex];
             if (row.empty()) continue;
-            std::map<std::string, std::string> values;
+            SqlRow values;
             for (size_t i = 0; i < tbl.len; ++i) {
                 const bool physicallyNull =
                     tbl.cols[i].generatedKind != 'v' &&
                     rowIndex < nullColumnsToDelete.size() &&
                     i < nullColumnsToDelete[rowIndex].size() &&
                     nullColumnsToDelete[rowIndex][i];
-                values[tbl.cols[i].dataName] = physicallyNull
-                    ? "NULL" : deletedColumnValue(rowIndex, i, true);
+                if (physicallyNull) {
+                    values[tbl.cols[i].dataName] = std::nullopt;
+                } else {
+                    values[tbl.cols[i].dataName] =
+                        deletedColumnValue(rowIndex, i, true);
+                }
             }
             deletedRows->push_back(std::move(values));
         }
@@ -20734,6 +20904,45 @@ DBStatus StorageEngine::update(
     std::vector<std::map<std::string, std::string>>* updatedRows,
     const UpdateResolver& updateResolver,
     const UpdateMatcher& updateMatcher) {
+    SqlUpdateResolver typedResolver;
+    if (updateResolver) {
+        typedResolver = [updateResolver](const SqlRow& oldValues,
+                                         SqlRow& effectiveUpdates) {
+            const auto legacyOld = legacyRowFromSql(oldValues);
+            auto legacyUpdates = legacyRowFromSql(effectiveUpdates);
+            if (!updateResolver(legacyOld, legacyUpdates)) return false;
+            effectiveUpdates = sqlRowFromLegacy(legacyUpdates);
+            return true;
+        };
+    }
+    SqlUpdateMatcher typedMatcher;
+    if (updateMatcher) {
+        typedMatcher = [updateMatcher](const SqlRow& oldValues) {
+            return updateMatcher(legacyRowFromSql(oldValues));
+        };
+    }
+    std::vector<SqlRow> typedRows;
+    const DBStatus status = updateRows(
+        dbname, tablename, sqlRowFromLegacy(updates), conditions,
+        updatedRows ? &typedRows : nullptr, typedResolver, typedMatcher);
+    if (updatedRows) {
+        for (const auto& row : typedRows) {
+            updatedRows->push_back(legacyRowFromSql(row));
+        }
+    }
+    return status;
+}
+
+DBStatus StorageEngine::updateRows(
+    const std::string& dbname, const std::string& tablename,
+    const SqlRow& sqlUpdates,
+    const std::vector<std::string>& conditions,
+    std::vector<SqlRow>* updatedRows,
+    const SqlUpdateResolver& updateResolver,
+    const SqlUpdateMatcher& updateMatcher) {
+    std::map<std::string, std::string> updates;
+    std::set<std::string> updateNullColumns;
+    splitSqlRow(sqlUpdates, updates, updateNullColumns);
     if (transactionContext().inTransaction &&
         dbname != transactionContext().txnDB) {
         return DBStatus::INVALID_VALUE;
@@ -20763,8 +20972,9 @@ DBStatus StorageEngine::update(
 
     ReferentialActionContext referentialContext;
     const DBStatus updateStatus = updateInternal(
-        dbname, tablename, updates, conditions, updatedRows, updateResolver,
-        updateMatcher, nullptr, referentialContext);
+        dbname, tablename, updates, updateNullColumns, conditions,
+        updatedRows, updateResolver, updateMatcher, nullptr,
+        referentialContext);
     if (updateStatus != DBStatus::OK) {
         DBStatus rollbackStatus = DBStatus::OK;
         if (ownsTransaction && transactionContext().inTransaction) {
@@ -20804,10 +21014,11 @@ DBStatus StorageEngine::update(
 DBStatus StorageEngine::updateInternal(
     const std::string& dbname, const std::string& tablename,
     const std::map<std::string, std::string>& updates,
+    const std::set<std::string>& updateNullColumns,
     const std::vector<std::string>& conditions,
-    std::vector<std::map<std::string, std::string>>* updatedRows,
-    const UpdateResolver& updateResolver,
-    const UpdateMatcher& updateMatcher,
+    std::vector<SqlRow>* updatedRows,
+    const SqlUpdateResolver& updateResolver,
+    const SqlUpdateMatcher& updateMatcher,
     const std::set<int64_t>* exactRids,
     ReferentialActionContext& referentialContext) {
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
@@ -20826,10 +21037,14 @@ DBStatus StorageEngine::updateInternal(
     // Validate columns and pre-check values. The same preparation function is
     // reused for row-dependent UPDATE expressions so all update entry points
     // share storage-level type normalization and validation.
-    auto prepareColumnUpdates = [&](const std::map<std::string, std::string>& source,
+    auto prepareColumnUpdates = [&](
+                                     const std::map<std::string, std::string>& source,
+                                     const std::set<std::string>& sourceNullColumns,
                                      std::map<size_t, std::string>& prepared,
+                                     std::set<size_t>& preparedNullColumns,
                                      bool allowGeneratedColumns) -> DBStatus {
         prepared.clear();
+        preparedNullColumns.clear();
         for (const auto& kv : source) {
             bool found = false;
             for (size_t i = 0; i < tbl.len; ++i) {
@@ -20841,12 +21056,14 @@ DBStatus StorageEngine::updateInternal(
                         !col.generatedExpr.empty()) {
                         return DBStatus::INVALID_VALUE;
                     }
-                    const bool isNullMarker = kv.second == "NULL";
+                    const bool isNullMarker =
+                        sourceNullColumns.count(kv.first) != 0;
                     if (!col.isNull && isNullMarker) {
                         return DBStatus::NULL_NOT_ALLOWED;
                     }
                     if (isNullMarker) {
-                        prepared[i] = "NULL";
+                        prepared[i].clear();
+                        preparedNullColumns.insert(i);
                         break;
                     }
                     if (kv.second.empty() &&
@@ -21021,7 +21238,7 @@ DBStatus StorageEngine::updateInternal(
                         }
                     }
                     const size_t maxLength = col.isArray ? 1024 : col.dsize;
-                    if (col.isVariableLength && storeVal != "NULL" &&
+                    if (col.isVariableLength &&
                         storeVal.size() > maxLength) {
                         return DBStatus::INVALID_VALUE;
                     }
@@ -21035,8 +21252,10 @@ DBStatus StorageEngine::updateInternal(
     };
 
     std::map<size_t, std::string> colUpdates;  // column index -> new value
+    std::set<size_t> colUpdateNullColumns;
     if (const DBStatus status =
-            prepareColumnUpdates(updates, colUpdates, false);
+            prepareColumnUpdates(updates, updateNullColumns, colUpdates,
+                                 colUpdateNullColumns, false);
         status != DBStatus::OK) {
         return status;
     }
@@ -21094,10 +21313,15 @@ DBStatus StorageEngine::updateInternal(
                 lockManager_.unlock(tablename);
                 return DBStatus::IO_ERROR;
             }
-            std::map<std::string, std::string> rowValues;
+            SqlRow rowValues;
             for (size_t i = 0; i < tbl.len; ++i) {
-                rowValues[tbl.cols[i].dataName] =
-                    extractColumnValue(row, tbl, i, dbname, true);
+                if (tbl.cols[i].isNull &&
+                    isColumnNullByRid(dbname, tablename, rid, i)) {
+                    rowValues[tbl.cols[i].dataName] = std::nullopt;
+                } else {
+                    rowValues[tbl.cols[i].dataName] =
+                        extractColumnValue(row, tbl, i, dbname, true);
+                }
             }
             if (updateMatcher(rowValues)) filteredIds.insert(rid);
         }
@@ -21207,13 +21431,28 @@ DBStatus StorageEngine::updateInternal(
         // Rebuild row buffer with updates
         std::map<std::string, std::string> rowValues = oldLogicalValues;
         if (updateResolver) {
-            std::map<std::string, std::string> effectiveUpdates = updates;
-            if (!updateResolver(rowValues, effectiveUpdates)) {
+            SqlRow resolverValues;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (i < oldNullColumns.size() && oldNullColumns[i]) {
+                    resolverValues[tbl.cols[i].dataName] = std::nullopt;
+                } else {
+                    resolverValues[tbl.cols[i].dataName] =
+                        valueFromRowMap(rowValues, tbl.cols[i].dataName);
+                }
+            }
+            SqlRow effectiveSqlUpdates =
+                joinSqlRow(updates, updateNullColumns);
+            if (!updateResolver(resolverValues, effectiveSqlUpdates)) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }
+            std::map<std::string, std::string> effectiveUpdates;
+            std::set<std::string> effectiveNullColumns;
+            splitSqlRow(effectiveSqlUpdates, effectiveUpdates,
+                        effectiveNullColumns);
             const DBStatus prepareStatus = prepareColumnUpdates(
-                effectiveUpdates, colUpdates, false);
+                effectiveUpdates, effectiveNullColumns, colUpdates,
+                colUpdateNullColumns, false);
             if (prepareStatus != DBStatus::OK) {
                 lockManager_.unlock(tablename);
                 return prepareStatus;
@@ -21222,7 +21461,8 @@ DBStatus StorageEngine::updateInternal(
         std::set<size_t> assignedColumnIndices;
         std::set<size_t> assignedNullColumnIndices;
         for (const auto& kv : colUpdates) {
-            const bool assignsNull = kv.second == "NULL";
+            const bool assignsNull =
+                colUpdateNullColumns.count(kv.first) != 0;
             rowValues[tbl.cols[kv.first].dataName] =
                 assignsNull ? std::string() : kv.second;
             assignedColumnIndices.insert(kv.first);
@@ -21235,13 +21475,14 @@ DBStatus StorageEngine::updateInternal(
         for (size_t i = 0; i < tbl.len; ++i) {
             const Column& col = tbl.cols[i];
             if (col.generatedExpr.empty() || col.generatedKind == 'v') continue;
-            bool ok = false;
-            std::string computed = evalExpressionSql(col.generatedExpr, rowValues, updateTypeHints, dbname, &ok);
-            if (!ok) {
+            std::string computed;
+            bool assignsNull = false;
+            if (!evalExpressionSqlValue(
+                    col.generatedExpr, rowValues, updateTypeHints, dbname,
+                    computed, assignsNull)) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }
-            const bool assignsNull = computed == "NULL";
             rowValues[col.dataName] =
                 assignsNull ? std::string() : computed;
             assignedColumnIndices.insert(i);
@@ -21251,8 +21492,9 @@ DBStatus StorageEngine::updateInternal(
         // Validate ENUM columns in updates
         for (const auto& kv : colUpdates) {
             const Column& col = tbl.cols[kv.first];
-            if (!col.enumValues.empty() && !kv.second.empty() &&
-                kv.second != "NULL") {
+            if (!col.enumValues.empty() &&
+                colUpdateNullColumns.count(kv.first) == 0 &&
+                !kv.second.empty()) {
                 bool valid = false;
                 for (const auto& label : col.enumValues) {
                     if (label == kv.second) { valid = true; break; }
@@ -21362,13 +21604,10 @@ DBStatus StorageEngine::updateInternal(
                             }
                         }
                         std::string val = rawVal;
-                        bool evaluated = false;
-                        std::string evaluatedVal = evalExpressionSql(rawVal, rowValues,
-                                                                      updateTypeHints, dbname,
-                                                                      &evaluated);
-                        if (evaluated) {
-                            val = evaluatedVal;
-                        }
+                        bool evaluatedNull = false;
+                        const bool evaluated = evalExpressionSqlValue(
+                            rawVal, rowValues, updateTypeHints, dbname, val,
+                            evaluatedNull);
                         if (!evaluated && val.size() >= 2 &&
                             ((val.front() == '\'' && val.back() == '\'') ||
                              (val.front() == '"' && val.back() == '"'))) {
@@ -21376,7 +21615,8 @@ DBStatus StorageEngine::updateInternal(
                         }
                         for (size_t i = 0; i < tbl.len; ++i) {
                             if (tbl.cols[i].dataName == assignment.column) {
-                                const bool assignsNull = val == "NULL";
+                                const bool assignsNull =
+                                    evaluated && evaluatedNull;
                                 rowValues[assignment.column] =
                                     assignsNull ? std::string() : val;
                                 assignedColumnIndices.insert(i);
@@ -21396,13 +21636,14 @@ DBStatus StorageEngine::updateInternal(
             for (size_t i = 0; i < tbl.len; ++i) {
                 const Column& col = tbl.cols[i];
                 if (col.generatedExpr.empty() || col.generatedKind == 'v') continue;
-                bool ok = false;
-                std::string computed = evalExpressionSql(col.generatedExpr, rowValues, updateTypeHints2, dbname, &ok);
-                if (!ok) {
+                std::string computed;
+                bool assignsNull = false;
+                if (!evalExpressionSqlValue(
+                        col.generatedExpr, rowValues, updateTypeHints2,
+                        dbname, computed, assignsNull)) {
                     lockManager_.unlock(tablename);
                     return DBStatus::INVALID_VALUE;
                 }
-                const bool assignsNull = computed == "NULL";
                 rowValues[col.dataName] =
                     assignsNull ? std::string() : computed;
                 assignedColumnIndices.insert(i);
@@ -21417,6 +21658,7 @@ DBStatus StorageEngine::updateInternal(
         // row buffer, where malformed fixed-width values could otherwise be
         // truncated, converted to sentinels, or throw from stof/stod.
         std::map<std::string, std::string> finalAssignedValues;
+        std::set<std::string> finalAssignedNullColumns;
         for (const size_t columnIndex : assignedColumnIndices) {
             if (columnIndex >= tbl.len) {
                 lockManager_.unlock(tablename);
@@ -21424,49 +21666,48 @@ DBStatus StorageEngine::updateInternal(
             }
             const std::string& columnName = tbl.cols[columnIndex].dataName;
             finalAssignedValues[columnName] =
-                assignedNullColumnIndices.count(columnIndex) != 0
-                    ? "NULL"
-                    : valueFromRowMap(rowValues, columnName);
+                valueFromRowMap(rowValues, columnName);
+            if (assignedNullColumnIndices.count(columnIndex) != 0) {
+                finalAssignedNullColumns.insert(columnName);
+            }
         }
         std::map<size_t, std::string> finalPreparedValues;
+        std::set<size_t> finalPreparedNullColumns;
         const DBStatus finalPrepareStatus = prepareColumnUpdates(
-            finalAssignedValues, finalPreparedValues, true);
+            finalAssignedValues, finalAssignedNullColumns,
+            finalPreparedValues, finalPreparedNullColumns, true);
         if (finalPrepareStatus != DBStatus::OK) {
             lockManager_.unlock(tablename);
             return finalPrepareStatus;
         }
         for (const auto& [columnIndex, value] : finalPreparedValues) {
-            const bool assignsNull = value == "NULL";
+            const bool assignsNull =
+                finalPreparedNullColumns.count(columnIndex) != 0;
             rowValues[tbl.cols[columnIndex].dataName] =
                 assignsNull ? std::string() : value;
             if (assignsNull) assignedNullColumnIndices.insert(columnIndex);
             else assignedNullColumnIndices.erase(columnIndex);
         }
 
-        if (!normalizePointColumns(tbl, rowValues)) {
+        std::set<std::string> finalNullColumnNames;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (assignedNullColumnIndices.count(i) != 0 ||
+                (i < oldNullColumns.size() && oldNullColumns[i] &&
+                 assignedColumnIndices.count(i) == 0)) {
+                finalNullColumnNames.insert(tbl.cols[i].dataName);
+            }
+        }
+        if (!normalizePointColumns(
+                tbl, rowValues, &finalNullColumnNames)) {
             lockManager_.unlock(tablename);
             return DBStatus::INVALID_VALUE;
         }
-        if (!variableColumnWidthsValid(tbl, rowValues)) {
+        if (!variableColumnWidthsValid(
+                tbl, rowValues, &finalNullColumnNames)) {
             lockManager_.unlock(tablename);
             return DBStatus::INVALID_VALUE;
         }
 
-        // Logical evaluators continue to use an empty string for SQL NULL,
-        // but the physical tuple builder needs an explicit marker to retain
-        // the old null bitmap.  Only restore columns untouched by this UPDATE;
-        // assigning an empty string intentionally produces a non-NULL empty
-        // value for text-like columns.
-        const auto preserveUnchangedNulls = [&](auto values) {
-            for (size_t i = 0; i < tbl.len && i < oldNullColumns.size(); ++i) {
-                if (assignedNullColumnIndices.count(i) != 0 ||
-                    (oldNullColumns[i] &&
-                     assignedColumnIndices.count(i) == 0)) {
-                    values[tbl.cols[i].dataName] = "NULL";
-                }
-            }
-            return values;
-        };
         const auto newColumnIsNull = [&](size_t columnIndex) {
             return columnIndex < tbl.len &&
                 tbl.cols[columnIndex].generatedKind != 'v' &&
@@ -21523,8 +21764,12 @@ DBStatus StorageEngine::updateInternal(
         // constraint and foreign-key checks below must be able to fail
         // without leaving newly allocated external values behind.
         uint64_t updateTxnId = transactionContext().inTransaction ? transactionContext().currentTxnId : 0;
+        std::set<size_t> physicalNullColumns;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (newColumnIsNull(i)) physicalNullColumns.insert(i);
+        }
         std::string newRow = buildRowBuffer(
-            tbl, preserveUnchangedNulls(rowValues), updateTxnId);
+            tbl, rowValues, updateTxnId, &physicalNullColumns);
         std::string strippedNewRow = stripRowHeader(newRow, tbl.formatVersion, tbl.len);
 
         // Write back via PageAllocator
@@ -22024,7 +22269,7 @@ DBStatus StorageEngine::updateInternal(
                 return DBStatus::IO_ERROR;
             }
 
-            using ReferentialValues = std::map<std::string, std::string>;
+            using ReferentialValues = SqlRow;
             std::map<std::string,
                      std::map<int64_t, ReferentialValues>> rowUpdates;
             for (const auto& sa : updateSetNullActions) {
@@ -22032,7 +22277,7 @@ DBStatus StorageEngine::updateInternal(
                 auto& values = rowUpdates[sa.table][sa.rid];
                 for (const size_t columnIndex : sa.colIndices) {
                     if (columnIndex < child.len) {
-                        values[child.cols[columnIndex].dataName] = "NULL";
+                        values[child.cols[columnIndex].dataName] = std::nullopt;
                     }
                 }
             }
@@ -22060,9 +22305,12 @@ DBStatus StorageEngine::updateInternal(
             DBStatus actionStatus = DBStatus::OK;
             for (const auto& [tableName, groups] : groupedUpdates) {
                 for (const auto& [values, rows] : groups) {
+                    std::map<std::string, std::string> rawValues;
+                    std::set<std::string> nullColumns;
+                    splitSqlRow(values, rawValues, nullColumns);
                     actionStatus = updateInternal(
-                        dbname, tableName, values, {}, nullptr,
-                        UpdateResolver{}, UpdateMatcher{}, &rows,
+                        dbname, tableName, rawValues, nullColumns, {}, nullptr,
+                        SqlUpdateResolver{}, SqlUpdateMatcher{}, &rows,
                         referentialContext);
                     if (actionStatus != DBStatus::OK) break;
                 }
@@ -22113,8 +22361,7 @@ DBStatus StorageEngine::updateInternal(
             updateLogIndex = transactionContext().txnLog.size() - 1;
         }
         newRow = buildRowBuffer(
-            tbl, preserveUnchangedNulls(std::move(storedRowValues)),
-            updateTxnId);
+            tbl, storedRowValues, updateTxnId, &physicalNullColumns);
         strippedNewRow = stripRowHeader(newRow, tbl.formatVersion, tbl.len);
 
         int64_t actualRid = rid;
@@ -22743,10 +22990,10 @@ DBStatus StorageEngine::updateInternal(
         // row has been rebuilt and generated columns/BEFORE triggers applied,
         // without a second predicate query that could select a different row.
         if (updatedRows) {
-            std::map<std::string, std::string> values;
+            SqlRow values;
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (newColumnIsNull(i)) {
-                    values[tbl.cols[i].dataName] = "NULL";
+                    values[tbl.cols[i].dataName] = std::nullopt;
                 } else {
                     values[tbl.cols[i].dataName] =
                         extractColumnValue(
