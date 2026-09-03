@@ -318,17 +318,44 @@ static void test_comment_on() {
 
     Session s;
     setupSession(s, db);
+    s.pid = 515151;
     dbms::DdlExecutor ddl;
 
-    ddl.executeSql("CREATE TABLE cmt_tbl (id INT)", s);
-    bool err = ddl.executeSql("COMMENT ON TABLE cmt_tbl IS 'a test table'", s);
+    assert(!ddl.executeSql("CREATE TABLE cmt_tbl (id INT)", s));
+    bool err = ddl.executeSql(
+        "COMMENT ON TABLE cmt_tbl IS 'A Mixed-Case table'", s);
     assert(!err);
+    assert(g_engine.getTableComment(db, "cmt_tbl") == "A Mixed-Case table");
 
     err = ddl.executeSql("COMMENT ON COLUMN cmt_tbl.id IS 'primary key'", s);
     assert(!err);
+    assert(g_engine.getColumnComment(db, "cmt_tbl", "id") == "primary key");
+
+    assert(!ddl.executeSql("CREATE SCHEMA comment_schema", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE comment_schema.notes (id INT, body VARCHAR(20))", s));
+    assert(!ddl.executeSql(
+        "COMMENT ON TABLE comment_schema.notes IS 'schema table'", s));
+    assert(!ddl.executeSql(
+        "COMMENT ON COLUMN comment_schema.notes.body IS 'schema column'", s));
+    assert(g_engine.getTableComment(
+               db, "comment_schema__notes") == "schema table");
+    assert(g_engine.getColumnComment(
+               db, "comment_schema__notes", "body") == "schema column");
+
+    assert(!ddl.executeSql(
+        "CREATE TEMP TABLE session_notes (id INT, body VARCHAR(20))", s));
+    const std::string temporaryName = tempTablePrefix(s, "session_notes");
+    assert(!ddl.executeSql(
+        "COMMENT ON TABLE session_notes IS 'temporary table'", s));
+    assert(!ddl.executeSql(
+        "COMMENT ON COLUMN session_notes.body IS 'temporary column'", s));
+    assert(g_engine.getTableComment(db, temporaryName) == "temporary table");
+    assert(g_engine.getColumnComment(
+               db, temporaryName, "body") == "temporary column");
 
     cleanup(db);
-    std::cout << "[DDL] comment OK" << std::endl;
+    std::cout << "[DDL] comment namespace resolution OK" << std::endl;
 }
 
 static void test_alter_table_metadata_actions() {

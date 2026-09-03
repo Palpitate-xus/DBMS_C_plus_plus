@@ -4567,14 +4567,17 @@ bool DdlExecutor::executeComment(const CommentStmt* stmt, Session& s) {
 
     std::string objType = toLower(stmt->objectType);
     if (objType == "table") {
-        DBStatus res = g_engine.commentOnTable(s.currentDB, stmt->objectName, stmt->comment);
+        const std::string tableName =
+            resolveTableName(s, stmt->objectName);
+        DBStatus res = g_engine.commentOnTable(
+            s.currentDB, tableName, stmt->comment);
         if (res != DBStatus::OK) {
             std::cout << "COMMENT ON TABLE failed" << std::endl;
             return true;
         }
-        txn.recordUpdate(DdlObjectKind::Table, stmt->objectName);
+        txn.recordUpdate(DdlObjectKind::Table, tableName);
     } else if (objType == "column") {
-        std::string tname = stmt->objectName;
+        std::string tname = resolveTableName(s, stmt->objectName);
         std::string cname = stmt->columnName;
         if (tname.empty() || cname.empty()) {
             std::cout << "COMMENT ON COLUMN requires table.column" << std::endl;
