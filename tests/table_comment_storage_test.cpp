@@ -137,12 +137,104 @@ static void testIoFailures(StorageEngine& engine) {
     cleanupTestDb("table_comment_io");
 }
 
+static bool hasColumn(const TableSchema& table, const std::string& name) {
+    for (size_t i = 0; i < table.len; ++i) {
+        if (table.cols[i].dataName == name) return true;
+    }
+    return false;
+}
+
+static void testRenameAndDropLifecycle(StorageEngine& engine) {
+    const std::string database = testDbPath("table_comment_lifecycle");
+    cleanupTestDb("table_comment_lifecycle");
+    assert(engine.createDatabase(database) == DBStatus::OK);
+    assert(engine.createTable(database, makeTable("source")) == DBStatus::OK);
+    assert(engine.createTable(database, makeTable("unrelated")) ==
+           DBStatus::OK);
+    assert(engine.commentOnTable(database, "source", "live table") ==
+           DBStatus::OK);
+    assert(engine.commentOnColumn(database, "source", "body", "live column") ==
+           DBStatus::OK);
+    assert(engine.commentOnTable(database, "unrelated", "keep me") ==
+           DBStatus::OK);
+
+    // Simulate records left under a reusable destination name by an older
+    // engine version.  Rename must discard them before moving live metadata.
+    {
+        std::ofstream stale(fs::path(database) / ".comments",
+                            std::ios::binary | std::ios::app);
+        assert(stale);
+        stale << "T|renamed|stale table\n";
+        stale << "C|renamed|renamed_body|stale column\n";
+        assert(stale);
+    }
+
+    assert(engine.alterTableRenameColumn(
+               database, "source", "body", "renamed_body") == DBStatus::OK);
+    assert(engine.getColumnComment(database, "source", "body").empty());
+    assert(engine.getColumnComment(
+               database, "source", "renamed_body") == "live column");
+
+    assert(engine.alterTableRenameTable(database, "source", "renamed") ==
+           DBStatus::OK);
+    assert(engine.getTableComment(database, "source").empty());
+    assert(engine.getColumnComment(
+               database, "source", "renamed_body").empty());
+    assert(engine.getTableComment(database, "renamed") == "live table");
+    assert(engine.getColumnComment(
+               database, "renamed", "renamed_body") == "live column");
+    assert(engine.getTableComment(database, "unrelated") == "keep me");
+
+    assert(engine.dropTable(database, "renamed") == DBStatus::OK);
+    assert(engine.getTableComment(database, "renamed").empty());
+    assert(engine.getColumnComment(
+               database, "renamed", "renamed_body").empty());
+    assert(engine.getTableComment(database, "unrelated") == "keep me");
+
+    assert(engine.createTable(
+               database, makeTable("renamed", "renamed_body")) ==
+           DBStatus::OK);
+    assert(engine.getTableComment(database, "renamed").empty());
+    assert(engine.getColumnComment(
+               database, "renamed", "renamed_body").empty());
+
+    cleanupTestDb("table_comment_lifecycle");
+}
+
+static void testLifecycleMetadataFailures(StorageEngine& engine) {
+    const std::string database = testDbPath("table_comment_lifecycle_io");
+    cleanupTestDb("table_comment_lifecycle_io");
+    assert(engine.createDatabase(database) == DBStatus::OK);
+    assert(engine.createTable(database, makeTable("source")) == DBStatus::OK);
+    const fs::path comments = fs::path(database) / ".comments";
+    assert(fs::create_directory(comments));
+
+    assert(engine.alterTableRenameColumn(
+               database, "source", "body", "renamed_body") ==
+           DBStatus::IO_ERROR);
+    TableSchema table = engine.getTableSchema(database, "source");
+    assert(hasColumn(table, "body"));
+    assert(!hasColumn(table, "renamed_body"));
+
+    assert(engine.alterTableRenameTable(database, "source", "renamed") ==
+           DBStatus::IO_ERROR);
+    assert(engine.tableExists(database, "source"));
+    assert(!engine.tableExists(database, "renamed"));
+
+    assert(engine.dropTable(database, "source") == DBStatus::IO_ERROR);
+    assert(engine.tableExists(database, "source"));
+
+    cleanupTestDb("table_comment_lifecycle_io");
+}
+
 int main() {
     cleanupAllTestData();
     StorageEngine engine;
     testRoundTripAndValidation(engine);
     testLegacyRecords(engine);
     testIoFailures(engine);
+    testRenameAndDropLifecycle(engine);
+    testLifecycleMetadataFailures(engine);
     finalCleanupTestData();
     std::cout << "[TABLE COMMENT STORAGE] all passed\n";
     return 0;

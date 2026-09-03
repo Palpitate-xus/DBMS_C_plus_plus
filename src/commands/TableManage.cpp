@@ -12023,11 +12023,61 @@ static bool removeTableStatistics(const std::filesystem::path& path,
     return index_file::writeAtomically(path, retained.str());
 }
 
+static std::filesystem::path commentsPath(const std::string& dbname);
+static DBStatus readCommentRecords(const std::filesystem::path& path,
+                                   std::vector<std::string>& lines);
+static bool rewriteCommentsForTable(
+    std::vector<std::string>& lines, const std::string& oldName,
+    const std::optional<std::string>& newName);
+static bool rewriteCommentForColumn(std::vector<std::string>& lines,
+                                    const std::string& tablename,
+                                    const std::string& oldName,
+                                    const std::string& newName);
+
+class CommentRewriteGuard {
+public:
+    CommentRewriteGuard(std::filesystem::path path,
+                        std::vector<std::string> original,
+                        std::vector<std::string> rewritten,
+                        bool changed);
+    CommentRewriteGuard(const CommentRewriteGuard&) = delete;
+    CommentRewriteGuard& operator=(const CommentRewriteGuard&) = delete;
+    DBStatus publish();
+    void commit();
+    ~CommentRewriteGuard();
+
+private:
+    std::filesystem::path path_;
+    std::vector<std::string> original_;
+    std::vector<std::string> rewritten_;
+    bool changed_ = false;
+    bool rollbackNeeded_ = false;
+};
+
 DBStatus StorageEngine::dropTable(const std::string& dbname,
                                    const std::string& tablename) {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
+
+    std::vector<std::string> originalComments;
+    DBStatus commentStatus = readCommentRecords(
+        commentsPath(dbname), originalComments);
+    if (commentStatus != DBStatus::OK) {
+        lockManager_.unlock(tablename);
+        return commentStatus;
+    }
+    std::vector<std::string> filteredComments = originalComments;
+    const bool commentsChanged = rewriteCommentsForTable(
+        filteredComments, tablename, std::nullopt);
+    CommentRewriteGuard commentGuard(
+        commentsPath(dbname), std::move(originalComments),
+        std::move(filteredComments), commentsChanged);
+    commentStatus = commentGuard.publish();
+    if (commentStatus != DBStatus::OK) {
+        lockManager_.unlock(tablename);
+        return commentStatus;
+    }
 
     // Keep the schema readable until every physical path has been resolved;
     // custom tablespace paths are derived from the schema itself.
@@ -12192,6 +12242,10 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
         return DBStatus::IO_ERROR;
     }
 
+    // From this point onward DROP removes relation files irreversibly.  Keep
+    // the already-published comment cleanup even if a later filesystem call
+    // throws, otherwise a partially dropped/recreated name can inherit it.
+    commentGuard.commit();
     std::filesystem::remove(paramsPath(dbname, tablename));
     std::filesystem::remove(dataPath(dbname, tablename));
     std::filesystem::remove(indexPath(dbname, tablename));
@@ -12987,10 +13041,32 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
         }
     }
 
+    std::vector<std::string> originalComments;
+    DBStatus commentStatus = readCommentRecords(
+        commentsPath(dbname), originalComments);
+    if (commentStatus != DBStatus::OK) {
+        lockManager_.unlock(tablename);
+        return commentStatus;
+    }
+    std::vector<std::string> renamedComments = originalComments;
+    const bool commentsChanged = rewriteCommentForColumn(
+        renamedComments, tablename, oldName, newName);
+    CommentRewriteGuard commentGuard(
+        commentsPath(dbname), std::move(originalComments),
+        std::move(renamedComments), commentsChanged);
+    commentStatus = commentGuard.publish();
+    if (commentStatus != DBStatus::OK) {
+        lockManager_.unlock(tablename);
+        return commentStatus;
+    }
+
     // Update schema
     tbl.cols[colIdx].dataName = newName;
     writeSchemaFile(dbname, tablename, tbl);
     invalidateCatalogSchema(dbname, tablename);
+    // The schema now exposes the new column name.  Later index-sidecar work
+    // must not roll its comment back to a name that the table no longer has.
+    commentGuard.commit();
 
     auto dbDir = dbPath(dbname);
 
@@ -13220,6 +13296,26 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
         lockManager_.unlock(oldName);
         lockManager_.unlock(newName);
         return DBStatus::CORRUPTED_DATA;
+    }
+    std::vector<std::string> originalComments;
+    DBStatus commentStatus = readCommentRecords(
+        commentsPath(dbname), originalComments);
+    if (commentStatus != DBStatus::OK) {
+        lockManager_.unlock(oldName);
+        lockManager_.unlock(newName);
+        return commentStatus;
+    }
+    std::vector<std::string> renamedComments = originalComments;
+    const bool commentsChanged = rewriteCommentsForTable(
+        renamedComments, oldName, std::optional<std::string>(newName));
+    CommentRewriteGuard commentGuard(
+        commentsPath(dbname), std::move(originalComments),
+        std::move(renamedComments), commentsChanged);
+    commentStatus = commentGuard.publish();
+    if (commentStatus != DBStatus::OK) {
+        lockManager_.unlock(oldName);
+        lockManager_.unlock(newName);
+        return commentStatus;
     }
     std::error_code dirtyStateError;
     const bool renamedSpecializedIndexesWereDirty =
@@ -13629,6 +13725,9 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
     invalidateCatalogTableList(dbname);
     invalidateCatalogSchema(dbname, oldName);
     invalidateCatalogSchema(dbname, newName);
+    // The relation namespace has now switched to newName.  Any later metadata
+    // error must leave comments attached to the name that actually exists.
+    commentGuard.commit();
 
     // Update caches: remove old keys, keep new files on disk for lazy open
     std::string oldKey = dbname + "/" + oldName;
@@ -14720,6 +14819,169 @@ static DBStatus writeCommentRecords(const std::filesystem::path& path,
         if (!line.empty()) contents << line << '\n';
     }
     return persistMetadata(path, contents.str());
+}
+
+// Decode a record for one known table.  Supplying the table name lets the
+// legacy parser retain its historical prefix semantics even for unusual
+// quoted identifiers containing the old delimiter.
+static bool commentRecordForTable(const std::string& line,
+                                  const std::string& tablename,
+                                  bool& isColumn,
+                                  std::string& column,
+                                  std::string& comment) {
+    if (line.rfind("T2|", 0) == 0) {
+        const size_t tableEnd = line.find('|', 3);
+        if (tableEnd == std::string::npos ||
+            line.find('|', tableEnd + 1) != std::string::npos) {
+            return false;
+        }
+        std::string storedTable;
+        if (!decodeCommentField(line.substr(3, tableEnd - 3), storedTable) ||
+            storedTable != tablename ||
+            !decodeCommentField(line.substr(tableEnd + 1), comment)) {
+            return false;
+        }
+        isColumn = false;
+        column.clear();
+        return true;
+    }
+    if (line.rfind("C2|", 0) == 0) {
+        const size_t tableEnd = line.find('|', 3);
+        if (tableEnd == std::string::npos) return false;
+        const size_t columnEnd = line.find('|', tableEnd + 1);
+        if (columnEnd == std::string::npos ||
+            line.find('|', columnEnd + 1) != std::string::npos) {
+            return false;
+        }
+        std::string storedTable;
+        if (!decodeCommentField(line.substr(3, tableEnd - 3), storedTable) ||
+            storedTable != tablename ||
+            !decodeCommentField(
+                line.substr(tableEnd + 1, columnEnd - tableEnd - 1),
+                column) ||
+            !decodeCommentField(line.substr(columnEnd + 1), comment)) {
+            return false;
+        }
+        isColumn = true;
+        return true;
+    }
+
+    const std::string legacyTablePrefix = "T|" + tablename + "|";
+    if (line.rfind(legacyTablePrefix, 0) == 0) {
+        isColumn = false;
+        column.clear();
+        comment = line.substr(legacyTablePrefix.size());
+        return true;
+    }
+    const std::string legacyColumnPrefix = "C|" + tablename + "|";
+    if (line.rfind(legacyColumnPrefix, 0) != 0) return false;
+    const size_t columnEnd = line.find('|', legacyColumnPrefix.size());
+    if (columnEnd == std::string::npos) return false;
+    isColumn = true;
+    column = line.substr(
+        legacyColumnPrefix.size(), columnEnd - legacyColumnPrefix.size());
+    comment = line.substr(columnEnd + 1);
+    return true;
+}
+
+static bool rewriteCommentsForTable(
+    std::vector<std::string>& lines, const std::string& oldName,
+    const std::optional<std::string>& newName) {
+    std::optional<std::string> tableComment;
+    std::map<std::string, std::string> columnComments;
+    std::vector<std::string> retained;
+    retained.reserve(lines.size());
+    bool changed = false;
+
+    for (const auto& line : lines) {
+        bool isColumn = false;
+        std::string column;
+        std::string comment;
+        if (commentRecordForTable(
+                line, oldName, isColumn, column, comment)) {
+            changed = true;
+            if (newName) {
+                if (isColumn) columnComments.emplace(column, comment);
+                else if (!tableComment) tableComment = comment;
+            }
+            continue;
+        }
+        // A relation name may be reusable even though an older buggy DROP
+        // left metadata behind.  Remove destination records before moving
+        // the live source so stale comments can never take precedence.
+        if (newName && commentRecordForTable(
+                           line, *newName, isColumn, column, comment)) {
+            changed = true;
+            continue;
+        }
+        retained.push_back(line);
+    }
+
+    if (newName) {
+        if (tableComment) {
+            retained.push_back("T2|" + encodeCommentField(*newName) + "|" +
+                               encodeCommentField(*tableComment));
+        }
+        for (const auto& entry : columnComments) {
+            retained.push_back("C2|" + encodeCommentField(*newName) + "|" +
+                               encodeCommentField(entry.first) + "|" +
+                               encodeCommentField(entry.second));
+        }
+    }
+    lines = std::move(retained);
+    return changed;
+}
+
+static bool rewriteCommentForColumn(std::vector<std::string>& lines,
+                                    const std::string& tablename,
+                                    const std::string& oldName,
+                                    const std::string& newName) {
+    std::optional<std::string> movedComment;
+    std::vector<std::string> retained;
+    retained.reserve(lines.size());
+    bool changed = false;
+    for (const auto& line : lines) {
+        if (auto comment = columnCommentFromRecord(
+                line, tablename, oldName)) {
+            if (!movedComment) movedComment = std::move(*comment);
+            changed = true;
+            continue;
+        }
+        if (columnCommentFromRecord(line, tablename, newName)) {
+            changed = true;
+            continue;
+        }
+        retained.push_back(line);
+    }
+    if (movedComment) {
+        retained.push_back("C2|" + encodeCommentField(tablename) + "|" +
+                           encodeCommentField(newName) + "|" +
+                           encodeCommentField(*movedComment));
+    }
+    lines = std::move(retained);
+    return changed;
+}
+
+CommentRewriteGuard::CommentRewriteGuard(
+    std::filesystem::path path, std::vector<std::string> original,
+    std::vector<std::string> rewritten, bool changed)
+    : path_(std::move(path)), original_(std::move(original)),
+      rewritten_(std::move(rewritten)), changed_(changed) {}
+
+DBStatus CommentRewriteGuard::publish() {
+    if (!changed_) return DBStatus::OK;
+    rollbackNeeded_ = true;
+    return writeCommentRecords(path_, rewritten_);
+}
+
+void CommentRewriteGuard::commit() {
+    rollbackNeeded_ = false;
+}
+
+CommentRewriteGuard::~CommentRewriteGuard() {
+    if (rollbackNeeded_) {
+        (void)writeCommentRecords(path_, original_);
+    }
 }
 
 DBStatus StorageEngine::commentOnTable(const std::string& dbname,
