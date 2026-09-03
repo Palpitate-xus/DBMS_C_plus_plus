@@ -12209,6 +12209,192 @@ std::string StorageEngine::resolveToastValues(const std::string& dbname,
     return result;
 }
 
+namespace {
+
+struct ValidatedForeignKeyDefinition {
+    std::vector<size_t> localColumnIndices;
+    std::vector<size_t> referencedColumnIndices;
+    std::vector<std::string> referencedColumnNames;
+};
+
+bool collectPrimaryKeyColumns(const TableSchema& table,
+                              std::vector<size_t>& columns) {
+    columns = table.pkColIndices;
+    if (columns.empty()) {
+        for (size_t columnIndex = 0; columnIndex < table.len; ++columnIndex) {
+            if (table.cols[columnIndex].isPrimaryKey) {
+                columns.push_back(columnIndex);
+            }
+        }
+    }
+    std::set<size_t> distinct;
+    for (const size_t columnIndex : columns) {
+        if (columnIndex >= table.len || !distinct.insert(columnIndex).second) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool sameColumnSet(std::vector<size_t> left, std::vector<size_t> right) {
+    if (left.size() != right.size()) return false;
+    std::sort(left.begin(), left.end());
+    std::sort(right.begin(), right.end());
+    return left == right;
+}
+
+bool foreignKeyColumnTypesCompatible(const Column& local,
+                                     const Column& referenced) {
+    if (local.isArray != referenced.isArray) return false;
+    if (!local.domainName.empty() || !referenced.domainName.empty()) {
+        return !local.domainName.empty() &&
+               local.domainName == referenced.domainName;
+    }
+    if (!local.enumValues.empty() || !referenced.enumValues.empty()) {
+        return local.enumValues == referenced.enumValues;
+    }
+
+    const auto baseType = [](const Column& column) {
+        std::string type = column.dataType;
+        if (type.size() >= 2 &&
+            type.compare(type.size() - 2, 2, "[]") == 0) {
+            type.resize(type.size() - 2);
+        }
+        const std::string normalized =
+            TypeRegistry::instance().normalizeTypeName(type);
+        return normalized.empty() ? type : normalized;
+    };
+    const std::string localType = baseType(local);
+    const std::string referencedType = baseType(referenced);
+    if (localType == referencedType) return true;
+    if (local.isArray) return false;
+
+    const TypeEntry* localEntry =
+        TypeRegistry::instance().findType(localType);
+    const TypeEntry* referencedEntry =
+        TypeRegistry::instance().findType(referencedType);
+    if (!localEntry || !referencedEntry) return false;
+    if (localEntry->category != referencedEntry->category) return false;
+    return localEntry->category == TypeCategory::Numeric ||
+           localEntry->category == TypeCategory::String ||
+           localEntry->category == TypeCategory::Binary;
+}
+
+DBStatus validateForeignKeyDefinition(
+    const TableSchema& localTable, const TableSchema& referencedTable,
+    const std::vector<std::string>& localColumnNames,
+    const std::vector<std::string>& requestedReferencedColumnNames,
+    ValidatedForeignKeyDefinition& result, std::string* error = nullptr) {
+    const auto reject = [&](const std::string& message) {
+        if (error) *error = message;
+        return DBStatus::INVALID_VALUE;
+    };
+    if (localColumnNames.empty() || localColumnNames.size() > MAX_COLUMNS) {
+        return reject("foreign key requires at least one local column");
+    }
+
+    result = {};
+    std::set<size_t> distinctLocalColumns;
+    for (const auto& columnName : localColumnNames) {
+        size_t columnIndex = localTable.len;
+        for (size_t candidate = 0; candidate < localTable.len; ++candidate) {
+            if (localTable.cols[candidate].dataName == columnName) {
+                columnIndex = candidate;
+                break;
+            }
+        }
+        if (columnIndex >= localTable.len) {
+            return reject("foreign key local column does not exist: " +
+                          columnName);
+        }
+        if (!distinctLocalColumns.insert(columnIndex).second) {
+            return reject("foreign key local column appears more than once: " +
+                          columnName);
+        }
+        result.localColumnIndices.push_back(columnIndex);
+    }
+
+    std::vector<size_t> primaryColumns;
+    if (!collectPrimaryKeyColumns(referencedTable, primaryColumns)) {
+        return reject("referenced primary key metadata is invalid");
+    }
+    result.referencedColumnNames = requestedReferencedColumnNames;
+    if (result.referencedColumnNames.empty()) {
+        if (primaryColumns.empty() ||
+            primaryColumns.size() != localColumnNames.size()) {
+            return reject(
+                "foreign key column count does not match referenced primary key");
+        }
+        for (const size_t columnIndex : primaryColumns) {
+            result.referencedColumnNames.push_back(
+                referencedTable.cols[columnIndex].dataName);
+        }
+    }
+    if (result.referencedColumnNames.size() != localColumnNames.size()) {
+        return reject(
+            "foreign key column count does not match referenced key");
+    }
+
+    std::set<size_t> distinctReferencedColumns;
+    for (const auto& columnName : result.referencedColumnNames) {
+        size_t columnIndex = referencedTable.len;
+        for (size_t candidate = 0; candidate < referencedTable.len;
+             ++candidate) {
+            if (referencedTable.cols[candidate].dataName == columnName) {
+                columnIndex = candidate;
+                break;
+            }
+        }
+        if (columnIndex >= referencedTable.len) {
+            return reject("foreign key referenced column does not exist: " +
+                          columnName);
+        }
+        if (!distinctReferencedColumns.insert(columnIndex).second) {
+            return reject(
+                "foreign key referenced column appears more than once: " +
+                columnName);
+        }
+        result.referencedColumnIndices.push_back(columnIndex);
+    }
+
+    bool referencedKeyIsUnique =
+        !primaryColumns.empty() &&
+        sameColumnSet(result.referencedColumnIndices, primaryColumns);
+    if (!referencedKeyIsUnique &&
+        result.referencedColumnIndices.size() == 1) {
+        referencedKeyIsUnique = referencedTable
+            .cols[result.referencedColumnIndices.front()]
+            .isUnique;
+    }
+    for (const auto& uniqueColumns : referencedTable.uniqueConstraints) {
+        for (const size_t columnIndex : uniqueColumns) {
+            if (columnIndex >= referencedTable.len) {
+                return reject("referenced unique-key metadata is invalid");
+            }
+        }
+        if (sameColumnSet(result.referencedColumnIndices, uniqueColumns)) {
+            referencedKeyIsUnique = true;
+            break;
+        }
+    }
+    if (!referencedKeyIsUnique) {
+        return reject("foreign key target is not a primary or unique key");
+    }
+
+    for (size_t columnIndex = 0;
+         columnIndex < result.localColumnIndices.size(); ++columnIndex) {
+        if (!foreignKeyColumnTypesCompatible(
+                localTable.cols[result.localColumnIndices[columnIndex]],
+                referencedTable.cols[
+                    result.referencedColumnIndices[columnIndex]])) {
+            return reject("foreign key column types are incompatible");
+        }
+    }
+    return DBStatus::OK;
+}
+
+}  // namespace
+
 DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema& tbl, std::string* error) {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname)) {
@@ -12256,6 +12442,43 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
             if (error) *error = typeErr;
             return DBStatus::INVALID_ARGUMENT;
         }
+    }
+
+    // A malformed FK embedded in a CREATE TABLE schema used to be persisted
+    // without any of the checks performed by ALTER TABLE ADD CONSTRAINT.  Do
+    // all definition validation before creating the first relation file, and
+    // materialize an omitted referenced-column list as the parent's PK.
+    for (size_t foreignKeyIndex = 0;
+         foreignKeyIndex < tblWithVersion.fkLen; ++foreignKeyIndex) {
+        ForeignKey& foreignKey = tblWithVersion.fks[foreignKeyIndex];
+        if (foreignKey.refTable.empty()) {
+            if (error) *error = "foreign key referenced table is empty";
+            return DBStatus::INVALID_VALUE;
+        }
+
+        TableSchema storedReferencedTable;
+        const TableSchema* referencedTable = nullptr;
+        if (foreignKey.refTable == tblWithVersion.tablename) {
+            referencedTable = &tblWithVersion;
+        } else {
+            if (!tableExists(dbname, foreignKey.refTable)) {
+                if (error) {
+                    *error = "foreign key referenced table does not exist: " +
+                             foreignKey.refTable;
+                }
+                return DBStatus::TABLE_NOT_FOUND;
+            }
+            storedReferencedTable =
+                getTableSchema(dbname, foreignKey.refTable);
+            referencedTable = &storedReferencedTable;
+        }
+
+        ValidatedForeignKeyDefinition definition;
+        const DBStatus validationStatus = validateForeignKeyDefinition(
+            tblWithVersion, *referencedTable, foreignKey.colNames,
+            foreignKey.refCols, definition, error);
+        if (validationStatus != DBStatus::OK) return validationStatus;
+        foreignKey.refCols = std::move(definition.referencedColumnNames);
     }
 
     if (tblWithVersion.formatVersion != DATA_FILE_FORMAT_VERSION) {
@@ -15215,60 +15438,6 @@ DBStatus StorageEngine::alterTableAddFKConstraint(const std::string& dbname,
         return finish(DBStatus::INVALID_VALUE);
     }
 
-    std::vector<size_t> localColumnIndices;
-    std::vector<size_t> referencedColumnIndices;
-    std::vector<size_t> primaryColumns = referencedTable.pkColIndices;
-    if (primaryColumns.empty()) {
-        for (size_t i = 0; i < referencedTable.len; ++i) {
-            if (referencedTable.cols[i].isPrimaryKey) {
-                primaryColumns.push_back(i);
-            }
-        }
-    }
-    std::vector<std::string> effectiveRefCols = refCols;
-    if (effectiveRefCols.empty()) {
-        if (primaryColumns.size() != localCols.size()) {
-            return finish(DBStatus::INVALID_VALUE);
-        }
-        for (const size_t columnIndex : primaryColumns) {
-            if (columnIndex >= referencedTable.len) {
-                return finish(DBStatus::CORRUPTED_DATA);
-            }
-            effectiveRefCols.push_back(
-                referencedTable.cols[columnIndex].dataName);
-        }
-    }
-    std::set<size_t> distinctLocalColumns;
-    std::set<size_t> distinctReferencedColumns;
-    for (const auto& cname : localCols) {
-        size_t columnIndex = tbl.len;
-        for (size_t i = 0; i < tbl.len; ++i) {
-            if (tbl.cols[i].dataName == cname) {
-                columnIndex = i;
-                break;
-            }
-        }
-        if (columnIndex >= tbl.len ||
-            !distinctLocalColumns.insert(columnIndex).second) {
-            return finish(DBStatus::INVALID_VALUE);
-        }
-        localColumnIndices.push_back(columnIndex);
-    }
-    for (const auto& cname : effectiveRefCols) {
-        size_t columnIndex = referencedTable.len;
-        for (size_t i = 0; i < referencedTable.len; ++i) {
-            if (referencedTable.cols[i].dataName == cname) {
-                columnIndex = i;
-                break;
-            }
-        }
-        if (columnIndex >= referencedTable.len ||
-            !distinctReferencedColumns.insert(columnIndex).second) {
-            return finish(DBStatus::INVALID_VALUE);
-        }
-        referencedColumnIndices.push_back(columnIndex);
-    }
-
     // Check for duplicate constraint name
     for (size_t i = 0; i < tbl.fkLen; ++i) {
         if (tbl.fks[i].name == name) {
@@ -15276,28 +15445,15 @@ DBStatus StorageEngine::alterTableAddFKConstraint(const std::string& dbname,
         }
     }
 
-    const auto sameColumnSet = [](std::vector<size_t> left,
-                                  std::vector<size_t> right) {
-        if (left.size() != right.size()) return false;
-        std::sort(left.begin(), left.end());
-        std::sort(right.begin(), right.end());
-        return left == right;
-    };
-    bool referencedKeyIsUnique =
-        sameColumnSet(referencedColumnIndices, primaryColumns);
-    if (!referencedKeyIsUnique && referencedColumnIndices.size() == 1) {
-        referencedKeyIsUnique =
-            referencedTable.cols[referencedColumnIndices.front()].isUnique;
+    ValidatedForeignKeyDefinition definition;
+    const DBStatus validationStatus = validateForeignKeyDefinition(
+        tbl, referencedTable, localCols, refCols, definition);
+    if (validationStatus != DBStatus::OK) {
+        return finish(validationStatus);
     }
-    for (const auto& uniqueColumns : referencedTable.uniqueConstraints) {
-        if (sameColumnSet(referencedColumnIndices, uniqueColumns)) {
-            referencedKeyIsUnique = true;
-            break;
-        }
-    }
-    if (!referencedKeyIsUnique) {
-        return finish(DBStatus::INVALID_VALUE);
-    }
+    const auto& localColumnIndices = definition.localColumnIndices;
+    const auto& referencedColumnIndices =
+        definition.referencedColumnIndices;
 
     std::set<std::vector<std::string>> referencedKeys;
     const bool parentScanOk = forEachRow(
@@ -15353,7 +15509,7 @@ DBStatus StorageEngine::alterTableAddFKConstraint(const std::string& dbname,
     ForeignKey fk;
     fk.name = name;
     fk.colNames = localCols;
-    fk.refCols = effectiveRefCols;
+    fk.refCols = definition.referencedColumnNames;
     fk.refTable = refTable;
     fk.onDelete = onDelete.empty() ? "restrict" : onDelete;
     fk.onUpdate = onUpdate.empty() ? "restrict" : onUpdate;

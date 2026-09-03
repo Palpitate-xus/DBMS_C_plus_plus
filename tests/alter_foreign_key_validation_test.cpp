@@ -68,6 +68,8 @@ int main() {
 
     dbms::TableSchema invalidChild = keyedTable("invalid_child");
     invalidChild.append(dbms::makeIntColumn("parent_value", false, 4, false));
+    invalidChild.append(dbms::makeStringColumn(
+        "parent_text", false, 20, false));
     assert(g_engine.createTable(database, invalidChild) == dbms::DBStatus::OK);
     assert(g_engine.alterTableAddFKConstraint(
                database, "invalid_child", "missing_column_fk",
@@ -80,6 +82,10 @@ int main() {
     assert(g_engine.alterTableAddFKConstraint(
                database, "invalid_child", "mismatched_columns_fk",
                {"parent_value"}, "parent", {"id", "code"}) ==
+           dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.alterTableAddFKConstraint(
+               database, "invalid_child", "incompatible_type_fk",
+               {"parent_text"}, "parent", {"code"}) ==
            dbms::DBStatus::INVALID_VALUE);
     assert(g_engine.getTableSchema(database, "invalid_child").fkLen == 0);
 
