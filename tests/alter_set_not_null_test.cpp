@@ -72,6 +72,27 @@ static void test_set_not_null_rejected() {
     std::cout << "[SETNN] set-not-null rejection OK" << std::endl;
 }
 
+static void test_empty_string_is_not_null() {
+    std::string db = testDbPath("snn_empty_string");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE t (id INT, code VARCHAR(10))", s));
+
+    // An explicitly stored empty string is a value, not SQL NULL.
+    assert(g_engine.insert(db, "t", {{"id", "1"}, {"code", ""}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.alterTableSetNotNull(db, "t", "code") ==
+           dbms::DBStatus::OK);
+    assert(colNotNull(g_engine.getTableSchema(db, "t"), "code"));
+    assert(g_engine.insert(db, "t", {{"id", "2"}}) ==
+           dbms::DBStatus::NULL_NOT_ALLOWED);
+
+    cleanup(db);
+    std::cout << "[SETNN] empty string remains a non-NULL value OK" << std::endl;
+}
+
 static void test_drop_then_set() {
     std::string db = testDbPath("snn_cycle");
     cleanup(db);
@@ -97,6 +118,7 @@ int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_set_not_null_ok();
     test_set_not_null_rejected();
+    test_empty_string_is_not_null();
     test_drop_then_set();
     std::cout << "[SETNN] all passed" << std::endl;
     return 0;

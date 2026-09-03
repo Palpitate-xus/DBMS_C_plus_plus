@@ -14529,15 +14529,17 @@ DBStatus StorageEngine::alterTableSetNotNull(const std::string& dbname,
         return DBStatus::INVALID_VALUE;
     }
 
-    // Reject if any existing row has NULL in this column (PostgreSQL behavior).
-    // NULL detection uses the empty-string convention (reliable for
-    // variable-length / 8-byte columns; best-effort for narrow fixed ints).
+    // Reject if any existing row has SQL NULL in this column.  The logical
+    // value alone is insufficient here because an empty string is a valid,
+    // non-NULL value; consult the tuple's physical null bitmap by RID.
     bool hasNull = false;
-    if (!forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
-        if (hasNull) return;
-        std::string row(data, len);
-        if (extractColumnValue(row, tbl, colIdx).empty()) hasNull = true;
-    })) {
+    if (!forEachRow(
+            dbname, tablename,
+            [&](uint32_t pageId, uint16_t slotId, const char*, size_t) {
+                if (hasNull) return;
+                hasNull = isColumnNullByRid(
+                    dbname, tablename, encodeRid(pageId, slotId), colIdx);
+            })) {
         lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
     }
