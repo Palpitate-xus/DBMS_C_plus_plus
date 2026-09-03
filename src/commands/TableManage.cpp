@@ -14597,90 +14597,200 @@ static std::filesystem::path commentsPath(const std::string& dbname) {
     return std::filesystem::path(dbname) / ".comments";
 }
 
+// Version 2 comment records hex-encode every field.  The legacy line format
+// stored the comment verbatim, so a newline in a perfectly valid SQL string
+// could inject another metadata record.  Keep legacy records readable while
+// ensuring all newly written records remain one unambiguous physical line.
+static std::string encodeCommentField(const std::string& value) {
+    static constexpr char hex[] = "0123456789abcdef";
+    std::string encoded;
+    encoded.reserve(value.size() * 2);
+    for (unsigned char byte : value) {
+        encoded.push_back(hex[byte >> 4]);
+        encoded.push_back(hex[byte & 0x0f]);
+    }
+    return encoded;
+}
+
+static bool decodeCommentField(const std::string& encoded,
+                               std::string& value) {
+    if (encoded.size() % 2 != 0) return false;
+    auto nibble = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+
+    value.clear();
+    value.reserve(encoded.size() / 2);
+    for (size_t i = 0; i < encoded.size(); i += 2) {
+        const int high = nibble(encoded[i]);
+        const int low = nibble(encoded[i + 1]);
+        if (high < 0 || low < 0) {
+            value.clear();
+            return false;
+        }
+        value.push_back(static_cast<char>((high << 4) | low));
+    }
+    return true;
+}
+
+static std::optional<std::string> tableCommentFromRecord(
+    const std::string& line, const std::string& tablename) {
+    if (line.rfind("T2|", 0) == 0) {
+        const size_t separator = line.find('|', 3);
+        if (separator == std::string::npos ||
+            line.find('|', separator + 1) != std::string::npos) {
+            return std::nullopt;
+        }
+        std::string storedTable;
+        std::string comment;
+        if (!decodeCommentField(line.substr(3, separator - 3), storedTable) ||
+            storedTable != tablename ||
+            !decodeCommentField(line.substr(separator + 1), comment)) {
+            return std::nullopt;
+        }
+        return comment;
+    }
+
+    const std::string legacyPrefix = "T|" + tablename + "|";
+    if (line.rfind(legacyPrefix, 0) == 0) {
+        return line.substr(legacyPrefix.size());
+    }
+    return std::nullopt;
+}
+
+static std::optional<std::string> columnCommentFromRecord(
+    const std::string& line, const std::string& tablename,
+    const std::string& colname) {
+    if (line.rfind("C2|", 0) == 0) {
+        const size_t tableEnd = line.find('|', 3);
+        if (tableEnd == std::string::npos) return std::nullopt;
+        const size_t columnEnd = line.find('|', tableEnd + 1);
+        if (columnEnd == std::string::npos ||
+            line.find('|', columnEnd + 1) != std::string::npos) {
+            return std::nullopt;
+        }
+        std::string storedTable;
+        std::string storedColumn;
+        std::string comment;
+        if (!decodeCommentField(line.substr(3, tableEnd - 3), storedTable) ||
+            !decodeCommentField(
+                line.substr(tableEnd + 1, columnEnd - tableEnd - 1),
+                storedColumn) ||
+            storedTable != tablename || storedColumn != colname ||
+            !decodeCommentField(line.substr(columnEnd + 1), comment)) {
+            return std::nullopt;
+        }
+        return comment;
+    }
+
+    const std::string legacyPrefix =
+        "C|" + tablename + "|" + colname + "|";
+    if (line.rfind(legacyPrefix, 0) == 0) {
+        return line.substr(legacyPrefix.size());
+    }
+    return std::nullopt;
+}
+
+static DBStatus readCommentRecords(const std::filesystem::path& path,
+                                   std::vector<std::string>& lines) {
+    std::error_code error;
+    const bool exists = std::filesystem::exists(path, error);
+    if (error) return DBStatus::IO_ERROR;
+    if (!exists) return DBStatus::OK;
+    if (!std::filesystem::is_regular_file(path, error) || error) {
+        return DBStatus::IO_ERROR;
+    }
+
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return DBStatus::IO_ERROR;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty()) lines.push_back(line);
+    }
+    return in.bad() ? DBStatus::IO_ERROR : DBStatus::OK;
+}
+
+static DBStatus writeCommentRecords(const std::filesystem::path& path,
+                                    const std::vector<std::string>& lines) {
+    std::ostringstream contents;
+    for (const auto& line : lines) {
+        if (!line.empty()) contents << line << '\n';
+    }
+    return persistMetadata(path, contents.str());
+}
+
 DBStatus StorageEngine::commentOnTable(const std::string& dbname,
                                         const std::string& tablename,
                                         const std::string& comment) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
-    auto path = commentsPath(dbname);
+    const auto path = commentsPath(dbname);
     std::vector<std::string> lines;
-    {
-        std::ifstream in(path);
-        std::string line;
-        while (std::getline(in, line)) {
-            if (!line.empty()) lines.push_back(line);
-        }
+    DBStatus status = readCommentRecords(path, lines);
+    if (status != DBStatus::OK) return status;
+
+    lines.erase(std::remove_if(lines.begin(), lines.end(),
+                               [&](const std::string& line) {
+                                   return tableCommentFromRecord(
+                                              line, tablename).has_value();
+                               }),
+                lines.end());
+    if (!comment.empty()) {
+        lines.push_back("T2|" + encodeCommentField(tablename) + "|" +
+                        encodeCommentField(comment));
     }
-    bool updated = false;
-    std::string prefix = "T|" + tablename + "|";
-    for (auto& line : lines) {
-        if (line.substr(0, prefix.size()) == prefix) {
-            if (comment.empty()) {
-                line.clear();
-            } else {
-                line = prefix + comment;
-            }
-            updated = true;
-            break;
-        }
-    }
-    if (!updated && !comment.empty()) {
-        lines.push_back(prefix + comment);
-    }
-    std::ofstream out(path, std::ios::trunc);
-    for (const auto& line : lines) {
-        if (!line.empty()) out << line << '\n';
-    }
-    return DBStatus::OK;
+    return writeCommentRecords(path, lines);
 }
 
 DBStatus StorageEngine::commentOnColumn(const std::string& dbname,
                                          const std::string& tablename,
                                          const std::string& colname,
                                          const std::string& comment) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
-    auto path = commentsPath(dbname);
-    std::vector<std::string> lines;
-    {
-        std::ifstream in(path);
-        std::string line;
-        while (std::getline(in, line)) {
-            if (!line.empty()) lines.push_back(line);
-        }
-    }
-    bool updated = false;
-    std::string prefix = "C|" + tablename + "|" + colname + "|";
-    for (auto& line : lines) {
-        if (line.substr(0, prefix.size()) == prefix) {
-            if (comment.empty()) {
-                line.clear();
-            } else {
-                line = prefix + comment;
-            }
-            updated = true;
+    const TableSchema table = getTableSchema(dbname, tablename);
+    bool columnExists = false;
+    for (size_t i = 0; i < table.len; ++i) {
+        if (table.cols[i].dataName == colname) {
+            columnExists = true;
             break;
         }
     }
-    if (!updated && !comment.empty()) {
-        lines.push_back(prefix + comment);
+    if (!columnExists) return DBStatus::INVALID_VALUE;
+
+    const auto path = commentsPath(dbname);
+    std::vector<std::string> lines;
+    DBStatus status = readCommentRecords(path, lines);
+    if (status != DBStatus::OK) return status;
+
+    lines.erase(std::remove_if(lines.begin(), lines.end(),
+                               [&](const std::string& line) {
+                                   return columnCommentFromRecord(
+                                              line, tablename,
+                                              colname).has_value();
+                               }),
+                lines.end());
+    if (!comment.empty()) {
+        lines.push_back("C2|" + encodeCommentField(tablename) + "|" +
+                        encodeCommentField(colname) + "|" +
+                        encodeCommentField(comment));
     }
-    std::ofstream out(path, std::ios::trunc);
-    for (const auto& line : lines) {
-        if (!line.empty()) out << line << '\n';
-    }
-    return DBStatus::OK;
+    return writeCommentRecords(path, lines);
 }
 
 std::string StorageEngine::getTableComment(const std::string& dbname,
                                             const std::string& tablename) const {
-    auto path = commentsPath(dbname);
-    std::ifstream in(path);
-    if (!in) return "";
-    std::string prefix = "T|" + tablename + "|";
-    std::string line;
-    while (std::getline(in, line)) {
-        if (line.substr(0, prefix.size()) == prefix) {
-            return line.substr(prefix.size());
-        }
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    std::vector<std::string> lines;
+    if (readCommentRecords(commentsPath(dbname), lines) != DBStatus::OK) {
+        return "";
+    }
+    for (const auto& line : lines) {
+        auto stored = tableCommentFromRecord(line, tablename);
+        if (stored) return *stored;
     }
     return "";
 }
@@ -14688,15 +14798,14 @@ std::string StorageEngine::getTableComment(const std::string& dbname,
 std::string StorageEngine::getColumnComment(const std::string& dbname,
                                              const std::string& tablename,
                                              const std::string& colname) const {
-    auto path = commentsPath(dbname);
-    std::ifstream in(path);
-    if (!in) return "";
-    std::string prefix = "C|" + tablename + "|" + colname + "|";
-    std::string line;
-    while (std::getline(in, line)) {
-        if (line.substr(0, prefix.size()) == prefix) {
-            return line.substr(prefix.size());
-        }
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    std::vector<std::string> lines;
+    if (readCommentRecords(commentsPath(dbname), lines) != DBStatus::OK) {
+        return "";
+    }
+    for (const auto& line : lines) {
+        auto stored = columnCommentFromRecord(line, tablename, colname);
+        if (stored) return *stored;
     }
     return "";
 }
