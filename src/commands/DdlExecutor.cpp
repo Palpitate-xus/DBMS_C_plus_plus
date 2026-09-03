@@ -78,6 +78,9 @@ bool tableConstraintExists(const std::string& dbname,
     for (size_t i = 0; i < table.len; ++i) {
         if (table.cols[i].checkConstraintName == constraintName) return true;
     }
+    for (const auto& check : table.additionalCheckConstraints) {
+        if (check.name == constraintName) return true;
+    }
     for (const auto& name : table.uniqueConstraintNames) {
         if (name == constraintName) return true;
     }
@@ -96,6 +99,9 @@ bool checkConstraintExists(const std::string& dbname,
     const auto table = g_engine.getTableSchema(dbname, tableName);
     for (size_t i = 0; i < table.len; ++i) {
         if (table.cols[i].checkConstraintName == constraintName) return true;
+    }
+    for (const auto& check : table.additionalCheckConstraints) {
+        if (check.name == constraintName) return true;
     }
     return false;
 }
@@ -1006,6 +1012,12 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     for (size_t i = 0; i < table.len && !nameExists; ++i) {
                         nameExists = table.cols[i].checkConstraintName == constraintName;
                     }
+                    for (const auto& check : table.additionalCheckConstraints) {
+                        if (check.name == constraintName) {
+                            nameExists = true;
+                            break;
+                        }
+                    }
                     for (const auto& name : table.uniqueConstraintNames) {
                         if (name == constraintName) { nameExists = true; break; }
                     }
@@ -1057,6 +1069,12 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     return true;
                 }
                 if (!alterStatusOk(status, "Constraint")) return true;
+                if (type == "check") {
+                    status = g_engine.alterTableSetConstraintDeferrability(
+                        s.currentDB, tableName, constraintName,
+                        tc.deferrable, tc.initiallyDeferred);
+                    if (!alterStatusOk(status, "Constraint")) return true;
+                }
                 TableConstraint metadata;
                 metadata.name = constraintName;
                 metadata.type = tc.type;
@@ -2571,6 +2589,12 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             tbl.append(c);
             if (inclIndexes && c.isPrimaryKey) tbl.pkColIndices.push_back(tbl.len - 1);
         }
+        if (inclConstraints) {
+            tbl.additionalCheckConstraints.insert(
+                tbl.additionalCheckConstraints.end(),
+                srcSchema.additionalCheckConstraints.begin(),
+                srcSchema.additionalCheckConstraints.end());
+        }
     }
 
     // CREATE TABLE ... INHERITS (parent, ...) — prepend inherited columns
@@ -2612,9 +2636,17 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                 c.isPrimaryKey = false;
                 merged.append(c);
             }
+            merged.additionalCheckConstraints.insert(
+                merged.additionalCheckConstraints.end(),
+                parentSchema.additionalCheckConstraints.begin(),
+                parentSchema.additionalCheckConstraints.end());
         }
         for (size_t i = 0; i < tbl.len; ++i) merged.append(tbl.cols[i]);
         for (size_t i = 0; i < tbl.fkLen; ++i) merged.appendFK(tbl.fks[i]);
+        merged.additionalCheckConstraints.insert(
+            merged.additionalCheckConstraints.end(),
+            tbl.additionalCheckConstraints.begin(),
+            tbl.additionalCheckConstraints.end());
         tbl = merged;
     }
 
@@ -2626,7 +2658,18 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             std::cout << "Invalid column type: " << typeError << std::endl;
             return true;
         }
+        const size_t previousColumnCount = tbl.len;
         tbl.append(column);
+        if (tbl.len == previousColumnCount) continue;
+        for (size_t checkIndex = 1; checkIndex < cd.checkExprs.size();
+             ++checkIndex) {
+            CheckConstraint check;
+            if (checkIndex < cd.checkNames.size()) {
+                check.name = cd.checkNames[checkIndex];
+            }
+            check.expression = cd.checkExprs[checkIndex]->toString();
+            tbl.additionalCheckConstraints.push_back(std::move(check));
+        }
     }
 
     // CREATE TABLE name OF composite_type — derive columns from the type's fields.
@@ -2756,13 +2799,24 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         } else if (t == "foreign key") {
             tbl.appendFK(tableConstraintToForeignKey(tc));
         } else if (t == "check") {
-            if (tbl.len > 0) {
-                if (tbl.cols[0].checkExpr.empty()) {
-                    tbl.cols[0].checkExpr = tc.checkExpr ? tc.checkExpr->toString() : "";
-                    tbl.cols[0].checkConstraintName = tc.name;
-                    tbl.cols[0].deferrable = tc.deferrable;
-                    tbl.cols[0].initiallyDeferred = tc.initiallyDeferred;
-                }
+            if (tbl.len == 0 || !tc.checkExpr) {
+                std::cout << "ERROR: CHECK constraint requires an expression"
+                          << std::endl;
+                return true;
+            }
+            const std::string expression = tc.checkExpr->toString();
+            if (tbl.cols[0].checkExpr.empty()) {
+                tbl.cols[0].checkExpr = expression;
+                tbl.cols[0].checkConstraintName = tc.name;
+                tbl.cols[0].deferrable = tc.deferrable;
+                tbl.cols[0].initiallyDeferred = tc.initiallyDeferred;
+            } else {
+                CheckConstraint check;
+                check.name = tc.name;
+                check.expression = expression;
+                check.deferrable = tc.deferrable;
+                check.initiallyDeferred = tc.initiallyDeferred;
+                tbl.additionalCheckConstraints.push_back(std::move(check));
             }
         } else if (t == "exclude") {
             // Defer creation until the table exists; collect for later.

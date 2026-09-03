@@ -59,6 +59,10 @@ static void test_initially_deferred_check_blocks_commit() {
         "CONSTRAINT chk_price CHECK (price > 0) DEFERRABLE INITIALLY DEFERRED)",
         s));
 
+    // With no transaction boundary available, an initially-deferred CHECK
+    // must still be enforced by the autocommit statement itself.
+    assert(g_engine.insert(db, "t", {{"id", "2"}, {"price", "0"}}) ==
+           dbms::DBStatus::INVALID_VALUE);
     assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "t", {{"id", "1"}, {"price", "0"}}) == dbms::DBStatus::OK);
     // Commit should fail because deferred CHECK catches the violation
@@ -85,6 +89,10 @@ static void test_initially_deferred_check_allows_valid_commit() {
         "CONSTRAINT chk_price CHECK (price > 0) DEFERRABLE INITIALLY DEFERRED)",
         s));
 
+    assert(g_engine.insert(db, "t", {{"id", "2"}, {"price", "10"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.update(db, "t", {{"price", "0"}}, {"=id 2"}) ==
+           dbms::DBStatus::INVALID_VALUE);
     assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "t", {{"id", "1"}, {"price", "10"}}) == dbms::DBStatus::OK);
     assert(g_engine.commitTransaction() == dbms::DBStatus::OK);

@@ -939,9 +939,27 @@ static bool validateTableSchemaIdentifiers(const TableSchema& tbl, std::string* 
             reject(tbl.cols[i].checkConstraintName, MAX_COL_NAME_LEN, "constraint name")) {
             return false;
         }
+        if (tbl.cols[i].checkExpr.size() >
+            std::numeric_limits<uint16_t>::max()) {
+            if (error) *error = "CHECK constraint expression is too long";
+            return false;
+        }
     }
     for (const auto& name : tbl.uniqueConstraintNames) {
         if (reject(name, MAX_TABLE_NAME_LEN, "constraint name")) return false;
+    }
+    if (tbl.additionalCheckConstraints.size() > 1024) {
+        if (error) *error = "too many CHECK constraints";
+        return false;
+    }
+    for (const auto& check : tbl.additionalCheckConstraints) {
+        if (reject(check.name, MAX_TABLE_NAME_LEN, "constraint name")) {
+            return false;
+        }
+        if (check.expression.empty() || check.expression.size() > 1024 * 1024) {
+            if (error) *error = "CHECK constraint expression is invalid";
+            return false;
+        }
     }
     for (size_t i = 0; i < tbl.fkLen; ++i) {
         if (reject(tbl.fks[i].name, MAX_TABLE_NAME_LEN, "constraint name") ||
@@ -8657,9 +8675,26 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
     // CHECK constraint evaluation
     if (!tableExists(dc.dbname, dc.tablename)) return true;
     const TableSchema tbl = getTableSchema(dc.dbname, dc.tablename);
-    if (dc.colIdx >= tbl.len) return true;
-    const Column& col = tbl.cols[dc.colIdx];
-    if (col.checkExpr.empty()) return true;
+    std::string expression = dc.checkExpr;
+    if (!expression.empty()) {
+        const auto current = std::find_if(
+            tbl.additionalCheckConstraints.begin(),
+            tbl.additionalCheckConstraints.end(),
+            [&](const CheckConstraint& check) {
+                return (!dc.constraintName.empty() &&
+                        check.name == dc.constraintName) ||
+                       check.expression == dc.checkExpr;
+            });
+        if (current == tbl.additionalCheckConstraints.end()) {
+            // The constraint was dropped after this row queued its check.
+            return true;
+        }
+        expression = current->expression;
+    } else {
+        if (dc.colIdx >= tbl.len) return true;
+        expression = tbl.cols[dc.colIdx].checkExpr;
+    }
+    if (expression.empty()) return true;
 
     int64_t currentRid = dc.rid;
     std::string row;
@@ -8679,7 +8714,7 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
     }
     std::string err;
     return dbms::ExprHelper::evalCheck(
-        col.checkExpr, rowValues, buildTypeHints(tbl), &err, dc.dbname);
+        expression, rowValues, buildTypeHints(tbl), &err, dc.dbname);
 }
 
 // TableSchema PK helpers (defined here because they use StorageEngine::extractColumnValue)
@@ -11015,6 +11050,9 @@ DBStatus StorageEngine::dropDatabase(const std::string& dbname) {
 
 constexpr int32_t SCHEMA_FORMAT_VERSION = 0x44420009;  // "DB" + 64-byte identifier fields
 constexpr int32_t MAX_PERSISTED_COLUMN_SIZE = 65535;
+constexpr uint32_t SCHEMA_ADDITIONAL_CHECK_MAGIC = 0x324B4843;  // "CHK2"
+constexpr int32_t MAX_ADDITIONAL_CHECK_CONSTRAINTS = 1024;
+constexpr uint32_t MAX_PERSISTED_CHECK_EXPRESSION = 1024 * 1024;
 
 void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     // Write format version marker
@@ -11193,6 +11231,30 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     uint16_t ownerLen = static_cast<uint16_t>(std::min<size_t>(tbl.owner.size(), UINT16_MAX));
     out.write(reinterpret_cast<const char*>(&ownerLen), 2);
     if (ownerLen > 0) out.write(tbl.owner.data(), ownerLen);
+
+    // Optional trailing extension: independent CHECK constraints that could
+    // not fit the legacy one-per-column representation.  Keeping this after
+    // the old payload lets the current reader accept existing schema files
+    // that end immediately after owner.
+    out.write(reinterpret_cast<const char*>(&SCHEMA_ADDITIONAL_CHECK_MAGIC),
+              sizeof(SCHEMA_ADDITIONAL_CHECK_MAGIC));
+    const int32_t additionalCheckCount = static_cast<int32_t>(
+        tbl.additionalCheckConstraints.size());
+    out.write(reinterpret_cast<const char*>(&additionalCheckCount),
+              sizeof(additionalCheckCount));
+    for (const auto& check : tbl.additionalCheckConstraints) {
+        writeFixedString(out, check.name, MAX_TABLE_NAME_LEN);
+        const uint32_t expressionLength =
+            static_cast<uint32_t>(check.expression.size());
+        out.write(reinterpret_cast<const char*>(&expressionLength),
+                  sizeof(expressionLength));
+        if (expressionLength > 0) {
+            out.write(check.expression.data(), expressionLength);
+        }
+        const uint8_t flags = (check.deferrable ? 1 : 0) |
+                              (check.initiallyDeferred ? 2 : 0);
+        out.write(reinterpret_cast<const char*>(&flags), sizeof(flags));
+    }
 }
 
 TableSchema StorageEngine::readSchema(std::istream& in, const std::string& tablename) const {
@@ -11498,6 +11560,47 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     }
 
     if (!in) return {};
+    if (in.peek() == std::char_traits<char>::eof()) {
+        if (!in.eof()) return {};
+        in.clear();
+        return tbl;
+    }
+
+    uint32_t additionalCheckMagic = 0;
+    in.read(reinterpret_cast<char*>(&additionalCheckMagic),
+            sizeof(additionalCheckMagic));
+    if (!in || additionalCheckMagic != SCHEMA_ADDITIONAL_CHECK_MAGIC) {
+        return {};
+    }
+    int32_t additionalCheckCount = 0;
+    in.read(reinterpret_cast<char*>(&additionalCheckCount),
+            sizeof(additionalCheckCount));
+    if (!in || additionalCheckCount < 0 ||
+        additionalCheckCount > MAX_ADDITIONAL_CHECK_CONSTRAINTS) {
+        return {};
+    }
+    tbl.additionalCheckConstraints.reserve(
+        static_cast<size_t>(additionalCheckCount));
+    for (int32_t checkIndex = 0; checkIndex < additionalCheckCount;
+         ++checkIndex) {
+        CheckConstraint check;
+        check.name = readFixedString(in, MAX_TABLE_NAME_LEN);
+        uint32_t expressionLength = 0;
+        in.read(reinterpret_cast<char*>(&expressionLength),
+                sizeof(expressionLength));
+        if (!in || expressionLength == 0 ||
+            expressionLength > MAX_PERSISTED_CHECK_EXPRESSION) {
+            return {};
+        }
+        check.expression.resize(expressionLength);
+        in.read(check.expression.data(), expressionLength);
+        uint8_t flags = 0;
+        in.read(reinterpret_cast<char*>(&flags), sizeof(flags));
+        if (!in) return {};
+        check.deferrable = (flags & 1) != 0;
+        check.initiallyDeferred = (flags & 2) != 0;
+        tbl.additionalCheckConstraints.push_back(std::move(check));
+    }
     return tbl;
 }
 
@@ -14993,12 +15096,24 @@ DBStatus StorageEngine::alterTableSetConstraintDeferrability(
             break;
         }
     }
-    if (match == tbl.len) {
+    auto additionalMatch = std::find_if(
+        tbl.additionalCheckConstraints.begin(),
+        tbl.additionalCheckConstraints.end(),
+        [&](const CheckConstraint& check) {
+            return check.name == constraintName;
+        });
+    if (match == tbl.len &&
+        additionalMatch == tbl.additionalCheckConstraints.end()) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
-    tbl.cols[match].deferrable = deferrable;
-    tbl.cols[match].initiallyDeferred = initiallyDeferred;
+    if (match != tbl.len) {
+        tbl.cols[match].deferrable = deferrable;
+        tbl.cols[match].initiallyDeferred = initiallyDeferred;
+    } else {
+        additionalMatch->deferrable = deferrable;
+        additionalMatch->initiallyDeferred = initiallyDeferred;
+    }
     std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
     if (!out) {
         lockManager_.unlock(tablename);
@@ -15091,7 +15206,10 @@ DBStatus StorageEngine::alterTableAddCheckConstraint(const std::string& dbname,
                                                         const std::string& name,
                                                         const std::string& expr) {
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
-    if (!validStoredIdentifier(name, MAX_TABLE_NAME_LEN)) return DBStatus::INVALID_VALUE;
+    if (!validStoredIdentifier(name, MAX_TABLE_NAME_LEN) || expr.empty() ||
+        expr.size() > std::numeric_limits<uint16_t>::max()) {
+        return DBStatus::INVALID_VALUE;
+    }
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -15110,6 +15228,12 @@ DBStatus StorageEngine::alterTableAddCheckConstraint(const std::string& dbname,
     // Ensure constraint name is unique
     for (size_t i = 0; i < tbl.len; ++i) {
         if (tbl.cols[i].checkConstraintName == name) {
+            lockManager_.unlock(tablename);
+            return DBStatus::TABLE_ALREADY_EXISTS;
+        }
+    }
+    for (const auto& check : tbl.additionalCheckConstraints) {
+        if (check.name == name) {
             lockManager_.unlock(tablename);
             return DBStatus::TABLE_ALREADY_EXISTS;
         }
@@ -15154,8 +15278,22 @@ DBStatus StorageEngine::alterTableAddCheckConstraint(const std::string& dbname,
         return DBStatus::INVALID_VALUE;
     }
 
-    tbl.cols[targetCol].checkExpr = expr;
-    tbl.cols[targetCol].checkConstraintName = name;
+    if (tbl.cols[targetCol].checkExpr.empty()) {
+        tbl.cols[targetCol].checkExpr = expr;
+        tbl.cols[targetCol].checkConstraintName = name;
+        tbl.cols[targetCol].deferrable = false;
+        tbl.cols[targetCol].initiallyDeferred = false;
+    } else {
+        if (tbl.additionalCheckConstraints.size() >=
+            static_cast<size_t>(MAX_ADDITIONAL_CHECK_CONSTRAINTS)) {
+            lockManager_.unlock(tablename);
+            return DBStatus::INVALID_VALUE;
+        }
+        CheckConstraint check;
+        check.name = name;
+        check.expression = expr;
+        tbl.additionalCheckConstraints.push_back(std::move(check));
+    }
     writeSchemaFile(dbname, tablename, tbl);
     lockManager_.unlock(tablename);
     return DBStatus::OK;
@@ -15534,8 +15672,22 @@ DBStatus StorageEngine::alterTableDropConstraint(const std::string& dbname,
         if (tbl.cols[i].checkConstraintName == name) {
             tbl.cols[i].checkExpr.clear();
             tbl.cols[i].checkConstraintName.clear();
+            tbl.cols[i].deferrable = false;
+            tbl.cols[i].initiallyDeferred = false;
             found = true;
             break;
+        }
+    }
+    if (!found) {
+        const auto check = std::find_if(
+            tbl.additionalCheckConstraints.begin(),
+            tbl.additionalCheckConstraints.end(),
+            [&](const CheckConstraint& candidate) {
+                return candidate.name == name;
+            });
+        if (check != tbl.additionalCheckConstraints.end()) {
+            tbl.additionalCheckConstraints.erase(check);
+            found = true;
         }
     }
 
@@ -15619,6 +15771,8 @@ DBStatus StorageEngine::alterTableRenameConstraint(const std::string& dbname,
         if (!primaryKeyName.empty() && primaryKeyName == n) return true;
         for (size_t i = 0; i < tbl.len; ++i)
             if (tbl.cols[i].checkConstraintName == n) return true;
+        for (const auto& check : tbl.additionalCheckConstraints)
+            if (check.name == n) return true;
         for (const auto& un : tbl.uniqueConstraintNames)
             if (un == n) return true;
         for (size_t i = 0; i < tbl.fkLen; ++i)
@@ -15639,6 +15793,12 @@ DBStatus StorageEngine::alterTableRenameConstraint(const std::string& dbname,
     for (size_t i = 0; i < tbl.len && !found; ++i) {
         if (tbl.cols[i].checkConstraintName == oldName) {
             tbl.cols[i].checkConstraintName = newName;
+            found = true;
+        }
+    }
+    for (auto& check : tbl.additionalCheckConstraints) {
+        if (!found && check.name == oldName) {
+            check.name = newName;
             found = true;
         }
     }
@@ -18607,10 +18767,13 @@ DBStatus StorageEngine::insertInternal(
 
     // Check CHECK constraints before writing; collect deferrable deferred checks for commit-time validation.
     std::vector<size_t> deferredCheckCols;
+    std::vector<const CheckConstraint*> deferredAdditionalChecks;
     for (size_t i = 0; i < tbl.len; ++i) {
         const Column& col = tbl.cols[i];
         if (col.checkExpr.empty()) continue;
-        bool deferred = col.deferrable && isConstraintDeferred(col.checkConstraintName, col.initiallyDeferred);
+        const bool deferred = transactionContext().inTransaction &&
+            col.deferrable && isConstraintDeferred(
+                col.checkConstraintName, col.initiallyDeferred);
         if (deferred) {
             deferredCheckCols.push_back(i);
             continue;
@@ -18618,6 +18781,23 @@ DBStatus StorageEngine::insertInternal(
         std::string err;
         if (!dbms::ExprHelper::evalCheck(
                 col.checkExpr, actualValues, typeHints, &err, dbname)) {
+            lockManager_.unlock(tablename);
+            return DBStatus::INVALID_VALUE;
+        }
+    }
+    for (const auto& check : tbl.additionalCheckConstraints) {
+        if (check.expression.empty()) continue;
+        const bool deferred = transactionContext().inTransaction &&
+            check.deferrable &&
+            isConstraintDeferred(
+                check.name, check.initiallyDeferred);
+        if (deferred) {
+            deferredAdditionalChecks.push_back(&check);
+            continue;
+        }
+        std::string err;
+        if (!dbms::ExprHelper::evalCheck(
+                check.expression, actualValues, typeHints, &err, dbname)) {
             lockManager_.unlock(tablename);
             return DBStatus::INVALID_VALUE;
         }
@@ -19021,6 +19201,21 @@ DBStatus StorageEngine::insertInternal(
             check.rid = rid;
             check.constraintName = tbl.cols[ci].checkConstraintName;
             check.colIdx = ci;
+            transactionContext()
+                .deferredChecks[transactionContext().currentTxnId]
+                .push_back(std::move(check));
+        }
+    }
+    if (transactionContext().inTransaction &&
+        !deferredAdditionalChecks.empty()) {
+        for (const CheckConstraint* storedCheck : deferredAdditionalChecks) {
+            DeferredCheck check;
+            check.kind = DeferredCheck::Kind::Check;
+            check.dbname = dbname;
+            check.tablename = tablename;
+            check.rid = rid;
+            check.constraintName = storedCheck->name;
+            check.checkExpr = storedCheck->expression;
             transactionContext()
                 .deferredChecks[transactionContext().currentTxnId]
                 .push_back(std::move(check));
@@ -22005,7 +22200,9 @@ DBStatus StorageEngine::updateInternal(
         for (size_t i = 0; i < tbl.len; ++i) {
             const Column& col = tbl.cols[i];
             if (col.checkExpr.empty()) continue;
-            bool deferred = col.deferrable && isConstraintDeferred(col.checkConstraintName, col.initiallyDeferred);
+            const bool deferred = transactionContext().inTransaction &&
+                col.deferrable && isConstraintDeferred(
+                    col.checkConstraintName, col.initiallyDeferred);
             if (deferred) {
                 deferredCheckCols.push_back(i);
                 continue;
@@ -22030,6 +22227,37 @@ DBStatus StorageEngine::updateInternal(
                     .deferredChecks[transactionContext().currentTxnId]
                     .push_back(std::move(check));
             }
+        }
+        std::vector<const CheckConstraint*> deferredAdditionalChecks;
+        for (const auto& storedCheck : tbl.additionalCheckConstraints) {
+            if (storedCheck.expression.empty()) continue;
+            const bool deferred = transactionContext().inTransaction &&
+                storedCheck.deferrable &&
+                isConstraintDeferred(
+                    storedCheck.name, storedCheck.initiallyDeferred);
+            if (deferred) {
+                deferredAdditionalChecks.push_back(&storedCheck);
+                continue;
+            }
+            std::string err;
+            if (!dbms::ExprHelper::evalCheck(
+                    storedCheck.expression, rowValues, updateTypeHints, &err,
+                    dbname)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
+            }
+        }
+        for (const CheckConstraint* storedCheck : deferredAdditionalChecks) {
+            DeferredCheck check;
+            check.kind = DeferredCheck::Kind::Check;
+            check.dbname = dbname;
+            check.tablename = tablename;
+            check.rid = rid;
+            check.constraintName = storedCheck->name;
+            check.checkExpr = storedCheck->expression;
+            transactionContext()
+                .deferredChecks[transactionContext().currentTxnId]
+                .push_back(std::move(check));
         }
 
         // Check EXCLUDE constraints before writing (exclude the row being

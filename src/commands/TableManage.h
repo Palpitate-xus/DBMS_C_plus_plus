@@ -1545,7 +1545,11 @@ private:
         std::string tablename;
         int64_t rid;
         std::string constraintName;
-        size_t colIdx;
+        size_t colIdx = 0;
+        // Additional table CHECK constraints are not tied to a Column slot.
+        // Capture their expression so a deferred re-check can survive until
+        // the transaction boundary.
+        std::string checkExpr;
         // Unique payload
         std::string uniqueCol;
         std::string payloadValue;

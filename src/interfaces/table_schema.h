@@ -93,6 +93,16 @@ struct ForeignKey {
     std::string singleRefCol() const { return refCols.empty() ? "" : refCols[0]; }
 };
 
+// CHECK constraints historically lived one-per-column in Column.  Keep those
+// fields for storage/API compatibility and retain any additional independent
+// constraints here so names and deferrability are not lost.
+struct CheckConstraint {
+    std::string name;
+    std::string expression;
+    bool deferrable = false;
+    bool initiallyDeferred = false;
+};
+
 struct TableSchema {
     std::string tablename;
     std::string owner; // role that owns the relation; empty for engine-internal tables
@@ -106,6 +116,7 @@ struct TableSchema {
     // Composite UNIQUE constraints: each inner vector is column indices
     std::vector<std::vector<size_t>> uniqueConstraints;
     std::vector<std::string> uniqueConstraintNames; // names parallel to uniqueConstraints
+    std::vector<CheckConstraint> additionalCheckConstraints;
 
     // Partitioning
     enum class PartitionType { None, Range, List, Hash };
