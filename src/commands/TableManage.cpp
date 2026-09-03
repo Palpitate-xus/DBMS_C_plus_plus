@@ -21365,8 +21365,10 @@ DBStatus StorageEngine::updateInternal(
             auto itOld = oldIdxVals.find(colname);
             std::string oldVal = (itOld != oldIdxVals.end()) ? itOld->second : "";
             std::string newVal = valueFromRowMap(rowValues, colname);
-            bool colChanged = (colUpdates.find(colIdx) != colUpdates.end());
-            if (colChanged && oldVal != newVal) {
+            // Generated columns and BEFORE triggers can change an indexed
+            // value even when that column was absent from the user's SET
+            // list. The logical OLD/NEW images are the source of truth.
+            if (oldVal != newVal) {
                 if (!oldVal.empty() &&
                     (!containsIndexRid(hidx->search(oldVal), rid) ||
                      !hidx->remove(oldVal, rid))) {
@@ -21405,8 +21407,7 @@ DBStatus StorageEngine::updateInternal(
             auto itOld = oldIdxVals.find(colname);
             std::string oldVal = (itOld != oldIdxVals.end()) ? itOld->second : "";
             std::string newVal = valueFromRowMap(rowValues, colname);
-            bool colChanged = (colUpdates.find(colIdx) != colUpdates.end());
-            if (colChanged && oldVal != newVal) {
+            if (oldVal != newVal) {
                 if (!oldVal.empty() &&
                     (!containsIndexRid(bidx->search(oldVal), rid) ||
                      !bidx->remove(oldVal, rid))) {
