@@ -4926,7 +4926,7 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                                 const std::function<void(uint32_t, uint16_t, const char*, size_t)>& callback,
                                 const ReadView* readView,
                                 const std::vector<std::string>& targetPartitions,
-                                bool registerRelationSiread) const {
+                                bool registerSiread) const {
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
         transactionContext().hasRead = true;
     }
@@ -4956,7 +4956,7 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
     // scan returns no rows.  It is conservative (and therefore may reduce
     // serializable concurrency), but it closes the correctness hole where a
     // concurrent INSERT could otherwise evade row-level SSI tracking.
-    if (registerRelationSiread && transactionContext().inTransaction &&
+    if (registerSiread && transactionContext().inTransaction &&
         transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE) {
         const std::string relation = ssiRelationKey(dbname, tablename);
         transactionContext().txnReadRelations.insert(relation);
@@ -4966,7 +4966,7 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
 
     // Helper: visibility check, SSI tracking, header stripping, then callback
     auto emitRow = [
-        &callback, rv, this, dbname, tablename,
+        &callback, rv, this, dbname, tablename, registerSiread,
         fmtVer = tbl.formatVersion, natts = tbl.len
     ](uint32_t pid, uint16_t sid, const char* data, size_t len) {
         if (len == 0) return;
@@ -4975,7 +4975,9 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
         if (rv) {
             if (!rv->isVisible(data, len, fmtVer)) return;
         }
-        if (this->transactionContext().inTransaction && this->transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE) {
+        if (registerSiread && this->transactionContext().inTransaction &&
+            this->transactionContext().txnIsolationLevel ==
+                IsolationLevel::SERIALIZABLE) {
             int64_t rid = this->encodeRid(pid, sid);
             std::string key = ssiRidKey(dbname, tablename, rid);
             std::string page = ssiPageKey(dbname, tablename, pid);
