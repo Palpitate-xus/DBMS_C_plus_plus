@@ -776,8 +776,11 @@ private:
     std::string rightCol_;
     TableSchema leftTbl_;
     TableSchema rightTbl_;
+    size_t leftColIdx_ = 0;
+    size_t rightColIdx_ = 0;
     std::string curLeftRow_;
     bool hasLeft_ = false;
+    bool curLeftKeyNull_ = false;
 };
 
 // ========================================================================
@@ -811,12 +814,15 @@ private:
     std::string rightCol_;
     TableSchema leftTbl_;
     TableSchema rightTbl_;
+    size_t leftColIdx_ = 0;
+    size_t rightColIdx_ = 0;
 
     std::unordered_map<std::string, std::vector<std::string>> rightHash_;
     std::string curLeftRow_;
     std::vector<std::string> curRightMatches_;
     size_t matchPos_ = 0;
     bool hasLeft_ = false;
+    bool curLeftKeyNull_ = false;
 };
 
 // ========================================================================
@@ -965,9 +971,12 @@ private:
     bool usedParallelWorkers_ = false;
     TableSchema leftTbl_;
     TableSchema rightTbl_;
+    size_t leftColIdx_ = 0;
+    size_t rightColIdx_ = 0;
     std::map<std::string, std::vector<std::pair<int64_t, std::string>>> rightHash_;
     std::string curLeftRow_;
     bool hasLeft_ = false;
+    bool curLeftKeyNull_ = false;
     std::vector<std::pair<int64_t, std::string>> curRightMatches_;
     size_t matchPos_ = 0;
 };

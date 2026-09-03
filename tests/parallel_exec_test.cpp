@@ -183,6 +183,10 @@ int main() {
                                 {"k", std::to_string(values.second)}})
                    == DBStatus::OK);
     }
+    assert(g_engine.insert(db, "merge_l", {{"id", "4"}, {"k", "NULL"}}) ==
+           DBStatus::OK);
+    assert(g_engine.insert(db, "merge_r", {{"id", "50"}, {"k", "NULL"}}) ==
+           DBStatus::OK);
     auto hashLeft = std::make_unique<dbms::TableScanOp>(
         &g_engine, db, "merge_l");
     auto hashRight = std::make_unique<dbms::TableScanOp>(
@@ -203,6 +207,24 @@ int main() {
     assert(hashDuplicateRows.size() == 7);
     assert(mergeDuplicateRows == hashDuplicateRows);
     std::cout << "[PAR] merge join duplicate-key product OK" << std::endl;
+
+    auto nestedLeft = std::make_unique<dbms::TableScanOp>(
+        &g_engine, db, "merge_l");
+    auto nestedRight = std::make_unique<dbms::TableScanOp>(
+        &g_engine, db, "merge_r");
+    dbms::NestedLoopJoinOp nullNested(
+        &g_engine, db, std::move(nestedLeft), std::move(nestedRight),
+        "merge_l", "merge_r", "k", "k");
+    assert(sorted(runPlan(&nullNested)) == hashDuplicateRows);
+
+    auto parallelLeft = std::make_unique<dbms::TableScanOp>(
+        &g_engine, db, "merge_l");
+    auto parallelRight = std::make_unique<dbms::TableScanOp>(
+        &g_engine, db, "merge_r");
+    dbms::ParallelHashJoinOp nullParallelFallback(
+        &g_engine, db, std::move(parallelLeft), std::move(parallelRight),
+        "merge_l", "merge_r", "k", "k", 4);
+    assert(sorted(runPlan(&nullParallelFallback)) == hashDuplicateRows);
 
     // ------------------------------------------------------------------
     // 4. GatherMerge: per-worker sorted runs merge globally.
@@ -269,6 +291,23 @@ int main() {
         std::cout << "[PAR] GatherMerge fallback to Sort (acceptable)"
                   << std::endl;
     }
+
+    // Exercise the direct page-range build path with one NULL on each side.
+    // The non-NULL key domains do not overlap, so NULL = NULL was the only
+    // way this join could incorrectly emit a row.
+    assert(g_engine.insert(db, "big",
+                           {{"id", "600"}, {"grp", "NULL"}, {"val", "0"}}) ==
+           DBStatus::OK);
+    auto nullProbe = std::make_unique<dbms::TableScanOp>(
+        &g_engine, db, "merge_l");
+    auto parallelBuild = std::make_unique<dbms::TableScanOp>(
+        &g_engine, db, "big");
+    dbms::ParallelHashJoinOp nullParallelBuild(
+        &g_engine, db, std::move(nullProbe), std::move(parallelBuild),
+        "merge_l", "big", "k", "grp", 4);
+    assert(runPlan(&nullParallelBuild).empty());
+    assert(nullParallelBuild.usedParallelWorkers());
+    std::cout << "[PAR] NULL join keys remain unmatched" << std::endl;
     dbms::QueryPlanner::setParallelWorkers(0);
 
     cleanupDb(db);

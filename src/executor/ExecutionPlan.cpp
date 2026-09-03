@@ -2261,6 +2261,14 @@ void SetOperationOp::close() {
 // NestedLoopJoinOp
 // ========================================================================
 
+static size_t findJoinColumnIndex(const TableSchema& tbl,
+                                  const std::string& colName) {
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].dataName == colName) return i;
+    }
+    return tbl.len;
+}
+
 NestedLoopJoinOp::NestedLoopJoinOp(StorageEngine* engine, const std::string& dbname,
                                     OpPtr left, OpPtr right,
                                     const std::string& leftTable,
@@ -2275,9 +2283,16 @@ NestedLoopJoinOp::NestedLoopJoinOp(StorageEngine* engine, const std::string& dbn
 bool NestedLoopJoinOp::open() {
     leftTbl_ = engine_->getTableSchema(dbname_, leftTable_);
     rightTbl_ = engine_->getTableSchema(dbname_, rightTable_);
+    leftColIdx_ = findJoinColumnIndex(leftTbl_, leftCol_);
+    rightColIdx_ = findJoinColumnIndex(rightTbl_, rightCol_);
+    if (leftColIdx_ >= leftTbl_.len || rightColIdx_ >= rightTbl_.len) {
+        setError("nested-loop join column does not exist");
+        return false;
+    }
     if (!left_->open()) return false;
     hasLeft_ = left_->next(curLeftRow_);
     if (left_->hasError()) return propagateChildError(left_.get(), "nested-loop left child failed");
+    curLeftKeyNull_ = hasLeft_ && left_->lastColumnIsNull(leftColIdx_);
     return right_->open();
 }
 
@@ -2286,6 +2301,9 @@ bool NestedLoopJoinOp::next(std::string& outRow) {
     std::string rightRow;
     while (hasLeft_) {
         while (right_->next(rightRow)) {
+            if (curLeftKeyNull_ || right_->lastColumnIsNull(rightColIdx_)) {
+                continue;
+            }
             // Find column offsets
             size_t leftOff = 0;
             for (size_t i = 0; i < leftTbl_.len; ++i) {
@@ -2341,6 +2359,7 @@ bool NestedLoopJoinOp::next(std::string& outRow) {
         right_->close();
         hasLeft_ = left_->next(curLeftRow_);
         if (left_->hasError()) return propagateChildError(left_.get(), "nested-loop left child failed");
+        curLeftKeyNull_ = hasLeft_ && left_->lastColumnIsNull(leftColIdx_);
         if (hasLeft_) right_->open();
     }
     return false;
@@ -2355,10 +2374,7 @@ void NestedLoopJoinOp::close() {
 // Helper: extract join key value from raw row data as string
 // ========================================================================
 static std::string extractJoinKey(const std::string& row, const TableSchema& tbl, const std::string& colName) {
-    size_t colIdx = tbl.len;
-    for (size_t i = 0; i < tbl.len; ++i) {
-        if (tbl.cols[i].dataName == colName) { colIdx = i; break; }
-    }
+    size_t colIdx = findJoinColumnIndex(tbl, colName);
     if (colIdx >= tbl.len) return "";
     return StorageEngine::extractColumnValueStatic(row, tbl, colIdx);
 }
@@ -2379,11 +2395,19 @@ HashJoinOp::HashJoinOp(StorageEngine* engine, const std::string& dbname,
 bool HashJoinOp::open() {
     leftTbl_ = engine_->getTableSchema(dbname_, leftTable_);
     rightTbl_ = engine_->getTableSchema(dbname_, rightTable_);
+    leftColIdx_ = findJoinColumnIndex(leftTbl_, leftCol_);
+    rightColIdx_ = findJoinColumnIndex(rightTbl_, rightCol_);
+    if (leftColIdx_ >= leftTbl_.len || rightColIdx_ >= rightTbl_.len) {
+        setError("hash join column does not exist");
+        return false;
+    }
+    rightHash_.clear();
 
     // Build hash table from right table
     if (!right_->open()) return false;
     std::string rightRow;
     while (right_->next(rightRow)) {
+        if (right_->lastColumnIsNull(rightColIdx_)) continue;
         std::string key = extractJoinKey(rightRow, rightTbl_, rightCol_);
         rightHash_[key].push_back(std::move(rightRow));
     }
@@ -2394,9 +2418,10 @@ bool HashJoinOp::open() {
     if (!left_->open()) return false;
     hasLeft_ = left_->next(curLeftRow_);
     if (left_->hasError()) return propagateChildError(left_.get(), "hash join left child failed");
+    curLeftKeyNull_ = hasLeft_ && left_->lastColumnIsNull(leftColIdx_);
     matchPos_ = 0;
     curRightMatches_.clear();
-    if (hasLeft_) {
+    if (hasLeft_ && !curLeftKeyNull_) {
         std::string key = extractJoinKey(curLeftRow_, leftTbl_, leftCol_);
         auto it = rightHash_.find(key);
         if (it != rightHash_.end()) curRightMatches_ = it->second;
@@ -2757,6 +2782,12 @@ ParallelHashJoinOp::ParallelHashJoinOp(
 bool ParallelHashJoinOp::open() {
     leftTbl_ = engine_->getTableSchema(dbname_, leftTable_);
     rightTbl_ = engine_->getTableSchema(dbname_, rightTable_);
+    leftColIdx_ = findJoinColumnIndex(leftTbl_, leftCol_);
+    rightColIdx_ = findJoinColumnIndex(rightTbl_, rightCol_);
+    if (leftColIdx_ >= leftTbl_.len || rightColIdx_ >= rightTbl_.len) {
+        setError("parallel hash join column does not exist");
+        return false;
+    }
     rightHash_.clear();
 
     // Decide whether the build side can be hashed by worker threads.
@@ -2790,9 +2821,14 @@ bool ParallelHashJoinOp::open() {
                                 failed.store(true, std::memory_order_relaxed);
                                 return;
                             }
+                            const int64_t rid =
+                                StorageEngine::encodeRid(pageId, slotId);
+                            if (engine_->isColumnNullByRid(
+                                    dbname_, rightTable_, rid, rightColIdx_)) {
+                                return;
+                            }
                             std::string key = extractJoinKey(row, rightTbl_, rightCol_);
-                            shard[key].emplace_back(
-                                StorageEngine::encodeRid(pageId, slotId), std::move(row));
+                            shard[key].emplace_back(rid, std::move(row));
                         })) {
                     failed.store(true, std::memory_order_relaxed);
                 }
@@ -2823,6 +2859,7 @@ bool ParallelHashJoinOp::open() {
         if (!right_->open()) return false;
         std::string rightRow;
         while (right_->next(rightRow)) {
+            if (right_->lastColumnIsNull(rightColIdx_)) continue;
             std::string key = extractJoinKey(rightRow, rightTbl_, rightCol_);
             rightHash_[key].emplace_back(0, std::move(rightRow));
         }
@@ -2837,9 +2874,10 @@ bool ParallelHashJoinOp::open() {
     if (left_->hasError()) {
         return propagateChildError(left_.get(), "hash join left child failed");
     }
+    curLeftKeyNull_ = hasLeft_ && left_->lastColumnIsNull(leftColIdx_);
     matchPos_ = 0;
     curRightMatches_.clear();
-    if (hasLeft_) {
+    if (hasLeft_ && !curLeftKeyNull_) {
         std::string key = extractJoinKey(curLeftRow_, leftTbl_, leftCol_);
         auto it = rightHash_.find(key);
         if (it != rightHash_.end()) curRightMatches_ = it->second;
@@ -2861,6 +2899,12 @@ bool ParallelHashJoinOp::next(std::string& outRow) {
             return propagateChildError(left_.get(), "hash join left child failed");
         }
         if (!hasLeft_) break;
+        curLeftKeyNull_ = left_->lastColumnIsNull(leftColIdx_);
+        if (curLeftKeyNull_) {
+            curRightMatches_.clear();
+            matchPos_ = 0;
+            continue;
+        }
         std::string key = extractJoinKey(curLeftRow_, leftTbl_, leftCol_);
         auto it = rightHash_.find(key);
         curRightMatches_ = (it == rightHash_.end())
@@ -2965,6 +3009,12 @@ bool HashJoinOp::next(std::string& outRow) {
         hasLeft_ = left_->next(curLeftRow_);
         if (left_->hasError()) return propagateChildError(left_.get(), "hash join left child failed");
         if (!hasLeft_) break;
+        curLeftKeyNull_ = left_->lastColumnIsNull(leftColIdx_);
+        if (curLeftKeyNull_) {
+            curRightMatches_.clear();
+            matchPos_ = 0;
+            continue;
+        }
 
         std::string key = extractJoinKey(curLeftRow_, leftTbl_, leftCol_);
         auto it = rightHash_.find(key);
@@ -3001,19 +3051,33 @@ MergeJoinOp::MergeJoinOp(StorageEngine* engine, const std::string& dbname,
 bool MergeJoinOp::open() {
     leftTbl_ = engine_->getTableSchema(dbname_, leftTable_);
     rightTbl_ = engine_->getTableSchema(dbname_, rightTable_);
+    const size_t leftColIdx = findJoinColumnIndex(leftTbl_, leftCol_);
+    const size_t rightColIdx = findJoinColumnIndex(rightTbl_, rightCol_);
+    if (leftColIdx >= leftTbl_.len || rightColIdx >= rightTbl_.len) {
+        setError("merge join column does not exist");
+        return false;
+    }
     leftRows_.clear();
     rightRows_.clear();
 
     // Read all left rows
     if (!left_->open()) return false;
     std::string row;
-    while (left_->next(row)) leftRows_.push_back(std::move(row));
+    while (left_->next(row)) {
+        if (!left_->lastColumnIsNull(leftColIdx)) {
+            leftRows_.push_back(std::move(row));
+        }
+    }
     if (left_->hasError()) return propagateChildError(left_.get(), "merge join left child failed");
     left_->close();
 
     // Read all right rows
     if (!right_->open()) return false;
-    while (right_->next(row)) rightRows_.push_back(std::move(row));
+    while (right_->next(row)) {
+        if (!right_->lastColumnIsNull(rightColIdx)) {
+            rightRows_.push_back(std::move(row));
+        }
+    }
     if (right_->hasError()) return propagateChildError(right_.get(), "merge join right child failed");
     right_->close();
 
