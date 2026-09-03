@@ -2,7 +2,7 @@
 // ALTER TABLE ALTER COLUMN SET NOT NULL validation test — Phase 4 Wave 4.27d
 // SET NOT NULL now rejects the change when an existing row has NULL in the
 // column (PostgreSQL behavior); succeeds when all rows are non-NULL. DROP NOT
-// NULL always succeeds.
+// NULL remains forbidden for primary-key columns.
 // ============================================================================
 
 #include "commands/DdlExecutor.h"
@@ -104,7 +104,7 @@ static void test_drop_then_set() {
 
     assert(g_engine.alterTableSetNotNull(db, "t", "code") == dbms::DBStatus::OK);
     assert(colNotNull(g_engine.getTableSchema(db, "t"), "code"));
-    // DROP NOT NULL always succeeds.
+    // DROP NOT NULL succeeds for an ordinary column.
     assert(g_engine.alterTableDropNotNull(db, "t", "code") == dbms::DBStatus::OK);
     assert(!colNotNull(g_engine.getTableSchema(db, "t"), "code"));
     // Unknown column rejected.
@@ -114,12 +114,48 @@ static void test_drop_then_set() {
     std::cout << "[SETNN] drop/set cycle OK" << std::endl;
 }
 
+static void test_primary_key_drop_not_null_rejected() {
+    std::string db = testDbPath("snn_primary_key");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE TABLE inline_pk (id INT PRIMARY KEY, value INT)", s));
+
+    assert(g_engine.alterTableDropNotNull(db, "inline_pk", "id") ==
+           dbms::DBStatus::INVALID_VALUE);
+    assert(colNotNull(g_engine.getTableSchema(db, "inline_pk"), "id"));
+    assert(g_engine.insert(
+               db, "inline_pk", {{"id", "NULL"}, {"value", "1"}}) ==
+           dbms::DBStatus::NULL_NOT_ALLOWED);
+
+    // Persisted composite-key positions are authoritative even if an
+    // embedded caller did not duplicate the primary-key flag on each column.
+    dbms::TableSchema composite;
+    composite.tablename = "composite_pk";
+    composite.formatVersion = dbms::DATA_FILE_FORMAT_VERSION;
+    composite.append(dbms::makeIntColumn("tenant", false, 4));
+    composite.append(dbms::makeIntColumn("id", false, 4));
+    composite.append(dbms::makeIntColumn("value", true, 4));
+    composite.pkColIndices = {0, 1};
+    assert(g_engine.createTable(db, composite) == dbms::DBStatus::OK);
+    assert(g_engine.alterTableDropNotNull(db, "composite_pk", "tenant") ==
+           dbms::DBStatus::INVALID_VALUE);
+    assert(colNotNull(g_engine.getTableSchema(db, "composite_pk"),
+                      "tenant"));
+
+    cleanup(db);
+    std::cout << "[SETNN] primary keys retain NOT NULL OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_set_not_null_ok();
     test_set_not_null_rejected();
     test_empty_string_is_not_null();
     test_drop_then_set();
+    test_primary_key_drop_not_null_rejected();
     std::cout << "[SETNN] all passed" << std::endl;
     return 0;
 }

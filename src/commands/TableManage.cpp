@@ -14830,6 +14830,13 @@ DBStatus StorageEngine::alterTableDropNotNull(const std::string& dbname,
         return DBStatus::INVALID_VALUE;
     }
 
+    if (tbl.cols[colIdx].isPrimaryKey ||
+        std::find(tbl.pkColIndices.begin(), tbl.pkColIndices.end(), colIdx) !=
+            tbl.pkColIndices.end()) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
+
     tbl.cols[colIdx].isNull = true;
     writeSchemaFile(dbname, tablename, tbl);
     invalidateCatalogSchema(dbname, tablename);
