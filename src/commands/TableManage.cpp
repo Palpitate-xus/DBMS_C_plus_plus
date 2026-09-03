@@ -34400,8 +34400,14 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
             // failed after only a prefix of its access-method writes. Missing
             // mappings are therefore already-undone state, not rollback
             // failures; remove only exact mappings owned by this RID.
-            std::string insertedRow;
-            if (!readRowByRid(pa, entry.rowIdx, insertedRow, tbl)) {
+            std::string insertedRow = entry.rowData;
+            std::string heapRow;
+            if (readRowByRid(pa, entry.rowIdx, heapRow, tbl)) {
+                insertedRow = std::move(heapRow);
+            } else {
+                rowUndoOk = false;
+            }
+            if (insertedRow.empty()) {
                 rowUndoOk = false;
             } else if (tbl.hasPrimaryKey()) {
                 BPTree* pkIdx = getPKIndex(
@@ -34514,21 +34520,66 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
             // Then remove the row from page
             uint32_t pageId; uint16_t slotId;
             decodeRid(entry.rowIdx, pageId, slotId);
-            char* pageBuf = pa->fetchPage(pageId);
-            if (pageBuf) {
-                PageWrapper page(pageBuf, pa->pageSize(), tbl.formatVersion);
-                walPageImage(transactionContext().txnDB, entry.tableName, pageId,
-                             pageBuf, pa->pageSize(), true);
-                page.remove(slotId);
-                pa->markDirty(pageId);
-                Lsn lsn = walPageImage(transactionContext().txnDB, entry.tableName,
-                                       pageId, pageBuf, pa->pageSize(), false);
-                if (lsn != INVALID_LSN) {
-                    setPageLsnAndChecksum(pageBuf, lsn);
-                    pa->markDirty(pageId);
+            if (!pa) {
+                rowUndoOk = false;
+            } else {
+                char* pageBuf = pa->fetchPage(pageId);
+                if (!pageBuf) {
+                    rowUndoOk = false;
+                } else {
+                    PageWrapper page(
+                        pageBuf, pa->pageSize(), tbl.formatVersion);
+                    const char* currentData = nullptr;
+                    size_t currentLength = 0;
+                    if (!page.isValid() ||
+                        !page.read(slotId, currentData, currentLength)) {
+                        rowUndoOk = false;
+                    } else {
+                        const Lsn beforeLsn = walPageImage(
+                            transactionContext().txnDB, entry.tableName,
+                            pageId, pageBuf, pa->pageSize(), true);
+                        std::vector<char> stagedPage(
+                            pageBuf, pageBuf + pa->pageSize());
+                        PageWrapper staged(
+                            stagedPage.data(), pa->pageSize(),
+                            tbl.formatVersion);
+                        if (beforeLsn == INVALID_LSN ||
+                            !staged.remove(slotId)) {
+                            rowUndoOk = false;
+                        } else {
+                            const Lsn lsn = walPageImage(
+                                transactionContext().txnDB,
+                                entry.tableName, pageId,
+                                stagedPage.data(), pa->pageSize(), false);
+                            WALManager* wal = getWAL(
+                                transactionContext().txnDB);
+                            if (lsn == INVALID_LSN || !wal ||
+                                !wal->XLogFlush(lsn)) {
+                                rowUndoOk = false;
+                            } else {
+                                std::memcpy(
+                                    pageBuf, stagedPage.data(),
+                                    pa->pageSize());
+                                setPageLsnAndChecksum(pageBuf, lsn);
+                                pa->markDirty(pageId);
+                                const size_t freePercent =
+                                    staged.freeSpace() * 100 /
+                                    pa->pageSize();
+                                getFSM(
+                                    transactionContext().txnDB,
+                                    entry.tableName)->setFreePercent(
+                                        pageId,
+                                        static_cast<uint8_t>(freePercent));
+                                getVM(
+                                    transactionContext().txnDB,
+                                    entry.tableName)->setAllVisible(
+                                        pageId, false);
+                                if (!pa->flush()) rowUndoOk = false;
+                            }
+                        }
+                    }
+                    pa->unpinPage(pageId);
                 }
-                pa->flush();
-                pa->unpinPage(pageId);
             }
         } else if (entry.op == TxnLogEntry::Op::Update) {
             if (entry.previousRowIdx >= 0) {
@@ -34776,22 +34827,37 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
     for (BloomIndex* index : bloomUndoIndexes) {
         if (!index->flush()) rowUndoOk = false;
     }
-    transactionContext().txnLog.resize(txnLogSpIdx);
-    transactionContext().txnLogicalChanges.resize(logicalChangeSpIdx);
-    if (deferredChecks != transactionContext().deferredChecks.end()) {
-        deferredChecks->second.resize(deferredCheckSpIdx);
-    }
 
     // DDL CREATE undo actions follow the same savepoint boundary. Row undo
     // above runs first so a newly-created relation remains available while
     // its rows are being removed.
     bool ddlUndoOk = true;
-    for (size_t i = transactionContext().ddlUndoActions.size(); i > ddlSpIdx; --i) {
-        try {
-            if (!transactionContext().ddlUndoActions[i - 1]()) ddlUndoOk = false;
-        } catch (...) {
-            ddlUndoOk = false;
+    if (rowUndoOk) {
+        for (size_t i = transactionContext().ddlUndoActions.size();
+             i > ddlSpIdx; --i) {
+            try {
+                if (!transactionContext().ddlUndoActions[i - 1]()) {
+                    ddlUndoOk = false;
+                }
+            } catch (...) {
+                ddlUndoOk = false;
+            }
         }
+    }
+
+    // Never discard undo records after a partial savepoint rollback.  The
+    // transaction's heap and indexes may already disagree, so keeping it
+    // active would expose a state that neither COMMIT nor a later ROLLBACK TO
+    // could repair. Escalate to a full abort while every log entry is intact.
+    if (!rowUndoOk || !ddlUndoOk) {
+        (void)rollbackTransaction();
+        return DBStatus::IO_ERROR;
+    }
+
+    transactionContext().txnLog.resize(txnLogSpIdx);
+    transactionContext().txnLogicalChanges.resize(logicalChangeSpIdx);
+    if (deferredChecks != transactionContext().deferredChecks.end()) {
+        deferredChecks->second.resize(deferredCheckSpIdx);
     }
     transactionContext().ddlUndoActions.resize(ddlSpIdx);
     lockManager_.rollbackToCheckpoint(it->second.lockCheckpoint);
@@ -34803,7 +34869,7 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
         }
         else ++sit;
     }
-    return rowUndoOk && ddlUndoOk ? DBStatus::OK : DBStatus::IO_ERROR;
+    return DBStatus::OK;
 }
 
 DBStatus StorageEngine::releaseSavepoint(const std::string& name) {
