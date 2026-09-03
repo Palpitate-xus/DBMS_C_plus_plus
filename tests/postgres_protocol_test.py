@@ -1357,6 +1357,41 @@ def main():
             "ON jo_plain.x = l.x"))
         assert jo_left == [[b"1", b"2"]], jo_left
 
+        # JOIN keywords must have SQL-identifier boundaries.  Underscores
+        # are identifier characters, so names ending in _left/_right before
+        # JOIN (or merely containing _join) must not change the join type.
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE kw_left (left_id INT PRIMARY KEY, k INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE kw_right (right_id INT PRIMARY KEY, k INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO kw_left VALUES (1, 7)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO kw_right VALUES (2, 7)"))
+        kw_left_join = data_row_values(simple_query(
+            sock, "SELECT left_id, right_id FROM kw_left JOIN kw_right "
+            "ON kw_left.k = kw_right.k"))
+        assert kw_left_join == [[b"1", b"2"]], kw_left_join
+        kw_right_join = data_row_values(simple_query(
+            sock, "SELECT right_id, left_id FROM kw_right JOIN kw_left "
+            "ON kw_right.k = kw_left.k"))
+        assert kw_right_join == [[b"2", b"1"]], kw_right_join
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE kw_joined (id INT PRIMARY KEY)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO kw_joined VALUES (9)"))
+        kw_plain = data_row_values(simple_query(
+            sock, "SELECT id FROM kw_joined"))
+        assert kw_plain == [[b"9"]], kw_plain
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE kw_on (on_id INT PRIMARY KEY, k INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO kw_on VALUES (3, 1)"))
+        kw_on_join = data_row_values(simple_query(
+            sock, "SELECT z, on_id FROM jo_plain JOIN kw_on "
+            "ON jo_plain.x = kw_on.k"))
+        assert kw_on_join == [[b"5", b"3"]], kw_on_join
+
         # Equality joins must keep SQL NULL distinct from both another NULL
         # and a real empty string.  Previously the heap payload discarded the
         # null bitmap, so NULL = NULL and NULL = '' could both match.

@@ -1005,6 +1005,9 @@ static size_t findTopLevelKeyword(const string& sql, const string& kw, size_t st
     int depth = 0;
     bool inStr = false;
     size_t klen = kw.size();
+    auto isIdentifierChar = [](unsigned char ch) {
+        return isalnum(ch) || ch == '_' || ch == '$';
+    };
     for (size_t i = startPos; i < sql.size(); ++i) {
         char c = sql[i];
         if (inStr) {
@@ -1015,8 +1018,10 @@ static size_t findTopLevelKeyword(const string& sql, const string& kw, size_t st
         if (c == '(') { depth++; continue; }
         if (c == ')') { depth--; continue; }
         if (depth == 0 && i + klen <= sql.size() && sql.compare(i, klen, kw) == 0) {
-            bool leftOk = (i == 0) || !isalnum(static_cast<unsigned char>(sql[i-1]));
-            bool rightOk = (i + klen == sql.size()) || !isalnum(static_cast<unsigned char>(sql[i+klen]));
+            bool leftOk = (i == 0) ||
+                !isIdentifierChar(static_cast<unsigned char>(sql[i - 1]));
+            bool rightOk = (i + klen == sql.size()) ||
+                !isIdentifierChar(static_cast<unsigned char>(sql[i + klen]));
             if (leftOk && rightOk) return i;
         }
     }
@@ -16253,12 +16258,13 @@ if (sql.rfind("backup database", 0) == 0) {
         };
 
         // Check for JOIN
-        size_t leftJoinPos = sql.find("left join", fromPos);
-        size_t rightJoinPos = sql.find("right join", fromPos);
-        size_t fullOuterJoinPos = sql.find("full outer join", fromPos);
-        size_t crossJoinPos = sql.find("cross join", fromPos);
-        size_t innerJoinPos = sql.find("inner join", fromPos);
-        size_t joinPos = sql.find("join", fromPos);
+        size_t leftJoinPos = findTopLevelKeyword(sql, "left join", fromPos);
+        size_t rightJoinPos = findTopLevelKeyword(sql, "right join", fromPos);
+        size_t fullOuterJoinPos = findTopLevelKeyword(
+            sql, "full outer join", fromPos);
+        size_t crossJoinPos = findTopLevelKeyword(sql, "cross join", fromPos);
+        size_t innerJoinPos = findTopLevelKeyword(sql, "inner join", fromPos);
+        size_t joinPos = findTopLevelKeyword(sql, "join", fromPos);
 
         enum class JoinType { Inner, Left, Right, FullOuter, Cross };
         JoinType jt = JoinType::Inner;
@@ -16309,11 +16315,10 @@ if (sql.rfind("backup database", 0) == 0) {
             size_t joinCount = 0;
             {
                 size_t p = fromPos;
-                while ((p = sql.find("join", p)) != string::npos) {
-                    // avoid matching "join" inside words (e.g., a column
-                    // named joined_id): require a word boundary before
-                    if (p == 0 || !isalnum((unsigned char)sql[p - 1])) ++joinCount;
-                    ++p;
+                while ((p = findTopLevelKeyword(sql, "join", p)) !=
+                       string::npos) {
+                    ++joinCount;
+                    p += 4;
                 }
             }
             if (joinCount >= 2) {
@@ -16742,24 +16747,10 @@ if (sql.rfind("backup database", 0) == 0) {
         if (isJoin) {
             string leftTableOrig = trim(sql.substr(fromPos + 4, actualJoinPos - fromPos - 4));
             bool isCrossJoin = (jt == JoinType::Cross);
-            // Word-boundary "on": a naive find() matches the "on" inside
-            // table names like "location"/"person", silently slicing the
-            // right table down to a prefix and failing with a bogus
-            // "not exist" (or worse, joining the wrong fragment).
-            size_t onPos = string::npos;
-            {
-                size_t p = actualJoinPos;
-                while ((p = sql.find("on", p)) != string::npos) {
-                    bool leftOk = (p == 0) ||
-                        !isalnum((unsigned char)sql[p - 1]) ||
-                        sql[p - 1] == '_';
-                    bool rightOk = (p + 2 >= sql.size()) ||
-                        !isalnum((unsigned char)sql[p + 2]) ||
-                        sql[p + 2] == '_';
-                    if (leftOk && rightOk) { onPos = p; break; }
-                    ++p;
-                }
-            }
+            // Use SQL-identifier boundaries here as well: a right table or
+            // alias ending in "_on" is still an identifier, not the ON
+            // clause that follows it.
+            size_t onPos = findTopLevelKeyword(sql, "on", actualJoinPos);
             size_t tableNameStart = actualJoinPos;
             if (jt == JoinType::Left) tableNameStart += 9;
             else if (jt == JoinType::Right) tableNameStart += 10;
