@@ -14833,49 +14833,209 @@ DBStatus StorageEngine::alterTableAddFKConstraint(const std::string& dbname,
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!validStoredIdentifier(name, MAX_TABLE_NAME_LEN) ||
         !validStoredIdentifier(refTable, MAX_TABLE_NAME_LEN)) return DBStatus::INVALID_VALUE;
+    if (localCols.empty() ||
+        (!refCols.empty() && localCols.size() != refCols.size()) ||
+        localCols.size() > MAX_COLUMNS) {
+        return DBStatus::INVALID_VALUE;
+    }
+    for (const auto& columnName : localCols) {
+        if (!validStoredIdentifier(columnName, MAX_COL_NAME_LEN)) {
+            return DBStatus::INVALID_VALUE;
+        }
+    }
+    for (const auto& columnName : refCols) {
+        if (!validStoredIdentifier(columnName, MAX_COL_NAME_LEN)) {
+            return DBStatus::INVALID_VALUE;
+        }
+    }
     if (!tableExists(dbname, refTable)) {
         // FK references a table in the same database
         if (!std::filesystem::exists(schemaPath(dbname, refTable))) {
             return DBStatus::TABLE_NOT_FOUND;
         }
     }
-    if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
+
+    // The definition scan must see stable child and parent relations. Acquire
+    // both metadata locks in a canonical order to avoid cross-table DDL
+    // deadlocks; self-references acquire the relation only once.
+    std::vector<std::string> relationNames = {tablename};
+    if (refTable != tablename) relationNames.push_back(refTable);
+    std::sort(relationNames.begin(), relationNames.end());
+    std::vector<std::string> lockedRelations;
+    for (const auto& relationName : relationNames) {
+        if (!lockManager_.lockMetadata(relationName)) {
+            for (auto it = lockedRelations.rbegin();
+                 it != lockedRelations.rend(); ++it) {
+                lockManager_.unlock(*it);
+            }
+            return DBStatus::LOCK_CONFLICT;
+        }
+        lockedRelations.push_back(relationName);
+    }
+    const auto finish = [&](DBStatus status) {
+        for (auto it = lockedRelations.rbegin();
+             it != lockedRelations.rend(); ++it) {
+            lockManager_.unlock(*it);
+        }
+        return status;
+    };
+
+    if (!tableExists(dbname, tablename) ||
+        !tableExists(dbname, refTable)) {
+        return finish(DBStatus::TABLE_NOT_FOUND);
+    }
 
     TableSchema tbl = getTableSchema(dbname, tablename);
+    TableSchema referencedTable = getTableSchema(dbname, refTable);
     if (tbl.fkLen >= MAX_COLUMNS) {
-        lockManager_.unlock(tablename);
-        return DBStatus::INVALID_VALUE;
+        return finish(DBStatus::INVALID_VALUE);
     }
-    // Verify local columns exist
+
+    std::vector<size_t> localColumnIndices;
+    std::vector<size_t> referencedColumnIndices;
+    std::vector<size_t> primaryColumns = referencedTable.pkColIndices;
+    if (primaryColumns.empty()) {
+        for (size_t i = 0; i < referencedTable.len; ++i) {
+            if (referencedTable.cols[i].isPrimaryKey) {
+                primaryColumns.push_back(i);
+            }
+        }
+    }
+    std::vector<std::string> effectiveRefCols = refCols;
+    if (effectiveRefCols.empty()) {
+        if (primaryColumns.size() != localCols.size()) {
+            return finish(DBStatus::INVALID_VALUE);
+        }
+        for (const size_t columnIndex : primaryColumns) {
+            if (columnIndex >= referencedTable.len) {
+                return finish(DBStatus::CORRUPTED_DATA);
+            }
+            effectiveRefCols.push_back(
+                referencedTable.cols[columnIndex].dataName);
+        }
+    }
+    std::set<size_t> distinctLocalColumns;
+    std::set<size_t> distinctReferencedColumns;
     for (const auto& cname : localCols) {
-        bool found = false;
+        size_t columnIndex = tbl.len;
         for (size_t i = 0; i < tbl.len; ++i) {
-            if (tbl.cols[i].dataName == cname) { found = true; break; }
+            if (tbl.cols[i].dataName == cname) {
+                columnIndex = i;
+                break;
+            }
         }
-        if (!found) {
-            lockManager_.unlock(tablename);
-            return DBStatus::INVALID_VALUE;
+        if (columnIndex >= tbl.len ||
+            !distinctLocalColumns.insert(columnIndex).second) {
+            return finish(DBStatus::INVALID_VALUE);
         }
+        localColumnIndices.push_back(columnIndex);
     }
+    for (const auto& cname : effectiveRefCols) {
+        size_t columnIndex = referencedTable.len;
+        for (size_t i = 0; i < referencedTable.len; ++i) {
+            if (referencedTable.cols[i].dataName == cname) {
+                columnIndex = i;
+                break;
+            }
+        }
+        if (columnIndex >= referencedTable.len ||
+            !distinctReferencedColumns.insert(columnIndex).second) {
+            return finish(DBStatus::INVALID_VALUE);
+        }
+        referencedColumnIndices.push_back(columnIndex);
+    }
+
     // Check for duplicate constraint name
     for (size_t i = 0; i < tbl.fkLen; ++i) {
         if (tbl.fks[i].name == name) {
-            lockManager_.unlock(tablename);
-            return DBStatus::TABLE_ALREADY_EXISTS;
+            return finish(DBStatus::TABLE_ALREADY_EXISTS);
         }
     }
+
+    const auto sameColumnSet = [](std::vector<size_t> left,
+                                  std::vector<size_t> right) {
+        if (left.size() != right.size()) return false;
+        std::sort(left.begin(), left.end());
+        std::sort(right.begin(), right.end());
+        return left == right;
+    };
+    bool referencedKeyIsUnique =
+        sameColumnSet(referencedColumnIndices, primaryColumns);
+    if (!referencedKeyIsUnique && referencedColumnIndices.size() == 1) {
+        referencedKeyIsUnique =
+            referencedTable.cols[referencedColumnIndices.front()].isUnique;
+    }
+    for (const auto& uniqueColumns : referencedTable.uniqueConstraints) {
+        if (sameColumnSet(referencedColumnIndices, uniqueColumns)) {
+            referencedKeyIsUnique = true;
+            break;
+        }
+    }
+    if (!referencedKeyIsUnique) {
+        return finish(DBStatus::INVALID_VALUE);
+    }
+
+    std::set<std::vector<std::string>> referencedKeys;
+    const bool parentScanOk = forEachRow(
+        dbname, refTable,
+        [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
+            const int64_t rid = encodeRid(pageId, slotId);
+            const std::string row(data, len);
+            std::vector<std::string> key;
+            key.reserve(referencedColumnIndices.size());
+            for (const size_t columnIndex : referencedColumnIndices) {
+                if (referencedTable.cols[columnIndex].isNull &&
+                    isColumnNullByRid(
+                        dbname, refTable, rid, columnIndex)) {
+                    return;
+                }
+                key.push_back(canonicalColumnKeyValue(
+                    referencedTable.cols[columnIndex],
+                    extractColumnValue(
+                        row, referencedTable, columnIndex, dbname)));
+            }
+            referencedKeys.insert(std::move(key));
+        });
+    if (!parentScanOk) return finish(DBStatus::IO_ERROR);
+
+    bool orphanedRow = false;
+    const bool childScanOk = forEachRow(
+        dbname, tablename,
+        [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
+            if (orphanedRow) return;
+            const int64_t rid = encodeRid(pageId, slotId);
+            const std::string row(data, len);
+            std::vector<std::string> key;
+            key.reserve(localColumnIndices.size());
+            for (size_t valueIndex = 0;
+                 valueIndex < localColumnIndices.size(); ++valueIndex) {
+                const size_t localColumnIndex =
+                    localColumnIndices[valueIndex];
+                if (tbl.cols[localColumnIndex].isNull &&
+                    isColumnNullByRid(
+                        dbname, tablename, rid, localColumnIndex)) {
+                    return;  // MATCH SIMPLE: any NULL suppresses the check.
+                }
+                key.push_back(canonicalColumnKeyValue(
+                    referencedTable.cols[referencedColumnIndices[valueIndex]],
+                    extractColumnValue(
+                        row, tbl, localColumnIndex, dbname)));
+            }
+            orphanedRow = referencedKeys.count(key) == 0;
+        });
+    if (!childScanOk) return finish(DBStatus::IO_ERROR);
+    if (orphanedRow) return finish(DBStatus::INVALID_VALUE);
 
     ForeignKey fk;
     fk.name = name;
     fk.colNames = localCols;
-    fk.refCols = refCols;
+    fk.refCols = effectiveRefCols;
     fk.refTable = refTable;
     fk.onDelete = onDelete.empty() ? "restrict" : onDelete;
     fk.onUpdate = onUpdate.empty() ? "restrict" : onUpdate;
     tbl.appendFK(fk);
     writeSchemaFile(dbname, tablename, tbl);
-    lockManager_.unlock(tablename);
-    return DBStatus::OK;
+    return finish(DBStatus::OK);
 }
 
 DBStatus StorageEngine::alterTableDropConstraint(const std::string& dbname,
