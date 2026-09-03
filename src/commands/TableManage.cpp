@@ -8504,14 +8504,23 @@ std::string TableSchema::buildPKValue(const std::string& rowBuffer) const {
     } else {
         // Collect all columns marked as primary key (composite PK support)
         bool first = true;
+        size_t primaryColumnCount = 0;
         for (size_t i = 0; i < len; ++i) {
             if (cols[i].isPrimaryKey) {
+                ++primaryColumnCount;
                 if (!first) key += "\x01";
                 key += canonicalColumnKeyValue(
                     cols[i], StorageEngine::extractColumnValueStatic(
                                  rowBuffer, *this, i));
                 first = false;
             }
+        }
+        // Legacy inline single-column keys do not carry a separator.  Keep
+        // their established non-empty encoding unchanged, but give a real
+        // empty string a non-empty internal key so index maintenance does not
+        // mistake it for an absent/NULL primary key.
+        if (primaryColumnCount == 1 && key.empty()) {
+            key.assign(1, '\0');
         }
     }
     return key;
@@ -8530,14 +8539,19 @@ std::string TableSchema::buildPKValue(const std::map<std::string, std::string>& 
         }
     } else {
         bool first = true;
+        size_t primaryColumnCount = 0;
         for (size_t i = 0; i < len; ++i) {
             if (cols[i].isPrimaryKey) {
+                ++primaryColumnCount;
                 if (!first) key += "\x01";
                 auto it = values.find(cols[i].dataName);
                 key += canonicalColumnKeyValue(
                     cols[i], it != values.end() ? it->second : "");
                 first = false;
             }
+        }
+        if (primaryColumnCount == 1 && key.empty()) {
+            key.assign(1, '\0');
         }
     }
     return key;
