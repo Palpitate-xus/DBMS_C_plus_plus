@@ -2682,18 +2682,66 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         else if (pt == "hash") tbl.partitionType = TableSchema::PartitionType::Hash;
     }
 
+    // Inline PRIMARY KEY declarations and a copied key each already define
+    // the table's one permitted primary key.  Without composite index metadata,
+    // multiple inline flags represent multiple declarations rather than one
+    // composite key.
+    bool hasPrimaryKeyDefinition = !tbl.pkColIndices.empty();
+    if (!hasPrimaryKeyDefinition) {
+        size_t inlinePrimaryKeys = 0;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].isPrimaryKey) ++inlinePrimaryKeys;
+        }
+        if (inlinePrimaryKeys > 1) {
+            std::cout << "ERROR: multiple primary keys for table are not allowed"
+                      << std::endl;
+            return true;
+        }
+        hasPrimaryKeyDefinition = inlinePrimaryKeys == 1;
+    }
+
     // Table-level constraints
     for (const auto& tc : stmt->constraints) {
         std::string t = toLower(tc.type);
         if (t == "primary key") {
+            if (hasPrimaryKeyDefinition) {
+                std::cout << "ERROR: multiple primary keys for table are not allowed"
+                          << std::endl;
+                return true;
+            }
+            if (tc.columns.empty()) {
+                std::cout << "ERROR: PRIMARY KEY requires at least one column"
+                          << std::endl;
+                return true;
+            }
+            std::vector<size_t> primaryColumns;
+            std::set<size_t> distinctColumns;
             for (const auto& cname : tc.columns) {
+                size_t columnIndex = tbl.len;
                 for (size_t i = 0; i < tbl.len; ++i) {
                     if (tbl.cols[i].dataName == cname) {
-                        tbl.cols[i].isPrimaryKey = true;
-                        tbl.pkColIndices.push_back(i);
+                        columnIndex = i;
+                        break;
                     }
                 }
+                if (columnIndex >= tbl.len) {
+                    std::cout << "ERROR: PRIMARY KEY column \"" << cname
+                              << "\" does not exist" << std::endl;
+                    return true;
+                }
+                if (!distinctColumns.insert(columnIndex).second) {
+                    std::cout << "ERROR: PRIMARY KEY column \"" << cname
+                              << "\" appears more than once" << std::endl;
+                    return true;
+                }
+                primaryColumns.push_back(columnIndex);
             }
+            tbl.pkColIndices = std::move(primaryColumns);
+            for (const size_t columnIndex : tbl.pkColIndices) {
+                tbl.cols[columnIndex].isPrimaryKey = true;
+                tbl.cols[columnIndex].isNull = false;
+            }
+            hasPrimaryKeyDefinition = true;
         } else if (t == "unique") {
             std::vector<size_t> idxs;
             for (const auto& cname : tc.columns) {
