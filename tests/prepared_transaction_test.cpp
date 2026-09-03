@@ -1,4 +1,6 @@
+#include "commands/DdlExecutor.h"
 #include "commands/TableManage.h"
+#include "Session.h"
 #include "storage/CommitLog.h"
 #include "storage/WAL.h"
 #include "test_utils.h"
@@ -20,6 +22,39 @@ void cleanup(const std::string& db) {
     std::error_code ec;
     std::filesystem::remove_all(db, ec);
     std::filesystem::remove_all("info/.prepared", ec);
+}
+
+void test_prepare_rejects_deferred_constraint_violation() {
+    const std::string db = testDbPath("prepared_deferred_constraint");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session session;
+    session.username = "testuser";
+    session.permission = 1;
+    session.currentDB = db;
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE parent (id INT PRIMARY KEY)", session));
+    assert(!ddl.executeSql(
+        "CREATE TABLE child ("
+        "id INT PRIMARY KEY, pid INT, "
+        "CONSTRAINT child_pid_fkey FOREIGN KEY (pid) REFERENCES parent(id) "
+        "DEFERRABLE INITIALLY DEFERRED)",
+        session));
+
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "child", {{"id", "1"}, {"pid", "999"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.prepareTransaction("prepared_deferred_violation") ==
+           dbms::DBStatus::INVALID_VALUE);
+    assert(!g_engine.inTransaction());
+    const auto prepared = g_engine.listPreparedTransactions();
+    assert(std::find(prepared.begin(), prepared.end(),
+                     "prepared_deferred_violation") == prepared.end());
+    assert(g_engine.query(db, "child", {}, {"id"}).empty());
+
+    cleanup(db);
+    std::cout << "[PREPARED-TXN] deferred violation rejected before prepare OK\n";
 }
 
 void test_cross_backend_prepare_completion() {
@@ -302,6 +337,7 @@ int main(int argc, char** argv) {
         return runPreparedRestartVerifier();
     }
     cleanupAllTestData();
+    test_prepare_rejects_deferred_constraint_violation();
     test_cross_backend_prepare_completion();
     test_commit_refreshes_warm_completion_backend();
     test_commit_clog_failure_is_irrevocable();

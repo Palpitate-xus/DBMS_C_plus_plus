@@ -35520,6 +35520,24 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
         return DBStatus::INVALID_VALUE;
     }
 
+    // PREPARE is the last point at which backend-local deferred checks are
+    // available.  Validate them before publishing any prepared state; a
+    // COMMIT PREPARED may run in another process and cannot reconstruct this
+    // queue from the row undo log.
+    {
+        auto it = transactionContext().deferredChecks.find(
+            transactionContext().currentTxnId);
+        if (it != transactionContext().deferredChecks.end()) {
+            for (const auto& dc : it->second) {
+                if (!runDeferredCheck(dc)) {
+                    rollbackTransaction();
+                    return DBStatus::INVALID_VALUE;
+                }
+            }
+            transactionContext().deferredChecks.erase(it);
+        }
+    }
+
     // The preparing backend may own dirty heap, index, FSM or visibility-map
     // pages that a different backend will never see in its private caches.
     // PREPARE is therefore the hand-off boundary: publish all physical
