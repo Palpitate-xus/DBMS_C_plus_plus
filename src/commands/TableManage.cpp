@@ -16815,6 +16815,14 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                                 const std::string& tablename,
                                 const std::map<std::string, std::string>& values,
                                 std::vector<std::map<std::string, std::string>>* insertedRows) {
+    // A transaction owns one database lock, read view, commit log and undo
+    // stream. Writing another database with its transaction ID would leave
+    // that database's heap/index changes outside both commit and rollback.
+    if (transactionContext().inTransaction &&
+        dbname != transactionContext().txnDB) {
+        return DBStatus::INVALID_VALUE;
+    }
+
     // SQL execution already gives top-level DML a transaction, while embedded
     // callers may intentionally use the legacy non-transactional partition
     // route. Inside an existing transaction, add a per-INSERT savepoint so a
@@ -18814,6 +18822,11 @@ DBStatus StorageEngine::remove(
     const std::vector<std::string>& conditions,
     std::vector<std::map<std::string, std::string>>* deletedRows,
     const DeleteMatcher& deleteMatcher) {
+    if (transactionContext().inTransaction &&
+        dbname != transactionContext().txnDB) {
+        return DBStatus::INVALID_VALUE;
+    }
+
     // Referential actions can touch several child relations before the
     // parent heap is changed. Give the public DELETE a statement boundary so
     // a later child failure cannot leave earlier cascades or SET NULL actions
@@ -19823,6 +19836,11 @@ DBStatus StorageEngine::update(
     std::vector<std::map<std::string, std::string>>* updatedRows,
     const UpdateResolver& updateResolver,
     const UpdateMatcher& updateMatcher) {
+    if (transactionContext().inTransaction &&
+        dbname != transactionContext().txnDB) {
+        return DBStatus::INVALID_VALUE;
+    }
+
     // A single UPDATE may touch many rows. In autocommit mode, run it inside
     // an engine-owned transaction so a constraint or storage error on a later
     // row cannot leave earlier rows permanently modified.
