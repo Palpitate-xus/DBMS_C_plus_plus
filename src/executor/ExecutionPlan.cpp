@@ -3001,6 +3001,8 @@ MergeJoinOp::MergeJoinOp(StorageEngine* engine, const std::string& dbname,
 bool MergeJoinOp::open() {
     leftTbl_ = engine_->getTableSchema(dbname_, leftTable_);
     rightTbl_ = engine_->getTableSchema(dbname_, rightTable_);
+    leftRows_.clear();
+    rightRows_.clear();
 
     // Read all left rows
     if (!left_->open()) return false;
@@ -3027,31 +3029,65 @@ bool MergeJoinOp::open() {
 
     leftPos_ = 0;
     rightPos_ = 0;
+    leftGroupEnd_ = 0;
+    rightGroupBegin_ = 0;
+    rightGroupEnd_ = 0;
+    emittingGroup_ = false;
     return true;
 }
 
 bool MergeJoinOp::next(std::string& outRow) {
     NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
-    while (leftPos_ < leftRows_.size() && rightPos_ < rightRows_.size()) {
+    while (true) {
+        if (emittingGroup_) {
+            outRow = leftRows_[leftPos_] + rightRows_[rightPos_];
+            ++rightPos_;
+            if (rightPos_ >= rightGroupEnd_) {
+                rightPos_ = rightGroupBegin_;
+                ++leftPos_;
+                if (leftPos_ >= leftGroupEnd_) {
+                    emittingGroup_ = false;
+                    rightPos_ = rightGroupEnd_;
+                }
+            }
+            rtInstr_.emitted = true;
+            return true;
+        }
+
+        if (leftPos_ >= leftRows_.size() || rightPos_ >= rightRows_.size()) {
+            return false;
+        }
         std::string lk = extractJoinKey(leftRows_[leftPos_], leftTbl_, leftCol_);
         std::string rk = extractJoinKey(rightRows_[rightPos_], rightTbl_, rightCol_);
         if (lk == rk) {
-            outRow = leftRows_[leftPos_] + rightRows_[rightPos_];
-            ++rightPos_;
-            rtInstr_.emitted = true;
-    return true;
+            leftGroupEnd_ = leftPos_ + 1;
+            while (leftGroupEnd_ < leftRows_.size() &&
+                   extractJoinKey(leftRows_[leftGroupEnd_], leftTbl_, leftCol_) ==
+                       lk) {
+                ++leftGroupEnd_;
+            }
+            rightGroupBegin_ = rightPos_;
+            rightGroupEnd_ = rightPos_ + 1;
+            while (rightGroupEnd_ < rightRows_.size() &&
+                   extractJoinKey(rightRows_[rightGroupEnd_], rightTbl_,
+                                  rightCol_) == rk) {
+                ++rightGroupEnd_;
+            }
+            emittingGroup_ = true;
         } else if (lk < rk) {
             ++leftPos_;
         } else {
             ++rightPos_;
         }
     }
-    return false;
 }
 
 void MergeJoinOp::close() {
     leftRows_.clear();
     rightRows_.clear();
+    leftPos_ = 0;
+    rightPos_ = 0;
+    emittingGroup_ = false;
 }
 
 // ========================================================================

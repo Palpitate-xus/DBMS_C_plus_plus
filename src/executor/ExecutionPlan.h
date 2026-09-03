@@ -855,6 +855,10 @@ private:
     std::vector<std::string> rightRows_;
     size_t leftPos_ = 0;
     size_t rightPos_ = 0;
+    size_t leftGroupEnd_ = 0;
+    size_t rightGroupBegin_ = 0;
+    size_t rightGroupEnd_ = 0;
+    bool emittingGroup_ = false;
 };
 
 // GroupAggregate: consume a filtered Volcano stream and produce one row per

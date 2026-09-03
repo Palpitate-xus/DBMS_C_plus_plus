@@ -20,6 +20,7 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "test_utils.h"
@@ -162,6 +163,46 @@ int main() {
     std::string jx = dbms::QueryPlanner::explain(joinPlan, &g_engine, db, opts);
     assert(jx.find("ParallelHashJoin") != std::string::npos);
     std::cout << "[PAR] planner chooses ParallelHashJoin OK" << std::endl;
+
+    // ------------------------------------------------------------------
+    // 3b. MergeJoinOp must emit the Cartesian product of equal-key groups.
+    // ------------------------------------------------------------------
+    assert(!ddl.executeSql("CREATE TABLE merge_l (id INT, k INT)", s));
+    assert(!ddl.executeSql("CREATE TABLE merge_r (id INT, k INT)", s));
+    for (const auto& values : std::vector<std::pair<int, int>>{
+             {1, 7}, {2, 7}, {3, 8}}) {
+        assert(g_engine.insert(db, "merge_l",
+                               {{"id", std::to_string(values.first)},
+                                {"k", std::to_string(values.second)}})
+                   == DBStatus::OK);
+    }
+    for (const auto& values : std::vector<std::pair<int, int>>{
+             {10, 7}, {20, 7}, {30, 7}, {40, 8}}) {
+        assert(g_engine.insert(db, "merge_r",
+                               {{"id", std::to_string(values.first)},
+                                {"k", std::to_string(values.second)}})
+                   == DBStatus::OK);
+    }
+    auto hashLeft = std::make_unique<dbms::TableScanOp>(
+        &g_engine, db, "merge_l");
+    auto hashRight = std::make_unique<dbms::TableScanOp>(
+        &g_engine, db, "merge_r");
+    dbms::HashJoinOp duplicateHash(
+        &g_engine, db, std::move(hashLeft), std::move(hashRight),
+        "merge_l", "merge_r", "k", "k");
+    auto hashDuplicateRows = sorted(runPlan(&duplicateHash));
+
+    auto mergeLeft = std::make_unique<dbms::TableScanOp>(
+        &g_engine, db, "merge_l");
+    auto mergeRight = std::make_unique<dbms::TableScanOp>(
+        &g_engine, db, "merge_r");
+    dbms::MergeJoinOp duplicateMerge(
+        &g_engine, db, std::move(mergeLeft), std::move(mergeRight),
+        "merge_l", "merge_r", "k", "k");
+    auto mergeDuplicateRows = sorted(runPlan(&duplicateMerge));
+    assert(hashDuplicateRows.size() == 7);
+    assert(mergeDuplicateRows == hashDuplicateRows);
+    std::cout << "[PAR] merge join duplicate-key product OK" << std::endl;
 
     // ------------------------------------------------------------------
     // 4. GatherMerge: per-worker sorted runs merge globally.
