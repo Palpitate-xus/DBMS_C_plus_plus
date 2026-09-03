@@ -1769,7 +1769,8 @@ private:
         // required to restore the pre-transaction state; duplicates are pure
         // WAL amplification for multi-write transactions. The owning xid is
         // tracked so a new transaction automatically discards the stale set.
-        std::map<std::string, uint64_t> txnLoggedBeforePages;
+        std::map<std::string, std::pair<uint64_t, Lsn>>
+            txnLoggedBeforePages;
         // Logical decoding buffer (P2-5): row changes captured by the DML
         // write paths, streamed into logical replication slots at commit
         // and discarded on rollback.

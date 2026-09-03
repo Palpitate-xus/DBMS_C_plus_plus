@@ -19356,7 +19356,14 @@ DBStatus StorageEngine::removeInternal(
             return DBStatus::CORRUPTED_DATA;
         }
 
-        walPageImage(dbname, tablename, pageId, pageBuf, pa->pageSize(), true);
+        const Lsn beforeLsn = walPageImage(
+            dbname, tablename, pageId, pageBuf, pa->pageSize(), true);
+        if (beforeLsn == INVALID_LSN) {
+            pa->unpinPage(pageId);
+            lockManager_.pageUnlock(dbname, tablename, pageId);
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
+        }
         const bool transactionalDelete =
             usesHeapTupleHeader(tbl.formatVersion) &&
             transactionContext().inTransaction &&
@@ -19390,10 +19397,14 @@ DBStatus StorageEngine::removeInternal(
         pa->markDirty(pageId);
         Lsn lsn = walPageImage(
             dbname, tablename, pageId, pageBuf, pa->pageSize(), false);
-        if (lsn != INVALID_LSN) {
-            setPageLsnAndChecksum(pageBuf, lsn);
-            pa->markDirty(pageId);
+        if (lsn == INVALID_LSN) {
+            pa->unpinPage(pageId);
+            lockManager_.pageUnlock(dbname, tablename, pageId);
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
         }
+        setPageLsnAndChecksum(pageBuf, lsn);
+        pa->markDirty(pageId);
         size_t freePct = page.freeSpace() * 100 / pa->pageSize();
         getFSM(dbname, tablename)->setFreePercent(
             pageId, static_cast<uint8_t>(freePct));
@@ -27826,13 +27837,8 @@ Lsn StorageEngine::walPageImage(const std::string& dbname, const std::string& ta
     if (beforeImage && xid != 0) {
         auto& logged = transactionContext().txnLoggedBeforePages;
         auto it = logged.find(key);
-        if (it != logged.end() && it->second == xid) {
-            return INVALID_LSN;  // already covered by the earliest image
-        }
-        if (it == logged.end()) {
-            logged.emplace(key, xid);
-        } else {
-            it->second = xid;
+        if (it != logged.end() && it->second.first == xid) {
+            return it->second.second;  // covered by the earliest image
         }
     }
     std::vector<char> payload =
@@ -27842,7 +27848,13 @@ Lsn StorageEngine::walPageImage(const std::string& dbname, const std::string& ta
                    reinterpret_cast<const char*>(&pageLen) + sizeof(pageLen));
     payload.insert(payload.end(), pageBuf, pageBuf + pageSize);
     uint8_t info = beforeImage ? XLOG_HEAP_PAGE_BEFORE : XLOG_HEAP_PAGE_AFTER;
-    return wal->XLogInsert(RM_HEAP_ID, info, xid, payload);
+    const Lsn lsn = wal->XLogInsert(RM_HEAP_ID, info, xid, payload);
+    // Do not suppress a retry after a failed insert: only a WAL record that
+    // actually entered the stream covers this page's pre-transaction image.
+    if (beforeImage && xid != 0 && lsn != INVALID_LSN) {
+        transactionContext().txnLoggedBeforePages[key] = {xid, lsn};
+    }
+    return lsn;
 }
 
 Lsn StorageEngine::walIndexFileImage(const std::string& dbname,
