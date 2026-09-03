@@ -21623,7 +21623,9 @@ DBStatus StorageEngine::updateInternal(
                     auto newRid = newVersionRids.find(rid);
                     const int64_t triggerRid =
                         newRid == newVersionRids.end() ? rid : newRid->second;
-                    if (!readRowByRid(pa, triggerRid, newRow, tbl)) continue;
+                    if (!readRowByRid(pa, triggerRid, newRow, tbl)) {
+                        return DBStatus::IO_ERROR;
+                    }
                     std::map<std::string, std::string> newValues;
                     for (size_t i = 0; i < tbl.len; ++i) {
                         newValues[tbl.cols[i].dataName] =

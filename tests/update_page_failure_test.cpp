@@ -152,12 +152,43 @@ void test_prewrite_row_read_failure_aborts_update() {
               << std::endl;
 }
 
+void test_after_trigger_row_read_failure_aborts_update() {
+    const std::string database = testDbPath("update_after_read_failure");
+    cleanupTestDb("update_after_read_failure");
+    createTableWithRows(database, 2);
+    assert(g_engine.createTrigger(database, {
+               "observe_after", "after", "update", "t", "select 1", "",
+               true, true, {}}) == dbms::DBStatus::OK);
+
+    HeapPageFailure failure(database);
+    int calls = 0;
+    g_engine.setTriggerExecutor([&](const std::string&) {
+        ++calls;
+        if (calls == 1) failure.inject();
+        return false;
+    });
+    const dbms::DBStatus status = g_engine.update(
+        database, "t", {{"value", "changed"}}, {});
+    g_engine.setTriggerExecutor({});
+    failure.restore();
+
+    assert(calls == 1);
+    assert(status == dbms::DBStatus::IO_ERROR);
+    assert(!g_engine.inTransaction());
+    assertRowsUnchanged(database, 2);
+
+    cleanupTestDb("update_after_read_failure");
+    std::cout << "[UPDATE PAGE FAILURE] AFTER trigger read failure aborted OK"
+              << std::endl;
+}
+
 }  // namespace
 
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_matcher_candidate_read_failure_aborts_update();
     test_prewrite_row_read_failure_aborts_update();
+    test_after_trigger_row_read_failure_aborts_update();
     finalCleanupTestData();
     return 0;
 }
