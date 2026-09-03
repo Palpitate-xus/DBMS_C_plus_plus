@@ -1000,8 +1000,10 @@ bool SemiJoinOp::open() {
         };
         std::set<std::vector<std::string>> innerKeys;
         bool innerHasNull = false;
+        bool innerHasRow = false;
         std::string row;
         while (inner_->next(row)) {
+            innerHasRow = true;
             bool isNull = false;
             const std::vector<std::string> key = rowKey(
                 row, innerTbl_, innerIdxs, inner_.get(), isNull);
@@ -1015,7 +1017,9 @@ bool SemiJoinOp::open() {
             const std::vector<std::string> outerKey = rowKey(
                 row, outerTbl_, outerIdxs, outer_.get(), isNull2);
             const bool found = !isNull2 && innerKeys.count(outerKey) > 0;
-            const bool keep = anti_ ? (!isNull2 && !found && !innerHasNull) : found;
+            const bool keep = anti_
+                ? (!innerHasRow || (!isNull2 && !found && !innerHasNull))
+                : found;
             if (keep) rememberOuterRow(row);
         }
         outer_->close();
@@ -1041,8 +1045,10 @@ bool SemiJoinOp::open() {
 
     std::unordered_set<std::string> innerKeys;
     bool innerHasNull = false;
+    bool innerHasRow = false;
     std::string row;
     while (inner_->next(row)) {
+        innerHasRow = true;
         const std::string value =
             StorageEngine::extractColumnValueStatic(row, innerTbl_, innerIdx);
         if (inner_->lastColumnIsNull(innerIdx) ||
@@ -1064,8 +1070,11 @@ bool SemiJoinOp::open() {
 
         // SQL's three-valued logic matters for NOT IN: a NULL in the inner
         // relation makes every non-matching comparison UNKNOWN, not TRUE.
-        const bool keep = anti_ ? (!outerIsNull && !found && !innerHasNull)
-                                : found;
+        // The empty set is the exception: NOT IN over it is TRUE even when
+        // the outer value is NULL (there is no comparison that can be UNKNOWN).
+        const bool keep = anti_
+            ? (!innerHasRow || (!outerIsNull && !found && !innerHasNull))
+            : found;
         if (keep) rememberOuterRow(row);
     }
     outer_->close();
@@ -1158,6 +1167,15 @@ bool QuantifiedSubqueryFilterOp::next(std::string& outRow) {
         const std::string left = StorageEngine::extractColumnValueStatic(
             outRow, outerTbl_, outerIdx);
         const bool leftIsNull = outer_->lastColumnIsNull(outerIdx);
+        // ANY over an empty set is FALSE and ALL over an empty set is TRUE,
+        // independently of the left operand (including SQL NULL).
+        if (values_.empty()) {
+            if (all_) {
+                rtInstr_.emitted = true;
+                return true;
+            }
+            continue;
+        }
         if (leftIsNull) continue; // NULL <op> ANY/ALL is UNKNOWN.
 
         bool result = all_;

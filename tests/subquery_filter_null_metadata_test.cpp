@@ -49,6 +49,8 @@ int main() {
         "id INT PRIMARY KEY, match_key INT, payload TEXT)", session));
     assert(!ddl.executeSql(
         "CREATE TABLE inner_rows (match_key INT)", session));
+    assert(!ddl.executeSql(
+        "CREATE TABLE empty_inner_rows (match_key INT)", session));
 
     assert(g_engine.insert(
                database, "outer_rows",
@@ -62,6 +64,10 @@ int main() {
                database, "outer_rows",
                {{"id", "3"}, {"match_key", "30"}, {"payload", "value"}}) ==
            dbms::DBStatus::OK);
+    assert(g_engine.insert(
+               database, "outer_rows",
+               {{"id", "4"}, {"match_key", "NULL"},
+                {"payload", "null-key"}}) == dbms::DBStatus::OK);
     for (const std::string key : {"10", "20", "30"}) {
         assert(g_engine.insert(database, "inner_rows", {{"match_key", key}}) ==
                dbms::DBStatus::OK);
@@ -83,7 +89,7 @@ int main() {
     existence.tablename = "inner_rows";
     existenceContext.existenceFilters.push_back(std::move(existence));
     assert(execute(std::move(existenceContext)) ==
-           (std::vector<std::string>{"NULL ", " ", "value "}));
+           (std::vector<std::string>{"NULL ", " ", "value ", "null-key "}));
 
     dbms::PlanContext quantifiedContext = baseContext(database);
     dbms::QuantifiedSubquerySpec quantified;
@@ -95,6 +101,41 @@ int main() {
     quantifiedContext.quantifiedSubqueries.push_back(std::move(quantified));
     assert(execute(std::move(quantifiedContext)) ==
            (std::vector<std::string>{"NULL ", " ", "value "}));
+
+    dbms::PlanContext emptyNotInContext = baseContext(database);
+    dbms::SemiJoinSpec emptyNotIn;
+    emptyNotIn.dbname = database;
+    emptyNotIn.tablename = "empty_inner_rows";
+    emptyNotIn.outerColumn = "match_key";
+    emptyNotIn.innerColumn = "match_key";
+    emptyNotIn.anti = true;
+    emptyNotInContext.semiJoins.push_back(std::move(emptyNotIn));
+    assert(execute(std::move(emptyNotInContext)) ==
+           (std::vector<std::string>{
+               "NULL ", " ", "value ", "null-key "}));
+
+    dbms::PlanContext emptyAllContext = baseContext(database);
+    dbms::QuantifiedSubquerySpec emptyAll;
+    emptyAll.dbname = database;
+    emptyAll.tablename = "empty_inner_rows";
+    emptyAll.outerColumn = "match_key";
+    emptyAll.innerColumn = "match_key";
+    emptyAll.op = ">";
+    emptyAll.all = true;
+    emptyAllContext.quantifiedSubqueries.push_back(std::move(emptyAll));
+    assert(execute(std::move(emptyAllContext)) ==
+           (std::vector<std::string>{
+               "NULL ", " ", "value ", "null-key "}));
+
+    dbms::PlanContext emptyAnyContext = baseContext(database);
+    dbms::QuantifiedSubquerySpec emptyAny;
+    emptyAny.dbname = database;
+    emptyAny.tablename = "empty_inner_rows";
+    emptyAny.outerColumn = "match_key";
+    emptyAny.innerColumn = "match_key";
+    emptyAny.op = ">";
+    emptyAnyContext.quantifiedSubqueries.push_back(std::move(emptyAny));
+    assert(execute(std::move(emptyAnyContext)).empty());
 
     cleanupTestDb(testName);
     finalCleanupTestData();

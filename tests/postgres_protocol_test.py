@@ -779,6 +779,18 @@ def main():
             sock, "SELECT id FROM sub_outer "
             "WHERE id > ALL (SELECT id FROM sub_inner WHERE enabled = 9)"))
         assert empty_all_rows == [[b"1"], [b"2"], [b"3"], [b"4"]], empty_all_rows
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE sub_nullable (id INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO sub_nullable VALUES (1), (NULL)"))
+        empty_not_in_nullable = data_row_values(simple_query(
+            sock, "SELECT id FROM sub_nullable "
+            "WHERE id NOT IN (SELECT id FROM sub_inner WHERE enabled = 9)"))
+        assert empty_not_in_nullable == [[b"1"], [None]], empty_not_in_nullable
+        empty_all_nullable = data_row_values(simple_query(
+            sock, "SELECT id FROM sub_nullable "
+            "WHERE id > ALL (SELECT id FROM sub_inner WHERE enabled = 9)"))
+        assert empty_all_nullable == [[b"1"], [None]], empty_all_nullable
         scalar_rows = data_row_values(simple_query(
             sock, "SELECT id, (SELECT id FROM sub_inner WHERE id = 2) "
             "FROM sub_outer"))
