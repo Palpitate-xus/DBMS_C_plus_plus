@@ -31826,6 +31826,94 @@ bool StorageEngine::restoreDeletedRowIndexes(
     return ok;
 }
 
+bool StorageEngine::undoDeletedRow(
+    const TxnLogEntry& entry,
+    std::set<BloomIndex*>& bloomUndoIndexes) {
+    if (entry.op != TxnLogEntry::Op::Delete || entry.rowIdx < 0 ||
+        entry.rowData.empty() || transactionContext().txnDB.empty()) {
+        return false;
+    }
+
+    const std::string& dbname = transactionContext().txnDB;
+    const std::string& tablename = entry.tableName;
+    PageAllocator* pa = getPageAllocator(dbname, tablename);
+    const TableSchema tbl = getTableSchema(dbname, tablename);
+    uint32_t pageId = 0;
+    uint16_t slotId = 0;
+    decodeRid(entry.rowIdx, pageId, slotId);
+
+    bool heapOk = false;
+    bool pageLocked = false;
+    if (pa) {
+        pageLocked = lockManager_.pageLockExclusive(
+            dbname, tablename, pageId);
+    }
+    if (pa && pageLocked) {
+        char* pageBuffer = pa->fetchPage(pageId);
+        if (pageBuffer) {
+            PageWrapper page(
+                pageBuffer, pa->pageSize(), tbl.formatVersion);
+            const char* currentData = nullptr;
+            size_t currentLength = 0;
+            if (page.isValid() &&
+                page.read(slotId, currentData, currentLength) &&
+                currentLength >=
+                    rowHeaderSize(tbl.formatVersion, tbl.len) &&
+                stripRowHeader(
+                    currentData, currentLength, tbl.formatVersion,
+                    tbl.len) == entry.rowData) {
+                std::vector<char> stagedBuffer(
+                    pageBuffer, pageBuffer + pa->pageSize());
+                PageWrapper staged(
+                    stagedBuffer.data(), pa->pageSize(),
+                    tbl.formatVersion);
+                std::string restored = replaceRowData(
+                    std::string(currentData, currentLength),
+                    entry.rowData, tbl.formatVersion, tbl.len);
+                setRowXmax(
+                    restored.data(), restored.size(), tbl.formatVersion, 0);
+                uint16_t restoredSlot = slotId;
+                const bool stagedOk = staged.update(
+                    slotId, restored.data(), restored.size(), restoredSlot);
+                const Lsn beforeLsn = stagedOk && restoredSlot == slotId
+                    ? walPageImage(
+                          dbname, tablename, pageId, pageBuffer,
+                          pa->pageSize(), true)
+                    : INVALID_LSN;
+                const Lsn afterLsn = beforeLsn != INVALID_LSN
+                    ? walPageImage(
+                          dbname, tablename, pageId,
+                          stagedBuffer.data(), pa->pageSize(), false)
+                    : INVALID_LSN;
+                WALManager* wal = getWAL(dbname);
+                if (afterLsn != INVALID_LSN && wal &&
+                    wal->XLogFlush(afterLsn)) {
+                    std::memcpy(
+                        pageBuffer, stagedBuffer.data(), pa->pageSize());
+                    setPageLsnAndChecksum(pageBuffer, afterLsn);
+                    pa->markDirty(pageId);
+                    const size_t freePercent =
+                        staged.freeSpace() * 100 / pa->pageSize();
+                    getFSM(dbname, tablename)->setFreePercent(
+                        pageId, static_cast<uint8_t>(freePercent));
+                    getVM(dbname, tablename)->setAllVisible(pageId, false);
+                    heapOk = pa->flush();
+                }
+            }
+            pa->unpinPage(pageId);
+        }
+        lockManager_.pageUnlock(dbname, tablename, pageId);
+    }
+
+    // DELETE may have failed after removing only a prefix of its indexes.
+    // Restore every missing exact key/RID pair even when the heap page is
+    // unreadable; the logged OLD image is independent of that page.
+    const bool indexesOk = restoreDeletedRowIndexes(
+        dbname, tablename, tbl, entry.rowData, entry.rowIdx,
+        bloomUndoIndexes);
+    return heapOk && indexesOk;
+}
+
 // ========================================================================
 // Transaction support (row undo log with opt-in DDL snapshots)
 // ========================================================================
@@ -33332,42 +33420,7 @@ DBStatus StorageEngine::rollbackTransaction() {
                                         it->rowData);
             }
         } else if (it->op == TxnLogEntry::Op::Delete) {
-            // Undo DELETE: restore the row by clearing tombstone and writing back old data
-            uint32_t pageId; uint16_t slotId;
-            decodeRid(it->rowIdx, pageId, slotId);
-            char* pageBuf = pa->fetchPage(pageId);
-            if (pageBuf) {
-                PageWrapper page(pageBuf, pa->pageSize(), tbl.formatVersion);
-                walPageImage(transactionContext().txnDB, it->tableName, pageId,
-                             pageBuf, pa->pageSize(), true);
-                // Transactional DELETE keeps the tuple in place. Restore the
-                // payload and clear xmax so a later COMMIT of the surrounding
-                // transaction does not hide a row rolled back to this point.
-                const char* currentData = nullptr;
-                size_t currentLen = 0;
-                size_t hdrLen = rowHeaderSize(tbl.formatVersion, tbl.len);
-                if (page.read(slotId, currentData, currentLen) && currentLen >= hdrLen) {
-                    std::string fullRow = replaceRowData(
-                        std::string(currentData, currentLen), it->rowData, tbl.formatVersion, tbl.len);
-                    setRowXmax(fullRow.data(), fullRow.size(), tbl.formatVersion, 0);
-                    page.update(slotId, fullRow.data(), fullRow.size());
-                }
-                pa->markDirty(pageId);
-                Lsn lsn = walPageImage(transactionContext().txnDB, it->tableName,
-                                       pageId, pageBuf, pa->pageSize(), false);
-                if (lsn != INVALID_LSN) {
-                    setPageLsnAndChecksum(pageBuf, lsn);
-                    pa->markDirty(pageId);
-                }
-                pa->flush();
-                pa->unpinPage(pageId);
-            }
-            // Some index entries may not have been reached when the DELETE
-            // failed. Restore only missing key/RID pairs so rollback remains
-            // idempotent across a partially applied index-removal sequence.
-            if (!restoreDeletedRowIndexes(
-                    transactionContext().txnDB, it->tableName, tbl,
-                    it->rowData, it->rowIdx, bloomUndoIndexes)) {
+            if (!undoDeletedRow(*it, bloomUndoIndexes)) {
                 rowUndoOk = false;
             }
         }
@@ -34790,36 +34843,7 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                                         entry.rowData);
             }
         } else if (entry.op == TxnLogEntry::Op::Delete) {
-            uint32_t pageId; uint16_t slotId;
-            decodeRid(entry.rowIdx, pageId, slotId);
-            char* pageBuf = pa->fetchPage(pageId);
-            if (pageBuf) {
-                PageWrapper page(pageBuf, pa->pageSize(), tbl.formatVersion);
-                const char* currentData = nullptr;
-                size_t currentLen = 0;
-                walPageImage(transactionContext().txnDB, entry.tableName, pageId,
-                             pageBuf, pa->pageSize(), true);
-                if (page.read(slotId, currentData, currentLen) &&
-                    currentLen >= rowHeaderSize(tbl.formatVersion, tbl.len)) {
-                    std::string fullRow = replaceRowData(
-                        std::string(currentData, currentLen), entry.rowData,
-                        tbl.formatVersion, tbl.len);
-                    setRowXmax(fullRow.data(), fullRow.size(), tbl.formatVersion, 0);
-                    page.update(slotId, fullRow.data(), fullRow.size());
-                }
-                pa->markDirty(pageId);
-                Lsn lsn = walPageImage(transactionContext().txnDB, entry.tableName,
-                                       pageId, pageBuf, pa->pageSize(), false);
-                if (lsn != INVALID_LSN) {
-                    setPageLsnAndChecksum(pageBuf, lsn);
-                    pa->markDirty(pageId);
-                }
-                pa->flush();
-                pa->unpinPage(pageId);
-            }
-            if (!restoreDeletedRowIndexes(
-                    transactionContext().txnDB, entry.tableName, tbl,
-                    entry.rowData, entry.rowIdx, bloomUndoIndexes)) {
+            if (!undoDeletedRow(entry, bloomUndoIndexes)) {
                 rowUndoOk = false;
             }
         }

@@ -1635,6 +1635,9 @@ private:
         const std::string& dbname, const std::string& tablename,
         const TableSchema& tbl, const std::string& rowData, int64_t rid,
         std::set<BloomIndex*>& bloomUndoIndexes);
+    bool undoDeletedRow(
+        const TxnLogEntry& entry,
+        std::set<BloomIndex*>& bloomUndoIndexes);
     struct SsiIndexPredicate;
     struct SsiIndexKey;
     void recordSsiIndexPredicate(const std::string& dbname, const std::string& tablename,
