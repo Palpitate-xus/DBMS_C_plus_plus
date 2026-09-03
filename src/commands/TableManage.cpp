@@ -13192,6 +13192,33 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
         return DBStatus::INVALID_VALUE;
     }
 
+    // Composite PRIMARY KEY and UNIQUE metadata stores physical column
+    // positions. A constrained member cannot be dropped without CASCADE,
+    // and every surviving position to its right must shift with the row
+    // layout. Validate the persisted positions before touching heap files.
+    for (const size_t columnIndex : tbl.pkColIndices) {
+        if (columnIndex >= tbl.len) {
+            lockManager_.unlock(tablename);
+            return DBStatus::CORRUPTED_DATA;
+        }
+        if (columnIndex == dropIdx) {
+            lockManager_.unlock(tablename);
+            return DBStatus::INVALID_VALUE;
+        }
+    }
+    for (const auto& constraint : tbl.uniqueConstraints) {
+        for (const size_t columnIndex : constraint) {
+            if (columnIndex >= tbl.len) {
+                lockManager_.unlock(tablename);
+                return DBStatus::CORRUPTED_DATA;
+            }
+            if (columnIndex == dropIdx) {
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
+            }
+        }
+    }
+
     const auto indexedCols = getIndexedColumns(dbname, tablename);
     const auto hashCols = getHashIndexedColumns(dbname, tablename);
     const auto compositeIndexes = getCompositeIndexes(dbname, tablename);
@@ -13249,6 +13276,14 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
         return DBStatus::IO_ERROR;
     }
 
+    for (size_t& columnIndex : tbl.pkColIndices) {
+        if (columnIndex > dropIdx) --columnIndex;
+    }
+    for (auto& constraint : tbl.uniqueConstraints) {
+        for (size_t& columnIndex : constraint) {
+            if (columnIndex > dropIdx) --columnIndex;
+        }
+    }
     for (size_t i = dropIdx; i + 1 < tbl.len; ++i) tbl.cols[i] = tbl.cols[i + 1];
     tbl.len--;
 
