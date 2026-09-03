@@ -16965,141 +16965,140 @@ DBStatus StorageEngine::insertInternal(
         return DBStatus::INVALID_VALUE;
     }
 
-    // Check primary key uniqueness using B+ tree index
-    if (tbl.hasPrimaryKey()) {
-        std::string pkVal = tbl.buildPKValue(actualValues);
-        if (!pkVal.empty()) {
-            BPTree* idx = getPKIndex(dbname, tablename);
-            if (idx) {
-                int64_t dummy;
-                if (idx->search(pkVal, dummy)) {
-                    lockManager_.unlock(tablename);
-                    return DBStatus::DUPLICATE_KEY;
+    // Uniqueness must be checked against the final NEW row, after BEFORE
+    // triggers and stored generated columns. Define the validator here so it
+    // can share the deferred-constraint bookkeeping, but invoke it only once
+    // that row image is complete below.
+    const auto validateFinalUniqueKeys = [&]() -> DBStatus {
+        if (tbl.hasPrimaryKey()) {
+            const std::string pkVal = tbl.buildPKValue(actualValues);
+            if (!pkVal.empty()) {
+                bool duplicate = false;
+                BPTree* index = getPKIndex(dbname, tablename);
+                if (index && index->isOpen()) {
+                    int64_t ignored = -1;
+                    duplicate = index->search(pkVal, ignored);
+                } else if (!forEachRow(
+                               dbname, tablename,
+                               [&](uint32_t, uint16_t, const char* data,
+                                   size_t length) {
+                                   if (duplicate) return;
+                                   duplicate = extractPKValue(
+                                       std::string(data, length), tbl,
+                                       dbname) == pkVal;
+                               })) {
+                    return DBStatus::IO_ERROR;
                 }
+                if (duplicate) return DBStatus::DUPLICATE_KEY;
             }
         }
-    }
 
-    // Check single-column UNIQUE constraints (use B+ tree index if available).
-    // DEFERRABLE constraints that are currently deferred skip the immediate
-    // check here; the violation (if any) is queued for commit time below.
-    for (size_t i = 0; i < tbl.len; ++i) {
-        const Column& col = tbl.cols[i];
-        if (!col.isUnique) continue;
-        auto it = actualValues.find(col.dataName);
-        if (it == actualValues.end() || it->second.empty()) continue;
-        {
-            // Find this column's constraint name: named table-level UNIQUE
-            // via uniqueConstraintNames (single-col), else PG-derived name.
-            std::string cname = tablename + "_" + col.dataName + "_key";
-            if (i < tbl.uniqueConstraints.size()) {
-                // uniqueConstraints entries are column-index groups; find the
-                // group containing i and take the parallel name when present.
-                for (size_t ui = 0; ui < tbl.uniqueConstraints.size(); ++ui) {
-                    for (size_t uj = 0; uj < tbl.uniqueConstraints[ui].size(); ++uj) {
-                        if (tbl.uniqueConstraints[ui][uj] == i) {
-                            if (ui < tbl.uniqueConstraintNames.size()
-                                && !tbl.uniqueConstraintNames[ui].empty()) {
-                                cname = tbl.uniqueConstraintNames[ui];
-                            }
-                            break;
-                        }
-                    }
+        // Check single-column UNIQUE constraints (use B+ tree index if
+        // available). Deferred constraints queue their final value for the
+        // commit-time validation below.
+        for (size_t i = 0; i < tbl.len; ++i) {
+            const Column& col = tbl.cols[i];
+            if (!col.isUnique) continue;
+            const auto value = actualValues.find(col.dataName);
+            if (value == actualValues.end() || value->second.empty()) continue;
+            std::string constraintName =
+                tablename + "_" + col.dataName + "_key";
+            for (size_t uniqueIndex = 0;
+                 uniqueIndex < tbl.uniqueConstraints.size(); ++uniqueIndex) {
+                const auto& columns = tbl.uniqueConstraints[uniqueIndex];
+                if (std::find(columns.begin(), columns.end(), i) ==
+                    columns.end()) {
+                    continue;
                 }
+                if (uniqueIndex < tbl.uniqueConstraintNames.size() &&
+                    !tbl.uniqueConstraintNames[uniqueIndex].empty()) {
+                    constraintName = tbl.uniqueConstraintNames[uniqueIndex];
+                }
+                break;
             }
             if (transactionContext().inTransaction &&
-                isConstraintCurrentlyDeferred(dbname, tablename, cname)) {
+                isConstraintCurrentlyDeferred(
+                    dbname, tablename, constraintName)) {
                 deferredUniqueCols.push_back(i);
                 continue;
             }
-        }
-        bool duplicate = false;
-        // Try B+ tree secondary index first
-        BPTree* secIdx = getSecondaryIndex(dbname, tablename, col.dataName);
-        if (secIdx) {
-            int64_t dummy;
-            if (secIdx->search(it->second, dummy)) duplicate = true;
-        } else {
-            bool scanFailed = false;
-            if (!forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
-                if (duplicate) return;
-                std::string row(data, len);
-                std::string existingVal = extractColumnValue(row, tbl, i);
-                if (existingVal == it->second) duplicate = true;
-            })) scanFailed = true;
-            if (scanFailed) {
-                lockManager_.unlock(tablename);
+
+            bool duplicate = false;
+            BPTree* index = getSecondaryIndex(
+                dbname, tablename, col.dataName);
+            if (index && index->isOpen()) {
+                duplicate = !index->searchMulti(value->second).empty();
+            } else if (!forEachRow(
+                           dbname, tablename,
+                           [&](uint32_t, uint16_t, const char* data,
+                               size_t length) {
+                               if (duplicate) return;
+                               duplicate = extractColumnValue(
+                                   std::string(data, length), tbl, i,
+                                   dbname) == value->second;
+                           })) {
                 return DBStatus::IO_ERROR;
             }
+            if (duplicate) return DBStatus::DUPLICATE_KEY;
         }
-        if (duplicate) {
-            lockManager_.unlock(tablename);
-            return DBStatus::DUPLICATE_KEY;
-        }
-    }
 
-    // Check composite UNIQUE constraints
-    for (size_t uci = 0; uci < tbl.uniqueConstraints.size(); ++uci) {
-        const auto& uc = tbl.uniqueConstraints[uci];
-        if (uc.empty()) continue;
-        // Deferrable UNIQUE currently deferred: queue instead of failing.
-        // The commit-time check is value-equality on the first column (the
-        // common single-column constraint written table-level).
-        {
-            std::string cname;
-            if (uci < tbl.uniqueConstraintNames.size()) cname = tbl.uniqueConstraintNames[uci];
-            if (cname.empty()) cname = tablename + "_" + tbl.cols[uc[0]].dataName + "_key";
-            if (uc.size() == 1 && transactionContext().inTransaction &&
-                isConstraintCurrentlyDeferred(dbname, tablename, cname)) {
-                deferredUniqueCols.push_back(uc[0]);
+        // Check table-level composite UNIQUE constraints.
+        for (size_t uniqueIndex = 0;
+             uniqueIndex < tbl.uniqueConstraints.size(); ++uniqueIndex) {
+            const auto& columns = tbl.uniqueConstraints[uniqueIndex];
+            if (columns.empty()) continue;
+            std::string constraintName;
+            if (uniqueIndex < tbl.uniqueConstraintNames.size()) {
+                constraintName = tbl.uniqueConstraintNames[uniqueIndex];
+            }
+            if (constraintName.empty() && columns.front() < tbl.len) {
+                constraintName = tablename + "_" +
+                    tbl.cols[columns.front()].dataName + "_key";
+            }
+            if (columns.size() == 1 &&
+                transactionContext().inTransaction &&
+                isConstraintCurrentlyDeferred(
+                    dbname, tablename, constraintName)) {
+                deferredUniqueCols.push_back(columns.front());
                 continue;
             }
-        }
-        std::string compositeKey;
-        bool containsNull = false;
-        for (size_t idx : uc) {
-            if (idx < tbl.len) {
-                auto it = actualValues.find(tbl.cols[idx].dataName);
-                const std::string value = it != actualValues.end() ? it->second : "";
-                // PostgreSQL UNIQUE constraints treat NULL values as distinct
-                // (unless NULLS NOT DISTINCT is explicitly requested).  The
-                // storage row format represents NULL as an empty value, so a
-                // composite key containing one must not participate in the
-                // duplicate check.
-                if (value.empty()) {
+
+            std::string compositeKey;
+            bool containsNull = false;
+            for (const size_t columnIndex : columns) {
+                if (columnIndex >= tbl.len) return DBStatus::CORRUPTED_DATA;
+                const auto value = actualValues.find(
+                    tbl.cols[columnIndex].dataName);
+                if (value == actualValues.end() || value->second.empty()) {
                     containsNull = true;
                     break;
                 }
-                compositeKey += value + "\x01";
+                compositeKey += value->second + "\x01";
             }
-        }
-        if (containsNull) continue;
-        bool duplicate = false;
-        if (!forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
-            if (duplicate) return;
-            std::string row(data, len);
-            std::string existingKey;
-            bool existingContainsNull = false;
-            for (size_t idx : uc) {
-                if (idx < tbl.len) {
-                    const std::string value = extractColumnValue(row, tbl, idx);
-                    if (value.empty()) {
-                        existingContainsNull = true;
-                        break;
-                    }
-                    existingKey += value + "\x01";
-                }
+            if (containsNull) continue;
+
+            bool duplicate = false;
+            if (!forEachRow(
+                    dbname, tablename,
+                    [&](uint32_t, uint16_t, const char* data,
+                        size_t length) {
+                        if (duplicate) return;
+                        const std::string row(data, length);
+                        std::string existingKey;
+                        for (const size_t columnIndex : columns) {
+                            const std::string value = extractColumnValue(
+                                row, tbl, columnIndex, dbname);
+                            if (value.empty()) return;
+                            existingKey += value + "\x01";
+                        }
+                        duplicate = existingKey == compositeKey;
+                    })) {
+                return DBStatus::IO_ERROR;
             }
-            if (!existingContainsNull && existingKey == compositeKey) duplicate = true;
-        })) {
-            lockManager_.unlock(tablename);
-            return DBStatus::IO_ERROR;
+            if (duplicate) return DBStatus::DUPLICATE_KEY;
         }
-        if (duplicate) {
-            lockManager_.unlock(tablename);
-            return DBStatus::DUPLICATE_KEY;
-        }
-    }
+        return DBStatus::OK;
+    };
 
     // Validate all values before building row buffer
     for (size_t i = 0; i < tbl.len; ++i) {
@@ -17453,6 +17452,12 @@ DBStatus StorageEngine::insertInternal(
     if (!variableColumnWidthsValid(tbl, actualValues)) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
+    }
+
+    const DBStatus uniqueStatus = validateFinalUniqueKeys();
+    if (uniqueStatus != DBStatus::OK) {
+        lockManager_.unlock(tablename);
+        return uniqueStatus;
     }
 
     // RLS WITH CHECK is evaluated after defaults, generated values and
