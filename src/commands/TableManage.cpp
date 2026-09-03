@@ -22943,7 +22943,8 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
     if (!orderBy.empty()) {
         struct SortKey {
             int64_t rid;
-            std::vector<std::tuple<std::string, int64_t, Date>> vals; // (str, num, date) per column
+            std::vector<
+                std::tuple<std::string, int64_t, double, Date, Numeric>> vals;
             std::vector<bool> isNulls; // true if value is NULL
         };
         std::vector<SortKey> keys;
@@ -22956,19 +22957,43 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
                     if (tbl.cols[i].dataName == spec.colName) { sortIdx = i; break; }
                 }
                 if (sortIdx < tbl.len) {
-                    std::string val = extractColumnValue(mr.second, tbl, sortIdx);
+                    std::string val = extractColumnValue(
+                        mr.second, tbl, sortIdx, dbname, true);
                     const Column& scol = tbl.cols[sortIdx];
                     k.isNulls.push_back(val.empty());
-                    if (scol.dataType == "char" || scol.isVariableLength) {
-                        k.vals.emplace_back(val, 0, Date{});
+                    if (scol.dataType == "numeric") {
+                        k.vals.emplace_back(
+                            "", 0, 0.0, Date{},
+                            val.empty() ? Numeric{} : Numeric(val));
+                    } else if (scol.dataType == "char" ||
+                               scol.isVariableLength) {
+                        k.vals.emplace_back(val, 0, 0.0, Date{}, Numeric{});
                     } else if (scol.dataType == "date") {
-                        k.vals.emplace_back("", 0, val.empty() ? Date{} : Date(val.c_str()));
+                        k.vals.emplace_back(
+                            "", 0, 0.0,
+                            val.empty() ? Date{} : Date(val.c_str()),
+                            Numeric{});
+                    } else if (scol.dataType == "float") {
+                        float parsed = 0.0f;
+                        if (!val.empty()) (void)parseFloatLiteral(val, parsed);
+                        k.vals.emplace_back(
+                            "", 0, static_cast<double>(parsed), Date{},
+                            Numeric{});
+                    } else if (scol.dataType == "double" ||
+                               scol.dataType == "decimal") {
+                        double parsed = 0.0;
+                        if (!val.empty()) (void)parseDoubleLiteral(val, parsed);
+                        k.vals.emplace_back(
+                            "", 0, parsed, Date{}, Numeric{});
                     } else {
-                        k.vals.emplace_back("", val.empty() ? 0 : parseInt(val), Date{});
+                        k.vals.emplace_back(
+                            "", val.empty() ? 0 : parseInt(val), 0.0,
+                            Date{}, Numeric{});
                     }
                 } else {
                     k.isNulls.push_back(true);
-                    k.vals.emplace_back("", 0, Date{});
+                    k.vals.emplace_back(
+                        "", 0, 0.0, Date{}, Numeric{});
                 }
             }
             keys.push_back(std::move(k));
@@ -22989,7 +23014,11 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
                 if (bNull) return !spec.nullsFirst;
                 const Column& scol = tbl.cols[sortIdx];
                 bool less = false, greater = false;
-                if (scol.dataType == "char" || scol.isVariableLength) {
+                if (scol.dataType == "numeric") {
+                    less = std::get<4>(a.vals[i]) < std::get<4>(b.vals[i]);
+                    greater = std::get<4>(b.vals[i]) < std::get<4>(a.vals[i]);
+                } else if (scol.dataType == "char" ||
+                           scol.isVariableLength) {
                     std::string av = std::get<0>(a.vals[i]);
                     std::string bv = std::get<0>(b.vals[i]);
                     // Apply collation for string comparison
@@ -23008,8 +23037,15 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
                         greater = bv < av;
                     }
                 } else if (scol.dataType == "date") {
-                    less = std::get<2>(a.vals[i]) < std::get<2>(b.vals[i]);
-                    greater = std::get<2>(b.vals[i]) < std::get<2>(a.vals[i]);
+                    less = std::get<3>(a.vals[i]) < std::get<3>(b.vals[i]);
+                    greater = std::get<3>(b.vals[i]) < std::get<3>(a.vals[i]);
+                } else if (scol.dataType == "float" ||
+                           scol.dataType == "double" ||
+                           scol.dataType == "decimal") {
+                    const int comparison = compareFloatingValues(
+                        std::get<2>(a.vals[i]), std::get<2>(b.vals[i]));
+                    less = comparison < 0;
+                    greater = comparison > 0;
                 } else {
                     less = std::get<1>(a.vals[i]) < std::get<1>(b.vals[i]);
                     greater = std::get<1>(b.vals[i]) < std::get<1>(a.vals[i]);
@@ -26027,7 +26063,8 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
     if (!orderBy.empty()) {
         struct SortKey {
             int64_t rid;
-            std::vector<std::tuple<std::string, int64_t, Date>> vals;
+            std::vector<
+                std::tuple<std::string, int64_t, double, Date, Numeric>> vals;
             std::vector<bool> isNulls;
         };
         std::vector<SortKey> keys;
@@ -26040,19 +26077,43 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
                     if (tbl.cols[i].dataName == spec.colName) { sortIdx = i; break; }
                 }
                 if (sortIdx < tbl.len) {
-                    std::string val = extractColumnValue(mr.second, tbl, sortIdx);
+                    std::string val = extractColumnValue(
+                        mr.second, tbl, sortIdx, dbname, true);
                     const Column& scol = tbl.cols[sortIdx];
                     k.isNulls.push_back(val.empty());
-                    if (scol.dataType == "char" || scol.isVariableLength) {
-                        k.vals.push_back({val, 0, {}});
+                    if (scol.dataType == "numeric") {
+                        k.vals.emplace_back(
+                            "", 0, 0.0, Date{},
+                            val.empty() ? Numeric{} : Numeric(val));
+                    } else if (scol.dataType == "char" ||
+                               scol.isVariableLength) {
+                        k.vals.emplace_back(val, 0, 0.0, Date{}, Numeric{});
                     } else if (scol.dataType == "date") {
-                        k.vals.push_back({"", 0, val.empty() ? Date{} : Date(val.c_str())});
+                        k.vals.emplace_back(
+                            "", 0, 0.0,
+                            val.empty() ? Date{} : Date(val.c_str()),
+                            Numeric{});
+                    } else if (scol.dataType == "float") {
+                        float parsed = 0.0f;
+                        if (!val.empty()) (void)parseFloatLiteral(val, parsed);
+                        k.vals.emplace_back(
+                            "", 0, static_cast<double>(parsed), Date{},
+                            Numeric{});
+                    } else if (scol.dataType == "double" ||
+                               scol.dataType == "decimal") {
+                        double parsed = 0.0;
+                        if (!val.empty()) (void)parseDoubleLiteral(val, parsed);
+                        k.vals.emplace_back(
+                            "", 0, parsed, Date{}, Numeric{});
                     } else {
-                        k.vals.push_back({"", val.empty() ? 0 : parseInt(val), {}});
+                        k.vals.emplace_back(
+                            "", val.empty() ? 0 : parseInt(val), 0.0,
+                            Date{}, Numeric{});
                     }
                 } else {
                     k.isNulls.push_back(true);
-                    k.vals.push_back({"", 0, {}});
+                    k.vals.emplace_back(
+                        "", 0, 0.0, Date{}, Numeric{});
                 }
             }
             keys.push_back(std::move(k));
@@ -26072,12 +26133,23 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
                 if (bNull) return !spec.nullsFirst;
                 const Column& scol = tbl.cols[sortIdx];
                 bool less = false, greater = false;
-                if (scol.dataType == "char" || scol.isVariableLength) {
+                if (scol.dataType == "numeric") {
+                    less = std::get<4>(a.vals[i]) < std::get<4>(b.vals[i]);
+                    greater = std::get<4>(b.vals[i]) < std::get<4>(a.vals[i]);
+                } else if (scol.dataType == "char" ||
+                           scol.isVariableLength) {
                     less = std::get<0>(a.vals[i]) < std::get<0>(b.vals[i]);
                     greater = std::get<0>(b.vals[i]) < std::get<0>(a.vals[i]);
                 } else if (scol.dataType == "date") {
-                    less = std::get<2>(a.vals[i]) < std::get<2>(b.vals[i]);
-                    greater = std::get<2>(b.vals[i]) < std::get<2>(a.vals[i]);
+                    less = std::get<3>(a.vals[i]) < std::get<3>(b.vals[i]);
+                    greater = std::get<3>(b.vals[i]) < std::get<3>(a.vals[i]);
+                } else if (scol.dataType == "float" ||
+                           scol.dataType == "double" ||
+                           scol.dataType == "decimal") {
+                    const int comparison = compareFloatingValues(
+                        std::get<2>(a.vals[i]), std::get<2>(b.vals[i]));
+                    less = comparison < 0;
+                    greater = comparison > 0;
                 } else {
                     less = std::get<1>(a.vals[i]) < std::get<1>(b.vals[i]);
                     greater = std::get<1>(b.vals[i]) < std::get<1>(a.vals[i]);
