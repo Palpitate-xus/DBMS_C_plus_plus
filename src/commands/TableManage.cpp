@@ -13263,12 +13263,21 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
 
     // Read logical rows before changing the column map.  This preserves page
     // headers, variable-length offsets, MVCC visibility, and TOAST values.
-    std::vector<std::map<std::string, std::string>> rows;
-    if (!forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
+    std::vector<SqlRow> rows;
+    if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
+                                          const char* data, size_t len) {
         std::string row(data, len);
-        std::map<std::string, std::string> values;
+        SqlRow values;
+        const int64_t rid = encodeRid(pageId, slotId);
         for (size_t i = 0; i < tbl.len; ++i) {
-            if (i != dropIdx) values[tbl.cols[i].dataName] = extractColumnValue(row, tbl, i, dbname);
+            if (i == dropIdx) continue;
+            if (tbl.cols[i].generatedKind != 'v' && tbl.cols[i].isNull &&
+                isColumnNullByRid(dbname, tablename, rid, i)) {
+                values[tbl.cols[i].dataName] = std::nullopt;
+            } else {
+                values[tbl.cols[i].dataName] =
+                    extractColumnValue(row, tbl, i, dbname);
+            }
         }
         rows.push_back(std::move(values));
     })) {
@@ -13397,7 +13406,7 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
     lockManager_.unlock(tablename);
 
     for (const auto& values : rows) {
-        DBStatus status = insert(dbname, tablename, values);
+        DBStatus status = insertRow(dbname, tablename, values);
         if (status != DBStatus::OK) return status;
     }
     DBStatus indexStatus = reindex(dbname, tablename);
