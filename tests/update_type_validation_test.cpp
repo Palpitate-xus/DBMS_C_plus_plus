@@ -102,7 +102,9 @@ int main() {
                    "2025-02-03 04:05:06");
     expectRejected("time_value", "99:00:00", "04:05:06");
     expectRejected("float_value", "not-a-float", "4.5");
+    expectRejected("float_value", "4.5junk", "4.5");
     expectRejected("double_value", "not-a-double", "5.5");
+    expectRejected("double_value", "5.5junk", "5.5");
     expectRejected("numeric_value", "not-a-number", "6.2500");
     expectRejected("json_value", "{broken}", "{\"new\":true}");
     expectRejected("jsonb_value", "[broken]", "[3,4]");
@@ -116,6 +118,38 @@ int main() {
     assert(g_engine.update(database, "typed_values",
                            {{"enum_value", "blue"}}, {"=id 999"}) ==
            dbms::DBStatus::INVALID_VALUE);
+
+    // INSERT uses the same conversion code but a different row-building
+    // path for tables without variable-length columns.  Numeric prefixes
+    // must not be accepted merely because std::stof/std::stod consumed a
+    // valid prefix, while PostgreSQL's supported non-finite values remain
+    // valid floating-point inputs.
+    dbms::TableSchema floatingSchema;
+    floatingSchema.tablename = "floating_values";
+    floatingSchema.formatVersion = 2;
+    floatingSchema.append(dbms::makeIntColumn("id", false, 4, true));
+    floatingSchema.append(dbms::makeFloatColumn("float_value", false));
+    floatingSchema.append(dbms::makeDoubleColumn("double_value", false));
+    assert(g_engine.createTable(database, floatingSchema) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(database, "floating_values",
+                           {{"id", "1"}, {"float_value", "1.25"},
+                            {"double_value", "2.5"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(database, "floating_values",
+                           {{"id", "2"}, {"float_value", "1.25junk"},
+                            {"double_value", "2.5"}}) ==
+           dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insert(database, "floating_values",
+                           {{"id", "3"}, {"float_value", "1.25"},
+                            {"double_value", "2.5junk"}}) ==
+           dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.query(database, "floating_values", {}, {"id"}).size() ==
+           1);
+    assert(g_engine.insert(database, "floating_values",
+                           {{"id", "4"}, {"float_value", "Infinity"},
+                            {"double_value", "NaN"}}) ==
+           dbms::DBStatus::OK);
 
     cleanupTestDb(testName);
     finalCleanupTestData();

@@ -506,16 +506,32 @@ static std::string trim(const std::string& s) {
     return s.substr(a, b - a);
 }
 
-static bool parseFiniteDouble(const std::string& input, double& value) {
+static bool parseFloatLiteral(const std::string& input, float& value) {
+    const std::string token = trim(input);
+    if (token.empty()) return false;
+    try {
+        size_t consumed = 0;
+        value = std::stof(token, &consumed);
+        return consumed == token.size();
+    } catch (...) {
+        return false;
+    }
+}
+
+static bool parseDoubleLiteral(const std::string& input, double& value) {
     const std::string token = trim(input);
     if (token.empty()) return false;
     try {
         size_t consumed = 0;
         value = std::stod(token, &consumed);
-        return consumed == token.size() && std::isfinite(value);
+        return consumed == token.size();
     } catch (...) {
         return false;
     }
+}
+
+static bool parseFiniteDouble(const std::string& input, double& value) {
+    return parseDoubleLiteral(input, value) && std::isfinite(value);
 }
 
 static std::string formatPointCoordinate(double value) {
@@ -16657,10 +16673,12 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                 int32_t num = val.empty() ? -1 : parseTimeToSeconds(val);
                 std::memcpy(&rowBuffer[offset], &num, sizeof(int32_t));
             } else if (col.dataType == "float") {
-                float num = val.empty() ? 0.0f : std::stof(val);
+                float num = 0.0f;
+                if (!val.empty()) parseFloatLiteral(val, num);
                 std::memcpy(&rowBuffer[offset], &num, sizeof(float));
             } else if (col.dataType == "double" || col.dataType == "decimal") {
-                double num = val.empty() ? 0.0 : std::stod(val);
+                double num = 0.0;
+                if (!val.empty()) parseDoubleLiteral(val, num);
                 std::memcpy(&rowBuffer[offset], &num, sizeof(double));
             } else if (col.dataType == "point") {
                 double x = 0.0, y = 0.0;
@@ -16739,10 +16757,12 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                     int32_t num = val.empty() ? -1 : parseTimeToSeconds(val);
                     std::memcpy(&fixedData[fixedOff], &num, sizeof(int32_t));
                 } else if (col.dataType == "float") {
-                    float num = val.empty() ? 0.0f : std::stof(val);
+                    float num = 0.0f;
+                    if (!val.empty()) parseFloatLiteral(val, num);
                     std::memcpy(&fixedData[fixedOff], &num, sizeof(float));
                 } else if (col.dataType == "double" || col.dataType == "decimal" || col.dataType == "numeric") {
-                    double num = val.empty() ? 0.0 : std::stod(val);
+                    double num = 0.0;
+                    if (!val.empty()) parseDoubleLiteral(val, num);
                     std::memcpy(&fixedData[fixedOff], &num, sizeof(double));
                 } else if (col.dataType == "point") {
                     double x = 0.0, y = 0.0;
@@ -17319,7 +17339,8 @@ DBStatus StorageEngine::insertInternal(
             }
         }
         if (!col.isVariableLength && col.dataType == "float" && !val.empty()) {
-            try { std::stof(val); } catch (...) {
+            float parsed = 0.0f;
+            if (!parseFloatLiteral(val, parsed)) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }
@@ -17330,7 +17351,8 @@ DBStatus StorageEngine::insertInternal(
                 return DBStatus::INVALID_VALUE;
             }
         } else if (!col.isVariableLength && (col.dataType == "double" || col.dataType == "decimal") && !val.empty()) {
-            try { std::stod(val); } catch (...) {
+            double parsed = 0.0;
+            if (!parseDoubleLiteral(val, parsed)) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }
@@ -20177,18 +20199,16 @@ DBStatus StorageEngine::updateInternal(
                         }
                     } else if (col.dataType == "float") {
                         if (!kv.second.empty()) {
-                            try {
-                                (void)std::stof(kv.second);
-                            } catch (...) {
+                            float parsed = 0.0f;
+                            if (!parseFloatLiteral(kv.second, parsed)) {
                                 return DBStatus::INVALID_VALUE;
                             }
                         }
                     } else if (col.dataType == "double" ||
                                col.dataType == "decimal") {
                         if (!kv.second.empty()) {
-                            try {
-                                (void)std::stod(kv.second);
-                            } catch (...) {
+                            double parsed = 0.0;
+                            if (!parseDoubleLiteral(kv.second, parsed)) {
                                 return DBStatus::INVALID_VALUE;
                             }
                         }
