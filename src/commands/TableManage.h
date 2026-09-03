@@ -1560,6 +1560,10 @@ private:
         std::set<std::string> activeDeletes;
         std::set<std::string> activeUpdates;
     };
+    DBStatus insertInternal(
+        const std::string& dbname, const std::string& tablename,
+        const std::map<std::string, std::string>& values,
+        std::vector<std::map<std::string, std::string>>* insertedRows);
     DBStatus removeInternal(
         const std::string& dbname, const std::string& tablename,
         const std::vector<std::string>& conditions,

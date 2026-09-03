@@ -16815,6 +16815,63 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                                 const std::string& tablename,
                                 const std::map<std::string, std::string>& values,
                                 std::vector<std::map<std::string, std::string>>* insertedRows) {
+    // SQL execution already gives top-level DML a transaction, while embedded
+    // callers may intentionally use the legacy non-transactional partition
+    // route. Inside an existing transaction, add a per-INSERT savepoint so a
+    // failed AFTER trigger cannot leave its row or trigger side effects behind
+    // or abort unrelated work from earlier statements.
+    const size_t returnedRowStart = insertedRows ? insertedRows->size() : 0;
+    if (!transactionContext().inTransaction) {
+        const DBStatus status =
+            insertInternal(dbname, tablename, values, insertedRows);
+        if (status != DBStatus::OK && insertedRows) {
+            insertedRows->resize(returnedRowStart);
+        }
+        return status;
+    }
+
+    static std::atomic<uint64_t> statementSavepointSequence{0};
+    std::string statementSavepoint;
+    auto& context = transactionContext();
+    do {
+        statementSavepoint = "__dbms_insert_statement_" +
+            std::to_string(context.currentTxnId) + "_" +
+            std::to_string(statementSavepointSequence.fetch_add(1));
+    } while (context.savepoints.count(statementSavepoint) != 0);
+    const bool hasStatementSavepoint =
+        savepoint(statementSavepoint) == DBStatus::OK;
+
+    const DBStatus insertStatus =
+        insertInternal(dbname, tablename, values, insertedRows);
+    if (insertStatus != DBStatus::OK) {
+        DBStatus rollbackStatus = DBStatus::OK;
+        if (transactionContext().inTransaction && hasStatementSavepoint) {
+            rollbackStatus = rollbackToSavepoint(statementSavepoint);
+            if (rollbackStatus == DBStatus::OK) {
+                rollbackStatus = releaseSavepoint(statementSavepoint);
+            }
+        } else if (transactionContext().inTransaction) {
+            rollbackStatus = rollbackTransaction();
+        }
+        if (insertedRows) insertedRows->resize(returnedRowStart);
+        return rollbackStatus == DBStatus::OK
+            ? insertStatus : rollbackStatus;
+    }
+
+    if (!hasStatementSavepoint) return DBStatus::OK;
+    const DBStatus releaseStatus = releaseSavepoint(statementSavepoint);
+    if (releaseStatus == DBStatus::OK) return DBStatus::OK;
+    if (insertedRows) insertedRows->resize(returnedRowStart);
+    const DBStatus rollbackStatus = rollbackTransaction();
+    return rollbackStatus == DBStatus::OK
+        ? releaseStatus : rollbackStatus;
+}
+
+DBStatus StorageEngine::insertInternal(
+                                const std::string& dbname,
+                                const std::string& tablename,
+                                const std::map<std::string, std::string>& values,
+                                std::vector<std::map<std::string, std::string>>* insertedRows) {
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
         transactionContext().hasWrite = true;
     }
@@ -18100,7 +18157,22 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             stageExecFunctionCtx(*this, trg.name, trg.timing,
                               "INSERT", trg.tableName,
                               trg.forEachRow, &actualValues, nullptr, &tbl);
-            triggerExecutor_(action);
+            if (triggerExecutor_(action)) {
+                if (transactionContext().inTransaction &&
+                    transactionContext().txnDB == dbname) {
+                    // The public insert() wrapper owns the statement
+                    // savepoint and will remove both this row and any trigger
+                    // side effects recorded after it.
+                    return DBStatus::IO_ERROR;
+                }
+                // Embedded non-transactional callers still need the local
+                // heap/index compensation path. It expects the table intent
+                // lock that was released before running AFTER triggers.
+                if (!lockManager_.lockIntentExclusive(tablename)) {
+                    return DBStatus::LOCK_CONFLICT;
+                }
+                return abortIndexUpdate();
+            }
         }
     }
 
