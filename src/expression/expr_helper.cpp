@@ -266,4 +266,24 @@ bool ExprHelper::evalBool(
     return tmp.asBool();
 }
 
+bool ExprHelper::evalCheck(
+    const std::string& exprSql,
+    const std::map<std::string, std::string>& row,
+    const std::map<std::string, std::string>& typeHints,
+    std::string* error,
+    const std::string& currentDB,
+    const std::string& currentUser) {
+
+    ExprEvalResult r = evalString(
+        exprSql, row, typeHints, currentDB, currentUser);
+    if (!r.ok) {
+        if (error) *error = r.error;
+        return false;
+    }
+    if (r.isNull) return true;
+
+    ExprValue tmp("boolean", r.value, false);
+    return tmp.asBool();
+}
+
 } // namespace dbms

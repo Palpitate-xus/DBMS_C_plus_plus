@@ -46,6 +46,16 @@ public:
         std::string* error = nullptr,
         const std::string& currentDB = "",
         const std::string& currentUser = "");
+
+    // CHECK constraints reject only FALSE. SQL UNKNOWN/NULL satisfies the
+    // constraint, while parse and evaluation errors still fail closed.
+    static bool evalCheck(
+        const std::string& exprSql,
+        const std::map<std::string, std::string>& row,
+        const std::map<std::string, std::string>& typeHints = {},
+        std::string* error = nullptr,
+        const std::string& currentDB = "",
+        const std::string& currentUser = "");
 };
 
 } // namespace dbms

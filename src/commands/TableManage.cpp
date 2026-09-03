@@ -8457,7 +8457,8 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
                 row, tbl, i, dc.dbname);
     }
     std::string err;
-    return dbms::ExprHelper::evalBool(col.checkExpr, rowValues, buildTypeHints(tbl), &err, dc.dbname);
+    return dbms::ExprHelper::evalCheck(
+        col.checkExpr, rowValues, buildTypeHints(tbl), &err, dc.dbname);
 }
 
 // TableSchema PK helpers (defined here because they use StorageEngine::extractColumnValue)
@@ -14618,7 +14619,7 @@ DBStatus StorageEngine::alterTableAddCheckConstraint(const std::string& dbname,
                 }
             }
             std::string evaluationError;
-            if (!dbms::ExprHelper::evalBool(
+            if (!dbms::ExprHelper::evalCheck(
                     expr, rowValues, typeHints, &evaluationError, dbname)) {
                 violation = true;
             }
@@ -17880,7 +17881,8 @@ DBStatus StorageEngine::insertInternal(
             continue;
         }
         std::string err;
-        if (!dbms::ExprHelper::evalBool(col.checkExpr, actualValues, typeHints, &err, dbname)) {
+        if (!dbms::ExprHelper::evalCheck(
+                col.checkExpr, actualValues, typeHints, &err, dbname)) {
             lockManager_.unlock(tablename);
             return DBStatus::INVALID_VALUE;
         }
@@ -21147,7 +21149,8 @@ DBStatus StorageEngine::updateInternal(
                 continue;
             }
             std::string err;
-            if (!dbms::ExprHelper::evalBool(col.checkExpr, rowValues, updateTypeHints, &err, dbname)) {
+            if (!dbms::ExprHelper::evalCheck(
+                    col.checkExpr, rowValues, updateTypeHints, &err, dbname)) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }
