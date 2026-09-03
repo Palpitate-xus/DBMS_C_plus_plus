@@ -2396,6 +2396,11 @@ bool HashJoinOp::open() {
     if (left_->hasError()) return propagateChildError(left_.get(), "hash join left child failed");
     matchPos_ = 0;
     curRightMatches_.clear();
+    if (hasLeft_) {
+        std::string key = extractJoinKey(curLeftRow_, leftTbl_, leftCol_);
+        auto it = rightHash_.find(key);
+        if (it != rightHash_.end()) curRightMatches_ = it->second;
+    }
     return true;
 }
 
@@ -2834,6 +2839,11 @@ bool ParallelHashJoinOp::open() {
     }
     matchPos_ = 0;
     curRightMatches_.clear();
+    if (hasLeft_) {
+        std::string key = extractJoinKey(curLeftRow_, leftTbl_, leftCol_);
+        auto it = rightHash_.find(key);
+        if (it != rightHash_.end()) curRightMatches_ = it->second;
+    }
     return true;
 }
 

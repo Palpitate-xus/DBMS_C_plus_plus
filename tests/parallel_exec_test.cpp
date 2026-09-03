@@ -135,7 +135,7 @@ int main() {
     dbms::HashJoinOp serialJ(&g_engine, db, std::move(ls), std::move(rs),
                              "big", "big", "id", "id");
     auto serialJRows = runPlan(&serialJ);
-    assert(!serialJRows.empty());
+    assert(serialJRows.size() == 600);
 
     auto ls2 = std::make_unique<dbms::TableScanOp>(&g_engine, db, "big");
     auto rs2 = std::make_unique<dbms::TableScanOp>(&g_engine, db, "big");
@@ -143,6 +143,7 @@ int main() {
                                   "big", "big", "id", "id", 4);
     auto parJRows = runPlan(&parJ);
     // Result parity with the serial operator (same contract, same rows).
+    assert(parJRows.size() == 600);
     assert(parJRows.size() == serialJRows.size());
     assert(sorted(parJRows) == sorted(serialJRows));
     assert(!parJRows.empty());
