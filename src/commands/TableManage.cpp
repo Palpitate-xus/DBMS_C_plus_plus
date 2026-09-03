@@ -7337,6 +7337,9 @@ std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer
         int64_t val = 0;
         size_t n = std::min(col.dsize, sizeof(val));
         std::memcpy(&val, rowBuffer.data() + offset, n);
+        if (col.isUnsigned) {
+            return std::to_string(static_cast<uint64_t>(val));
+        }
         // Sign-extend sub-8-byte integers: -7 stored in 4 bytes must
         // decode as -7, not 4294967289.
         if (n == 4 && (val & 0x80000000LL)) val |= 0xFFFFFFFF00000000LL;
@@ -10861,6 +10864,12 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
         bool hasCheck = (flags & 64) != 0;
         bool hasGenerated = (flags & 128) != 0;
         tbl.cols[i].dataType = readFixedString(in, MAX_TYPE_NAME_LEN);
+        constexpr std::string_view unsignedSuffix = " unsigned";
+        tbl.cols[i].isUnsigned =
+            tbl.cols[i].dataType.size() >= unsignedSuffix.size() &&
+            tbl.cols[i].dataType.compare(
+                tbl.cols[i].dataType.size() - unsignedSuffix.size(),
+                unsignedSuffix.size(), unsignedSuffix) == 0;
         tbl.cols[i].dataName = readFixedString(in, MAX_COL_NAME_LEN);
         int32_t dsize = 0;
         in.read(reinterpret_cast<char*>(&dsize), 4);
@@ -15848,20 +15857,45 @@ TableSchema StorageEngine::getTableSchema(const std::string& dbname,
 
 int64_t StorageEngine::parseInt(const std::string& s) {
     if (s.empty() || s.length() > 20) return INF;
-    bool neg = false;
-    size_t i = 0;
-    if (s[0] == '+' || s[0] == '-') {
-        neg = (s[0] == '-');
-        i = 1;
-        if (s.size() == 1) return INF;
+    const char* begin = s.data();
+    const char* end = begin + s.size();
+    if (*begin == '+') {
+        ++begin;
+        if (begin == end) return INF;
     }
-    int64_t val = 0;
-    for (; i < s.size(); ++i) {
-        char c = s[i];
-        if (c < '0' || c > '9') return INF;
-        val = val * 10 + (c - '0');
+    int64_t value = 0;
+    const auto parsed = std::from_chars(begin, end, value, 10);
+    // INF is also the legacy fixed-width NULL/invalid sentinel and therefore
+    // cannot be represented as an integer value in the current heap format.
+    if (parsed.ec != std::errc{} || parsed.ptr != end || value == INF) {
+        return INF;
     }
-    return neg ? -val : val;
+    return value;
+}
+
+static bool integerValueFitsColumn(const Column& column, int64_t value) {
+    if (column.dsize == 0 || column.dsize > sizeof(int64_t)) return false;
+    if (column.isUnsigned) {
+        if (value < 0) return false;
+        if (column.dsize == sizeof(int64_t)) return true;
+        const unsigned bits = static_cast<unsigned>(column.dsize * 8);
+        const uint64_t maximum = (uint64_t{1} << bits) - 1;
+        return static_cast<uint64_t>(value) <= maximum;
+    }
+    if (column.dsize == sizeof(int64_t)) return true;
+    const unsigned bits = static_cast<unsigned>(column.dsize * 8);
+    const int64_t minimum = -(int64_t{1} << (bits - 1));
+    const int64_t maximum = (int64_t{1} << (bits - 1)) - 1;
+    return value >= minimum && value <= maximum;
+}
+
+static bool isIntegerStorageType(const std::string& type) {
+    return type == "tinyint" || type == "smallint" || type == "int" ||
+           type == "integer" || type == "bigint" || type == "long" ||
+           type == "int2" || type == "int4" || type == "int8" ||
+           type == "tinyint unsigned" || type == "smallint unsigned" ||
+           type == "int unsigned" || type == "integer unsigned" ||
+           type == "bigint unsigned";
 }
 
 bool StorageEngine::stringToBuffer(const std::string& src, char* dst, size_t len) {
@@ -17417,11 +17451,7 @@ DBStatus StorageEngine::insertInternal(
         }
         if (!col.isVariableLength && col.dataType != "char" && col.dataType != "binary" && col.dataType != "date" && col.dataType != "timestamp" && col.dataType != "timestamptz" && col.dataType != "datetime" && col.dataType != "time" && col.dataType != "float" && col.dataType != "double" && col.dataType != "decimal" && col.dataType != "numeric" && col.dataType != "boolean" && col.dataType != "uuid" && col.dataType != "point" && col.dataType != "inet" && col.dataType != "cidr" && col.dataType != "macaddr" && col.dataType != "macaddr8" && !val.empty()) {
             int64_t num = parseInt(val);
-            if (num == INF) {
-                lockManager_.unlock(tablename);
-                return DBStatus::INVALID_VALUE;
-            }
-            if (col.isUnsigned && num < 0) {
+            if (num == INF || !integerValueFitsColumn(col, num)) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }
@@ -20176,6 +20206,14 @@ DBStatus StorageEngine::updateInternal(
                             kv.second != "FALSE") {
                             return DBStatus::INVALID_VALUE;
                         }
+                    } else if (isIntegerStorageType(col.dataType)) {
+                        if (!kv.second.empty()) {
+                            int64_t num = parseInt(kv.second);
+                            if (num == INF ||
+                                !integerValueFitsColumn(col, num)) {
+                                return DBStatus::INVALID_VALUE;
+                            }
+                        }
                     } else if (!col.isArray && TypeRegistry::instance().findType(col.dataType) == nullptr) {
                         CompositeType ct = getCompositeType(dbname, col.dataType);
                         if (!ct.name.empty() && !kv.second.empty()) {
@@ -20187,8 +20225,10 @@ DBStatus StorageEngine::updateInternal(
                     } else if (!col.isVariableLength && col.dataType != "char") {
                         if (!kv.second.empty()) {
                             int64_t num = parseInt(kv.second);
-                            if (num == INF) return DBStatus::INVALID_VALUE;
-                            if (col.isUnsigned && num < 0) return DBStatus::INVALID_VALUE;
+                            if (num == INF ||
+                                !integerValueFitsColumn(col, num)) {
+                                return DBStatus::INVALID_VALUE;
+                            }
                         }
                     }
                     const size_t maxLength = col.isArray ? 1024 : col.dsize;
