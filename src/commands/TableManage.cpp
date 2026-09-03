@@ -16016,13 +16016,13 @@ StorageEngine::PredicateTruth StorageEngine::compareValues(
     }
     if (col.dataType == "float" || col.dataType == "double" ||
         col.dataType == "decimal") {
-        try {
-            const double l = std::stod(left);
-            const double r = std::stod(right);
-            return fromCompare(l < r ? -1 : (r < l ? 1 : 0));
-        } catch (...) {
+        double l = 0.0;
+        double r = 0.0;
+        if (!parseDoubleLiteral(left, l) ||
+            !parseDoubleLiteral(right, r)) {
             return PredicateTruth::Unknown;
         }
+        return fromCompare(l < r ? -1 : (r < l ? 1 : 0));
     }
     if (col.dataType == "boolean") {
         auto normalizeBool = [](const std::string& value) {
@@ -16383,10 +16383,8 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         if (cond.op == "!=" && cmp >= 0 && num == cmp)   return false;
     } else if (col.dataType == "float") {
         float num = 0.0f, cmp = 0.0f;
-        try {
-            num = val.empty() ? 0.0f : std::stof(val);
-            cmp = std::stof(cond.value);
-        } catch (...) {
+        if ((!val.empty() && !parseFloatLiteral(val, num)) ||
+            !parseFloatLiteral(cond.value, cmp)) {
             return false;  // Invalid comparison value → UNKNOWN → FALSE in WHERE
         }
         if (cond.op == "<"  && !(num < cmp)) return false;
@@ -16433,22 +16431,20 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         if (cond.op == "between" || cond.op == "notbetween") {
             size_t sp = cond.value.find(' ');
             if (sp == std::string::npos) return false;
-            try {
-                double lo = std::stod(cond.value.substr(0, sp));
-                double hi = std::stod(cond.value.substr(sp + 1));
-                num = val.empty() ? 0.0 : std::stod(val);
-                bool inRange = num >= lo && num <= hi;
-                if (cond.op == "between" && !inRange) return false;
-                if (cond.op == "notbetween" && inRange) return false;
-            } catch (...) {
+            double lo = 0.0;
+            double hi = 0.0;
+            if (!parseDoubleLiteral(cond.value.substr(0, sp), lo) ||
+                !parseDoubleLiteral(cond.value.substr(sp + 1), hi) ||
+                (!val.empty() && !parseDoubleLiteral(val, num))) {
                 return false;
             }
+            bool inRange = num >= lo && num <= hi;
+            if (cond.op == "between" && !inRange) return false;
+            if (cond.op == "notbetween" && inRange) return false;
             return true;
         }
-        try {
-            num = val.empty() ? 0.0 : std::stod(val);
-            cmp = std::stod(cond.value);
-        } catch (...) {
+        if ((!val.empty() && !parseDoubleLiteral(val, num)) ||
+            !parseDoubleLiteral(cond.value, cmp)) {
             return false;  // Invalid comparison value → UNKNOWN → FALSE in WHERE
         }
         if (cond.op == "<"  && !(num < cmp)) return false;
@@ -16580,23 +16576,23 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
             // Decimal bounds compare numerically against the integer
             // column value ("id between 1.1 and 2.9" in PostgreSQL matches
             // ids 1 and 2); fall back to integer parsing when not decimal.
-            try {
-                double loD = std::stod(cond.value.substr(0, sp));
-                double hiD = std::stod(cond.value.substr(sp + 1));
+            double loD = 0.0;
+            double hiD = 0.0;
+            if (parseDoubleLiteral(cond.value.substr(0, sp), loD) &&
+                parseDoubleLiteral(cond.value.substr(sp + 1), hiD)) {
                 if (num == INF) return false;
                 bool inRange = static_cast<double>(num) >= loD && static_cast<double>(num) <= hiD;
                 if (cond.op == "between" && !inRange) return false;
                 if (cond.op == "notbetween" && inRange) return false;
                 return true;
-            } catch (...) {
-                int64_t lo = StorageEngine::parseInt(cond.value.substr(0, sp));
-                int64_t hi = StorageEngine::parseInt(cond.value.substr(sp + 1));
-                if (num == INF || lo == INF || hi == INF) return false;
-                bool inRange = num >= lo && num <= hi;
-                if (cond.op == "between" && !inRange) return false;
-                if (cond.op == "notbetween" && inRange) return false;
-                return true;
             }
+            int64_t lo = StorageEngine::parseInt(cond.value.substr(0, sp));
+            int64_t hi = StorageEngine::parseInt(cond.value.substr(sp + 1));
+            if (num == INF || lo == INF || hi == INF) return false;
+            bool inRange = num >= lo && num <= hi;
+            if (cond.op == "between" && !inRange) return false;
+            if (cond.op == "notbetween" && inRange) return false;
+            return true;
         }
         if (cond.op == "notlike" || cond.op == "notilike") {
             // NOT LIKE / NOT ILIKE on a non-text column: match textually,
