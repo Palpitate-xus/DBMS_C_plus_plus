@@ -492,7 +492,10 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
                          parsedCmd == dbms::SqlCommand::AlterUser ||
                          parsedCmd == dbms::SqlCommand::DropRole ||
                          parsedCmd == dbms::SqlCommand::DropUser;
-    const std::string& parseInput = authDdl && !rawSql.empty() ? rawSql : sql;
+    const bool preservesLiteralText =
+        authDdl || parsedCmd == dbms::SqlCommand::Comment;
+    const std::string& parseInput = preservesLiteralText && !rawSql.empty()
+        ? rawSql : sql;
     dbms::SQLParser parser;
     dbms::ParseResult r = parser.parse(parseInput);
     if (!r.success || !r.stmt) {

@@ -4170,68 +4170,141 @@ ParseResult SQLParser::parseCopy(const std::string&) {
 ParseResult SQLParser::parseComment(const std::string& sql) {
     ParseResult r;
     auto stmt = std::make_unique<CommentStmt>();
-    std::string lsql = toLower(trim(sql));
-    if (!lsql.empty() && lsql.back() == ';') lsql.pop_back();
+    std::string statement = trim(sql);
+    if (!statement.empty() && statement.back() == ';') {
+        statement.pop_back();
+        statement = trim(statement);
+    }
+    const std::string lsql = toLower(statement);
+    auto findKeywordOutsideQuotes = [](const std::string& original,
+                                       const std::string& lowered,
+                                       const std::string& keyword,
+                                       size_t start = 0) {
+        bool singleQuoted = false;
+        bool doubleQuoted = false;
+        for (size_t i = start; i + keyword.size() <= original.size(); ++i) {
+            const char c = original[i];
+            if (singleQuoted) {
+                if (c == '\'' && i + 1 < original.size() &&
+                    original[i + 1] == '\'') {
+                    ++i;
+                } else if (c == '\'') {
+                    singleQuoted = false;
+                }
+                continue;
+            }
+            if (doubleQuoted) {
+                if (c == '"' && i + 1 < original.size() &&
+                    original[i + 1] == '"') {
+                    ++i;
+                } else if (c == '"') {
+                    doubleQuoted = false;
+                }
+                continue;
+            }
+            if (c == '\'') {
+                singleQuoted = true;
+                continue;
+            }
+            if (c == '"') {
+                doubleQuoted = true;
+                continue;
+            }
+            if (lowered.compare(i, keyword.size(), keyword) == 0) return i;
+        }
+        return std::string::npos;
+    };
 
-    size_t onPos = lsql.find(" on ");
+    size_t onPos = findKeywordOutsideQuotes(statement, lsql, " on ");
     if (onPos == std::string::npos) {
         r.success = false;
         return r;
     }
 
-    std::string rest = trim(lsql.substr(onPos + 4));
-    size_t isPos = rest.find(" is ");
-    std::string beforeIs = (isPos == std::string::npos) ? rest : trim(rest.substr(0, isPos));
-    std::string afterIs = (isPos == std::string::npos) ? "" : trim(rest.substr(isPos + 4));
+    std::string rest = trim(statement.substr(onPos + 4));
+    const std::string lowerRest = toLower(rest);
+    size_t isPos = findKeywordOutsideQuotes(rest, lowerRest, " is ");
+    if (isPos == std::string::npos) {
+        r.success = false;
+        return r;
+    }
+    std::string beforeIs = trim(rest.substr(0, isPos));
+    std::string afterIs = trim(rest.substr(isPos + 4));
 
     if (!afterIs.empty() && afterIs.size() >= 2 &&
         ((afterIs.front() == '\'' && afterIs.back() == '\'') ||
          (afterIs.front() == '"' && afterIs.back() == '"'))) {
-        stmt->comment = afterIs.substr(1, afterIs.size() - 2);
-    } else if (afterIs == "null") {
+        const char quote = afterIs.front();
+        for (size_t i = 1; i + 1 < afterIs.size(); ++i) {
+            if (afterIs[i] == quote && i + 2 < afterIs.size() &&
+                afterIs[i + 1] == quote) {
+                stmt->comment.push_back(quote);
+                ++i;
+            } else {
+                stmt->comment.push_back(afterIs[i]);
+            }
+        }
+    } else if (toLower(afterIs) == "null") {
         stmt->comment.clear();
     } else {
         stmt->comment = afterIs;
     }
 
+    std::string normalizedBeforeIs = beforeIs;
+    bool quotedIdentifier = false;
+    for (size_t i = 0; i < normalizedBeforeIs.size(); ++i) {
+        char& c = normalizedBeforeIs[i];
+        if (c == '"') {
+            if (quotedIdentifier && i + 1 < normalizedBeforeIs.size() &&
+                normalizedBeforeIs[i + 1] == '"') {
+                ++i;
+            } else {
+                quotedIdentifier = !quotedIdentifier;
+            }
+        } else if (!quotedIdentifier) {
+            c = static_cast<char>(
+                std::tolower(static_cast<unsigned char>(c)));
+        }
+    }
+    const std::string lowerBeforeIs = toLower(beforeIs);
     auto startsWith = [&](const std::string& prefix) -> bool {
-        return beforeIs.size() >= prefix.size() &&
-               toLower(beforeIs.substr(0, prefix.size())) == prefix;
+        return lowerBeforeIs.size() >= prefix.size() &&
+               lowerBeforeIs.compare(0, prefix.size(), prefix) == 0;
     };
 
     if (startsWith("materialized view ")) {
         stmt->objectType = "MATERIALIZED VIEW";
-        stmt->objectName = trim(beforeIs.substr(18));
+        stmt->objectName = trim(normalizedBeforeIs.substr(18));
     } else if (startsWith("table ")) {
         stmt->objectType = "TABLE";
-        stmt->objectName = trim(beforeIs.substr(6));
+        stmt->objectName = trim(normalizedBeforeIs.substr(6));
     } else if (startsWith("column ")) {
         stmt->objectType = "COLUMN";
-        stmt->objectName = trim(beforeIs.substr(7));
+        stmt->objectName = trim(normalizedBeforeIs.substr(7));
     } else if (startsWith("schema ")) {
         stmt->objectType = "SCHEMA";
-        stmt->objectName = trim(beforeIs.substr(7));
+        stmt->objectName = trim(normalizedBeforeIs.substr(7));
     } else if (startsWith("index ")) {
         stmt->objectType = "INDEX";
-        stmt->objectName = trim(beforeIs.substr(6));
+        stmt->objectName = trim(normalizedBeforeIs.substr(6));
     } else if (startsWith("view ")) {
         stmt->objectType = "VIEW";
-        stmt->objectName = trim(beforeIs.substr(5));
+        stmt->objectName = trim(normalizedBeforeIs.substr(5));
     } else if (startsWith("function ")) {
         stmt->objectType = "FUNCTION";
-        stmt->objectName = trim(beforeIs.substr(9));
+        stmt->objectName = trim(normalizedBeforeIs.substr(9));
     } else if (startsWith("procedure ")) {
         stmt->objectType = "PROCEDURE";
-        stmt->objectName = trim(beforeIs.substr(10));
+        stmt->objectName = trim(normalizedBeforeIs.substr(10));
     } else if (startsWith("sequence ")) {
         stmt->objectType = "SEQUENCE";
-        stmt->objectName = trim(beforeIs.substr(9));
+        stmt->objectName = trim(normalizedBeforeIs.substr(9));
     } else if (startsWith("type ")) {
         stmt->objectType = "TYPE";
-        stmt->objectName = trim(beforeIs.substr(5));
+        stmt->objectName = trim(normalizedBeforeIs.substr(5));
     } else {
         stmt->objectType = "UNKNOWN";
-        stmt->objectName = beforeIs;
+        stmt->objectName = normalizedBeforeIs;
     }
 
     if (stmt->objectType == "COLUMN") {

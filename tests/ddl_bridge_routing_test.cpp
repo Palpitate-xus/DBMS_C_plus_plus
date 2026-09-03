@@ -247,6 +247,36 @@ static void test_bridge_handles_typed_alter_table() {
     std::cout << "[DDL-ROUTE] typed ALTER TABLE bridge OK" << std::endl;
 }
 
+static void test_comment_uses_raw_literal_text() {
+    const std::string db = testDbPath("ddl_route_comment_text");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s;
+    setupSession(s, db);
+
+    dbms::TableSchema table;
+    table.tablename = "notes";
+    table.append(dbms::makeIntColumn("id", false, 0, true));
+    assert(g_engine.createTable(db, table) == dbms::DBStatus::OK);
+
+    const std::string raw =
+        "CoMmEnT ON TABLE notes IS 'Mixed Case\nLine ''quoted'' | pipe'";
+    // executeInternal supplies the bridge a normalized string whose physical
+    // newlines have already been removed, plus the original SQL separately.
+    const std::string normalized =
+        "comment on table notes is 'Mixed CaseLine ''quoted'' | pipe'";
+    bool handled = false;
+    const bool error = dbms::tryDdlBridge(
+        normalized, dbms::SqlCommand::Comment, s, handled, raw);
+    assert(handled);
+    assert(!error);
+    assert(g_engine.getTableComment(db, "notes") ==
+           "Mixed Case\nLine 'quoted' | pipe");
+
+    cleanup(db);
+    std::cout << "[DDL-ROUTE] COMMENT raw literal preservation OK" << std::endl;
+}
+
 static void test_bridge_handles_catalog_auth_ddl() {
     Session s;
     setupSession(s, "");
@@ -297,6 +327,7 @@ int main() {
     test_supported_serial_type_mapping();
     test_bridge_handles_ctas();
     test_bridge_handles_typed_alter_table();
+    test_comment_uses_raw_literal_text();
     test_bridge_handles_catalog_auth_ddl();
     std::cout << "[DDL-ROUTE] all passed" << std::endl;
     return 0;

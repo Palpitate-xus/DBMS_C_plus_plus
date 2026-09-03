@@ -356,6 +356,23 @@ int main() {
         assert(r3.success);
         auto* c3 = dynamic_cast<const CommentStmt*>(r3.stmt.get());
         assert(c3 && c3->objectType == "MATERIALIZED VIEW" && c3->objectName == "mv");
+
+        auto r4 = parser.parse(
+            "CoMmEnT ON TABLE MixedName IS 'Mixed Case\nLine ''quoted'' | pipe';");
+        assert(r4.success);
+        auto* c4 = dynamic_cast<const CommentStmt*>(r4.stmt.get());
+        assert(c4 && c4->objectType == "TABLE" &&
+               c4->objectName == "mixedname" &&
+               c4->comment == "Mixed Case\nLine 'quoted' | pipe");
+
+        auto r5 = parser.parse(
+            "COMMENT ON TABLE \"Object IS Name\" IS 'Payload IS Intact'");
+        assert(r5.success);
+        auto* c5 = dynamic_cast<const CommentStmt*>(r5.stmt.get());
+        assert(c5 && c5->objectName == "\"Object IS Name\"" &&
+               c5->comment == "Payload IS Intact");
+
+        assert(!parser.parse("COMMENT ON TABLE missing_is_clause").success);
         std::cout << "[PARSER P1] COMMENT ON OK\n";
     }
 
