@@ -17885,6 +17885,18 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                 if (!val.empty()) idx->remove(val, rid);
             }
         }
+        for (const auto& colname : getBloomIndexedColumns(dbname, tablename)) {
+            size_t colIdx = tbl.len;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+            }
+            if (colIdx >= tbl.len) continue;
+            if (BloomIndex* idx = getBloomIndex(
+                    dbname, tablename, colname); idx) {
+                const std::string val = valueFromRowMap(actualValues, colname);
+                if (!val.empty()) idx->remove(val, rid);
+            }
+        }
         deleteRowToast(dbname, tablename, rid);
         if (char* pageBuf = pa->fetchPage(pageId)) {
             PageWrapper page(pageBuf, pa->pageSize(), tbl.formatVersion);
