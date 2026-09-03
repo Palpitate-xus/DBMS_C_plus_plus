@@ -1,35 +1,73 @@
 #pragma once
 
+#include <cctype>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <string_view>
 
 constexpr int DAYS[14] = {0, 365, 334, 306, 275, 245, 214, 184, 153, 122, 92, 61, 31, 0};
 
+inline bool parseTemporalUnsigned(std::string_view text, size_t maxDigits,
+                                  int& value) {
+    if (text.empty() || text.size() > maxDigits) return false;
+    int parsed = 0;
+    for (const unsigned char c : text) {
+        if (!std::isdigit(c)) return false;
+        parsed = parsed * 10 + static_cast<int>(c - '0');
+    }
+    value = parsed;
+    return true;
+}
+
 struct Date {
     Date() : year(0), month(0), day(0) {}
-    Date(int y, int m, int d) : year(y), month(m), day(d) {
-        if (month > 12 || day > DAYS[month] - DAYS[month + 1] + (month == 2) * isleap()) {
-            month = 0; year = 0; day = 0;
-        }
+    Date(int y, int m, int d) {
+        if (m < 1 || m > 12 || d < 1) return;
+        const bool leap = ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0);
+        const int maximumDay =
+            DAYS[m] - DAYS[m + 1] + (m == 2 && leap ? 1 : 0);
+        if (d > maximumDay) return;
+        year = y;
+        month = m;
+        day = d;
     }
     Date(const char* s) {
-        int pos[2] = {0, 0};
-        int k = 0;
-        for (int i = 0; s[i] && k < 2; i++) {
-            if (s[i] == '-') pos[k++] = i;
-        }
-        if (!pos[0] || !pos[1] || pos[1] == pos[0] + 1 ||
-            pos[1] - pos[0] > 3 || static_cast<int>(strlen(s)) - pos[1] > 3 || pos[0] > 4) {
+        if (!s) return;
+        const std::string_view input(s);
+        const size_t firstDash = input.find('-');
+        if (firstDash == std::string_view::npos) return;
+        const size_t secondDash = input.find('-', firstDash + 1);
+        if (secondDash == std::string_view::npos ||
+            input.find('-', secondDash + 1) != std::string_view::npos) {
             return;
         }
-        for (int i = 0; i < pos[0]; i++) year = year * 10 + s[i] - '0';
-        for (int i = pos[0] + 1; i < pos[1]; i++) month = month * 10 + s[i] - '0';
-        for (int i = pos[1] + 1; s[i]; i++) day = day * 10 + s[i] - '0';
-        if (month > 12 || day > DAYS[month] - DAYS[month + 1] + (month == 2) * isleap()) {
-            month = 0; year = 0; day = 0;
+        int parsedYear = 0;
+        int parsedMonth = 0;
+        int parsedDay = 0;
+        if (!parseTemporalUnsigned(input.substr(0, firstDash), 4,
+                                   parsedYear) ||
+            !parseTemporalUnsigned(
+                input.substr(firstDash + 1,
+                             secondDash - firstDash - 1),
+                2, parsedMonth) ||
+            !parseTemporalUnsigned(input.substr(secondDash + 1), 2,
+                                   parsedDay) ||
+            parsedYear == 0 || parsedMonth < 1 || parsedMonth > 12 ||
+            parsedDay < 1) {
+            return;
         }
+        const bool leap =
+            ((parsedYear % 4 == 0 && parsedYear % 100 != 0) ||
+             parsedYear % 400 == 0);
+        const int maximumDay = DAYS[parsedMonth] - DAYS[parsedMonth + 1] +
+            (parsedMonth == 2 && leap ? 1 : 0);
+        if (parsedDay > maximumDay) return;
+        year = parsedYear;
+        month = parsedMonth;
+        day = parsedDay;
     }
 
     int year = 0, month = 0, day = 0;
@@ -145,17 +183,25 @@ inline std::ostream& operator<<(std::ostream& ost, Date a) {
 // Time helpers: store as int32_t seconds since 00:00:00
 // ========================================================================
 inline int32_t parseTimeToSeconds(const std::string& s) {
-    int h = 0, m = 0, sec = 0;
-    int pos[2] = {0, 0};
-    int k = 0;
-    for (size_t i = 0; i < s.size() && k < 2; i++) {
-        if (s[i] == ':') pos[k++] = static_cast<int>(i);
+    const std::string_view input(s);
+    const size_t firstColon = input.find(':');
+    if (firstColon == std::string_view::npos) return -1;
+    const size_t secondColon = input.find(':', firstColon + 1);
+    if (secondColon == std::string_view::npos ||
+        input.find(':', secondColon + 1) != std::string_view::npos) {
+        return -1;
     }
-    if (!pos[0] || !pos[1]) return -1;
-    for (int i = 0; i < pos[0]; i++) h = h * 10 + s[i] - '0';
-    for (int i = pos[0] + 1; i < pos[1]; i++) m = m * 10 + s[i] - '0';
-    for (size_t i = pos[1] + 1; i < s.size(); i++) sec = sec * 10 + s[i] - '0';
-    if (h < 0 || h > 23 || m < 0 || m > 59 || sec < 0 || sec > 59) return -1;
+    int h = 0;
+    int m = 0;
+    int sec = 0;
+    if (!parseTemporalUnsigned(input.substr(0, firstColon), 2, h) ||
+        !parseTemporalUnsigned(
+            input.substr(firstColon + 1, secondColon - firstColon - 1),
+            2, m) ||
+        !parseTemporalUnsigned(input.substr(secondColon + 1), 2, sec) ||
+        h > 23 || m > 59 || sec > 59) {
+        return -1;
+    }
     return h * 3600 + m * 60 + sec;
 }
 
@@ -183,11 +229,14 @@ inline int64_t parseTimestampToSeconds(const std::string& s) {
     for (auto& c : lower) c = std::tolower(static_cast<unsigned char>(c));
     if (lower == "infinity") return INT64_MAX;
     if (lower == "-infinity") return INT64_MIN;
-    int y = 0, m = 0, d = 0, h = 0, mn = 0, sec = 0;
+    if (s.empty()) return 0;
     int tzOffsetMinutes = 0;  // +08:00 => +480, -05:00 => -300
-    auto sp = s.find(' ');
+    const size_t sp = s.find(' ');
+    if (sp != std::string::npos && s.find(' ', sp + 1) != std::string::npos)
+        return 0;
     std::string datePart = (sp == std::string::npos) ? s : s.substr(0, sp);
     std::string timePart = (sp == std::string::npos) ? "00:00:00" : s.substr(sp + 1);
+    if (datePart.empty() || timePart.empty()) return 0;
     // Parse timezone offset from timePart if present: [+-]HH or [+-]HH:MM
     size_t tzPos = std::string::npos;
     for (size_t i = 0; i < timePart.size(); ++i) {
@@ -197,48 +246,45 @@ inline int64_t parseTimestampToSeconds(const std::string& s) {
         }
     }
     std::string tzStr;
+    const bool hasZulu = !timePart.empty() &&
+        (timePart.back() == 'Z' || timePart.back() == 'z');
+    if (hasZulu) {
+        if (tzPos != std::string::npos) return 0;
+        timePart.pop_back();
+        if (timePart.empty()) return 0;
+    }
     if (tzPos != std::string::npos) {
         tzStr = timePart.substr(tzPos);
         timePart = timePart.substr(0, tzPos);
+        if (timePart.empty() || tzStr.size() < 2) return 0;
         bool tzNegative = (tzStr[0] == '-');
         int tzh = 0, tzm = 0;
         size_t tzColon = tzStr.find(':');
         if (tzColon != std::string::npos) {
-            for (size_t i = 1; i < tzColon; ++i) if (tzStr[i] >= '0' && tzStr[i] <= '9') tzh = tzh * 10 + tzStr[i] - '0';
-            for (size_t i = tzColon + 1; i < tzStr.size(); ++i) if (tzStr[i] >= '0' && tzStr[i] <= '9') tzm = tzm * 10 + tzStr[i] - '0';
+            if (tzStr.find(':', tzColon + 1) != std::string::npos ||
+                !parseTemporalUnsigned(
+                    std::string_view(tzStr).substr(1, tzColon - 1), 2,
+                    tzh) ||
+                !parseTemporalUnsigned(
+                    std::string_view(tzStr).substr(tzColon + 1), 2,
+                    tzm)) {
+                return 0;
+            }
         } else {
-            for (size_t i = 1; i < tzStr.size(); ++i) if (tzStr[i] >= '0' && tzStr[i] <= '9') tzh = tzh * 10 + tzStr[i] - '0';
+            if (!parseTemporalUnsigned(
+                    std::string_view(tzStr).substr(1), 2, tzh)) {
+                return 0;
+            }
         }
+        if (tzh > 15 || tzm > 59) return 0;
         tzOffsetMinutes = (tzNegative ? -1 : 1) * (tzh * 60 + tzm);
     }
-    // Parse date YYYY-MM-DD
-    int pos[2] = {0, 0};
-    int k = 0;
-    for (size_t i = 0; i < datePart.size() && k < 2; i++) {
-        if (datePart[i] == '-') pos[k++] = static_cast<int>(i);
-    }
-    if (pos[0] && pos[1]) {
-        for (int i = 0; i < pos[0]; i++) y = y * 10 + datePart[i] - '0';
-        for (int i = pos[0] + 1; i < pos[1]; i++) m = m * 10 + datePart[i] - '0';
-        for (size_t i = pos[1] + 1; i < datePart.size(); i++) d = d * 10 + datePart[i] - '0';
-    }
-    // Parse time HH:MM:SS
-    int tpos[2] = {0, 0};
-    k = 0;
-    for (size_t i = 0; i < timePart.size() && k < 2; i++) {
-        if (timePart[i] == ':') tpos[k++] = static_cast<int>(i);
-    }
-    if (tpos[0] && tpos[1]) {
-        for (int i = 0; i < tpos[0]; i++) h = h * 10 + timePart[i] - '0';
-        for (int i = tpos[0] + 1; i < tpos[1]; i++) mn = mn * 10 + timePart[i] - '0';
-        for (size_t i = tpos[1] + 1; i < timePart.size(); i++) {
-            if (timePart[i] >= '0' && timePart[i] <= '9') sec = sec * 10 + timePart[i] - '0';
-        }
-    }
-    Date dt(y, m, d);
+    Date dt(datePart.c_str());
     if (dt.year == 0) return 0;
+    const int32_t timeSeconds = parseTimeToSeconds(timePart);
+    if (timeSeconds < 0) return 0;
     // For TIMESTAMPTZ: store as UTC (subtract timezone offset)
-    return dt.convert() * 86400LL + h * 3600LL + mn * 60LL + sec - tzOffsetMinutes * 60LL;
+    return dt.convert() * 86400LL + timeSeconds - tzOffsetMinutes * 60LL;
 }
 
 inline std::string formatTimestampSeconds(int64_t ts) {
