@@ -7676,6 +7676,120 @@ std::vector<StorageEngine::Trigger> filterTriggers(
     return result;
 }
 
+struct TriggerRowAssignment {
+    std::string column;
+    std::string expression;
+};
+
+bool triggerTokenEquals(std::string_view token, std::string_view expected) {
+    if (token.size() != expected.size()) return false;
+    for (size_t i = 0; i < token.size(); ++i) {
+        if (std::tolower(static_cast<unsigned char>(token[i])) !=
+            std::tolower(static_cast<unsigned char>(expected[i]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The storage layer supports a deliberately small row-rewrite form for
+// BEFORE triggers: "SET col = expression" (and "NEW.col = expression").
+// Trigger actions may otherwise be arbitrary SQL, so an equals sign inside an
+// INSERT/UPDATE statement or a string literal must never be treated as a row
+// assignment.
+std::vector<TriggerRowAssignment> parseTriggerRowAssignments(
+        const std::string& action) {
+    std::vector<TriggerRowAssignment> assignments;
+    size_t statementStart = 0;
+    while (statementStart < action.size()) {
+        size_t statementEnd = statementStart;
+        char quote = '\0';
+        for (; statementEnd < action.size(); ++statementEnd) {
+            const char c = action[statementEnd];
+            if (quote != '\0') {
+                if (c == quote) {
+                    if (statementEnd + 1 < action.size() &&
+                        action[statementEnd + 1] == quote) {
+                        ++statementEnd;
+                    } else {
+                        quote = '\0';
+                    }
+                }
+                continue;
+            }
+            if (c == '\'' || c == '"') {
+                quote = c;
+            } else if (c == ';') {
+                break;
+            }
+        }
+
+        const std::string statement = trim(
+            action.substr(statementStart, statementEnd - statementStart));
+        statementStart = statementEnd < action.size()
+            ? statementEnd + 1 : action.size();
+        if (statement.empty()) continue;
+
+        size_t lhsStart = 0;
+        bool hasSetKeyword = false;
+        if (statement.size() >= 3 &&
+            triggerTokenEquals(std::string_view(statement).substr(0, 3),
+                               "set") &&
+            (statement.size() == 3 ||
+             std::isspace(static_cast<unsigned char>(statement[3])))) {
+            hasSetKeyword = true;
+            lhsStart = 3;
+            while (lhsStart < statement.size() &&
+                   std::isspace(static_cast<unsigned char>(statement[lhsStart]))) {
+                ++lhsStart;
+            }
+        }
+
+        size_t equals = std::string::npos;
+        quote = '\0';
+        for (size_t i = lhsStart; i < statement.size(); ++i) {
+            const char c = statement[i];
+            if (quote != '\0') {
+                if (c == quote) {
+                    if (i + 1 < statement.size() && statement[i + 1] == quote) {
+                        ++i;
+                    } else {
+                        quote = '\0';
+                    }
+                }
+                continue;
+            }
+            if (c == '\'' || c == '"') {
+                quote = c;
+            } else if (c == '=') {
+                equals = i;
+                break;
+            }
+        }
+        if (equals == std::string::npos) continue;
+
+        std::string column = trim(
+            statement.substr(lhsStart, equals - lhsStart));
+        const bool hasNewQualifier =
+            column.size() > 4 &&
+            triggerTokenEquals(std::string_view(column).substr(0, 4), "new.");
+        if (hasNewQualifier) column.erase(0, 4);
+        if (!hasSetKeyword && !hasNewQualifier) continue;
+        if (column.empty() ||
+            !std::all_of(column.begin(), column.end(), [](unsigned char c) {
+                return std::isalnum(c) || c == '_';
+            })) {
+            continue;
+        }
+
+        std::string expression = trim(statement.substr(equals + 1));
+        if (!expression.empty()) {
+            assignments.push_back({std::move(column), std::move(expression)});
+        }
+    }
+    return assignments;
+}
+
 }  // namespace
 
 std::filesystem::path StorageEngine::triggerPath(const std::string& dbname) const {
@@ -18044,36 +18158,22 @@ DBStatus StorageEngine::insertInternal(
                 lockManager_.unlock(tablename);
                 return DBStatus::IO_ERROR;
             }
-            // Parse "SET col = val" assignments from action and apply to actualValues
+            // Parse only the storage layer's explicit row-assignment syntax.
+            // Use the original action so NEW.col on the left-hand side is not
+            // consumed by the placeholder substitution performed above.
             {
-                size_t searchPos = 0;
-                while (searchPos < action.size()) {
-                    size_t eqPos = action.find('=', searchPos);
-                    if (eqPos == std::string::npos || eqPos == 0) break;
-                    // Find column name (skip "SET " or "NEW." prefix)
-                    size_t colEnd = eqPos;
-                    while (colEnd > 0 && (action[colEnd-1] == ' ' || action[colEnd-1] == '\t'))
-                        --colEnd;
-                    size_t colStart = colEnd;
-                    while (colStart > 0 && action[colStart-1] != ' ' && action[colStart-1] != ',')
-                        --colStart;
-                    std::string colName = action.substr(colStart, colEnd - colStart);
-                    // Trim
-                    while (!colName.empty() && (colName.back() == ' ' || colName.back() == '\t'))
-                        colName.pop_back();
-                    while (!colName.empty() && (colName.front() == ' ' || colName.front() == '\t'))
-                        colName.erase(colName.begin());
-                    if (colName.size() > 4 && colName.substr(0, 4) == "NEW.")
-                        colName.erase(0, 4);
-                    // Find value (after = until ; or end)
-                    size_t valStart = eqPos + 1;
-                    while (valStart < action.size() && (action[valStart] == ' ' || action[valStart] == '\t'))
-                        ++valStart;
-                    size_t valEnd = action.find(';', valStart);
-                    if (valEnd == std::string::npos) valEnd = action.size();
-                    while (valEnd > valStart && (action[valEnd-1] == ' ' || action[valEnd-1] == '\t'))
-                        --valEnd;
-                    std::string rawVal = action.substr(valStart, valEnd - valStart);
+                for (const auto& assignment :
+                     parseTriggerRowAssignments(trg.action)) {
+                    std::string rawVal = assignment.expression;
+                    for (const auto& [col, currentValue] : actualValues) {
+                        const std::string placeholder = "NEW." + col;
+                        size_t pos = 0;
+                        while ((pos = rawVal.find(placeholder, pos)) !=
+                               std::string::npos) {
+                            rawVal.replace(pos, placeholder.size(), currentValue);
+                            pos += currentValue.size();
+                        }
+                    }
                     std::string val = rawVal;
                     bool evaluated = false;
                     std::string evaluatedVal = evalExpressionSql(rawVal, actualValues,
@@ -18087,15 +18187,12 @@ DBStatus StorageEngine::insertInternal(
                          (val.front() == '"' && val.back() == '"'))) {
                         val = val.substr(1, val.size() - 2);
                     }
-                    if (!colName.empty()) {
-                        for (size_t i = 0; i < tbl.len; ++i) {
-                            if (tbl.cols[i].dataName == colName) {
-                                actualValues[colName] = val;
-                                break;
-                            }
+                    for (size_t i = 0; i < tbl.len; ++i) {
+                        if (tbl.cols[i].dataName == assignment.column) {
+                            actualValues[assignment.column] = val;
+                            break;
                         }
                     }
-                    searchPos = valEnd + 1;
                 }
             }
         }
@@ -21240,33 +21337,30 @@ DBStatus StorageEngine::updateInternal(
                     lockManager_.unlock(tablename);
                     return DBStatus::IO_ERROR;
                 }
-                // Parse "SET col = val" assignments and apply to rowValues
+                // Parse only explicit row assignments from the original action;
+                // arbitrary SQL may contain equals signs of its own.
                 {
-                    size_t searchPos = 0;
-                    while (searchPos < action.size()) {
-                        size_t eqPos = action.find('=', searchPos);
-                        if (eqPos == std::string::npos || eqPos == 0) break;
-                        size_t colEnd = eqPos;
-                        while (colEnd > 0 && (action[colEnd-1] == ' ' || action[colEnd-1] == '\t'))
-                            --colEnd;
-                        size_t colStart = colEnd;
-                        while (colStart > 0 && action[colStart-1] != ' ' && action[colStart-1] != ',')
-                            --colStart;
-                        std::string colName = action.substr(colStart, colEnd - colStart);
-                        while (!colName.empty() && (colName.back() == ' ' || colName.back() == '\t'))
-                            colName.pop_back();
-                        while (!colName.empty() && (colName.front() == ' ' || colName.front() == '\t'))
-                            colName.erase(colName.begin());
-                        if (colName.size() > 4 && colName.substr(0, 4) == "NEW.")
-                            colName.erase(0, 4);
-                        size_t valStart = eqPos + 1;
-                        while (valStart < action.size() && (action[valStart] == ' ' || action[valStart] == '\t'))
-                            ++valStart;
-                        size_t valEnd = action.find(';', valStart);
-                        if (valEnd == std::string::npos) valEnd = action.size();
-                        while (valEnd > valStart && (action[valEnd-1] == ' ' || action[valEnd-1] == '\t'))
-                            --valEnd;
-                        std::string rawVal = action.substr(valStart, valEnd - valStart);
+                    for (const auto& assignment :
+                         parseTriggerRowAssignments(trg.action)) {
+                        std::string rawVal = assignment.expression;
+                        for (const auto& [col, currentValue] : rowValues) {
+                            const std::string placeholder = "NEW." + col;
+                            size_t pos = 0;
+                            while ((pos = rawVal.find(placeholder, pos)) !=
+                                   std::string::npos) {
+                                rawVal.replace(pos, placeholder.size(), currentValue);
+                                pos += currentValue.size();
+                            }
+                        }
+                        for (const auto& [col, oldValue] : oldRowValues) {
+                            const std::string placeholder = "OLD." + col;
+                            size_t pos = 0;
+                            while ((pos = rawVal.find(placeholder, pos)) !=
+                                   std::string::npos) {
+                                rawVal.replace(pos, placeholder.size(), oldValue);
+                                pos += oldValue.size();
+                            }
+                        }
                         std::string val = rawVal;
                         bool evaluated = false;
                         std::string evaluatedVal = evalExpressionSql(rawVal, rowValues,
@@ -21280,23 +21374,20 @@ DBStatus StorageEngine::updateInternal(
                              (val.front() == '"' && val.back() == '"'))) {
                             val = val.substr(1, val.size() - 2);
                         }
-                        if (!colName.empty()) {
-                            for (size_t i = 0; i < tbl.len; ++i) {
-                                if (tbl.cols[i].dataName == colName) {
-                                    const bool assignsNull = val == "NULL";
-                                    rowValues[colName] =
-                                        assignsNull ? std::string() : val;
-                                    assignedColumnIndices.insert(i);
-                                    if (assignsNull) {
-                                        assignedNullColumnIndices.insert(i);
-                                    } else {
-                                        assignedNullColumnIndices.erase(i);
-                                    }
-                                    break;
+                        for (size_t i = 0; i < tbl.len; ++i) {
+                            if (tbl.cols[i].dataName == assignment.column) {
+                                const bool assignsNull = val == "NULL";
+                                rowValues[assignment.column] =
+                                    assignsNull ? std::string() : val;
+                                assignedColumnIndices.insert(i);
+                                if (assignsNull) {
+                                    assignedNullColumnIndices.insert(i);
+                                } else {
+                                    assignedNullColumnIndices.erase(i);
                                 }
+                                break;
                             }
                         }
-                        searchPos = valEnd + 1;
                     }
                 }
             }

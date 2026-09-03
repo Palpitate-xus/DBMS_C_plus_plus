@@ -89,10 +89,10 @@ static void test_before_insert_modify() {
     dbms::DdlExecutor ddl;
     assert(!ddl.executeSql("CREATE TABLE t (id INT, name VARCHAR(20), status VARCHAR(10))", s));
 
-    // Create a BEFORE INSERT trigger that sets status = 'active' when not provided
+    // Create a BEFORE INSERT trigger that assigns through the NEW-row form.
     assert(g_engine.createTrigger(db, {
         "trg_set_status", "before", "insert", "t",
-        "set status = 'active'",  // action: SET col = val form
+        "NEW.status = 'active'",
         "", true, true
     }) == dbms::DBStatus::OK);
 
@@ -178,7 +178,36 @@ static void test_before_update_modify() {
     std::cout << "[BEFORE-TRIGGER] BEFORE UPDATE modify OK" << std::endl;
 }
 
-// -------- Test 4: BEFORE DELETE trigger fires --------
+// -------- Test 4: BEFORE UPDATE SQL is not parsed as a row assignment --------
+static void test_before_update_sql_action() {
+    std::string db = testDbPath("before_upd_sql");
+    cleanup(db);
+    g_currentTestDB = db;
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE t (id INT, name VARCHAR(20))", s));
+    assert(!ddl.executeSql("CREATE TABLE audit (msg VARCHAR(100))", s));
+    assert(g_engine.insert(db, "t", {{"id", "20"}, {"name", "old"}}) ==
+           dbms::DBStatus::OK);
+
+    assert(g_engine.createTrigger(db, {
+        "trg_update_audit", "before", "update", "t",
+        "insert into audit values ('updated id=' || NEW.id)",
+        "", true, true
+    }) == dbms::DBStatus::OK);
+
+    assert(g_engine.update(db, "t", {{"name", "new"}}, {"=id 20"}) ==
+           dbms::DBStatus::OK);
+    const auto audit = g_engine.query(db, "audit", {}, {});
+    assert(audit.size() == 1);
+    assert(audit.front().find("updated id=20") != std::string::npos);
+
+    cleanup(db);
+    std::cout << "[BEFORE-TRIGGER] BEFORE UPDATE SQL action OK" << std::endl;
+}
+
+// -------- Test 5: BEFORE DELETE trigger fires --------
 static void test_before_delete() {
     std::string db = testDbPath("before_del");
     cleanup(db);
@@ -225,6 +254,7 @@ int main() {
     test_before_insert_modify();
     test_before_insert_when();
     test_before_update_modify();
+    test_before_update_sql_action();
     test_before_delete();
     std::cout << "[BEFORE-TRIGGER] all tests passed" << std::endl;
     return 0;
