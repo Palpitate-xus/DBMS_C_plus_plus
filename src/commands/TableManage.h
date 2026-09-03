@@ -1300,6 +1300,8 @@ private:
     // index files keep their flush + WAL-image bookkeeping in all modes.
     bool flushDatabaseCaches(const std::string& dbname, bool heapPages = true);
     void closeDatabaseCaches(const std::string& dbname);
+    bool refreshPreparedTableCaches(const std::string& dbname,
+                                    const std::string& tablename);
     void pruneMissingDatabaseCaches();
     bool rebuildIndexesAfterRecovery(const std::string& dbname,
                                      bool preservePreparedState);

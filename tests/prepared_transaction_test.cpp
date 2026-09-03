@@ -57,9 +57,40 @@ void test_cross_backend_prepare_completion() {
     assert(backendB.rollbackTransaction() == dbms::DBStatus::OK);
     assert(backendB.rollbackPrepared("prepared_rollback") == dbms::DBStatus::OK);
     assert(backendB.query(db, "accounts", {"=id 2"}, {"id"}).empty());
+    assert(backendB.insert(db, "accounts", {{"id", "2"}}) ==
+           dbms::DBStatus::OK);
+    assert(backendB.query(db, "accounts", {"=id 2"}, {"id"}).size() == 1);
 
     cleanup(db);
     std::cout << "[PREPARED-TXN] cross-backend commit/rollback and lock ownership OK\n";
+}
+
+void test_commit_refreshes_warm_completion_backend() {
+    const std::string db = testDbPath("prepared_warm_commit");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    dbms::TableSchema table;
+    table.tablename = "accounts";
+    table.append(dbms::makeIntColumn("id", false, 2, true));
+    assert(g_engine.createTable(db, table) == dbms::DBStatus::OK);
+
+    dbms::StorageEngine completingBackend;
+    assert(completingBackend.query(
+               db, "accounts", {"=id 7"}, {"id"}).empty());
+
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "accounts", {{"id", "7"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.prepareTransaction("prepared_warm_commit") ==
+           dbms::DBStatus::OK);
+    assert(completingBackend.commitPrepared("prepared_warm_commit") ==
+           dbms::DBStatus::OK);
+    assert(completingBackend.query(
+               db, "accounts", {"=id 7"}, {"id"}).size() == 1);
+
+    cleanup(db);
+    std::cout << "[PREPARED-TXN] warm completion cache refreshed OK\n";
 }
 
 void test_commit_clog_failure_is_irrevocable() {
@@ -272,6 +303,7 @@ int main(int argc, char** argv) {
     }
     cleanupAllTestData();
     test_cross_backend_prepare_completion();
+    test_commit_refreshes_warm_completion_backend();
     test_commit_clog_failure_is_irrevocable();
     test_terminal_metadata_cleanup_is_idempotent();
     test_prepared_survives_engine_restart(argv[0]);

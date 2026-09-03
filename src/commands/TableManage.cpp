@@ -4683,6 +4683,111 @@ void StorageEngine::closeDatabaseCaches(const std::string& dbname) {
     }
 }
 
+bool StorageEngine::refreshPreparedTableCaches(
+    const std::string& dbname, const std::string& tablename) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    const std::string tableKey = dbname + "/" + tablename;
+    const std::string secondaryPrefix = tableKey + "/";
+    const std::string auxiliaryPrefix = dbname + "." + tablename + ".";
+    const std::string toastKey = dbname + ":" + tablename;
+
+    // PREPARE flushes the producing backend before publishing its durable
+    // record.  A different completing backend may nevertheless have clean,
+    // older pages for the same relation cached.  Reject genuinely dirty
+    // local state, then discard only clean data/index caches so completion
+    // operates on the producer's on-disk generation.
+    const auto pageCacheDirty = [](const auto& allocator) {
+        if (!allocator || !allocator->bufferPool()) return false;
+        for (const auto& frame : allocator->bufferPool()->getFrameInfo()) {
+            if (frame.dirty) return true;
+        }
+        return false;
+    };
+    if (auto it = pageAllocators_.find(tableKey);
+        it != pageAllocators_.end() && pageCacheDirty(it->second)) {
+        return false;
+    }
+    if (auto it = pkIndexCache_.find(tableKey);
+        it != pkIndexCache_.end() && it->second &&
+        it->second->hasDirtyPages()) {
+        return false;
+    }
+    for (const auto& [key, index] : secondaryIndexCache_) {
+        if (key.rfind(secondaryPrefix, 0) == 0 && index &&
+            index->hasDirtyPages()) {
+            return false;
+        }
+    }
+    for (const auto& [key, index] : hashIndexCache_) {
+        if (key.rfind(auxiliaryPrefix, 0) == 0 && index &&
+            index->hasDirtyData()) {
+            return false;
+        }
+    }
+    for (const auto& [key, index] : bloomIndexCache_) {
+        if (key.rfind(auxiliaryPrefix, 0) == 0 && index &&
+            index->hasDirtyData()) {
+            return false;
+        }
+    }
+    if (auto it = toastPageAllocators_.find(toastKey);
+        it != toastPageAllocators_.end() && pageCacheDirty(it->second)) {
+        return false;
+    }
+    if (auto it = toastIndexes_.find(toastKey);
+        it != toastIndexes_.end() && it->second &&
+        it->second->hasDirtyPages()) {
+        return false;
+    }
+
+    if (auto it = pageAllocators_.find(tableKey);
+        it != pageAllocators_.end()) {
+        if (it->second && it->second->bufferPool()) {
+            it->second->bufferPool()->invalidateAll();
+        }
+        pageAllocators_.erase(it);
+    }
+    pkIndexCache_.erase(tableKey);
+    for (auto it = secondaryIndexCache_.begin();
+         it != secondaryIndexCache_.end();) {
+        if (it->first.rfind(secondaryPrefix, 0) == 0)
+            it = secondaryIndexCache_.erase(it);
+        else
+            ++it;
+    }
+    for (auto it = hashIndexCache_.begin(); it != hashIndexCache_.end();) {
+        if (it->first.rfind(auxiliaryPrefix, 0) == 0)
+            it = hashIndexCache_.erase(it);
+        else
+            ++it;
+    }
+    for (auto it = bloomIndexCache_.begin();
+         it != bloomIndexCache_.end();) {
+        if (it->first.rfind(auxiliaryPrefix, 0) == 0)
+            it = bloomIndexCache_.erase(it);
+        else
+            ++it;
+    }
+    if (auto it = toastPageAllocators_.find(toastKey);
+        it != toastPageAllocators_.end()) {
+        if (it->second && it->second->bufferPool()) {
+            it->second->bufferPool()->invalidateAll();
+        }
+        toastPageAllocators_.erase(it);
+    }
+    toastIndexes_.erase(toastKey);
+    {
+        std::lock_guard<std::mutex> lock(spGiSTMutex_);
+        for (auto it = spGiSTCache_.begin(); it != spGiSTCache_.end();) {
+            if (it->first.rfind(secondaryPrefix, 0) == 0)
+                it = spGiSTCache_.erase(it);
+            else
+                ++it;
+        }
+    }
+    return true;
+}
+
 void StorageEngine::pruneMissingDatabaseCaches() {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::set<std::string> stale;
@@ -33830,6 +33935,13 @@ DBStatus StorageEngine::commitPrepared(const std::string& xid) {
             return DBStatus::LOCK_CONFLICT;
         }
     }
+    for (const auto& tableName : specializedTables) {
+        if (tableExists(savedDB, tableName) &&
+            !refreshPreparedTableCaches(savedDB, tableName)) {
+            lockManager_.unlockAll();
+            return DBStatus::IO_ERROR;
+        }
+    }
 
     // PREPARE deliberately left the old whole-file sidecars in place while
     // its xid stayed globally active.  Build the future committed generation
@@ -33986,6 +34098,13 @@ DBStatus StorageEngine::rollbackPrepared(const std::string& xid) {
                 tableName, savedTxnId)) {
             lockManager_.unlockAll();
             return DBStatus::LOCK_CONFLICT;
+        }
+    }
+    for (const auto& tableName : specializedTables) {
+        if (tableExists(savedDB, tableName) &&
+            !refreshPreparedTableCaches(savedDB, tableName)) {
+            lockManager_.unlockAll();
+            return DBStatus::IO_ERROR;
         }
     }
 
