@@ -937,20 +937,21 @@ void FilterOp::close() {
 SemiJoinOp::SemiJoinOp(OpPtr outer, OpPtr inner, const TableSchema& outerTbl,
                        const TableSchema& innerTbl,
                        const std::string& outerColumn,
-                       const std::string& innerColumn, bool anti)
+                       const std::string& innerColumn, bool anti,
+                       NullSemantics nullSemantics)
     : outer_(std::move(outer)), inner_(std::move(inner)), outerTbl_(outerTbl),
       innerTbl_(innerTbl), outerColumn_(outerColumn), innerColumn_(innerColumn),
-      anti_(anti) {}
+      anti_(anti), nullSemantics_(nullSemantics) {}
 
 SemiJoinOp::SemiJoinOp(OpPtr outer, OpPtr inner, const TableSchema& outerTbl,
                        const TableSchema& innerTbl,
                        std::vector<std::pair<std::string, std::string>> keys,
-                       bool anti)
+                       bool anti, NullSemantics nullSemantics)
     : outer_(std::move(outer)), inner_(std::move(inner)), outerTbl_(outerTbl),
       innerTbl_(innerTbl),
       outerColumn_(keys.empty() ? std::string() : keys.front().first),
       innerColumn_(keys.empty() ? std::string() : keys.front().second),
-      keys_(std::move(keys)), anti_(anti) {}
+      keys_(std::move(keys)), anti_(anti), nullSemantics_(nullSemantics) {}
 
 bool SemiJoinOp::open() {
     rows_.clear();
@@ -1017,9 +1018,11 @@ bool SemiJoinOp::open() {
             const std::vector<std::string> outerKey = rowKey(
                 row, outerTbl_, outerIdxs, outer_.get(), isNull2);
             const bool found = !isNull2 && innerKeys.count(outerKey) > 0;
-            const bool keep = anti_
-                ? (!innerHasRow || (!isNull2 && !found && !innerHasNull))
-                : found;
+            const bool keep = nullSemantics_ == NullSemantics::ExistsCorrelation
+                ? (anti_ ? !found : found)
+                : (anti_
+                    ? (!innerHasRow || (!isNull2 && !found && !innerHasNull))
+                    : found);
             if (keep) rememberOuterRow(row);
         }
         outer_->close();
@@ -1072,9 +1075,11 @@ bool SemiJoinOp::open() {
         // relation makes every non-matching comparison UNKNOWN, not TRUE.
         // The empty set is the exception: NOT IN over it is TRUE even when
         // the outer value is NULL (there is no comparison that can be UNKNOWN).
-        const bool keep = anti_
-            ? (!innerHasRow || (!outerIsNull && !found && !innerHasNull))
-            : found;
+        const bool keep = nullSemantics_ == NullSemantics::ExistsCorrelation
+            ? (anti_ ? !found : found)
+            : (anti_
+                ? (!innerHasRow || (!outerIsNull && !found && !innerHasNull))
+                : found);
         if (keep) rememberOuterRow(row);
     }
     outer_->close();
@@ -3575,13 +3580,15 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
                 // correlations join on a composite key.
                 root = std::make_unique<SemiJoinOp>(
                     std::move(root), std::move(inner), outerTbl, innerTbl,
-                    spec.correlations, spec.anti);
+                    spec.correlations, spec.anti,
+                    SemiJoinOp::NullSemantics::ExistsCorrelation);
             } else if (!spec.outerColumn.empty() && !spec.innerColumn.empty()) {
                 // Correlated EXISTS: the equality to the outer row lowers
                 // to a semi-join key (anti for NOT EXISTS).
                 root = std::make_unique<SemiJoinOp>(
                     std::move(root), std::move(inner), outerTbl, innerTbl,
-                    spec.outerColumn, spec.innerColumn, spec.anti);
+                    spec.outerColumn, spec.innerColumn, spec.anti,
+                    SemiJoinOp::NullSemantics::ExistsCorrelation);
             } else {
                 root = std::make_unique<ExistenceFilterOp>(
                     std::move(root), std::move(inner), spec.anti);

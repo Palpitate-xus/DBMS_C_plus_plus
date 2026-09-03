@@ -387,15 +387,22 @@ private:
 // FilterOp so the subquery predicate is evaluated before matching.
 class SemiJoinOp : public Operator {
 public:
+    enum class NullSemantics {
+        InPredicate,
+        ExistsCorrelation
+    };
+
     SemiJoinOp(OpPtr outer, OpPtr inner, const TableSchema& outerTbl,
                const TableSchema& innerTbl, const std::string& outerColumn,
-               const std::string& innerColumn, bool anti);
+               const std::string& innerColumn, bool anti,
+               NullSemantics nullSemantics = NullSemantics::InPredicate);
     // Multi-key correlated semi/anti join: each pair is (outer col,
     // inner col); rows match when ALL pairs match.
     SemiJoinOp(OpPtr outer, OpPtr inner, const TableSchema& outerTbl,
                const TableSchema& innerTbl,
                std::vector<std::pair<std::string, std::string>> keys,
-               bool anti);
+               bool anti,
+               NullSemantics nullSemantics = NullSemantics::InPredicate);
 
     bool open() override;
     bool next(std::string& outRow) override;
@@ -417,6 +424,7 @@ private:
     std::string innerColumn_;
     std::vector<std::pair<std::string, std::string>> keys_;
     bool anti_;
+    NullSemantics nullSemantics_;
     std::vector<std::string> rows_;
     std::vector<std::vector<bool>> nullRows_;
     std::vector<ScanOrigin> origins_;

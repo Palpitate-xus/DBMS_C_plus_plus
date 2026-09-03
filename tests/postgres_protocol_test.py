@@ -754,6 +754,11 @@ def main():
             sock, "SELECT id FROM sub_outer "
             "WHERE NOT EXISTS (SELECT 1 FROM sub_inner WHERE enabled = 1)"))
         assert not_exists_hit_rows == [], not_exists_hit_rows
+        correlated_not_exists_rows = data_row_values(simple_query(
+            sock, "SELECT id FROM sub_outer "
+            "WHERE NOT EXISTS (SELECT 1 FROM sub_inner "
+            "WHERE sub_inner.id = sub_outer.id)"))
+        assert correlated_not_exists_rows == [[b"1"], [b"4"]], correlated_not_exists_rows
         any_rows = data_row_values(simple_query(
             sock, "SELECT id FROM sub_outer "
             "WHERE id > ANY (SELECT id FROM sub_inner WHERE enabled = 1)"))

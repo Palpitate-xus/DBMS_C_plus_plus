@@ -78,6 +78,22 @@ int main() {
     assert(result.ok);
     assert(result.rows == (std::vector<std::string>{"1 ", "3 "}));
 
+    dbms::ExistenceSpec notExists;
+    notExists.dbname = database;
+    notExists.tablename = "inner_keys";
+    notExists.correlations = {{"a", "a"}, {"b", "b"}};
+    notExists.anti = true;
+    dbms::PlanContext notExistsContext;
+    notExistsContext.dbname = database;
+    notExistsContext.tablename = "outer_keys";
+    notExistsContext.selectCols = {"id"};
+    notExistsContext.orderByCol = "id";
+    notExistsContext.existenceFilters.push_back(std::move(notExists));
+    auto notExistsResult = dbms::QueryPlanner::executePlanChecked(
+        dbms::QueryPlanner::buildSelectPlan(&g_engine, notExistsContext));
+    assert(notExistsResult.ok);
+    assert(notExistsResult.rows == (std::vector<std::string>{"2 ", "4 "}));
+
     cleanupTestDb(testName);
     finalCleanupTestData();
     std::cout << "[COMPOSITE SEMI JOIN] structured key semantics OK"

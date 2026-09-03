@@ -68,10 +68,17 @@ int main() {
                database, "outer_rows",
                {{"id", "4"}, {"match_key", "NULL"},
                 {"payload", "null-key"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(
+               database, "outer_rows",
+               {{"id", "5"}, {"match_key", "40"},
+                {"payload", "unmatched"}}) == dbms::DBStatus::OK);
     for (const std::string key : {"10", "20", "30"}) {
         assert(g_engine.insert(database, "inner_rows", {{"match_key", key}}) ==
                dbms::DBStatus::OK);
     }
+    assert(g_engine.insert(
+               database, "inner_rows", {{"match_key", "NULL"}}) ==
+           dbms::DBStatus::OK);
 
     dbms::PlanContext semiContext = baseContext(database);
     dbms::SemiJoinSpec semi;
@@ -89,7 +96,20 @@ int main() {
     existence.tablename = "inner_rows";
     existenceContext.existenceFilters.push_back(std::move(existence));
     assert(execute(std::move(existenceContext)) ==
-           (std::vector<std::string>{"NULL ", " ", "value ", "null-key "}));
+           (std::vector<std::string>{
+               "NULL ", " ", "value ", "null-key ", "unmatched "}));
+
+    dbms::PlanContext correlatedNotExistsContext = baseContext(database);
+    dbms::ExistenceSpec correlatedNotExists;
+    correlatedNotExists.dbname = database;
+    correlatedNotExists.tablename = "inner_rows";
+    correlatedNotExists.outerColumn = "match_key";
+    correlatedNotExists.innerColumn = "match_key";
+    correlatedNotExists.anti = true;
+    correlatedNotExistsContext.existenceFilters.push_back(
+        std::move(correlatedNotExists));
+    assert(execute(std::move(correlatedNotExistsContext)) ==
+           (std::vector<std::string>{"null-key ", "unmatched "}));
 
     dbms::PlanContext quantifiedContext = baseContext(database);
     dbms::QuantifiedSubquerySpec quantified;
@@ -112,7 +132,7 @@ int main() {
     emptyNotInContext.semiJoins.push_back(std::move(emptyNotIn));
     assert(execute(std::move(emptyNotInContext)) ==
            (std::vector<std::string>{
-               "NULL ", " ", "value ", "null-key "}));
+               "NULL ", " ", "value ", "null-key ", "unmatched "}));
 
     dbms::PlanContext emptyAllContext = baseContext(database);
     dbms::QuantifiedSubquerySpec emptyAll;
@@ -125,7 +145,7 @@ int main() {
     emptyAllContext.quantifiedSubqueries.push_back(std::move(emptyAll));
     assert(execute(std::move(emptyAllContext)) ==
            (std::vector<std::string>{
-               "NULL ", " ", "value ", "null-key "}));
+               "NULL ", " ", "value ", "null-key ", "unmatched "}));
 
     dbms::PlanContext emptyAnyContext = baseContext(database);
     dbms::QuantifiedSubquerySpec emptyAny;
