@@ -22973,6 +22973,16 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
                             "", 0, 0.0,
                             val.empty() ? Date{} : Date(val.c_str()),
                             Numeric{});
+                    } else if (scol.dataType == "timestamp" ||
+                               scol.dataType == "timestamptz" ||
+                               scol.dataType == "datetime") {
+                        k.vals.emplace_back(
+                            "", val.empty() ? 0 : parseTimestampToSeconds(val),
+                            0.0, Date{}, Numeric{});
+                    } else if (scol.dataType == "time") {
+                        k.vals.emplace_back(
+                            "", val.empty() ? 0 : parseTimeToSeconds(val),
+                            0.0, Date{}, Numeric{});
                     } else if (scol.dataType == "float") {
                         float parsed = 0.0f;
                         if (!val.empty()) (void)parseFloatLiteral(val, parsed);
@@ -26093,6 +26103,16 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
                             "", 0, 0.0,
                             val.empty() ? Date{} : Date(val.c_str()),
                             Numeric{});
+                    } else if (scol.dataType == "timestamp" ||
+                               scol.dataType == "timestamptz" ||
+                               scol.dataType == "datetime") {
+                        k.vals.emplace_back(
+                            "", val.empty() ? 0 : parseTimestampToSeconds(val),
+                            0.0, Date{}, Numeric{});
+                    } else if (scol.dataType == "time") {
+                        k.vals.emplace_back(
+                            "", val.empty() ? 0 : parseTimeToSeconds(val),
+                            0.0, Date{}, Numeric{});
                     } else if (scol.dataType == "float") {
                         float parsed = 0.0f;
                         if (!val.empty()) (void)parseFloatLiteral(val, parsed);
