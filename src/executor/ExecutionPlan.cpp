@@ -969,9 +969,10 @@ bool SemiJoinOp::open() {
     };
 
     if (!keys_.empty()) {
-        // Multi-key correlated semi/anti join: composite keys joined
-        // with a NUL-free separator; NULL in any key column never
-        // matches (three-valued NOT semantics for anti).
+        // Multi-key correlated semi/anti join. Keep fields structural so a
+        // delimiter byte stored in one column cannot collide with a boundary
+        // between two columns. NULL state comes from the producing operator;
+        // an empty non-NULL string remains an ordinary key component.
         std::vector<size_t> outerIdxs, innerIdxs;
         for (const auto& k : keys_) {
             size_t oi = outerTbl_.len, ii = innerTbl_.len;
@@ -984,23 +985,26 @@ bool SemiJoinOp::open() {
             innerIdxs.push_back(ii);
         }
         if (!inner_->open()) return false;
-        auto innerKey = [&](const std::string& r, bool& isNull) {
-            std::string key;
-            for (size_t ki = 0; ki < innerIdxs.size(); ++ki) {
-                if (ki) key += "\x01";
-                const std::string v = StorageEngine::extractColumnValueStatic(
-                    r, innerTbl_, innerIdxs[ki]);
-                if (rawColumnIsNull(r, innerTbl_, innerIdxs[ki])) isNull = true;
-                key += v;
+        const auto rowKey = [](const std::string& row,
+                               const TableSchema& table,
+                               const std::vector<size_t>& indexes,
+                               const Operator* source, bool& isNull) {
+            std::vector<std::string> key;
+            key.reserve(indexes.size());
+            for (const size_t index : indexes) {
+                if (source->lastColumnIsNull(index)) isNull = true;
+                key.push_back(StorageEngine::extractColumnValueStatic(
+                    row, table, index));
             }
             return key;
         };
-        std::unordered_set<std::string> innerKeys;
+        std::set<std::vector<std::string>> innerKeys;
         bool innerHasNull = false;
         std::string row;
         while (inner_->next(row)) {
             bool isNull = false;
-            const std::string key = innerKey(row, isNull);
+            const std::vector<std::string> key = rowKey(
+                row, innerTbl_, innerIdxs, inner_.get(), isNull);
             if (isNull) innerHasNull = true;
             else innerKeys.insert(key);
         }
@@ -1008,16 +1012,9 @@ bool SemiJoinOp::open() {
         if (!outer_->open()) return false;
         while (outer_->next(row)) {
             bool isNull2 = false;
-            std::string okey;
-
-            for (size_t ki = 0; ki < outerIdxs.size(); ++ki) {
-                if (ki) okey += "\x01";
-                const std::string v = StorageEngine::extractColumnValueStatic(
-                    row, outerTbl_, outerIdxs[ki]);
-                if (rawColumnIsNull(row, outerTbl_, outerIdxs[ki])) isNull2 = true;
-                okey += v;
-            }
-            const bool found = !isNull2 && innerKeys.count(okey) > 0;
+            const std::vector<std::string> outerKey = rowKey(
+                row, outerTbl_, outerIdxs, outer_.get(), isNull2);
+            const bool found = !isNull2 && innerKeys.count(outerKey) > 0;
             const bool keep = anti_ ? (!isNull2 && !found && !innerHasNull) : found;
             if (keep) rememberOuterRow(row);
         }
