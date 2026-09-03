@@ -18239,9 +18239,68 @@ DBStatus StorageEngine::remove(
     const std::vector<std::string>& conditions,
     std::vector<std::map<std::string, std::string>>* deletedRows,
     const DeleteMatcher& deleteMatcher) {
+    // Referential actions can touch several child relations before the
+    // parent heap is changed. Give the public DELETE a statement boundary so
+    // a later child failure cannot leave earlier cascades or SET NULL actions
+    // applied on their own.
+    const bool ownsTransaction = !transactionContext().inTransaction;
+    const std::vector<std::map<std::string, std::string>> originalDeletedRows =
+        deletedRows
+            ? *deletedRows
+            : std::vector<std::map<std::string, std::string>>{};
+    std::string statementSavepoint;
+    bool hasStatementSavepoint = false;
+    if (ownsTransaction) {
+        const DBStatus beginStatus = beginTransaction(dbname);
+        if (beginStatus != DBStatus::OK) return beginStatus;
+    } else {
+        static std::atomic<uint64_t> statementSavepointSequence{0};
+        auto& context = transactionContext();
+        do {
+            statementSavepoint = "__dbms_delete_statement_" +
+                std::to_string(context.currentTxnId) + "_" +
+                std::to_string(statementSavepointSequence.fetch_add(1));
+        } while (context.savepoints.count(statementSavepoint) != 0);
+        hasStatementSavepoint =
+            savepoint(statementSavepoint) == DBStatus::OK;
+    }
+
     ReferentialActionContext referentialContext;
-    return removeInternal(dbname, tablename, conditions, deletedRows,
-                          deleteMatcher, nullptr, referentialContext);
+    const DBStatus deleteStatus = removeInternal(
+        dbname, tablename, conditions, deletedRows, deleteMatcher, nullptr,
+        referentialContext);
+    if (deleteStatus != DBStatus::OK) {
+        DBStatus rollbackStatus = DBStatus::OK;
+        if (ownsTransaction && transactionContext().inTransaction) {
+            rollbackStatus = rollbackTransaction();
+        } else if (transactionContext().inTransaction &&
+                   hasStatementSavepoint) {
+            rollbackStatus = rollbackToSavepoint(statementSavepoint);
+            if (rollbackStatus == DBStatus::OK) {
+                rollbackStatus = releaseSavepoint(statementSavepoint);
+            }
+        } else if (transactionContext().inTransaction) {
+            rollbackStatus = rollbackTransaction();
+        }
+        if (deletedRows) *deletedRows = originalDeletedRows;
+        return rollbackStatus == DBStatus::OK ? deleteStatus : rollbackStatus;
+    }
+
+    if (!ownsTransaction) {
+        if (!hasStatementSavepoint) return DBStatus::OK;
+        const DBStatus releaseStatus = releaseSavepoint(statementSavepoint);
+        if (releaseStatus == DBStatus::OK) return DBStatus::OK;
+        if (deletedRows) *deletedRows = originalDeletedRows;
+        const DBStatus rollbackStatus = rollbackTransaction();
+        return rollbackStatus == DBStatus::OK
+            ? releaseStatus : rollbackStatus;
+    }
+
+    const DBStatus commitStatus = commitTransaction();
+    if (commitStatus != DBStatus::OK && deletedRows) {
+        *deletedRows = originalDeletedRows;
+    }
+    return commitStatus;
 }
 
 DBStatus StorageEngine::removeInternal(
