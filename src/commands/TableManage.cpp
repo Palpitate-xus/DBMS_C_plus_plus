@@ -18803,6 +18803,10 @@ DBStatus StorageEngine::removeInternal(
         return DBStatus::CORRUPTED_DATA;
     }
     PageAllocator* pa = getPageAllocator(dbname, tablename);
+    if (!pa) {
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
+    }
 
     const bool enforceRls = exactRids == nullptr &&
         shouldEnforceRLS(tbl, StorageEngine::getRLSUser());
@@ -18842,7 +18846,10 @@ DBStatus StorageEngine::removeInternal(
         std::set<int64_t> filteredIds;
         for (int64_t rid : toDelete) {
             std::string row;
-            if (!readRowByRid(pa, rid, row, tbl)) continue;
+            if (!readRowByRid(pa, rid, row, tbl)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::IO_ERROR;
+            }
             std::map<std::string, std::string> rowValues;
             for (size_t i = 0; i < tbl.len; ++i) {
                 rowValues[tbl.cols[i].dataName] =
@@ -18899,7 +18906,10 @@ DBStatus StorageEngine::removeInternal(
             std::vector<std::map<std::string, std::string>> deletedPKRows;
             for (int64_t rid : toDelete) {
                 std::string row;
-                if (!readRowByRid(pa, rid, row, tbl)) continue;
+                if (!readRowByRid(pa, rid, row, tbl)) {
+                    lockManager_.unlock(tablename);
+                    return DBStatus::IO_ERROR;
+                }
                 std::map<std::string, std::string> pkVals;
                 if (!tbl.pkColIndices.empty()) {
                     for (size_t pki : tbl.pkColIndices) {
@@ -19140,11 +19150,11 @@ DBStatus StorageEngine::removeInternal(
     rowsToDelete.reserve(toDelete.size());
     for (int64_t rid : toDelete) {
         std::string row;
-        if (readRowByRid(pa, rid, row, tbl)) {
-            rowsToDelete.push_back(row);
-        } else {
-            rowsToDelete.push_back("");
+        if (!readRowByRid(pa, rid, row, tbl)) {
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
         }
+        rowsToDelete.push_back(std::move(row));
     }
 
     // Resolve every OLD image while its external chunks still exist.  The
@@ -19316,11 +19326,6 @@ DBStatus StorageEngine::removeInternal(
     // Delete rows via PageAllocator tombstones
     size_t delIdx = 0;
     for (int64_t rid : toDelete) {
-        // Log for transaction rollback (before deletion)
-        if (transactionContext().inTransaction && dbname == transactionContext().txnDB && !rowsToDelete[delIdx].empty()) {
-            logTxnDelete(tablename, rid, rowsToDelete[delIdx]);
-        }
-
         uint32_t pageId; uint16_t slotId;
         decodeRid(rid, pageId, slotId);
         if (!lockManager_.pageLockExclusive(dbname, tablename, pageId)) {
@@ -19334,36 +19339,66 @@ DBStatus StorageEngine::removeInternal(
             return DBStatus::LOCK_CONFLICT;
         }
         char* pageBuf = pa->fetchPage(pageId);
-        if (pageBuf) {
-            PageWrapper page(pageBuf, pa->pageSize(), tbl.formatVersion);
-            walPageImage(dbname, tablename, pageId, pageBuf, pa->pageSize(), true);
-            // Mark row as deleted by setting xmax for PostgreSQL-style tuples.
-            if (usesHeapTupleHeader(tbl.formatVersion) && transactionContext().inTransaction && dbname == transactionContext().txnDB) {
-                const char* data = nullptr;
-                size_t len = 0;
-                if (page.read(slotId, data, len)) {
-                    std::string mutableRow(data, len);
-                    setRowXmax(mutableRow.data(), mutableRow.size(), tbl.formatVersion, transactionContext().currentTxnId);
-                    page.update(slotId, mutableRow.data(), mutableRow.size());
-                }
-            }
-            // Keep the line pointer and tuple body during an explicit
-            // transaction. Rollback can then clear xmax in place; VACUUM
-            // will reclaim the committed dead tuple later.
-            if (!(transactionContext().inTransaction && dbname == transactionContext().txnDB)) {
-                page.remove(slotId);
-            }
-            pa->markDirty(pageId);
-            Lsn lsn = walPageImage(dbname, tablename, pageId, pageBuf, pa->pageSize(), false);
-            if (lsn != INVALID_LSN) {
-                setPageLsnAndChecksum(pageBuf, lsn);
-                pa->markDirty(pageId);
-            }
-            size_t freePct = page.freeSpace() * 100 / pa->pageSize();
-            getFSM(dbname, tablename)->setFreePercent(pageId, static_cast<uint8_t>(freePct));
-            getVM(dbname, tablename)->setAllVisible(pageId, false);
-            pa->unpinPage(pageId);
+        if (!pageBuf) {
+            lockManager_.pageUnlock(dbname, tablename, pageId);
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
         }
+
+        PageWrapper page(pageBuf, pa->pageSize(), tbl.formatVersion);
+        const char* currentData = nullptr;
+        size_t currentLen = 0;
+        if (!page.read(slotId, currentData, currentLen) ||
+            currentLen < rowHeaderSize(tbl.formatVersion, tbl.len)) {
+            pa->unpinPage(pageId);
+            lockManager_.pageUnlock(dbname, tablename, pageId);
+            lockManager_.unlock(tablename);
+            return DBStatus::CORRUPTED_DATA;
+        }
+
+        walPageImage(dbname, tablename, pageId, pageBuf, pa->pageSize(), true);
+        const bool transactionalDelete =
+            usesHeapTupleHeader(tbl.formatVersion) &&
+            transactionContext().inTransaction &&
+            dbname == transactionContext().txnDB;
+        bool pageChanged = false;
+        if (transactionalDelete) {
+            std::string mutableRow(currentData, currentLen);
+            setRowXmax(mutableRow.data(), mutableRow.size(), tbl.formatVersion,
+                       transactionContext().currentTxnId);
+            pageChanged = page.update(
+                slotId, mutableRow.data(), mutableRow.size());
+        } else {
+            pageChanged = page.remove(slotId);
+        }
+        if (!pageChanged) {
+            pa->unpinPage(pageId);
+            lockManager_.pageUnlock(dbname, tablename, pageId);
+            lockManager_.unlock(tablename);
+            return DBStatus::CORRUPTED_DATA;
+        }
+
+        // Publish the undo record only after the heap mutation succeeds. A
+        // failed fetch/read/update must not make rollback re-add index keys
+        // that this statement never removed.
+        if (transactionContext().inTransaction &&
+            dbname == transactionContext().txnDB &&
+            !rowsToDelete[delIdx].empty()) {
+            logTxnDelete(tablename, rid, rowsToDelete[delIdx]);
+        }
+
+        pa->markDirty(pageId);
+        Lsn lsn = walPageImage(
+            dbname, tablename, pageId, pageBuf, pa->pageSize(), false);
+        if (lsn != INVALID_LSN) {
+            setPageLsnAndChecksum(pageBuf, lsn);
+            pa->markDirty(pageId);
+        }
+        size_t freePct = page.freeSpace() * 100 / pa->pageSize();
+        getFSM(dbname, tablename)->setFreePercent(
+            pageId, static_cast<uint8_t>(freePct));
+        getVM(dbname, tablename)->setAllVisible(pageId, false);
+        pa->unpinPage(pageId);
         lockManager_.pageUnlock(dbname, tablename, pageId);
         ++delIdx;
     }
