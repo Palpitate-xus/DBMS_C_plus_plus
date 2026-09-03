@@ -17746,8 +17746,15 @@ DBStatus StorageEngine::insertInternal(
                 PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
                 if (page.canFit(actualRowSize) &&
                     pageFitsWithFillfactor(page, actualRowSize, pa->pageSize(), fillfactor)) {
-                    walPageImage(dbname, tablename, candidate, buf,
-                                 pa->pageSize(), true, heapFork);
+                    const Lsn beforeLsn = walPageImage(
+                        dbname, tablename, candidate, buf,
+                        pa->pageSize(), true, heapFork);
+                    if (beforeLsn == INVALID_LSN) {
+                        pa->unpinPage(candidate);
+                        lockManager_.pageUnlock(
+                            dbname, tablename, candidate);
+                        return failBeforeHeapInsert(DBStatus::IO_ERROR);
+                    }
                     if (page.insert(rowBuffer.data(), actualRowSize, slotId)) {
                         pageId = candidate;
                         inserted = true;
@@ -17775,8 +17782,14 @@ DBStatus StorageEngine::insertInternal(
             PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
             if (page.canFit(actualRowSize) &&
                 pageFitsWithFillfactor(page, actualRowSize, pa->pageSize(), fillfactor)) {
-                walPageImage(dbname, tablename, pid, buf, pa->pageSize(),
-                             true, heapFork);
+                const Lsn beforeLsn = walPageImage(
+                    dbname, tablename, pid, buf, pa->pageSize(),
+                    true, heapFork);
+                if (beforeLsn == INVALID_LSN) {
+                    pa->unpinPage(pid);
+                    lockManager_.pageUnlock(dbname, tablename, pid);
+                    return failBeforeHeapInsert(DBStatus::IO_ERROR);
+                }
                 if (page.insert(rowBuffer.data(), actualRowSize, slotId)) {
                     pageId = pid;
                     inserted = true;
@@ -17806,8 +17819,14 @@ DBStatus StorageEngine::insertInternal(
                 return failBeforeHeapInsert(DBStatus::IO_ERROR);
             }
             PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
-            walPageImage(dbname, tablename, pageId, buf, pa->pageSize(),
-                         true, heapFork);
+            const Lsn beforeLsn = walPageImage(
+                dbname, tablename, pageId, buf, pa->pageSize(),
+                true, heapFork);
+            if (beforeLsn == INVALID_LSN) {
+                pa->unpinPage(pageId);
+                lockManager_.pageUnlock(dbname, tablename, pageId);
+                return failBeforeHeapInsert(DBStatus::IO_ERROR);
+            }
             if (!page.insert(rowBuffer.data(), actualRowSize, slotId)) {
                 pa->unpinPage(pageId);
                 lockManager_.pageUnlock(dbname, tablename, pageId);
@@ -18017,27 +18036,40 @@ DBStatus StorageEngine::insertInternal(
         if (!lockManager_.pageLockExclusive(dbname, tablename, pageId)) {
             return abortIndexUpdate();
         }
+        bool finalized = false;
         char* buf = pa->fetchPage(pageId);
         if (buf) {
-            PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
+            // Stage the tuple/header update in a private page image. The
+            // shared buffer must not expose a new ctid unless its matching
+            // after-image has entered WAL successfully.
+            std::vector<char> stagedPage(
+                buf, buf + pa->pageSize());
+            PageWrapper page(
+                stagedPage.data(), pa->pageSize(), tbl.formatVersion);
             const char* data = nullptr;
             size_t len = 0;
             if (page.read(slotId, data, len)) {
                 ItemPointer selfCtid{ pageId, static_cast<OffsetNumber>(slotId + 1) };
                 std::string mutableRow(data, len);
                 setRowCtid(mutableRow.data(), mutableRow.size(), tbl.formatVersion, selfCtid);
-                page.update(slotId, mutableRow.data(), mutableRow.size());
-                pa->markDirty(pageId);
-                Lsn lsn = walPageImage(dbname, tablename, pageId, buf,
-                                       pa->pageSize(), false, heapFork);
-                if (lsn != INVALID_LSN) {
-                    setPageLsnAndChecksum(buf, lsn);
-                    pa->markDirty(pageId);
+                if (page.update(
+                        slotId, mutableRow.data(), mutableRow.size())) {
+                    const Lsn lsn = walPageImage(
+                        dbname, tablename, pageId, stagedPage.data(),
+                        pa->pageSize(), false, heapFork);
+                    if (lsn != INVALID_LSN) {
+                        std::memcpy(
+                            buf, stagedPage.data(), pa->pageSize());
+                        setPageLsnAndChecksum(buf, lsn);
+                        pa->markDirty(pageId);
+                        finalized = true;
+                    }
                 }
             }
             pa->unpinPage(pageId);
         }
         lockManager_.pageUnlock(dbname, tablename, pageId);
+        if (!finalized) return abortIndexUpdate();
     }
 
     // Update B+ tree PK index.
