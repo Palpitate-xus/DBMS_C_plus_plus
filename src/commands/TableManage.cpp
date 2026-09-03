@@ -19077,10 +19077,36 @@ DBStatus StorageEngine::update(
     std::vector<std::map<std::string, std::string>>* updatedRows,
     const UpdateResolver& updateResolver,
     const UpdateMatcher& updateMatcher) {
+    // A single UPDATE may touch many rows. In autocommit mode, run it inside
+    // an engine-owned transaction so a constraint or storage error on a later
+    // row cannot leave earlier rows permanently modified.
+    const bool ownsTransaction = !transactionContext().inTransaction;
+    const size_t returnedRowStart = updatedRows ? updatedRows->size() : 0;
+    if (ownsTransaction) {
+        const DBStatus beginStatus = beginTransaction(dbname);
+        if (beginStatus != DBStatus::OK) return beginStatus;
+    }
+
     ReferentialActionContext referentialContext;
-    return updateInternal(dbname, tablename, updates, conditions, updatedRows,
-                          updateResolver, updateMatcher, nullptr,
-                          referentialContext);
+    const DBStatus updateStatus = updateInternal(
+        dbname, tablename, updates, conditions, updatedRows, updateResolver,
+        updateMatcher, nullptr, referentialContext);
+    if (!ownsTransaction) return updateStatus;
+
+    if (updateStatus != DBStatus::OK) {
+        DBStatus rollbackStatus = DBStatus::OK;
+        if (transactionContext().inTransaction) {
+            rollbackStatus = rollbackTransaction();
+        }
+        if (updatedRows) updatedRows->resize(returnedRowStart);
+        return rollbackStatus == DBStatus::OK ? updateStatus : rollbackStatus;
+    }
+
+    const DBStatus commitStatus = commitTransaction();
+    if (commitStatus != DBStatus::OK && updatedRows) {
+        updatedRows->resize(returnedRowStart);
+    }
+    return commitStatus;
 }
 
 DBStatus StorageEngine::updateInternal(
