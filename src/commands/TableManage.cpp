@@ -8294,13 +8294,15 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
             // corrupt-page failures must not be mistaken for an empty table.
             return !readFailed;
         }
+        if (tbl.cols[static_cast<size_t>(colIdx)].isNull &&
+            isColumnNullByRid(dc.dbname, dc.tablename, currentRid,
+                              static_cast<size_t>(colIdx))) {
+            return true;
+        }
         const std::string payloadValue = canonicalColumnKeyValue(
             tbl.cols[static_cast<size_t>(colIdx)],
             const_cast<StorageEngine*>(this)->extractColumnValue(
                 currentRow, tbl, static_cast<size_t>(colIdx), dc.dbname));
-        // NULL values are distinct for ordinary UNIQUE constraints.
-        if (payloadValue.empty()) return true;
-
         int matches = 0;
         const bool scanOk = forEachRow(
             dc.dbname, dc.tablename,
@@ -8308,6 +8310,12 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
             if (matches > 0) return;
             const int64_t rid = encodeRid(pageId, slot);
             if (rid == currentRid) return;
+            if (tbl.cols[static_cast<size_t>(colIdx)].isNull &&
+                isColumnNullByRid(
+                    dc.dbname, dc.tablename, rid,
+                    static_cast<size_t>(colIdx))) {
+                return;
+            }
             std::string row(data, len);
             if (canonicalColumnKeyValue(
                     tbl.cols[static_cast<size_t>(colIdx)],
@@ -17618,10 +17626,11 @@ DBStatus StorageEngine::insertInternal(
             const Column& col = tbl.cols[i];
             if (!col.isUnique) continue;
             const auto value = actualValues.find(col.dataName);
-            if (value == actualValues.end()) continue;
+            if (value == actualValues.end() || value->second == "NULL") {
+                continue;
+            }
             const std::string candidateKey =
                 canonicalColumnKeyValue(col, value->second);
-            if (candidateKey.empty()) continue;
             std::string constraintName =
                 tablename + "_" + col.dataName + "_key";
             for (size_t uniqueIndex = 0;
@@ -17647,13 +17656,24 @@ DBStatus StorageEngine::insertInternal(
             bool duplicate = false;
             BPTree* index = getSecondaryIndex(
                 dbname, tablename, col.dataName);
-            if (index && index->isOpen()) {
+            // Empty strings were historically omitted from secondary
+            // indexes because an empty index key also represented SQL NULL.
+            // Use the heap for that value so both legacy and newly-written
+            // rows participate in UNIQUE without changing on-disk keys.
+            if (!candidateKey.empty() && index && index->isOpen()) {
                 duplicate = !index->searchMulti(candidateKey).empty();
             } else if (!forEachRow(
                            dbname, tablename,
-                           [&](uint32_t, uint16_t, const char* data,
+                           [&](uint32_t pageId, uint16_t slotId,
+                               const char* data,
                                size_t length) {
                                if (duplicate) return;
+                               const int64_t existingRid =
+                                   encodeRid(pageId, slotId);
+                               if (col.isNull && isColumnNullByRid(
+                                       dbname, tablename, existingRid, i)) {
+                                   return;
+                               }
                                duplicate = canonicalColumnKeyValue(
                                    col, extractColumnValue(
                                             std::string(data, length), tbl,
@@ -17685,38 +17705,44 @@ DBStatus StorageEngine::insertInternal(
                 continue;
             }
 
-            std::string compositeKey;
+            std::vector<std::string> compositeKey;
             bool containsNull = false;
             for (const size_t columnIndex : columns) {
                 if (columnIndex >= tbl.len) return DBStatus::CORRUPTED_DATA;
                 const auto value = actualValues.find(
                     tbl.cols[columnIndex].dataName);
-                if (value == actualValues.end() || value->second.empty() ||
+                if (value == actualValues.end() ||
                     value->second == "NULL") {
                     containsNull = true;
                     break;
                 }
-                compositeKey += canonicalColumnKeyValue(
-                    tbl.cols[columnIndex], value->second) + "\x01";
+                compositeKey.push_back(canonicalColumnKeyValue(
+                    tbl.cols[columnIndex], value->second));
             }
             if (containsNull) continue;
 
             bool duplicate = false;
             if (!forEachRow(
                     dbname, tablename,
-                    [&](uint32_t, uint16_t, const char* data,
+                    [&](uint32_t pageId, uint16_t slotId,
+                        const char* data,
                         size_t length) {
                         if (duplicate) return;
                         const std::string row(data, length);
-                        std::string existingKey;
+                        const int64_t existingRid =
+                            encodeRid(pageId, slotId);
+                        std::vector<std::string> existingKey;
+                        existingKey.reserve(columns.size());
                         for (const size_t columnIndex : columns) {
-                            const std::string value =
-                                canonicalColumnKeyValue(
-                                    tbl.cols[columnIndex],
-                                    extractColumnValue(
-                                        row, tbl, columnIndex, dbname));
-                            if (value.empty()) return;
-                            existingKey += value + "\x01";
+                            if (tbl.cols[columnIndex].isNull &&
+                                isColumnNullByRid(
+                                    dbname, tablename, existingRid,
+                                    columnIndex)) {
+                                return;
+                            }
+                            existingKey.push_back(canonicalColumnKeyValue(
+                                tbl.cols[columnIndex], extractColumnValue(
+                                    row, tbl, columnIndex, dbname)));
                         }
                         duplicate = existingKey == compositeKey;
                     })) {
@@ -18561,7 +18587,7 @@ DBStatus StorageEngine::insertInternal(
     if (transactionContext().inTransaction && !deferredUniqueCols.empty()) {
         for (size_t ci : deferredUniqueCols) {
             auto vit = actualValues.find(tbl.cols[ci].dataName);
-            if (vit == actualValues.end() || vit->second.empty()) continue;
+            if (vit == actualValues.end() || vit->second == "NULL") continue;
             std::string cname = tablename + "_" + tbl.cols[ci].dataName + "_key";
             for (size_t ui = 0; ui < tbl.uniqueConstraints.size(); ++ui) {
                 for (size_t uj = 0; uj < tbl.uniqueConstraints[ui].size(); ++uj) {
@@ -21621,27 +21647,30 @@ DBStatus StorageEngine::updateInternal(
                 const std::vector<size_t>& columns,
                 const std::string& constraintName) -> DBStatus {
             if (columns.empty()) return DBStatus::OK;
-            std::vector<std::string> oldValues;
             std::vector<std::string> newValues;
-            oldValues.reserve(columns.size());
             newValues.reserve(columns.size());
+            bool keyChanged = false;
             for (const size_t columnIndex : columns) {
                 if (columnIndex >= tbl.len) return DBStatus::CORRUPTED_DATA;
+                // UNIQUE permits multiple SQL NULLs. Empty non-NULL strings
+                // are ordinary values and must still be compared.
+                if (newColumnIsNull(columnIndex)) return DBStatus::OK;
                 const std::string& columnName = tbl.cols[columnIndex].dataName;
                 const std::string rawNewValue =
                     valueFromRowMap(rowValues, columnName);
-                // UNIQUE treats NULL values as distinct.  The legacy row
-                // representation exposes SQL NULL as an empty value here.
-                if (rawNewValue.empty() || rawNewValue == "NULL") {
-                    return DBStatus::OK;
-                }
-                oldValues.push_back(canonicalColumnKeyValue(
-                    tbl.cols[columnIndex],
-                    valueFromRowMap(oldLogicalValues, columnName)));
                 newValues.push_back(canonicalColumnKeyValue(
                     tbl.cols[columnIndex], rawNewValue));
+                const bool oldIsNull =
+                    columnIndex < oldNullColumns.size() &&
+                    oldNullColumns[columnIndex];
+                if (oldIsNull || canonicalColumnKeyValue(
+                        tbl.cols[columnIndex], valueFromRowMap(
+                            oldLogicalValues, columnName)) !=
+                        newValues.back()) {
+                    keyChanged = true;
+                }
             }
-            if (oldValues == newValues) return DBStatus::OK;
+            if (!keyChanged) return DBStatus::OK;
 
             if (columns.size() == 1 &&
                 transactionContext().inTransaction &&
@@ -21673,10 +21702,19 @@ DBStatus StorageEngine::updateInternal(
                     const std::string otherRow(data, length);
                     for (size_t valueIndex = 0;
                          valueIndex < columns.size(); ++valueIndex) {
+                        const size_t columnIndex = columns[valueIndex];
+                        const int64_t otherRid =
+                            encodeRid(otherPage, otherSlot);
+                        if (tbl.cols[columnIndex].isNull &&
+                            isColumnNullByRid(
+                                dbname, tablename, otherRid,
+                                columnIndex)) {
+                            return;
+                        }
                         if (canonicalColumnKeyValue(
-                                tbl.cols[columns[valueIndex]],
+                                tbl.cols[columnIndex],
                                 extractColumnValue(
-                                    otherRow, tbl, columns[valueIndex],
+                                    otherRow, tbl, columnIndex,
                                     dbname)) != newValues[valueIndex]) {
                             return;
                         }
