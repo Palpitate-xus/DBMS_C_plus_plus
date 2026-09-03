@@ -393,6 +393,7 @@ IndexScanOp::IndexScanOp(StorageEngine* engine, const std::string& dbname,
 bool IndexScanOp::open() {
     tbl_ = engine_->getTableSchema(dbname_, tablename_);
     rids_.clear();
+    lastRid_ = 0;
     // Check if this is a PK scan
     size_t pkIdx = tbl_.len;
     for (size_t i = 0; i < tbl_.len; ++i) {
@@ -446,14 +447,24 @@ bool IndexScanOp::next(std::string& outRow) {
             setError("TOAST value read failed");
             return false;
         }
+        lastRid_ = rid;
+        StorageEngine::bindNullRow(
+            engine_, dbname_, tablename_, lastRid_, tbl_.len);
         rtInstr_.emitted = true;
-    return true;
+        return true;
     }
     return false;
 }
 
+bool IndexScanOp::lastColumnIsNull(size_t colIdx) const {
+    return lastRid_ > 0 && colIdx < tbl_.len &&
+        engine_->isColumnNullByRid(dbname_, tablename_, lastRid_, colIdx);
+}
+
 void IndexScanOp::close() {
     rids_.clear();
+    lastRid_ = 0;
+    StorageEngine::unbindNullRow();
     statsRecorded_ = false;
 }
 
@@ -518,6 +529,7 @@ bool BitmapHeapScanOp::open() {
     rids_.clear();
     rows_.clear();
     pos_ = 0;
+    lastRid_ = 0;
 
     std::set<std::string> indexedColumns;
     std::set<int64_t> matched;
@@ -554,6 +566,8 @@ bool BitmapHeapScanOp::open() {
     rids_.assign(matched.begin(), matched.end());
 
     bool readFailed = false;
+    std::vector<int64_t> visibleRids;
+    visibleRids.reserve(rids_.size());
     for (int64_t rid : rids_) {
         std::string row;
         if (!engine_->readIndexedRowByRid(dbname_, tablename_, rid, row, tbl_, nullptr,
@@ -574,7 +588,9 @@ bool BitmapHeapScanOp::open() {
             return false;
         }
         rows_.push_back(std::move(row));
+        visibleRids.push_back(rid);
     }
+    rids_ = std::move(visibleRids);
     if (!statsRecorded_) {
         recordTableScan(dbname_, tablename_, rows_.size(), true, false);
         statsRecorded_ = true;
@@ -585,15 +601,25 @@ bool BitmapHeapScanOp::open() {
 bool BitmapHeapScanOp::next(std::string& outRow) {
     NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     if (pos_ >= rows_.size()) return false;
+    lastRid_ = rids_[pos_];
     outRow = rows_[pos_++];
+    StorageEngine::bindNullRow(
+        engine_, dbname_, tablename_, lastRid_, tbl_.len);
     rtInstr_.emitted = true;
     return true;
+}
+
+bool BitmapHeapScanOp::lastColumnIsNull(size_t colIdx) const {
+    return lastRid_ > 0 && colIdx < tbl_.len &&
+        engine_->isColumnNullByRid(dbname_, tablename_, lastRid_, colIdx);
 }
 
 void BitmapHeapScanOp::close() {
     rids_.clear();
     rows_.clear();
     pos_ = 0;
+    lastRid_ = 0;
+    StorageEngine::unbindNullRow();
     statsRecorded_ = false;
 }
 
@@ -620,6 +646,7 @@ bool GiSTScanOp::open() {
     rids_.clear();
     rows_.clear();
     pos_ = 0;
+    lastRid_ = 0;
 
     // Fold the GiST-servable predicates into [lo, hi] bounds on the
     // indexed column.  Mixed-column predicates stay in FilterOp; this node
@@ -681,6 +708,8 @@ bool GiSTScanOp::open() {
     }
 
     bool readFailed = false;
+    std::vector<int64_t> visibleRids;
+    visibleRids.reserve(rids_.size());
     for (int64_t rid : rids_) {
         std::string row;
         if (!engine_->readIndexedRowByRid(dbname_, tablename_, rid, row, tbl_, nullptr,
@@ -693,7 +722,9 @@ bool GiSTScanOp::open() {
             continue;  // concurrently removed row: not visible, skip
         }
         rows_.push_back(std::move(row));
+        visibleRids.push_back(rid);
     }
+    rids_ = std::move(visibleRids);
     pos_ = 0;
     if (!statsRecorded_) {
         recordTableScan(dbname_, tablename_, rows_.size(), true, false);
@@ -705,15 +736,25 @@ bool GiSTScanOp::open() {
 bool GiSTScanOp::next(std::string& outRow) {
     NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     if (pos_ >= rows_.size()) return false;
+    lastRid_ = rids_[pos_];
     outRow = rows_[pos_++];
+    StorageEngine::bindNullRow(
+        engine_, dbname_, tablename_, lastRid_, tbl_.len);
     rtInstr_.emitted = true;
     return true;
+}
+
+bool GiSTScanOp::lastColumnIsNull(size_t colIdx) const {
+    return lastRid_ > 0 && colIdx < tbl_.len &&
+        engine_->isColumnNullByRid(dbname_, tablename_, lastRid_, colIdx);
 }
 
 void GiSTScanOp::close() {
     rids_.clear();
     rows_.clear();
     pos_ = 0;
+    lastRid_ = 0;
+    StorageEngine::unbindNullRow();
     statsRecorded_ = false;
 }
 
@@ -820,6 +861,10 @@ bool BitmapOrHeapScanOp::next(std::string& outRow) {
     outRow = rows_[pos_];
     lastRid_ = (pos_ < rids_.size()) ? rids_[pos_] : 0;
     ++pos_;
+    if (lastRid_ > 0) {
+        StorageEngine::bindNullRow(
+            engine_, dbname_, tablename_, lastRid_, tbl_.len);
+    }
     rtInstr_.emitted = true;
     return true;
 }
@@ -834,6 +879,7 @@ void BitmapOrHeapScanOp::close() {
     rids_.clear();
     pos_ = 0;
     lastRid_ = 0;
+    StorageEngine::unbindNullRow();
     statsRecorded_ = false;
 }
 

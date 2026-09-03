@@ -208,10 +208,19 @@ public:
 
     bool open() override;
     bool next(std::string& outRow) override;
+    bool lastColumnIsNull(size_t colIdx) const override;
     void close() override;
     const std::string& tableName() const { return tablename_; }
     const std::string& colName() const { return colname_; }
     const std::string& value() const { return value_; }
+    ScanOrigin scanOrigin() const override {
+        ScanOrigin origin;
+        origin.engine = engine_;
+        origin.dbname = dbname_;
+        origin.tablename = tablename_;
+        origin.rid = lastRid_;
+        return origin;
+    }
 
 private:
     StorageEngine* engine_;
@@ -222,6 +231,7 @@ private:
     TableSchema tbl_;
     std::vector<int64_t> rids_;
     size_t pos_ = 0;
+    int64_t lastRid_ = 0;
     bool isPK_ = false;
     bool statsRecorded_ = false;
 };
@@ -240,7 +250,16 @@ public:
 
     bool open() override;
     bool next(std::string& outRow) override;
+    bool lastColumnIsNull(size_t colIdx) const override;
     void close() override;
+    ScanOrigin scanOrigin() const override {
+        ScanOrigin origin;
+        origin.engine = engine_;
+        origin.dbname = dbname_;
+        origin.tablename = tablename_;
+        origin.rid = lastRid_;
+        return origin;
+    }
 
     const std::string& tableName() const { return tablename_; }
     // Human-readable predicate summary for EXPLAIN.
@@ -255,6 +274,7 @@ private:
     std::vector<int64_t> rids_;
     std::vector<std::string> rows_;
     size_t pos_ = 0;
+    int64_t lastRid_ = 0;
     bool statsRecorded_ = false;
 };
 
@@ -269,7 +289,16 @@ public:
 
     bool open() override;
     bool next(std::string& outRow) override;
+    bool lastColumnIsNull(size_t colIdx) const override;
     void close() override;
+    ScanOrigin scanOrigin() const override {
+        ScanOrigin origin;
+        origin.engine = engine_;
+        origin.dbname = dbname_;
+        origin.tablename = tablename_;
+        origin.rid = lastRid_;
+        return origin;
+    }
 
 private:
     StorageEngine* engine_;
@@ -280,6 +309,7 @@ private:
     std::vector<int64_t> rids_;
     std::vector<std::string> rows_;
     size_t pos_ = 0;
+    int64_t lastRid_ = 0;
     bool statsRecorded_ = false;
 };
 
@@ -299,6 +329,14 @@ public:
     // Stored-NULL truth for the row emitted by the last next() call, so the
     // projection can render NULL (not the zero-filled fixed-width value).
     bool lastColumnIsNull(size_t colIdx) const override;
+    ScanOrigin scanOrigin() const override {
+        ScanOrigin origin;
+        origin.engine = engine_;
+        origin.dbname = dbname_;
+        origin.tablename = tablename_;
+        origin.rid = lastRid_;
+        return origin;
+    }
 
 private:
     StorageEngine* engine_;
