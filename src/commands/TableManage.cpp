@@ -19988,7 +19988,10 @@ DBStatus StorageEngine::updateInternal(
         std::set<int64_t> filteredIds;
         for (const int64_t rid : matchIds) {
             std::string row;
-            if (!readRowByRid(pa, rid, row, tbl)) continue;
+            if (!readRowByRid(pa, rid, row, tbl)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::IO_ERROR;
+            }
             std::map<std::string, std::string> rowValues;
             for (size_t i = 0; i < tbl.len; ++i) {
                 rowValues[tbl.cols[i].dataName] =
@@ -20047,7 +20050,10 @@ DBStatus StorageEngine::updateInternal(
     std::map<int64_t, int64_t> newVersionRids;
     for (int64_t rid : matchIds) {
         std::string row;
-        if (!readRowByRid(pa, rid, row, tbl)) continue;
+        if (!readRowByRid(pa, rid, row, tbl)) {
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
+        }
 
         bool resolvedOldRowOk = false;
         const std::string resolvedOldRow = resolveToastValues(
