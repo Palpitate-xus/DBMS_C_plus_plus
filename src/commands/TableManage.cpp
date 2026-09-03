@@ -799,6 +799,17 @@ static bool validStoredIdentifier(const std::string& value, size_t fieldSize) {
            value != "." && value != "..";
 }
 
+static std::string primaryKeyConstraintName(const TableSchema& table) {
+    if (!table.hasPrimaryKey()) return {};
+    const auto storedName = table.storageParams.find(
+        PRIMARY_KEY_CONSTRAINT_NAME_PARAM);
+    if (storedName != table.storageParams.end() &&
+        !storedName->second.empty()) {
+        return storedName->second;
+    }
+    return table.tablename + "_pkey";
+}
+
 // Auxiliary object definitions are stored in line-oriented sidecars.  Keep
 // their object names safe both as path components and as metadata fields; a
 // delimiter or newline here would make the definition ambiguous on reload.
@@ -15096,13 +15107,8 @@ DBStatus StorageEngine::alterTableDropConstraint(const std::string& dbname,
     // schemas written before the name metadata was introduced use the normal
     // implicit name as a safe compatibility fallback; an arbitrary unknown
     // name must never remove the key.
-    auto primaryKeyName = tbl.storageParams.find(
-        PRIMARY_KEY_CONSTRAINT_NAME_PARAM);
     const std::string effectivePrimaryKeyName =
-        primaryKeyName != tbl.storageParams.end() &&
-                !primaryKeyName->second.empty()
-            ? primaryKeyName->second
-            : tablename + "_pkey";
+        primaryKeyConstraintName(tbl);
     if (!found && tbl.hasPrimaryKey() && name == effectivePrimaryKeyName) {
         tbl.pkColIndices.clear();
         for (size_t i = 0; i < tbl.len; ++i) tbl.cols[i].isPrimaryKey = false;
@@ -15140,13 +15146,14 @@ DBStatus StorageEngine::alterTableRenameConstraint(const std::string& dbname,
                                                     const std::string& newName) {
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!validStoredIdentifier(newName, MAX_TABLE_NAME_LEN)) return DBStatus::INVALID_VALUE;
-    if (oldName == newName) return DBStatus::OK;
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
+    const std::string primaryKeyName = primaryKeyConstraintName(tbl);
 
     // Reject if the new name already names a constraint.
     auto nameInUse = [&](const std::string& n) {
+        if (!primaryKeyName.empty() && primaryKeyName == n) return true;
         for (size_t i = 0; i < tbl.len; ++i)
             if (tbl.cols[i].checkConstraintName == n) return true;
         for (const auto& un : tbl.uniqueConstraintNames)
@@ -15155,6 +15162,11 @@ DBStatus StorageEngine::alterTableRenameConstraint(const std::string& dbname,
             if (tbl.fks[i].name == n) return true;
         return false;
     };
+    if (oldName == newName) {
+        const bool found = nameInUse(oldName);
+        lockManager_.unlock(tablename);
+        return found ? DBStatus::OK : DBStatus::INVALID_VALUE;
+    }
     if (nameInUse(newName)) {
         lockManager_.unlock(tablename);
         return DBStatus::TABLE_ALREADY_EXISTS;
@@ -15179,12 +15191,36 @@ DBStatus StorageEngine::alterTableRenameConstraint(const std::string& dbname,
             found = true;
         }
     }
+    bool renamedPrimaryKey = false;
+    if (!found && !primaryKeyName.empty() && oldName == primaryKeyName) {
+        found = true;
+        renamedPrimaryKey = true;
+    }
     if (!found) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
 
     writeSchemaFile(dbname, tablename, tbl);
+    std::map<std::string, std::string> metadataChanges;
+    const std::string oldPrefix = "constraint." + oldName + ".";
+    const std::string newPrefix = "constraint." + newName + ".";
+    for (const auto& [key, value] : tbl.storageParams) {
+        if (key.rfind(oldPrefix, 0) != 0) continue;
+        metadataChanges[newPrefix + key.substr(oldPrefix.size())] = value;
+        metadataChanges[key] = "";
+    }
+    if (renamedPrimaryKey) {
+        metadataChanges[PRIMARY_KEY_CONSTRAINT_NAME_PARAM] = newName;
+    }
+    if (!metadataChanges.empty()) {
+        DBStatus metadataStatus = updateStorageParams(
+            dbname, tablename, metadataChanges);
+        if (metadataStatus != DBStatus::OK) {
+            lockManager_.unlock(tablename);
+            return metadataStatus;
+        }
+    }
     invalidateCatalogSchema(dbname, tablename);
     lockManager_.unlock(tablename);
     return DBStatus::OK;
