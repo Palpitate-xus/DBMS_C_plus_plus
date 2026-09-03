@@ -83,7 +83,7 @@ void test_delete_stops_when_page_wal_fails() {
             failure.restore();
             afterFired = true;
         }
-        return true;
+        return false;
     });
 
     const dbms::DBStatus status =
