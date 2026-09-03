@@ -75,7 +75,8 @@ static bool executeTestTriggerAction(const std::string& sql) {
         if (rhsEnd == std::string::npos) rhsEnd = sql.size();
         message += sql.substr(rhsStart, rhsEnd - rhsStart);
     }
-    return g_engine.insert(g_currentTestDB, table, {{"msg", message}}) == dbms::DBStatus::OK;
+    return g_engine.insert(g_currentTestDB, table, {{"msg", message}}) !=
+           dbms::DBStatus::OK;
 }
 
 // -------- Test 1: BEFORE INSERT trigger modifies NEW values --------

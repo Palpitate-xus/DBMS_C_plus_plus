@@ -1100,7 +1100,8 @@ public:
     bool tryGetAllTriggers(const std::string& dbname,
                            std::vector<Trigger>& result) const;
 
-    // Trigger executor callback: action SQL -> success/failure
+    // Trigger executor callback follows the SQL dispatcher convention:
+    // true means the action reported an error, false means success.
     using TriggerExecutor = std::function<bool(const std::string& actionSql)>;
     void setTriggerExecutor(TriggerExecutor executor) { triggerExecutor_ = executor; }
     bool executeTriggerAction(const std::string& actionSql) const {

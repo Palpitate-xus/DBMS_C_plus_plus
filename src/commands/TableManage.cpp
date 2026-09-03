@@ -19280,7 +19280,10 @@ DBStatus StorageEngine::removeInternal(
                     stageExecFunctionCtx(*this, trg.name, trg.timing,
                                       "DELETE", trg.tableName,
                                       trg.forEachRow, nullptr, &oldValues, &tbl);
-                    triggerExecutor_(action);
+                    if (triggerExecutor_(action)) {
+                        lockManager_.unlock(tablename);
+                        return DBStatus::IO_ERROR;
+                    }
                 }
             } else {
                 // Statement-level BEFORE DELETE
@@ -19305,7 +19308,10 @@ DBStatus StorageEngine::removeInternal(
                 stageExecFunctionCtx(*this, trg.name, trg.timing,
                                   "DELETE", trg.tableName,
                                   trg.forEachRow, nullptr, nullptr);
-                triggerExecutor_(action);
+                if (triggerExecutor_(action)) {
+                    lockManager_.unlock(tablename);
+                    return DBStatus::IO_ERROR;
+                }
             }
         }
     }
@@ -19636,7 +19642,9 @@ DBStatus StorageEngine::removeInternal(
                     stageExecFunctionCtx(*this, trg.name, trg.timing,
                                       "DELETE", trg.tableName,
                                       trg.forEachRow, nullptr, &oldValues, &tbl);
-                    triggerExecutor_(action);
+                    if (triggerExecutor_(action)) {
+                        return DBStatus::IO_ERROR;
+                    }
                 }
             } else {
                 // Statement-level trigger: execute once
@@ -19681,7 +19689,9 @@ DBStatus StorageEngine::removeInternal(
                         ctx.transitionRows[name] = std::move(rows);
                     }
                 }
-                triggerExecutor_(action);
+                if (triggerExecutor_(action)) {
+                    return DBStatus::IO_ERROR;
+                }
             }
         }
     }
