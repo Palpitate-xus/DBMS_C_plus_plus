@@ -16960,11 +16960,6 @@ DBStatus StorageEngine::insertInternal(
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
-    if (!variableColumnWidthsValid(tbl, actualValues)) {
-        lockManager_.unlock(tablename);
-        return DBStatus::INVALID_VALUE;
-    }
-
     // Uniqueness must be checked against the final NEW row, after BEFORE
     // triggers and stored generated columns. Define the validator here so it
     // can share the deferred-constraint bookkeeping, but invoke it only once
@@ -17100,7 +17095,7 @@ DBStatus StorageEngine::insertInternal(
         return DBStatus::OK;
     };
 
-    // Validate all values before building row buffer
+    // Validate and canonicalize all values before triggers consume them.
     for (size_t i = 0; i < tbl.len; ++i) {
         const Column& col = tbl.cols[i];
         auto it = actualValues.find(col.dataName);
@@ -17311,6 +17306,12 @@ DBStatus StorageEngine::insertInternal(
                 return DBStatus::INVALID_VALUE;
             }
         }
+    }
+    // Width is measured on the canonical SQL value. In particular BIT
+    // literals may enter as B'1010' but are stored as the bare bit string.
+    if (!variableColumnWidthsValid(tbl, actualValues)) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
     }
 
     // Fire BEFORE INSERT triggers (row-level)
