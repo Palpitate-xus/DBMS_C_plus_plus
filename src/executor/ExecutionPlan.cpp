@@ -55,7 +55,7 @@ static std::string formatRow(const std::string& rowBuffer, const TableSchema& tb
         const bool physicallyNull =
             nullMeta && nullMeta->lastColumnIsNull(i) &&
             (val.empty() || !tbl.cols[i].isVariableLength);
-        if (physicallyNull || (val.empty() && !col.isNull)) rowStr += "NULL ";
+        if (physicallyNull) rowStr += "NULL ";
         else if (val.find(' ') != std::string::npos && selectCols.size() != 1)
             rowStr += "\"" + val + "\" ";
         else rowStr += val + ' ';

@@ -23650,7 +23650,7 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
                     }
                 }
             }
-            if (val.empty() && (physicallyNull || !col.isNull)) rowStr += "NULL ";
+            if (physicallyNull) rowStr += "NULL ";
             else if (val.find(' ') != std::string::npos && selectCols.size() != 1)
                 rowStr += "\"" + val + "\" ";
             else rowStr += val + ' ';
