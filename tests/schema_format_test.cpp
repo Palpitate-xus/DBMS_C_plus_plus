@@ -34,7 +34,11 @@ int main() {
         std::ifstream in(schemaPath, std::ios::binary);
         validSchema.assign(std::istreambuf_iterator<char>(in),
                            std::istreambuf_iterator<char>());
-        assert(in.eof());
+        // istreambuf_iterator reads the stream buffer directly and is not
+        // required to set the owning stream's eofbit.  Verify the property
+        // this test actually needs: a complete, error-free schema image.
+        assert(!in.bad());
+        assert(validSchema.size() == std::filesystem::file_size(schemaPath));
     }
     int corruptionVersion = 0;
     const auto writeCorruptDsize = [&](int32_t dsize) {
