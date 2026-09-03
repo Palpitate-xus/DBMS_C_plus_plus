@@ -21108,14 +21108,26 @@ DBStatus StorageEngine::updateInternal(
                     lockManager_.pageUnlock(dbname, tablename, candidate);
                     return DBStatus::CORRUPTED_DATA;
                 }
+                DBStatus writeStatus = DBStatus::OK;
                 if (page.canFit(newRow.size())) {
-                    walPageImage(dbname, tablename, candidate, buffer,
-                                 pa->pageSize(), true);
-                    if (page.insert(newRow.data(), newRow.size(), insertedSlot)) {
+                    const Lsn beforeLsn = walPageImage(
+                        dbname, tablename, candidate, buffer,
+                        pa->pageSize(), true);
+                    if (beforeLsn == INVALID_LSN) {
+                        writeStatus = DBStatus::IO_ERROR;
+                    } else {
+                        std::vector<char> stagedBuffer(
+                            buffer, buffer + pa->pageSize());
+                        PageWrapper stagedPage(
+                            stagedBuffer.data(), pa->pageSize(),
+                            tbl.formatVersion);
+                        uint16_t stagedSlot = 0;
+                        const bool stagedInsert = stagedPage.insert(
+                            newRow.data(), newRow.size(), stagedSlot);
                         const char* insertedData = nullptr;
                         size_t insertedLength = 0;
-                        bool finalized = page.read(
-                            insertedSlot, insertedData, insertedLength);
+                        bool finalized = stagedInsert && stagedPage.read(
+                            stagedSlot, insertedData, insertedLength);
                         if (finalized) {
                             std::string mutableNew(insertedData, insertedLength);
                             setRowCtid(
@@ -21123,34 +21135,44 @@ DBStatus StorageEngine::updateInternal(
                                 tbl.formatVersion,
                                 ItemPointer{
                                     candidate,
-                                    static_cast<OffsetNumber>(insertedSlot + 1)});
-                            finalized = page.update(
-                                insertedSlot, mutableNew.data(),
+                                    static_cast<OffsetNumber>(stagedSlot + 1)});
+                            finalized = stagedPage.update(
+                                stagedSlot, mutableNew.data(),
                                 mutableNew.size());
                         }
-                        if (!finalized) {
-                            page.remove(insertedSlot);
-                        } else {
-                            inserted = true;
+                        if (stagedInsert && !finalized) {
+                            writeStatus = DBStatus::CORRUPTED_DATA;
+                        } else if (finalized) {
+                            const Lsn lsn = walPageImage(
+                                dbname, tablename, candidate,
+                                stagedBuffer.data(), pa->pageSize(), false);
+                            if (lsn == INVALID_LSN) {
+                                writeStatus = DBStatus::IO_ERROR;
+                            } else {
+                                std::memcpy(
+                                    buffer, stagedBuffer.data(),
+                                    pa->pageSize());
+                                setPageLsnAndChecksum(buffer, lsn);
+                                insertedSlot = stagedSlot;
+                                inserted = true;
+                                const size_t freePercent =
+                                    stagedPage.freeSpace() * 100 /
+                                    pa->pageSize();
+                                getFSM(dbname, tablename)->setFreePercent(
+                                    candidate,
+                                    static_cast<uint8_t>(freePercent));
+                                getVM(dbname, tablename)->setAllVisible(
+                                    candidate, false);
+                            }
                         }
-                        pa->markDirty(candidate);
-                        const Lsn lsn = walPageImage(
-                            dbname, tablename, candidate, buffer,
-                            pa->pageSize(), false);
-                        if (lsn != INVALID_LSN) {
-                            setPageLsnAndChecksum(buffer, lsn);
+                        if (inserted) {
                             pa->markDirty(candidate);
                         }
-                        const size_t freePercent =
-                            page.freeSpace() * 100 / pa->pageSize();
-                        getFSM(dbname, tablename)->setFreePercent(
-                            candidate, static_cast<uint8_t>(freePercent));
-                        getVM(dbname, tablename)->setAllVisible(candidate, false);
                     }
                 }
                 pa->unpinPage(candidate);
                 lockManager_.pageUnlock(dbname, tablename, candidate);
-                return DBStatus::OK;
+                return writeStatus;
             };
 
             uint32_t newPageId = 0;
@@ -21217,40 +21239,57 @@ DBStatus StorageEngine::updateInternal(
                                        tbl.len) != row) {
                         retireStatus = DBStatus::CORRUPTED_DATA;
                     } else {
-                        walPageImage(dbname, tablename, pageId,
-                                     oldPageBuffer, pa->pageSize(), true);
-                        std::string mutableOld(oldData, oldLength);
-                        setRowXmax(
-                            mutableOld.data(), mutableOld.size(),
-                            tbl.formatVersion,
-                            transactionContext().currentTxnId);
-                        setRowCtid(
-                            mutableOld.data(), mutableOld.size(),
-                            tbl.formatVersion,
-                            ItemPointer{
-                                newPageId,
-                                static_cast<OffsetNumber>(newSlotId + 1)});
-                        auto* oldHeader = castHeapHeader(mutableOld.data());
-                        oldHeader->t_infomask |= HEAP_UPDATED;
-                        oldHeader->t_infomask &= ~(
-                            HEAP_XMAX_COMMITTED | HEAP_XMAX_INVALID |
-                            HEAP_XMAX_EXCL_LOCK | HEAP_XMAX_KEYSHR_LOCK |
-                            HEAP_XMAX_LOCK_ONLY | HEAP_XMAX_IS_MULTI);
-                        if (!oldPage.update(
-                                slotId, mutableOld.data(),
-                                mutableOld.size())) {
+                        const Lsn beforeLsn = walPageImage(
+                            dbname, tablename, pageId, oldPageBuffer,
+                            pa->pageSize(), true);
+                        if (beforeLsn == INVALID_LSN) {
                             retireStatus = DBStatus::IO_ERROR;
                         } else {
-                            pa->markDirty(pageId);
-                            const Lsn lsn = walPageImage(
-                                dbname, tablename, pageId, oldPageBuffer,
-                                pa->pageSize(), false);
-                            if (lsn != INVALID_LSN) {
-                                setPageLsnAndChecksum(oldPageBuffer, lsn);
-                                pa->markDirty(pageId);
+                            std::vector<char> stagedOldBuffer(
+                                oldPageBuffer,
+                                oldPageBuffer + pa->pageSize());
+                            PageWrapper stagedOldPage(
+                                stagedOldBuffer.data(), pa->pageSize(),
+                                tbl.formatVersion);
+                            std::string mutableOld(oldData, oldLength);
+                            setRowXmax(
+                                mutableOld.data(), mutableOld.size(),
+                                tbl.formatVersion,
+                                transactionContext().currentTxnId);
+                            setRowCtid(
+                                mutableOld.data(), mutableOld.size(),
+                                tbl.formatVersion,
+                                ItemPointer{
+                                    newPageId,
+                                    static_cast<OffsetNumber>(newSlotId + 1)});
+                            auto* oldHeader = castHeapHeader(mutableOld.data());
+                            oldHeader->t_infomask |= HEAP_UPDATED;
+                            oldHeader->t_infomask &= ~(
+                                HEAP_XMAX_COMMITTED | HEAP_XMAX_INVALID |
+                                HEAP_XMAX_EXCL_LOCK | HEAP_XMAX_KEYSHR_LOCK |
+                                HEAP_XMAX_LOCK_ONLY | HEAP_XMAX_IS_MULTI);
+                            if (!stagedOldPage.update(
+                                    slotId, mutableOld.data(),
+                                    mutableOld.size())) {
+                                retireStatus = DBStatus::IO_ERROR;
+                            } else {
+                                const Lsn lsn = walPageImage(
+                                    dbname, tablename, pageId,
+                                    stagedOldBuffer.data(), pa->pageSize(),
+                                    false);
+                                if (lsn == INVALID_LSN) {
+                                    retireStatus = DBStatus::IO_ERROR;
+                                } else {
+                                    std::memcpy(
+                                        oldPageBuffer,
+                                        stagedOldBuffer.data(),
+                                        pa->pageSize());
+                                    setPageLsnAndChecksum(oldPageBuffer, lsn);
+                                    pa->markDirty(pageId);
+                                    getVM(dbname, tablename)->setAllVisible(
+                                        pageId, false);
+                                }
                             }
-                            getVM(dbname, tablename)->setAllVisible(
-                                pageId, false);
                         }
                     }
                     pa->unpinPage(pageId);
@@ -21299,10 +21338,29 @@ DBStatus StorageEngine::updateInternal(
                 return DBStatus::IO_ERROR;
             }
             PageWrapper page(pageBuffer, pa->pageSize(), tbl.formatVersion);
-            walPageImage(dbname, tablename, pageId, pageBuffer,
-                         pa->pageSize(), true);
+            if (!page.isValid()) {
+                deleteToastForRow(dbname, tablename, strippedNewRow);
+                pa->unpinPage(pageId);
+                lockManager_.pageUnlock(dbname, tablename, pageId);
+                lockManager_.unlock(tablename);
+                return DBStatus::CORRUPTED_DATA;
+            }
+            const Lsn beforeLsn = walPageImage(
+                dbname, tablename, pageId, pageBuffer,
+                pa->pageSize(), true);
+            if (beforeLsn == INVALID_LSN) {
+                deleteToastForRow(dbname, tablename, strippedNewRow);
+                pa->unpinPage(pageId);
+                lockManager_.pageUnlock(dbname, tablename, pageId);
+                lockManager_.unlock(tablename);
+                return DBStatus::IO_ERROR;
+            }
+            std::vector<char> stagedPageBuffer(
+                pageBuffer, pageBuffer + pa->pageSize());
+            PageWrapper stagedPage(
+                stagedPageBuffer.data(), pa->pageSize(), tbl.formatVersion);
             uint16_t newSlotId = slotId;
-            if (!page.update(
+            if (!stagedPage.update(
                     slotId, newRow.data(), newRow.size(), newSlotId)) {
                 deleteToastForRow(dbname, tablename, strippedNewRow);
                 pa->unpinPage(pageId);
@@ -21313,7 +21371,8 @@ DBStatus StorageEngine::updateInternal(
             actualRid = encodeRid(pageId, newSlotId);
             const char* finalData = nullptr;
             size_t finalLength = 0;
-            if (!page.read(newSlotId, finalData, finalLength)) {
+            if (!stagedPage.read(newSlotId, finalData, finalLength)) {
+                deleteToastForRow(dbname, tablename, strippedNewRow);
                 pa->unpinPage(pageId);
                 lockManager_.pageUnlock(dbname, tablename, pageId);
                 lockManager_.unlock(tablename);
@@ -21324,23 +21383,30 @@ DBStatus StorageEngine::updateInternal(
                 mutableFinal.data(), mutableFinal.size(), tbl.formatVersion,
                 ItemPointer{
                     pageId, static_cast<OffsetNumber>(newSlotId + 1)});
-            if (!page.update(
+            if (!stagedPage.update(
                     newSlotId, mutableFinal.data(), mutableFinal.size())) {
+                deleteToastForRow(dbname, tablename, strippedNewRow);
                 pa->unpinPage(pageId);
                 lockManager_.pageUnlock(dbname, tablename, pageId);
                 lockManager_.unlock(tablename);
                 return DBStatus::IO_ERROR;
             }
-            pa->markDirty(pageId);
             const Lsn lsn = walPageImage(
-                dbname, tablename, pageId, pageBuffer,
+                dbname, tablename, pageId, stagedPageBuffer.data(),
                 pa->pageSize(), false);
-            if (lsn != INVALID_LSN) {
-                setPageLsnAndChecksum(pageBuffer, lsn);
-                pa->markDirty(pageId);
+            if (lsn == INVALID_LSN) {
+                deleteToastForRow(dbname, tablename, strippedNewRow);
+                pa->unpinPage(pageId);
+                lockManager_.pageUnlock(dbname, tablename, pageId);
+                lockManager_.unlock(tablename);
+                return DBStatus::IO_ERROR;
             }
+            std::memcpy(
+                pageBuffer, stagedPageBuffer.data(), pa->pageSize());
+            setPageLsnAndChecksum(pageBuffer, lsn);
+            pa->markDirty(pageId);
             const size_t freePercent =
-                page.freeSpace() * 100 / pa->pageSize();
+                stagedPage.freeSpace() * 100 / pa->pageSize();
             getFSM(dbname, tablename)->setFreePercent(
                 pageId, static_cast<uint8_t>(freePercent));
             getVM(dbname, tablename)->setAllVisible(pageId, false);
