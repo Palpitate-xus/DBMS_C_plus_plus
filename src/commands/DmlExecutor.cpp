@@ -12,6 +12,7 @@
 #include "permissions.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <functional>
 #include <iostream>
@@ -44,6 +45,78 @@ void clearLastDmlResult() {
 }
 
 namespace {
+
+class InsertStatementScope {
+public:
+    InsertStatementScope(StorageEngine& engine, const std::string& database)
+        : engine_(engine) {
+        if (!engine_.inTransaction()) {
+            ready_ = engine_.beginTransaction(database) == DBStatus::OK;
+            ownsTransaction_ = ready_;
+            return;
+        }
+
+        static std::atomic<uint64_t> sequence{0};
+        savepointName_ = "__dbms_dml_insert_statement_" +
+            std::to_string(sequence.fetch_add(1));
+        hasSavepoint_ = engine_.savepoint(savepointName_) == DBStatus::OK;
+        // Snapshot-backed DDL cannot currently create a savepoint. The INSERT
+        // may still proceed, but a later error must roll back the transaction
+        // rather than leave a partially applied multi-row statement.
+        ready_ = true;
+        rollbackWholeTransaction_ = !hasSavepoint_;
+    }
+
+    InsertStatementScope(const InsertStatementScope&) = delete;
+    InsertStatementScope& operator=(const InsertStatementScope&) = delete;
+
+    ~InsertStatementScope() {
+        if (!completed_) rollback();
+    }
+
+    bool ready() const { return ready_; }
+
+    bool finish() {
+        if (!ready_ || completed_) return ready_ && completed_;
+        DBStatus status = DBStatus::OK;
+        if (ownsTransaction_) {
+            status = engine_.commitTransaction();
+        } else if (hasSavepoint_) {
+            status = engine_.releaseSavepoint(savepointName_);
+        }
+        if (status == DBStatus::OK) {
+            completed_ = true;
+            return true;
+        }
+        rollback();
+        completed_ = true;
+        return false;
+    }
+
+private:
+    void rollback() {
+        if (!ready_ || !engine_.inTransaction()) return;
+        if (ownsTransaction_ || rollbackWholeTransaction_) {
+            (void)engine_.rollbackTransaction();
+            return;
+        }
+        const DBStatus rollbackStatus =
+            engine_.rollbackToSavepoint(savepointName_);
+        if (rollbackStatus == DBStatus::OK) {
+            (void)engine_.releaseSavepoint(savepointName_);
+        } else if (engine_.inTransaction()) {
+            (void)engine_.rollbackTransaction();
+        }
+    }
+
+    StorageEngine& engine_;
+    std::string savepointName_;
+    bool ready_ = false;
+    bool ownsTransaction_ = false;
+    bool hasSavepoint_ = false;
+    bool rollbackWholeTransaction_ = false;
+    bool completed_ = false;
+};
 
 std::string lower(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
@@ -1741,6 +1814,12 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
         }
         if (buildResult == InsertSelectBuildResult::Error) return true;
 
+        InsertStatementScope statementScope(g_engine, s.currentDB);
+        if (!statementScope.ready()) {
+            std::cout << "Could not start INSERT statement transaction"
+                      << std::endl;
+            return true;
+        }
         int inserted = 0;
         for (const auto& values : pendingRows) {
             const DBStatus status = g_engine.insert(
@@ -1764,12 +1843,23 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
             printReturningRows(g_lastDmlResult);
         }
         if (inserted > 0) g_engine.analyzeTable(s.currentDB, resolvedTable);
+        if (!statementScope.finish()) {
+            std::cout << "Could not finish INSERT statement transaction"
+                      << std::endl;
+            return true;
+        }
         return false;
     }
 
     if (stmt.defaultValues) {
         if (!stmt.values.empty()) {
             std::cout << "SQL syntax error: invalid DEFAULT VALUES statement"
+                      << std::endl;
+            return true;
+        }
+        InsertStatementScope statementScope(g_engine, s.currentDB);
+        if (!statementScope.ready()) {
+            std::cout << "Could not start INSERT statement transaction"
                       << std::endl;
             return true;
         }
@@ -1782,6 +1872,11 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
                 if (!publishReturning(returningProjections, table, s.currentDB,
                                       insertedRows, "INSERT")) return true;
                 printReturningRows(g_lastDmlResult);
+            }
+            if (!statementScope.finish()) {
+                std::cout << "Could not finish INSERT statement transaction"
+                          << std::endl;
+                return true;
             }
             return false;
         }
@@ -1796,6 +1891,11 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
             printReturningRows(g_lastDmlResult);
         }
         g_engine.analyzeTable(s.currentDB, resolvedTable);
+        if (!statementScope.finish()) {
+            std::cout << "Could not finish INSERT statement transaction"
+                      << std::endl;
+            return true;
+        }
         return false;
     }
 
@@ -1862,6 +1962,12 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
         }
     }
 
+    InsertStatementScope statementScope(g_engine, s.currentDB);
+    if (!statementScope.ready()) {
+        std::cout << "Could not start INSERT statement transaction"
+                  << std::endl;
+        return true;
+    }
     int inserted = 0;
     for (const auto& values : pendingRows) {
         const DBStatus status = g_engine.insert(
@@ -1980,6 +2086,11 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
         printReturningRows(g_lastDmlResult);
     }
     if (inserted > 0) g_engine.analyzeTable(s.currentDB, resolvedTable);
+    if (!statementScope.finish()) {
+        std::cout << "Could not finish INSERT statement transaction"
+                  << std::endl;
+        return true;
+    }
     return false;
 }
 
