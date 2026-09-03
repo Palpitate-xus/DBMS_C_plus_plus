@@ -17898,11 +17898,11 @@ DBStatus StorageEngine::insertInternal(
     // index entry (or leave a stale entry after a non-transactional INSERT).
     auto abortIndexUpdate = [&]() -> DBStatus {
         if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
-            // The INSERT is already in txnLog.  Release the table lock before
-            // rolling back so rollback can acquire any required page locks.
+            // The INSERT is already in txnLog. The public insert() wrapper
+            // owns a statement savepoint, so leave earlier transaction work
+            // intact and let it undo this partially completed index update.
             lockManager_.unlock(tablename);
-            DBStatus rollbackStatus = rollbackTransaction();
-            return rollbackStatus == DBStatus::OK ? DBStatus::IO_ERROR : rollbackStatus;
+            return DBStatus::IO_ERROR;
         }
 
         // Embedded callers may use insert() outside an explicit transaction.
@@ -33959,21 +33959,79 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
 
     bool rowUndoOk = true;
     std::set<BloomIndex*> bloomUndoIndexes;
+    const auto removeSecondaryRid = [&](BPTree* index,
+                                        const std::string& key,
+                                        int64_t rid) {
+        if (!index || (!index->isOpen() && !index->open())) return false;
+        while (true) {
+            const auto rids = index->searchMulti(key);
+            const size_t occurrences = static_cast<size_t>(std::count(
+                rids.begin(), rids.end(), rid));
+            if (occurrences == 0) return true;
+            for (size_t occurrence = 0; occurrence < occurrences;
+                 ++occurrence) {
+                if (!index->removeMulti(key, rid)) return false;
+            }
+        }
+    };
+    const auto removeHashRid = [&](HashIndex* index,
+                                   const std::string& key,
+                                   int64_t rid) {
+        if (!index || (!index->isOpen() && !index->open())) return false;
+        while (true) {
+            const auto rids = index->search(key);
+            const size_t occurrences = static_cast<size_t>(std::count(
+                rids.begin(), rids.end(), rid));
+            if (occurrences == 0) return true;
+            for (size_t occurrence = 0; occurrence < occurrences;
+                 ++occurrence) {
+                if (!index->remove(key, rid)) return false;
+            }
+        }
+    };
+    const auto removeBloomRid = [&](BloomIndex* index,
+                                    const std::string& key,
+                                    int64_t rid) {
+        if (!index || (!index->isOpen() && !index->open())) return false;
+        while (true) {
+            const auto rids = index->search(key);
+            const size_t occurrences = static_cast<size_t>(std::count(
+                rids.begin(), rids.end(), rid));
+            if (occurrences == 0) return true;
+            for (size_t occurrence = 0; occurrence < occurrences;
+                 ++occurrence) {
+                if (!index->remove(key, rid)) return false;
+            }
+        }
+    };
     // Undo entries from end back to savepoint
     for (size_t i = transactionContext().txnLog.size(); i > txnLogSpIdx; --i) {
         auto& entry = transactionContext().txnLog[i - 1];
         PageAllocator* pa = getPageAllocator(transactionContext().txnDB, entry.tableName);
         TableSchema tbl = getTableSchema(transactionContext().txnDB, entry.tableName);
         if (entry.op == TxnLogEntry::Op::Insert) {
-            // Remove from indexes first (row still exists)
+            // Remove from indexes first (row still exists). INSERT may have
+            // failed after only a prefix of its access-method writes. Missing
+            // mappings are therefore already-undone state, not rollback
+            // failures; remove only exact mappings owned by this RID.
             std::string insertedRow;
-            readRowByRid(pa, entry.rowIdx, insertedRow, tbl);
-            BPTree* pkIdx = getPKIndex(transactionContext().txnDB, entry.tableName);
-            if (pkIdx) {
-                if (!insertedRow.empty()) {
-                    std::string pkVal = extractPKValue(
-                        insertedRow, tbl, transactionContext().txnDB);
-                    if (!pkVal.empty()) pkIdx->remove(pkVal);
+            if (!readRowByRid(pa, entry.rowIdx, insertedRow, tbl)) {
+                rowUndoOk = false;
+            } else if (tbl.hasPrimaryKey()) {
+                BPTree* pkIdx = getPKIndex(
+                    transactionContext().txnDB, entry.tableName);
+                const std::string pkVal = extractPKValue(
+                    insertedRow, tbl, transactionContext().txnDB);
+                if (!pkIdx || (!pkIdx->isOpen() && !pkIdx->open()) ||
+                    pkVal.empty()) {
+                    rowUndoOk = false;
+                } else {
+                    int64_t indexedRid = -1;
+                    if (pkIdx->search(pkVal, indexedRid) &&
+                        indexedRid == entry.rowIdx &&
+                        !pkIdx->remove(pkVal)) {
+                        rowUndoOk = false;
+                    }
                 }
             }
             for (const auto& metadata : getIndexMetadata(
@@ -33990,8 +34048,8 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                 BPTree* index = getSecondaryIndex(
                     transactionContext().txnDB, entry.tableName,
                     metadata.name);
-                if (!index ||
-                    !index->removeMulti(indexEntry.key, entry.rowIdx)) {
+                if (!removeSecondaryRid(
+                        index, indexEntry.key, entry.rowIdx)) {
                     rowUndoOk = false;
                 }
             }
@@ -34007,7 +34065,8 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                 if (!indexEntry.included || indexEntry.key.empty()) continue;
                 BPTree* index = getCompositeIndexTree(
                     transactionContext().txnDB, entry.tableName, ci.name);
-                if (!index || !index->removeMulti(indexEntry.key, entry.rowIdx)) {
+                if (!removeSecondaryRid(
+                        index, indexEntry.key, entry.rowIdx)) {
                     rowUndoOk = false;
                 }
             }
@@ -34017,12 +34076,18 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                 for (size_t j = 0; j < tbl.len; ++j) {
                     if (tbl.cols[j].dataName == colname) { colIdx = j; break; }
                 }
-                if (colIdx >= tbl.len) continue;
+                if (colIdx >= tbl.len) {
+                    rowUndoOk = false;
+                    continue;
+                }
                 std::string value = extractColumnValue(
                     insertedRow, tbl, colIdx, transactionContext().txnDB);
                 HashIndex* hashIdx = getHashIndex(
                     transactionContext().txnDB, entry.tableName, colname);
-                if (hashIdx && !value.empty()) hashIdx->remove(value, entry.rowIdx);
+                if (!value.empty() &&
+                    !removeHashRid(hashIdx, value, entry.rowIdx)) {
+                    rowUndoOk = false;
+                }
             }
             for (const auto& colname : getBloomIndexedColumns(
                      transactionContext().txnDB, entry.tableName)) {
@@ -34043,13 +34108,14 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                     transactionContext().txnDB);
                 BloomIndex* bloomIdx = getBloomIndex(
                     transactionContext().txnDB, entry.tableName, colname);
-                if (!bloomIdx) {
+                if (!bloomIdx ||
+                    (!bloomIdx->isOpen() && !bloomIdx->open())) {
                     rowUndoOk = false;
                     continue;
                 }
                 bloomUndoIndexes.insert(bloomIdx);
                 if (!value.empty() &&
-                    !bloomIdx->remove(value, entry.rowIdx)) {
+                    !removeBloomRid(bloomIdx, value, entry.rowIdx)) {
                     rowUndoOk = false;
                 }
             }
