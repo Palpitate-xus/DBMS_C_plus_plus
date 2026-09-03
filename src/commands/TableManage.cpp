@@ -20117,6 +20117,44 @@ DBStatus StorageEngine::updateInternal(
                     if (col.dataType == "date") {
                         Date d(kv.second.c_str());
                         if (d.year == 0) return DBStatus::INVALID_VALUE;
+                    } else if (col.dataType == "timestamp" ||
+                               col.dataType == "timestamptz" ||
+                               col.dataType == "datetime") {
+                        if (!kv.second.empty() &&
+                            parseTimestampToSeconds(kv.second) == 0) {
+                            return DBStatus::INVALID_VALUE;
+                        }
+                    } else if (col.dataType == "time") {
+                        if (!kv.second.empty() &&
+                            parseTimeToSeconds(kv.second) < 0) {
+                            return DBStatus::INVALID_VALUE;
+                        }
+                    } else if (col.dataType == "float") {
+                        if (!kv.second.empty()) {
+                            try {
+                                (void)std::stof(kv.second);
+                            } catch (...) {
+                                return DBStatus::INVALID_VALUE;
+                            }
+                        }
+                    } else if (col.dataType == "double" ||
+                               col.dataType == "decimal") {
+                        if (!kv.second.empty()) {
+                            try {
+                                (void)std::stod(kv.second);
+                            } catch (...) {
+                                return DBStatus::INVALID_VALUE;
+                            }
+                        }
+                    } else if (col.dataType == "numeric") {
+                        if (!kv.second.empty()) {
+                            try {
+                                Numeric numeric(kv.second);
+                                (void)numeric;
+                            } catch (...) {
+                                return DBStatus::INVALID_VALUE;
+                            }
+                        }
                     } else if (col.dataType == "macaddr" || col.dataType == "macaddr8") {
                         if (!kv.second.empty()) {
                             int n = (col.dataType == "macaddr8") ? 8 : 6;
@@ -20192,6 +20230,10 @@ DBStatus StorageEngine::updateInternal(
                     } else if (col.dataType == "jsonpath") {
                         if (!kv.second.empty() && !isValidJsonPath(kv.second))
                             return DBStatus::INVALID_VALUE;
+                    } else if (col.dataType == "json" ||
+                               col.dataType == "jsonb") {
+                        if (!kv.second.empty() && !isValidJson(kv.second))
+                            return DBStatus::INVALID_VALUE;
                     } else if (col.dataType == "interval") {
                         if (!kv.second.empty()) {
                             std::string canon;
@@ -20213,6 +20255,13 @@ DBStatus StorageEngine::updateInternal(
                                 !integerValueFitsColumn(col, num)) {
                                 return DBStatus::INVALID_VALUE;
                             }
+                        }
+                    } else if (!col.enumValues.empty()) {
+                        if (!kv.second.empty() &&
+                            std::find(col.enumValues.begin(),
+                                      col.enumValues.end(), kv.second) ==
+                                col.enumValues.end()) {
+                            return DBStatus::INVALID_VALUE;
                         }
                     } else if (!col.isArray && TypeRegistry::instance().findType(col.dataType) == nullptr) {
                         CompositeType ct = getCompositeType(dbname, col.dataType);
