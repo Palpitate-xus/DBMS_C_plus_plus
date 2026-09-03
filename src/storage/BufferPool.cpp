@@ -11,6 +11,11 @@ namespace dbms {
 BufferPool::BufferPool(const std::string& filename, size_t numFrames, size_t pageSize)
     : filename_(filename), numFrames_(numFrames == 0 ? 1 : numFrames),
       pageSize_(pageSize), clockHand_(0) {
+    initializeFramesUnlocked();
+}
+
+void BufferPool::initializeFramesUnlocked() {
+    frames_.clear();
     frames_.resize(numFrames_);
     for (size_t i = 0; i < numFrames_; ++i) {
         frames_[i].pageId = static_cast<uint32_t>(-1);
@@ -19,6 +24,8 @@ BufferPool::BufferPool(const std::string& filename, size_t numFrames, size_t pag
         frames_[i].usageCount = 0;
         frames_[i].data.resize(pageSize_);
     }
+    pageMap_.clear();
+    clockHand_ = 0;
 }
 
 BufferPool::~BufferPool() {
@@ -26,7 +33,12 @@ BufferPool::~BufferPool() {
 }
 
 bool BufferPool::open() {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (fd_ >= 0) return true;
+    // close() intentionally releases the potentially large frame storage.
+    // A PageAllocator is nevertheless reusable, so rebuild that storage
+    // before any fetch indexes it by the configured frame count.
+    if (frames_.size() != numFrames_) initializeFramesUnlocked();
     fd_ = ::open(filename_.c_str(), O_RDWR | O_CREAT, 0644);
     if (fd_ < 0) return false;
     // TDE sidecar for the page envelopes.  Absent sidecar = database not

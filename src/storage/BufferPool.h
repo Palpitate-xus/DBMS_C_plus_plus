@@ -149,6 +149,9 @@ private:
     bool readTdeRecord(uint32_t pageId, uint8_t record[PageCrypto::kRecordSize]);
     bool writeTdeRecord(uint32_t pageId,
                         const uint8_t record[PageCrypto::kRecordSize]);
+    // Recreate the frame array after close() releases its memory. mutex_ is
+    // held by open(); construction calls this before the object is shared.
+    void initializeFramesUnlocked();
     bool flushUnlocked();
     std::optional<size_t> evictFrame();
     // Fast path: pin a cached page; waits on an in-flight load of it.

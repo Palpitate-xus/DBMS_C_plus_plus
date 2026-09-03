@@ -42,6 +42,15 @@ int main() {
         assert(pool.fetchPage(2) != nullptr);
         pool.unpinPage(2);
         assert(pool.flush());
+
+        // PageAllocator exposes close/open as a reusable lifecycle. close()
+        // frees the frame array, so open() must recreate it before fetch.
+        pool.close();
+        assert(pool.open());
+        reloaded = pool.fetchPage(0);
+        assert(reloaded != nullptr);
+        assert(std::memcmp(reloaded, "durable-page", 12) == 0);
+        pool.unpinPage(0);
         pool.close();
         std::filesystem::remove(poolPath);
         std::cout << "[CHECKPOINT] BufferPool eviction/pin safety OK\n";
