@@ -18416,16 +18416,31 @@ DBStatus StorageEngine::insertInternal(
 std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
     const std::vector<std::string>& cstr) {
     std::vector<Condition> conds;
+    auto decodeSqlLiteral = [](std::string value) {
+        if (value.size() < 2 || value.front() != '\'' ||
+            value.back() != '\'') {
+            return value;
+        }
+        std::string decoded;
+        decoded.reserve(value.size() - 2);
+        for (size_t i = 1; i + 1 < value.size(); ++i) {
+            decoded.push_back(value[i]);
+            if (value[i] == '\'' && i + 2 < value.size() &&
+                value[i + 1] == '\'') {
+                ++i;
+            }
+        }
+        return decoded;
+    };
     // Strip one level of single quotes from every space-separated token:
     // "betweenid 'b' 'c'" -> value "b c" (comparisons must not see quotes).
-    auto unquoteTokens = [](const std::string& v) {
+    auto unquoteTokens = [&](const std::string& v) {
         std::string out;
         std::istringstream iss(v);
         std::string tok;
         bool first = true;
         while (iss >> tok) {
-            if (tok.size() >= 2 && tok.front() == '\'' && tok.back() == '\'')
-                tok = tok.substr(1, tok.size() - 2);
+            tok = decodeSqlLiteral(std::move(tok));
             if (!first) out += ' ';
             out += tok;
             first = false;
@@ -18480,9 +18495,7 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
             size_t sp = s.find(' ', 8);
             if (sp == std::string::npos) continue;
             c.colName = s.substr(8, sp - 8);
-            c.value = s.substr(sp + 1);
-            if (c.value.size() >= 2 && c.value.front() == 39 && c.value.back() == 39)
-            c.value = c.value.substr(1, c.value.size() - 2);
+            c.value = decodeSqlLiteral(s.substr(sp + 1));
             conds.push_back(c);
             continue;
         }
@@ -18491,9 +18504,7 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
             size_t sp = s.find(' ', 5);
             if (sp == std::string::npos) continue;
             c.colName = s.substr(5, sp - 5);
-            c.value = s.substr(sp + 1);
-            if (c.value.size() >= 2 && c.value.front() == 39 && c.value.back() == 39)
-                c.value = c.value.substr(1, c.value.size() - 2);
+            c.value = decodeSqlLiteral(s.substr(sp + 1));
             conds.push_back(c);
             continue;
         }
@@ -18502,9 +18513,7 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
             size_t sp = s.find(' ', 4);
             if (sp == std::string::npos) continue;
             c.colName = s.substr(4, sp - 4);
-            c.value = s.substr(sp + 1);
-            if (c.value.size() >= 2 && c.value.front() == '\'' && c.value.back() == '\'')
-                c.value = c.value.substr(1, c.value.size() - 2);
+            c.value = decodeSqlLiteral(s.substr(sp + 1));
             conds.push_back(c);
             continue;
         }
@@ -18514,9 +18523,7 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
             size_t sp = s.find(' ', 6);
             if (sp == std::string::npos) continue;
             c.colName = s.substr(6, sp - 6);
-            c.value = s.substr(sp + 1);
-            if (c.value.size() >= 2 && c.value.front() == '\'' && c.value.back() == '\'')
-                c.value = c.value.substr(1, c.value.size() - 2);
+            c.value = decodeSqlLiteral(s.substr(sp + 1));
             conds.push_back(c);
             continue;
         }
@@ -18526,9 +18533,7 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
             size_t sp = s.find(' ', 8);
             if (sp == std::string::npos) continue;
             c.colName = s.substr(8, sp - 8);
-            c.value = s.substr(sp + 1);
-            if (c.value.size() >= 2 && c.value.front() == '\'' && c.value.back() == '\'')
-                c.value = c.value.substr(1, c.value.size() - 2);
+            c.value = decodeSqlLiteral(s.substr(sp + 1));
             conds.push_back(c);
             continue;
         }
@@ -18548,9 +18553,7 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
             size_t sp = s.find(' ', 2);
             if (sp == std::string::npos) continue;
             c.colName = s.substr(2, sp - 2);
-            c.value = s.substr(sp + 1);
-            if (c.value.size() >= 2 && c.value.front() == '\'' && c.value.back() == '\'')
-                c.value = c.value.substr(1, c.value.size() - 2);
+            c.value = decodeSqlLiteral(s.substr(sp + 1));
             conds.push_back(c);
             continue;
         }
@@ -18562,7 +18565,7 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
             if (sp != std::string::npos && sp > 5) {
                 c.op = "notin";
                 c.colName = s.substr(5, sp - 5);
-                c.value = s.substr(sp + 1);
+                c.value = unquoteTokens(s.substr(sp + 1));
                 conds.push_back(c);
                 continue;
             }
@@ -18572,7 +18575,7 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
             if (sp != std::string::npos && sp > 2) {
                 c.op = "in";
                 c.colName = s.substr(2, sp - 2);
-                c.value = s.substr(sp + 1);
+                c.value = unquoteTokens(s.substr(sp + 1));
                 conds.push_back(c);
                 continue;
             }
@@ -18630,9 +18633,7 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
         size_t sp = s.find(' ', opEnd);
         if (sp == std::string::npos) continue;
         c.colName = s.substr(opEnd, sp - opEnd);
-        c.value = s.substr(sp + 1);
-        if (c.value.size() >= 2 && c.value.front() == '\'' && c.value.back() == '\'')
-            c.value = c.value.substr(1, c.value.size() - 2);
+        c.value = decodeSqlLiteral(s.substr(sp + 1));
         conds.push_back(c);
     }
     return conds;

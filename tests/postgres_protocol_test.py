@@ -816,7 +816,9 @@ def main():
         for identifier, timestamp, label in (
                 (1, "2025-01-01 00:00:00", "early value"),
                 (2, "2026-08-07 12:34:56", "target (value)"),
-                (3, "2027-12-31 23:59:59", "late value")):
+                (3, "2027-12-31 23:59:59", "late value"),
+                (4, "2028-06-30 12:00:00", "escaped ''quote'' value"),
+                (5, "2029-07-01 12:00:00", "O''Brien")):
             assert any(kind == b"C" for kind, _ in simple_query(
                 sock, "INSERT INTO protocol_timestamp_filter VALUES "
                 "(%d, '%s', '%s')" % (identifier, timestamp, label)))
@@ -827,6 +829,15 @@ def main():
             sock, "SELECT id FROM protocol_timestamp_filter "
             "WHERE label = 'target (value)'")
         assert data_row_values(label_messages) == [[b"2"]], label_messages
+        assert data_row_values(simple_query(
+            sock, "SELECT id FROM protocol_timestamp_filter "
+            "WHERE label = 'escaped ''quote'' value'")) == [[b"4"]]
+        assert data_row_values(simple_query(
+            sock, "SELECT id FROM protocol_timestamp_filter "
+            "WHERE label LIKE 'escaped ''quote''%'")) == [[b"4"]]
+        assert data_row_values(simple_query(
+            sock, "SELECT id FROM protocol_timestamp_filter "
+            "WHERE label IN ('O''Brien')")) == [[b"5"]]
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "CREATE TABLE protocol_numeric (n NUMERIC)"))
         numeric_description = row_description_fields(
