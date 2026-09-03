@@ -14609,11 +14609,20 @@ DBStatus StorageEngine::alterTableAddUniqueConstraint(const std::string& dbname,
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
+    if (colNames.empty()) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
     std::vector<size_t> colIndices;
+    std::set<size_t> distinctColumns;
     for (const auto& cname : colNames) {
         bool found = false;
         for (size_t i = 0; i < tbl.len; ++i) {
             if (tbl.cols[i].dataName == cname) {
+                if (!distinctColumns.insert(i).second) {
+                    lockManager_.unlock(tablename);
+                    return DBStatus::INVALID_VALUE;
+                }
                 colIndices.push_back(i);
                 found = true;
                 break;
@@ -14630,6 +14639,41 @@ DBStatus StorageEngine::alterTableAddUniqueConstraint(const std::string& dbname,
             lockManager_.unlock(tablename);
             return DBStatus::TABLE_ALREADY_EXISTS;
         }
+    }
+
+    // Adding a constraint validates the rows that already exist. Publishing
+    // metadata without this scan leaves a table that advertises uniqueness
+    // while retaining duplicate keys from before the ALTER statement.
+    std::set<std::vector<std::string>> seenKeys;
+    bool duplicate = false;
+    const bool scanOk = forEachRow(
+        dbname, tablename,
+        [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
+            if (duplicate) return;
+            const std::string row(data, len);
+            const int64_t rid = encodeRid(pageId, slotId);
+            std::vector<std::string> key;
+            key.reserve(colIndices.size());
+            for (const size_t columnIndex : colIndices) {
+                if (tbl.cols[columnIndex].isNull &&
+                    isColumnNullByRid(
+                        dbname, tablename, rid, columnIndex)) {
+                    return;  // UNIQUE treats NULL keys as distinct.
+                }
+                key.push_back(canonicalColumnKeyValue(
+                    tbl.cols[columnIndex],
+                    extractColumnValue(
+                        row, tbl, columnIndex, dbname)));
+            }
+            duplicate = !seenKeys.insert(std::move(key)).second;
+        });
+    if (!scanOk) {
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
+    }
+    if (duplicate) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
     }
 
     tbl.uniqueConstraints.push_back(colIndices);
