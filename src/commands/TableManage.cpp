@@ -19082,30 +19082,60 @@ DBStatus StorageEngine::update(
     // row cannot leave earlier rows permanently modified.
     const bool ownsTransaction = !transactionContext().inTransaction;
     const size_t returnedRowStart = updatedRows ? updatedRows->size() : 0;
+    std::string statementSavepoint;
+    bool hasStatementSavepoint = false;
     if (ownsTransaction) {
         const DBStatus beginStatus = beginTransaction(dbname);
         if (beginStatus != DBStatus::OK) return beginStatus;
+    } else {
+        static std::atomic<uint64_t> statementSavepointSequence{0};
+        auto& context = transactionContext();
+        do {
+            statementSavepoint = "__dbms_update_statement_" +
+                std::to_string(context.currentTxnId) + "_" +
+                std::to_string(statementSavepointSequence.fetch_add(1));
+        } while (context.savepoints.count(statementSavepoint) != 0);
+        hasStatementSavepoint =
+            savepoint(statementSavepoint) == DBStatus::OK;
     }
 
     ReferentialActionContext referentialContext;
     const DBStatus updateStatus = updateInternal(
         dbname, tablename, updates, conditions, updatedRows, updateResolver,
         updateMatcher, nullptr, referentialContext);
-    if (!ownsTransaction) return updateStatus;
-
     if (updateStatus != DBStatus::OK) {
         DBStatus rollbackStatus = DBStatus::OK;
-        if (transactionContext().inTransaction) {
+        if (ownsTransaction && transactionContext().inTransaction) {
+            rollbackStatus = rollbackTransaction();
+        } else if (transactionContext().inTransaction &&
+                   hasStatementSavepoint) {
+            rollbackStatus = rollbackToSavepoint(statementSavepoint);
+            if (rollbackStatus == DBStatus::OK) {
+                rollbackStatus = releaseSavepoint(statementSavepoint);
+            }
+        } else if (transactionContext().inTransaction) {
+            // A transaction containing a dirty DDL snapshot cannot create a
+            // savepoint. Abort it rather than expose a partially applied DML
+            // statement if such an UPDATE fails.
             rollbackStatus = rollbackTransaction();
         }
         if (updatedRows) updatedRows->resize(returnedRowStart);
         return rollbackStatus == DBStatus::OK ? updateStatus : rollbackStatus;
     }
 
-    const DBStatus commitStatus = commitTransaction();
-    if (commitStatus != DBStatus::OK && updatedRows) {
-        updatedRows->resize(returnedRowStart);
+    if (!ownsTransaction) {
+        if (!hasStatementSavepoint) return DBStatus::OK;
+        const DBStatus releaseStatus = releaseSavepoint(statementSavepoint);
+        if (releaseStatus == DBStatus::OK) return DBStatus::OK;
+        if (updatedRows) updatedRows->resize(returnedRowStart);
+        const DBStatus rollbackStatus = rollbackTransaction();
+        return rollbackStatus == DBStatus::OK
+            ? releaseStatus : rollbackStatus;
     }
+
+    const DBStatus commitStatus = commitTransaction();
+    if (commitStatus != DBStatus::OK && updatedRows)
+        updatedRows->resize(returnedRowStart);
     return commitStatus;
 }
 
@@ -32963,9 +32993,15 @@ DBStatus StorageEngine::savepoint(const std::string& name) {
         // savepoint images are available.
         return DBStatus::INVALID_VALUE;
     }
-    transactionContext().savepoints[name] = {
-        transactionContext().txnLog.size(),
-        transactionContext().ddlUndoActions.size(),
+    auto& context = transactionContext();
+    const auto deferred = context.deferredChecks.find(context.currentTxnId);
+    const size_t deferredCheckSize = deferred == context.deferredChecks.end()
+        ? 0 : deferred->second.size();
+    context.savepoints[name] = {
+        context.txnLog.size(),
+        context.ddlUndoActions.size(),
+        deferredCheckSize,
+        context.txnLogicalChanges.size(),
         lockManager_.captureCheckpoint()
     };
     return DBStatus::OK;
@@ -32978,8 +33014,17 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
     if (it == transactionContext().savepoints.end()) return DBStatus::INVALID_VALUE;
     const size_t txnLogSpIdx = it->second.txnLogSize;
     const size_t ddlSpIdx = it->second.ddlUndoSize;
+    const size_t deferredCheckSpIdx = it->second.deferredCheckSize;
+    const size_t logicalChangeSpIdx = it->second.logicalChangeSize;
+    const auto deferredChecks = transactionContext().deferredChecks.find(
+        transactionContext().currentTxnId);
+    const size_t currentDeferredCheckSize =
+        deferredChecks == transactionContext().deferredChecks.end()
+            ? 0 : deferredChecks->second.size();
     if (txnLogSpIdx > transactionContext().txnLog.size() ||
-        ddlSpIdx > transactionContext().ddlUndoActions.size()) {
+        ddlSpIdx > transactionContext().ddlUndoActions.size() ||
+        deferredCheckSpIdx > currentDeferredCheckSize ||
+        logicalChangeSpIdx > transactionContext().txnLogicalChanges.size()) {
         return DBStatus::INVALID_VALUE;
     }
 
@@ -33427,6 +33472,10 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
         if (!index->flush()) rowUndoOk = false;
     }
     transactionContext().txnLog.resize(txnLogSpIdx);
+    transactionContext().txnLogicalChanges.resize(logicalChangeSpIdx);
+    if (deferredChecks != transactionContext().deferredChecks.end()) {
+        deferredChecks->second.resize(deferredCheckSpIdx);
+    }
 
     // DDL CREATE undo actions follow the same savepoint boundary. Row undo
     // above runs first so a newly-created relation remains available while

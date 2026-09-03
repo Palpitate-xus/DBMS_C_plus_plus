@@ -1748,6 +1748,8 @@ private:
         struct SavepointState {
             size_t txnLogSize = 0;
             size_t ddlUndoSize = 0;
+            size_t deferredCheckSize = 0;
+            size_t logicalChangeSize = 0;
             LockManager::LockCheckpoint lockCheckpoint;
         };
         std::map<std::string, SavepointState> savepoints;

@@ -62,10 +62,50 @@ void test_autocommit_update_is_atomic() {
               << std::endl;
 }
 
+void test_transactional_update_is_statement_atomic() {
+    const std::string database = testDbPath("update_txn_atomicity");
+    cleanupTestDb("update_txn_atomicity");
+    assert(g_engine.createDatabase(database, "utf8") == dbms::DBStatus::OK);
+
+    Session session;
+    session.username = "testuser";
+    session.permission = 1;
+    session.currentDB = database;
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE TABLE items (id INT PRIMARY KEY, tag VARCHAR(20) UNIQUE)",
+        session));
+    assert(g_engine.insert(database, "items", {{"id", "1"}, {"tag", "a"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(database, "items", {{"id", "2"}, {"tag", "b"}}) ==
+           dbms::DBStatus::OK);
+
+    assert(g_engine.beginTransaction(database) == dbms::DBStatus::OK);
+    // This earlier statement must survive rollback of only the failing UPDATE.
+    assert(g_engine.insert(database, "items", {{"id", "3"}, {"tag", "c"}}) ==
+           dbms::DBStatus::OK);
+    std::vector<std::map<std::string, std::string>> returnedRows;
+    assert(g_engine.update(
+               database, "items", {{"tag", "duplicate"}}, {},
+               &returnedRows) == dbms::DBStatus::DUPLICATE_KEY);
+    assert(returnedRows.empty());
+    assert(g_engine.inTransaction());
+    assert(selectedValue(database, 1) == "a");
+    assert(selectedValue(database, 2) == "b");
+    assert(selectedValue(database, 3) == "c");
+    assert(g_engine.commitTransaction() == dbms::DBStatus::OK);
+    assert(selectedValue(database, 3) == "c");
+
+    cleanupTestDb("update_txn_atomicity");
+    std::cout << "[UPDATE ATOMICITY] failed transactional statement rolled back OK"
+              << std::endl;
+}
+
 }  // namespace
 
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_autocommit_update_is_atomic();
+    test_transactional_update_is_statement_atomic();
     return 0;
 }
