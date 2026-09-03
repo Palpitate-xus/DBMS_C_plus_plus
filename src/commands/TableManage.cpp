@@ -536,6 +536,9 @@ static bool parseFiniteDouble(const std::string& input, double& value) {
 
 template <typename Floating>
 static std::string formatFloatingValue(Floating value) {
+    if (std::isnan(value)) return "NaN";
+    if (std::isinf(value)) return std::signbit(value) ? "-Infinity" : "Infinity";
+
     char buffer[64];
     const auto converted = std::to_chars(
         buffer, buffer + sizeof(buffer), value, std::chars_format::general);
@@ -552,6 +555,25 @@ static std::string formatFloatingValue(Floating value) {
 
 static std::string formatPointCoordinate(double value) {
     return formatFloatingValue(value);
+}
+
+template <typename Floating>
+static int compareFloatingValues(Floating left, Floating right) {
+    const bool leftNaN = std::isnan(left);
+    const bool rightNaN = std::isnan(right);
+    if (leftNaN) return rightNaN ? 0 : 1;
+    if (rightNaN) return -1;
+    return left < right ? -1 : (right < left ? 1 : 0);
+}
+
+static bool floatingPredicateMatches(const std::string& op, int comparison) {
+    if (op == "=") return comparison == 0;
+    if (op == "!=" || op == "<>") return comparison != 0;
+    if (op == "<") return comparison < 0;
+    if (op == ">") return comparison > 0;
+    if (op == "<=") return comparison <= 0;
+    if (op == ">=") return comparison >= 0;
+    return false;
 }
 
 static bool normalizePointLiteral(const std::string& input, std::string& output,
@@ -16022,7 +16044,7 @@ StorageEngine::PredicateTruth StorageEngine::compareValues(
             !parseDoubleLiteral(right, r)) {
             return PredicateTruth::Unknown;
         }
-        return fromCompare(l < r ? -1 : (r < l ? 1 : 0));
+        return fromCompare(compareFloatingValues(l, r));
     }
     if (col.dataType == "boolean") {
         auto normalizeBool = [](const std::string& value) {
@@ -16387,12 +16409,8 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
             !parseFloatLiteral(cond.value, cmp)) {
             return false;  // Invalid comparison value → UNKNOWN → FALSE in WHERE
         }
-        if (cond.op == "<"  && !(num < cmp)) return false;
-        if (cond.op == ">"  && !(num > cmp)) return false;
-        if (cond.op == "="  && num != cmp)   return false;
-        if (cond.op == "<=" && (num > cmp))  return false;
-        if (cond.op == ">=" && (num < cmp))  return false;
-        if (cond.op == "!=" && num == cmp)   return false;
+        if (!floatingPredicateMatches(
+                cond.op, compareFloatingValues(num, cmp))) return false;
     } else if (col.dataType == "numeric") {
         if (cond.op == "between" || cond.op == "notbetween") {
             // cond.value = "lo hi" (space-joined upstream).  Numeric bounds
@@ -16438,7 +16456,8 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
                 (!val.empty() && !parseDoubleLiteral(val, num))) {
                 return false;
             }
-            bool inRange = num >= lo && num <= hi;
+            bool inRange = compareFloatingValues(num, lo) >= 0 &&
+                           compareFloatingValues(num, hi) <= 0;
             if (cond.op == "between" && !inRange) return false;
             if (cond.op == "notbetween" && inRange) return false;
             return true;
@@ -16447,12 +16466,8 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
             !parseDoubleLiteral(cond.value, cmp)) {
             return false;  // Invalid comparison value → UNKNOWN → FALSE in WHERE
         }
-        if (cond.op == "<"  && !(num < cmp)) return false;
-        if (cond.op == ">"  && !(num > cmp)) return false;
-        if (cond.op == "="  && num != cmp)   return false;
-        if (cond.op == "<=" && (num > cmp))  return false;
-        if (cond.op == ">=" && (num < cmp))  return false;
-        if (cond.op == "!=" && num == cmp)   return false;
+        if (!floatingPredicateMatches(
+                cond.op, compareFloatingValues(num, cmp))) return false;
     } else if (col.dataType == "boolean") {
         auto normalizeBool = [](const std::string& s) -> std::string {
             if (s == "1" || s == "true" || s == "yes" || s == "on") return "true";
