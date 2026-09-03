@@ -175,12 +175,105 @@ static void testStorageFailures(StorageEngine& engine) {
     cleanupTestDb("security_label_io");
 }
 
+static bool hasColumn(const TableSchema& table, const std::string& name) {
+    for (size_t i = 0; i < table.len; ++i) {
+        if (table.cols[i].dataName == name) return true;
+    }
+    return false;
+}
+
+static void testRenameAndDropLifecycle(StorageEngine& engine) {
+    const std::string database = testDbPath("security_label_lifecycle");
+    cleanupTestDb("security_label_lifecycle");
+    assert(engine.createDatabase(database) == DBStatus::OK);
+    assert(engine.createTable(database, makeTable("source")) == DBStatus::OK);
+    assert(engine.createTable(database, makeTable("unrelated")) ==
+           DBStatus::OK);
+    assert(engine.setSecurityLabel(
+               database, "table", "source", "live table") == DBStatus::OK);
+    assert(engine.setSecurityLabel(
+               database, "column", "source.body", "live column") ==
+           DBStatus::OK);
+    assert(engine.setSecurityLabel(
+               database, "table", "unrelated", "keep me") == DBStatus::OK);
+
+    // Seed destination records left by an older DROP implementation.  The
+    // live source labels must replace these instead of being shadowed by them.
+    {
+        std::ofstream stale(fs::path(database) / ".security_labels",
+                            std::ios::binary | std::ios::app);
+        assert(stale);
+        stale << "table renamed stale table\n";
+        stale << "column renamed.renamed_body stale column\n";
+        assert(stale);
+    }
+
+    assert(engine.alterTableRenameColumn(
+               database, "source", "body", "renamed_body") == DBStatus::OK);
+    assert(engine.getSecurityLabel(
+               database, "column", "source.body").empty());
+    assert(engine.getSecurityLabel(
+               database, "column", "source.renamed_body") == "live column");
+
+    assert(engine.alterTableRenameTable(database, "source", "renamed") ==
+           DBStatus::OK);
+    assert(engine.getSecurityLabel(database, "table", "source").empty());
+    assert(engine.getSecurityLabel(
+               database, "column", "source.renamed_body").empty());
+    assert(engine.getSecurityLabel(
+               database, "table", "renamed") == "live table");
+    assert(engine.getSecurityLabel(
+               database, "column", "renamed.renamed_body") == "live column");
+    assert(engine.getSecurityLabel(
+               database, "table", "unrelated") == "keep me");
+
+    assert(engine.dropTable(database, "renamed") == DBStatus::OK);
+    assert(engine.getSecurityLabel(database, "table", "renamed").empty());
+    assert(engine.getSecurityLabel(
+               database, "column", "renamed.renamed_body").empty());
+    assert(engine.getSecurityLabel(
+               database, "table", "unrelated") == "keep me");
+
+    assert(engine.createTable(database, makeTable("renamed")) == DBStatus::OK);
+    assert(engine.getSecurityLabel(database, "table", "renamed").empty());
+    assert(engine.getSecurityLabel(
+               database, "column", "renamed.body").empty());
+    cleanupTestDb("security_label_lifecycle");
+}
+
+static void testLifecycleMetadataFailures(StorageEngine& engine) {
+    const std::string database = testDbPath("security_label_lifecycle_io");
+    cleanupTestDb("security_label_lifecycle_io");
+    assert(engine.createDatabase(database) == DBStatus::OK);
+    assert(engine.createTable(database, makeTable("source")) == DBStatus::OK);
+    const fs::path labelsPath = fs::path(database) / ".security_labels";
+    assert(fs::create_directory(labelsPath));
+
+    assert(engine.alterTableRenameColumn(
+               database, "source", "body", "renamed_body") ==
+           DBStatus::IO_ERROR);
+    const TableSchema table = engine.getTableSchema(database, "source");
+    assert(hasColumn(table, "body"));
+    assert(!hasColumn(table, "renamed_body"));
+
+    assert(engine.alterTableRenameTable(database, "source", "renamed") ==
+           DBStatus::IO_ERROR);
+    assert(engine.tableExists(database, "source"));
+    assert(!engine.tableExists(database, "renamed"));
+
+    assert(engine.dropTable(database, "source") == DBStatus::IO_ERROR);
+    assert(engine.tableExists(database, "source"));
+    cleanupTestDb("security_label_lifecycle_io");
+}
+
 int main() {
     cleanupAllTestData();
     StorageEngine engine;
     testRoundTripAndValidation(engine);
     testLegacyMigration(engine);
     testStorageFailures(engine);
+    testRenameAndDropLifecycle(engine);
+    testLifecycleMetadataFailures(engine);
     finalCleanupTestData();
     std::cout << "[SECURITY LABEL STORAGE] all passed\n";
     return 0;

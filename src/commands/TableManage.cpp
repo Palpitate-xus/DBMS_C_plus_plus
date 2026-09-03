@@ -12054,6 +12054,42 @@ private:
     bool rollbackNeeded_ = false;
 };
 
+using SecurityLabelKey = std::pair<std::string, std::string>;
+using SecurityLabelMap = std::map<SecurityLabelKey, std::string>;
+
+static DBStatus readSecurityLabels(const std::filesystem::path& path,
+                                   SecurityLabelMap& labels);
+static DBStatus writeSecurityLabels(const std::filesystem::path& path,
+                                    const SecurityLabelMap& labels);
+static bool rewriteSecurityLabelsForTable(
+    SecurityLabelMap& labels, const std::string& oldName,
+    const std::optional<std::string>& newName);
+static bool rewriteSecurityLabelForColumn(SecurityLabelMap& labels,
+                                          const std::string& tablename,
+                                          const std::string& oldName,
+                                          const std::string& newName);
+
+class SecurityLabelRewriteGuard {
+public:
+    SecurityLabelRewriteGuard(std::filesystem::path path,
+                              SecurityLabelMap original,
+                              SecurityLabelMap rewritten,
+                              bool changed);
+    SecurityLabelRewriteGuard(const SecurityLabelRewriteGuard&) = delete;
+    SecurityLabelRewriteGuard& operator=(
+        const SecurityLabelRewriteGuard&) = delete;
+    DBStatus publish();
+    void commit();
+    ~SecurityLabelRewriteGuard();
+
+private:
+    std::filesystem::path path_;
+    SecurityLabelMap original_;
+    SecurityLabelMap rewritten_;
+    bool changed_ = false;
+    bool rollbackNeeded_ = false;
+};
+
 DBStatus StorageEngine::dropTable(const std::string& dbname,
                                    const std::string& tablename) {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
@@ -12077,6 +12113,25 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
     if (commentStatus != DBStatus::OK) {
         lockManager_.unlock(tablename);
         return commentStatus;
+    }
+
+    SecurityLabelMap originalSecurityLabels;
+    DBStatus securityLabelStatus = readSecurityLabels(
+        seclabelPath(dbname), originalSecurityLabels);
+    if (securityLabelStatus != DBStatus::OK) {
+        lockManager_.unlock(tablename);
+        return securityLabelStatus;
+    }
+    SecurityLabelMap filteredSecurityLabels = originalSecurityLabels;
+    const bool securityLabelsChanged = rewriteSecurityLabelsForTable(
+        filteredSecurityLabels, tablename, std::nullopt);
+    SecurityLabelRewriteGuard securityLabelGuard(
+        seclabelPath(dbname), std::move(originalSecurityLabels),
+        std::move(filteredSecurityLabels), securityLabelsChanged);
+    securityLabelStatus = securityLabelGuard.publish();
+    if (securityLabelStatus != DBStatus::OK) {
+        lockManager_.unlock(tablename);
+        return securityLabelStatus;
     }
 
     // Keep the schema readable until every physical path has been resolved;
@@ -12243,9 +12298,11 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
     }
 
     // From this point onward DROP removes relation files irreversibly.  Keep
-    // the already-published comment cleanup even if a later filesystem call
-    // throws, otherwise a partially dropped/recreated name can inherit it.
+    // the already-published auxiliary metadata cleanup even if a later
+    // filesystem call throws, otherwise a partially dropped/recreated name
+    // can inherit it.
     commentGuard.commit();
+    securityLabelGuard.commit();
     std::filesystem::remove(paramsPath(dbname, tablename));
     std::filesystem::remove(dataPath(dbname, tablename));
     std::filesystem::remove(indexPath(dbname, tablename));
@@ -13060,13 +13117,33 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
         return commentStatus;
     }
 
+    SecurityLabelMap originalSecurityLabels;
+    DBStatus securityLabelStatus = readSecurityLabels(
+        seclabelPath(dbname), originalSecurityLabels);
+    if (securityLabelStatus != DBStatus::OK) {
+        lockManager_.unlock(tablename);
+        return securityLabelStatus;
+    }
+    SecurityLabelMap renamedSecurityLabels = originalSecurityLabels;
+    const bool securityLabelsChanged = rewriteSecurityLabelForColumn(
+        renamedSecurityLabels, tablename, oldName, newName);
+    SecurityLabelRewriteGuard securityLabelGuard(
+        seclabelPath(dbname), std::move(originalSecurityLabels),
+        std::move(renamedSecurityLabels), securityLabelsChanged);
+    securityLabelStatus = securityLabelGuard.publish();
+    if (securityLabelStatus != DBStatus::OK) {
+        lockManager_.unlock(tablename);
+        return securityLabelStatus;
+    }
+
     // Update schema
     tbl.cols[colIdx].dataName = newName;
     writeSchemaFile(dbname, tablename, tbl);
     invalidateCatalogSchema(dbname, tablename);
     // The schema now exposes the new column name.  Later index-sidecar work
-    // must not roll its comment back to a name that the table no longer has.
+    // must not roll auxiliary metadata back to a name the table no longer has.
     commentGuard.commit();
+    securityLabelGuard.commit();
 
     auto dbDir = dbPath(dbname);
 
@@ -13316,6 +13393,27 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
         lockManager_.unlock(oldName);
         lockManager_.unlock(newName);
         return commentStatus;
+    }
+    SecurityLabelMap originalSecurityLabels;
+    DBStatus securityLabelStatus = readSecurityLabels(
+        seclabelPath(dbname), originalSecurityLabels);
+    if (securityLabelStatus != DBStatus::OK) {
+        lockManager_.unlock(oldName);
+        lockManager_.unlock(newName);
+        return securityLabelStatus;
+    }
+    SecurityLabelMap renamedSecurityLabels = originalSecurityLabels;
+    const bool securityLabelsChanged = rewriteSecurityLabelsForTable(
+        renamedSecurityLabels, oldName,
+        std::optional<std::string>(newName));
+    SecurityLabelRewriteGuard securityLabelGuard(
+        seclabelPath(dbname), std::move(originalSecurityLabels),
+        std::move(renamedSecurityLabels), securityLabelsChanged);
+    securityLabelStatus = securityLabelGuard.publish();
+    if (securityLabelStatus != DBStatus::OK) {
+        lockManager_.unlock(oldName);
+        lockManager_.unlock(newName);
+        return securityLabelStatus;
     }
     std::error_code dirtyStateError;
     const bool renamedSpecializedIndexesWereDirty =
@@ -13726,8 +13824,9 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
     invalidateCatalogSchema(dbname, oldName);
     invalidateCatalogSchema(dbname, newName);
     // The relation namespace has now switched to newName.  Any later metadata
-    // error must leave comments attached to the name that actually exists.
+    // error must leave auxiliary records attached to the name that exists.
     commentGuard.commit();
+    securityLabelGuard.commit();
 
     // Update caches: remove old keys, keep new files on disk for lazy open
     std::string oldKey = dbname + "/" + oldName;
@@ -34128,9 +34227,6 @@ std::filesystem::path StorageEngine::seclabelPath(const std::string& dbname) con
     return dbPath(dbname) / ".security_labels";
 }
 
-using SecurityLabelKey = std::pair<std::string, std::string>;
-using SecurityLabelMap = std::map<SecurityLabelKey, std::string>;
-
 static bool parseSecurityLabelRecord(const std::string& line,
                                      std::string& objectType,
                                      std::string& objectName,
@@ -34199,6 +34295,108 @@ static DBStatus writeSecurityLabels(const std::filesystem::path& path,
                  << encodeCommentField(entry.second) << '\n';
     }
     return persistMetadata(path, contents.str());
+}
+
+static bool securityLabelTypeIs(const std::string& value,
+                                const char* expected) {
+    size_t index = 0;
+    for (; index < value.size() && expected[index] != '\0'; ++index) {
+        if (std::tolower(static_cast<unsigned char>(value[index])) !=
+            expected[index]) {
+            return false;
+        }
+    }
+    return index == value.size() && expected[index] == '\0';
+}
+
+static bool rewriteSecurityLabelsForTable(
+    SecurityLabelMap& labels, const std::string& oldName,
+    const std::optional<std::string>& newName) {
+    SecurityLabelMap rewritten;
+    bool changed = false;
+    const std::string oldColumnPrefix = oldName + ".";
+    const std::string newColumnPrefix =
+        newName ? *newName + "." : std::string();
+
+    for (const auto& entry : labels) {
+        const std::string& type = entry.first.first;
+        const std::string& name = entry.first.second;
+        const bool tableLabel = securityLabelTypeIs(type, "table");
+        const bool columnLabel = securityLabelTypeIs(type, "column");
+        const bool sourceTable = tableLabel && name == oldName;
+        const bool sourceColumn =
+            columnLabel && name.rfind(oldColumnPrefix, 0) == 0;
+        const bool destinationTable =
+            newName && tableLabel && name == *newName;
+        const bool destinationColumn =
+            newName && columnLabel && name.rfind(newColumnPrefix, 0) == 0;
+
+        if (sourceTable || sourceColumn) {
+            changed = true;
+            if (newName) {
+                const std::string movedName = sourceTable
+                    ? *newName
+                    : newColumnPrefix + name.substr(oldColumnPrefix.size());
+                rewritten[{type, movedName}] = entry.second;
+            }
+            continue;
+        }
+        if (destinationTable || destinationColumn) {
+            changed = true;
+            continue;
+        }
+        rewritten.insert(entry);
+    }
+    labels = std::move(rewritten);
+    return changed;
+}
+
+static bool rewriteSecurityLabelForColumn(SecurityLabelMap& labels,
+                                          const std::string& tablename,
+                                          const std::string& oldName,
+                                          const std::string& newName) {
+    const std::string oldObjectName = tablename + "." + oldName;
+    const std::string newObjectName = tablename + "." + newName;
+    SecurityLabelMap rewritten;
+    bool changed = false;
+    for (const auto& entry : labels) {
+        const bool columnLabel =
+            securityLabelTypeIs(entry.first.first, "column");
+        if (columnLabel && entry.first.second == oldObjectName) {
+            rewritten[{entry.first.first, newObjectName}] = entry.second;
+            changed = true;
+            continue;
+        }
+        if (columnLabel && entry.first.second == newObjectName) {
+            changed = true;
+            continue;
+        }
+        rewritten.insert(entry);
+    }
+    labels = std::move(rewritten);
+    return changed;
+}
+
+SecurityLabelRewriteGuard::SecurityLabelRewriteGuard(
+    std::filesystem::path path, SecurityLabelMap original,
+    SecurityLabelMap rewritten, bool changed)
+    : path_(std::move(path)), original_(std::move(original)),
+      rewritten_(std::move(rewritten)), changed_(changed) {}
+
+DBStatus SecurityLabelRewriteGuard::publish() {
+    if (!changed_) return DBStatus::OK;
+    rollbackNeeded_ = true;
+    return writeSecurityLabels(path_, rewritten_);
+}
+
+void SecurityLabelRewriteGuard::commit() {
+    rollbackNeeded_ = false;
+}
+
+SecurityLabelRewriteGuard::~SecurityLabelRewriteGuard() {
+    if (rollbackNeeded_) {
+        (void)writeSecurityLabels(path_, original_);
+    }
 }
 
 DBStatus StorageEngine::setSecurityLabel(
