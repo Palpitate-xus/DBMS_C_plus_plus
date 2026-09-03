@@ -664,6 +664,18 @@ static bool variableColumnWidthsValid(
     return true;
 }
 
+static bool columnAcceptsEmptyValue(const Column& column) {
+    if (column.isArray) return false;
+    if (!column.enumValues.empty()) {
+        return std::find(column.enumValues.begin(), column.enumValues.end(),
+                         std::string()) != column.enumValues.end();
+    }
+    const TypeEntry* type =
+        TypeRegistry::instance().findType(column.dataType);
+    return type && (type->category == TypeCategory::String ||
+                    type->category == TypeCategory::Binary);
+}
+
 static std::string valueFromRowMap(
     const std::map<std::string, std::string>& values,
     const std::string& columnName) {
@@ -17709,15 +17721,22 @@ DBStatus StorageEngine::insertInternal(
     for (size_t i = 0; i < tbl.len; ++i) {
         const Column& col = tbl.cols[i];
         auto it = actualValues.find(col.dataName);
-        std::string val = (it != actualValues.end()) ? it->second : "";
+        const bool hasValue = it != actualValues.end();
+        const bool isNullMarker = hasValue && it->second == "NULL";
+        std::string val = hasValue ? it->second : "";
         if (enforceNotNull && !col.isNull &&
-            (val.empty() || val == "NULL")) {
+            (!hasValue || isNullMarker)) {
             lockManager_.unlock(tablename);
             return DBStatus::NULL_NOT_ALLOWED;
         }
+        if (hasValue && !isNullMarker && val.empty() &&
+            !columnAcceptsEmptyValue(col)) {
+            lockManager_.unlock(tablename);
+            return DBStatus::INVALID_VALUE;
+        }
         // The NULL marker encodes SQL NULL; type validations below must not
         // try to parse it as a value.
-        if (val == "NULL") val.clear();
+        if (isNullMarker) val.clear();
         if (!col.isVariableLength && col.dataType == "date" && !val.empty()) {
             Date d(val.c_str());
             if (d.year == 0) {
@@ -20681,13 +20700,16 @@ DBStatus StorageEngine::updateInternal(
                         return DBStatus::INVALID_VALUE;
                     }
                     const bool isNullMarker = kv.second == "NULL";
-                    if (!col.isNull &&
-                        (kv.second.empty() || isNullMarker)) {
+                    if (!col.isNull && isNullMarker) {
                         return DBStatus::NULL_NOT_ALLOWED;
                     }
                     if (isNullMarker) {
                         prepared[i] = "NULL";
                         break;
+                    }
+                    if (kv.second.empty() &&
+                        !columnAcceptsEmptyValue(col)) {
+                        return DBStatus::INVALID_VALUE;
                     }
                     std::string storeVal = kv.second;
                     if (col.dataType == "date") {
