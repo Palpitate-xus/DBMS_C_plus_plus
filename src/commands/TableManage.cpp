@@ -31698,6 +31698,40 @@ bool StorageEngine::archiveWal(const std::string& dbname) {
 // Physical backup / restore
 // ========================================================================
 
+static bool restorePathContains(const std::filesystem::path& parent,
+                                const std::filesystem::path& child) {
+    auto parentPart = parent.begin();
+    auto childPart = child.begin();
+    for (; parentPart != parent.end(); ++parentPart, ++childPart) {
+        if (childPart == child.end() || *parentPart != *childPart) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool restorePathsOverlap(const std::filesystem::path& first,
+                                const std::filesystem::path& second) {
+    const auto normalizedFirst = std::filesystem::weakly_canonical(
+        std::filesystem::absolute(first));
+    const auto normalizedSecond = std::filesystem::weakly_canonical(
+        std::filesystem::absolute(second));
+    return restorePathContains(normalizedFirst, normalizedSecond) ||
+           restorePathContains(normalizedSecond, normalizedFirst);
+}
+
+static bool validPhysicalBackupSource(const std::filesystem::path& source) {
+    if (!std::filesystem::is_directory(source)) return false;
+    const auto marker = source / kPhysicalBackupMarker;
+    if (!std::filesystem::is_regular_file(marker)) return false;
+    std::ifstream input(marker, std::ios::binary);
+    if (!input) return false;
+    const std::string contents{
+        std::istreambuf_iterator<char>(input),
+        std::istreambuf_iterator<char>()};
+    return contents == "DBMS_PHYSICAL_BACKUP_V1\n";
+}
+
 bool StorageEngine::physicalBackup(const std::string& dbname, const std::string& backupPath) {
     if (!databaseExists(dbname)) return false;
     auto src = dbPath(dbname);
@@ -31789,9 +31823,42 @@ bool StorageEngine::physicalBackup(const std::string& dbname, const std::string&
 
 bool StorageEngine::physicalRestore(const std::string& dbname, const std::string& backupPath) {
     auto src = std::filesystem::path(backupPath);
-    if (!std::filesystem::exists(src)) return false;
     auto dst = dbPath(dbname);
     try {
+        // Validate the complete source and every destructive destination
+        // before removing the current database. In particular, aliases and
+        // parent/child paths must not let remove_all(dst) erase the only
+        // backup copy before directory iteration begins.
+        if (!validPhysicalBackupSource(src) ||
+            restorePathsOverlap(src, dst) ||
+            restorePathsOverlap(src, walArchiveDir(dbname))) {
+            return false;
+        }
+
+        const auto markerSourceDir = src / "pg_tblspc";
+        const auto tablespaceBackup = src / "tablespaces";
+        if (std::filesystem::exists(markerSourceDir)) {
+            if (!std::filesystem::is_directory(markerSourceDir)) return false;
+            for (const auto& marker :
+                 std::filesystem::directory_iterator(markerSourceDir)) {
+                if (!marker.is_regular_file() ||
+                    marker.path().extension() != ".path") {
+                    continue;
+                }
+                std::ifstream in(marker.path());
+                std::string location;
+                if (!std::getline(in, location) || location.empty()) {
+                    return false;
+                }
+                const auto source =
+                    tablespaceBackup / marker.path().stem();
+                if (!std::filesystem::is_directory(source)) return false;
+                const auto relationRoot =
+                    std::filesystem::path(location) / dbname;
+                if (restorePathsOverlap(src, relationRoot)) return false;
+            }
+        }
+
         // Remove existing database if present
         if (std::filesystem::exists(dst)) {
             std::filesystem::remove_all(dst);
@@ -31832,7 +31899,6 @@ bool StorageEngine::physicalRestore(const std::string& dbname, const std::string
         // Restore external relation files after restoring the database
         // directory and its tablespace markers. Keep the marker's location so
         // a physical restore does not silently relocate data.
-        auto tablespaceBackup = src / "tablespaces";
         auto markerDir = dst / "pg_tblspc";
         if (std::filesystem::exists(markerDir) && std::filesystem::exists(tablespaceBackup)) {
             for (const auto& marker : std::filesystem::directory_iterator(markerDir)) {
