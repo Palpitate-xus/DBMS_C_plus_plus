@@ -29267,12 +29267,22 @@ std::vector<std::string> StorageEngine::fullOuterJoin(
     const std::string& rightCol,
     const std::vector<std::string>& conditions,
     const std::set<std::string>& selectCols) {
-    // FULL OUTER JOIN = LEFT JOIN UNION RIGHT JOIN, deduplicate inner rows
+    // FULL OUTER JOIN uses bag semantics.  LEFT and RIGHT each contain the
+    // matched rows, so subtract exactly the INNER multiplicity from RIGHT
+    // before appending it.  A set would also collapse distinct source rows
+    // that happen to render identically.
     auto leftResult = leftJoin(dbname, leftTable, rightTable, leftCol, rightCol, conditions, selectCols);
     auto rightResult = rightJoin(dbname, leftTable, rightTable, leftCol, rightCol, conditions, selectCols);
-    std::set<std::string> seen(leftResult.begin(), leftResult.end());
+    auto innerResult = join(dbname, leftTable, rightTable, leftCol, rightCol, conditions, selectCols);
+    std::unordered_map<std::string, size_t> innerCounts;
+    for (const auto& row : innerResult) ++innerCounts[row];
     for (const auto& r : rightResult) {
-        if (seen.insert(r).second) leftResult.push_back(r);
+        auto it = innerCounts.find(r);
+        if (it != innerCounts.end() && it->second > 0) {
+            --it->second;
+        } else {
+            leftResult.push_back(r);
+        }
     }
     return leftResult;
 }

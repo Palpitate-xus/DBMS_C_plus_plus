@@ -1433,6 +1433,24 @@ def main():
             [None, b"10"], [b"2", b"20"], [b"3", b"30"]
         ], jn_right_rows
 
+        # FULL OUTER JOIN is a bag operation: identical unmatched rows are
+        # separate source rows and must not be collapsed during LEFT/RIGHT
+        # result reconciliation.
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE fb_a (aid INT, k INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE fb_b (bid INT, k INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO fb_a VALUES (1, 1)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO fb_b VALUES (20, 2), (20, 2)"))
+        fb_rows = data_row_values(simple_query(
+            sock, "SELECT aid, bid FROM fb_a FULL OUTER JOIN fb_b "
+            "ON fb_a.k = fb_b.k"))
+        assert fb_rows == [
+            [b"1", None], [None, b"20"], [None, b"20"]
+        ], fb_rows
+
         # Transition tables: REFERENCING OLD TABLE AS <alias> on a
         # statement-level trigger exposes the pre-statement row set to the
         # action SQL as a queryable table.
