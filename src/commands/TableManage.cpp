@@ -20117,7 +20117,8 @@ DBStatus StorageEngine::updateInternal(
     // reused for row-dependent UPDATE expressions so all update entry points
     // share storage-level type normalization and validation.
     auto prepareColumnUpdates = [&](const std::map<std::string, std::string>& source,
-                                     std::map<size_t, std::string>& prepared) -> DBStatus {
+                                     std::map<size_t, std::string>& prepared,
+                                     bool allowGeneratedColumns) -> DBStatus {
         prepared.clear();
         for (const auto& kv : source) {
             bool found = false;
@@ -20126,7 +20127,8 @@ DBStatus StorageEngine::updateInternal(
                     found = true;
                     const Column& col = tbl.cols[i];
                     // GENERATED ALWAYS AS ... columns cannot be directly updated.
-                    if (!col.generatedExpr.empty()) {
+                    if (!allowGeneratedColumns &&
+                        !col.generatedExpr.empty()) {
                         return DBStatus::INVALID_VALUE;
                     }
                     const bool isNullMarker = kv.second == "NULL";
@@ -20320,7 +20322,8 @@ DBStatus StorageEngine::updateInternal(
     };
 
     std::map<size_t, std::string> colUpdates;  // column index -> new value
-    if (const DBStatus status = prepareColumnUpdates(updates, colUpdates);
+    if (const DBStatus status =
+            prepareColumnUpdates(updates, colUpdates, false);
         status != DBStatus::OK) {
         return status;
     }
@@ -20489,7 +20492,7 @@ DBStatus StorageEngine::updateInternal(
                 return DBStatus::INVALID_VALUE;
             }
             const DBStatus prepareStatus = prepareColumnUpdates(
-                effectiveUpdates, colUpdates);
+                effectiveUpdates, colUpdates, false);
             if (prepareStatus != DBStatus::OK) {
                 lockManager_.unlock(tablename);
                 return prepareStatus;
@@ -20513,14 +20516,16 @@ DBStatus StorageEngine::updateInternal(
             if (col.generatedExpr.empty() || col.generatedKind == 'v') continue;
             bool ok = false;
             std::string computed = evalExpressionSql(col.generatedExpr, rowValues, updateTypeHints, dbname, &ok);
-            if (ok) {
-                const bool assignsNull = computed == "NULL";
-                rowValues[col.dataName] =
-                    assignsNull ? std::string() : computed;
-                assignedColumnIndices.insert(i);
-                if (assignsNull) assignedNullColumnIndices.insert(i);
-                else assignedNullColumnIndices.erase(i);
+            if (!ok) {
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
             }
+            const bool assignsNull = computed == "NULL";
+            rowValues[col.dataName] =
+                assignsNull ? std::string() : computed;
+            assignedColumnIndices.insert(i);
+            if (assignsNull) assignedNullColumnIndices.insert(i);
+            else assignedNullColumnIndices.erase(i);
         }
         // Validate ENUM columns in updates
         for (const auto& kv : colUpdates) {
@@ -20678,15 +20683,49 @@ DBStatus StorageEngine::updateInternal(
                 if (col.generatedExpr.empty() || col.generatedKind == 'v') continue;
                 bool ok = false;
                 std::string computed = evalExpressionSql(col.generatedExpr, rowValues, updateTypeHints2, dbname, &ok);
-                if (ok) {
-                    const bool assignsNull = computed == "NULL";
-                    rowValues[col.dataName] =
-                        assignsNull ? std::string() : computed;
-                    assignedColumnIndices.insert(i);
-                    if (assignsNull) assignedNullColumnIndices.insert(i);
-                    else assignedNullColumnIndices.erase(i);
+                if (!ok) {
+                    lockManager_.unlock(tablename);
+                    return DBStatus::INVALID_VALUE;
                 }
+                const bool assignsNull = computed == "NULL";
+                rowValues[col.dataName] =
+                    assignsNull ? std::string() : computed;
+                assignedColumnIndices.insert(i);
+                if (assignsNull) assignedNullColumnIndices.insert(i);
+                else assignedNullColumnIndices.erase(i);
             }
+        }
+
+        // BEFORE triggers and generated expressions own the final NEW image.
+        // Re-run storage-level validation and canonicalization for every
+        // column they (or the original UPDATE) assigned before constructing a
+        // row buffer, where malformed fixed-width values could otherwise be
+        // truncated, converted to sentinels, or throw from stof/stod.
+        std::map<std::string, std::string> finalAssignedValues;
+        for (const size_t columnIndex : assignedColumnIndices) {
+            if (columnIndex >= tbl.len) {
+                lockManager_.unlock(tablename);
+                return DBStatus::CORRUPTED_DATA;
+            }
+            const std::string& columnName = tbl.cols[columnIndex].dataName;
+            finalAssignedValues[columnName] =
+                assignedNullColumnIndices.count(columnIndex) != 0
+                    ? "NULL"
+                    : valueFromRowMap(rowValues, columnName);
+        }
+        std::map<size_t, std::string> finalPreparedValues;
+        const DBStatus finalPrepareStatus = prepareColumnUpdates(
+            finalAssignedValues, finalPreparedValues, true);
+        if (finalPrepareStatus != DBStatus::OK) {
+            lockManager_.unlock(tablename);
+            return finalPrepareStatus;
+        }
+        for (const auto& [columnIndex, value] : finalPreparedValues) {
+            const bool assignsNull = value == "NULL";
+            rowValues[tbl.cols[columnIndex].dataName] =
+                assignsNull ? std::string() : value;
+            if (assignsNull) assignedNullColumnIndices.insert(columnIndex);
+            else assignedNullColumnIndices.erase(columnIndex);
         }
 
         if (!normalizePointColumns(tbl, rowValues)) {
