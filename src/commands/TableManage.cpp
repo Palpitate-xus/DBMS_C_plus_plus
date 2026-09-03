@@ -20208,7 +20208,10 @@ DBStatus StorageEngine::updateInternal(
                 stageExecFunctionCtx(*this, trg.name, trg.timing,
                                   "UPDATE", trg.tableName,
                                   trg.forEachRow, &rowValues, &oldRowValues, &tbl);
-                triggerExecutor_(action);
+                if (triggerExecutor_(action)) {
+                    lockManager_.unlock(tablename);
+                    return DBStatus::IO_ERROR;
+                }
                 // Parse "SET col = val" assignments and apply to rowValues
                 {
                     size_t searchPos = 0;
@@ -21536,7 +21539,9 @@ DBStatus StorageEngine::updateInternal(
                     stageExecFunctionCtx(*this, trg.name, trg.timing,
                                       "UPDATE", trg.tableName,
                                       trg.forEachRow, &newValues, oldImage, &tbl);
-                    triggerExecutor_(action);
+                    if (triggerExecutor_(action)) {
+                        return DBStatus::IO_ERROR;
+                    }
                 }
             } else {
                 // Statement-level trigger: execute once
@@ -21561,7 +21566,9 @@ DBStatus StorageEngine::updateInternal(
                 stageExecFunctionCtx(*this, trg.name, trg.timing,
                                   "UPDATE", trg.tableName,
                                   trg.forEachRow, nullptr, nullptr);
-                triggerExecutor_(action);
+                if (triggerExecutor_(action)) {
+                    return DBStatus::IO_ERROR;
+                }
             }
         }
     }
