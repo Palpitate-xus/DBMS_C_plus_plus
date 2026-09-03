@@ -19414,13 +19414,30 @@ DBStatus StorageEngine::removeInternal(
         ++delIdx;
     }
 
-    // Remove from PK index
-    BPTree* pkIdx = getPKIndex(dbname, tablename);
-    if (pkIdx) {
-        for (const auto& row : logicalRowsToDelete) {
+    // Every expected index entry must be removed successfully. Continuing
+    // after a missing/unavailable access method would commit a heap/index
+    // split; the statement wrapper can instead roll the heap versions back.
+    if (tbl.hasPrimaryKey()) {
+        BPTree* pkIdx = getPKIndex(dbname, tablename);
+        if (!pkIdx) {
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
+        }
+        size_t rowIndex = 0;
+        for (int64_t rid : toDelete) {
+            if (rowIndex >= logicalRowsToDelete.size()) {
+                lockManager_.unlock(tablename);
+                return DBStatus::CORRUPTED_DATA;
+            }
+            const auto& row = logicalRowsToDelete[rowIndex++];
             if (row.empty()) continue;
-            std::string pkVal = extractPKValue(row, tbl);
-            if (!pkVal.empty()) pkIdx->remove(pkVal);
+            const std::string pkVal = extractPKValue(row, tbl);
+            int64_t indexedRid = -1;
+            if (pkVal.empty() || !pkIdx->search(pkVal, indexedRid) ||
+                indexedRid != rid || !pkIdx->remove(pkVal)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::IO_ERROR;
+            }
         }
     }
 
@@ -19429,12 +19446,17 @@ DBStatus StorageEngine::removeInternal(
     {
         size_t rowIndex = 0;
         for (int64_t rid : toDelete) {
-            if (rowIndex >= deleteSecondaryValues.size()) break;
+            if (rowIndex >= deleteSecondaryValues.size()) {
+                lockManager_.unlock(tablename);
+                return DBStatus::CORRUPTED_DATA;
+            }
             for (const auto& entry : deleteSecondaryValues[rowIndex]) {
                 if (!entry.included || entry.key.empty()) continue;
-                if (BPTree* index = getSecondaryIndex(
-                        dbname, tablename, entry.name); index) {
-                    index->removeMulti(entry.key, rid);
+                BPTree* index = getSecondaryIndex(
+                    dbname, tablename, entry.name);
+                if (!index || !index->removeMulti(entry.key, rid)) {
+                    lockManager_.unlock(tablename);
+                    return DBStatus::IO_ERROR;
                 }
             }
             ++rowIndex;
@@ -19444,12 +19466,17 @@ DBStatus StorageEngine::removeInternal(
     {
         size_t rowIndex = 0;
         for (int64_t rid : toDelete) {
-            if (rowIndex >= deleteCompositeValues.size()) break;
+            if (rowIndex >= deleteCompositeValues.size()) {
+                lockManager_.unlock(tablename);
+                return DBStatus::CORRUPTED_DATA;
+            }
             for (const auto& entry : deleteCompositeValues[rowIndex]) {
                 if (!entry.included || entry.key.empty()) continue;
-                if (BPTree* index = getCompositeIndexTree(
-                        dbname, tablename, entry.name); index) {
-                    index->removeMulti(entry.key, rid);
+                BPTree* index = getCompositeIndexTree(
+                    dbname, tablename, entry.name);
+                if (!index || !index->removeMulti(entry.key, rid)) {
+                    lockManager_.unlock(tablename);
+                    return DBStatus::IO_ERROR;
                 }
             }
             ++rowIndex;
@@ -19463,16 +19490,28 @@ DBStatus StorageEngine::removeInternal(
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
             }
-            if (colIdx >= tbl.len) continue;
+            if (colIdx >= tbl.len) {
+                lockManager_.unlock(tablename);
+                return DBStatus::CORRUPTED_DATA;
+            }
             HashIndex* hidx = getHashIndex(dbname, tablename, colname);
-            if (!hidx) continue;
+            if (!hidx) {
+                lockManager_.unlock(tablename);
+                return DBStatus::IO_ERROR;
+            }
             size_t hidx_i = 0;
             for (int64_t rid : toDelete) {
-                if (hidx_i < logicalRowsToDelete.size() &&
-                    !logicalRowsToDelete[hidx_i].empty()) {
+                if (hidx_i >= logicalRowsToDelete.size()) {
+                    lockManager_.unlock(tablename);
+                    return DBStatus::CORRUPTED_DATA;
+                }
+                if (!logicalRowsToDelete[hidx_i].empty()) {
                     std::string val = extractColumnValue(
                         logicalRowsToDelete[hidx_i], tbl, colIdx);
-                    if (!val.empty()) hidx->remove(val, rid);
+                    if (!val.empty() && !hidx->remove(val, rid)) {
+                        lockManager_.unlock(tablename);
+                        return DBStatus::IO_ERROR;
+                    }
                 }
                 ++hidx_i;
             }
@@ -19486,16 +19525,33 @@ DBStatus StorageEngine::removeInternal(
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
             }
-            if (colIdx >= tbl.len) continue;
+            if (colIdx >= tbl.len) {
+                lockManager_.unlock(tablename);
+                return DBStatus::CORRUPTED_DATA;
+            }
             BloomIndex* bidx = getBloomIndex(dbname, tablename, colname);
-            if (!bidx) continue;
+            if (!bidx) {
+                lockManager_.unlock(tablename);
+                return DBStatus::IO_ERROR;
+            }
             size_t bidx_i = 0;
             for (int64_t rid : toDelete) {
-                if (bidx_i < logicalRowsToDelete.size() &&
-                    !logicalRowsToDelete[bidx_i].empty()) {
+                if (bidx_i >= logicalRowsToDelete.size()) {
+                    lockManager_.unlock(tablename);
+                    return DBStatus::CORRUPTED_DATA;
+                }
+                if (!logicalRowsToDelete[bidx_i].empty()) {
                     std::string val = extractColumnValue(
                         logicalRowsToDelete[bidx_i], tbl, colIdx);
-                    if (!val.empty()) bidx->remove(val, rid);
+                    if (!val.empty()) {
+                        const auto indexedRids = bidx->search(val);
+                        if (std::find(indexedRids.begin(), indexedRids.end(),
+                                      rid) == indexedRids.end() ||
+                            !bidx->remove(val, rid)) {
+                            lockManager_.unlock(tablename);
+                            return DBStatus::IO_ERROR;
+                        }
+                    }
                 }
                 ++bidx_i;
             }
@@ -31204,6 +31260,125 @@ void StorageEngine::logTxnDelete(const std::string& tableName, int64_t rowIdx,
     }
 }
 
+bool StorageEngine::restoreDeletedRowIndexes(
+    const std::string& dbname, const std::string& tablename,
+    const TableSchema& tbl, const std::string& rowData, int64_t rid,
+    std::set<BloomIndex*>& bloomUndoIndexes) {
+    bool ok = true;
+    const auto containsRid = [rid](const std::vector<int64_t>& values) {
+        return std::find(values.begin(), values.end(), rid) != values.end();
+    };
+
+    if (tbl.hasPrimaryKey()) {
+        BPTree* primary = getPKIndex(dbname, tablename);
+        const std::string key = extractPKValue(rowData, tbl, dbname);
+        if (!primary || key.empty()) {
+            ok = false;
+        } else {
+            int64_t indexedRid = -1;
+            if (primary->search(key, indexedRid)) {
+                if (indexedRid != rid) ok = false;
+            } else if (!primary->insert(key, rid)) {
+                ok = false;
+            }
+        }
+    }
+
+    for (const auto& metadata : getIndexMetadata(dbname, tablename)) {
+        EvaluatedIndexEntry entry;
+        if (!secondaryIndexEntryFromBuffer(
+                *this, metadata, tbl, rowData, dbname, entry)) {
+            ok = false;
+            continue;
+        }
+        if (!entry.included || entry.key.empty()) continue;
+        BPTree* index = getSecondaryIndex(
+            dbname, tablename, metadata.name);
+        if (!index) {
+            ok = false;
+            continue;
+        }
+        if (!containsRid(index->searchMulti(entry.key)) &&
+            !index->insertMulti(entry.key, rid)) {
+            ok = false;
+        }
+    }
+
+    for (const auto& metadata : getCompositeIndexes(dbname, tablename)) {
+        EvaluatedIndexEntry entry;
+        if (!compositeIndexEntryFromBuffer(
+                *this, metadata, tbl, rowData, dbname, entry)) {
+            ok = false;
+            continue;
+        }
+        if (!entry.included || entry.key.empty()) continue;
+        BPTree* index = getCompositeIndexTree(
+            dbname, tablename, metadata.name);
+        if (!index) {
+            ok = false;
+            continue;
+        }
+        if (!containsRid(index->searchMulti(entry.key)) &&
+            !index->insertMulti(entry.key, rid)) {
+            ok = false;
+        }
+    }
+
+    for (const auto& columnName :
+         getHashIndexedColumns(dbname, tablename)) {
+        size_t columnIndex = tbl.len;
+        for (size_t index = 0; index < tbl.len; ++index) {
+            if (tbl.cols[index].dataName == columnName) {
+                columnIndex = index;
+                break;
+            }
+        }
+        if (columnIndex >= tbl.len) {
+            ok = false;
+            continue;
+        }
+        const std::string value = extractColumnValue(
+            rowData, tbl, columnIndex, dbname);
+        if (value.empty()) continue;
+        HashIndex* index = getHashIndex(dbname, tablename, columnName);
+        if (!index) {
+            ok = false;
+            continue;
+        }
+        if (!containsRid(index->search(value)) && !index->insert(value, rid)) {
+            ok = false;
+        }
+    }
+
+    for (const auto& columnName :
+         getBloomIndexedColumns(dbname, tablename)) {
+        size_t columnIndex = tbl.len;
+        for (size_t index = 0; index < tbl.len; ++index) {
+            if (tbl.cols[index].dataName == columnName) {
+                columnIndex = index;
+                break;
+            }
+        }
+        if (columnIndex >= tbl.len) {
+            ok = false;
+            continue;
+        }
+        const std::string value = extractColumnValue(
+            rowData, tbl, columnIndex, dbname);
+        if (value.empty()) continue;
+        BloomIndex* index = getBloomIndex(dbname, tablename, columnName);
+        if (!index) {
+            ok = false;
+            continue;
+        }
+        bloomUndoIndexes.insert(index);
+        if (!containsRid(index->search(value)) && !index->insert(value, rid)) {
+            ok = false;
+        }
+    }
+    return ok;
+}
+
 // ========================================================================
 // Transaction support (row undo log with opt-in DDL snapshots)
 // ========================================================================
@@ -32576,85 +32751,13 @@ DBStatus StorageEngine::rollbackTransaction() {
                 pa->flush();
                 pa->unpinPage(pageId);
             }
-            // Re-add to indexes
-            BPTree* pkIdx = getPKIndex(transactionContext().txnDB, it->tableName);
-            if (pkIdx) {
-                std::string pkVal = extractPKValue(
-                    it->rowData, tbl, transactionContext().txnDB);
-                if (!pkVal.empty()) pkIdx->insert(pkVal, it->rowIdx);
-            }
-            for (const auto& metadata : getIndexMetadata(
-                     transactionContext().txnDB, it->tableName)) {
-                EvaluatedIndexEntry entry;
-                if (!secondaryIndexEntryFromBuffer(
-                        *this, metadata, tbl, it->rowData,
-                        transactionContext().txnDB, entry)) {
-                    rowUndoOk = false;
-                    continue;
-                }
-                if (!entry.included || entry.key.empty()) continue;
-                BPTree* index = getSecondaryIndex(
-                    transactionContext().txnDB, it->tableName, metadata.name);
-                if (!index ||
-                    !index->insertMulti(entry.key, it->rowIdx)) {
-                    rowUndoOk = false;
-                }
-            }
-            for (const auto& ci : getCompositeIndexes(transactionContext().txnDB, it->tableName)) {
-                EvaluatedIndexEntry entry;
-                if (!compositeIndexEntryFromBuffer(
-                        *this, ci, tbl, it->rowData,
-                        transactionContext().txnDB, entry)) {
-                    rowUndoOk = false;
-                    continue;
-                }
-                if (!entry.included || entry.key.empty()) continue;
-                BPTree* index = getCompositeIndexTree(
-                    transactionContext().txnDB, it->tableName, ci.name);
-                if (!index || !index->insertMulti(entry.key, it->rowIdx)) {
-                    rowUndoOk = false;
-                }
-            }
-            for (const auto& colname : getHashIndexedColumns(transactionContext().txnDB, it->tableName)) {
-                size_t colIdx = tbl.len;
-                for (size_t i = 0; i < tbl.len; ++i) {
-                    if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
-                }
-                if (colIdx >= tbl.len) continue;
-                HashIndex* hashIdx = getHashIndex(
-                    transactionContext().txnDB, it->tableName, colname);
-                if (!hashIdx) continue;
-                std::string value = extractColumnValue(
-                    it->rowData, tbl, colIdx, transactionContext().txnDB);
-                if (!value.empty()) hashIdx->insert(value, it->rowIdx);
-            }
-            for (const auto& colname : getBloomIndexedColumns(
-                     transactionContext().txnDB, it->tableName)) {
-                size_t colIdx = tbl.len;
-                for (size_t i = 0; i < tbl.len; ++i) {
-                    if (tbl.cols[i].dataName == colname) {
-                        colIdx = i;
-                        break;
-                    }
-                }
-                if (colIdx >= tbl.len) {
-                    rowUndoOk = false;
-                    continue;
-                }
-                BloomIndex* bloomIdx = getBloomIndex(
-                    transactionContext().txnDB, it->tableName, colname);
-                const std::string value = extractColumnValue(
-                    it->rowData, tbl, colIdx,
-                    transactionContext().txnDB);
-                if (!bloomIdx) {
-                    rowUndoOk = false;
-                    continue;
-                }
-                bloomUndoIndexes.insert(bloomIdx);
-                if (!value.empty() &&
-                    !bloomIdx->insert(value, it->rowIdx)) {
-                    rowUndoOk = false;
-                }
+            // Some index entries may not have been reached when the DELETE
+            // failed. Restore only missing key/RID pairs so rollback remains
+            // idempotent across a partially applied index-removal sequence.
+            if (!restoreDeletedRowIndexes(
+                    transactionContext().txnDB, it->tableName, tbl,
+                    it->rowData, it->rowIdx, bloomUndoIndexes)) {
+                rowUndoOk = false;
             }
         }
     }
@@ -33961,86 +34064,10 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                 pa->flush();
                 pa->unpinPage(pageId);
             }
-            BPTree* pkIdx = getPKIndex(transactionContext().txnDB, entry.tableName);
-            if (pkIdx) {
-                std::string pkVal = extractPKValue(
-                    entry.rowData, tbl, transactionContext().txnDB);
-                if (!pkVal.empty()) pkIdx->insert(pkVal, entry.rowIdx);
-            }
-            for (const auto& metadata : getIndexMetadata(
-                     transactionContext().txnDB, entry.tableName)) {
-                EvaluatedIndexEntry indexEntry;
-                if (!secondaryIndexEntryFromBuffer(
-                        *this, metadata, tbl, entry.rowData,
-                        transactionContext().txnDB, indexEntry)) {
-                    rowUndoOk = false;
-                    continue;
-                }
-                if (!indexEntry.included || indexEntry.key.empty()) continue;
-                BPTree* index = getSecondaryIndex(
-                    transactionContext().txnDB, entry.tableName,
-                    metadata.name);
-                if (!index ||
-                    !index->insertMulti(indexEntry.key, entry.rowIdx)) {
-                    rowUndoOk = false;
-                }
-            }
-            for (const auto& ci : getCompositeIndexes(transactionContext().txnDB, entry.tableName)) {
-                EvaluatedIndexEntry indexEntry;
-                if (!compositeIndexEntryFromBuffer(
-                        *this, ci, tbl, entry.rowData,
-                        transactionContext().txnDB, indexEntry)) {
-                    rowUndoOk = false;
-                    continue;
-                }
-                if (!indexEntry.included || indexEntry.key.empty()) continue;
-                BPTree* index = getCompositeIndexTree(
-                    transactionContext().txnDB, entry.tableName, ci.name);
-                if (!index ||
-                    !index->insertMulti(indexEntry.key, entry.rowIdx)) {
-                    rowUndoOk = false;
-                }
-            }
-            for (const auto& colname : getHashIndexedColumns(transactionContext().txnDB, entry.tableName)) {
-                size_t colIdx = tbl.len;
-                for (size_t i = 0; i < tbl.len; ++i) {
-                    if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
-                }
-                if (colIdx >= tbl.len) continue;
-                HashIndex* hashIdx = getHashIndex(
-                    transactionContext().txnDB, entry.tableName, colname);
-                if (!hashIdx) continue;
-                std::string value = extractColumnValue(
-                    entry.rowData, tbl, colIdx, transactionContext().txnDB);
-                if (!value.empty()) hashIdx->insert(value, entry.rowIdx);
-            }
-            for (const auto& colname : getBloomIndexedColumns(
-                     transactionContext().txnDB, entry.tableName)) {
-                size_t colIdx = tbl.len;
-                for (size_t i = 0; i < tbl.len; ++i) {
-                    if (tbl.cols[i].dataName == colname) {
-                        colIdx = i;
-                        break;
-                    }
-                }
-                if (colIdx >= tbl.len) {
-                    rowUndoOk = false;
-                    continue;
-                }
-                BloomIndex* bloomIdx = getBloomIndex(
-                    transactionContext().txnDB, entry.tableName, colname);
-                const std::string value = extractColumnValue(
-                    entry.rowData, tbl, colIdx,
-                    transactionContext().txnDB);
-                if (!bloomIdx) {
-                    rowUndoOk = false;
-                    continue;
-                }
-                bloomUndoIndexes.insert(bloomIdx);
-                if (!value.empty() &&
-                    !bloomIdx->insert(value, entry.rowIdx)) {
-                    rowUndoOk = false;
-                }
+            if (!restoreDeletedRowIndexes(
+                    transactionContext().txnDB, entry.tableName, tbl,
+                    entry.rowData, entry.rowIdx, bloomUndoIndexes)) {
+                rowUndoOk = false;
             }
         }
     }

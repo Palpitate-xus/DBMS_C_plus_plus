@@ -1623,6 +1623,10 @@ private:
     void logTxnUpdate(const std::string& tableName, int64_t rowIdx, const std::string& oldRowData);
     void logTxnDelete(const std::string& tableName, int64_t rowIdx, const std::string& oldRowData);
     bool undoVersionedUpdate(const TxnLogEntry& entry);
+    bool restoreDeletedRowIndexes(
+        const std::string& dbname, const std::string& tablename,
+        const TableSchema& tbl, const std::string& rowData, int64_t rid,
+        std::set<BloomIndex*>& bloomUndoIndexes);
     struct SsiIndexPredicate;
     struct SsiIndexKey;
     void recordSsiIndexPredicate(const std::string& dbname, const std::string& tablename,
