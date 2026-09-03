@@ -59,7 +59,14 @@ bool parseDateDays(const std::string& value, int32_t& days) {
 
 bool parseTimestampMicros(const std::string& value, int64_t& micros) {
     const int64_t seconds = parseTimestampToSeconds(value);
-    if (seconds == INT64_MAX || seconds == INT64_MIN) return false;
+    if (seconds == TIMESTAMP_POSITIVE_INFINITY) {
+        micros = INT64_MAX;
+        return true;
+    }
+    if (seconds == TIMESTAMP_NEGATIVE_INFINITY) {
+        micros = INT64_MIN;
+        return true;
+    }
     const int64_t epoch = parseTimestampToSeconds("2000-01-01 00:00:00");
     const __int128 result = (static_cast<__int128>(seconds) - epoch) * 1000000;
     if (result < std::numeric_limits<int64_t>::min() ||

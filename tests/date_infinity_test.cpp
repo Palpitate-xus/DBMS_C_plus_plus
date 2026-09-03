@@ -9,6 +9,7 @@
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include <vector>
 #include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
@@ -31,14 +32,57 @@ static void test_infinity_timestamp() {
     dbms::DdlExecutor ddl;
 
     assert(!ddl.executeSql(
-        "CREATE TABLE t (id INT PRIMARY KEY, ts TIMESTAMP)", s));
+        "CREATE TABLE t (id INT PRIMARY KEY, ts TIMESTAMP, tz TIMESTAMPTZ)",
+        s));
 
-    assert(g_engine.insert(db, "t", {{"id", "1"}, {"ts", "2025-01-01 00:00:00"}}) == dbms::DBStatus::OK);
-    assert(g_engine.insert(db, "t", {{"id", "2"}, {"ts", "infinity"}}) == dbms::DBStatus::OK);
-    assert(g_engine.insert(db, "t", {{"id", "3"}, {"ts", "-infinity"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "t",
+                           {{"id", "1"},
+                            {"ts", "2025-01-01 00:00:00"},
+                            {"tz", "2025-01-01 00:00:00+00:00"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "t",
+                           {{"id", "2"},
+                            {"ts", "infinity"},
+                            {"tz", "infinity"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "t",
+                           {{"id", "3"},
+                            {"ts", "-infinity"},
+                            {"tz", "-infinity"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "t", {{"id", "4"}}) == dbms::DBStatus::OK);
 
     auto rows = g_engine.query(db, "t", {}, {"id", "ts"});
-    assert(rows.size() == 3);
+    assert(rows.size() == 4);
+    assert(g_engine.query(db, "t", {"=id 2"}, {"ts"}) ==
+           std::vector<std::string>{"infinity "});
+    assert(g_engine.query(db, "t", {"=id 3"}, {"ts"}) ==
+           std::vector<std::string>{"-infinity "});
+    assert(g_engine.query(db, "t", {"=id 4"}, {"ts"}) ==
+           std::vector<std::string>{"NULL "});
+
+    assert(g_engine.query(db, "t", {">ts 2025-01-01 00:00:00"}, {"id"}) ==
+           std::vector<std::string>{"2 "});
+    assert(g_engine.query(db, "t", {"<ts 2025-01-01 00:00:00"}, {"id"}) ==
+           std::vector<std::string>{"3 "});
+    assert(g_engine.query(db, "t", {"=ts infinity"}, {"id"}) ==
+           std::vector<std::string>{"2 "});
+    assert(g_engine.query(db, "t", {"=ts -infinity"}, {"id"}) ==
+           std::vector<std::string>{"3 "});
+
+    assert(g_engine.query(db, "t", {"=id 2"}, {"tz"}, {}, false, false,
+                          false, 480) ==
+           std::vector<std::string>{"infinity "});
+    assert(g_engine.query(db, "t", {"=id 3"}, {"tz"}, {}, false, false,
+                          false, -300) ==
+           std::vector<std::string>{"-infinity "});
+
+    assert(g_engine.update(db, "t", {{"ts", "-infinity"}}, {"=id 4"}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.query(db, "t", {"=id 4"}, {"ts"}) ==
+           std::vector<std::string>{"-infinity "});
+    assert(g_engine.update(db, "t", {{"ts", "NULL"}}, {"=id 4"}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.query(db, "t", {"=id 4"}, {"ts"}) ==
+           std::vector<std::string>{"NULL "});
 
     cleanup(db);
     std::cout << "[DATE_INF] infinity timestamp OK" << std::endl;

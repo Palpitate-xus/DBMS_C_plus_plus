@@ -374,6 +374,10 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
         case 1114: case 1184: {
             if (!decodeBinaryUnsigned(raw, 8, bits)) break;
             const int64_t micros = static_cast<int64_t>(bits);
+            if (micros == INT64_MAX)
+                return quoteProtocolText("infinity", error);
+            if (micros == INT64_MIN)
+                return quoteProtocolText("-infinity", error);
             if (micros % 1000000 != 0) break;
             const int64_t epoch = parseTimestampToSeconds("2000-01-01 00:00:00");
             const __int128 seconds = static_cast<__int128>(epoch) + micros / 1000000;

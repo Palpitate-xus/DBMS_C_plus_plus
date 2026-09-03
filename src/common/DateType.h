@@ -10,6 +10,17 @@
 
 constexpr int DAYS[14] = {0, 365, 334, 306, 275, 245, 214, 184, 153, 122, 92, 61, 31, 0};
 
+// INT64_MIN is already the legacy fixed-width NULL marker (INF).  Keep the
+// negative-infinity value distinct so a stored timestamp remains observable
+// even in code paths that do not have a heap null bitmap bound.
+inline constexpr int64_t TIMESTAMP_POSITIVE_INFINITY = INT64_MAX;
+inline constexpr int64_t TIMESTAMP_NEGATIVE_INFINITY = INT64_MIN + int64_t{1};
+
+inline bool isInfiniteTimestamp(int64_t value) {
+    return value == TIMESTAMP_POSITIVE_INFINITY ||
+           value == TIMESTAMP_NEGATIVE_INFINITY;
+}
+
 inline bool parseTemporalUnsigned(std::string_view text, size_t maxDigits,
                                   int& value) {
     if (text.empty() || text.size() > maxDigits) return false;
@@ -227,8 +238,8 @@ inline int64_t parseTimestampToSeconds(const std::string& s) {
     // Support PostgreSQL infinity / -infinity sentinels.
     std::string lower = s;
     for (auto& c : lower) c = std::tolower(static_cast<unsigned char>(c));
-    if (lower == "infinity") return INT64_MAX;
-    if (lower == "-infinity") return INT64_MIN;
+    if (lower == "infinity") return TIMESTAMP_POSITIVE_INFINITY;
+    if (lower == "-infinity") return TIMESTAMP_NEGATIVE_INFINITY;
     if (s.empty()) return 0;
     int tzOffsetMinutes = 0;  // +08:00 => +480, -05:00 => -300
     const size_t sp = s.find(' ');
@@ -288,6 +299,8 @@ inline int64_t parseTimestampToSeconds(const std::string& s) {
 }
 
 inline std::string formatTimestampSeconds(int64_t ts) {
+    if (ts == TIMESTAMP_POSITIVE_INFINITY) return "infinity";
+    if (ts == TIMESTAMP_NEGATIVE_INFINITY) return "-infinity";
     if (ts < 0) return "";
     int64_t dayNum = ts / 86400;
     int64_t sod = ts % 86400;
@@ -324,6 +337,8 @@ inline std::string formatTimestampSeconds(int64_t ts) {
 
 // Format timestamp seconds with timezone offset (e.g. +480 min = Asia/Shanghai)
 inline std::string formatTimestampWithTz(int64_t utcSeconds, int tzOffsetMinutes) {
+    if (isInfiniteTimestamp(utcSeconds))
+        return formatTimestampSeconds(utcSeconds);
     int64_t localSeconds = utcSeconds + tzOffsetMinutes * 60LL;
     if (localSeconds < 0) localSeconds = 0;
     std::string base = formatTimestampSeconds(localSeconds);

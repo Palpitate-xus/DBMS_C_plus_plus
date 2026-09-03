@@ -7280,7 +7280,25 @@ std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer
     } else if (col.dataType == "timestamp" || col.dataType == "timestamptz" || col.dataType == "datetime") {
         int64_t val = 0;
         std::memcpy(&val, rowBuffer.data() + offset, TIMESTAMP_SIZE);
-        return (val == INF || val == 0) ? "" : formatTimestampSeconds(val);
+        if (val == INF) {
+            // Releases before the dedicated timestamp sentinel encoded
+            // -infinity as INF.  A v2 heap null bitmap can distinguish those
+            // rows from SQL NULL, so keep existing databases readable.
+            if (usesHeapTupleHeader(tbl.formatVersion)) {
+                if (g_nullRowEngine && g_nullRowRid >= 0 &&
+                    colIdx < g_nullRowNatts && tbl.tablename == g_nullRowTable) {
+                    return "-infinity";  // a true NULL returned at function entry
+                }
+                if (g_condNullEngine && g_condNullRid >= 0 &&
+                    tbl.tablename == g_condNullTable &&
+                    !g_condNullEngine->isColumnNullByRid(
+                        g_condNullDb, tbl.tablename, g_condNullRid, colIdx)) {
+                    return "-infinity";
+                }
+            }
+            return "";
+        }
+        return val == 0 ? "" : formatTimestampSeconds(val);
     } else if (col.dataType == "time") {
         int32_t val = 0;
         std::memcpy(&val, rowBuffer.data() + offset, sizeof(int32_t));

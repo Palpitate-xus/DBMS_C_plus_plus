@@ -315,6 +315,8 @@ def extended_query_temporal_binary_parameters(sock):
     sample_timestamp = datetime.datetime(2026, 8, 7, 12, 34, 56)
     timestamp_micros = int((sample_timestamp - epoch_timestamp).total_seconds() * 1000000)
     time_micros = (12 * 3600 + 34 * 60 + 56) * 1000000
+    positive_infinity = struct.pack("!q", (1 << 63) - 1)
+    negative_infinity = struct.pack("!q", -(1 << 63))
     uuid_bytes = bytes.fromhex("550e8400e29b41d4a716446655440000")
 
     extended_query_binary_parameter(
@@ -329,6 +331,22 @@ def extended_query_temporal_binary_parameters(sock):
     extended_query_binary_parameter(
         sock, "timestamptz", "SELECT tz FROM protocol_temporal WHERE tz = $1", 1184,
         struct.pack("!q", timestamp_micros), struct.pack("!q", timestamp_micros))
+    extended_query_binary_parameter(
+        sock, "timestamp_pos_inf",
+        "SELECT ts FROM protocol_infinity_pos WHERE ts = $1", 1114,
+        positive_infinity, positive_infinity)
+    extended_query_binary_parameter(
+        sock, "timestamp_neg_inf",
+        "SELECT ts FROM protocol_infinity_neg WHERE ts = $1", 1114,
+        negative_infinity, negative_infinity)
+    extended_query_binary_parameter(
+        sock, "timestamptz_pos_inf",
+        "SELECT tz FROM protocol_infinity_pos WHERE tz = $1", 1184,
+        positive_infinity, positive_infinity)
+    extended_query_binary_parameter(
+        sock, "timestamptz_neg_inf",
+        "SELECT tz FROM protocol_infinity_neg WHERE tz = $1", 1184,
+        negative_infinity, negative_infinity)
     extended_query_binary_parameter(
         sock, "uuid", "SELECT u FROM protocol_temporal WHERE u = $1", 2950,
         uuid_bytes, uuid_bytes)
@@ -776,6 +794,18 @@ def main():
             "('2026-08-07', '12:34:56', '2026-08-07 12:34:56', "
             "'2026-08-07 12:34:56+00:00', "
             "'550e8400-e29b-41d4-a716-446655440000')"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE protocol_infinity_pos "
+            "(ts TIMESTAMP, tz TIMESTAMPTZ)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO protocol_infinity_pos "
+            "VALUES ('infinity', 'infinity')"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE protocol_infinity_neg "
+            "(ts TIMESTAMP, tz TIMESTAMPTZ)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO protocol_infinity_neg "
+            "VALUES ('-infinity', '-infinity')"))
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "CREATE TABLE protocol_numeric (n NUMERIC)"))
         numeric_description = row_description_fields(
