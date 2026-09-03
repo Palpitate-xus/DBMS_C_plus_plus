@@ -534,7 +534,8 @@ static bool parseFiniteDouble(const std::string& input, double& value) {
     return parseDoubleLiteral(input, value) && std::isfinite(value);
 }
 
-static std::string formatPointCoordinate(double value) {
+template <typename Floating>
+static std::string formatFloatingValue(Floating value) {
     char buffer[64];
     const auto converted = std::to_chars(
         buffer, buffer + sizeof(buffer), value, std::chars_format::general);
@@ -544,8 +545,13 @@ static std::string formatPointCoordinate(double value) {
     // libstdc++ implementations with incomplete floating-point to_chars
     // support still get a lossless fallback.
     std::ostringstream out;
-    out << std::setprecision(std::numeric_limits<double>::max_digits10) << value;
+    out << std::setprecision(std::numeric_limits<Floating>::max_digits10)
+        << value;
     return out.str();
+}
+
+static std::string formatPointCoordinate(double value) {
+    return formatFloatingValue(value);
 }
 
 static bool normalizePointLiteral(const std::string& input, std::string& output,
@@ -7322,15 +7328,11 @@ std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer
     } else if (col.dataType == "float") {
         float val = 0.0f;
         std::memcpy(&val, rowBuffer.data() + offset, sizeof(float));
-        std::ostringstream oss;
-        oss << val;
-        return oss.str();
+        return formatFloatingValue(val);
     } else if (col.dataType == "double" || col.dataType == "decimal" || col.dataType == "numeric") {
         double val = 0.0;
         std::memcpy(&val, rowBuffer.data() + offset, sizeof(double));
-        std::ostringstream oss;
-        oss << val;
-        return oss.str();
+        return formatFloatingValue(val);
     } else if (col.dataType == "point") {
         double x = 0.0, y = 0.0;
         std::memcpy(&x, rowBuffer.data() + offset, sizeof(double));
