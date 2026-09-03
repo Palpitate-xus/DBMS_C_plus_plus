@@ -31,6 +31,9 @@ bool execute(const std::string& sql, Session& session) {
 bool checkAdmin(const Session& s) { (void)s; return true; }
 bool checkDB(const Session& s) { (void)s; return s.currentDB.empty() ? false : true; }
 std::string resolveTableName(Session& s, const std::string& name) {
+    if (s.tempTables.count(name) || s.transientTempTables.count(name)) {
+        return tempTablePrefix(s, name);
+    }
     const size_t dot = name.find('.');
     if (dot != std::string::npos && dot > 0 && dot + 1 < name.size()) {
         const std::string schema = name.substr(0, dot);

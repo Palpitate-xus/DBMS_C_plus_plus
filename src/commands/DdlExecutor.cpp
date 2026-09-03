@@ -629,7 +629,10 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
     if (!ownerOnly && !checkAdmin(s)) return true;
 
     if (!checkAndImplicitCommit(s)) return true;
+    const bool tableIsTemporary =
+        s.tempTables.count(stmt->tableName) != 0;
     const std::string tableName = resolveTableName(s, stmt->tableName);
+    std::string pendingTemporaryRename;
 
     // ALTER TABLE actions can rewrite schemas, indexes, parameters, and
     // relation files directly; the row-level undo log cannot restore those
@@ -754,33 +757,39 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 }
                 const auto qualifiedName =
                     dbms::CatalogService::logicalName(tableName);
-                const std::string physicalNewName = qualifiedName.schema.empty()
-                    ? sub.newName
-                    : qualifiedName.schema + "__" + sub.newName;
+                const std::string physicalNewName = tableIsTemporary
+                    ? tempTablePrefix(s, sub.newName)
+                    : (qualifiedName.schema.empty()
+                           ? sub.newName
+                           : qualifiedName.schema + "__" + sub.newName);
                 status = g_engine.alterTableRenameTable(
                     s.currentDB, tableName, physicalNewName);
                 if (!alterStatusOk(status, "Table")) return true;
-                try {
-                    dbms::CatalogManager& catalog =
-                        g_engine.catalogService().get(s.currentDB);
-                    const std::string schemaName = qualifiedName.schema.empty()
-                        ? "public"
-                        : qualifiedName.schema;
-                    const auto* relation = catalog.resolveRelation(
-                        qualifiedName.name, {schemaName});
-                    if (relation) {
-                        const dbms::Oid relationOid = relation->oid;
-                        if (!catalog.renameClass(relationOid, sub.newName) ||
-                            !catalog.persistAll()) {
-                            std::cout << "ALTER TABLE RENAME catalog update failed"
-                                      << std::endl;
-                            return true;
+                if (tableIsTemporary) {
+                    pendingTemporaryRename = sub.newName;
+                } else {
+                    try {
+                        dbms::CatalogManager& catalog =
+                            g_engine.catalogService().get(s.currentDB);
+                        const std::string schemaName = qualifiedName.schema.empty()
+                            ? "public"
+                            : qualifiedName.schema;
+                        const auto* relation = catalog.resolveRelation(
+                            qualifiedName.name, {schemaName});
+                        if (relation) {
+                            const dbms::Oid relationOid = relation->oid;
+                            if (!catalog.renameClass(relationOid, sub.newName) ||
+                                !catalog.persistAll()) {
+                                std::cout << "ALTER TABLE RENAME catalog update failed"
+                                          << std::endl;
+                                return true;
+                            }
                         }
+                    } catch (const std::exception& e) {
+                        std::cerr << "ALTER TABLE RENAME catalog update failed: "
+                                  << e.what() << std::endl;
+                        return true;
                     }
-                } catch (const std::exception& e) {
-                    std::cerr << "ALTER TABLE RENAME catalog update failed: "
-                              << e.what() << std::endl;
-                    return true;
                 }
                 break;
             }
@@ -1246,9 +1255,44 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 return true;
         }
     }
-    std::cout << "ALTER TABLE succeeded" << std::endl;
     txn.recordUpdate(DdlObjectKind::Table, tableName);
-    if (!txn.commit()) return true;
+    bool temporarySessionRenamed = false;
+    bool hadOnCommitAction = false;
+    bool wasCreatedInTransaction = false;
+    std::string onCommitAction;
+    if (tableIsTemporary && !pendingTemporaryRename.empty()) {
+        s.tempTables.erase(stmt->tableName);
+        s.tempTables.insert(pendingTemporaryRename);
+        const auto action = s.tempTableOnCommit.find(stmt->tableName);
+        if (action != s.tempTableOnCommit.end()) {
+            hadOnCommitAction = true;
+            onCommitAction = action->second;
+            s.tempTableOnCommit.erase(action);
+            s.tempTableOnCommit[pendingTemporaryRename] = onCommitAction;
+        }
+        wasCreatedInTransaction =
+            s.tempTablesCreatedInTransaction.erase(stmt->tableName) != 0;
+        if (wasCreatedInTransaction) {
+            s.tempTablesCreatedInTransaction.insert(pendingTemporaryRename);
+        }
+        temporarySessionRenamed = true;
+    }
+    if (!txn.commit()) {
+        if (temporarySessionRenamed) {
+            s.tempTables.erase(pendingTemporaryRename);
+            s.tempTables.insert(stmt->tableName);
+            s.tempTableOnCommit.erase(pendingTemporaryRename);
+            if (hadOnCommitAction) {
+                s.tempTableOnCommit[stmt->tableName] = onCommitAction;
+            }
+            s.tempTablesCreatedInTransaction.erase(pendingTemporaryRename);
+            if (wasCreatedInTransaction) {
+                s.tempTablesCreatedInTransaction.insert(stmt->tableName);
+            }
+        }
+        return true;
+    }
+    std::cout << "ALTER TABLE succeeded" << std::endl;
     return false;
 }
 
