@@ -968,6 +968,9 @@ public:
                                                       const char* data, size_t len)>& callback,
                              const ReadView* readView = nullptr) const;
     bool readRowByRid(PageAllocator* pa, int64_t rid, std::string& rowBuffer, const TableSchema& tbl) const;
+    bool readRowByRid(PageAllocator* pa, int64_t rid,
+                      std::string& rowBuffer, const TableSchema& tbl,
+                      std::vector<bool>* nullColumns) const;
     bool readVisibleRowByRid(const std::string& dbname, PageAllocator* pa, int64_t rid,
                              std::string& rowBuffer, const TableSchema& tbl,
                              const ReadView* readView = nullptr,

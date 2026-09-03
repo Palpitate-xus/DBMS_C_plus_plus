@@ -201,6 +201,8 @@ void assertSetNullState(StorageEngine& engine, const std::string& id,
     assert(row.at("payload") == kPayload);
 
     const int64_t rid = primaryRid(engine, "nullable_child", id);
+    assert(engine.isColumnNullByRid(
+        kDatabase, "nullable_child", rid, 1));
     BPTree* secondary = engine.getSecondaryIndex(
         kDatabase, "nullable_child", "parent_id");
     HashIndex* hash = engine.getHashIndex(
