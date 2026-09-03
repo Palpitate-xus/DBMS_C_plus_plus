@@ -21214,16 +21214,39 @@ DBStatus StorageEngine::updateInternal(
             deleteToastForRow(dbname, tablename, row);
         }
 
-        // Update PK index if PK was updated or RID changed
-        BPTree* pkIdx = getPKIndex(dbname, tablename);
-        if (pkIdx) {
+        const auto containsIndexRid = [](const std::vector<int64_t>& values,
+                                         int64_t expectedRid) {
+            return std::find(values.begin(), values.end(), expectedRid) !=
+                   values.end();
+        };
+        const auto indexMaintenanceFailure = [&]() {
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
+        };
+
+        // Update PK index if PK was updated or RID changed. Every expected
+        // OLD mapping must exist and every mutation must complete; otherwise
+        // the statement savepoint restores the heap and all earlier indexes.
+        if (tbl.hasPrimaryKey()) {
+            BPTree* pkIdx = getPKIndex(dbname, tablename);
+            if (!pkIdx || !pkIdx->isOpen() || oldPK.empty() || newPK.empty()) {
+                return indexMaintenanceFailure();
+            }
             if (oldPK != newPK) {
-                if (!oldPK.empty()) pkIdx->remove(oldPK);
-                if (!newPK.empty()) pkIdx->insert(newPK, actualRid);
-            } else if (actualRid != rid && !newPK.empty()) {
+                int64_t indexedRid = -1;
+                if (!pkIdx->search(oldPK, indexedRid) || indexedRid != rid ||
+                    !pkIdx->remove(oldPK) ||
+                    !pkIdx->insert(newPK, actualRid)) {
+                    return indexMaintenanceFailure();
+                }
+            } else if (actualRid != rid) {
                 // RID changed but PK same: re-insert with new RID
-                pkIdx->remove(newPK);
-                pkIdx->insert(newPK, actualRid);
+                int64_t indexedRid = -1;
+                if (!pkIdx->search(newPK, indexedRid) || indexedRid != rid ||
+                    !pkIdx->remove(newPK) ||
+                    !pkIdx->insert(newPK, actualRid)) {
+                    return indexMaintenanceFailure();
+                }
             }
         }
 
@@ -21232,24 +21255,43 @@ DBStatus StorageEngine::updateInternal(
         for (const auto& transition : secondaryIndexTransitions) {
             BPTree* index = getSecondaryIndex(
                 dbname, tablename, transition.newEntry.name);
-            if (!index) continue;
+            if (!index || !index->isOpen()) {
+                return indexMaintenanceFailure();
+            }
             const bool keyChanged =
                 transition.oldEntry.included != transition.newEntry.included ||
                 transition.oldEntry.key != transition.newEntry.key;
             if (keyChanged) {
                 if (transition.oldEntry.included &&
                     !transition.oldEntry.key.empty()) {
-                    index->removeMulti(transition.oldEntry.key, rid);
+                    if (!containsIndexRid(
+                            index->searchMulti(transition.oldEntry.key), rid) ||
+                        !index->removeMulti(transition.oldEntry.key, rid)) {
+                        return indexMaintenanceFailure();
+                    }
                 }
                 if (transition.newEntry.included &&
                     !transition.newEntry.key.empty()) {
-                    index->insertMulti(
-                        transition.newEntry.key, actualRid);
+                    if (containsIndexRid(
+                            index->searchMulti(transition.newEntry.key),
+                            actualRid) ||
+                        !index->insertMulti(
+                            transition.newEntry.key, actualRid)) {
+                        return indexMaintenanceFailure();
+                    }
                 }
             } else if (actualRid != rid && transition.newEntry.included &&
                        !transition.newEntry.key.empty()) {
-                index->removeMulti(transition.newEntry.key, rid);
-                index->insertMulti(transition.newEntry.key, actualRid);
+                if (!containsIndexRid(
+                        index->searchMulti(transition.newEntry.key), rid) ||
+                    !index->removeMulti(transition.newEntry.key, rid) ||
+                    containsIndexRid(
+                        index->searchMulti(transition.newEntry.key),
+                        actualRid) ||
+                    !index->insertMulti(
+                        transition.newEntry.key, actualRid)) {
+                    return indexMaintenanceFailure();
+                }
             }
         }
 
@@ -21265,24 +21307,43 @@ DBStatus StorageEngine::updateInternal(
         for (const auto& transition : compositeIndexTransitions) {
             BPTree* index = getCompositeIndexTree(
                 dbname, tablename, transition.newEntry.name);
-            if (!index) continue;
+            if (!index || !index->isOpen()) {
+                return indexMaintenanceFailure();
+            }
             const bool keyChanged =
                 transition.oldEntry.included != transition.newEntry.included ||
                 transition.oldEntry.key != transition.newEntry.key;
             if (keyChanged) {
                 if (transition.oldEntry.included &&
                     !transition.oldEntry.key.empty()) {
-                    index->removeMulti(transition.oldEntry.key, rid);
+                    if (!containsIndexRid(
+                            index->searchMulti(transition.oldEntry.key), rid) ||
+                        !index->removeMulti(transition.oldEntry.key, rid)) {
+                        return indexMaintenanceFailure();
+                    }
                 }
                 if (transition.newEntry.included &&
                     !transition.newEntry.key.empty()) {
-                    index->insertMulti(
-                        transition.newEntry.key, actualRid);
+                    if (containsIndexRid(
+                            index->searchMulti(transition.newEntry.key),
+                            actualRid) ||
+                        !index->insertMulti(
+                            transition.newEntry.key, actualRid)) {
+                        return indexMaintenanceFailure();
+                    }
                 }
             } else if (actualRid != rid && transition.newEntry.included &&
                        !transition.newEntry.key.empty()) {
-                index->removeMulti(transition.newEntry.key, rid);
-                index->insertMulti(transition.newEntry.key, actualRid);
+                if (!containsIndexRid(
+                        index->searchMulti(transition.newEntry.key), rid) ||
+                    !index->removeMulti(transition.newEntry.key, rid) ||
+                    containsIndexRid(
+                        index->searchMulti(transition.newEntry.key),
+                        actualRid) ||
+                    !index->insertMulti(
+                        transition.newEntry.key, actualRid)) {
+                    return indexMaintenanceFailure();
+                }
             }
         }
 
@@ -21293,19 +21354,36 @@ DBStatus StorageEngine::updateInternal(
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
             }
-            if (colIdx >= tbl.len) continue;
+            if (colIdx >= tbl.len) {
+                lockManager_.unlock(tablename);
+                return DBStatus::CORRUPTED_DATA;
+            }
             HashIndex* hidx = getHashIndex(dbname, tablename, colname);
-            if (!hidx) continue;
+            if (!hidx || !hidx->isOpen()) {
+                return indexMaintenanceFailure();
+            }
             auto itOld = oldIdxVals.find(colname);
             std::string oldVal = (itOld != oldIdxVals.end()) ? itOld->second : "";
             std::string newVal = valueFromRowMap(rowValues, colname);
             bool colChanged = (colUpdates.find(colIdx) != colUpdates.end());
             if (colChanged && oldVal != newVal) {
-                if (!oldVal.empty()) hidx->remove(oldVal, rid);
-                if (!newVal.empty()) hidx->insert(newVal, actualRid);
+                if (!oldVal.empty() &&
+                    (!containsIndexRid(hidx->search(oldVal), rid) ||
+                     !hidx->remove(oldVal, rid))) {
+                    return indexMaintenanceFailure();
+                }
+                if (!newVal.empty() &&
+                    (containsIndexRid(hidx->search(newVal), actualRid) ||
+                     !hidx->insert(newVal, actualRid))) {
+                    return indexMaintenanceFailure();
+                }
             } else if (actualRid != rid && !newVal.empty()) {
-                hidx->remove(newVal, rid);
-                hidx->insert(newVal, actualRid);
+                if (!containsIndexRid(hidx->search(newVal), rid) ||
+                    !hidx->remove(newVal, rid) ||
+                    containsIndexRid(hidx->search(newVal), actualRid) ||
+                    !hidx->insert(newVal, actualRid)) {
+                    return indexMaintenanceFailure();
+                }
             }
         }
 
@@ -21316,19 +21394,36 @@ DBStatus StorageEngine::updateInternal(
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
             }
-            if (colIdx >= tbl.len) continue;
+            if (colIdx >= tbl.len) {
+                lockManager_.unlock(tablename);
+                return DBStatus::CORRUPTED_DATA;
+            }
             BloomIndex* bidx = getBloomIndex(dbname, tablename, colname);
-            if (!bidx) continue;
+            if (!bidx || !bidx->isOpen()) {
+                return indexMaintenanceFailure();
+            }
             auto itOld = oldIdxVals.find(colname);
             std::string oldVal = (itOld != oldIdxVals.end()) ? itOld->second : "";
             std::string newVal = valueFromRowMap(rowValues, colname);
             bool colChanged = (colUpdates.find(colIdx) != colUpdates.end());
             if (colChanged && oldVal != newVal) {
-                if (!oldVal.empty()) bidx->remove(oldVal, rid);
-                if (!newVal.empty()) bidx->insert(newVal, actualRid);
+                if (!oldVal.empty() &&
+                    (!containsIndexRid(bidx->search(oldVal), rid) ||
+                     !bidx->remove(oldVal, rid))) {
+                    return indexMaintenanceFailure();
+                }
+                if (!newVal.empty() &&
+                    (containsIndexRid(bidx->search(newVal), actualRid) ||
+                     !bidx->insert(newVal, actualRid))) {
+                    return indexMaintenanceFailure();
+                }
             } else if (actualRid != rid && !newVal.empty()) {
-                bidx->remove(newVal, rid);
-                bidx->insert(newVal, actualRid);
+                if (!containsIndexRid(bidx->search(newVal), rid) ||
+                    !bidx->remove(newVal, rid) ||
+                    containsIndexRid(bidx->search(newVal), actualRid) ||
+                    !bidx->insert(newVal, actualRid)) {
+                    return indexMaintenanceFailure();
+                }
             }
         }
 
@@ -32240,84 +32335,128 @@ bool StorageEngine::undoVersionedUpdate(const TxnLogEntry& entry) {
     if (!heapOk || !pa->flush()) return false;
 
     bool indexesOk = true;
-    if (BPTree* index = getPKIndex(dbname, tablename); index) {
+    const auto containsRid = [](const std::vector<int64_t>& values,
+                                int64_t rid) {
+        return std::find(values.begin(), values.end(), rid) != values.end();
+    };
+    if (tbl.hasPrimaryKey()) {
+        BPTree* index = getPKIndex(dbname, tablename);
         const std::string currentKey = extractPKValue(currentRow, tbl, dbname);
         const std::string previousKey =
             extractPKValue(entry.rowData, tbl, dbname);
-        if (!currentKey.empty() && !index->remove(currentKey)) {
+        if (!index || !index->isOpen() || currentKey.empty() ||
+            previousKey.empty()) {
             indexesOk = false;
+        } else {
+            // Forward index maintenance may have failed before inserting NEW
+            // (or even before removing OLD). Undo only mutations that are
+            // actually present, then restore OLD only when it is absent.
+            int64_t indexedRid = -1;
+            if (index->search(currentKey, indexedRid) &&
+                indexedRid == entry.rowIdx &&
+                !index->remove(currentKey)) {
+                indexesOk = false;
+            }
+
+            indexedRid = -1;
+            if (index->search(previousKey, indexedRid)) {
+                if (indexedRid != entry.previousRowIdx) indexesOk = false;
+            } else if (!index->insert(
+                           previousKey, entry.previousRowIdx)) {
+                indexesOk = false;
+            }
+            if (!index->flush()) indexesOk = false;
         }
-        if (!previousKey.empty() &&
-            !index->insert(previousKey, entry.previousRowIdx)) {
-            indexesOk = false;
-        }
-        if (!index->flush()) indexesOk = false;
     }
 
     for (const auto& undo : secondaryEntries) {
         BPTree* index = getSecondaryIndex(dbname, tablename, undo.name);
-        if (!index) {
+        if (!index || !index->isOpen()) {
             indexesOk = false;
             continue;
         }
-        if (undo.current.included && !undo.current.key.empty() &&
-            !index->removeMulti(undo.current.key, entry.rowIdx)) {
-            indexesOk = false;
+        if (undo.current.included && !undo.current.key.empty()) {
+            const auto currentRids = index->searchMulti(undo.current.key);
+            if (containsRid(currentRids, entry.rowIdx) &&
+                !index->removeMulti(undo.current.key, entry.rowIdx)) {
+                indexesOk = false;
+            }
         }
-        if (undo.previous.included && !undo.previous.key.empty() &&
-            !index->insertMulti(
-                undo.previous.key, entry.previousRowIdx)) {
-            indexesOk = false;
+        if (undo.previous.included && !undo.previous.key.empty()) {
+            const auto previousRids = index->searchMulti(undo.previous.key);
+            if (!containsRid(previousRids, entry.previousRowIdx) &&
+                !index->insertMulti(
+                    undo.previous.key, entry.previousRowIdx)) {
+                indexesOk = false;
+            }
         }
         if (!index->flush()) indexesOk = false;
     }
     for (const auto& undo : compositeEntries) {
         BPTree* index = getCompositeIndexTree(
             dbname, tablename, undo.name);
-        if (!index) {
+        if (!index || !index->isOpen()) {
             indexesOk = false;
             continue;
         }
-        if (undo.current.included && !undo.current.key.empty() &&
-            !index->removeMulti(undo.current.key, entry.rowIdx)) {
-            indexesOk = false;
+        if (undo.current.included && !undo.current.key.empty()) {
+            const auto currentRids = index->searchMulti(undo.current.key);
+            if (containsRid(currentRids, entry.rowIdx) &&
+                !index->removeMulti(undo.current.key, entry.rowIdx)) {
+                indexesOk = false;
+            }
         }
-        if (undo.previous.included && !undo.previous.key.empty() &&
-            !index->insertMulti(
-                undo.previous.key, entry.previousRowIdx)) {
-            indexesOk = false;
+        if (undo.previous.included && !undo.previous.key.empty()) {
+            const auto previousRids = index->searchMulti(undo.previous.key);
+            if (!containsRid(previousRids, entry.previousRowIdx) &&
+                !index->insertMulti(
+                    undo.previous.key, entry.previousRowIdx)) {
+                indexesOk = false;
+            }
         }
         if (!index->flush()) indexesOk = false;
     }
     for (const auto& [columnName, values] : hashValues) {
         HashIndex* index = getHashIndex(dbname, tablename, columnName);
-        if (!index) {
+        if (!index || !index->isOpen()) {
             indexesOk = false;
             continue;
         }
-        if (!values.first.empty() &&
-            !index->remove(values.first, entry.rowIdx)) {
-            indexesOk = false;
+        if (!values.first.empty()) {
+            const auto currentRids = index->search(values.first);
+            if (containsRid(currentRids, entry.rowIdx) &&
+                !index->remove(values.first, entry.rowIdx)) {
+                indexesOk = false;
+            }
         }
-        if (!values.second.empty() &&
-            !index->insert(values.second, entry.previousRowIdx)) {
-            indexesOk = false;
+        if (!values.second.empty()) {
+            const auto previousRids = index->search(values.second);
+            if (!containsRid(previousRids, entry.previousRowIdx) &&
+                !index->insert(values.second, entry.previousRowIdx)) {
+                indexesOk = false;
+            }
         }
         if (!index->flush()) indexesOk = false;
     }
     for (const auto& [columnName, values] : bloomValues) {
         BloomIndex* index = getBloomIndex(dbname, tablename, columnName);
-        if (!index) {
+        if (!index || !index->isOpen()) {
             indexesOk = false;
             continue;
         }
-        if (!values.first.empty() &&
-            !index->remove(values.first, entry.rowIdx)) {
-            indexesOk = false;
+        if (!values.first.empty()) {
+            const auto currentRids = index->search(values.first);
+            if (containsRid(currentRids, entry.rowIdx) &&
+                !index->remove(values.first, entry.rowIdx)) {
+                indexesOk = false;
+            }
         }
-        if (!values.second.empty() &&
-            !index->insert(values.second, entry.previousRowIdx)) {
-            indexesOk = false;
+        if (!values.second.empty()) {
+            const auto previousRids = index->search(values.second);
+            if (!containsRid(previousRids, entry.previousRowIdx) &&
+                !index->insert(values.second, entry.previousRowIdx)) {
+                indexesOk = false;
+            }
         }
         if (!index->flush()) indexesOk = false;
     }
