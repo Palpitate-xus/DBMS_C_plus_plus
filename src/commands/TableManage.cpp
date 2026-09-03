@@ -14593,6 +14593,45 @@ DBStatus StorageEngine::alterTableAddCheckConstraint(const std::string& dbname,
         }
     }
 
+    // CHECK constraints apply to the whole relation immediately. Validate
+    // every visible row before publishing the expression so ALTER cannot
+    // leave pre-existing rows that violate the newly advertised invariant.
+    const auto typeHints = buildTypeHints(tbl);
+    bool violation = false;
+    const bool scanOk = forEachRow(
+        dbname, tablename,
+        [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
+            if (violation) return;
+            const int64_t rid = encodeRid(pageId, slotId);
+            const std::string row(data, len);
+            std::map<std::string, std::string> rowValues;
+            for (size_t columnIndex = 0;
+                 columnIndex < tbl.len; ++columnIndex) {
+                if (tbl.cols[columnIndex].isNull &&
+                    isColumnNullByRid(
+                        dbname, tablename, rid, columnIndex)) {
+                    rowValues[tbl.cols[columnIndex].dataName] = "";
+                } else {
+                    rowValues[tbl.cols[columnIndex].dataName] =
+                        extractColumnValue(
+                            row, tbl, columnIndex, dbname);
+                }
+            }
+            std::string evaluationError;
+            if (!dbms::ExprHelper::evalBool(
+                    expr, rowValues, typeHints, &evaluationError, dbname)) {
+                violation = true;
+            }
+        });
+    if (!scanOk) {
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
+    }
+    if (violation) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
+
     tbl.cols[targetCol].checkExpr = expr;
     tbl.cols[targetCol].checkConstraintName = name;
     writeSchemaFile(dbname, tablename, tbl);
