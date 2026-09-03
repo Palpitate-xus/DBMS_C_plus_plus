@@ -1357,6 +1357,47 @@ def main():
             "ON jo_plain.x = l.x"))
         assert jo_left == [[b"1", b"2"]], jo_left
 
+        # Equality joins must keep SQL NULL distinct from both another NULL
+        # and a real empty string.  Previously the heap payload discarded the
+        # null bitmap, so NULL = NULL and NULL = '' could both match.
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE nk_a (aid INT PRIMARY KEY, k TEXT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE nk_b (bid INT PRIMARY KEY, k TEXT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO nk_a VALUES (1, NULL), (2, ''), (3, 'x')"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO nk_b VALUES (10, NULL), (20, ''), (30, 'x')"))
+        jn_left_data = data_row_values(simple_query(
+            sock, "SELECT aid, k FROM nk_a"))
+        assert jn_left_data == [
+            [b"1", None], [b"2", b""], [b"3", b"x"]
+        ], jn_left_data
+        jn_right_data = data_row_values(simple_query(
+            sock, "SELECT bid, k FROM nk_b"))
+        assert jn_right_data == [
+            [b"10", None], [b"20", b""], [b"30", b"x"]
+        ], jn_right_data
+        jn_inner_response = simple_query(
+            sock, "SELECT aid, bid FROM nk_a JOIN nk_b "
+            "ON nk_a.k = nk_b.k")
+        assert not any(kind == b"E" for kind, _ in jn_inner_response), \
+            jn_inner_response
+        jn_inner = data_row_values(jn_inner_response)
+        assert jn_inner == [[b"2", b"20"], [b"3", b"30"]], jn_inner
+        jn_left_rows = data_row_values(simple_query(
+            sock, "SELECT aid, bid FROM nk_a LEFT JOIN nk_b "
+            "ON nk_a.k = nk_b.k"))
+        assert jn_left_rows == [
+            [b"1", None], [b"2", b"20"], [b"3", b"30"]
+        ], jn_left_rows
+        jn_right_rows = data_row_values(simple_query(
+            sock, "SELECT aid, bid FROM nk_a RIGHT JOIN nk_b "
+            "ON nk_a.k = nk_b.k"))
+        assert jn_right_rows == [
+            [None, b"10"], [b"2", b"20"], [b"3", b"30"]
+        ], jn_right_rows
+
         # Transition tables: REFERENCING OLD TABLE AS <alias> on a
         # statement-level trigger exposes the pre-statement row set to the
         # action SQL as a queryable table.

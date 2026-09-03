@@ -28659,10 +28659,19 @@ std::vector<std::string> StorageEngine::join(
     TableSchema leftTbl = getTableSchema(dbname, leftTable);
     TableSchema rightTbl = getTableSchema(dbname, rightTable);
 
-    // Read all rows from left table
-    std::vector<std::string> leftRows;
-    if (!forEachRow(dbname, leftTable, [&leftRows](uint32_t, uint16_t, const char* data, size_t len) {
-        leftRows.emplace_back(data, len);
+    struct JoinRow {
+        std::string data;
+        int64_t rid = 0;
+        bool joinKeyNull = false;
+    };
+
+    // Keep the physical row identity with buffered data.  The payload alone
+    // cannot distinguish SQL NULL from an empty string after the heap header
+    // (and its null bitmap) has been stripped.
+    std::vector<JoinRow> leftRows;
+    if (!forEachRow(dbname, leftTable, [&](uint32_t pageId, uint16_t slotId,
+                                           const char* data, size_t len) {
+        leftRows.push_back({std::string(data, len), encodeRid(pageId, slotId)});
     })) {
         lockManager_.unlock(leftTable);
         lockManager_.unlock(rightTable);
@@ -28670,9 +28679,10 @@ std::vector<std::string> StorageEngine::join(
     }
 
     // Read all rows from right table
-    std::vector<std::string> rightRows;
-    if (!forEachRow(dbname, rightTable, [&rightRows](uint32_t, uint16_t, const char* data, size_t len) {
-        rightRows.emplace_back(data, len);
+    std::vector<JoinRow> rightRows;
+    if (!forEachRow(dbname, rightTable, [&](uint32_t pageId, uint16_t slotId,
+                                            const char* data, size_t len) {
+        rightRows.push_back({std::string(data, len), encodeRid(pageId, slotId)});
     })) {
         lockManager_.unlock(leftTable);
         lockManager_.unlock(rightTable);
@@ -28787,15 +28797,17 @@ std::vector<std::string> StorageEngine::join(
 
     if (!leftConds.empty()) {
         leftRows.erase(std::remove_if(leftRows.begin(), leftRows.end(),
-            [&](const std::string& row) {
-                for (const auto& c : leftConds) if (!evalSingleCond(c, row, leftTbl)) return true;
+            [&](const JoinRow& row) {
+                for (const auto& c : leftConds)
+                    if (!evalSingleCond(c, row.data, leftTbl)) return true;
                 return false;
             }), leftRows.end());
     }
     if (!rightConds.empty()) {
         rightRows.erase(std::remove_if(rightRows.begin(), rightRows.end(),
-            [&](const std::string& row) {
-                for (const auto& c : rightConds) if (!evalSingleCond(c, row, rightTbl)) return true;
+            [&](const JoinRow& row) {
+                for (const auto& c : rightConds)
+                    if (!evalSingleCond(c, row.data, rightTbl)) return true;
                 return false;
             }), rightRows.end());
     }
@@ -28810,27 +28822,46 @@ std::vector<std::string> StorageEngine::join(
         if (rightTbl.cols[i].dataName == rightCol) { rightColIdx = i; break; }
     }
 
+    if (leftColIdx < leftTbl.len) {
+        for (auto& row : leftRows) {
+            row.joinKeyNull = isColumnNullByRid(
+                dbname, leftTable, row.rid, leftColIdx);
+        }
+    }
+    if (rightColIdx < rightTbl.len) {
+        for (auto& row : rightRows) {
+            row.joinKeyNull = isColumnNullByRid(
+                dbname, rightTable, row.rid, rightColIdx);
+        }
+    }
+
     // JOIN optimization: build hash table on right table's join column
-    std::unordered_map<std::string, std::vector<std::string>> rightHash;
+    std::unordered_map<std::string, std::vector<const JoinRow*>> rightHash;
     if (rightColIdx < rightTbl.len) {
         for (const auto& rr : rightRows) {
-            std::string rv = extractColumnValue(rr, rightTbl, rightColIdx);
-            rightHash[rv].push_back(rr);
+            if (rr.joinKeyNull) continue;
+            std::string rv = extractColumnValue(
+                rr.data, rightTbl, rightColIdx);
+            rightHash[rv].push_back(&rr);
         }
     }
 
     for (const auto& lr : leftRows) {
         // ON condition via hash probe
         if (leftColIdx >= leftTbl.len || rightColIdx >= rightTbl.len) continue;
-        std::string lv = extractColumnValue(lr, leftTbl, leftColIdx);
+        if (lr.joinKeyNull) continue;
+        std::string lv = extractColumnValue(lr.data, leftTbl, leftColIdx);
         auto it = rightHash.find(lv);
         if (it == rightHash.end()) continue;
 
-        for (const auto& rr : it->second) {
+        for (const JoinRow* rr : it->second) {
             // WHERE conditions (only cross-table conditions remain after pushdown)
             bool whereMatch = true;
             for (const auto& c : joinConds) {
-                if (!evalCond(c, lr, rr)) { whereMatch = false; break; }
+                if (!evalCond(c, lr.data, rr->data)) {
+                    whereMatch = false;
+                    break;
+                }
             }
             if (!whereMatch) continue;
 
@@ -28844,7 +28875,7 @@ std::vector<std::string> StorageEngine::join(
                         selectCols.find(fullName) != selectCols.end()) include = true;
                 }
                 if (!include) continue;
-                std::string val = extractColumnValue(lr, leftTbl, i);
+                std::string val = extractColumnValue(lr.data, leftTbl, i);
                 if (val.empty() && !leftTbl.cols[i].isNull) rowStr += "NULL ";
                 else rowStr += val + ' ';
             }
@@ -28856,7 +28887,7 @@ std::vector<std::string> StorageEngine::join(
                         selectCols.find(fullName) != selectCols.end()) include = true;
                 }
                 if (!include) continue;
-                std::string val = extractColumnValue(rr, rightTbl, i);
+                std::string val = extractColumnValue(rr->data, rightTbl, i);
                 if (val.empty() && !rightTbl.cols[i].isNull) rowStr += "NULL ";
                 else rowStr += val + ' ';
             }
@@ -28900,17 +28931,24 @@ std::vector<std::string> StorageEngine::leftJoin(
     TableSchema leftTbl = getTableSchema(dbname, leftTable);
     TableSchema rightTbl = getTableSchema(dbname, rightTable);
 
-    std::vector<std::string> leftRows;
-    if (!forEachRow(dbname, leftTable, [&leftRows](uint32_t, uint16_t, const char* data, size_t len) {
-        leftRows.emplace_back(data, len);
+    struct JoinRow {
+        std::string data;
+        int64_t rid = 0;
+        bool joinKeyNull = false;
+    };
+    std::vector<JoinRow> leftRows;
+    if (!forEachRow(dbname, leftTable, [&](uint32_t pageId, uint16_t slotId,
+                                           const char* data, size_t len) {
+        leftRows.push_back({std::string(data, len), encodeRid(pageId, slotId)});
     })) {
         lockManager_.unlock(leftTable);
         lockManager_.unlock(rightTable);
         return result;
     }
-    std::vector<std::string> rightRows;
-    if (!forEachRow(dbname, rightTable, [&rightRows](uint32_t, uint16_t, const char* data, size_t len) {
-        rightRows.emplace_back(data, len);
+    std::vector<JoinRow> rightRows;
+    if (!forEachRow(dbname, rightTable, [&](uint32_t pageId, uint16_t slotId,
+                                            const char* data, size_t len) {
+        rightRows.push_back({std::string(data, len), encodeRid(pageId, slotId)});
     })) {
         lockManager_.unlock(leftTable);
         lockManager_.unlock(rightTable);
@@ -28976,6 +29014,19 @@ std::vector<std::string> StorageEngine::leftJoin(
         if (rightTbl.cols[i].dataName == rightCol) { rightColIdx = i; break; }
     }
 
+    if (leftColIdx < leftTbl.len) {
+        for (auto& row : leftRows) {
+            row.joinKeyNull = isColumnNullByRid(
+                dbname, leftTable, row.rid, leftColIdx);
+        }
+    }
+    if (rightColIdx < rightTbl.len) {
+        for (auto& row : rightRows) {
+            row.joinKeyNull = isColumnNullByRid(
+                dbname, rightTable, row.rid, rightColIdx);
+        }
+    }
+
     auto formatRow = [&](const std::string& lr, const std::string& rr, bool rightNull) -> std::string {
         std::string rowStr;
         for (size_t i = 0; i < leftTbl.len; ++i) {
@@ -29002,20 +29053,24 @@ std::vector<std::string> StorageEngine::leftJoin(
         bool hasMatch = false;
         for (const auto& rr : rightRows) {
             if (leftColIdx >= leftTbl.len || rightColIdx >= rightTbl.len) continue;
-            std::string lv = extractColumnValue(lr, leftTbl, leftColIdx);
-            std::string rv = extractColumnValue(rr, rightTbl, rightColIdx);
+            if (lr.joinKeyNull || rr.joinKeyNull) continue;
+            std::string lv = extractColumnValue(lr.data, leftTbl, leftColIdx);
+            std::string rv = extractColumnValue(rr.data, rightTbl, rightColIdx);
             if (lv != rv) continue;
             bool whereMatch = true;
             for (const auto& c : conds) {
-                if (!evalCond(c, lr, rr)) { whereMatch = false; break; }
+                if (!evalCond(c, lr.data, rr.data)) {
+                    whereMatch = false;
+                    break;
+                }
             }
             if (!whereMatch) continue;
             hasMatch = true;
-            std::string rowStr = formatRow(lr, rr, false);
+            std::string rowStr = formatRow(lr.data, rr.data, false);
             if (!rowStr.empty()) result.push_back(rowStr);
         }
         if (!hasMatch) {
-            std::string rowStr = formatRow(lr, "", true);
+            std::string rowStr = formatRow(lr.data, "", true);
             if (!rowStr.empty()) result.push_back(rowStr);
         }
     }
@@ -29056,17 +29111,24 @@ std::vector<std::string> StorageEngine::rightJoin(
     TableSchema leftTbl = getTableSchema(dbname, leftTable);
     TableSchema rightTbl = getTableSchema(dbname, rightTable);
 
-    std::vector<std::string> leftRows;
-    if (!forEachRow(dbname, leftTable, [&leftRows](uint32_t, uint16_t, const char* data, size_t len) {
-        leftRows.emplace_back(data, len);
+    struct JoinRow {
+        std::string data;
+        int64_t rid = 0;
+        bool joinKeyNull = false;
+    };
+    std::vector<JoinRow> leftRows;
+    if (!forEachRow(dbname, leftTable, [&](uint32_t pageId, uint16_t slotId,
+                                           const char* data, size_t len) {
+        leftRows.push_back({std::string(data, len), encodeRid(pageId, slotId)});
     })) {
         lockManager_.unlock(leftTable);
         lockManager_.unlock(rightTable);
         return result;
     }
-    std::vector<std::string> rightRows;
-    if (!forEachRow(dbname, rightTable, [&rightRows](uint32_t, uint16_t, const char* data, size_t len) {
-        rightRows.emplace_back(data, len);
+    std::vector<JoinRow> rightRows;
+    if (!forEachRow(dbname, rightTable, [&](uint32_t pageId, uint16_t slotId,
+                                            const char* data, size_t len) {
+        rightRows.push_back({std::string(data, len), encodeRid(pageId, slotId)});
     })) {
         lockManager_.unlock(leftTable);
         lockManager_.unlock(rightTable);
@@ -29132,6 +29194,19 @@ std::vector<std::string> StorageEngine::rightJoin(
         if (rightTbl.cols[i].dataName == rightCol) { rightColIdx = i; break; }
     }
 
+    if (leftColIdx < leftTbl.len) {
+        for (auto& row : leftRows) {
+            row.joinKeyNull = isColumnNullByRid(
+                dbname, leftTable, row.rid, leftColIdx);
+        }
+    }
+    if (rightColIdx < rightTbl.len) {
+        for (auto& row : rightRows) {
+            row.joinKeyNull = isColumnNullByRid(
+                dbname, rightTable, row.rid, rightColIdx);
+        }
+    }
+
     auto formatRow = [&](const std::string& lr, const std::string& rr, bool leftNull) -> std::string {
         std::string rowStr;
         for (size_t i = 0; i < leftTbl.len; ++i) {
@@ -29158,20 +29233,24 @@ std::vector<std::string> StorageEngine::rightJoin(
         bool hasMatch = false;
         for (const auto& lr : leftRows) {
             if (leftColIdx >= leftTbl.len || rightColIdx >= rightTbl.len) continue;
-            std::string lv = extractColumnValue(lr, leftTbl, leftColIdx);
-            std::string rv = extractColumnValue(rr, rightTbl, rightColIdx);
+            if (lr.joinKeyNull || rr.joinKeyNull) continue;
+            std::string lv = extractColumnValue(lr.data, leftTbl, leftColIdx);
+            std::string rv = extractColumnValue(rr.data, rightTbl, rightColIdx);
             if (lv != rv) continue;
             bool whereMatch = true;
             for (const auto& c : conds) {
-                if (!evalCond(c, lr, rr)) { whereMatch = false; break; }
+                if (!evalCond(c, lr.data, rr.data)) {
+                    whereMatch = false;
+                    break;
+                }
             }
             if (!whereMatch) continue;
             hasMatch = true;
-            std::string rowStr = formatRow(lr, rr, false);
+            std::string rowStr = formatRow(lr.data, rr.data, false);
             if (!rowStr.empty()) result.push_back(rowStr);
         }
         if (!hasMatch) {
-            std::string rowStr = formatRow("", rr, true);
+            std::string rowStr = formatRow("", rr.data, true);
             if (!rowStr.empty()) result.push_back(rowStr);
         }
     }
