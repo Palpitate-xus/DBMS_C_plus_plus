@@ -14728,7 +14728,6 @@ DBStatus StorageEngine::alterTableAddPrimaryKey(const std::string& dbname,
                                                 const std::string& name,
                                                 const std::vector<std::string>& colNames) {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
-    (void)name;  // PK constraint name is not separately persisted
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!validStoredIdentifier(name, MAX_TABLE_NAME_LEN)) return DBStatus::INVALID_VALUE;
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
@@ -14815,6 +14814,13 @@ DBStatus StorageEngine::alterTableAddPrimaryKey(const std::string& dbname,
             lockManager_.unlock(tablename);
             return DBStatus::IO_ERROR;
         }
+    }
+    DBStatus metadataStatus = updateStorageParams(
+        dbname, tablename,
+        {{PRIMARY_KEY_CONSTRAINT_NAME_PARAM, name}});
+    if (metadataStatus != DBStatus::OK) {
+        lockManager_.unlock(tablename);
+        return metadataStatus;
     }
     invalidateCatalogSchema(dbname, tablename);
     lockManager_.unlock(tablename);
@@ -15047,6 +15053,7 @@ DBStatus StorageEngine::alterTableDropConstraint(const std::string& dbname,
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     bool found = false;
+    bool droppedPrimaryKey = false;
 
     // Search CHECK constraints
     for (size_t i = 0; i < tbl.len; ++i) {
@@ -15085,11 +15092,18 @@ DBStatus StorageEngine::alterTableDropConstraint(const std::string& dbname,
         }
     }
 
-    // Drop the primary key. The PK constraint name is not persisted separately,
-    // so when no CHECK/UNIQUE/FK matched and the table has a primary key, treat
-    // the named constraint as the primary key. Per PostgreSQL, the implicit
-    // NOT NULL on the former PK columns is retained.
-    if (!found && tbl.hasPrimaryKey()) {
+    // Primary keys must be addressed by their actual constraint name.  Older
+    // schemas written before the name metadata was introduced use the normal
+    // implicit name as a safe compatibility fallback; an arbitrary unknown
+    // name must never remove the key.
+    auto primaryKeyName = tbl.storageParams.find(
+        PRIMARY_KEY_CONSTRAINT_NAME_PARAM);
+    const std::string effectivePrimaryKeyName =
+        primaryKeyName != tbl.storageParams.end() &&
+                !primaryKeyName->second.empty()
+            ? primaryKeyName->second
+            : tablename + "_pkey";
+    if (!found && tbl.hasPrimaryKey() && name == effectivePrimaryKeyName) {
         tbl.pkColIndices.clear();
         for (size_t i = 0; i < tbl.len; ++i) tbl.cols[i].isPrimaryKey = false;
         std::string pkKey = dbname + "/" + tablename;
@@ -15097,6 +15111,7 @@ DBStatus StorageEngine::alterTableDropConstraint(const std::string& dbname,
         if (cit != pkIndexCache_.end()) { cit->second->close(); pkIndexCache_.erase(cit); }
         std::filesystem::remove(indexPath(dbname, tablename));
         found = true;
+        droppedPrimaryKey = true;
     }
 
     if (!found) {
@@ -15105,6 +15120,15 @@ DBStatus StorageEngine::alterTableDropConstraint(const std::string& dbname,
     }
 
     writeSchemaFile(dbname, tablename, tbl);
+    if (droppedPrimaryKey) {
+        DBStatus metadataStatus = updateStorageParams(
+            dbname, tablename,
+            {{PRIMARY_KEY_CONSTRAINT_NAME_PARAM, ""}});
+        if (metadataStatus != DBStatus::OK) {
+            lockManager_.unlock(tablename);
+            return metadataStatus;
+        }
+    }
     invalidateCatalogSchema(dbname, tablename);
     lockManager_.unlock(tablename);
     return DBStatus::OK;

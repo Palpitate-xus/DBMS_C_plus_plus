@@ -18,6 +18,8 @@ constexpr size_t MAX_COL_NAME_LEN = 64;
 constexpr size_t DATE_SIZE = 12;
 constexpr size_t TIMESTAMP_SIZE = 8;
 constexpr int64_t INF = 0x8000000000000000LL;
+inline constexpr char PRIMARY_KEY_CONSTRAINT_NAME_PARAM[] =
+    "internal.primary_key_constraint_name";
 
 struct Column {
     bool isNull = false;

@@ -2741,6 +2741,23 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     // relation exists.  Keep the relation in the rollback log immediately.
     txn.recordCreate(DdlObjectKind::Table, tname);
 
+    // The primary-key name is metadata, not an interchangeable label.  Keep
+    // it alongside the other constraint metadata so DROP CONSTRAINT can
+    // distinguish the real key from an unrelated or misspelled name.
+    if (tbl.hasPrimaryKey()) {
+        std::string primaryKeyName = tname + "_pkey";
+        for (const auto& tc : stmt->constraints) {
+            if (toLower(tc.type) == "primary key" && !tc.name.empty()) {
+                primaryKeyName = tc.name;
+                break;
+            }
+        }
+        DBStatus primaryKeyMetadataStatus = g_engine.updateStorageParams(
+            s.currentDB, tname,
+            {{PRIMARY_KEY_CONSTRAINT_NAME_PARAM, primaryKeyName}});
+        if (!alterStatusOk(primaryKeyMetadataStatus, "Constraint")) return true;
+    }
+
     // Create exclusion constraints now that the table exists.
     for (const auto& tc : stmt->constraints) {
         if (toLower(tc.type) != "exclude") continue;
