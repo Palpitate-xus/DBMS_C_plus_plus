@@ -17095,12 +17095,17 @@ DBStatus StorageEngine::insertInternal(
         return DBStatus::OK;
     };
 
-    // Validate and canonicalize all values before triggers consume them.
+    // Canonicalize input values before triggers consume them, then run the
+    // same validation against the final NEW image after triggers/generated
+    // columns. NOT NULL belongs only to that final pass so a BEFORE trigger
+    // can supply an omitted required value.
+    const auto validateRowValues = [&](bool enforceNotNull) -> DBStatus {
     for (size_t i = 0; i < tbl.len; ++i) {
         const Column& col = tbl.cols[i];
         auto it = actualValues.find(col.dataName);
         std::string val = (it != actualValues.end()) ? it->second : "";
-        if (!col.isNull && (val.empty() || val == "NULL")) {
+        if (enforceNotNull && !col.isNull &&
+            (val.empty() || val == "NULL")) {
             lockManager_.unlock(tablename);
             return DBStatus::NULL_NOT_ALLOWED;
         }
@@ -17307,6 +17312,11 @@ DBStatus StorageEngine::insertInternal(
             }
         }
     }
+    return DBStatus::OK;
+    };
+
+    const DBStatus inputValidation = validateRowValues(false);
+    if (inputValidation != DBStatus::OK) return inputValidation;
     // Width is measured on the canonical SQL value. In particular BIT
     // literals may enter as B'1010' but are stored as the bare bit string.
     if (!variableColumnWidthsValid(tbl, actualValues)) {
@@ -17443,6 +17453,9 @@ DBStatus StorageEngine::insertInternal(
         }
         actualValues[col.dataName] = computed;
     }
+
+    const DBStatus finalValidation = validateRowValues(true);
+    if (finalValidation != DBStatus::OK) return finalValidation;
 
     // BEFORE triggers and generated expressions can replace POINT values
     // after the initial input pass; validate their final row image too.
