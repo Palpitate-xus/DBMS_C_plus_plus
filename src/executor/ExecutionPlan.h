@@ -399,6 +399,8 @@ public:
 
     bool open() override;
     bool next(std::string& outRow) override;
+    bool lastColumnIsNull(size_t colIdx) const override;
+    ScanOrigin scanOrigin() const override;
     void close() override;
     Operator* outerChild() const { return outer_.get(); }
     Operator* innerChild() const { return inner_.get(); }
@@ -416,6 +418,8 @@ private:
     std::vector<std::pair<std::string, std::string>> keys_;
     bool anti_;
     std::vector<std::string> rows_;
+    std::vector<std::vector<bool>> nullRows_;
+    std::vector<ScanOrigin> origins_;
     size_t pos_ = 0;
 };
 
@@ -452,6 +456,7 @@ public:
     bool lastColumnIsNull(size_t colIdx) const override {
         return outer_->lastColumnIsNull(colIdx);
     }
+    ScanOrigin scanOrigin() const override { return outer_->scanOrigin(); }
     Operator* outerChild() const { return outer_.get(); }
     Operator* innerChild() const { return inner_.get(); }
     const std::string& outerColumn() const { return outerColumn_; }
@@ -485,6 +490,8 @@ public:
 
     bool open() override;
     bool next(std::string& outRow) override;
+    bool lastColumnIsNull(size_t colIdx) const override;
+    ScanOrigin scanOrigin() const override;
     void close() override;
     Operator* outerChild() const { return outer_.get(); }
     Operator* innerChild() const { return inner_.get(); }
@@ -495,6 +502,7 @@ private:
     OpPtr inner_;
     bool anti_ = false;
     std::vector<std::string> rows_;
+    std::vector<ScanOrigin> origins_;
     size_t pos_ = 0;
 };
 

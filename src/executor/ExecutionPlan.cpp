@@ -954,7 +954,19 @@ SemiJoinOp::SemiJoinOp(OpPtr outer, OpPtr inner, const TableSchema& outerTbl,
 
 bool SemiJoinOp::open() {
     rows_.clear();
+    nullRows_.clear();
+    origins_.clear();
     pos_ = 0;
+
+    const auto rememberOuterRow = [&](const std::string& row) {
+        rows_.push_back(row);
+        origins_.push_back(outer_->scanOrigin());
+        std::vector<bool> nulls(outerTbl_.len, false);
+        for (size_t i = 0; i < outerTbl_.len; ++i) {
+            nulls[i] = outer_->lastColumnIsNull(i);
+        }
+        nullRows_.push_back(std::move(nulls));
+    };
 
     if (!keys_.empty()) {
         // Multi-key correlated semi/anti join: composite keys joined
@@ -1007,7 +1019,7 @@ bool SemiJoinOp::open() {
             }
             const bool found = !isNull2 && innerKeys.count(okey) > 0;
             const bool keep = anti_ ? (!isNull2 && !found && !innerHasNull) : found;
-            if (keep) rows_.push_back(row);
+            if (keep) rememberOuterRow(row);
         }
         outer_->close();
         return true;
@@ -1057,7 +1069,7 @@ bool SemiJoinOp::open() {
         // relation makes every non-matching comparison UNKNOWN, not TRUE.
         const bool keep = anti_ ? (!outerIsNull && !found && !innerHasNull)
                                 : found;
-        if (keep) rows_.push_back(row);
+        if (keep) rememberOuterRow(row);
     }
     outer_->close();
     return true;
@@ -1066,14 +1078,37 @@ bool SemiJoinOp::open() {
 bool SemiJoinOp::next(std::string& outRow) {
     NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     if (pos_ >= rows_.size()) return false;
-    outRow = rows_[pos_++];
+    const size_t rowIndex = pos_++;
+    outRow = rows_[rowIndex];
+    const ScanOrigin origin = rowIndex < origins_.size()
+        ? origins_[rowIndex] : ScanOrigin{};
+    if (origin.engine && origin.rid > 0) {
+        StorageEngine::bindNullRow(
+            origin.engine, origin.dbname, origin.tablename, origin.rid,
+            outerTbl_.len);
+    } else {
+        StorageEngine::unbindNullRow();
+    }
     rtInstr_.emitted = true;
     return true;
 }
 
+bool SemiJoinOp::lastColumnIsNull(size_t colIdx) const {
+    return pos_ > 0 && pos_ - 1 < nullRows_.size() &&
+        colIdx < nullRows_[pos_ - 1].size() && nullRows_[pos_ - 1][colIdx];
+}
+
+Operator::ScanOrigin SemiJoinOp::scanOrigin() const {
+    return pos_ > 0 && pos_ - 1 < origins_.size()
+        ? origins_[pos_ - 1] : ScanOrigin{};
+}
+
 void SemiJoinOp::close() {
     rows_.clear();
+    nullRows_.clear();
+    origins_.clear();
     pos_ = 0;
+    StorageEngine::unbindNullRow();
 }
 
 // ========================================================================
@@ -1167,6 +1202,7 @@ void QuantifiedSubqueryFilterOp::close() {
 
 bool ExistenceFilterOp::open() {
     rows_.clear();
+    origins_.clear();
     pos_ = 0;
 
     if (!inner_->open()) return false;
@@ -1178,7 +1214,10 @@ bool ExistenceFilterOp::open() {
     const bool keepRows = anti_ ? !innerHasRow : innerHasRow;
     if (!keepRows) return true;
     if (!outer_->open()) return false;
-    while (outer_->next(row)) rows_.push_back(row);
+    while (outer_->next(row)) {
+        rows_.push_back(row);
+        origins_.push_back(outer_->scanOrigin());
+    }
     if (outer_->hasError()) return propagateChildError(outer_.get(), "existence outer scan failed");
     outer_->close();
     return true;
@@ -1187,14 +1226,38 @@ bool ExistenceFilterOp::open() {
 bool ExistenceFilterOp::next(std::string& outRow) {
     NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     if (pos_ >= rows_.size()) return false;
-    outRow = rows_[pos_++];
+    const size_t rowIndex = pos_++;
+    outRow = rows_[rowIndex];
+    const ScanOrigin origin = rowIndex < origins_.size()
+        ? origins_[rowIndex] : ScanOrigin{};
+    if (origin.engine && origin.rid > 0) {
+        StorageEngine::bindNullRow(
+            origin.engine, origin.dbname, origin.tablename, origin.rid,
+            std::numeric_limits<size_t>::max());
+    } else {
+        StorageEngine::unbindNullRow();
+    }
     rtInstr_.emitted = true;
     return true;
 }
 
+bool ExistenceFilterOp::lastColumnIsNull(size_t colIdx) const {
+    const ScanOrigin origin = scanOrigin();
+    return origin.engine && origin.rid > 0 &&
+        origin.engine->isColumnNullByRid(
+            origin.dbname, origin.tablename, origin.rid, colIdx);
+}
+
+Operator::ScanOrigin ExistenceFilterOp::scanOrigin() const {
+    return pos_ > 0 && pos_ - 1 < origins_.size()
+        ? origins_[pos_ - 1] : ScanOrigin{};
+}
+
 void ExistenceFilterOp::close() {
     rows_.clear();
+    origins_.clear();
     pos_ = 0;
+    StorageEngine::unbindNullRow();
 }
 
 // ========================================================================
