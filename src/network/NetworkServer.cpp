@@ -806,6 +806,24 @@ std::string whereUnknownFunctionError(const std::string& sql,
     };
     std::string low;
     for (char c : sql) low += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    std::vector<bool> quoted(sql.size(), false);
+    char activeQuote = '\0';
+    for (size_t i = 0; i < sql.size(); ++i) {
+        const char c = sql[i];
+        if (activeQuote != '\0') {
+            quoted[i] = true;
+            if (c == activeQuote) {
+                if (i + 1 < sql.size() && sql[i + 1] == activeQuote) {
+                    quoted[++i] = true;
+                } else {
+                    activeQuote = '\0';
+                }
+            }
+        } else if (c == '\'' || c == '"') {
+            activeQuote = c;
+            quoted[i] = true;
+        }
+    }
     size_t wpos = low.find(" where ");
     if (wpos == std::string::npos) return "";
     size_t wend = low.size();
@@ -829,6 +847,7 @@ std::string whereUnknownFunctionError(const std::string& sql,
         }
     }
     for (size_t p = wpos + 7; p < wend; ++p) {
+        if (quoted[p]) continue;
         if (!std::isalpha(static_cast<unsigned char>(low[p])) && low[p] != '_') continue;
         size_t start = p;
         while (p < wend && (std::isalnum(static_cast<unsigned char>(low[p])) || low[p] == '_')) ++p;

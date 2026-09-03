@@ -337,9 +337,29 @@ static vector<string> tokenize(const string& sql) {
             continue;
         }
         size_t j = i;
-        while (j < sql.size() && !isspace(static_cast<unsigned char>(sql[j]))
-               && sql[j] != '(' && sql[j] != ')')
+        char quote = '\0';
+        while (j < sql.size()) {
+            const char c = sql[j];
+            if (quote != '\0') {
+                if (c == quote) {
+                    if (j + 1 < sql.size() && sql[j + 1] == quote) {
+                        j += 2;  // SQL escaped quote: '' or ""
+                        continue;
+                    }
+                    quote = '\0';
+                }
+                ++j;
+                continue;
+            }
+            if (c == '\'' || c == '"') {
+                quote = c;
+                ++j;
+                continue;
+            }
+            if (isspace(static_cast<unsigned char>(c)) || c == '(' || c == ')')
+                break;
             ++j;
+        }
         tokens.push_back(sql.substr(i, j - i));
         i = j;
     }

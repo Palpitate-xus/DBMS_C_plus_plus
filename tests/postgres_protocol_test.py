@@ -348,6 +348,10 @@ def extended_query_temporal_binary_parameters(sock):
         "SELECT tz FROM protocol_infinity_neg WHERE tz = $1", 1184,
         negative_infinity, negative_infinity)
     extended_query_binary_parameter(
+        sock, "timestamp_filter",
+        "SELECT ts FROM protocol_timestamp_filter WHERE ts = $1", 1114,
+        struct.pack("!q", timestamp_micros), struct.pack("!q", timestamp_micros))
+    extended_query_binary_parameter(
         sock, "uuid", "SELECT u FROM protocol_temporal WHERE u = $1", 2950,
         uuid_bytes, uuid_bytes)
 
@@ -806,6 +810,23 @@ def main():
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "INSERT INTO protocol_infinity_neg "
             "VALUES ('-infinity', '-infinity')"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE protocol_timestamp_filter "
+            "(id INT, ts TIMESTAMP, label TEXT)"))
+        for identifier, timestamp, label in (
+                (1, "2025-01-01 00:00:00", "early value"),
+                (2, "2026-08-07 12:34:56", "target (value)"),
+                (3, "2027-12-31 23:59:59", "late value")):
+            assert any(kind == b"C" for kind, _ in simple_query(
+                sock, "INSERT INTO protocol_timestamp_filter VALUES "
+                "(%d, '%s', '%s')" % (identifier, timestamp, label)))
+        assert data_row_values(simple_query(
+            sock, "SELECT id FROM protocol_timestamp_filter "
+            "WHERE label = 'early value'")) == [[b"1"]]
+        label_messages = simple_query(
+            sock, "SELECT id FROM protocol_timestamp_filter "
+            "WHERE label = 'target (value)'")
+        assert data_row_values(label_messages) == [[b"2"]], label_messages
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "CREATE TABLE protocol_numeric (n NUMERIC)"))
         numeric_description = row_description_fields(
