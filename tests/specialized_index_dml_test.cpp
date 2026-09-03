@@ -214,6 +214,21 @@ void testDmlAndTransactionBoundaries(StorageEngine& engine) {
     assert(engine.brinSearchRange(
                kDatabase, kTable, "score", "=", "10").empty());
 
+    // A commit-time BRIN rebuild must summarize only the transaction's
+    // visible NEW version, not the physically retained dead OLD tuple.
+    assert(engine.beginTransaction(kDatabase) == DBStatus::OK);
+    assert(engine.update(
+               kDatabase, kTable, {{"score", "10"}}, {"=id 1"}) ==
+           DBStatus::OK);
+    assert(engine.commitTransaction() == DBStatus::OK);
+    assertIndexed(engine, ridFor(engine, "1"), "gamma", "3,3", "10");
+    assert(engine.brinSearchRange(
+               kDatabase, kTable, "score", "=", "30").empty());
+    assert(engine.update(
+               kDatabase, kTable, {{"score", "30"}}, {"=id 1"}) ==
+           DBStatus::OK);
+    assertIndexed(engine, ridFor(engine, "1"), "gamma", "3,3", "30");
+
     assert(engine.remove(kDatabase, kTable, {"=id 2"}) == DBStatus::OK);
     assertTokenAbsent(engine, "beta");
     assert(!gistSidecarContains("20"));

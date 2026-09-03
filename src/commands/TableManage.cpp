@@ -10057,6 +10057,24 @@ DBStatus StorageEngine::createBrinIndex(const std::string& dbname,
     std::vector<StorageBrinRange> ranges;
     const uint32_t rangeWidth = static_cast<uint32_t>(pagesPerRange);
 
+    ReadView autocommitView;
+    const ReadView* indexReadView = nullptr;
+    if (transactionContext().inTransaction &&
+        transactionContext().txnDB == dbname) {
+        indexReadView = &transactionContext().readView;
+    } else {
+        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        autocommitView.creatorTxnId = 0;
+        autocommitView.lowLimitId =
+            TxnIdGenerator::instance().maxCommittedTxId() + 1;
+        autocommitView.upLimitId = activeTransactions_.empty()
+            ? autocommitView.lowLimitId : *activeTransactions_.begin();
+        autocommitView.activeTxnIds = activeTransactions_;
+        autocommitView.subTxnIds.clear();
+        autocommitView.commitLog = getCommitLog(dbname);
+        indexReadView = &autocommitView;
+    }
+
     auto scanAllocator = [&](PageAllocator& allocator, const TableSchema& t) -> bool {
         const uint32_t np = allocator.numPages();
         for (uint64_t start = 1; start < np; start += rangeWidth) {
@@ -10071,7 +10089,13 @@ DBStatus StorageEngine::createBrinIndex(const std::string& dbname,
                 if (!buf) return false;
                 PageWrapper page(buf, allocator.pageSize(), t.formatVersion);
                 page.forEachLive([&](uint16_t, const char* data, size_t len) {
-                    if (len <= MVCC_HEADER_SIZE) return;
+                    if (usesHeapTupleHeader(t.formatVersion) &&
+                        indexReadView &&
+                        !indexReadView->isVisible(
+                            data, len, t.formatVersion)) {
+                        return;
+                    }
+                    if (len < rowHeaderSize(t.formatVersion, t.len)) return;
                     std::string row = stripRowHeader(data, len, t.formatVersion, t.len);
                     if (row.empty()) return;
                     std::string val = extractColumnValue(
