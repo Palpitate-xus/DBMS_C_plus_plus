@@ -17847,41 +17847,80 @@ DBStatus StorageEngine::insertInternal(
             return DBStatus::TABLE_NOT_FOUND;
         }
         TableSchema refTbl = getTableSchema(dbname, fk.refTable);
-        if (fk.colNames.size() == 1) {
-            // Single-column FK: use BPTree index for fast lookup
-            BPTree* refIdx = getPKIndex(dbname, fk.refTable);
-            if (refIdx) {
-                auto it = actualValues.find(fk.colNames[0]);
-                int64_t dummy;
-                if (!refIdx->search(it->second, dummy)) {
-                    lockManager_.unlock(tablename);
-                    return DBStatus::INVALID_VALUE;  // referenced key not found
+        if (fk.colNames.empty() ||
+            fk.colNames.size() != fk.refCols.size()) {
+            lockManager_.unlock(tablename);
+            return DBStatus::CORRUPTED_DATA;
+        }
+
+        std::vector<size_t> referencedColumns;
+        referencedColumns.reserve(fk.refCols.size());
+        for (const auto& referencedName : fk.refCols) {
+            size_t referencedColumn = refTbl.len;
+            for (size_t candidate = 0; candidate < refTbl.len; ++candidate) {
+                if (refTbl.cols[candidate].dataName == referencedName) {
+                    referencedColumn = candidate;
+                    break;
                 }
             }
+            if (referencedColumn >= refTbl.len) {
+                lockManager_.unlock(tablename);
+                return DBStatus::CORRUPTED_DATA;
+            }
+            referencedColumns.push_back(referencedColumn);
+        }
+
+        std::vector<size_t> primaryColumns = refTbl.pkColIndices;
+        if (primaryColumns.empty()) {
+            for (size_t candidate = 0; candidate < refTbl.len; ++candidate) {
+                if (refTbl.cols[candidate].isPrimaryKey) {
+                    primaryColumns.push_back(candidate);
+                }
+            }
+        }
+        const bool referencesSinglePrimaryKey =
+            referencedColumns.size() == 1 && primaryColumns.size() == 1 &&
+            referencedColumns.front() == primaryColumns.front();
+        if (referencesSinglePrimaryKey) {
+            // Use the primary index only when the FK actually references the
+            // table's sole PK column. A single-column FK may instead target a
+            // UNIQUE non-PK column, in which case the PK index is unrelated.
+            BPTree* refIdx = getPKIndex(dbname, fk.refTable);
+            if (!refIdx) {
+                lockManager_.unlock(tablename);
+                return DBStatus::IO_ERROR;
+            }
+            std::map<std::string, std::string> referencedKeyValues;
+            referencedKeyValues[fk.refCols.front()] =
+                actualValues.at(fk.colNames.front());
+            int64_t dummy = -1;
+            if (!refIdx->search(
+                    refTbl.buildPKValue(referencedKeyValues), dummy)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
+            }
         } else {
-            // Multi-column FK: scan reference table rows
+            // Non-PK and composite references must compare the declared
+            // referenced columns, never an unrelated physical index.
             bool found = false;
             if (!forEachRow(dbname, fk.refTable, [&](uint32_t, uint16_t, const char* data, size_t len) {
                 if (found) return;
                 std::string row(data, len);
-                bool match = true;
-                for (size_t ci = 0; ci < fk.refCols.size() && ci < fk.colNames.size(); ++ci) {
-                    int refColIdx = -1;
-                    for (size_t ri = 0; ri < refTbl.len; ++ri) {
-                        if (refTbl.cols[ri].dataName == fk.refCols[ci]) {
-                            refColIdx = static_cast<int>(ri);
-                            break;
-                        }
-                    }
-                    if (refColIdx < 0) { match = false; break; }
-                    std::string refVal = extractColumnValue(row, refTbl, refColIdx);
-                    auto it = actualValues.find(fk.colNames[ci]);
-                    if (it == actualValues.end() || it->second != refVal) {
-                        match = false;
-                        break;
-                    }
+                for (size_t valueIndex = 0;
+                     valueIndex < referencedColumns.size(); ++valueIndex) {
+                    const Column& referencedColumn =
+                        refTbl.cols[referencedColumns[valueIndex]];
+                    const std::string storedValue = canonicalColumnKeyValue(
+                        referencedColumn,
+                        extractColumnValue(row, refTbl,
+                                           referencedColumns[valueIndex],
+                                           dbname));
+                    const std::string localValue = canonicalColumnKeyValue(
+                        referencedColumn,
+                        actualValues.at(fk.colNames[valueIndex]));
+                    if (storedValue != localValue) return;
                 }
-                if (match) found = true;
+                found = true;
             })) {
                 lockManager_.unlock(tablename);
                 return DBStatus::IO_ERROR;
