@@ -34128,70 +34128,151 @@ std::filesystem::path StorageEngine::seclabelPath(const std::string& dbname) con
     return dbPath(dbname) / ".security_labels";
 }
 
-void StorageEngine::setSecurityLabel(const std::string& dbname, const std::string& objType,
-                                     const std::string& objName, const std::string& label) {
-    auto spath = seclabelPath(dbname);
-    std::map<std::string, std::string> labels; // key=objType|objName -> label
-    if (std::filesystem::exists(spath)) {
-        std::ifstream ifs(spath);
-        std::string line;
-        while (std::getline(ifs, line)) {
-            if (line.empty()) continue;
-            size_t p1 = line.find(' ');
-            size_t p2 = line.find(' ', p1 + 1);
-            if (p1 == std::string::npos || p2 == std::string::npos) continue;
-            std::string key = line.substr(0, p1) + "|" + line.substr(p1 + 1, p2 - p1 - 1);
-            labels[key] = line.substr(p2 + 1);
+using SecurityLabelKey = std::pair<std::string, std::string>;
+using SecurityLabelMap = std::map<SecurityLabelKey, std::string>;
+
+static bool parseSecurityLabelRecord(const std::string& line,
+                                     std::string& objectType,
+                                     std::string& objectName,
+                                     std::string& label) {
+    if (line.rfind("S2|", 0) == 0) {
+        const size_t typeEnd = line.find('|', 3);
+        if (typeEnd == std::string::npos) return false;
+        const size_t nameEnd = line.find('|', typeEnd + 1);
+        if (nameEnd == std::string::npos ||
+            line.find('|', nameEnd + 1) != std::string::npos) {
+            return false;
         }
+        return decodeCommentField(
+                   line.substr(3, typeEnd - 3), objectType) &&
+               decodeCommentField(
+                   line.substr(typeEnd + 1, nameEnd - typeEnd - 1),
+                   objectName) &&
+               decodeCommentField(line.substr(nameEnd + 1), label) &&
+               !objectType.empty() && !objectName.empty();
     }
-    std::string key = objType + "|" + objName;
-    if (label.empty()) {
-        labels.erase(key);
-    } else {
-        labels[key] = label;
+
+    const size_t typeEnd = line.find(' ');
+    if (typeEnd == std::string::npos || typeEnd == 0) return false;
+    const size_t nameEnd = line.find(' ', typeEnd + 1);
+    if (nameEnd == std::string::npos || nameEnd == typeEnd + 1) return false;
+    objectType = line.substr(0, typeEnd);
+    objectName = line.substr(typeEnd + 1, nameEnd - typeEnd - 1);
+    label = line.substr(nameEnd + 1);
+    return true;
+}
+
+static DBStatus readSecurityLabels(const std::filesystem::path& path,
+                                   SecurityLabelMap& labels) {
+    std::error_code error;
+    const bool exists = std::filesystem::exists(path, error);
+    if (error) return DBStatus::IO_ERROR;
+    if (!exists) return DBStatus::OK;
+    if (!std::filesystem::is_regular_file(path, error) || error) {
+        return DBStatus::IO_ERROR;
     }
-    std::ofstream ofs(spath);
-    for (const auto& kv : labels) {
-        size_t dp = kv.first.find('|');
-        std::string ot = kv.first.substr(0, dp);
-        std::string on = kv.first.substr(dp + 1);
-        ofs << ot << " " << on << " " << kv.second << "\n";
+
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return DBStatus::IO_ERROR;
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.empty()) continue;
+        std::string objectType;
+        std::string objectName;
+        std::string label;
+        if (!parseSecurityLabelRecord(
+                line, objectType, objectName, label)) {
+            return DBStatus::CORRUPTED_DATA;
+        }
+        labels[{std::move(objectType), std::move(objectName)}] =
+            std::move(label);
     }
+    return input.bad() ? DBStatus::IO_ERROR : DBStatus::OK;
+}
+
+static DBStatus writeSecurityLabels(const std::filesystem::path& path,
+                                    const SecurityLabelMap& labels) {
+    std::ostringstream contents;
+    for (const auto& entry : labels) {
+        contents << "S2|" << encodeCommentField(entry.first.first) << '|'
+                 << encodeCommentField(entry.first.second) << '|'
+                 << encodeCommentField(entry.second) << '\n';
+    }
+    return persistMetadata(path, contents.str());
+}
+
+DBStatus StorageEngine::setSecurityLabel(
+    const std::string& dbname, const std::string& objType,
+    const std::string& objName, const std::string& label) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    if (objType.empty() || objName.empty() ||
+        objType.find('\0') != std::string::npos ||
+        objName.find('\0') != std::string::npos) {
+        return DBStatus::INVALID_ARGUMENT;
+    }
+
+    std::string normalizedType = objType;
+    std::transform(normalizedType.begin(), normalizedType.end(),
+                   normalizedType.begin(), [](unsigned char c) {
+                       return static_cast<char>(std::tolower(c));
+                   });
+    if (normalizedType == "table") {
+        if (!tableExists(dbname, objName)) return DBStatus::TABLE_NOT_FOUND;
+    } else if (normalizedType == "column") {
+        const size_t separator = objName.rfind('.');
+        if (separator == std::string::npos || separator == 0 ||
+            separator + 1 >= objName.size()) {
+            return DBStatus::INVALID_ARGUMENT;
+        }
+        const std::string tableName = objName.substr(0, separator);
+        const std::string columnName = objName.substr(separator + 1);
+        if (!tableExists(dbname, tableName)) return DBStatus::TABLE_NOT_FOUND;
+        const TableSchema table = getTableSchema(dbname, tableName);
+        bool found = false;
+        for (size_t i = 0; i < table.len; ++i) {
+            if (table.cols[i].dataName == columnName) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return DBStatus::INVALID_VALUE;
+    }
+
+    const auto path = seclabelPath(dbname);
+    SecurityLabelMap labels;
+    DBStatus status = readSecurityLabels(path, labels);
+    if (status != DBStatus::OK) return status;
+
+    const SecurityLabelKey key{objType, objName};
+    if (label.empty()) labels.erase(key);
+    else labels[key] = label;
+    return writeSecurityLabels(path, labels);
 }
 
 std::string StorageEngine::getSecurityLabel(const std::string& dbname, const std::string& objType,
                                             const std::string& objName) const {
-    auto spath = seclabelPath(dbname);
-    if (!std::filesystem::exists(spath)) return "";
-    std::ifstream ifs(spath);
-    std::string line;
-    while (std::getline(ifs, line)) {
-        if (line.empty()) continue;
-        std::stringstream ss(line);
-        std::string ot, on, lab;
-        ss >> ot >> on;
-        std::getline(ss, lab);
-        if (!lab.empty() && lab[0] == ' ') lab = lab.substr(1);
-        if (ot == objType && on == objName) return lab;
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    SecurityLabelMap labels;
+    if (readSecurityLabels(seclabelPath(dbname), labels) != DBStatus::OK) {
+        return "";
     }
-    return "";
+    auto it = labels.find({objType, objName});
+    return it == labels.end() ? "" : it->second;
 }
 
 std::vector<std::tuple<std::string, std::string, std::string>> StorageEngine::getAllSecurityLabels(
     const std::string& dbname) const {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::vector<std::tuple<std::string, std::string, std::string>> result;
-    auto spath = seclabelPath(dbname);
-    if (!std::filesystem::exists(spath)) return result;
-    std::ifstream ifs(spath);
-    std::string line;
-    while (std::getline(ifs, line)) {
-        if (line.empty()) continue;
-        std::stringstream ss(line);
-        std::string ot, on, lab;
-        ss >> ot >> on;
-        std::getline(ss, lab);
-        if (!lab.empty() && lab[0] == ' ') lab = lab.substr(1);
-        result.emplace_back(ot, on, lab);
+    SecurityLabelMap labels;
+    if (readSecurityLabels(seclabelPath(dbname), labels) != DBStatus::OK) {
+        return result;
+    }
+    result.reserve(labels.size());
+    for (const auto& entry : labels) {
+        result.emplace_back(
+            entry.first.first, entry.first.second, entry.second);
     }
     return result;
 }

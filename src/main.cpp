@@ -2424,7 +2424,13 @@ static bool handleSecurityLabel(const string& sql, Session& s) {
         cout << "Table " << resolvedName << " not exist" << endl;
         return true;
     }
-    g_engine.setSecurityLabel(s.currentDB, objType, resolvedName, labelPart);
+    DBStatus labelStatus = g_engine.setSecurityLabel(
+        s.currentDB, objType, resolvedName, labelPart);
+    if (labelStatus != DBStatus::OK) {
+        cout << "SECURITY LABEL failed (SQLSTATE "
+             << dbms::sqlstateForDBStatus(labelStatus) << ")" << endl;
+        return true;
+    }
     if (labelPart.empty()) {
         cout << "Security label removed from " << objType << " " << resolvedName << endl;
     } else {

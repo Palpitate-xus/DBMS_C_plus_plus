@@ -1201,8 +1201,8 @@ public:
     std::filesystem::path seclabelPath(const std::string& dbname) const;
 
     // Security Labels
-    void setSecurityLabel(const std::string& dbname, const std::string& objType,
-                          const std::string& objName, const std::string& label);
+    DBStatus setSecurityLabel(const std::string& dbname, const std::string& objType,
+                              const std::string& objName, const std::string& label);
     std::string getSecurityLabel(const std::string& dbname, const std::string& objType,
                                  const std::string& objName) const;
     std::vector<std::tuple<std::string, std::string, std::string>> getAllSecurityLabels(
