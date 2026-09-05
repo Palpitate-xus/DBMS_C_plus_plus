@@ -64,11 +64,11 @@ int main() {
     // After cascade the sequence is gone
     assert(!g_engine.sequenceExists(db, "s"));
 
-    // Inserting without id no longer uses the sequence (falls back to 0 sentinel)
+    // Inserting without id no longer uses the sequence and leaves id NULL.
     assert(g_engine.insert(db, "t", {{"name", "c"}}) == dbms::DBStatus::OK);
     rows = g_engine.query(db, "t", {}, {"id", "name"});
     assert(rows.size() == 3);
-    assert(trimRight(rows[2]) == "0 c");
+    assert(trimRight(rows[2]) == "NULL c");
 
     cleanup(db);
     std::cout << "[DEFAULT_SEQUENCE_E2E] smoke passed" << std::endl;

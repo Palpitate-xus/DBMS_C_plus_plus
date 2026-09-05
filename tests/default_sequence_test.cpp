@@ -98,8 +98,8 @@ static void test_drop_sequence_default_dependency() {
     assert(g_engine.insert(db, "t3", {{"name", "y"}}) == dbms::DBStatus::OK);
     auto rows = g_engine.query(db, "t3", {}, {"id", "name"});
     assert(rows.size() == 1);
-    // Default was dropped; id falls back to storage null sentinel (displayed as 0).
-    assert(trimRight(rows[0]) == "0 y");
+    // Default was dropped; the omitted nullable column remains SQL NULL.
+    assert(trimRight(rows[0]) == "NULL y");
 
     cleanup(db);
     std::cout << "[DEFAULT_SEQUENCE] DROP SEQUENCE dependency OK" << std::endl;
