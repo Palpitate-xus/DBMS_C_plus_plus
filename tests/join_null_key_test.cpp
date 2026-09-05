@@ -83,6 +83,51 @@ int main() {
                "NULL NULL 20 2 ",
                "NULL NULL 20 2 "}));
 
+    assert(!ddl.executeSql(
+        "CREATE TABLE virtual_left (id INT PRIMARY KEY, base INT, "
+        "k INT GENERATED ALWAYS AS (base + 1) VIRTUAL)", session));
+    assert(!ddl.executeSql(
+        "CREATE TABLE virtual_right (id INT PRIMARY KEY, base INT, "
+        "k INT GENERATED ALWAYS AS (base + 1) VIRTUAL)", session));
+    assert(g_engine.insert(
+               database, "virtual_left", {{"id", "1"}, {"base", "4"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(
+               database, "virtual_left", {{"id", "2"}, {"base", "8"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(
+               database, "virtual_right", {{"id", "10"}, {"base", "4"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(
+               database, "virtual_right", {{"id", "20"}, {"base", "6"}}) ==
+           dbms::DBStatus::OK);
+
+    const std::set<std::string> virtualColumns = {
+        "virtual_left.id", "virtual_left.k",
+        "virtual_right.id", "virtual_right.k"};
+    assert(g_engine.join(
+               database, "virtual_left", "virtual_right", "k", "k", {},
+               virtualColumns) ==
+           (std::vector<std::string>{"1 5 10 5 "}));
+    assert(g_engine.leftJoin(
+               database, "virtual_left", "virtual_right", "k", "k", {},
+               virtualColumns) ==
+           (std::vector<std::string>{"1 5 10 5 ", "2 9 NULL NULL "}));
+    assert(g_engine.rightJoin(
+               database, "virtual_left", "virtual_right", "k", "k", {},
+               virtualColumns) ==
+           (std::vector<std::string>{"1 5 10 5 ", "NULL NULL 20 7 "}));
+    assert(g_engine.fullOuterJoin(
+               database, "virtual_left", "virtual_right", "k", "k", {},
+               virtualColumns) ==
+           (std::vector<std::string>{
+               "1 5 10 5 ", "2 9 NULL NULL ", "NULL NULL 20 7 "}));
+    assert(g_engine.crossJoin(
+               database, "virtual_left", "virtual_right",
+               {"=virtual_left.k 5"},
+               {"virtual_left.k", "virtual_right.id"}) ==
+           (std::vector<std::string>{"5 10 ", "5 20 "}));
+
     cleanupTestDb(testName);
     std::cout << "[JOIN NULL KEY] NULL never equals NULL or empty string"
               << std::endl;

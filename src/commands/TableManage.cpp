@@ -29908,7 +29908,8 @@ std::vector<std::string> StorageEngine::join(
         if (it == colMap.end()) return false;
         const TableSchema& tbl = it->second.isLeft ? leftTbl : rightTbl;
         const std::string& row = it->second.isLeft ? leftRow : rightRow;
-        std::string val = extractColumnValue(row, tbl, it->second.colIdx);
+        std::string val = extractColumnValue(
+            row, tbl, it->second.colIdx, dbname, true);
         const Column& col = tbl.cols[it->second.colIdx];
         if (col.dataType == "char" || col.isVariableLength) {
             if (c.op == "<"  && !(val <  c.value)) return false;
@@ -29962,7 +29963,8 @@ std::vector<std::string> StorageEngine::join(
                                const TableSchema& tbl) -> bool {
         auto it = colMap.find(c.colName);
         if (it == colMap.end()) return false;
-        std::string val = extractColumnValue(row, tbl, it->second.colIdx);
+        std::string val = extractColumnValue(
+            row, tbl, it->second.colIdx, dbname, true);
         const Column& col = tbl.cols[it->second.colIdx];
         if (col.dataType == "char" || col.isVariableLength) {
             if (c.op == "<"  && !(val <  c.value)) return false;
@@ -30022,13 +30024,15 @@ std::vector<std::string> StorageEngine::join(
 
     if (leftColIdx < leftTbl.len) {
         for (auto& row : leftRows) {
-            row.joinKeyNull = isColumnNullByRid(
+            row.joinKeyNull = leftTbl.cols[leftColIdx].generatedKind != 'v' &&
+                isColumnNullByRid(
                 dbname, leftTable, row.rid, leftColIdx);
         }
     }
     if (rightColIdx < rightTbl.len) {
         for (auto& row : rightRows) {
-            row.joinKeyNull = isColumnNullByRid(
+            row.joinKeyNull = rightTbl.cols[rightColIdx].generatedKind != 'v' &&
+                isColumnNullByRid(
                 dbname, rightTable, row.rid, rightColIdx);
         }
     }
@@ -30039,7 +30043,7 @@ std::vector<std::string> StorageEngine::join(
         for (const auto& rr : rightRows) {
             if (rr.joinKeyNull) continue;
             std::string rv = extractColumnValue(
-                rr.data, rightTbl, rightColIdx);
+                rr.data, rightTbl, rightColIdx, dbname, true);
             rightHash[rv].push_back(&rr);
         }
     }
@@ -30048,7 +30052,8 @@ std::vector<std::string> StorageEngine::join(
         // ON condition via hash probe
         if (leftColIdx >= leftTbl.len || rightColIdx >= rightTbl.len) continue;
         if (lr.joinKeyNull) continue;
-        std::string lv = extractColumnValue(lr.data, leftTbl, leftColIdx);
+        std::string lv = extractColumnValue(
+            lr.data, leftTbl, leftColIdx, dbname, true);
         auto it = rightHash.find(lv);
         if (it == rightHash.end()) continue;
 
@@ -30073,7 +30078,8 @@ std::vector<std::string> StorageEngine::join(
                         selectCols.find(fullName) != selectCols.end()) include = true;
                 }
                 if (!include) continue;
-                std::string val = extractColumnValue(lr.data, leftTbl, i);
+                std::string val = extractColumnValue(
+                    lr.data, leftTbl, i, dbname, true);
                 if (val.empty() && !leftTbl.cols[i].isNull) rowStr += "NULL ";
                 else rowStr += val + ' ';
             }
@@ -30085,7 +30091,8 @@ std::vector<std::string> StorageEngine::join(
                         selectCols.find(fullName) != selectCols.end()) include = true;
                 }
                 if (!include) continue;
-                std::string val = extractColumnValue(rr->data, rightTbl, i);
+                std::string val = extractColumnValue(
+                    rr->data, rightTbl, i, dbname, true);
                 if (val.empty() && !rightTbl.cols[i].isNull) rowStr += "NULL ";
                 else rowStr += val + ' ';
             }
@@ -30170,7 +30177,8 @@ std::vector<std::string> StorageEngine::leftJoin(
         if (it == colMap.end()) return false;
         const TableSchema& tbl = it->second.isLeft ? leftTbl : rightTbl;
         const std::string& row = it->second.isLeft ? leftRow : rightRow;
-        std::string val = extractColumnValue(row, tbl, it->second.colIdx);
+        std::string val = extractColumnValue(
+            row, tbl, it->second.colIdx, dbname, true);
         const Column& col = tbl.cols[it->second.colIdx];
         if (col.dataType == "char" || col.isVariableLength) {
             if (c.op == "<"  && !(val <  c.value)) return false;
@@ -30214,13 +30222,15 @@ std::vector<std::string> StorageEngine::leftJoin(
 
     if (leftColIdx < leftTbl.len) {
         for (auto& row : leftRows) {
-            row.joinKeyNull = isColumnNullByRid(
+            row.joinKeyNull = leftTbl.cols[leftColIdx].generatedKind != 'v' &&
+                isColumnNullByRid(
                 dbname, leftTable, row.rid, leftColIdx);
         }
     }
     if (rightColIdx < rightTbl.len) {
         for (auto& row : rightRows) {
-            row.joinKeyNull = isColumnNullByRid(
+            row.joinKeyNull = rightTbl.cols[rightColIdx].generatedKind != 'v' &&
+                isColumnNullByRid(
                 dbname, rightTable, row.rid, rightColIdx);
         }
     }
@@ -30231,7 +30241,8 @@ std::vector<std::string> StorageEngine::leftJoin(
             std::string fullName = leftTable + "." + leftTbl.cols[i].dataName;
             bool include = selectCols.empty() || selectCols.find(leftTbl.cols[i].dataName) != selectCols.end() || selectCols.find(fullName) != selectCols.end();
             if (!include) continue;
-            std::string val = extractColumnValue(lr, leftTbl, i);
+            std::string val = extractColumnValue(
+                lr, leftTbl, i, dbname, true);
             if (val.empty() && !leftTbl.cols[i].isNull) rowStr += "NULL ";
             else rowStr += val + ' ';
         }
@@ -30240,7 +30251,8 @@ std::vector<std::string> StorageEngine::leftJoin(
             bool include = selectCols.empty() || selectCols.find(rightTbl.cols[i].dataName) != selectCols.end() || selectCols.find(fullName) != selectCols.end();
             if (!include) continue;
             if (rightNull) { rowStr += "NULL "; continue; }
-            std::string val = extractColumnValue(rr, rightTbl, i);
+            std::string val = extractColumnValue(
+                rr, rightTbl, i, dbname, true);
             if (val.empty() && !rightTbl.cols[i].isNull) rowStr += "NULL ";
             else rowStr += val + ' ';
         }
@@ -30252,8 +30264,10 @@ std::vector<std::string> StorageEngine::leftJoin(
         for (const auto& rr : rightRows) {
             if (leftColIdx >= leftTbl.len || rightColIdx >= rightTbl.len) continue;
             if (lr.joinKeyNull || rr.joinKeyNull) continue;
-            std::string lv = extractColumnValue(lr.data, leftTbl, leftColIdx);
-            std::string rv = extractColumnValue(rr.data, rightTbl, rightColIdx);
+            std::string lv = extractColumnValue(
+                lr.data, leftTbl, leftColIdx, dbname, true);
+            std::string rv = extractColumnValue(
+                rr.data, rightTbl, rightColIdx, dbname, true);
             if (lv != rv) continue;
             bool whereMatch = true;
             for (const auto& c : conds) {
@@ -30350,7 +30364,8 @@ std::vector<std::string> StorageEngine::rightJoin(
         if (it == colMap.end()) return false;
         const TableSchema& tbl = it->second.isLeft ? leftTbl : rightTbl;
         const std::string& row = it->second.isLeft ? leftRow : rightRow;
-        std::string val = extractColumnValue(row, tbl, it->second.colIdx);
+        std::string val = extractColumnValue(
+            row, tbl, it->second.colIdx, dbname, true);
         const Column& col = tbl.cols[it->second.colIdx];
         if (col.dataType == "char" || col.isVariableLength) {
             if (c.op == "<"  && !(val <  c.value)) return false;
@@ -30394,13 +30409,15 @@ std::vector<std::string> StorageEngine::rightJoin(
 
     if (leftColIdx < leftTbl.len) {
         for (auto& row : leftRows) {
-            row.joinKeyNull = isColumnNullByRid(
+            row.joinKeyNull = leftTbl.cols[leftColIdx].generatedKind != 'v' &&
+                isColumnNullByRid(
                 dbname, leftTable, row.rid, leftColIdx);
         }
     }
     if (rightColIdx < rightTbl.len) {
         for (auto& row : rightRows) {
-            row.joinKeyNull = isColumnNullByRid(
+            row.joinKeyNull = rightTbl.cols[rightColIdx].generatedKind != 'v' &&
+                isColumnNullByRid(
                 dbname, rightTable, row.rid, rightColIdx);
         }
     }
@@ -30412,7 +30429,8 @@ std::vector<std::string> StorageEngine::rightJoin(
             bool include = selectCols.empty() || selectCols.find(leftTbl.cols[i].dataName) != selectCols.end() || selectCols.find(fullName) != selectCols.end();
             if (!include) continue;
             if (leftNull) { rowStr += "NULL "; continue; }
-            std::string val = extractColumnValue(lr, leftTbl, i);
+            std::string val = extractColumnValue(
+                lr, leftTbl, i, dbname, true);
             if (val.empty() && !leftTbl.cols[i].isNull) rowStr += "NULL ";
             else rowStr += val + ' ';
         }
@@ -30420,7 +30438,8 @@ std::vector<std::string> StorageEngine::rightJoin(
             std::string fullName = rightTable + "." + rightTbl.cols[i].dataName;
             bool include = selectCols.empty() || selectCols.find(rightTbl.cols[i].dataName) != selectCols.end() || selectCols.find(fullName) != selectCols.end();
             if (!include) continue;
-            std::string val = extractColumnValue(rr, rightTbl, i);
+            std::string val = extractColumnValue(
+                rr, rightTbl, i, dbname, true);
             if (val.empty() && !rightTbl.cols[i].isNull) rowStr += "NULL ";
             else rowStr += val + ' ';
         }
@@ -30432,8 +30451,10 @@ std::vector<std::string> StorageEngine::rightJoin(
         for (const auto& lr : leftRows) {
             if (leftColIdx >= leftTbl.len || rightColIdx >= rightTbl.len) continue;
             if (lr.joinKeyNull || rr.joinKeyNull) continue;
-            std::string lv = extractColumnValue(lr.data, leftTbl, leftColIdx);
-            std::string rv = extractColumnValue(rr.data, rightTbl, rightColIdx);
+            std::string lv = extractColumnValue(
+                lr.data, leftTbl, leftColIdx, dbname, true);
+            std::string rv = extractColumnValue(
+                rr.data, rightTbl, rightColIdx, dbname, true);
             if (lv != rv) continue;
             bool whereMatch = true;
             for (const auto& c : conds) {
@@ -30547,7 +30568,8 @@ std::vector<std::string> StorageEngine::crossJoin(
         if (it == colMap.end()) return false;
         const TableSchema& tbl = it->second.isLeft ? leftTbl : rightTbl;
         const std::string& row = it->second.isLeft ? leftRow : rightRow;
-        std::string val = extractColumnValue(row, tbl, it->second.colIdx);
+        std::string val = extractColumnValue(
+            row, tbl, it->second.colIdx, dbname, true);
         const Column& col = tbl.cols[it->second.colIdx];
         if (col.dataType == "char" || col.isVariableLength) {
             if (c.op == "<"  && !(val <  c.value)) return false;
@@ -30590,7 +30612,8 @@ std::vector<std::string> StorageEngine::crossJoin(
                 std::string fullName = leftTable + "." + leftTbl.cols[i].dataName;
                 bool include = selectCols.empty() || selectCols.find(leftTbl.cols[i].dataName) != selectCols.end() || selectCols.find(fullName) != selectCols.end();
                 if (!include) continue;
-                std::string val = extractColumnValue(lr, leftTbl, i);
+                std::string val = extractColumnValue(
+                    lr, leftTbl, i, dbname, true);
                 if (val.empty() && !leftTbl.cols[i].isNull) rowStr += "NULL ";
                 else rowStr += val + ' ';
             }
@@ -30598,7 +30621,8 @@ std::vector<std::string> StorageEngine::crossJoin(
                 std::string fullName = rightTable + "." + rightTbl.cols[i].dataName;
                 bool include = selectCols.empty() || selectCols.find(rightTbl.cols[i].dataName) != selectCols.end() || selectCols.find(fullName) != selectCols.end();
                 if (!include) continue;
-                std::string val = extractColumnValue(rr, rightTbl, i);
+                std::string val = extractColumnValue(
+                    rr, rightTbl, i, dbname, true);
                 if (val.empty() && !rightTbl.cols[i].isNull) rowStr += "NULL ";
                 else rowStr += val + ' ';
             }
