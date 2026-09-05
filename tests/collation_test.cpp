@@ -561,6 +561,168 @@ static void test_custom_collation_runtime_resolution() {
     std::cout << "[COLLATION] custom runtime resolution OK" << std::endl;
 }
 
+static void test_collation_aware_unique_constraints() {
+    using dbms::DBStatus;
+
+    std::string db = testDbPath("collation_unique_constraints");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == DBStatus::OK);
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    assert(!ddl.executeSql("CREATE SCHEMA app", s));
+    assert(!ddl.executeSql(
+        "CREATE COLLATION app.casefold "
+        "(provider=libc, locale='nocase')", s));
+
+    // Column-level UNIQUE must use the column's equality semantics on INSERT
+    // and UPDATE, while still allowing a case-only rewrite of the same row.
+    assert(!ddl.executeSql(
+        "CREATE TABLE inline_unique ("
+        "id INT PRIMARY KEY, "
+        "v VARCHAR(30) COLLATE nocase UNIQUE)", s));
+    assert(g_engine.insert(
+               db, "inline_unique", {{"id", "1"}, {"v", "Alpha"}}) ==
+           DBStatus::OK);
+    assert(g_engine.insert(
+               db, "inline_unique", {{"id", "2"}, {"v", "Bravo"}}) ==
+           DBStatus::OK);
+    assert(g_engine.insert(
+               db, "inline_unique", {{"id", "3"}, {"v", "alpha"}}) ==
+           DBStatus::DUPLICATE_KEY);
+    assert(g_engine.update(
+               db, "inline_unique", {{"v", "ALPHA"}}, {"=id 1"}) ==
+           DBStatus::OK);
+    assert(g_engine.update(
+               db, "inline_unique", {{"v", "alpha"}}, {"=id 2"}) ==
+           DBStatus::DUPLICATE_KEY);
+    assert(g_engine.query(
+               db, "inline_unique", {"=v bravo"}, {"id"}).size() == 1);
+
+    // A custom collation on a primary key needs the same heap fallback; its
+    // physical B-tree stores the original bytes and cannot decide equality.
+    assert(!ddl.executeSql(
+        "CREATE TABLE custom_pk ("
+        "v VARCHAR(30) COLLATE app.casefold PRIMARY KEY, payload INT)", s));
+    assert(g_engine.insert(
+               db, "custom_pk", {{"v", "Hello"}, {"payload", "1"}}) ==
+           DBStatus::OK);
+    assert(g_engine.insert(
+               db, "custom_pk", {{"v", "hello"}, {"payload", "2"}}) ==
+           DBStatus::DUPLICATE_KEY);
+    assert(g_engine.insert(
+               db, "custom_pk", {{"v", "World"}, {"payload", "2"}}) ==
+           DBStatus::OK);
+    assert(g_engine.update(
+               db, "custom_pk", {{"v", "hELLo"}}, {"=payload 2"}) ==
+           DBStatus::DUPLICATE_KEY);
+    assert(g_engine.query(
+               db, "custom_pk", {"=v world"}, {"payload"}).size() == 1);
+
+    // Composite UNIQUE compares each component under its own semantics and
+    // preserves MATCH SIMPLE-style NULL behavior for uniqueness.
+    assert(!ddl.executeSql(
+        "CREATE TABLE composite_unique ("
+        "id INT PRIMARY KEY, tenant INT, "
+        "v VARCHAR(30) COLLATE app.casefold, "
+        "CONSTRAINT tenant_word_key UNIQUE (tenant, v))", s));
+    assert(g_engine.insert(
+               db, "composite_unique",
+               {{"id", "1"}, {"tenant", "10"}, {"v", "Hello"}}) ==
+           DBStatus::OK);
+    assert(g_engine.insert(
+               db, "composite_unique",
+               {{"id", "2"}, {"tenant", "10"}, {"v", "HELLO"}}) ==
+           DBStatus::DUPLICATE_KEY);
+    assert(g_engine.insert(
+               db, "composite_unique",
+               {{"id", "2"}, {"tenant", "20"}, {"v", "HELLO"}}) ==
+           DBStatus::OK);
+    for (const char* id : {"3", "4"}) {
+        assert(g_engine.insert(
+                   db, "composite_unique",
+                   {{"id", id}, {"tenant", "10"}, {"v", "NULL"}}) ==
+               DBStatus::OK);
+    }
+
+    // ALTER must reject pre-existing collation-equal rows before publishing
+    // either UNIQUE or PRIMARY KEY metadata.
+    assert(!ddl.executeSql(
+        "CREATE TABLE alter_unique ("
+        "id INT PRIMARY KEY, v VARCHAR(30) COLLATE app.casefold)", s));
+    assert(g_engine.insert(
+               db, "alter_unique", {{"id", "1"}, {"v", "Key"}}) ==
+           DBStatus::OK);
+    assert(g_engine.insert(
+               db, "alter_unique", {{"id", "2"}, {"v", "KEY"}}) ==
+           DBStatus::OK);
+    assert(g_engine.alterTableAddUniqueConstraint(
+               db, "alter_unique", "alter_unique_v_key", {"v"}) ==
+           DBStatus::INVALID_VALUE);
+    assert(g_engine.getTableSchema(db, "alter_unique")
+               .uniqueConstraints.empty());
+    assert(g_engine.update(
+               db, "alter_unique", {{"v", "Other"}}, {"=id 2"}) ==
+           DBStatus::OK);
+    assert(g_engine.alterTableAddUniqueConstraint(
+               db, "alter_unique", "alter_unique_v_key", {"v"}) ==
+           DBStatus::OK);
+    assert(g_engine.insert(
+               db, "alter_unique", {{"id", "3"}, {"v", "kEy"}}) ==
+           DBStatus::DUPLICATE_KEY);
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE alter_pk ("
+        "v VARCHAR(30) COLLATE app.casefold, payload INT)", s));
+    assert(g_engine.insert(
+               db, "alter_pk", {{"v", "Code"}, {"payload", "1"}}) ==
+           DBStatus::OK);
+    assert(g_engine.insert(
+               db, "alter_pk", {{"v", "CODE"}, {"payload", "2"}}) ==
+           DBStatus::OK);
+    assert(g_engine.alterTableAddPrimaryKey(
+               db, "alter_pk", "alter_pk_pkey", {"v"}) ==
+           DBStatus::INVALID_VALUE);
+    assert(!g_engine.getTableSchema(db, "alter_pk").hasPrimaryKey());
+    assert(g_engine.update(
+               db, "alter_pk", {{"v", "Other"}}, {"=payload 2"}) ==
+           DBStatus::OK);
+    assert(g_engine.alterTableAddPrimaryKey(
+               db, "alter_pk", "alter_pk_pkey", {"v"}) == DBStatus::OK);
+    assert(g_engine.insert(
+               db, "alter_pk", {{"v", "cOdE"}, {"payload", "3"}}) ==
+           DBStatus::DUPLICATE_KEY);
+
+    // Deferred single-column UNIQUE is checked again at COMMIT using the
+    // resolved collation, not the raw payload bytes captured at INSERT time.
+    assert(!ddl.executeSql(
+        "CREATE TABLE deferred_unique ("
+        "id INT PRIMARY KEY, v VARCHAR(30) COLLATE app.casefold, "
+        "CONSTRAINT deferred_v_key UNIQUE (v) "
+        "DEFERRABLE INITIALLY DEFERRED)", s));
+    assert(g_engine.insert(
+               db, "deferred_unique", {{"id", "1"}, {"v", "Deferred"}}) ==
+           DBStatus::OK);
+    assert(g_engine.beginTransaction(db) == DBStatus::OK);
+    assert(g_engine.insert(
+               db, "deferred_unique", {{"id", "2"}, {"v", "DEFERRED"}}) ==
+           DBStatus::OK);
+    assert(g_engine.commitTransaction() == DBStatus::INVALID_VALUE);
+    assert(g_engine.query(
+               db, "deferred_unique", {}, {"id"}).size() == 1);
+
+    // Reopening reconstructs the runtime collation and keeps enforcement.
+    dbms::StorageEngine reopened;
+    assert(reopened.insert(
+               db, "inline_unique", {{"id", "3"}, {"v", "aLpHa"}}) ==
+           DBStatus::DUPLICATE_KEY);
+
+    cleanup(db);
+    std::cout << "[COLLATION] UNIQUE and primary-key equality OK"
+              << std::endl;
+}
+
 static void test_drop_collation_protects_table_dependencies() {
     using dbms::DBStatus;
 
@@ -643,6 +805,7 @@ int main() {
     test_collation_metadata_is_atomic_and_backward_compatible();
     test_collation_ddl_preserves_options_and_namespace();
     test_custom_collation_runtime_resolution();
+    test_collation_aware_unique_constraints();
     test_drop_collation_protects_table_dependencies();
     std::cout << "[COLLATION] all passed" << std::endl;
     return 0;

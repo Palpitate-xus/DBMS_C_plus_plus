@@ -2955,6 +2955,47 @@ bool columnUsesBinaryCollation(const Column& column) {
            collation::isBinary(column.collation);
 }
 
+// Physical B-tree/hash keys are byte ordered, but SQL uniqueness follows the
+// column's equality semantics.  Keep the fast canonical-key comparison for
+// binary columns and use the resolved collation for non-binary text columns.
+bool constraintColumnValuesEqual(const Column& column,
+                                 const std::string& left,
+                                 const std::string& right) {
+    if (!columnUsesBinaryCollation(column)) {
+        return compareTextValues(column, left, right) == 0;
+    }
+    return canonicalColumnKeyValue(column, left) ==
+           canonicalColumnKeyValue(column, right);
+}
+
+bool constraintKeyValuesEqual(const TableSchema& table,
+                              const std::vector<size_t>& columns,
+                              const std::vector<std::string>& left,
+                              const std::vector<std::string>& right) {
+    if (left.size() != columns.size() || right.size() != columns.size()) {
+        return false;
+    }
+    for (size_t valueIndex = 0; valueIndex < columns.size(); ++valueIndex) {
+        const size_t columnIndex = columns[valueIndex];
+        if (columnIndex >= table.len ||
+            !constraintColumnValuesEqual(
+                table.cols[columnIndex], left[valueIndex],
+                right[valueIndex])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool constraintNeedsCollationScan(const TableSchema& table,
+                                  const std::vector<size_t>& columns) {
+    return std::any_of(
+        columns.begin(), columns.end(), [&](size_t columnIndex) {
+            return columnIndex >= table.len ||
+                   !columnUsesBinaryCollation(table.cols[columnIndex]);
+        });
+}
+
 } // namespace
 
 DBStatus StorageEngine::createCollation(const std::string& dbname,
@@ -9002,10 +9043,11 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
                               static_cast<size_t>(colIdx))) {
             return true;
         }
-        const std::string payloadValue = canonicalColumnKeyValue(
-            tbl.cols[static_cast<size_t>(colIdx)],
+        const Column& uniqueColumn =
+            tbl.cols[static_cast<size_t>(colIdx)];
+        const std::string payloadValue =
             const_cast<StorageEngine*>(this)->extractColumnValue(
-                currentRow, tbl, static_cast<size_t>(colIdx), dc.dbname));
+                currentRow, tbl, static_cast<size_t>(colIdx), dc.dbname);
         int matches = 0;
         const bool scanOk = forEachRow(
             dc.dbname, dc.tablename,
@@ -9013,18 +9055,18 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
             if (matches > 0) return;
             const int64_t rid = encodeRid(pageId, slot);
             if (rid == currentRid) return;
-            if (tbl.cols[static_cast<size_t>(colIdx)].isNull &&
+            if (uniqueColumn.isNull &&
                 isColumnNullByRid(
                     dc.dbname, dc.tablename, rid,
                     static_cast<size_t>(colIdx))) {
                 return;
             }
             std::string row(data, len);
-            if (canonicalColumnKeyValue(
-                    tbl.cols[static_cast<size_t>(colIdx)],
+            if (constraintColumnValuesEqual(
+                    uniqueColumn,
                     const_cast<StorageEngine*>(this)->extractColumnValue(
-                        row, tbl, static_cast<size_t>(colIdx), dc.dbname)) ==
-                payloadValue) {
+                        row, tbl, static_cast<size_t>(colIdx), dc.dbname),
+                    payloadValue)) {
                 ++matches;
             }
         });
@@ -16018,7 +16060,10 @@ DBStatus StorageEngine::alterTableAddUniqueConstraint(const std::string& dbname,
     // Adding a constraint validates the rows that already exist. Publishing
     // metadata without this scan leaves a table that advertises uniqueness
     // while retaining duplicate keys from before the ALTER statement.
-    std::set<std::vector<std::string>> seenKeys;
+    const bool needsCollationScan =
+        constraintNeedsCollationScan(tbl, colIndices);
+    std::set<std::vector<std::string>> seenBinaryKeys;
+    std::vector<std::vector<std::string>> seenCollatedKeys;
     bool duplicate = false;
     const bool scanOk = forEachRow(
         dbname, tablename,
@@ -16034,12 +16079,28 @@ DBStatus StorageEngine::alterTableAddUniqueConstraint(const std::string& dbname,
                         dbname, tablename, rid, columnIndex)) {
                     return;  // UNIQUE treats NULL keys as distinct.
                 }
-                key.push_back(canonicalColumnKeyValue(
-                    tbl.cols[columnIndex],
-                    extractColumnValue(
-                        row, tbl, columnIndex, dbname)));
+                key.push_back(extractColumnValue(
+                    row, tbl, columnIndex, dbname));
             }
-            duplicate = !seenKeys.insert(std::move(key)).second;
+            if (needsCollationScan) {
+                duplicate = std::any_of(
+                    seenCollatedKeys.begin(), seenCollatedKeys.end(),
+                    [&](const std::vector<std::string>& existingKey) {
+                        return constraintKeyValuesEqual(
+                            tbl, colIndices, existingKey, key);
+                    });
+                if (!duplicate) {
+                    seenCollatedKeys.push_back(std::move(key));
+                }
+            } else {
+                for (size_t valueIndex = 0;
+                     valueIndex < colIndices.size(); ++valueIndex) {
+                    key[valueIndex] = canonicalColumnKeyValue(
+                        tbl.cols[colIndices[valueIndex]], key[valueIndex]);
+                }
+                duplicate =
+                    !seenBinaryKeys.insert(std::move(key)).second;
+            }
         });
     if (!scanOk) {
         lockManager_.unlock(tablename);
@@ -16108,7 +16169,10 @@ DBStatus StorageEngine::alterTableAddPrimaryKey(const std::string& dbname,
 
     // Validate existing data: every PK column must be non-NULL and the tuple of
     // PK columns must be unique across all rows.
-    std::set<std::vector<std::string>> seen;
+    const bool needsCollationScan =
+        constraintNeedsCollationScan(tbl, colIndices);
+    std::set<std::vector<std::string>> seenBinaryKeys;
+    std::vector<std::vector<std::string>> seenCollatedKeys;
     bool violation = false;
     if (!forEachRow(dbname, tablename,
                [&](uint32_t pageId, uint16_t slotId,
@@ -16125,13 +16189,29 @@ DBStatus StorageEngine::alterTableAddPrimaryKey(const std::string& dbname,
                            violation = true;
                            return;
                        }
-                       key.push_back(canonicalColumnKeyValue(
-                           tbl.cols[ci],
-                           extractColumnValue(
-                               row, tbl, ci, dbname)));
+                       key.push_back(extractColumnValue(
+                           row, tbl, ci, dbname));
                    }
-                   if (!seen.insert(std::move(key)).second) {
-                       violation = true;
+                   if (needsCollationScan) {
+                       violation = std::any_of(
+                           seenCollatedKeys.begin(),
+                           seenCollatedKeys.end(),
+                           [&](const std::vector<std::string>& existingKey) {
+                               return constraintKeyValuesEqual(
+                                   tbl, colIndices, existingKey, key);
+                           });
+                       if (!violation) {
+                           seenCollatedKeys.push_back(std::move(key));
+                       }
+                   } else {
+                       for (size_t valueIndex = 0;
+                            valueIndex < colIndices.size(); ++valueIndex) {
+                           key[valueIndex] = canonicalColumnKeyValue(
+                               tbl.cols[colIndices[valueIndex]],
+                               key[valueIndex]);
+                       }
+                       violation =
+                           !seenBinaryKeys.insert(std::move(key)).second;
                    }
                })) {
         lockManager_.unlock(tablename);
@@ -19091,23 +19171,58 @@ DBStatus StorageEngine::insertInternal(
     // that row image is complete below.
     const auto validateFinalUniqueKeys = [&]() -> DBStatus {
         if (tbl.hasPrimaryKey()) {
+            std::vector<size_t> primaryColumns;
+            if (!collectPrimaryKeyColumns(tbl, primaryColumns) ||
+                primaryColumns.empty()) {
+                return DBStatus::CORRUPTED_DATA;
+            }
             const std::string pkVal = tbl.buildPKValue(actualValues);
             if (!pkVal.empty()) {
                 bool duplicate = false;
-                BPTree* index = getPKIndex(dbname, tablename);
-                if (index && index->isOpen()) {
-                    int64_t ignored = -1;
-                    duplicate = index->search(pkVal, ignored);
-                } else if (!forEachRow(
-                               dbname, tablename,
-                               [&](uint32_t, uint16_t, const char* data,
-                                   size_t length) {
-                                   if (duplicate) return;
-                                   duplicate = extractPKValue(
-                                       std::string(data, length), tbl,
-                                       dbname) == pkVal;
-                               })) {
-                    return DBStatus::IO_ERROR;
+                if (constraintNeedsCollationScan(tbl, primaryColumns)) {
+                    std::vector<std::string> candidateValues;
+                    candidateValues.reserve(primaryColumns.size());
+                    for (const size_t columnIndex : primaryColumns) {
+                        candidateValues.push_back(valueFromRowMap(
+                            actualValues,
+                            tbl.cols[columnIndex].dataName));
+                    }
+                    if (!forEachRow(
+                            dbname, tablename,
+                            [&](uint32_t, uint16_t, const char* data,
+                                size_t length) {
+                                if (duplicate) return;
+                                const std::string row(data, length);
+                                std::vector<std::string> existingValues;
+                                existingValues.reserve(primaryColumns.size());
+                                for (const size_t columnIndex :
+                                     primaryColumns) {
+                                    existingValues.push_back(
+                                        extractColumnValue(
+                                            row, tbl, columnIndex, dbname));
+                                }
+                                duplicate = constraintKeyValuesEqual(
+                                    tbl, primaryColumns, existingValues,
+                                    candidateValues);
+                            })) {
+                        return DBStatus::IO_ERROR;
+                    }
+                } else {
+                    BPTree* index = getPKIndex(dbname, tablename);
+                    if (index && index->isOpen()) {
+                        int64_t ignored = -1;
+                        duplicate = index->search(pkVal, ignored);
+                    } else if (!forEachRow(
+                                   dbname, tablename,
+                                   [&](uint32_t, uint16_t, const char* data,
+                                       size_t length) {
+                                       if (duplicate) return;
+                                       duplicate = extractPKValue(
+                                           std::string(data, length), tbl,
+                                           dbname) == pkVal;
+                                   })) {
+                        return DBStatus::IO_ERROR;
+                    }
                 }
                 if (duplicate) return DBStatus::DUPLICATE_KEY;
             }
@@ -19126,6 +19241,7 @@ DBStatus StorageEngine::insertInternal(
             }
             const std::string candidateKey =
                 canonicalColumnKeyValue(col, value->second);
+            const std::string& candidateValue = value->second;
             std::string constraintName =
                 tablename + "_" + col.dataName + "_key";
             for (size_t uniqueIndex = 0;
@@ -19155,7 +19271,8 @@ DBStatus StorageEngine::insertInternal(
             // indexes because an empty index key also represented SQL NULL.
             // Use the heap for that value so both legacy and newly-written
             // rows participate in UNIQUE without changing on-disk keys.
-            if (!candidateKey.empty() && index && index->isOpen()) {
+            if (columnUsesBinaryCollation(col) && !candidateKey.empty() &&
+                index && index->isOpen()) {
                 duplicate = !index->searchMulti(candidateKey).empty();
             } else if (!forEachRow(
                            dbname, tablename,
@@ -19169,10 +19286,11 @@ DBStatus StorageEngine::insertInternal(
                                        dbname, tablename, existingRid, i)) {
                                    return;
                                }
-                               duplicate = canonicalColumnKeyValue(
+                               duplicate = constraintColumnValuesEqual(
                                    col, extractColumnValue(
                                             std::string(data, length), tbl,
-                                            i, dbname)) == candidateKey;
+                                            i, dbname),
+                                   candidateValue);
                            })) {
                 return DBStatus::IO_ERROR;
             }
@@ -19212,8 +19330,7 @@ DBStatus StorageEngine::insertInternal(
                     containsNull = true;
                     break;
                 }
-                compositeKey.push_back(canonicalColumnKeyValue(
-                    tbl.cols[columnIndex], value->second));
+                compositeKey.push_back(value->second);
             }
             if (containsNull) continue;
 
@@ -19236,11 +19353,11 @@ DBStatus StorageEngine::insertInternal(
                                     columnIndex)) {
                                 return;
                             }
-                            existingKey.push_back(canonicalColumnKeyValue(
-                                tbl.cols[columnIndex], extractColumnValue(
-                                    row, tbl, columnIndex, dbname)));
+                            existingKey.push_back(extractColumnValue(
+                                row, tbl, columnIndex, dbname));
                         }
-                        duplicate = existingKey == compositeKey;
+                        duplicate = constraintKeyValuesEqual(
+                            tbl, columns, existingKey, compositeKey);
                     })) {
                 return DBStatus::IO_ERROR;
             }
@@ -23574,15 +23691,14 @@ DBStatus StorageEngine::updateInternal(
                 const std::string& columnName = tbl.cols[columnIndex].dataName;
                 const std::string rawNewValue =
                     valueFromRowMap(rowValues, columnName);
-                newValues.push_back(canonicalColumnKeyValue(
-                    tbl.cols[columnIndex], rawNewValue));
+                newValues.push_back(rawNewValue);
                 const bool oldIsNull =
                     columnIndex < oldNullColumns.size() &&
                     oldNullColumns[columnIndex];
-                if (oldIsNull || canonicalColumnKeyValue(
+                if (oldIsNull || !constraintColumnValuesEqual(
                         tbl.cols[columnIndex], valueFromRowMap(
-                            oldLogicalValues, columnName)) !=
-                        newValues.back()) {
+                            oldLogicalValues, columnName),
+                        newValues.back())) {
                     keyChanged = true;
                 }
             }
@@ -23627,11 +23743,11 @@ DBStatus StorageEngine::updateInternal(
                                 columnIndex)) {
                             return;
                         }
-                        if (canonicalColumnKeyValue(
+                        if (!constraintColumnValuesEqual(
                                 tbl.cols[columnIndex],
                                 extractColumnValue(
-                                    otherRow, tbl, columnIndex,
-                                    dbname)) != newValues[valueIndex]) {
+                                    otherRow, tbl, columnIndex, dbname),
+                                newValues[valueIndex])) {
                             return;
                         }
                     }
@@ -23640,6 +23756,24 @@ DBStatus StorageEngine::updateInternal(
             if (!scanOk) return DBStatus::IO_ERROR;
             return duplicate ? DBStatus::DUPLICATE_KEY : DBStatus::OK;
         };
+
+        if (tbl.hasPrimaryKey()) {
+            std::vector<size_t> primaryColumns;
+            if (!collectPrimaryKeyColumns(tbl, primaryColumns) ||
+                primaryColumns.empty()) {
+                lockManager_.unlock(tablename);
+                return DBStatus::CORRUPTED_DATA;
+            }
+            // Primary keys remain immediate in this storage layer. Passing an
+            // empty constraint name prevents the UNIQUE deferral branch while
+            // reusing its collation-aware tuple scan.
+            const DBStatus primaryStatus =
+                validateUniqueUpdate(primaryColumns, {});
+            if (primaryStatus != DBStatus::OK) {
+                lockManager_.unlock(tablename);
+                return primaryStatus;
+            }
+        }
 
         for (size_t columnIndex = 0; columnIndex < tbl.len; ++columnIndex) {
             if (!tbl.cols[columnIndex].isUnique) continue;
