@@ -83,6 +83,58 @@ static void test_like_including_indexes() {
     std::cout << "[OPTS] LIKE INCLUDING INDEXES OK" << std::endl;
 }
 
+static void test_like_including_composite_unique() {
+    std::string db = testDbPath("opts_like_composite_unique");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE src (tenant INT, code INT, UNIQUE (tenant, code))", s));
+    assert(!ddl.executeSql("CREATE TABLE plain (LIKE src)", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE cpy (LIKE src INCLUDING INDEXES)", s));
+
+    auto copied = g_engine.getTableSchema(db, "cpy");
+    assert(copied.uniqueConstraints ==
+           std::vector<std::vector<size_t>>({{0, 1}}));
+    assert(copied.uniqueConstraintNames == std::vector<std::string>{""});
+    assert(g_engine.insert(
+               db, "cpy", {{"tenant", "1"}, {"code", "10"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(
+               db, "cpy", {{"tenant", "1"}, {"code", "10"}}) ==
+           dbms::DBStatus::DUPLICATE_KEY);
+    assert(g_engine.insert(
+               db, "plain", {{"tenant", "1"}, {"code", "10"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(
+               db, "plain", {{"tenant", "1"}, {"code", "10"}}) ==
+           dbms::DBStatus::OK);
+    {
+        dbms::StorageEngine restarted;
+        copied = restarted.getTableSchema(db, "cpy");
+        assert(copied.uniqueConstraints ==
+               std::vector<std::vector<size_t>>({{0, 1}}));
+    }
+
+    assert(!ddl.executeSql("CREATE TABLE pk_a (a INT PRIMARY KEY)", s));
+    assert(!ddl.executeSql("CREATE TABLE pk_b (b INT PRIMARY KEY)", s));
+    assert(ddl.executeSql(
+        "CREATE TABLE two_keys (LIKE pk_a INCLUDING INDEXES, "
+        "LIKE pk_b INCLUDING INDEXES)", s));
+    assert(!g_engine.tableExists(db, "two_keys"));
+    assert(ddl.executeSql(
+        "CREATE TABLE copied_and_local_key "
+        "(LIKE pk_a INCLUDING INDEXES, local_id INT PRIMARY KEY)", s));
+    assert(!g_engine.tableExists(db, "copied_and_local_key"));
+
+    cleanup(db);
+    std::cout << "[OPTS] LIKE composite indexes and key conflicts OK"
+              << std::endl;
+}
+
 // LIKE INCLUDING IDENTITY copies auto-increment flag.
 static void test_like_including_identity() {
     std::string db = testDbPath("opts_like_id");
@@ -285,6 +337,7 @@ int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_like_including_constraints();
     test_like_including_indexes();
+    test_like_including_composite_unique();
     test_like_including_identity();
     test_identity_always();
     test_identity_by_default();

@@ -3146,6 +3146,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     // CHECK constraints, identity and PK/UNIQUE are copied only with the matching
     // INCLUDING option (or INCLUDING ALL).
     std::vector<std::pair<std::string, std::string>> likeColumnComments;
+    size_t copiedPrimaryKeyCount = 0;
     for (const auto& lc : stmt->likeClauses) {
         if (!lc.optionsValid) {
             std::cout << "ERROR: invalid CREATE TABLE LIKE option \""
@@ -3174,6 +3175,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             }
         }
         TableSchema srcSchema = g_engine.getTableSchema(s.currentDB, src);
+        const size_t destinationOffset = tbl.len;
         for (size_t i = 0; i < srcSchema.len; ++i) {
             if (tbl.len >= MAX_COLUMNS) {
                 std::cout << "ERROR: table cannot have more than "
@@ -3196,15 +3198,54 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                 c.isUnique = false;
             }
             tbl.append(c);
-            if (lc.includingIndexes && c.isPrimaryKey) {
-                tbl.pkColIndices.push_back(tbl.len - 1);
-            }
             if (lc.includingComments) {
                 const std::string comment = g_engine.getColumnComment(
                     s.currentDB, src, c.dataName);
                 if (!comment.empty()) {
                     likeColumnComments.emplace_back(c.dataName, comment);
                 }
+            }
+        }
+        if (lc.includingIndexes) {
+            std::vector<size_t> sourcePrimaryKey = srcSchema.pkColIndices;
+            if (sourcePrimaryKey.empty()) {
+                for (size_t i = 0; i < srcSchema.len; ++i) {
+                    if (srcSchema.cols[i].isPrimaryKey) {
+                        sourcePrimaryKey.push_back(i);
+                    }
+                }
+            }
+            if (!sourcePrimaryKey.empty() && ++copiedPrimaryKeyCount > 1) {
+                std::cout << "ERROR: multiple primary keys for table are not allowed"
+                          << std::endl;
+                return true;
+            }
+            for (const size_t sourceIndex : sourcePrimaryKey) {
+                if (sourceIndex >= srcSchema.len) {
+                    std::cout << "ERROR: LIKE source has invalid primary key metadata"
+                              << std::endl;
+                    return true;
+                }
+                const size_t targetIndex = destinationOffset + sourceIndex;
+                tbl.pkColIndices.push_back(targetIndex);
+                tbl.cols[targetIndex].isPrimaryKey = true;
+                tbl.cols[targetIndex].isNull = false;
+            }
+            for (const auto& sourceUnique : srcSchema.uniqueConstraints) {
+                std::vector<size_t> targetUnique;
+                targetUnique.reserve(sourceUnique.size());
+                for (const size_t sourceIndex : sourceUnique) {
+                    if (sourceIndex >= srcSchema.len) {
+                        std::cout << "ERROR: LIKE source has invalid unique "
+                                     "constraint metadata"
+                                  << std::endl;
+                        return true;
+                    }
+                    targetUnique.push_back(destinationOffset + sourceIndex);
+                }
+                tbl.uniqueConstraints.push_back(std::move(targetUnique));
+                // LIKE chooses a fresh default constraint name for the target.
+                tbl.uniqueConstraintNames.emplace_back();
             }
         }
         if (lc.includingConstraints) {
@@ -3507,6 +3548,18 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     // multiple inline flags represent multiple declarations rather than one
     // composite key.
     bool hasPrimaryKeyDefinition = !tbl.pkColIndices.empty();
+    if (hasPrimaryKeyDefinition) {
+        std::set<size_t> representedPrimaryColumns(
+            tbl.pkColIndices.begin(), tbl.pkColIndices.end());
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].isPrimaryKey &&
+                representedPrimaryColumns.count(i) == 0) {
+                std::cout << "ERROR: multiple primary keys for table are not allowed"
+                          << std::endl;
+                return true;
+            }
+        }
+    }
     if (!hasPrimaryKeyDefinition) {
         size_t inlinePrimaryKeys = 0;
         for (size_t i = 0; i < tbl.len; ++i) {
