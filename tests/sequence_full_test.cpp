@@ -317,6 +317,148 @@ static void test_sequence_owned_by_drop_table() {
     std::cout << "[SEQUENCE] owned by rename/drop lifecycle OK" << std::endl;
 }
 
+static void test_sequence_owned_by_drop_column() {
+    const std::string db = testDbPath("seq_owned_column");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    // The owning column's own DEFAULT is part of the column being removed;
+    // it must not turn the automatic ownership dependency into a blocker.
+    assert(!ddl.executeSql(
+        "CREATE TABLE owner_table (id INT, keep INT)", s));
+    assert(!ddl.executeSql(
+        "CREATE SEQUENCE owned_seq OWNED BY owner_table.id", s));
+    assert(!ddl.executeSql(
+        "ALTER TABLE owner_table ALTER COLUMN id "
+        "SET DEFAULT nextval('owned_seq')", s));
+    s.sequenceLastValues["owned_seq"] = 9;
+    s.sequenceLastValues["public.owned_seq"] = 9;
+    assert(!ddl.executeSql(
+        "ALTER TABLE owner_table DROP COLUMN id", s));
+    assert(!g_engine.sequenceExists(db, "owned_seq"));
+    const auto ownerStorage = g_engine.getTableSchema(db, "owner_table");
+    assert(ownerStorage.len == 1);
+    assert(ownerStorage.cols[0].dataName == "keep");
+    assert(s.sequenceLastValues.count("owned_seq") == 0);
+    assert(s.sequenceLastValues.count("public.owned_seq") == 0);
+
+    // Exercise an upgraded zero-subobject ownership row and schema-qualified
+    // storage naming at the same time.
+    assert(!ddl.executeSql("CREATE SCHEMA app", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE app.legacy_owner (id INT, keep INT)", s));
+    assert(!ddl.executeSql(
+        "CREATE SEQUENCE app.legacy_owned "
+        "OWNED BY app.legacy_owner.id", s));
+    {
+        dbms::CatalogManager& catalog =
+            g_engine.catalogService().get(db);
+        const auto* table =
+            catalog.resolveRelation("app.legacy_owner", {"public"});
+        const auto* sequence =
+            catalog.resolveRelation("app.legacy_owned", {"public"});
+        const auto* column = table
+            ? catalog.findAttribute(table->oid, "id") : nullptr;
+        assert(table && sequence && column);
+        assert(catalog.removeDepend(
+            dbms::PgClassOid_Class, sequence->oid, 0,
+            dbms::PgClassOid_Class, table->oid, column->attnum));
+        dbms::PgDependRow legacyOwnership;
+        legacyOwnership.classid = dbms::PgClassOid_Class;
+        legacyOwnership.objid = sequence->oid;
+        legacyOwnership.objsubid = 0;
+        legacyOwnership.refclassid = dbms::PgClassOid_Class;
+        legacyOwnership.refobjid = table->oid;
+        legacyOwnership.refobjsubid = 0;
+        legacyOwnership.deptype = 'a';
+        catalog.addDepend(legacyOwnership);
+        assert(catalog.persistAll());
+    }
+    s.sequenceLastValues["app.legacy_owned"] = 3;
+    assert(!ddl.executeSql(
+        "ALTER TABLE app.legacy_owner DROP COLUMN id", s));
+    assert(!g_engine.sequenceExists(db, "app.legacy_owned"));
+    assert(s.sequenceLastValues.count("app.legacy_owned") == 0);
+    const auto legacyOwnerStorage =
+        g_engine.getTableSchema(db, "app__legacy_owner");
+    assert(legacyOwnerStorage.len == 1);
+    assert(legacyOwnerStorage.cols[0].dataName == "keep");
+
+    // A DEFAULT on another column is a normal dependency. RESTRICT must
+    // roll back the already-rewritten owner table; CASCADE clears that
+    // default and then removes the owned sequence.
+    assert(!ddl.executeSql(
+        "CREATE TABLE shared_owner (id INT, keep INT)", s));
+    assert(!ddl.executeSql(
+        "CREATE SEQUENCE shared_seq OWNED BY shared_owner.id", s));
+    assert(!ddl.executeSql(
+        "ALTER TABLE shared_owner ALTER COLUMN id "
+        "SET DEFAULT nextval('shared_seq')", s));
+    assert(!ddl.executeSql(
+        "ALTER TABLE shared_owner ALTER COLUMN keep "
+        "SET DEFAULT nextval('shared_seq')", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE sequence_consumer "
+        "(value INT DEFAULT nextval('shared_seq'))", s));
+    s.sequenceLastValues["shared_seq"] = 17;
+    assert(ddl.executeSql(
+        "ALTER TABLE shared_owner DROP COLUMN id RESTRICT", s));
+    assert(g_engine.sequenceExists(db, "shared_seq"));
+    const auto restrictedOwner =
+        g_engine.getTableSchema(db, "shared_owner");
+    assert(restrictedOwner.len == 2);
+    assert(restrictedOwner.cols[0].dataName == "id");
+    assert(!restrictedOwner.cols[1].defaultValue.empty());
+    assert(!g_engine.getTableSchema(
+        db, "sequence_consumer").cols[0].defaultValue.empty());
+    assert(s.sequenceLastValues["shared_seq"] == 17);
+
+    assert(!ddl.executeSql(
+        "ALTER TABLE shared_owner DROP COLUMN id CASCADE", s));
+    assert(!g_engine.sequenceExists(db, "shared_seq"));
+    assert(s.sequenceLastValues.count("shared_seq") == 0);
+    const auto cascadedOwner =
+        g_engine.getTableSchema(db, "shared_owner");
+    assert(cascadedOwner.len == 1);
+    assert(cascadedOwner.cols[0].dataName == "keep");
+    assert(cascadedOwner.cols[0].defaultValue.empty());
+    assert(g_engine.getTableSchema(
+        db, "sequence_consumer").cols[0].defaultValue.empty());
+
+    {
+        dbms::CatalogManager durable(
+            (fs::path(g_engine.dbPath(db)) / "pg_catalog").string());
+        const auto* publicNamespace =
+            durable.findNamespaceByName("public");
+        const auto* appNamespace = durable.findNamespaceByName("app");
+        assert(publicNamespace && appNamespace);
+        assert(durable.findClassByName(
+                   "owned_seq", publicNamespace->oid) == nullptr);
+        assert(durable.findClassByName(
+                   "shared_seq", publicNamespace->oid) == nullptr);
+        assert(durable.findClassByName(
+                   "legacy_owned", appNamespace->oid) == nullptr);
+        const auto* consumer = durable.findClassByName(
+            "sequence_consumer", publicNamespace->oid);
+        const auto* consumerColumn = consumer
+            ? durable.findAttribute(consumer->oid, "value") : nullptr;
+        assert(consumerColumn && !consumerColumn->atthasdef);
+        const auto* durableOwner = durable.findClassByName(
+            "shared_owner", publicNamespace->oid);
+        const auto* durableKeep = durableOwner
+            ? durable.findAttribute(durableOwner->oid, "keep") : nullptr;
+        assert(durableKeep && !durableKeep->atthasdef);
+    }
+
+    cleanup(db);
+    std::cout << "[SEQUENCE] owned by drop column lifecycle OK"
+              << std::endl;
+}
+
 static void test_default_sequence_is_not_table_owned() {
     const std::string db = testDbPath("seq_default_not_owned");
     cleanup(db);
@@ -955,6 +1097,7 @@ int main() {
     test_sequence_alter();
     test_sequence_rename();
     test_sequence_owned_by_drop_table();
+    test_sequence_owned_by_drop_column();
     test_default_sequence_is_not_table_owned();
     test_sequence_identity_still_works();
     test_sequence_numeric_input_fails_closed();

@@ -1233,6 +1233,13 @@ static bool updateOwnedSequenceColumnNames(
     int32_t columnNumber, const std::string& tableName,
     const std::string& oldColumnName, const std::string& newColumnName);
 
+static bool dropOwnedSequencesForColumn(
+    CatalogManager& catalog, const std::string& dbname,
+    const std::string& physicalTableName,
+    const std::string& logicalTableName, Oid tableOid,
+    int32_t columnNumber, const std::string& columnName, bool cascade,
+    std::set<std::string>& droppedSequenceStorageNames);
+
 bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
     if (!stmt) return true;
     if (!checkDB(s)) return true;
@@ -1251,6 +1258,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
         s.tempTables.count(stmt->tableName) != 0;
     const std::string tableName = resolveTableName(s, stmt->tableName);
     std::string pendingTemporaryRename;
+    std::set<std::string> droppedOwnedSequenceStorageNames;
 
     // ALTER TABLE actions can rewrite schemas, indexes, parameters, and
     // relation files directly; the row-level undo log cannot restore those
@@ -1371,11 +1379,23 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                         const auto* droppedAttribute = relation
                             ? catalog.findAttribute(relation->oid, sub.name)
                             : nullptr;
+                        const int32_t droppedAttributeNumber =
+                            droppedAttribute ? droppedAttribute->attnum : 0;
                         if (relation &&
                             (!droppedAttribute ||
+                             !dropOwnedSequencesForColumn(
+                                 catalog, s.currentDB, tableName,
+                                 schemaName == "public"
+                                     ? qualifiedName.name
+                                     : schemaName + "." + qualifiedName.name,
+                                 relation->oid, droppedAttributeNumber,
+                                 sub.name,
+                                 sub.options.find("cascade") !=
+                                     sub.options.end(),
+                                 droppedOwnedSequenceStorageNames) ||
                              !catalog.remapColumnMetadataAfterDrop(
                                  relation->oid,
-                                 droppedAttribute->attnum))) {
+                                 droppedAttributeNumber))) {
                             std::cout
                                 << "ALTER TABLE DROP COLUMN has dependent catalog objects"
                                 << std::endl;
@@ -2233,6 +2253,9 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
         }
     }
     txn.recordUpdate(DdlObjectKind::Table, tableName);
+    for (const auto& sequenceName : droppedOwnedSequenceStorageNames) {
+        txn.recordDrop(DdlObjectKind::Sequence, sequenceName);
+    }
     bool temporarySessionRenamed = false;
     bool hadOnCommitAction = false;
     bool wasCreatedInTransaction = false;
@@ -2268,6 +2291,12 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
             }
         }
         return true;
+    }
+    for (const auto& sequenceName : droppedOwnedSequenceStorageNames) {
+        s.sequenceLastValues.erase(sequenceName);
+        if (sequenceName.find('.') == std::string::npos) {
+            s.sequenceLastValues.erase("public." + sequenceName);
+        }
     }
     std::cout << "ALTER TABLE succeeded" << std::endl;
     return false;
@@ -4634,6 +4663,206 @@ static bool dropPhysicalCascadeAction(StorageEngine& engine,
     // catalog plan still needs to remove its stale metadata.  Other failures
     // must abort and let DdlTransaction restore the snapshot.
     return status == DBStatus::OK || status == DBStatus::TABLE_NOT_FOUND;
+}
+
+// An OWNED BY dependency is automatic in PostgreSQL: dropping the owning
+// column also drops the sequence, even under RESTRICT. A normal dependency
+// on that sequence (represented here by a stored DEFAULT expression rather
+// than pg_attrdef) still blocks RESTRICT and is removed only for CASCADE.
+static bool dropOwnedSequencesForColumn(
+    CatalogManager& catalog, const std::string& dbname,
+    const std::string& physicalTableName,
+    const std::string& logicalTableName, Oid tableOid,
+    int32_t columnNumber, const std::string& columnName, bool cascade,
+    std::set<std::string>& droppedSequenceStorageNames) {
+    struct Target {
+        Oid oid = INVALID_OID;
+        std::string storageName;
+        std::vector<std::pair<std::string, std::string>> defaultDependencies;
+        CatalogManager::DropPlan catalogPlan;
+    };
+
+    std::vector<Target> targets;
+    std::set<Oid> targetOids;
+    std::set<std::string> targetStorageNames;
+    for (const auto& dependency :
+         catalog.findRefs(PgClassOid_Class, tableOid, -1)) {
+        if (dependency.classid != PgClassOid_Class ||
+            dependency.objsubid != 0 || dependency.deptype != 'a') {
+            continue;
+        }
+        if (dependency.refobjsubid > 0 &&
+            dependency.refobjsubid != columnNumber) {
+            continue;
+        }
+
+        const PgClassRow* dependent = catalog.findClass(dependency.objid);
+        if (!dependent || dependent->relkind != 'S' ||
+            targetOids.count(dependent->oid) != 0) {
+            continue;
+        }
+
+        std::string storageName;
+        std::string error;
+        if (!catalogSequenceStorageName(
+                catalog, *dependent, storageName, error)) {
+            std::cout << "ALTER TABLE DROP COLUMN owned sequence planning failed: "
+                      << error << std::endl;
+            return false;
+        }
+        SequenceInfo sequenceInfo;
+        if (g_engine.getSequenceInfo(
+                dbname, storageName, sequenceInfo) != DBStatus::OK) {
+            std::cout << "ALTER TABLE DROP COLUMN cannot read owned sequence "
+                      << storageName << std::endl;
+            return false;
+        }
+
+        // Current dependencies carry the owning attribute number. A zero
+        // sub-id is accepted only for genuine legacy ownership corroborated
+        // by the sequence file; old releases also emitted zero rows for
+        // unrelated DEFAULT nextval() references.
+        if (dependency.refobjsubid == 0 &&
+            (sequenceInfo.ownedByTable.empty() ||
+             canonicalOwnedTableName(sequenceInfo.ownedByTable) !=
+                 canonicalOwnedTableName(logicalTableName) ||
+             sequenceInfo.ownedByColumn != columnName)) {
+            continue;
+        }
+
+        Target target;
+        target.oid = dependent->oid;
+        target.storageName = storageName;
+        for (const auto& defaultDependency :
+             findDefaultNextvalDeps(dbname, storageName)) {
+            if (defaultDependency.first == physicalTableName &&
+                defaultDependency.second == columnName) {
+                continue;
+            }
+            target.defaultDependencies.push_back(defaultDependency);
+        }
+        if (!cascade && !target.defaultDependencies.empty()) {
+            const auto& blocker = target.defaultDependencies.front();
+            std::cout << "ERROR: cannot drop column " << columnName
+                      << " because default on " << blocker.first << "."
+                      << blocker.second << " depends on owned sequence "
+                      << storageName << std::endl;
+            return false;
+        }
+        target.catalogPlan = catalog.planDrop(
+            PgClassOid_Class, target.oid,
+            cascade ? CatalogManager::DropBehavior::Cascade
+                    : CatalogManager::DropBehavior::Restrict);
+        if (!target.catalogPlan.ok()) {
+            std::cout << "ERROR: " << target.catalogPlan.error << std::endl;
+            return false;
+        }
+        targetOids.insert(target.oid);
+        targetStorageNames.insert(target.storageName);
+        targets.push_back(std::move(target));
+    }
+
+    if (targets.empty()) return true;
+
+    CatalogManager::DropPlan combinedCatalogPlan;
+    std::set<std::pair<Oid, Oid>> plannedCatalogObjects;
+    std::vector<PhysicalCascadeAction> physicalActions;
+    for (const auto& target : targets) {
+        for (const auto& object : target.catalogPlan.objectsToDrop) {
+            if (plannedCatalogObjects.insert(object).second) {
+                combinedCatalogPlan.objectsToDrop.push_back(object);
+            }
+        }
+
+        std::vector<PhysicalCascadeAction> targetActions;
+        std::string error;
+        if (!buildPhysicalCascadeActions(
+                catalog, g_engine, dbname, target.oid,
+                target.catalogPlan, targetActions, error)) {
+            std::cout << "ALTER TABLE DROP COLUMN dependency planning failed: "
+                      << error << std::endl;
+            return false;
+        }
+        for (auto& action : targetActions) {
+            if (action.kind == PhysicalCascadeAction::Kind::Sequence &&
+                targetStorageNames.count(action.name) != 0) {
+                continue;
+            }
+            const auto duplicate = std::find_if(
+                physicalActions.begin(), physicalActions.end(),
+                [&](const PhysicalCascadeAction& existing) {
+                    return existing.kind == action.kind &&
+                           existing.name == action.name &&
+                           existing.tableName == action.tableName &&
+                           existing.accessMethod == action.accessMethod &&
+                           existing.key == action.key;
+                });
+            if (duplicate == physicalActions.end()) {
+                physicalActions.push_back(std::move(action));
+            }
+        }
+    }
+
+    std::set<std::pair<std::string, std::string>> clearedDefaults;
+    std::set<std::string> changedDefaultTables;
+    for (const auto& target : targets) {
+        for (const auto& dependency : target.defaultDependencies) {
+            if (!clearedDefaults.insert(dependency).second) continue;
+            if (g_engine.alterTableDropDefault(
+                    dbname, dependency.first,
+                    dependency.second) != DBStatus::OK) {
+                std::cout << "ALTER TABLE DROP COLUMN failed to clear default on "
+                          << dependency.first << "." << dependency.second
+                          << std::endl;
+                return false;
+            }
+            changedDefaultTables.insert(dependency.first);
+        }
+    }
+    for (const auto& changedTable : changedDefaultTables) {
+        // The caller still needs the pre-drop pg_attribute rows in order to
+        // compact dependency/description sub-ids. Its final synchronization
+        // will publish both the compacted schema and this default change.
+        if (changedTable == physicalTableName) continue;
+        if (!synchronizeTableAttributesInCatalog(dbname, changedTable)) {
+            std::cout << "ALTER TABLE DROP COLUMN default catalog update failed for "
+                      << changedTable << std::endl;
+            return false;
+        }
+    }
+
+    for (const auto& action : physicalActions) {
+        if (!dropPhysicalCascadeAction(g_engine, dbname, action)) {
+            std::cout << "ALTER TABLE DROP COLUMN dependency cleanup failed for "
+                      << action.name << std::endl;
+            return false;
+        }
+        if (action.kind == PhysicalCascadeAction::Kind::Sequence) {
+            droppedSequenceStorageNames.insert(action.name);
+        }
+    }
+    for (const auto& target : targets) {
+        if (g_engine.dropSequence(
+                dbname, target.storageName) != DBStatus::OK) {
+            std::cout << "ALTER TABLE DROP COLUMN failed to drop owned sequence "
+                      << target.storageName << std::endl;
+            return false;
+        }
+        droppedSequenceStorageNames.insert(target.storageName);
+    }
+
+    std::string catalogError;
+    if (!catalog.applyDropPlan(combinedCatalogPlan, &catalogError)) {
+        std::cout << "ALTER TABLE DROP COLUMN sequence catalog cleanup failed: "
+                  << catalogError << std::endl;
+        return false;
+    }
+    if (!catalog.persistAll()) {
+        std::cout << "ALTER TABLE DROP COLUMN sequence catalog persistence failed"
+                  << std::endl;
+        return false;
+    }
+    return true;
 }
 
 bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
