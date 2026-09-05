@@ -1065,6 +1065,8 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
             (rt == "timestamp" || rt == "timestamptz" || rt == "datetime")) {
             long long ls = parseTimestampToSeconds(l.value);
             long long rs = parseTimestampToSeconds(r.value);
+            if (isInfiniteTimestamp(ls) || isInfiniteTimestamp(rs))
+                return ExprValue("interval", "", true);
             long long diff = ls - rs;
             // PG renders the sign on each component:
             // -1 days -00:30:00

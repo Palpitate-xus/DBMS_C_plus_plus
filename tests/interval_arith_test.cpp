@@ -36,6 +36,21 @@ static void test_add_sub() {
         "'2024-03-10'::date + 9223372036854775807");
     assert(dateIntegerOverflow.ok && dateIntegerOverflow.isNull);
 
+    auto infiniteTimestampDifference = eval(
+        "'infinity'::timestamp - '2024-03-10'::timestamp");
+    assert(infiniteTimestampDifference.ok &&
+           infiniteTimestampDifference.isNull);
+
+    auto equalInfiniteTimestampDifference = eval(
+        "'infinity'::timestamp - 'infinity'::timestamp");
+    assert(equalInfiniteTimestampDifference.ok &&
+           equalInfiniteTimestampDifference.isNull);
+
+    auto negativeInfiniteTimestampDifference = eval(
+        "'-infinity'::timestamp - '2024-03-10'::timestamp");
+    assert(negativeInfiniteTimestampDifference.ok &&
+           negativeInfiniteTimestampDifference.isNull);
+
     // days
     auto a = eval("'2024-03-10'::timestamp + '1 day'::interval");
     assert(a.ok && !a.isNull);
