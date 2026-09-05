@@ -17,6 +17,25 @@ static ExprEvalResult eval(const std::string& exprText) {
 }
 
 static void test_add_sub() {
+    auto datePlusDays = eval("'2024-03-10'::date + 7");
+    assert(datePlusDays.ok && datePlusDays.value == "2024-03-17");
+
+    auto daysPlusDate = eval("7 + '2024-03-10'::date");
+    assert(daysPlusDate.ok && daysPlusDate.value == "2024-03-17");
+
+    auto dateMinusDays = eval("'2024-03-10'::date - 7");
+    assert(dateMinusDays.ok && dateMinusDays.value == "2024-03-03");
+
+    auto dateUpperOverflow = eval("'9999-12-31'::date + 1");
+    assert(dateUpperOverflow.ok && dateUpperOverflow.isNull);
+
+    auto dateLowerOverflow = eval("'0001-01-01'::date - 1");
+    assert(dateLowerOverflow.ok && dateLowerOverflow.isNull);
+
+    auto dateIntegerOverflow = eval(
+        "'2024-03-10'::date + 9223372036854775807");
+    assert(dateIntegerOverflow.ok && dateIntegerOverflow.isNull);
+
     // days
     auto a = eval("'2024-03-10'::timestamp + '1 day'::interval");
     assert(a.ok && !a.isNull);
