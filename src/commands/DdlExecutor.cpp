@@ -2858,6 +2858,10 @@ bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
             std::cout << "DROP SCHEMA catalog cleanup failed: " << error << std::endl;
             return true;
         }
+        if (!catalogManager->persistAll()) {
+            std::cout << "DROP SCHEMA catalog persistence failed" << std::endl;
+            return true;
+        }
     }
     txn.recordDrop(DdlObjectKind::Schema, name);
     if (!txn.commit()) return true;

@@ -709,6 +709,11 @@ static void test_create_database_schema() {
     assert(!err);
     assert(!g_engine.schemaExists(db, "myschema"));
     assert(cat.findNamespaceByName("myschema") == nullptr);
+    {
+        dbms::CatalogManager durable(
+            (fs::path(g_engine.dbPath(db)) / "pg_catalog").string());
+        assert(durable.findNamespaceByName("myschema") == nullptr);
+    }
 
     cleanup(db);
     std::cout << "[DDL] database/schema OK" << std::endl;
