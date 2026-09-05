@@ -461,6 +461,61 @@ static int16_t tableCheckConstraintCount(const TableSchema& table) {
     return static_cast<int16_t>(count);
 }
 
+static bool normalizeNamedCheckConstraints(TableSchema& table,
+                                           std::string& error) {
+    struct Definition {
+        std::string expression;
+        bool deferrable = false;
+        bool initiallyDeferred = false;
+    };
+    std::map<std::string, Definition> named;
+    const auto record = [&](const std::string& name,
+                            const std::string& expression,
+                            bool deferrable,
+                            bool initiallyDeferred) {
+        if (name.empty()) return 1;
+        const auto [position, inserted] = named.emplace(
+            name, Definition{expression, deferrable, initiallyDeferred});
+        if (inserted) return 1;
+        if (position->second.expression != expression ||
+            position->second.deferrable != deferrable ||
+            position->second.initiallyDeferred != initiallyDeferred) {
+            error = "CHECK constraint \"" + name +
+                "\" has conflicting definitions";
+            return -1;
+        }
+        return 0;
+    };
+
+    for (size_t columnIndex = 0; columnIndex < table.len; ++columnIndex) {
+        Column& column = table.cols[columnIndex];
+        if (column.checkExpr.empty()) continue;
+        const int result = record(
+            column.checkConstraintName, column.checkExpr,
+            column.deferrable, column.initiallyDeferred);
+        if (result < 0) return false;
+        if (result == 0) {
+            column.checkExpr.clear();
+            column.checkConstraintName.clear();
+            column.deferrable = false;
+            column.initiallyDeferred = false;
+        }
+    }
+
+    std::vector<CheckConstraint> retained;
+    retained.reserve(table.additionalCheckConstraints.size());
+    for (const auto& check : table.additionalCheckConstraints) {
+        if (check.expression.empty()) continue;
+        const int result = record(
+            check.name, check.expression,
+            check.deferrable, check.initiallyDeferred);
+        if (result < 0) return false;
+        if (result > 0) retained.push_back(check);
+    }
+    table.additionalCheckConstraints = std::move(retained);
+    return true;
+}
+
 static bool tableSchemaHasImplicitIndex(const TableSchema& table) {
     if (table.hasPrimaryKey()) return true;
     for (size_t column = 0; column < table.len; ++column) {
@@ -3560,7 +3615,10 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             }
             if (!target.checkConstraintName.empty() &&
                 target.checkConstraintName == incoming.checkConstraintName) {
-                if (target.checkExpr != incoming.checkExpr) {
+                if (target.checkExpr != incoming.checkExpr ||
+                    target.deferrable != incoming.deferrable ||
+                    target.initiallyDeferred !=
+                        incoming.initiallyDeferred) {
                     mergeError = "inherited CHECK constraint \"" +
                         target.checkConstraintName +
                         "\" has conflicting expressions";
@@ -3897,6 +3955,12 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         } else if (t == "exclude") {
             // Defer creation until the table exists; collect for later.
         }
+    }
+
+    std::string checkConstraintError;
+    if (!normalizeNamedCheckConstraints(tbl, checkConstraintError)) {
+        std::cout << "ERROR: " << checkConstraintError << std::endl;
+        return true;
     }
 
     // Prepare the database-wide inheritance graph before creating any physical

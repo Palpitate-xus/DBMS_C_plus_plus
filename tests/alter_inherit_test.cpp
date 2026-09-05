@@ -303,6 +303,41 @@ static void test_create_inherits_merges_columns_and_constraints() {
     assert(shared && shared->defaultValue == "3");
 
     assert(!ddl.executeSql(
+        "CREATE TABLE checks_a (value INT, "
+        "CONSTRAINT positive CHECK (value > 0), "
+        "CONSTRAINT bounded CHECK (value < 10))", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE checks_b (value INT, "
+        "CONSTRAINT positive CHECK (value > 0), "
+        "CONSTRAINT bounded CHECK (value < 10))", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE merged_checks (extra INT) "
+        "INHERITS (checks_a, checks_b)", s));
+    const auto mergedChecks =
+        g_engine.getTableSchema(db, "merged_checks");
+    size_t mergedCheckCount = mergedChecks.additionalCheckConstraints.size();
+    for (size_t columnIndex = 0; columnIndex < mergedChecks.len;
+         ++columnIndex) {
+        if (!mergedChecks.cols[columnIndex].checkExpr.empty()) {
+            ++mergedCheckCount;
+        }
+    }
+    assert(mergedCheckCount == 2);
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE checks_conflict (value INT, "
+        "CONSTRAINT positive CHECK (value > 0), "
+        "CONSTRAINT bounded CHECK (value < 20))", s));
+    assert(ddl.executeSql(
+        "CREATE TABLE conflicting_checks (extra INT) "
+        "INHERITS (checks_a, checks_conflict)", s));
+    assert(!g_engine.tableExists(db, "conflicting_checks"));
+    assert(ddl.executeSql(
+        "CREATE TABLE local_check_conflict "
+        "(CONSTRAINT bounded CHECK (value < 20)) INHERITS (checks_a)", s));
+    assert(!g_engine.tableExists(db, "local_check_conflict"));
+
+    assert(!ddl.executeSql(
         "CREATE TABLE keyed (a INT, b INT, PRIMARY KEY (a, b))", s));
     assert(!ddl.executeSql("CREATE TABLE prefix (p INT)", s));
     assert(!ddl.executeSql(
