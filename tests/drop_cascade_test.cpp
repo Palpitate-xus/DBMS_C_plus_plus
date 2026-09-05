@@ -458,6 +458,31 @@ static void test_drop_schema_validates_both_catalogs() {
               << std::endl;
 }
 
+static void test_multi_schema_drop_fails_before_mutation() {
+    const std::string db = testDbPath("drop_multiple_schemas");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE SCHEMA first_schema", s));
+    assert(!ddl.executeSql("CREATE SCHEMA second_schema", s));
+
+    assert(ddl.executeSql(
+        "DROP SCHEMA first_schema, second_schema CASCADE", s));
+    assert(g_engine.schemaExists(db, "first_schema"));
+    assert(g_engine.schemaExists(db, "second_schema"));
+    auto& catalog = g_engine.catalogService().get(db);
+    assert(catalog.findNamespaceByName("first_schema") != nullptr);
+    assert(catalog.findNamespaceByName("second_schema") != nullptr);
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[DROP-CASCADE] multi-schema DROP fails before mutation OK"
+              << std::endl;
+}
+
 static void test_multi_table_drop_fails_before_mutation() {
     const std::string db = testDbPath("drop_multiple_preflight");
     cleanup(db);
@@ -605,6 +630,7 @@ int main() {
     test_drop_schema_catalog_preflight_fails_closed();
     test_drop_schema_handles_auxiliary_objects();
     test_drop_schema_validates_both_catalogs();
+    test_multi_schema_drop_fails_before_mutation();
     test_multi_table_drop_fails_before_mutation();
     test_drop_removes_named_table_sidecars();
     test_drop_purges_authorization_state();

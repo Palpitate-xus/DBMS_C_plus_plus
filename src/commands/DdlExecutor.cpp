@@ -2817,6 +2817,11 @@ bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
         std::cout << "SQL syntax error: DROP SCHEMA name" << std::endl;
         return true;
     }
+    if (stmt->objectNames.size() != 1) {
+        std::cout << "DROP SCHEMA with multiple targets is not supported"
+                  << std::endl;
+        return true;
+    }
     std::string name = stmt->objectNames.front();
     const bool storageSchemaExists =
         g_engine.schemaExists(s.currentDB, name);
