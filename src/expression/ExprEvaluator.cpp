@@ -4878,6 +4878,26 @@ void ExprEvaluator::registerBuiltins() {
             return ExprValue("numeric", "", true);
         std::string field = toLower(a[0].value);
         const std::string& src = a[1].value;
+        const bool declaredInterval =
+            toLower(a[1].typeName).find("interval") != std::string::npos;
+        if (!declaredInterval) {
+            const int64_t timestamp = parseTimestampToSeconds(src);
+            if (isInfiniteTimestamp(timestamp)) {
+                const bool monotonicField =
+                    field == "epoch" || field == "year" ||
+                    field == "decade" || field == "century" ||
+                    field == "millennium";
+                if (!monotonicField)
+                    return ExprValue("numeric", "", true);
+                return ExprValue(
+                    "numeric",
+                    timestamp == TIMESTAMP_POSITIVE_INFINITY
+                        ? "Infinity" : "-Infinity",
+                    false);
+            }
+            if (timestamp == 0)
+                return ExprValue("numeric", "", true);
+        }
         auto num = [&](size_t off, size_t len) -> int {
             if (src.size() < off + len) return 0;
             int v = 0;
@@ -4916,9 +4936,6 @@ void ExprEvaluator::registerBuiltins() {
             // seconds (months counted as 30 days, days as 86400s).
             {
                 std::string iv = src;
-                const bool declaredInterval =
-                    toLower(a[1].typeName).find("interval") !=
-                    std::string::npos;
                 {
                     std::string lowI;
                     for (char c : iv)

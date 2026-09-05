@@ -46,6 +46,18 @@ static void test_extract_date_part() {
     assert(callFn(eval, "extract", {F("quarter"), ts}).value == "2");
     // date_part is an alias of extract.
     assert(callFn(eval, "date_part", {F("year"), ts}).value == "2026");
+    assert(callFn(eval, "extract",
+                  {F("dow"), TS("2026-13-01 14:35:09")}).isNull);
+    assert(callFn(eval, "extract",
+                  {F("month"), TS("2026-02-30 14:35:09")}).isNull);
+    assert(callFn(eval, "extract",
+                  {F("hour"), TS("2026-06-26 24:00:00")}).isNull);
+    assert(callFn(eval, "date_part",
+                  {F("year"), TS("not-a-timestamp")}).isNull);
+    assert(callFn(eval, "extract",
+                  {F("year"), TS("infinity")}).value == "Infinity");
+    assert(callFn(eval, "extract",
+                  {F("month"), TS("infinity")}).isNull);
     std::cout << "[DATEFN] extract/date_part OK" << std::endl;
 }
 
@@ -73,6 +85,10 @@ static void test_epoch() {
     assert(callFn(eval, "extract", {F("epoch"), TS("1970-01-02 00:00:00")}).value == "86400.000000");
     // A specific later instant.
     assert(callFn(eval, "extract", {F("epoch"), TS("1970-01-01 01:00:00")}).value == "3600.000000");
+    assert(callFn(eval, "extract",
+                  {F("epoch"), TS("infinity")}).value == "Infinity");
+    assert(callFn(eval, "extract",
+                  {F("epoch"), TS("-infinity")}).value == "-Infinity");
     assert(callFn(eval, "extract", {F("epoch"), IV("3 days")}).value ==
            "259200.000000");
     assert(callFn(eval, "extract",
