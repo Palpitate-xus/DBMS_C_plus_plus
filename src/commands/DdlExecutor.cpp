@@ -4969,12 +4969,25 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
     if (!checkDB(s)) return true;
 
     DdlTransaction txn(s);
+    txn.enableSnapshotRollback();
     if (!txn.begin()) {
         std::cout << "DDL transaction begin failed" << std::endl;
         return true;
     }
 
-    std::string seqname = stmt->objectName;
+    const std::string requestedName = stmt->schema.empty()
+        ? stmt->objectName : stmt->schema + "." + stmt->objectName;
+    CatalogManager::QualifiedName sequenceName;
+    if (!CatalogManager::parseQualifiedName(
+            requestedName, sequenceName)) {
+        std::cout << "CREATE SEQUENCE has an invalid name" << std::endl;
+        return true;
+    }
+    const std::string sequenceSchema = sequenceName.schema.empty()
+        ? "public" : sequenceName.schema;
+    const std::string seqname = sequenceSchema == "public"
+        ? sequenceName.name
+        : sequenceSchema + "." + sequenceName.name;
     dbms::SequenceInfo info;
     auto opt = stmt->options.find("start");
     if (opt != stmt->options.end()) {
@@ -5035,44 +5048,95 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
         }
     }
 
+    CatalogManager* sequenceCatalog = nullptr;
+    Oid sequenceNamespaceOid = INVALID_OID;
+    Oid ownedTableOid = INVALID_OID;
+    try {
+        CatalogManager& catalog =
+            g_engine.catalogService().get(s.currentDB);
+        sequenceCatalog = &catalog;
+        const auto* sequenceNamespace =
+            catalog.findNamespaceByName(sequenceSchema);
+        if (!sequenceNamespace) {
+            std::cout << "ERROR: schema \"" << sequenceSchema
+                      << "\" does not exist" << std::endl;
+            return true;
+        }
+        sequenceNamespaceOid = sequenceNamespace->oid;
+        const auto* existing = catalog.findClassByName(
+            sequenceName.name, sequenceNamespaceOid);
+        if (existing) {
+            if (stmt->ifNotExists &&
+                (existing->relkind != 'S' ||
+                 g_engine.sequenceExists(s.currentDB, seqname))) {
+                std::cout << "NOTICE: relation \"" << requestedName
+                          << "\" already exists, skipping" << std::endl;
+                return false;
+            }
+            std::cout << "ERROR: relation \"" << requestedName
+                      << "\" already exists" << std::endl;
+            return true;
+        }
+        if (g_engine.sequenceExists(s.currentDB, seqname)) {
+            std::cout << "CREATE SEQUENCE failed: physical sequence already exists"
+                      << std::endl;
+            return true;
+        }
+        if (!info.ownedByTable.empty()) {
+            const auto* table = catalog.resolveRelation(
+                info.ownedByTable, {sequenceSchema, "public"});
+            if (!table || table->relkind != 'r' ||
+                info.ownedByColumn.empty() ||
+                !catalog.findAttribute(
+                    table->oid, info.ownedByColumn)) {
+                std::cout << "CREATE SEQUENCE OWNED BY target does not exist"
+                          << std::endl;
+                return true;
+            }
+            ownedTableOid = table->oid;
+        }
+    } catch (const std::exception& error) {
+        std::cout << "CREATE SEQUENCE catalog preflight failed: "
+                  << error.what() << std::endl;
+        return true;
+    }
+
+    txn.markSnapshotDirty();
     DBStatus res = g_engine.createSequence(s.currentDB, seqname, info);
     if (res != DBStatus::OK) {
         std::cout << "CREATE SEQUENCE failed" << std::endl;
         return true;
     }
+    txn.recordCreate(DdlObjectKind::Sequence, seqname);
 
     try {
-        dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
-        const auto* nsPublic = cat.findNamespaceByName("public");
-        if (nsPublic) {
-            PgClassRow seq;
-            seq.relname = seqname;
-            seq.relnamespace = nsPublic->oid;
-            seq.relkind = 'S';
-            seq.relnatts = 0;
-            dbms::Oid seqOid = cat.createClass(seq);
+        PgClassRow sequence;
+        sequence.relname = sequenceName.name;
+        sequence.relnamespace = sequenceNamespaceOid;
+        sequence.relkind = 'S';
+        sequence.relnatts = 0;
+        const Oid sequenceOid = sequenceCatalog->createClass(sequence);
 
-            if (!info.ownedByTable.empty()) {
-                // Register dependency: sequence -> owning table (so DROP TABLE CASCADE drops seq).
-                auto tableRel = cat.resolveRelation(info.ownedByTable, {"public"});
-                if (tableRel) {
-                    PgDependRow dep;
-                    dep.classid = dbms::PgClassOid_Class;
-                    dep.objid = seqOid;
-                    dep.objsubid = 0;
-                    dep.refclassid = dbms::PgClassOid_Class;
-                    dep.refobjid = tableRel->oid;
-                    dep.refobjsubid = 0;
-                    dep.deptype = 'a';
-                    cat.addDepend(dep);
-                }
-            }
+        if (ownedTableOid != INVALID_OID) {
+            PgDependRow dependency;
+            dependency.classid = PgClassOid_Class;
+            dependency.objid = sequenceOid;
+            dependency.objsubid = 0;
+            dependency.refclassid = PgClassOid_Class;
+            dependency.refobjid = ownedTableOid;
+            dependency.refobjsubid = 0;
+            dependency.deptype = 'a';
+            sequenceCatalog->addDepend(dependency);
         }
-    } catch (const std::exception& e) {
-        std::cerr << "WARNING: catalog sequence registration failed: " << e.what() << std::endl;
+        if (!sequenceCatalog->persistAll()) {
+            throw std::runtime_error("cannot persist sequence catalog");
+        }
+    } catch (const std::exception& error) {
+        std::cout << "CREATE SEQUENCE catalog registration failed: "
+                  << error.what() << std::endl;
+        return true;
     }
 
-    txn.recordCreate(DdlObjectKind::Sequence, seqname);
     if (!txn.commit()) return true;
     std::cout << "CREATE SEQUENCE succeeded" << std::endl;
     return false;

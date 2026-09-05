@@ -16694,8 +16694,25 @@ void StorageEngine::cleanupStaleSessionTemporaryFiles() {
 
 static std::mutex g_sequenceMutex;
 
+static bool validSequenceName(const std::string& seqname) {
+    const size_t separator = seqname.find('.');
+    if (separator == std::string::npos) {
+        return validStoredIdentifier(seqname, MAX_TABLE_NAME_LEN);
+    }
+    if (separator == 0 || separator + 1 >= seqname.size() ||
+        seqname.find('.', separator + 1) != std::string::npos) {
+        return false;
+    }
+    return validStoredIdentifier(
+               seqname.substr(0, separator), MAX_TABLE_NAME_LEN) &&
+           validStoredIdentifier(
+               seqname.substr(separator + 1), MAX_TABLE_NAME_LEN);
+}
+
 static std::filesystem::path sequencePath(const std::string& dbname, const std::string& seqname) {
-    return std::filesystem::path(dbname) / (seqname + ".seq");
+    const std::string storageName = seqname.rfind("public.", 0) == 0
+        ? seqname.substr(7) : seqname;
+    return std::filesystem::path(dbname) / (storageName + ".seq");
 }
 
 static bool checkedAdd(int64_t lhs, int64_t rhs, int64_t& result) {
@@ -16801,7 +16818,7 @@ DBStatus StorageEngine::createSequence(const std::string& dbname,
                                         const std::string& seqname,
                                         const dbms::SequenceInfo& info) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    if (seqname.empty() || !validStoredIdentifier(seqname, MAX_TABLE_NAME_LEN)) {
+    if (!validSequenceName(seqname)) {
         return DBStatus::INVALID_ARGUMENT;
     }
     auto path = sequencePath(dbname, seqname);
@@ -16835,7 +16852,7 @@ DBStatus StorageEngine::alterSequence(const std::string& dbname,
                                        const std::string& seqname,
                                        const dbms::SequenceInfo& info) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    if (seqname.empty() || !validStoredIdentifier(seqname, MAX_TABLE_NAME_LEN)) {
+    if (!validSequenceName(seqname)) {
         return DBStatus::INVALID_ARGUMENT;
     }
     auto path = sequencePath(dbname, seqname);
@@ -16892,8 +16909,8 @@ DBStatus StorageEngine::renameSequence(const std::string& dbname,
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (oldName.empty() || newName.empty() || oldName == "." || newName == "." ||
         oldName == ".." || newName == ".." ||
-        !validStoredIdentifier(oldName, MAX_TABLE_NAME_LEN) ||
-        !validStoredIdentifier(newName, MAX_TABLE_NAME_LEN) ||
+        !validSequenceName(oldName) ||
+        !validSequenceName(newName) ||
         oldName.find('/') != std::string::npos || newName.find('/') != std::string::npos ||
         oldName.find('\\') != std::string::npos || newName.find('\\') != std::string::npos) {
         return DBStatus::INVALID_VALUE;
@@ -16923,7 +16940,7 @@ DBStatus StorageEngine::renameSequence(const std::string& dbname,
 
 DBStatus StorageEngine::dropSequence(const std::string& dbname,
                                       const std::string& seqname) {
-    if (seqname.empty() || !validStoredIdentifier(seqname, MAX_TABLE_NAME_LEN)) {
+    if (!validSequenceName(seqname)) {
         return DBStatus::INVALID_ARGUMENT;
     }
     auto path = sequencePath(dbname, seqname);
@@ -16936,7 +16953,7 @@ DBStatus StorageEngine::dropSequence(const std::string& dbname,
 int64_t StorageEngine::nextval(const std::string& dbname,
                                 const std::string& seqname) {
     if (dbname.empty() || !validStoredIdentifier(dbname, MAX_TABLE_NAME_LEN) ||
-        seqname.empty() || !validStoredIdentifier(seqname, MAX_TABLE_NAME_LEN)) return 0;
+        !validSequenceName(seqname)) return 0;
     auto path = sequencePath(dbname, seqname);
     std::lock_guard<std::mutex> lock(g_sequenceMutex);
     dbms::SequenceInfo info;
@@ -17017,7 +17034,7 @@ int64_t StorageEngine::nextval(const std::string& dbname,
 int64_t StorageEngine::currval(const std::string& dbname,
                                const std::string& seqname) {
     if (dbname.empty() || !validStoredIdentifier(dbname, MAX_TABLE_NAME_LEN) ||
-        seqname.empty() || !validStoredIdentifier(seqname, MAX_TABLE_NAME_LEN)) return 0;
+        !validSequenceName(seqname)) return 0;
     auto path = sequencePath(dbname, seqname);
     std::lock_guard<std::mutex> lock(g_sequenceMutex);
     dbms::SequenceInfo info;
@@ -17036,7 +17053,7 @@ int64_t StorageEngine::setval(const std::string& dbname,
                                const std::string& seqname,
                                int64_t value, bool isCalled) {
     if (dbname.empty() || !validStoredIdentifier(dbname, MAX_TABLE_NAME_LEN) ||
-        seqname.empty() || !validStoredIdentifier(seqname, MAX_TABLE_NAME_LEN)) return 0;
+        !validSequenceName(seqname)) return 0;
     auto path = sequencePath(dbname, seqname);
     std::lock_guard<std::mutex> lock(g_sequenceMutex);
     dbms::SequenceInfo info;
@@ -17067,7 +17084,7 @@ int64_t StorageEngine::setval(const std::string& dbname,
 
 bool StorageEngine::sequenceExists(const std::string& dbname,
                                     const std::string& seqname) const {
-    if (seqname.empty() || !validStoredIdentifier(seqname, MAX_TABLE_NAME_LEN)) return false;
+    if (!validSequenceName(seqname)) return false;
     return std::filesystem::exists(sequencePath(dbname, seqname));
 }
 

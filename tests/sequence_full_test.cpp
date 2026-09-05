@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <unistd.h>
 #include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
@@ -252,6 +253,78 @@ static void test_sequence_numeric_input_fails_closed() {
     std::cout << "[SEQUENCE] invalid numeric options fail closed OK" << std::endl;
 }
 
+static void test_schema_qualified_sequence_create() {
+    const std::string db = testDbPath("seq_schema_create");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE SCHEMA app", s));
+    assert(!ddl.executeSql(
+        "CREATE SEQUENCE app.counter START 7 INCREMENT 3", s));
+    assert(g_engine.sequenceExists(db, "app.counter"));
+    assert(!g_engine.sequenceExists(db, "counter"));
+
+    dbms::CatalogManager& catalog =
+        g_engine.catalogService().get(db);
+    const auto* appNamespace = catalog.findNamespaceByName("app");
+    const auto* publicNamespace = catalog.findNamespaceByName("public");
+    assert(appNamespace && publicNamespace);
+    const auto* appSequence =
+        catalog.findClassByName("counter", appNamespace->oid);
+    assert(appSequence && appSequence->relkind == 'S');
+    assert(catalog.findClassByName(
+               "counter", publicNamespace->oid) == nullptr);
+    {
+        dbms::CatalogManager durable(
+            (fs::path(g_engine.dbPath(db)) / "pg_catalog").string());
+        const auto* durableNamespace =
+            durable.findNamespaceByName("app");
+        assert(durableNamespace);
+        const auto* durableSequence = durable.findClassByName(
+            "counter", durableNamespace->oid);
+        assert(durableSequence && durableSequence->relkind == 'S');
+    }
+
+    assert(g_engine.nextval(db, "app.counter") == 7);
+    assert(!ddl.executeSql(
+        "CREATE SEQUENCE IF NOT EXISTS app.counter START 100", s));
+    assert(g_engine.nextval(db, "app.counter") == 10);
+
+    assert(ddl.executeSql("CREATE SEQUENCE missing.counter", s));
+    assert(!g_engine.sequenceExists(db, "missing.counter"));
+    assert(ddl.executeSql(
+        "CREATE SEQUENCE app.bad_owner OWNED BY missing.id", s));
+    assert(!g_engine.sequenceExists(db, "app.bad_owner"));
+
+    const fs::path blockedCatalogTemporary =
+        fs::path(db) / "pg_catalog" /
+        ("pg_class.cat.tmp." +
+         std::to_string(static_cast<unsigned long long>(::getpid())));
+    fs::create_directories(blockedCatalogTemporary);
+    assert(ddl.executeSql("CREATE SEQUENCE app.must_rollback", s));
+    assert(!g_engine.sequenceExists(db, "app.must_rollback"));
+    fs::remove_all(blockedCatalogTemporary);
+    g_engine.catalogService().evict(db);
+    dbms::CatalogManager& reloadedCatalog =
+        g_engine.catalogService().get(db);
+    const auto* reloadedAppNamespace =
+        reloadedCatalog.findNamespaceByName("app");
+    assert(reloadedAppNamespace);
+    assert(reloadedCatalog.findClassByName(
+               "must_rollback", reloadedAppNamespace->oid) == nullptr);
+
+    assert(!ddl.executeSql("CREATE SEQUENCE counter START 100", s));
+    assert(g_engine.sequenceExists(db, "public.counter"));
+    assert(g_engine.nextval(db, "public.counter") == 100);
+
+    cleanup(db);
+    std::cout << "[SEQUENCE] schema-qualified create/catalog OK"
+              << std::endl;
+}
+
 static void test_sequence_integer_boundaries() {
     std::string db = testDbPath("seq_boundaries");
     cleanup(db);
@@ -294,6 +367,7 @@ int main() {
     test_sequence_owned_by_drop_table();
     test_sequence_identity_still_works();
     test_sequence_numeric_input_fails_closed();
+    test_schema_qualified_sequence_create();
     test_sequence_integer_boundaries();
     std::cout << "[SEQUENCE_FULL] all passed" << std::endl;
     return 0;
