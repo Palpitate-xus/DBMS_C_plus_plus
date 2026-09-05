@@ -4998,16 +4998,21 @@ void ExprEvaluator::registerBuiltins() {
                 long long hh = totalSecs / 3600;
                 long long mm = (totalSecs % 3600) / 60;
                 long long ss = totalSecs % 60;
+                auto formatIntervalField = [](long long value) {
+                    std::string field = std::to_string(value);
+                    if (field.size() < 2) field.insert(field.begin(), '0');
+                    return field;
+                };
                 std::string out;
                 for (size_t fi = 0; fi < fmt.size(); ++fi) {
                     if (fmt.compare(fi, 4, "HH24") == 0) {
-                        char b[8]; snprintf(b, sizeof b, "%02lld", hh); out += b; fi += 3; continue;
+                        out += formatIntervalField(hh); fi += 3; continue;
                     }
                     if (fmt.compare(fi, 2, "MI") == 0) {
-                        char b[8]; snprintf(b, sizeof b, "%02lld", mm); out += b; fi += 1; continue;
+                        out += formatIntervalField(mm); fi += 1; continue;
                     }
                     if (fmt.compare(fi, 2, "SS") == 0) {
-                        char b[8]; snprintf(b, sizeof b, "%02lld", ss); out += b; fi += 1; continue;
+                        out += formatIntervalField(ss); fi += 1; continue;
                     }
                     out += fmt[fi];
                 }

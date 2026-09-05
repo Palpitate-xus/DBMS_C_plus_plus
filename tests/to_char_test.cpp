@@ -32,6 +32,7 @@ static dbms::ExprValue callFn(dbms::ExprEvaluator& eval, const std::string& name
 static dbms::ExprValue TS(const std::string& v) { return dbms::ExprValue("timestamp", v, false); }
 static dbms::ExprValue DT(const std::string& v) { return dbms::ExprValue("date", v, false); }
 static dbms::ExprValue TM(const std::string& v) { return dbms::ExprValue("time", v, false); }
+static dbms::ExprValue IV(const std::string& v) { return dbms::ExprValue("interval", v, false); }
 static dbms::ExprValue F(const std::string& v) { return dbms::ExprValue("text", v, false); }
 static dbms::ExprValue N(const std::string& v) { return dbms::ExprValue("numeric", v, false); }
 
@@ -87,6 +88,16 @@ static void test_numeric() {
     std::cout << "[TOCHAR] numeric OK" << std::endl;
 }
 
+static void test_interval() {
+    dbms::ExprEvaluator eval;
+    assert(callFn(eval, "to_char", {IV("3 days 2 hours"), F("HH24:MI")}).value == "02:00");
+    // The interval representation permits an hour field wider than seven
+    // digits. Formatting must not silently truncate it to the stack buffer.
+    assert(callFn(eval, "to_char", {IV("10000000 hours"), F("HH24:MI:SS")}).value ==
+           "10000000:00:00");
+    std::cout << "[TOCHAR] interval OK" << std::endl;
+}
+
 static void test_null() {
     dbms::ExprEvaluator eval;
     assert(callFn(eval, "to_char", {dbms::ExprValue("timestamp", "", true), F("YYYY")}).isNull);
@@ -99,6 +110,7 @@ int main() {
     test_names_and_fields();
     test_quoting_and_date_time();
     test_numeric();
+    test_interval();
     test_null();
     std::cout << "[TOCHAR] all passed" << std::endl;
     return 0;
