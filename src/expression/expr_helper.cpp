@@ -63,7 +63,126 @@ std::string canonicalTypeName(const std::string& storageType) {
     return t;
 }
 
+bool parsedExpressionReferencesColumn(
+    const Expr* expression, const std::string& columnName) {
+    if (!expression) return false;
+    switch (expression->type) {
+        case ExprType::Literal:
+        case ExprType::Parameter:
+        case ExprType::A_Star:
+            return false;
+        case ExprType::ColumnRef: {
+            const auto* column =
+                dynamic_cast<const ColumnRefExpr*>(expression);
+            return !column || column->column == columnName;
+        }
+        case ExprType::UnaryOp: {
+            const auto* unary =
+                dynamic_cast<const UnaryOpExpr*>(expression);
+            return !unary || parsedExpressionReferencesColumn(
+                unary->operand.get(), columnName);
+        }
+        case ExprType::BinaryOp: {
+            const auto* binary =
+                dynamic_cast<const BinaryOpExpr*>(expression);
+            return !binary ||
+                parsedExpressionReferencesColumn(
+                    binary->left.get(), columnName) ||
+                parsedExpressionReferencesColumn(
+                    binary->right.get(), columnName);
+        }
+        case ExprType::FunctionCall: {
+            const auto* function =
+                dynamic_cast<const FunctionCallExpr*>(expression);
+            if (!function) return true;
+            for (const auto& argument : function->args) {
+                if (parsedExpressionReferencesColumn(
+                        argument.get(), columnName)) return true;
+            }
+            for (const auto& argument : function->namedArgs) {
+                if (parsedExpressionReferencesColumn(
+                        argument.value.get(), columnName)) return true;
+            }
+            if (parsedExpressionReferencesColumn(
+                    function->filter.get(), columnName)) return true;
+            for (const auto& partition : function->over.partitionBy) {
+                if (parsedExpressionReferencesColumn(
+                        partition.get(), columnName)) return true;
+            }
+            for (const auto& order : function->over.orderBy) {
+                if (parsedExpressionReferencesColumn(
+                        order.first.get(), columnName)) return true;
+            }
+            return parsedExpressionReferencesColumn(
+                       function->over.frameStart.get(), columnName) ||
+                   parsedExpressionReferencesColumn(
+                       function->over.frameEnd.get(), columnName);
+        }
+        case ExprType::CastExpr: {
+            const auto* cast = dynamic_cast<const CastExpr*>(expression);
+            return !cast || parsedExpressionReferencesColumn(
+                cast->operand.get(), columnName);
+        }
+        case ExprType::CaseExpr: {
+            const auto* caseExpression =
+                dynamic_cast<const CaseExpr*>(expression);
+            if (!caseExpression) return true;
+            if (parsedExpressionReferencesColumn(
+                    caseExpression->switchExpr.get(), columnName)) {
+                return true;
+            }
+            for (const auto& clause : caseExpression->whenClauses) {
+                if (parsedExpressionReferencesColumn(
+                        clause.first.get(), columnName) ||
+                    parsedExpressionReferencesColumn(
+                        clause.second.get(), columnName)) {
+                    return true;
+                }
+            }
+            return parsedExpressionReferencesColumn(
+                caseExpression->elseExpr.get(), columnName);
+        }
+        case ExprType::ArrayExpr: {
+            const auto* array =
+                dynamic_cast<const ArrayExpr*>(expression);
+            if (!array) return true;
+            for (const auto& element : array->elements) {
+                if (parsedExpressionReferencesColumn(
+                        element.get(), columnName)) return true;
+            }
+            return false;
+        }
+        case ExprType::RowExpr: {
+            const auto* row = dynamic_cast<const RowExpr*>(expression);
+            if (!row) return true;
+            for (const auto& element : row->elements) {
+                if (parsedExpressionReferencesColumn(
+                        element.get(), columnName)) return true;
+            }
+            return false;
+        }
+        case ExprType::Subquery:
+            return true;
+    }
+    return true;
+}
+
 } // namespace
+
+std::optional<bool> ExprHelper::referencesColumn(
+    const std::string& exprSql, const std::string& columnName) {
+    if (exprSql.empty()) return false;
+    SQLParser parser;
+    ParseResult parsed = parser.parse("SELECT " + exprSql);
+    if (!parsed.success || !parsed.stmt) return std::nullopt;
+    const auto* select = dynamic_cast<const SelectStmt*>(parsed.stmt.get());
+    if (!select || select->selectList.size() != 1 ||
+        !select->selectList.front().expr) {
+        return std::nullopt;
+    }
+    return parsedExpressionReferencesColumn(
+        select->selectList.front().expr.get(), columnName);
+}
 
 ExprEvalResult ExprHelper::evalString(
     const std::string& exprSql,

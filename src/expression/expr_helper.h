@@ -56,6 +56,11 @@ public:
         std::string* error = nullptr,
         const std::string& currentDB = "",
         const std::string& currentUser = "");
+
+    // Parse an expression and report whether it references a logical column.
+    // nullopt means the stored expression could not be parsed safely.
+    static std::optional<bool> referencesColumn(
+        const std::string& exprSql, const std::string& columnName);
 };
 
 } // namespace dbms

@@ -13590,6 +13590,26 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
+    for (size_t columnIndex = 0; columnIndex < tbl.len; ++columnIndex) {
+        if (columnIndex == dropIdx) continue;
+        const Column& column = tbl.cols[columnIndex];
+        if (ExprHelper::referencesColumn(
+                column.checkExpr, colName).value_or(true) ||
+            ExprHelper::referencesColumn(
+                column.generatedExpr, colName).value_or(true) ||
+            ExprHelper::referencesColumn(
+                column.defaultValue, colName).value_or(true)) {
+            lockManager_.unlock(tablename);
+            return DBStatus::INVALID_VALUE;
+        }
+    }
+    for (const auto& check : tbl.additionalCheckConstraints) {
+        if (ExprHelper::referencesColumn(
+                check.expression, colName).value_or(true)) {
+            lockManager_.unlock(tablename);
+            return DBStatus::INVALID_VALUE;
+        }
+    }
 
     // Composite PRIMARY KEY and UNIQUE metadata stores physical column
     // positions. A constrained member cannot be dropped without CASCADE,
@@ -13669,7 +13689,7 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
         SqlRow values;
         const int64_t rid = encodeRid(pageId, slotId);
         for (size_t i = 0; i < tbl.len; ++i) {
-            if (i == dropIdx) continue;
+            if (i == dropIdx || !tbl.cols[i].generatedExpr.empty()) continue;
             if (tbl.cols[i].generatedKind != 'v' && tbl.cols[i].isNull &&
                 isColumnNullByRid(dbname, tablename, rid, i)) {
                 values[tbl.cols[i].dataName] = std::nullopt;
