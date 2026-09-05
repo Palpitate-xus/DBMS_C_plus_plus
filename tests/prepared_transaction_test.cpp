@@ -57,6 +57,44 @@ void test_prepare_rejects_deferred_constraint_violation() {
     std::cout << "[PREPARED-TXN] deferred violation rejected before prepare OK\n";
 }
 
+void test_prepare_resets_originating_transaction_modes() {
+    const std::string db = testDbPath("prepared_constraint_mode");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session session;
+    session.username = "testuser";
+    session.permission = 1;
+    session.currentDB = db;
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE TABLE mode_rows ("
+        "id INT PRIMARY KEY, tag INT, "
+        "CONSTRAINT mode_rows_tag_key UNIQUE (tag) "
+        "DEFERRABLE INITIALLY IMMEDIATE)",
+        session));
+    assert(g_engine.insert(db, "mode_rows", {{"id", "1"}, {"tag", "10"}}) ==
+           dbms::DBStatus::OK);
+
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    g_engine.setConstraintMode({"all"}, true);
+    assert(g_engine.insert(db, "mode_rows", {{"id", "2"}, {"tag", "20"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.prepareTransaction("prepared_constraint_mode") ==
+           dbms::DBStatus::OK);
+    dbms::StorageEngine completingBackend;
+    assert(completingBackend.commitPrepared("prepared_constraint_mode") ==
+           dbms::DBStatus::OK);
+
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "mode_rows", {{"id", "3"}, {"tag", "10"}}) ==
+           dbms::DBStatus::DUPLICATE_KEY);
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+
+    cleanup(db);
+    std::cout << "[PREPARED-TXN] preparing session transaction modes reset OK\n";
+}
+
 void test_cross_backend_prepare_completion() {
     const std::string db = testDbPath("prepared_transaction");
     cleanup(db);
@@ -374,6 +412,7 @@ int main(int argc, char** argv) {
     }
     cleanupAllTestData();
     test_prepare_rejects_deferred_constraint_violation();
+    test_prepare_resets_originating_transaction_modes();
     test_cross_backend_prepare_completion();
     test_quoted_names_round_trip_through_prepared_metadata();
     test_commit_refreshes_warm_completion_backend();

@@ -38775,6 +38775,10 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
     transactionContext().hasRead = false;
     transactionContext().hasWrite = false;
     transactionContext().savepoints.clear();
+    transactionContext().txnSubTxnIds.clear();
+    transactionContext().txnLoggedBeforePages.clear();
+    transactionContext().constraintMode.clear();
+    clearCatalogSnapshot();
 
     {
         std::lock_guard<std::mutex> lock(ssiMutex_);
