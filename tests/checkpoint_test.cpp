@@ -42,7 +42,7 @@ int main() {
         // barrier must keep the only dirty copy cached, and a successful
         // barrier must run while the old disk image is still untouched.
         bool evictionBarrierCalled = false;
-        pool.setEvictionWritebackBarrier([&]() {
+        pool.setWritebackBarrier([&]() {
             evictionBarrierCalled = true;
             return false;
         });
@@ -53,7 +53,7 @@ int main() {
         assert(dirtyAfterEvictionFailure.front().pageId == 0);
         assert(dirtyAfterEvictionFailure.front().dirty);
         evictionBarrierCalled = false;
-        pool.setEvictionWritebackBarrier([&]() {
+        pool.setWritebackBarrier([&]() {
             evictionBarrierCalled = true;
             return std::filesystem::file_size(poolPath) == 0;
         });
@@ -96,6 +96,8 @@ int main() {
             disk.flush();
             assert(disk.good());
         }
+        // Model the COMMIT path's already-durable WAL boundary.
+        pool.setWritebackBarrier([]() { return true; });
         assert(pool.flushPage(0));
         pool.invalidatePage(0);
         reloaded = pool.fetchPage(0);
@@ -140,6 +142,35 @@ int main() {
             return true;
         }));
         assert(!barrierCalled);  // a clean pool performs no fsync/barrier
+
+        // A heap's installed WAL barrier must cover an explicit flush too,
+        // not only clock eviction. Statement-local partition allocators and
+        // engine shutdown both reach this path.
+        char* fullFlushPage = pool.fetchPage(0);
+        assert(fullFlushPage != nullptr);
+        std::memcpy(fullFlushPage, "full-flush!!", 12);
+        pool.markDirty(0);
+        pool.unpinPage(0);
+        bool fullFlushBarrierCalled = false;
+        pool.setWritebackBarrier([&]() {
+            fullFlushBarrierCalled = true;
+            return false;
+        });
+        assert(!pool.flush());
+        assert(fullFlushBarrierCalled);
+        const auto dirtyAfterFullFlushBarrierFailure = pool.getFrameInfo();
+        assert(dirtyAfterFullFlushBarrierFailure.size() == 1);
+        assert(dirtyAfterFullFlushBarrierFailure.front().dirty);
+        fullFlushBarrierCalled = false;
+        pool.setWritebackBarrier([&]() {
+            fullFlushBarrierCalled = true;
+            std::ifstream disk(poolPath, std::ios::binary);
+            char oldBytes[12]{};
+            assert(disk.read(oldBytes, sizeof(oldBytes)));
+            return std::memcmp(oldBytes, "background!!", 12) == 0;
+        });
+        assert(pool.flush());
+        assert(fullFlushBarrierCalled);
         pool.close();
         std::filesystem::remove(poolPath);
         std::cout << "[CHECKPOINT] BufferPool eviction/pin safety OK\n";

@@ -1749,6 +1749,13 @@ StorageEngine::~StorageEngine() {
         }
     }
 
+    // Heap writeback barriers capture their database WAL manager. Member
+    // declaration order would otherwise destroy walManagers_ before
+    // pageAllocators_; close every allocator explicitly while those captured
+    // managers are still alive, including caches for a database removed
+    // externally and therefore absent from getDatabaseNames().
+    closeAllPageAllocators();
+
     // A process crash normally ends the whole process, but tests and embedded
     // callers can destroy an engine and construct another one in the same
     // process. Do not leave this engine's abandoned xids in the process-wide
@@ -5374,16 +5381,16 @@ std::vector<std::string> StorageEngine::listTablespaces(const std::string& dbnam
 // ========================================================================
 namespace {
 
-bool installHeapEvictionWalBarrier(const StorageEngine& engine,
-                                   const std::string& dbname,
-                                   PageAllocator& allocator) {
+bool installHeapWritebackWalBarrier(const StorageEngine& engine,
+                                    const std::string& dbname,
+                                    PageAllocator& allocator) {
     WALManager* wal = engine.getWAL(dbname);
     if (!wal || !allocator.bufferPool()) return false;
-    // Capture the manager, not StorageEngine::getWAL(): eviction holds the
+    // Capture the manager, not StorageEngine::getWAL(): writeback holds the
     // buffer-pool mutex, while getWAL takes cacheMutex_. Background writeback
     // takes those locks in the opposite order. The database-cache teardown
     // path erases allocators before their corresponding WAL manager.
-    allocator.bufferPool()->setEvictionWritebackBarrier([wal]() {
+    allocator.bufferPool()->setWritebackBarrier([wal]() {
         return wal->XLogFlush(wal->currentWriteLsn());
     });
     return true;
@@ -5414,7 +5421,7 @@ PageAllocator* StorageEngine::getPageAllocator(const std::string& dbname,
     std::filesystem::path dt = dataPath(dbname, tablename);
 
     auto pa = std::make_unique<PageAllocator>(dt.string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
-    if (!installHeapEvictionWalBarrier(*this, dbname, *pa) || !pa->open()) {
+    if (!installHeapWritebackWalBarrier(*this, dbname, *pa) || !pa->open()) {
         return nullptr;
     }
     PageAllocator* ptr = pa.get();
@@ -21028,14 +21035,14 @@ DBStatus StorageEngine::insertInternal(
     std::unique_ptr<PageAllocator> partPa;
     if (!targetPartition.empty() && !targetSubPartition.empty()) {
         partPa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, targetPartition, targetSubPartition).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
-        if (!installHeapEvictionWalBarrier(*this, dbname, *partPa) ||
+        if (!installHeapWritebackWalBarrier(*this, dbname, *partPa) ||
             !partPa->open()) {
             return failBeforeHeapInsert(DBStatus::INVALID_VALUE);
         }
         pa = partPa.get();
     } else if (!targetPartition.empty()) {
         partPa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, targetPartition).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
-        if (!installHeapEvictionWalBarrier(*this, dbname, *partPa) ||
+        if (!installHeapWritebackWalBarrier(*this, dbname, *partPa) ||
             !partPa->open()) {
             return failBeforeHeapInsert(DBStatus::INVALID_VALUE);
         }
@@ -32837,6 +32844,9 @@ CatalogService& StorageEngine::catalogService() {
 
 void StorageEngine::closeAllWALs() {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    // PageAllocator writeback barriers capture WALManager pointers.
+    // Destroy their owners before invalidating those callbacks.
+    pageAllocators_.clear();
     walManagers_.clear();
 }
 

@@ -300,8 +300,7 @@ std::optional<size_t> BufferPool::evictFrame() {
             // crash without the before/after image needed by recovery. Leave
             // the frame and mapping intact when either step fails.
             if (f.dirty) {
-                if (evictionWritebackBarrier_ &&
-                    !evictionWritebackBarrier_()) {
+                if (writebackBarrier_ && !writebackBarrier_()) {
                     return std::nullopt;
                 }
                 if (!writeToDisk(f.pageId, f.data.data())) {
@@ -530,8 +529,17 @@ void BufferPool::unpinPage(uint32_t pageId) {
     }
 }
 
-bool BufferPool::flushUnlocked() {
+bool BufferPool::flushUnlocked(bool useInstalledBarrier) {
     if (fd_ < 0) return false;
+    if (useInstalledBarrier && writebackBarrier_) {
+        const bool hasDirtyFrame = std::any_of(
+            frames_.begin(), frames_.end(), [](const Frame& frame) {
+                return frame.dirty &&
+                    frame.pageId != static_cast<uint32_t>(-1) &&
+                    frame.pageId != kOrphanedPage;
+            });
+        if (hasDirtyFrame && !writebackBarrier_()) return false;
+    }
     bool ok = true;
     std::vector<size_t> writtenFrames;
     std::optional<size_t> writeLastFrame;
@@ -599,7 +607,9 @@ bool BufferPool::flushDirtyUnpinned(
     }
     if (!hasDirtyFrame) return true;
     if (!walBarrier || !walBarrier()) return false;
-    return flushUnlocked();
+    // The caller supplied the equivalent frozen-frame WAL boundary above;
+    // do not invoke the installed callback a second time.
+    return flushUnlocked(/*useInstalledBarrier=*/false);
 }
 
 bool BufferPool::isPageDirty(uint32_t pageId) const {
@@ -613,6 +623,10 @@ bool BufferPool::flushPage(uint32_t pageId) {
     const auto it = pageMap_.find(pageId);
     if (it == pageMap_.end()) return true;  // not cached: nothing to write
     Frame& frame = frames_[it->second];
+    if (writebackBarrier_ && !writebackBarrier_()) {
+        frame.dirty = true;
+        return false;
+    }
     if (!writeToDisk(pageId, frame.data.data())) {
         frame.dirty = true;
         return false;

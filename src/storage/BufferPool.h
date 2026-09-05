@@ -64,12 +64,13 @@ public:
         pageValidator_ = std::move(validator);
     }
 
-    // Install the durability boundary that must succeed before clock-sweep
-    // writes a dirty victim. Heap owners use this to enforce WAL-before-data
-    // even when cache pressure, rather than a checkpoint, triggers writeback.
-    void setEvictionWritebackBarrier(std::function<bool()> barrier) {
+    // Install the durability boundary that must succeed before any cached
+    // page writeback (clock eviction, flush, flushPage, or close). Heap
+    // owners use this to enforce WAL-before-data regardless of which path
+    // initiates persistence.
+    void setWritebackBarrier(std::function<bool()> barrier) {
         std::lock_guard<std::mutex> lock(mutex_);
-        evictionWritebackBarrier_ = std::move(barrier);
+        writebackBarrier_ = std::move(barrier);
     }
 
     // Designate a structural page that must be written only after every
@@ -162,9 +163,9 @@ private:
     // pages.  It is flushed last and cannot be evicted while dirty.
     std::optional<uint32_t> writeLastPage_;
 
-    // Called under mutex_ immediately before a dirty clock victim is written.
-    // Failure leaves both the frame and page-map entry intact.
-    std::function<bool()> evictionWritebackBarrier_;
+    // Called under mutex_ immediately before cached pages are written.
+    // Failure leaves the dirty frame(s) and page-map entries intact.
+    std::function<bool()> writebackBarrier_;
 
     // Clock sweep hand
     size_t clockHand_ = 0;
@@ -194,7 +195,7 @@ private:
     // Recreate the frame array after close() releases its memory. mutex_ is
     // held by open(); construction calls this before the object is shared.
     void initializeFramesUnlocked();
-    bool flushUnlocked();
+    bool flushUnlocked(bool useInstalledBarrier = true);
     std::optional<size_t> evictFrame();
     // Fast path: pin a cached page; waits on an in-flight load of it.
     // Returns nullptr on miss. mutex_ is NOT held on return.
