@@ -3911,47 +3911,34 @@ void ExprEvaluator::registerBuiltins() {
     // to_date(text, fmt): parse per the pattern (YYYY/MM/DD widths, literal
     // separators); render the ISO date.
     functions_["to_date"] = [](const std::vector<ExprValue>& a) -> ExprValue {
-        if (a.empty() || a[0].isNull) return ExprValue("date", "", true);
+        if (a.empty() || a[0].isNull || (a.size() >= 2 && a[1].isNull))
+            return ExprValue("date", "", true);
         const std::string& s = a[0].value;
-        std::string fmt = (a.size() >= 2 && !a[1].isNull) ? a[1].value : "YYYY-MM-DD";
-        int y = 0, m = 0, d = 0;
-        size_t ip = 0;
-        for (size_t fp = 0; fp < fmt.size() && ip < s.size();) {
-            if (fmt.compare(fp, 4, "YYYY") == 0) {
-                y = std::stoi(s.substr(ip, 4)); fp += 4; ip += 4;
-            } else if (fmt.compare(fp, 2, "MM") == 0) {
-                m = std::stoi(s.substr(ip, 2)); fp += 2; ip += 2;
-            } else if (fmt.compare(fp, 2, "DD") == 0) {
-                d = std::stoi(s.substr(ip, 2)); fp += 2; ip += 2;
-            } else {
-                ++fp; ++ip;  // literal separator
-            }
-        }
-        char buf[16];
-        std::snprintf(buf, sizeof buf, "%04d-%02d-%02d", y, m, d);
-        return ExprValue("date", buf, false);
+        const std::string fmt =
+            a.size() >= 2 ? a[1].value : "YYYY-MM-DD";
+        Date date;
+        int32_t timeSeconds = 0;
+        if (!parseTemporalFormatValue(s, fmt, date, timeSeconds))
+            return ExprValue("date", "", true);
+        return ExprValue("date", str(date), false);
     };
 
     // to_timestamp(text, fmt): pattern parse like to_date plus HH24/MI/SS;
     // renders "YYYY-MM-DD HH:MM:SS+00" (UTC offset like PG).
     functions_["to_timestamp"] = [](const std::vector<ExprValue>& a) -> ExprValue {
-        if (a.empty() || a[0].isNull) return ExprValue("timestamp", "", true);
+        if (a.empty() || a[0].isNull || (a.size() >= 2 && a[1].isNull))
+            return ExprValue("timestamp", "", true);
         const std::string& s = a[0].value;
-        std::string fmt = (a.size() >= 2 && !a[1].isNull) ? a[1].value : "YYYY-MM-DD HH24:MI:SS";
-        int y = 0, mo = 0, d = 0, h = 0, mi = 0, se = 0;
-        size_t ip = 0;
-        for (size_t fp = 0; fp < fmt.size() && ip < s.size();) {
-            if (fmt.compare(fp, 4, "YYYY") == 0) { y = std::stoi(s.substr(ip, 4)); fp += 4; ip += 4; }
-            else if (fmt.compare(fp, 4, "HH24") == 0) { h = std::stoi(s.substr(ip, 2)); fp += 4; ip += 2; }
-            else if (fmt.compare(fp, 2, "MM") == 0) { mo = std::stoi(s.substr(ip, 2)); fp += 2; ip += 2; }
-            else if (fmt.compare(fp, 2, "DD") == 0) { d = std::stoi(s.substr(ip, 2)); fp += 2; ip += 2; }
-            else if (fmt.compare(fp, 2, "MI") == 0) { mi = std::stoi(s.substr(ip, 2)); fp += 2; ip += 2; }
-            else if (fmt.compare(fp, 2, "SS") == 0) { se = std::stoi(s.substr(ip, 2)); fp += 2; ip += 2; }
-            else { ++fp; ++ip; }
-        }
-        char buf[32];
-        std::snprintf(buf, sizeof buf, "%04d-%02d-%02d %02d:%02d:%02d+00", y, mo, d, h, mi, se);
-        return ExprValue("timestamp", buf, false);
+        const std::string fmt = a.size() >= 2
+            ? a[1].value : "YYYY-MM-DD HH24:MI:SS";
+        Date date;
+        int32_t timeSeconds = 0;
+        if (!parseTemporalFormatValue(s, fmt, date, timeSeconds))
+            return ExprValue("timestamp", "", true);
+        return ExprValue("timestamp",
+                         str(date) + " " + formatTimeSeconds(timeSeconds) +
+                             "+00",
+                         false);
     };
 
     // to_number(text, fmt): extract the numeric literal; pattern characters

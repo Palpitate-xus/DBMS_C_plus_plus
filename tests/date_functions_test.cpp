@@ -97,6 +97,33 @@ static void test_date_trunc() {
     std::cout << "[DATEFN] date_trunc OK" << std::endl;
 }
 
+static void test_template_parsing() {
+    dbms::ExprEvaluator eval;
+    assert(callFn(eval, "to_date", {F("15.08.2026"), F("DD.MM.YYYY")}).value ==
+           "2026-08-15");
+    assert(callFn(eval, "to_timestamp",
+                  {F("2026-08-15 14:30:05"),
+                   F("YYYY-MM-DD HH24:MI:SS")}).value ==
+           "2026-08-15 14:30:05+00");
+
+    // Malformed template input must fail as a value conversion; it must not
+    // throw from stoi or manufacture an invalid civil date/time.
+    assert(callFn(eval, "to_date",
+                  {F("not-a-date"), F("YYYY-MM-DD")}).isNull);
+    assert(callFn(eval, "to_date",
+                  {F("2026-02-30"), F("YYYY-MM-DD")}).isNull);
+    assert(callFn(eval, "to_timestamp",
+                  {F("2026-08-15 25:30:05"),
+                   F("YYYY-MM-DD HH24:MI:SS")}).isNull);
+    assert(callFn(eval, "to_timestamp",
+                  {F("2026-08-15 14:30"),
+                   F("YYYY-MM-DD HH24:MI:SS")}).isNull);
+    assert(callFn(eval, "to_date",
+                  {F("2026-08-15"),
+                   dbms::ExprValue("text", "", true)}).isNull);
+    std::cout << "[DATEFN] template parsing OK" << std::endl;
+}
+
 static void test_current_family() {
     dbms::ExprEvaluator eval;
     assert(!callFn(eval, "current_timestamp", {}).isNull);
@@ -113,6 +140,7 @@ int main() {
     test_epoch();
     test_make();
     test_date_trunc();
+    test_template_parsing();
     test_current_family();
     std::cout << "[DATEFN] all passed" << std::endl;
     return 0;

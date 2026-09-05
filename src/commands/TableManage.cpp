@@ -28843,19 +28843,11 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::string val = getVal(expr.funcArgs[0]);
         if (expr.funcArgs.size() >= 2) {
             std::string fmt = getVal(expr.funcArgs[1]);
-            int y = 0, mo = 0, d = 0, h = 0, mi = 0, se = 0; size_t ip = 0;
-            for (size_t fp = 0; fp < fmt.size() && ip < val.size();) {
-                if (fmt.compare(fp, 4, "YYYY") == 0) { y = std::stoi(val.substr(ip, 4)); fp += 4; ip += 4; }
-                else if (fmt.compare(fp, 4, "HH24") == 0) { h = std::stoi(val.substr(ip, 2)); fp += 4; ip += 2; }
-                else if (fmt.compare(fp, 2, "MM") == 0) { mo = std::stoi(val.substr(ip, 2)); fp += 2; ip += 2; }
-                else if (fmt.compare(fp, 2, "DD") == 0) { d = std::stoi(val.substr(ip, 2)); fp += 2; ip += 2; }
-                else if (fmt.compare(fp, 2, "MI") == 0) { mi = std::stoi(val.substr(ip, 2)); fp += 2; ip += 2; }
-                else if (fmt.compare(fp, 2, "SS") == 0) { se = std::stoi(val.substr(ip, 2)); fp += 2; ip += 2; }
-                else { ++fp; ++ip; }
-            }
-            char buf[32];
-            std::snprintf(buf, sizeof buf, "%04d-%02d-%02d %02d:%02d:%02d+00", y, mo, d, h, mi, se);
-            return buf;
+            Date date;
+            int32_t timeSeconds = 0;
+            if (!parseTemporalFormatValue(val, fmt, date, timeSeconds))
+                return "";
+            return str(date) + " " + formatTimeSeconds(timeSeconds) + "+00";
         }
         int64_t ts = parseTimestampToSeconds(val);
         return (ts == 0) ? "" : formatTimestampSeconds(ts);
@@ -28865,16 +28857,11 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         // Pattern parse when a format is supplied (YYYY/MM/DD widths).
         if (expr.funcArgs.size() >= 2) {
             std::string fmt = getVal(expr.funcArgs[1]);
-            int y = 0, m = 0, d = 0; size_t ip = 0;
-            for (size_t fp = 0; fp < fmt.size() && ip < val.size();) {
-                if (fmt.compare(fp, 4, "YYYY") == 0) { y = std::stoi(val.substr(ip, 4)); fp += 4; ip += 4; }
-                else if (fmt.compare(fp, 2, "MM") == 0) { m = std::stoi(val.substr(ip, 2)); fp += 2; ip += 2; }
-                else if (fmt.compare(fp, 2, "DD") == 0) { d = std::stoi(val.substr(ip, 2)); fp += 2; ip += 2; }
-                else { ++fp; ++ip; }
-            }
-            char buf[16];
-            std::snprintf(buf, sizeof buf, "%04d-%02d-%02d", y, m, d);
-            return buf;
+            Date date;
+            int32_t timeSeconds = 0;
+            if (!parseTemporalFormatValue(val, fmt, date, timeSeconds))
+                return "";
+            return str(date);
         }
         Date d(val.c_str());
         return (d.year == 0) ? "" : str(d);

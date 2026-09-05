@@ -208,6 +208,80 @@ inline std::ostream& operator<<(std::ostream& ost, Date a) {
     return ost;
 }
 
+// Parse the fixed-width subset used by to_date/to_timestamp. Non-token
+// format characters retain the engine's legacy one-character separator
+// behavior, while fields and the complete input are validated strictly.
+inline bool parseTemporalFormatValue(std::string_view input,
+                                     std::string_view format,
+                                     Date& date,
+                                     int32_t& timeSeconds) {
+    int year = 0;
+    int month = 0;
+    int day = 0;
+    int hour = 0;
+    int minute = 0;
+    int second = 0;
+    bool sawYear = false;
+    bool sawMonth = false;
+    bool sawDay = false;
+    size_t inputPos = 0;
+    size_t formatPos = 0;
+
+    auto matches = [&](std::string_view token) {
+        return format.substr(formatPos, token.size()) == token;
+    };
+    auto readField = [&](size_t width, int& field) {
+        if (inputPos > input.size() || width > input.size() - inputPos)
+            return false;
+        if (!parseTemporalUnsigned(input.substr(inputPos, width), width,
+                                   field)) {
+            return false;
+        }
+        inputPos += width;
+        return true;
+    };
+
+    while (formatPos < format.size()) {
+        if (matches("YYYY")) {
+            if (!readField(4, year)) return false;
+            sawYear = true;
+            formatPos += 4;
+        } else if (matches("HH24")) {
+            if (!readField(2, hour)) return false;
+            formatPos += 4;
+        } else if (matches("MM")) {
+            if (!readField(2, month)) return false;
+            sawMonth = true;
+            formatPos += 2;
+        } else if (matches("DD")) {
+            if (!readField(2, day)) return false;
+            sawDay = true;
+            formatPos += 2;
+        } else if (matches("MI")) {
+            if (!readField(2, minute)) return false;
+            formatPos += 2;
+        } else if (matches("SS")) {
+            if (!readField(2, second)) return false;
+            formatPos += 2;
+        } else {
+            if (inputPos >= input.size()) return false;
+            ++formatPos;
+            ++inputPos;
+        }
+    }
+
+    if (inputPos != input.size() || !sawYear || !sawMonth || !sawDay ||
+        year < 1 || year > 9999 || hour > 23 || minute > 59 ||
+        second > 59) {
+        return false;
+    }
+    Date parsedDate(year, month, day);
+    if (parsedDate.year == 0) return false;
+    date = parsedDate;
+    timeSeconds = hour * 3600 + minute * 60 + second;
+    return true;
+}
+
 // ========================================================================
 // Time helpers: store as int32_t seconds since 00:00:00
 // ========================================================================
