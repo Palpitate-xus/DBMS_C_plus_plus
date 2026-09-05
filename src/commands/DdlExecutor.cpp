@@ -1240,6 +1240,12 @@ static bool dropOwnedSequencesForColumn(
     int32_t columnNumber, const std::string& columnName, bool cascade,
     std::set<std::string>& droppedSequenceStorageNames);
 
+static bool executeSchemaPhysicalDropPlan(
+    CatalogManager& catalog, const std::string& dbname,
+    const CatalogManager::DropPlan& catalogPlan, bool cascade,
+    std::set<std::string>& droppedSequenceStorageNames,
+    std::string& error);
+
 bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
     if (!stmt) return true;
     if (!checkDB(s)) return true;
@@ -2843,7 +2849,22 @@ bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
     // remove several relations), so every failure must be able to restore
     // the pre-statement snapshot.
     txn.markSnapshotDirty();
-    DBStatus res = g_engine.dropSchema(s.currentDB, name, stmt->cascade);
+    std::set<std::string> droppedSequenceStorageNames;
+    if (hasCatalogDropPlan && catalogManager) {
+        std::string error;
+        if (!executeSchemaPhysicalDropPlan(
+                *catalogManager, s.currentDB, catalogDropPlan,
+                stmt->cascade, droppedSequenceStorageNames, error)) {
+            std::cout << "DROP SCHEMA physical cleanup failed: "
+                      << error << std::endl;
+            return true;
+        }
+    }
+    // Catalog-planned relation removal above is dependency ordered and also
+    // includes objects outside this namespace reached by CASCADE. The storage
+    // primitive now only removes the namespace marker; asking it to cascade
+    // again would double-drop tables while still missing other relation kinds.
+    DBStatus res = g_engine.dropSchema(s.currentDB, name, false);
     if (res != DBStatus::OK) {
         std::cout << "DROP SCHEMA failed" << std::endl;
         return true;
@@ -2864,7 +2885,16 @@ bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
         }
     }
     txn.recordDrop(DdlObjectKind::Schema, name);
+    for (const auto& sequenceName : droppedSequenceStorageNames) {
+        txn.recordDrop(DdlObjectKind::Sequence, sequenceName);
+    }
     if (!txn.commit()) return true;
+    for (const auto& sequenceName : droppedSequenceStorageNames) {
+        s.sequenceLastValues.erase(sequenceName);
+        if (sequenceName.find('.') == std::string::npos) {
+            s.sequenceLastValues.erase("public." + sequenceName);
+        }
+    }
     std::cout << "DROP SCHEMA succeeded" << std::endl;
     return false;
 }
@@ -4667,6 +4697,78 @@ static bool dropPhysicalCascadeAction(StorageEngine& engine,
     // catalog plan still needs to remove its stale metadata.  Other failures
     // must abort and let DdlTransaction restore the snapshot.
     return status == DBStatus::OK || status == DBStatus::TABLE_NOT_FOUND;
+}
+
+static bool executeSchemaPhysicalDropPlan(
+    CatalogManager& catalog, const std::string& dbname,
+    const CatalogManager::DropPlan& catalogPlan, bool cascade,
+    std::set<std::string>& droppedSequenceStorageNames,
+    std::string& error) {
+    std::vector<PhysicalCascadeAction> actions;
+    if (!buildPhysicalCascadeActions(
+            catalog, g_engine, dbname, INVALID_OID,
+            catalogPlan, actions, error)) {
+        return false;
+    }
+
+    std::set<std::string> droppedTableStorageNames;
+    std::set<std::string> sequenceStorageNames;
+    for (const auto& action : actions) {
+        if (action.kind == PhysicalCascadeAction::Kind::Table) {
+            droppedTableStorageNames.insert(action.name);
+        } else if (action.kind == PhysicalCascadeAction::Kind::Sequence) {
+            sequenceStorageNames.insert(action.name);
+        }
+    }
+
+    // pg_attrdef is not modeled as a catalog class. Preserve its normal
+    // dependency behavior explicitly for sequences reached through the
+    // namespace plan, including defaults in other schemas.
+    std::set<std::pair<std::string, std::string>> defaultsToClear;
+    for (const auto& sequenceName : sequenceStorageNames) {
+        for (const auto& dependency :
+             findDefaultNextvalDeps(dbname, sequenceName)) {
+            if (droppedTableStorageNames.count(dependency.first) != 0) {
+                continue;
+            }
+            if (!cascade) {
+                error = "default on " + dependency.first + "." +
+                        dependency.second + " depends on sequence " +
+                        sequenceName;
+                return false;
+            }
+            defaultsToClear.insert(dependency);
+        }
+    }
+
+    std::set<std::string> changedDefaultTables;
+    for (const auto& dependency : defaultsToClear) {
+        if (g_engine.alterTableDropDefault(
+                dbname, dependency.first,
+                dependency.second) != DBStatus::OK) {
+            error = "cannot clear default on " + dependency.first + "." +
+                    dependency.second;
+            return false;
+        }
+        changedDefaultTables.insert(dependency.first);
+    }
+    for (const auto& changedTable : changedDefaultTables) {
+        if (!synchronizeTableAttributesInCatalog(dbname, changedTable)) {
+            error = "cannot persist default removal for " + changedTable;
+            return false;
+        }
+    }
+
+    for (const auto& action : actions) {
+        if (!dropPhysicalCascadeAction(g_engine, dbname, action)) {
+            error = "cannot remove relation " + action.name;
+            return false;
+        }
+        if (action.kind == PhysicalCascadeAction::Kind::Sequence) {
+            droppedSequenceStorageNames.insert(action.name);
+        }
+    }
+    return true;
 }
 
 // An OWNED BY dependency is automatic in PostgreSQL: dropping the owning

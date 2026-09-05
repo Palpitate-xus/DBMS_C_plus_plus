@@ -212,6 +212,83 @@ static void test_owned_sequence_defaults_obey_drop_behavior() {
               << std::endl;
 }
 
+static void test_drop_schema_cascade_removes_relation_storage() {
+    const std::string db = testDbPath("drop_schema_relations");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE SCHEMA app", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE app.items (id INT, value INT)", s));
+    assert(!ddl.executeSql(
+        "CREATE INDEX items_value_idx ON app.items (value)", s));
+    assert(!ddl.executeSql(
+        "CREATE SEQUENCE app.items_id_seq OWNED BY app.items.id", s));
+    assert(!ddl.executeSql(
+        "ALTER TABLE app.items ALTER COLUMN id "
+        "SET DEFAULT nextval('app.items_id_seq')", s));
+    assert(!ddl.executeSql(
+        "CREATE VIEW app.items_view AS SELECT * FROM app.items", s));
+    assert(!ddl.executeSql(
+        "CREATE MATERIALIZED VIEW app.items_mv "
+        "AS SELECT id, value FROM app.items", s));
+    assert(!ddl.executeSql(
+        "CREATE VIEW public_items_view AS SELECT * FROM app.items", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE public_sequence_consumer "
+        "(id INT DEFAULT nextval('app.items_id_seq'))", s));
+    s.sequenceLastValues["app.items_id_seq"] = 52;
+
+    assert(ddl.executeSql("DROP SCHEMA app RESTRICT", s));
+    assert(g_engine.schemaExists(db, "app"));
+    assert(g_engine.tableExists(db, "app__items"));
+    assert(g_engine.sequenceExists(db, "app.items_id_seq"));
+    assert(g_engine.viewExists(db, "app.items_view"));
+    assert(g_engine.isMaterializedView(db, "app.items_mv"));
+    assert(g_engine.viewExists(db, "public_items_view"));
+    assert(!g_engine.getTableSchema(
+        db, "public_sequence_consumer").cols[0].defaultValue.empty());
+
+    assert(!ddl.executeSql("DROP SCHEMA app CASCADE", s));
+    assert(!g_engine.schemaExists(db, "app"));
+    assert(!g_engine.tableExists(db, "app__items"));
+    assert(!g_engine.getNamedIndex(
+        db, "app__items", "items_value_idx"));
+    assert(!g_engine.sequenceExists(db, "app.items_id_seq"));
+    assert(!g_engine.viewExists(db, "app.items_view"));
+    assert(!g_engine.isMaterializedView(db, "app.items_mv"));
+    assert(!g_engine.tableExists(
+        db, dbms::StorageEngine::materializedViewPrefix("app.items_mv")));
+    assert(!g_engine.viewExists(db, "public_items_view"));
+    assert(g_engine.getTableSchema(
+        db, "public_sequence_consumer").cols[0].defaultValue.empty());
+    assert(s.sequenceLastValues.count("app.items_id_seq") == 0);
+
+    {
+        dbms::CatalogManager durable(
+            (fs::path(g_engine.dbPath(db)) / "pg_catalog").string());
+        assert(durable.findNamespaceByName("app") == nullptr);
+        const auto* publicNamespace =
+            durable.findNamespaceByName("public");
+        assert(publicNamespace);
+        assert(durable.findClassByName(
+                   "public_items_view", publicNamespace->oid) == nullptr);
+        const auto* consumer = durable.findClassByName(
+            "public_sequence_consumer", publicNamespace->oid);
+        const auto* column = consumer
+            ? durable.findAttribute(consumer->oid, "id") : nullptr;
+        assert(column && !column->atthasdef);
+    }
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[DROP-CASCADE] schema CASCADE removes relation storage OK"
+              << std::endl;
+}
+
 static void test_multi_table_drop_fails_before_mutation() {
     const std::string db = testDbPath("drop_multiple_preflight");
     cleanup(db);
@@ -355,6 +432,7 @@ int main() {
     test_schema_table_cascade_resolves_index_owner();
     test_drop_table_restrict_removes_automatic_dependents();
     test_owned_sequence_defaults_obey_drop_behavior();
+    test_drop_schema_cascade_removes_relation_storage();
     test_multi_table_drop_fails_before_mutation();
     test_drop_removes_named_table_sidecars();
     test_drop_purges_authorization_state();
