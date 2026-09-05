@@ -274,6 +274,9 @@ int main() {
         vals["id"] = "1";
         assert(engine.insert(dbname, "t", vals) == DBStatus::OK);
         assert(!engine.checkpoint(dbname));
+        // The database mutex is process-wide, so a different engine cannot
+        // pass the active-set check/flush boundary either.
+        assert(!observer.checkpoint(dbname));
         assert(engine.rollbackTransaction() == DBStatus::OK);
 
         assert(engine.beginTransaction(dbname) == DBStatus::OK);

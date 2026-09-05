@@ -34773,8 +34773,27 @@ void StorageEngine::invalidateCatalogTableList(const std::string& dbname) {
 // ========================================================================
 // Checkpoint: flush all dirty pages and persist a checkpoint record.
 // ========================================================================
+namespace {
+std::shared_ptr<std::shared_mutex> databaseTxnLockFor(
+    const std::string& dbname);
+}
+
 bool StorageEngine::checkpoint(const std::string& dbname) {
     if (!databaseExists(dbname)) return false;
+
+    // Transactions hold this mutex in shared mode from before xid
+    // registration until their terminal cleanup. Acquire it exclusively
+    // before checking the active set, so a new BEGIN cannot enter in the gap
+    // between that check and cache/WAL checkpointing. Never recursively try
+    // to upgrade this thread's own transaction lock.
+    const auto& context = transactionContext();
+    if (context.inTransaction && context.txnDB == dbname) return false;
+    const auto databaseMutex = databaseTxnLockFor(dbname);
+    std::unique_lock<std::shared_mutex> checkpointDatabaseLock(
+        *databaseMutex, std::try_to_lock);
+    if (!checkpointDatabaseLock.owns_lock() || !databaseExists(dbname)) {
+        return false;
+    }
 
     // Do not advance the recovery start point while a transaction for this
     // database is active.  A checkpoint must not make an uncommitted heap or
