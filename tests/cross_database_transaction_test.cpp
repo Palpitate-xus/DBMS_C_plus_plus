@@ -52,6 +52,9 @@ void test_dml_cannot_escape_transaction_database() {
                second, "items", {{"id", "10"}}, {"=id 1"}) ==
            dbms::DBStatus::INVALID_VALUE);
     assert(g_engine.inTransaction());
+    // A sequential scan must use the target database's CLOG as well as an
+    // indexed lookup.  The surrounding transaction belongs to `first`.
+    assert(g_engine.query(second, "items", {}, {"id"}).size() == 2);
     assert(hasId(second, "1"));
     assert(!hasId(second, "10"));
 

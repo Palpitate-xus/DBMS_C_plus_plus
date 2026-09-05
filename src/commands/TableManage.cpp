@@ -5875,7 +5875,8 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
     ReadView autocommitView;
     if (indexMaintenanceView) {
         rv = nullptr;
-    } else if (!rv && transactionContext().inTransaction) {
+    } else if (!rv && transactionContext().inTransaction &&
+               transactionContext().txnDB == dbname) {
         rv = &transactionContext().readView;
     } else if (!rv) {
         // Autocommit readers still need MVCC filtering: transactional DELETE
@@ -5900,6 +5901,7 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
     // serializable concurrency), but it closes the correctness hole where a
     // concurrent INSERT could otherwise evade row-level SSI tracking.
     if (registerSiread && transactionContext().inTransaction &&
+        transactionContext().txnDB == dbname &&
         transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE) {
         const std::string relation = ssiRelationKey(dbname, tablename);
         transactionContext().txnReadRelations.insert(relation);
@@ -5980,6 +5982,7 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
             if (!rv->isVisible(data, len, fmtVer)) return;
         }
         if (registerSiread && this->transactionContext().inTransaction &&
+            this->transactionContext().txnDB == dbname &&
             this->transactionContext().txnIsolationLevel ==
                 IsolationLevel::SERIALIZABLE) {
             int64_t rid = this->encodeRid(pid, sid);
@@ -6151,7 +6154,8 @@ bool StorageEngine::forEachRowPageRange(
 
     ReadView autocommitView;
     const ReadView* rv = readView;
-    if (!rv && transactionContext().inTransaction) {
+    if (!rv && transactionContext().inTransaction &&
+        transactionContext().txnDB == dbname) {
         rv = &transactionContext().readView;
     } else if (!rv) {
         std::lock_guard<std::mutex> lock(globalTxnMutex_);
@@ -6259,7 +6263,8 @@ bool StorageEngine::readVisibleRowByRid(const std::string& dbname, PageAllocator
     bool visible = ok;
     ReadView autocommitView;
     const ReadView* rv = readView;
-    if (!rv && transactionContext().inTransaction) {
+    if (!rv && transactionContext().inTransaction &&
+        transactionContext().txnDB == dbname) {
         rv = &transactionContext().readView;
     } else if (!rv) {
         std::lock_guard<std::mutex> lock(globalTxnMutex_);
@@ -6296,7 +6301,8 @@ bool StorageEngine::readCurrentRowByRid(
 
     ReadView autocommitView;
     const ReadView* view = nullptr;
-    if (transactionContext().inTransaction) {
+    if (transactionContext().inTransaction &&
+        transactionContext().txnDB == dbname) {
         view = &transactionContext().readView;
     } else {
         std::lock_guard<std::mutex> lock(globalTxnMutex_);
@@ -21809,6 +21815,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
 
     auto registerPageSiread = [&](uint32_t pageId) {
         if (!transactionContext().inTransaction ||
+            transactionContext().txnDB != dbname ||
             transactionContext().txnIsolationLevel != IsolationLevel::SERIALIZABLE) return;
         const std::string page = ssiPageKey(dbname, tablename, pageId);
         transactionContext().txnReadPages.insert(page);
@@ -21818,6 +21825,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
 
     auto finishSerializablePredicateRead = [&]() {
         if (!transactionContext().inTransaction ||
+            transactionContext().txnDB != dbname ||
             transactionContext().txnIsolationLevel != IsolationLevel::SERIALIZABLE) return;
         if (ids.empty()) {
             const std::string relation = ssiRelationKey(dbname, tablename);
@@ -26392,7 +26400,9 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
     }
 
     // READ COMMITTED: refresh snapshot before each query
-    if (transactionContext().inTransaction && transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED) {
+    if (transactionContext().inTransaction &&
+        transactionContext().txnDB == dbname &&
+        transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED) {
         refreshReadView();
     }
 
@@ -26401,7 +26411,8 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
 
     ReadView autocommitView;
     const ReadView* queryView = nullptr;
-    if (transactionContext().inTransaction) {
+    if (transactionContext().inTransaction &&
+        transactionContext().txnDB == dbname) {
         queryView = &transactionContext().readView;
     } else {
         std::lock_guard<std::mutex> lock(globalTxnMutex_);
@@ -26428,8 +26439,6 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
         const auto targetParts = tbl.partitionType == TableSchema::PartitionType::None
             ? std::vector<std::string>{}
             : getTargetPartitions(tbl, conds);
-        const ReadView* rv = transactionContext().inTransaction
-            ? &transactionContext().readView : nullptr;
         const bool scanOk = forEachVisibleRow(
             dbname, tablename, "SELECT",
             [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
@@ -26438,7 +26447,7 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
                     if (!evalConditionOnRow(c, row, tbl)) return;
                 }
                 matchRows.emplace_back(encodeRid(pid, sid), std::move(row));
-            }, rv, targetParts);
+            }, queryView, targetParts);
         if (!scanOk) scanFailed = true;
     } else if (conds.empty()) {
         if (!forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
@@ -26447,7 +26456,6 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
     } else if (tbl.partitionType != TableSchema::PartitionType::None) {
         // Partitioned table: use forEachRow with partition pruning + in-callback filtering
         auto targetParts = getTargetPartitions(tbl, conds);
-        const ReadView* rv = transactionContext().inTransaction ? &transactionContext().readView : nullptr;
         if (!forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
             std::string row(data, len);
             bool match = true;
@@ -26455,7 +26463,7 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
                 if (!evalConditionOnRow(c, row, tbl)) { match = false; break; }
             }
             if (match) matchRows.emplace_back(encodeRid(pid, sid), std::move(row));
-        }, rv, targetParts)) scanFailed = true;
+        }, queryView, targetParts)) scanFailed = true;
     } else {
         auto ids = filterRows(dbname, tablename, conds, &usedIndex, &scanFailed);
         for (int64_t rid : ids) {
@@ -36160,6 +36168,7 @@ void StorageEngine::recordSsiIndexPredicate(const std::string& dbname,
                                             const Condition& condition,
                                             const TableSchema& tbl) {
     if (!transactionContext().inTransaction ||
+        transactionContext().txnDB != dbname ||
         transactionContext().txnIsolationLevel != IsolationLevel::SERIALIZABLE ||
         (condition.op != "=" && condition.op != ">" && condition.op != ">=" &&
          condition.op != "<" && condition.op != "<=")) {
