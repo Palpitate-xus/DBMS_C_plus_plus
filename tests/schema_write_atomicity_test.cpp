@@ -28,7 +28,10 @@ int main() {
 
     dbms::TableSchema table;
     table.tablename = "items";
-    table.append(dbms::makeIntColumn("id", true, 2));
+    auto id = dbms::makeIntColumn("id", true, 2);
+    id.checkExpr = "id > 0";
+    id.checkConstraintName = "items_id_positive";
+    table.append(id);
     assert(g_engine.createTable(db, table) == dbms::DBStatus::OK);
 
     const fs::path schemaPath = fs::path(db) / "items.stc";
@@ -67,6 +70,41 @@ int main() {
     const auto afterSuccess = persisted.getTableSchema(db, "items");
     assert(afterSuccess.len == 1);
     assert(afterSuccess.cols[0].defaultValue == "42");
+
+    // ALTER CONSTRAINT used to bypass the common schema publisher and open
+    // the live .stc file with truncation. Exercise that path independently so
+    // an I/O failure cannot expose a partial constraint definition.
+    const std::string beforeConstraintBytes = readFile(schemaPath);
+    const auto beforeConstraintSchema = g_engine.getTableSchema(db, "items");
+    assert(!beforeConstraintSchema.cols[0].deferrable);
+    const auto beforeConstraintTimestamp = fs::last_write_time(schemaPath);
+    fs::rename(schemaPath, savedPath);
+    assert(fs::create_directory(schemaPath));
+    fs::last_write_time(schemaPath, beforeConstraintTimestamp);
+
+    assert(g_engine.alterTableSetConstraintDeferrability(
+               db, "items", "items_id_positive", true, true) ==
+           dbms::DBStatus::IO_ERROR);
+    assert(fs::is_directory(schemaPath));
+
+    fs::remove(schemaPath);
+    fs::rename(savedPath, schemaPath);
+    assert(readFile(schemaPath) == beforeConstraintBytes);
+
+    dbms::StorageEngine constraintFailureReloaded;
+    const auto afterConstraintFailure =
+        constraintFailureReloaded.getTableSchema(db, "items");
+    assert(!afterConstraintFailure.cols[0].deferrable);
+    assert(!afterConstraintFailure.cols[0].initiallyDeferred);
+
+    assert(g_engine.alterTableSetConstraintDeferrability(
+               db, "items", "items_id_positive", true, true) ==
+           dbms::DBStatus::OK);
+    dbms::StorageEngine constraintPersisted;
+    const auto afterConstraintSuccess =
+        constraintPersisted.getTableSchema(db, "items");
+    assert(afterConstraintSuccess.cols[0].deferrable);
+    assert(afterConstraintSuccess.cols[0].initiallyDeferred);
 
     g_engine.catalogService().evict(db);
     fs::remove_all(db);

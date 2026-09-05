@@ -15424,16 +15424,9 @@ DBStatus StorageEngine::alterTableSetConstraintDeferrability(
         additionalMatch->deferrable = deferrable;
         additionalMatch->initiallyDeferred = initiallyDeferred;
     }
-    std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
-    if (!out) {
+    if (!writeSchemaFile(dbname, tablename, tbl)) {
         lockManager_.unlock(tablename);
-        return DBStatus::INVALID_VALUE;
-    }
-    writeSchema(out, tbl);
-    invalidateCatalogSchema(dbname, tablename);
-    if (!out) {
-        lockManager_.unlock(tablename);
-        return DBStatus::INVALID_VALUE;
+        return DBStatus::IO_ERROR;
     }
     lockManager_.unlock(tablename);
     return DBStatus::OK;
