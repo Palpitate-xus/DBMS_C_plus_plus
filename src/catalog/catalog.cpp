@@ -4,6 +4,7 @@
 #include <sstream>
 #include <iostream>
 #include <algorithm>
+#include <iomanip>
 #include <limits>
 #include <set>
 #include <functional>
@@ -51,6 +52,20 @@ static std::string readString(std::istringstream& in) {
         }
     }
     return result;
+}
+
+template <typename T>
+static bool readCatalogCsvField(std::istringstream& input, T& value) {
+    if (!(input >> value)) return false;
+    char delimiter = 0;
+    return input.get(delimiter) && delimiter == ',';
+}
+
+template <typename T>
+static bool readCatalogCsvLastField(std::istringstream& input, T& value) {
+    if (!(input >> value)) return false;
+    input >> std::ws;
+    return input.eof();
 }
 
 static std::string oidPath(const std::string& dbPath) {
@@ -1249,6 +1264,28 @@ bool CatalogManager::persistAll() {
             out << (r.relhasindex ? 't' : 'f') << ',';
             out << (r.relpersistence) << ',';
             out << (r.relisshared ? 't' : 'f');
+            // Optional extension fields follow the legacy prefix so current
+            // readers can still load old rows and old readers can ignore the
+            // new tail.
+            out << ',' << r.reloftype;
+            out << ',' << r.reltablespace;
+            out << ',' << r.relpages;
+            out << ',' << std::setprecision(
+                std::numeric_limits<float>::max_digits10) << r.reltuples;
+            out << ',' << r.relallvisible;
+            out << ',' << r.reltoastrelid;
+            out << ',' << r.relchecks;
+            out << ',' << (r.relhasrules ? 't' : 'f');
+            out << ',' << (r.relhastriggers ? 't' : 'f');
+            out << ',' << (r.relhassubclass ? 't' : 'f');
+            out << ',' << (r.relrowsecurity ? 't' : 'f');
+            out << ',' << (r.relforcerowsecurity ? 't' : 'f');
+            out << ',' << (r.relispopulated ? 't' : 'f');
+            out << ',' << r.relreplident;
+            out << ',' << (r.relispartition ? 't' : 'f');
+            out << ',' << r.relrewrite;
+            out << ',' << r.relfrozenxid;
+            out << ',' << r.relminmxid;
             out << '\n';
         }
     });
@@ -1399,6 +1436,55 @@ void CatalogManager::loadAll() {
             iss >> flag; r.relhasindex = (flag == 't'); iss.ignore(1);
             iss >> r.relpersistence; iss.ignore(1);
             iss >> flag; r.relisshared = (flag == 't');
+
+            // Rows written before the pg_class extension end here. Keep
+            // their in-struct defaults; if a tail exists it must be complete.
+            if (iss.peek() == ',') {
+                iss.ignore(1);
+                char hasRules = 'f';
+                char hasTriggers = 'f';
+                char hasSubclass = 'f';
+                char rowSecurity = 'f';
+                char forceRowSecurity = 'f';
+                char isPopulated = 't';
+                char isPartition = 'f';
+                if (!readCatalogCsvField(iss, r.reloftype) ||
+                    !readCatalogCsvField(iss, r.reltablespace) ||
+                    !readCatalogCsvField(iss, r.relpages) ||
+                    !readCatalogCsvField(iss, r.reltuples) ||
+                    !readCatalogCsvField(iss, r.relallvisible) ||
+                    !readCatalogCsvField(iss, r.reltoastrelid) ||
+                    !readCatalogCsvField(iss, r.relchecks) ||
+                    !readCatalogCsvField(iss, hasRules) ||
+                    !readCatalogCsvField(iss, hasTriggers) ||
+                    !readCatalogCsvField(iss, hasSubclass) ||
+                    !readCatalogCsvField(iss, rowSecurity) ||
+                    !readCatalogCsvField(iss, forceRowSecurity) ||
+                    !readCatalogCsvField(iss, isPopulated) ||
+                    !readCatalogCsvField(iss, r.relreplident) ||
+                    !readCatalogCsvField(iss, isPartition) ||
+                    !readCatalogCsvField(iss, r.relrewrite) ||
+                    !readCatalogCsvField(iss, r.relfrozenxid) ||
+                    !readCatalogCsvLastField(iss, r.relminmxid) ||
+                    (hasRules != 't' && hasRules != 'f') ||
+                    (hasTriggers != 't' && hasTriggers != 'f') ||
+                    (hasSubclass != 't' && hasSubclass != 'f') ||
+                    (rowSecurity != 't' && rowSecurity != 'f') ||
+                    (forceRowSecurity != 't' && forceRowSecurity != 'f') ||
+                    (isPopulated != 't' && isPopulated != 'f') ||
+                    (isPartition != 't' && isPartition != 'f') ||
+                    (r.relreplident != 'd' && r.relreplident != 'n' &&
+                     r.relreplident != 'f' && r.relreplident != 'i')) {
+                    continue;
+                }
+                r.relhasrules = hasRules == 't';
+                r.relhastriggers = hasTriggers == 't';
+                r.relhassubclass = hasSubclass == 't';
+                r.relrowsecurity = rowSecurity == 't';
+                r.relforcerowsecurity = forceRowSecurity == 't';
+                r.relispopulated = isPopulated == 't';
+                r.relispartition = isPartition == 't';
+            }
             classes_.push_back(r);
         }
     }

@@ -5,6 +5,7 @@
 #include "catalog/type_registry.h"
 #include <cassert>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include "test_utils.h"
 
@@ -76,8 +77,33 @@ static void test_checkpoint_persists_catalog() {
     dbms::PgClassRow cls;
     cls.relname = "checkpoint_tbl";
     cls.relnamespace = nsPublic->oid;
-    cls.relkind = 'r';
+    cls.reltype = 50001;
+    cls.reloftype = 50002;
+    cls.relowner = 50003;
+    cls.relam = 50004;
+    cls.relfilenode = 50005;
+    cls.reltablespace = 50006;
+    cls.relpages = 17;
+    cls.reltuples = 23.5f;
+    cls.relallvisible = 11;
+    cls.reltoastrelid = 50007;
+    cls.relhasindex = true;
+    cls.relisshared = true;
+    cls.relpersistence = 'u';
+    cls.relkind = 'm';
     cls.relnatts = 3;
+    cls.relchecks = 2;
+    cls.relhasrules = true;
+    cls.relhastriggers = true;
+    cls.relhassubclass = true;
+    cls.relrowsecurity = true;
+    cls.relforcerowsecurity = true;
+    cls.relispopulated = false;
+    cls.relreplident = 'i';
+    cls.relispartition = true;
+    cls.relrewrite = 50008;
+    cls.relfrozenxid = 1234;
+    cls.relminmxid = 5678;
     cat.createClass(cls);
 
     // Checkpoint should persist the catalog (among other things).
@@ -93,10 +119,64 @@ static void test_checkpoint_persists_catalog() {
     // The class we created should be visible (checkpoint persists catalog).
     const auto* cls2 = cat2.findClassByName("checkpoint_tbl", ns2->oid);
     assert(cls2 != nullptr);
+    assert(cls2->reltype == 50001);
+    assert(cls2->reloftype == 50002);
+    assert(cls2->relowner == 50003);
+    assert(cls2->relam == 50004);
+    assert(cls2->relfilenode == 50005);
+    assert(cls2->reltablespace == 50006);
+    assert(cls2->relpages == 17);
+    assert(cls2->reltuples == 23.5f);
+    assert(cls2->relallvisible == 11);
+    assert(cls2->reltoastrelid == 50007);
+    assert(cls2->relhasindex);
+    assert(cls2->relisshared);
+    assert(cls2->relpersistence == 'u');
+    assert(cls2->relkind == 'm');
     assert(cls2->relnatts == 3);
+    assert(cls2->relchecks == 2);
+    assert(cls2->relhasrules);
+    assert(cls2->relhastriggers);
+    assert(cls2->relhassubclass);
+    assert(cls2->relrowsecurity);
+    assert(cls2->relforcerowsecurity);
+    assert(!cls2->relispopulated);
+    assert(cls2->relreplident == 'i');
+    assert(cls2->relispartition);
+    assert(cls2->relrewrite == 50008);
+    assert(cls2->relfrozenxid == 1234);
+    assert(cls2->relminmxid == 5678);
 
     cleanup(db);
     std::cout << "[CATALOG-SVC] checkpoint persists catalog OK" << std::endl;
+}
+
+static void test_legacy_pg_class_prefix_still_loads() {
+    const std::string path = testDbPath("catalog_legacy_class_prefix");
+    cleanup(path);
+    std::filesystem::create_directories(path);
+    {
+        std::ofstream out(
+            std::filesystem::path(path) / "pg_class.cat",
+            std::ios::trunc);
+        assert(out);
+        out << "71001,\"legacy_relation\",11,0,12,0,0,r,2,t,u,f\n";
+    }
+    {
+        dbms::CatalogManager catalog(path);
+        const auto* relation = catalog.findClass(71001);
+        assert(relation != nullptr);
+        assert(relation->relname == "legacy_relation");
+        assert(relation->relnatts == 2);
+        assert(relation->relhasindex);
+        assert(relation->relpersistence == 'u');
+        assert(!relation->relrowsecurity);
+        assert(relation->relispopulated);
+        assert(relation->relreplident == 'd');
+    }
+    cleanup(path);
+    std::cout << "[CATALOG-SVC] legacy pg_class prefix loads OK"
+              << std::endl;
 }
 
 int main() {
@@ -105,6 +185,7 @@ int main() {
     test_bootstrap_and_cache();
     test_storage_only_metadata_is_not_imported();
     test_checkpoint_persists_catalog();
+    test_legacy_pg_class_prefix_still_loads();
     std::cout << "[CATALOG-SVC] all passed" << std::endl;
     return 0;
 }
