@@ -124,6 +124,19 @@ static void test_virtual_generated() {
     rows = g_engine.query(db, "t", {"=id 2"}, {"c"});
     assert(rows.size() == 1);
     assert(trimRight(rows[0]) == "12");
+
+    const std::vector<dbms::StorageEngine::AggItem> aggregateItems = {
+        {"sum", "c", {}, {}}, {"count", "c", {}, {}}};
+    assert(g_engine.aggregate(db, "t", {}, aggregateItems) ==
+           std::vector<std::string>{"47 2 "});
+    const std::vector<dbms::StorageEngine::AggItem> groupedItems = {
+        {"count", "*", {}, {}}};
+    assert(g_engine.groupAggregate(db, "t", {}, groupedItems, {"c"}, {}) ==
+           (std::vector<std::string>{"12 1 ", "35 1 "}));
+    assert(g_engine.groupAggregateSets(
+               db, "t", {}, groupedItems, {"c"}, {{"c"}}, {}) ==
+           (std::vector<std::string>{"12 1 ", "35 1 "}));
+
     assert(g_engine.remove(db, "t", {"=c 12"}) == dbms::DBStatus::OK);
     assert(g_engine.query(db, "t", {"=id 2"}, {"id"}).empty());
 

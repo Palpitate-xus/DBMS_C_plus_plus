@@ -28179,6 +28179,10 @@ std::vector<std::string> StorageEngine::aggregate(
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     PageAllocator* pa = getPageAllocator(dbname, tablename);
+    const auto logicalValue = [&](const std::string& row, size_t columnIndex) {
+        return extractColumnValue(
+            row, tbl, columnIndex, dbname, true);
+    };
 
     auto conds = parseConditions(conditions);
     bool scanFailed = false;
@@ -28313,7 +28317,7 @@ std::unordered_set<std::string> arraySeen;
                     if (!pass) continue;
                 }
                 if (colIdx >= tbl.len) continue;
-                std::string val = extractColumnValue(row, tbl, colIdx);
+                std::string val = logicalValue(row, colIdx);
                 if (!val.empty()) distinctVals.insert(val);
             }
             count = static_cast<int64_t>(distinctVals.size());
@@ -28334,6 +28338,7 @@ std::unordered_set<std::string> arraySeen;
                     // PG count(col) skips only NULL rows; an empty string
                     // counts.  The stored null bit is the authoritative test.
                     if (colIdx < tbl.len &&
+                        tbl.cols[colIdx].generatedKind != 'v' &&
                         isColumnNullByRid(dbname, tablename, rid, colIdx)) {
                         continue;
                     }
@@ -28343,7 +28348,7 @@ std::unordered_set<std::string> arraySeen;
                         auto getValC = [&](const std::string& tok) -> std::string {
                             for (size_t ci2 = 0; ci2 < tbl.len; ++ci2)
                                 if (tbl.cols[ci2].dataName == tok)
-                                    return extractColumnValue(row, tbl, ci2);
+                                    return logicalValue(row, ci2);
                             if (tok.size() >= 2 && tok.front() == '\'' && tok.back() == '\'')
                                 return tok.substr(1, tok.size() - 2);
                             return tok;
@@ -28351,17 +28356,18 @@ std::unordered_set<std::string> arraySeen;
                         val = evalAggArgExpr(aggExprText, getValC);
                     } else {
                         if (colIdx >= tbl.len) continue;
-                        val = extractColumnValue(row, tbl, colIdx);
+                        val = logicalValue(row, colIdx);
                     }
                     count++;  // null rows were skipped above; empty strings count
                 } else if (func == "group_concat" || func == "string_agg") {
                     if (colIdx >= tbl.len) continue;
-                    std::string val = extractColumnValue(row, tbl, colIdx);
+                    std::string val = logicalValue(row, colIdx);
                     if (val.empty()) continue;
                     if (aggDistinct && groupSeen.count(val)) continue;
                     groupSeen.insert(val);
                     if (orderKeyIdx < tbl.len) {
-                        groupOrdered.emplace_back(extractColumnValue(row, tbl, orderKeyIdx), val);
+                        groupOrdered.emplace_back(
+                            logicalValue(row, orderKeyIdx), val);
                         groupConcatFirst = false;
                         continue;
                     }
@@ -28370,15 +28376,16 @@ std::unordered_set<std::string> arraySeen;
                     groupConcatFirst = false;
                 } else if (isJsonAgg) {
                     if (colIdx >= tbl.len) continue;
-                    std::string val = extractColumnValue(row, tbl, colIdx);
+                    std::string val = logicalValue(row, colIdx);
                     jsonAggVals.push_back(val);
                 } else if (isArrayAgg) {
                     if (colIdx >= tbl.len) continue;
-                    std::string val = extractColumnValue(row, tbl, colIdx);
+                    std::string val = logicalValue(row, colIdx);
                     if (aggDistinct && arraySeen.count(val)) continue;
                     arraySeen.insert(val);
                     if (orderKeyIdx < tbl.len) {
-                        arrayOrderedVals.emplace_back(extractColumnValue(row, tbl, orderKeyIdx), val);
+                        arrayOrderedVals.emplace_back(
+                            logicalValue(row, orderKeyIdx), val);
                         continue;
                     }
                     arrayAggVals.push_back(val);
@@ -28388,7 +28395,7 @@ std::unordered_set<std::string> arraySeen;
                     auto getVal = [&](const std::string& tok) -> std::string {
                         for (size_t ci2 = 0; ci2 < tbl.len; ++ci2)
                             if (tbl.cols[ci2].dataName == tok)
-                                return extractColumnValue(row, tbl, ci2);
+                                return logicalValue(row, ci2);
                         if (tok.size() >= 2 && tok.front() == '\'' && tok.back() == '\'')
                             return tok.substr(1, tok.size() - 2);
                         return tok;
@@ -28398,7 +28405,7 @@ std::unordered_set<std::string> arraySeen;
                     auto getValB = [&](const std::string& tok) -> std::string {
                         for (size_t ci2 = 0; ci2 < tbl.len; ++ci2)
                             if (tbl.cols[ci2].dataName == tok)
-                                return extractColumnValue(row, tbl, ci2);
+                                return logicalValue(row, ci2);
                         if (tok.size() >= 2 && tok.front() == 39 && tok.back() == 39)
                             return tok.substr(1, tok.size() - 2);
                         return tok;
@@ -28416,7 +28423,7 @@ std::unordered_set<std::string> arraySeen;
                             val = actualColName;
                         } catch (...) { continue; }
                     } else {
-                        val = extractColumnValue(row, tbl, colIdx);
+                        val = logicalValue(row, colIdx);
                     }
                 }
                 if (isModeMedian) {
@@ -28792,6 +28799,10 @@ std::vector<std::string> StorageEngine::groupAggregate(
     }
 
     PageAllocator* pa = getPageAllocator(dbname, tablename);
+    const auto logicalValue = [&](const std::string& row, size_t columnIndex) {
+        return extractColumnValue(
+            row, tbl, columnIndex, dbname, true);
+    };
     auto conds = parseConditions(conditions);
     std::vector<int64_t> matchIds;
     bool scanFailed = false;
@@ -28816,7 +28827,7 @@ std::vector<std::string> StorageEngine::groupAggregate(
         std::string key;
         for (size_t idx : groupIdxs) {
             if (!key.empty()) key += "\x01";
-            key += extractColumnValue(row, tbl, idx);
+            key += logicalValue(row, idx);
         }
         return key;
     };
@@ -28911,7 +28922,7 @@ std::unordered_set<std::string> arraySeen;
                 if (!readRowByRid(pa, rid, row, tbl)) continue;
                 NullRowBinding nbD(this, dbname, tablename, rid, tbl.len);
                 if (colIdx >= tbl.len) continue;
-                std::string val = extractColumnValue(row, tbl, colIdx);
+                std::string val = logicalValue(row, colIdx);
                 if (!val.empty()) distinctVals.insert(val);
             }
             count = static_cast<int64_t>(distinctVals.size());
@@ -28935,12 +28946,14 @@ std::unordered_set<std::string> arraySeen;
                     // PG count(col) skips only NULL rows; an empty string
                     // counts.  The stored null bit is the authoritative test.
                     if (colIdx < tbl.len &&
+                        tbl.cols[colIdx].generatedKind != 'v' &&
                         isColumnNullByRid(dbname, tablename, rid, colIdx)) {
                         continue;
                     }
                     // PG count(col) skips only NULL rows; an empty string
                     // counts.  The stored null bit is the authoritative test.
                     if (colIdx < tbl.len &&
+                        tbl.cols[colIdx].generatedKind != 'v' &&
                         isColumnNullByRid(dbname, tablename, rid, colIdx)) {
                         continue;
                     }
@@ -28950,7 +28963,7 @@ std::unordered_set<std::string> arraySeen;
                         auto getValC = [&](const std::string& tok) -> std::string {
                             for (size_t ci2 = 0; ci2 < tbl.len; ++ci2)
                                 if (tbl.cols[ci2].dataName == tok)
-                                    return extractColumnValue(row, tbl, ci2);
+                                    return logicalValue(row, ci2);
                             if (tok.size() >= 2 && tok.front() == '\'' && tok.back() == '\'')
                                 return tok.substr(1, tok.size() - 2);
                             return tok;
@@ -28958,12 +28971,12 @@ std::unordered_set<std::string> arraySeen;
                         val = evalAggArgExpr(aggExprText, getValC);
                     } else {
                         if (colIdx >= tbl.len) continue;
-                        val = extractColumnValue(row, tbl, colIdx);
+                        val = logicalValue(row, colIdx);
                     }
                     count++;  // null rows were skipped above; empty strings count
                 } else if (func == "group_concat" || func == "string_agg") {
                     if (colIdx >= tbl.len) continue;
-                    std::string val = extractColumnValue(row, tbl, colIdx);
+                    std::string val = logicalValue(row, colIdx);
                     if (val.empty()) continue;
                     if (aggDistinct && groupSeen.count(val)) continue;
                     groupSeen.insert(val);
@@ -28972,11 +28985,11 @@ std::unordered_set<std::string> arraySeen;
                     groupConcatFirst = false;
                 } else if (isJsonAgg) {
                     if (colIdx >= tbl.len) continue;
-                    std::string val = extractColumnValue(row, tbl, colIdx);
+                    std::string val = logicalValue(row, colIdx);
                     jsonAggVals.push_back(val);
                 } else if (isArrayAgg) {
                     if (colIdx >= tbl.len) continue;
-                    std::string val = extractColumnValue(row, tbl, colIdx);
+                    std::string val = logicalValue(row, colIdx);
                     if (aggDistinct && arraySeen.count(val)) continue;
                     arraySeen.insert(val);
                     arrayAggVals.push_back(val);
@@ -28986,7 +28999,7 @@ std::unordered_set<std::string> arraySeen;
                     auto getVal = [&](const std::string& tok) -> std::string {
                         for (size_t ci2 = 0; ci2 < tbl.len; ++ci2)
                             if (tbl.cols[ci2].dataName == tok)
-                                return extractColumnValue(row, tbl, ci2);
+                                return logicalValue(row, ci2);
                         if (tok.size() >= 2 && tok.front() == '\'' && tok.back() == '\'')
                             return tok.substr(1, tok.size() - 2);
                         return tok;
@@ -28996,7 +29009,7 @@ std::unordered_set<std::string> arraySeen;
                     auto getValB = [&](const std::string& tok) -> std::string {
                         for (size_t ci2 = 0; ci2 < tbl.len; ++ci2)
                             if (tbl.cols[ci2].dataName == tok)
-                                return extractColumnValue(row, tbl, ci2);
+                                return logicalValue(row, ci2);
                         if (tok.size() >= 2 && tok.front() == 39 && tok.back() == 39)
                             return tok.substr(1, tok.size() - 2);
                         return tok;
@@ -29014,7 +29027,7 @@ std::unordered_set<std::string> arraySeen;
                             val = actualColName;
                         } catch (...) { continue; }
                     } else {
-                        val = extractColumnValue(row, tbl, colIdx);
+                        val = logicalValue(row, colIdx);
                     }
                 }
                 if (isModeMedian) {
@@ -29281,6 +29294,10 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
     }
 
     PageAllocator* pa = getPageAllocator(dbname, tablename);
+    const auto logicalValue = [&](const std::string& row, size_t columnIndex) {
+        return extractColumnValue(
+            row, tbl, columnIndex, dbname, true);
+    };
     auto conds = parseConditions(conditions);
     std::vector<int64_t> matchIds;
     bool scanFailed = false;
@@ -29379,7 +29396,7 @@ std::unordered_set<std::string> arraySeen;
                 if (!readRowByRid(pa, rid, row, tbl)) continue;
                 NullRowBinding nbD(this, dbname, tablename, rid, tbl.len);
                 if (colIdx >= tbl.len) continue;
-                std::string val = extractColumnValue(row, tbl, colIdx);
+                std::string val = logicalValue(row, colIdx);
                 if (!val.empty()) distinctVals.insert(val);
             }
             count = static_cast<int64_t>(distinctVals.size());
@@ -29388,6 +29405,8 @@ std::unordered_set<std::string> arraySeen;
             for (int64_t rid : gids) {
                 std::string row;
                 if (!readRowByRid(pa, rid, row, tbl)) continue;
+                NullRowBinding nullBinding(
+                    this, dbname, tablename, rid, tbl.len);
                 if (!parsedFilters.empty()) {
                     bool pass = true;
                     for (const auto& fc : parsedFilters) {
@@ -29399,13 +29418,14 @@ std::unordered_set<std::string> arraySeen;
                     if (colName == "*") { count++; continue; }
                     if (colIdx >= tbl.len) continue;
                     // PG count(col) skips only NULL rows; empty strings count.
-                    if (isColumnNullByRid(dbname, tablename, rid, colIdx)) continue;
-                    std::string val = extractColumnValue(row, tbl, colIdx);
+                    if (tbl.cols[colIdx].generatedKind != 'v' &&
+                        isColumnNullByRid(dbname, tablename, rid, colIdx)) continue;
+                    std::string val = logicalValue(row, colIdx);
                     (void)val;
                     count++;
                 } else if (func == "group_concat" || func == "string_agg") {
                     if (colIdx >= tbl.len) continue;
-                    std::string val = extractColumnValue(row, tbl, colIdx);
+                    std::string val = logicalValue(row, colIdx);
                     if (val.empty()) continue;
                     if (aggDistinct && groupSeen.count(val)) continue;
                     groupSeen.insert(val);
@@ -29414,11 +29434,11 @@ std::unordered_set<std::string> arraySeen;
                     groupConcatFirst = false;
                 } else if (isJsonAgg) {
                     if (colIdx >= tbl.len) continue;
-                    std::string val = extractColumnValue(row, tbl, colIdx);
+                    std::string val = logicalValue(row, colIdx);
                     jsonAggVals.push_back(val);
                 } else if (isArrayAgg) {
                     if (colIdx >= tbl.len) continue;
-                    std::string val = extractColumnValue(row, tbl, colIdx);
+                    std::string val = logicalValue(row, colIdx);
                     if (aggDistinct && arraySeen.count(val)) continue;
                     arraySeen.insert(val);
                     arrayAggVals.push_back(val);
@@ -29428,7 +29448,7 @@ std::unordered_set<std::string> arraySeen;
                         auto getVal = [&](const std::string& tok) -> std::string {
                             for (size_t ci2 = 0; ci2 < tbl.len; ++ci2)
                                 if (tbl.cols[ci2].dataName == tok)
-                                    return extractColumnValue(row, tbl, ci2);
+                                    return logicalValue(row, ci2);
                             if (tok.size() >= 2 && tok.front() == '\'' && tok.back() == '\'')
                                 return tok.substr(1, tok.size() - 2);
                             return tok;
@@ -29436,7 +29456,7 @@ std::unordered_set<std::string> arraySeen;
                         val = evalAggArgExpr(aggExprText, getVal);
                     } else {
                         if (colIdx >= tbl.len) continue;
-                        val = extractColumnValue(row, tbl, colIdx);
+                        val = logicalValue(row, colIdx);
                     }
                     if (isInt || aggArgExpr) {
                         int64_t num = val.empty() ? INF : parseInt(val);
@@ -29617,10 +29637,12 @@ std::unordered_set<std::string> arraySeen;
         auto readSetKey = [&](int64_t rid) -> std::string {
             std::string row;
             if (!readRowByRid(pa, rid, row, tbl)) return "";
+            NullRowBinding nullBinding(
+                this, dbname, tablename, rid, tbl.len);
             std::string key;
             for (size_t idx : setIdxs) {
                 if (!key.empty()) key += "\x01";
-                key += extractColumnValue(row, tbl, idx);
+                key += logicalValue(row, idx);
             }
             return key;
         };
