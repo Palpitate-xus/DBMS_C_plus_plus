@@ -204,6 +204,47 @@ static void test_rename_preserves_table_sidecars() {
     std::cout << "[ALTER_ONLY] RENAME preserves table sidecars OK" << std::endl;
 }
 
+static void test_add_column_preserves_modifiers() {
+    const std::string db = testDbPath("alter_add_column_modifiers");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    assert(!ddl.executeSql("CREATE TABLE modifier_target (id INT PRIMARY KEY)", s));
+    assert(g_engine.insert(db, "modifier_target", {{"id", "1"}}) ==
+           dbms::DBStatus::OK);
+
+    assert(!ddl.executeSql(
+        "ALTER TABLE modifier_target ADD COLUMN score INT DEFAULT 5 "
+        "NOT NULL CONSTRAINT score_positive CHECK (score > 0)", s));
+    auto schema = g_engine.getTableSchema(db, "modifier_target");
+    assert(schema.len == 2);
+    assert(schema.cols[1].dataName == "score");
+    assert(!schema.cols[1].isNull);
+    assert(schema.cols[1].defaultValue == "5");
+    assert(schema.cols[1].checkExpr == "score > 0");
+    assert(schema.cols[1].checkConstraintName == "score_positive");
+    assert(g_engine.insert(db, "modifier_target",
+                           {{"id", "2"}, {"score", "0"}}) ==
+           dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insert(db, "modifier_target", {{"id", "2"}}) ==
+           dbms::DBStatus::OK);
+
+    assert(!ddl.executeSql(
+        "ALTER TABLE modifier_target ADD COLUMN doubled INT "
+        "GENERATED ALWAYS AS (score * 2) VIRTUAL", s));
+    schema = g_engine.getTableSchema(db, "modifier_target");
+    assert(schema.len == 3);
+    assert(schema.cols[2].generatedExpr == "score * 2");
+    assert(schema.cols[2].generatedKind == 'v');
+
+    cleanup(db);
+    std::cout << "[ALTER_ONLY] ADD COLUMN modifiers preserved OK"
+              << std::endl;
+}
+
 static void test_typed_security_partition_and_trigger_actions() {
     std::string db = testDbPath("alter_typed_actions");
     cleanup(db);
@@ -283,6 +324,7 @@ int main() {
     test_only_parser();
     test_set_tablespace();
     test_rename_preserves_table_sidecars();
+    test_add_column_preserves_modifiers();
     test_typed_security_partition_and_trigger_actions();
     std::cout << "[ALTER_ONLY] all passed" << std::endl;
     return 0;

@@ -190,6 +190,37 @@ int main() {
         assert(a->subCommands[1].name == "d");
         assert(a->subCommands[2].action == AlterTableStmt::Action::AddConstraint);
         assert(a->subCommands[2].constraint.type == "PRIMARY KEY");
+
+        auto modifiers = parser.parse(
+            "ALTER TABLE t ADD COLUMN score INT[] DEFAULT 5 NOT NULL "
+            "CONSTRAINT score_positive CHECK (score > 0) UNIQUE");
+        assert(modifiers.success);
+        auto* modified = asAlterTable(modifiers.stmt);
+        assert(modified && modified->subCommands.size() == 1);
+        const auto& column = modified->subCommands[0].colDef;
+        assert(column.name == "score" && column.typeName == "INT");
+        assert(column.isArray && !column.isNull && column.isUnique);
+        assert(column.defaultValue && column.defaultValue->toString() == "5");
+        assert(column.checkExprs.size() == 1 &&
+               column.checkExprs[0]->toString() == "score > 0");
+        assert(column.checkNames.size() == 1 &&
+               column.checkNames[0] == "score_positive");
+
+        auto generated = parser.parse(
+            "ALTER TABLE t ADD COLUMN doubled INT "
+            "GENERATED ALWAYS AS (id * 2) VIRTUAL");
+        assert(generated.success);
+        auto* generatedAlter = asAlterTable(generated.stmt);
+        assert(generatedAlter && generatedAlter->subCommands.size() == 1);
+        const auto& generatedColumn =
+            generatedAlter->subCommands[0].colDef;
+        assert(generatedColumn.generatedExpr == "id * 2");
+        assert(generatedColumn.generatedKind == 'v');
+
+        // Unsupported inline forms must fail closed instead of creating an
+        // unconstrained column after silently discarding trailing tokens.
+        assert(!parser.parse(
+            "ALTER TABLE t ADD COLUMN parent_id INT REFERENCES p(id)").success);
         std::cout << "[PARSER P1] ALTER TABLE OK\n";
     }
 
