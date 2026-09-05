@@ -3270,15 +3270,26 @@ std::vector<std::string> StorageEngine::getMaterializedViewNames(const std::stri
 DBStatus StorageEngine::dropMaterializedView(const std::string& dbname,
                                               const std::string& viewname) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    // Drop backing table
-    std::string backingTable = materializedViewPrefix(viewname);
-    if (tableExists(dbname, backingTable)) {
-        dropTable(dbname, backingTable);
-    }
-    // Remove mview metadata
-    auto path = materializedViewPath(dbname, viewname, this);
-    if (std::filesystem::exists(path)) {
-        std::filesystem::remove(path);
+    try {
+        // The DDL executor wraps both removals in a physical snapshot. Return
+        // the first failure so it can restore that snapshot instead of
+        // committing a materialized view with only one half removed.
+        const std::string backingTable = materializedViewPrefix(viewname);
+        if (tableExists(dbname, backingTable)) {
+            const DBStatus status = dropTable(dbname, backingTable);
+            if (status != DBStatus::OK) return status;
+        }
+
+        const auto path = materializedViewPath(dbname, viewname, this);
+        std::error_code error;
+        const bool exists = std::filesystem::exists(path, error);
+        if (error) return DBStatus::IO_ERROR;
+        if (exists) {
+            const bool removed = std::filesystem::remove(path, error);
+            if (!removed || error) return DBStatus::IO_ERROR;
+        }
+    } catch (const std::filesystem::filesystem_error&) {
+        return DBStatus::IO_ERROR;
     }
     return DBStatus::OK;
 }

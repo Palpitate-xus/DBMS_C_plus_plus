@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cassert>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <vector>
 #include "test_utils.h"
@@ -383,6 +384,45 @@ static void test_matview_metadata_write_failure_rolls_back() {
     std::cout << "[MATVIEW] metadata write failure rollback OK" << std::endl;
 }
 
+static void test_matview_drop_io_failure_rolls_back() {
+    const std::string db = testDbPath("matview_drop_io_failure");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE t (id INT)", s));
+    assert(!ddl.executeSql(
+        "CREATE MATERIALIZED VIEW mv AS SELECT id FROM t", s));
+    const std::string backing =
+        dbms::StorageEngine::materializedViewPrefix("mv");
+    const fs::path metadata = g_engine.viewsDir(db) / "mv.mview";
+    fs::remove(metadata);
+    fs::create_directory(metadata);
+    std::ofstream(metadata / "keep") << "force non-empty directory";
+
+    bool threw = false;
+    bool error = false;
+    try {
+        error = ddl.executeSql("DROP MATERIALIZED VIEW mv", s);
+    } catch (const fs::filesystem_error&) {
+        threw = true;
+    }
+    assert(!threw);
+    assert(error);
+    assert(g_engine.tableExists(db, backing));
+    assert(fs::is_directory(metadata));
+    assert(fs::exists(metadata / "keep"));
+    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
+    const auto* relation = catalog.resolveRelation("mv", {"public"});
+    assert(relation != nullptr && relation->relkind == 'm');
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[MATVIEW] DROP I/O failure rollback OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_create_matview_select_star();
@@ -393,6 +433,7 @@ int main() {
     test_create_matview_with_no_data();
     test_drop_matview_cleans_catalog_atomically();
     test_matview_metadata_write_failure_rolls_back();
+    test_matview_drop_io_failure_rolls_back();
     std::cout << "[MATVIEW] all passed" << std::endl;
     return 0;
 }
