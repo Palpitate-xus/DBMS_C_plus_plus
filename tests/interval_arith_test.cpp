@@ -42,6 +42,13 @@ static void test_add_sub() {
     auto f = eval("'2024-03-10 12:00:00'::timestamp - '90 minutes'::interval");
     assert(f.ok && f.value == "2024-03-10 10:30:00");
 
+    // A leading minus on the hour field applies to the complete clock part,
+    // including its minutes and seconds.
+    auto negativeClock = eval(
+        "'2024-03-10 12:00:00'::timestamp + '-04:05:06'::interval");
+    assert(negativeClock.ok &&
+           negativeClock.value == "2024-03-10 07:54:54");
+
     // across leap day
     auto g = eval("'2024-02-28'::timestamp + '2 days'::interval");
     assert(g.ok && g.value == "2024-03-01 00:00:00");

@@ -14,6 +14,7 @@
 #include <iomanip>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <regex>
 #include <sstream>
 #include <tuple>
@@ -190,6 +191,24 @@ static IntervalParts parseIntervalText(const std::string& in) {
         }
     }
     r.ok = true;
+    auto addClockMicros = [&](long long hours, long long minutes,
+                              long long seconds, long long fraction,
+                              bool negative) {
+        if (minutes < 0 || seconds < 0 || fraction < 0) return false;
+        __int128 hourMagnitude = static_cast<__int128>(hours);
+        if (hourMagnitude < 0) hourMagnitude = -hourMagnitude;
+        __int128 delta =
+            (hourMagnitude * 3600 + static_cast<__int128>(minutes) * 60 +
+             seconds) * 1000000 + fraction;
+        if (negative) delta = -delta;
+        const __int128 total = static_cast<__int128>(r.micros) + delta;
+        if (total <= std::numeric_limits<long long>::lowest() ||
+            total > std::numeric_limits<long long>::max()) {
+            return false;
+        }
+        r.micros = static_cast<long long>(total);
+        return true;
+    };
     auto applyUnit = [&](long long n, const std::string& unit) {
         std::string u;
         for (char c : unit) u += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -221,11 +240,19 @@ static IntervalParts parseIntervalText(const std::string& in) {
                 while (fracDigits > 6) { fv /= 10; --fracDigits; }
                 while (fracDigits < 6 && fracDigits > 0) { fv *= 10; ++fracDigits; }
                 if (fracDigits == 0) fv = 0;
-                r.micros += (hh * 3600 + mm * 60 + ss) * 1000000LL + fv;
+                if (!addClockMicros(hh, mm, ss, fv,
+                                    !tok.empty() && tok.front() == '-')) {
+                    r.ok = false;
+                    break;
+                }
                 continue;
             }
             if (std::sscanf(tok.c_str(), "%lld%c%lld", &hh, &c1, &mm) == 3 && c1 == ':') {
-                r.micros += (hh * 3600 + mm * 60) * 1000000LL;
+                if (!addClockMicros(hh, mm, 0, 0,
+                                    !tok.empty() && tok.front() == '-')) {
+                    r.ok = false;
+                    break;
+                }
                 continue;
             }
             r.ok = false;
