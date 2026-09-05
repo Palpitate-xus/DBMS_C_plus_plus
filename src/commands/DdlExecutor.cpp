@@ -321,6 +321,17 @@ static PgAttributeRow catalogAttributeForColumn(
     return attribute;
 }
 
+static int16_t tableCheckConstraintCount(const TableSchema& table) {
+    size_t count = 0;
+    for (size_t column = 0; column < table.len; ++column) {
+        if (!table.cols[column].checkExpr.empty()) ++count;
+    }
+    for (const auto& check : table.additionalCheckConstraints) {
+        if (!check.expression.empty()) ++count;
+    }
+    return static_cast<int16_t>(count);
+}
+
 static void registerTableInCatalog(CatalogManager& cat, const TableSchema& tbl,
                                    const std::string& logicalSchema,
                                    const std::string& logicalName) {
@@ -339,6 +350,7 @@ static void registerTableInCatalog(CatalogManager& cat, const TableSchema& tbl,
     cls.relnamespace = nspOid;
     cls.relkind = 'r';
     cls.relnatts = static_cast<int16_t>(tbl.len);
+    cls.relchecks = tableCheckConstraintCount(tbl);
     cls.relpersistence = tbl.isUnlogged ? 'u' : 'p';
     if (!tbl.owner.empty()) {
         const auto owner = authCatalog().getAuthIdByName(tbl.owner);
@@ -409,7 +421,14 @@ static bool synchronizeTableAttributesInCatalog(
                 catalog, relationOid, namespaceOid, column,
                 columnIndex, retained));
         }
-        return catalog.replaceAttributes(relationOid, replacement) &&
+        if (!catalog.replaceAttributes(relationOid, replacement)) {
+            return false;
+        }
+        const auto* updatedRelation = catalog.findClass(relationOid);
+        if (!updatedRelation) return false;
+        PgClassRow classReplacement = *updatedRelation;
+        classReplacement.relchecks = tableCheckConstraintCount(table);
+        return catalog.updateClass(relationOid, classReplacement) &&
                catalog.persistAll();
     } catch (const std::exception& error) {
         std::cerr << "ALTER TABLE column catalog update failed: "
@@ -457,6 +476,24 @@ static bool synchronizeTableRlsInCatalog(
             });
     } catch (const std::exception& error) {
         std::cerr << "ALTER TABLE row-security catalog update failed: "
+                  << error.what() << std::endl;
+        return false;
+    }
+}
+
+static bool synchronizeTableCheckCountInCatalog(
+    const std::string& dbname, const std::string& physicalTableName) {
+    try {
+        const TableSchema table =
+            g_engine.getTableSchema(dbname, physicalTableName);
+        const int16_t count = tableCheckConstraintCount(table);
+        return updateTableClassInCatalog(
+            dbname, physicalTableName,
+            [&](PgClassRow& relation) {
+                relation.relchecks = count;
+            });
+    } catch (const std::exception& error) {
+        std::cerr << "ALTER TABLE CHECK catalog update failed: "
                   << error.what() << std::endl;
         return false;
     }
@@ -1357,6 +1394,13 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     s.currentDB, tableName, constraintName, !tc.notValid, tc.notValid,
                     tc.deferrable, tc.initiallyDeferred);
                 if (!alterStatusOk(status, "Constraint")) return true;
+                if (type == "check" && !tableIsTemporary &&
+                    !synchronizeTableCheckCountInCatalog(
+                        s.currentDB, tableName)) {
+                    std::cout << "ALTER TABLE CHECK catalog update failed"
+                              << std::endl;
+                    return true;
+                }
                 break;
             }
             case AlterTableStmt::Action::DropConstraint: {
@@ -1379,6 +1423,13 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                      {constraintMetadataKey(sub.name, "deferrable"), ""},
                      {constraintMetadataKey(sub.name, "initially_deferred"), ""}});
                 if (!alterStatusOk(status, "Constraint")) return true;
+                if (!tableIsTemporary && !isExclusion &&
+                    !synchronizeTableCheckCountInCatalog(
+                        s.currentDB, tableName)) {
+                    std::cout << "ALTER TABLE CHECK catalog update failed"
+                              << std::endl;
+                    return true;
+                }
                 break;
             }
             case AlterTableStmt::Action::SetOptions:

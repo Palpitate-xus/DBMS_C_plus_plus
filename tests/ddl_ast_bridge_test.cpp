@@ -382,6 +382,63 @@ static void test_alter_rls_state_updates_catalog() {
     std::cout << "[DDL] ALTER RLS state updates catalog OK" << std::endl;
 }
 
+static void test_check_constraint_count_updates_catalog() {
+    const std::string db = testDbPath("ddl_bridge_check_catalog");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE TABLE check_catalog ("
+        "a INT CHECK (a > 0) CHECK (a < 100), "
+        "b INT, c INT CHECK (c <> 10), "
+        "CONSTRAINT b_nonnegative CHECK (b >= 0))", s));
+
+    dbms::CatalogManager& initial = g_engine.catalogService().get(db);
+    const auto* relation =
+        initial.resolveRelation("check_catalog", {"public"});
+    assert(relation != nullptr && relation->relchecks == 4);
+    const dbms::Oid relationOid = relation->oid;
+
+    assert(!ddl.executeSql(
+        "ALTER TABLE check_catalog DROP COLUMN c", s));
+    relation = initial.findClass(relationOid);
+    assert(relation != nullptr && relation->relchecks == 3);
+
+    assert(!ddl.executeSql(
+        "ALTER TABLE check_catalog ADD COLUMN c INT", s));
+    relation = initial.findClass(relationOid);
+    assert(relation != nullptr && relation->relchecks == 3);
+
+    assert(!ddl.executeSql(
+        "ALTER TABLE check_catalog DROP COLUMN c", s));
+    relation = initial.findClass(relationOid);
+    assert(relation != nullptr && relation->relchecks == 3);
+
+    assert(!ddl.executeSql(
+        "ALTER TABLE check_catalog ADD CONSTRAINT a_not_50 "
+        "CHECK (a <> 50)", s));
+    relation = initial.findClass(relationOid);
+    assert(relation != nullptr && relation->relchecks == 4);
+
+    assert(!ddl.executeSql(
+        "ALTER TABLE check_catalog DROP CONSTRAINT a_not_50", s));
+    relation = initial.findClass(relationOid);
+    assert(relation != nullptr && relation->relchecks == 3);
+
+    g_engine.catalogService().evict(db);
+    dbms::CatalogManager& reloaded = g_engine.catalogService().get(db);
+    relation = reloaded.findClass(relationOid);
+    assert(relation != nullptr && relation->relchecks == 3);
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[DDL] CHECK constraint count updates catalog OK"
+              << std::endl;
+}
+
 static void test_schema_qualified_rename_preserves_schema() {
     const std::string db = testDbPath("ddl_bridge_schema_rename");
     cleanup(db);
@@ -783,6 +840,7 @@ int main() {
     test_alter_column_definitions_update_catalog();
     test_alter_logged_state_updates_catalog();
     test_alter_rls_state_updates_catalog();
+    test_check_constraint_count_updates_catalog();
     test_schema_qualified_rename_preserves_schema();
     test_create_index_sequence();
     test_drop_index_uses_sql_name();
