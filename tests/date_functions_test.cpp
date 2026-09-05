@@ -10,6 +10,7 @@
 #include "parser/ast.h"
 #include <cassert>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -92,6 +93,17 @@ static void test_make() {
            == "2026-06-26 14:05:09");
     // Invalid month -> NULL.
     assert(callFn(eval, "make_date", {I(2026), I(13), I(1)}).isNull);
+    assert(callFn(eval, "make_date", {I(2023), I(2), I(29)}).isNull);
+    assert(callFn(eval, "make_date", {I(2024), I(2), I(29)}).value ==
+           "2024-02-29");
+    assert(callFn(eval, "make_date",
+                  {I(std::numeric_limits<int64_t>::max()), I(1), I(1)}).isNull);
+    assert(callFn(eval, "make_time", {I(4294967296LL), I(0), I(0)}).isNull);
+    assert(callFn(eval, "make_timestamp",
+                  {I(2026), I(2), I(30), I(0), I(0), I(0)}).isNull);
+    assert(callFn(eval, "make_timestamp",
+                  {I(std::numeric_limits<int64_t>::max()), I(1), I(1),
+                   I(0), I(0), I(0)}).isNull);
     std::cout << "[DATEFN] make_* OK" << std::endl;
 }
 

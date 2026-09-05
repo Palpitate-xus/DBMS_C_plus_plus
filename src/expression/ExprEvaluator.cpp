@@ -4946,43 +4946,54 @@ void ExprEvaluator::registerBuiltins() {
     functions_["make_date"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 3 || a[0].isNull || a[1].isNull || a[2].isNull)
             return ExprValue("date", "", true);
-        int y = static_cast<int>(a[0].asInt());
-        int m = static_cast<int>(a[1].asInt());
-        int d = static_cast<int>(a[2].asInt());
-        if (m < 1 || m > 12 || d < 1 || d > 31) return ExprValue("date", "", true);
-        char buf[16];
-        std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", y, m, d);
-        return ExprValue("date", buf, false);
+        const int64_t y = a[0].asInt();
+        const int64_t m = a[1].asInt();
+        const int64_t d = a[2].asInt();
+        if (y < 1 || y > 9999 || m < 1 || m > 12 || d < 1 || d > 31)
+            return ExprValue("date", "", true);
+        Date date(static_cast<int>(y), static_cast<int>(m),
+                  static_cast<int>(d));
+        if (date.year == 0) return ExprValue("date", "", true);
+        return ExprValue("date", str(date), false);
     };
     // make_time(h, m, s) -> 'HH:MM:SS'
     functions_["make_time"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 3 || a[0].isNull || a[1].isNull || a[2].isNull)
             return ExprValue("time", "", true);
-        int h = static_cast<int>(a[0].asInt());
-        int m = static_cast<int>(a[1].asInt());
-        int s = static_cast<int>(a[2].asDouble());
-        if (h < 0 || h > 23 || m < 0 || m > 59 || s < 0 || s > 59)
+        const int64_t h = a[0].asInt();
+        const int64_t m = a[1].asInt();
+        const double seconds = a[2].asDouble();
+        if (h < 0 || h > 23 || m < 0 || m > 59 ||
+            !std::isfinite(seconds) || seconds < 0 || seconds >= 60) {
             return ExprValue("time", "", true);
-        char buf[16];
-        std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d", h, m, s);
-        return ExprValue("time", buf, false);
+        }
+        const int timeSeconds = static_cast<int>(h * 3600 + m * 60) +
+            static_cast<int>(seconds);
+        return ExprValue("time", formatTimeSeconds(timeSeconds), false);
     };
     // make_timestamp(y, m, d, h, mi, s) -> 'YYYY-MM-DD HH:MM:SS'
     functions_["make_timestamp"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 6) return ExprValue("timestamp", "", true);
         for (int i = 0; i < 6; ++i) if (a[i].isNull) return ExprValue("timestamp", "", true);
-        int y = static_cast<int>(a[0].asInt());
-        int mo = static_cast<int>(a[1].asInt());
-        int d = static_cast<int>(a[2].asInt());
-        int h = static_cast<int>(a[3].asInt());
-        int mi = static_cast<int>(a[4].asInt());
-        int s = static_cast<int>(a[5].asDouble());
-        if (mo < 1 || mo > 12 || d < 1 || d > 31 || h < 0 || h > 23 ||
-            mi < 0 || mi > 59 || s < 0 || s > 59)
+        const int64_t y = a[0].asInt();
+        const int64_t mo = a[1].asInt();
+        const int64_t d = a[2].asInt();
+        const int64_t h = a[3].asInt();
+        const int64_t mi = a[4].asInt();
+        const double seconds = a[5].asDouble();
+        if (y < 1 || y > 9999 || mo < 1 || mo > 12 || d < 1 || d > 31 ||
+            h < 0 || h > 23 || mi < 0 || mi > 59 ||
+            !std::isfinite(seconds) || seconds < 0 || seconds >= 60) {
             return ExprValue("timestamp", "", true);
-        char buf[32];
-        std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d", y, mo, d, h, mi, s);
-        return ExprValue("timestamp", buf, false);
+        }
+        Date date(static_cast<int>(y), static_cast<int>(mo),
+                  static_cast<int>(d));
+        if (date.year == 0) return ExprValue("timestamp", "", true);
+        const int timeSeconds = static_cast<int>(h * 3600 + mi * 60) +
+            static_cast<int>(seconds);
+        return ExprValue("timestamp",
+                         str(date) + " " + formatTimeSeconds(timeSeconds),
+                         false);
     };
     // date_trunc(field, source) -> truncate timestamp to the given precision
     functions_["date_trunc"] = [](const std::vector<ExprValue>& a) {
