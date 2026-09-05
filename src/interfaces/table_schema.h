@@ -73,11 +73,11 @@ struct SequenceInfo {
     // Compute PG-compatible defaults based on increment direction.
     void applyDefaults() {
         if (increment > 0) {
-            if (!hasMinValue && !noMinValue) minValue = 1;
-            if (!hasMaxValue && !noMaxValue) maxValue = std::numeric_limits<int64_t>::max();
+            if (!hasMinValue) minValue = 1;
+            if (!hasMaxValue) maxValue = std::numeric_limits<int64_t>::max();
         } else if (increment < 0) {
-            if (!hasMaxValue && !noMaxValue) maxValue = -1;
-            if (!hasMinValue && !noMinValue) minValue = -std::numeric_limits<int64_t>::max();
+            if (!hasMaxValue) maxValue = -1;
+            if (!hasMinValue) minValue = -std::numeric_limits<int64_t>::max();
         }
     }
 };

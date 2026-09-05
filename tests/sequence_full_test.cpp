@@ -643,6 +643,79 @@ static void test_schema_qualified_sequence_drop() {
               << std::endl;
 }
 
+static void test_sequence_bound_defaults_and_file_upgrade() {
+    const std::string db = testDbPath("seq_bound_metadata");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    assert(!ddl.executeSql(
+        "CREATE SEQUENCE descending_default "
+        "INCREMENT -2 NO MINVALUE NO MAXVALUE", s));
+    assert(g_engine.nextval(db, "descending_default") == -1);
+    assert(g_engine.nextval(db, "descending_default") == -3);
+    assert(!ddl.executeSql(
+        "ALTER SEQUENCE descending_default "
+        "INCREMENT 2 START 1 RESTART", s));
+    assert(g_engine.nextval(db, "descending_default") == 1);
+    assert(g_engine.nextval(db, "descending_default") == 3);
+
+    assert(!ddl.executeSql(
+        "CREATE SEQUENCE bounded START 10 INCREMENT 2 "
+        "MINVALUE 10 MAXVALUE 30", s));
+    assert(g_engine.nextval(db, "bounded") == 10);
+    assert(!ddl.executeSql("ALTER SEQUENCE bounded INCREMENT -2", s));
+    assert(g_engine.nextval(db, "bounded") == 12);
+    assert(g_engine.nextval(db, "bounded") == 10);
+
+    const fs::path boundedPath = fs::path(db) / "bounded.seq";
+    {
+        std::ifstream input(boundedPath);
+        std::string magic;
+        assert(input >> magic);
+        assert(magic == "DBMSSEQ2");
+    }
+
+    assert(!ddl.executeSql(
+        "ALTER SEQUENCE bounded NO MINVALUE NO MAXVALUE "
+        "START -1 RESTART", s));
+    assert(g_engine.nextval(db, "bounded") == -1);
+    assert(g_engine.nextval(db, "bounded") == -3);
+
+    assert(!ddl.executeSql(
+        "CREATE SEQUENCE custom_min MINVALUE 5", s));
+    assert(g_engine.nextval(db, "custom_min") == 5);
+
+    const fs::path legacyPath = fs::path(db) / "legacy.seq";
+    {
+        std::ofstream output(legacyPath);
+        output << "5 1 1 10 1 0 5 4  \n";
+    }
+    assert(g_engine.nextval(db, "legacy") == 5);
+    {
+        std::ifstream input(legacyPath);
+        std::string magic;
+        assert(input >> magic);
+        assert(magic == "DBMSSEQ2");
+    }
+    dbms::SequenceInfo legacyAlter;
+    legacyAlter.increment = -1;
+    legacyAlter.incrementSpecified = true;
+    assert(g_engine.alterSequence(db, "legacy", legacyAlter) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.nextval(db, "legacy") == 6);
+
+    dbms::StorageEngine restarted;
+    assert(restarted.nextval(db, "bounded") == -5);
+    assert(restarted.nextval(db, "custom_min") == 6);
+
+    cleanup(db);
+    std::cout << "[SEQUENCE] bound defaults/file upgrade OK" << std::endl;
+}
+
 static void test_sequence_integer_boundaries() {
     std::string db = testDbPath("seq_boundaries");
     cleanup(db);
@@ -688,6 +761,7 @@ int main() {
     test_schema_qualified_sequence_create();
     test_schema_qualified_sequence_alter();
     test_schema_qualified_sequence_drop();
+    test_sequence_bound_defaults_and_file_upgrade();
     test_sequence_integer_boundaries();
     std::cout << "[SEQUENCE_FULL] all passed" << std::endl;
     return 0;

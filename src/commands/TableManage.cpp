@@ -16734,55 +16734,108 @@ static void sequencePredecessor(int64_t value, int64_t increment,
     if (!checkedSub(value, increment, predecessor)) predecessor = value;
 }
 
-// New sequence file format (space-separated):
-// start increment min max cache cycle nextValue lastAllocated ownedTable ownedColumn
+static constexpr const char* SEQUENCE_FILE_V2 = "DBMSSEQ2";
+
+static bool parseSequenceInt64(const std::string& token, int64_t& value) {
+    if (token.empty()) return false;
+    const char* begin = token.data();
+    const char* end = begin + token.size();
+    if (*begin == '+') {
+        ++begin;
+        if (begin == end) return false;
+    }
+    const auto parsed = std::from_chars(begin, end, value, 10);
+    return parsed.ec == std::errc{} && parsed.ptr == end;
+}
+
+// V2 sequence file format (space-separated):
+// DBMSSEQ2 start increment min max cache cycle nextValue lastAllocated
+//          minIsExplicit maxIsExplicit [ownedTable ownedColumn]
+// Legacy unversioned files remain readable and are upgraded on the next write.
 static bool readSequenceFile(const std::filesystem::path& path,
                              dbms::SequenceInfo& info,
                              int64_t& nextValue,
                              int64_t& lastAllocated) {
     std::ifstream ifs(path);
     if (!ifs) return false;
-    int64_t start = 1, increment = 1;
-    if (!(ifs >> start >> increment)) return false;
-    int64_t minV, maxV, cache, cycleFlag, nextV, lastAlloc;
-    if (ifs >> minV >> maxV >> cache >> cycleFlag >> nextV >> lastAlloc) {
-        std::string ownedTable, ownedCol;
-        if (ifs >> ownedTable) {
-            if (!(ifs >> ownedCol)) return false;
-        } else if (!ifs.eof()) {
+    std::string firstToken;
+    if (!(ifs >> firstToken)) return false;
+
+    const bool version2 = firstToken == SEQUENCE_FILE_V2;
+    int64_t start = 1;
+    int64_t increment = 1;
+    int64_t minValue = 1;
+    int64_t maxValue = std::numeric_limits<int64_t>::max();
+    int64_t cache = 1;
+    int64_t cycleFlag = 0;
+    int64_t next = 1;
+    int64_t last = 0;
+    int64_t minExplicit = 0;
+    int64_t maxExplicit = 0;
+    if (version2) {
+        if (!(ifs >> start >> increment >> minValue >> maxValue >> cache >>
+              cycleFlag >> next >> last >> minExplicit >> maxExplicit)) {
             return false;
         }
-        ifs.clear();
-        std::string extra;
-        if (ifs >> extra) return false;
-        if (cycleFlag != 0 && cycleFlag != 1) return false;
-        if (increment == 0 || minV > maxV || start < minV || start > maxV || cache < 1) {
+        if ((minExplicit != 0 && minExplicit != 1) ||
+            (maxExplicit != 0 && maxExplicit != 1)) {
             return false;
         }
-        if (nextV < minV || nextV > maxV) {
-            return false;
-        }
-        if (lastAlloc < minV || lastAlloc > maxV) {
-            int64_t initialPredecessor = 0;
-            if (!checkedSub(start, increment, initialPredecessor)) {
-                initialPredecessor = start;
-            }
-            if (lastAlloc != initialPredecessor) return false;
-        }
-        info = dbms::SequenceInfo{};
-        info.start = start;
-        info.increment = increment;
-        info.minValue = minV;
-        info.maxValue = maxV;
-        info.cache = cache;
-        info.cycle = (cycleFlag != 0);
-        info.ownedByTable = ownedTable;
-        info.ownedByColumn = ownedCol;
-        nextValue = nextV;
-        lastAllocated = lastAlloc;
     } else {
+        if (!parseSequenceInt64(firstToken, start) ||
+            !(ifs >> increment >> minValue >> maxValue >> cache >>
+              cycleFlag >> next >> last)) {
+            return false;
+        }
+    }
+
+    std::string ownedTable;
+    std::string ownedColumn;
+    if (ifs >> ownedTable) {
+        if (!(ifs >> ownedColumn)) return false;
+    } else if (!ifs.eof()) {
         return false;
     }
+    ifs.clear();
+    std::string extra;
+    if (ifs >> extra) return false;
+
+    if (cycleFlag != 0 && cycleFlag != 1) return false;
+    if (increment == 0 || minValue > maxValue ||
+        start < minValue || start > maxValue || cache < 1 ||
+        next < minValue || next > maxValue) {
+        return false;
+    }
+    if (last < minValue || last > maxValue) {
+        int64_t initialPredecessor = 0;
+        if (!checkedSub(start, increment, initialPredecessor)) {
+            initialPredecessor = start;
+        }
+        if (last != initialPredecessor) return false;
+    }
+
+    if (!version2) {
+        const int64_t defaultMinimum = increment > 0
+            ? 1 : -std::numeric_limits<int64_t>::max();
+        const int64_t defaultMaximum = increment > 0
+            ? std::numeric_limits<int64_t>::max() : -1;
+        minExplicit = minValue != defaultMinimum;
+        maxExplicit = maxValue != defaultMaximum;
+    }
+
+    info = dbms::SequenceInfo{};
+    info.start = start;
+    info.increment = increment;
+    info.minValue = minValue;
+    info.maxValue = maxValue;
+    info.cache = cache;
+    info.cycle = cycleFlag != 0;
+    info.hasMinValue = minExplicit != 0;
+    info.hasMaxValue = maxExplicit != 0;
+    info.ownedByTable = std::move(ownedTable);
+    info.ownedByColumn = std::move(ownedColumn);
+    nextValue = next;
+    lastAllocated = last;
     return true;
 }
 
@@ -16791,7 +16844,8 @@ static bool writeSequenceFile(const std::filesystem::path& path,
                               int64_t nextValue,
                               int64_t lastAllocated) {
     std::ostringstream serialized;
-    serialized << info.start << " "
+    serialized << SEQUENCE_FILE_V2 << " "
+               << info.start << " "
                << info.increment << " "
                << info.minValue << " "
                << info.maxValue << " "
@@ -16799,6 +16853,8 @@ static bool writeSequenceFile(const std::filesystem::path& path,
                << (info.cycle ? 1 : 0) << " "
                << nextValue << " "
                << lastAllocated << " "
+               << (info.hasMinValue ? 1 : 0) << " "
+               << (info.hasMaxValue ? 1 : 0) << " "
                << info.ownedByTable << " "
                << info.ownedByColumn << "\n";
     return index_file::writeAtomically(path, serialized.str());
@@ -16810,6 +16866,8 @@ DBStatus StorageEngine::createSequence(const std::string& dbname,
     dbms::SequenceInfo info;
     info.start = start;
     info.increment = increment;
+    info.startSpecified = true;
+    info.incrementSpecified = true;
     info.applyDefaults();
     return createSequence(dbname, seqname, info);
 }
@@ -16827,6 +16885,10 @@ DBStatus StorageEngine::createSequence(const std::string& dbname,
     if (info.increment == 0) return DBStatus::INVALID_VALUE;
     dbms::SequenceInfo applied = info;
     applied.applyDefaults();
+    if (!info.startSpecified && info.start == 1) {
+        applied.start = applied.increment > 0
+            ? applied.minValue : applied.maxValue;
+    }
     if (applied.minValue > applied.start || applied.start > applied.maxValue)
         return DBStatus::INVALID_VALUE;
     if (applied.cache < 1) return DBStatus::INVALID_VALUE;
@@ -16874,9 +16936,8 @@ DBStatus StorageEngine::alterSequence(const std::string& dbname,
     if (info.incrementSpecified) {
         merged.increment = info.increment;
         if (merged.increment == 0) return DBStatus::INVALID_VALUE;
-        // Recompute defaults for the new direction.
-        merged.hasMinValue = false; merged.noMinValue = false;
-        merged.hasMaxValue = false; merged.noMaxValue = false;
+        // Direction-dependent defaults are recomputed below, while explicit
+        // bounds loaded from the versioned file remain unchanged.
         merged.applyDefaults();
         sequencePredecessor(nextValue, merged.increment, lastAllocated);
     }

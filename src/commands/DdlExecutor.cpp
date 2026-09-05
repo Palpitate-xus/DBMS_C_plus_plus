@@ -5071,9 +5071,15 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
         info.cycle = (opt->second == "yes");
     }
     opt = stmt->options.find("nominvalue");
-    if (opt != stmt->options.end()) info.noMinValue = true;
+    if (opt != stmt->options.end()) {
+        info.noMinValue = true;
+        info.hasMinValue = false;
+    }
     opt = stmt->options.find("nomaxvalue");
-    if (opt != stmt->options.end()) info.noMaxValue = true;
+    if (opt != stmt->options.end()) {
+        info.noMaxValue = true;
+        info.hasMaxValue = false;
+    }
     opt = stmt->options.find("ownedby");
     if (opt != stmt->options.end()) {
         info.ownedBySpecified = true;
