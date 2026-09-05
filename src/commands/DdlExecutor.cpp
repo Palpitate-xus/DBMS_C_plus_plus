@@ -2842,7 +2842,9 @@ bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
             hasCatalogDropPlan = true;
         }
     } catch (const std::exception& e) {
-        std::cerr << "WARNING: catalog schema drop check failed: " << e.what() << std::endl;
+        std::cerr << "DROP SCHEMA catalog preflight failed: " << e.what()
+                  << std::endl;
+        return true;
     }
 
     // From this point on physical deletion may be partial (CASCADE can

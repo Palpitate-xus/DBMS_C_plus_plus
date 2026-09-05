@@ -289,6 +289,44 @@ static void test_drop_schema_cascade_removes_relation_storage() {
               << std::endl;
 }
 
+static void test_drop_schema_catalog_preflight_fails_closed() {
+    const std::string db = testDbPath("drop_schema_catalog_preflight");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE SCHEMA guarded", s));
+    assert(!ddl.executeSql("CREATE TABLE guarded.items (id INT)", s));
+
+    // Force CatalogManager construction to throw. DROP SCHEMA must not treat
+    // an unavailable dependency catalog as an empty one and remove the
+    // namespace marker anyway.
+    g_engine.catalogService().evict(db);
+    const fs::path catalogPath = fs::path(db) / "pg_catalog";
+    const fs::path savedCatalogPath = fs::path(db) / "pg_catalog.saved";
+    fs::rename(catalogPath, savedCatalogPath);
+    {
+        std::ofstream blocker(catalogPath);
+        assert(blocker.good());
+    }
+
+    assert(ddl.executeSql("DROP SCHEMA guarded CASCADE", s));
+    assert(g_engine.schemaExists(db, "guarded"));
+    assert(g_engine.tableExists(db, "guarded__items"));
+
+    fs::remove(catalogPath);
+    fs::rename(savedCatalogPath, catalogPath);
+    auto& reloadedCatalog = g_engine.catalogService().get(db);
+    assert(reloadedCatalog.findNamespaceByName("guarded") != nullptr);
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[DROP-CASCADE] schema catalog preflight fails closed OK"
+              << std::endl;
+}
+
 static void test_multi_table_drop_fails_before_mutation() {
     const std::string db = testDbPath("drop_multiple_preflight");
     cleanup(db);
@@ -433,6 +471,7 @@ int main() {
     test_drop_table_restrict_removes_automatic_dependents();
     test_owned_sequence_defaults_obey_drop_behavior();
     test_drop_schema_cascade_removes_relation_storage();
+    test_drop_schema_catalog_preflight_fails_closed();
     test_multi_table_drop_fails_before_mutation();
     test_drop_removes_named_table_sidecars();
     test_drop_purges_authorization_state();
