@@ -867,6 +867,7 @@ struct CreateIndexStmt : public Stmt {
     bool unique = false;
     bool ifNotExists = false;
     bool concurrently = false;
+    bool nullsNotDistinct = false;
     ExprPtr whereClause;       // partial index
     std::vector<std::string> includeCols;
     std::map<std::string, std::string> options;

@@ -6165,6 +6165,18 @@ bool readIndexMetadata(const std::filesystem::path& path, std::string& contents)
 bool writeIndexMetadata(const std::filesystem::path& path, const std::string& contents) {
     return index_file::writeAtomically(path, contents);
 }
+
+constexpr const char* UNIQUE_INDEX_METADATA_PREFIX =
+    "DBMS_UNIQUE_INDEX_V1:";
+
+bool consumeUniqueIndexMetadataPrefix(std::string& definition) {
+    if (definition.rfind(UNIQUE_INDEX_METADATA_PREFIX, 0) != 0) {
+        return false;
+    }
+    definition.erase(0, std::char_traits<char>::length(
+                            UNIQUE_INDEX_METADATA_PREFIX));
+    return true;
+}
 }
 
 bool StorageEngine::registerIndexName(const std::string& dbname,
@@ -6550,7 +6562,10 @@ void StorageEngine::invalidateSecidxCache(const std::string& dbname,
 std::vector<std::string> StorageEngine::getIndexedColumns(const std::string& dbname,
                                                            const std::string& tablename) const {
     std::vector<std::string> cols;
-    for (const std::string& line : readSecidxLines(dbname, tablename)) {
+    for (const std::string& storedLine :
+         readSecidxLines(dbname, tablename)) {
+        std::string line = storedLine;
+        (void)consumeUniqueIndexMetadataPrefix(line);
         if (line.size() > 2 && line[0] == 'C' && line[1] == ':') {
             // Composite indexes have their own physical tree and are
             // maintained through getCompositeIndexes().  Treating their
@@ -6581,7 +6596,10 @@ std::vector<std::string> StorageEngine::getIndexedColumns(const std::string& dbn
 
 bool StorageEngine::isDescendingIndex(const std::string& dbname, const std::string& tablename,
                                       const std::string& colname) const {
-    for (const std::string& line : readSecidxLines(dbname, tablename)) {
+    for (const std::string& storedLine :
+         readSecidxLines(dbname, tablename)) {
+        std::string line = storedLine;
+        (void)consumeUniqueIndexMetadataPrefix(line);
         if (line.substr(0, 5) == "EXPR:") continue;
         size_t wherePos = line.find(":WHERE:");
         std::string base = (wherePos != std::string::npos) ? line.substr(0, wherePos) : line;
@@ -6596,7 +6614,10 @@ std::vector<std::string> StorageEngine::getIndexIncludeColumns(const std::string
                                                                const std::string& tablename,
                                                                const std::string& colname) const {
     std::vector<std::string> result;
-    for (const std::string& line : readSecidxLines(dbname, tablename)) {
+    for (const std::string& storedLine :
+         readSecidxLines(dbname, tablename)) {
+        std::string line = storedLine;
+        (void)consumeUniqueIndexMetadataPrefix(line);
         size_t incPos = line.find(":INCLUDE:");
         if (incPos == std::string::npos) continue;
         // For single-column index: colname[:DESC][:WHERE:...]:INCLUDE:...
@@ -6630,8 +6651,11 @@ std::vector<std::string> StorageEngine::getIndexIncludeColumns(const std::string
 std::vector<StorageEngine::IndexMetadata> StorageEngine::getIndexMetadata(
     const std::string& dbname, const std::string& tablename) const {
     std::vector<IndexMetadata> result;
-    for (const std::string& line : readSecidxLines(dbname, tablename)) {
+    for (const std::string& storedLine :
+         readSecidxLines(dbname, tablename)) {
+        std::string line = storedLine;
         IndexMetadata info;
+        info.isUnique = consumeUniqueIndexMetadataPrefix(line);
         // Composite index lines start with "C:"
         if (line.size() > 2 && line[0] == 'C' && line[1] == ':') continue;
 
@@ -6715,12 +6739,16 @@ std::vector<StorageEngine::IndexMetadata> StorageEngine::getIndexMetadata(
 std::vector<StorageEngine::CompositeIndexInfo> StorageEngine::getCompositeIndexes(
     const std::string& dbname, const std::string& tablename) const {
     std::vector<CompositeIndexInfo> result;
-    for (const std::string& line : readSecidxLines(dbname, tablename)) {
+    for (const std::string& storedLine :
+         readSecidxLines(dbname, tablename)) {
+        std::string line = storedLine;
+        const bool isUnique = consumeUniqueIndexMetadataPrefix(line);
         if (line.size() > 2 && line[0] == 'C' && line[1] == ':') {
             const size_t nameEnd = line.find(':', 2);
             if (nameEnd == std::string::npos) continue;
             CompositeIndexInfo info;
             info.name = line.substr(2, nameEnd - 2);
+            info.isUnique = isUnique;
 
             const size_t includePos = line.find(":INCLUDE:", nameEnd);
             const size_t wherePos = line.find(":WHERE:", nameEnd);
@@ -9511,14 +9539,28 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
                                      const std::vector<std::string>& includeCols,
                                      const std::string& whereCondition,
                                      const std::string& expression,
-                                     bool concurrently) {
+                                     bool concurrently,
+                                     bool unique) {
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
+    // Concurrent validation and partial/expression uniqueness need predicate
+    // locking and expression-specific equality metadata that this access path
+    // does not yet persist. Reject them rather than publishing a non-enforcing
+    // UNIQUE index.
+    if (unique && (concurrently || !whereCondition.empty() ||
+                   !expression.empty())) {
+        return DBStatus::INVALID_VALUE;
+    }
     if (concurrently) {
         if (!lockManager_.lockShared(tablename)) return DBStatus::LOCK_CONFLICT;
     } else {
         if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
     }
     TableSchema tbl = getTableSchema(dbname, tablename);
+    if (unique &&
+        tbl.partitionType != TableSchema::PartitionType::None) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
 
     bool isExpression = !expression.empty();
     std::string actualColname = colname;
@@ -9556,10 +9598,15 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
+    if (unique && tbl.cols[colIdx].generatedKind == 'v') {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
 
     IndexMetadata candidateMetadata;
     candidateMetadata.name = isExpression ? expression : actualColname;
     candidateMetadata.isExpression = isExpression;
+    candidateMetadata.isUnique = unique;
     candidateMetadata.exprFunc = exprFunc;
     candidateMetadata.whereCondition = whereCondition;
     std::map<std::string, std::string> nullValues;
@@ -9580,6 +9627,10 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
         if (c == actualColname) { alreadyIndexed = true; break; }
     }
     if (alreadyIndexed && !isExpression) {
+        if (unique) {
+            lockManager_.unlock(tablename);
+            return DBStatus::INVALID_VALUE;
+        }
         bool currentDesc = isDescendingIndex(dbname, tablename, actualColname);
         if (currentDesc == !ascending) {
             lockManager_.unlock(tablename);
@@ -9609,16 +9660,43 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
         std::filesystem::remove(secondaryIndexPath(dbname, tablename, physicalIndexKey), error);
     };
 
+    const std::vector<size_t> uniqueColumns{colIdx};
+    const bool needsCollationScan = unique &&
+        constraintNeedsCollationScan(tbl, uniqueColumns);
+    std::set<std::string> seenBinaryKeys;
+    std::vector<std::string> seenCollatedKeys;
+    bool duplicate = false;
     bool entriesValid = true;
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
-        if (!entriesValid) return;
+        if (!entriesValid || duplicate) return;
         std::string row(data, len);
         EvaluatedIndexEntry entry;
         if (!secondaryIndexEntryFromBuffer(
                 *this, candidateMetadata, tbl, row, dbname, entry)) {
             entriesValid = false;
             return;
+        }
+        if (unique) {
+            const int64_t rid = encodeRid(pageId, slotId);
+            if (!(tbl.cols[colIdx].isNull && isColumnNullByRid(
+                    dbname, tablename, rid, colIdx))) {
+                const std::string value = extractColumnValue(
+                    row, tbl, colIdx, dbname, true);
+                if (needsCollationScan) {
+                    duplicate = std::any_of(
+                        seenCollatedKeys.begin(), seenCollatedKeys.end(),
+                        [&](const std::string& existingValue) {
+                            return constraintColumnValuesEqual(
+                                tbl.cols[colIdx], existingValue, value);
+                        });
+                    if (!duplicate) seenCollatedKeys.push_back(value);
+                } else {
+                    duplicate = !seenBinaryKeys.insert(
+                        canonicalColumnKeyValue(
+                            tbl.cols[colIdx], value)).second;
+                }
+            }
         }
         if (entry.included && !entry.key.empty()) {
             idx->insertMulti(entry.key, encodeRid(pageId, slotId));
@@ -9627,6 +9705,11 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
         discardPhysicalIndex();
         lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
+    }
+    if (duplicate) {
+        discardPhysicalIndex();
+        lockManager_.unlock(tablename);
+        return DBStatus::DUPLICATE_KEY;
     }
     if (!entriesValid) {
         discardPhysicalIndex();
@@ -9643,6 +9726,7 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
         return DBStatus::IO_ERROR;
     }
     std::ostringstream serialized;
+    if (unique) serialized << UNIQUE_INDEX_METADATA_PREFIX;
     if (isExpression) {
         serialized << "EXPR:" << expression;
     } else {
@@ -9707,18 +9791,23 @@ DBStatus StorageEngine::dropIndex(const std::string& dbname, const std::string& 
     std::string line;
     while (std::getline(in, line)) {
         if (line.empty()) continue;
+        std::string definition = line;
+        (void)consumeUniqueIndexMetadataPrefix(definition);
         bool match = false;
-        if (line.substr(0, 5) == "EXPR:") {
+        if (definition.substr(0, 5) == "EXPR:") {
             // Expression index: match "EXPR:colname" or "EXPR:expression"
-            size_t exprEnd = line.find(":INCLUDE:");
-            if (exprEnd == std::string::npos) exprEnd = line.find(":WHERE:");
-            if (exprEnd == std::string::npos) exprEnd = line.size();
-            std::string expr = line.substr(5, exprEnd - 5);
+            size_t exprEnd = definition.find(":INCLUDE:");
+            if (exprEnd == std::string::npos) {
+                exprEnd = definition.find(":WHERE:");
+            }
+            if (exprEnd == std::string::npos) exprEnd = definition.size();
+            std::string expr = definition.substr(5, exprEnd - 5);
             if (expr == colname) match = true;
         } else {
             // Regular index: extract column name (before :DESC, :INCLUDE, :WHERE)
-            size_t wherePos = line.find(":WHERE:");
-            std::string base = (wherePos != std::string::npos) ? line.substr(0, wherePos) : line;
+            size_t wherePos = definition.find(":WHERE:");
+            std::string base = (wherePos != std::string::npos)
+                ? definition.substr(0, wherePos) : definition;
             size_t includePos = base.find(":INCLUDE");
             base = (includePos != std::string::npos) ? base.substr(0, includePos) : base;
             size_t descPos = base.find(":DESC");
@@ -9770,25 +9859,42 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
                                               const std::string& indexName,
                                               const std::vector<std::string>& includeCols,
                                               const std::string& whereCondition,
-                                              bool concurrently) {
+                                              bool concurrently,
+                                              bool unique) {
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
+    if (unique && (concurrently || !whereCondition.empty())) {
+        return DBStatus::INVALID_VALUE;
+    }
     if (concurrently) {
         if (!lockManager_.lockShared(tablename)) return DBStatus::LOCK_CONFLICT;
     } else {
         if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
     }
     TableSchema tbl = getTableSchema(dbname, tablename);
+    if (unique &&
+        tbl.partitionType != TableSchema::PartitionType::None) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
 
-    // Validate all columns exist
+    // Validate all columns exist and no key component is repeated.
+    std::vector<size_t> columnIndices;
+    std::set<size_t> distinctColumns;
     for (const auto& cname : colnames) {
-        bool found = false;
+        size_t found = tbl.len;
         for (size_t i = 0; i < tbl.len; ++i) {
-            if (tbl.cols[i].dataName == cname) { found = true; break; }
+            if (tbl.cols[i].dataName == cname) { found = i; break; }
         }
-        if (!found) {
+        if (found >= tbl.len || !distinctColumns.insert(found).second ||
+            (unique && tbl.cols[found].generatedKind == 'v')) {
             lockManager_.unlock(tablename);
             return DBStatus::INVALID_VALUE;
         }
+        columnIndices.push_back(found);
+    }
+    if (columnIndices.empty()) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
     }
 
     // Check name collision with existing composite indexes
@@ -9796,7 +9902,8 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
     for (const auto& ci : existingComp) {
         if (ci.name == indexName) {
             lockManager_.unlock(tablename);
-            return DBStatus::OK;
+            return ci.isUnique == unique
+                ? DBStatus::OK : DBStatus::INVALID_VALUE;
         }
     }
 
@@ -9804,6 +9911,7 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
     candidateMetadata.name = indexName;
     candidateMetadata.columns = colnames;
     candidateMetadata.whereCondition = whereCondition;
+    candidateMetadata.isUnique = unique;
     std::map<std::string, std::string> nullValues;
     for (size_t i = 0; i < tbl.len; ++i) {
         nullValues[tbl.cols[i].dataName] = "";
@@ -9833,16 +9941,56 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
                                 (tablename + ".idx_" + indexName), error);
     };
 
+    const bool needsCollationScan = unique &&
+        constraintNeedsCollationScan(tbl, columnIndices);
+    std::set<std::vector<std::string>> seenBinaryKeys;
+    std::vector<std::vector<std::string>> seenCollatedKeys;
+    bool duplicate = false;
     bool entriesValid = true;
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
-        if (!entriesValid) return;
+        if (!entriesValid || duplicate) return;
         std::string row(data, len);
         EvaluatedIndexEntry entry;
         if (!compositeIndexEntryFromBuffer(
                 *this, candidateMetadata, tbl, row, dbname, entry)) {
             entriesValid = false;
             return;
+        }
+        if (unique) {
+            const int64_t rid = encodeRid(pageId, slotId);
+            std::vector<std::string> key;
+            key.reserve(columnIndices.size());
+            bool containsNull = false;
+            for (const size_t columnIndex : columnIndices) {
+                if (tbl.cols[columnIndex].isNull && isColumnNullByRid(
+                        dbname, tablename, rid, columnIndex)) {
+                    containsNull = true;
+                    break;
+                }
+                key.push_back(extractColumnValue(
+                    row, tbl, columnIndex, dbname, true));
+            }
+            if (!containsNull && needsCollationScan) {
+                duplicate = std::any_of(
+                    seenCollatedKeys.begin(), seenCollatedKeys.end(),
+                    [&](const std::vector<std::string>& existingKey) {
+                        return constraintKeyValuesEqual(
+                            tbl, columnIndices, existingKey, key);
+                    });
+                if (!duplicate) {
+                    seenCollatedKeys.push_back(std::move(key));
+                }
+            } else if (!containsNull) {
+                for (size_t valueIndex = 0;
+                     valueIndex < columnIndices.size(); ++valueIndex) {
+                    key[valueIndex] = canonicalColumnKeyValue(
+                        tbl.cols[columnIndices[valueIndex]],
+                        key[valueIndex]);
+                }
+                duplicate =
+                    !seenBinaryKeys.insert(std::move(key)).second;
+            }
         }
         if (entry.included && !entry.key.empty()) {
             idx->insertMulti(entry.key, encodeRid(pageId, slotId));
@@ -9851,6 +9999,11 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
         discardPhysicalIndex();
         lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
+    }
+    if (duplicate) {
+        discardPhysicalIndex();
+        lockManager_.unlock(tablename);
+        return DBStatus::DUPLICATE_KEY;
     }
     if (!entriesValid) {
         discardPhysicalIndex();
@@ -9867,6 +10020,7 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
         return DBStatus::IO_ERROR;
     }
     std::ostringstream serialized;
+    if (unique) serialized << UNIQUE_INDEX_METADATA_PREFIX;
     serialized << "C:" << indexName;
     for (const auto& c : colnames) serialized << ":" << c;
     if (!includeCols.empty()) {
@@ -9913,9 +10067,12 @@ DBStatus StorageEngine::dropCompositeIndex(const std::string& dbname,
     std::string line;
     bool removedMetadata = false;
     while (std::getline(input, line)) {
+        std::string definition = line;
+        (void)consumeUniqueIndexMetadataPrefix(definition);
         const std::string prefix = "C:" + indexName;
-        const bool isTarget = line.rfind(prefix, 0) == 0 &&
-            (line.size() == prefix.size() || line[prefix.size()] == ':');
+        const bool isTarget = definition.rfind(prefix, 0) == 0 &&
+            (definition.size() == prefix.size() ||
+             definition[prefix.size()] == ':');
         if (isTarget) {
             removedMetadata = true;
             continue;
@@ -19082,6 +19239,10 @@ DBStatus StorageEngine::insertInternal(
     if (!lockManager_.lockIntentExclusive(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
+    const auto secondaryIndexMetadata =
+        getIndexMetadata(dbname, tablename);
+    const auto compositeIndexMetadata =
+        getCompositeIndexes(dbname, tablename);
     // A partition-local tuple locator is not represented in TxnLogEntry yet:
     // every partition starts at page 1/slot 0, so transaction rollback would
     // address the empty parent heap (or an unrelated partition row).  Reject
@@ -19362,6 +19523,98 @@ DBStatus StorageEngine::insertInternal(
                 return DBStatus::IO_ERROR;
             }
             if (duplicate) return DBStatus::DUPLICATE_KEY;
+        }
+
+        const auto validateStandaloneUniqueIndex = [&]
+            (const std::vector<size_t>& columns) -> DBStatus {
+            if (columns.empty()) return DBStatus::CORRUPTED_DATA;
+            std::vector<std::string> candidateValues;
+            candidateValues.reserve(columns.size());
+            for (const size_t columnIndex : columns) {
+                if (columnIndex >= tbl.len) return DBStatus::CORRUPTED_DATA;
+                const std::string& columnName =
+                    tbl.cols[columnIndex].dataName;
+                const auto value = actualValues.find(columnName);
+                // Ordinary UNIQUE indexes use NULLS DISTINCT semantics.
+                if (value == actualValues.end() ||
+                    actualNullColumns.count(columnName) != 0) {
+                    return DBStatus::OK;
+                }
+                candidateValues.push_back(value->second);
+            }
+
+            bool duplicate = false;
+            if (!forEachRow(
+                    dbname, tablename,
+                    [&](uint32_t pageId, uint16_t slotId,
+                        const char* data, size_t length) {
+                        if (duplicate) return;
+                        const int64_t existingRid =
+                            encodeRid(pageId, slotId);
+                        const std::string row(data, length);
+                        std::vector<std::string> existingValues;
+                        existingValues.reserve(columns.size());
+                        for (const size_t columnIndex : columns) {
+                            if (tbl.cols[columnIndex].isNull &&
+                                isColumnNullByRid(
+                                    dbname, tablename, existingRid,
+                                    columnIndex)) {
+                                return;
+                            }
+                            existingValues.push_back(extractColumnValue(
+                                row, tbl, columnIndex, dbname));
+                        }
+                        duplicate = constraintKeyValuesEqual(
+                            tbl, columns, existingValues, candidateValues);
+                    })) {
+                return DBStatus::IO_ERROR;
+            }
+            return duplicate ? DBStatus::DUPLICATE_KEY : DBStatus::OK;
+        };
+
+        for (const auto& metadata : secondaryIndexMetadata) {
+            if (!metadata.isUnique) continue;
+            if (metadata.isExpression ||
+                !metadata.whereCondition.empty()) {
+                return DBStatus::CORRUPTED_DATA;
+            }
+            size_t columnIndex = tbl.len;
+            for (size_t candidate = 0; candidate < tbl.len; ++candidate) {
+                if (tbl.cols[candidate].dataName == metadata.name) {
+                    columnIndex = candidate;
+                    break;
+                }
+            }
+            if (columnIndex >= tbl.len) return DBStatus::CORRUPTED_DATA;
+            const DBStatus status =
+                validateStandaloneUniqueIndex({columnIndex});
+            if (status != DBStatus::OK) return status;
+        }
+        for (const auto& metadata : compositeIndexMetadata) {
+            if (!metadata.isUnique) continue;
+            if (!metadata.whereCondition.empty()) {
+                return DBStatus::CORRUPTED_DATA;
+            }
+            std::vector<size_t> columns;
+            std::set<size_t> distinctColumns;
+            for (const auto& columnName : metadata.columns) {
+                size_t columnIndex = tbl.len;
+                for (size_t candidate = 0; candidate < tbl.len;
+                     ++candidate) {
+                    if (tbl.cols[candidate].dataName == columnName) {
+                        columnIndex = candidate;
+                        break;
+                    }
+                }
+                if (columnIndex >= tbl.len ||
+                    !distinctColumns.insert(columnIndex).second) {
+                    return DBStatus::CORRUPTED_DATA;
+                }
+                columns.push_back(columnIndex);
+            }
+            const DBStatus status =
+                validateStandaloneUniqueIndex(columns);
+            if (status != DBStatus::OK) return status;
         }
         return DBStatus::OK;
     };
@@ -19754,7 +20007,7 @@ DBStatus StorageEngine::insertInternal(
     // logical row.  The physical image may replace large values with TOAST
     // markers and must never be used for a predicate or key.
     std::vector<EvaluatedIndexEntry> secondaryIndexValues;
-    for (const auto& metadata : getIndexMetadata(dbname, tablename)) {
+    for (const auto& metadata : secondaryIndexMetadata) {
         EvaluatedIndexEntry entry;
         if (!secondaryIndexEntry(
                 metadata, tbl, actualValues, dbname, entry)) {
@@ -19764,7 +20017,7 @@ DBStatus StorageEngine::insertInternal(
         secondaryIndexValues.push_back(std::move(entry));
     }
     std::vector<EvaluatedIndexEntry> compositeIndexValues;
-    for (const auto& metadata : getCompositeIndexes(dbname, tablename)) {
+    for (const auto& metadata : compositeIndexMetadata) {
         EvaluatedIndexEntry entry;
         if (!compositeIndexEntry(
                 metadata, tbl, actualValues, dbname, entry)) {
@@ -23775,6 +24028,63 @@ DBStatus StorageEngine::updateInternal(
             }
         }
 
+        for (const auto& metadata : secondaryIndexMetadata) {
+            if (!metadata.isUnique) continue;
+            if (metadata.isExpression ||
+                !metadata.whereCondition.empty()) {
+                lockManager_.unlock(tablename);
+                return DBStatus::CORRUPTED_DATA;
+            }
+            size_t columnIndex = tbl.len;
+            for (size_t candidate = 0; candidate < tbl.len; ++candidate) {
+                if (tbl.cols[candidate].dataName == metadata.name) {
+                    columnIndex = candidate;
+                    break;
+                }
+            }
+            if (columnIndex >= tbl.len) {
+                lockManager_.unlock(tablename);
+                return DBStatus::CORRUPTED_DATA;
+            }
+            const DBStatus indexStatus =
+                validateUniqueUpdate({columnIndex}, {});
+            if (indexStatus != DBStatus::OK) {
+                lockManager_.unlock(tablename);
+                return indexStatus;
+            }
+        }
+        for (const auto& metadata : compositeIndexMetadata) {
+            if (!metadata.isUnique) continue;
+            if (!metadata.whereCondition.empty()) {
+                lockManager_.unlock(tablename);
+                return DBStatus::CORRUPTED_DATA;
+            }
+            std::vector<size_t> columns;
+            std::set<size_t> distinctColumns;
+            for (const auto& columnName : metadata.columns) {
+                size_t columnIndex = tbl.len;
+                for (size_t candidate = 0; candidate < tbl.len;
+                     ++candidate) {
+                    if (tbl.cols[candidate].dataName == columnName) {
+                        columnIndex = candidate;
+                        break;
+                    }
+                }
+                if (columnIndex >= tbl.len ||
+                    !distinctColumns.insert(columnIndex).second) {
+                    lockManager_.unlock(tablename);
+                    return DBStatus::CORRUPTED_DATA;
+                }
+                columns.push_back(columnIndex);
+            }
+            const DBStatus indexStatus =
+                validateUniqueUpdate(columns, {});
+            if (indexStatus != DBStatus::OK) {
+                lockManager_.unlock(tablename);
+                return indexStatus;
+            }
+        }
+
         for (size_t columnIndex = 0; columnIndex < tbl.len; ++columnIndex) {
             if (!tbl.cols[columnIndex].isUnique) continue;
             const std::string constraintName =
@@ -25321,6 +25631,8 @@ std::vector<std::string> StorageEngine::queryPgCatalog(
                 TableSchema tbl = getTableSchema(dbname, tname);
                 // Single-column indexes
                 auto idxCols = getIndexedColumns(dbname, tname);
+                const auto indexMetadata =
+                    getIndexMetadata(dbname, tname);
                 for (const auto& cname : idxCols) {
                     std::string isUnique = "f";
                     std::string isPrimary = "f";
@@ -25330,10 +25642,38 @@ std::vector<std::string> StorageEngine::queryPgCatalog(
                             if (tbl.cols[i].isPrimaryKey) isPrimary = "t";
                         }
                     }
+                    for (const auto& metadata : indexMetadata) {
+                        if (!metadata.isExpression &&
+                            metadata.name == cname && metadata.isUnique) {
+                            isUnique = "t";
+                            break;
+                        }
+                    }
                     std::string row = tname + " " + cname + " " + isUnique + " " + isPrimary + " ";
                     bool match = true;
                     for (const auto& c : conds) {
                         if (c.colName == "indrelid" && c.op == "=" && tname != c.value) { match = false; break; }
+                    }
+                    if (match) result.push_back(row);
+                }
+                for (const auto& metadata :
+                     getCompositeIndexes(dbname, tname)) {
+                    std::string key;
+                    for (size_t columnIndex = 0;
+                         columnIndex < metadata.columns.size();
+                         ++columnIndex) {
+                        if (columnIndex != 0) key += ',';
+                        key += metadata.columns[columnIndex];
+                    }
+                    std::string row = tname + " " + key + " " +
+                        (metadata.isUnique ? "t" : "f") + " f ";
+                    bool match = true;
+                    for (const auto& c : conds) {
+                        if (c.colName == "indrelid" && c.op == "=" &&
+                            tname != c.value) {
+                            match = false;
+                            break;
+                        }
                     }
                     if (match) result.push_back(row);
                 }

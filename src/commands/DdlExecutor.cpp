@@ -5663,14 +5663,38 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
 
     DBStatus res;
     std::string am = toLower(stmt->accessMethod);
+    if (stmt->unique) {
+        const bool unsupportedMethod = !am.empty() && am != "btree";
+        const bool unsupportedShape = stmt->concurrently ||
+            stmt->nullsNotDistinct ||
+            stmt->whereClause != nullptr ||
+            std::any_of(
+                stmt->columns.begin(), stmt->columns.end(),
+                [](const IndexElem& element) {
+                    return element.column.empty() || element.expr != nullptr ||
+                           !element.collation.empty() ||
+                           !element.opclass.empty();
+                });
+        if (unsupportedMethod || unsupportedShape) {
+            std::cout << "CREATE UNIQUE INDEX currently requires plain "
+                         "B-tree columns without WHERE, COLLATE, operator "
+                         "classes, expressions, NULLS NOT DISTINCT, or "
+                         "CONCURRENTLY"
+                      << std::endl;
+            return true;
+        }
+    }
     if (am.empty() || am == "btree") {
         if (colnames.size() == 1) {
             res = g_engine.createIndex(s.currentDB, tname, colnames.front(), true,
-                                       includeCols, whereCondition, "", stmt->concurrently);
+                                       includeCols, whereCondition, "",
+                                       stmt->concurrently, stmt->unique);
         } else {
             res = g_engine.createCompositeIndex(s.currentDB, tname, colnames,
                                                 idxName, includeCols,
-                                                whereCondition, stmt->concurrently);
+                                                whereCondition,
+                                                stmt->concurrently,
+                                                stmt->unique);
         }
     } else if (am == "hash") {
         if (colnames.size() == 1) {

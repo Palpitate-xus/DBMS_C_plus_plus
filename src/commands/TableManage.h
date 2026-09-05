@@ -742,6 +742,7 @@ public:
     struct IndexMetadata {
         std::string name;           // column name or expression
         bool isExpression = false;  // true for expression index (e.g. UPPER(col))
+        bool isUnique = false;      // standalone CREATE UNIQUE INDEX
         bool descending = false;
         std::vector<std::string> includeCols;
         std::string whereCondition; // partial index WHERE clause
@@ -756,7 +757,8 @@ public:
                          const std::vector<std::string>& includeCols = {},
                          const std::string& whereCondition = "",
                          const std::string& expression = "",
-                         bool concurrently = false);
+                         bool concurrently = false,
+                         bool unique = false);
     DBStatus dropIndex(const std::string& dbname, const std::string& tablename,
                        const std::string& colname);
     // Dispatch a physical index drop to the right access-method routine.
@@ -819,13 +821,15 @@ public:
         std::string name;
         std::vector<std::string> columns;
         std::string whereCondition; // partial index WHERE clause
+        bool isUnique = false;      // standalone CREATE UNIQUE INDEX
     };
     DBStatus createCompositeIndex(const std::string& dbname, const std::string& tablename,
                                   const std::vector<std::string>& colnames,
                                   const std::string& indexName,
                                   const std::vector<std::string>& includeCols = {},
                                   const std::string& whereCondition = "",
-                                  bool concurrently = false);
+                                  bool concurrently = false,
+                                  bool unique = false);
     DBStatus dropCompositeIndex(const std::string& dbname, const std::string& tablename,
                                 const std::string& indexName);
     std::vector<CompositeIndexInfo> getCompositeIndexes(const std::string& dbname,

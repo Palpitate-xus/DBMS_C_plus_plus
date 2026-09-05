@@ -5285,6 +5285,17 @@ StmtPtr SQLParser::parseCreateIndex(const std::vector<std::string>& tokens, size
         } else if (kw == "where") {
             ++pos;
             stmt->whereClause = parseExpr(tokens, pos);
+        } else if (kw == "nulls" && pos + 1 < tokens.size()) {
+            if (toLower(tokens[pos + 1]) == "not" &&
+                pos + 2 < tokens.size() &&
+                toLower(tokens[pos + 2]) == "distinct") {
+                stmt->nullsNotDistinct = true;
+                pos += 3;
+            } else if (toLower(tokens[pos + 1]) == "distinct") {
+                pos += 2;
+            } else {
+                ++pos;
+            }
         } else if (kw == "with" && pos + 1 < tokens.size() && tokens[pos + 1] == "(") {
             pos += 2;
             auto opts = collectParenthesized(tokens, pos);
