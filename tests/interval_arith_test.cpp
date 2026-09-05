@@ -84,6 +84,24 @@ static void test_interval_ops() {
     auto divideByZero = eval("'2 hours'::interval / 0");
     assert(divideByZero.ok && divideByZero.isNull);
 
+    auto addOverflow = eval(
+        "'9223372036854775807 microseconds'::interval + "
+        "'1 microsecond'::interval");
+    assert(addOverflow.ok && addOverflow.isNull);
+
+    auto subtractOverflow = eval(
+        "'-9223372036854775807 microseconds'::interval - "
+        "'1 microsecond'::interval");
+    assert(subtractOverflow.ok && subtractOverflow.isNull);
+
+    auto scaleOverflow = eval(
+        "'3000000000 microseconds'::interval * 4000000000");
+    assert(scaleOverflow.ok && scaleOverflow.isNull);
+
+    auto safeScale = eval(
+        "'4000000000 microseconds'::interval * 2");
+    assert(safeScale.ok && safeScale.value == "02:13:20");
+
     std::cout << "[IV] interval ± interval, * n, / n OK" << std::endl;
 }
 

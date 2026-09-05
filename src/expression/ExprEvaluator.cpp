@@ -160,6 +160,33 @@ struct IntervalParts {
     bool ok = false;
 };
 
+static bool combineIntervalField(long long left, long long right,
+                                 bool subtract, long long& result) {
+    const __int128 total = static_cast<__int128>(left) +
+        (subtract ? -static_cast<__int128>(right)
+                  : static_cast<__int128>(right));
+    if (total <= std::numeric_limits<long long>::lowest() ||
+        total > std::numeric_limits<long long>::max()) {
+        return false;
+    }
+    result = static_cast<long long>(total);
+    return true;
+}
+
+static bool scaleIntervalField(long long value, long double scale,
+                               long long& result) {
+    const long double scaled = static_cast<long double>(value) * scale;
+    if (!std::isfinite(scaled) ||
+        scaled <= static_cast<long double>(
+                      std::numeric_limits<long long>::lowest()) ||
+        scaled > static_cast<long double>(
+                     std::numeric_limits<long long>::max())) {
+        return false;
+    }
+    result = static_cast<long long>(scaled);
+    return true;
+}
+
 // Parse the canonical output form or the human input form ("2 years",
 // "14 months", "90 minutes", "1-2", "04:05:06", "1.5 days").
 static IntervalParts parseIntervalText(const std::string& in) {
@@ -1050,20 +1077,33 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
             if (!iv.ok) return ExprValue("interval", "", true);
             if (op == "/" && k == 0)
                 return ExprValue("interval", "", true);
-            double scale = (op == "*") ? k : 1.0 / k;
+            const long double scale = op == "*"
+                ? static_cast<long double>(k)
+                : 1.0L / static_cast<long double>(k);
+            long long months = 0;
+            long long days = 0;
+            long long micros = 0;
+            if (!scaleIntervalField(iv.months, scale, months) ||
+                !scaleIntervalField(iv.days, scale, days) ||
+                !scaleIntervalField(iv.micros, scale, micros)) {
+                return ExprValue("interval", "", true);
+            }
             return ExprValue("interval",
-                             intervalToText(static_cast<long long>(iv.months * scale),
-                                            static_cast<long long>(iv.days * scale),
-                                            static_cast<long long>(iv.micros * scale)),
-                             false);
+                             intervalToText(months, days, micros), false);
         }
         if (lIv && rIv) {
             IntervalParts a = parseIntervalText(l.value);
             IntervalParts b = parseIntervalText(r.value);
             if (!a.ok || !b.ok) return ExprValue("interval", "", true);
-            long long mm = a.months + (op == "+" ? b.months : -b.months);
-            long long dd = a.days + (op == "+" ? b.days : -b.days);
-            long long us = a.micros + (op == "+" ? b.micros : -b.micros);
+            const bool subtract = op == "-";
+            long long mm = 0;
+            long long dd = 0;
+            long long us = 0;
+            if (!combineIntervalField(a.months, b.months, subtract, mm) ||
+                !combineIntervalField(a.days, b.days, subtract, dd) ||
+                !combineIntervalField(a.micros, b.micros, subtract, us)) {
+                return ExprValue("interval", "", true);
+            }
             return ExprValue("interval", intervalToText(mm, dd, us), false);
         }
         if (lIv && op == "+") {
