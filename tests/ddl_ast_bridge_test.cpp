@@ -269,6 +269,50 @@ static void test_alter_column_definitions_update_catalog() {
               << std::endl;
 }
 
+static void test_alter_logged_state_updates_catalog() {
+    const std::string db = testDbPath("ddl_bridge_logged_catalog");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE TABLE persistence_catalog (id INT)", s));
+
+    dbms::CatalogManager& initial = g_engine.catalogService().get(db);
+    const auto* relation =
+        initial.resolveRelation("persistence_catalog", {"public"});
+    assert(relation != nullptr && relation->relpersistence == 'p');
+    const dbms::Oid relationOid = relation->oid;
+
+    assert(!ddl.executeSql(
+        "ALTER TABLE persistence_catalog SET UNLOGGED", s));
+    assert(g_engine.getTableSchema(db, "persistence_catalog").isUnlogged);
+    relation = initial.findClass(relationOid);
+    assert(relation != nullptr && relation->relpersistence == 'u');
+
+    g_engine.catalogService().evict(db);
+    dbms::CatalogManager& unlogged = g_engine.catalogService().get(db);
+    relation = unlogged.findClass(relationOid);
+    assert(relation != nullptr && relation->relpersistence == 'u');
+
+    assert(!ddl.executeSql(
+        "ALTER TABLE persistence_catalog SET LOGGED", s));
+    assert(!g_engine.getTableSchema(db, "persistence_catalog").isUnlogged);
+    relation = unlogged.findClass(relationOid);
+    assert(relation != nullptr && relation->relpersistence == 'p');
+
+    g_engine.catalogService().evict(db);
+    dbms::CatalogManager& logged = g_engine.catalogService().get(db);
+    relation = logged.findClass(relationOid);
+    assert(relation != nullptr && relation->relpersistence == 'p');
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[DDL] ALTER logged state updates catalog OK" << std::endl;
+}
+
 static void test_schema_qualified_rename_preserves_schema() {
     const std::string db = testDbPath("ddl_bridge_schema_rename");
     cleanup(db);
@@ -668,6 +712,7 @@ int main() {
     test_alter_table_rename_updates_catalog();
     test_alter_column_rename_updates_catalog();
     test_alter_column_definitions_update_catalog();
+    test_alter_logged_state_updates_catalog();
     test_schema_qualified_rename_preserves_schema();
     test_create_index_sequence();
     test_drop_index_uses_sql_name();

@@ -418,6 +418,32 @@ static bool synchronizeTableAttributesInCatalog(
     }
 }
 
+template <typename Update>
+static bool updateTableClassInCatalog(
+    const std::string& dbname, const std::string& physicalTableName,
+    Update update) {
+    try {
+        CatalogManager& catalog = g_engine.catalogService().get(dbname);
+        const auto qualifiedName =
+            CatalogService::logicalName(physicalTableName);
+        const std::string schemaName = qualifiedName.schema.empty()
+            ? "public" : qualifiedName.schema;
+        const auto* relation = catalog.resolveRelation(
+            qualifiedName.name, {schemaName});
+        // Storage-only relations intentionally remain outside pg_catalog.
+        if (!relation) return true;
+        const Oid relationOid = relation->oid;
+        PgClassRow replacement = *relation;
+        update(replacement);
+        return catalog.updateClass(relationOid, replacement) &&
+               catalog.persistAll();
+    } catch (const std::exception& error) {
+        std::cerr << "ALTER TABLE relation catalog update failed: "
+                  << error.what() << std::endl;
+        return false;
+    }
+}
+
 // ----------------------------------------------------------------------------
 // Public entry points
 // ----------------------------------------------------------------------------
@@ -966,10 +992,31 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
             case AlterTableStmt::Action::SetLogged:
                 status = g_engine.alterTableSetLogged(s.currentDB, tableName, true);
                 if (!alterStatusOk(status, "Table")) return true;
+                if (!tableIsTemporary &&
+                    !updateTableClassInCatalog(
+                        s.currentDB, tableName,
+                        [](PgClassRow& relation) {
+                            relation.relpersistence = 'p';
+                        })) {
+                    std::cout << "ALTER TABLE SET LOGGED catalog update failed"
+                              << std::endl;
+                    return true;
+                }
                 break;
             case AlterTableStmt::Action::SetUnlogged:
                 status = g_engine.alterTableSetLogged(s.currentDB, tableName, false);
                 if (!alterStatusOk(status, "Table")) return true;
+                if (!tableIsTemporary &&
+                    !updateTableClassInCatalog(
+                        s.currentDB, tableName,
+                        [](PgClassRow& relation) {
+                            relation.relpersistence = 'u';
+                        })) {
+                    std::cout
+                        << "ALTER TABLE SET UNLOGGED catalog update failed"
+                        << std::endl;
+                    return true;
+                }
                 break;
             case AlterTableStmt::Action::ClusterOn:
                 if (sub.name.empty()) {
