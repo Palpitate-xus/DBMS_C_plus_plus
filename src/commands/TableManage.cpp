@@ -37133,6 +37133,32 @@ DBStatus StorageEngine::commitTransaction() {
         }
     }
 
+    // Main heap pages have WAL full-page images and can be written after the
+    // COMMIT record. TOAST heap pages do not: once the main tuple containing
+    // __TOAST__<id> becomes visible, every referenced chunk must already be
+    // durable. The table IX tokens acquired above prevent a writer from
+    // changing these buffers while PageAllocator copies them. Flush only the
+    // relations touched by this transaction instead of publishing unrelated
+    // databases-wide heap state.
+    bool toastHeapWritebackOk = true;
+    {
+        std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+        for (const auto& tableName :
+             committingContext.specializedIndexTables) {
+            const auto allocator = toastPageAllocators_.find(
+                committingDb + ":" + tableName);
+            if (allocator != toastPageAllocators_.end() &&
+                allocator->second && !allocator->second->flush()) {
+                toastHeapWritebackOk = false;
+                break;
+            }
+        }
+    }
+    if (!toastHeapWritebackOk) {
+        rollbackTransaction();
+        return DBStatus::IO_ERROR;
+    }
+
     if (!flushDatabaseCaches(committingDb, /*heapPages=*/false)) {
         rollbackTransaction();
         return DBStatus::IO_ERROR;

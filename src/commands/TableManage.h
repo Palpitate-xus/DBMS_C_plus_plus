@@ -1350,10 +1350,11 @@ private:
     mutable std::recursive_mutex cacheMutex_;
     mutable std::map<std::string, std::unique_ptr<PageAllocator>> pageAllocators_;
     void closeAllPageAllocators();
-    // Flush every loaded cache for the database.  heapPages=false skips the
-    // heap/TOAST page flushes (callers whose durability already rides on WAL
-    // full-page images + the background flusher, e.g. the commit path);
-    // index files keep their flush + WAL-image bookkeeping in all modes.
+    // Flush every loaded cache for the database. heapPages=false skips the
+    // bulk heap/TOAST page flushes; COMMIT instead writes its main-heap pages
+    // transaction-by-transaction and explicitly publishes touched TOAST
+    // heaps before the terminal WAL record. Index files keep their flush +
+    // WAL-image bookkeeping in all modes.
     bool flushDatabaseCaches(const std::string& dbname, bool heapPages = true);
     void closeDatabaseCaches(const std::string& dbname);
     bool refreshPreparedTableCaches(const std::string& dbname,

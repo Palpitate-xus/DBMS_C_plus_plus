@@ -16,7 +16,9 @@
 #include <iostream>
 #include <cassert>
 #include <limits>
+#include <sys/wait.h>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 dbms::Config g_config;
@@ -50,6 +52,54 @@ int main() {
     assert(!StorageEngine::parseToastMarker("__TOAST__-1", markerId));
     assert(!StorageEngine::parseToastMarker("__TOAST__+1", markerId));
     assert(!StorageEngine::parseToastMarker("__TOAST__1junk", markerId));
+
+    // COMMIT must make external values durable itself.  In particular, a
+    // successful transaction cannot rely on the background writer or the
+    // StorageEngine destructor to publish the TOAST heap: kill -9 skips both.
+    const std::string crashDb = "toast_commit_crash_db";
+    std::filesystem::remove_all(crashDb);
+    std::filesystem::remove_all(crashDb + ".txn_backup");
+    const std::string crashPayload =
+        makeIncompressiblePayload(10000, 0x31415926u);
+    {
+        StorageEngine setup;
+        setup.setBackgroundIntervals(60000, 60000);
+        assert(setup.createDatabase(crashDb) == DBStatus::OK);
+        TableSchema table;
+        table.tablename = "committed_toast";
+        table.formatVersion = 2;
+        table.append(makeIntColumn("id", false, 4, true));
+        table.append(makeVarCharColumn("payload", false, 12000, false));
+        assert(setup.createTable(crashDb, table) == DBStatus::OK);
+    }
+    const pid_t crashChild = ::fork();
+    assert(crashChild >= 0);
+    if (crashChild == 0) {
+        StorageEngine child;
+        child.setBackgroundIntervals(60000, 60000);
+        if (child.beginTransaction(crashDb) != DBStatus::OK) ::_exit(2);
+        if (child.insert(crashDb, "committed_toast",
+                         {{"id", "1"}, {"payload", crashPayload}}) !=
+            DBStatus::OK) {
+            ::_exit(3);
+        }
+        if (child.commitTransaction() != DBStatus::OK) ::_exit(4);
+        ::_exit(0);
+    }
+    int crashStatus = 0;
+    assert(::waitpid(crashChild, &crashStatus, 0) == crashChild);
+    assert(WIFEXITED(crashStatus) && WEXITSTATUS(crashStatus) == 0);
+    {
+        StorageEngine recovered;
+        recovered.setBackgroundIntervals(60000, 60000);
+        const auto rows = recovered.query(
+            crashDb, "committed_toast", {"=id 1"}, {"payload"});
+        assert(rows.size() == 1);
+        assert(rows.front().find(crashPayload) != std::string::npos);
+    }
+    std::filesystem::remove_all(crashDb);
+    std::filesystem::remove_all(crashDb + ".txn_backup");
+    std::cout << "[TOAST] committed value survives kill -9 OK\n";
 
     {
         StorageEngine engine;
