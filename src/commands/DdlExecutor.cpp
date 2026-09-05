@@ -2819,6 +2819,81 @@ bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
     }
     std::string name = stmt->objectNames.front();
 
+    // Several object families still use storage sidecars instead of pg_type
+    // or pg_proc rows. They nevertheless belong to their logical namespace
+    // and must participate in the same RESTRICT/CASCADE decision.
+    enum class AuxiliarySchemaObjectKind {
+        Domain,
+        CompositeType,
+        EnumType,
+        ShellType,
+        UdtType,
+        Function,
+        TableFunction,
+        Procedure,
+        Collation
+    };
+    struct AuxiliarySchemaObject {
+        AuxiliarySchemaObjectKind kind;
+        std::string name;
+    };
+    std::vector<AuxiliarySchemaObject> auxiliaryObjects;
+    const std::string logicalPrefix = name + ".";
+    const std::string physicalPrefix = name + "__";
+    const auto hasLogicalNamespace = [&](const std::string& objectName) {
+        return objectName.size() > logicalPrefix.size() &&
+               objectName.rfind(logicalPrefix, 0) == 0;
+    };
+    const auto addLogicalObjects = [&](const std::vector<std::string>& names,
+                                       AuxiliarySchemaObjectKind kind) {
+        for (const auto& objectName : names) {
+            if (hasLogicalNamespace(objectName)) {
+                auxiliaryObjects.push_back({kind, objectName});
+            }
+        }
+    };
+    try {
+        addLogicalObjects(g_engine.getDomainNames(s.currentDB),
+                          AuxiliarySchemaObjectKind::Domain);
+        addLogicalObjects(g_engine.getCompositeTypeNames(s.currentDB),
+                          AuxiliarySchemaObjectKind::CompositeType);
+        addLogicalObjects(g_engine.getEnumTypeNames(s.currentDB),
+                          AuxiliarySchemaObjectKind::EnumType);
+        addLogicalObjects(loadShellTypes(s.currentDB),
+                          AuxiliarySchemaObjectKind::ShellType);
+        for (const auto& meta : loadUdtMeta(s.currentDB)) {
+            if (hasLogicalNamespace(meta.name)) {
+                auxiliaryObjects.push_back(
+                    {AuxiliarySchemaObjectKind::UdtType, meta.name});
+            }
+        }
+        addLogicalObjects(g_engine.getUDFNames(s.currentDB),
+                          AuxiliarySchemaObjectKind::Function);
+        addLogicalObjects(g_engine.getTVFNames(s.currentDB),
+                          AuxiliarySchemaObjectKind::TableFunction);
+        addLogicalObjects(g_engine.getProcedureNames(s.currentDB),
+                          AuxiliarySchemaObjectKind::Procedure);
+        for (const auto& collation :
+             g_engine.getCollationNames(s.currentDB)) {
+            if (hasLogicalNamespace(collation) ||
+                (collation.size() > physicalPrefix.size() &&
+                 collation.rfind(physicalPrefix, 0) == 0)) {
+                auxiliaryObjects.push_back(
+                    {AuxiliarySchemaObjectKind::Collation, collation});
+            }
+        }
+    } catch (const std::exception& error) {
+        std::cout << "DROP SCHEMA auxiliary-object preflight failed: "
+                  << error.what() << std::endl;
+        return true;
+    }
+    if (!stmt->cascade && !auxiliaryObjects.empty()) {
+        std::cout << "ERROR: cannot drop schema " << name
+                  << " because object " << auxiliaryObjects.front().name
+                  << " depends on it" << std::endl;
+        return true;
+    }
+
     // Validate dependencies without mutating the catalog.  The physical
     // schema removal must win the race with catalog publication, otherwise a
     // failed filesystem operation can leave a catalog namespace that no
@@ -2861,6 +2936,53 @@ bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
                       << error << std::endl;
             return true;
         }
+    }
+    for (const auto& object : auxiliaryObjects) {
+        DBStatus status = DBStatus::OK;
+        DdlObjectKind ddlKind = DdlObjectKind::Type;
+        switch (object.kind) {
+            case AuxiliarySchemaObjectKind::Domain:
+                status = g_engine.dropDomain(s.currentDB, object.name);
+                ddlKind = DdlObjectKind::Domain;
+                break;
+            case AuxiliarySchemaObjectKind::CompositeType:
+                status = g_engine.dropCompositeType(
+                    s.currentDB, object.name);
+                break;
+            case AuxiliarySchemaObjectKind::EnumType:
+                status = g_engine.dropEnumType(s.currentDB, object.name);
+                break;
+            case AuxiliarySchemaObjectKind::ShellType:
+                status = removeShellType(s.currentDB, object.name)
+                    ? DBStatus::OK : DBStatus::IO_ERROR;
+                break;
+            case AuxiliarySchemaObjectKind::UdtType:
+                status = removeUdtMeta(s.currentDB, object.name)
+                    ? DBStatus::OK : DBStatus::IO_ERROR;
+                break;
+            case AuxiliarySchemaObjectKind::Function:
+                status = g_engine.dropUDF(s.currentDB, object.name);
+                ddlKind = DdlObjectKind::Function;
+                break;
+            case AuxiliarySchemaObjectKind::TableFunction:
+                status = g_engine.dropTVF(s.currentDB, object.name);
+                ddlKind = DdlObjectKind::Function;
+                break;
+            case AuxiliarySchemaObjectKind::Procedure:
+                status = g_engine.dropProcedure(s.currentDB, object.name);
+                ddlKind = DdlObjectKind::Procedure;
+                break;
+            case AuxiliarySchemaObjectKind::Collation:
+                status = g_engine.dropCollation(s.currentDB, object.name);
+                ddlKind = DdlObjectKind::Collation;
+                break;
+        }
+        if (status != DBStatus::OK) {
+            std::cout << "DROP SCHEMA auxiliary cleanup failed for "
+                      << object.name << std::endl;
+            return true;
+        }
+        txn.recordDrop(ddlKind, object.name);
     }
     // Catalog-planned relation removal above is dependency ordered and also
     // includes objects outside this namespace reached by CASCADE. The storage

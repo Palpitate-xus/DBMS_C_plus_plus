@@ -2793,6 +2793,23 @@ DBStatus StorageEngine::dropCollation(const std::string& dbname,
     return DBStatus::OK;
 }
 
+std::vector<std::string> StorageEngine::getCollationNames(
+    const std::string& dbname) const {
+    std::vector<std::string> result;
+    if (!databaseExists(dbname)) return result;
+    const auto path = dbPath(dbname) / ".collations";
+    std::ifstream input(path);
+    if (!input) return result;
+    std::string line;
+    while (std::getline(input, line)) {
+        const size_t separator = line.find('|');
+        if (separator != std::string::npos && separator != 0) {
+            result.push_back(line.substr(0, separator));
+        }
+    }
+    return result;
+}
+
 bool StorageEngine::viewExists(const std::string& dbname,
                                const std::string& viewname) const {
     if (!databaseExists(dbname) || !validMetadataObjectName(viewname)) return false;

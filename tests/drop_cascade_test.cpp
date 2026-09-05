@@ -327,6 +327,102 @@ static void test_drop_schema_catalog_preflight_fails_closed() {
               << std::endl;
 }
 
+static bool lineFileContains(const fs::path& path,
+                             const std::string& expected) {
+    std::ifstream input(path);
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line == expected ||
+            line.find("|" + expected + "|") != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void test_drop_schema_handles_auxiliary_objects() {
+    const std::string db = testDbPath("drop_schema_auxiliary");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE SCHEMA app_aux", s));
+    assert(!ddl.executeSql("CREATE SCHEMA app_auxiliary", s));
+
+    dbms::StorageEngine::DomainInfo domain;
+    domain.name = "app_aux.positive";
+    domain.baseType = "int";
+    assert(g_engine.createDomain(db, domain) == dbms::DBStatus::OK);
+    dbms::StorageEngine::CompositeType composite;
+    composite.name = "app_aux.coordinate";
+    composite.fields = {{"x", "int"}, {"y", "int"}};
+    assert(g_engine.createCompositeType(db, composite) == dbms::DBStatus::OK);
+    dbms::StorageEngine::EnumType enumeration;
+    enumeration.name = "app_aux.mood";
+    enumeration.labels = {"ok", "sad"};
+    assert(g_engine.createEnumType(db, enumeration) == dbms::DBStatus::OK);
+    assert(g_engine.createUDF(db, "app_aux.bump", "x", "x + 1") ==
+           dbms::DBStatus::OK);
+    assert(g_engine.createTVF(
+               db, "app_aux.rows", "x", "SELECT x") ==
+           dbms::DBStatus::OK);
+    assert(g_engine.createProcedure(
+               db, "app_aux.work", {}, {"SELECT 1"}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.createCollation(
+               db, "app_aux__locale", "libc", "C") ==
+           dbms::DBStatus::OK);
+    assert(!ddl.executeSql("CREATE TYPE app_aux.shell_value", s));
+    assert(!ddl.executeSql(
+        "CREATE TYPE app_aux.int_range AS RANGE (subtype = int4)", s));
+
+    // A longer neighboring schema name must not match either namespace
+    // delimiter used by the current storage formats.
+    dbms::StorageEngine::DomainInfo survivorDomain = domain;
+    survivorDomain.name = "app_auxiliary.positive";
+    assert(g_engine.createDomain(db, survivorDomain) == dbms::DBStatus::OK);
+    assert(g_engine.createUDF(
+               db, "app_auxiliary.bump", "x", "x + 2") ==
+           dbms::DBStatus::OK);
+    assert(g_engine.createCollation(
+               db, "app_auxiliary__locale", "libc", "C") ==
+           dbms::DBStatus::OK);
+
+    assert(ddl.executeSql("DROP SCHEMA app_aux RESTRICT", s));
+    assert(g_engine.schemaExists(db, "app_aux"));
+    assert(!g_engine.getDomain(db, domain.name).name.empty());
+    assert(g_engine.udfExists(db, "app_aux.bump"));
+    assert(g_engine.procedureExists(db, "app_aux.work"));
+
+    assert(!ddl.executeSql("DROP SCHEMA app_aux CASCADE", s));
+    assert(!g_engine.schemaExists(db, "app_aux"));
+    assert(g_engine.getDomain(db, domain.name).name.empty());
+    assert(!g_engine.isCompositeType(db, composite.name));
+    assert(g_engine.getEnumType(db, enumeration.name).name.empty());
+    assert(!g_engine.udfExists(db, "app_aux.bump"));
+    assert(!g_engine.tvfExists(db, "app_aux.rows"));
+    assert(!g_engine.procedureExists(db, "app_aux.work"));
+    const auto collations = g_engine.getCollationNames(db);
+    assert(std::find(collations.begin(), collations.end(),
+                     "app_aux__locale") == collations.end());
+    assert(!lineFileContains(
+        fs::path(db) / ".shell_types", "app_aux.shell_value"));
+    assert(!lineFileContains(
+        fs::path(db) / ".udt_meta", "app_aux.int_range"));
+
+    assert(!g_engine.getDomain(db, survivorDomain.name).name.empty());
+    assert(g_engine.udfExists(db, "app_auxiliary.bump"));
+    assert(std::find(collations.begin(), collations.end(),
+                     "app_auxiliary__locale") != collations.end());
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[DROP-CASCADE] schema handles auxiliary objects OK"
+              << std::endl;
+}
+
 static void test_multi_table_drop_fails_before_mutation() {
     const std::string db = testDbPath("drop_multiple_preflight");
     cleanup(db);
@@ -472,6 +568,7 @@ int main() {
     test_owned_sequence_defaults_obey_drop_behavior();
     test_drop_schema_cascade_removes_relation_storage();
     test_drop_schema_catalog_preflight_fails_closed();
+    test_drop_schema_handles_auxiliary_objects();
     test_multi_table_drop_fails_before_mutation();
     test_drop_removes_named_table_sidecars();
     test_drop_purges_authorization_state();

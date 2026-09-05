@@ -195,6 +195,7 @@ public:
     DBStatus createCollation(const std::string& dbname, const std::string& collationName,
                              const std::string& provider, const std::string& locale);
     DBStatus dropCollation(const std::string& dbname, const std::string& collationName);
+    std::vector<std::string> getCollationNames(const std::string& dbname) const;
 
     // View support
     DBStatus createView(const std::string& dbname, const std::string& viewname, const std::string& sql);
