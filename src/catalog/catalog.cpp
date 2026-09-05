@@ -1074,6 +1074,17 @@ CatalogManager::DropPlan CatalogManager::planDropUnlocked(Oid classid, Oid objid
                 plan.error = "cannot drop object because it is required by the database system";
                 return false;
             }
+            // Automatic and internal dependents are implementation details of
+            // the referenced object.  They must follow it even for RESTRICT;
+            // only independently created (normal/unknown) dependents require
+            // the caller to request CASCADE.  Extension membership has the
+            // same referenced-object behavior as an internal dependency.
+            const bool dropsAutomatically =
+                d.deptype == 'a' || d.deptype == 'i' || d.deptype == 'e';
+            if (behavior == DropBehavior::Restrict && !dropsAutomatically) {
+                plan.error = "cannot drop object because other objects depend on it";
+                return false;
+            }
             if (!dfs(d.classid, d.objid)) return false;
         }
 
@@ -1084,11 +1095,6 @@ CatalogManager::DropPlan CatalogManager::planDropUnlocked(Oid classid, Oid objid
     };
 
     if (!dfs(classid, objid)) return plan;
-
-    if (behavior == DropBehavior::Restrict && toDrop.size() > 1) {
-        plan.error = "cannot drop object because other objects depend on it";
-        return plan;
-    }
 
     plan.objectsToDrop = std::move(toDrop);
     return plan;

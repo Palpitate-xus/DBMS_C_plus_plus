@@ -105,6 +105,39 @@ int main() {
         std::cout << "[CASCADE] chain dependency OK\n";
     }
 
+    // 自动依赖属于被引用对象的一部分，即使使用 RESTRICT 也应随其删除。
+    {
+        PgClassRow owner;
+        owner.relname = "auto_owner";
+        owner.relnamespace = publicOid;
+        owner.relkind = 'r';
+        Oid ownerOid = mgr.createClass(owner);
+
+        PgClassRow automatic;
+        automatic.relname = "auto_index";
+        automatic.relnamespace = publicOid;
+        automatic.relkind = 'i';
+        Oid automaticOid = mgr.createClass(automatic);
+
+        PgDependRow automaticDependency;
+        automaticDependency.classid = PgClassOid_Class;
+        automaticDependency.objid = automaticOid;
+        automaticDependency.objsubid = 0;
+        automaticDependency.refclassid = PgClassOid_Class;
+        automaticDependency.refobjid = ownerOid;
+        automaticDependency.refobjsubid = 0;
+        automaticDependency.deptype = 'a';
+        mgr.addDepend(automaticDependency);
+
+        std::string err;
+        assert(mgr.dropObject(PgClassOid_Class, ownerOid,
+                              CatalogManager::DropBehavior::Restrict, &err));
+        assert(err.empty());
+        assert(mgr.findClass(ownerOid) == nullptr);
+        assert(mgr.findClass(automaticOid) == nullptr);
+        std::cout << "[CASCADE] automatic dependency ignores RESTRICT OK\n";
+    }
+
     // pin 依赖不可删除
     {
         PgTypeRow pinT;

@@ -4585,12 +4585,13 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
     }
 
     std::vector<PhysicalCascadeAction> physicalCascadeActions;
-    if (stmt->cascade && hasCatalogDropPlan && catalogManager) {
+    if (hasCatalogDropPlan && catalogManager) {
         std::string error;
         if (!buildPhysicalCascadeActions(*catalogManager, g_engine, s.currentDB,
                                           catalogRootOid,
                                           catalogDropPlan, physicalCascadeActions, error)) {
-            std::cout << "DROP TABLE CASCADE planning failed: " << error << std::endl;
+            std::cout << "DROP TABLE dependency planning failed: " << error
+                      << std::endl;
             return true;
         }
     }
@@ -4598,7 +4599,7 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
     txn.markSnapshotDirty();
     for (const auto& action : physicalCascadeActions) {
         if (!dropPhysicalCascadeAction(g_engine, s.currentDB, action)) {
-            std::cout << "DROP TABLE CASCADE physical cleanup failed for "
+            std::cout << "DROP TABLE dependency cleanup failed for "
                       << action.name << std::endl;
             return true;
         }

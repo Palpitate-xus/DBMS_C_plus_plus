@@ -113,6 +113,44 @@ static void test_schema_table_cascade_resolves_index_owner() {
               << std::endl;
 }
 
+static void test_drop_table_restrict_removes_automatic_dependents() {
+    const std::string db = testDbPath("drop_automatic_dependents");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE owner (id INT)", s));
+    assert(!ddl.executeSql("CREATE INDEX owner_id_idx ON owner (id)", s));
+    assert(!ddl.executeSql(
+        "CREATE SEQUENCE owner_id_seq OWNED BY owner.id", s));
+
+    auto& catalog = g_engine.catalogService().get(db);
+    const auto* publicNamespace = catalog.findNamespaceByName("public");
+    assert(publicNamespace != nullptr);
+    assert(catalog.findClassByName(
+               "owner_id_idx", publicNamespace->oid) != nullptr);
+    assert(catalog.findClassByName(
+               "owner_id_seq", publicNamespace->oid) != nullptr);
+
+    // Neither an index nor an OWNED BY sequence should force users to spell
+    // CASCADE when dropping their owning table.
+    assert(!ddl.executeSql("DROP TABLE owner", s));
+    assert(!g_engine.tableExists(db, "owner"));
+    assert(!g_engine.getNamedIndex(db, "owner", "owner_id_idx"));
+    assert(!g_engine.sequenceExists(db, "owner_id_seq"));
+    assert(catalog.findClassByName(
+               "owner_id_idx", publicNamespace->oid) == nullptr);
+    assert(catalog.findClassByName(
+               "owner_id_seq", publicNamespace->oid) == nullptr);
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[DROP-CASCADE] RESTRICT drops automatic dependents OK"
+              << std::endl;
+}
+
 static void test_multi_table_drop_fails_before_mutation() {
     const std::string db = testDbPath("drop_multiple_preflight");
     cleanup(db);
@@ -254,6 +292,7 @@ int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_drop_table_cascade_removes_dependents();
     test_schema_table_cascade_resolves_index_owner();
+    test_drop_table_restrict_removes_automatic_dependents();
     test_multi_table_drop_fails_before_mutation();
     test_drop_removes_named_table_sidecars();
     test_drop_purges_authorization_state();
