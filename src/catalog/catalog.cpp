@@ -483,6 +483,25 @@ const PgAttributeRow* CatalogManager::findAttribute(Oid relOid, const std::strin
     return nullptr;
 }
 
+bool CatalogManager::renameAttribute(
+    Oid relOid, const std::string& oldName, const std::string& newName) {
+    if (relOid == INVALID_OID || oldName.empty() || newName.empty()) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    PgAttributeRow* target = nullptr;
+    for (auto& attribute : attributes_) {
+        if (attribute.attrelid != relOid) continue;
+        if (attribute.attname == newName && attribute.attname != oldName) {
+            return false;
+        }
+        if (attribute.attname == oldName) target = &attribute;
+    }
+    if (!target) return false;
+    target->attname = newName;
+    return true;
+}
+
 bool CatalogManager::dropAttributes(Oid relOid) {
     std::lock_guard<std::mutex> lock(mutex_);
     return dropAttributesUnlocked(relOid);

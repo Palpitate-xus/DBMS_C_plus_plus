@@ -140,6 +140,57 @@ static void test_alter_table_rename_updates_catalog() {
     std::cout << "[DDL] ALTER TABLE RENAME updates catalog OK" << std::endl;
 }
 
+static void test_alter_column_rename_updates_catalog() {
+    const std::string db = testDbPath("ddl_bridge_column_rename_catalog");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE TABLE rename_columns (old_name INT, untouched TEXT)", s));
+
+    dbms::Oid relationOid = dbms::INVALID_OID;
+    {
+        dbms::CatalogManager& catalog =
+            g_engine.catalogService().get(db);
+        const auto* relation =
+            catalog.resolveRelation("rename_columns", {"public"});
+        assert(relation != nullptr);
+        relationOid = relation->oid;
+        const auto* oldAttribute =
+            catalog.findAttribute(relationOid, "old_name");
+        assert(oldAttribute != nullptr && oldAttribute->attnum == 1);
+    }
+
+    assert(!ddl.executeSql(
+        "ALTER TABLE rename_columns RENAME COLUMN old_name TO new_name", s));
+    const auto schema = g_engine.getTableSchema(db, "rename_columns");
+    assert(schema.cols[0].dataName == "new_name");
+
+    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
+    assert(catalog.findAttribute(relationOid, "old_name") == nullptr);
+    const auto* renamedAttribute =
+        catalog.findAttribute(relationOid, "new_name");
+    assert(renamedAttribute != nullptr && renamedAttribute->attnum == 1);
+
+    // The pg_attribute update must be durable, not just an in-memory rename.
+    g_engine.catalogService().evict(db);
+    dbms::CatalogManager& reloaded = g_engine.catalogService().get(db);
+    const auto* relation =
+        reloaded.resolveRelation("rename_columns", {"public"});
+    assert(relation != nullptr && relation->oid == relationOid);
+    assert(reloaded.findAttribute(relationOid, "old_name") == nullptr);
+    renamedAttribute = reloaded.findAttribute(relationOid, "new_name");
+    assert(renamedAttribute != nullptr && renamedAttribute->attnum == 1);
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[DDL] ALTER TABLE RENAME COLUMN updates catalog OK"
+              << std::endl;
+}
+
 static void test_schema_qualified_rename_preserves_schema() {
     const std::string db = testDbPath("ddl_bridge_schema_rename");
     cleanup(db);
@@ -537,6 +588,7 @@ int main() {
     test_create_drop_table();
     test_create_table_registers_in_catalog();
     test_alter_table_rename_updates_catalog();
+    test_alter_column_rename_updates_catalog();
     test_schema_qualified_rename_preserves_schema();
     test_create_index_sequence();
     test_drop_index_uses_sql_name();

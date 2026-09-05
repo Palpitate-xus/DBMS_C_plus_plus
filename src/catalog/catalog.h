@@ -100,6 +100,8 @@ public:
     std::vector<PgAttributeRow> findAttributes(Oid relOid) const;
     std::vector<PgAttributeRow> findAttributesByNum(Oid relOid) const; // 按 attnum 排序
     const PgAttributeRow* findAttribute(Oid relOid, const std::string& attname) const;
+    bool renameAttribute(Oid relOid, const std::string& oldName,
+                         const std::string& newName);
     bool dropAttributes(Oid relOid);
 
     // =====================================================================
