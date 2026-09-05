@@ -76,6 +76,43 @@ static void test_create_table_registers_in_catalog() {
     std::cout << "[DDL] CREATE TABLE registers in catalog OK" << std::endl;
 }
 
+static void test_create_table_requires_existing_schema() {
+    const std::string db = testDbPath("ddl_missing_table_schema");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE source_rows (id INT)", s));
+    assert(g_engine.insert(db, "source_rows", {{"id", "1"}}) ==
+           dbms::DBStatus::OK);
+
+    assert(!g_engine.schemaExists(db, "missing_schema"));
+    assert(ddl.executeSql(
+        "CREATE TABLE missing_schema.plain_copy (id INT)", s));
+    assert(ddl.executeSql(
+        "CREATE TABLE missing_schema.ctas_copy AS SELECT id FROM source_rows",
+        s));
+    assert(ddl.executeSql(
+        "CREATE TABLE missing_schema.like_copy (LIKE source_rows)", s));
+
+    for (const auto& name : {"plain_copy", "ctas_copy", "like_copy"}) {
+        assert(!g_engine.tableExists(
+            db, std::string("missing_schema.") + name));
+        assert(!g_engine.tableExists(
+            db, std::string("missing_schema__") + name));
+    }
+    assert(!g_engine.schemaExists(db, "missing_schema"));
+    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
+    assert(catalog.findNamespaceByName("missing_schema") == nullptr);
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[DDL] CREATE TABLE requires an existing schema OK"
+              << std::endl;
+}
+
 static void test_alter_table_rename_updates_catalog() {
     std::string db = testDbPath("ddl_bridge_rename_catalog");
     cleanup(db);
@@ -921,6 +958,7 @@ int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_create_drop_table();
     test_create_table_registers_in_catalog();
+    test_create_table_requires_existing_schema();
     test_alter_table_rename_updates_catalog();
     test_alter_column_rename_updates_catalog();
     test_alter_column_definitions_update_catalog();

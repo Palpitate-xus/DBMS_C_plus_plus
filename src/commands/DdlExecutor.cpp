@@ -2807,6 +2807,19 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         std::cout << "ERROR: ON COMMIT is only supported for valid temporary tables" << std::endl;
         return true;
     }
+    CatalogManager::QualifiedName targetName;
+    if (!CatalogManager::parseQualifiedName(stmt->tableName, targetName)) {
+        std::cout << "ERROR: invalid table name \"" << stmt->tableName
+                  << "\"" << std::endl;
+        return true;
+    }
+    const std::string targetSchema = targetName.schema.empty()
+        ? "public" : targetName.schema;
+    if (!temporary && !g_engine.schemaExists(s.currentDB, targetSchema)) {
+        std::cout << "ERROR: schema \"" << targetSchema
+                  << "\" does not exist" << std::endl;
+        return true;
+    }
     const std::string tname = temporary
                                   ? tempTablePrefix(s, stmt->tableName)
                                   : resolveTableName(s, stmt->tableName);
