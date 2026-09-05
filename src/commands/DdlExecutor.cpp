@@ -629,6 +629,8 @@ bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
             return executeCreatePolicy(dynamic_cast<const CreatePolicyStmt*>(stmt.get()), s);
         case SqlCommand::CreateMaterializedView:
             return executeCreateMaterializedView(dynamic_cast<const CreateViewStmt*>(stmt.get()), s);
+        case SqlCommand::DropMaterializedView:
+            return executeDropMaterializedView(dynamic_cast<const DropStmt*>(stmt.get()), s);
         case SqlCommand::CreateCollation:
             return executeCreateCollation(dynamic_cast<const CreateObjectStmt*>(stmt.get()), s);
         case SqlCommand::DropCollation:
@@ -700,6 +702,7 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         case dbms::SqlCommand::CreateProcedure:
         case dbms::SqlCommand::CreatePolicy:
         case dbms::SqlCommand::CreateMaterializedView:
+        case dbms::SqlCommand::DropMaterializedView:
         case dbms::SqlCommand::CreateDatabase:
         case dbms::SqlCommand::DropDatabase:
         case dbms::SqlCommand::CreateSchema:
@@ -4983,6 +4986,132 @@ bool DdlExecutor::executeCreateMaterializedView(const CreateViewStmt* stmt, Sess
     txn.recordCreate(DdlObjectKind::MaterializedView, viewname);
     if (!txn.commit()) return true;
     std::cout << "CREATE MATERIALIZED VIEW succeeded: " << inserted << " rows" << std::endl;
+    return false;
+}
+
+// ----------------------------------------------------------------------------
+// DROP MATERIALIZED VIEW
+// ----------------------------------------------------------------------------
+
+bool DdlExecutor::executeDropMaterializedView(const DropStmt* stmt, Session& s) {
+    if (!stmt) return false;
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+
+    DdlTransaction txn(s);
+    txn.enableSnapshotRollback();
+    if (!txn.begin()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
+    if (stmt->objectNames.empty()) {
+        std::cout << "SQL syntax error: DROP MATERIALIZED VIEW name" << std::endl;
+        return true;
+    }
+
+    struct DropTarget {
+        std::string name;
+        bool hasCatalogPlan = false;
+        CatalogManager::DropPlan catalogPlan;
+    };
+
+    CatalogManager* catalog = nullptr;
+    try {
+        catalog = &g_engine.catalogService().get(s.currentDB);
+    } catch (const std::exception& error) {
+        std::cout << "DROP MATERIALIZED VIEW: catalog lookup failed: "
+                  << error.what() << std::endl;
+        return true;
+    }
+
+    std::set<std::string> requestedNames;
+    std::vector<DropTarget> targets;
+    for (const std::string& name : stmt->objectNames) {
+        if (name.empty() || !requestedNames.insert(name).second) {
+            std::cout << "DROP MATERIALIZED VIEW: duplicate or empty name"
+                      << std::endl;
+            return true;
+        }
+
+        const PgClassRow* relation =
+            catalog->resolveRelation(name, {"public"});
+        const bool physicalExists =
+            g_engine.isMaterializedView(s.currentDB, name);
+        const bool catalogExists = relation && relation->relkind == 'm';
+        if (relation && relation->relkind != 'm') {
+            std::cout << "ERROR: \"" << name
+                      << "\" is not a materialized view" << std::endl;
+            return true;
+        }
+        if (!physicalExists && !catalogExists) {
+            if (stmt->ifExists) {
+                std::cout << "NOTICE: materialized view \"" << name
+                          << "\" does not exist, skipping" << std::endl;
+                continue;
+            }
+            std::cout << "ERROR: materialized view \"" << name
+                      << "\" does not exist" << std::endl;
+            return true;
+        }
+
+        DropTarget target;
+        target.name = name;
+        if (catalogExists) {
+            const auto behavior = stmt->cascade
+                ? CatalogManager::DropBehavior::Cascade
+                : CatalogManager::DropBehavior::Restrict;
+            target.catalogPlan = catalog->planDrop(
+                PgClassOid_Class, relation->oid, behavior);
+            if (!target.catalogPlan.ok()) {
+                std::cout << "ERROR: " << target.catalogPlan.error
+                          << std::endl;
+                return true;
+            }
+            // Catalog dependencies are not enough to remove file-backed
+            // dependents. Fail closed until such a plan has a physical
+            // worklist instead of leaving orphaned relation files behind.
+            if (target.catalogPlan.objectsToDrop.size() != 1) {
+                std::cout
+                    << "DROP MATERIALIZED VIEW CASCADE physical cleanup is not supported"
+                    << std::endl;
+                return true;
+            }
+            target.hasCatalogPlan = true;
+        }
+        targets.push_back(std::move(target));
+    }
+
+    if (targets.empty()) {
+        return !txn.commit();
+    }
+
+    txn.markSnapshotDirty();
+    for (const auto& target : targets) {
+        const DBStatus status =
+            g_engine.dropMaterializedView(s.currentDB, target.name);
+        if (status != DBStatus::OK) {
+            std::cout << "DROP MATERIALIZED VIEW physical cleanup failed"
+                      << std::endl;
+            return true;
+        }
+        if (target.hasCatalogPlan) {
+            std::string error;
+            if (!catalog->applyDropPlan(target.catalogPlan, &error)) {
+                std::cout << "DROP MATERIALIZED VIEW catalog cleanup failed: "
+                          << error << std::endl;
+                return true;
+            }
+        }
+        txn.recordDrop(DdlObjectKind::MaterializedView, target.name);
+    }
+
+    if (!catalog->persistAll()) {
+        std::cout << "DROP MATERIALIZED VIEW catalog persistence failed"
+                  << std::endl;
+        return true;
+    }
+    if (!txn.commit()) return true;
+    std::cout << "DROP MATERIALIZED VIEW succeeded" << std::endl;
     return false;
 }
 

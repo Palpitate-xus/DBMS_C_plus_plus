@@ -291,6 +291,68 @@ static void test_create_matview_with_no_data() {
     std::cout << "[MATVIEW] WITH NO DATA OK" << std::endl;
 }
 
+static void test_drop_matview_cleans_catalog_atomically() {
+    const std::string db = testDbPath("matview_drop_catalog");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE t (id INT, name VARCHAR(20))", s));
+    assert(!ddl.executeSql(
+        "CREATE MATERIALIZED VIEW first_mv AS SELECT * FROM t", s));
+    assert(!ddl.executeSql(
+        "CREATE MATERIALIZED VIEW second_mv AS SELECT id FROM t", s));
+
+    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
+    const auto* firstRelation =
+        catalog.resolveRelation("first_mv", {"public"});
+    assert(firstRelation != nullptr && firstRelation->relkind == 'm');
+    const dbms::Oid firstOid = firstRelation->oid;
+    assert(catalog.findAttributes(firstOid).size() == 2);
+
+    bool handled = false;
+    bool error = dbms::tryDdlBridge(
+        "drop materialized view first_mv, missing_mv",
+        dbms::SqlCommand::DropMaterializedView, s, handled);
+    assert(handled && error);
+    assert(g_engine.isMaterializedView(db, "first_mv"));
+    assert(catalog.findClass(firstOid) != nullptr);
+
+    error = dbms::tryDdlBridge(
+        "drop materialized view first_mv, second_mv",
+        dbms::SqlCommand::DropMaterializedView, s, handled);
+    assert(handled && !error);
+    assert(!g_engine.isMaterializedView(db, "first_mv"));
+    assert(!g_engine.isMaterializedView(db, "second_mv"));
+    assert(!g_engine.tableExists(
+        db, dbms::StorageEngine::materializedViewPrefix("first_mv")));
+    assert(!g_engine.tableExists(
+        db, dbms::StorageEngine::materializedViewPrefix("second_mv")));
+    assert(catalog.findClass(firstOid) == nullptr);
+    assert(catalog.findAttributes(firstOid).empty());
+
+    g_engine.catalogService().evict(db);
+    dbms::CatalogManager& reloaded = g_engine.catalogService().get(db);
+    assert(reloaded.resolveRelation("first_mv", {"public"}) == nullptr);
+    assert(reloaded.findClass(firstOid) == nullptr);
+    assert(reloaded.findAttributes(firstOid).empty());
+
+    error = dbms::tryDdlBridge(
+        "drop materialized view if exists first_mv",
+        dbms::SqlCommand::DropMaterializedView, s, handled);
+    assert(handled && !error);
+    error = dbms::tryDdlBridge(
+        "drop materialized view first_mv",
+        dbms::SqlCommand::DropMaterializedView, s, handled);
+    assert(handled && error);
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[MATVIEW] DROP catalog lifecycle OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_create_matview_select_star();
@@ -299,6 +361,7 @@ int main() {
     test_create_matview_reversed_projection();
     test_create_matview_preserves_exact_sql_values();
     test_create_matview_with_no_data();
+    test_drop_matview_cleans_catalog_atomically();
     std::cout << "[MATVIEW] all passed" << std::endl;
     return 0;
 }
