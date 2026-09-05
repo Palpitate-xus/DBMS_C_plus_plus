@@ -4450,6 +4450,7 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
     }
 
     CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
+    bool catalogChanged = false;
     for (const auto& rawName : stmt->objectNames) {
         CatalogManager::QualifiedName indexQn;
         if (!CatalogManager::parseQualifiedName(rawName, indexQn)) {
@@ -4579,6 +4580,7 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
                 std::cout << "ERROR: " << error << std::endl;
                 return true;
             }
+            catalogChanged = true;
         }
         if (tableOid == INVALID_OID) {
             const auto tableQn = CatalogService::logicalName(tableName);
@@ -4614,8 +4616,13 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
                           << std::endl;
                 return true;
             }
+            catalogChanged = true;
         }
         txn.recordDrop(DdlObjectKind::Index, indexName, tableName);
+    }
+    if (catalogChanged && !cat.persistAll()) {
+        std::cout << "DROP INDEX catalog persistence failed" << std::endl;
+        return true;
     }
     if (!txn.commit()) return true;
     std::cout << "DROP INDEX succeeded" << std::endl;
