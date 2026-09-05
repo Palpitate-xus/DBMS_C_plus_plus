@@ -19808,7 +19808,7 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
         statementSavepoint = "__dbms_insert_statement_" +
             std::to_string(context.currentTxnId) + "_" +
             std::to_string(statementSavepointSequence.fetch_add(1));
-    } while (context.savepoints.count(statementSavepoint) != 0);
+    } while (context.containsSavepoint(statementSavepoint));
     const bool hasStatementSavepoint =
         savepoint(statementSavepoint) == DBStatus::OK;
 
@@ -22151,7 +22151,7 @@ DBStatus StorageEngine::removeRows(
             statementSavepoint = "__dbms_delete_statement_" +
                 std::to_string(context.currentTxnId) + "_" +
                 std::to_string(statementSavepointSequence.fetch_add(1));
-        } while (context.savepoints.count(statementSavepoint) != 0);
+        } while (context.containsSavepoint(statementSavepoint));
         hasStatementSavepoint =
             savepoint(statementSavepoint) == DBStatus::OK;
     }
@@ -23279,7 +23279,7 @@ DBStatus StorageEngine::updateRows(
             statementSavepoint = "__dbms_update_statement_" +
                 std::to_string(context.currentTxnId) + "_" +
                 std::to_string(statementSavepointSequence.fetch_add(1));
-        } while (context.savepoints.count(statementSavepoint) != 0);
+        } while (context.containsSavepoint(statementSavepoint));
         hasStatementSavepoint =
             savepoint(statementSavepoint) == DBStatus::OK;
     }
@@ -39026,34 +39026,45 @@ DBStatus StorageEngine::savepoint(const std::string& name) {
     const auto deferred = context.deferredChecks.find(context.currentTxnId);
     const size_t deferredCheckSize = deferred == context.deferredChecks.end()
         ? 0 : deferred->second.size();
-    context.savepoints[name] = {
+    context.savepoints.push_back({
+        name,
         context.txnLog.size(),
         context.ddlUndoActions.size(),
         deferredCheckSize,
         context.txnLogicalChanges.size(),
         lockManager_.captureCheckpoint()
-    };
+    });
     return DBStatus::OK;
 }
 
 DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
-    if (!transactionContext().inTransaction) return DBStatus::INVALID_VALUE;
-    if (transactionContext().transactionBackupDirty) return DBStatus::INVALID_VALUE;
-    auto it = transactionContext().savepoints.find(name);
-    if (it == transactionContext().savepoints.end()) return DBStatus::INVALID_VALUE;
-    const size_t txnLogSpIdx = it->second.txnLogSize;
-    const size_t ddlSpIdx = it->second.ddlUndoSize;
-    const size_t deferredCheckSpIdx = it->second.deferredCheckSize;
-    const size_t logicalChangeSpIdx = it->second.logicalChangeSize;
-    const auto deferredChecks = transactionContext().deferredChecks.find(
-        transactionContext().currentTxnId);
+    auto& context = transactionContext();
+    if (!context.inTransaction) return DBStatus::INVALID_VALUE;
+    if (context.transactionBackupDirty) return DBStatus::INVALID_VALUE;
+    const auto reverseIt = std::find_if(
+        context.savepoints.rbegin(), context.savepoints.rend(),
+        [&](const TransactionContext::SavepointState& savepoint) {
+            return savepoint.name == name;
+        });
+    if (reverseIt == context.savepoints.rend()) {
+        return DBStatus::INVALID_VALUE;
+    }
+    const size_t savepointIndex = static_cast<size_t>(std::distance(
+        context.savepoints.begin(), reverseIt.base()) - 1);
+    const TransactionContext::SavepointState target = *reverseIt;
+    const size_t txnLogSpIdx = target.txnLogSize;
+    const size_t ddlSpIdx = target.ddlUndoSize;
+    const size_t deferredCheckSpIdx = target.deferredCheckSize;
+    const size_t logicalChangeSpIdx = target.logicalChangeSize;
+    const auto deferredChecks = context.deferredChecks.find(
+        context.currentTxnId);
     const size_t currentDeferredCheckSize =
-        deferredChecks == transactionContext().deferredChecks.end()
+        deferredChecks == context.deferredChecks.end()
             ? 0 : deferredChecks->second.size();
-    if (txnLogSpIdx > transactionContext().txnLog.size() ||
-        ddlSpIdx > transactionContext().ddlUndoActions.size() ||
+    if (txnLogSpIdx > context.txnLog.size() ||
+        ddlSpIdx > context.ddlUndoActions.size() ||
         deferredCheckSpIdx > currentDeferredCheckSize ||
-        logicalChangeSpIdx > transactionContext().txnLogicalChanges.size()) {
+        logicalChangeSpIdx > context.txnLogicalChanges.size()) {
         return DBStatus::INVALID_VALUE;
     }
 
@@ -39554,23 +39565,36 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
         deferredChecks->second.resize(deferredCheckSpIdx);
     }
     transactionContext().ddlUndoActions.resize(ddlSpIdx);
-    lockManager_.rollbackToCheckpoint(it->second.lockCheckpoint);
+    lockManager_.rollbackToCheckpoint(target.lockCheckpoint);
 
-    // Remove all savepoints created after this one
-    for (auto sit = transactionContext().savepoints.begin(); sit != transactionContext().savepoints.end(); ) {
-        if (sit->second.txnLogSize > txnLogSpIdx || sit->second.ddlUndoSize > ddlSpIdx) {
-            sit = transactionContext().savepoints.erase(sit);
-        }
-        else ++sit;
-    }
+    // ROLLBACK TO retains the target but destroys every savepoint created
+    // after it, even when no row or DDL changes separated their declarations.
+    context.savepoints.erase(
+        context.savepoints.begin() +
+            static_cast<std::ptrdiff_t>(savepointIndex + 1),
+        context.savepoints.end());
     return DBStatus::OK;
 }
 
 DBStatus StorageEngine::releaseSavepoint(const std::string& name) {
-    if (!transactionContext().inTransaction) return DBStatus::INVALID_VALUE;
-    auto it = transactionContext().savepoints.find(name);
-    if (it == transactionContext().savepoints.end()) return DBStatus::INVALID_VALUE;
-    transactionContext().savepoints.erase(it);
+    auto& context = transactionContext();
+    if (!context.inTransaction) return DBStatus::INVALID_VALUE;
+    const auto reverseIt = std::find_if(
+        context.savepoints.rbegin(), context.savepoints.rend(),
+        [&](const TransactionContext::SavepointState& savepoint) {
+            return savepoint.name == name;
+        });
+    if (reverseIt == context.savepoints.rend()) {
+        return DBStatus::INVALID_VALUE;
+    }
+    const size_t savepointIndex = static_cast<size_t>(std::distance(
+        context.savepoints.begin(), reverseIt.base()) - 1);
+    // RELEASE destroys the named savepoint and every savepoint nested after
+    // it. With duplicate names, reverse lookup releases only the newest one.
+    context.savepoints.erase(
+        context.savepoints.begin() +
+            static_cast<std::ptrdiff_t>(savepointIndex),
+        context.savepoints.end());
     return DBStatus::OK;
 }
 

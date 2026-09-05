@@ -1830,13 +1830,20 @@ private:
         std::set<std::string> specializedIndexTables;
         std::vector<std::function<bool()>> ddlUndoActions;
         struct SavepointState {
+            std::string name;
             size_t txnLogSize = 0;
             size_t ddlUndoSize = 0;
             size_t deferredCheckSize = 0;
             size_t logicalChangeSize = 0;
             LockManager::LockCheckpoint lockCheckpoint;
         };
-        std::map<std::string, SavepointState> savepoints;
+        std::vector<SavepointState> savepoints;
+        bool containsSavepoint(const std::string& name) const {
+            for (const auto& savepoint : savepoints) {
+                if (savepoint.name == name) return true;
+            }
+            return false;
+        }
         std::vector<uint64_t> txnSubTxnIds;       // current transaction's subtransaction IDs
         std::optional<CatalogSnapshot> catalogSnapshot;
         std::set<std::string> txnReadRids;        // relation-qualified RIDs
