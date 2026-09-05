@@ -8,6 +8,7 @@
 #include "commands/TableManage.h"
 #include "parser/parser.h"
 #include "Session.h"
+#include "catalog/CatalogService.h"
 #include "catalog/type_registry.h"
 #include <cassert>
 #include <filesystem>
@@ -41,11 +42,22 @@ static void test_statistics_parser() {
     assert(alter->subCommands[0].name == "name");
     assert(alter->subCommands[0].statisticsTarget == 500);
 
+    auto reset = parser.parse(
+        "ALTER TABLE t ALTER COLUMN name SET STATISTICS -1");
+    assert(reset.success);
+    alter = dynamic_cast<dbms::AlterTableStmt*>(reset.stmt.get());
+    assert(alter && alter->subCommands[0].statisticsTarget == -1);
+    assert(!parser.parse(
+        "ALTER TABLE t ALTER COLUMN name SET STATISTICS -2").success);
+    assert(!parser.parse(
+        "ALTER TABLE t ALTER COLUMN name SET STATISTICS 10001").success);
+
     cleanupTestDb("parser_stats_tmp");
     std::cout << "[ALTER_STATS] parser OK" << std::endl;
 }
 
-// Verify statistics target persists through engine storage params.
+// Verify the DDL path validates columns and keeps private options and
+// pg_attribute in sync across catalog reloads.
 static void test_statistics_persistence() {
     std::string db = testDbPath("stats_persist");
     cleanup(db);
@@ -55,44 +67,49 @@ static void test_statistics_persistence() {
 
     assert(!ddl.executeSql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR(50), val INT)", s));
 
-    // Simulate main.cpp SET STATISTICS path (each SET replaces storage params)
-    {
-        std::map<std::string, std::string> params;
-        params["column_statistics:name"] = "500";
-        g_engine.setStorageParams(db, "t", params);
-    }
+    dbms::CatalogManager& initial = g_engine.catalogService().get(db);
+    const auto* relation = initial.resolveRelation("t", {"public"});
+    assert(relation != nullptr);
+    const dbms::Oid relationOid = relation->oid;
 
-    {
-        auto opts = g_engine.getStorageParams(db, "t");
-        assert(opts["column_statistics:name"] == "500");
-    }
+    assert(!ddl.executeSql(
+        "ALTER TABLE t ALTER COLUMN name SET STATISTICS 500", s));
+    auto opts = g_engine.getStorageParams(db, "t");
+    assert(opts["column_statistics:name"] == "500");
+    auto* attribute = initial.findAttribute(relationOid, "name");
+    assert(attribute != nullptr && attribute->attstattarget == 500);
 
-    // Overwrite: replace the previous value
-    {
-        std::map<std::string, std::string> params;
-        params["column_statistics:name"] = "200";
-        g_engine.setStorageParams(db, "t", params);
-    }
+    assert(!ddl.executeSql(
+        "ALTER TABLE t ALTER COLUMN val SET STATISTICS 1000", s));
+    opts = g_engine.getStorageParams(db, "t");
+    assert(opts["column_statistics:name"] == "500");
+    assert(opts["column_statistics:val"] == "1000");
+    attribute = initial.findAttribute(relationOid, "val");
+    assert(attribute != nullptr && attribute->attstattarget == 1000);
 
-    {
-        auto opts = g_engine.getStorageParams(db, "t");
-        assert(opts["column_statistics:name"] == "200");
-    }
+    // -1 removes the private override and restores pg_attribute's default.
+    assert(!ddl.executeSql(
+        "ALTER TABLE t ALTER COLUMN name SET STATISTICS -1", s));
+    opts = g_engine.getStorageParams(db, "t");
+    assert(opts.count("column_statistics:name") == 0);
+    assert(opts["column_statistics:val"] == "1000");
+    attribute = initial.findAttribute(relationOid, "name");
+    assert(attribute != nullptr && attribute->attstattarget == -1);
 
-    // Two columns together
-    {
-        std::map<std::string, std::string> params;
-        params["column_statistics:name"] = "200";
-        params["column_statistics:val"] = "1000";
-        g_engine.setStorageParams(db, "t", params);
-    }
+    // A misspelled column must fail without leaving an orphan option behind.
+    assert(ddl.executeSql(
+        "ALTER TABLE t ALTER COLUMN missing SET STATISTICS 42", s));
+    opts = g_engine.getStorageParams(db, "t");
+    assert(opts.count("column_statistics:missing") == 0);
 
-    {
-        auto opts = g_engine.getStorageParams(db, "t");
-        assert(opts["column_statistics:name"] == "200");
-        assert(opts["column_statistics:val"] == "1000");
-    }
+    g_engine.catalogService().evict(db);
+    dbms::CatalogManager& reloaded = g_engine.catalogService().get(db);
+    attribute = reloaded.findAttribute(relationOid, "name");
+    assert(attribute != nullptr && attribute->attstattarget == -1);
+    attribute = reloaded.findAttribute(relationOid, "val");
+    assert(attribute != nullptr && attribute->attstattarget == 1000);
 
+    g_engine.catalogService().evict(db);
     cleanup(db);
     std::cout << "[ALTER_STATS] persistence OK" << std::endl;
 }

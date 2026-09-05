@@ -462,6 +462,37 @@ static bool synchronizeTableRlsInCatalog(
     }
 }
 
+static bool updateColumnStatisticsInCatalog(
+    const std::string& dbname, const std::string& physicalTableName,
+    const std::string& columnName, int statisticsTarget) {
+    try {
+        CatalogManager& catalog = g_engine.catalogService().get(dbname);
+        const auto qualifiedName =
+            CatalogService::logicalName(physicalTableName);
+        const std::string schemaName = qualifiedName.schema.empty()
+            ? "public" : qualifiedName.schema;
+        const auto* relation = catalog.resolveRelation(
+            qualifiedName.name, {schemaName});
+        // Storage-only relations intentionally remain outside pg_catalog.
+        if (!relation) return true;
+        const Oid relationOid = relation->oid;
+        auto attributes = catalog.findAttributes(relationOid);
+        const auto attribute = std::find_if(
+            attributes.begin(), attributes.end(),
+            [&](const PgAttributeRow& row) {
+                return row.attname == columnName;
+            });
+        if (attribute == attributes.end()) return false;
+        attribute->attstattarget = statisticsTarget;
+        return catalog.replaceAttributes(relationOid, attributes) &&
+               catalog.persistAll();
+    } catch (const std::exception& error) {
+        std::cerr << "ALTER COLUMN SET STATISTICS catalog update failed: "
+                  << error.what() << std::endl;
+        return false;
+    }
+}
+
 // ----------------------------------------------------------------------------
 // Public entry points
 // ----------------------------------------------------------------------------
@@ -997,14 +1028,41 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 break;
             }
             case AlterTableStmt::Action::SetStatistics: {
-                if (sub.name.empty() || sub.statisticsTarget < 0 || sub.statisticsTarget > 10000) {
+                if (sub.name.empty() || sub.statisticsTarget < -1 ||
+                    sub.statisticsTarget > 10000) {
                     std::cout << "Invalid statistics target" << std::endl;
                     return true;
                 }
+                const TableSchema table =
+                    g_engine.getTableSchema(s.currentDB, tableName);
+                bool columnExists = false;
+                for (size_t column = 0; column < table.len; ++column) {
+                    if (table.cols[column].dataName == sub.name) {
+                        columnExists = true;
+                        break;
+                    }
+                }
+                if (!columnExists) {
+                    std::cout << "Column " << sub.name << " not found"
+                              << std::endl;
+                    return true;
+                }
                 std::map<std::string, std::string> params;
-                params["column_statistics:" + sub.name] = std::to_string(sub.statisticsTarget);
+                params["column_statistics:" + sub.name] =
+                    sub.statisticsTarget == -1
+                        ? std::string{}
+                        : std::to_string(sub.statisticsTarget);
                 status = g_engine.updateStorageParams(s.currentDB, tableName, params);
                 if (!alterStatusOk(status, "Statistics")) return true;
+                if (!tableIsTemporary &&
+                    !updateColumnStatisticsInCatalog(
+                        s.currentDB, tableName, sub.name,
+                        sub.statisticsTarget)) {
+                    std::cout
+                        << "ALTER COLUMN SET STATISTICS catalog update failed"
+                        << std::endl;
+                    return true;
+                }
                 break;
             }
             case AlterTableStmt::Action::SetLogged:
