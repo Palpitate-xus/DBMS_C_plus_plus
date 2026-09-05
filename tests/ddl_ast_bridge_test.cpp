@@ -833,6 +833,46 @@ static void test_alter_table_metadata_actions() {
     std::cout << "[DDL] ALTER TABLE metadata actions OK" << std::endl;
 }
 
+static void test_schema_replica_identity_updates_catalog() {
+    const std::string db = testDbPath("ddl_schema_replica_identity");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE SCHEMA replication", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE replication.events (id INT, payload TEXT)", s));
+    assert(!ddl.executeSql(
+        "ALTER TABLE replication.events REPLICA IDENTITY FULL", s));
+
+    auto params = g_engine.getStorageParams(db, "replication__events");
+    assert(params.at("replica_identity") == "full");
+    dbms::CatalogManager& initial = g_engine.catalogService().get(db);
+    const auto* relation = initial.resolveRelation(
+        "events", {"replication"});
+    assert(relation != nullptr && relation->relreplident == 'f');
+    const dbms::Oid relationOid = relation->oid;
+
+    g_engine.catalogService().evict(db);
+    dbms::CatalogManager& reloaded = g_engine.catalogService().get(db);
+    relation = reloaded.findClass(relationOid);
+    assert(relation != nullptr && relation->relreplident == 'f');
+
+    assert(!ddl.executeSql(
+        "ALTER TABLE replication.events REPLICA IDENTITY NOTHING", s));
+    relation = reloaded.findClass(relationOid);
+    assert(relation != nullptr && relation->relreplident == 'n');
+    params = g_engine.getStorageParams(db, "replication__events");
+    assert(params.at("replica_identity") == "nothing");
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[DDL] schema replica identity updates catalog OK"
+              << std::endl;
+}
+
 static void test_long_identifiers_round_trip() {
     std::string db = testDbPath("ddl_long_identifiers");
     cleanup(db);
@@ -974,6 +1014,7 @@ int main() {
     test_drop_database_evicts_catalog();
     test_comment_on();
     test_alter_table_metadata_actions();
+    test_schema_replica_identity_updates_catalog();
     test_long_identifiers_round_trip();
     test_database_storage_errors_are_not_success();
     test_domain_storage_errors_are_not_success();

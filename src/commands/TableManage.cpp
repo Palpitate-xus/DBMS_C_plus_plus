@@ -15254,7 +15254,11 @@ DBStatus StorageEngine::alterTableSetReplicaIdentity(
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
     try {
         auto& catalog = catalogService().get(dbname);
-        const auto* relation = catalog.resolveRelation(tablename, {"public"});
+        const auto qualifiedName = CatalogService::logicalName(tablename);
+        const std::string schemaName = qualifiedName.schema.empty()
+            ? "public" : qualifiedName.schema;
+        const auto* relation = catalog.resolveRelation(
+            qualifiedName.name, {schemaName});
         if (relation) {
             auto updated = *relation;
             updated.relreplident = relreplident;
