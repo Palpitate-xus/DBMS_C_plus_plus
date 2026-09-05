@@ -16940,13 +16940,27 @@ DBStatus StorageEngine::renameSequence(const std::string& dbname,
 
 DBStatus StorageEngine::dropSequence(const std::string& dbname,
                                       const std::string& seqname) {
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!validSequenceName(seqname)) {
         return DBStatus::INVALID_ARGUMENT;
     }
     auto path = sequencePath(dbname, seqname);
     std::lock_guard<std::mutex> lock(g_sequenceMutex);
-    if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
-    std::filesystem::remove(path);
+    std::error_code ec;
+    const auto fileStatus = std::filesystem::symlink_status(path, ec);
+    if (ec) return DBStatus::IO_ERROR;
+    if (!std::filesystem::exists(fileStatus)) return DBStatus::TABLE_NOT_FOUND;
+    if (!std::filesystem::is_regular_file(fileStatus)) {
+        return DBStatus::INVALID_VALUE;
+    }
+    if (!std::filesystem::remove(path, ec) || ec) return DBStatus::IO_ERROR;
+
+    const int dirFd = ::open(path.parent_path().c_str(),
+                             O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dirFd < 0) return DBStatus::IO_ERROR;
+    const bool durable = ::fsync(dirFd) == 0;
+    const bool closed = ::close(dirFd) == 0;
+    if (!durable || !closed) return DBStatus::IO_ERROR;
     return DBStatus::OK;
 }
 

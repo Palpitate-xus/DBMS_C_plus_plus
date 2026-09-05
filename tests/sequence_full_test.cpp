@@ -470,6 +470,119 @@ static void test_schema_qualified_sequence_alter() {
               << std::endl;
 }
 
+static void test_schema_qualified_sequence_drop() {
+    const std::string db = testDbPath("seq_schema_drop");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    dbms::SQLParser parser;
+    const auto parsed = parser.parse(
+        "DROP SEQUENCE IF EXISTS app.one, public.two CASCADE");
+    assert(parsed.success && parsed.stmt);
+    const auto* drop = dynamic_cast<const dbms::DropStmt*>(
+        parsed.stmt.get());
+    assert(drop && drop->ifExists && drop->cascade);
+    assert(drop->objectNames ==
+           std::vector<std::string>({"app.one", "public.two"}));
+    assert(!parser.parse("DROP SEQUENCE app.one public.two").success);
+    assert(!parser.parse("DROP SEQUENCE app.one,").success);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE SCHEMA app", s));
+    assert(!ddl.executeSql("CREATE SEQUENCE app.one START 10", s));
+    assert(!ddl.executeSql("CREATE SEQUENCE app.two START 20", s));
+    assert(!ddl.executeSql("CREATE SEQUENCE one START 100", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE app.uses_one "
+        "(id INT DEFAULT nextval('app.one'))", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE public_uses_one "
+        "(id INT DEFAULT nextval('one'))", s));
+    assert(!ddl.executeSql("CREATE TABLE app.not_sequence (id INT)", s));
+
+    s.sequenceLastValues["app.one"] = 10;
+    s.sequenceLastValues["one"] = 100;
+    assert(ddl.executeSql("DROP SEQUENCE app.one RESTRICT", s));
+    assert(g_engine.sequenceExists(db, "app.one"));
+    assert(g_engine.sequenceExists(db, "one"));
+    assert(ddl.executeSql(
+        "DROP SEQUENCE app.two, app.absent", s));
+    assert(g_engine.sequenceExists(db, "app.two"));
+    assert(ddl.executeSql(
+        "DROP SEQUENCE IF EXISTS app.not_sequence", s));
+    assert(g_engine.tableExists(db, "app__not_sequence"));
+
+    assert(!ddl.executeSql(
+        "DROP SEQUENCE IF EXISTS app.one, app.absent, app.two, public.one CASCADE",
+        s));
+    assert(!g_engine.sequenceExists(db, "app.one"));
+    assert(!g_engine.sequenceExists(db, "app.two"));
+    assert(!g_engine.sequenceExists(db, "one"));
+    assert(s.sequenceLastValues.count("app.one") == 0);
+    assert(s.sequenceLastValues.count("one") == 0);
+    assert(g_engine.getTableSchema(
+               db, "app__uses_one").cols[0].defaultValue.empty());
+    assert(g_engine.getTableSchema(
+               db, "public_uses_one").cols[0].defaultValue.empty());
+
+    {
+        dbms::CatalogManager durable(
+            (fs::path(g_engine.dbPath(db)) / "pg_catalog").string());
+        const auto* durableApp = durable.findNamespaceByName("app");
+        const auto* durablePublic = durable.findNamespaceByName("public");
+        assert(durableApp && durablePublic);
+        assert(durable.findClassByName("one", durableApp->oid) == nullptr);
+        assert(durable.findClassByName("two", durableApp->oid) == nullptr);
+        assert(durable.findClassByName("one", durablePublic->oid) == nullptr);
+    }
+
+    assert(!ddl.executeSql("CREATE TABLE app.owner (id INT)", s));
+    assert(!ddl.executeSql("CREATE SEQUENCE app.owned", s));
+    assert(!ddl.executeSql(
+        "ALTER SEQUENCE app.owned OWNED BY app.owner.id", s));
+    assert(!ddl.executeSql("DROP TABLE app.owner CASCADE", s));
+    assert(!g_engine.sequenceExists(db, "app.owned"));
+    {
+        dbms::CatalogManager durable(
+            (fs::path(g_engine.dbPath(db)) / "pg_catalog").string());
+        const auto* durableApp = durable.findNamespaceByName("app");
+        assert(durableApp);
+        assert(durable.findClassByName(
+                   "owned", durableApp->oid) == nullptr);
+    }
+
+    dbms::SequenceInfo orphanInfo;
+    assert(g_engine.createSequence(
+               db, "app.orphan", orphanInfo) == dbms::DBStatus::OK);
+    assert(ddl.executeSql(
+        "DROP SEQUENCE IF EXISTS app.orphan", s));
+    assert(g_engine.sequenceExists(db, "app.orphan"));
+
+    assert(!ddl.executeSql("CREATE SEQUENCE app.catalog_only", s));
+    assert(g_engine.dropSequence(
+               db, "app.catalog_only") == dbms::DBStatus::OK);
+    assert(ddl.executeSql(
+        "DROP SEQUENCE IF EXISTS app.catalog_only", s));
+    dbms::CatalogManager& catalog =
+        g_engine.catalogService().get(db);
+    const auto* appNamespace = catalog.findNamespaceByName("app");
+    assert(appNamespace);
+    assert(catalog.findClassByName(
+               "catalog_only", appNamespace->oid) != nullptr);
+
+    const fs::path nonSequencePath = fs::path(db) / "app.not_a_file.seq";
+    fs::create_directory(nonSequencePath);
+    assert(g_engine.dropSequence(db, "app.not_a_file") ==
+           dbms::DBStatus::INVALID_VALUE);
+    assert(fs::is_directory(nonSequencePath));
+
+    cleanup(db);
+    std::cout << "[SEQUENCE] schema-qualified/multi-target drop OK"
+              << std::endl;
+}
+
 static void test_sequence_integer_boundaries() {
     std::string db = testDbPath("seq_boundaries");
     cleanup(db);
@@ -514,6 +627,7 @@ int main() {
     test_sequence_numeric_input_fails_closed();
     test_schema_qualified_sequence_create();
     test_schema_qualified_sequence_alter();
+    test_schema_qualified_sequence_drop();
     test_sequence_integer_boundaries();
     std::cout << "[SEQUENCE_FULL] all passed" << std::endl;
     return 0;

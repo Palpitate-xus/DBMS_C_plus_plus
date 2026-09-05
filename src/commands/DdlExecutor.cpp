@@ -4297,6 +4297,22 @@ static bool catalogViewStorageName(const CatalogManager& catalog,
     return true;
 }
 
+static bool catalogSequenceStorageName(const CatalogManager& catalog,
+                                       const PgClassRow& relation,
+                                       std::string& storageName,
+                                       std::string& error) {
+    const PgNamespaceRow* relationNamespace =
+        catalog.findNamespace(relation.relnamespace);
+    if (!relationNamespace) {
+        error = "sequence namespace is missing";
+        return false;
+    }
+    storageName = relationNamespace->nspname == "public"
+        ? relation.relname
+        : relationNamespace->nspname + "." + relation.relname;
+    return true;
+}
+
 // Catalog CASCADE plans are dependency-complete, but catalog deletion alone
 // is not enough: every file-backed dependent relation must be removed before
 // the catalog plan is published.  Build the physical worklist first so an
@@ -4330,7 +4346,13 @@ static bool buildPhysicalCascadeActions(
             continue;
         }
         if (rel.relkind == 'S') {
-            actions.push_back({PhysicalCascadeAction::Kind::Sequence, rel.relname, "", "", ""});
+            std::string sequenceName;
+            if (!catalogSequenceStorageName(
+                    catalog, rel, sequenceName, error)) {
+                return false;
+            }
+            actions.push_back({PhysicalCascadeAction::Kind::Sequence,
+                               sequenceName, "", "", ""});
             continue;
         }
         if (rel.relkind == 'v' || rel.relkind == 'm') {
@@ -5550,52 +5572,201 @@ bool DdlExecutor::executeDropSequence(const DropStmt* stmt, Session& s) {
         std::cout << "SQL syntax error: DROP SEQUENCE name" << std::endl;
         return true;
     }
-    std::string seqname = stmt->objectNames.front();
 
-    // Check for columns depending on this sequence via DEFAULT nextval.
-    auto defaultDeps = findDefaultNextvalDeps(s.currentDB, seqname);
-    if (!defaultDeps.empty()) {
-        if (!stmt->cascade) {
-            std::cout << "ERROR: cannot drop sequence " << seqname
-                     << " because other objects depend on it" << std::endl;
+    struct SequenceDropTarget {
+        std::string requestedName;
+        std::string schema;
+        std::string relationName;
+        std::string storageName;
+        Oid oid = INVALID_OID;
+        std::vector<std::pair<std::string, std::string>> defaultDependencies;
+        CatalogManager::DropPlan catalogPlan;
+    };
+
+    CatalogManager* catalog = nullptr;
+    std::vector<SequenceDropTarget> targets;
+    std::set<std::string> targetStorageNames;
+    try {
+        catalog = &g_engine.catalogService().get(s.currentDB);
+        for (const auto& requestedName : stmt->objectNames) {
+            CatalogManager::QualifiedName qualifiedName;
+            if (!CatalogManager::parseQualifiedName(
+                    requestedName, qualifiedName) ||
+                qualifiedName.name.empty() ||
+                qualifiedName.schema.find('.') != std::string::npos) {
+                std::cout << "DROP SEQUENCE has an invalid name: "
+                          << requestedName << std::endl;
+                return true;
+            }
+            const std::string schema = qualifiedName.schema.empty()
+                ? "public" : qualifiedName.schema;
+            const std::string storageName = schema == "public"
+                ? qualifiedName.name : schema + "." + qualifiedName.name;
+            if (!targetStorageNames.insert(storageName).second) continue;
+
+            const bool physicalExists =
+                g_engine.sequenceExists(s.currentDB, storageName);
+            const auto* sequenceNamespace =
+                catalog->findNamespaceByName(schema);
+            const PgClassRow* sequence = sequenceNamespace
+                ? catalog->findClassByName(
+                      qualifiedName.name, sequenceNamespace->oid)
+                : nullptr;
+            if (!sequence) {
+                if (physicalExists) {
+                    std::cout << "DROP SEQUENCE failed: sequence catalog entry is missing for \""
+                              << requestedName << "\"" << std::endl;
+                    return true;
+                }
+                if (stmt->ifExists) {
+                    std::cout << "NOTICE: sequence \"" << requestedName
+                              << "\" does not exist, skipping" << std::endl;
+                    continue;
+                }
+                std::cout << "ERROR: sequence \"" << requestedName
+                          << "\" does not exist" << std::endl;
+                return true;
+            }
+            if (sequence->relkind != 'S') {
+                std::cout << "ERROR: relation \"" << requestedName
+                          << "\" is not a sequence" << std::endl;
+                return true;
+            }
+            if (!physicalExists) {
+                std::cout << "DROP SEQUENCE failed: physical sequence is missing for \""
+                          << requestedName << "\"" << std::endl;
+                return true;
+            }
+
+            SequenceDropTarget target;
+            target.requestedName = requestedName;
+            target.schema = schema;
+            target.relationName = qualifiedName.name;
+            target.storageName = storageName;
+            target.oid = sequence->oid;
+            target.defaultDependencies =
+                findDefaultNextvalDeps(s.currentDB, storageName);
+            if (!stmt->cascade && !target.defaultDependencies.empty()) {
+                std::cout << "ERROR: cannot drop sequence " << requestedName
+                          << " because other objects depend on it"
+                          << std::endl;
+                return true;
+            }
+            target.catalogPlan = catalog->planDrop(
+                PgClassOid_Class, target.oid,
+                stmt->cascade ? CatalogManager::DropBehavior::Cascade
+                              : CatalogManager::DropBehavior::Restrict);
+            if (!target.catalogPlan.ok()) {
+                std::cout << "ERROR: " << target.catalogPlan.error
+                          << std::endl;
+                return true;
+            }
+            targets.push_back(std::move(target));
+        }
+    } catch (const std::exception& error) {
+        std::cout << "DROP SEQUENCE catalog preflight failed: "
+                  << error.what() << std::endl;
+        return true;
+    }
+
+    if (targets.empty()) {
+        if (!txn.commit()) return true;
+        std::cout << "DROP SEQUENCE succeeded" << std::endl;
+        return false;
+    }
+
+    CatalogManager::DropPlan combinedCatalogPlan;
+    std::set<std::pair<Oid, Oid>> plannedCatalogObjects;
+    std::vector<PhysicalCascadeAction> physicalCascadeActions;
+    for (const auto& target : targets) {
+        for (const auto& object : target.catalogPlan.objectsToDrop) {
+            if (plannedCatalogObjects.insert(object).second) {
+                combinedCatalogPlan.objectsToDrop.push_back(object);
+            }
+        }
+        if (!stmt->cascade) continue;
+        std::vector<PhysicalCascadeAction> targetActions;
+        std::string error;
+        if (!buildPhysicalCascadeActions(
+                *catalog, g_engine, s.currentDB, target.oid,
+                target.catalogPlan, targetActions, error)) {
+            std::cout << "DROP SEQUENCE CASCADE planning failed: "
+                      << error << std::endl;
             return true;
         }
-        txn.markSnapshotDirty();
-        for (const auto& dep : defaultDeps) {
-            DBStatus clearRes = g_engine.alterTableDropDefault(s.currentDB, dep.first, dep.second);
-            if (clearRes != DBStatus::OK) {
-                std::cout << "ERROR: failed to clear default on " << dep.first << "." << dep.second << std::endl;
-                return true;
+        for (auto& action : targetActions) {
+            if (action.kind == PhysicalCascadeAction::Kind::Sequence &&
+                targetStorageNames.count(action.name) != 0) {
+                continue;
+            }
+            const auto duplicate = std::find_if(
+                physicalCascadeActions.begin(),
+                physicalCascadeActions.end(),
+                [&](const PhysicalCascadeAction& existing) {
+                    return existing.kind == action.kind &&
+                           existing.name == action.name &&
+                           existing.tableName == action.tableName &&
+                           existing.accessMethod == action.accessMethod &&
+                           existing.key == action.key;
+                });
+            if (duplicate == physicalCascadeActions.end()) {
+                physicalCascadeActions.push_back(std::move(action));
             }
         }
     }
 
     txn.markSnapshotDirty();
-    txn.recordDrop(DdlObjectKind::Sequence, seqname);
-
-    try {
-        dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
-        const auto* seq = cat.resolveRelation(seqname, {"public"});
-        if (seq) {
-            auto behavior = stmt->cascade ? CatalogManager::DropBehavior::Cascade
-                                          : CatalogManager::DropBehavior::Restrict;
-            std::string err;
-            bool ok = cat.dropObject(PgClassOid_Class, seq->oid, behavior, &err);
-            if (!ok) {
-                std::cout << "ERROR: " << err << std::endl;
+    std::set<std::pair<std::string, std::string>> clearedDefaults;
+    for (const auto& target : targets) {
+        for (const auto& dependency : target.defaultDependencies) {
+            if (!clearedDefaults.insert(dependency).second) continue;
+            if (g_engine.alterTableDropDefault(
+                    s.currentDB, dependency.first,
+                    dependency.second) != DBStatus::OK) {
+                std::cout << "ERROR: failed to clear default on "
+                          << dependency.first << "." << dependency.second
+                          << std::endl;
                 return true;
             }
         }
-    } catch (const std::exception& e) {
-        std::cerr << "WARNING: catalog sequence drop failed: " << e.what() << std::endl;
+    }
+    for (const auto& action : physicalCascadeActions) {
+        if (!dropPhysicalCascadeAction(
+                g_engine, s.currentDB, action)) {
+            std::cout << "DROP SEQUENCE CASCADE physical cleanup failed for "
+                      << action.name << std::endl;
+            return true;
+        }
+    }
+    for (const auto& target : targets) {
+        if (g_engine.dropSequence(
+                s.currentDB, target.storageName) != DBStatus::OK) {
+            std::cout << "DROP SEQUENCE failed for "
+                      << target.requestedName << std::endl;
+            return true;
+        }
+        txn.recordDrop(DdlObjectKind::Sequence, target.storageName);
     }
 
-    DBStatus res = g_engine.dropSequence(s.currentDB, seqname);
-    if (res != DBStatus::OK) {
-        std::cout << "DROP SEQUENCE failed" << std::endl;
+    std::string catalogError;
+    if (!catalog->applyDropPlan(combinedCatalogPlan, &catalogError)) {
+        std::cout << "DROP SEQUENCE catalog cleanup failed: "
+                  << catalogError << std::endl;
+        return true;
+    }
+    if (!catalog->persistAll()) {
+        std::cout << "DROP SEQUENCE catalog persistence failed"
+                  << std::endl;
         return true;
     }
     if (!txn.commit()) return true;
+
+    for (const auto& target : targets) {
+        s.sequenceLastValues.erase(target.storageName);
+        if (target.schema == "public") {
+            s.sequenceLastValues.erase("public." + target.relationName);
+        }
+    }
     std::cout << "DROP SEQUENCE succeeded" << std::endl;
     return false;
 }
