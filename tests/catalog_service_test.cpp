@@ -104,7 +104,30 @@ static void test_checkpoint_persists_catalog() {
     cls.relrewrite = 50008;
     cls.relfrozenxid = 1234;
     cls.relminmxid = 5678;
-    cat.createClass(cls);
+    const dbms::Oid classOid = cat.createClass(cls);
+
+    dbms::PgAttributeRow attribute;
+    attribute.attrelid = classOid;
+    attribute.attname = "complete_column";
+    attribute.atttypid = 23;
+    attribute.attstattarget = 321;
+    attribute.attlen = 8;
+    attribute.attnum = 1;
+    attribute.attndims = 2;
+    attribute.attcacheoff = 64;
+    attribute.atttypmod = 42;
+    attribute.attbyval = true;
+    attribute.attstorage = 'm';
+    attribute.attalign = 'd';
+    attribute.attnotnull = true;
+    attribute.atthasdef = true;
+    attribute.attidentity = 'a';
+    attribute.attgenerated = 'v';
+    attribute.attisdropped = true;
+    attribute.attislocal = false;
+    attribute.attinhcount = 3;
+    attribute.attcollation = 50009;
+    cat.addAttribute(attribute);
 
     // Checkpoint should persist the catalog (among other things).
     engine.checkpoint(db);
@@ -146,6 +169,27 @@ static void test_checkpoint_persists_catalog() {
     assert(cls2->relrewrite == 50008);
     assert(cls2->relfrozenxid == 1234);
     assert(cls2->relminmxid == 5678);
+    const auto* attribute2 =
+        cat2.findAttribute(classOid, "complete_column");
+    assert(attribute2 != nullptr);
+    assert(attribute2->atttypid == 23);
+    assert(attribute2->attstattarget == 321);
+    assert(attribute2->attlen == 8);
+    assert(attribute2->attnum == 1);
+    assert(attribute2->attndims == 2);
+    assert(attribute2->attcacheoff == 64);
+    assert(attribute2->atttypmod == 42);
+    assert(attribute2->attbyval);
+    assert(attribute2->attstorage == 'm');
+    assert(attribute2->attalign == 'd');
+    assert(attribute2->attnotnull);
+    assert(attribute2->atthasdef);
+    assert(attribute2->attidentity == 'a');
+    assert(attribute2->attgenerated == 'v');
+    assert(attribute2->attisdropped);
+    assert(!attribute2->attislocal);
+    assert(attribute2->attinhcount == 3);
+    assert(attribute2->attcollation == 50009);
 
     cleanup(db);
     std::cout << "[CATALOG-SVC] checkpoint persists catalog OK" << std::endl;
@@ -163,6 +207,13 @@ static void test_legacy_pg_class_prefix_still_loads() {
         out << "71001,\"legacy_relation\",11,0,12,0,0,r,2,t,u,f\n";
     }
     {
+        std::ofstream out(
+            std::filesystem::path(path) / "pg_attribute.cat",
+            std::ios::trunc);
+        assert(out);
+        out << "71001,\"legacy_column\",23,1,4,-1,t,f,p,i\n";
+    }
+    {
         dbms::CatalogManager catalog(path);
         const auto* relation = catalog.findClass(71001);
         assert(relation != nullptr);
@@ -173,6 +224,22 @@ static void test_legacy_pg_class_prefix_still_loads() {
         assert(!relation->relrowsecurity);
         assert(relation->relispopulated);
         assert(relation->relreplident == 'd');
+        const auto* attribute =
+            catalog.findAttribute(71001, "legacy_column");
+        assert(attribute != nullptr);
+        assert(attribute->attnum == 1);
+        assert(attribute->attlen == 4);
+        assert(attribute->attnotnull);
+        assert(attribute->attstattarget == -1);
+        assert(attribute->attndims == 0);
+        assert(attribute->attcacheoff == -1);
+        assert(!attribute->attbyval);
+        assert(attribute->attidentity == '\0');
+        assert(attribute->attgenerated == '\0');
+        assert(!attribute->attisdropped);
+        assert(attribute->attislocal);
+        assert(attribute->attinhcount == 0);
+        assert(attribute->attcollation == dbms::INVALID_OID);
     }
     cleanup(path);
     std::cout << "[CATALOG-SVC] legacy pg_class prefix loads OK"

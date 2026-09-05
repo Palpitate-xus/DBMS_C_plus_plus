@@ -1303,6 +1303,22 @@ bool CatalogManager::persistAll() {
             out << (r.atthasdef ? 't' : 'f') << ',';
             out << r.attstorage << ',';
             out << r.attalign;
+            // Keep the original prefix readable by older catalogs and append
+            // every PgAttributeRow field that was historically omitted.
+            // Character flags are encoded numerically because their unset
+            // representation is NUL, which is unsafe in the text format.
+            out << ',' << r.attstattarget;
+            out << ',' << r.attndims;
+            out << ',' << r.attcacheoff;
+            out << ',' << (r.attbyval ? 't' : 'f');
+            out << ',' << static_cast<unsigned int>(
+                static_cast<unsigned char>(r.attidentity));
+            out << ',' << static_cast<unsigned int>(
+                static_cast<unsigned char>(r.attgenerated));
+            out << ',' << (r.attisdropped ? 't' : 'f');
+            out << ',' << (r.attislocal ? 't' : 'f');
+            out << ',' << r.attinhcount;
+            out << ',' << r.attcollation;
             out << '\n';
         }
     });
@@ -1508,6 +1524,42 @@ void CatalogManager::loadAll() {
             iss >> flag; r.atthasdef = (flag == 't'); iss.ignore(1);
             iss >> r.attstorage; iss.ignore(1);
             iss >> r.attalign;
+
+            // Attribute rows written before the extension end at attalign.
+            // Preserve the in-struct defaults for those rows.  A present tail
+            // must be complete so a torn catalog record cannot be accepted as
+            // a subtly altered column definition.
+            if (iss.peek() == ',') {
+                iss.ignore(1);
+                char byValue = 'f';
+                unsigned int identity = 0;
+                unsigned int generated = 0;
+                char isDropped = 'f';
+                char isLocal = 't';
+                if (!readCatalogCsvField(iss, r.attstattarget) ||
+                    !readCatalogCsvField(iss, r.attndims) ||
+                    !readCatalogCsvField(iss, r.attcacheoff) ||
+                    !readCatalogCsvField(iss, byValue) ||
+                    !readCatalogCsvField(iss, identity) ||
+                    !readCatalogCsvField(iss, generated) ||
+                    !readCatalogCsvField(iss, isDropped) ||
+                    !readCatalogCsvField(iss, isLocal) ||
+                    !readCatalogCsvField(iss, r.attinhcount) ||
+                    !readCatalogCsvLastField(iss, r.attcollation) ||
+                    (byValue != 't' && byValue != 'f') ||
+                    (isDropped != 't' && isDropped != 'f') ||
+                    (isLocal != 't' && isLocal != 'f') ||
+                    (identity != 0 && identity != 'a' && identity != 'd') ||
+                    (generated != 0 && generated != 's' &&
+                     generated != 'v')) {
+                    continue;
+                }
+                r.attbyval = byValue == 't';
+                r.attidentity = static_cast<char>(identity);
+                r.attgenerated = static_cast<char>(generated);
+                r.attisdropped = isDropped == 't';
+                r.attislocal = isLocal == 't';
+            }
             attributes_.push_back(r);
         }
     }
