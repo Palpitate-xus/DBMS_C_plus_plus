@@ -81,6 +81,9 @@ static void test_interval_ops() {
     auto e = eval("'2 hours'::interval / 2");
     assert(e.ok && e.value == "01:00:00");
 
+    auto divideByZero = eval("'2 hours'::interval / 0");
+    assert(divideByZero.ok && divideByZero.isNull);
+
     std::cout << "[IV] interval ± interval, * n, / n OK" << std::endl;
 }
 

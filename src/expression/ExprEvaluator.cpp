@@ -1048,7 +1048,9 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
                 return ExprValue("interval", "", true);
             }
             if (!iv.ok) return ExprValue("interval", "", true);
-            double scale = (op == "*") ? k : (k == 0 ? 0 : 1.0 / k);
+            if (op == "/" && k == 0)
+                return ExprValue("interval", "", true);
+            double scale = (op == "*") ? k : 1.0 / k;
             return ExprValue("interval",
                              intervalToText(static_cast<long long>(iv.months * scale),
                                             static_cast<long long>(iv.days * scale),
