@@ -1783,11 +1783,85 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                         if (!actual || actual->dataType != expected.dataType ||
                             actual->dsize != expected.dsize ||
                             actual->isVariableLength != expected.isVariableLength ||
-                            actual->isArray != expected.isArray) {
+                            actual->isUnsigned != expected.isUnsigned ||
+                            actual->isArray != expected.isArray ||
+                            actual->collation != expected.collation ||
+                            actual->enumValues != expected.enumValues ||
+                            actual->domainName != expected.domainName) {
                             std::cout << "Child table has no compatible inherited column "
                                       << expected.dataName << std::endl;
                             return true;
                         }
+                        if (!expected.isNull && actual->isNull) {
+                            std::cout << "Child column " << expected.dataName
+                                      << " must be NOT NULL to inherit"
+                                      << std::endl;
+                            return true;
+                        }
+                        const bool parentGenerated =
+                            !expected.generatedExpr.empty();
+                        const bool childGenerated =
+                            !actual->generatedExpr.empty();
+                        if (parentGenerated != childGenerated ||
+                            (parentGenerated &&
+                             expected.generatedKind != actual->generatedKind)) {
+                            std::cout << "Child column " << expected.dataName
+                                      << " has incompatible generation status"
+                                      << std::endl;
+                            return true;
+                        }
+                    }
+
+                    struct InheritableCheck {
+                        std::string name;
+                        std::string expression;
+                        bool deferrable = false;
+                        bool initiallyDeferred = false;
+                    };
+                    const auto collectChecks = [](const TableSchema& table) {
+                        std::vector<InheritableCheck> checks;
+                        for (size_t columnIndex = 0;
+                             columnIndex < table.len; ++columnIndex) {
+                            const Column& column = table.cols[columnIndex];
+                            if (column.checkExpr.empty()) continue;
+                            checks.push_back({
+                                column.checkConstraintName,
+                                column.checkExpr,
+                                column.deferrable,
+                                column.initiallyDeferred});
+                        }
+                        for (const auto& check :
+                             table.additionalCheckConstraints) {
+                            if (check.expression.empty()) continue;
+                            checks.push_back({check.name, check.expression,
+                                              check.deferrable,
+                                              check.initiallyDeferred});
+                        }
+                        return checks;
+                    };
+                    auto childChecks = collectChecks(childSchema);
+                    for (const auto& required :
+                         collectChecks(parentSchema)) {
+                        const auto matching = std::find_if(
+                            childChecks.begin(), childChecks.end(),
+                            [&](const InheritableCheck& candidate) {
+                                return candidate.name == required.name &&
+                                       candidate.expression ==
+                                           required.expression &&
+                                       candidate.deferrable ==
+                                           required.deferrable &&
+                                       candidate.initiallyDeferred ==
+                                           required.initiallyDeferred;
+                            });
+                        if (matching == childChecks.end()) {
+                            std::cout << "Child table is missing matching CHECK constraint";
+                            if (!required.name.empty()) {
+                                std::cout << " " << required.name;
+                            }
+                            std::cout << std::endl;
+                            return true;
+                        }
+                        childChecks.erase(matching);
                     }
 
                     // Adding parent -> child is cyclic if parent is already

@@ -144,6 +144,60 @@ static void test_table_rename_updates_inheritance_graph() {
     std::cout << "[INHERIT] table rename preserves graph OK" << std::endl;
 }
 
+static void test_inherit_requires_parent_constraints() {
+    const std::string db = testDbPath("inh_constraints");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE constrained_parent (id INT NOT NULL, amount INT, "
+        "CONSTRAINT amount_positive CHECK (amount > 0))", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE nullable_child (id INT, amount INT, "
+        "CONSTRAINT amount_positive CHECK (amount > 0))", s));
+    assert(ddl.executeSql(
+        "ALTER TABLE nullable_child INHERIT constrained_parent", s));
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE unchecked_child (id INT NOT NULL, amount INT)", s));
+    assert(ddl.executeSql(
+        "ALTER TABLE unchecked_child INHERIT constrained_parent", s));
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE wrong_check_child (id INT NOT NULL, amount INT, "
+        "CONSTRAINT amount_positive CHECK (amount >= 0))", s));
+    assert(ddl.executeSql(
+        "ALTER TABLE wrong_check_child INHERIT constrained_parent", s));
+    assert(g_engine.getInheritedChildren(db, "constrained_parent").empty());
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE matching_child (id INT NOT NULL, amount INT, "
+        "CONSTRAINT amount_positive CHECK (amount > 0))", s));
+    assert(!ddl.executeSql(
+        "ALTER TABLE matching_child INHERIT constrained_parent", s));
+    assert(g_engine.getInheritedChildren(db, "constrained_parent") ==
+           std::vector<std::string>{"matching_child"});
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE generated_parent (base INT, derived INT "
+        "GENERATED ALWAYS AS (base + 1) STORED)", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE plain_generated_child (base INT, derived INT)", s));
+    assert(ddl.executeSql(
+        "ALTER TABLE plain_generated_child INHERIT generated_parent", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE generated_child (base INT, derived INT "
+        "GENERATED ALWAYS AS (base + 2) STORED)", s));
+    assert(!ddl.executeSql(
+        "ALTER TABLE generated_child INHERIT generated_parent", s));
+
+    cleanup(db);
+    std::cout << "[INHERIT] parent constraints required OK" << std::endl;
+}
+
 static void test_drop_removes_inheritance_edges() {
     const std::string db = testDbPath("inh_drop");
     cleanup(db);
@@ -267,6 +321,7 @@ int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_inherit_parser();
     test_inherit_execution();
+    test_inherit_requires_parent_constraints();
     test_table_rename_updates_inheritance_graph();
     test_drop_removes_inheritance_edges();
     test_create_inherits_metadata_failure_is_atomic();
