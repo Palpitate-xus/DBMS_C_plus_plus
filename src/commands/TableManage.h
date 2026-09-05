@@ -1510,6 +1510,10 @@ private:
         int64_t mtimeSec = -1;
         int64_t mtimeNsec = -1;
         uintmax_t size = 0;
+        bool collationMetadataExists = false;
+        int64_t collationMtimeSec = -1;
+        int64_t collationMtimeNsec = -1;
+        uintmax_t collationSize = 0;
     };
     mutable std::map<std::string, CachedSchema> schemaCache_;
     std::shared_ptr<const TableSchema> getCachedSchema(const std::string& dbname,

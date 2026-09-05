@@ -40,6 +40,12 @@ struct Column {
     std::string generatedExpr;      // GENERATED ALWAYS AS (expr)
     char generatedKind = 0;         // 0=none, 's'=STORED, 'v'=VIRTUAL
     std::string collation;          // COLLATE (e.g. "C", "POSIX", "en_US.utf8")
+    // Runtime-only resolution of `collation`.  These fields are deliberately
+    // not serialized: the schema retains the referenced collation name while
+    // each load resolves its current database-local definition.
+    std::string resolvedCollation;
+    bool resolvedCollationUsesLocale = false;
+    bool resolvedCollationIsBinary = true;
     std::vector<std::string> enumValues;  // ENUM('a','b','c') values
     std::string domainName;         // If type is a DOMAIN, the domain name
 

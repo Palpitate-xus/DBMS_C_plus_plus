@@ -32,11 +32,17 @@ int caseInsensitiveCompare(const std::string& a, const std::string& b) {
     return 0;
 }
 
-int localeCompare(const std::string& a, const std::string& b, const std::string& locName) {
+int localeCompareOrThrow(const std::string& a, const std::string& b,
+                         const std::string& locName) {
+    const std::locale loc(locName.empty() ? "C" : locName.c_str());
+    const std::collate<char>& coll = std::use_facet<std::collate<char>>(loc);
+    return coll.compare(a.data(), a.data() + a.size(), b.data(), b.data() + b.size());
+}
+
+int localeCompare(const std::string& a, const std::string& b,
+                  const std::string& locName) {
     try {
-        const std::locale loc(locName.empty() ? "C" : locName.c_str());
-        const std::collate<char>& coll = std::use_facet<std::collate<char>>(loc);
-        return coll.compare(a.data(), a.data() + a.size(), b.data(), b.data() + b.size());
+        return localeCompareOrThrow(a, b, locName);
     } catch (...) {
         // Locale unavailable: fall back to binary comparison.
         return a.compare(b);
@@ -73,6 +79,15 @@ bool isBinary(const std::string& name) {
     return isBinaryCollation(normalizeName(name));
 }
 
+bool isLocaleAvailable(const std::string& name) {
+    try {
+        (void)std::locale(name.empty() ? "C" : name.c_str());
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 int compare(const std::string& a, const std::string& b, const std::string& collation) {
     std::string coll = normalizeName(collation);
     if (isBinaryCollation(coll)) {
@@ -93,6 +108,11 @@ int compare(const std::string& a, const std::string& b, const std::string& colla
     if (a < b) return -1;
     if (a > b) return 1;
     return 0;
+}
+
+int compareLocale(const std::string& a, const std::string& b,
+                  const std::string& localeName) {
+    return localeCompareOrThrow(a, b, localeName);
 }
 
 std::vector<std::string> listBuiltins() {

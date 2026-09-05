@@ -2815,6 +2815,146 @@ std::string serializeStoredCollations(
     return serialized.str();
 }
 
+struct ResolvedCollation {
+    std::string comparisonName;
+    bool usesSystemLocale = false;
+    bool isBinary = true;
+};
+
+bool physicalCollationReference(const std::string& reference,
+                                std::string& physicalName) {
+    physicalName.clear();
+    if (reference.empty() || reference.find('\0') != std::string::npos) {
+        return false;
+    }
+    const size_t separator = reference.find('.');
+    if (separator == std::string::npos) {
+        physicalName = reference;
+        return validMetadataObjectName(physicalName);
+    }
+    if (separator == 0 || separator + 1 >= reference.size() ||
+        reference.find('.', separator + 1) != std::string::npos) {
+        return false;
+    }
+    const std::string schema = reference.substr(0, separator);
+    const std::string name = reference.substr(separator + 1);
+    if (!validMetadataObjectName(schema) ||
+        !validMetadataObjectName(name)) {
+        return false;
+    }
+    physicalName = schema == "public" ? name : schema + "__" + name;
+    return validMetadataObjectName(physicalName);
+}
+
+DBStatus resolveCollationReference(const StorageEngine& engine,
+                                   const std::string& dbname,
+                                   const std::string& reference,
+                                   ResolvedCollation& resolved,
+                                   std::string* error = nullptr) {
+    resolved = {};
+    auto reject = [&](DBStatus status, const std::string& message) {
+        if (error) *error = message;
+        return status;
+    };
+
+    if (reference.empty()) return DBStatus::OK;
+    if (collation::isValid(reference)) {
+        resolved.comparisonName = collation::normalizeName(reference);
+        resolved.isBinary = collation::isBinary(reference);
+        return DBStatus::OK;
+    }
+
+    std::string physicalName;
+    if (!physicalCollationReference(reference, physicalName)) {
+        return reject(DBStatus::INVALID_VALUE,
+                      "invalid collation name: " + reference);
+    }
+    std::vector<StoredCollation> collations;
+    if (!loadStoredCollations(
+            engine.dbPath(dbname) / ".collations", collations)) {
+        return reject(DBStatus::CORRUPTED_DATA,
+                      "could not read collation metadata");
+    }
+    const auto found = std::find_if(
+        collations.begin(), collations.end(),
+        [&](const StoredCollation& candidate) {
+            return candidate.name == physicalName;
+        });
+    if (found == collations.end()) {
+        return reject(DBStatus::INVALID_VALUE,
+                      "collation does not exist: " + reference);
+    }
+
+    std::string provider = found->provider;
+    std::transform(provider.begin(), provider.end(), provider.begin(),
+                   [](unsigned char byte) {
+                       return static_cast<char>(std::tolower(byte));
+                   });
+    if (provider != "libc") {
+        return reject(DBStatus::INVALID_VALUE,
+                      "unsupported collation provider for " + reference);
+    }
+
+    const std::string locale = found->locale.empty() ? "C" : found->locale;
+    const std::string normalizedLocale = collation::normalizeName(locale);
+    if (collation::isValid(locale) && normalizedLocale != "en_us.utf8") {
+        resolved.comparisonName = normalizedLocale;
+        resolved.isBinary = collation::isBinary(locale);
+        return DBStatus::OK;
+    }
+    if (!collation::isLocaleAvailable(locale)) {
+        return reject(DBStatus::INVALID_VALUE,
+                      "collation locale is unavailable: " + locale);
+    }
+    resolved.comparisonName = locale;
+    resolved.usesSystemLocale = true;
+    resolved.isBinary = false;
+    return DBStatus::OK;
+}
+
+DBStatus resolveTableCollations(const StorageEngine& engine,
+                                const std::string& dbname,
+                                TableSchema& table,
+                                std::string* error = nullptr) {
+    for (size_t columnIndex = 0; columnIndex < table.len; ++columnIndex) {
+        Column& column = table.cols[columnIndex];
+        column.resolvedCollation.clear();
+        column.resolvedCollationUsesLocale = false;
+        column.resolvedCollationIsBinary = true;
+        if (column.collation.empty()) continue;
+
+        ResolvedCollation resolved;
+        const DBStatus status = resolveCollationReference(
+            engine, dbname, column.collation, resolved, error);
+        if (status != DBStatus::OK) return status;
+        column.resolvedCollation = std::move(resolved.comparisonName);
+        column.resolvedCollationUsesLocale = resolved.usesSystemLocale;
+        column.resolvedCollationIsBinary = resolved.isBinary;
+    }
+    return DBStatus::OK;
+}
+
+int compareTextValues(const Column& column, const std::string& left,
+                      const std::string& right) {
+    if (column.collation.empty()) return left.compare(right);
+    const std::string& effective = column.resolvedCollation.empty()
+        ? column.collation : column.resolvedCollation;
+    if (column.resolvedCollationUsesLocale) {
+        return collation::compareLocale(left, right, effective);
+    }
+    return collation::compare(left, right, effective);
+}
+
+bool columnUsesBinaryCollation(const Column& column) {
+    if (column.collation.empty()) return true;
+    if (!column.resolvedCollation.empty()) {
+        return column.resolvedCollationIsBinary;
+    }
+    // An unresolved custom name must never enable a binary physical index.
+    return collation::isValid(column.collation) &&
+           collation::isBinary(column.collation);
+}
+
 } // namespace
 
 DBStatus StorageEngine::createCollation(const std::string& dbname,
@@ -2825,6 +2965,11 @@ DBStatus StorageEngine::createCollation(const std::string& dbname,
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     const StoredCollation requested{collationName, provider, locale};
     if (!validStoredCollation(requested)) return DBStatus::INVALID_ARGUMENT;
+    // Built-ins are resolved before database-local entries.  Reject a public
+    // definition that could be persisted successfully but never referenced.
+    if (collation::isValid(collationName)) {
+        return DBStatus::TABLE_ALREADY_EXISTS;
+    }
     const auto path = dbPath(dbname) / ".collations";
     std::vector<StoredCollation> collations;
     if (!loadStoredCollations(path, collations)) return DBStatus::IO_ERROR;
@@ -12833,6 +12978,9 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
 
     // Wave 0: 通过 TypeRegistry 校验并补齐每列类型元数据
     TableSchema tblWithVersion = tbl;
+    const DBStatus collationStatus = resolveTableCollations(
+        *this, dbname, tblWithVersion, error);
+    if (collationStatus != DBStatus::OK) return collationStatus;
     // pkColIndices is the authoritative representation when present.  The
     // embedded API historically permits callers to omit duplicate per-column
     // primary-key flags, but PRIMARY KEY must still imply NOT NULL before the
@@ -13588,6 +13736,18 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
     if (!typeErr.empty()) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
+    }
+    {
+        TableSchema collationProbe;
+        collationProbe.len = 1;
+        collationProbe.cols[0] = validatedCol;
+        const DBStatus collationStatus = resolveTableCollations(
+            *this, dbname, collationProbe);
+        if (collationStatus != DBStatus::OK) {
+            lockManager_.unlock(tablename);
+            return collationStatus;
+        }
+        validatedCol = std::move(collationProbe.cols[0]);
     }
     for (size_t i = 0; i < tbl.len; ++i) {
         if (tbl.cols[i].dataName == col.dataName) {
@@ -17414,12 +17574,30 @@ std::shared_ptr<const TableSchema> StorageEngine::getCachedSchema(
     // Cheap freshness check: another StorageEngine instance in this process
     // may have rewritten the schema file without running our invalidation.
     std::error_code ec;
-    const auto st = std::filesystem::last_write_time(schemaPath(dbname, tablename), ec);
+    const auto schemaFile = schemaPath(dbname, tablename);
+    const auto st = std::filesystem::last_write_time(schemaFile, ec);
     const bool existsNow = !ec;
+    uintmax_t schemaSize = 0;
+    if (existsNow) schemaSize = std::filesystem::file_size(schemaFile, ec);
+
+    const auto collationFile = dbPath(dbname) / ".collations";
+    std::error_code collationError;
+    const bool collationExists =
+        std::filesystem::exists(collationFile, collationError);
+    std::filesystem::file_time_type collationTime{};
+    uintmax_t collationSize = 0;
+    if (!collationError && collationExists) {
+        collationTime = std::filesystem::last_write_time(
+            collationFile, collationError);
+        if (!collationError) {
+            collationSize = std::filesystem::file_size(
+                collationFile, collationError);
+        }
+    }
     std::lock_guard<std::mutex> lock(schemaCacheMutex_);
     auto it = schemaCache_.find(key);
     if (it == schemaCache_.end()) return nullptr;
-    if (!existsNow) {
+    if (!existsNow || ec || collationError) {
         schemaCache_.erase(it);
         return nullptr;
     }
@@ -17428,7 +17606,21 @@ std::shared_ptr<const TableSchema> StorageEngine::getCachedSchema(
     const auto dur = st.time_since_epoch();
     const int64_t sec = std::chrono::duration_cast<std::chrono::seconds>(dur).count();
     const int64_t nsec = std::chrono::duration_cast<std::chrono::nanoseconds>(dur).count() % 1000000000LL;
-    if (it->second.mtimeSec != sec || it->second.mtimeNsec != nsec) {
+    int64_t collationSec = -1;
+    int64_t collationNsec = -1;
+    if (collationExists) {
+        const auto collationDuration = collationTime.time_since_epoch();
+        collationSec = std::chrono::duration_cast<std::chrono::seconds>(
+            collationDuration).count();
+        collationNsec = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            collationDuration).count() % 1000000000LL;
+    }
+    if (it->second.mtimeSec != sec || it->second.mtimeNsec != nsec ||
+        it->second.size != schemaSize ||
+        it->second.collationMetadataExists != collationExists ||
+        it->second.collationMtimeSec != collationSec ||
+        it->second.collationMtimeNsec != collationNsec ||
+        it->second.collationSize != collationSize) {
         schemaCache_.erase(it);
         return nullptr;
     }
@@ -17475,12 +17667,39 @@ TableSchema StorageEngine::getTableSchema(const std::string& dbname,
     TableSchema tbl = readSchema(in, tablename);
     tbl.storageParams = getStorageParams(dbname, tablename);
 
+    if (tbl.len > 0) {
+        std::string collationError;
+        const DBStatus collationStatus = resolveTableCollations(
+            *this, dbname, tbl, &collationError);
+        if (collationStatus != DBStatus::OK) {
+            std::cerr << "[catalog] cannot resolve collation for table "
+                      << tablename << ": " << collationError << std::endl;
+            return {};
+        }
+    }
+
     // Do not cache a missing/unparsed schema (readSchema returns len == 0):
     // a CREATE TABLE that follows would be masked by the cached empty entry.
     if (tbl.len > 0) {
         std::error_code mtEc;
         const auto mtime = std::filesystem::last_write_time(
             schemaPath(dbname, tablename), mtEc);
+        const uintmax_t schemaSize = std::filesystem::file_size(
+            schemaPath(dbname, tablename), mtEc);
+        const auto collationPath = dbPath(dbname) / ".collations";
+        std::error_code collationEc;
+        const bool collationExists =
+            std::filesystem::exists(collationPath, collationEc);
+        std::filesystem::file_time_type collationMtime{};
+        uintmax_t collationSize = 0;
+        if (!collationEc && collationExists) {
+            collationMtime = std::filesystem::last_write_time(
+                collationPath, collationEc);
+            if (!collationEc) {
+                collationSize = std::filesystem::file_size(
+                    collationPath, collationEc);
+            }
+        }
         std::lock_guard<std::mutex> lock(schemaCacheMutex_);
         CachedSchema entry;
         entry.schema = std::make_shared<const TableSchema>(tbl);
@@ -17488,9 +17707,23 @@ TableSchema StorageEngine::getTableSchema(const std::string& dbname,
             const auto dur = mtime.time_since_epoch();
             entry.mtimeSec = std::chrono::duration_cast<std::chrono::seconds>(dur).count();
             entry.mtimeNsec = std::chrono::duration_cast<std::chrono::nanoseconds>(dur).count() % 1000000000LL;
+            entry.size = schemaSize;
         } else {
             entry.mtimeSec = -1;
             entry.mtimeNsec = -1;
+        }
+        if (!collationEc) {
+            entry.collationMetadataExists = collationExists;
+            entry.collationSize = collationSize;
+            if (collationExists) {
+                const auto duration = collationMtime.time_since_epoch();
+                entry.collationMtimeSec =
+                    std::chrono::duration_cast<std::chrono::seconds>(
+                        duration).count();
+                entry.collationMtimeNsec =
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        duration).count() % 1000000000LL;
+            }
         }
         schemaCache_[dbname + "/" + tablename] = std::move(entry);
     }
@@ -17573,9 +17806,7 @@ StorageEngine::PredicateTruth StorageEngine::compareValues(
 
     if (col.dataType == "char" || col.dataType == "uuid" ||
         (col.isVariableLength && col.dataType != "numeric")) {
-        const int cmp = col.collation.empty()
-            ? left.compare(right)
-            : collation::compare(left, right, col.collation);
+        const int cmp = compareTextValues(col, left, right);
         return fromCompare(cmp);
     }
     if (col.dataType == "date") {
@@ -17915,9 +18146,8 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
     if (col.dataType == "char" || col.dataType == "uuid" ||
         (col.isVariableLength && col.dataType != "numeric")) {
         // Apply the column's collation for equality/comparison operators.
-        const std::string& coll = col.collation;
         auto scmp = [&](const std::string& a, const std::string& b) {
-            return coll.empty() ? a.compare(b) : collation::compare(a, b, coll);
+            return compareTextValues(col, a, b);
         };
         if (cond.op == "<"  && !(scmp(val, cond.value) < 0))     return false;
         if (cond.op == ">"  && !(scmp(val, cond.value) > 0))     return false;
@@ -20493,7 +20723,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
     auto columnNeedsCollation = [&](const std::string& colName) -> bool {
         for (size_t i = 0; i < tbl.len; ++i) {
             if (tbl.cols[i].dataName == colName) {
-                return !tbl.cols[i].collation.empty() && !collation::isBinary(tbl.cols[i].collation);
+                return !columnUsesBinaryCollation(tbl.cols[i]);
             }
         }
         return false;
@@ -25122,6 +25352,37 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
 
     // ORDER BY (multi-column)
     if (!orderBy.empty()) {
+        std::vector<size_t> sortColumnIndices(orderBy.size(), tbl.len);
+        std::vector<Column> sortComparisonColumns(orderBy.size());
+        for (size_t orderIndex = 0; orderIndex < orderBy.size(); ++orderIndex) {
+            const auto& spec = orderBy[orderIndex];
+            for (size_t columnIndex = 0; columnIndex < tbl.len;
+                 ++columnIndex) {
+                if (tbl.cols[columnIndex].dataName == spec.colName) {
+                    sortColumnIndices[orderIndex] = columnIndex;
+                    sortComparisonColumns[orderIndex] = tbl.cols[columnIndex];
+                    break;
+                }
+            }
+            if (sortColumnIndices[orderIndex] >= tbl.len ||
+                spec.collation.empty()) {
+                continue;
+            }
+            Column& comparisonColumn = sortComparisonColumns[orderIndex];
+            comparisonColumn.collation =
+                collation::normalizeName(spec.collation) == "binary"
+                    ? "C" : spec.collation;
+            TableSchema collationProbe;
+            collationProbe.len = 1;
+            collationProbe.cols[0] = comparisonColumn;
+            if (resolveTableCollations(
+                    *this, dbname, collationProbe) != DBStatus::OK) {
+                lockManager_.unlock(tablename);
+                return result;
+            }
+            comparisonColumn = std::move(collationProbe.cols[0]);
+        }
+
         struct SortKey {
             int64_t rid;
             std::vector<
@@ -25132,11 +25393,9 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
         for (auto& mr : matchRows) {
             SortKey k{mr.first, {}, {}};
             NullRowBinding nbS(this, dbname, tbl.tablename, mr.first, tbl.len);
-            for (const auto& spec : orderBy) {
-                size_t sortIdx = tbl.len;
-                for (size_t i = 0; i < tbl.len; ++i) {
-                    if (tbl.cols[i].dataName == spec.colName) { sortIdx = i; break; }
-                }
+            for (size_t orderIndex = 0; orderIndex < orderBy.size();
+                 ++orderIndex) {
+                const size_t sortIdx = sortColumnIndices[orderIndex];
                 if (sortIdx < tbl.len) {
                     std::string val = extractColumnValue(
                         mr.second, tbl, sortIdx, dbname, true);
@@ -25192,10 +25451,7 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
         std::sort(keys.begin(), keys.end(), [&](const SortKey& a, const SortKey& b) {
             for (size_t i = 0; i < orderBy.size(); ++i) {
                 const auto& spec = orderBy[i];
-                size_t sortIdx = tbl.len;
-                for (size_t j = 0; j < tbl.len; ++j) {
-                    if (tbl.cols[j].dataName == spec.colName) { sortIdx = j; break; }
-                }
+                const size_t sortIdx = sortColumnIndices[i];
                 if (sortIdx >= tbl.len) continue;
                 // NULL handling: NULLS FIRST or NULLS LAST (default)
                 bool aNull = a.isNulls[i];
@@ -25210,23 +25466,11 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
                     greater = std::get<4>(b.vals[i]) < std::get<4>(a.vals[i]);
                 } else if (scol.dataType == "char" ||
                            scol.isVariableLength) {
-                    std::string av = std::get<0>(a.vals[i]);
-                    std::string bv = std::get<0>(b.vals[i]);
-                    // Apply collation for string comparison
-                    if (spec.collation == "nocase" || spec.collation == "NOCASE") {
-                        std::string al = av, bl = bv;
-                        for (char& c : al) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-                        for (char& c : bl) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-                        less = al < bl;
-                        greater = bl < al;
-                    } else if (spec.collation == "reverse" || spec.collation == "REVERSE") {
-                        less = bv < av;
-                        greater = av < bv;
-                    } else {
-                        // Default: binary collation
-                        less = av < bv;
-                        greater = bv < av;
-                    }
+                    const int comparison = compareTextValues(
+                        sortComparisonColumns[i], std::get<0>(a.vals[i]),
+                        std::get<0>(b.vals[i]));
+                    less = comparison < 0;
+                    greater = comparison > 0;
                 } else if (scol.dataType == "date") {
                     less = std::get<3>(a.vals[i]) < std::get<3>(b.vals[i]);
                     greater = std::get<3>(b.vals[i]) < std::get<3>(a.vals[i]);
@@ -25262,6 +25506,40 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
         if (spec.isExpression) { hasExprOrder = true; break; }
     }
     if (hasExprOrder) {
+        std::vector<Column> expressionComparisonColumns;
+        for (const auto& spec : orderBy) {
+            if (!spec.isExpression) continue;
+            Column comparisonColumn;
+            comparisonColumn.dataType = "text";
+            comparisonColumn.isVariableLength = true;
+            if (spec.exprFunc == "upper" || spec.exprFunc == "lower" ||
+                spec.exprFunc.empty()) {
+                for (size_t columnIndex = 0; columnIndex < tbl.len;
+                     ++columnIndex) {
+                    if (tbl.cols[columnIndex].dataName == spec.exprArg) {
+                        comparisonColumn = tbl.cols[columnIndex];
+                        break;
+                    }
+                }
+            }
+            if (!spec.collation.empty()) {
+                comparisonColumn.collation =
+                    collation::normalizeName(spec.collation) == "binary"
+                        ? "C" : spec.collation;
+                TableSchema collationProbe;
+                collationProbe.len = 1;
+                collationProbe.cols[0] = comparisonColumn;
+                if (resolveTableCollations(
+                        *this, dbname, collationProbe) != DBStatus::OK) {
+                    lockManager_.unlock(tablename);
+                    return result;
+                }
+                comparisonColumn = std::move(collationProbe.cols[0]);
+            }
+            expressionComparisonColumns.push_back(
+                std::move(comparisonColumn));
+        }
+
         struct ExprKey {
             size_t idx;
             std::vector<std::string> exprVals;
@@ -25319,14 +25597,21 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
                 if (aNull) return spec.nullsFirst;
                 if (bNull) return !spec.nullsFirst;
                 bool less = false, greater = false;
-                try {
-                    int64_t na = std::stoll(av);
-                    int64_t nb = std::stoll(bv);
-                    less = na < nb;
-                    greater = na > nb;
-                } catch (...) {
-                    less = av < bv;
-                    greater = av > bv;
+                if (!expressionComparisonColumns[evi].collation.empty()) {
+                    const int comparison = compareTextValues(
+                        expressionComparisonColumns[evi], av, bv);
+                    less = comparison < 0;
+                    greater = comparison > 0;
+                } else {
+                    try {
+                        int64_t na = std::stoll(av);
+                        int64_t nb = std::stoll(bv);
+                        less = na < nb;
+                        greater = na > nb;
+                    } catch (...) {
+                        less = av < bv;
+                        greater = av > bv;
+                    }
                 }
                 if (less) return spec.ascending;
                 if (greater) return !spec.ascending;
@@ -30246,6 +30531,37 @@ std::vector<std::string> StorageEngine::sortByExpression(
     const std::vector<OrderBySpec>& exprSpecs) const {
     if (rows.empty() || exprSpecs.empty()) return rows;
     TableSchema tbl = getTableSchema(dbname, tablename);
+    std::vector<Column> comparisonColumns;
+    comparisonColumns.reserve(exprSpecs.size());
+    for (const auto& spec : exprSpecs) {
+        Column comparisonColumn;
+        comparisonColumn.dataType = "text";
+        comparisonColumn.isVariableLength = true;
+        if (spec.exprFunc == "upper" || spec.exprFunc == "lower" ||
+            spec.exprFunc.empty()) {
+            for (size_t columnIndex = 0; columnIndex < tbl.len;
+                 ++columnIndex) {
+                if (tbl.cols[columnIndex].dataName == spec.exprArg) {
+                    comparisonColumn = tbl.cols[columnIndex];
+                    break;
+                }
+            }
+        }
+        if (!spec.collation.empty()) {
+            comparisonColumn.collation =
+                collation::normalizeName(spec.collation) == "binary"
+                    ? "C" : spec.collation;
+            TableSchema collationProbe;
+            collationProbe.len = 1;
+            collationProbe.cols[0] = comparisonColumn;
+            if (resolveTableCollations(
+                    *this, dbname, collationProbe) != DBStatus::OK) {
+                return rows;
+            }
+            comparisonColumn = std::move(collationProbe.cols[0]);
+        }
+        comparisonColumns.push_back(std::move(comparisonColumn));
+    }
 
     struct SortRow {
         std::string rowStr;
@@ -30311,15 +30627,22 @@ std::vector<std::string> StorageEngine::sortByExpression(
                 if (aNull) return spec.nullsFirst;
                 if (bNull) return !spec.nullsFirst;
                 bool less = false, greater = false;
-                // Try numeric comparison first
-                try {
-                    int64_t na = std::stoll(av);
-                    int64_t nb = std::stoll(bv);
-                    less = na < nb;
-                    greater = na > nb;
-                } catch (...) {
-                    less = av < bv;
-                    greater = av > bv;
+                if (!comparisonColumns[i].collation.empty()) {
+                    const int comparison = compareTextValues(
+                        comparisonColumns[i], av, bv);
+                    less = comparison < 0;
+                    greater = comparison > 0;
+                } else {
+                    // Try numeric comparison first.
+                    try {
+                        int64_t na = std::stoll(av);
+                        int64_t nb = std::stoll(bv);
+                        less = na < nb;
+                        greater = na > nb;
+                    } catch (...) {
+                        less = av < bv;
+                        greater = av > bv;
+                    }
                 }
                 if (less) return spec.ascending;
                 if (greater) return !spec.ascending;
@@ -34592,8 +34915,7 @@ void StorageEngine::recordSsiIndexPredicate(const std::string& dbname,
         }
     }
     if (columnIndex >= tbl.len ||
-        (!tbl.cols[columnIndex].collation.empty() &&
-         !collation::isBinary(tbl.cols[columnIndex].collation))) {
+        !columnUsesBinaryCollation(tbl.cols[columnIndex])) {
         return;
     }
 

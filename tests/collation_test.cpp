@@ -461,6 +461,106 @@ static void test_collation_ddl_preserves_options_and_namespace() {
     std::cout << "[COLLATION] DDL options and namespace OK" << std::endl;
 }
 
+static void test_custom_collation_runtime_resolution() {
+    using dbms::DBStatus;
+
+    std::string db = testDbPath("collation_custom_runtime");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == DBStatus::OK);
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    assert(!ddl.executeSql("CREATE SCHEMA app", s));
+    assert(!ddl.executeSql(
+        "CREATE COLLATION app.casefold "
+        "(provider=libc, locale='nocase')", s));
+    assert(ddl.executeSql(
+        "CREATE COLLATION public.nocase "
+        "(provider=libc, locale='reverse')", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE words (v VARCHAR(50) COLLATE app.casefold)", s));
+
+    dbms::TableSchema schema = g_engine.getTableSchema(db, "words");
+    assert(schema.len == 1);
+    assert(schema.cols[0].collation == "app.casefold");
+    assert(schema.cols[0].resolvedCollation == "nocase");
+    assert(!schema.cols[0].resolvedCollationUsesLocale);
+    assert(!schema.cols[0].resolvedCollationIsBinary);
+
+    assert(g_engine.insert(db, "words", {{"v", "Hello"}}) == DBStatus::OK);
+    assert(g_engine.insert(db, "words", {{"v", "HELLO"}}) == DBStatus::OK);
+    assert(g_engine.insert(db, "words", {{"v", "world"}}) == DBStatus::OK);
+    assert(!ddl.executeSql("CREATE INDEX words_v_idx ON words(v)", s));
+
+    // The physical B-tree is binary.  A custom non-binary collation must use
+    // a heap fallback or this lookup would miss both differently cased rows.
+    auto rows = g_engine.query(db, "words", {"=v hello"}, {"v"});
+    assert(rows.size() == 2);
+    rows = g_engine.query(db, "words", {">v hello"}, {"v"});
+    assert(rows.size() == 1);
+    assert(rows.front() == "world ");
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE ordered (v VARCHAR(50) COLLATE app.casefold)", s));
+    assert(g_engine.insert(db, "ordered", {{"v", "Zoo"}}) == DBStatus::OK);
+    assert(g_engine.insert(db, "ordered", {{"v", "apple"}}) == DBStatus::OK);
+    assert(g_engine.insert(db, "ordered", {{"v", "Banana"}}) == DBStatus::OK);
+    dbms::StorageEngine::OrderBySpec byColumn;
+    byColumn.colName = "v";
+    rows = g_engine.query(db, "ordered", {}, {"v"}, {byColumn});
+    assert((rows == std::vector<std::string>{
+                        "apple ", "Banana ", "Zoo "}));
+
+    // An explicit ORDER BY collation is resolved through the same metadata,
+    // even when the underlying column itself is binary.
+    assert(!ddl.executeSql(
+        "CREATE TABLE explicit_order (v VARCHAR(50) COLLATE C)", s));
+    assert(g_engine.insert(db, "explicit_order", {{"v", "Zoo"}}) == DBStatus::OK);
+    assert(g_engine.insert(db, "explicit_order", {{"v", "apple"}}) == DBStatus::OK);
+    assert(g_engine.insert(db, "explicit_order", {{"v", "Banana"}}) == DBStatus::OK);
+    byColumn.collation = "app.casefold";
+    rows = g_engine.query(db, "explicit_order", {}, {"v"}, {byColumn});
+    assert((rows == std::vector<std::string>{
+                        "apple ", "Banana ", "Zoo "}));
+
+    assert(!ddl.executeSql("CREATE TABLE alter_target (id INT)", s));
+    assert(!ddl.executeSql(
+        "ALTER TABLE alter_target ADD COLUMN "
+        "v VARCHAR(20) COLLATE app.casefold", s));
+    schema = g_engine.getTableSchema(db, "alter_target");
+    assert(schema.len == 2);
+    assert(schema.cols[1].collation == "app.casefold");
+    assert(schema.cols[1].resolvedCollation == "nocase");
+
+    // Resolution is reconstructed from the persisted custom definition after
+    // reopening the engine; it is not an in-memory CREATE COLLATION effect.
+    dbms::StorageEngine reopened;
+    rows = reopened.query(db, "words", {"=v hello"}, {"v"});
+    assert(rows.size() == 2);
+
+    // Unknown and unavailable custom definitions must not silently acquire C
+    // semantics and publish a table whose comparisons change after restart.
+    assert(ddl.executeSql(
+        "CREATE TABLE missing_collation "
+        "(v VARCHAR(10) COLLATE app.absent)", s));
+    assert(!g_engine.tableExists(db, "missing_collation"));
+    assert(ddl.executeSql(
+        "CREATE TABLE malformed_collation "
+        "(v VARCHAR(10) COLLATE app.)", s));
+    assert(!g_engine.tableExists(db, "malformed_collation"));
+    assert(!ddl.executeSql(
+        "CREATE COLLATION app.unavailable "
+        "(provider=libc, locale='dbms_locale_that_does_not_exist')", s));
+    assert(ddl.executeSql(
+        "CREATE TABLE unavailable_collation "
+        "(v VARCHAR(10) COLLATE app.unavailable)", s));
+    assert(!g_engine.tableExists(db, "unavailable_collation"));
+
+    cleanup(db);
+    std::cout << "[COLLATION] custom runtime resolution OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_collation_provider();
@@ -472,6 +572,7 @@ int main() {
     test_collate_schema_persistence();
     test_collation_metadata_is_atomic_and_backward_compatible();
     test_collation_ddl_preserves_options_and_namespace();
+    test_custom_collation_runtime_resolution();
     std::cout << "[COLLATION] all passed" << std::endl;
     return 0;
 }

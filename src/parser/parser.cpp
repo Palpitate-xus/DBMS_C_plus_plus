@@ -5071,7 +5071,24 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                         }
                     } else if (ckw == "collate") {
                         ++pos;
-                        if (pos < tokens.size()) col.collation = tokens[pos++];
+                        if (pos >= tokens.size() || tokens[pos] == "," ||
+                            tokens[pos] == ")" || tokens[pos] == ";") {
+                            return nullptr;
+                        }
+                        col.collation = tokens[pos++];
+                        if (pos < tokens.size() && tokens[pos] == ".") {
+                            if (pos + 1 >= tokens.size() ||
+                                tokens[pos + 1] == "," ||
+                                tokens[pos + 1] == ")" ||
+                                tokens[pos + 1] == ";") {
+                                return nullptr;
+                            }
+                            col.collation += "." + tokens[pos + 1];
+                            pos += 2;
+                            if (pos < tokens.size() && tokens[pos] == ".") {
+                                return nullptr;
+                            }
+                        }
                     } else if (ckw == "references") {
                         ++pos;
                         if (pos < tokens.size()) {
@@ -7661,9 +7678,17 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                         return nullptr;
                     }
                     sub.colDef.collation = tokens[pos++];
-                    if (pos + 1 < tokens.size() && tokens[pos] == ".") {
+                    if (pos < tokens.size() && tokens[pos] == ".") {
+                        if (pos + 1 >= tokens.size() ||
+                            tokens[pos + 1] == "," ||
+                            tokens[pos + 1] == ";") {
+                            return nullptr;
+                        }
                         sub.colDef.collation += "." + tokens[pos + 1];
                         pos += 2;
+                        if (pos < tokens.size() && tokens[pos] == ".") {
+                            return nullptr;
+                        }
                     }
                 } else {
                     return nullptr;
