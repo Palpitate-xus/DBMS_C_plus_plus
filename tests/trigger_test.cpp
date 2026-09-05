@@ -1,6 +1,7 @@
 #include "commands/DdlExecutor.h"
 #include "commands/TableManage.h"
 #include "Session.h"
+#include "catalog/CatalogService.h"
 #include "catalog/type_registry.h"
 #include <atomic>
 #include <cassert>
@@ -65,6 +66,18 @@ static void test_create_trigger_before_insert() {
     assert(triggers[0].name == "trg");
     assert(triggers[0].forEachRow);
 
+    dbms::CatalogManager& initialCatalog =
+        g_engine.catalogService().get(db);
+    const auto* relation = initialCatalog.resolveRelation("t", {"public"});
+    assert(relation != nullptr && relation->relhastriggers);
+    const dbms::Oid relationOid = relation->oid;
+    g_engine.catalogService().evict(db);
+    dbms::CatalogManager& reloadedCatalog =
+        g_engine.catalogService().get(db);
+    relation = reloadedCatalog.findClass(relationOid);
+    assert(relation != nullptr && relation->relhastriggers);
+
+    g_engine.catalogService().evict(db);
     cleanup(db);
     std::cout << "[TRIGGER] before insert OK" << std::endl;
 }

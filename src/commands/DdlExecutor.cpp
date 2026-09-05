@@ -481,6 +481,22 @@ static bool synchronizeTableRlsInCatalog(
     }
 }
 
+static bool synchronizeRelationTriggerFlagInCatalog(
+    const std::string& dbname, const std::string& physicalTableName) {
+    std::vector<StorageEngine::Trigger> triggers;
+    if (!g_engine.tryGetAllTriggers(dbname, triggers)) return false;
+    const bool hasTriggers = std::any_of(
+        triggers.begin(), triggers.end(),
+        [&](const StorageEngine::Trigger& trigger) {
+            return trigger.tableName == physicalTableName;
+        });
+    return updateTableClassInCatalog(
+        dbname, physicalTableName,
+        [&](PgClassRow& relation) {
+            relation.relhastriggers = hasTriggers;
+        });
+}
+
 static bool synchronizeTableCheckCountInCatalog(
     const std::string& dbname, const std::string& physicalTableName) {
     try {
@@ -4892,6 +4908,7 @@ bool DdlExecutor::executeCreateTrigger(const CreateTriggerStmt* stmt, Session& s
     if (!checkDB(s)) return true;
 
     DdlTransaction txn(s);
+    txn.enableSnapshotRollback();
     if (!txn.begin()) {
         std::cout << "DDL transaction begin failed" << std::endl;
         return true;
@@ -4949,6 +4966,7 @@ bool DdlExecutor::executeCreateTrigger(const CreateTriggerStmt* stmt, Session& s
         return true;
     }
 
+    txn.markSnapshotDirty();
     DBStatus res = g_engine.createTrigger(s.currentDB, trg);
     if (res != DBStatus::OK) {
         std::cout << "CREATE TRIGGER failed" << std::endl;
@@ -4956,6 +4974,10 @@ bool DdlExecutor::executeCreateTrigger(const CreateTriggerStmt* stmt, Session& s
     }
 
     txn.recordCreate(DdlObjectKind::Trigger, stmt->triggerName, tname);
+    if (!synchronizeRelationTriggerFlagInCatalog(s.currentDB, tname)) {
+        std::cout << "CREATE TRIGGER catalog update failed" << std::endl;
+        return true;
+    }
     if (!txn.commit()) return true;
     std::cout << "CREATE TRIGGER succeeded" << std::endl;
     return false;
