@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace dbms {
@@ -50,6 +51,24 @@ bool BufferPool::open() {
         return false;
     }
     return true;
+}
+
+bool BufferPool::refersToCurrentFiles() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto descriptorMatchesPath = [](int descriptor,
+                                          const std::string& path) {
+        struct stat descriptorStatus {};
+        struct stat pathStatus {};
+        return descriptor >= 0 &&
+               ::fstat(descriptor, &descriptorStatus) == 0 &&
+               ::stat(path.c_str(), &pathStatus) == 0 &&
+               descriptorStatus.st_dev == pathStatus.st_dev &&
+               descriptorStatus.st_ino == pathStatus.st_ino;
+    };
+
+    if (!descriptorMatchesPath(fd_, filename_)) return false;
+    return tdeFd_ < 0 || descriptorMatchesPath(
+        tdeFd_, filename_ + ".tde");
 }
 
 // Read one sidecar record.  Returns an all-zero record for pageIds beyond

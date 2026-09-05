@@ -71,6 +71,12 @@ public:
         return bp_ != nullptr && bp_->isOpen();
     }
 
+    bool hasStaleFileGeneration() const {
+        std::shared_lock<std::shared_mutex> lock(treeMutex_);
+        return bp_ != nullptr && bp_->isOpen() &&
+               !bp_->refersToCurrentFiles();
+    }
+
     const std::filesystem::path& filePath() const { return filePath_; }
     bool hasDirtyPages() const {
         std::shared_lock<std::shared_mutex> lock(treeMutex_);

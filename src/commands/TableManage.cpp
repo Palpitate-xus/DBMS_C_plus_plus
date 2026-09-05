@@ -6454,7 +6454,10 @@ BPTree* StorageEngine::getPKIndex(const std::string& dbname, const std::string& 
     std::string key = dbname + "/" + tablename;
     auto it = pkIndexCache_.find(key);
     if (it != pkIndexCache_.end()) {
-        return it->second.get();
+        if (it->second && !it->second->hasStaleFileGeneration()) {
+            return it->second.get();
+        }
+        pkIndexCache_.erase(it);
     }
 
     auto tree = std::make_unique<BPTree>(indexPath(dbname, tablename));
@@ -7119,7 +7122,12 @@ BPTree* StorageEngine::getSecondaryIndex(const std::string& dbname,
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::string key = dbname + "/" + tablename + "/" + colname;
     auto it = secondaryIndexCache_.find(key);
-    if (it != secondaryIndexCache_.end()) return it->second.get();
+    if (it != secondaryIndexCache_.end()) {
+        if (it->second && !it->second->hasStaleFileGeneration()) {
+            return it->second.get();
+        }
+        secondaryIndexCache_.erase(it);
+    }
 
     auto tree = std::make_unique<BPTree>(secondaryIndexPath(dbname, tablename, colname));
     if (tree->open()) {
@@ -7136,7 +7144,12 @@ BPTree* StorageEngine::getCompositeIndexTree(const std::string& dbname,
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::string key = dbname + "/" + tablename + "/C/" + indexName;
     auto it = secondaryIndexCache_.find(key);
-    if (it != secondaryIndexCache_.end()) return it->second.get();
+    if (it != secondaryIndexCache_.end()) {
+        if (it->second && !it->second->hasStaleFileGeneration()) {
+            return it->second.get();
+        }
+        secondaryIndexCache_.erase(it);
+    }
 
     std::filesystem::path p = relationDir(dbname, tablename) / (tablename + ".idx_" + indexName);
     auto tree = std::make_unique<BPTree>(p);
@@ -13107,7 +13120,12 @@ BPTree* StorageEngine::getToastIndex(const std::string& dbname,
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::string key = dbname + ":" + tablename;
     auto it = toastIndexes_.find(key);
-    if (it != toastIndexes_.end()) return it->second.get();
+    if (it != toastIndexes_.end()) {
+        if (it->second && !it->second->hasStaleFileGeneration()) {
+            return it->second.get();
+        }
+        toastIndexes_.erase(it);
+    }
     auto idx = std::make_unique<BPTree>(toastIndexPath(dbname, tablename).string());
     if (!idx->open()) return nullptr;
     BPTree* ptr = idx.get();

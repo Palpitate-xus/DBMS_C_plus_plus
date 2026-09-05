@@ -205,6 +205,60 @@ void test_missing_live_index_generation_is_rebuilt() {
     cleanupTestDb(testName);
 }
 
+void test_peer_cache_reopens_replaced_generation() {
+    using dbms::DBStatus;
+
+    const std::string testName = "reindex_peer_cache";
+    const std::string database = testDbPath(testName);
+    cleanupTestDb(testName);
+    const TestRow first = {"1", "alpha", "one"};
+    const TestRow second = {"2", "bravo", "two"};
+    createIndexedTable(database, {first});
+    assert(g_engine.checkpoint(database));
+
+    {
+        dbms::StorageEngine peer;
+        dbms::BPTree* peerPrimary = peer.getPKIndex(database, "t");
+        dbms::BPTree* peerSecondary =
+            peer.getSecondaryIndex(database, "t", "tag");
+        dbms::BPTree* peerComposite =
+            peer.getCompositeIndexTree(database, "t", "tag_part_idx");
+        assert(peerPrimary && peerSecondary && peerComposite);
+        int64_t firstRid = -1;
+        assert(peerPrimary->search(first.id, firstRid));
+        assert(peerSecondary->searchMulti(first.tag).size() == 1);
+        assert(peerComposite->searchMulti(
+                   first.tag + std::string(1, '\x01') + first.part).size() ==
+               1);
+
+        // Warm the peer's old node caches, then add data and replace all
+        // three index files through another engine instance.
+        assert(g_engine.insert(
+                   database, "t",
+                   {{"id", second.id},
+                    {"tag", second.tag},
+                    {"part", second.part}}) == DBStatus::OK);
+        assert(g_engine.reindex(database, "t") == DBStatus::OK);
+
+        peerPrimary = peer.getPKIndex(database, "t");
+        peerSecondary = peer.getSecondaryIndex(database, "t", "tag");
+        peerComposite =
+            peer.getCompositeIndexTree(database, "t", "tag_part_idx");
+        assert(peerPrimary && peerSecondary && peerComposite);
+        int64_t secondRid = -1;
+        assert(peerPrimary->search(second.id, secondRid));
+        const auto secondaryRids = peerSecondary->searchMulti(second.tag);
+        const auto compositeRids = peerComposite->searchMulti(
+            second.tag + std::string(1, '\x01') + second.part);
+        assert(secondaryRids.size() == 1 &&
+               secondaryRids.front() == secondRid);
+        assert(compositeRids.size() == 1 &&
+               compositeRids.front() == secondRid);
+    }
+
+    cleanupTestDb(testName);
+}
+
 void test_reindex_preserves_inflight_transaction_state() {
     using dbms::DBStatus;
     using namespace std::chrono_literals;
@@ -411,6 +465,7 @@ int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_failed_build_preserves_live_indexes();
     test_missing_live_index_generation_is_rebuilt();
+    test_peer_cache_reopens_replaced_generation();
     test_reindex_preserves_inflight_transaction_state();
     test_tde_sidecars_follow_rebuilt_indexes();
     test_interrupted_tde_swap_recovers_on_startup();

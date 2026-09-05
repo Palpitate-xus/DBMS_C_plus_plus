@@ -49,6 +49,10 @@ public:
     bool open();
     void close();
     bool isOpen() const { return fd_ >= 0; }
+    // True when the open main/TDE descriptors still name the same filesystem
+    // objects as their paths. Atomic index replacement changes the inode even
+    // though the pathname is unchanged.
+    bool refersToCurrentFiles() const;
 
     // Install (or clear) the on-load page validator. Must be called before
     // open() or with no pages cached. Returning false rejects the page: the
