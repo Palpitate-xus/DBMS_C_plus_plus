@@ -224,6 +224,15 @@ static void test_make_interval_bounds() {
     auto partialPositional = eval("make_interval(2)");
     assert(partialPositional.ok && partialPositional.value == "2 years");
 
+    auto fractionalSeconds = eval("make_interval(secs => 1.5)");
+    assert(fractionalSeconds.ok &&
+           fractionalSeconds.value == "00:00:01.500000");
+
+    auto positionalFractionalSeconds = eval(
+        "make_interval(0, 0, 0, 0, 0, 0, -2.25)");
+    assert(positionalFractionalSeconds.ok &&
+           positionalFractionalSeconds.value == "-00:00:02.250000");
+
     auto yearOverflow = eval(
         "make_interval(years => 9223372036854775807)");
     assert(yearOverflow.ok && yearOverflow.isNull);

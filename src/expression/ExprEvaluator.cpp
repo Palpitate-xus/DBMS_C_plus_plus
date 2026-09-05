@@ -185,6 +185,31 @@ static bool addScaledIntervalField(long long& target, long long value,
     return true;
 }
 
+static bool addIntervalSeconds(long long& target,
+                               const std::string& secondsText) {
+    long double seconds = 0;
+    try {
+        size_t consumed = 0;
+        seconds = std::stold(secondsText, &consumed);
+        if (consumed != secondsText.size() || !std::isfinite(seconds))
+            return false;
+    } catch (...) {
+        return false;
+    }
+
+    const long double roundedMicros =
+        std::round(seconds * 1000000.0L);
+    if (!std::isfinite(roundedMicros) ||
+        roundedMicros <= static_cast<long double>(
+                             std::numeric_limits<long long>::lowest()) ||
+        roundedMicros > static_cast<long double>(
+                            std::numeric_limits<long long>::max())) {
+        return false;
+    }
+    return addScaledIntervalField(
+        target, static_cast<long long>(roundedMicros), 1);
+}
+
 static bool scaleIntervalField(long long value, long double scale,
                                long long& result) {
     const long double scaled = static_cast<long double>(value) * scale;
@@ -2075,9 +2100,6 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
             if (key == "mins")
                 return addScaledIntervalField(
                     mi_micros, value, 60000000LL);
-            if (key == "secs")
-                return addScaledIntervalField(
-                    mi_micros, value, 1000000LL);
             return true;
         };
 
@@ -2087,8 +2109,12 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         if (args.size() > std::size(positionalNames))
             return ExprValue("interval", "", true);
         for (size_t i = 0; i < args.size(); ++i) {
-            if (args[i].isNull ||
-                !addIntegerField(positionalNames[i], args[i].asInt())) {
+            const bool valid = !args[i].isNull &&
+                (i == 6
+                     ? addIntervalSeconds(mi_micros, args[i].value)
+                     : addIntegerField(positionalNames[i],
+                                       args[i].asInt()));
+            if (!valid) {
                 return ExprValue("interval", "", true);
             }
         }
@@ -2096,9 +2122,11 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         for (const auto& na : e->namedArgs) {
             ExprValue nv = eval(na.value.get(), ctx);
             if (nv.isNull) continue;
-            long long n = nv.asInt();
             std::string k = toLower(na.name);
-            if (!addIntegerField(k, n))
+            const bool valid = k == "secs"
+                ? addIntervalSeconds(mi_micros, nv.value)
+                : addIntegerField(k, nv.asInt());
+            if (!valid)
                 return ExprValue("interval", "", true);
         }
         return ExprValue("interval", intervalToText(mi_months, mi_days, mi_micros), false);
