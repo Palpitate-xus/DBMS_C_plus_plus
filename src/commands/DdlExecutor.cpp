@@ -6763,6 +6763,7 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
     if (!checkDB(s)) return true;
 
     DdlTransaction txn(s);
+    txn.enableSnapshotRollback();
     if (!txn.begin()) {
         std::cout << "DDL transaction begin failed" << std::endl;
         return true;
@@ -6790,6 +6791,7 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
             std::cout << "CREATE TYPE AS ENUM requires at least one label" << std::endl;
             return true;
         }
+        txn.markSnapshotDirty();
         DBStatus res = g_engine.createEnumType(s.currentDB, et);
         if (res != DBStatus::OK) {
             std::cout << "CREATE TYPE AS ENUM failed" << std::endl;
@@ -6807,6 +6809,7 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
             std::cout << "Type " << typeName << " already exists" << std::endl;
             return true;
         }
+        txn.markSnapshotDirty();
         if (!recordShellType(s.currentDB, typeName)) {
             std::cout << "CREATE TYPE failed" << std::endl;
             return true;
@@ -6835,6 +6838,7 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
             std::cout << "CREATE TYPE AS RANGE requires a subtype" << std::endl;
             return true;
         }
+        txn.markSnapshotDirty();
         if (!recordUdtMeta(s.currentDB, meta)) {
             std::cout << "CREATE TYPE failed" << std::endl;
             return true;
@@ -6863,6 +6867,7 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
             std::cout << "CREATE TYPE base requires INPUT and OUTPUT functions" << std::endl;
             return true;
         }
+        txn.markSnapshotDirty();
         if (!recordUdtMeta(s.currentDB, meta)) {
             std::cout << "CREATE TYPE failed" << std::endl;
             return true;
@@ -6894,6 +6899,7 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
         std::cout << "CREATE TYPE requires field list" << std::endl;
         return true;
     }
+    txn.markSnapshotDirty();
     DBStatus res = g_engine.createCompositeType(s.currentDB, ct);
     if (res != DBStatus::OK) {
         std::cout << "CREATE TYPE failed" << std::endl;

@@ -217,6 +217,74 @@ static void test_schema_qualified_type_names() {
     std::cout << "[CTYPE] schema-qualified names OK" << std::endl;
 }
 
+enum class RollbackTypeKind { Shell, Range, Base, Enum, Composite };
+
+static bool rollbackTypeExists(const std::string& db,
+                               RollbackTypeKind kind,
+                               const std::string& name) {
+    switch (kind) {
+        case RollbackTypeKind::Shell:
+            return shellTypeFileContains(db, name);
+        case RollbackTypeKind::Range:
+            return udtMetaContains(db, "range", name, {});
+        case RollbackTypeKind::Base:
+            return udtMetaContains(db, "base", name, {});
+        case RollbackTypeKind::Enum:
+            return !g_engine.getEnumType(db, name).name.empty();
+        case RollbackTypeKind::Composite:
+            return g_engine.isCompositeType(db, name);
+    }
+    return false;
+}
+
+static void assert_failed_commit_rolls_back_type(
+    const std::string& suffix, const std::string& createSql,
+    RollbackTypeKind kind, const std::string& name) {
+    const std::string db = testDbPath("ct_rollback_" + suffix);
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE SCHEMA app", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE guard (id int primary key, value int, "
+        "CONSTRAINT positive CHECK (value > 0) "
+        "DEFERRABLE INITIALLY DEFERRED)", s));
+
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "guard", {{"id", "1"}, {"value", "0"}}) ==
+           dbms::DBStatus::OK);
+    assert(!ddl.executeSql(createSql, s));
+    assert(rollbackTypeExists(db, kind, name));
+    assert(g_engine.commitTransaction() != dbms::DBStatus::OK);
+    assert(!g_engine.inTransaction());
+    assert(!rollbackTypeExists(db, kind, name));
+    assert(!fs::exists(db + ".txn_backup"));
+
+    cleanup(db);
+}
+
+static void test_create_type_commit_failure_restores_all_families() {
+    assert_failed_commit_rolls_back_type(
+        "shell", "CREATE TYPE app.failed_shell",
+        RollbackTypeKind::Shell, "app.failed_shell");
+    assert_failed_commit_rolls_back_type(
+        "range", "CREATE TYPE app.failed_range AS RANGE (subtype = int4)",
+        RollbackTypeKind::Range, "app.failed_range");
+    assert_failed_commit_rolls_back_type(
+        "base", "CREATE TYPE app.failed_base "
+                "(INPUT = failed_in, OUTPUT = failed_out)",
+        RollbackTypeKind::Base, "app.failed_base");
+    assert_failed_commit_rolls_back_type(
+        "enum", "CREATE TYPE app.failed_enum AS ENUM ('one', 'two')",
+        RollbackTypeKind::Enum, "app.failed_enum");
+    assert_failed_commit_rolls_back_type(
+        "composite", "CREATE TYPE app.failed_pair AS (x int, y text)",
+        RollbackTypeKind::Composite, "app.failed_pair");
+    std::cout << "[CTYPE] failed commit restores every type family OK"
+              << std::endl;
+}
+
 static void test_composite_metadata_is_validated_and_atomic() {
     const std::string db = testDbPath("ct_composite_atomicity");
     cleanup(db);
@@ -277,6 +345,7 @@ int main() {
     test_base_type_create_drop();
     test_drop_composite_still_works();
     test_schema_qualified_type_names();
+    test_create_type_commit_failure_restores_all_families();
     test_composite_metadata_is_validated_and_atomic();
     std::cout << "[CTYPE] all passed" << std::endl;
     return 0;
