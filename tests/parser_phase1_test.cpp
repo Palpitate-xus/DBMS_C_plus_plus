@@ -134,6 +134,10 @@ int main() {
         assert(c->tableName == "audit.events");
         assert(c->columns.size() == 1);
         assert(c->columns[0].column == "created_at");
+
+        auto qualifiedIndexName = parser.parse(
+            "CREATE INDEX audit.events_created_idx ON audit.events (created_at)");
+        assert(!qualifiedIndexName.success);
     std::cout << "[PARSER P1] CREATE INDEX OK\n";
 
     // CREATE TEMP/TEMPORARY must preserve session-local DDL flags for the

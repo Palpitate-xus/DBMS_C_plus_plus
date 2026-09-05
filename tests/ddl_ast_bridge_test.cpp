@@ -678,6 +678,13 @@ static void test_drop_schema_qualified_index() {
     assert(catalog.findClassByName(
         "items_sku_idx", inventory->oid) != nullptr);
 
+    assert(ddl.executeSql(
+        "CREATE INDEX inventory.invalid_idx ON inventory.items (id)", s));
+    assert(!g_engine.getNamedIndex(
+        db, physicalTable, "invalid_idx").has_value());
+    assert(catalog.findClassByName(
+        "invalid_idx", inventory->oid) == nullptr);
+
     assert(!ddl.executeSql("DROP INDEX inventory.items_sku_idx", s));
     assert(!g_engine.getNamedIndex(
         db, physicalTable, "items_sku_idx").has_value());

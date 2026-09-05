@@ -5156,10 +5156,11 @@ StmtPtr SQLParser::parseCreateIndex(const std::vector<std::string>& tokens, size
     if (pos < tokens.size() && !match(tokens, pos, "on")) {
         stmt->indexName = tokens[pos++];
         if (pos < tokens.size() && tokens[pos] == ".") {
-            ++pos;
-            if (pos < tokens.size()) {
-                stmt->indexName = tokens[pos++]; // schema was first token; not stored separately here
-            }
+            // PostgreSQL always creates an index in its parent table's
+            // namespace and does not permit a schema-qualified index name.
+            // Reject this instead of silently discarding the qualifier and
+            // creating a differently named object.
+            return nullptr;
         }
     }
     if (pos < tokens.size() && match(tokens, pos, "on")) ++pos;
