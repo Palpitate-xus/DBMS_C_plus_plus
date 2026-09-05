@@ -81,11 +81,26 @@ static void test_view_with_check_option() {
     std::cout << "[VIEW] with check option OK" << std::endl;
 }
 
+static void test_view_existence_requires_metadata_file() {
+    const std::string db = testDbPath("view_metadata_kind");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    const fs::path fakeView = g_engine.viewsDir(db) / "fake.view";
+    fs::create_directories(fakeView);
+    assert(!g_engine.viewExists(db, "fake"));
+    assert(g_engine.getViewSQL(db, "fake").empty());
+
+    cleanup(db);
+    std::cout << "[VIEW] metadata object type validation OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_create_view();
     test_create_or_replace_view();
     test_view_with_check_option();
+    test_view_existence_requires_metadata_file();
     std::cout << "[VIEW] all passed" << std::endl;
     return 0;
 }

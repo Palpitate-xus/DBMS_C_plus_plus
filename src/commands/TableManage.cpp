@@ -2752,14 +2752,16 @@ DBStatus StorageEngine::dropCollation(const std::string& dbname,
 bool StorageEngine::viewExists(const std::string& dbname,
                                const std::string& viewname) const {
     if (!databaseExists(dbname) || !validMetadataObjectName(viewname)) return false;
-    return std::filesystem::exists(viewPath(dbname, viewname));
+    std::error_code error;
+    const bool regular =
+        std::filesystem::is_regular_file(viewPath(dbname, viewname), error);
+    return regular && !error;
 }
 
 std::string StorageEngine::getViewSQL(const std::string& dbname,
                                        const std::string& viewname) const {
-    if (!databaseExists(dbname) || !validMetadataObjectName(viewname)) return "";
+    if (!viewExists(dbname, viewname)) return "";
     auto path = viewPath(dbname, viewname);
-    if (!std::filesystem::exists(path)) return "";
     std::ifstream ifs(path);
     if (!ifs) return "";
     std::string sql((std::istreambuf_iterator<char>(ifs)),
@@ -3238,13 +3240,19 @@ static std::filesystem::path materializedViewPath(const std::string& dbname,
 
 bool StorageEngine::isMaterializedView(const std::string& dbname,
                                        const std::string& viewname) const {
-    return std::filesystem::exists(materializedViewPath(dbname, viewname, this));
+    if (!databaseExists(dbname) || !validMetadataObjectName(viewname)) {
+        return false;
+    }
+    std::error_code error;
+    const bool regular = std::filesystem::is_regular_file(
+        materializedViewPath(dbname, viewname, this), error);
+    return regular && !error;
 }
 
 std::string StorageEngine::getMaterializedViewSQL(const std::string& dbname,
                                                    const std::string& viewname) const {
+    if (!isMaterializedView(dbname, viewname)) return "";
     auto path = materializedViewPath(dbname, viewname, this);
-    if (!std::filesystem::exists(path)) return "";
     std::ifstream ifs(path);
     if (!ifs) return "";
     std::string sql((std::istreambuf_iterator<char>(ifs)),

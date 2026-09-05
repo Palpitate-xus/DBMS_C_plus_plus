@@ -370,6 +370,8 @@ static void test_matview_metadata_write_failure_rolls_back() {
     assert(ddl.executeSql(
         "CREATE MATERIALIZED VIEW blocked_mv AS SELECT id FROM t", s));
     assert(fs::is_directory(blockedTarget));
+    assert(!g_engine.isMaterializedView(db, "blocked_mv"));
+    assert(g_engine.getMaterializedViewSQL(db, "blocked_mv").empty());
     assert(!g_engine.tableExists(
         db, dbms::StorageEngine::materializedViewPrefix("blocked_mv")));
     dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
