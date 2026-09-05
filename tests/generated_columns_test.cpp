@@ -82,11 +82,50 @@ static void test_virtual_generated() {
     assert(rows.size() == 1);
     assert(trimRight(rows[0]) == "42");
 
+    // Predicates and the expression projection path must observe the
+    // computed value instead of the virtual column's unused storage slot.
+    assert(g_engine.query(db, "t", {"=c 42"}, {"id"}) ==
+           std::vector<std::string>{"1 "});
+    assert(g_engine.query(db, "t", {"isnotnull c"}, {"id"}) ==
+           std::vector<std::string>{"1 "});
+    dbms::StorageEngine::SelectExpr cExpr;
+    cExpr.displayName = "c";
+    cExpr.colName = "c";
+    assert(g_engine.queryExpr(db, "t", {}, {cExpr}) ==
+           std::vector<std::string>{"42 "});
+
+    dbms::StorageEngine::SelectExpr absExpr;
+    absExpr.displayName = "abs_c";
+    absExpr.isScalar = true;
+    absExpr.funcName = "abs";
+    absExpr.funcArgs = {"c"};
+    assert(g_engine.queryExpr(db, "t", {}, {absExpr}) ==
+           std::vector<std::string>{"42 "});
+
+    assert(g_engine.insert(db, "t", {{"id", "2"}, {"a", "2"}, {"b", "3"}}) ==
+           dbms::DBStatus::OK);
+    dbms::StorageEngine::OrderBySpec exprOrder;
+    exprOrder.isExpression = true;
+    exprOrder.exprFunc = "add";
+    exprOrder.exprArg = "c";
+    exprOrder.exprArg2 = "0";
+    assert(g_engine.query(db, "t", {}, {"id"}, {exprOrder}) ==
+           (std::vector<std::string>{"2 ", "1 "}));
+
     // VIRTUAL column is recomputed after UPDATE of base columns.
     assert(g_engine.update(db, "t", {{"a", "5"}}, {"=id 1"}) == dbms::DBStatus::OK);
     rows = g_engine.query(db, "t", {"=id 1"}, {"c"});
     assert(rows.size() == 1);
     assert(trimRight(rows[0]) == "35");
+
+    // DML predicates use the same logical value path.
+    assert(g_engine.update(db, "t", {{"a", "4"}}, {"=c 6"}) ==
+           dbms::DBStatus::OK);
+    rows = g_engine.query(db, "t", {"=id 2"}, {"c"});
+    assert(rows.size() == 1);
+    assert(trimRight(rows[0]) == "12");
+    assert(g_engine.remove(db, "t", {"=c 12"}) == dbms::DBStatus::OK);
+    assert(g_engine.query(db, "t", {"=id 2"}, {"id"}).empty());
 
     // Direct update of virtual generated column is rejected.
     assert(g_engine.update(db, "t", {{"c", "99"}}, {"=id 1"}) == dbms::DBStatus::INVALID_VALUE);

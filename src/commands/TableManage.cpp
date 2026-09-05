@@ -17209,7 +17209,8 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
     }
     const auto extractValue = [&](size_t columnIndex) {
         return valueEngine
-            ? valueEngine->extractColumnValue(rowBuffer, tbl, columnIndex, valueDb)
+            ? valueEngine->extractColumnValue(
+                  rowBuffer, tbl, columnIndex, valueDb, true)
             : extractColumnValueStatic(rowBuffer, tbl, columnIndex);
     };
 
@@ -17246,7 +17247,8 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
                 if (arg.empty() || arg.front() == 0x27) continue;
                 for (size_t i = 0; i < tbl.len; ++i) {
                     if (tbl.cols[i].dataName != arg) continue;
-                    if (g_condNullEngine->isColumnNullByRid(
+                    if (tbl.cols[i].generatedKind != 'v' &&
+                        g_condNullEngine->isColumnNullByRid(
                             g_condNullDb, tbl.tablename, g_condNullRid, i)) {
                         return false;
                     }
@@ -17262,7 +17264,8 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
                 if (arg.empty() || arg.front() == 0x27) continue;
                 for (size_t i = 0; i < tbl.len; ++i) {
                     if (tbl.cols[i].dataName != arg) continue;
-                    if (i < g_nullRowNatts &&
+                    if (tbl.cols[i].generatedKind != 'v' &&
+                        i < g_nullRowNatts &&
                         g_nullRowEngine->isColumnNullByRid(
                             g_nullRowDb, tbl.tablename, g_nullRowRid, i)) {
                         return false;
@@ -17352,7 +17355,8 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
     // Stored-NULL truth: prefer the bound scan row null bitmap (see
     // NullRowBinding), which distinguishes NULL from a stored empty string.
     bool physNull = false;
-    if (g_condNullEngine && g_condNullRid >= 0 &&
+    if (col.generatedKind != 'v' &&
+        g_condNullEngine && g_condNullRid >= 0 &&
         tbl.tablename == g_condNullTable &&
         g_condNullEngine->isColumnNullByRid(g_condNullDb, tbl.tablename,
                                             g_condNullRid, ci)) {
@@ -17372,7 +17376,8 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         for (; rci < tbl.len && tbl.cols[rci].dataName != cond.value; ++rci) {}
         if (rci < tbl.len) {
             bool rNull = false;
-            if (g_condNullEngine && g_condNullRid >= 0 &&
+            if (tbl.cols[rci].generatedKind != 'v' &&
+                g_condNullEngine && g_condNullRid >= 0 &&
                 tbl.tablename == g_condNullTable &&
                 g_condNullEngine->isColumnNullByRid(g_condNullDb, tbl.tablename,
                                                     g_condNullRid, rci)) {
@@ -24786,10 +24791,13 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
         ekeys.reserve(matchRows.size());
         for (size_t ri = 0; ri < matchRows.size(); ++ri) {
             ExprKey ek{ri, {}};
+            NullRowBinding nullBinding(
+                this, dbname, tbl.tablename, matchRows[ri].first, tbl.len);
             // Build column value map for expression evaluation
             std::map<std::string, std::string> rowData;
             for (size_t ci = 0; ci < tbl.len; ++ci) {
-                rowData[tbl.cols[ci].dataName] = extractColumnValue(matchRows[ri].second, tbl, ci);
+                rowData[tbl.cols[ci].dataName] = extractColumnValue(
+                    matchRows[ri].second, tbl, ci, dbname, true);
             }
             for (const auto& spec : orderBy) {
                 if (!spec.isExpression) continue;
@@ -25007,6 +25015,7 @@ static bool scalarArgColumnIsPhysNull(const std::string& arg,
     if (arg.empty() || arg.front() == 0x27) return false;  // literal
     for (size_t i = 0; i < tbl.len; ++i) {
         if (tbl.cols[i].dataName != arg) continue;
+        if (tbl.cols[i].generatedKind == 'v') return false;
         if (!engine || dbname.empty()) return false;
         // Condition-scope context (forEachRow scans)...
         if (g_condNullEngine && g_condNullRid >= 0 &&
@@ -27938,7 +27947,8 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
                     std::string v;
                     for (size_t ci = 0; ci < tbl.len; ++ci) {
                         if (tbl.cols[ci].dataName == expr.colName) {
-                            v = extractColumnValue(mr.second, tbl, ci);
+                            v = extractColumnValue(
+                                mr.second, tbl, ci, dbname, true);
                             break;
                         }
                     }
@@ -27984,8 +27994,10 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
                 } else {
                     for (size_t i = 0; i < tbl.len; ++i) {
                         if (tbl.cols[i].dataName == expr.colName) {
-                            val = extractColumnValue(mr.second, tbl, i, dbname);
+                            val = extractColumnValue(
+                                mr.second, tbl, i, dbname, true);
                             if (val.empty() &&
+                                tbl.cols[i].generatedKind != 'v' &&
                                 isColumnNullByRid(dbname, tbl.tablename, mr.first, i)) {
                                 val = "NULL";
                             }
