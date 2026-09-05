@@ -169,11 +169,62 @@ static void test_virtual_scalar_function() {
     std::cout << "[GENERATED] VIRTUAL scalar OK" << std::endl;
 }
 
+static void test_virtual_null_and_empty() {
+    std::string db = testDbPath("gen_col_virtual_null");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE TABLE t (id INT PRIMARY KEY, base INT, source_text VARCHAR(10), "
+        "null_value INT GENERATED ALWAYS AS (base + 1) VIRTUAL, "
+        "empty_value VARCHAR(10) GENERATED ALWAYS AS ('') VIRTUAL, "
+        "copied_value VARCHAR(10) GENERATED ALWAYS AS (source_text || '') VIRTUAL)", s));
+    assert(g_engine.insert(
+               db, "t", {{"id", "1"}, {"source_text", ""}}) ==
+           dbms::DBStatus::OK);
+
+    assert(g_engine.query(db, "t", {}, {"null_value"}) ==
+           std::vector<std::string>{"NULL "});
+    assert(g_engine.query(db, "t", {"isnull null_value"}, {"id"}) ==
+           std::vector<std::string>{"1 "});
+    assert(g_engine.query(db, "t", {"isnotnull empty_value"}, {"id"}) ==
+           std::vector<std::string>{"1 "});
+    assert(g_engine.query(db, "t", {"isnotnull copied_value"}, {"id"}) ==
+           std::vector<std::string>{"1 "});
+
+    const std::vector<dbms::StorageEngine::AggItem> items = {
+        {"count", "null_value", {}, {}},
+        {"count", "empty_value", {}, {}},
+        {"count", "copied_value", {}, {}},
+        {"count", "distinct null_value", {}, {}},
+        {"count", "distinct empty_value", {}, {}}};
+    assert(g_engine.aggregate(db, "t", {}, items) ==
+           std::vector<std::string>{"0 1 1 0 1 "});
+
+    dbms::StorageEngine::SelectExpr nullExpr;
+    nullExpr.displayName = "null_value";
+    nullExpr.colName = "null_value";
+    dbms::StorageEngine::SelectExpr absExpr;
+    absExpr.displayName = "abs_null";
+    absExpr.isScalar = true;
+    absExpr.funcName = "abs";
+    absExpr.funcArgs = {"null_value"};
+    assert(g_engine.queryExpr(db, "t", {}, {nullExpr, absExpr}) ==
+           std::vector<std::string>{"NULL NULL "});
+
+    cleanup(db);
+    std::cout << "[GENERATED] VIRTUAL NULL/empty distinction OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_stored_generated();
     test_virtual_generated();
     test_virtual_scalar_function();
+    test_virtual_null_and_empty();
     std::cout << "[GENERATED_COLUMNS] all passed" << std::endl;
     return 0;
 }

@@ -184,10 +184,11 @@ std::optional<bool> ExprHelper::referencesColumn(
         select->selectList.front().expr.get(), columnName);
 }
 
-ExprEvalResult ExprHelper::evalString(
+static ExprEvalResult evalStringImpl(
     const std::string& exprSql,
     const std::map<std::string, std::string>& row,
     const std::map<std::string, std::string>& typeHints,
+    const std::set<std::string>* nullColumns,
     const std::string& currentDB,
     const std::string& currentUser) {
 
@@ -315,7 +316,10 @@ ExprEvalResult ExprHelper::evalString(
         if (it != typeHints.end() && !it->second.empty()) {
             typeName = canonicalTypeName(it->second);
         }
-        ctx.set(name, ExprValue(typeName, value, value.empty()));
+        const bool isNull = nullColumns
+            ? nullColumns->count(name) != 0
+            : value.empty();
+        ctx.set(name, ExprValue(typeName, value, isNull));
     }
     // PostgreSQL exposes these as special session-value expressions. The
     // parser accepts both the function-like AST form and the bare identifier
@@ -363,6 +367,27 @@ ExprEvalResult ExprHelper::evalString(
     res.isNull = v.isNull;
     res.value = v.value;
     return res;
+}
+
+ExprEvalResult ExprHelper::evalString(
+    const std::string& exprSql,
+    const std::map<std::string, std::string>& row,
+    const std::map<std::string, std::string>& typeHints,
+    const std::string& currentDB,
+    const std::string& currentUser) {
+    return evalStringImpl(
+        exprSql, row, typeHints, nullptr, currentDB, currentUser);
+}
+
+ExprEvalResult ExprHelper::evalStringWithNulls(
+    const std::string& exprSql,
+    const std::map<std::string, std::string>& row,
+    const std::set<std::string>& nullColumns,
+    const std::map<std::string, std::string>& typeHints,
+    const std::string& currentDB,
+    const std::string& currentUser) {
+    return evalStringImpl(
+        exprSql, row, typeHints, &nullColumns, currentDB, currentUser);
 }
 
 bool ExprHelper::evalBool(

@@ -2,6 +2,7 @@
 
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 
 namespace dbms {
@@ -32,6 +33,17 @@ public:
     static ExprEvalResult evalString(
         const std::string& exprSql,
         const std::map<std::string, std::string>& row,
+        const std::map<std::string, std::string>& typeHints = {},
+        const std::string& currentDB = "",
+        const std::string& currentUser = "");
+
+    // Variant for callers that retain SQL NULL metadata separately from the
+    // textual value.  This preserves a real empty string as distinct from
+    // NULL while constructing the evaluator's row context.
+    static ExprEvalResult evalStringWithNulls(
+        const std::string& exprSql,
+        const std::map<std::string, std::string>& row,
+        const std::set<std::string>& nullColumns,
         const std::map<std::string, std::string>& typeHints = {},
         const std::string& currentDB = "",
         const std::string& currentUser = "");
