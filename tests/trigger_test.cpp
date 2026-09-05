@@ -1,5 +1,6 @@
 #include "commands/DdlExecutor.h"
 #include "commands/TableManage.h"
+#include "parser/parser.h"
 #include "Session.h"
 #include "catalog/CatalogService.h"
 #include "catalog/type_registry.h"
@@ -140,6 +141,62 @@ static void test_create_trigger_statement_level() {
 
     cleanup(db);
     std::cout << "[TRIGGER] statement level OK" << std::endl;
+}
+
+static void test_drop_trigger_is_relation_scoped_and_updates_catalog() {
+    const std::string db = testDbPath("trigger_drop_catalog");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE events (id INT)", s));
+    assert(!ddl.executeSql("CREATE TABLE other_events (id INT)", s));
+    assert(!ddl.executeSql(
+        "CREATE TRIGGER audit_insert BEFORE INSERT ON events "
+        "FOR EACH ROW EXECUTE FUNCTION audit()", s));
+    assert(!ddl.executeSql(
+        "CREATE TRIGGER audit_update AFTER UPDATE ON events "
+        "FOR EACH ROW EXECUTE FUNCTION audit()", s));
+
+    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
+    const auto* relation = catalog.resolveRelation("events", {"public"});
+    assert(relation != nullptr && relation->relhastriggers);
+    const dbms::Oid relationOid = relation->oid;
+
+    // PostgreSQL requires ON table, and a trigger on one table must not be
+    // removed by naming a different table.
+    assert(ddl.executeSql("DROP TRIGGER audit_insert", s));
+    assert(ddl.executeSql(
+        "DROP TRIGGER audit_insert ON other_events", s));
+    assert(!ddl.executeSql(
+        "DROP TRIGGER IF EXISTS audit_insert ON other_events", s));
+    assert(g_engine.getAllTriggers(db).size() == 2);
+
+    bool handled = false;
+    const std::string firstDrop = "DROP TRIGGER audit_insert ON events";
+    assert(!dbms::tryDdlBridge(
+        firstDrop, dbms::SQLParser::classify(firstDrop), s, handled));
+    assert(handled);
+    assert(g_engine.getAllTriggers(db).size() == 1);
+    relation = catalog.findClass(relationOid);
+    assert(relation != nullptr && relation->relhastriggers);
+
+    assert(!ddl.executeSql("DROP TRIGGER audit_update ON events", s));
+    assert(g_engine.getAllTriggers(db).empty());
+    relation = catalog.findClass(relationOid);
+    assert(relation != nullptr && !relation->relhastriggers);
+
+    g_engine.catalogService().evict(db);
+    dbms::CatalogManager& reloaded = g_engine.catalogService().get(db);
+    relation = reloaded.findClass(relationOid);
+    assert(relation != nullptr && !relation->relhastriggers);
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[TRIGGER] relation-scoped DROP updates catalog OK"
+              << std::endl;
 }
 
 static void test_trigger_metadata_failures_preserve_old_state() {
@@ -322,6 +379,7 @@ int main() {
     test_create_trigger_after_update();
     test_create_trigger_when();
     test_create_trigger_statement_level();
+    test_drop_trigger_is_relation_scoped_and_updates_catalog();
     test_trigger_metadata_failures_preserve_old_state();
     test_concurrent_trigger_creates_do_not_lose_updates();
     test_legacy_trigger_metadata_is_migrated();

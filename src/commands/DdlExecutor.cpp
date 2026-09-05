@@ -587,6 +587,8 @@ bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
             return executeCreateView(dynamic_cast<const CreateViewStmt*>(stmt.get()), s);
         case SqlCommand::CreateTrigger:
             return executeCreateTrigger(dynamic_cast<const CreateTriggerStmt*>(stmt.get()), s);
+        case SqlCommand::DropTrigger:
+            return executeDropTrigger(dynamic_cast<const DropStmt*>(stmt.get()), s);
         case SqlCommand::CreateFunction:
             return executeCreateFunction(dynamic_cast<const CreateFunctionStmt*>(stmt.get()), s);
         case SqlCommand::CreateProcedure:
@@ -661,6 +663,7 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         case dbms::SqlCommand::DropType:
         case dbms::SqlCommand::CreateView:
         case dbms::SqlCommand::CreateTrigger:
+        case dbms::SqlCommand::DropTrigger:
         case dbms::SqlCommand::CreateFunction:
         case dbms::SqlCommand::CreateProcedure:
         case dbms::SqlCommand::CreatePolicy:
@@ -4980,6 +4983,71 @@ bool DdlExecutor::executeCreateTrigger(const CreateTriggerStmt* stmt, Session& s
     }
     if (!txn.commit()) return true;
     std::cout << "CREATE TRIGGER succeeded" << std::endl;
+    return false;
+}
+
+bool DdlExecutor::executeDropTrigger(const DropStmt* stmt, Session& s) {
+    if (!stmt) return false;
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    if (stmt->objectNames.size() != 1 || stmt->objectNames.front().empty() ||
+        stmt->tableName.empty()) {
+        std::cout << "SQL syntax error: DROP TRIGGER name ON table"
+                  << std::endl;
+        return true;
+    }
+
+    const std::string& triggerName = stmt->objectNames.front();
+    const std::string tableName = resolveTableName(s, stmt->tableName);
+    if (!g_engine.tableExists(s.currentDB, tableName) &&
+        !g_engine.viewExists(s.currentDB, tableName)) {
+        std::cout << "Relation " << tableName << " not found" << std::endl;
+        return true;
+    }
+
+    std::vector<StorageEngine::Trigger> triggers;
+    if (!g_engine.tryGetAllTriggers(s.currentDB, triggers)) {
+        std::cout << "DROP TRIGGER metadata read failed" << std::endl;
+        return true;
+    }
+    const bool existsOnRelation = std::any_of(
+        triggers.begin(), triggers.end(),
+        [&](const StorageEngine::Trigger& trigger) {
+            return trigger.name == triggerName &&
+                   trigger.tableName == tableName;
+        });
+    if (!existsOnRelation) {
+        if (stmt->ifExists) {
+            std::cout << "NOTICE: trigger \"" << triggerName
+                      << "\" for relation \"" << stmt->tableName
+                      << "\" does not exist, skipping" << std::endl;
+            return false;
+        }
+        std::cout << "Trigger " << triggerName << " does not exist on relation "
+                  << stmt->tableName << std::endl;
+        return true;
+    }
+
+    DdlTransaction txn(s);
+    txn.enableSnapshotRollback();
+    if (!txn.begin()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
+    txn.markSnapshotDirty();
+    const DBStatus status =
+        g_engine.dropTrigger(s.currentDB, triggerName, tableName);
+    if (status != DBStatus::OK) {
+        std::cout << "DROP TRIGGER failed" << std::endl;
+        return true;
+    }
+    txn.recordDrop(DdlObjectKind::Trigger, triggerName, tableName);
+    if (!synchronizeRelationTriggerFlagInCatalog(s.currentDB, tableName)) {
+        std::cout << "DROP TRIGGER catalog update failed" << std::endl;
+        return true;
+    }
+    if (!txn.commit()) return true;
+    std::cout << "DROP TRIGGER succeeded" << std::endl;
     return false;
 }
 

@@ -1122,7 +1122,8 @@ public:
         std::vector<std::string> transitions;
     };
     DBStatus createTrigger(const std::string& dbname, const Trigger& trg);
-    DBStatus dropTrigger(const std::string& dbname, const std::string& trgName);
+    DBStatus dropTrigger(const std::string& dbname, const std::string& trgName,
+                         const std::string& tableName = {});
     DBStatus enableTrigger(const std::string& dbname, const std::string& trgName);
     DBStatus disableTrigger(const std::string& dbname, const std::string& trgName);
     std::vector<Trigger> getTriggers(const std::string& dbname, const std::string& tablename,

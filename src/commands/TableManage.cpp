@@ -8196,13 +8196,18 @@ DBStatus StorageEngine::createTrigger(const std::string& dbname, const Trigger& 
     return persistTriggers(dbname, existing);
 }
 
-DBStatus StorageEngine::dropTrigger(const std::string& dbname, const std::string& trgName) {
+DBStatus StorageEngine::dropTrigger(const std::string& dbname,
+                                    const std::string& trgName,
+                                    const std::string& tableName) {
     std::lock_guard<std::recursive_mutex> triggerLock(cacheMutex_);
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     std::vector<Trigger> existing;
     if (!loadTriggers(dbname, existing)) return DBStatus::CORRUPTED_DATA;
     const auto newEnd = std::remove_if(existing.begin(), existing.end(),
-        [&](const Trigger& trigger) { return trigger.name == trgName; });
+        [&](const Trigger& trigger) {
+            return trigger.name == trgName &&
+                   (tableName.empty() || trigger.tableName == tableName);
+        });
     if (newEnd == existing.end()) return DBStatus::TABLE_NOT_FOUND;
     existing.erase(newEnd, existing.end());
     return persistTriggers(dbname, existing);

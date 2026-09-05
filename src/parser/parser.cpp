@@ -6824,12 +6824,24 @@ StmtPtr SQLParser::parseDropTrigger(const std::vector<std::string>& tokens, size
     if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
         stmt->ifExists = true; pos += 2;
     }
+    if (pos >= tokens.size() || tokens[pos] == ";") return nullptr;
+    stmt->objectNames.push_back(tokens[pos++]);
+    if (pos >= tokens.size() || !match(tokens, pos, "on")) return nullptr;
+    ++pos;
+    if (pos >= tokens.size() || tokens[pos] == ";") return nullptr;
+    stmt->tableName = tokens[pos++];
+    if (pos < tokens.size() && tokens[pos] == ".") {
+        ++pos;
+        if (pos >= tokens.size() || tokens[pos] == ";") return nullptr;
+        stmt->tableName += "." + tokens[pos++];
+    }
+    bool behaviorSpecified = false;
     while (pos < tokens.size() && tokens[pos] != ";") {
-        std::string w = toLower(tokens[pos]);
-        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
-        if (w == "restrict") { ++pos; continue; }
-        if (w == ",") { ++pos; continue; }
-        stmt->objectNames.push_back(tokens[pos++]);
+        const std::string option = toLower(tokens[pos++]);
+        if (option != "cascade" && option != "restrict") return nullptr;
+        if (behaviorSpecified) return nullptr;
+        behaviorSpecified = true;
+        stmt->cascade = option == "cascade";
     }
     return stmt;
 }
