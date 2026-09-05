@@ -36700,15 +36700,10 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
         return DBStatus::IO_ERROR;
     }
 
-    // Flush every loaded heap and index cache before taking the transaction
-    // snapshot.  Otherwise a backup can contain older index pages than the
-    // heap rows already visible through the in-memory caches.
-    if (!flushDatabaseCaches(dbname)) {
-        context.databaseExclusiveLock.reset();
-        context.databaseSharedLock.reset();
-        context.databaseTxnMutex.reset();
-        return DBStatus::IO_ERROR;
-    }
+    // A ReadView and catalog snapshot are logical, in-memory state; neither
+    // requires writing unrelated dirty buffers. Physical DDL rollback
+    // snapshots are created later by createTransactionBackup(), which owns
+    // the exclusive database lock and performs its own complete cache flush.
 
     // Assign transaction ID and create ReadView (if needed).
     transactionContext().currentTxnId = TxnIdGenerator::instance().nextTxId();

@@ -164,6 +164,37 @@ int main() {
         assert(heapPageIsClean());
         std::cout << "[CHECKPOINT] transaction-scoped heap writeback OK\n";
 
+        // BEGIN only creates logical snapshots. It must not flush a dirty
+        // page owned by another active transaction on the same database.
+        assert(engine.beginTransaction(dbname) == DBStatus::OK);
+        vals["id"] = "3";
+        assert(engine.insert(dbname, "t", vals) == DBStatus::OK);
+        const auto heapPageIsDirty = [&]() {
+            PageAllocator* allocator = engine.getPageAllocator(dbname, "t");
+            assert(allocator != nullptr && allocator->bufferPool() != nullptr);
+            const auto frames = allocator->bufferPool()->getFrameInfo();
+            const auto page = std::find_if(
+                frames.begin(), frames.end(),
+                [](const BufferPool::FrameInfo& frame) {
+                    return frame.pageId == 1;
+                });
+            return page != frames.end() && page->dirty;
+        };
+        assert(heapPageIsDirty());
+        DBStatus peerBegin = DBStatus::IO_ERROR;
+        DBStatus peerCommit = DBStatus::IO_ERROR;
+        std::thread peer([&]() {
+            peerBegin = engine.beginTransaction(dbname);
+            if (peerBegin == DBStatus::OK) {
+                peerCommit = engine.commitTransaction();
+            }
+        });
+        peer.join();
+        assert(peerBegin == DBStatus::OK && peerCommit == DBStatus::OK);
+        assert(heapPageIsDirty());
+        assert(engine.rollbackTransaction() == DBStatus::OK);
+        std::cout << "[CHECKPOINT] BEGIN leaves peer dirty pages untouched OK\n";
+
         assert(engine.checkpoint(dbname));
     }
 
