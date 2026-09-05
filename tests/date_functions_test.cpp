@@ -30,6 +30,7 @@ static dbms::ExprValue callFn(dbms::ExprEvaluator& eval, const std::string& name
 
 static dbms::ExprValue F(const std::string& v) { return dbms::ExprValue("text", v, false); }
 static dbms::ExprValue TS(const std::string& v) { return dbms::ExprValue("timestamp", v, false); }
+static dbms::ExprValue IV(const std::string& v) { return dbms::ExprValue("interval", v, false); }
 static dbms::ExprValue I(int64_t v) { return dbms::ExprValue("integer", std::to_string(v), false); }
 
 static void test_extract_date_part() {
@@ -71,6 +72,15 @@ static void test_epoch() {
     assert(callFn(eval, "extract", {F("epoch"), TS("1970-01-02 00:00:00")}).value == "86400.000000");
     // A specific later instant.
     assert(callFn(eval, "extract", {F("epoch"), TS("1970-01-01 01:00:00")}).value == "3600.000000");
+    assert(callFn(eval, "extract", {F("epoch"), IV("3 days")}).value ==
+           "259200.000000");
+    assert(callFn(eval, "extract",
+                  {F("epoch"),
+                   IV("9223372036854775807 months")}).value ==
+           "23906980319527578891744000.000000");
+    assert(callFn(eval, "extract",
+                  {F("epoch"),
+                   IV(std::string(400, '9') + " months")}).isNull);
     std::cout << "[DATEFN] epoch OK" << std::endl;
 }
 

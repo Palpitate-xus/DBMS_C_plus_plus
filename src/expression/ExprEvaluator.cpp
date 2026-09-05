@@ -187,6 +187,28 @@ static bool scaleIntervalField(long long value, long double scale,
     return true;
 }
 
+static std::string formatMicrosNumeric(__int128 value) {
+    const bool negative = value < 0;
+    const unsigned __int128 magnitude = negative
+        ? static_cast<unsigned __int128>(-(value + 1)) + 1
+        : static_cast<unsigned __int128>(value);
+    unsigned __int128 whole = magnitude / 1000000;
+    const unsigned int fraction =
+        static_cast<unsigned int>(magnitude % 1000000);
+
+    std::string integer;
+    do {
+        integer.push_back(static_cast<char>('0' + whole % 10));
+        whole /= 10;
+    } while (whole != 0);
+    if (negative) integer.push_back('-');
+    std::reverse(integer.begin(), integer.end());
+
+    std::string fractional = std::to_string(fraction);
+    fractional.insert(fractional.begin(), 6 - fractional.size(), '0');
+    return integer + "." + fractional;
+}
+
 // Parse the canonical output form or the human input form ("2 years",
 // "14 months", "90 minutes", "1-2", "04:05:06", "1.5 days").
 static IntervalParts parseIntervalText(const std::string& in) {
@@ -4880,6 +4902,9 @@ void ExprEvaluator::registerBuiltins() {
             // seconds (months counted as 30 days, days as 86400s).
             {
                 std::string iv = src;
+                const bool declaredInterval =
+                    toLower(a[1].typeName).find("interval") !=
+                    std::string::npos;
                 {
                     std::string lowI;
                     for (char c : iv)
@@ -4892,13 +4917,16 @@ void ExprEvaluator::registerBuiltins() {
                 }
                 IntervalParts ip = parseIntervalText(iv);
                 if (ip.ok) {
-                    long long us = ip.months * 30LL * 86400000000LL +
-                                   ip.days * 86400000000LL + ip.micros;
-                    char ib[64];
-                    std::snprintf(ib, sizeof(ib), "%.6f",
-                                  static_cast<double>(us) / 1000000.0);
-                    return ExprValue("numeric", ib, false);
+                    const __int128 us =
+                        static_cast<__int128>(ip.months) * 30 *
+                            86400000000LL +
+                        static_cast<__int128>(ip.days) * 86400000000LL +
+                        ip.micros;
+                    return ExprValue("numeric", formatMicrosNumeric(us),
+                                     false);
                 }
+                if (declaredInterval)
+                    return ExprValue("numeric", "", true);
             }
             // Timestamp: seconds since 1970-01-01 00:00:00, numeric
             // scale 6 (86400.000000).
