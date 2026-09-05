@@ -425,6 +425,45 @@ static void test_matview_drop_io_failure_rolls_back() {
     std::cout << "[MATVIEW] DROP I/O failure rollback OK" << std::endl;
 }
 
+static void test_schema_qualified_matview_name() {
+    const std::string db = testDbPath("matview_qualified_name");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE t (id INT)", s));
+    assert(ddl.executeSql(
+        "CREATE MATERIALIZED VIEW missing_schema.mv AS SELECT id FROM t",
+        s));
+    assert(!g_engine.isMaterializedView(db, "missing_schema.mv"));
+    assert(!g_engine.isMaterializedView(db, "mv"));
+
+    assert(!ddl.executeSql("CREATE SCHEMA reporting", s));
+    assert(!ddl.executeSql(
+        "CREATE MATERIALIZED VIEW reporting.mv AS SELECT id FROM t", s));
+    assert(g_engine.isMaterializedView(db, "reporting.mv"));
+    assert(!g_engine.isMaterializedView(db, "mv"));
+    assert(g_engine.tableExists(
+        db, dbms::StorageEngine::materializedViewPrefix("reporting.mv")));
+    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
+    const auto* relation =
+        catalog.resolveRelation("reporting.mv", {"public"});
+    assert(relation != nullptr && relation->relkind == 'm');
+    const dbms::Oid relationOid = relation->oid;
+
+    assert(!ddl.executeSql("DROP MATERIALIZED VIEW reporting.mv", s));
+    assert(!g_engine.isMaterializedView(db, "reporting.mv"));
+    assert(!g_engine.tableExists(
+        db, dbms::StorageEngine::materializedViewPrefix("reporting.mv")));
+    assert(catalog.findClass(relationOid) == nullptr);
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[MATVIEW] schema-qualified name lifecycle OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_create_matview_select_star();
@@ -436,6 +475,7 @@ int main() {
     test_drop_matview_cleans_catalog_atomically();
     test_matview_metadata_write_failure_rolls_back();
     test_matview_drop_io_failure_rolls_back();
+    test_schema_qualified_matview_name();
     std::cout << "[MATVIEW] all passed" << std::endl;
     return 0;
 }

@@ -95,12 +95,39 @@ static void test_view_existence_requires_metadata_file() {
     std::cout << "[VIEW] metadata object type validation OK" << std::endl;
 }
 
+static void test_schema_qualified_view_name() {
+    const std::string db = testDbPath("view_qualified_name");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE t (id INT)", s));
+    assert(ddl.executeSql(
+        "CREATE VIEW missing_schema.v AS SELECT id FROM t", s));
+    assert(!g_engine.viewExists(db, "missing_schema.v"));
+    assert(!g_engine.viewExists(db, "v"));
+
+    assert(!ddl.executeSql("CREATE SCHEMA reporting", s));
+    assert(!ddl.executeSql(
+        "CREATE VIEW reporting.v AS SELECT id FROM t", s));
+    assert(g_engine.viewExists(db, "reporting.v"));
+    assert(!g_engine.viewExists(db, "v"));
+    assert(g_engine.getViewBaseTable(db, "reporting.v") == "t");
+    assert(g_engine.dropView(db, "reporting.v") == dbms::DBStatus::OK);
+
+    cleanup(db);
+    std::cout << "[VIEW] schema-qualified name OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_create_view();
     test_create_or_replace_view();
     test_view_with_check_option();
     test_view_existence_requires_metadata_file();
+    test_schema_qualified_view_name();
     std::cout << "[VIEW] all passed" << std::endl;
     return 0;
 }

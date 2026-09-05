@@ -4744,6 +4744,20 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
 
     std::string viewname = stmt->viewName;
     std::string viewSql = stmt->selectSql;
+    CatalogManager::QualifiedName qualifiedName;
+    if (!CatalogManager::parseQualifiedName(viewname, qualifiedName) ||
+        qualifiedName.name.empty()) {
+        std::cout << "ERROR: invalid view name \"" << viewname << "\""
+                  << std::endl;
+        return true;
+    }
+    const std::string schemaName = qualifiedName.schema.empty()
+        ? "public" : qualifiedName.schema;
+    if (!g_engine.schemaExists(s.currentDB, schemaName)) {
+        std::cout << "ERROR: schema \"" << schemaName
+                  << "\" does not exist" << std::endl;
+        return true;
+    }
     if (viewSql.empty()) {
         std::cout << "CREATE VIEW requires AS SELECT" << std::endl;
         return true;
@@ -4817,6 +4831,20 @@ bool DdlExecutor::executeCreateMaterializedView(const CreateViewStmt* stmt, Sess
 
     std::string viewname = stmt->viewName;
     std::string selectSql = stmt->selectSql;
+    CatalogManager::QualifiedName qualifiedName;
+    if (!CatalogManager::parseQualifiedName(viewname, qualifiedName) ||
+        qualifiedName.name.empty()) {
+        std::cout << "ERROR: invalid materialized-view name \""
+                  << viewname << "\"" << std::endl;
+        return true;
+    }
+    const std::string schemaName = qualifiedName.schema.empty()
+        ? "public" : qualifiedName.schema;
+    if (!g_engine.schemaExists(s.currentDB, schemaName)) {
+        std::cout << "ERROR: schema \"" << schemaName
+                  << "\" does not exist" << std::endl;
+        return true;
+    }
     if (selectSql.empty()) {
         std::cout << "CREATE MATERIALIZED VIEW requires AS SELECT" << std::endl;
         return true;
@@ -4965,12 +4993,6 @@ bool DdlExecutor::executeCreateMaterializedView(const CreateViewStmt* stmt, Sess
     }
 
     try {
-        CatalogManager::QualifiedName qualifiedName;
-        if (!CatalogManager::parseQualifiedName(viewname, qualifiedName)) {
-            throw std::runtime_error("invalid materialized-view name");
-        }
-        const std::string schemaName = qualifiedName.schema.empty()
-            ? "public" : qualifiedName.schema;
         CatalogManager& catalog =
             g_engine.catalogService().get(s.currentDB);
         registerMaterializedViewInCatalog(

@@ -3118,7 +3118,8 @@ ParseResult SQLParser::parseCreate(const std::string& sql) {
             mvs->replace = isReplace;
             mvs->command = SqlCommand::CreateMaterializedView;
         }
-        r.success = true;
+        r.success = stmt != nullptr;
+        if (!r.success) r.error = "invalid CREATE MATERIALIZED VIEW statement";
         r.stmt = std::move(stmt);
         return r;
     }
@@ -5254,7 +5255,11 @@ StmtPtr SQLParser::parseCreateView(const std::vector<std::string>& tokens, size_
         stmt->viewName = tokens[pos++];
         if (pos < tokens.size() && tokens[pos] == ".") {
             ++pos;
-            if (pos < tokens.size()) stmt->viewName = tokens[pos++];
+            if (pos >= tokens.size() || tokens[pos] == ";" ||
+                match(tokens, pos, "as") || tokens[pos] == "(") {
+                return nullptr;
+            }
+            stmt->viewName += "." + tokens[pos++];
         }
     }
     if (pos < tokens.size() && tokens[pos] == "(") {
@@ -6678,7 +6683,13 @@ StmtPtr SQLParser::parseDropView(const std::vector<std::string>& tokens, size_t&
         if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
         if (w == "restrict") { ++pos; continue; }
         if (w == ",") { ++pos; continue; }
-        stmt->objectNames.push_back(tokens[pos++]);
+        std::string name = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos >= tokens.size() || tokens[pos] == ";") return nullptr;
+            name += "." + tokens[pos++];
+        }
+        stmt->objectNames.push_back(std::move(name));
     }
     return stmt;
 }
@@ -6694,7 +6705,13 @@ StmtPtr SQLParser::parseDropMaterializedView(const std::vector<std::string>& tok
         if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
         if (w == "restrict") { ++pos; continue; }
         if (w == ",") { ++pos; continue; }
-        stmt->objectNames.push_back(tokens[pos++]);
+        std::string name = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos >= tokens.size() || tokens[pos] == ";") return nullptr;
+            name += "." + tokens[pos++];
+        }
+        stmt->objectNames.push_back(std::move(name));
     }
     return stmt;
 }

@@ -190,6 +190,41 @@ int main() {
         std::cout << "[PARSER P1] CREATE OR REPLACE VIEW OK\n";
     }
 
+    {
+        auto view = parser.parse(
+            "CREATE VIEW reporting.summary AS SELECT id FROM t");
+        assert(view.success);
+        auto* createView = asCreateView(view.stmt);
+        assert(createView && createView->viewName == "reporting.summary");
+
+        auto materialized = parser.parse(
+            "CREATE MATERIALIZED VIEW reporting.cached AS SELECT id FROM t");
+        assert(materialized.success);
+        auto* createMaterialized = asCreateView(materialized.stmt);
+        assert(createMaterialized &&
+               createMaterialized->viewName == "reporting.cached");
+
+        auto dropViews = parser.parse(
+            "DROP VIEW reporting.summary, public.other_view");
+        assert(dropViews.success);
+        auto* dropView = dynamic_cast<DropStmt*>(dropViews.stmt.get());
+        assert(dropView && dropView->objectNames.size() == 2);
+        assert(dropView->objectNames[0] == "reporting.summary");
+        assert(dropView->objectNames[1] == "public.other_view");
+
+        auto dropMaterialized = parser.parse(
+            "DROP MATERIALIZED VIEW reporting.cached");
+        assert(dropMaterialized.success);
+        auto* dropMv = dynamic_cast<DropStmt*>(dropMaterialized.stmt.get());
+        assert(dropMv && dropMv->objectNames.size() == 1);
+        assert(dropMv->objectNames[0] == "reporting.cached");
+
+        assert(!parser.parse(
+            "CREATE MATERIALIZED VIEW reporting. AS SELECT id FROM t").success);
+        assert(!parser.parse("DROP VIEW reporting.").success);
+        std::cout << "[PARSER P1] qualified view names preserved OK\n";
+    }
+
     // 8. ALTER TABLE
     {
         auto r = parser.parse("ALTER TABLE t ADD COLUMN c INT, DROP COLUMN d, ADD CONSTRAINT pk PRIMARY KEY (id)");
