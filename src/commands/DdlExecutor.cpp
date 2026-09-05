@@ -3285,16 +3285,18 @@ static std::string extractNextvalSequence(const std::string& expr) {
 // references nextval('seqname') (or schema-qualified variant).
 static std::vector<std::pair<std::string, std::string>> findDefaultNextvalDeps(
     const std::string& dbname, const std::string& seqname) {
+    auto canonicalSequenceName = [](const std::string& name) {
+        return name.rfind("public.", 0) == 0 ? name.substr(7) : name;
+    };
+    const std::string canonicalTarget = canonicalSequenceName(seqname);
     std::vector<std::pair<std::string, std::string>> deps;
     for (const auto& tname : g_engine.getTableNames(dbname)) {
         dbms::TableSchema tbl = g_engine.getTableSchema(dbname, tname);
         for (size_t i = 0; i < tbl.len; ++i) {
-            std::string seq = extractNextvalSequence(tbl.cols[i].defaultValue);
-            // Support both bare sequence name and schema-qualified name.
-            std::string bareSeq = seq;
-            size_t dot = seq.find('.');
-            if (dot != std::string::npos) bareSeq = seq.substr(dot + 1);
-            if (bareSeq == seqname || seq == seqname) {
+            const std::string sequence =
+                extractNextvalSequence(tbl.cols[i].defaultValue);
+            if (!sequence.empty() &&
+                canonicalSequenceName(sequence) == canonicalTarget) {
                 deps.emplace_back(tname, tbl.cols[i].dataName);
             }
         }
@@ -3310,13 +3312,17 @@ static std::string renameNextvalSequenceReference(const std::string& expression,
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     const std::string referenced = extractNextvalSequence(expression);
     if (referenced.empty()) return expression;
-    std::string bare = referenced;
-    const size_t dot = bare.rfind('.');
-    if (dot != std::string::npos) bare = bare.substr(dot + 1);
-    if (referenced != oldName && bare != oldName) return expression;
+    auto canonicalSequenceName = [](const std::string& name) {
+        return name.rfind("public.", 0) == 0 ? name.substr(7) : name;
+    };
+    if (canonicalSequenceName(referenced) !=
+        canonicalSequenceName(oldName)) return expression;
 
     std::string replacement = newName;
-    if (dot != std::string::npos) replacement = referenced.substr(0, dot + 1) + newName;
+    if (referenced.rfind("public.", 0) == 0 &&
+        newName.find('.') == std::string::npos) {
+        replacement = "public." + newName;
+    }
     const size_t nextvalPos = lowerExpression.find("nextval");
     const size_t literalStart = expression.find('\'', nextvalPos);
     if (literalStart == std::string::npos) return expression;
@@ -5154,10 +5160,27 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
         return true;
     }
 
-    std::string seqname = stmt->objectName;
+    if (stmt->only) {
+        std::cout << "SQL syntax error: ONLY is not valid for ALTER SEQUENCE"
+                  << std::endl;
+        return true;
+    }
+
+    const std::string requestedName = stmt->schema.empty()
+        ? stmt->objectName : stmt->schema + "." + stmt->objectName;
+    CatalogManager::QualifiedName sequenceName;
+    if (!CatalogManager::parseQualifiedName(requestedName, sequenceName) ||
+        sequenceName.name.empty() ||
+        sequenceName.schema.find('.') != std::string::npos) {
+        std::cout << "ALTER SEQUENCE has an invalid name" << std::endl;
+        return true;
+    }
+    const std::string sequenceSchema = sequenceName.schema.empty()
+        ? "public" : sequenceName.schema;
+    const std::string seqname = sequenceSchema == "public"
+        ? sequenceName.name : sequenceSchema + "." + sequenceName.name;
     dbms::SequenceInfo info;
 
-    // Parse subCommand (lowercase space-separated tokens saved by parser).
     std::string rest = stmt->subCommand;
     std::vector<std::string> tokens;
     {
@@ -5166,65 +5189,27 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
         while (iss >> tok) tokens.push_back(tok);
     }
 
-    if (!tokens.empty() && toLower(tokens[0]) == "rename") {
+    if (tokens.empty()) {
+        std::cout << "SQL syntax error: ALTER SEQUENCE requires an action"
+                  << std::endl;
+        return true;
+    }
+
+    const bool renameRequested = toLower(tokens[0]) == "rename";
+    std::string newName;
+    if (renameRequested) {
         if (tokens.size() != 3 || toLower(tokens[1]) != "to" || tokens[2].empty()) {
             std::cout << "SQL syntax error: ALTER SEQUENCE name RENAME TO new_name" << std::endl;
             return true;
         }
-        const std::string newName = tokens[2];
-        txn.markSnapshotDirty();
-        if (g_engine.renameSequence(s.currentDB, seqname, newName) != DBStatus::OK) {
-            std::cout << "ALTER SEQUENCE RENAME failed" << std::endl;
+        CatalogManager::QualifiedName newSequenceName;
+        if (!CatalogManager::parseQualifiedName(tokens[2], newSequenceName) ||
+            newSequenceName.name.empty() || !newSequenceName.schema.empty()) {
+            std::cout << "SQL syntax error: ALTER SEQUENCE RENAME target must be unqualified"
+                      << std::endl;
             return true;
         }
-
-        try {
-            dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
-            const auto* seqRel = cat.resolveRelation(seqname, {"public"});
-            if (!seqRel || !cat.renameClass(seqRel->oid, newName) || !cat.persistAll()) {
-                std::cout << "ALTER SEQUENCE RENAME catalog update failed" << std::endl;
-                return true;
-            }
-        } catch (const std::exception& e) {
-            std::cerr << "ALTER SEQUENCE RENAME catalog update failed: " << e.what() << std::endl;
-            return true;
-        }
-
-        const auto dependencies = findDefaultNextvalDeps(s.currentDB, seqname);
-        for (const auto& [tableName, columnName] : dependencies) {
-            const auto table = g_engine.getTableSchema(s.currentDB, tableName);
-            size_t columnIndex = table.len;
-            for (size_t i = 0; i < table.len; ++i) {
-                if (table.cols[i].dataName == columnName) {
-                    columnIndex = i;
-                    break;
-                }
-            }
-            if (columnIndex >= table.len) {
-                std::cout << "ALTER SEQUENCE RENAME dependency update failed" << std::endl;
-                return true;
-            }
-            const std::string updatedDefault = renameNextvalSequenceReference(
-                table.cols[columnIndex].defaultValue, seqname, newName);
-            if (g_engine.alterTableSetDefault(s.currentDB, tableName, columnName,
-                                              updatedDefault) != DBStatus::OK) {
-                std::cout << "ALTER SEQUENCE RENAME dependency update failed" << std::endl;
-                return true;
-            }
-        }
-        if (auto it = s.sequenceLastValues.find(seqname); it != s.sequenceLastValues.end()) {
-            s.sequenceLastValues[newName] = it->second;
-            s.sequenceLastValues.erase(it);
-        }
-        if (!txn.commit()) return true;
-        std::cout << "ALTER SEQUENCE succeeded" << std::endl;
-        return false;
-    }
-    for (const auto& token : tokens) {
-        if (toLower(token) == "rename" || toLower(token) == "to") {
-            std::cout << "SQL syntax error: ALTER SEQUENCE name RENAME TO new_name" << std::endl;
-            return true;
-        }
+        newName = newSequenceName.name;
     }
 
     auto lower = [](const std::string& str) {
@@ -5233,118 +5218,317 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
         return r;
     };
 
-    for (size_t i = 0; i < tokens.size(); ++i) {
-        std::string tok = lower(tokens[i]);
-        auto readValue = [&](int64_t& target, const char* name) {
-            if (i + 1 >= tokens.size() || !parseInt64Strict(tokens[i + 1], target)) {
-                std::cout << "SQL syntax error: invalid " << name << " value" << std::endl;
-                return false;
+    if (!renameRequested) {
+        for (const auto& token : tokens) {
+            if (toLower(token) == "rename" || toLower(token) == "to") {
+                std::cout << "SQL syntax error: ALTER SEQUENCE name RENAME TO new_name"
+                          << std::endl;
+                return true;
             }
-            ++i;
-            return true;
-        };
-        if (tok == "restart") {
-            info.startSpecified = true;
-            if (i + 1 < tokens.size() && lower(tokens[i + 1]) == "with") {
+        }
+
+        for (size_t i = 0; i < tokens.size(); ++i) {
+            std::string tok = lower(tokens[i]);
+            auto readValue = [&](int64_t& target, const char* name) {
+                if (i + 1 >= tokens.size() ||
+                    !parseInt64Strict(tokens[i + 1], target)) {
+                    std::cout << "SQL syntax error: invalid " << name
+                              << " value" << std::endl;
+                    return false;
+                }
                 ++i;
-                if (!readValue(info.start, "RESTART")) return true;
-            } else if (!readValue(info.start, "RESTART")) return true;
-        } else if (tok == "increment") {
-            info.incrementSpecified = true;
-            if (i + 1 < tokens.size() && lower(tokens[i + 1]) == "by") {
+                return true;
+            };
+            if (tok == "restart") {
+                info.startSpecified = true;
+                if (i + 1 < tokens.size() && lower(tokens[i + 1]) == "with") {
+                    ++i;
+                    if (!readValue(info.start, "RESTART")) return true;
+                } else if (!readValue(info.start, "RESTART")) {
+                    return true;
+                }
+            } else if (tok == "increment") {
+                info.incrementSpecified = true;
+                if (i + 1 < tokens.size() && lower(tokens[i + 1]) == "by") {
+                    ++i;
+                    if (!readValue(info.increment, "INCREMENT")) return true;
+                } else if (!readValue(info.increment, "INCREMENT")) {
+                    return true;
+                }
+            } else if (tok == "minvalue") {
+                info.hasMinValue = true;
+                if (!readValue(info.minValue, "MINVALUE")) return true;
+            } else if (tok == "maxvalue") {
+                info.hasMaxValue = true;
+                if (!readValue(info.maxValue, "MAXVALUE")) return true;
+            } else if (tok == "cache") {
+                info.cacheSpecified = true;
+                if (!readValue(info.cache, "CACHE")) return true;
+            } else if (tok == "no") {
+                if (i + 1 >= tokens.size()) {
+                    std::cout << "SQL syntax error: incomplete NO option"
+                              << std::endl;
+                    return true;
+                }
+                const std::string next = lower(tokens[i + 1]);
+                if (next == "minvalue") {
+                    info.noMinValue = true;
+                } else if (next == "maxvalue") {
+                    info.noMaxValue = true;
+                } else if (next == "cycle") {
+                    info.cycleSpecified = true;
+                    info.cycle = false;
+                } else {
+                    std::cout << "SQL syntax error: unsupported ALTER SEQUENCE option NO "
+                              << tokens[i + 1] << std::endl;
+                    return true;
+                }
                 ++i;
-                if (!readValue(info.increment, "INCREMENT")) return true;
-            } else if (!readValue(info.increment, "INCREMENT")) return true;
-        } else if (tok == "minvalue") {
-            info.hasMinValue = true;
-            if (!readValue(info.minValue, "MINVALUE")) return true;
-        } else if (tok == "maxvalue") {
-            info.hasMaxValue = true;
-            if (!readValue(info.maxValue, "MAXVALUE")) return true;
-        } else if (tok == "cache") {
-            info.cacheSpecified = true;
-            if (!readValue(info.cache, "CACHE")) return true;
-        } else if (tok == "no" && i + 1 < tokens.size()) {
-            std::string next = lower(tokens[i + 1]);
-            if (next == "minvalue") { info.noMinValue = true; ++i; }
-            else if (next == "maxvalue") { info.noMaxValue = true; ++i; }
-            else if (next == "cycle") { info.cycleSpecified = true; info.cycle = false; ++i; }
-        } else if (tok == "cycle") {
-            info.cycleSpecified = true;
-            info.cycle = true;
-        } else if (tok == "owned" && i + 1 < tokens.size() && lower(tokens[i + 1]) == "by") {
-            info.ownedBySpecified = true;
-            if (i + 2 < tokens.size()) {
-                std::string owner = tokens[i + 2];
-                if (lower(owner) == "none") {
+            } else if (tok == "cycle") {
+                info.cycleSpecified = true;
+                info.cycle = true;
+            } else if (tok == "owned") {
+                if (info.ownedBySpecified || i + 2 >= tokens.size() ||
+                    lower(tokens[i + 1]) != "by") {
+                    std::cout << "SQL syntax error: invalid OWNED BY clause"
+                              << std::endl;
+                    return true;
+                }
+                info.ownedBySpecified = true;
+                if (lower(tokens[i + 2]) == "none") {
                     info.ownedByTable.clear();
                     info.ownedByColumn.clear();
-                } else if (i + 4 < tokens.size() && tokens[i + 3] == "." && i + 6 < tokens.size() && tokens[i + 5] == ".") {
-                    // schema.table.column
-                    std::string schemaPart = owner;
-                    std::string tablePart = tokens[i + 4];
-                    info.ownedByTable = (schemaPart == "public") ? tablePart : owner + "." + tablePart;
-                    info.ownedByColumn = tokens[i + 6];
-                    i += 4;
-                } else if (i + 4 < tokens.size() && tokens[i + 3] == ".") {
-                    // table.column
-                    info.ownedByTable = owner;
-                    info.ownedByColumn = tokens[i + 4];
                     i += 2;
+                } else if (i + 6 < tokens.size() &&
+                           tokens[i + 3] == "." && tokens[i + 5] == ".") {
+                    info.ownedByTable =
+                        tokens[i + 2] + "." + tokens[i + 4];
+                    info.ownedByColumn = tokens[i + 6];
+                    i += 6;
+                } else if (i + 4 < tokens.size() && tokens[i + 3] == ".") {
+                    info.ownedByTable = tokens[i + 2];
+                    info.ownedByColumn = tokens[i + 4];
+                    i += 4;
                 } else {
-                    info.ownedByTable = owner;
+                    std::cout << "SQL syntax error: OWNED BY requires table.column"
+                              << std::endl;
+                    return true;
                 }
-                i += 2;
             } else {
-                i += 1;
+                std::cout << "SQL syntax error: unsupported ALTER SEQUENCE option "
+                          << tokens[i] << std::endl;
+                return true;
             }
-        } else {
-            std::cout << "SQL syntax error: unsupported ALTER SEQUENCE option " << tokens[i] << std::endl;
-            return true;
         }
     }
 
+    CatalogManager* sequenceCatalog = nullptr;
+    Oid sequenceOid = INVALID_OID;
+    Oid sequenceNamespaceOid = INVALID_OID;
+    Oid ownedTableOid = INVALID_OID;
+    int32_t ownedColumnNumber = 0;
+    try {
+        CatalogManager& catalog =
+            g_engine.catalogService().get(s.currentDB);
+        sequenceCatalog = &catalog;
+        const bool physicalExists =
+            g_engine.sequenceExists(s.currentDB, seqname);
+        const auto* sequenceNamespace =
+            catalog.findNamespaceByName(sequenceSchema);
+        const PgClassRow* sequence = sequenceNamespace
+            ? catalog.findClassByName(
+                  sequenceName.name, sequenceNamespace->oid)
+            : nullptr;
+        if (!sequence) {
+            if (physicalExists) {
+                std::cout << "ALTER SEQUENCE failed: sequence catalog entry is missing"
+                          << std::endl;
+                return true;
+            }
+            if (stmt->ifExists) {
+                std::cout << "NOTICE: sequence \"" << requestedName
+                          << "\" does not exist, skipping" << std::endl;
+                return !txn.commit();
+            }
+            std::cout << "ERROR: sequence \"" << requestedName
+                      << "\" does not exist" << std::endl;
+            return true;
+        }
+        if (sequence->relkind != 'S') {
+            std::cout << "ERROR: relation \"" << requestedName
+                      << "\" is not a sequence" << std::endl;
+            return true;
+        }
+        if (!physicalExists) {
+            std::cout << "ALTER SEQUENCE failed: physical sequence is missing"
+                      << std::endl;
+            return true;
+        }
+        sequenceOid = sequence->oid;
+        sequenceNamespaceOid = sequence->relnamespace;
+
+        if (renameRequested) {
+            const auto* collision =
+                catalog.findClassByName(newName, sequenceNamespaceOid);
+            const std::string newStorageName = sequenceSchema == "public"
+                ? newName : sequenceSchema + "." + newName;
+            if (collision ||
+                g_engine.sequenceExists(s.currentDB, newStorageName)) {
+                std::cout << "ERROR: relation \"" << newName
+                          << "\" already exists" << std::endl;
+                return true;
+            }
+        }
+
+        if (info.ownedBySpecified && !info.ownedByTable.empty()) {
+            CatalogManager::QualifiedName ownerName;
+            if (!CatalogManager::parseQualifiedName(
+                    info.ownedByTable, ownerName) ||
+                ownerName.name.empty() ||
+                ownerName.schema.find('.') != std::string::npos) {
+                std::cout << "ALTER SEQUENCE OWNED BY target is invalid"
+                          << std::endl;
+                return true;
+            }
+            const std::string ownerSchema = ownerName.schema.empty()
+                ? sequenceSchema : ownerName.schema;
+            if (ownerSchema != sequenceSchema) {
+                std::cout << "ERROR: sequence and owned table must be in the same schema"
+                          << std::endl;
+                return true;
+            }
+            const auto* table = catalog.findClassByName(
+                ownerName.name, sequenceNamespaceOid);
+            const auto* column = table && table->relkind == 'r'
+                ? catalog.findAttribute(table->oid, info.ownedByColumn)
+                : nullptr;
+            if (!table || table->relkind != 'r' || !column) {
+                std::cout << "ALTER SEQUENCE OWNED BY target does not exist"
+                          << std::endl;
+                return true;
+            }
+            ownedTableOid = table->oid;
+            ownedColumnNumber = column->attnum;
+            info.ownedByTable = sequenceSchema == "public"
+                ? ownerName.name : sequenceSchema + "." + ownerName.name;
+        }
+    } catch (const std::exception& error) {
+        std::cout << "ALTER SEQUENCE catalog preflight failed: "
+                  << error.what() << std::endl;
+        return true;
+    }
+
+    if (renameRequested) {
+        const std::string newStorageName = sequenceSchema == "public"
+            ? newName : sequenceSchema + "." + newName;
+        const auto dependencies =
+            findDefaultNextvalDeps(s.currentDB, seqname);
+        txn.markSnapshotDirty();
+        if (g_engine.renameSequence(
+                s.currentDB, seqname, newStorageName) != DBStatus::OK) {
+            std::cout << "ALTER SEQUENCE RENAME failed" << std::endl;
+            return true;
+        }
+        if (!sequenceCatalog->renameClass(sequenceOid, newName)) {
+            std::cout << "ALTER SEQUENCE RENAME catalog update failed"
+                      << std::endl;
+            return true;
+        }
+        for (const auto& [tableName, columnName] : dependencies) {
+            const auto table =
+                g_engine.getTableSchema(s.currentDB, tableName);
+            size_t columnIndex = table.len;
+            for (size_t i = 0; i < table.len; ++i) {
+                if (table.cols[i].dataName == columnName) {
+                    columnIndex = i;
+                    break;
+                }
+            }
+            if (columnIndex >= table.len) {
+                std::cout << "ALTER SEQUENCE RENAME dependency update failed"
+                          << std::endl;
+                return true;
+            }
+            const std::string updatedDefault =
+                renameNextvalSequenceReference(
+                    table.cols[columnIndex].defaultValue,
+                    seqname, newStorageName);
+            if (g_engine.alterTableSetDefault(
+                    s.currentDB, tableName, columnName,
+                    updatedDefault) != DBStatus::OK) {
+                std::cout << "ALTER SEQUENCE RENAME dependency update failed"
+                          << std::endl;
+                return true;
+            }
+        }
+        if (!sequenceCatalog->persistAll()) {
+            std::cout << "ALTER SEQUENCE RENAME catalog persistence failed"
+                      << std::endl;
+            return true;
+        }
+        txn.recordUpdate(DdlObjectKind::Sequence, seqname, newStorageName);
+        if (!txn.commit()) return true;
+
+        auto moveSessionValue = [&](const std::string& oldKey,
+                                    const std::string& newKey) {
+            auto it = s.sequenceLastValues.find(oldKey);
+            if (it == s.sequenceLastValues.end()) return;
+            const int64_t value = it->second;
+            s.sequenceLastValues.erase(it);
+            s.sequenceLastValues[newKey] = value;
+        };
+        moveSessionValue(seqname, newStorageName);
+        if (sequenceSchema == "public") {
+            moveSessionValue("public." + sequenceName.name,
+                             "public." + newName);
+        }
+        std::cout << "ALTER SEQUENCE succeeded" << std::endl;
+        return false;
+    }
+
     txn.markSnapshotDirty();
-    DBStatus res = g_engine.alterSequence(s.currentDB, seqname, info);
-    if (res != DBStatus::OK) {
+    if (g_engine.alterSequence(s.currentDB, seqname, info) != DBStatus::OK) {
         std::cout << "ALTER SEQUENCE failed" << std::endl;
         return true;
     }
 
-    // Update catalog dependency for OWNED BY changes.
     if (info.ownedBySpecified) {
         try {
-            dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
-            auto seqRel = cat.resolveRelation(seqname, {"public"});
-            if (seqRel) {
-                // Remove old auto-dependencies for this sequence.
-                auto oldDeps = cat.findDepends(dbms::PgClassOid_Class, seqRel->oid, 0);
-                for (const auto& d : oldDeps) {
-                    if (d.deptype == 'a') {
-                        cat.removeDepend(d.classid, d.objid, d.objsubid,
-                                         d.refclassid, d.refobjid, d.refobjsubid);
-                    }
-                }
-                if (!info.ownedByTable.empty()) {
-                    auto tableRel = cat.resolveRelation(info.ownedByTable, {"public"});
-                    if (tableRel) {
-                        PgDependRow dep;
-                        dep.classid = dbms::PgClassOid_Class;
-                        dep.objid = seqRel->oid;
-                        dep.objsubid = 0;
-                        dep.refclassid = dbms::PgClassOid_Class;
-                        dep.refobjid = tableRel->oid;
-                        dep.refobjsubid = 0;
-                        dep.deptype = 'a';
-                        cat.addDepend(dep);
-                    }
+            const auto oldDependencies = sequenceCatalog->findDepends(
+                PgClassOid_Class, sequenceOid, 0);
+            for (const auto& dependency : oldDependencies) {
+                if (dependency.deptype == 'a' &&
+                    !sequenceCatalog->removeDepend(
+                        dependency.classid, dependency.objid,
+                        dependency.objsubid, dependency.refclassid,
+                        dependency.refobjid, dependency.refobjsubid)) {
+                    throw std::runtime_error(
+                        "cannot remove previous sequence ownership");
                 }
             }
-        } catch (const std::exception& e) {
-            std::cerr << "WARNING: catalog alter sequence failed: " << e.what() << std::endl;
+            if (ownedTableOid != INVALID_OID) {
+                PgDependRow dependency;
+                dependency.classid = PgClassOid_Class;
+                dependency.objid = sequenceOid;
+                dependency.objsubid = 0;
+                dependency.refclassid = PgClassOid_Class;
+                dependency.refobjid = ownedTableOid;
+                dependency.refobjsubid = ownedColumnNumber;
+                dependency.deptype = 'a';
+                sequenceCatalog->addDepend(dependency);
+            }
+            if (!sequenceCatalog->persistAll()) {
+                throw std::runtime_error(
+                    "cannot persist sequence ownership catalog");
+            }
+        } catch (const std::exception& error) {
+            std::cout << "ALTER SEQUENCE catalog update failed: "
+                      << error.what() << std::endl;
+            return true;
         }
     }
 
+    txn.recordUpdate(DdlObjectKind::Sequence, seqname);
     if (!txn.commit()) return true;
     std::cout << "ALTER SEQUENCE succeeded" << std::endl;
     return false;

@@ -4,6 +4,7 @@
 #include "catalog/CatalogService.h"
 #include "parser/parser.h"
 #include "catalog/type_registry.h"
+#include <algorithm>
 #include <cassert>
 #include <filesystem>
 #include <fstream>
@@ -325,6 +326,150 @@ static void test_schema_qualified_sequence_create() {
               << std::endl;
 }
 
+static void test_schema_qualified_sequence_alter() {
+    const std::string db = testDbPath("seq_schema_alter");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE SCHEMA app", s));
+    assert(!ddl.executeSql(
+        "CREATE SEQUENCE app.counter START 3 INCREMENT 2", s));
+
+    dbms::SQLParser parser;
+    const auto parsed = parser.parse(
+        "ALTER SEQUENCE IF EXISTS app.counter RESTART WITH 11");
+    assert(parsed.success && parsed.stmt);
+    const auto* alter = dynamic_cast<const dbms::AlterObjectStmt*>(
+        parsed.stmt.get());
+    assert(alter && alter->ifExists);
+    assert(alter->schema == "app" && alter->objectName == "counter");
+
+    assert(!ddl.executeSql(
+        "ALTER SEQUENCE IF EXISTS app.absent RESTART WITH 1", s));
+    assert(ddl.executeSql(
+        "ALTER SEQUENCE app.absent RESTART WITH 1", s));
+    assert(!ddl.executeSql(
+        "ALTER SEQUENCE app.counter RESTART WITH 11 INCREMENT BY 4", s));
+    assert(g_engine.nextval(db, "app.counter") == 11);
+    assert(g_engine.nextval(db, "app.counter") == 15);
+
+    assert(!ddl.executeSql("CREATE TABLE app.owner (id INT)", s));
+    assert(!ddl.executeSql("CREATE TABLE public_owner (id INT)", s));
+    assert(ddl.executeSql(
+        "ALTER SEQUENCE app.counter OWNED BY public.public_owner.id", s));
+    assert(ddl.executeSql(
+        "ALTER SEQUENCE app.counter OWNED BY app.owner.missing", s));
+    assert(!ddl.executeSql(
+        "ALTER SEQUENCE app.counter OWNED BY app.owner.id", s));
+
+    dbms::CatalogManager& catalog =
+        g_engine.catalogService().get(db);
+    const auto* appNamespace = catalog.findNamespaceByName("app");
+    assert(appNamespace);
+    const auto* sequence =
+        catalog.findClassByName("counter", appNamespace->oid);
+    const auto* owner =
+        catalog.findClassByName("owner", appNamespace->oid);
+    assert(sequence && sequence->relkind == 'S');
+    assert(owner && owner->relkind == 'r');
+    const dbms::Oid sequenceOid = sequence->oid;
+    const dbms::Oid ownerOid = owner->oid;
+    const auto* ownerColumn = catalog.findAttribute(ownerOid, "id");
+    assert(ownerColumn);
+    auto ownerships = catalog.findDepends(
+        dbms::PgClassOid_Class, sequenceOid, 0);
+    assert(std::count_if(
+               ownerships.begin(), ownerships.end(),
+               [&](const dbms::PgDependRow& dependency) {
+                   return dependency.deptype == 'a' &&
+                          dependency.refobjid == ownerOid &&
+                          dependency.refobjsubid == ownerColumn->attnum;
+               }) == 1);
+    {
+        dbms::CatalogManager durable(
+            (fs::path(g_engine.dbPath(db)) / "pg_catalog").string());
+        const auto durableOwnerships = durable.findDepends(
+            dbms::PgClassOid_Class, sequenceOid, 0);
+        assert(std::count_if(
+                   durableOwnerships.begin(), durableOwnerships.end(),
+                   [&](const dbms::PgDependRow& dependency) {
+                       return dependency.deptype == 'a' &&
+                              dependency.refobjid == ownerOid &&
+                              dependency.refobjsubid == ownerColumn->attnum;
+                   }) == 1);
+    }
+
+    assert(!ddl.executeSql(
+        "ALTER SEQUENCE app.counter OWNED BY NONE", s));
+    ownerships = catalog.findDepends(
+        dbms::PgClassOid_Class, sequenceOid, 0);
+    assert(std::none_of(
+        ownerships.begin(), ownerships.end(),
+        [](const dbms::PgDependRow& dependency) {
+            return dependency.deptype == 'a';
+        }));
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE app.uses_seq "
+        "(id INT DEFAULT nextval('app.counter'), name VARCHAR(20))", s));
+    assert(!ddl.executeSql("CREATE SEQUENCE counter START 100", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE public_uses_seq "
+        "(id INT DEFAULT nextval('counter'))", s));
+    s.sequenceLastValues["app.counter"] = 15;
+
+    assert(!ddl.executeSql(
+        "ALTER SEQUENCE app.counter RENAME TO renamed", s));
+    assert(!g_engine.sequenceExists(db, "app.counter"));
+    assert(g_engine.sequenceExists(db, "app.renamed"));
+    assert(!g_engine.sequenceExists(db, "renamed"));
+    assert(s.sequenceLastValues.count("app.counter") == 0);
+    assert(s.sequenceLastValues["app.renamed"] == 15);
+    const auto appTable = g_engine.getTableSchema(db, "app__uses_seq");
+    const auto publicTable = g_engine.getTableSchema(db, "public_uses_seq");
+    assert(appTable.cols[0].defaultValue.find("app.renamed") !=
+           std::string::npos);
+    assert(publicTable.cols[0].defaultValue.find("counter") !=
+           std::string::npos);
+    assert(publicTable.cols[0].defaultValue.find("renamed") ==
+           std::string::npos);
+    assert(g_engine.insert(
+               db, "app__uses_seq", {{"name", "x"}}) ==
+           dbms::DBStatus::OK);
+    const auto rows = g_engine.query(
+        db, "app__uses_seq", {}, {"id", "name"});
+    assert(rows.size() == 1 && rows[0].find("19 x") == 0);
+
+    const auto* renamed =
+        catalog.findClassByName("renamed", appNamespace->oid);
+    assert(renamed && renamed->oid == sequenceOid);
+    assert(catalog.findClassByName("counter", appNamespace->oid) == nullptr);
+    {
+        dbms::CatalogManager durable(
+            (fs::path(g_engine.dbPath(db)) / "pg_catalog").string());
+        const auto* durableApp = durable.findNamespaceByName("app");
+        assert(durableApp);
+        const auto* durableRenamed =
+            durable.findClassByName("renamed", durableApp->oid);
+        assert(durableRenamed && durableRenamed->oid == sequenceOid);
+        assert(durable.findClassByName(
+                   "counter", durableApp->oid) == nullptr);
+    }
+
+    assert(!ddl.executeSql("CREATE TABLE app.taken (id INT)", s));
+    assert(ddl.executeSql(
+        "ALTER SEQUENCE app.renamed RENAME TO taken", s));
+    assert(g_engine.sequenceExists(db, "app.renamed"));
+    assert(!g_engine.sequenceExists(db, "app.taken"));
+
+    cleanup(db);
+    std::cout << "[SEQUENCE] schema-qualified alter/rename/catalog OK"
+              << std::endl;
+}
+
 static void test_sequence_integer_boundaries() {
     std::string db = testDbPath("seq_boundaries");
     cleanup(db);
@@ -368,6 +513,7 @@ int main() {
     test_sequence_identity_still_works();
     test_sequence_numeric_input_fails_closed();
     test_schema_qualified_sequence_create();
+    test_schema_qualified_sequence_alter();
     test_sequence_integer_boundaries();
     std::cout << "[SEQUENCE_FULL] all passed" << std::endl;
     return 0;
