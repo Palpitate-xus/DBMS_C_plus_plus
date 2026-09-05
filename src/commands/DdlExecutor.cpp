@@ -7000,6 +7000,19 @@ bool DdlExecutor::executeDropCollation(const DropStmt* stmt, Session& s) {
         return false;
     }
     if (status != DBStatus::OK) {
+        if (status == DBStatus::INVALID_VALUE) {
+            if (stmt->cascade) {
+                std::cout
+                    << "DROP COLLATION CASCADE for dependent table columns "
+                       "is not supported; no objects were dropped"
+                    << std::endl;
+            } else {
+                std::cout << "Cannot drop collation " << cname
+                          << " because a table column depends on it"
+                          << std::endl;
+            }
+            return true;
+        }
         std::cout << "DROP COLLATION failed (SQLSTATE "
                   << sqlstateForDBStatus(status) << ")" << std::endl;
         return true;

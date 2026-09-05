@@ -3027,6 +3027,64 @@ DBStatus StorageEngine::dropCollation(const std::string& dbname,
 
     std::vector<StoredCollation> collations;
     if (!loadStoredCollations(path, collations)) return DBStatus::IO_ERROR;
+    if (std::none_of(
+            collations.begin(), collations.end(),
+            [&](const StoredCollation& collation) {
+                return collation.name == collationName;
+            })) {
+        return DBStatus::TABLE_NOT_FOUND;
+    }
+
+    // A table schema persists the logical collation reference.  Removing its
+    // definition would make subsequent schema loads either change semantics
+    // or fail.  Scan the authoritative schema files before touching the
+    // sidecar; do not trust tlist.lst alone because an incomplete catalog
+    // update must not hide a dependency.
+    std::error_code directoryError;
+    std::filesystem::directory_iterator entry(
+        dbPath(dbname), directoryError);
+    const std::filesystem::directory_iterator end;
+    if (directoryError) return DBStatus::IO_ERROR;
+    for (; entry != end; entry.increment(directoryError)) {
+        if (directoryError) return DBStatus::IO_ERROR;
+        const std::string filename = entry->path().filename().string();
+        constexpr std::string_view schemaSuffix = ".stc";
+        if (filename.size() <= schemaSuffix.size() ||
+            filename.compare(filename.size() - schemaSuffix.size(),
+                             schemaSuffix.size(), schemaSuffix) != 0) {
+            continue;
+        }
+        std::error_code typeError;
+        if (!entry->is_regular_file(typeError)) {
+            if (typeError) return DBStatus::IO_ERROR;
+            return DBStatus::CORRUPTED_DATA;
+        }
+        const std::string tableName = filename.substr(
+            0, filename.size() - schemaSuffix.size());
+        if (!validStoredIdentifier(tableName, MAX_TABLE_NAME_LEN)) {
+            return DBStatus::CORRUPTED_DATA;
+        }
+        std::ifstream schemaInput(entry->path(), std::ios::binary);
+        if (!schemaInput) return DBStatus::IO_ERROR;
+        const TableSchema table = readSchema(schemaInput, tableName);
+        // readSchema preserves the requested name on a successful zero-column
+        // schema and returns a value-initialized object on malformed input.
+        if (table.tablename != tableName) return DBStatus::CORRUPTED_DATA;
+        for (size_t columnIndex = 0; columnIndex < table.len; ++columnIndex) {
+            const std::string& reference = table.cols[columnIndex].collation;
+            if (reference.empty()) continue;
+            std::string physicalReference;
+            if (!physicalCollationReference(
+                    reference, physicalReference)) {
+                return DBStatus::CORRUPTED_DATA;
+            }
+            if (physicalReference == collationName) {
+                return DBStatus::INVALID_VALUE;
+            }
+        }
+    }
+    if (directoryError) return DBStatus::IO_ERROR;
+
     std::vector<StoredCollation> retained;
     retained.reserve(collations.size());
     bool found = false;

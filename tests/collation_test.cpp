@@ -561,6 +561,76 @@ static void test_custom_collation_runtime_resolution() {
     std::cout << "[COLLATION] custom runtime resolution OK" << std::endl;
 }
 
+static void test_drop_collation_protects_table_dependencies() {
+    using dbms::DBStatus;
+
+    std::string db = testDbPath("collation_drop_dependencies");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == DBStatus::OK);
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    assert(!ddl.executeSql("CREATE SCHEMA app", s));
+    assert(!ddl.executeSql(
+        "CREATE COLLATION app.casefold "
+        "(provider=libc, locale='nocase')", s));
+    assert(!ddl.executeSql(
+        "CREATE COLLATION app.unused "
+        "(provider=libc, locale='C')", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE public_words "
+        "(v VARCHAR(30) COLLATE app.casefold)", s));
+    assert(g_engine.insert(db, "public_words", {{"v", "Hello"}}) ==
+           DBStatus::OK);
+
+    const fs::path metadata = fs::path(db) / ".collations";
+    const std::string originalBytes = readBytes(metadata);
+    assert(g_engine.dropCollation(db, "app__casefold") ==
+           DBStatus::INVALID_VALUE);
+    assert(readBytes(metadata) == originalBytes);
+    assert(ddl.executeSql("DROP COLLATION app.casefold", s));
+    assert(ddl.executeSql("DROP COLLATION app.casefold CASCADE", s));
+    assert(readBytes(metadata) == originalBytes);
+    assert(g_engine.getTableSchema(db, "public_words").len == 1);
+    assert(g_engine.query(
+               db, "public_words", {"=v hello"}, {"v"}).size() == 1);
+
+    // DROP SCHEMA must not bypass the same cross-schema dependency merely
+    // because it is dropping the collation through its auxiliary worklist.
+    assert(ddl.executeSql("DROP SCHEMA app CASCADE", s));
+    assert(g_engine.schemaExists(db, "app"));
+    assert(readBytes(metadata) == originalBytes);
+
+    // An unrelated definition can still be removed while the dependency is
+    // present; the scan is specific to the requested object.
+    assert(!ddl.executeSql("DROP COLLATION app.unused", s));
+    assert((g_engine.getCollationNames(db) ==
+            std::vector<std::string>{"app__casefold"}));
+
+    assert(!ddl.executeSql("DROP TABLE public_words", s));
+    const fs::path corruptSchema = fs::path(db) / "orphan.stc";
+    {
+        std::ofstream output(corruptSchema, std::ios::binary);
+        output << "not a table schema";
+        assert(output.good());
+    }
+    const std::string beforeCorruptPreflight = readBytes(metadata);
+    assert(g_engine.dropCollation(db, "missing") ==
+           DBStatus::TABLE_NOT_FOUND);
+    assert(g_engine.dropCollation(db, "app__casefold") ==
+           DBStatus::CORRUPTED_DATA);
+    assert(readBytes(metadata) == beforeCorruptPreflight);
+    assert(fs::remove(corruptSchema));
+
+    assert(!ddl.executeSql("DROP SCHEMA app CASCADE", s));
+    assert(!g_engine.schemaExists(db, "app"));
+    assert(!fs::exists(metadata));
+
+    cleanup(db);
+    std::cout << "[COLLATION] DROP dependency protection OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_collation_provider();
@@ -573,6 +643,7 @@ int main() {
     test_collation_metadata_is_atomic_and_backward_compatible();
     test_collation_ddl_preserves_options_and_namespace();
     test_custom_collation_runtime_resolution();
+    test_drop_collation_protects_table_dependencies();
     std::cout << "[COLLATION] all passed" << std::endl;
     return 0;
 }
