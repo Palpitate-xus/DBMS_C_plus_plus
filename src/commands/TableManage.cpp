@@ -9667,9 +9667,10 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
     std::vector<std::string> seenCollatedKeys;
     bool duplicate = false;
     bool entriesValid = true;
+    bool indexWriteFailed = false;
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
-        if (!entriesValid || duplicate) return;
+        if (!entriesValid || duplicate || indexWriteFailed) return;
         std::string row(data, len);
         EvaluatedIndexEntry entry;
         if (!secondaryIndexEntryFromBuffer(
@@ -9699,7 +9700,8 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
             }
         }
         if (entry.included && !entry.key.empty()) {
-            idx->insertMulti(entry.key, encodeRid(pageId, slotId));
+            indexWriteFailed = !idx->insertMulti(
+                entry.key, encodeRid(pageId, slotId));
         }
     })) {
         discardPhysicalIndex();
@@ -9715,6 +9717,11 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
         discardPhysicalIndex();
         lockManager_.unlock(tablename);
         return DBStatus::CORRUPTED_DATA;
+    }
+    if (indexWriteFailed || !idx->flush()) {
+        discardPhysicalIndex();
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
     }
 
     // Record in metadata
@@ -9947,9 +9954,10 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
     std::vector<std::vector<std::string>> seenCollatedKeys;
     bool duplicate = false;
     bool entriesValid = true;
+    bool indexWriteFailed = false;
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
-        if (!entriesValid || duplicate) return;
+        if (!entriesValid || duplicate || indexWriteFailed) return;
         std::string row(data, len);
         EvaluatedIndexEntry entry;
         if (!compositeIndexEntryFromBuffer(
@@ -9993,7 +10001,8 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
             }
         }
         if (entry.included && !entry.key.empty()) {
-            idx->insertMulti(entry.key, encodeRid(pageId, slotId));
+            indexWriteFailed = !idx->insertMulti(
+                entry.key, encodeRid(pageId, slotId));
         }
     })) {
         discardPhysicalIndex();
@@ -10009,6 +10018,11 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
         discardPhysicalIndex();
         lockManager_.unlock(tablename);
         return DBStatus::CORRUPTED_DATA;
+    }
+    if (indexWriteFailed || !idx->flush()) {
+        discardPhysicalIndex();
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
     }
 
     // Record in metadata: C:indexName:col1:col2:...:INCLUDE:inc1,inc2[:WHERE:cond]
