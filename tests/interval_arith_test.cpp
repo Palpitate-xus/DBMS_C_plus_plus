@@ -34,6 +34,14 @@ static void test_add_sub() {
     auto d = eval("'2024-12-15'::timestamp + '2 months'::interval");
     assert(d.ok && d.value == "2025-02-15 00:00:00");
 
+    auto dateWithTime = eval("'2024-03-10'::date + '2 hours'::interval");
+    assert(dateWithTime.ok && dateWithTime.value == "2024-03-10 02:00:00");
+
+    auto dateWithNegativeTime = eval(
+        "'2024-03-10'::date + '-04:05:00'::interval");
+    assert(dateWithNegativeTime.ok &&
+           dateWithNegativeTime.value == "2024-03-09 19:55:00");
+
     // hours carry into days
     auto e = eval("'2024-03-10 23:30:00'::timestamp + '2 hours'::interval");
     assert(e.ok && e.value == "2024-03-11 01:30:00");

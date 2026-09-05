@@ -521,9 +521,10 @@ static std::tuple<long long, unsigned, unsigned> daysToCivil(long long z) {
     return {y + (m <= 2), m, d};
 }
 
-// Apply an interval to 'YYYY-MM-DD[ HH:MM:SS]' (returns the same shape).
-// Months roll the calendar date (day clamped to month length); days and
-// microseconds shift absolutely with day carry — PostgreSQL semantics.
+// Apply an interval to 'YYYY-MM-DD[ HH:MM:SS]' and return a timestamp.
+// DATE +/- INTERVAL promotes to timestamp, so a date-only input must retain
+// any time introduced by the interval. Months roll the calendar date (day
+// clamped to month length); days and microseconds shift with day carry.
 static std::string timestampShift(const std::string& ts, const IntervalParts& iv, bool add) {
     int Y = 1970, Mo = 1, D = 1, h = 0, mi = 0;
     long long s = 0;
@@ -586,14 +587,10 @@ static std::string timestampShift(const std::string& ts, const IntervalParts& iv
     long long ss = (dayMicros / 1000000LL) % 60;
     long long fs = dayMicros % 1000000LL;
     char buf[80];
-    if (hasTime) {
-        if (fs) std::snprintf(buf, sizeof(buf), "%04lld-%02u-%02u %02lld:%02lld:%02lld.%06lld",
-                              Y2, M2, D2, hh, mm, ss, fs);
-        else std::snprintf(buf, sizeof(buf), "%04lld-%02u-%02u %02lld:%02lld:%02lld",
-                           Y2, M2, D2, hh, mm, ss);
-    } else {
-        std::snprintf(buf, sizeof(buf), "%04lld-%02u-%02u", Y2, M2, D2);
-    }
+    if (fs) std::snprintf(buf, sizeof(buf), "%04lld-%02u-%02u %02lld:%02lld:%02lld.%06lld",
+                          Y2, M2, D2, hh, mm, ss, fs);
+    else std::snprintf(buf, sizeof(buf), "%04lld-%02u-%02u %02lld:%02lld:%02lld",
+                       Y2, M2, D2, hh, mm, ss);
     return buf;
 }
 
@@ -1150,9 +1147,6 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
             if (!iv.ok || !isTsLike(l)) return ExprValue("timestamp", "", true);
             std::string shifted = timestampShift(l.value, iv, op == "+");
             if (shifted.empty()) return ExprValue("timestamp", "", true);
-            // PG date +/- interval promotes to timestamp: a bare date
-            // result renders with 00:00:00 (2026-02-28 00:00:00).
-            if (shifted.size() == 10) shifted += " 00:00:00";
             return ExprValue("timestamp", shifted, false);
         }
         return ExprValue("timestamp", "", true);
