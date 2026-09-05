@@ -3411,6 +3411,22 @@ struct PhysicalCascadeAction {
     std::string key;
 };
 
+static bool catalogTableStorageName(const CatalogManager& catalog,
+                                    const PgClassRow& relation,
+                                    std::string& storageName,
+                                    std::string& error) {
+    const PgNamespaceRow* relationNamespace =
+        catalog.findNamespace(relation.relnamespace);
+    if (!relationNamespace) {
+        error = "relation namespace is missing";
+        return false;
+    }
+    storageName = relationNamespace->nspname == "public"
+        ? relation.relname
+        : relationNamespace->nspname + "__" + relation.relname;
+    return true;
+}
+
 // Catalog CASCADE plans are dependency-complete, but catalog deletion alone
 // is not enough: every file-backed dependent relation must be removed before
 // the catalog plan is published.  Build the physical worklist first so an
@@ -3434,7 +3450,13 @@ static bool buildPhysicalCascadeActions(
         const PgClassRow rel = *relation;
 
         if (rel.relkind == 'r') {
-            actions.push_back({PhysicalCascadeAction::Kind::Table, rel.relname, "", "", ""});
+            std::string tableName;
+            if (!catalogTableStorageName(
+                    catalog, rel, tableName, error)) {
+                return false;
+            }
+            actions.push_back({PhysicalCascadeAction::Kind::Table,
+                               tableName, "", "", ""});
             continue;
         }
         if (rel.relkind == 'S') {
@@ -3449,7 +3471,10 @@ static bool buildPhysicalCascadeActions(
             if (dependency.refclassid != PgClassOid_Class) continue;
             const PgClassRow* referenced = catalog.findClass(dependency.refobjid);
             if (referenced && referenced->relkind == 'r') {
-                tableName = referenced->relname;
+                if (!catalogTableStorageName(
+                        catalog, *referenced, tableName, error)) {
+                    return false;
+                }
                 break;
             }
         }
@@ -3515,6 +3540,11 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
 
     if (stmt->objectNames.empty()) {
         std::cout << "SQL syntax error: DROP TABLE name" << std::endl;
+        return true;
+    }
+    if (stmt->objectNames.size() != 1) {
+        std::cout << "DROP TABLE with multiple targets is not supported"
+                  << std::endl;
         return true;
     }
     const std::string logicalName = stmt->objectNames.front();

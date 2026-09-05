@@ -81,6 +81,59 @@ static void test_drop_table_cascade_removes_dependents() {
     std::cout << "[DROP-CASCADE] CASCADE removes dependents OK" << std::endl;
 }
 
+static void test_schema_table_cascade_resolves_index_owner() {
+    const std::string db = testDbPath("drop_cascade_schema_index");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE SCHEMA inventory", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE inventory.items (id INT, sku VARCHAR(20))", s));
+    assert(!ddl.executeSql(
+        "CREATE INDEX items_sku_idx ON inventory.items (sku)", s));
+    assert(g_engine.getNamedIndex(
+        db, "inventory__items", "items_sku_idx"));
+
+    assert(!ddl.executeSql("DROP TABLE inventory.items CASCADE", s));
+    assert(!g_engine.tableExists(db, "inventory__items"));
+    assert(!g_engine.getNamedIndex(
+        db, "inventory__items", "items_sku_idx"));
+    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
+    const auto* inventory = catalog.findNamespaceByName("inventory");
+    assert(inventory != nullptr);
+    assert(catalog.findClassByName("items", inventory->oid) == nullptr);
+    assert(catalog.findClassByName("items_sku_idx", inventory->oid) == nullptr);
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[DROP-CASCADE] schema index owner resolution OK"
+              << std::endl;
+}
+
+static void test_multi_table_drop_fails_before_mutation() {
+    const std::string db = testDbPath("drop_multiple_preflight");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE first_table (id INT)", s));
+    assert(!ddl.executeSql("CREATE TABLE second_table (id INT)", s));
+    assert(ddl.executeSql(
+        "DROP TABLE first_table, second_table", s));
+    assert(g_engine.tableExists(db, "first_table"));
+    assert(g_engine.tableExists(db, "second_table"));
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[DROP-CASCADE] multi-target DROP fails before mutation OK"
+              << std::endl;
+}
+
 static void test_drop_removes_named_table_sidecars() {
     std::string db = testDbPath("drop_sidecars");
     cleanup(db);
@@ -200,6 +253,8 @@ static void test_drop_purges_authorization_state() {
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_drop_table_cascade_removes_dependents();
+    test_schema_table_cascade_resolves_index_owner();
+    test_multi_table_drop_fails_before_mutation();
     test_drop_removes_named_table_sidecars();
     test_drop_purges_authorization_state();
     std::cout << "[DROP-CASCADE] all passed" << std::endl;

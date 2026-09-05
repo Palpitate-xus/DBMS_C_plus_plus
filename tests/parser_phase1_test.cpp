@@ -225,6 +225,18 @@ int main() {
         std::cout << "[PARSER P1] qualified view names preserved OK\n";
     }
 
+    {
+        auto result = parser.parse(
+            "DROP TABLE IF EXISTS inventory.items, public.audit CASCADE");
+        assert(result.success);
+        auto* drop = dynamic_cast<DropStmt*>(result.stmt.get());
+        assert(drop && drop->ifExists && drop->cascade);
+        assert(drop->objectNames.size() == 2);
+        assert(drop->objectNames[0] == "inventory.items");
+        assert(drop->objectNames[1] == "public.audit");
+        std::cout << "[PARSER P1] qualified DROP TABLE list OK\n";
+    }
+
     // 8. ALTER TABLE
     {
         auto r = parser.parse("ALTER TABLE t ADD COLUMN c INT, DROP COLUMN d, ADD CONSTRAINT pk PRIMARY KEY (id)");

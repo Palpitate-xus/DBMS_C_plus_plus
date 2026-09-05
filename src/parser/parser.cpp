@@ -6623,16 +6623,24 @@ StmtPtr SQLParser::parseDropTable(const std::vector<std::string>& tokens, size_t
     auto stmt = std::make_unique<DropStmt>(SqlCommand::DropTable);
     stmt->objectType = "TABLE";
     while (pos < tokens.size() && tokens[pos] != ";") {
-        if (toLower(tokens[pos]) == "cascade") {
+        const std::string word = toLower(tokens[pos]);
+        if (word == "cascade") {
             stmt->cascade = true; ++pos; continue;
         }
-        if (toLower(tokens[pos]) == "restrict") {
+        if (word == "restrict" || tokens[pos] == ",") {
             ++pos; continue;
         }
-        if (toLower(tokens[pos]) == "if" && pos + 2 < tokens.size() && toLower(tokens[pos + 1]) == "exists") {
+        if (word == "if" && pos + 1 < tokens.size() &&
+            toLower(tokens[pos + 1]) == "exists") {
             stmt->ifExists = true; pos += 2; continue;
         }
-        stmt->objectNames.push_back(tokens[pos++]);
+        std::string name = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos >= tokens.size() || tokens[pos] == ";") return nullptr;
+            name += "." + tokens[pos++];
+        }
+        stmt->objectNames.push_back(std::move(name));
     }
     return stmt;
 }
