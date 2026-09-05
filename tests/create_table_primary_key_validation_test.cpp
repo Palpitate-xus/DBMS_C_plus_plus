@@ -39,6 +39,63 @@ int main() {
     assert(directError.find("duplicate column") != std::string::npos);
     assert(!g_engine.tableExists(database, directDuplicate.tablename));
 
+    const auto directPrimaryKey = [](const std::string& name) {
+        dbms::TableSchema table;
+        table.tablename = name;
+        table.append(dbms::makeIntColumn("id", false, 2));
+        table.append(dbms::makeIntColumn("tenant", false, 2));
+        return table;
+    };
+
+    dbms::TableSchema outOfRangePrimaryKey =
+        directPrimaryKey("direct_out_of_range_primary_key");
+    outOfRangePrimaryKey.pkColIndices = {2};
+    assert(g_engine.createTable(database, outOfRangePrimaryKey) ==
+           dbms::DBStatus::INVALID_ARGUMENT);
+    assert(!g_engine.tableExists(database, outOfRangePrimaryKey.tablename));
+
+    dbms::TableSchema duplicatePrimaryKey =
+        directPrimaryKey("direct_duplicate_primary_key");
+    duplicatePrimaryKey.pkColIndices = {0, 0};
+    assert(g_engine.createTable(database, duplicatePrimaryKey) ==
+           dbms::DBStatus::INVALID_ARGUMENT);
+    assert(!g_engine.tableExists(database, duplicatePrimaryKey.tablename));
+
+    dbms::TableSchema nullablePrimaryKey =
+        directPrimaryKey("direct_nullable_primary_key");
+    nullablePrimaryKey.cols[0].isNull = true;
+    nullablePrimaryKey.pkColIndices = {0};
+    assert(g_engine.createTable(database, nullablePrimaryKey) ==
+           dbms::DBStatus::OK);
+    const dbms::TableSchema normalizedPrimaryKey =
+        g_engine.getTableSchema(database, nullablePrimaryKey.tablename);
+    assert(!normalizedPrimaryKey.cols[0].isNull);
+    assert(g_engine.insert(
+               database, nullablePrimaryKey.tablename,
+               {{"id", "NULL"}, {"tenant", "7"}}) ==
+           dbms::DBStatus::NULL_NOT_ALLOWED);
+
+    dbms::TableSchema conflictingPrimaryKey =
+        directPrimaryKey("direct_conflicting_primary_key");
+    conflictingPrimaryKey.pkColIndices = {0};
+    conflictingPrimaryKey.cols[1].isPrimaryKey = true;
+    assert(g_engine.createTable(database, conflictingPrimaryKey) ==
+           dbms::DBStatus::INVALID_ARGUMENT);
+    assert(!g_engine.tableExists(database, conflictingPrimaryKey.tablename));
+
+    dbms::TableSchema authoritativePrimaryKey =
+        directPrimaryKey("direct_authoritative_primary_key");
+    authoritativePrimaryKey.pkColIndices = {0, 1};
+    assert(g_engine.createTable(database, authoritativePrimaryKey) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(
+               database, authoritativePrimaryKey.tablename,
+               {{"id", "1"}, {"tenant", "7"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(
+               database, authoritativePrimaryKey.tablename,
+               {{"id", "1"}, {"tenant", "7"}}) ==
+           dbms::DBStatus::DUPLICATE_KEY);
+
     std::string maximumColumnsSql = "CREATE TABLE maximum_columns (";
     for (size_t i = 0; i < dbms::MAX_COLUMNS; ++i) {
         if (i != 0) maximumColumnsSql += ", ";

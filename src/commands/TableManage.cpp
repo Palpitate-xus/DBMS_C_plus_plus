@@ -967,6 +967,30 @@ static bool validateTableSchemaIdentifiers(const TableSchema& tbl, std::string* 
             return false;
         }
     }
+    std::set<size_t> primaryKeyColumns;
+    if (!tbl.pkColIndices.empty()) {
+        if (tbl.pkColIndices.size() > tbl.len) {
+            if (error) *error = "invalid primary key column metadata";
+            return false;
+        }
+        for (const size_t columnIndex : tbl.pkColIndices) {
+            if (columnIndex >= tbl.len ||
+                !primaryKeyColumns.insert(columnIndex).second) {
+                if (error) *error = "invalid primary key column metadata";
+                return false;
+            }
+        }
+        for (size_t columnIndex = 0; columnIndex < tbl.len;
+             ++columnIndex) {
+            if (tbl.cols[columnIndex].isPrimaryKey &&
+                primaryKeyColumns.count(columnIndex) == 0) {
+                if (error) {
+                    *error = "primary key flags conflict with primary key columns";
+                }
+                return false;
+            }
+        }
+    }
     for (const auto& name : tbl.uniqueConstraintNames) {
         if (reject(name, MAX_TABLE_NAME_LEN, "constraint name")) return false;
     }
@@ -12664,6 +12688,22 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
 
     // Wave 0: 通过 TypeRegistry 校验并补齐每列类型元数据
     TableSchema tblWithVersion = tbl;
+    // pkColIndices is the authoritative representation when present.  The
+    // embedded API historically permits callers to omit duplicate per-column
+    // primary-key flags, but PRIMARY KEY must still imply NOT NULL before the
+    // schema reaches disk.
+    if (!tblWithVersion.pkColIndices.empty()) {
+        for (const size_t columnIndex : tblWithVersion.pkColIndices) {
+            tblWithVersion.cols[columnIndex].isNull = false;
+        }
+    } else {
+        for (size_t columnIndex = 0; columnIndex < tblWithVersion.len;
+             ++columnIndex) {
+            if (tblWithVersion.cols[columnIndex].isPrimaryKey) {
+                tblWithVersion.cols[columnIndex].isNull = false;
+            }
+        }
+    }
     if (tblWithVersion.tablespace.empty()) tblWithVersion.tablespace = "pg_default";
     if (tblWithVersion.tablespace != "pg_default") {
         const auto marker = dbPath(dbname) / "pg_tblspc" /
