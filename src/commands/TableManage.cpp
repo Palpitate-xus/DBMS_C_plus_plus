@@ -19785,20 +19785,53 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
         return DBStatus::INVALID_VALUE;
     }
 
-    // SQL execution already gives top-level DML a transaction, while embedded
-    // callers may intentionally use the legacy non-transactional partition
-    // route. Inside an existing transaction, add a per-INSERT savepoint so a
-    // failed AFTER trigger cannot leave its row or trigger side effects behind
-    // or abort unrelated work from earlier statements.
+    // SQL execution already gives top-level DML a transaction. Give embedded
+    // callers the same atomic commit boundary for ordinary tables so trigger
+    // side effects, WAL/CLOG publication and logical decoding cannot diverge
+    // from the inserted row. Partition tuple locators are not represented in
+    // TxnLogEntry yet, so retain their legacy statement-local route rather
+    // than pretending rollback can address the correct physical partition.
+    // Inside an existing transaction, add a per-INSERT savepoint so a failed
+    // AFTER trigger cannot abort unrelated work from earlier statements.
     const size_t returnedRowStart = insertedRows ? insertedRows->size() : 0;
     if (!transactionContext().inTransaction) {
-        const DBStatus status =
-            insertInternal(dbname, tablename, values, nullColumns,
-                           insertedRows);
-        if (status != DBStatus::OK && insertedRows) {
+        bool usesLegacyPartitionRoute = false;
+        if (tableExists(dbname, tablename)) {
+            const TableSchema table = getTableSchema(dbname, tablename);
+            usesLegacyPartitionRoute =
+                table.partitionType != TableSchema::PartitionType::None;
+        } else {
+            return insertInternal(
+                dbname, tablename, values, nullColumns, insertedRows);
+        }
+        if (usesLegacyPartitionRoute) {
+            const DBStatus status = insertInternal(
+                dbname, tablename, values, nullColumns, insertedRows);
+            if (status != DBStatus::OK && insertedRows) {
+                insertedRows->resize(returnedRowStart);
+            }
+            return status;
+        }
+
+        const DBStatus beginStatus = beginTransaction(dbname);
+        if (beginStatus != DBStatus::OK) return beginStatus;
+        // This transaction is the boundary of one autocommit statement.
+        // INITIALLY DEFERRED constraints therefore have no later statement
+        // to wait for; preserve the legacy API's immediate status codes.
+        transactionContext().constraintMode["all"] = false;
+        const DBStatus insertStatus = insertInternal(
+            dbname, tablename, values, nullColumns, insertedRows);
+        if (insertStatus != DBStatus::OK) {
+            const DBStatus rollbackStatus = rollbackTransaction();
+            if (insertedRows) insertedRows->resize(returnedRowStart);
+            return rollbackStatus == DBStatus::OK
+                ? insertStatus : rollbackStatus;
+        }
+        const DBStatus commitStatus = commitTransaction();
+        if (commitStatus != DBStatus::OK && insertedRows) {
             insertedRows->resize(returnedRowStart);
         }
-        return status;
+        return commitStatus;
     }
 
     static std::atomic<uint64_t> statementSavepointSequence{0};

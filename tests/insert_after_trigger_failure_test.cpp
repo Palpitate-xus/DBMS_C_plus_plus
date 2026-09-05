@@ -23,6 +23,11 @@ void createFixture(const std::string& database, bool forEachRow) {
     schema.append(dbms::makeIntColumn("id", false, 4, true));
     schema.append(dbms::makeVarCharColumn("value", false, 40));
     assert(g_engine.createTable(database, schema) == dbms::DBStatus::OK);
+    dbms::TableSchema audit;
+    audit.tablename = "audit";
+    audit.formatVersion = 2;
+    audit.append(dbms::makeIntColumn("id", false, 4, true));
+    assert(g_engine.createTable(database, audit) == dbms::DBStatus::OK);
     assert(g_engine.createIndex(database, "t", "value") ==
            dbms::DBStatus::OK);
     assert(g_engine.createHashIndex(database, "t", "value") ==
@@ -76,6 +81,8 @@ void runAutocommitFailure(const std::string& testName, bool forEachRow) {
     int calls = 0;
     g_engine.setTriggerExecutor([&](const std::string&) {
         ++calls;
+        assert(g_engine.insert(database, "audit", {{"id", "1"}}) ==
+               dbms::DBStatus::OK);
         return true;
     });
     std::vector<std::map<std::string, std::string>> returned{
@@ -90,6 +97,7 @@ void runAutocommitFailure(const std::string& testName, bool forEachRow) {
     assert(returned.front().at("sentinel") == "keep");
     assert(!g_engine.inTransaction());
     assertMissing(database, "1", "failed");
+    assert(g_engine.query(database, "audit", {}, {"id"}).empty());
 
     // A retry may reuse the exact heap slot. Every access method must still
     // contain one mapping rather than a stale+new duplicate.

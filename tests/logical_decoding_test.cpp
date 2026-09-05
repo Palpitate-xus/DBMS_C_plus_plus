@@ -295,6 +295,21 @@ static void test_end_to_end_streaming() {
     assert(LogicalChangeStore::instance().depth("e2e_slot") == 0);
     assert(repl.advanceSlotLsn("e2e_slot", 0) == false);  // never rewind
 
+    // The embedded API's implicit transaction follows the same commit path.
+    assert(g_engine.insert(
+               db, "src_t", {{"id", "4"}, {"v", "four"}}) ==
+           DBStatus::OK);
+    assert(LogicalChangeStore::instance().depth("e2e_slot") == 1);
+    auto autocommitPeek = LogicalChangeStore::instance().peek(
+        "e2e_slot", peek.nextLsn, 100);
+    assert(autocommitPeek.batches.size() == 1);
+    assert(autocommitPeek.batches[0].changes.size() == 1);
+    assert(autocommitPeek.batches[0].changes[0].newRow == "4|four");
+    LogicalChangeStore::instance().acknowledge(
+        "e2e_slot", autocommitPeek.nextLsn);
+    assert(repl.advanceSlotLsn(
+        "e2e_slot", static_cast<int64_t>(autocommitPeek.nextLsn)));
+
     assert(repl.dropReplicationSlot("e2e_slot"));
     g_engine.dropDatabase(db);
     cleanupTestDb(db);
