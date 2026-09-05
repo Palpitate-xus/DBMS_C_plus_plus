@@ -570,6 +570,33 @@ static void test_table_index_flag_updates_catalog() {
     relation = initial.findClass(tableOid);
     assert(relation != nullptr && relation->relhasindex);
 
+    // Read through an independent manager rather than evicting the live one:
+    // eviction's destructor persists dirty memory and would mask a CREATE
+    // INDEX path that forgot to make its catalog update durable.
+    {
+        dbms::CatalogManager durable(
+            (fs::path(g_engine.dbPath(db)) / "pg_catalog").string());
+        const auto* durableNamespace =
+            durable.findNamespaceByName("public");
+        assert(durableNamespace != nullptr);
+        const auto* durableTable = durable.findClass(tableOid);
+        assert(durableTable != nullptr && durableTable->relhasindex);
+        const auto* durableIndex = durable.findClassByName(
+            "indexed_table_a_idx", durableNamespace->oid);
+        assert(durableIndex != nullptr && durableIndex->relkind == 'i');
+        const auto dependencies = durable.findDepends(
+            dbms::PgClassOid_Class, durableIndex->oid);
+        bool ownsIndex = false;
+        for (const auto& dependency : dependencies) {
+            if (dependency.refclassid == dbms::PgClassOid_Class &&
+                dependency.refobjid == tableOid) {
+                ownsIndex = true;
+                break;
+            }
+        }
+        assert(ownsIndex);
+    }
+
     g_engine.catalogService().evict(db);
     dbms::CatalogManager& indexed = g_engine.catalogService().get(db);
     relation = indexed.findClass(tableOid);

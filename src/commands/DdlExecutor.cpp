@@ -4402,6 +4402,9 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
             if (!cat.updateClass(tableOid, updatedTable)) {
                 throw std::runtime_error("cannot update indexed table catalog row");
             }
+            if (!cat.persistAll()) {
+                throw std::runtime_error("cannot persist index catalog");
+            }
             catalogRegistered = true;
         }
     } catch (const std::exception& e) {
