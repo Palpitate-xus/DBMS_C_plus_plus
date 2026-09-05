@@ -2611,7 +2611,8 @@ static dbms::Column makeColumnFromSource(const dbms::Column& src, const std::str
 }
 
 static bool executeCreateTableAs(const CreateTableStmt* stmt, Session& s,
-                                 const std::string& tname) {
+                                 const std::string& tname,
+                                 DdlTransaction& transaction) {
     if (stmt->asSelect.empty()) return false; // not CTAS
 
     std::vector<std::string> selectCols;
@@ -2634,11 +2635,11 @@ static bool executeCreateTableAs(const CreateTableStmt* stmt, Session& s,
     newTbl.owner = effectiveSessionRole(s);
     newTbl.isTemporary = stmt->temp || stmt->localTemp;
 
-    std::set<std::string> queryCols;
+    std::vector<size_t> selectedSourceColumns;
     if (selectCols.size() == 1 && selectCols[0] == "*") {
         for (size_t i = 0; i < srcTbl.len; ++i) {
             newTbl.append(makeColumnFromSource(srcTbl.cols[i], srcTbl.cols[i].dataName));
-            queryCols.insert(srcTbl.cols[i].dataName);
+            selectedSourceColumns.push_back(i);
         }
     } else {
         for (const auto& cname : selectCols) {
@@ -2646,7 +2647,7 @@ static bool executeCreateTableAs(const CreateTableStmt* stmt, Session& s,
             for (size_t i = 0; i < srcTbl.len; ++i) {
                 if (toLower(srcTbl.cols[i].dataName) == cname) {
                     newTbl.append(makeColumnFromSource(srcTbl.cols[i], srcTbl.cols[i].dataName));
-                    queryCols.insert(srcTbl.cols[i].dataName);
+                    selectedSourceColumns.push_back(i);
                     found = true;
                     break;
                 }
@@ -2663,30 +2664,61 @@ static bool executeCreateTableAs(const CreateTableStmt* stmt, Session& s,
         std::cout << "CTAS: create table failed" << std::endl;
         return true;
     }
+    // Record ownership as soon as the physical relation exists.  A source
+    // scan or target INSERT failure below must remove the partially-built
+    // table through the enclosing DDL transaction.
+    transaction.recordCreate(DdlObjectKind::Table, tname);
 
-    auto rows = g_engine.query(s.currentDB, srcTable, conditions, queryCols, {});
-    // StorageEngine::query emits values in SOURCE SCHEMA order (filtered to
-    // queryCols), NOT in the alphabetical order of the queryCols set. Build the
-    // value->column mapping in that same schema order so columns line up.
-    std::vector<std::string> orderedCols;
-    for (size_t i = 0; i < srcTbl.len; ++i) {
-        if (queryCols.count(srcTbl.cols[i].dataName))
-            orderedCols.push_back(srcTbl.cols[i].dataName);
-    }
     size_t inserted = 0;
     if (stmt->withData) {
-        for (const auto& row : rows) {
-            std::map<std::string, std::string> values;
-            std::istringstream iss(row);
-            std::string val;
-            size_t idx = 0;
-            while (iss >> val && idx < orderedCols.size()) {
-                if (val == "NULL") val = "";
-                values[orderedCols[idx]] = val;
-                ++idx;
+        const auto parsedConditions =
+            StorageEngine::parseConditions(conditions);
+        std::vector<StorageEngine::SqlRow> sourceRows;
+        const bool scanOk = g_engine.forEachVisibleRow(
+            s.currentDB, srcTable, "SELECT",
+            [&](uint32_t pageId, uint16_t slotId,
+                const char* data, size_t length) {
+                const int64_t rid =
+                    StorageEngine::encodeRid(pageId, slotId);
+                StorageEngine::bindNullRow(
+                    &g_engine, s.currentDB, srcTable, rid, srcTbl.len);
+                struct BindingGuard {
+                    ~BindingGuard() { StorageEngine::unbindNullRow(); }
+                } bindingGuard;
+
+                const std::string row(data, length);
+                for (const auto& condition : parsedConditions) {
+                    if (!StorageEngine::evalConditionOnRow(
+                            condition, row, srcTbl)) {
+                        return;
+                    }
+                }
+
+                StorageEngine::SqlRow values;
+                for (const size_t sourceColumn : selectedSourceColumns) {
+                    bool isNull = false;
+                    std::string value = g_engine.extractColumnValue(
+                        row, srcTbl, sourceColumn, s.currentDB, true,
+                        &isNull);
+                    const std::string& name =
+                        srcTbl.cols[sourceColumn].dataName;
+                    if (isNull) values[name] = std::nullopt;
+                    else values[name] = std::move(value);
+                }
+                sourceRows.push_back(std::move(values));
+            });
+        if (!scanOk) {
+            std::cout << "CTAS: source scan failed" << std::endl;
+            return true;
+        }
+        for (const auto& row : sourceRows) {
+            const DBStatus status =
+                g_engine.insertRow(s.currentDB, tname, row);
+            if (status != DBStatus::OK) {
+                std::cout << "CTAS: row copy failed" << std::endl;
+                return true;
             }
-            if (idx != orderedCols.size()) continue;
-            if (g_engine.insert(s.currentDB, tname, values) == DBStatus::OK) ++inserted;
+            ++inserted;
         }
     }
 
@@ -2871,11 +2903,8 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
 
     // CREATE TABLE ... AS SELECT ...
     if (!stmt->asSelect.empty()) {
-        bool err = executeCreateTableAs(stmt, s, tname);
+        bool err = executeCreateTableAs(stmt, s, tname, txn);
         if (!err) {
-            // Record the physical relation before catalog post-processing so
-            // a later failure can remove the table through the transaction.
-            txn.recordCreate(DdlObjectKind::Table, tname);
             try {
                 if (!temporary) {
                     dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
