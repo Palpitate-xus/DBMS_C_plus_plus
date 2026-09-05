@@ -62,6 +62,54 @@ bool parseInt64Strict(const std::string& token, int64_t& value) {
     return result.ec == std::errc{} && result.ptr == end;
 }
 
+bool likeSourceHasExtendedStatistics(const std::string& dbname,
+                                     const std::string& tableName,
+                                     bool& hasStatistics,
+                                     std::string& error) {
+    hasStatistics = false;
+    error.clear();
+    const std::filesystem::path path =
+        g_engine.dbPath(dbname) / ".extended_stats";
+    std::error_code filesystemError;
+    if (!std::filesystem::exists(path, filesystemError)) {
+        if (filesystemError) error = filesystemError.message();
+        return !filesystemError;
+    }
+    if (!std::filesystem::is_regular_file(path, filesystemError) ||
+        filesystemError) {
+        error = filesystemError
+            ? filesystemError.message()
+            : "extended statistics catalog is not a regular file";
+        return false;
+    }
+
+    std::ifstream input(path);
+    if (!input) {
+        error = "cannot read extended statistics catalog";
+        return false;
+    }
+    std::string line;
+    while (std::getline(input, line)) {
+        if (trim(line).empty()) continue;
+        const size_t nameEnd = line.find('|');
+        const size_t tableEnd = nameEnd == std::string::npos
+            ? std::string::npos : line.find('|', nameEnd + 1);
+        if (nameEnd == std::string::npos || tableEnd == std::string::npos) {
+            error = "malformed extended statistics catalog";
+            return false;
+        }
+        if (line.substr(nameEnd + 1, tableEnd - nameEnd - 1) == tableName) {
+            hasStatistics = true;
+            return true;
+        }
+    }
+    if (input.bad()) {
+        error = "cannot read extended statistics catalog";
+        return false;
+    }
+    return true;
+}
+
 std::string canonicalRoleName(const std::string& raw) {
     const std::string value = trim(raw);
     if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
@@ -3095,27 +3143,64 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     // Plain LIKE copies column definitions + NOT NULL + collation only. DEFAULTS,
     // CHECK constraints, identity and PK/UNIQUE are copied only with the matching
     // INCLUDING option (or INCLUDING ALL).
+    std::vector<std::pair<std::string, std::string>> likeColumnComments;
     for (const auto& lc : stmt->likeClauses) {
+        if (!lc.optionsValid) {
+            std::cout << "ERROR: invalid CREATE TABLE LIKE option \""
+                      << lc.invalidOption << "\"" << std::endl;
+            return true;
+        }
         std::string src = resolveTableName(s, lc.tableName);
         if (!g_engine.tableExists(s.currentDB, src)) {
             std::cout << "LIKE source table " << lc.tableName << " not found" << std::endl;
             return true;
         }
-        bool inclDefaults = lc.includingAll || lc.includingDefaults;
-        bool inclConstraints = lc.includingAll || lc.includingConstraints;
-        bool inclIndexes = lc.includingAll || lc.includingIndexes;
-        bool inclIdentity = lc.includingAll || lc.includingIdentity;
+        if (lc.includingStatistics) {
+            bool hasStatistics = false;
+            std::string statisticsError;
+            if (!likeSourceHasExtendedStatistics(
+                    s.currentDB, src, hasStatistics, statisticsError)) {
+                std::cout << "ERROR: cannot inspect LIKE source statistics: "
+                          << statisticsError << std::endl;
+                return true;
+            }
+            if (hasStatistics) {
+                std::cout << "ERROR: LIKE INCLUDING STATISTICS is not supported "
+                             "for a source with extended statistics"
+                          << std::endl;
+                return true;
+            }
+        }
         TableSchema srcSchema = g_engine.getTableSchema(s.currentDB, src);
         for (size_t i = 0; i < srcSchema.len && tbl.len < MAX_COLUMNS; ++i) {
             Column c = srcSchema.cols[i];
-            if (!inclDefaults) c.defaultValue.clear();
-            if (!inclConstraints) { c.checkExpr.clear(); c.checkConstraintName.clear(); }
-            if (!inclIdentity) c.isAutoIncrement = false;
-            if (!inclIndexes) { c.isPrimaryKey = false; c.isUnique = false; }
+            if (!lc.includingDefaults) c.defaultValue.clear();
+            if (!lc.includingConstraints) {
+                c.checkExpr.clear();
+                c.checkConstraintName.clear();
+            }
+            if (!lc.includingGenerated) {
+                c.generatedExpr.clear();
+                c.generatedKind = 0;
+            }
+            if (!lc.includingIdentity) c.isAutoIncrement = false;
+            if (!lc.includingIndexes) {
+                c.isPrimaryKey = false;
+                c.isUnique = false;
+            }
             tbl.append(c);
-            if (inclIndexes && c.isPrimaryKey) tbl.pkColIndices.push_back(tbl.len - 1);
+            if (lc.includingIndexes && c.isPrimaryKey) {
+                tbl.pkColIndices.push_back(tbl.len - 1);
+            }
+            if (lc.includingComments) {
+                const std::string comment = g_engine.getColumnComment(
+                    s.currentDB, src, c.dataName);
+                if (!comment.empty()) {
+                    likeColumnComments.emplace_back(c.dataName, comment);
+                }
+            }
         }
-        if (inclConstraints) {
+        if (lc.includingConstraints) {
             tbl.additionalCheckConstraints.insert(
                 tbl.additionalCheckConstraints.end(),
                 srcSchema.additionalCheckConstraints.begin(),
@@ -3388,6 +3473,15 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     // Constraint metadata and catalog registration happen after the physical
     // relation exists.  Keep the relation in the rollback log immediately.
     txn.recordCreate(DdlObjectKind::Table, tname);
+
+    for (const auto& [columnName, comment] : likeColumnComments) {
+        const DBStatus commentStatus = g_engine.commentOnColumn(
+            s.currentDB, tname, columnName, comment);
+        if (commentStatus != DBStatus::OK) {
+            std::cout << "CREATE TABLE LIKE comment copy failed" << std::endl;
+            return true;
+        }
+    }
 
     // The primary-key name is metadata, not an interchangeable label.  Keep
     // it alongside the other constraint metadata so DROP CONSTRAINT can

@@ -4,6 +4,7 @@
 #include "table_schema.h"
 #include <cassert>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include "test_utils.h"
 
@@ -89,6 +90,122 @@ static void test_like_including_all() {
     std::cout << "[LIKE] INCLUDING ALL OK" << std::endl;
 }
 
+static void test_like_options_are_ordered() {
+    std::string db = testDbPath("like_option_order");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE src (id INT PRIMARY KEY, amount INT DEFAULT 5)", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE cpy (LIKE src INCLUDING ALL EXCLUDING DEFAULTS)", s));
+    auto schema = g_engine.getTableSchema(db, "cpy");
+    const dbms::Column* id = findCol(schema, "id");
+    const dbms::Column* amount = findCol(schema, "amount");
+    assert(id && amount);
+    assert(id->isPrimaryKey);
+    assert(amount->defaultValue.empty());
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE cpy_last (LIKE src INCLUDING ALL EXCLUDING DEFAULTS "
+        "INCLUDING DEFAULTS)", s));
+    schema = g_engine.getTableSchema(db, "cpy_last");
+    amount = findCol(schema, "amount");
+    assert(amount && !amount->defaultValue.empty());
+    cleanup(db);
+    std::cout << "[LIKE] option ordering OK" << std::endl;
+}
+
+static void test_like_generated_is_opt_in() {
+    std::string db = testDbPath("like_generated");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE src (a INT, doubled INT GENERATED ALWAYS AS (a * 2) STORED)", s));
+    assert(!ddl.executeSql("CREATE TABLE plain (LIKE src)", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE generated (LIKE src INCLUDING GENERATED)", s));
+
+    const auto plainSchema = g_engine.getTableSchema(db, "plain");
+    const auto generatedSchema = g_engine.getTableSchema(db, "generated");
+    const dbms::Column* plain = findCol(plainSchema, "doubled");
+    const dbms::Column* generated = findCol(generatedSchema, "doubled");
+    assert(plain && plain->generatedExpr.empty() && plain->generatedKind == 0);
+    assert(generated && generated->generatedExpr == "a * 2");
+    assert(generated->generatedKind == 's');
+    cleanup(db);
+    std::cout << "[LIKE] generated columns are opt-in OK" << std::endl;
+}
+
+static void test_like_including_comments() {
+    std::string db = testDbPath("like_comments");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    assert(!ddl.executeSql("CREATE TABLE src (id INT, note VARCHAR(20))", s));
+    assert(g_engine.commentOnTable(db, "src", "source table") ==
+           dbms::DBStatus::OK);
+    assert(g_engine.commentOnColumn(db, "src", "note", "copied note") ==
+           dbms::DBStatus::OK);
+    assert(!ddl.executeSql("CREATE TABLE plain (LIKE src)", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE cpy (LIKE src INCLUDING COMMENTS)", s));
+
+    assert(g_engine.getColumnComment(db, "plain", "note").empty());
+    assert(g_engine.getColumnComment(db, "cpy", "note") == "copied note");
+    // LIKE copies comments on copied objects, not the source relation itself.
+    assert(g_engine.getTableComment(db, "cpy").empty());
+    cleanup(db);
+    std::cout << "[LIKE] INCLUDING COMMENTS OK" << std::endl;
+}
+
+static void test_like_invalid_options_fail_before_creation() {
+    std::string db = testDbPath("like_invalid_option");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    assert(!ddl.executeSql("CREATE TABLE src (id INT)", s));
+    assert(ddl.executeSql(
+        "CREATE TABLE unknown_opt (LIKE src INCLUDING BANANAS)", s));
+    assert(ddl.executeSql(
+        "CREATE TABLE missing_opt (LIKE src INCLUDING)", s));
+    assert(!g_engine.tableExists(db, "unknown_opt"));
+    assert(!g_engine.tableExists(db, "missing_opt"));
+    cleanup(db);
+    std::cout << "[LIKE] invalid options rejected OK" << std::endl;
+}
+
+static void test_like_statistics_never_silently_ignored() {
+    std::string db = testDbPath("like_statistics");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    assert(!ddl.executeSql("CREATE TABLE src (a INT, b INT)", s));
+    {
+        std::ofstream catalog(g_engine.dbPath(db) / ".extended_stats");
+        assert(catalog);
+        catalog << "src_stats|src|a,b|ndistinct|-1\n";
+        assert(catalog);
+    }
+    assert(ddl.executeSql(
+        "CREATE TABLE cpy (LIKE src INCLUDING STATISTICS)", s));
+    assert(!g_engine.tableExists(db, "cpy"));
+    cleanup(db);
+    std::cout << "[LIKE] unsupported statistics copy fails closed OK"
+              << std::endl;
+}
+
 static void test_like_plus_extra_column() {
     std::string db = testDbPath("like_extra");
     cleanup(db);
@@ -125,6 +242,11 @@ int main() {
     test_like_basic();
     test_like_including_defaults();
     test_like_including_all();
+    test_like_options_are_ordered();
+    test_like_generated_is_opt_in();
+    test_like_including_comments();
+    test_like_invalid_options_fail_before_creation();
+    test_like_statistics_never_silently_ignored();
     test_like_plus_extra_column();
     test_like_missing_source();
     std::cout << "[LIKE] all passed" << std::endl;

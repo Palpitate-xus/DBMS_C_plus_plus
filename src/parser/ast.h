@@ -822,10 +822,17 @@ struct CreateTableStmt : public Stmt {
     struct LikeClause {
         std::string tableName;
         bool includingAll = false;
+        bool includingComments = false;
+        bool includingCompression = false;
         bool includingDefaults = false;
         bool includingConstraints = false;
+        bool includingGenerated = false;
         bool includingIndexes = false;
         bool includingIdentity = false;
+        bool includingStatistics = false;
+        bool includingStorage = false;
+        bool optionsValid = true;
+        std::string invalidOption;
     };
     std::vector<LikeClause> likeClauses;
     std::vector<SelectItem> partitionBy;       // PARTITION BY ...

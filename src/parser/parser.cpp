@@ -4635,6 +4635,66 @@ static void parseCreateTableOnCommit(const std::vector<std::string>& tokens,
     }
 }
 
+static void applyCreateTableLikeOption(CreateTableStmt::LikeClause& clause,
+                                       const std::string& option,
+                                       bool include) {
+    auto applyAll = [&]() {
+        clause.includingComments = include;
+        clause.includingCompression = include;
+        clause.includingConstraints = include;
+        clause.includingDefaults = include;
+        clause.includingGenerated = include;
+        clause.includingIdentity = include;
+        clause.includingIndexes = include;
+        clause.includingStatistics = include;
+        clause.includingStorage = include;
+    };
+
+    if (option == "all") {
+        clause.includingAll = include;
+        applyAll();
+    } else if (option == "comments") {
+        clause.includingComments = include;
+    } else if (option == "compression") {
+        clause.includingCompression = include;
+    } else if (option == "constraints") {
+        clause.includingConstraints = include;
+    } else if (option == "defaults") {
+        clause.includingDefaults = include;
+    } else if (option == "generated") {
+        clause.includingGenerated = include;
+    } else if (option == "identity") {
+        clause.includingIdentity = include;
+    } else if (option == "indexes") {
+        clause.includingIndexes = include;
+    } else if (option == "statistics") {
+        clause.includingStatistics = include;
+    } else if (option == "storage") {
+        clause.includingStorage = include;
+    } else {
+        clause.optionsValid = false;
+        if (clause.invalidOption.empty()) clause.invalidOption = option;
+    }
+}
+
+static void parseCreateTableLikeOptions(const std::vector<std::string>& tokens,
+                                        size_t& pos,
+                                        CreateTableStmt::LikeClause& clause) {
+    while (pos < tokens.size() &&
+           (SQLParser::toLower(tokens[pos]) == "including" ||
+            SQLParser::toLower(tokens[pos]) == "excluding")) {
+        const bool include = SQLParser::toLower(tokens[pos++]) == "including";
+        if (pos >= tokens.size() || tokens[pos] == "," ||
+            tokens[pos] == ")" || tokens[pos] == ";") {
+            clause.optionsValid = false;
+            if (clause.invalidOption.empty()) clause.invalidOption = "<missing>";
+            return;
+        }
+        applyCreateTableLikeOption(
+            clause, SQLParser::toLower(tokens[pos++]), include);
+    }
+}
+
 StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size_t& pos) {
     auto stmt = std::make_unique<CreateTableStmt>();
 
@@ -4871,20 +4931,7 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                         if (pos < tokens.size()) lc.tableName += "." + tokens[pos++];
                     }
                 }
-                while (pos < tokens.size() &&
-                       (toLower(tokens[pos]) == "including" || toLower(tokens[pos]) == "excluding")) {
-                    bool incl = (toLower(tokens[pos]) == "including");
-                    ++pos;
-                    if (pos < tokens.size()) {
-                        std::string opt = toLower(tokens[pos++]);
-                        if (opt == "all") lc.includingAll = incl;
-                        else if (opt == "defaults") lc.includingDefaults = incl;
-                        else if (opt == "constraints") lc.includingConstraints = incl;
-                        else if (opt == "indexes") lc.includingIndexes = incl;
-                        else if (opt == "identity") lc.includingIdentity = incl;
-                        // storage / comments / generated / statistics: accepted but ignored
-                    }
-                }
+                parseCreateTableLikeOptions(tokens, pos, lc);
                 if (!lc.tableName.empty()) {
                     stmt->likeClauses.push_back(lc);
                     stmt->likeTables.emplace_back(lc.tableName, ColumnDef());
@@ -5116,19 +5163,7 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                     ++pos;
                     if (pos < tokens.size()) lc.tableName += "." + tokens[pos++];
                 }
-                while (pos < tokens.size() &&
-                       (toLower(tokens[pos]) == "including" || toLower(tokens[pos]) == "excluding")) {
-                    bool incl = (toLower(tokens[pos]) == "including");
-                    ++pos;
-                    if (pos < tokens.size()) {
-                        std::string opt = toLower(tokens[pos++]);
-                        if (opt == "all") lc.includingAll = incl;
-                        else if (opt == "defaults") lc.includingDefaults = incl;
-                        else if (opt == "constraints") lc.includingConstraints = incl;
-                        else if (opt == "indexes") lc.includingIndexes = incl;
-                        else if (opt == "identity") lc.includingIdentity = incl;
-                    }
-                }
+                parseCreateTableLikeOptions(tokens, pos, lc);
                 stmt->likeClauses.push_back(lc);
                 stmt->likeTables.emplace_back(lc.tableName, ColumnDef());
             }
