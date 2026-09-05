@@ -18,6 +18,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -3209,66 +3210,14 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         }
     }
 
-    // CREATE TABLE ... INHERITS (parent, ...) — prepend inherited columns
-    // (parent columns first, in declaration order, then this table's own;
-    // same-named columns are not duplicated). The relationship is recorded
-    // in <db>/.inherits so SELECT/UPDATE/DELETE can expand children.
-    std::vector<std::string> inheritedParents;
-    if (!stmt->inherits.empty()) {
-        std::set<std::string> ownCols;
-        for (size_t i = 0; i < tbl.len; ++i) ownCols.insert(tbl.cols[i].dataName);
-        TableSchema merged;
-        merged.tablename = tbl.tablename;
-        merged.owner = tbl.owner;
-        merged.isTemporary = tbl.isTemporary;
-        merged.isUnlogged = tbl.isUnlogged;
-        merged.tablespace = tbl.tablespace;
-        merged.storageParams = tbl.storageParams;
-        merged.partitionType = tbl.partitionType;
-        merged.partitionKey = tbl.partitionKey;
-        merged.rangePartitions = tbl.rangePartitions;
-        merged.listPartitions = tbl.listPartitions;
-        merged.hashPartitions = tbl.hashPartitions;
-        merged.defaultPartitionName = tbl.defaultPartitionName;
-        merged.pkColIndices = tbl.pkColIndices;
-        merged.uniqueConstraints = tbl.uniqueConstraints;
-        for (const auto& parentRaw : stmt->inherits) {
-            std::string parent = resolveTableName(s, parentRaw);
-            if (!g_engine.tableExists(s.currentDB, parent)) {
-                std::cout << "Parent table " << parentRaw << " not found" << std::endl;
-                return true;
-            }
-            inheritedParents.push_back(parent);
-            TableSchema parentSchema = g_engine.getTableSchema(s.currentDB, parent);
-            for (size_t i = 0; i < parentSchema.len && merged.len < MAX_COLUMNS; ++i) {
-                const Column& pc = parentSchema.cols[i];
-                if (ownCols.count(pc.dataName)) continue; // child redefines it
-                // Inherited columns are nullable in the child (PG does not
-                // propagate NOT NULL through inheritance).
-                Column c = pc;
-                c.isNull = true;
-                c.isPrimaryKey = false;
-                merged.append(c);
-            }
-            merged.additionalCheckConstraints.insert(
-                merged.additionalCheckConstraints.end(),
-                parentSchema.additionalCheckConstraints.begin(),
-                parentSchema.additionalCheckConstraints.end());
-        }
-        for (size_t i = 0; i < tbl.len; ++i) merged.append(tbl.cols[i]);
-        for (size_t i = 0; i < tbl.fkLen; ++i) merged.appendFK(tbl.fks[i]);
-        merged.additionalCheckConstraints.insert(
-            merged.additionalCheckConstraints.end(),
-            tbl.additionalCheckConstraints.begin(),
-            tbl.additionalCheckConstraints.end());
-        tbl = merged;
-    }
-
+    // Convert locally declared columns before merging inheritance so a local
+    // declaration with the same name as a parent column is merged instead of
+    // being appended as a duplicate after the inheritance pass.
     for (const auto& cd : stmt->columns) {
         Column column;
         std::string typeError;
         if (!columnDefToColumn(cd, s.currentDB, column, typeError,
-                            s.compatibilityMode)) {
+                              s.compatibilityMode)) {
             std::cout << "Invalid column type: " << typeError << std::endl;
             return true;
         }
@@ -3284,6 +3233,208 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             check.expression = cd.checkExprs[checkIndex]->toString();
             tbl.additionalCheckConstraints.push_back(std::move(check));
         }
+    }
+
+    // CREATE TABLE ... INHERITS (parent, ...) — prepend inherited columns
+    // (parent columns first, in declaration order, then this table's own;
+    // same-named columns are not duplicated). The relationship is recorded
+    // in <db>/.inherits so SELECT/UPDATE/DELETE can expand children.
+    std::vector<std::string> inheritedParents;
+    if (!stmt->inherits.empty()) {
+        const TableSchema localSchema = tbl;
+        TableSchema merged = localSchema;
+        merged.len = 0;
+        merged.fkLen = 0;
+        merged.pkColIndices.clear();
+        merged.uniqueConstraints.clear();
+        merged.uniqueConstraintNames.clear();
+        merged.additionalCheckConstraints.clear();
+
+        std::map<std::string, size_t> mergedColumns;
+        std::set<std::string> inheritedColumnNames;
+        std::set<std::string> localDefaultOverrides;
+        for (size_t i = 0; i < localSchema.len; ++i) {
+            if (!localSchema.cols[i].defaultValue.empty()) {
+                localDefaultOverrides.insert(localSchema.cols[i].dataName);
+            }
+        }
+        std::vector<size_t> localColumnMap(
+            localSchema.len, std::numeric_limits<size_t>::max());
+        std::string mergeError;
+        const auto columnsHaveCompatibleTypes = [](const Column& left,
+                                                   const Column& right) {
+            return left.dataType == right.dataType &&
+                   left.dsize == right.dsize &&
+                   left.isVariableLength == right.isVariableLength &&
+                   left.isUnsigned == right.isUnsigned &&
+                   left.isArray == right.isArray &&
+                   left.collation == right.collation &&
+                   left.enumValues == right.enumValues &&
+                   left.domainName == right.domainName;
+        };
+        auto mergeCheckConstraint = [&](Column& target,
+                                        const Column& incoming) {
+            if (incoming.checkExpr.empty()) return true;
+            if (target.checkExpr.empty()) {
+                target.checkExpr = incoming.checkExpr;
+                target.checkConstraintName = incoming.checkConstraintName;
+                target.deferrable = incoming.deferrable;
+                target.initiallyDeferred = incoming.initiallyDeferred;
+                return true;
+            }
+            if (!target.checkConstraintName.empty() &&
+                target.checkConstraintName == incoming.checkConstraintName) {
+                if (target.checkExpr != incoming.checkExpr) {
+                    mergeError = "inherited CHECK constraint \"" +
+                        target.checkConstraintName +
+                        "\" has conflicting expressions";
+                    return false;
+                }
+                return true;
+            }
+            CheckConstraint additional;
+            additional.name = incoming.checkConstraintName;
+            additional.expression = incoming.checkExpr;
+            additional.deferrable = incoming.deferrable;
+            additional.initiallyDeferred = incoming.initiallyDeferred;
+            merged.additionalCheckConstraints.push_back(
+                std::move(additional));
+            return true;
+        };
+        auto mergeColumn = [&](Column& target, const Column& incoming,
+                               bool localDeclaration) {
+            if (!columnsHaveCompatibleTypes(target, incoming)) {
+                mergeError = "inherited column \"" + incoming.dataName +
+                    "\" has an incompatible type";
+                return false;
+            }
+            target.isNull = target.isNull && incoming.isNull;
+            if (!incoming.defaultValue.empty()) {
+                if (localDeclaration || target.defaultValue.empty()) {
+                    target.defaultValue = incoming.defaultValue;
+                } else if (target.defaultValue != incoming.defaultValue &&
+                           localDefaultOverrides.count(
+                               incoming.dataName) == 0) {
+                    mergeError = "inherited column \"" + incoming.dataName +
+                        "\" has conflicting default values";
+                    return false;
+                }
+            }
+            if (!incoming.generatedExpr.empty()) {
+                if (!target.generatedExpr.empty() &&
+                    (target.generatedExpr != incoming.generatedExpr ||
+                     target.generatedKind != incoming.generatedKind)) {
+                    mergeError = "inherited generated column \"" +
+                        incoming.dataName + "\" has conflicting expressions";
+                    return false;
+                }
+                target.generatedExpr = incoming.generatedExpr;
+                target.generatedKind = incoming.generatedKind;
+            }
+            if (!mergeCheckConstraint(target, incoming)) return false;
+            if (localDeclaration) {
+                // PRIMARY KEY, UNIQUE and identity are local-only properties.
+                target.isPrimaryKey = incoming.isPrimaryKey;
+                target.isUnique = incoming.isUnique;
+                target.isAutoIncrement = incoming.isAutoIncrement;
+            }
+            return true;
+        };
+
+        for (const auto& parentRaw : stmt->inherits) {
+            std::string parent = resolveTableName(s, parentRaw);
+            if (!g_engine.tableExists(s.currentDB, parent)) {
+                std::cout << "Parent table " << parentRaw << " not found" << std::endl;
+                return true;
+            }
+            inheritedParents.push_back(parent);
+            TableSchema parentSchema = g_engine.getTableSchema(s.currentDB, parent);
+            for (size_t i = 0; i < parentSchema.len; ++i) {
+                Column inherited = parentSchema.cols[i];
+                // These constraints are local to the parent. CHECK and
+                // NOT NULL remain on the inherited column.
+                inherited.isPrimaryKey = false;
+                inherited.isUnique = false;
+                inherited.isAutoIncrement = false;
+                const auto existing = mergedColumns.find(inherited.dataName);
+                inheritedColumnNames.insert(inherited.dataName);
+                if (existing != mergedColumns.end()) {
+                    if (!mergeColumn(
+                            merged.cols[existing->second], inherited, false)) {
+                        std::cout << "ERROR: " << mergeError << std::endl;
+                        return true;
+                    }
+                    continue;
+                }
+                if (merged.len >= MAX_COLUMNS) {
+                    std::cout << "ERROR: inherited table has too many columns"
+                              << std::endl;
+                    return true;
+                }
+                mergedColumns[inherited.dataName] = merged.len;
+                merged.append(inherited);
+            }
+            merged.additionalCheckConstraints.insert(
+                merged.additionalCheckConstraints.end(),
+                parentSchema.additionalCheckConstraints.begin(),
+                parentSchema.additionalCheckConstraints.end());
+        }
+
+        for (size_t i = 0; i < localSchema.len; ++i) {
+            const Column& local = localSchema.cols[i];
+            const auto existing = mergedColumns.find(local.dataName);
+            if (existing != mergedColumns.end()) {
+                if (inheritedColumnNames.count(local.dataName) == 0) {
+                    std::cout << "ERROR: column \"" << local.dataName
+                              << "\" specified more than once" << std::endl;
+                    return true;
+                }
+                if (!mergeColumn(
+                        merged.cols[existing->second], local, true)) {
+                    std::cout << "ERROR: " << mergeError << std::endl;
+                    return true;
+                }
+                localColumnMap[i] = existing->second;
+                continue;
+            }
+            if (merged.len >= MAX_COLUMNS) {
+                std::cout << "ERROR: inherited table has too many columns"
+                          << std::endl;
+                return true;
+            }
+            localColumnMap[i] = merged.len;
+            mergedColumns[local.dataName] = merged.len;
+            merged.append(local);
+        }
+        for (const size_t localIndex : localSchema.pkColIndices) {
+            if (localIndex >= localColumnMap.size()) {
+                std::cout << "ERROR: invalid local primary key metadata"
+                          << std::endl;
+                return true;
+            }
+            merged.pkColIndices.push_back(localColumnMap[localIndex]);
+        }
+        for (const auto& localUnique : localSchema.uniqueConstraints) {
+            std::vector<size_t> remapped;
+            for (const size_t localIndex : localUnique) {
+                if (localIndex >= localColumnMap.size()) {
+                    std::cout << "ERROR: invalid local unique constraint metadata"
+                              << std::endl;
+                    return true;
+                }
+                remapped.push_back(localColumnMap[localIndex]);
+            }
+            merged.uniqueConstraints.push_back(std::move(remapped));
+        }
+        merged.uniqueConstraintNames = localSchema.uniqueConstraintNames;
+        for (size_t i = 0; i < localSchema.fkLen; ++i) {
+            merged.appendFK(localSchema.fks[i]);
+        }
+        merged.additionalCheckConstraints.insert(
+            merged.additionalCheckConstraints.end(),
+            localSchema.additionalCheckConstraints.begin(),
+            localSchema.additionalCheckConstraints.end());
+        tbl = merged;
     }
 
     // CREATE TABLE name OF composite_type — derive columns from the type's fields.

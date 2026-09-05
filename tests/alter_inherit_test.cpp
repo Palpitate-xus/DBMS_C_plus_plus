@@ -27,6 +27,14 @@ static void setupSession(Session& s, const std::string& db) {
     s.currentDB = db;
 }
 
+static const dbms::Column* findColumn(const dbms::TableSchema& table,
+                                      const std::string& name) {
+    for (size_t i = 0; i < table.len; ++i) {
+        if (table.cols[i].dataName == name) return &table.cols[i];
+    }
+    return nullptr;
+}
+
 // Verify parser correctly parses ALTER TABLE ... INHERIT / NO INHERIT.
 static void test_inherit_parser() {
     std::string db = testDbPath("inh_parse");
@@ -193,6 +201,68 @@ static void test_create_inherits_metadata_failure_is_atomic() {
               << std::endl;
 }
 
+static void test_create_inherits_merges_columns_and_constraints() {
+    const std::string db = testDbPath("inh_column_merge");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE parent (id INT NOT NULL UNIQUE, inherited_default INT "
+        "DEFAULT 7, parent_identity INT GENERATED ALWAYS AS IDENTITY)", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE child (id INT, local_a INT, local_b INT, "
+        "PRIMARY KEY (local_a, local_b)) INHERITS (parent)", s));
+
+    const auto child = g_engine.getTableSchema(db, "child");
+    assert(child.len == 5);
+    const dbms::Column* id = findColumn(child, "id");
+    const dbms::Column* inheritedDefault =
+        findColumn(child, "inherited_default");
+    const dbms::Column* parentIdentity =
+        findColumn(child, "parent_identity");
+    assert(id && !id->isNull && !id->isUnique);
+    assert(inheritedDefault && inheritedDefault->defaultValue == "7");
+    assert(parentIdentity && !parentIdentity->isAutoIncrement);
+    assert(child.pkColIndices == std::vector<size_t>({3, 4}));
+    assert(g_engine.insert(
+               db, "child", {{"local_a", "1"}, {"local_b", "2"}}) ==
+           dbms::DBStatus::NULL_NOT_ALLOWED);
+
+    assert(ddl.executeSql(
+        "CREATE TABLE incompatible (id VARCHAR(8)) INHERITS (parent)", s));
+    assert(!g_engine.tableExists(db, "incompatible"));
+
+    assert(!ddl.executeSql("CREATE TABLE defaults_a (shared INT DEFAULT 1)", s));
+    assert(!ddl.executeSql("CREATE TABLE defaults_b (shared INT DEFAULT 2)", s));
+    assert(ddl.executeSql(
+        "CREATE TABLE conflicting (extra INT) "
+        "INHERITS (defaults_a, defaults_b)", s));
+    assert(!g_engine.tableExists(db, "conflicting"));
+    assert(!ddl.executeSql(
+        "CREATE TABLE overridden (shared INT DEFAULT 3, extra INT) "
+        "INHERITS (defaults_a, defaults_b)", s));
+    const auto overridden = g_engine.getTableSchema(db, "overridden");
+    const dbms::Column* shared = findColumn(overridden, "shared");
+    assert(shared && shared->defaultValue == "3");
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE keyed (a INT, b INT, PRIMARY KEY (a, b))", s));
+    assert(!ddl.executeSql("CREATE TABLE prefix (p INT)", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE inherited_key "
+        "(LIKE keyed INCLUDING INDEXES) INHERITS (prefix)", s));
+    const auto inheritedKey =
+        g_engine.getTableSchema(db, "inherited_key");
+    assert(inheritedKey.pkColIndices == std::vector<size_t>({1, 2}));
+
+    cleanup(db);
+    std::cout << "[INHERIT] column and constraint merge semantics OK"
+              << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_inherit_parser();
@@ -200,6 +270,7 @@ int main() {
     test_table_rename_updates_inheritance_graph();
     test_drop_removes_inheritance_edges();
     test_create_inherits_metadata_failure_is_atomic();
+    test_create_inherits_merges_columns_and_constraints();
     std::cout << "[INHERIT] all passed" << std::endl;
     return 0;
 }
