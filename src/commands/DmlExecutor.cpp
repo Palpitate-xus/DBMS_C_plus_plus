@@ -359,6 +359,8 @@ bool sameColumnSet(const std::vector<size_t>& left,
 }
 
 bool resolveConflictTarget(const InsertStmt& stmt, const TableSchema& table,
+                           const std::string& currentDB,
+                           const std::string& tableName,
                            std::vector<std::string>& targetColumns) {
     if (stmt.conflictTarget.empty()) return false;
 
@@ -399,13 +401,56 @@ bool resolveConflictTarget(const InsertStmt& stmt, const TableSchema& table,
     // uniqueConstraints, so recognize their single-column form here.
     if (targetIndices.size() == 1) {
         const Column& column = table.cols[targetIndices.front()];
-        return column.isUnique || column.isPrimaryKey;
+        if (column.isUnique || column.isPrimaryKey) return true;
+    }
+
+    // Standalone CREATE UNIQUE INDEX definitions live in the index sidecar,
+    // not TableSchema.  They participate in PostgreSQL-style conflict target
+    // inference just like table-level UNIQUE constraints.
+    for (const auto& index :
+         g_engine.getIndexMetadata(currentDB, tableName)) {
+        if (!index.isUnique || index.isExpression ||
+            !index.whereCondition.empty()) {
+            continue;
+        }
+        for (size_t columnIndex = 0; columnIndex < table.len;
+             ++columnIndex) {
+            if (table.cols[columnIndex].dataName == index.name &&
+                targetIndices.size() == 1 &&
+                targetIndices.front() == columnIndex) {
+                return true;
+            }
+        }
+    }
+    for (const auto& index :
+         g_engine.getCompositeIndexes(currentDB, tableName)) {
+        if (!index.isUnique || !index.whereCondition.empty()) continue;
+        std::vector<size_t> indexColumns;
+        for (const auto& columnName : index.columns) {
+            size_t columnIndex = table.len;
+            for (size_t candidate = 0; candidate < table.len; ++candidate) {
+                if (table.cols[candidate].dataName == columnName) {
+                    columnIndex = candidate;
+                    break;
+                }
+            }
+            if (columnIndex >= table.len) {
+                indexColumns.clear();
+                break;
+            }
+            indexColumns.push_back(columnIndex);
+        }
+        if (!indexColumns.empty() &&
+            sameColumnSet(targetIndices, indexColumns)) {
+            return true;
+        }
     }
     return false;
 }
 
 bool buildConflictUpdatePlan(const InsertStmt& stmt, const TableSchema& table,
                              const std::string& currentDB,
+                             const std::string& physicalTable,
                              std::vector<std::string>& targetColumns,
                              const std::string& targetTable,
                              SqlRow& updates,
@@ -417,7 +462,10 @@ bool buildConflictUpdatePlan(const InsertStmt& stmt, const TableSchema& table,
         return false;
     }
 
-    if (!resolveConflictTarget(stmt, table, targetColumns)) return false;
+    if (!resolveConflictTarget(stmt, table, currentDB, physicalTable,
+                               targetColumns)) {
+        return false;
+    }
 
     std::set<std::string> seen;
     for (const auto& [rawColumn, expr] : stmt.conflictUpdateSet) {
@@ -1667,7 +1715,7 @@ bool evaluateValue(const ExprPtr& expr, const std::string& currentDB,
 bool evaluateConflictExpression(
     const Expr* expr, const TableSchema& table, const SqlRow& values,
     const std::string& currentDB, SqlCell& value,
-    const std::map<std::string, std::string>* targetRow = nullptr,
+    const SqlRow* targetRow = nullptr,
     const std::string& targetTable = {}) {
     ExprEvaluator evaluator;
     evaluator.setCurrentDB(currentDB);
@@ -1678,10 +1726,10 @@ bool evaluateConflictExpression(
         if (targetRow) {
             const auto target = targetRow->find(column);
             const bool targetNull =
-                target == targetRow->end() || target->second.empty();
+                target == targetRow->end() || !target->second;
             const ExprValue targetValue(
                 table.cols[i].dataType,
-                targetNull ? std::string{} : target->second, targetNull);
+                targetNull ? std::string{} : *target->second, targetNull);
             context.set(column, targetValue);
             if (!targetTable.empty()) {
                 context.set(targetTable + "." + column, targetValue);
@@ -1710,12 +1758,39 @@ bool evaluateConflictExpression(
     return true;
 }
 
+bool conflictTargetMatches(const TableSchema& table,
+                           const std::vector<std::string>& targetColumns,
+                           const SqlRow& targetValues,
+                           const SqlRow& candidate) {
+    for (const auto& targetColumn : targetColumns) {
+        size_t columnIndex = table.len;
+        for (size_t i = 0; i < table.len; ++i) {
+            if (table.cols[i].dataName == targetColumn) {
+                columnIndex = i;
+                break;
+            }
+        }
+        const auto expected = targetValues.find(targetColumn);
+        const auto actual = candidate.find(targetColumn);
+        if (columnIndex >= table.len || expected == targetValues.end() ||
+            actual == candidate.end() || !expected->second ||
+            !actual->second ||
+            StorageEngine::compareValues(
+                table.cols[columnIndex], *actual->second, false,
+                *expected->second, false, "=") !=
+                StorageEngine::PredicateTruth::True) {
+            return false;
+        }
+    }
+    return !targetColumns.empty();
+}
+
 bool loadConflictTargetRow(const std::string& currentDB,
                            const std::string& tableName,
                            const TableSchema& table,
                            const std::vector<std::string>& targetColumns,
-                           const std::map<std::string, std::string>& targetValues,
-                           std::map<std::string, std::string>& rowValues,
+                           const SqlRow& targetValues,
+                           SqlRow& rowValues,
                            bool* scanFailed = nullptr) {
     if (scanFailed) *scanFailed = false;
     if (targetColumns.empty()) return false;
@@ -1732,39 +1807,47 @@ bool loadConflictTargetRow(const std::string& currentDB,
         }
         const auto value = targetValues.find(targetColumn);
         if (targetIndex >= table.len || value == targetValues.end() ||
-            value->second.empty()) {
+            !value->second) {
             return false;
         }
         targetIndices.push_back(targetIndex);
     }
 
-    auto captureRow = [&](const std::string& rowBuffer) {
-        rowValues.clear();
+    auto captureRow = [&](const std::string& rowBuffer, SqlRow& output) {
+        output.clear();
         for (size_t i = 0; i < table.len; ++i) {
-            rowValues[table.cols[i].dataName] =
-                g_engine.extractColumnValue(rowBuffer, table, i, currentDB, true);
+            bool isNull = false;
+            std::string value = g_engine.extractColumnValue(
+                rowBuffer, table, i, currentDB, true, &isNull);
+            output[table.cols[i].dataName] = isNull
+                ? SqlCell{} : SqlCell{std::move(value)};
         }
-        return true;
     };
 
-    // Preserve the indexed fast path for the common single-column case. The
-    // composite path below intentionally verifies every target column from
-    // the visible heap row because composite UNIQUE constraints do not yet
-    // have a dedicated constraint index.
+    // A byte-identical single-column key can still use the physical index.
+    // Verify the heap row with SQL equality before accepting it, and fall
+    // back to a scan when the B-tree cannot represent the column's collation
+    // or canonical numeric equality (for example Alpha/aLPHa or -0/0).
     if (targetIndices.size() == 1) {
         const std::string& targetColumn = targetColumns.front();
-        const std::string& targetValue = targetValues.at(targetColumn);
         BPTree* index = table.cols[targetIndices.front()].isPrimaryKey
             ? g_engine.getPKIndex(currentDB, tableName)
             : g_engine.getSecondaryIndex(currentDB, tableName, targetColumn);
         if (index) {
             int64_t rid = 0;
-            if (index->search(targetValue, rid)) {
+            if (index->search(*targetValues.at(targetColumn), rid)) {
                 std::string rowBuffer;
-                PageAllocator* allocator = g_engine.getPageAllocator(currentDB, tableName);
+                PageAllocator* allocator =
+                    g_engine.getPageAllocator(currentDB, tableName);
                 if (allocator && g_engine.readVisibleRowByRid(
                         currentDB, allocator, rid, rowBuffer, table)) {
-                    return captureRow(rowBuffer);
+                    SqlRow candidate;
+                    captureRow(rowBuffer, candidate);
+                    if (conflictTargetMatches(
+                            table, targetColumns, targetValues, candidate)) {
+                        rowValues = std::move(candidate);
+                        return true;
+                    }
                 }
             }
         }
@@ -1775,16 +1858,12 @@ bool loadConflictTargetRow(const std::string& currentDB,
                         [&](uint32_t, uint16_t, const char* data, size_t len) {
         if (found) return;
         const std::string rowBuffer(data, len);
-        for (size_t i = 0; i < targetIndices.size(); ++i) {
-            const std::string value = g_engine.extractColumnValue(
-                rowBuffer, table, targetIndices[i], currentDB, true);
-            const auto expected = targetValues.find(targetColumns[i]);
-            if (expected == targetValues.end() || value != expected->second) {
-                return;
-            }
-        }
-        {
-            found = captureRow(rowBuffer);
+        SqlRow candidate;
+        captureRow(rowBuffer, candidate);
+        if (conflictTargetMatches(
+                table, targetColumns, targetValues, candidate)) {
+            rowValues = std::move(candidate);
+            found = true;
         }
     })) {
         if (scanFailed) *scanFailed = true;
@@ -1872,7 +1951,8 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
 
     if (conflictUpdate || (ignoreDuplicate && !stmt.conflictTarget.empty())) {
         if (!conflictUpdate &&
-            !resolveConflictTarget(stmt, table, conflictTarget)) {
+            !resolveConflictTarget(stmt, table, s.currentDB, resolvedTable,
+                                   conflictTarget)) {
             fallback = true;
             return false;
         }
@@ -1883,8 +1963,9 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
                                  StorageEngine::TablePrivilege::Update)) {
             return true;
         }
-        if (!buildConflictUpdatePlan(stmt, table, s.currentDB, conflictTarget,
-                                     requestedTable, conflictUpdates,
+        if (!buildConflictUpdatePlan(stmt, table, s.currentDB, resolvedTable,
+                                     conflictTarget, requestedTable,
+                                     conflictUpdates,
                                      conflictExpressionUpdates, conflictExpressionSources,
                                      conflictWhereExcludedColumns)) {
             fallback = true;
@@ -2097,18 +2178,17 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
             if (ignoreDuplicate) {
                 if (conflictTarget.empty()) continue;
 
-                std::map<std::string, std::string> targetValues;
+                SqlRow targetValues;
                 bool targetValueUnavailable = false;
                 for (const auto& targetColumn : conflictTarget) {
                     const auto targetValue = values.find(targetColumn);
-                    if (targetValue == values.end() || !targetValue->second ||
-                        targetValue->second->empty()) {
+                    if (targetValue == values.end() || !targetValue->second) {
                         targetValueUnavailable = true;
                         break;
                     }
-                    targetValues[targetColumn] = *targetValue->second;
+                    targetValues[targetColumn] = targetValue->second;
                 }
-                std::map<std::string, std::string> targetRow;
+                SqlRow targetRow;
                 bool targetScanFailed = false;
                 if (!targetValueUnavailable &&
                     loadConflictTargetRow(s.currentDB, resolvedTable, table,
@@ -2126,33 +2206,31 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
                 return true;
             }
             if (conflictUpdate) {
-                std::map<std::string, std::string> targetValues;
-                std::vector<std::string> conditions;
-                conditions.reserve(conflictTarget.size());
+                SqlRow targetValues;
                 for (const auto& targetColumn : conflictTarget) {
                     const auto targetValue = values.find(targetColumn);
-                    if (targetValue == values.end() || !targetValue->second ||
-                        targetValue->second->empty()) {
+                    if (targetValue == values.end() || !targetValue->second) {
                         std::cout << "ON CONFLICT target value is unavailable" << std::endl;
                         return true;
                     }
-                    targetValues[targetColumn] = *targetValue->second;
-                    conditions.push_back(
-                        "=" + targetColumn + " " + *targetValue->second);
+                    targetValues[targetColumn] = targetValue->second;
                 }
-                if (stmt.conflictWhere) {
-                    std::map<std::string, std::string> targetRow;
-                    bool targetScanFailed = false;
-                    if (!loadConflictTargetRow(s.currentDB, resolvedTable, table,
-                                                conflictTarget, targetValues,
-                                                targetRow, &targetScanFailed)) {
-                        std::cout << "ON CONFLICT target row is unavailable" << std::endl;
-                        return true;
-                    }
+                SqlRow targetRow;
+                bool targetScanFailed = false;
+                if (!loadConflictTargetRow(
+                        s.currentDB, resolvedTable, table, conflictTarget,
+                        targetValues, targetRow, &targetScanFailed)) {
                     if (targetScanFailed) {
                         std::cout << "ON CONFLICT target scan failed" << std::endl;
-                        return true;
+                    } else {
+                        // The duplicate came from a different unique key;
+                        // this conflict target is not allowed to consume it.
+                        std::cout << "ON CONFLICT target row is unavailable"
+                                  << std::endl;
                     }
+                    return true;
+                }
+                if (stmt.conflictWhere) {
                     SqlCell whereValue;
                     if (!evaluateConflictExpression(stmt.conflictWhere.get(), table,
                                                      values, s.currentDB, whereValue,
@@ -2178,9 +2256,14 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
                     rowConflictUpdates[updateColumn] = std::move(value);
                 }
                 std::vector<SqlRow> updatedRows;
+                const auto targetMatcher =
+                    [&](const SqlRow& candidate) {
+                        return conflictTargetMatches(
+                            table, conflictTarget, targetValues, candidate);
+                    };
                 const DBStatus updateStatus = g_engine.updateRows(
-                    s.currentDB, resolvedTable, rowConflictUpdates, conditions,
-                    &updatedRows);
+                    s.currentDB, resolvedTable, rowConflictUpdates, {},
+                    &updatedRows, {}, targetMatcher);
                 if (updateStatus != DBStatus::OK || updatedRows.size() != 1) {
                     std::cout << "ON CONFLICT DO UPDATE failed" << std::endl;
                     return true;
