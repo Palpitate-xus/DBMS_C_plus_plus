@@ -67,6 +67,34 @@ int main() {
         auto rows50 = engine.query(dbname, "t50", {}, {"payload"});
         assert(rows100.size() == 4);
         assert(rows50.size() == 4);
+
+        // Parameter replacement must report publication failures instead of
+        // truncating the old file and claiming success. A directory at the
+        // destination deterministically makes the final rename fail.
+        const auto paramsPath =
+            std::filesystem::path(dbname) / "t50.params";
+        const auto savedParamsPath =
+            std::filesystem::path(dbname) / "t50.params.saved";
+        std::filesystem::rename(paramsPath, savedParamsPath);
+        assert(std::filesystem::create_directory(paramsPath));
+        assert(engine.setStorageParams(
+                   dbname, "t50", {{"fillfactor", "60"}}) ==
+               DBStatus::IO_ERROR);
+        assert(std::filesystem::is_directory(paramsPath));
+        assert(std::filesystem::is_regular_file(savedParamsPath));
+        std::filesystem::remove(paramsPath);
+        std::filesystem::rename(savedParamsPath, paramsPath);
+        assert(engine.getStorageParams(dbname, "t50").at("fillfactor") ==
+               "50");
+
+        assert(engine.setStorageParams(
+                   dbname, "missing", {{"fillfactor", "70"}}) ==
+               DBStatus::TABLE_NOT_FOUND);
+        assert(!std::filesystem::exists(
+            std::filesystem::path(dbname) / "missing.params"));
+        assert(engine.setStorageParams(
+                   dbname, "t50", {{"bad\nkey", "value"}}) ==
+               DBStatus::INVALID_ARGUMENT);
     }
 
     // Cleanup

@@ -11784,11 +11784,22 @@ std::map<std::string, std::string> StorageEngine::getStorageParams(
 DBStatus StorageEngine::setStorageParams(
     const std::string& dbname, const std::string& tablename,
     const std::map<std::string, std::string>& params) {
-    auto pp = paramsPath(dbname, tablename);
-    std::ofstream ofs(pp);
-    if (!ofs) return DBStatus::INVALID_VALUE;
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
+
+    std::ostringstream serialized;
     for (const auto& kv : params) {
-        ofs << kv.first << "=" << kv.second << "\n";
+        if (kv.first.empty() || kv.first.find('\0') != std::string::npos ||
+            kv.second.find('\0') != std::string::npos ||
+            kv.first.find_first_of("=\r\n") != std::string::npos ||
+            kv.second.find_first_of("\r\n") != std::string::npos) {
+            return DBStatus::INVALID_ARGUMENT;
+        }
+        serialized << kv.first << "=" << kv.second << "\n";
+    }
+    if (!index_file::writeAtomically(
+            paramsPath(dbname, tablename), serialized.str())) {
+        return DBStatus::IO_ERROR;
     }
     // storageParams are folded into the cached table schema.
     invalidateCatalogSchema(dbname, tablename);
