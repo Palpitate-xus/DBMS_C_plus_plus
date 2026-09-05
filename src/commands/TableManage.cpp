@@ -16843,7 +16843,11 @@ DBStatus StorageEngine::alterSequence(const std::string& dbname,
                                        bool hasRestart, int64_t restart,
                                        bool hasIncrement, int64_t increment) {
     dbms::SequenceInfo info;
-    if (hasRestart) { info.start = restart; info.startSpecified = true; }
+    if (hasRestart) {
+        info.restart = restart;
+        info.restartSpecified = true;
+        info.restartValueSpecified = true;
+    }
     if (hasIncrement) { info.increment = increment; info.incrementSpecified = true; }
     return alterSequence(dbname, seqname, info);
 }
@@ -16866,8 +16870,6 @@ DBStatus StorageEngine::alterSequence(const std::string& dbname,
     dbms::SequenceInfo merged = old;
     if (info.startSpecified) {
         merged.start = info.start;
-        nextValue = info.start;
-        sequencePredecessor(info.start, merged.increment, lastAllocated);
     }
     if (info.incrementSpecified) {
         merged.increment = info.increment;
@@ -16891,7 +16893,18 @@ DBStatus StorageEngine::alterSequence(const std::string& dbname,
 
     merged.applyDefaults();
     if (merged.minValue > merged.maxValue) return DBStatus::INVALID_VALUE;
-    if (nextValue < merged.minValue || nextValue > merged.maxValue) {
+    if (merged.start < merged.minValue || merged.start > merged.maxValue) {
+        return DBStatus::INVALID_VALUE;
+    }
+    if (info.restartSpecified) {
+        const int64_t restartValue = info.restartValueSpecified
+            ? info.restart : merged.start;
+        if (restartValue < merged.minValue || restartValue > merged.maxValue) {
+            return DBStatus::INVALID_VALUE;
+        }
+        nextValue = restartValue;
+        sequencePredecessor(nextValue, merged.increment, lastAllocated);
+    } else if (nextValue < merged.minValue || nextValue > merged.maxValue) {
         // PG adjusts nextValue to be within bounds when ALTER changes bounds.
         if (merged.increment > 0) nextValue = merged.minValue;
         else nextValue = merged.maxValue;

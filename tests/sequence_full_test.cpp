@@ -107,8 +107,32 @@ static void test_sequence_alter() {
     assert(g_engine.nextval(db, "s1") == 100);
     assert(g_engine.nextval(db, "s1") == 110);
 
+    // START changes the value used by a later bare RESTART, but does not
+    // itself move the current sequence position.
+    assert(!ddl.executeSql("ALTER SEQUENCE s1 START WITH 25", s));
+    assert(g_engine.nextval(db, "s1") == 120);
+    assert(!ddl.executeSql("ALTER SEQUENCE s1 RESTART", s));
+    assert(g_engine.nextval(db, "s1") == 25);
+
+    // An explicit RESTART value is a one-off position change and must not
+    // overwrite the recorded START value.
+    assert(!ddl.executeSql("ALTER SEQUENCE s1 RESTART WITH 40", s));
+    assert(g_engine.nextval(db, "s1") == 40);
+    assert(!ddl.executeSql("ALTER SEQUENCE s1 RESTART", s));
+    assert(g_engine.nextval(db, "s1") == 25);
+
+    // Options in the same statement are applied together; bare RESTART uses
+    // the newly recorded START value.
+    assert(!ddl.executeSql("ALTER SEQUENCE s1 START 50 RESTART", s));
+    assert(g_engine.nextval(db, "s1") == 50);
+    assert(ddl.executeSql(
+        "ALTER SEQUENCE s1 START 0 MINVALUE 1", s));
+
+    dbms::StorageEngine restarted;
+    assert(restarted.nextval(db, "s1") == 60);
+
     cleanup(db);
-    std::cout << "[SEQUENCE] alter OK" << std::endl;
+    std::cout << "[SEQUENCE] alter START/RESTART semantics OK" << std::endl;
 }
 
 static void test_sequence_rename() {

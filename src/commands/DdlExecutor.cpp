@@ -5261,13 +5261,25 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
                 ++i;
                 return true;
             };
-            if (tok == "restart") {
+            if (tok == "start") {
                 info.startSpecified = true;
                 if (i + 1 < tokens.size() && lower(tokens[i + 1]) == "with") {
                     ++i;
-                    if (!readValue(info.start, "RESTART")) return true;
-                } else if (!readValue(info.start, "RESTART")) {
-                    return true;
+                }
+                if (!readValue(info.start, "START")) return true;
+            } else if (tok == "restart") {
+                info.restartSpecified = true;
+                if (i + 1 < tokens.size() && lower(tokens[i + 1]) == "with") {
+                    ++i;
+                    if (!readValue(info.restart, "RESTART")) return true;
+                    info.restartValueSpecified = true;
+                } else if (i + 1 < tokens.size()) {
+                    int64_t restartValue = 0;
+                    if (parseInt64Strict(tokens[i + 1], restartValue)) {
+                        info.restart = restartValue;
+                        info.restartValueSpecified = true;
+                        ++i;
+                    }
                 }
             } else if (tok == "increment") {
                 info.incrementSpecified = true;

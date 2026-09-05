@@ -61,7 +61,10 @@ struct SequenceInfo {
     std::string ownedByColumn;
 
     // Explicit-set flags (used by ALTER SEQUENCE to know what changed).
-    bool startSpecified = false;
+    bool startSpecified = false;   // START [WITH]: update recorded start
+    int64_t restart = 1;
+    bool restartSpecified = false; // RESTART: reset current position
+    bool restartValueSpecified = false;
     bool incrementSpecified = false;
     bool cacheSpecified = false;
     bool cycleSpecified = false;  // true when CYCLE or NO CYCLE was written
