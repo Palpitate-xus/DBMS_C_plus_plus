@@ -5047,24 +5047,55 @@ void ExprEvaluator::registerBuiltins() {
         }
         return o;
     };
-    auto justifyCommon = [intervalToTextPg](const std::string& in,
-                                             int mode) -> std::string {
+    auto justifyCommon = [intervalToTextPg](
+                             const std::string& in,
+                             int mode) -> std::optional<std::string> {
         IntervalParts p = parseIntervalText(in);
-        if (!p.ok) return in;
+        if (!p.ok) return std::nullopt;
         long long months = p.months, days = p.days, micros = p.micros;
+        auto assignRepresentable = [](const __int128 value,
+                                      long long& output) {
+            if (value <= std::numeric_limits<long long>::lowest() ||
+                value > std::numeric_limits<long long>::max()) {
+                return false;
+            }
+            output = static_cast<long long>(value);
+            return true;
+        };
         if (mode == 2) {
             // Normalize so a single sign dominates: decompose |days+time|,
             // attach the overall sign, fold whole 30-day groups into months.
-            long long totUs = days * 86400000000LL + micros;
-            long long sgn = (months != 0) ? (months < 0 ? -1 : 1) : (totUs < 0 ? -1 : 1);
-            long long au = totUs < 0 ? -totUs : totUs;
-            long long nd = au / 86400000000LL;
-            long long rem = au % 86400000000LL;
-            months += sgn * (nd / 30);
-            days = sgn * (nd % 30);
-            micros = sgn * rem;
-        } else if (mode == 1) { months += days / 30; days %= 30; }
-        else { long long nd = micros / 86400000000LL; long long rem = micros % 86400000000LL; days += nd; micros = rem; }
+            const __int128 totalMicros =
+                static_cast<__int128>(days) * 86400000000LL + micros;
+            const __int128 sign = months != 0
+                ? (months < 0 ? -1 : 1)
+                : (totalMicros < 0 ? -1 : 1);
+            const __int128 magnitude =
+                totalMicros < 0 ? -totalMicros : totalMicros;
+            const __int128 normalizedDays = magnitude / 86400000000LL;
+            if (!assignRepresentable(
+                    static_cast<__int128>(months) +
+                        sign * (normalizedDays / 30),
+                    months) ||
+                !assignRepresentable(sign * (normalizedDays % 30), days) ||
+                !assignRepresentable(
+                    sign * (magnitude % 86400000000LL), micros)) {
+                return std::nullopt;
+            }
+        } else if (mode == 1) {
+            if (!assignRepresentable(
+                    static_cast<__int128>(months) + days / 30, months)) {
+                return std::nullopt;
+            }
+            days %= 30;
+        } else {
+            const long long normalizedDays = micros / 86400000000LL;
+            if (!assignRepresentable(
+                    static_cast<__int128>(days) + normalizedDays, days)) {
+                return std::nullopt;
+            }
+            micros %= 86400000000LL;
+        }
         return intervalToTextPg(months, days, micros);
     };
     // isfinite(interval/date/timestamp): false for infinity/NaN.
@@ -5078,10 +5109,16 @@ void ExprEvaluator::registerBuiltins() {
         return ExprValue("bool", finite ? "t" : "f", false);
     };
     functions_["justify_hours"] = [justifyCommon](const std::vector<ExprValue>& a) -> ExprValue {
-        return ExprValue("interval", justifyCommon(a.empty() ? "" : a[0].value, 0), a.empty() || a[0].isNull);
+        if (a.empty() || a[0].isNull)
+            return ExprValue("interval", "", true);
+        const auto result = justifyCommon(a[0].value, 0);
+        return ExprValue("interval", result.value_or(""), !result);
     };
     functions_["justify_days"] = [justifyCommon](const std::vector<ExprValue>& a) -> ExprValue {
-        return ExprValue("interval", justifyCommon(a.empty() ? "" : a[0].value, 1), a.empty() || a[0].isNull);
+        if (a.empty() || a[0].isNull)
+            return ExprValue("interval", "", true);
+        const auto result = justifyCommon(a[0].value, 1);
+        return ExprValue("interval", result.value_or(""), !result);
     };
     // age(ts, ts): PG calendar difference as interval.
     functions_["age"] = [intervalToTextPg](const std::vector<ExprValue>& a) -> ExprValue {
@@ -5213,7 +5250,10 @@ void ExprEvaluator::registerBuiltins() {
         return ExprValue("boolean", any ? "t" : "f", false);
     };
     functions_["justify_interval"] = [justifyCommon](const std::vector<ExprValue>& a) -> ExprValue {
-        return ExprValue("interval", justifyCommon(a.empty() ? "" : a[0].value, 2), a.empty() || a[0].isNull);
+        if (a.empty() || a[0].isNull)
+            return ExprValue("interval", "", true);
+        const auto result = justifyCommon(a[0].value, 2);
+        return ExprValue("interval", result.value_or(""), !result);
     };
     functions_["to_char"] = [](const std::vector<ExprValue>& a) -> ExprValue {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);

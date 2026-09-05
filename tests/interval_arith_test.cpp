@@ -185,6 +185,33 @@ static void test_interval_ops() {
     std::cout << "[IV] interval ± interval, * n, / n OK" << std::endl;
 }
 
+static void test_justify_ops() {
+    auto hours = eval("justify_hours('25 hours'::interval)");
+    assert(hours.ok && hours.value == "1 day 01:00:00");
+
+    auto largeDays = eval(
+        "justify_interval('9223372036854775807 days'::interval)");
+    assert(largeDays.ok &&
+           largeDays.value == "25620477880152155 years 7 days");
+
+    auto hoursOverflow = eval(
+        "justify_hours("
+        "'9223372036854775807 days 24 hours'::interval)");
+    assert(hoursOverflow.ok && hoursOverflow.isNull);
+
+    auto daysOverflow = eval(
+        "justify_days("
+        "'9223372036854775807 months 30 days'::interval)");
+    assert(daysOverflow.ok && daysOverflow.isNull);
+
+    auto intervalOverflow = eval(
+        "justify_interval("
+        "'9223372036854775807 months 30 days'::interval)");
+    assert(intervalOverflow.ok && intervalOverflow.isNull);
+
+    std::cout << "[IV] justify interval bounds OK" << std::endl;
+}
+
 static void test_at_time_zone() {
     // UTC wall clock read at a POSIX numeric zone (sign inverted: UTC+8 = UTC-8)
     auto a = eval("'2024-06-01 00:30:00'::timestamp AT TIME ZONE 'UTC+8'");
@@ -229,6 +256,7 @@ static void test_at_time_zone() {
 int main() {
     test_add_sub();
     test_interval_ops();
+    test_justify_ops();
     test_at_time_zone();
     std::cout << "[IV] all tests passed" << std::endl;
     return 0;
