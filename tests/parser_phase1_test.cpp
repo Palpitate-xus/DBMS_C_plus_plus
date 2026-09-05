@@ -244,7 +244,19 @@ int main() {
     assert(!parser.parse("CREATE FUNCTION f() RETURNS int COST nope AS 'SELECT 1'").success);
     assert(!parser.parse("CREATE FUNCTION f() RETURNS int ROWS -1 AS 'SELECT 1'").success);
     assert(!parser.parse("CREATE ROLE r CONNECTION LIMIT nope").success);
+    auto unlimitedRole = parser.parse(
+        "CREATE ROLE unlimited CONNECTION LIMIT -1");
+    assert(unlimitedRole.success);
+    auto* unlimited =
+        dynamic_cast<CreateRoleStmt*>(unlimitedRole.stmt.get());
+    assert(unlimited && unlimited->connectionLimit == -1);
     assert(!parser.parse("ALTER TABLE t ALTER COLUMN c SET STATISTICS nope").success);
+    auto defaultStatistics = parser.parse(
+        "ALTER TABLE t ALTER COLUMN c SET STATISTICS -1");
+    assert(defaultStatistics.success);
+    auto* statistics = asAlterTable(defaultStatistics.stmt);
+    assert(statistics && statistics->subCommands.size() == 1 &&
+           statistics->subCommands[0].statisticsTarget == -1);
 
     // 12. Function calls: schema-qualified, named args, window
     {

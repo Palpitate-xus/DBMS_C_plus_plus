@@ -118,6 +118,20 @@ static bool parseSignedInteger(const std::string& token, int& value) {
     }
 }
 
+static bool parseSignedInteger(const std::vector<std::string>& tokens,
+                               size_t& position, int& value) {
+    if (position >= tokens.size()) return false;
+    std::string token = tokens[position];
+    size_t consumed = 1;
+    if ((token == "+" || token == "-") && position + 1 < tokens.size()) {
+        token += tokens[position + 1];
+        consumed = 2;
+    }
+    if (!parseSignedInteger(token, value)) return false;
+    position += consumed;
+    return true;
+}
+
 static bool parseInt64Token(const std::string& token, int64_t& value) {
     if (token.empty()) return false;
     const char* begin = token.data();
@@ -5959,10 +5973,13 @@ StmtPtr SQLParser::parseCreateRole(const std::vector<std::string>& tokens, size_
         else if (kw == "nobypassrls") { stmt->bypassrls = false; ++pos; }
         else if (kw == "connection") {
             if (pos + 2 >= tokens.size() || toLower(tokens[pos + 1]) != "limit") return nullptr;
-            if (!parseSignedInteger(tokens[pos + 2], stmt->connectionLimit) || stmt->connectionLimit < -1) {
+            size_t valuePosition = pos + 2;
+            if (!parseSignedInteger(tokens, valuePosition,
+                                    stmt->connectionLimit) ||
+                stmt->connectionLimit < -1) {
                 return nullptr;
             }
-            pos += 3;
+            pos = valuePosition;
         } else if (kw == "password") {
             ++pos;
             if (pos < tokens.size()) {
@@ -7487,9 +7504,11 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                     sub.action = AlterTableStmt::Action::SetStatistics;
                     if (pos < tokens.size()) {
                         int target = 0;
-                        if (!parseSignedInteger(tokens[pos], target) || target < 0) return nullptr;
+                        if (!parseSignedInteger(tokens, pos, target) ||
+                            target < -1 || target > 10000) {
+                            return nullptr;
+                        }
                         sub.statisticsTarget = target;
-                        ++pos;
                     } else return nullptr;
                 }
             } else if (pos < tokens.size() && toLower(tokens[pos]) == "drop") {
