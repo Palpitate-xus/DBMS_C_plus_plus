@@ -107,6 +107,20 @@ static void test_interval_ops() {
     auto c = eval("'90 minutes'::interval - '30 minutes'::interval");
     assert(c.ok && c.value == "01:00:00");
 
+    auto mixedSign = eval(
+        "'1 day'::interval - '2 hours'::interval");
+    assert(mixedSign.ok && mixedSign.value == "1 day -02:00:00");
+
+    auto allNegative = eval(
+        "'0 seconds'::interval - '1 day 2 hours'::interval");
+    assert(allNegative.ok &&
+           allNegative.value == "-1 day -02:00:00");
+
+    auto mixedRoundTrip = eval(
+        "('1 day'::interval - '2 hours'::interval) + "
+        "'2 hours'::interval");
+    assert(mixedRoundTrip.ok && mixedRoundTrip.value == "1 day");
+
     auto d = eval("'1 day'::interval * 3");
     assert(d.ok && d.value == "3 days");
 

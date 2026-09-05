@@ -476,26 +476,34 @@ static IntervalParts parseIntervalText(const std::string& in) {
 
 // Render (months, days, micros) back to canonical PG text.
 static std::string intervalToText(long long months, long long days, long long micros) {
-    bool neg = months < 0 || days < 0 || micros < 0;
-    long long m = months < 0 ? -months : months;
-    long long d = days < 0 ? -days : days;
-    long long us = micros < 0 ? -micros : micros;
-    long long years = m / 12, mons = m % 12;
     std::string out;
-    if (years) out += std::to_string(years) + (years == 1 ? " year" : " years");
-    if (mons) { if (!out.empty()) out += " "; out += std::to_string(mons) + (mons == 1 ? " mon" : " mons"); }
-    if (d) { if (!out.empty()) out += " "; out += std::to_string(d) + (d == 1 ? " day" : " days"); }
-    if (us || out.empty()) {
+    auto appendPart = [&](long long value, const char* singular,
+                          const char* plural) {
+        if (value == 0) return;
         if (!out.empty()) out += " ";
+        out += std::to_string(value);
+        out += (value == 1 || value == -1) ? singular : plural;
+    };
+    appendPart(months / 12, " year", " years");
+    appendPart(months % 12, " mon", " mons");
+    appendPart(days, " day", " days");
+    if (micros || out.empty()) {
+        if (!out.empty()) out += " ";
+        const bool negative = micros < 0;
+        long long us = negative ? -micros : micros;
         long long hh = us / 3600000000LL; us %= 3600000000LL;
         long long mm = us / 60000000LL; us %= 60000000LL;
         long long ss = us / 1000000LL; long long frac = us % 1000000LL;
         char buf[64];
-        if (frac) std::snprintf(buf, sizeof(buf), "%02lld:%02lld:%02lld.%06lld", hh, mm, ss, frac);
-        else std::snprintf(buf, sizeof(buf), "%02lld:%02lld:%02lld", hh, mm, ss);
+        if (frac) {
+            std::snprintf(buf, sizeof(buf), "%s%02lld:%02lld:%02lld.%06lld",
+                          negative ? "-" : "", hh, mm, ss, frac);
+        } else {
+            std::snprintf(buf, sizeof(buf), "%s%02lld:%02lld:%02lld",
+                          negative ? "-" : "", hh, mm, ss);
+        }
         out += buf;
     }
-    if (neg && (months || days || micros)) out = "-" + out;
     return out;
 }
 
