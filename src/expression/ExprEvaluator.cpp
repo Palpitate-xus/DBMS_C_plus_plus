@@ -2059,28 +2059,47 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
 
     if (name == "make_interval") {
         long long mi_months = 0, mi_days = 0, mi_micros = 0;
+        auto addIntegerField = [&](const std::string& key,
+                                   const long long value) {
+            if (key == "years")
+                return addScaledIntervalField(mi_months, value, 12);
+            if (key == "months")
+                return addScaledIntervalField(mi_months, value, 1);
+            if (key == "weeks")
+                return addScaledIntervalField(mi_days, value, 7);
+            if (key == "days")
+                return addScaledIntervalField(mi_days, value, 1);
+            if (key == "hours")
+                return addScaledIntervalField(
+                    mi_micros, value, 3600000000LL);
+            if (key == "mins")
+                return addScaledIntervalField(
+                    mi_micros, value, 60000000LL);
+            if (key == "secs")
+                return addScaledIntervalField(
+                    mi_micros, value, 1000000LL);
+            return true;
+        };
+
+        static const char* positionalNames[] = {
+            "years", "months", "weeks", "days", "hours", "mins",
+            "secs"};
+        if (args.size() > std::size(positionalNames))
+            return ExprValue("interval", "", true);
+        for (size_t i = 0; i < args.size(); ++i) {
+            if (args[i].isNull ||
+                !addIntegerField(positionalNames[i], args[i].asInt())) {
+                return ExprValue("interval", "", true);
+            }
+        }
+
         for (const auto& na : e->namedArgs) {
             ExprValue nv = eval(na.value.get(), ctx);
             if (nv.isNull) continue;
             long long n = nv.asInt();
             std::string k = toLower(na.name);
-            bool valid = true;
-            if (k == "years")
-                valid = addScaledIntervalField(mi_months, n, 12);
-            else if (k == "months")
-                valid = addScaledIntervalField(mi_months, n, 1);
-            else if (k == "weeks")
-                valid = addScaledIntervalField(mi_days, n, 7);
-            else if (k == "days")
-                valid = addScaledIntervalField(mi_days, n, 1);
-            else if (k == "hours")
-                valid = addScaledIntervalField(
-                    mi_micros, n, 3600000000LL);
-            else if (k == "mins")
-                valid = addScaledIntervalField(mi_micros, n, 60000000LL);
-            else if (k == "secs")
-                valid = addScaledIntervalField(mi_micros, n, 1000000LL);
-            if (!valid) return ExprValue("interval", "", true);
+            if (!addIntegerField(k, n))
+                return ExprValue("interval", "", true);
         }
         return ExprValue("interval", intervalToText(mi_months, mi_days, mi_micros), false);
     }

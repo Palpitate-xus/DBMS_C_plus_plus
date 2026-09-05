@@ -216,6 +216,14 @@ static void test_make_interval_bounds() {
     auto ordinary = eval("make_interval(days => 3, hours => 2)");
     assert(ordinary.ok && ordinary.value == "3 days 02:00:00");
 
+    auto positional = eval("make_interval(1, 2, 3, 4, 5, 6, 7)");
+    assert(positional.ok &&
+           positional.value ==
+               "1 year 2 mons 25 days 05:06:07");
+
+    auto partialPositional = eval("make_interval(2)");
+    assert(partialPositional.ok && partialPositional.value == "2 years");
+
     auto yearOverflow = eval(
         "make_interval(years => 9223372036854775807)");
     assert(yearOverflow.ok && yearOverflow.isNull);
