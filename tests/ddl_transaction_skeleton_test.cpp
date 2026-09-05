@@ -145,10 +145,13 @@ static void test_engine_transaction_backup_lifecycle() {
     std::cout << "[DDL-TXN] engine backup lifecycle OK" << std::endl;
 }
 
-static void test_begin_propagates_implicit_commit_failure() {
-    std::string db = testDbPath("ddl_txn_t_begin_failure");
+static void test_nested_begin_preserves_active_transaction() {
+    std::string db = testDbPath("ddl_txn_t_nested_begin");
+    std::string otherDb = testDbPath("ddl_txn_t_nested_begin_other");
     cleanup(db);
+    cleanup(otherDb);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    assert(g_engine.createDatabase(otherDb, "utf8") == dbms::DBStatus::OK);
 
     Session s;
     setupSession(s, db);
@@ -161,14 +164,26 @@ static void test_begin_propagates_implicit_commit_failure() {
     assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "deferred_begin", {{"id", "1"}, {"price", "0"}}) ==
            dbms::DBStatus::OK);
-    // Starting another transaction must not swallow the failed implicit
-    // commit or open a fresh transaction after the deferred CHECK aborts.
-    assert(g_engine.beginTransaction(db) == dbms::DBStatus::INVALID_VALUE);
-    assert(!g_engine.inTransaction());
+    // PostgreSQL treats BEGIN inside an active transaction as a warning/no-op.
+    // It must not run deferred checks or publish the current transaction.
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.inTransaction());
+    assert(g_engine.query(
+               db, "deferred_begin", {"=id 1"}, {"price"}).size() == 1);
+
+    // An embedded caller also cannot switch databases by starting a second
+    // transaction; rejection must leave the original transaction intact.
+    assert(g_engine.beginTransaction(otherDb) == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.inTransaction());
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+    assert(g_engine.query(
+               db, "deferred_begin", {"=id 1"}, {"price"}).empty());
     assert(!fs::exists(db + ".txn_backup"));
 
     cleanup(db);
-    std::cout << "[DDL-TXN] implicit begin failure propagation OK" << std::endl;
+    cleanup(otherDb);
+    std::cout << "[DDL-TXN] nested BEGIN preserves active transaction OK"
+              << std::endl;
 }
 
 static void test_snapshot_ddl_serializes_database_backends() {
@@ -620,7 +635,7 @@ int main() {
     test_commit_survives();
     test_commit_failure_is_propagated_and_restored();
     test_engine_transaction_backup_lifecycle();
-    test_begin_propagates_implicit_commit_failure();
+    test_nested_begin_preserves_active_transaction();
     test_snapshot_ddl_serializes_database_backends();
     test_unfinished_snapshot_recovers_on_restart();
     test_create_table_post_action_rollback();

@@ -36621,16 +36621,20 @@ bool StorageEngine::transactionBackupDirty() const {
 }
 
 DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnapshot) {
-    if (transactionContext().inTransaction) {
-        // Commit existing transaction before starting a new one.
-        // This matches PostgreSQL's implicit-commit-on-DDL behavior and
-        // prevents transactionContext().txnDB from pointing to a stale database.
-        const DBStatus previousStatus = commitTransaction();
-        if (previousStatus != DBStatus::OK) return previousStatus;
+    auto& context = transactionContext();
+    if (context.inTransaction) {
+        // BEGIN inside an active transaction is a warning/no-op in
+        // PostgreSQL. Never publish the existing transaction merely because
+        // a caller tried to start another one. An exclusive snapshot request
+        // cannot safely upgrade the already-held shared database lock, and a
+        // transaction may not silently switch databases.
+        if (ddlSnapshot || context.txnDB != dbname) {
+            return DBStatus::INVALID_VALUE;
+        }
+        return DBStatus::OK;
     }
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
 
-    auto& context = transactionContext();
     context.databaseTxnMutex = databaseTxnLockFor(dbname);
     if (ddlSnapshot) {
         context.databaseExclusiveLock = std::make_unique<std::unique_lock<std::shared_mutex>>(
