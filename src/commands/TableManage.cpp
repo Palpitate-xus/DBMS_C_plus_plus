@@ -7997,7 +7997,7 @@ bool StorageEngine::loadTriggers(
         }
 
         std::vector<Trigger> parsed;
-        std::unordered_set<std::string> names;
+        std::set<std::pair<std::string, std::string>> identities;
         uint32_t firstWord = 0;
         if (bytes.size() >= sizeof(firstWord))
             std::memcpy(&firstWord, bytes.data(), sizeof(firstWord));
@@ -8053,7 +8053,8 @@ bool StorageEngine::loadTriggers(
                     if (!readString(transition, MAX_TRIGGER_TRANSITION_STRING)) return false;
                     trigger.transitions.push_back(std::move(transition));
                 }
-                if (!validTriggerRecord(trigger) || !names.insert(trigger.name).second)
+                if (!validTriggerRecord(trigger) ||
+                    !identities.emplace(trigger.tableName, trigger.name).second)
                     return false;
                 parsed.push_back(std::move(trigger));
             }
@@ -8108,7 +8109,8 @@ bool StorageEngine::loadTriggers(
                     trigger.transitions.push_back(std::move(transition));
                 }
             }
-            if (!validTriggerRecord(trigger) || !names.insert(trigger.name).second)
+            if (!validTriggerRecord(trigger) ||
+                !identities.emplace(trigger.tableName, trigger.name).second)
                 return false;
             parsed.push_back(std::move(trigger));
         }
@@ -8128,7 +8130,7 @@ DBStatus StorageEngine::persistTriggers(
         const std::string& dbname, const std::vector<Trigger>& triggers) const {
     if (triggers.size() > MAX_TRIGGER_COUNT) return DBStatus::INVALID_VALUE;
     try {
-        std::unordered_set<std::string> names;
+        std::set<std::pair<std::string, std::string>> identities;
         std::string bytes;
         const size_t payloadLimit =
             static_cast<size_t>(MAX_TRIGGER_FILE_SIZE) - sizeof(uint64_t);
@@ -8154,7 +8156,8 @@ DBStatus StorageEngine::persistTriggers(
             return DBStatus::INVALID_VALUE;
         }
         for (const auto& trigger : triggers) {
-            if (!validTriggerRecord(trigger) || !names.insert(trigger.name).second)
+            if (!validTriggerRecord(trigger) ||
+                !identities.emplace(trigger.tableName, trigger.name).second)
                 return DBStatus::INVALID_VALUE;
             if (!appendString(trigger.name) || !appendString(trigger.timing) ||
                 !appendString(trigger.event) || !appendString(trigger.tableName) ||
@@ -8190,7 +8193,9 @@ DBStatus StorageEngine::createTrigger(const std::string& dbname, const Trigger& 
     std::vector<Trigger> existing;
     if (!loadTriggers(dbname, existing)) return DBStatus::CORRUPTED_DATA;
     for (const auto& t : existing) {
-        if (t.name == trg.name) return DBStatus::OK; // already exists
+        if (t.name == trg.name && t.tableName == trg.tableName) {
+            return DBStatus::TABLE_ALREADY_EXISTS;
+        }
     }
     existing.push_back(trg);
     return persistTriggers(dbname, existing);
@@ -8248,14 +8253,17 @@ bool StorageEngine::tryGetAllTriggers(
     return loadTriggers(dbname, result);
 }
 
-DBStatus StorageEngine::enableTrigger(const std::string& dbname, const std::string& trgName) {
+DBStatus StorageEngine::enableTrigger(const std::string& dbname,
+                                      const std::string& trgName,
+                                      const std::string& tableName) {
     std::lock_guard<std::recursive_mutex> triggerLock(cacheMutex_);
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     std::vector<Trigger> existing;
     if (!loadTriggers(dbname, existing)) return DBStatus::CORRUPTED_DATA;
     bool found = false;
     for (auto& trigger : existing) {
-        if (trigger.name == trgName) {
+        if (trigger.name == trgName &&
+            (tableName.empty() || trigger.tableName == tableName)) {
             trigger.enabled = true;
             found = true;
         }
@@ -8264,14 +8272,17 @@ DBStatus StorageEngine::enableTrigger(const std::string& dbname, const std::stri
     return persistTriggers(dbname, existing);
 }
 
-DBStatus StorageEngine::disableTrigger(const std::string& dbname, const std::string& trgName) {
+DBStatus StorageEngine::disableTrigger(const std::string& dbname,
+                                       const std::string& trgName,
+                                       const std::string& tableName) {
     std::lock_guard<std::recursive_mutex> triggerLock(cacheMutex_);
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     std::vector<Trigger> existing;
     if (!loadTriggers(dbname, existing)) return DBStatus::CORRUPTED_DATA;
     bool found = false;
     for (auto& trigger : existing) {
-        if (trigger.name == trgName) {
+        if (trigger.name == trgName &&
+            (tableName.empty() || trigger.tableName == tableName)) {
             trigger.enabled = false;
             found = true;
         }

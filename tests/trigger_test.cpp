@@ -199,6 +199,58 @@ static void test_drop_trigger_is_relation_scoped_and_updates_catalog() {
               << std::endl;
 }
 
+static void test_trigger_names_are_scoped_to_their_relation() {
+    const std::string db = testDbPath("trigger_relation_names");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE first_table (id INT)", s));
+    assert(!ddl.executeSql("CREATE TABLE second_table (id INT)", s));
+    const std::string firstCreate =
+        "CREATE TRIGGER shared_name BEFORE INSERT ON first_table "
+        "FOR EACH ROW EXECUTE FUNCTION audit()";
+    const std::string secondCreate =
+        "CREATE TRIGGER shared_name BEFORE INSERT ON second_table "
+        "FOR EACH ROW EXECUTE FUNCTION audit()";
+    assert(!ddl.executeSql(firstCreate, s));
+    assert(ddl.executeSql(firstCreate, s));
+    assert(!ddl.executeSql(secondCreate, s));
+
+    auto triggers = g_engine.getAllTriggers(db);
+    assert(triggers.size() == 2);
+    assert(!ddl.executeSql(
+        "ALTER TABLE first_table DISABLE TRIGGER shared_name", s));
+    triggers = g_engine.getAllTriggers(db);
+    bool firstEnabled = true;
+    bool secondEnabled = false;
+    for (const auto& trigger : triggers) {
+        if (trigger.tableName == "first_table") firstEnabled = trigger.enabled;
+        if (trigger.tableName == "second_table") secondEnabled = trigger.enabled;
+    }
+    assert(!firstEnabled);
+    assert(secondEnabled);
+
+    assert(!ddl.executeSql("DROP TRIGGER shared_name ON first_table", s));
+    triggers = g_engine.getAllTriggers(db);
+    assert(triggers.size() == 1);
+    assert(triggers.front().tableName == "second_table");
+
+    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
+    const auto* first = catalog.resolveRelation("first_table", {"public"});
+    const auto* second = catalog.resolveRelation("second_table", {"public"});
+    assert(first != nullptr && !first->relhastriggers);
+    assert(second != nullptr && second->relhastriggers);
+
+    assert(!ddl.executeSql("DROP TRIGGER shared_name ON second_table", s));
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[TRIGGER] names and state changes are relation-scoped OK"
+              << std::endl;
+}
+
 static void test_trigger_metadata_failures_preserve_old_state() {
     std::string db = testDbPath("trigger_io_failure");
     cleanup(db);
@@ -380,6 +432,7 @@ int main() {
     test_create_trigger_when();
     test_create_trigger_statement_level();
     test_drop_trigger_is_relation_scoped_and_updates_catalog();
+    test_trigger_names_are_scoped_to_their_relation();
     test_trigger_metadata_failures_preserve_old_state();
     test_concurrent_trigger_creates_do_not_lose_updates();
     test_legacy_trigger_metadata_is_migrated();

@@ -1124,8 +1124,10 @@ public:
     DBStatus createTrigger(const std::string& dbname, const Trigger& trg);
     DBStatus dropTrigger(const std::string& dbname, const std::string& trgName,
                          const std::string& tableName = {});
-    DBStatus enableTrigger(const std::string& dbname, const std::string& trgName);
-    DBStatus disableTrigger(const std::string& dbname, const std::string& trgName);
+    DBStatus enableTrigger(const std::string& dbname, const std::string& trgName,
+                           const std::string& tableName = {});
+    DBStatus disableTrigger(const std::string& dbname, const std::string& trgName,
+                            const std::string& tableName = {});
     std::vector<Trigger> getTriggers(const std::string& dbname, const std::string& tablename,
                                       const std::string& timing, const std::string& event) const;
     bool tryGetTriggers(const std::string& dbname, const std::string& tablename,

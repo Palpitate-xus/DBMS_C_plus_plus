@@ -1271,7 +1271,8 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     std::cout << "SQL syntax error: ENABLE TRIGGER requires a name" << std::endl;
                     return true;
                 }
-                status = g_engine.enableTrigger(s.currentDB, sub.name);
+                status = g_engine.enableTrigger(
+                    s.currentDB, sub.name, tableName);
                 if (!alterStatusOk(status, "Trigger")) return true;
                 break;
             case AlterTableStmt::Action::DisableTrigger:
@@ -1279,7 +1280,8 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     std::cout << "SQL syntax error: DISABLE TRIGGER requires a name" << std::endl;
                     return true;
                 }
-                status = g_engine.disableTrigger(s.currentDB, sub.name);
+                status = g_engine.disableTrigger(
+                    s.currentDB, sub.name, tableName);
                 if (!alterStatusOk(status, "Trigger")) return true;
                 break;
             case AlterTableStmt::Action::AttachPartition:
