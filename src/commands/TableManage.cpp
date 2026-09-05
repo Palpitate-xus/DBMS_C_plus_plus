@@ -975,6 +975,25 @@ static bool validateTableSchemaIdentifiers(const TableSchema& tbl, std::string* 
     for (const auto& name : tbl.uniqueConstraintNames) {
         if (reject(name, MAX_TABLE_NAME_LEN, "constraint name")) return false;
     }
+    if (tbl.uniqueConstraints.size() > MAX_COLUMNS ||
+        tbl.uniqueConstraintNames.size() > tbl.uniqueConstraints.size()) {
+        if (error) *error = "invalid UNIQUE constraint metadata";
+        return false;
+    }
+    for (const auto& constraint : tbl.uniqueConstraints) {
+        if (constraint.empty() || constraint.size() > tbl.len) {
+            if (error) *error = "UNIQUE constraint requires valid columns";
+            return false;
+        }
+        std::set<size_t> distinctColumns;
+        for (const size_t columnIndex : constraint) {
+            if (columnIndex >= tbl.len ||
+                !distinctColumns.insert(columnIndex).second) {
+                if (error) *error = "invalid UNIQUE constraint column metadata";
+                return false;
+            }
+        }
+    }
     if (tbl.additionalCheckConstraints.size() > 1024) {
         if (error) *error = "too many CHECK constraints";
         return false;

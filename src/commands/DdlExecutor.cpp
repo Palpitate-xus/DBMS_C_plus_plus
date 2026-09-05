@@ -2786,16 +2786,35 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             }
             hasPrimaryKeyDefinition = true;
         } else if (t == "unique") {
+            if (tc.columns.empty()) {
+                std::cout << "ERROR: UNIQUE requires at least one column"
+                          << std::endl;
+                return true;
+            }
             std::vector<size_t> idxs;
+            std::set<size_t> distinctColumns;
             for (const auto& cname : tc.columns) {
+                size_t columnIndex = tbl.len;
                 for (size_t i = 0; i < tbl.len; ++i) {
-                    if (tbl.cols[i].dataName == cname) idxs.push_back(i);
+                    if (tbl.cols[i].dataName == cname) {
+                        columnIndex = i;
+                        break;
+                    }
                 }
+                if (columnIndex >= tbl.len) {
+                    std::cout << "ERROR: UNIQUE column \"" << cname
+                              << "\" does not exist" << std::endl;
+                    return true;
+                }
+                if (!distinctColumns.insert(columnIndex).second) {
+                    std::cout << "ERROR: UNIQUE column \"" << cname
+                              << "\" appears more than once" << std::endl;
+                    return true;
+                }
+                idxs.push_back(columnIndex);
             }
-            if (!idxs.empty()) {
-                tbl.uniqueConstraints.push_back(idxs);
-                tbl.uniqueConstraintNames.push_back(tc.name);
-            }
+            tbl.uniqueConstraints.push_back(std::move(idxs));
+            tbl.uniqueConstraintNames.push_back(tc.name);
         } else if (t == "foreign key") {
             tbl.appendFK(tableConstraintToForeignKey(tc));
         } else if (t == "check") {
