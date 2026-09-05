@@ -2,9 +2,11 @@
 #include "commands/TableManage.h"
 #include "Session.h"
 #include "catalog/type_registry.h"
+#include <algorithm>
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include <vector>
 #include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
@@ -17,6 +19,36 @@ static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
     s.permission = 1;
     s.currentDB = db;
+}
+
+static std::vector<dbms::StorageEngine::SqlRow> readStructuredRows(
+    const std::string& db, const std::string& tableName) {
+    const auto schema = g_engine.getTableSchema(db, tableName);
+    std::vector<dbms::StorageEngine::SqlRow> rows;
+    assert(g_engine.forEachRow(
+        db, tableName,
+        [&](uint32_t pageId, uint16_t slotId,
+            const char* data, size_t length) {
+            const int64_t rid =
+                dbms::StorageEngine::encodeRid(pageId, slotId);
+            dbms::StorageEngine::bindNullRow(
+                &g_engine, db, tableName, rid, schema.len);
+            dbms::StorageEngine::SqlRow row;
+            const std::string buffer(data, length);
+            for (size_t column = 0; column < schema.len; ++column) {
+                bool isNull = false;
+                std::string value = g_engine.extractColumnValue(
+                    buffer, schema, column, db, true, &isNull);
+                if (isNull) {
+                    row[schema.cols[column].dataName] = std::nullopt;
+                } else {
+                    row[schema.cols[column].dataName] = std::move(value);
+                }
+            }
+            dbms::StorageEngine::unbindNullRow();
+            rows.push_back(std::move(row));
+        }));
+    return rows;
 }
 
 static void test_create_matview_select_star() {
@@ -133,6 +165,68 @@ static void test_create_matview_reversed_projection() {
     std::cout << "[MATVIEW] reversed projection mapping OK" << std::endl;
 }
 
+static void test_create_matview_preserves_exact_sql_values() {
+    const std::string db = testDbPath("matview_exact_values");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE TABLE source_values (id INT, note VARCHAR(50), marker VARCHAR(50))",
+        s));
+
+    using SqlRow = dbms::StorageEngine::SqlRow;
+    assert(g_engine.insertRow(
+               db, "source_values",
+               SqlRow{{"id", std::string("1")},
+                      {"note", std::string("hello world")},
+                      {"marker", std::string("")}}) == dbms::DBStatus::OK);
+    assert(g_engine.insertRow(
+               db, "source_values",
+               SqlRow{{"id", std::string("2")},
+                      {"note", std::string("")},
+                      {"marker", std::nullopt}}) == dbms::DBStatus::OK);
+    assert(g_engine.insertRow(
+               db, "source_values",
+               SqlRow{{"id", std::string("3")},
+                      {"note", std::string("NULL")},
+                      {"marker", std::string("two words")}}) ==
+           dbms::DBStatus::OK);
+
+    assert(!ddl.executeSql(
+        "CREATE MATERIALIZED VIEW exact_values AS "
+        "SELECT id, note, marker FROM source_values", s));
+    const std::string backing =
+        dbms::StorageEngine::materializedViewPrefix("exact_values");
+    const auto rows = readStructuredRows(db, backing);
+    assert(rows.size() == 3);
+    const auto findById = [&](const std::string& id) {
+        return std::find_if(
+            rows.begin(), rows.end(), [&](const SqlRow& row) {
+                const auto value = row.find("id");
+                return value != row.end() && value->second &&
+                       *value->second == id;
+            });
+    };
+    auto row = findById("1");
+    assert(row != rows.end());
+    assert(row->at("note") && *row->at("note") == "hello world");
+    assert(row->at("marker") && row->at("marker")->empty());
+    row = findById("2");
+    assert(row != rows.end());
+    assert(row->at("note") && row->at("note")->empty());
+    assert(!row->at("marker"));
+    row = findById("3");
+    assert(row != rows.end());
+    assert(row->at("note") && *row->at("note") == "NULL");
+    assert(row->at("marker") && *row->at("marker") == "two words");
+
+    cleanup(db);
+    std::cout << "[MATVIEW] exact SQL values preserved OK" << std::endl;
+}
+
 static void test_create_matview_with_no_data() {
     std::string db = testDbPath("matview_nodata");
     cleanup(db);
@@ -164,6 +258,7 @@ int main() {
     test_create_matview_select_columns();
     test_create_matview_where();
     test_create_matview_reversed_projection();
+    test_create_matview_preserves_exact_sql_values();
     test_create_matview_with_no_data();
     std::cout << "[MATVIEW] all passed" << std::endl;
     return 0;

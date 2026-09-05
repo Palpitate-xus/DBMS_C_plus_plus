@@ -4803,12 +4803,12 @@ bool DdlExecutor::executeCreateMaterializedView(const CreateViewStmt* stmt, Sess
 
     dbms::TableSchema srcTbl = g_engine.getTableSchema(s.currentDB, srcTable);
     std::vector<std::string> colNames;
-    std::set<std::string> queryCols;
+    std::vector<size_t> selectedSourceColumns;
 
     if (selectCols.size() == 1 && selectCols[0] == "*") {
         for (size_t i = 0; i < srcTbl.len; ++i) {
             colNames.push_back(srcTbl.cols[i].dataName);
-            queryCols.insert(srcTbl.cols[i].dataName);
+            selectedSourceColumns.push_back(i);
         }
     } else {
         for (const auto& cname : selectCols) {
@@ -4816,7 +4816,7 @@ bool DdlExecutor::executeCreateMaterializedView(const CreateViewStmt* stmt, Sess
             for (size_t i = 0; i < srcTbl.len; ++i) {
                 if (toLower(srcTbl.cols[i].dataName) == cname) {
                     colNames.push_back(srcTbl.cols[i].dataName);
-                    queryCols.insert(srcTbl.cols[i].dataName);
+                    selectedSourceColumns.push_back(i);
                     found = true;
                     break;
                 }
@@ -4858,27 +4858,61 @@ bool DdlExecutor::executeCreateMaterializedView(const CreateViewStmt* stmt, Sess
         return true;
     }
 
-    auto rows = g_engine.query(s.currentDB, srcTable, conditions, queryCols, {});
-    // query() emits values in SOURCE schema order (filtered to queryCols); map
-    // them in that same order so values line up with the right columns.
-    std::vector<std::string> orderedCols;
-    for (size_t i = 0; i < srcTbl.len; ++i) {
-        if (queryCols.count(srcTbl.cols[i].dataName))
-            orderedCols.push_back(srcTbl.cols[i].dataName);
-    }
     size_t inserted = 0;
     if (stmt->withData) {
-        for (const auto& row : rows) {
-            std::map<std::string, std::string> values;
-            std::istringstream iss(row);
-            std::string val;
-            size_t idx = 0;
-            while (iss >> val && idx < orderedCols.size()) {
-                values[orderedCols[idx]] = val;
-                ++idx;
+        const auto parsedConditions =
+            StorageEngine::parseConditions(conditions);
+        std::vector<StorageEngine::SqlRow> sourceRows;
+        const bool scanOk = g_engine.forEachVisibleRow(
+            s.currentDB, srcTable, "SELECT",
+            [&](uint32_t pageId, uint16_t slotId,
+                const char* data, size_t length) {
+                const int64_t rid = StorageEngine::encodeRid(pageId, slotId);
+                StorageEngine::bindNullRow(
+                    &g_engine, s.currentDB, srcTable, rid, srcTbl.len);
+                struct BindingGuard {
+                    ~BindingGuard() { StorageEngine::unbindNullRow(); }
+                } bindingGuard;
+
+                const std::string row(data, length);
+                for (const auto& condition : parsedConditions) {
+                    if (!StorageEngine::evalConditionOnRow(
+                            condition, row, srcTbl)) {
+                        return;
+                    }
+                }
+
+                StorageEngine::SqlRow values;
+                for (size_t outputColumn = 0;
+                     outputColumn < selectedSourceColumns.size();
+                     ++outputColumn) {
+                    const size_t sourceColumn =
+                        selectedSourceColumns[outputColumn];
+                    bool isNull = false;
+                    std::string value = g_engine.extractColumnValue(
+                        row, srcTbl, sourceColumn, s.currentDB, true,
+                        &isNull);
+                    if (isNull) {
+                        values[colNames[outputColumn]] = std::nullopt;
+                    } else {
+                        values[colNames[outputColumn]] = std::move(value);
+                    }
+                }
+                sourceRows.push_back(std::move(values));
+            });
+        if (!scanOk) {
+            std::cout << "CREATE MATERIALIZED VIEW: source scan failed"
+                      << std::endl;
+            return true;
+        }
+        for (const auto& row : sourceRows) {
+            if (g_engine.insertRow(s.currentDB, backingTable, row) !=
+                DBStatus::OK) {
+                std::cout << "CREATE MATERIALIZED VIEW: row copy failed"
+                          << std::endl;
+                return true;
             }
-            if (idx != orderedCols.size()) continue;
-            if (g_engine.insert(s.currentDB, backingTable, values) == DBStatus::OK) ++inserted;
+            ++inserted;
         }
     }
 
