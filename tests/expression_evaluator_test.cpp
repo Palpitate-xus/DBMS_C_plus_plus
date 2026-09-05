@@ -4,6 +4,7 @@
 #include "catalog/type_registry.h"
 #include <cassert>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 
 using namespace dbms;
@@ -94,6 +95,31 @@ static void test_arithmetic() {
     bin->right = makeLit("4");
     v = eval.eval(bin.get(), {});
     assert(v.value == "6");
+
+    auto expectOverflow = [&](const std::string& op,
+                              const std::string& left,
+                              const std::string& right) {
+        auto expression = std::make_unique<BinaryOpExpr>();
+        expression->op = op;
+        auto leftLiteral = makeLit(left);
+        leftLiteral->typeName = "integer";
+        expression->left = std::move(leftLiteral);
+        auto rightLiteral = makeLit(right);
+        rightLiteral->typeName = "integer";
+        expression->right = std::move(rightLiteral);
+        bool rejected = false;
+        try {
+            (void)eval.eval(expression.get(), {});
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("SQLSTATE 22003") !=
+                       std::string::npos;
+        }
+        assert(rejected);
+    };
+    expectOverflow("+", "9223372036854775807", "1");
+    expectOverflow("-", "-9223372036854775808", "1");
+    expectOverflow("*", "9223372036854775807", "2");
+    expectOverflow("/", "-9223372036854775808", "-1");
 
     std::cout << "[EXPR] arithmetic OK" << std::endl;
 }

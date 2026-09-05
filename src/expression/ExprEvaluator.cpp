@@ -1405,12 +1405,33 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
         throw std::runtime_error(std::string("invalid input syntax for type integer: \"") + l.value + "\" (SQLSTATE 22P02)");
     if (!cleanInt(r.value))
         throw std::runtime_error(std::string("invalid input syntax for type integer: \"") + r.value + "\" (SQLSTATE 22P02)");
-    int64_t a = l.asInt(), b = r.asInt(), res = 0;
-    if (op == "+") res = a + b;
-    else if (op == "-") res = a - b;
-    else if (op == "*") res = a * b;
+    auto integerOutOfRange = []() {
+        throw std::runtime_error("integer out of range (SQLSTATE 22003)");
+    };
+    long long a = 0;
+    long long b = 0;
+    if (!parseInt64Exact(l.value, a) || !parseInt64Exact(r.value, b))
+        integerOutOfRange();
+
+    int64_t res = 0;
+    if (op == "+" || op == "-" || op == "*") {
+        __int128 wide = 0;
+        if (op == "+")
+            wide = static_cast<__int128>(a) + b;
+        else if (op == "-")
+            wide = static_cast<__int128>(a) - b;
+        else
+            wide = static_cast<__int128>(a) * b;
+        if (wide < std::numeric_limits<int64_t>::lowest() ||
+            wide > std::numeric_limits<int64_t>::max()) {
+            integerOutOfRange();
+        }
+        res = static_cast<int64_t>(wide);
+    }
     else if (op == "/") {
         if (b == 0) throw std::runtime_error("division by zero (SQLSTATE 22012)");
+        if (a == std::numeric_limits<int64_t>::lowest() && b == -1)
+            integerOutOfRange();
         res = a / b;
     }
     else if (op == "%") res = (b == 0) ? 0 : a % b;
