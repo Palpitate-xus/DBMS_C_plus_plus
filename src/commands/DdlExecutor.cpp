@@ -5015,6 +5015,12 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
             return true;
         }
     }
+    std::set<std::string> droppedSequenceStorageNames;
+    for (const auto& action : physicalCascadeActions) {
+        if (action.kind == PhysicalCascadeAction::Kind::Sequence) {
+            droppedSequenceStorageNames.insert(action.name);
+        }
+    }
 
     txn.markSnapshotDirty();
     for (const auto& action : physicalCascadeActions) {
@@ -5054,7 +5060,16 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
         }
     }
     txn.recordDrop(DdlObjectKind::Table, tname);
+    for (const auto& sequenceName : droppedSequenceStorageNames) {
+        txn.recordDrop(DdlObjectKind::Sequence, sequenceName);
+    }
     if (!txn.commit()) return true;
+    for (const auto& sequenceName : droppedSequenceStorageNames) {
+        s.sequenceLastValues.erase(sequenceName);
+        if (sequenceName.find('.') == std::string::npos) {
+            s.sequenceLastValues.erase("public." + sequenceName);
+        }
+    }
     if (droppingTemp) {
         s.tempTables.erase(logicalName);
         s.tempTableOnCommit.erase(logicalName);

@@ -308,10 +308,22 @@ static void test_sequence_owned_by_drop_table() {
     assert(renamedTable && renamedTable->oid == tableOid);
     assert(renamedColumn && renamedColumn->attnum == 1);
 
+    s.sequenceLastValues["s1"] = 23;
+    s.sequenceLastValues["public.s1"] = 23;
+    s.sequenceLastValues["legacy_owned"] = 24;
     err = ddl.executeSql("DROP TABLE renamed_t", s);
     assert(!err);
     assert(!g_engine.sequenceExists(db, "s1"));
     assert(!g_engine.sequenceExists(db, "legacy_owned"));
+    assert(s.sequenceLastValues.count("s1") == 0);
+    assert(s.sequenceLastValues.count("public.s1") == 0);
+    assert(s.sequenceLastValues.count("legacy_owned") == 0);
+
+    // A same-name sequence is a new catalog object and must not inherit the
+    // removed sequence's session-local currval state.
+    assert(!ddl.executeSql("CREATE SEQUENCE s1", s));
+    assert(s.sequenceLastValues.count("s1") == 0);
+    assert(s.sequenceLastValues.count("public.s1") == 0);
 
     cleanup(db);
     std::cout << "[SEQUENCE] owned by rename/drop lifecycle OK" << std::endl;
