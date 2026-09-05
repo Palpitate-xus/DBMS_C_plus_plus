@@ -209,31 +209,84 @@ static void test_sequence_owned_by_drop_table() {
     assert(!err);
     err = ddl.executeSql("CREATE SEQUENCE s1 OWNED BY t.id", s);
     assert(!err);
+    err = ddl.executeSql("CREATE SEQUENCE legacy_owned OWNED BY t.id", s);
+    assert(!err);
     assert(g_engine.sequenceExists(db, "s1"));
+    assert(g_engine.sequenceExists(db, "legacy_owned"));
 
     dbms::CatalogManager& cat = g_engine.catalogService().get(db);
     const auto* seqRel = cat.resolveRelation("s1", {"public"});
+    const auto* legacySeqRel =
+        cat.resolveRelation("legacy_owned", {"public"});
     assert(seqRel != nullptr);
+    assert(legacySeqRel != nullptr);
     const auto* tableRel = cat.resolveRelation("t", {"public"});
     assert(tableRel != nullptr);
     const auto* ownerColumn = cat.findAttribute(tableRel->oid, "id");
     assert(ownerColumn != nullptr);
+    const dbms::Oid tableOid = tableRel->oid;
+    const dbms::Oid sequenceOid = seqRel->oid;
+    const dbms::Oid legacySequenceOid = legacySeqRel->oid;
+    const int32_t ownerColumnNumber = ownerColumn->attnum;
     const auto ownerships = cat.findDepends(
-        dbms::PgClassOid_Class, seqRel->oid, 0);
+        dbms::PgClassOid_Class, sequenceOid, 0);
     assert(std::count_if(
                ownerships.begin(), ownerships.end(),
                [&](const dbms::PgDependRow& dependency) {
                    return dependency.deptype == 'a' &&
-                          dependency.refobjid == tableRel->oid &&
-                          dependency.refobjsubid == ownerColumn->attnum;
+                          dependency.refobjid == tableOid &&
+                          dependency.refobjsubid == ownerColumnNumber;
                }) == 1);
 
-    err = ddl.executeSql("DROP TABLE t CASCADE", s);
+    // Simulate a genuine ownership row written before referenced column
+    // numbers were persisted. Rename must use the sequence file to preserve
+    // this legacy association without confusing it with an old DEFAULT row.
+    assert(cat.removeDepend(
+        dbms::PgClassOid_Class, legacySequenceOid, 0,
+        dbms::PgClassOid_Class, tableOid, ownerColumnNumber));
+    dbms::PgDependRow legacyOwnership;
+    legacyOwnership.classid = dbms::PgClassOid_Class;
+    legacyOwnership.objid = legacySequenceOid;
+    legacyOwnership.objsubid = 0;
+    legacyOwnership.refclassid = dbms::PgClassOid_Class;
+    legacyOwnership.refobjid = tableOid;
+    legacyOwnership.refobjsubid = 0;
+    legacyOwnership.deptype = 'a';
+    cat.addDepend(legacyOwnership);
+    assert(cat.persistAll());
+
+    assert(!ddl.executeSql("ALTER TABLE t RENAME TO renamed_t", s));
+    dbms::SequenceInfo currentInfo;
+    dbms::SequenceInfo legacyInfo;
+    assert(g_engine.getSequenceInfo(db, "s1", currentInfo) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.getSequenceInfo(db, "legacy_owned", legacyInfo) ==
+           dbms::DBStatus::OK);
+    assert(currentInfo.ownedByTable == "renamed_t");
+    assert(legacyInfo.ownedByTable == "renamed_t");
+
+    assert(!ddl.executeSql(
+        "ALTER TABLE renamed_t RENAME COLUMN id TO sequence_id", s));
+    assert(g_engine.getSequenceInfo(db, "s1", currentInfo) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.getSequenceInfo(db, "legacy_owned", legacyInfo) ==
+           dbms::DBStatus::OK);
+    assert(currentInfo.ownedByColumn == "sequence_id");
+    assert(legacyInfo.ownedByColumn == "sequence_id");
+    const auto* renamedTable =
+        cat.resolveRelation("renamed_t", {"public"});
+    const auto* renamedColumn = renamedTable
+        ? cat.findAttribute(renamedTable->oid, "sequence_id") : nullptr;
+    assert(renamedTable && renamedTable->oid == tableOid);
+    assert(renamedColumn && renamedColumn->attnum == ownerColumnNumber);
+
+    err = ddl.executeSql("DROP TABLE renamed_t", s);
     assert(!err);
     assert(!g_engine.sequenceExists(db, "s1"));
+    assert(!g_engine.sequenceExists(db, "legacy_owned"));
 
     cleanup(db);
-    std::cout << "[SEQUENCE] owned by / drop table cascade OK" << std::endl;
+    std::cout << "[SEQUENCE] owned by rename/drop lifecycle OK" << std::endl;
 }
 
 static void test_default_sequence_is_not_table_owned() {
@@ -709,7 +762,18 @@ static void test_schema_qualified_sequence_drop() {
                db, "app.owned", ownedInfo) == dbms::DBStatus::OK);
     assert(ownedInfo.ownedByTable == "app.owner");
     assert(ownedInfo.ownedByColumn == "id");
-    assert(!ddl.executeSql("DROP TABLE app.owner CASCADE", s));
+    assert(!ddl.executeSql(
+        "ALTER TABLE app.owner RENAME TO renamed_owner", s));
+    assert(g_engine.getSequenceInfo(
+               db, "app.owned", ownedInfo) == dbms::DBStatus::OK);
+    assert(ownedInfo.ownedByTable == "app.renamed_owner");
+    assert(!ddl.executeSql(
+        "ALTER TABLE app.renamed_owner RENAME COLUMN id TO owner_id", s));
+    assert(g_engine.getSequenceInfo(
+               db, "app.owned", ownedInfo) == dbms::DBStatus::OK);
+    assert(ownedInfo.ownedByTable == "app.renamed_owner");
+    assert(ownedInfo.ownedByColumn == "owner_id");
+    assert(!ddl.executeSql("DROP TABLE app.renamed_owner", s));
     assert(!g_engine.sequenceExists(db, "app.owned"));
     {
         dbms::CatalogManager durable(

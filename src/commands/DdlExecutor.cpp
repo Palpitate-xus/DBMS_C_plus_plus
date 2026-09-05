@@ -1224,6 +1224,15 @@ static bool alterStatusOk(DBStatus status, const std::string& operation) {
     return false;
 }
 
+static bool updateOwnedSequenceTableNames(
+    CatalogManager& catalog, const std::string& dbname, Oid tableOid,
+    const std::string& oldTableName, const std::string& newTableName);
+
+static bool updateOwnedSequenceColumnNames(
+    CatalogManager& catalog, const std::string& dbname, Oid tableOid,
+    int32_t columnNumber, const std::string& tableName,
+    const std::string& oldColumnName, const std::string& newColumnName);
+
 bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
     if (!stmt) return true;
     if (!checkDB(s)) return true;
@@ -1373,10 +1382,26 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                         if (relation) {
                             const dbms::Oid relationOid = relation->oid;
                             if (!catalog.renameAttribute(
-                                    relationOid, sub.name, sub.newName) ||
-                                !catalog.persistAll()) {
+                                    relationOid, sub.name, sub.newName)) {
                                 std::cout
                                     << "ALTER TABLE RENAME COLUMN catalog update failed"
+                                    << std::endl;
+                                return true;
+                            }
+                            const auto* renamedAttribute = catalog.findAttribute(
+                                relationOid, sub.newName);
+                            const std::string logicalTableName =
+                                schemaName == "public"
+                                    ? qualifiedName.name
+                                    : schemaName + "." + qualifiedName.name;
+                            if (!renamedAttribute ||
+                                !updateOwnedSequenceColumnNames(
+                                    catalog, s.currentDB, relationOid,
+                                    renamedAttribute->attnum, logicalTableName,
+                                    sub.name, sub.newName) ||
+                                !catalog.persistAll()) {
+                                std::cout
+                                    << "ALTER TABLE RENAME COLUMN owned sequence update failed"
                                     << std::endl;
                                 return true;
                             }
@@ -1430,10 +1455,26 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                             qualifiedName.name, {schemaName});
                         if (relation) {
                             const dbms::Oid relationOid = relation->oid;
-                            if (!catalog.renameClass(relationOid, sub.newName) ||
-                                !catalog.persistAll()) {
+                            if (!catalog.renameClass(relationOid, sub.newName)) {
                                 std::cout << "ALTER TABLE RENAME catalog update failed"
                                           << std::endl;
+                                return true;
+                            }
+                            const std::string oldLogicalName =
+                                schemaName == "public"
+                                    ? qualifiedName.name
+                                    : schemaName + "." + qualifiedName.name;
+                            const std::string newLogicalName =
+                                schemaName == "public"
+                                    ? sub.newName
+                                    : schemaName + "." + sub.newName;
+                            if (!updateOwnedSequenceTableNames(
+                                    catalog, s.currentDB, relationOid,
+                                    oldLogicalName, newLogicalName) ||
+                                !catalog.persistAll()) {
+                                std::cout
+                                    << "ALTER TABLE RENAME owned sequence update failed"
+                                    << std::endl;
                                 return true;
                             }
                         }
@@ -4321,6 +4362,117 @@ static bool catalogSequenceStorageName(const CatalogManager& catalog,
         ? relation.relname
         : relationNamespace->nspname + "." + relation.relname;
     return true;
+}
+
+static std::string canonicalOwnedTableName(const std::string& name) {
+    return name.rfind("public.", 0) == 0 ? name.substr(7) : name;
+}
+
+static bool updateOwnedSequenceNames(
+    CatalogManager& catalog, const std::string& dbname, Oid tableOid,
+    const std::string& oldTableName, const std::string& newTableName,
+    int32_t renamedColumnNumber, const std::string& oldColumnName,
+    const std::string& newColumnName) {
+    const bool renamingColumn = renamedColumnNumber > 0;
+    std::set<Oid> updatedSequences;
+    for (const auto& dependency :
+         catalog.findRefs(PgClassOid_Class, tableOid, -1)) {
+        if (dependency.classid != PgClassOid_Class ||
+            dependency.objsubid != 0 ||
+            dependency.deptype != 'a') {
+            continue;
+        }
+        if (renamingColumn && dependency.refobjsubid > 0 &&
+            dependency.refobjsubid != renamedColumnNumber) {
+            continue;
+        }
+        const PgClassRow* dependent = catalog.findClass(dependency.objid);
+        if (!dependent || dependent->relkind != 'S' ||
+            updatedSequences.count(dependent->oid) != 0) {
+            continue;
+        }
+
+        std::string sequenceStorageName;
+        std::string sequenceNameError;
+        if (!catalogSequenceStorageName(
+                catalog, *dependent, sequenceStorageName,
+                sequenceNameError)) {
+            std::cout << "owned sequence metadata update failed: "
+                      << sequenceNameError << std::endl;
+            return false;
+        }
+        SequenceInfo current;
+        if (g_engine.getSequenceInfo(
+                dbname, sequenceStorageName, current) != DBStatus::OK) {
+            std::cout << "owned sequence metadata update failed: cannot read "
+                      << sequenceStorageName << std::endl;
+            return false;
+        }
+
+        // Current releases identify the owning column in pg_depend. Legacy
+        // releases used zero for both true ownership and ordinary DEFAULT
+        // references, so only trust such a row when the sequence file names
+        // this table (and, for a column rename, this column).
+        const bool explicitOwnership = dependency.refobjsubid > 0;
+        const bool legacyOwnership =
+            dependency.refobjsubid == 0 &&
+            !current.ownedByTable.empty() &&
+            canonicalOwnedTableName(current.ownedByTable) ==
+                canonicalOwnedTableName(oldTableName);
+        if (!explicitOwnership && !legacyOwnership) continue;
+
+        if (renamingColumn) {
+            if ((explicitOwnership &&
+                 dependency.refobjsubid != renamedColumnNumber) ||
+                (legacyOwnership &&
+                 current.ownedByColumn != oldColumnName)) {
+                continue;
+            }
+        }
+
+        SequenceInfo update;
+        update.ownedBySpecified = true;
+        update.ownedByTable = renamingColumn
+            ? canonicalOwnedTableName(oldTableName)
+            : canonicalOwnedTableName(newTableName);
+        update.ownedByColumn = renamingColumn
+            ? newColumnName : current.ownedByColumn;
+        if (update.ownedByColumn.empty() && explicitOwnership) {
+            for (const auto& attribute :
+                 catalog.findAttributesByNum(tableOid)) {
+                if (attribute.attnum == dependency.refobjsubid) {
+                    update.ownedByColumn = attribute.attname;
+                    break;
+                }
+            }
+        }
+        if (update.ownedByColumn.empty() ||
+            g_engine.alterSequence(
+                dbname, sequenceStorageName, update) != DBStatus::OK) {
+            std::cout << "owned sequence metadata update failed for "
+                      << sequenceStorageName << std::endl;
+            return false;
+        }
+        updatedSequences.insert(dependent->oid);
+    }
+    return true;
+}
+
+static bool updateOwnedSequenceTableNames(
+    CatalogManager& catalog, const std::string& dbname, Oid tableOid,
+    const std::string& oldTableName, const std::string& newTableName) {
+    return updateOwnedSequenceNames(
+        catalog, dbname, tableOid, oldTableName, newTableName,
+        0, "", "");
+}
+
+static bool updateOwnedSequenceColumnNames(
+    CatalogManager& catalog, const std::string& dbname, Oid tableOid,
+    int32_t columnNumber, const std::string& tableName,
+    const std::string& oldColumnName, const std::string& newColumnName) {
+    return updateOwnedSequenceNames(
+        catalog, dbname, tableOid, tableName, tableName,
+        columnNumber, oldColumnName, newColumnName);
 }
 
 // Catalog CASCADE plans are dependency-complete, but catalog deletion alone
