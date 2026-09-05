@@ -112,6 +112,85 @@ bool likeSourceHasExtendedStatistics(const std::string& dbname,
     return true;
 }
 
+bool inspectLikeSourceIndexes(const std::string& dbname,
+                              const std::string& tableName,
+                              const TableSchema& table,
+                              bool& hasUncopyableIndex,
+                              std::string& error) {
+    hasUncopyableIndex = false;
+    error.clear();
+
+    // Every SQL-created standalone index has a durable name mapping. Check
+    // that first, including for temporary/legacy relations with no pg_class
+    // entry. Constraint-backed indexes created with the table do not use this
+    // file and are represented by TableSchema below.
+    const std::filesystem::path namesPath =
+        g_engine.dbPath(dbname) / (tableName + ".idxnames");
+    std::error_code filesystemError;
+    if (std::filesystem::exists(namesPath, filesystemError)) {
+        if (!std::filesystem::is_regular_file(namesPath, filesystemError) ||
+            filesystemError) {
+            error = filesystemError
+                ? filesystemError.message()
+                : "index-name metadata is not a regular file";
+            return false;
+        }
+        std::ifstream names(namesPath, std::ios::binary);
+        if (!names) {
+            error = "cannot read index-name metadata";
+            return false;
+        }
+        const std::string contents{
+            std::istreambuf_iterator<char>(names),
+            std::istreambuf_iterator<char>()};
+        if (names.bad()) {
+            error = "cannot read index-name metadata";
+            return false;
+        }
+        if (!trim(contents).empty()) {
+            hasUncopyableIndex = true;
+            return true;
+        }
+    } else if (filesystemError) {
+        error = filesystemError.message();
+        return false;
+    }
+
+    // A plain single-column index is implicit only when it is the default
+    // index backing a column-level UNIQUE constraint. Every richer B-tree
+    // shape and every specialized access method is a standalone index.
+    for (const auto& metadata :
+         g_engine.getIndexMetadata(dbname, tableName)) {
+        const Column* indexedColumn = nullptr;
+        if (!metadata.isExpression) {
+            for (size_t column = 0; column < table.len; ++column) {
+                if (table.cols[column].dataName == metadata.name) {
+                    indexedColumn = &table.cols[column];
+                    break;
+                }
+            }
+        }
+        if (!indexedColumn || !indexedColumn->isUnique ||
+            metadata.descending || !metadata.includeCols.empty() ||
+            !metadata.whereCondition.empty()) {
+            hasUncopyableIndex = true;
+            return true;
+        }
+    }
+    if (!g_engine.getCompositeIndexes(dbname, tableName).empty() ||
+        !g_engine.getHashIndexedColumns(dbname, tableName).empty() ||
+        !g_engine.getBloomIndexedColumns(dbname, tableName).empty() ||
+        !g_engine.getFullTextIndexedColumns(dbname, tableName).empty() ||
+        !g_engine.getGinIndexedColumns(dbname, tableName).empty() ||
+        !g_engine.getGiSTIndexedColumns(dbname, tableName).empty() ||
+        !g_engine.getBrinIndexedColumns(dbname, tableName).empty() ||
+        !g_engine.getSPGiSTIndexedColumns(dbname, tableName).empty() ||
+        !g_engine.getExclusionConstraints(dbname, tableName).empty()) {
+        hasUncopyableIndex = true;
+    }
+    return true;
+}
+
 std::string canonicalRoleName(const std::string& raw) {
     const std::string value = trim(raw);
     if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
@@ -3175,6 +3254,23 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             }
         }
         TableSchema srcSchema = g_engine.getTableSchema(s.currentDB, src);
+        if (lc.includingIndexes) {
+            bool hasUncopyableIndex = false;
+            std::string indexError;
+            if (!inspectLikeSourceIndexes(
+                    s.currentDB, src, srcSchema,
+                    hasUncopyableIndex, indexError)) {
+                std::cout << "ERROR: cannot inspect LIKE source indexes: "
+                          << indexError << std::endl;
+                return true;
+            }
+            if (hasUncopyableIndex) {
+                std::cout << "ERROR: LIKE INCLUDING INDEXES cannot clone one "
+                             "or more standalone indexes or exclusion constraints"
+                          << std::endl;
+                return true;
+            }
+        }
         const size_t destinationOffset = tbl.len;
         for (size_t i = 0; i < srcSchema.len; ++i) {
             if (tbl.len >= MAX_COLUMNS) {

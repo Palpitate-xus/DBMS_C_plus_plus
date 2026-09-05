@@ -135,6 +135,37 @@ static void test_like_including_composite_unique() {
               << std::endl;
 }
 
+static void test_like_standalone_indexes_fail_closed() {
+    std::string db = testDbPath("opts_like_standalone_index");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    assert(!ddl.executeSql("CREATE TABLE src (id INT, payload INT)", s));
+    assert(!ddl.executeSql(
+        "CREATE INDEX src_payload_idx ON src (payload)", s));
+    assert(ddl.executeSql(
+        "CREATE TABLE rejected (LIKE src INCLUDING INDEXES)", s));
+    assert(!g_engine.tableExists(db, "rejected"));
+    assert(!ddl.executeSql(
+        "CREATE TABLE without_indexes "
+        "(LIKE src INCLUDING ALL EXCLUDING INDEXES)", s));
+    assert(g_engine.tableExists(db, "without_indexes"));
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE excluded (room INT, "
+        "CONSTRAINT no_duplicate_room EXCLUDE (room WITH =))", s));
+    assert(ddl.executeSql(
+        "CREATE TABLE rejected_exclusion "
+        "(LIKE excluded INCLUDING INDEXES)", s));
+    assert(!g_engine.tableExists(db, "rejected_exclusion"));
+
+    cleanup(db);
+    std::cout << "[OPTS] standalone LIKE indexes fail closed OK"
+              << std::endl;
+}
+
 // LIKE INCLUDING IDENTITY copies auto-increment flag.
 static void test_like_including_identity() {
     std::string db = testDbPath("opts_like_id");
@@ -338,6 +369,7 @@ int main() {
     test_like_including_constraints();
     test_like_including_indexes();
     test_like_including_composite_unique();
+    test_like_standalone_indexes_fail_closed();
     test_like_including_identity();
     test_identity_always();
     test_identity_by_default();
