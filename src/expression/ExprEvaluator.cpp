@@ -5015,6 +5015,13 @@ void ExprEvaluator::registerBuiltins() {
             return ExprValue("timestamp", "", true);
         std::string field = toLower(a[0].value);
         const std::string& src = a[1].value;
+        const int64_t parsedTimestamp = parseTimestampToSeconds(src);
+        if (isInfiniteTimestamp(parsedTimestamp)) {
+            return ExprValue("timestamp",
+                             formatTimestampSeconds(parsedTimestamp), false);
+        }
+        if (parsedTimestamp == 0)
+            return ExprValue("timestamp", "", true);
         auto num = [&](size_t off, size_t len) -> int {
             if (src.size() < off + len) return 0;
             int v = 0;

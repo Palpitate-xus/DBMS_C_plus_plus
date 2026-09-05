@@ -116,6 +116,18 @@ static void test_date_trunc() {
     assert(callFn(eval, "date_trunc", {F("hour"), ts}).value == "2026-06-26 14:00:00");
     assert(callFn(eval, "date_trunc", {F("minute"), ts}).value == "2026-06-26 14:35:00");
     assert(callFn(eval, "date_trunc", {F("quarter"), ts}).value == "2026-04-01 00:00:00");
+    assert(callFn(eval, "date_trunc",
+                  {F("day"), TS("infinity")}).value == "infinity");
+    assert(callFn(eval, "date_trunc",
+                  {F("day"), TS("-infinity")}).value == "-infinity");
+    assert(callFn(eval, "date_trunc",
+                  {F("day"), TS("2026-02-30 14:35:09")}).isNull);
+    assert(callFn(eval, "date_trunc",
+                  {F("day"), TS("2026-13-01 14:35:09")}).isNull);
+    assert(callFn(eval, "date_trunc",
+                  {F("day"), TS("2026x06x26 14:35:09")}).isNull);
+    assert(callFn(eval, "date_trunc",
+                  {F("day"), TS("not-a-timestamp")}).isNull);
     std::cout << "[DATEFN] date_trunc OK" << std::endl;
 }
 
