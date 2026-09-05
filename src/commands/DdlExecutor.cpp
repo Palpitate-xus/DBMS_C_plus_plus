@@ -4237,7 +4237,6 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             if (!tableRelation || tableRelation->relkind != 'r') {
                 throw std::runtime_error("created table catalog row is missing");
             }
-            const Oid tableOid = tableRelation->oid;
             for (const auto& parent : inheritedParents) {
                 if (!updateTableHierarchyFlagsInCatalog(
                         cat, s.currentDB, parent)) {
@@ -4245,23 +4244,11 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                         "cannot update inheritance catalog flags");
                 }
             }
-            for (size_t i = 0; i < tbl.len; ++i) {
-                const std::string sequenceName =
-                    extractNextvalSequence(tbl.cols[i].defaultValue);
-                if (sequenceName.empty()) continue;
-                const PgClassRow* sequence = cat.resolveRelation(
-                    sequenceName, {targetSchema, "public"});
-                if (!sequence || sequence->relkind != 'S') continue;
-                PgDependRow dependency;
-                dependency.classid = PgClassOid_Class;
-                dependency.objid = sequence->oid;
-                dependency.objsubid = 0;
-                dependency.refclassid = PgClassOid_Class;
-                dependency.refobjid = tableOid;
-                dependency.refobjsubid = 0;
-                dependency.deptype = 'a';
-                cat.addDepend(dependency);
-            }
+            // DEFAULT nextval() references remain part of the physical table
+            // definition and are handled by sequence DROP/RENAME scanning.
+            // Modeling them as sequence -> table auto-dependencies would make
+            // an ordinary DROP TABLE incorrectly delete an independent
+            // sequence; pg_attrdef is not modeled as a separate catalog class.
             if (!cat.persistAll()) {
                 throw std::runtime_error("cannot persist table catalog");
             }
@@ -4506,12 +4493,10 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
         }
     }
 
-    // Build the catalog-side CASCADE/RESTRICT plan without mutating catalog
-    // state. Physical storage must be removed before applying this plan.
-    // A rejected plan (e.g. RESTRICT with dependents) must not mark the
-    // DDL snapshot dirty: restoring the physical backup would evict the
-    // CatalogManager and invalidate every outstanding reference even though
-    // no storage mutation ever happened.
+    // Build the catalog-side CASCADE/RESTRICT plan before removing physical
+    // storage. The legacy sequence-dependency migration below is the only
+    // pre-plan mutation; it marks the snapshot dirty so a rejected plan
+    // restores both disk and the live CatalogManager.
     CatalogManager* catalogManager = nullptr;
     CatalogManager::DropPlan catalogDropPlan;
     bool hasCatalogDropPlan = false;
@@ -4526,6 +4511,62 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
         const PgClassRow* cls = cat.resolveRelation(catalogLogicalName, {"public"});
         if (cls) {
             catalogRootOid = cls->oid;
+            // Releases before this fix recorded an ordinary DEFAULT
+            // nextval() as an auto-owned sequence dependency with a zero
+            // referenced column. Distinguish those rows from genuine legacy
+            // OWNED BY metadata by reading the sequence file before planning
+            // the table drop, so an upgrade cannot silently delete an
+            // independent sequence.
+            const auto incomingDependencies = cat.findRefs(
+                PgClassOid_Class, catalogRootOid, -1);
+            for (const auto& dependency : incomingDependencies) {
+                if (dependency.classid != PgClassOid_Class ||
+                    dependency.objsubid != 0 ||
+                    dependency.refobjsubid != 0 ||
+                    dependency.deptype != 'a') {
+                    continue;
+                }
+                const PgClassRow* dependent =
+                    cat.findClass(dependency.objid);
+                if (!dependent || dependent->relkind != 'S') continue;
+
+                std::string sequenceStorageName;
+                std::string sequenceNameError;
+                if (!catalogSequenceStorageName(
+                        cat, *dependent, sequenceStorageName,
+                        sequenceNameError)) {
+                    std::cout << "DROP TABLE dependency migration failed: "
+                              << sequenceNameError << std::endl;
+                    return true;
+                }
+                SequenceInfo sequenceInfo;
+                if (g_engine.getSequenceInfo(
+                        s.currentDB, sequenceStorageName,
+                        sequenceInfo) != DBStatus::OK) {
+                    std::cout << "DROP TABLE dependency migration failed: cannot read sequence "
+                              << sequenceStorageName << std::endl;
+                    return true;
+                }
+                auto canonicalPublicName = [](const std::string& name) {
+                    return name.rfind("public.", 0) == 0
+                        ? name.substr(7) : name;
+                };
+                if (!sequenceInfo.ownedByTable.empty() &&
+                    canonicalPublicName(sequenceInfo.ownedByTable) ==
+                        canonicalPublicName(catalogLogicalName)) {
+                    continue;
+                }
+                txn.markSnapshotDirty();
+                if (!cat.removeDepend(
+                        dependency.classid, dependency.objid,
+                        dependency.objsubid, dependency.refclassid,
+                        dependency.refobjid,
+                        dependency.refobjsubid)) {
+                    std::cout << "DROP TABLE dependency migration failed"
+                              << std::endl;
+                    return true;
+                }
+            }
             auto behavior = stmt->cascade
                                 ? CatalogManager::DropBehavior::Cascade
                                 : CatalogManager::DropBehavior::Restrict;
@@ -5091,10 +5132,8 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
             size_t first = owner.find('.');
             size_t last = owner.rfind('.');
             if (first != std::string::npos && last != first) {
-                // schema.table.column or table.column with schema
-                std::string schemaPart = owner.substr(0, first);
-                std::string tablePart = owner.substr(first + 1, last - first - 1);
-                info.ownedByTable = (schemaPart == "public") ? tablePart : owner.substr(0, last);
+                // schema.table.column
+                info.ownedByTable = owner.substr(0, last);
                 info.ownedByColumn = owner.substr(last + 1);
             } else if (first != std::string::npos) {
                 info.ownedByTable = owner.substr(0, first);
@@ -5108,6 +5147,7 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
     CatalogManager* sequenceCatalog = nullptr;
     Oid sequenceNamespaceOid = INVALID_OID;
     Oid ownedTableOid = INVALID_OID;
+    int32_t ownedColumnNumber = 0;
     try {
         CatalogManager& catalog =
             g_engine.catalogService().get(s.currentDB);
@@ -5140,17 +5180,36 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
             return true;
         }
         if (!info.ownedByTable.empty()) {
-            const auto* table = catalog.resolveRelation(
-                info.ownedByTable, {sequenceSchema, "public"});
-            if (!table || table->relkind != 'r' ||
-                info.ownedByColumn.empty() ||
-                !catalog.findAttribute(
-                    table->oid, info.ownedByColumn)) {
+            CatalogManager::QualifiedName ownerName;
+            if (!CatalogManager::parseQualifiedName(
+                    info.ownedByTable, ownerName) ||
+                ownerName.name.empty() ||
+                ownerName.schema.find('.') != std::string::npos) {
+                std::cout << "CREATE SEQUENCE OWNED BY target is invalid"
+                          << std::endl;
+                return true;
+            }
+            const std::string ownerSchema = ownerName.schema.empty()
+                ? sequenceSchema : ownerName.schema;
+            if (ownerSchema != sequenceSchema) {
+                std::cout << "ERROR: sequence and owned table must be in the same schema"
+                          << std::endl;
+                return true;
+            }
+            const auto* table = catalog.findClassByName(
+                ownerName.name, sequenceNamespaceOid);
+            const auto* column = table && table->relkind == 'r'
+                ? catalog.findAttribute(table->oid, info.ownedByColumn)
+                : nullptr;
+            if (!table || table->relkind != 'r' || !column) {
                 std::cout << "CREATE SEQUENCE OWNED BY target does not exist"
                           << std::endl;
                 return true;
             }
             ownedTableOid = table->oid;
+            ownedColumnNumber = column->attnum;
+            info.ownedByTable = sequenceSchema == "public"
+                ? ownerName.name : sequenceSchema + "." + ownerName.name;
         }
     } catch (const std::exception& error) {
         std::cout << "CREATE SEQUENCE catalog preflight failed: "
@@ -5181,7 +5240,7 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
             dependency.objsubid = 0;
             dependency.refclassid = PgClassOid_Class;
             dependency.refobjid = ownedTableOid;
-            dependency.refobjsubid = 0;
+            dependency.refobjsubid = ownedColumnNumber;
             dependency.deptype = 'a';
             sequenceCatalog->addDepend(dependency);
         }

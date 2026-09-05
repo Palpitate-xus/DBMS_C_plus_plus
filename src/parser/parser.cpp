@@ -5446,12 +5446,19 @@ StmtPtr SQLParser::parseCreateSequence(const std::vector<std::string>& tokens, s
                     if (toLower(owner) == "none") {
                         stmt->options["ownedby"] = "none";
                         pos += 3;
-                    } else if (pos + 4 < tokens.size() && tokens[pos + 3] == ".") {
+                    } else if (pos + 6 < tokens.size() &&
+                               tokens[pos + 3] == "." &&
+                               tokens[pos + 5] == ".") {
+                        stmt->options["ownedby"] =
+                            owner + "." + tokens[pos + 4] + "." +
+                            tokens[pos + 6];
+                        pos += 7;
+                    } else if (pos + 4 < tokens.size() &&
+                               tokens[pos + 3] == ".") {
                         stmt->options["ownedby"] = owner + "." + tokens[pos + 4];
                         pos += 5;
                     } else {
-                        stmt->options["ownedby"] = owner;
-                        pos += 3;
+                        return nullptr;
                     }
                 } else {
                     return nullptr;

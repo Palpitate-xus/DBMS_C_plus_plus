@@ -214,6 +214,19 @@ static void test_sequence_owned_by_drop_table() {
     dbms::CatalogManager& cat = g_engine.catalogService().get(db);
     const auto* seqRel = cat.resolveRelation("s1", {"public"});
     assert(seqRel != nullptr);
+    const auto* tableRel = cat.resolveRelation("t", {"public"});
+    assert(tableRel != nullptr);
+    const auto* ownerColumn = cat.findAttribute(tableRel->oid, "id");
+    assert(ownerColumn != nullptr);
+    const auto ownerships = cat.findDepends(
+        dbms::PgClassOid_Class, seqRel->oid, 0);
+    assert(std::count_if(
+               ownerships.begin(), ownerships.end(),
+               [&](const dbms::PgDependRow& dependency) {
+                   return dependency.deptype == 'a' &&
+                          dependency.refobjid == tableRel->oid &&
+                          dependency.refobjsubid == ownerColumn->attnum;
+               }) == 1);
 
     err = ddl.executeSql("DROP TABLE t CASCADE", s);
     assert(!err);
@@ -221,6 +234,85 @@ static void test_sequence_owned_by_drop_table() {
 
     cleanup(db);
     std::cout << "[SEQUENCE] owned by / drop table cascade OK" << std::endl;
+}
+
+static void test_default_sequence_is_not_table_owned() {
+    const std::string db = testDbPath("seq_default_not_owned");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE SEQUENCE standalone", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE uses_standalone "
+        "(id INT DEFAULT nextval('standalone'))", s));
+
+    dbms::CatalogManager& catalog =
+        g_engine.catalogService().get(db);
+    const auto* sequence = catalog.resolveRelation("standalone", {"public"});
+    const auto* table =
+        catalog.resolveRelation("uses_standalone", {"public"});
+    assert(sequence && table);
+    const dbms::Oid sequenceOid = sequence->oid;
+    const dbms::Oid tableOid = table->oid;
+    const auto dependencies = catalog.findDepends(
+        dbms::PgClassOid_Class, sequenceOid, 0);
+    assert(std::none_of(
+        dependencies.begin(), dependencies.end(),
+        [&](const dbms::PgDependRow& dependency) {
+            return dependency.deptype == 'a' &&
+                   dependency.refobjid == tableOid;
+        }));
+
+    assert(!ddl.executeSql("DROP TABLE uses_standalone", s));
+    assert(g_engine.sequenceExists(db, "standalone"));
+    assert(g_engine.nextval(db, "standalone") == 1);
+
+    // Simulate the zero-subobject dependency written by older releases.
+    assert(!ddl.executeSql("CREATE SEQUENCE legacy_standalone", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE legacy_uses "
+        "(id INT DEFAULT nextval('legacy_standalone'))", s));
+    const auto* legacySequence =
+        catalog.resolveRelation("legacy_standalone", {"public"});
+    const auto* legacyTable =
+        catalog.resolveRelation("legacy_uses", {"public"});
+    assert(legacySequence && legacyTable);
+    const dbms::Oid legacySequenceOid = legacySequence->oid;
+    dbms::PgDependRow legacyDependency;
+    legacyDependency.classid = dbms::PgClassOid_Class;
+    legacyDependency.objid = legacySequenceOid;
+    legacyDependency.objsubid = 0;
+    legacyDependency.refclassid = dbms::PgClassOid_Class;
+    legacyDependency.refobjid = legacyTable->oid;
+    legacyDependency.refobjsubid = 0;
+    legacyDependency.deptype = 'a';
+    catalog.addDepend(legacyDependency);
+    assert(catalog.persistAll());
+
+    assert(!ddl.executeSql("DROP TABLE legacy_uses", s));
+    assert(g_engine.sequenceExists(db, "legacy_standalone"));
+    assert(g_engine.nextval(db, "legacy_standalone") == 1);
+    {
+        dbms::CatalogManager durable(
+            (fs::path(g_engine.dbPath(db)) / "pg_catalog").string());
+        const auto* durableSequence =
+            durable.findClass(legacySequenceOid);
+        assert(durableSequence && durableSequence->relkind == 'S');
+        const auto durableDependencies = durable.findDepends(
+            dbms::PgClassOid_Class, legacySequenceOid, 0);
+        assert(std::none_of(
+            durableDependencies.begin(), durableDependencies.end(),
+            [](const dbms::PgDependRow& dependency) {
+                return dependency.deptype == 'a';
+            }));
+    }
+
+    cleanup(db);
+    std::cout << "[SEQUENCE] defaults remain independent of tables OK"
+              << std::endl;
 }
 
 static void test_sequence_identity_still_works() {
@@ -599,9 +691,24 @@ static void test_schema_qualified_sequence_drop() {
     }
 
     assert(!ddl.executeSql("CREATE TABLE app.owner (id INT)", s));
-    assert(!ddl.executeSql("CREATE SEQUENCE app.owned", s));
-    assert(!ddl.executeSql(
-        "ALTER SEQUENCE app.owned OWNED BY app.owner.id", s));
+    assert(!ddl.executeSql("CREATE TABLE public_owner (id INT)", s));
+    const auto parsedOwnedCreate = parser.parse(
+        "CREATE SEQUENCE app.owned OWNED BY app.owner.id");
+    assert(parsedOwnedCreate.success && parsedOwnedCreate.stmt);
+    const auto* ownedCreate = dynamic_cast<const dbms::CreateObjectStmt*>(
+        parsedOwnedCreate.stmt.get());
+    assert(ownedCreate);
+    assert(ownedCreate->options.at("ownedby") == "app.owner.id");
+    assert(ddl.executeSql(
+        "CREATE SEQUENCE app.cross_schema "
+        "OWNED BY public.public_owner.id", s));
+    assert(!g_engine.sequenceExists(db, "app.cross_schema"));
+    assert(!ddl.execute(parsedOwnedCreate.stmt, s));
+    dbms::SequenceInfo ownedInfo;
+    assert(g_engine.getSequenceInfo(
+               db, "app.owned", ownedInfo) == dbms::DBStatus::OK);
+    assert(ownedInfo.ownedByTable == "app.owner");
+    assert(ownedInfo.ownedByColumn == "id");
     assert(!ddl.executeSql("DROP TABLE app.owner CASCADE", s));
     assert(!g_engine.sequenceExists(db, "app.owned"));
     {
@@ -756,6 +863,7 @@ int main() {
     test_sequence_alter();
     test_sequence_rename();
     test_sequence_owned_by_drop_table();
+    test_default_sequence_is_not_table_owned();
     test_sequence_identity_still_works();
     test_sequence_numeric_input_fails_closed();
     test_schema_qualified_sequence_create();

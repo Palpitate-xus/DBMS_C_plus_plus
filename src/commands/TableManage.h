@@ -168,6 +168,9 @@ public:
     DBStatus renameSequence(const std::string& dbname, const std::string& oldName,
                             const std::string& newName);
     DBStatus dropSequence(const std::string& dbname, const std::string& seqname);
+    DBStatus getSequenceInfo(const std::string& dbname,
+                             const std::string& seqname,
+                             dbms::SequenceInfo& info) const;
     int64_t nextval(const std::string& dbname, const std::string& seqname);
     int64_t currval(const std::string& dbname, const std::string& seqname);
     int64_t lastval() const;

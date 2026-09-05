@@ -17038,6 +17038,26 @@ DBStatus StorageEngine::dropSequence(const std::string& dbname,
     return DBStatus::OK;
 }
 
+DBStatus StorageEngine::getSequenceInfo(const std::string& dbname,
+                                        const std::string& seqname,
+                                        dbms::SequenceInfo& info) const {
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    if (!validSequenceName(seqname)) return DBStatus::INVALID_ARGUMENT;
+    const auto path = sequencePath(dbname, seqname);
+    std::lock_guard<std::mutex> lock(g_sequenceMutex);
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(path, error);
+    if (error) return DBStatus::IO_ERROR;
+    if (!std::filesystem::exists(status)) return DBStatus::TABLE_NOT_FOUND;
+    if (!std::filesystem::is_regular_file(status)) {
+        return DBStatus::CORRUPTED_DATA;
+    }
+    int64_t nextValue = 0;
+    int64_t lastAllocated = 0;
+    return readSequenceFile(path, info, nextValue, lastAllocated)
+        ? DBStatus::OK : DBStatus::CORRUPTED_DATA;
+}
+
 int64_t StorageEngine::nextval(const std::string& dbname,
                                 const std::string& seqname) {
     if (dbname.empty() || !validStoredIdentifier(dbname, MAX_TABLE_NAME_LEN) ||
