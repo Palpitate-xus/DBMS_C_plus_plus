@@ -95,6 +95,14 @@ static void test_interval() {
     // digits. Formatting must not silently truncate it to the stack buffer.
     assert(callFn(eval, "to_char", {IV("10000000 hours"), F("HH24:MI:SS")}).value ==
            "10000000:00:00");
+    assert(callFn(eval, "to_char",
+                  {IV(std::string(400, '9') + " hours"), F("HH24")}).isNull);
+    assert(callFn(eval, "to_char",
+                  {IV("3000000000 hours"), F("HH24")}).isNull);
+    assert(callFn(eval, "to_char",
+                  {IV("9223372036854775807 seconds"), F("HH24")}).isNull);
+    assert(callFn(eval, "to_char",
+                  {IV(std::string(100, '9') + ":00:00"), F("HH24")}).isNull);
     std::cout << "[TOCHAR] interval OK" << std::endl;
 }
 

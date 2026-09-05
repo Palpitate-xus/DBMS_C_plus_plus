@@ -174,6 +174,54 @@ static IntervalParts parseIntervalText(const std::string& in) {
         negate = true;
         s = trimStr(s.substr(0, s.size() - 4));
     }
+    auto parseInteger = [](const std::string& text, long long& value) {
+        try {
+            size_t consumed = 0;
+            value = std::stoll(text, &consumed);
+            return consumed == text.size();
+        } catch (...) {
+            return false;
+        }
+    };
+    auto addScaled = [](long long& target, long long value,
+                        long long scale) {
+        const __int128 total = static_cast<__int128>(target) +
+            static_cast<__int128>(value) * scale;
+        // LLONG_MIN cannot be safely negated by the canonical formatter or
+        // by a trailing "ago", so it is outside this text representation.
+        if (total <= std::numeric_limits<long long>::lowest() ||
+            total > std::numeric_limits<long long>::max()) {
+            return false;
+        }
+        target = static_cast<long long>(total);
+        return true;
+    };
+    auto parseDecimal = [](const std::string& text, long double& value) {
+        try {
+            size_t consumed = 0;
+            value = std::stold(text, &consumed);
+            return consumed == text.size() && std::isfinite(value);
+        } catch (...) {
+            return false;
+        }
+    };
+    auto truncateToInteger = [](long double value, long long& result) {
+        if (!std::isfinite(value) ||
+            value <= static_cast<long double>(
+                         std::numeric_limits<long long>::lowest()) ||
+            value > static_cast<long double>(
+                        std::numeric_limits<long long>::max())) {
+            return false;
+        }
+        result = static_cast<long long>(value);
+        return true;
+    };
+    auto addScaledDecimal = [&](long long& target, long double value,
+                                long double scale) {
+        long long delta = 0;
+        return truncateToInteger(value * scale, delta) &&
+               addScaled(target, delta, 1);
+    };
     // SQL year-month shorthand "N-M"
     {
         bool shorthand = true;
@@ -184,8 +232,15 @@ static IntervalParts parseIntervalText(const std::string& in) {
             else if (!std::isdigit(static_cast<unsigned char>(c))) { shorthand = false; break; }
         }
         if (shorthand && dash != std::string::npos && dash > 0 && dash + 1 < s.size()) {
-            long long mm = std::stoll(s.substr(0, dash)) * 12 + std::stoll(s.substr(dash + 1));
-            r.months = negate ? -mm : mm;
+            long long years = 0;
+            long long months = 0;
+            if (!parseInteger(s.substr(0, dash), years) ||
+                !parseInteger(s.substr(dash + 1), months) ||
+                !addScaled(r.months, years, 12) ||
+                !addScaled(r.months, months, 1)) {
+                return IntervalParts{};
+            }
+            if (negate) r.months = -r.months;
             r.ok = true;
             return r;
         }
@@ -209,58 +264,101 @@ static IntervalParts parseIntervalText(const std::string& in) {
         r.micros = static_cast<long long>(total);
         return true;
     };
+    auto parseClockToken = [&](const std::string& token) {
+        const size_t firstColon = token.find(':');
+        if (firstColon == std::string::npos || firstColon == 0)
+            return false;
+        const size_t secondColon = token.find(':', firstColon + 1);
+        if (secondColon != std::string::npos &&
+            token.find(':', secondColon + 1) != std::string::npos) {
+            return false;
+        }
+        auto parseClockInteger = [&](const std::string& text,
+                                     long long& value) {
+            return !text.empty() &&
+                text.find_first_not_of("0123456789") == std::string::npos &&
+                parseInteger(text, value);
+        };
+
+        const std::string hourText = token.substr(0, firstColon);
+        long long hours = 0;
+        if (!parseInteger(hourText, hours)) return false;
+        const size_t minuteEnd = secondColon == std::string::npos
+            ? token.size() : secondColon;
+        long long minutes = 0;
+        if (!parseClockInteger(
+                token.substr(firstColon + 1,
+                             minuteEnd - firstColon - 1),
+                minutes)) {
+            return false;
+        }
+
+        long long seconds = 0;
+        long long fraction = 0;
+        if (secondColon != std::string::npos) {
+            const std::string secondsText = token.substr(secondColon + 1);
+            const size_t dot = secondsText.find('.');
+            if (dot != std::string::npos &&
+                secondsText.find('.', dot + 1) != std::string::npos) {
+                return false;
+            }
+            const std::string whole = secondsText.substr(0, dot);
+            if (!parseClockInteger(whole, seconds)) return false;
+            if (dot != std::string::npos) {
+                const std::string digits = secondsText.substr(dot + 1);
+                if (digits.empty() ||
+                    digits.find_first_not_of("0123456789") !=
+                        std::string::npos) {
+                    return false;
+                }
+                const size_t kept = std::min<size_t>(digits.size(), 6);
+                for (size_t i = 0; i < kept; ++i)
+                    fraction = fraction * 10 + (digits[i] - '0');
+                for (size_t i = kept; i < 6; ++i) fraction *= 10;
+            }
+        }
+        return addClockMicros(hours, minutes, seconds, fraction,
+                              hourText.front() == '-');
+    };
     auto applyUnit = [&](long long n, const std::string& unit) {
         std::string u;
         for (char c : unit) u += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        // strip a trailing 's' for singular forms
-        if (u == "year" || u == "years" || u == "y") r.months += n * 12;
-        else if (u == "mon" || u == "mons" || u == "month" || u == "months") r.months += n;
-        else if (u == "week" || u == "weeks" || u == "w") r.days += n * 7;
-        else if (u == "day" || u == "days" || u == "d") r.days += n;
-        else if (u == "hour" || u == "hours" || u == "h") r.micros += n * 3600000000LL;
-        else if (u == "min" || u == "mins" || u == "minute" || u == "minutes") r.micros += n * 60000000LL;
-        else if (u == "sec" || u == "secs" || u == "second" || u == "seconds" || u == "s") r.micros += n * 1000000LL;
-        else if (u == "millisec" || u == "millisecs" || u == "milliseconds") r.micros += n * 1000LL;
-        else if (u == "microsec" || u == "microsecs" || u == "microseconds") r.micros += n;
-        else r.ok = false;
-        (void)negate;
+        if (u == "year" || u == "years" || u == "y")
+            return addScaled(r.months, n, 12);
+        if (u == "mon" || u == "mons" || u == "month" || u == "months")
+            return addScaled(r.months, n, 1);
+        if (u == "week" || u == "weeks" || u == "w")
+            return addScaled(r.days, n, 7);
+        if (u == "day" || u == "days" || u == "d")
+            return addScaled(r.days, n, 1);
+        if (u == "hour" || u == "hours" || u == "h")
+            return addScaled(r.micros, n, 3600000000LL);
+        if (u == "min" || u == "mins" || u == "minute" || u == "minutes")
+            return addScaled(r.micros, n, 60000000LL);
+        if (u == "sec" || u == "secs" || u == "second" || u == "seconds" || u == "s")
+            return addScaled(r.micros, n, 1000000LL);
+        if (u == "millisec" || u == "millisecs" || u == "milliseconds")
+            return addScaled(r.micros, n, 1000LL);
+        if (u == "microsec" || u == "microsecs" || u == "microseconds")
+            return addScaled(r.micros, n, 1);
+        return false;
     };
     std::istringstream iss(s);
     std::string tok;
     while (iss >> tok) {
         if (tok.find(':') != std::string::npos) {
-            // HH:MM:SS[.f] or HH:MM
-            long long hh = 0, mm = 0, ss = 0, fv = 0;
-            char c1 = 0, c2 = 0;
-            int got = std::sscanf(tok.c_str(), "%lld%c%lld%c%lld.%lld", &hh, &c1, &mm, &c2, &ss, &fv);
-            (void)got;
-            if (c1 == ':' && c2 == ':') {
-                size_t dot = tok.find('.');
-                size_t fracDigits = dot == std::string::npos ? 0 : tok.size() - dot - 1;
-                while (fracDigits > 6) { fv /= 10; --fracDigits; }
-                while (fracDigits < 6 && fracDigits > 0) { fv *= 10; ++fracDigits; }
-                if (fracDigits == 0) fv = 0;
-                if (!addClockMicros(hh, mm, ss, fv,
-                                    !tok.empty() && tok.front() == '-')) {
-                    r.ok = false;
-                    break;
-                }
-                continue;
-            }
-            if (std::sscanf(tok.c_str(), "%lld%c%lld", &hh, &c1, &mm) == 3 && c1 == ':') {
-                if (!addClockMicros(hh, mm, 0, 0,
-                                    !tok.empty() && tok.front() == '-')) {
-                    r.ok = false;
-                    break;
-                }
-                continue;
-            }
-            r.ok = false;
-            break;
+            if (!parseClockToken(tok)) r.ok = false;
+            if (!r.ok) break;
+            continue;
         }
         bool allDigit = !tok.empty() &&
             tok.find_first_not_of("0123456789") == std::string::npos;
         if (allDigit) {
+            long long integer = 0;
+            if (!parseInteger(tok, integer)) {
+                r.ok = false;
+                break;
+            }
             // A bare number is seconds — unless the next token is a unit
             // ("1 day"), in which case it applies to that unit.
             std::string peek;
@@ -269,47 +367,83 @@ static IntervalParts parseIntervalText(const std::string& in) {
                 bool unitish = !peek.empty() &&
                     std::isalpha(static_cast<unsigned char>(peek[0]));
                 if (unitish) {
-                    applyUnit(std::stoll(tok), peek);
+                    if (!applyUnit(integer, peek)) r.ok = false;
                     continue;
                 }
                 // put the token back
                 iss.clear();
                 iss.seekg(pos0);
             }
-            r.micros += std::stoll(tok) * 1000000LL;
+            if (!addScaled(r.micros, integer, 1000000LL)) {
+                r.ok = false;
+                break;
+            }
             continue;
         }
         // number[.fraction][unit] with unit possibly in the next token
         size_t endNum = 0;
-        bool tokNeg = !tok.empty() && tok[0] == '-';
-        size_t scan0 = tokNeg ? 1 : 0;
-        while (scan0 + endNum < tok.size() && (std::isdigit(static_cast<unsigned char>(tok[scan0 + endNum])) || tok[scan0 + endNum] == '.')) ++endNum;
-        while (endNum < tok.size() && (std::isdigit(static_cast<unsigned char>(tok[endNum])) || tok[endNum] == '.')) ++endNum;
-        if (endNum == 0) { r.ok = false; break; }
-        if (tokNeg) endNum += 1; // include the sign in the numeric prefix
-        double n = std::stod(tok.substr(0, endNum));
+        if (!tok.empty() && (tok[0] == '-' || tok[0] == '+')) ++endNum;
+        bool sawDigit = false;
+        while (endNum < tok.size() &&
+               std::isdigit(static_cast<unsigned char>(tok[endNum]))) {
+            sawDigit = true;
+            ++endNum;
+        }
+        if (endNum < tok.size() && tok[endNum] == '.') {
+            ++endNum;
+            while (endNum < tok.size() &&
+                   std::isdigit(static_cast<unsigned char>(tok[endNum]))) {
+                sawDigit = true;
+                ++endNum;
+            }
+        }
+        if (!sawDigit) { r.ok = false; break; }
+        long double n = 0;
+        if (!parseDecimal(tok.substr(0, endNum), n)) {
+            r.ok = false;
+            break;
+        }
         std::string unit = (endNum <= tok.size()) ? tok.substr(endNum) : std::string();
         if (unit.empty()) {
-            if (!(iss >> unit)) { r.micros += static_cast<long long>(n * 1000000.0); continue; }
+            if (!(iss >> unit)) {
+                if (!addScaledDecimal(r.micros, n, 1000000.0L))
+                    r.ok = false;
+                continue;
+            }
         }
         // lower-case the unit
         for (char& c : unit) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         if (unit == "days" || unit == "day") {
-            long long whole = static_cast<long long>(n);
-            double frac = n - whole;
-            r.days += whole;
-            r.micros += static_cast<long long>(frac * 86400000000.0);
+            long long whole = 0;
+            if (!truncateToInteger(n, whole) ||
+                !addScaled(r.days, whole, 1) ||
+                !addScaledDecimal(r.micros, n - whole,
+                                  86400000000.0L)) {
+                r.ok = false;
+            }
         } else if (unit == "hours" || unit == "hour") {
-            r.micros += static_cast<long long>(n * 3600000000.0);
+            if (!addScaledDecimal(r.micros, n, 3600000000.0L))
+                r.ok = false;
         } else if (unit == "minutes" || unit == "minute") {
-            r.micros += static_cast<long long>(n * 60000000.0);
+            if (!addScaledDecimal(r.micros, n, 60000000.0L))
+                r.ok = false;
         } else if (unit == "seconds" || unit == "second") {
-            r.micros += static_cast<long long>(n * 1000000.0);
+            if (!addScaledDecimal(r.micros, n, 1000000.0L))
+                r.ok = false;
         } else {
-            applyUnit(static_cast<long long>(n), unit);
+            long long integer = 0;
+            if (!truncateToInteger(n, integer) ||
+                !applyUnit(integer, unit)) {
+                r.ok = false;
+            }
         }
+        if (!r.ok) break;
     }
-    if (negate) { r.months = -r.months; r.days = -r.days; r.micros = -r.micros; }
+    if (r.ok && negate) {
+        r.months = -r.months;
+        r.days = -r.days;
+        r.micros = -r.micros;
+    }
     return r;
 }
 
@@ -5007,6 +5141,7 @@ void ExprEvaluator::registerBuiltins() {
         // (PG renders interval time-of-day fields).
         if (tn == "interval") {
             IntervalParts ip = parseIntervalText(vval);
+            if (!ip.ok) return ExprValue("text", "", true);
             {
                 long long totalSecs = ip.micros / 1000000LL;
                 long long hh = totalSecs / 3600;

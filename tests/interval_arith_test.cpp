@@ -49,6 +49,11 @@ static void test_add_sub() {
     assert(negativeClock.ok &&
            negativeClock.value == "2024-03-10 07:54:54");
 
+    auto fractionalDay = eval(
+        "'2024-03-10 00:00:00'::timestamp + '1.5 days'::interval");
+    assert(fractionalDay.ok &&
+           fractionalDay.value == "2024-03-11 12:00:00");
+
     // across leap day
     auto g = eval("'2024-02-28'::timestamp + '2 days'::interval");
     assert(g.ok && g.value == "2024-03-01 00:00:00");
