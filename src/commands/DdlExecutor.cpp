@@ -2818,6 +2818,8 @@ bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
         return true;
     }
     std::string name = stmt->objectNames.front();
+    const bool storageSchemaExists =
+        g_engine.schemaExists(s.currentDB, name);
 
     // Several object families still use storage sidecars instead of pg_type
     // or pg_proc rows. They nevertheless belong to their logical namespace
@@ -2905,17 +2907,36 @@ bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
         dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
         catalogManager = &cat;
         const auto* ns = cat.findNamespaceByName(name);
-        if (ns) {
-            const auto behavior = stmt->cascade
-                ? CatalogManager::DropBehavior::Cascade
-                : CatalogManager::DropBehavior::Restrict;
-            catalogDropPlan = cat.planDrop(PgClassOid_Namespace, ns->oid, behavior);
-            if (!catalogDropPlan.ok()) {
-                std::cout << "ERROR: " << catalogDropPlan.error << std::endl;
-                return true;
+        if (!ns) {
+            if (!storageSchemaExists && auxiliaryObjects.empty()) {
+                if (stmt->ifExists) {
+                    if (!txn.commit()) return true;
+                    std::cout << "NOTICE: schema \"" << name
+                              << "\" does not exist, skipping" << std::endl;
+                    return false;
+                }
+                std::cout << "ERROR: schema \"" << name
+                          << "\" does not exist" << std::endl;
+            } else {
+                std::cout << "DROP SCHEMA refused: storage objects for "
+                          << name << " have no catalog namespace" << std::endl;
             }
-            hasCatalogDropPlan = true;
+            return true;
         }
+        if (!storageSchemaExists) {
+            std::cout << "DROP SCHEMA refused: catalog namespace " << name
+                      << " has no storage marker" << std::endl;
+            return true;
+        }
+        const auto behavior = stmt->cascade
+            ? CatalogManager::DropBehavior::Cascade
+            : CatalogManager::DropBehavior::Restrict;
+        catalogDropPlan = cat.planDrop(PgClassOid_Namespace, ns->oid, behavior);
+        if (!catalogDropPlan.ok()) {
+            std::cout << "ERROR: " << catalogDropPlan.error << std::endl;
+            return true;
+        }
+        hasCatalogDropPlan = true;
     } catch (const std::exception& e) {
         std::cerr << "DROP SCHEMA catalog preflight failed: " << e.what()
                   << std::endl;

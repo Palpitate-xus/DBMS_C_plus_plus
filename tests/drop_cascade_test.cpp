@@ -423,6 +423,41 @@ static void test_drop_schema_handles_auxiliary_objects() {
               << std::endl;
 }
 
+static void test_drop_schema_validates_both_catalogs() {
+    const std::string db = testDbPath("drop_schema_existence");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("DROP SCHEMA IF EXISTS never_created", s));
+    assert(ddl.executeSql("DROP SCHEMA never_created", s));
+
+    assert(!ddl.executeSql("CREATE SCHEMA inconsistent", s));
+    auto& catalog = g_engine.catalogService().get(db);
+    const auto* namespaceRow =
+        catalog.findNamespaceByName("inconsistent");
+    assert(namespaceRow != nullptr);
+    const auto plan = catalog.planDrop(
+        dbms::PgClassOid_Namespace, namespaceRow->oid,
+        dbms::CatalogManager::DropBehavior::Restrict);
+    assert(plan.ok());
+    assert(catalog.applyDropPlan(plan));
+    assert(catalog.persistAll());
+
+    // A marker without its dependency catalog is corruption, not an empty
+    // schema. Refuse to erase the remaining evidence even with IF EXISTS.
+    assert(ddl.executeSql(
+        "DROP SCHEMA IF EXISTS inconsistent CASCADE", s));
+    assert(g_engine.schemaExists(db, "inconsistent"));
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[DROP-CASCADE] schema existence checks both catalogs OK"
+              << std::endl;
+}
+
 static void test_multi_table_drop_fails_before_mutation() {
     const std::string db = testDbPath("drop_multiple_preflight");
     cleanup(db);
@@ -569,6 +604,7 @@ int main() {
     test_drop_schema_cascade_removes_relation_storage();
     test_drop_schema_catalog_preflight_fails_closed();
     test_drop_schema_handles_auxiliary_objects();
+    test_drop_schema_validates_both_catalogs();
     test_multi_table_drop_fails_before_mutation();
     test_drop_removes_named_table_sidecars();
     test_drop_purges_authorization_state();
