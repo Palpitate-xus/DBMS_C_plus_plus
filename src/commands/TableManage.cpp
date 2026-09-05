@@ -24889,7 +24889,11 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
             if (!selectCols.empty() && selectCols.find(col.dataName) == selectCols.end())
                 continue;
             std::string val = extractColumnValue(mr.second, tbl, i, dbname, true);
-            const bool physicallyNull =
+            // VIRTUAL generated columns have no physical payload, so their
+            // heap NULL bit describes the absent storage slot rather than the
+            // value computed above.  Only persisted columns can be declared
+            // NULL by the row bitmap here.
+            const bool physicallyNull = col.generatedKind != 'v' &&
                 isColumnNullByRid(dbname, tbl.tablename, mr.first, i);
             // Apply session timezone for TIMESTAMPTZ columns
             if (timezoneOffsetMinutes != 0 && col.dataType == "timestamptz" && !val.empty()) {
