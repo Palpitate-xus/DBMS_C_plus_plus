@@ -444,6 +444,24 @@ static bool updateTableClassInCatalog(
     }
 }
 
+static bool synchronizeTableRlsInCatalog(
+    const std::string& dbname, const std::string& physicalTableName) {
+    try {
+        const TableSchema table =
+            g_engine.getTableSchema(dbname, physicalTableName);
+        return updateTableClassInCatalog(
+            dbname, physicalTableName,
+            [&](PgClassRow& relation) {
+                relation.relrowsecurity = table.rowLevelSecurity;
+                relation.relforcerowsecurity = table.forceRowLevelSecurity;
+            });
+    } catch (const std::exception& error) {
+        std::cerr << "ALTER TABLE row-security catalog update failed: "
+                  << error.what() << std::endl;
+        return false;
+    }
+}
+
 // ----------------------------------------------------------------------------
 // Public entry points
 // ----------------------------------------------------------------------------
@@ -1091,20 +1109,48 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 break;
             }
             case AlterTableStmt::Action::EnableRowLevelSecurity:
-                status = g_engine.enableRowLevelSecurity(s.currentDB, tableName, false);
+                status = g_engine.alterTableRowLevelSecurity(
+                    s.currentDB, tableName, true, std::nullopt);
                 if (!alterStatusOk(status, "Table")) return true;
+                if (!tableIsTemporary &&
+                    !synchronizeTableRlsInCatalog(s.currentDB, tableName)) {
+                    std::cout << "ALTER TABLE row-security catalog update failed"
+                              << std::endl;
+                    return true;
+                }
                 break;
             case AlterTableStmt::Action::DisableRowLevelSecurity:
-                status = g_engine.disableRowLevelSecurity(s.currentDB, tableName);
+                status = g_engine.alterTableRowLevelSecurity(
+                    s.currentDB, tableName, false, std::nullopt);
                 if (!alterStatusOk(status, "Table")) return true;
+                if (!tableIsTemporary &&
+                    !synchronizeTableRlsInCatalog(s.currentDB, tableName)) {
+                    std::cout << "ALTER TABLE row-security catalog update failed"
+                              << std::endl;
+                    return true;
+                }
                 break;
             case AlterTableStmt::Action::ForceRowLevelSecurity:
-                status = g_engine.enableRowLevelSecurity(s.currentDB, tableName, true);
+                status = g_engine.alterTableRowLevelSecurity(
+                    s.currentDB, tableName, std::nullopt, true);
                 if (!alterStatusOk(status, "Table")) return true;
+                if (!tableIsTemporary &&
+                    !synchronizeTableRlsInCatalog(s.currentDB, tableName)) {
+                    std::cout << "ALTER TABLE row-security catalog update failed"
+                              << std::endl;
+                    return true;
+                }
                 break;
             case AlterTableStmt::Action::NoForceRowLevelSecurity:
-                status = g_engine.enableRowLevelSecurity(s.currentDB, tableName, false);
+                status = g_engine.alterTableRowLevelSecurity(
+                    s.currentDB, tableName, std::nullopt, false);
                 if (!alterStatusOk(status, "Table")) return true;
+                if (!tableIsTemporary &&
+                    !synchronizeTableRlsInCatalog(s.currentDB, tableName)) {
+                    std::cout << "ALTER TABLE row-security catalog update failed"
+                              << std::endl;
+                    return true;
+                }
                 break;
             case AlterTableStmt::Action::EnableTrigger:
                 if (sub.name.empty()) {

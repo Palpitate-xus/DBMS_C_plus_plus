@@ -37752,24 +37752,23 @@ std::vector<StorageEngine::RowPolicy> StorageEngine::getApplicablePolicies(
 
 DBStatus StorageEngine::enableRowLevelSecurity(const std::string& dbname, const std::string& tablename,
                                                   bool force) {
-    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
-    TableSchema tbl = getTableSchema(dbname, tablename);
-    tbl.rowLevelSecurity = true;
-    tbl.forceRowLevelSecurity = force;
-    std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
-    writeSchema(out, tbl);
-    invalidateCatalogSchema(dbname, tablename);
-    return DBStatus::OK;
+    return alterTableRowLevelSecurity(dbname, tablename, true, force);
 }
 
 DBStatus StorageEngine::disableRowLevelSecurity(const std::string& dbname, const std::string& tablename) {
+    return alterTableRowLevelSecurity(dbname, tablename, false, false);
+}
+
+DBStatus StorageEngine::alterTableRowLevelSecurity(
+    const std::string& dbname, const std::string& tablename,
+    std::optional<bool> enabled, std::optional<bool> forced) {
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
+    if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
     TableSchema tbl = getTableSchema(dbname, tablename);
-    tbl.rowLevelSecurity = false;
-    tbl.forceRowLevelSecurity = false;
-    std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
-    writeSchema(out, tbl);
-    invalidateCatalogSchema(dbname, tablename);
+    if (enabled) tbl.rowLevelSecurity = *enabled;
+    if (forced) tbl.forceRowLevelSecurity = *forced;
+    writeSchemaFile(dbname, tablename, tbl);
+    lockManager_.unlock(tablename);
     return DBStatus::OK;
 }
 

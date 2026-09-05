@@ -1080,6 +1080,9 @@ public:
     DBStatus enableRowLevelSecurity(const std::string& dbname, const std::string& tablename,
                                      bool force = false);
     DBStatus disableRowLevelSecurity(const std::string& dbname, const std::string& tablename);
+    DBStatus alterTableRowLevelSecurity(
+        const std::string& dbname, const std::string& tablename,
+        std::optional<bool> enabled, std::optional<bool> forced);
 
     // RLS current user (thread-local, for transparent policy application inside engine)
     static void setRLSUser(const std::string& user) { rlsCurrentUser_ = user; }

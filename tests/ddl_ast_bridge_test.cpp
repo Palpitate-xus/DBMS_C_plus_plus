@@ -313,6 +313,75 @@ static void test_alter_logged_state_updates_catalog() {
     std::cout << "[DDL] ALTER logged state updates catalog OK" << std::endl;
 }
 
+static void test_alter_rls_state_updates_catalog() {
+    const std::string db = testDbPath("ddl_bridge_rls_catalog");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE rls_catalog (id INT)", s));
+
+    dbms::CatalogManager& initial = g_engine.catalogService().get(db);
+    const auto* relation =
+        initial.resolveRelation("rls_catalog", {"public"});
+    assert(relation != nullptr && !relation->relrowsecurity &&
+           !relation->relforcerowsecurity);
+    const dbms::Oid relationOid = relation->oid;
+
+    // FORCE and ENABLE are independent relation properties.  In particular,
+    // forcing a disabled table must not silently enable policy enforcement.
+    assert(!ddl.executeSql(
+        "ALTER TABLE rls_catalog FORCE ROW LEVEL SECURITY", s));
+    auto schema = g_engine.getTableSchema(db, "rls_catalog");
+    assert(!schema.rowLevelSecurity && schema.forceRowLevelSecurity);
+    relation = initial.findClass(relationOid);
+    assert(relation != nullptr && !relation->relrowsecurity &&
+           relation->relforcerowsecurity);
+
+    g_engine.catalogService().evict(db);
+    dbms::CatalogManager& forced = g_engine.catalogService().get(db);
+    relation = forced.findClass(relationOid);
+    assert(relation != nullptr && !relation->relrowsecurity &&
+           relation->relforcerowsecurity);
+
+    // ENABLE preserves FORCE, and DISABLE likewise leaves FORCE configured.
+    assert(!ddl.executeSql(
+        "ALTER TABLE rls_catalog ENABLE ROW LEVEL SECURITY", s));
+    schema = g_engine.getTableSchema(db, "rls_catalog");
+    assert(schema.rowLevelSecurity && schema.forceRowLevelSecurity);
+    relation = forced.findClass(relationOid);
+    assert(relation != nullptr && relation->relrowsecurity &&
+           relation->relforcerowsecurity);
+
+    assert(!ddl.executeSql(
+        "ALTER TABLE rls_catalog DISABLE ROW LEVEL SECURITY", s));
+    schema = g_engine.getTableSchema(db, "rls_catalog");
+    assert(!schema.rowLevelSecurity && schema.forceRowLevelSecurity);
+    relation = forced.findClass(relationOid);
+    assert(relation != nullptr && !relation->relrowsecurity &&
+           relation->relforcerowsecurity);
+
+    assert(!ddl.executeSql(
+        "ALTER TABLE rls_catalog NO FORCE ROW LEVEL SECURITY", s));
+    schema = g_engine.getTableSchema(db, "rls_catalog");
+    assert(!schema.rowLevelSecurity && !schema.forceRowLevelSecurity);
+    relation = forced.findClass(relationOid);
+    assert(relation != nullptr && !relation->relrowsecurity &&
+           !relation->relforcerowsecurity);
+
+    g_engine.catalogService().evict(db);
+    dbms::CatalogManager& reloaded = g_engine.catalogService().get(db);
+    relation = reloaded.findClass(relationOid);
+    assert(relation != nullptr && !relation->relrowsecurity &&
+           !relation->relforcerowsecurity);
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[DDL] ALTER RLS state updates catalog OK" << std::endl;
+}
+
 static void test_schema_qualified_rename_preserves_schema() {
     const std::string db = testDbPath("ddl_bridge_schema_rename");
     cleanup(db);
@@ -713,6 +782,7 @@ int main() {
     test_alter_column_rename_updates_catalog();
     test_alter_column_definitions_update_catalog();
     test_alter_logged_state_updates_catalog();
+    test_alter_rls_state_updates_catalog();
     test_schema_qualified_rename_preserves_schema();
     test_create_index_sequence();
     test_drop_index_uses_sql_name();
