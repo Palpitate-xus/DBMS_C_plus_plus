@@ -666,14 +666,8 @@ static void test_drop_schema_qualified_index() {
     assert(!ddl.executeSql("CREATE SCHEMA inventory", s));
     assert(!ddl.executeSql(
         "CREATE TABLE inventory.items (id INT, sku INT)", s));
-    auto createIndex = std::make_unique<dbms::CreateIndexStmt>();
-    createIndex->indexName = "items_sku_idx";
-    createIndex->tableName = "inventory.items";
-    dbms::IndexElem indexColumn;
-    indexColumn.column = "sku";
-    createIndex->columns.push_back(std::move(indexColumn));
-    dbms::StmtPtr createIndexStmt = std::move(createIndex);
-    assert(!ddl.execute(createIndexStmt, s));
+    assert(!ddl.executeSql(
+        "CREATE INDEX items_sku_idx ON inventory.items (sku)", s));
 
     const std::string physicalTable = "inventory__items";
     assert(g_engine.getNamedIndex(

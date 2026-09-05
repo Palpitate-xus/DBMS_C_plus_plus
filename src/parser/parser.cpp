@@ -5165,6 +5165,10 @@ StmtPtr SQLParser::parseCreateIndex(const std::vector<std::string>& tokens, size
     if (pos < tokens.size() && match(tokens, pos, "on")) ++pos;
     if (pos < tokens.size()) {
         stmt->tableName = tokens[pos++];
+        if (pos + 1 < tokens.size() && tokens[pos] == ".") {
+            stmt->tableName += "." + tokens[pos + 1];
+            pos += 2;
+        }
     }
     if (pos < tokens.size() && match(tokens, pos, "using")) {
         ++pos;
