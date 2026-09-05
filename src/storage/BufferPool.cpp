@@ -105,7 +105,7 @@ bool BufferPool::writeTdeRecord(
     return true;
 }
 
-void BufferPool::close() {
+void BufferPool::close(bool flushPages) {
     std::unique_lock<std::mutex> lock(mutex_);
     // Drain in-flight loads: a loader still holds a Frame& reference and a
     // spare-buffer copy pending memcpy into a frame that close() clears.
@@ -119,7 +119,7 @@ void BufferPool::close() {
         // Flush under the same lock as close.  Destructors cannot propagate
         // the error, but flushUnlocked still preserves dirty flags until the
         // last write attempt rather than falsely declaring pages clean.
-        flushUnlocked();
+        if (flushPages) flushUnlocked();
         ::close(fd_);
         fd_ = -1;
     }
@@ -280,6 +280,13 @@ std::optional<size_t> BufferPool::evictFrame() {
             Frame& f = frames_[idx];
             if (f.pinCount > 0 || f.pageId == kOrphanedPage) {
                 continue; // pinned pages and orphaned buffers are never evicted
+            }
+            if (f.dirty && writeLastPage_.has_value() &&
+                f.pageId == *writeLastPage_) {
+                // This frame publishes structural state for other pages.
+                // Only an ordered flush may write it; a one-frame eviction
+                // cannot establish the required data-before-header barrier.
+                continue;
             }
             if (f.usageCount > 0) {
                 f.usageCount--;
@@ -519,10 +526,16 @@ bool BufferPool::flushUnlocked() {
     if (fd_ < 0) return false;
     bool ok = true;
     std::vector<size_t> writtenFrames;
+    std::optional<size_t> writeLastFrame;
     for (size_t index = 0; index < frames_.size(); ++index) {
         auto& frame = frames_[index];
         if (frame.dirty && frame.pageId != static_cast<uint32_t>(-1) &&
             frame.pageId != kOrphanedPage) {
+            if (writeLastPage_.has_value() &&
+                frame.pageId == *writeLastPage_) {
+                writeLastFrame = index;
+                continue;
+            }
             if (writeToDisk(frame.pageId, frame.data.data())) {
                 writtenFrames.push_back(index);
             } else {
@@ -530,9 +543,24 @@ bool BufferPool::flushUnlocked() {
             }
         }
     }
+    // The first sync makes every data page durable before a structural page
+    // (for heap files, page zero's numPages/free-list header) can advertise
+    // those changes.  Keep the unconditional sync: an evicted dirty page was
+    // pwrite'd already but still needs a later durability barrier.
     if (::fsync(fd_) != 0) ok = false;
     if (PageCrypto::enabled() && (tdeFd_ < 0 || ::fsync(tdeFd_) != 0)) ok = false;
     if (!ok) return false;
+
+    if (writeLastFrame.has_value()) {
+        Frame& frame = frames_[*writeLastFrame];
+        if (!writeToDisk(frame.pageId, frame.data.data())) return false;
+        if (::fsync(fd_) != 0) return false;
+        if (PageCrypto::enabled() &&
+            (tdeFd_ < 0 || ::fsync(tdeFd_) != 0)) {
+            return false;
+        }
+        writtenFrames.push_back(*writeLastFrame);
+    }
     for (size_t index : writtenFrames) {
         frames_[index].dirty = false;
     }
@@ -542,6 +570,12 @@ bool BufferPool::flushUnlocked() {
 bool BufferPool::flush() {
     std::lock_guard<std::mutex> lock(mutex_);
     return flushUnlocked();
+}
+
+bool BufferPool::isPageDirty(uint32_t pageId) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = pageMap_.find(pageId);
+    return it != pageMap_.end() && frames_[it->second].dirty;
 }
 
 bool BufferPool::flushPage(uint32_t pageId) {

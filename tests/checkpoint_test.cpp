@@ -7,12 +7,16 @@
 #include "WAL.h"
 #include <algorithm>
 #include <chrono>
+#include <csignal>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <cassert>
 #include <cstring>
+#include <sys/resource.h>
+#include <sys/wait.h>
 #include <thread>
+#include <unistd.h>
 
 dbms::Config g_config;
 
@@ -80,6 +84,61 @@ int main() {
         std::cout << "[CHECKPOINT] BufferPool eviction/pin safety OK\n";
     }
 
+    // Crash between an appended page write and the final allocator-header
+    // write must not leave an unopenable relation. Force the child to hit its
+    // file-size limit partway through page 1, then exit without destructors;
+    // the parent's open must consume the pending marker and restore page 0.
+    {
+        const std::filesystem::path extentPath =
+            "checkpoint_extent_recovery.dt";
+        std::filesystem::remove(extentPath);
+        std::filesystem::remove(extentPath.string() + ".tde");
+        std::filesystem::remove(extentPath.string() + ".extent_pending");
+        {
+            PageAllocator initial(extentPath.string(), 32);
+            assert(initial.open());
+            assert(initial.flush());
+        }
+        assert(std::filesystem::file_size(extentPath) == PgPage::PAGE_SIZE);
+
+        const pid_t child = ::fork();
+        assert(child >= 0);
+        if (child == 0) {
+            std::signal(SIGXFSZ, SIG_IGN);
+            PageAllocator* interrupted =
+                new PageAllocator(extentPath.string(), 32);
+            if (!interrupted->open() || interrupted->allocPage() != 1) {
+                ::_exit(2);
+            }
+            struct rlimit limit {};
+            if (::getrlimit(RLIMIT_FSIZE, &limit) != 0) ::_exit(3);
+            limit.rlim_cur = std::min<rlim_t>(limit.rlim_max, 12000);
+            if (limit.rlim_cur <= PgPage::PAGE_SIZE ||
+                ::setrlimit(RLIMIT_FSIZE, &limit) != 0) {
+                ::_exit(4);
+            }
+            if (interrupted->flush()) ::_exit(5);
+            ::_exit(0);  // model kill -9: intentionally skip destructors
+        }
+        int status = 0;
+        assert(::waitpid(child, &status, 0) == child);
+        assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        assert(std::filesystem::exists(
+            extentPath.string() + ".extent_pending"));
+        {
+            PageAllocator recovered(extentPath.string(), 32);
+            assert(recovered.open());
+            assert(recovered.numPages() == 1);
+            assert(std::filesystem::file_size(extentPath) ==
+                   PgPage::PAGE_SIZE);
+        }
+        assert(!std::filesystem::exists(
+            extentPath.string() + ".extent_pending"));
+        std::filesystem::remove(extentPath);
+        std::filesystem::remove(extentPath.string() + ".tde");
+        std::cout << "[CHECKPOINT] interrupted extent publication recovers OK\n";
+    }
+
     std::string dbname = "checkpoint_db";
     std::filesystem::remove_all(dbname);
     std::filesystem::remove_all(dbname + ".txn_backup");
@@ -87,10 +146,15 @@ int main() {
 
     {
         StorageEngine engine;
+        // Construct the observer before the database exists. It therefore
+        // cannot repair the writer through startup WAL recovery; seeing a
+        // later commit proves the commit path itself published the extent.
+        StorageEngine observer;
         // Let a possible first 200ms worker pass finish, then keep the
         // background writer out of the assertions below. They must prove the
         // commit path itself wrote its pages, not pass due to a timed flush.
         engine.setBackgroundIntervals(60000, 60000);
+        observer.setBackgroundIntervals(60000, 60000);
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
         assert(engine.createDatabase(dbname) == DBStatus::OK);
 
@@ -101,9 +165,9 @@ int main() {
         assert(engine.createTable(dbname, tbl) == DBStatus::OK);
 
         // A newly allocated data page and its allocator-header numPages
-        // update form one physical extent change. COMMIT must not write just
-        // the data page and leave an immediately crashed file inconsistent;
-        // WAL redo/checkpoint will publish the complete extent later.
+        // update form one physical extent change. COMMIT publishes the data
+        // page first and the header last, so another already-running engine
+        // sees the row immediately without relying on BEGIN/bgwriter flushes.
         TableSchema fresh = tbl;
         fresh.tablename = "fresh_extent";
         assert(engine.createTable(dbname, fresh) == DBStatus::OK);
@@ -123,11 +187,27 @@ int main() {
             [](const BufferPool::FrameInfo& frame) {
                 return frame.pageId == 1;
             });
-        assert(freshPage != freshFrames.end() && freshPage->dirty);
-        assert(std::filesystem::file_size(
-                   std::filesystem::path(dbname) / "fresh_extent.dt") ==
-               freshAllocator->pageSize());
-        std::cout << "[CHECKPOINT] fresh extent remains WAL-backed OK\n";
+        assert(freshPage != freshFrames.end() && !freshPage->dirty);
+        const std::filesystem::path freshPath =
+            std::filesystem::path(dbname) / "fresh_extent.dt";
+        assert(std::filesystem::file_size(freshPath) ==
+               2 * freshAllocator->pageSize());
+        DataFileHeader durableHeader{};
+        {
+            std::ifstream input(freshPath, std::ios::binary);
+            assert(input.read(
+                reinterpret_cast<char*>(&durableHeader),
+                sizeof(durableHeader)));
+        }
+        assert(durableHeader.magic == DATA_FILE_MAGIC);
+        assert(durableHeader.numPages == 2);
+        assert(durableHeader.headerChecksum ==
+               computeDataFileHeaderChecksum(durableHeader));
+        assert(observer.query(
+                   dbname, fresh.tablename, {}, {"id"}).size() == 1);
+        assert(!std::filesystem::exists(
+            freshPath.string() + ".extent_pending"));
+        std::cout << "[CHECKPOINT] commit publishes fresh extent atomically OK\n";
 
         assert(engine.beginTransaction(dbname) == DBStatus::OK);
         std::map<std::string, std::string> vals;

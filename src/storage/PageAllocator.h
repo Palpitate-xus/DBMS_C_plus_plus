@@ -49,9 +49,17 @@ public:
     uint32_t numPages() const;
 
     // Whether the page already has a complete physical extent in the data
-    // file. nullopt reports an unavailable or structurally invalid file;
-    // false is the normal state for a newly allocated, WAL-backed page.
+    // file header. nullopt reports an unavailable or structurally invalid
+    // durable header; false is the normal state for a newly allocated page.
     std::optional<bool> pageExistsOnDisk(uint32_t pageId) const;
+
+    // True when page zero contains unpublished allocator metadata.
+    bool hasDirtyAllocationState() const;
+
+    // Publish dirty heap pages before page zero, using a recoverable marker
+    // so a torn header write can be rolled back on the next open. COMMIT
+    // calls this only after the matching heap WAL has been flushed.
+    bool flushAllocationStateForCommit();
 
     // Direct access to the underlying buffer pool.
     BufferPool* bufferPool() { return bp_.get(); }
@@ -74,6 +82,11 @@ private:
     uint32_t numPages_ = 0;
     std::unique_ptr<BufferPool> bp_;
     mutable std::mutex allocMutex_;
+    mutable std::mutex flushMutex_;
+    bool durableHeaderPresent_ = false;
+
+    bool flushWithAllocationMarker(bool allocationOnly);
+    bool recoverPendingAllocationFlush();
     bool validateFileHeader(const DataFileHeader& fh) const;
 };
 

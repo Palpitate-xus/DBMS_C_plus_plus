@@ -1,11 +1,301 @@
 #include "PageAllocator.h"
 
+#include "access/IndexFileUtil.h"
+
+#include <algorithm>
+#include <cerrno>
+#include <cstddef>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
+#include <fcntl.h>
 #include <iostream>
 #include <limits>
+#include <string>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <vector>
 
 namespace dbms {
+
+namespace {
+
+constexpr uint32_t ALLOCATION_FLUSH_MARKER_MAGIC = 0x31465845u;  // "EXF1"
+constexpr uint32_t ALLOCATION_FLUSH_MARKER_VERSION = 1;
+constexpr const char* ALLOCATION_FLUSH_MARKER_SUFFIX = ".extent_pending";
+
+#pragma pack(push, 1)
+struct AllocationFlushMarkerHeader {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t pageSize;
+    uint32_t headerBytes;
+    uint64_t dataFileBytes;
+    uint64_t tdeFileBytes;
+    uint64_t checksum;
+};
+#pragma pack(pop)
+
+struct DurableAllocationState {
+    bool hasHeader = false;
+    uint64_t dataFileBytes = 0;
+    uint64_t tdeFileBytes = 0;
+    DataFileHeader header{};
+    std::vector<char> headerPage;
+};
+
+std::filesystem::path allocationFlushMarkerPath(
+    const std::string& filename) {
+    return std::filesystem::path(filename + ALLOCATION_FLUSH_MARKER_SUFFIX);
+}
+
+bool readExactlyAt(int fd, void* data, size_t length, off_t offset) {
+    auto* bytes = static_cast<char*>(data);
+    size_t readBytes = 0;
+    while (readBytes < length) {
+        const ssize_t count = ::pread(
+            fd, bytes + readBytes, length - readBytes,
+            offset + static_cast<off_t>(readBytes));
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) return false;
+        readBytes += static_cast<size_t>(count);
+    }
+    return true;
+}
+
+bool writeExactlyAt(int fd, const void* data, size_t length, off_t offset) {
+    const auto* bytes = static_cast<const char*>(data);
+    size_t written = 0;
+    while (written < length) {
+        const ssize_t count = ::pwrite(
+            fd, bytes + written, length - written,
+            offset + static_cast<off_t>(written));
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) return false;
+        written += static_cast<size_t>(count);
+    }
+    return true;
+}
+
+bool syncParentDirectory(const std::filesystem::path& path) {
+    const std::filesystem::path parent = path.parent_path().empty()
+        ? std::filesystem::path(".") : path.parent_path();
+    const int fd = ::open(parent.c_str(), O_RDONLY | O_DIRECTORY);
+    if (fd < 0) return false;
+    const bool ok = (::fsync(fd) == 0);
+    const bool closeOk = (::close(fd) == 0);
+    return ok && closeOk;
+}
+
+bool removeFileDurably(const std::filesystem::path& path) {
+    std::error_code ec;
+    const bool exists = std::filesystem::exists(path, ec);
+    if (ec) return false;
+    if (!exists) return true;
+    if (!std::filesystem::remove(path, ec) || ec) return false;
+    return syncParentDirectory(path);
+}
+
+uint64_t allocationMarkerChecksum(const char* bytes, size_t length) {
+    constexpr size_t checksumOffset =
+        offsetof(AllocationFlushMarkerHeader, checksum);
+    constexpr size_t checksumEnd = checksumOffset + sizeof(uint64_t);
+    uint64_t hash = 14695981039346656037ULL;  // FNV-1a/64 offset basis
+    for (size_t i = 0; i < length; ++i) {
+        const uint8_t value = (i >= checksumOffset && i < checksumEnd)
+            ? 0 : static_cast<uint8_t>(bytes[i]);
+        hash ^= value;
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+bool validHeaderMetadata(const DataFileHeader& header, size_t rowSize,
+                         size_t pageSize, uint32_t formatVersion) {
+    if (header.magic != DATA_FILE_MAGIC ||
+        header.formatVersion != DATA_FILE_FORMAT_VERSION ||
+        header.formatVersion != formatVersion || header.numPages == 0 ||
+        header.freeListHead >= header.numPages ||
+        header.rowSize != rowSize ||
+        header.headerChecksum != computeDataFileHeaderChecksum(header)) {
+        return false;
+    }
+    return static_cast<uint64_t>(header.numPages) <=
+        std::numeric_limits<uint64_t>::max() / pageSize;
+}
+
+bool captureDurableAllocationState(
+    const std::string& filename, size_t rowSize, size_t pageSize,
+    uint32_t formatVersion, bool allowEmptyBaseline,
+    DurableAllocationState& state) {
+    state = DurableAllocationState{};
+
+    const int dataFd = ::open(filename.c_str(), O_RDONLY);
+    if (dataFd < 0) {
+        return allowEmptyBaseline && errno == ENOENT;
+    }
+    struct stat dataStatus {};
+    bool ok = (::fstat(dataFd, &dataStatus) == 0) &&
+              S_ISREG(dataStatus.st_mode) && dataStatus.st_size >= 0;
+    const uint64_t physicalBytes = ok
+        ? static_cast<uint64_t>(dataStatus.st_size) : 0;
+
+    if (ok && physicalBytes >= pageSize) {
+        state.headerPage.resize(pageSize);
+        ok = readExactlyAt(dataFd, state.headerPage.data(), pageSize, 0);
+        if (ok) {
+            std::memcpy(&state.header, state.headerPage.data(),
+                        sizeof(state.header));
+            ok = validHeaderMetadata(
+                state.header, rowSize, pageSize, formatVersion);
+        }
+        if (ok) {
+            const uint64_t declaredBytes =
+                static_cast<uint64_t>(state.header.numPages) * pageSize;
+            ok = declaredBytes <= physicalBytes;
+            if (ok) {
+                state.hasHeader = true;
+                // Ignore complete pages written past the last durable header.
+                // A pending marker must restore the header's logical extent,
+                // not preserve an unpublished eviction write.
+                state.dataFileBytes = declaredBytes;
+            }
+        }
+    } else if (ok && physicalBytes != 0) {
+        ok = false;
+    }
+    if (::close(dataFd) != 0) ok = false;
+
+    if (!ok) {
+        if (!allowEmptyBaseline) return false;
+        // A file opened from zero bytes can already have sparse/new pages
+        // written by eviction while its protected page-zero header remains
+        // dirty in memory. Its durable baseline is still the empty file.
+        state = DurableAllocationState{};
+    } else if (!state.hasHeader) {
+        if (!allowEmptyBaseline || physicalBytes != 0) return false;
+    }
+
+    struct stat tdeStatus {};
+    uint64_t physicalTdeBytes = 0;
+    const std::string tdeFilename = filename + ".tde";
+    if (::stat(tdeFilename.c_str(), &tdeStatus) == 0) {
+        if (!S_ISREG(tdeStatus.st_mode) || tdeStatus.st_size < 0) return false;
+        physicalTdeBytes = static_cast<uint64_t>(tdeStatus.st_size);
+    } else if (errno != ENOENT) {
+        return false;
+    }
+    const uint64_t maximumTdeBytes = state.hasHeader
+        ? static_cast<uint64_t>(state.header.numPages) *
+              PageCrypto::kRecordSize
+        : 0;
+    state.tdeFileBytes = std::min(physicalTdeBytes, maximumTdeBytes);
+    return state.tdeFileBytes % PageCrypto::kRecordSize == 0;
+}
+
+std::string encodeAllocationFlushMarker(
+    const DurableAllocationState& state, size_t pageSize) {
+    AllocationFlushMarkerHeader header{};
+    header.magic = ALLOCATION_FLUSH_MARKER_MAGIC;
+    header.version = ALLOCATION_FLUSH_MARKER_VERSION;
+    header.pageSize = static_cast<uint32_t>(pageSize);
+    header.headerBytes = state.hasHeader
+        ? static_cast<uint32_t>(pageSize) : 0;
+    header.dataFileBytes = state.dataFileBytes;
+    header.tdeFileBytes = state.tdeFileBytes;
+
+    std::string bytes(sizeof(header) + header.headerBytes, '\0');
+    std::memcpy(bytes.data(), &header, sizeof(header));
+    if (header.headerBytes != 0) {
+        std::memcpy(bytes.data() + sizeof(header), state.headerPage.data(),
+                    pageSize);
+    }
+    header.checksum = allocationMarkerChecksum(bytes.data(), bytes.size());
+    std::memcpy(bytes.data(), &header, sizeof(header));
+    return bytes;
+}
+
+bool readAllocationFlushMarker(
+    const std::filesystem::path& path, size_t rowSize, size_t pageSize,
+    uint32_t formatVersion, DurableAllocationState& state) {
+    std::error_code ec;
+    const uintmax_t fileBytes = std::filesystem::file_size(path, ec);
+    if (ec || fileBytes < sizeof(AllocationFlushMarkerHeader) ||
+        fileBytes > sizeof(AllocationFlushMarkerHeader) + pageSize) {
+        return false;
+    }
+    std::string bytes(static_cast<size_t>(fileBytes), '\0');
+    const int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0) return false;
+    const bool readOk = readExactlyAt(fd, bytes.data(), bytes.size(), 0);
+    const bool closeOk = (::close(fd) == 0);
+    if (!readOk || !closeOk) return false;
+
+    AllocationFlushMarkerHeader marker{};
+    std::memcpy(&marker, bytes.data(), sizeof(marker));
+    if (marker.magic != ALLOCATION_FLUSH_MARKER_MAGIC ||
+        marker.version != ALLOCATION_FLUSH_MARKER_VERSION ||
+        marker.pageSize != pageSize ||
+        (marker.headerBytes != 0 && marker.headerBytes != pageSize) ||
+        bytes.size() != sizeof(marker) + marker.headerBytes ||
+        marker.checksum != allocationMarkerChecksum(bytes.data(), bytes.size()) ||
+        marker.dataFileBytes % pageSize != 0 ||
+        marker.tdeFileBytes % PageCrypto::kRecordSize != 0) {
+        return false;
+    }
+
+    state = DurableAllocationState{};
+    state.dataFileBytes = marker.dataFileBytes;
+    state.tdeFileBytes = marker.tdeFileBytes;
+    state.hasHeader = marker.headerBytes != 0;
+    if (!state.hasHeader) {
+        return marker.dataFileBytes == 0 && marker.tdeFileBytes == 0;
+    }
+    if (marker.dataFileBytes < pageSize) return false;
+    state.headerPage.assign(
+        bytes.begin() + static_cast<std::ptrdiff_t>(sizeof(marker)),
+        bytes.end());
+    std::memcpy(&state.header, state.headerPage.data(), sizeof(state.header));
+    if (!validHeaderMetadata(
+            state.header, rowSize, pageSize, formatVersion) ||
+        marker.dataFileBytes !=
+            static_cast<uint64_t>(state.header.numPages) * pageSize ||
+        marker.tdeFileBytes >
+            static_cast<uint64_t>(state.header.numPages) *
+                PageCrypto::kRecordSize) {
+        return false;
+    }
+    return true;
+}
+
+bool restoreAllocationState(const std::string& filename,
+                            const DurableAllocationState& state) {
+    const int dataFd = ::open(filename.c_str(), O_RDWR | O_CREAT, 0644);
+    if (dataFd < 0) return false;
+    const std::string tdeFilename = filename + ".tde";
+    const int tdeFd = ::open(tdeFilename.c_str(), O_RDWR | O_CREAT, 0600);
+    if (tdeFd < 0) {
+        ::close(dataFd);
+        return false;
+    }
+
+    bool ok = true;
+    if (state.hasHeader) {
+        ok = writeExactlyAt(
+            dataFd, state.headerPage.data(), state.headerPage.size(), 0);
+    }
+    if (ok && ::ftruncate(dataFd, static_cast<off_t>(state.dataFileBytes)) != 0)
+        ok = false;
+    if (ok && ::ftruncate(tdeFd, static_cast<off_t>(state.tdeFileBytes)) != 0)
+        ok = false;
+    if (::fsync(dataFd) != 0) ok = false;
+    if (::fsync(tdeFd) != 0) ok = false;
+    if (::close(dataFd) != 0) ok = false;
+    if (::close(tdeFd) != 0) ok = false;
+    return ok;
+}
+
+}  // namespace
 
 size_t heapBufferFrameCount() {
     static const size_t frames = [] {
@@ -24,6 +314,7 @@ size_t heapBufferFrameCount() {
 
 PageAllocator::PageAllocator(const std::string& filename, size_t rowSize, size_t pageSize, uint32_t formatVersion)
     : filename_(filename), rowSize_(rowSize), pageSize_(pageSize), formatVersion_(formatVersion), bp_(std::make_unique<BufferPool>(filename, heapBufferFrameCount(), pageSize)) {
+    bp_->setWriteLastPage(0);
     // Verify heap pages when they are first loaded from disk. Page 0 is the
     // file header (own checksum, validated by validateFileHeader) and is
     // explicitly excluded from the heap-page check.
@@ -45,10 +336,17 @@ PageAllocator::~PageAllocator() {
 }
 
 bool PageAllocator::open() {
+    std::lock_guard<std::mutex> flushLock(flushMutex_);
     if (pageSize_ != PgPage::PAGE_SIZE || formatVersion_ != DATA_FILE_FORMAT_VERSION ||
         rowSize_ > std::numeric_limits<uint32_t>::max()) {
         std::cerr << "[storage] unsupported heap format: pageSize=" << pageSize_
                   << ", formatVersion=" << formatVersion_ << ", rowSize=" << rowSize_ << std::endl;
+        return false;
+    }
+    if (bp_->isOpen()) return true;
+    if (!recoverPendingAllocationFlush()) {
+        std::cerr << "[storage] cannot recover pending heap extent publication: "
+                  << filename_ << std::endl;
         return false;
     }
     std::error_code fileEc;
@@ -61,7 +359,6 @@ bool PageAllocator::open() {
         std::cerr << "[storage] truncated or misaligned heap file: " << filename_ << std::endl;
         return false;
     }
-    if (bp_->isOpen()) return true;
     if (!bp_->open()) return false;
 
     // Check if page 0 exists and has valid magic
@@ -95,14 +392,27 @@ bool PageAllocator::open() {
     }
     numPages_ = fh->numPages;
     bp_->unpinPage(0);
+    durableHeaderPresent_ = existingFile;
     return true;
 }
 
 void PageAllocator::close() {
+    std::lock_guard<std::mutex> flushLock(flushMutex_);
+    std::lock_guard<std::mutex> allocLock(allocMutex_);
     if (bp_) {
-        bp_->close();
+        if (bp_->isOpen()) {
+            if (!flushWithAllocationMarker(false)) {
+                std::cerr
+                    << "[storage] failed to flush heap allocator during close; "
+                       "discarding cached writeback for WAL/marker recovery: "
+                    << filename_ << std::endl;
+            }
+            // Never let BufferPool retry outside the allocator's marker.
+            bp_->close(/*flushPages=*/false);
+        }
     }
     numPages_ = 0;
+    durableHeaderPresent_ = false;
 }
 
 bool PageAllocator::isOpen() const {
@@ -212,11 +522,20 @@ uint32_t PageAllocator::numPages() const {
 
 std::optional<bool> PageAllocator::pageExistsOnDisk(uint32_t pageId) const {
     if (!isOpen() || pageSize_ == 0) return std::nullopt;
-    std::error_code ec;
-    const uintmax_t bytes = std::filesystem::file_size(filename_, ec);
-    if (ec || bytes % pageSize_ != 0) return std::nullopt;
-    const uintmax_t pageCount = bytes / pageSize_;
-    return pageId < pageCount;
+    std::lock_guard<std::mutex> flushLock(flushMutex_);
+    DurableAllocationState state;
+    if (!captureDurableAllocationState(
+            filename_, rowSize_, pageSize_, formatVersion_,
+            !durableHeaderPresent_, state)) {
+        return std::nullopt;
+    }
+    return state.hasHeader && pageId < state.header.numPages;
+}
+
+bool PageAllocator::hasDirtyAllocationState() const {
+    if (!isOpen() || !bp_) return false;
+    std::lock_guard<std::mutex> flushLock(flushMutex_);
+    return bp_->isPageDirty(0);
 }
 
 
@@ -239,7 +558,81 @@ void PageAllocator::markDirty(uint32_t pageId) {
 }
 
 bool PageAllocator::flush() {
-    return isOpen() && bp_->flush();
+    if (!isOpen()) return false;
+    std::lock_guard<std::mutex> flushLock(flushMutex_);
+    std::lock_guard<std::mutex> allocLock(allocMutex_);
+    return flushWithAllocationMarker(false);
+}
+
+bool PageAllocator::flushAllocationStateForCommit() {
+    if (!isOpen()) return false;
+    std::lock_guard<std::mutex> flushLock(flushMutex_);
+    std::lock_guard<std::mutex> allocLock(allocMutex_);
+    return flushWithAllocationMarker(true);
+}
+
+bool PageAllocator::flushWithAllocationMarker(bool allocationOnly) {
+    if (!recoverPendingAllocationFlush()) return false;
+    if (!bp_->isPageDirty(0)) {
+        return allocationOnly ? true : bp_->flush();
+    }
+
+    char* headerBuffer = bp_->fetchPage(0);
+    if (!headerBuffer) return false;
+    DataFileHeader currentHeader{};
+    std::memcpy(&currentHeader, headerBuffer, sizeof(currentHeader));
+    bp_->unpinPage(0);
+    if (!validHeaderMetadata(
+            currentHeader, rowSize_, pageSize_, formatVersion_) ||
+        currentHeader.numPages != numPages_) {
+        return false;
+    }
+
+    DurableAllocationState previous;
+    if (!captureDurableAllocationState(
+            filename_, rowSize_, pageSize_, formatVersion_,
+            !durableHeaderPresent_, previous)) {
+        return false;
+    }
+    if (previous.hasHeader &&
+        currentHeader.numPages < previous.header.numPages) {
+        // A stale allocator must never shrink a relation another backend has
+        // already published.
+        return false;
+    }
+
+    const std::filesystem::path marker =
+        allocationFlushMarkerPath(filename_);
+    const std::string markerBytes =
+        encodeAllocationFlushMarker(previous, pageSize_);
+    if (!index_file::writeAtomically(marker, markerBytes)) return false;
+
+    // BufferPool writes every dirty data page, syncs main/TDE files, and only
+    // then writes and syncs page zero.  The durable marker repairs a torn
+    // final header or truncates an only-partly-published new extent on open.
+    if (!bp_->flush()) return false;
+    if (!removeFileDurably(marker)) return false;
+    durableHeaderPresent_ = true;
+    return true;
+}
+
+bool PageAllocator::recoverPendingAllocationFlush() {
+    const std::filesystem::path marker =
+        allocationFlushMarkerPath(filename_);
+    std::error_code ec;
+    const bool exists = std::filesystem::exists(marker, ec);
+    if (ec) return false;
+    if (!exists) return true;
+
+    DurableAllocationState previous;
+    if (!readAllocationFlushMarker(
+            marker, rowSize_, pageSize_, formatVersion_, previous)) {
+        return false;
+    }
+    if (!restoreAllocationState(filename_, previous)) return false;
+    if (!removeFileDurably(marker)) return false;
+    durableHeaderPresent_ = previous.hasHeader;
+    return true;
 }
 
 bool PageAllocator::validateFileHeader(const DataFileHeader& fh) const {

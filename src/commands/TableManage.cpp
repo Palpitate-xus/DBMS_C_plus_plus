@@ -1927,8 +1927,10 @@ void StorageEngine::backgroundBufferFlush() {
     // overwritten by the next commit's flush of that page.
     for (auto& kv : pageAllocators_) {
         PageAllocator* pa = kv.second.get();
-        if (pa && pa->bufferPool()) {
-            pa->bufferPool()->flush();
+        if (pa) {
+            // PageAllocator serializes full writeback and protects a dirty
+            // extent header with its recoverable publication marker.
+            pa->flush();
         }
     }
 }
@@ -2111,11 +2113,20 @@ std::filesystem::path StorageEngine::vmPath(const std::string& dbname,
 static bool isRelationPhysicalFileName(const std::string& name,
                                         const std::string& tablename) {
     static constexpr std::string_view tdeSuffix = ".tde";
+    static constexpr std::string_view extentMarkerSuffix =
+        ".extent_pending";
     if (name.size() > tdeSuffix.size() &&
         name.compare(name.size() - tdeSuffix.size(), tdeSuffix.size(),
                      tdeSuffix) == 0) {
         return isRelationPhysicalFileName(
             name.substr(0, name.size() - tdeSuffix.size()), tablename);
+    }
+    if (name.size() > extentMarkerSuffix.size() &&
+        name.compare(name.size() - extentMarkerSuffix.size(),
+                     extentMarkerSuffix.size(), extentMarkerSuffix) == 0) {
+        return isRelationPhysicalFileName(
+            name.substr(0, name.size() - extentMarkerSuffix.size()),
+            tablename);
     }
     if (name == tablename + ".toast") return true;
     if (name.rfind(tablename + "#", 0) != 0 &&
@@ -37074,6 +37085,8 @@ DBStatus StorageEngine::commitTransaction() {
         PageAllocator* allocator = nullptr;
     };
     std::vector<CommitHeapPage> commitHeapPages;
+    std::vector<PageAllocator*> commitAllocationState;
+    std::set<PageAllocator*> seenAllocationState;
     for (const auto& [tableName, pageId] :
          transactionContext().txnHeapWritebackPages) {
         if (tableName.empty() || pageId == 0) {
@@ -37088,18 +37101,15 @@ DBStatus StorageEngine::commitTransaction() {
             rollbackTransaction();
             return DBStatus::IO_ERROR;
         }
-        const std::optional<bool> existsOnDisk =
-            allocator->pageExistsOnDisk(pageId);
-        if (!existsOnDisk.has_value()) {
+        if (!allocator->pageExistsOnDisk(pageId).has_value()) {
             rollbackTransaction();
             return DBStatus::IO_ERROR;
         }
-        // Extending only the data page would leave the on-disk allocator
-        // header's numPages behind and make the relation fail validation
-        // after an immediate crash. A fresh extent remains dirty so its WAL
-        // image can recreate both the allocation and page during redo.
-        if (!*existsOnDisk) continue;
         commitHeapPages.push_back({tableName, pageId, allocator});
+        if (seenAllocationState.insert(allocator).second &&
+            allocator->hasDirtyAllocationState()) {
+            commitAllocationState.push_back(allocator);
+        }
     }
 
     if (!flushDatabaseCaches(committingDb, /*heapPages=*/false)) {
@@ -37135,6 +37145,28 @@ DBStatus StorageEngine::commitTransaction() {
         releaseCommitHeapPageLocks();
         rollbackTransaction();
         return DBStatus::IO_ERROR;
+    }
+
+    // A fresh/reused page is not visible to another StorageEngine until page
+    // zero publishes the allocator's numPages/free-list change.  Flush all
+    // heap WAL first, then durably write data pages before the header under a
+    // recoverable extent marker.  This remains a reversible failure point:
+    // no COMMIT record has entered WAL yet, so rollback is still legal.
+    if (!commitAllocationState.empty()) {
+        const Lsn heapWalEnd = wal->currentWriteLsn();
+        if (!wal->XLogFlush(heapWalEnd)) {
+            releaseCommitHeapPageLocks();
+            rollbackTransaction();
+            return DBStatus::IO_ERROR;
+        }
+        for (PageAllocator* allocator : commitAllocationState) {
+            if (!allocator ||
+                !allocator->flushAllocationStateForCommit()) {
+                releaseCommitHeapPageLocks();
+                rollbackTransaction();
+                return DBStatus::IO_ERROR;
+            }
+        }
     }
     const Lsn commitLsn = walXactCommit(committingDb, committingTxnId);
     if (commitLsn == INVALID_LSN || !wal->XLogFlush(commitLsn)) {

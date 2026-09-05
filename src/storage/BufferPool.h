@@ -47,7 +47,10 @@ public:
     ~BufferPool();
 
     bool open();
-    void close();
+    // close(false) discards cached frames without another writeback attempt.
+    // PageAllocator uses it after its marker-protected flush succeeds or
+    // fails, so close cannot bypass that recovery protocol.
+    void close(bool flushPages = true);
     bool isOpen() const { return fd_ >= 0; }
     // True when the open main/TDE descriptors still name the same filesystem
     // objects as their paths. Atomic index replacement changes the inode even
@@ -59,6 +62,16 @@ public:
     // load fails and nothing is inserted into the cache.
     void setPageValidator(std::function<bool(uint32_t, const char*)> validator) {
         pageValidator_ = std::move(validator);
+    }
+
+    // Designate a structural page that must be written only after every
+    // other dirty frame has reached stable storage.  PageAllocator uses page
+    // zero here: publishing numPages before a newly appended heap page would
+    // leave a relation that cannot be opened after a crash.  A dirty
+    // write-last page is also kept out of ordinary clock eviction.
+    void setWriteLastPage(std::optional<uint32_t> pageId) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        writeLastPage_ = pageId;
     }
 
     // Invalidate cached page(s) so the next fetchPage reads from disk.
@@ -84,6 +97,9 @@ public:
     // a write or fsync fails so callers can retry instead of losing the only
     // in-memory copy of the page.
     bool flush();
+
+    // Whether a cached page currently carries unwritten changes.
+    bool isPageDirty(uint32_t pageId) const;
 
     // Stats
     size_t hits() const { return hits_; }
@@ -127,6 +143,10 @@ private:
 
     // Runs once per disk load; cache hits skip it.
     std::function<bool(uint32_t, const char*)> pageValidator_;
+
+    // Optional structural page whose contents publish the preceding data
+    // pages.  It is flushed last and cannot be evicted while dirty.
+    std::optional<uint32_t> writeLastPage_;
 
     // Clock sweep hand
     size_t clockHand_ = 0;
