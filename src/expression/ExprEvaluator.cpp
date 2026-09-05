@@ -4880,24 +4880,67 @@ void ExprEvaluator::registerBuiltins() {
         const std::string& src = a[1].value;
         const bool declaredInterval =
             toLower(a[1].typeName).find("interval") != std::string::npos;
-        if (!declaredInterval) {
-            const int64_t timestamp = parseTimestampToSeconds(src);
-            if (isInfiniteTimestamp(timestamp)) {
-                const bool monotonicField =
-                    field == "epoch" || field == "year" ||
-                    field == "decade" || field == "century" ||
-                    field == "millennium";
-                if (!monotonicField)
-                    return ExprValue("numeric", "", true);
+        if (declaredInterval) {
+            const IntervalParts interval = parseIntervalText(src);
+            if (!interval.ok)
+                return ExprValue("numeric", "", true);
+            if (field == "epoch") {
+                const __int128 micros =
+                    static_cast<__int128>(interval.months) * 30 *
+                        86400000000LL +
+                    static_cast<__int128>(interval.days) * 86400000000LL +
+                    interval.micros;
+                return ExprValue("numeric", formatMicrosNumeric(micros),
+                                 false);
+            }
+            if (field == "year")
+                return ExprValue("numeric",
+                                 std::to_string(interval.months / 12), false);
+            if (field == "month")
+                return ExprValue("numeric",
+                                 std::to_string(interval.months % 12), false);
+            if (field == "day")
+                return ExprValue("numeric", std::to_string(interval.days),
+                                 false);
+            if (field == "hour")
                 return ExprValue(
                     "numeric",
-                    timestamp == TIMESTAMP_POSITIVE_INFINITY
-                        ? "Infinity" : "-Infinity",
-                    false);
+                    std::to_string(interval.micros / 3600000000LL), false);
+            if (field == "minute")
+                return ExprValue(
+                    "numeric",
+                    std::to_string(
+                        (interval.micros / 60000000LL) % 60), false);
+            if (field == "second") {
+                const long long secondMicros =
+                    interval.micros % 60000000LL;
+                if (secondMicros % 1000000LL == 0) {
+                    return ExprValue(
+                        "numeric",
+                        std::to_string(secondMicros / 1000000LL), false);
+                }
+                return ExprValue(
+                    "numeric", formatMicrosNumeric(secondMicros), false);
             }
-            if (timestamp == 0)
-                return ExprValue("numeric", "", true);
+            return ExprValue("numeric", "", true);
         }
+
+        const int64_t timestamp = parseTimestampToSeconds(src);
+        if (isInfiniteTimestamp(timestamp)) {
+            const bool monotonicField =
+                field == "epoch" || field == "year" ||
+                field == "decade" || field == "century" ||
+                field == "millennium";
+            if (!monotonicField)
+                return ExprValue("numeric", "", true);
+            return ExprValue(
+                "numeric",
+                timestamp == TIMESTAMP_POSITIVE_INFINITY
+                    ? "Infinity" : "-Infinity",
+                false);
+        }
+        if (timestamp == 0)
+            return ExprValue("numeric", "", true);
         auto num = [&](size_t off, size_t len) -> int {
             if (src.size() < off + len) return 0;
             int v = 0;
@@ -4932,33 +4975,6 @@ void ExprEvaluator::registerBuiltins() {
             Date cur(y, mo, d), jan1(y, 1, 1);
             r = (cur.year != 0 && jan1.year != 0) ? cur.convert() - jan1.convert() + 1 : 0;
         } else if (field == "epoch") {
-            // For an INTERVAL operand PG returns the total interval in
-            // seconds (months counted as 30 days, days as 86400s).
-            {
-                std::string iv = src;
-                {
-                    std::string lowI;
-                    for (char c : iv)
-                        lowI += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                    if (lowI.rfind("interval ", 0) == 0) {
-                        size_t cut = 8;
-                        while (cut < iv.size() && std::isspace(static_cast<unsigned char>(iv[cut]))) ++cut;
-                        iv = iv.substr(cut);
-                    }
-                }
-                IntervalParts ip = parseIntervalText(iv);
-                if (ip.ok) {
-                    const __int128 us =
-                        static_cast<__int128>(ip.months) * 30 *
-                            86400000000LL +
-                        static_cast<__int128>(ip.days) * 86400000000LL +
-                        ip.micros;
-                    return ExprValue("numeric", formatMicrosNumeric(us),
-                                     false);
-                }
-                if (declaredInterval)
-                    return ExprValue("numeric", "", true);
-            }
             // Timestamp: seconds since 1970-01-01 00:00:00, numeric
             // scale 6 (86400.000000).
             r = parseTimestampToSeconds(src) - parseTimestampToSeconds("1970-01-01 00:00:00");

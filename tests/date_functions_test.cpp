@@ -58,6 +58,17 @@ static void test_extract_date_part() {
                   {F("year"), TS("infinity")}).value == "Infinity");
     assert(callFn(eval, "extract",
                   {F("month"), TS("infinity")}).isNull);
+
+    auto interval = IV("1 year 2 mons 3 days 04:05:06.25");
+    assert(callFn(eval, "extract", {F("year"), interval}).value == "1");
+    assert(callFn(eval, "extract", {F("month"), interval}).value == "2");
+    assert(callFn(eval, "extract", {F("day"), interval}).value == "3");
+    assert(callFn(eval, "extract", {F("hour"), interval}).value == "4");
+    assert(callFn(eval, "extract", {F("minute"), interval}).value == "5");
+    assert(callFn(eval, "extract", {F("second"), interval}).value ==
+           "6.250000");
+    assert(callFn(eval, "date_part",
+                  {F("dow"), interval}).isNull);
     std::cout << "[DATEFN] extract/date_part OK" << std::endl;
 }
 
