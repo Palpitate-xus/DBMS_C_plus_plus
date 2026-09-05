@@ -62,6 +62,30 @@ static void test_add_sub() {
     auto h = eval("'1 day'::interval + '2024-03-10'::timestamp");
     assert(h.ok && h.value == "2024-03-11 00:00:00");
 
+    auto dayOverflow = eval(
+        "'2024-03-10 00:00:00'::timestamp + "
+        "'9223372036854775807 days'::interval");
+    assert(dayOverflow.ok && dayOverflow.isNull);
+
+    auto timestampDomainOverflow = eval(
+        "'2024-03-10 00:00:00'::timestamp + "
+        "'9223372036854775807 microseconds'::interval");
+    assert(timestampDomainOverflow.ok && timestampDomainOverflow.isNull);
+
+    auto monthOverflow = eval(
+        "'2024-03-10 00:00:00'::timestamp + "
+        "'9223372036854775807 months'::interval");
+    assert(monthOverflow.ok && monthOverflow.isNull);
+
+    auto upperBoundary = eval(
+        "'9999-12-31 23:59:59'::timestamp + '1 second'::interval");
+    assert(upperBoundary.ok && upperBoundary.isNull);
+
+    auto inRangeBoundary = eval(
+        "'9999-12-30 23:59:59'::timestamp + '1 day'::interval");
+    assert(inRangeBoundary.ok &&
+           inRangeBoundary.value == "9999-12-31 23:59:59");
+
     std::cout << "[IV] timestamp ± interval OK" << std::endl;
 }
 

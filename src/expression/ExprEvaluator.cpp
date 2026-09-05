@@ -525,36 +525,68 @@ static std::tuple<long long, unsigned, unsigned> daysToCivil(long long z) {
 // Months roll the calendar date (day clamped to month length); days and
 // microseconds shift absolutely with day carry — PostgreSQL semantics.
 static std::string timestampShift(const std::string& ts, const IntervalParts& iv, bool add) {
-    long long months = add ? iv.months : -iv.months;
-    long long days = add ? iv.days : -iv.days;
-    long long micros = add ? iv.micros : -iv.micros;
     int Y = 1970, Mo = 1, D = 1, h = 0, mi = 0;
     long long s = 0;
-    if (std::sscanf(ts.c_str(), "%d-%d-%d %d:%d:%lld", &Y, &Mo, &D, &h, &mi, &s) < 3) return "";
-    long long totalDays = civilToDays(Y, Mo, D) + days;
-    if (months != 0) {
-        auto [y2, m2, d2] = daysToCivil(totalDays);
-        long long cm = y2 * 12 + (m2 - 1) + months;
-        long long ny = cm / 12; long long nm = cm % 12;
-        if (nm < 0) { nm += 12; --ny; }
+    const int parsed = std::sscanf(ts.c_str(), "%d-%d-%d %d:%d:%lld",
+                                   &Y, &Mo, &D, &h, &mi, &s);
+    const bool hasTime = ts.find(' ') != std::string::npos;
+    Date inputDate(Y, Mo, D);
+    if (parsed < 3 || (hasTime && parsed < 6) || inputDate.year == 0 ||
+        Y < 1 || Y > 9999 || h < 0 || h > 23 || mi < 0 || mi > 59 ||
+        s < 0 || s > 59) {
+        return "";
+    }
+
+    const __int128 direction = add ? 1 : -1;
+    const long long minimumDay = civilToDays(1, 1, 1);
+    const long long maximumDay = civilToDays(9999, 12, 31);
+    auto dayInDomain = [&](const __int128 value) {
+        return value >= minimumDay && value <= maximumDay;
+    };
+
+    __int128 totalDays = static_cast<__int128>(civilToDays(Y, Mo, D)) +
+        direction * iv.days;
+    if (!dayInDomain(totalDays)) return "";
+    if (iv.months != 0) {
+        auto [y2, m2, d2] =
+            daysToCivil(static_cast<long long>(totalDays));
+        const __int128 monthIndex = static_cast<__int128>(y2) * 12 +
+            (m2 - 1) + direction * iv.months;
+        const __int128 minimumMonth = 12;  // 0001-01
+        const __int128 maximumMonth =
+            static_cast<__int128>(9999) * 12 + 11;
+        if (monthIndex < minimumMonth || monthIndex > maximumMonth)
+            return "";
+        const long long ny = static_cast<long long>(monthIndex / 12);
+        const long long nm = static_cast<long long>(monthIndex % 12);
         static const int mdays[] = {31,28,31,30,31,30,31,31,30,31,30,31};
         int ml = mdays[nm];
         if (nm == 1 && ((ny % 4 == 0 && ny % 100 != 0) || ny % 400 == 0)) ml = 29;
         if (d2 > static_cast<unsigned>(ml)) d2 = static_cast<unsigned>(ml);
         totalDays = civilToDays(ny, static_cast<unsigned>(nm + 1), d2);
     }
-    long long totalMicros = (static_cast<long long>(h) * 3600 + mi * 60 + s) * 1000000LL + micros;
-    long long carryDays = totalMicros / 86400000000LL;
-    totalMicros %= 86400000000LL;
-    if (totalMicros < 0) { totalMicros += 86400000000LL; --carryDays; }
+
+    constexpr long long MICROS_PER_DAY = 86400000000LL;
+    __int128 totalMicros =
+        (static_cast<__int128>(h) * 3600 + mi * 60 + s) * 1000000 +
+        direction * iv.micros;
+    __int128 carryDays = totalMicros / MICROS_PER_DAY;
+    totalMicros %= MICROS_PER_DAY;
+    if (totalMicros < 0) {
+        totalMicros += MICROS_PER_DAY;
+        --carryDays;
+    }
     totalDays += carryDays;
-    auto [Y2, M2, D2] = daysToCivil(totalDays);
-    long long hh = totalMicros / 3600000000LL;
-    long long mm = (totalMicros / 60000000LL) % 60;
-    long long ss = (totalMicros / 1000000LL) % 60;
-    long long fs = totalMicros % 1000000LL;
+    if (!dayInDomain(totalDays)) return "";
+    auto [Y2, M2, D2] =
+        daysToCivil(static_cast<long long>(totalDays));
+    const long long dayMicros = static_cast<long long>(totalMicros);
+    long long hh = dayMicros / 3600000000LL;
+    long long mm = (dayMicros / 60000000LL) % 60;
+    long long ss = (dayMicros / 1000000LL) % 60;
+    long long fs = dayMicros % 1000000LL;
     char buf[80];
-    if (ts.find(' ') != std::string::npos) {
+    if (hasTime) {
         if (fs) std::snprintf(buf, sizeof(buf), "%04lld-%02u-%02u %02lld:%02lld:%02lld.%06lld",
                               Y2, M2, D2, hh, mm, ss, fs);
         else std::snprintf(buf, sizeof(buf), "%04lld-%02u-%02u %02lld:%02lld:%02lld",
@@ -1109,12 +1141,15 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
         if (lIv && op == "+") {
             IntervalParts iv = parseIntervalText(l.value);
             if (!iv.ok || !isTsLike(r)) return ExprValue("timestamp", "", true);
-            return ExprValue("timestamp", timestampShift(r.value, iv, true), false);
+            std::string shifted = timestampShift(r.value, iv, true);
+            if (shifted.empty()) return ExprValue("timestamp", "", true);
+            return ExprValue("timestamp", shifted, false);
         }
         if (rIv) {
             IntervalParts iv = parseIntervalText(r.value);
             if (!iv.ok || !isTsLike(l)) return ExprValue("timestamp", "", true);
             std::string shifted = timestampShift(l.value, iv, op == "+");
+            if (shifted.empty()) return ExprValue("timestamp", "", true);
             // PG date +/- interval promotes to timestamp: a bare date
             // result renders with 00:00:00 (2026-02-28 00:00:00).
             if (shifted.size() == 10) shifted += " 00:00:00";
