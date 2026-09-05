@@ -14025,6 +14025,42 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
         }
     }
 
+    // Foreign keys store logical column names rather than physical indices.
+    // Rewrite both the renamed table's local/self-referencing bindings and
+    // every inbound reference before publishing the new column name.
+    for (size_t foreignKeyIndex = 0;
+         foreignKeyIndex < tbl.fkLen; ++foreignKeyIndex) {
+        ForeignKey& foreignKey = tbl.fks[foreignKeyIndex];
+        for (std::string& localColumn : foreignKey.colNames) {
+            if (localColumn == oldName) localColumn = newName;
+        }
+        if (foreignKey.refTable == tablename) {
+            for (std::string& referencedColumn : foreignKey.refCols) {
+                if (referencedColumn == oldName) referencedColumn = newName;
+            }
+        }
+    }
+    std::vector<std::pair<std::string, TableSchema>> referencingSchemas;
+    for (const std::string& otherTableName : getTableNames(dbname)) {
+        if (otherTableName == tablename) continue;
+        TableSchema otherTable = getTableSchema(dbname, otherTableName);
+        bool changed = false;
+        for (size_t foreignKeyIndex = 0;
+             foreignKeyIndex < otherTable.fkLen; ++foreignKeyIndex) {
+            ForeignKey& foreignKey = otherTable.fks[foreignKeyIndex];
+            if (foreignKey.refTable != tablename) continue;
+            for (std::string& referencedColumn : foreignKey.refCols) {
+                if (referencedColumn != oldName) continue;
+                referencedColumn = newName;
+                changed = true;
+            }
+        }
+        if (changed) {
+            referencingSchemas.emplace_back(
+                otherTableName, std::move(otherTable));
+        }
+    }
+
     std::vector<std::string> originalComments;
     DBStatus commentStatus = readCommentRecords(
         commentsPath(dbname), originalComments);
@@ -14066,6 +14102,9 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
     // Update schema
     tbl.cols[colIdx].dataName = newName;
     writeSchemaFile(dbname, tablename, tbl);
+    for (const auto& [otherTableName, otherTable] : referencingSchemas) {
+        writeSchemaFile(dbname, otherTableName, otherTable);
+    }
     invalidateCatalogSchema(dbname, tablename);
     // The schema now exposes the new column name.  Later index-sidecar work
     // must not roll auxiliary metadata back to a name the table no longer has.
