@@ -11,6 +11,7 @@
 // ============================================================================
 
 #include "commands/DdlExecutor.h"
+#include "commands/DdlTransaction.h"
 #include "commands/TableManage.h"
 #include "Session.h"
 #include "catalog/type_registry.h"
@@ -51,20 +52,72 @@ static std::string readFile(const fs::path& path) {
             std::istreambuf_iterator<char>()};
 }
 
-static std::map<std::string, std::string> parseUdtMetaLine(const std::string& line) {
-    std::map<std::string, std::string> out;
-    size_t k1 = line.find('|');
-    size_t k2 = line.find('|', k1 + 1);
-    if (k1 == std::string::npos || k2 == std::string::npos) return out;
-    std::string rest = line.substr(k2 + 1);
-    std::stringstream ss(rest);
-    std::string kv;
-    while (std::getline(ss, kv, ';')) {
-        size_t eq = kv.find('=');
-        if (eq == std::string::npos) continue;
-        out[kv.substr(0, eq)] = kv.substr(eq + 1);
+static bool decodeHex(const std::string& encoded, std::string& value) {
+    if (encoded.size() % 2 != 0) return false;
+    auto nibble = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    value.clear();
+    for (size_t i = 0; i < encoded.size(); i += 2) {
+        const int high = nibble(encoded[i]);
+        const int low = nibble(encoded[i + 1]);
+        if (high < 0 || low < 0) return false;
+        value.push_back(static_cast<char>((high << 4) | low));
     }
-    return out;
+    return true;
+}
+
+static bool parseUdtMetaLine(const std::string& line, std::string& kind,
+                             std::string& name,
+                             std::map<std::string, std::string>& attrs) {
+    kind.clear();
+    name.clear();
+    attrs.clear();
+    static const std::string prefix = "DBMS_UDT_V2:";
+    if (line.rfind(prefix, 0) == 0) {
+        std::vector<std::string> fields;
+        size_t position = prefix.size();
+        while (true) {
+            const size_t separator = line.find('|', position);
+            fields.push_back(separator == std::string::npos
+                ? line.substr(position)
+                : line.substr(position, separator - position));
+            if (separator == std::string::npos) break;
+            position = separator + 1;
+        }
+        if (fields.size() < 2 || (fields.size() - 2) % 2 != 0 ||
+            !decodeHex(fields[0], kind) || !decodeHex(fields[1], name)) {
+            return false;
+        }
+        for (size_t i = 2; i < fields.size(); i += 2) {
+            std::string key;
+            std::string value;
+            if (!decodeHex(fields[i], key) ||
+                !decodeHex(fields[i + 1], value)) return false;
+            attrs[key] = value;
+        }
+        return true;
+    }
+
+    const size_t kindEnd = line.find('|');
+    const size_t nameEnd = kindEnd == std::string::npos
+        ? std::string::npos : line.find('|', kindEnd + 1);
+    if (kindEnd == std::string::npos || nameEnd == std::string::npos) {
+        return false;
+    }
+    kind = line.substr(0, kindEnd);
+    name = line.substr(kindEnd + 1, nameEnd - kindEnd - 1);
+    std::stringstream attributes(line.substr(nameEnd + 1));
+    std::string attribute;
+    while (std::getline(attributes, attribute, ';')) {
+        const size_t equals = attribute.find('=');
+        if (equals == std::string::npos) continue;
+        attrs[attribute.substr(0, equals)] = attribute.substr(equals + 1);
+    }
+    return true;
 }
 
 static bool udtMetaContains(const std::string& db, const std::string& kind, const std::string& name,
@@ -74,12 +127,11 @@ static bool udtMetaContains(const std::string& db, const std::string& kind, cons
     std::ifstream in(path);
     std::string line;
     while (std::getline(in, line)) {
-        if (line.substr(0, kind.size()) != kind) continue;
-        size_t p1 = line.find('|');
-        size_t p2 = line.find('|', p1 + 1);
-        std::string n = (p1 == std::string::npos) ? "" : line.substr(p1 + 1, p2 - p1 - 1);
-        if (n != name) continue;
-        auto attrs = parseUdtMetaLine(line);
+        std::string storedKind;
+        std::string storedName;
+        std::map<std::string, std::string> attrs;
+        if (!parseUdtMetaLine(line, storedKind, storedName, attrs) ||
+            storedKind != kind || storedName != name) continue;
         for (const auto& kv : expected) {
             if (attrs[kv.first] != kv.second) return false;
         }
@@ -285,6 +337,103 @@ static void test_create_type_commit_failure_restores_all_families() {
               << std::endl;
 }
 
+static bool executeWithDatabaseWritesBlocked(
+    dbms::DdlExecutor& ddl, Session& session, const std::string& db,
+    const std::string& sql) {
+    dbms::DdlTransaction outer(session);
+    assert(outer.enableSnapshotRollback());
+    assert(outer.begin());
+    const fs::perms originalPermissions = fs::status(db).permissions();
+    fs::permissions(db, fs::perms::owner_read | fs::perms::owner_exec,
+                    fs::perm_options::replace);
+    const bool failed = ddl.executeSql(sql, session);
+    fs::permissions(db, originalPermissions, fs::perm_options::replace);
+    outer.rollback();
+    assert(!g_engine.inTransaction());
+    assert(!g_engine.hasTransactionBackup());
+    return failed;
+}
+
+static void test_type_sidecars_are_atomic_and_fail_closed() {
+    const std::string db = testDbPath("ct_sidecar_atomicity");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    const fs::path shellPath = fs::path(db) / ".shell_types";
+    const fs::path udtPath = fs::path(db) / ".udt_meta";
+    {
+        std::ofstream shell(shellPath, std::ios::binary);
+        shell << "legacy_shell\nneighbor_shell\n";
+        assert(shell.good());
+        std::ofstream udt(udtPath, std::ios::binary);
+        udt << "range|legacy_range|subtype=int4;canonical=a=b|c\n";
+        assert(udt.good());
+    }
+
+    assert(!ddl.executeSql("CREATE TYPE added_shell", s));
+    assert(!ddl.executeSql(
+        "CREATE TYPE added_range AS RANGE (subtype = int8)", s));
+    assert(shellTypeFileContains(db, "legacy_shell"));
+    assert(shellTypeFileContains(db, "added_shell"));
+    assert(udtMetaContains(
+        db, "range", "legacy_range",
+        {{"subtype", "int4"}, {"canonical", "a=b|c"}}));
+    assert(udtMetaContains(
+        db, "range", "added_range", {{"subtype", "int8"}}));
+    const std::string shellBytes = readFile(shellPath);
+    const std::string udtBytes = readFile(udtPath);
+    assert(udtBytes.rfind("DBMS_UDT_V2:", 0) == 0);
+    assert(udtBytes.find("range|legacy_range") == std::string::npos);
+    assert(!ddl.executeSql("CREATE TYPE IF NOT EXISTS legacy_shell", s));
+    assert(ddl.executeSql(
+        "CREATE TYPE legacy_shell AS ENUM ('duplicate_kind')", s));
+    assert(!ddl.executeSql("DROP TYPE IF EXISTS absent_type", s));
+    assert(readFile(shellPath) == shellBytes);
+    assert(readFile(udtPath) == udtBytes);
+
+    assert(executeWithDatabaseWritesBlocked(
+        ddl, s, db, "CREATE TYPE blocked_shell"));
+    assert(readFile(shellPath) == shellBytes);
+    assert(readFile(udtPath) == udtBytes);
+    assert(!shellTypeFileContains(db, "blocked_shell"));
+
+    assert(executeWithDatabaseWritesBlocked(
+        ddl, s, db, "DROP TYPE legacy_range"));
+    assert(readFile(shellPath) == shellBytes);
+    assert(readFile(udtPath) == udtBytes);
+    assert(udtMetaContains(db, "range", "legacy_range", {}));
+
+    const fs::path compositePath = fs::path(db) / ".types";
+    assert(fs::create_directory(compositePath));
+    assert(ddl.executeSql("DROP TYPE legacy_shell", s));
+    assert(shellTypeFileContains(db, "legacy_shell"));
+    assert(fs::remove(compositePath));
+
+    const fs::path savedUdtPath = fs::path(db) / ".udt_meta.saved";
+    fs::rename(udtPath, savedUdtPath);
+    {
+        std::ofstream corrupt(udtPath, std::ios::binary);
+        corrupt << "malformed record\n";
+        assert(corrupt.good());
+    }
+    assert(ddl.executeSql("CREATE TYPE hidden_by_corruption", s));
+    assert(ddl.executeSql("DROP TYPE legacy_shell", s));
+    assert(shellTypeFileContains(db, "legacy_shell"));
+    fs::remove(udtPath);
+    fs::rename(savedUdtPath, udtPath);
+
+    assert(!ddl.executeSql("DROP TYPE legacy_shell", s));
+    assert(!shellTypeFileContains(db, "legacy_shell"));
+    assert(shellTypeFileContains(db, "neighbor_shell"));
+    assert(!ddl.executeSql("DROP TYPE legacy_range", s));
+    assert(!udtMetaContains(db, "range", "legacy_range", {}));
+
+    cleanup(db);
+    std::cout << "[CTYPE] sidecar atomicity and fail-closed errors OK"
+              << std::endl;
+}
+
 static void test_composite_metadata_is_validated_and_atomic() {
     const std::string db = testDbPath("ct_composite_atomicity");
     cleanup(db);
@@ -346,6 +495,7 @@ int main() {
     test_drop_composite_still_works();
     test_schema_qualified_type_names();
     test_create_type_commit_failure_restores_all_families();
+    test_type_sidecars_are_atomic_and_fail_closed();
     test_composite_metadata_is_validated_and_atomic();
     std::cout << "[CTYPE] all passed" << std::endl;
     return 0;

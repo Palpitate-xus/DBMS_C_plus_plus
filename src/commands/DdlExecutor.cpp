@@ -291,50 +291,105 @@ static std::filesystem::path shellTypesPath(const std::string& dbname) {
     return g_engine.dbPath(dbname) / ".shell_types";
 }
 
-static std::vector<std::string> loadShellTypes(const std::string& dbname) {
-    std::vector<std::string> names;
-    std::ifstream in(shellTypesPath(dbname));
+static bool validAuxiliaryTypeName(const std::string& name) {
+    if (name.empty() || name.find('\0') != std::string::npos ||
+        name.find('\n') != std::string::npos ||
+        name.find('\r') != std::string::npos) {
+        return false;
+    }
+    CatalogManager::QualifiedName qualified;
+    return CatalogManager::parseQualifiedName(name, qualified) &&
+           !qualified.name.empty() &&
+           qualified.schema.find('.') == std::string::npos;
+}
+
+static DBStatus loadShellTypes(const std::string& dbname,
+                               std::vector<std::string>& names) {
+    names.clear();
+    const auto path = shellTypesPath(dbname);
+    std::error_code error;
+    const bool exists = std::filesystem::exists(path, error);
+    if (error) return DBStatus::IO_ERROR;
+    if (!exists) return DBStatus::OK;
+
+    std::ifstream in(path);
+    if (!in) return DBStatus::IO_ERROR;
+    std::set<std::string> normalizedNames;
     std::string line;
     while (std::getline(in, line)) {
         line = trim(line);
-        if (!line.empty()) names.push_back(line);
+        if (line.empty()) continue;
+        if (!validAuxiliaryTypeName(line) ||
+            !normalizedNames.insert(toLower(line)).second) {
+            names.clear();
+            return DBStatus::CORRUPTED_DATA;
+        }
+        names.push_back(std::move(line));
     }
-    return names;
+    return in.bad() ? DBStatus::IO_ERROR : DBStatus::OK;
 }
 
-static bool shellTypeExists(const std::string& dbname, const std::string& name) {
-    for (const auto& n : loadShellTypes(dbname))
-        if (toLower(n) == toLower(name)) return true;
-    return false;
+static DBStatus saveShellTypes(const std::string& dbname,
+                               const std::vector<std::string>& names) {
+    std::ostringstream serialized;
+    for (const auto& name : names) serialized << name << '\n';
+    return index_file::writeAtomically(
+               shellTypesPath(dbname), serialized.str())
+        ? DBStatus::OK : DBStatus::IO_ERROR;
 }
 
-static bool recordShellType(const std::string& dbname, const std::string& name) {
-    if (shellTypeExists(dbname, name)) return true;
-    std::ofstream out(shellTypesPath(dbname), std::ios::app);
-    if (!out) return false;
-    out << name << "\n";
-    return true;
-}
-
-static bool removeShellType(const std::string& dbname, const std::string& name) {
-    auto names = loadShellTypes(dbname);
-    bool removed = false;
-    {
-        std::ofstream out(shellTypesPath(dbname), std::ios::trunc);
-        if (!out) return false;
-        for (const auto& n : names) {
-            if (toLower(n) == toLower(name)) {
-                removed = true;
-                continue;
-            }
-            out << n << "\n";
+static DBStatus shellTypeExists(const std::string& dbname,
+                                const std::string& name, bool& exists) {
+    exists = false;
+    std::vector<std::string> names;
+    const DBStatus status = loadShellTypes(dbname, names);
+    if (status != DBStatus::OK) return status;
+    for (const auto& existing : names) {
+        if (toLower(existing) == toLower(name)) {
+            exists = true;
+            break;
         }
     }
-    return removed;
+    return DBStatus::OK;
+}
+
+static DBStatus recordShellType(const std::string& dbname,
+                                const std::string& name) {
+    if (!validAuxiliaryTypeName(name)) return DBStatus::INVALID_ARGUMENT;
+    std::vector<std::string> names;
+    const DBStatus status = loadShellTypes(dbname, names);
+    if (status != DBStatus::OK) return status;
+    for (const auto& existing : names) {
+        if (toLower(existing) == toLower(name)) {
+            return DBStatus::TABLE_ALREADY_EXISTS;
+        }
+    }
+    names.push_back(name);
+    return saveShellTypes(dbname, names);
+}
+
+static DBStatus removeShellType(const std::string& dbname,
+                                const std::string& name) {
+    if (!validAuxiliaryTypeName(name)) return DBStatus::INVALID_ARGUMENT;
+    std::vector<std::string> names;
+    const DBStatus status = loadShellTypes(dbname, names);
+    if (status != DBStatus::OK) return status;
+    bool removed = false;
+    std::vector<std::string> retained;
+    retained.reserve(names.size());
+    for (auto& existing : names) {
+        if (toLower(existing) == toLower(name)) {
+            removed = true;
+        } else {
+            retained.push_back(std::move(existing));
+        }
+    }
+    if (!removed) return DBStatus::TABLE_NOT_FOUND;
+    return saveShellTypes(dbname, retained);
 }
 
 // ---- Range / base type metadata sidecar (CREATE TYPE AS RANGE / CREATE TYPE name (...)) ----
-// Format: kind|name|key=value;key=value...
+// Legacy format: kind|name|key=value;key=value...
 struct UdtMeta {
     std::string kind;  // "range" or "base"
     std::string name;
@@ -345,85 +400,214 @@ static std::filesystem::path udtMetaPath(const std::string& dbname) {
     return g_engine.dbPath(dbname) / ".udt_meta";
 }
 
-static std::vector<UdtMeta> loadUdtMeta(const std::string& dbname) {
-    std::vector<UdtMeta> out;
-    std::ifstream in(udtMetaPath(dbname));
-    std::string line;
-    while (std::getline(in, line)) {
-        line = trim(line);
-        if (line.empty()) continue;
-        size_t k1 = line.find('|');
-        size_t k2 = line.find('|', k1 + 1);
-        if (k1 == std::string::npos || k2 == std::string::npos) continue;
-        UdtMeta m;
-        m.kind = line.substr(0, k1);
-        m.name = line.substr(k1 + 1, k2 - k1 - 1);
-        std::string rest = line.substr(k2 + 1);
-        std::stringstream ss(rest);
-        std::string kv;
-        while (std::getline(ss, kv, ';')) {
-            kv = trim(kv);
-            if (kv.empty()) continue;
-            size_t eq = kv.find('=');
-            if (eq == std::string::npos) continue;
-            m.attrs[trim(kv.substr(0, eq))] = trim(kv.substr(eq + 1));
-        }
-        out.push_back(std::move(m));
+static constexpr const char* UDT_METADATA_V2_PREFIX = "DBMS_UDT_V2:";
+
+static std::string encodeUdtField(const std::string& value) {
+    static constexpr char hex[] = "0123456789abcdef";
+    std::string encoded;
+    encoded.reserve(value.size() * 2);
+    for (unsigned char byte : value) {
+        encoded.push_back(hex[byte >> 4]);
+        encoded.push_back(hex[byte & 0x0f]);
     }
-    return out;
+    return encoded;
 }
 
-static bool saveUdtMeta(const std::string& dbname, const std::vector<UdtMeta>& metas) {
-    std::ofstream out(udtMetaPath(dbname), std::ios::trunc);
-    if (!out) return false;
-    for (const auto& m : metas) {
-        out << m.kind << "|" << m.name << "|";
-        bool first = true;
-        for (const auto& kv : m.attrs) {
-            if (!first) out << ";";
-            first = false;
-            out << kv.first << "=" << kv.second;
+static bool decodeUdtField(const std::string& encoded, std::string& value) {
+    if (encoded.size() % 2 != 0) return false;
+    auto nibble = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    value.clear();
+    value.reserve(encoded.size() / 2);
+    for (size_t i = 0; i < encoded.size(); i += 2) {
+        const int high = nibble(encoded[i]);
+        const int low = nibble(encoded[i + 1]);
+        if (high < 0 || low < 0) {
+            value.clear();
+            return false;
         }
-        out << "\n";
+        value.push_back(static_cast<char>((high << 4) | low));
     }
     return true;
 }
 
-static bool udtMetaExists(const std::string& dbname, const std::string& name,
-                          const std::string& kind = "") {
-    for (const auto& m : loadUdtMeta(dbname)) {
-        if (toLower(m.name) == toLower(name) && (kind.empty() || toLower(m.kind) == toLower(kind)))
-            return true;
+static bool validUdtMeta(const UdtMeta& meta) {
+    if ((meta.kind != "range" && meta.kind != "base") ||
+        !validAuxiliaryTypeName(meta.name)) {
+        return false;
     }
-    return false;
+    for (const auto& [key, value] : meta.attrs) {
+        if (key.empty() || key.find('\0') != std::string::npos ||
+            value.find('\0') != std::string::npos) {
+            return false;
+        }
+    }
+    if (meta.kind == "range") return meta.attrs.count("subtype") != 0;
+    return meta.attrs.count("input") != 0 && meta.attrs.count("output") != 0;
 }
 
-static bool recordUdtMeta(const std::string& dbname, const UdtMeta& meta) {
-    auto metas = loadUdtMeta(dbname);
-    for (auto& m : metas) {
-        if (toLower(m.name) == toLower(meta.name)) { m = meta; return saveUdtMeta(dbname, metas); }
+static bool parseUdtRecord(const std::string& rawLine, UdtMeta& meta) {
+    meta = {};
+    if (rawLine.rfind(UDT_METADATA_V2_PREFIX, 0) == 0) {
+        const size_t prefixLength =
+            std::char_traits<char>::length(UDT_METADATA_V2_PREFIX);
+        std::vector<std::string> fields;
+        size_t position = prefixLength;
+        while (true) {
+            const size_t separator = rawLine.find('|', position);
+            fields.push_back(separator == std::string::npos
+                ? rawLine.substr(position)
+                : rawLine.substr(position, separator - position));
+            if (separator == std::string::npos) break;
+            position = separator + 1;
+        }
+        if (fields.size() < 2 || (fields.size() - 2) % 2 != 0 ||
+            !decodeUdtField(fields[0], meta.kind) ||
+            !decodeUdtField(fields[1], meta.name)) {
+            return false;
+        }
+        for (size_t i = 2; i < fields.size(); i += 2) {
+            std::string key;
+            std::string value;
+            if (!decodeUdtField(fields[i], key) ||
+                !decodeUdtField(fields[i + 1], value) ||
+                !meta.attrs.emplace(std::move(key), std::move(value)).second) {
+                return false;
+            }
+        }
+    } else {
+        const std::string line = trim(rawLine);
+        const size_t kindEnd = line.find('|');
+        const size_t nameEnd = kindEnd == std::string::npos
+            ? std::string::npos : line.find('|', kindEnd + 1);
+        if (kindEnd == std::string::npos || nameEnd == std::string::npos) {
+            return false;
+        }
+        meta.kind = line.substr(0, kindEnd);
+        meta.name = line.substr(kindEnd + 1, nameEnd - kindEnd - 1);
+        std::stringstream attributes(line.substr(nameEnd + 1));
+        std::string attribute;
+        while (std::getline(attributes, attribute, ';')) {
+            attribute = trim(attribute);
+            if (attribute.empty()) continue;
+            const size_t equals = attribute.find('=');
+            if (equals == std::string::npos) return false;
+            const std::string key = trim(attribute.substr(0, equals));
+            const std::string value = trim(attribute.substr(equals + 1));
+            if (!meta.attrs.emplace(key, value).second) return false;
+        }
+    }
+    return validUdtMeta(meta);
+}
+
+static DBStatus loadUdtMeta(const std::string& dbname,
+                            std::vector<UdtMeta>& metas) {
+    metas.clear();
+    const auto path = udtMetaPath(dbname);
+    std::error_code error;
+    const bool exists = std::filesystem::exists(path, error);
+    if (error) return DBStatus::IO_ERROR;
+    if (!exists) return DBStatus::OK;
+
+    std::ifstream in(path);
+    if (!in) return DBStatus::IO_ERROR;
+    std::set<std::string> normalizedNames;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty()) continue;
+        UdtMeta meta;
+        if (!parseUdtRecord(line, meta) ||
+            !normalizedNames.insert(toLower(meta.name)).second) {
+            metas.clear();
+            return DBStatus::CORRUPTED_DATA;
+        }
+        metas.push_back(std::move(meta));
+    }
+    return in.bad() ? DBStatus::IO_ERROR : DBStatus::OK;
+}
+
+static DBStatus saveUdtMeta(const std::string& dbname,
+                            const std::vector<UdtMeta>& metas) {
+    std::ostringstream serialized;
+    for (const auto& meta : metas) {
+        serialized << UDT_METADATA_V2_PREFIX
+                   << encodeUdtField(meta.kind) << '|'
+                   << encodeUdtField(meta.name);
+        for (const auto& [key, value] : meta.attrs) {
+            serialized << '|' << encodeUdtField(key)
+                       << '|' << encodeUdtField(value);
+        }
+        serialized << '\n';
+    }
+    return index_file::writeAtomically(
+               udtMetaPath(dbname), serialized.str())
+        ? DBStatus::OK : DBStatus::IO_ERROR;
+}
+
+static DBStatus udtMetaExists(const std::string& dbname,
+                              const std::string& name, bool& exists,
+                              const std::string& kind = "") {
+    exists = false;
+    std::vector<UdtMeta> metas;
+    const DBStatus status = loadUdtMeta(dbname, metas);
+    if (status != DBStatus::OK) return status;
+    for (const auto& meta : metas) {
+        if (toLower(meta.name) == toLower(name) &&
+            (kind.empty() || toLower(meta.kind) == toLower(kind))) {
+            exists = true;
+            break;
+        }
+    }
+    return DBStatus::OK;
+}
+
+static DBStatus recordUdtMeta(const std::string& dbname,
+                              const UdtMeta& meta) {
+    if (!validUdtMeta(meta)) return DBStatus::INVALID_ARGUMENT;
+    std::vector<UdtMeta> metas;
+    const DBStatus status = loadUdtMeta(dbname, metas);
+    if (status != DBStatus::OK) return status;
+    for (const auto& existing : metas) {
+        if (toLower(existing.name) == toLower(meta.name)) {
+            return DBStatus::TABLE_ALREADY_EXISTS;
+        }
     }
     metas.push_back(meta);
     return saveUdtMeta(dbname, metas);
 }
 
-static bool removeUdtMeta(const std::string& dbname, const std::string& name) {
-    auto metas = loadUdtMeta(dbname);
+static DBStatus removeUdtMeta(const std::string& dbname,
+                              const std::string& name) {
+    if (!validAuxiliaryTypeName(name)) return DBStatus::INVALID_ARGUMENT;
+    std::vector<UdtMeta> metas;
+    const DBStatus status = loadUdtMeta(dbname, metas);
+    if (status != DBStatus::OK) return status;
     bool removed = false;
     std::vector<UdtMeta> kept;
-    for (const auto& m : metas) {
-        if (toLower(m.name) == toLower(name)) { removed = true; continue; }
-        kept.push_back(m);
+    kept.reserve(metas.size());
+    for (auto& meta : metas) {
+        if (toLower(meta.name) == toLower(name)) {
+            removed = true;
+        } else {
+            kept.push_back(std::move(meta));
+        }
     }
-    if (!removed) return false;
+    if (!removed) return DBStatus::TABLE_NOT_FOUND;
     return saveUdtMeta(dbname, kept);
 }
 
-static bool anyTypeExists(const std::string& dbname, const std::string& name) {
-    return g_engine.isCompositeType(dbname, name) ||
-           !g_engine.getEnumType(dbname, name).name.empty() ||
-           shellTypeExists(dbname, name) ||
-           udtMetaExists(dbname, name);
+static DBStatus anyTypeExists(const std::string& dbname,
+                              const std::string& name, bool& exists) {
+    exists = g_engine.isCompositeType(dbname, name) ||
+             !g_engine.getEnumType(dbname, name).name.empty();
+    if (exists) return DBStatus::OK;
+    DBStatus status = shellTypeExists(dbname, name, exists);
+    if (status != DBStatus::OK || exists) return status;
+    return udtMetaExists(dbname, name, exists);
 }
 
 } // anonymous namespace
@@ -2860,15 +3044,31 @@ bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
         }
     };
     try {
+        std::vector<std::string> shellTypes;
+        DBStatus auxiliaryStatus = loadShellTypes(s.currentDB, shellTypes);
+        if (auxiliaryStatus != DBStatus::OK) {
+            std::cout << "DROP SCHEMA shell-type preflight failed (SQLSTATE "
+                      << sqlstateForDBStatus(auxiliaryStatus) << ")"
+                      << std::endl;
+            return true;
+        }
+        std::vector<UdtMeta> udtTypes;
+        auxiliaryStatus = loadUdtMeta(s.currentDB, udtTypes);
+        if (auxiliaryStatus != DBStatus::OK) {
+            std::cout << "DROP SCHEMA UDT preflight failed (SQLSTATE "
+                      << sqlstateForDBStatus(auxiliaryStatus) << ")"
+                      << std::endl;
+            return true;
+        }
         addLogicalObjects(g_engine.getDomainNames(s.currentDB),
                           AuxiliarySchemaObjectKind::Domain);
         addLogicalObjects(g_engine.getCompositeTypeNames(s.currentDB),
                           AuxiliarySchemaObjectKind::CompositeType);
         addLogicalObjects(g_engine.getEnumTypeNames(s.currentDB),
                           AuxiliarySchemaObjectKind::EnumType);
-        addLogicalObjects(loadShellTypes(s.currentDB),
+        addLogicalObjects(shellTypes,
                           AuxiliarySchemaObjectKind::ShellType);
-        for (const auto& meta : loadUdtMeta(s.currentDB)) {
+        for (const auto& meta : udtTypes) {
             if (hasLogicalNamespace(meta.name)) {
                 auxiliaryObjects.push_back(
                     {AuxiliarySchemaObjectKind::UdtType, meta.name});
@@ -2979,12 +3179,10 @@ bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
                 status = g_engine.dropEnumType(s.currentDB, object.name);
                 break;
             case AuxiliarySchemaObjectKind::ShellType:
-                status = removeShellType(s.currentDB, object.name)
-                    ? DBStatus::OK : DBStatus::IO_ERROR;
+                status = removeShellType(s.currentDB, object.name);
                 break;
             case AuxiliarySchemaObjectKind::UdtType:
-                status = removeUdtMeta(s.currentDB, object.name)
-                    ? DBStatus::OK : DBStatus::IO_ERROR;
+                status = removeUdtMeta(s.currentDB, object.name);
                 break;
             case AuxiliarySchemaObjectKind::Function:
                 status = g_engine.dropUDF(s.currentDB, object.name);
@@ -6781,6 +6979,25 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
     }
     const std::string typeName = typeSchema == "public"
         ? stmt->objectName : typeSchema + "." + stmt->objectName;
+    bool typeExists = false;
+    const DBStatus existenceStatus =
+        anyTypeExists(s.currentDB, typeName, typeExists);
+    if (existenceStatus != DBStatus::OK) {
+        std::cout << "CREATE TYPE metadata lookup failed (SQLSTATE "
+                  << sqlstateForDBStatus(existenceStatus) << ")"
+                  << std::endl;
+        return true;
+    }
+    if (typeExists) {
+        if (stmt->ifNotExists) {
+            if (!txn.commit()) return true;
+            std::cout << "NOTICE: type " << typeName
+                      << " already exists, skipping" << std::endl;
+            return false;
+        }
+        std::cout << "Type " << typeName << " already exists" << std::endl;
+        return true;
+    }
 
     std::string typeKind = stmt->options.count("type_kind") ? stmt->options.at("type_kind") : "";
     if (typeKind == "enum") {
@@ -6805,13 +7022,11 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
 
     // Shell type (CREATE TYPE name)
     if (typeKind == "shell") {
-        if (anyTypeExists(s.currentDB, typeName)) {
-            std::cout << "Type " << typeName << " already exists" << std::endl;
-            return true;
-        }
         txn.markSnapshotDirty();
-        if (!recordShellType(s.currentDB, typeName)) {
-            std::cout << "CREATE TYPE failed" << std::endl;
+        const DBStatus status = recordShellType(s.currentDB, typeName);
+        if (status != DBStatus::OK) {
+            std::cout << "CREATE TYPE failed (SQLSTATE "
+                      << sqlstateForDBStatus(status) << ")" << std::endl;
             return true;
         }
         txn.recordCreate(DdlObjectKind::Type, typeName);
@@ -6822,10 +7037,6 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
 
     // Range type (CREATE TYPE name AS RANGE (...))
     if (typeKind == "range") {
-        if (anyTypeExists(s.currentDB, typeName)) {
-            std::cout << "Type " << typeName << " already exists" << std::endl;
-            return true;
-        }
         UdtMeta meta;
         meta.kind = "range";
         meta.name = typeName;
@@ -6839,8 +7050,10 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
             return true;
         }
         txn.markSnapshotDirty();
-        if (!recordUdtMeta(s.currentDB, meta)) {
-            std::cout << "CREATE TYPE failed" << std::endl;
+        const DBStatus status = recordUdtMeta(s.currentDB, meta);
+        if (status != DBStatus::OK) {
+            std::cout << "CREATE TYPE failed (SQLSTATE "
+                      << sqlstateForDBStatus(status) << ")" << std::endl;
             return true;
         }
         txn.recordCreate(DdlObjectKind::Type, typeName);
@@ -6851,10 +7064,6 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
 
     // Base type (CREATE TYPE name (INPUT=..., OUTPUT=..., ...))
     if (typeKind == "base") {
-        if (anyTypeExists(s.currentDB, typeName)) {
-            std::cout << "Type " << typeName << " already exists" << std::endl;
-            return true;
-        }
         UdtMeta meta;
         meta.kind = "base";
         meta.name = typeName;
@@ -6868,8 +7077,10 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
             return true;
         }
         txn.markSnapshotDirty();
-        if (!recordUdtMeta(s.currentDB, meta)) {
-            std::cout << "CREATE TYPE failed" << std::endl;
+        const DBStatus status = recordUdtMeta(s.currentDB, meta);
+        if (status != DBStatus::OK) {
+            std::cout << "CREATE TYPE failed (SQLSTATE "
+                      << sqlstateForDBStatus(status) << ")" << std::endl;
             return true;
         }
         txn.recordCreate(DdlObjectKind::Type, typeName);
@@ -6944,23 +7155,48 @@ bool DdlExecutor::executeDropType(const DropStmt* stmt, Session& s) {
     const std::string name = schemaName == "public"
         ? qualifiedName.name : schemaName + "." + qualifiedName.name;
     txn.markSnapshotDirty();
-    txn.recordDrop(DdlObjectKind::Type, name);
     DBStatus res = g_engine.dropCompositeType(s.currentDB, name);
-    if (res != DBStatus::OK) {
-        res = g_engine.dropEnumType(s.currentDB, name);
-    }
-    bool droppedMeta = false;
-    if (res != DBStatus::OK) {
-        droppedMeta = removeUdtMeta(s.currentDB, name);
-    }
-    bool droppedShell = false;
-    if (res != DBStatus::OK && !droppedMeta) {
-        droppedShell = removeShellType(s.currentDB, name);
-    }
-    if (res != DBStatus::OK && !droppedMeta && !droppedShell) {
-        std::cout << "DROP TYPE failed" << std::endl;
+    if (res != DBStatus::OK && res != DBStatus::TABLE_NOT_FOUND) {
+        std::cout << "DROP TYPE failed (SQLSTATE "
+                  << sqlstateForDBStatus(res) << ")" << std::endl;
         return true;
     }
+    if (res == DBStatus::TABLE_NOT_FOUND) {
+        res = g_engine.dropEnumType(s.currentDB, name);
+    }
+    if (res != DBStatus::OK && res != DBStatus::TABLE_NOT_FOUND) {
+        std::cout << "DROP TYPE failed (SQLSTATE "
+                  << sqlstateForDBStatus(res) << ")" << std::endl;
+        return true;
+    }
+    if (res == DBStatus::TABLE_NOT_FOUND) {
+        res = removeUdtMeta(s.currentDB, name);
+    }
+    if (res != DBStatus::OK && res != DBStatus::TABLE_NOT_FOUND) {
+        std::cout << "DROP TYPE failed (SQLSTATE "
+                  << sqlstateForDBStatus(res) << ")" << std::endl;
+        return true;
+    }
+    if (res == DBStatus::TABLE_NOT_FOUND) {
+        res = removeShellType(s.currentDB, name);
+    }
+    if (res != DBStatus::OK && res != DBStatus::TABLE_NOT_FOUND) {
+        std::cout << "DROP TYPE failed (SQLSTATE "
+                  << sqlstateForDBStatus(res) << ")" << std::endl;
+        return true;
+    }
+    if (res == DBStatus::TABLE_NOT_FOUND) {
+        if (!stmt->ifExists) {
+            std::cout << "DROP TYPE failed: type " << name
+                      << " does not exist" << std::endl;
+            return true;
+        }
+        if (!txn.commit()) return true;
+        std::cout << "NOTICE: type " << name
+                  << " does not exist, skipping" << std::endl;
+        return false;
+    }
+    txn.recordDrop(DdlObjectKind::Type, name);
     if (!txn.commit()) return true;
     std::cout << "DROP TYPE succeeded" << std::endl;
     return false;

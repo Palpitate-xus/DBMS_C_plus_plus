@@ -327,6 +327,46 @@ static void test_drop_schema_catalog_preflight_fails_closed() {
               << std::endl;
 }
 
+static void test_drop_schema_auxiliary_preflight_fails_closed() {
+    const std::string db = testDbPath("drop_schema_aux_preflight");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE SCHEMA app_aux", s));
+
+    const fs::path shellPath = fs::path(db) / ".shell_types";
+    {
+        std::ofstream duplicateShell(shellPath, std::ios::binary);
+        duplicateShell << "app_aux.value\napp_aux.value\n";
+        assert(duplicateShell.good());
+    }
+    assert(ddl.executeSql("DROP SCHEMA app_aux CASCADE", s));
+    assert(g_engine.schemaExists(db, "app_aux"));
+
+    {
+        std::ofstream validShell(shellPath, std::ios::binary | std::ios::trunc);
+        validShell << "app_aux.value\n";
+        assert(validShell.good());
+        std::ofstream corruptUdt(
+            fs::path(db) / ".udt_meta", std::ios::binary);
+        corruptUdt << "malformed record\n";
+        assert(corruptUdt.good());
+    }
+    assert(ddl.executeSql("DROP SCHEMA app_aux CASCADE", s));
+    assert(g_engine.schemaExists(db, "app_aux"));
+
+    fs::remove(fs::path(db) / ".udt_meta");
+    assert(!ddl.executeSql("DROP SCHEMA app_aux CASCADE", s));
+    assert(!g_engine.schemaExists(db, "app_aux"));
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[DROP-CASCADE] auxiliary preflight fails closed OK"
+              << std::endl;
+}
+
 static bool lineFileContains(const fs::path& path,
                              const std::string& expected) {
     std::ifstream input(path);
@@ -335,6 +375,18 @@ static bool lineFileContains(const fs::path& path,
         if (line == expected ||
             line.find("|" + expected + "|") != std::string::npos) {
             return true;
+        }
+        if (line.rfind("DBMS_UDT_V2:", 0) == 0) {
+            static constexpr char hex[] = "0123456789abcdef";
+            std::string encoded;
+            encoded.reserve(expected.size() * 2);
+            for (unsigned char byte : expected) {
+                encoded.push_back(hex[byte >> 4]);
+                encoded.push_back(hex[byte & 0x0f]);
+            }
+            if (line.find("|" + encoded + "|") != std::string::npos) {
+                return true;
+            }
         }
     }
     return false;
@@ -632,6 +684,7 @@ int main() {
     test_owned_sequence_defaults_obey_drop_behavior();
     test_drop_schema_cascade_removes_relation_storage();
     test_drop_schema_catalog_preflight_fails_closed();
+    test_drop_schema_auxiliary_preflight_fails_closed();
     test_drop_schema_handles_auxiliary_objects();
     test_drop_schema_validates_both_catalogs();
     test_multi_schema_drop_fails_before_mutation();
