@@ -33500,7 +33500,7 @@ bool StorageEngine::rebuildIndexesAfterRecovery(
 // ========================================================================
 
 struct PreparedTransactionRecord {
-    static constexpr int CURRENT_FORMAT = 4;
+    static constexpr int CURRENT_FORMAT = 5;
     static constexpr int MINIMUM_FORMAT = 2;
     int format = 0;
     uint64_t txnId = 0;
@@ -33934,43 +33934,15 @@ bool StorageEngine::recoverAllDatabases() {
                           << entry.path() << std::endl;
                 return false;
             }
-            std::ifstream in(entry.path());
-            std::string line;
-            uint64_t xid = 0;
-            std::string dbname;
-            bool hasXid = false;
-            bool hasDbname = false;
-            while (std::getline(in, line)) {
-                if (line.rfind("TXN_ID ", 0) == 0) {
-                    if (hasXid) return false;
-                    try {
-                        size_t consumed = 0;
-                        xid = std::stoull(line.substr(7), &consumed);
-                        if (consumed != line.size() - 7 || xid == 0) return false;
-                    } catch (...) { return false; }
-                    hasXid = true;
-                } else if (line.rfind("DBNAME ", 0) == 0) {
-                    if (hasDbname) return false;
-                    dbname = line.substr(7);
-                    if (dbname.empty() || dbname.find('/') != std::string::npos ||
-                        dbname.find('\\') != std::string::npos ||
-                        dbname.find('\n') != std::string::npos ||
-                        dbname.find('\r') != std::string::npos) return false;
-                    hasDbname = true;
-                }
-            }
-            if (!in.eof() || !hasXid || !hasDbname || !isDatabaseDirectory(dbname)) {
+            PreparedTransactionRecord record;
+            if (!readPreparedRecord(entry.path(), record) ||
+                !isDatabaseDirectory(record.dbname)) {
                 std::cerr << "[recovery] invalid prepared metadata: "
                           << entry.path() << std::endl;
                 return false;
             }
-            PreparedTransactionRecord record;
-            if (!readPreparedRecord(entry.path(), record) ||
-                record.txnId != xid || record.dbname != dbname) {
-                std::cerr << "[recovery] invalid prepared transaction record: "
-                          << entry.path() << std::endl;
-                return false;
-            }
+            const uint64_t xid = record.txnId;
+            const std::string dbname = record.dbname;
             const auto key = std::make_pair(dbname, xid);
             if (!preparedFiles.emplace(key, entry.path()).second) {
                 std::cerr << "[recovery] duplicate prepared transaction metadata for xid "
@@ -38397,8 +38369,13 @@ static bool readPreparedRecord(const std::filesystem::path& path,
                 if (consumed != value.size()) return false;
                 hasTxnId = true;
             } else if (line.rfind("DBNAME ", 0) == 0) {
-                if (hasDbname) return false;
-                record.dbname = line.substr(7);
+                if (hasDbname || !hasFormat) return false;
+                const std::string storedName = line.substr(7);
+                if (record.format >= 5) {
+                    if (!preparedHexDecode(storedName, record.dbname)) return false;
+                } else {
+                    record.dbname = storedName;
+                }
                 hasDbname = true;
             } else if (line.rfind("ISOLATION ", 0) == 0) {
                 if (hasIsolation) return false;
@@ -38465,7 +38442,7 @@ static bool readPreparedRecord(const std::filesystem::path& path,
                 pos = opEnd + 1;
                 const size_t tableEnd = line.find(' ', pos);
                 if (tableEnd == std::string::npos) return false;
-                const std::string table = line.substr(pos, tableEnd - pos);
+                const std::string storedTable = line.substr(pos, tableEnd - pos);
                 pos = tableEnd + 1;
                 const size_t ridEnd = line.find(' ', pos);
                 if (ridEnd == std::string::npos) return false;
@@ -38474,7 +38451,15 @@ static bool readPreparedRecord(const std::filesystem::path& path,
                 else if (op == "UPDATE") entry.op = PreparedTransactionRecord::LogEntry::Op::Update;
                 else if (op == "DELETE") entry.op = PreparedTransactionRecord::LogEntry::Op::Delete;
                 else return false;
-                entry.tableName = table;
+                if (record.format >= 5) {
+                    if (!preparedHexDecode(storedTable, entry.tableName)) return false;
+                } else {
+                    entry.tableName = storedTable;
+                }
+                if (entry.tableName.empty() ||
+                    !validStoredIdentifier(entry.tableName, MAX_TABLE_NAME_LEN)) {
+                    return false;
+                }
                 const std::string rowRid = line.substr(pos, ridEnd - pos);
                 size_t consumed = 0;
                 entry.rowIdx = std::stoll(rowRid, &consumed);
@@ -38621,7 +38606,7 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
     // Transaction metadata
     prepared << "PREPARED_FORMAT " << PreparedTransactionRecord::CURRENT_FORMAT << "\n";
     prepared << "TXN_ID " << transactionContext().currentTxnId << "\n";
-    prepared << "DBNAME " << transactionContext().txnDB << "\n";
+    prepared << "DBNAME " << preparedHexEncode(transactionContext().txnDB) << "\n";
     prepared << "ISOLATION " << static_cast<int>(transactionContext().txnIsolationLevel) << "\n";
     prepared << "READONLY " << (transactionContext().readOnly ? 1 : 0) << "\n";
 
@@ -38662,7 +38647,7 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
         if (entry.op == TxnLogEntry::Op::Insert) prepared << "INSERT";
         else if (entry.op == TxnLogEntry::Op::Update) prepared << "UPDATE";
         else if (entry.op == TxnLogEntry::Op::Delete) prepared << "DELETE";
-        prepared << " " << entry.tableName << " " << entry.rowIdx << " "
+        prepared << " " << preparedHexEncode(entry.tableName) << " " << entry.rowIdx << " "
                  << entry.previousRowIdx << " "
                  << preparedHexEncode(entry.rowData) << " "
                  << preparedHexEncode(entry.newRowData) << "\n";

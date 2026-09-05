@@ -100,6 +100,42 @@ void test_cross_backend_prepare_completion() {
     std::cout << "[PREPARED-TXN] cross-backend commit/rollback and lock ownership OK\n";
 }
 
+void test_quoted_names_round_trip_through_prepared_metadata() {
+    const std::string db = testDbPath("prepared quoted database");
+    const std::string tableName = "order items";
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    dbms::TableSchema table;
+    table.tablename = tableName;
+    table.append(dbms::makeIntColumn("id", false, 2, true));
+    assert(g_engine.createTable(db, table) == dbms::DBStatus::OK);
+
+    dbms::StorageEngine completingBackend;
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, tableName, {{"id", "1"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.prepareTransaction("prepared_quoted_commit") ==
+           dbms::DBStatus::OK);
+    assert(completingBackend.commitPrepared("prepared_quoted_commit") ==
+           dbms::DBStatus::OK);
+    assert(completingBackend.query(
+               db, tableName, {"=id 1"}, {"id"}).size() == 1);
+
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, tableName, {{"id", "2"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.prepareTransaction("prepared_quoted_rollback") ==
+           dbms::DBStatus::OK);
+    assert(completingBackend.rollbackPrepared("prepared_quoted_rollback") ==
+           dbms::DBStatus::OK);
+    assert(completingBackend.query(
+               db, tableName, {"=id 2"}, {"id"}).empty());
+
+    cleanup(db);
+    std::cout << "[PREPARED-TXN] quoted database and table names round-trip OK\n";
+}
+
 void test_commit_refreshes_warm_completion_backend() {
     const std::string db = testDbPath("prepared_warm_commit");
     cleanup(db);
@@ -339,6 +375,7 @@ int main(int argc, char** argv) {
     cleanupAllTestData();
     test_prepare_rejects_deferred_constraint_violation();
     test_cross_backend_prepare_completion();
+    test_quoted_names_round_trip_through_prepared_metadata();
     test_commit_refreshes_warm_completion_backend();
     test_commit_clog_failure_is_irrevocable();
     test_terminal_metadata_cleanup_is_idempotent();
