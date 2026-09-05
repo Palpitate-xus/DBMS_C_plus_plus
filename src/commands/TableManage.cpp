@@ -38568,12 +38568,13 @@ DBStatus StorageEngine::alterDomain(const std::string& dbname, const std::string
         return DBStatus::TABLE_ALREADY_EXISTS;
     }
     std::ifstream ifs(path);
+    if (!ifs) return DBStatus::IO_ERROR;
     std::vector<DomainInfo> domains;
     std::string line;
     bool found = false;
     while (std::getline(ifs, line)) {
         size_t sp1 = line.find('|');
-        if (sp1 == std::string::npos) continue;
+        if (sp1 == std::string::npos) return DBStatus::INVALID_VALUE;
         size_t sp2 = line.find('|', sp1 + 1);
         size_t sp3 = (sp2 == std::string::npos) ? std::string::npos : line.find('|', sp2 + 1);
         size_t sp4 = (sp3 == std::string::npos) ? std::string::npos : line.find('|', sp3 + 1);
@@ -38594,14 +38595,16 @@ DBStatus StorageEngine::alterDomain(const std::string& dbname, const std::string
             domains.push_back(current);
         }
     }
+    if (ifs.bad()) return DBStatus::IO_ERROR;
     if (!found) return DBStatus::TABLE_NOT_FOUND;
-    std::ofstream ofs(path, std::ios::trunc);
-    if (!ofs) return DBStatus::INVALID_VALUE;
+    std::ostringstream serialized;
     for (const auto& d : domains) {
-        ofs << d.name << "|" << d.baseType << "|" << d.defaultValue << "|"
-            << d.checkExpr << "|" << d.constraintName << "\n";
+        serialized << d.name << "|" << d.baseType << "|"
+                   << d.defaultValue << "|" << d.checkExpr << "|"
+                   << d.constraintName << "\n";
     }
-    return DBStatus::OK;
+    return index_file::writeAtomically(path, serialized.str())
+        ? DBStatus::OK : DBStatus::IO_ERROR;
 }
 
 DBStatus StorageEngine::dropDomain(const std::string& dbname, const std::string& name) {
@@ -38609,6 +38612,7 @@ DBStatus StorageEngine::dropDomain(const std::string& dbname, const std::string&
     auto path = domainPath(dbname);
     if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
     std::ifstream ifs(path);
+    if (!ifs) return DBStatus::IO_ERROR;
     std::vector<std::string> lines;
     std::string line;
     bool found = false;
@@ -38620,10 +38624,12 @@ DBStatus StorageEngine::dropDomain(const std::string& dbname, const std::string&
             lines.push_back(line);
         }
     }
+    if (ifs.bad()) return DBStatus::IO_ERROR;
     if (!found) return DBStatus::TABLE_NOT_FOUND;
-    std::ofstream ofs(path, std::ios::trunc);
-    for (const auto& l : lines) ofs << l << '\n';
-    return DBStatus::OK;
+    std::ostringstream serialized;
+    for (const auto& retained : lines) serialized << retained << '\n';
+    return index_file::writeAtomically(path, serialized.str())
+        ? DBStatus::OK : DBStatus::IO_ERROR;
 }
 
 StorageEngine::DomainInfo StorageEngine::getDomain(const std::string& dbname, const std::string& name) const {

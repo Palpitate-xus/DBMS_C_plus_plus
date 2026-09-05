@@ -4,7 +4,9 @@
 #include "catalog/type_registry.h"
 #include <cassert>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
@@ -22,6 +24,12 @@ static void setupSession(Session& s, const std::string& db) {
 static std::string trimRight(const std::string& s) {
     size_t end = s.find_last_not_of(" \t\n\r");
     return (end == std::string::npos) ? "" : s.substr(0, end + 1);
+}
+
+static std::string readFile(const fs::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(input),
+            std::istreambuf_iterator<char>()};
 }
 
 static void test_domain_check() {
@@ -102,11 +110,58 @@ static void test_domain_update() {
     std::cout << "[DOMAIN] update OK" << std::endl;
 }
 
+static void test_domain_metadata_rewrites_are_atomic() {
+    const std::string db = testDbPath("domain_metadata_atomicity");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    dbms::StorageEngine::DomainInfo first;
+    first.name = "first_domain";
+    first.baseType = "int";
+    first.defaultValue = "1";
+    dbms::StorageEngine::DomainInfo second = first;
+    second.name = "second_domain";
+    second.defaultValue = "2";
+    assert(g_engine.createDomain(db, first) == dbms::DBStatus::OK);
+    assert(g_engine.createDomain(db, second) == dbms::DBStatus::OK);
+
+    const fs::path path = fs::path(db) / ".domains";
+    const fs::path savedPath = fs::path(db) / ".domains.saved";
+    const std::string originalBytes = readFile(path);
+    assert(!originalBytes.empty());
+    fs::rename(path, savedPath);
+    assert(fs::create_directory(path));
+
+    dbms::StorageEngine::DomainInfo changed = first;
+    changed.defaultValue = "42";
+    assert(g_engine.alterDomain(db, first.name, changed) ==
+           dbms::DBStatus::IO_ERROR);
+    assert(g_engine.dropDomain(db, first.name) == dbms::DBStatus::IO_ERROR);
+    fs::remove(path);
+    fs::rename(savedPath, path);
+    assert(readFile(path) == originalBytes);
+
+    assert(g_engine.alterDomain(db, first.name, changed) ==
+           dbms::DBStatus::OK);
+    dbms::StorageEngine reloaded;
+    assert(reloaded.getDomain(db, first.name).defaultValue == "42");
+    assert(reloaded.getDomain(db, second.name).defaultValue == "2");
+
+    assert(g_engine.dropDomain(db, first.name) == dbms::DBStatus::OK);
+    dbms::StorageEngine afterDrop;
+    assert(afterDrop.getDomain(db, first.name).name.empty());
+    assert(afterDrop.getDomain(db, second.name).defaultValue == "2");
+
+    cleanup(db);
+    std::cout << "[DOMAIN] metadata rewrites are atomic OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_domain_check();
     test_domain_default();
     test_domain_update();
+    test_domain_metadata_rewrites_are_atomic();
     std::cout << "[DOMAIN_FULL] all passed" << std::endl;
     return 0;
 }
