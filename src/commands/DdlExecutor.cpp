@@ -376,7 +376,7 @@ static void registerTableInCatalog(CatalogManager& cat, const TableSchema& tbl,
     }
 }
 
-static void registerMaterializedViewInCatalog(
+static Oid registerMaterializedViewInCatalog(
     CatalogManager& catalog, const TableSchema& output,
     const std::string& logicalSchema, const std::string& logicalName,
     bool populated) {
@@ -406,6 +406,7 @@ static void registerMaterializedViewInCatalog(
             catalog, relationOid, namespaceOid, output.cols[column],
             column));
     }
+    return relationOid;
 }
 
 static Oid registerViewInCatalog(
@@ -5273,6 +5274,7 @@ bool DdlExecutor::executeCreateMaterializedView(const CreateViewStmt* stmt, Sess
         return true;
     }
 
+    const std::string sourceRelationName = srcTable;
     srcTable = resolveTableName(s, srcTable);
     if (!g_engine.tableExists(s.currentDB, srcTable)) {
         std::cout << "CREATE MATERIALIZED VIEW: source table not found" << std::endl;
@@ -5410,8 +5412,21 @@ bool DdlExecutor::executeCreateMaterializedView(const CreateViewStmt* stmt, Sess
     try {
         CatalogManager& catalog =
             g_engine.catalogService().get(s.currentDB);
-        registerMaterializedViewInCatalog(
+        const Oid materializedViewOid = registerMaterializedViewInCatalog(
             catalog, tbl, schemaName, qualifiedName.name, stmt->withData);
+        const PgClassRow* sourceRelation =
+            catalog.resolveRelation(sourceRelationName, {"public"});
+        if (sourceRelation && sourceRelation->oid != materializedViewOid) {
+            PgDependRow dependency;
+            dependency.classid = PgClassOid_Class;
+            dependency.objid = materializedViewOid;
+            dependency.objsubid = 0;
+            dependency.refclassid = PgClassOid_Class;
+            dependency.refobjid = sourceRelation->oid;
+            dependency.refobjsubid = 0;
+            dependency.deptype = 'n';
+            catalog.addDepend(dependency);
+        }
         if (!catalog.persistAll()) {
             throw std::runtime_error("cannot persist materialized-view catalog");
         }

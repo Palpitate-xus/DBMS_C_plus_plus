@@ -2,6 +2,7 @@
 #include "commands/TableManage.h"
 #include "Session.h"
 #include "catalog/CatalogService.h"
+#include "catalog/systables.h"
 #include "catalog/type_registry.h"
 #include <algorithm>
 #include <cassert>
@@ -464,6 +465,56 @@ static void test_schema_qualified_matview_name() {
     std::cout << "[MATVIEW] schema-qualified name lifecycle OK" << std::endl;
 }
 
+static void test_matview_source_dependency_cascade() {
+    const std::string db = testDbPath("matview_source_dependency");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE base (id INT)", s));
+    assert(!ddl.executeSql(
+        "CREATE MATERIALIZED VIEW cached_base AS SELECT id FROM base", s));
+
+    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
+    const auto* base = catalog.resolveRelation("base", {"public"});
+    const auto* view = catalog.resolveRelation("cached_base", {"public"});
+    assert(base != nullptr);
+    assert(view != nullptr && view->relkind == 'm');
+    const dbms::Oid baseOid = base->oid;
+    const dbms::Oid viewOid = view->oid;
+    const auto dependencies =
+        catalog.findDepends(dbms::PgClassOid_Class, viewOid);
+    assert(std::any_of(
+        dependencies.begin(), dependencies.end(),
+        [&](const dbms::PgDependRow& dependency) {
+            return dependency.refclassid == dbms::PgClassOid_Class &&
+                   dependency.refobjid == baseOid;
+        }));
+
+    assert(ddl.executeSql("DROP TABLE base", s));
+    assert(g_engine.tableExists(db, "base"));
+    assert(g_engine.isMaterializedView(db, "cached_base"));
+    assert(!ddl.executeSql("DROP TABLE base CASCADE", s));
+    assert(!g_engine.tableExists(db, "base"));
+    assert(!g_engine.isMaterializedView(db, "cached_base"));
+    assert(!g_engine.tableExists(
+        db, dbms::StorageEngine::materializedViewPrefix("cached_base")));
+    assert(catalog.findClass(baseOid) == nullptr);
+    assert(catalog.findClass(viewOid) == nullptr);
+    assert(catalog.findAttributes(viewOid).empty());
+
+    g_engine.catalogService().evict(db);
+    dbms::CatalogManager& reloaded = g_engine.catalogService().get(db);
+    assert(reloaded.findClass(baseOid) == nullptr);
+    assert(reloaded.findClass(viewOid) == nullptr);
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[MATVIEW] source dependency CASCADE OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_create_matview_select_star();
@@ -476,6 +527,7 @@ int main() {
     test_matview_metadata_write_failure_rolls_back();
     test_matview_drop_io_failure_rolls_back();
     test_schema_qualified_matview_name();
+    test_matview_source_dependency_cascade();
     std::cout << "[MATVIEW] all passed" << std::endl;
     return 0;
 }
