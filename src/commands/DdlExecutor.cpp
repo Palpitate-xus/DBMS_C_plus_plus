@@ -4950,17 +4950,18 @@ bool DdlExecutor::executeCreateMaterializedView(const CreateViewStmt* stmt, Sess
 
     // Save SQL to .mview file
     auto mviewDir = g_engine.viewsDir(s.currentDB);
-    if (!std::filesystem::exists(mviewDir)) {
-        std::filesystem::create_directories(mviewDir);
+    std::error_code metadataError;
+    std::filesystem::create_directories(mviewDir, metadataError);
+    if (metadataError) {
+        std::cout << "CREATE MATERIALIZED VIEW: failed to create metadata directory"
+                  << std::endl;
+        return true;
     }
     auto mviewPath = mviewDir / (viewname + ".mview");
-    {
-        std::ofstream ofs(mviewPath);
-        if (!ofs) {
-            std::cout << "CREATE MATERIALIZED VIEW: failed to save metadata" << std::endl;
-            return true;
-        }
-        ofs << selectSql;
+    if (!index_file::writeAtomically(mviewPath, selectSql)) {
+        std::cout << "CREATE MATERIALIZED VIEW: failed to save metadata"
+                  << std::endl;
+        return true;
     }
 
     try {

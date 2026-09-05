@@ -353,6 +353,36 @@ static void test_drop_matview_cleans_catalog_atomically() {
     std::cout << "[MATVIEW] DROP catalog lifecycle OK" << std::endl;
 }
 
+static void test_matview_metadata_write_failure_rolls_back() {
+    const std::string db = testDbPath("matview_metadata_failure");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE t (id INT)", s));
+
+    const fs::path blockedTarget =
+        g_engine.viewsDir(db) / "blocked_mv.mview";
+    fs::create_directories(blockedTarget);
+    assert(ddl.executeSql(
+        "CREATE MATERIALIZED VIEW blocked_mv AS SELECT id FROM t", s));
+    assert(fs::is_directory(blockedTarget));
+    assert(!g_engine.tableExists(
+        db, dbms::StorageEngine::materializedViewPrefix("blocked_mv")));
+    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
+    assert(catalog.resolveRelation("blocked_mv", {"public"}) == nullptr);
+    for (const auto& entry : fs::directory_iterator(g_engine.viewsDir(db))) {
+        assert(entry.path().filename().string().find(
+                   "blocked_mv.mview.tmp.") != 0);
+    }
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[MATVIEW] metadata write failure rollback OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_create_matview_select_star();
@@ -362,6 +392,7 @@ int main() {
     test_create_matview_preserves_exact_sql_values();
     test_create_matview_with_no_data();
     test_drop_matview_cleans_catalog_atomically();
+    test_matview_metadata_write_failure_rolls_back();
     std::cout << "[MATVIEW] all passed" << std::endl;
     return 0;
 }
