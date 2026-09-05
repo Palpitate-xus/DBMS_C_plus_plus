@@ -5594,22 +5594,14 @@ StmtPtr SQLParser::parseCreateType(const std::vector<std::string>& tokens, size_
         stmt->options["type_kind"] = "enum";
         if (pos < tokens.size() && tokens[pos] == "(") {
             ++pos;
-            std::string labels;
             while (pos < tokens.size() && tokens[pos] != ")") {
                 if (tokens[pos] == ",") {
                     ++pos;
                     continue;
                 }
-                if (!labels.empty()) labels += ",";
-                std::string label = tokens[pos++];
-                // Strip quotes if present
-                if (label.size() >= 2 && label.front() == '\'' && label.back() == '\'') {
-                    label = label.substr(1, label.size() - 2);
-                }
-                labels += label;
+                stmt->enumLabels.push_back(stripQuotes(tokens[pos++]));
             }
             if (pos < tokens.size() && tokens[pos] == ")") ++pos;
-            stmt->options["enum_labels"] = labels;
         }
     }
     // CREATE TYPE name AS ( field type [, ...] )  -- composite (ROW) type

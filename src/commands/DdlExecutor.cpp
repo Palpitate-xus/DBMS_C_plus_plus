@@ -6772,12 +6772,7 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
     if (typeKind == "enum") {
         StorageEngine::EnumType et;
         et.name = stmt->objectName;
-        std::string labels = stmt->options.count("enum_labels") ? stmt->options.at("enum_labels") : "";
-        std::stringstream ss(labels);
-        std::string item;
-        while (std::getline(ss, item, ',')) {
-            if (!item.empty()) et.labels.push_back(item);
-        }
+        et.labels = stmt->enumLabels;
         if (et.labels.empty()) {
             std::cout << "CREATE TYPE AS ENUM requires at least one label" << std::endl;
             return true;

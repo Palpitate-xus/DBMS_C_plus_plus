@@ -887,6 +887,7 @@ struct CreateObjectStmt : public Stmt {
     bool ifNotExists = false;
     bool replace = false;
     std::map<std::string, std::string> options;
+    std::vector<std::string> enumLabels; // lossless CREATE TYPE ... AS ENUM labels
 
     CreateObjectStmt(SqlCommand cmd) : Stmt(cmd) {}
     std::string toString() const override { return "CREATE " + objectType; }

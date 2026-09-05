@@ -38842,105 +38842,190 @@ static std::filesystem::path enumPath(const std::string& dbname) {
     return std::filesystem::path(dbname) / ".enums";
 }
 
-DBStatus StorageEngine::createEnumType(const std::string& dbname, const EnumType& et) {
-    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    auto existing = getEnumType(dbname, et.name);
-    if (!existing.name.empty()) return DBStatus::TABLE_ALREADY_EXISTS;
-    std::ofstream ofs(enumPath(dbname), std::ios::app);
-    if (!ofs) return DBStatus::INVALID_VALUE;
-    ofs << et.name;
-    for (const auto& label : et.labels) {
-        ofs << "|" << label;
+// The legacy format stored labels verbatim separated by '|'.  Both '|' and
+// newlines are valid enum-label bytes, so one label could corrupt subsequent
+// definitions.  V2 hex-encodes every field while keeping legacy files
+// readable; every successful mutation rewrites the whole file as V2.
+static constexpr const char* ENUM_METADATA_V2_PREFIX = "DBMS_ENUM_V2:";
+
+static bool validEnumTypeDefinition(const StorageEngine::EnumType& type) {
+    if (!validMetadataObjectName(type.name) || type.labels.empty()) return false;
+    std::unordered_set<std::string> labels;
+    for (const auto& label : type.labels) {
+        if (label.find('\0') != std::string::npos ||
+            !labels.insert(label).second) {
+            return false;
+        }
     }
-    ofs << "\n";
-    return DBStatus::OK;
+    return true;
+}
+
+static bool parseEnumTypeRecord(
+    const std::string& line, StorageEngine::EnumType& type) {
+    type = {};
+    size_t position = 0;
+    if (line.rfind(ENUM_METADATA_V2_PREFIX, 0) == 0) {
+        position = std::char_traits<char>::length(ENUM_METADATA_V2_PREFIX);
+        const size_t nameEnd = line.find('|', position);
+        if (nameEnd == std::string::npos ||
+            !decodeCommentField(
+                line.substr(position, nameEnd - position), type.name)) {
+            return false;
+        }
+        position = nameEnd + 1;
+        while (true) {
+            const size_t labelEnd = line.find('|', position);
+            std::string label;
+            if (!decodeCommentField(
+                    labelEnd == std::string::npos
+                        ? line.substr(position)
+                        : line.substr(position, labelEnd - position),
+                    label)) {
+                return false;
+            }
+            type.labels.push_back(std::move(label));
+            if (labelEnd == std::string::npos) break;
+            position = labelEnd + 1;
+        }
+    } else {
+        const size_t nameEnd = line.find('|');
+        if (nameEnd == std::string::npos) return false;
+        type.name = line.substr(0, nameEnd);
+        position = nameEnd + 1;
+        while (true) {
+            const size_t labelEnd = line.find('|', position);
+            type.labels.push_back(
+                labelEnd == std::string::npos
+                    ? line.substr(position)
+                    : line.substr(position, labelEnd - position));
+            if (labelEnd == std::string::npos) break;
+            position = labelEnd + 1;
+        }
+    }
+    return validEnumTypeDefinition(type);
+}
+
+static bool loadEnumTypes(
+    const std::filesystem::path& path,
+    std::vector<StorageEngine::EnumType>& types) {
+    types.clear();
+    std::error_code error;
+    const bool exists = std::filesystem::exists(path, error);
+    if (error) return false;
+    if (!exists) return true;
+
+    std::ifstream input(path);
+    if (!input) return false;
+    std::unordered_set<std::string> names;
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.empty()) continue;
+        StorageEngine::EnumType type;
+        if (!parseEnumTypeRecord(line, type) ||
+            !names.insert(type.name).second) {
+            return false;
+        }
+        types.push_back(std::move(type));
+    }
+    return !input.bad();
+}
+
+static std::string serializeEnumTypes(
+    const std::vector<StorageEngine::EnumType>& types) {
+    std::ostringstream serialized;
+    for (const auto& type : types) {
+        serialized << ENUM_METADATA_V2_PREFIX << encodeCommentField(type.name);
+        for (const auto& label : type.labels) {
+            serialized << '|' << encodeCommentField(label);
+        }
+        serialized << '\n';
+    }
+    return serialized.str();
+}
+
+DBStatus StorageEngine::createEnumType(const std::string& dbname, const EnumType& et) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    if (!validEnumTypeDefinition(et)) return DBStatus::INVALID_ARGUMENT;
+    const auto path = enumPath(dbname);
+    std::vector<EnumType> types;
+    if (!loadEnumTypes(path, types)) return DBStatus::IO_ERROR;
+    for (const auto& existing : types) {
+        if (existing.name == et.name) return DBStatus::TABLE_ALREADY_EXISTS;
+    }
+    types.push_back(et);
+    return index_file::writeAtomically(path, serializeEnumTypes(types))
+        ? DBStatus::OK : DBStatus::IO_ERROR;
 }
 
 DBStatus StorageEngine::dropEnumType(const std::string& dbname, const std::string& name) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    auto path = enumPath(dbname);
-    if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
-    std::ifstream ifs(path);
-    std::vector<std::string> lines;
-    std::string line;
+    if (!validMetadataObjectName(name)) return DBStatus::INVALID_ARGUMENT;
+    const auto path = enumPath(dbname);
+    std::error_code pathError;
+    const bool exists = std::filesystem::exists(path, pathError);
+    if (pathError) return DBStatus::IO_ERROR;
+    if (!exists) return DBStatus::TABLE_NOT_FOUND;
+    std::vector<EnumType> types;
+    if (!loadEnumTypes(path, types)) return DBStatus::IO_ERROR;
     bool found = false;
-    while (std::getline(ifs, line)) {
-        size_t sp = line.find('|');
-        if (sp != std::string::npos && line.substr(0, sp) == name) {
+    std::vector<EnumType> retained;
+    retained.reserve(types.size());
+    for (auto& type : types) {
+        if (type.name == name) {
             found = true;
         } else {
-            lines.push_back(line);
+            retained.push_back(std::move(type));
         }
     }
     if (!found) return DBStatus::TABLE_NOT_FOUND;
-    std::ofstream ofs(path, std::ios::trunc);
-    for (const auto& l : lines) ofs << l << '\n';
-    return DBStatus::OK;
+    return index_file::writeAtomically(path, serializeEnumTypes(retained))
+        ? DBStatus::OK : DBStatus::IO_ERROR;
 }
 
 DBStatus StorageEngine::updateEnumType(const std::string& dbname, const EnumType& et) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    auto path = enumPath(dbname);
-    if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
-    std::ifstream ifs(path);
-    std::vector<std::string> lines;
-    std::string line;
+    if (!validEnumTypeDefinition(et)) return DBStatus::INVALID_ARGUMENT;
+    const auto path = enumPath(dbname);
+    std::error_code pathError;
+    const bool exists = std::filesystem::exists(path, pathError);
+    if (pathError) return DBStatus::IO_ERROR;
+    if (!exists) return DBStatus::TABLE_NOT_FOUND;
+    std::vector<EnumType> types;
+    if (!loadEnumTypes(path, types)) return DBStatus::IO_ERROR;
     bool found = false;
-    while (std::getline(ifs, line)) {
-        size_t sp = line.find('|');
-        std::string lname = (sp == std::string::npos) ? line : line.substr(0, sp);
-        if (lname == et.name) {
+    for (auto& type : types) {
+        if (type.name == et.name) {
             found = true;
-            std::string rebuilt = et.name;
-            for (const auto& label : et.labels) rebuilt += "|" + label;
-            lines.push_back(rebuilt);
-        } else {
-            lines.push_back(line);
+            type = et;
         }
     }
     if (!found) return DBStatus::TABLE_NOT_FOUND;
-    std::ofstream ofs(path, std::ios::trunc);
-    for (const auto& l : lines) ofs << l << '\n';
-    return DBStatus::OK;
+    return index_file::writeAtomically(path, serializeEnumTypes(types))
+        ? DBStatus::OK : DBStatus::IO_ERROR;
 }
 
 StorageEngine::EnumType StorageEngine::getEnumType(const std::string& dbname,
                                                     const std::string& name) const {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     EnumType result;
-    auto path = enumPath(dbname);
-    if (!std::filesystem::exists(path)) return result;
-    std::ifstream ifs(path);
-    std::string line;
-    while (std::getline(ifs, line)) {
-        size_t sp = line.find('|');
-        if (sp == std::string::npos || line.substr(0, sp) != name) continue;
-        result.name = name;
-        size_t pos = sp + 1;
-        while (pos < line.size()) {
-            size_t next = line.find('|', pos);
-            if (next == std::string::npos) {
-                result.labels.push_back(line.substr(pos));
-                break;
-            } else {
-                result.labels.push_back(line.substr(pos, next - pos));
-                pos = next + 1;
-            }
-        }
-        break;
+    if (!validMetadataObjectName(name)) return result;
+    std::vector<EnumType> types;
+    if (!loadEnumTypes(enumPath(dbname), types)) return result;
+    for (auto& type : types) {
+        if (type.name == name) return type;
     }
     return result;
 }
 
 std::vector<std::string> StorageEngine::getEnumTypeNames(const std::string& dbname) const {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::vector<std::string> result;
-    auto path = enumPath(dbname);
-    if (!std::filesystem::exists(path)) return result;
-    std::ifstream ifs(path);
-    std::string line;
-    while (std::getline(ifs, line)) {
-        size_t sp = line.find('|');
-        if (sp != std::string::npos) result.push_back(line.substr(0, sp));
-    }
+    std::vector<EnumType> types;
+    if (!loadEnumTypes(enumPath(dbname), types)) return result;
+    for (const auto& type : types) result.push_back(type.name);
     return result;
 }
 
