@@ -6768,10 +6768,23 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
         return true;
     }
 
+    if (stmt->objectName.empty()) {
+        std::cout << "CREATE TYPE requires a type name" << std::endl;
+        return true;
+    }
+    const std::string typeSchema = stmt->schema.empty()
+        ? "public" : stmt->schema;
+    if (!g_engine.schemaExists(s.currentDB, typeSchema)) {
+        std::cout << "Schema " << typeSchema << " does not exist" << std::endl;
+        return true;
+    }
+    const std::string typeName = typeSchema == "public"
+        ? stmt->objectName : typeSchema + "." + stmt->objectName;
+
     std::string typeKind = stmt->options.count("type_kind") ? stmt->options.at("type_kind") : "";
     if (typeKind == "enum") {
         StorageEngine::EnumType et;
-        et.name = stmt->objectName;
+        et.name = typeName;
         et.labels = stmt->enumLabels;
         if (et.labels.empty()) {
             std::cout << "CREATE TYPE AS ENUM requires at least one label" << std::endl;
@@ -6790,15 +6803,15 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
 
     // Shell type (CREATE TYPE name)
     if (typeKind == "shell") {
-        if (anyTypeExists(s.currentDB, stmt->objectName)) {
-            std::cout << "Type " << stmt->objectName << " already exists" << std::endl;
+        if (anyTypeExists(s.currentDB, typeName)) {
+            std::cout << "Type " << typeName << " already exists" << std::endl;
             return true;
         }
-        if (!recordShellType(s.currentDB, stmt->objectName)) {
+        if (!recordShellType(s.currentDB, typeName)) {
             std::cout << "CREATE TYPE failed" << std::endl;
             return true;
         }
-        txn.recordCreate(DdlObjectKind::Type, stmt->objectName);
+        txn.recordCreate(DdlObjectKind::Type, typeName);
         if (!txn.commit()) return true;
         std::cout << "CREATE TYPE succeeded" << std::endl;
         return false;
@@ -6806,13 +6819,13 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
 
     // Range type (CREATE TYPE name AS RANGE (...))
     if (typeKind == "range") {
-        if (anyTypeExists(s.currentDB, stmt->objectName)) {
-            std::cout << "Type " << stmt->objectName << " already exists" << std::endl;
+        if (anyTypeExists(s.currentDB, typeName)) {
+            std::cout << "Type " << typeName << " already exists" << std::endl;
             return true;
         }
         UdtMeta meta;
         meta.kind = "range";
-        meta.name = stmt->objectName;
+        meta.name = typeName;
         for (const auto& kv : stmt->options) {
             if (kv.first.substr(0, 6) == "range_") {
                 meta.attrs[kv.first.substr(6)] = kv.second;
@@ -6826,7 +6839,7 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
             std::cout << "CREATE TYPE failed" << std::endl;
             return true;
         }
-        txn.recordCreate(DdlObjectKind::Type, stmt->objectName);
+        txn.recordCreate(DdlObjectKind::Type, typeName);
         if (!txn.commit()) return true;
         std::cout << "CREATE TYPE AS RANGE succeeded" << std::endl;
         return false;
@@ -6834,13 +6847,13 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
 
     // Base type (CREATE TYPE name (INPUT=..., OUTPUT=..., ...))
     if (typeKind == "base") {
-        if (anyTypeExists(s.currentDB, stmt->objectName)) {
-            std::cout << "Type " << stmt->objectName << " already exists" << std::endl;
+        if (anyTypeExists(s.currentDB, typeName)) {
+            std::cout << "Type " << typeName << " already exists" << std::endl;
             return true;
         }
         UdtMeta meta;
         meta.kind = "base";
-        meta.name = stmt->objectName;
+        meta.name = typeName;
         for (const auto& kv : stmt->options) {
             if (kv.first.substr(0, 5) == "base_") {
                 meta.attrs[kv.first.substr(5)] = kv.second;
@@ -6854,7 +6867,7 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
             std::cout << "CREATE TYPE failed" << std::endl;
             return true;
         }
-        txn.recordCreate(DdlObjectKind::Type, stmt->objectName);
+        txn.recordCreate(DdlObjectKind::Type, typeName);
         if (!txn.commit()) return true;
         std::cout << "CREATE TYPE succeeded" << std::endl;
         return false;
@@ -6862,7 +6875,7 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
 
     // Composite type (existing behavior)
     StorageEngine::CompositeType ct;
-    ct.name = stmt->objectName;
+    ct.name = typeName;
     auto it = stmt->options.find("fields");
     if (it != stmt->options.end()) {
         std::stringstream ss(it->second);
@@ -6908,7 +6921,22 @@ bool DdlExecutor::executeDropType(const DropStmt* stmt, Session& s) {
         std::cout << "SQL syntax error: DROP TYPE name" << std::endl;
         return true;
     }
-    std::string name = stmt->objectNames.front();
+    if (stmt->objectNames.size() != 1) {
+        std::cout << "DROP TYPE with multiple targets is not supported"
+                  << std::endl;
+        return true;
+    }
+    CatalogManager::QualifiedName qualifiedName;
+    if (!CatalogManager::parseQualifiedName(
+            stmt->objectNames.front(), qualifiedName) ||
+        qualifiedName.name.empty()) {
+        std::cout << "DROP TYPE has an invalid name" << std::endl;
+        return true;
+    }
+    const std::string schemaName = qualifiedName.schema.empty()
+        ? "public" : qualifiedName.schema;
+    const std::string name = schemaName == "public"
+        ? qualifiedName.name : schemaName + "." + qualifiedName.name;
     txn.markSnapshotDirty();
     txn.recordDrop(DdlObjectKind::Type, name);
     DBStatus res = g_engine.dropCompositeType(s.currentDB, name);

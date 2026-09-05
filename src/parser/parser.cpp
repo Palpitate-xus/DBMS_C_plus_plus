@@ -6856,13 +6856,37 @@ StmtPtr SQLParser::parseDropType(const std::vector<std::string>& tokens, size_t&
     if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
         stmt->ifExists = true; pos += 2;
     }
+    bool expectName = true;
+    bool behaviorSeen = false;
     while (pos < tokens.size() && tokens[pos] != ";") {
-        std::string w = toLower(tokens[pos]);
-        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
-        if (w == "restrict") { ++pos; continue; }
-        if (w == ",") { ++pos; continue; }
-        stmt->objectNames.push_back(tokens[pos++]);
+        const std::string word = toLower(tokens[pos]);
+        if (!expectName && (word == "cascade" || word == "restrict")) {
+            if (behaviorSeen) return nullptr;
+            behaviorSeen = true;
+            stmt->cascade = word == "cascade";
+            ++pos;
+            if (pos < tokens.size() && tokens[pos] != ";") return nullptr;
+            break;
+        }
+        if (expectName) {
+            if (tokens[pos] == "," || word == "cascade" ||
+                word == "restrict") return nullptr;
+            std::string name = tokens[pos++];
+            if (pos < tokens.size() && tokens[pos] == ".") {
+                ++pos;
+                if (pos >= tokens.size() || tokens[pos] == ";" ||
+                    tokens[pos] == ",") return nullptr;
+                name += "." + tokens[pos++];
+            }
+            stmt->objectNames.push_back(std::move(name));
+            expectName = false;
+            continue;
+        }
+        if (tokens[pos] != ",") return nullptr;
+        ++pos;
+        expectName = true;
     }
+    if (expectName && !stmt->objectNames.empty()) return nullptr;
     return stmt;
 }
 

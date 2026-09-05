@@ -377,6 +377,10 @@ static void test_drop_schema_handles_auxiliary_objects() {
     assert(!ddl.executeSql("CREATE TYPE app_aux.shell_value", s));
     assert(!ddl.executeSql(
         "CREATE TYPE app_aux.int_range AS RANGE (subtype = int4)", s));
+    assert(lineFileContains(
+        fs::path(db) / ".shell_types", "app_aux.shell_value"));
+    assert(lineFileContains(
+        fs::path(db) / ".udt_meta", "app_aux.int_range"));
 
     // A longer neighboring schema name must not match either namespace
     // delimiter used by the current storage formats.

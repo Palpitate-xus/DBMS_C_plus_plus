@@ -174,6 +174,49 @@ static void test_drop_composite_still_works() {
     std::cout << "[CTYPE] drop composite type OK" << std::endl;
 }
 
+static void test_schema_qualified_type_names() {
+    std::string db = testDbPath("ct_schema_qualified");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    assert(!ddl.executeSql("CREATE SCHEMA app", s));
+    assert(!ddl.executeSql("CREATE SCHEMA neighbor", s));
+    assert(ddl.executeSql("CREATE TYPE missing.marker", s));
+
+    assert(!ddl.executeSql("CREATE TYPE app.marker", s));
+    assert(!ddl.executeSql("CREATE TYPE neighbor.marker", s));
+    assert(shellTypeFileContains(db, "app.marker"));
+    assert(shellTypeFileContains(db, "neighbor.marker"));
+
+    assert(!ddl.executeSql(
+        "CREATE TYPE app.int_range AS RANGE (subtype = int4)", s));
+    assert(udtMetaContains(
+        db, "range", "app.int_range", {{"subtype", "int4"}}));
+    assert(!ddl.executeSql("CREATE TYPE app.mood AS ENUM ('ok', 'sad')", s));
+    assert(g_engine.getEnumType(db, "app.mood").name == "app.mood");
+    assert(!ddl.executeSql("CREATE TYPE app.coordinate AS (x int, y int)", s));
+    assert(g_engine.isCompositeType(db, "app.coordinate"));
+
+    assert(ddl.executeSql("DROP TYPE app.marker, app.int_range", s));
+    assert(shellTypeFileContains(db, "app.marker"));
+    assert(udtMetaContains(db, "range", "app.int_range", {}));
+
+    assert(!ddl.executeSql("DROP TYPE app.marker", s));
+    assert(!shellTypeFileContains(db, "app.marker"));
+    assert(shellTypeFileContains(db, "neighbor.marker"));
+    assert(!ddl.executeSql("DROP TYPE app.int_range", s));
+    assert(!udtMetaContains(db, "range", "app.int_range", {}));
+    assert(!ddl.executeSql("DROP TYPE app.mood", s));
+    assert(g_engine.getEnumType(db, "app.mood").name.empty());
+    assert(!ddl.executeSql("DROP TYPE app.coordinate", s));
+    assert(!g_engine.isCompositeType(db, "app.coordinate"));
+
+    cleanup(db);
+    std::cout << "[CTYPE] schema-qualified names OK" << std::endl;
+}
+
 static void test_composite_metadata_is_validated_and_atomic() {
     const std::string db = testDbPath("ct_composite_atomicity");
     cleanup(db);
@@ -233,6 +276,7 @@ int main() {
     test_range_type_create_drop();
     test_base_type_create_drop();
     test_drop_composite_still_works();
+    test_schema_qualified_type_names();
     test_composite_metadata_is_validated_and_atomic();
     std::cout << "[CTYPE] all passed" << std::endl;
     return 0;
