@@ -20444,40 +20444,30 @@ DBStatus StorageEngine::removeInternal(
 
     // Check foreign key references and apply ON DELETE actions
     {
-        size_t pkIdx = tbl.len;
-        for (size_t i = 0; i < tbl.len; ++i) {
-            if (tbl.cols[i].isPrimaryKey) { pkIdx = i; break; }
-        }
-        if (pkIdx < tbl.len) {
-            // Collect deleted rows' primary key values (multi-column PK aware)
-            std::vector<std::map<std::string, std::string>> deletedPKRows;
-            for (int64_t rid : toDelete) {
-                std::string row;
-                if (!readRowByRid(pa, rid, row, tbl)) {
-                    lockManager_.unlock(tablename);
-                    return DBStatus::IO_ERROR;
-                }
-                std::map<std::string, std::string> pkVals;
-                if (!tbl.pkColIndices.empty()) {
-                    for (size_t pki : tbl.pkColIndices) {
-                        pkVals[tbl.cols[pki].dataName] =
-                            extractColumnValue(row, tbl, pki, dbname);
-                    }
-                } else {
-                    pkVals[tbl.cols[pkIdx].dataName] =
-                        extractColumnValue(row, tbl, pkIdx, dbname);
-                }
-                if (!pkVals.empty()) deletedPKRows.push_back(std::move(pkVals));
+        struct DeletedReferencedRow {
+            std::string row;
+            std::vector<bool> nullColumns;
+        };
+        std::vector<DeletedReferencedRow> deletedReferencedRows;
+        deletedReferencedRows.reserve(toDelete.size());
+        for (int64_t rid : toDelete) {
+            DeletedReferencedRow deleted;
+            if (!readRowByRid(
+                    pa, rid, deleted.row, tbl, &deleted.nullColumns)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::IO_ERROR;
             }
+            deletedReferencedRows.push_back(std::move(deleted));
+        }
 
-            if (!deletedPKRows.empty()) {
+        if (!deletedReferencedRows.empty()) {
                 // Scan all other tables for FK references and collect actions
                 struct CascadeAction { std::string table; int64_t rid; };
                 struct SetNullAction { std::string table; int64_t rid; std::vector<size_t> colIndices; };
                 std::vector<CascadeAction> cascadeActions;
                 std::vector<SetNullAction> setNullActions;
                 std::set<std::string> restrictTables;
-                bool dependencyScanFailed = false;
+                DBStatus dependencyScanStatus = DBStatus::OK;
 
                 auto allTables = getTableNames(dbname);
                 // The exact RIDs collected below stay meaningful only while
@@ -20516,47 +20506,75 @@ DBStatus StorageEngine::removeInternal(
                 }
 
                 for (const auto& otherTable : allTables) {
-                    if (dependencyScanFailed) break;
+                    if (dependencyScanStatus != DBStatus::OK) break;
                     if (otherTable == tablename) continue;
                     TableSchema otherTbl = getTableSchema(dbname, otherTable);
                     for (size_t fi = 0; fi < otherTbl.fkLen; ++fi) {
                         const ForeignKey& fk = otherTbl.fks[fi];
                         if (fk.refTable != tablename) continue;
 
-                        // Build mapping from refCols to local col indices in otherTbl
-                        std::vector<size_t> fkColIndices;
-                        bool allFound = true;
-                        for (const auto& colName : fk.colNames) {
-                            size_t colIdx = otherTbl.len;
-                            for (size_t ci = 0; ci < otherTbl.len; ++ci) {
-                                if (otherTbl.cols[ci].dataName == colName) { colIdx = ci; break; }
-                            }
-                            if (colIdx >= otherTbl.len) { allFound = false; break; }
-                            fkColIndices.push_back(colIdx);
+                        ValidatedForeignKeyDefinition definition;
+                        if (validateForeignKeyDefinition(
+                                otherTbl, tbl, fk.colNames, fk.refCols,
+                                definition) != DBStatus::OK) {
+                            dependencyScanStatus = DBStatus::CORRUPTED_DATA;
+                            break;
                         }
-                        if (!allFound || fkColIndices.empty()) continue;
+                        const auto& fkColIndices =
+                            definition.localColumnIndices;
+                        const auto& referencedColumnIndices =
+                            definition.referencedColumnIndices;
 
                         if (!forEachRow(dbname, otherTable, [&](uint32_t opid, uint16_t osid, const char* data, size_t len) {
-                            std::string row(data, len);
-                            // Build FK value map for this row
-                            std::map<std::string, std::string> fkVals;
-                            for (size_t ci = 0; ci < fk.colNames.size() && ci < fk.refCols.size(); ++ci) {
-                                fkVals[fk.refCols[ci]] = extractColumnValue(row, otherTbl, fkColIndices[ci]);
-                            }
-                            // Check if any deleted PK row matches this FK
+                            const std::string row(data, len);
+                            const int64_t orid = encodeRid(opid, osid);
                             bool matched = false;
-                            for (const auto& pkVals : deletedPKRows) {
+                            for (const auto& deleted : deletedReferencedRows) {
                                 bool allMatch = true;
-                                for (const auto& [refCol, refVal] : pkVals) {
-                                    auto it = fkVals.find(refCol);
-                                    if (it == fkVals.end() || it->second != refVal) {
-                                        allMatch = false; break;
+                                for (size_t valueIndex = 0;
+                                     valueIndex < fkColIndices.size();
+                                     ++valueIndex) {
+                                    const size_t localColumnIndex =
+                                        fkColIndices[valueIndex];
+                                    const size_t referencedColumnIndex =
+                                        referencedColumnIndices[valueIndex];
+                                    const bool referencedIsNull =
+                                        referencedColumnIndex <
+                                            deleted.nullColumns.size() &&
+                                        deleted.nullColumns[
+                                            referencedColumnIndex];
+                                    const bool localIsNull =
+                                        otherTbl.cols[localColumnIndex].isNull &&
+                                        isColumnNullByRid(
+                                            dbname, otherTable, orid,
+                                            localColumnIndex);
+                                    if (referencedIsNull || localIsNull) {
+                                        allMatch = false;
+                                        break;
+                                    }
+                                    const Column& referencedColumn =
+                                        tbl.cols[referencedColumnIndex];
+                                    const std::string referencedValue =
+                                        canonicalColumnKeyValue(
+                                            referencedColumn,
+                                            extractColumnValue(
+                                                deleted.row, tbl,
+                                                referencedColumnIndex,
+                                                dbname));
+                                    const std::string localValue =
+                                        canonicalColumnKeyValue(
+                                            referencedColumn,
+                                            extractColumnValue(
+                                                row, otherTbl,
+                                                localColumnIndex, dbname));
+                                    if (localValue != referencedValue) {
+                                        allMatch = false;
+                                        break;
                                     }
                                 }
                                 if (allMatch) { matched = true; break; }
                             }
                             if (matched) {
-                                int64_t orid = encodeRid(opid, osid);
                                 if (fk.onDelete == "cascade") {
                                     cascadeActions.push_back({otherTable, orid});
                                 } else if (fk.onDelete == "setnull") {
@@ -20566,18 +20584,18 @@ DBStatus StorageEngine::removeInternal(
                                 }
                             }
                         })) {
-                            dependencyScanFailed = true;
+                            dependencyScanStatus = DBStatus::IO_ERROR;
                             break;
                         }
                     }
                 }
 
-                if (dependencyScanFailed) {
+                if (dependencyScanStatus != DBStatus::OK) {
                     for (const auto& acquired : acquiredTables) {
                         lockManager_.unlock(acquired);
                     }
                     lockManager_.unlock(tablename);
-                    return DBStatus::IO_ERROR;
+                    return dependencyScanStatus;
                 }
 
                 if (!restrictTables.empty()) {
@@ -20693,7 +20711,6 @@ DBStatus StorageEngine::removeInternal(
                     lockManager_.unlock(tablename);
                     return DBStatus::IO_ERROR;
                 }
-            }
         }
     }
 
@@ -22543,7 +22560,7 @@ DBStatus StorageEngine::updateInternal(
             }
         }
 
-        // Check if PK changed and apply ON UPDATE foreign key actions.
+        // Keep the primary index synchronized when the primary key changes.
         std::string newPK = tbl.buildPKValue(rowValues);
         if (tbl.hasPrimaryKey() && oldPK != newPK && !newPK.empty()) {
             BPTree* primaryIndex = getPKIndex(dbname, tablename);
@@ -22558,38 +22575,74 @@ DBStatus StorageEngine::updateInternal(
                 return DBStatus::DUPLICATE_KEY;
             }
         }
-        if (!oldPK.empty() && oldPK != newPK) {
-            // Collect all referencing rows and their ON UPDATE actions
-            struct UpdateCascadeAction { std::string table; int64_t rid; std::map<std::string, std::string> newFkVals; };
+
+        // A foreign key may reference any declared UNIQUE key, not only the
+        // primary key. Avoid scanning child relations for payload-only
+        // updates, but enter the action path whenever any candidate key
+        // column changes.
+        std::set<size_t> referencedKeyCandidates;
+        for (size_t columnIndex = 0; columnIndex < tbl.len; ++columnIndex) {
+            if (tbl.cols[columnIndex].isPrimaryKey ||
+                tbl.cols[columnIndex].isUnique) {
+                referencedKeyCandidates.insert(columnIndex);
+            }
+        }
+        for (const size_t columnIndex : tbl.pkColIndices) {
+            if (columnIndex >= tbl.len) {
+                lockManager_.unlock(tablename);
+                return DBStatus::CORRUPTED_DATA;
+            }
+            referencedKeyCandidates.insert(columnIndex);
+        }
+        for (const auto& uniqueColumns : tbl.uniqueConstraints) {
+            for (const size_t columnIndex : uniqueColumns) {
+                if (columnIndex >= tbl.len) {
+                    lockManager_.unlock(tablename);
+                    return DBStatus::CORRUPTED_DATA;
+                }
+                referencedKeyCandidates.insert(columnIndex);
+            }
+        }
+        bool referencedKeyCandidateChanged = false;
+        for (const size_t columnIndex : referencedKeyCandidates) {
+            const bool oldIsNull =
+                tbl.cols[columnIndex].generatedKind != 'v' &&
+                columnIndex < oldNullColumns.size() &&
+                oldNullColumns[columnIndex];
+            const bool newIsNull = newColumnIsNull(columnIndex);
+            if (oldIsNull != newIsNull ||
+                (!oldIsNull && !newIsNull &&
+                 canonicalColumnKeyValue(
+                     tbl.cols[columnIndex],
+                     valueFromRowMap(
+                         oldLogicalValues,
+                         tbl.cols[columnIndex].dataName)) !=
+                     canonicalColumnKeyValue(
+                         tbl.cols[columnIndex],
+                         valueFromRowMap(
+                             rowValues,
+                             tbl.cols[columnIndex].dataName)))) {
+                referencedKeyCandidateChanged = true;
+                break;
+            }
+        }
+        if (referencedKeyCandidateChanged) {
+            // Collect all referencing rows and their ON UPDATE actions.
+            struct UpdateCascadeAction {
+                std::string table;
+                int64_t rid;
+                SqlRow newFkVals;
+            };
             struct UpdateSetNullAction { std::string table; int64_t rid; std::vector<size_t> colIndices; };
             std::vector<UpdateCascadeAction> updateCascadeActions;
             std::vector<UpdateSetNullAction> updateSetNullActions;
             std::set<std::string> restrictTables;
 
-            // Get the old PK values as a map
-            std::map<std::string, std::string> oldPKVals;
-            if (!tbl.pkColIndices.empty()) {
-                for (size_t pki : tbl.pkColIndices) {
-                    oldPKVals[tbl.cols[pki].dataName] =
-                        valueFromRowMap(oldLogicalValues, tbl.cols[pki].dataName);
-                }
-            } else {
-                size_t pkIdxCol = tbl.len;
-                for (size_t i = 0; i < tbl.len; ++i) {
-                    if (tbl.cols[i].isPrimaryKey) { pkIdxCol = i; break; }
-                }
-                if (pkIdxCol < tbl.len) {
-                    oldPKVals[tbl.cols[pkIdxCol].dataName] =
-                        valueFromRowMap(oldLogicalValues,
-                                        tbl.cols[pkIdxCol].dataName);
-                }
-            }
-
             std::vector<std::string> sortedTables;
             std::vector<std::string> acquiredTables;
-            if (!oldPKVals.empty()) {
+            {
                 auto allTables = getTableNames(dbname);
-                bool dependencyScanFailed = false;
+                DBStatus dependencyScanStatus = DBStatus::OK;
                 std::set<std::string> referencingTables;
                 for (const auto& otherTable : allTables) {
                     if (otherTable == tablename) continue;
@@ -22620,52 +22673,122 @@ DBStatus StorageEngine::updateInternal(
                 }
 
                 for (const auto& otherTable : allTables) {
-                    if (dependencyScanFailed) break;
+                    if (dependencyScanStatus != DBStatus::OK) break;
                     if (otherTable == tablename) continue;
                     TableSchema otherTbl = getTableSchema(dbname, otherTable);
                     for (size_t fi = 0; fi < otherTbl.fkLen; ++fi) {
                         const ForeignKey& fk = otherTbl.fks[fi];
                         if (fk.refTable != tablename) continue;
 
-                        // Build mapping from refCols to local col indices in otherTbl
-                        std::vector<size_t> fkColIndices;
-                        bool allFound = true;
-                        for (const auto& colName : fk.colNames) {
-                            size_t colIdx = otherTbl.len;
-                            for (size_t ci = 0; ci < otherTbl.len; ++ci) {
-                                if (otherTbl.cols[ci].dataName == colName) { colIdx = ci; break; }
-                            }
-                            if (colIdx >= otherTbl.len) { allFound = false; break; }
-                            fkColIndices.push_back(colIdx);
+                        ValidatedForeignKeyDefinition definition;
+                        if (validateForeignKeyDefinition(
+                                otherTbl, tbl, fk.colNames, fk.refCols,
+                                definition) != DBStatus::OK) {
+                            dependencyScanStatus = DBStatus::CORRUPTED_DATA;
+                            break;
                         }
-                        if (!allFound || fkColIndices.empty()) continue;
+                        const auto& fkColIndices =
+                            definition.localColumnIndices;
+                        const auto& referencedColumnIndices =
+                            definition.referencedColumnIndices;
+
+                        bool referencedKeyChanged = false;
+                        bool oldReferencedKeyHasNull = false;
+                        std::vector<std::string> oldReferencedValues;
+                        oldReferencedValues.reserve(
+                            referencedColumnIndices.size());
+                        for (const size_t referencedColumnIndex :
+                             referencedColumnIndices) {
+                            const bool oldIsNull =
+                                tbl.cols[referencedColumnIndex]
+                                        .generatedKind != 'v' &&
+                                referencedColumnIndex <
+                                    oldNullColumns.size() &&
+                                oldNullColumns[referencedColumnIndex];
+                            const bool newIsNull =
+                                newColumnIsNull(referencedColumnIndex);
+                            oldReferencedKeyHasNull =
+                                oldReferencedKeyHasNull || oldIsNull;
+                            const std::string oldValue = oldIsNull
+                                ? std::string()
+                                : canonicalColumnKeyValue(
+                                      tbl.cols[referencedColumnIndex],
+                                      valueFromRowMap(
+                                          oldLogicalValues,
+                                          tbl.cols[referencedColumnIndex]
+                                              .dataName));
+                            const std::string newValue = newIsNull
+                                ? std::string()
+                                : canonicalColumnKeyValue(
+                                      tbl.cols[referencedColumnIndex],
+                                      valueFromRowMap(
+                                          rowValues,
+                                          tbl.cols[referencedColumnIndex]
+                                              .dataName));
+                            referencedKeyChanged = referencedKeyChanged ||
+                                oldIsNull != newIsNull ||
+                                (!oldIsNull && !newIsNull &&
+                                 oldValue != newValue);
+                            oldReferencedValues.push_back(oldValue);
+                        }
+                        if (!referencedKeyChanged ||
+                            oldReferencedKeyHasNull) {
+                            continue;
+                        }
 
                         if (!forEachRow(dbname, otherTable, [&](uint32_t opid, uint16_t osid, const char* data, size_t len) {
-                            std::string oRow(data, len);
-                            // Build FK value map for this row
-                            std::map<std::string, std::string> fkVals;
-                            for (size_t ci = 0; ci < fk.colNames.size() && ci < fk.refCols.size(); ++ci) {
-                                fkVals[fk.refCols[ci]] = extractColumnValue(oRow, otherTbl, fkColIndices[ci]);
-                            }
-                            // Check if old PK row matches this FK
+                            const std::string oRow(data, len);
+                            const int64_t orid = encodeRid(opid, osid);
                             bool matched = true;
-                            for (const auto& [refCol, refVal] : oldPKVals) {
-                                auto it = fkVals.find(refCol);
-                                if (it == fkVals.end() || it->second != refVal) {
-                                    matched = false; break;
+                            for (size_t valueIndex = 0;
+                                 valueIndex < fkColIndices.size();
+                                 ++valueIndex) {
+                                const size_t localColumnIndex =
+                                    fkColIndices[valueIndex];
+                                if (otherTbl.cols[localColumnIndex].isNull &&
+                                    isColumnNullByRid(
+                                        dbname, otherTable, orid,
+                                        localColumnIndex)) {
+                                    matched = false;
+                                    break;
+                                }
+                                const Column& referencedColumn =
+                                    tbl.cols[
+                                        referencedColumnIndices[valueIndex]];
+                                if (canonicalColumnKeyValue(
+                                        referencedColumn,
+                                        extractColumnValue(
+                                            oRow, otherTbl,
+                                            localColumnIndex, dbname)) !=
+                                    oldReferencedValues[valueIndex]) {
+                                    matched = false;
+                                    break;
                                 }
                             }
                             if (matched) {
-                                int64_t orid = encodeRid(opid, osid);
                                 if (fk.onUpdate == "cascade") {
                                     UpdateCascadeAction ca;
                                     ca.table = otherTable;
                                     ca.rid = orid;
-                                    // Build new FK values: map refCols to new PK values
-                                    for (size_t ci = 0; ci < fk.colNames.size() && ci < fk.refCols.size(); ++ci) {
-                                        auto it = rowValues.find(fk.refCols[ci]);
-                                        if (it != rowValues.end()) {
-                                            ca.newFkVals[fk.colNames[ci]] = it->second;
+                                    for (size_t valueIndex = 0;
+                                         valueIndex < fk.colNames.size();
+                                         ++valueIndex) {
+                                        const size_t referencedColumnIndex =
+                                            referencedColumnIndices[
+                                                valueIndex];
+                                        if (newColumnIsNull(
+                                                referencedColumnIndex)) {
+                                            ca.newFkVals[
+                                                fk.colNames[valueIndex]] =
+                                                std::nullopt;
+                                        } else {
+                                            ca.newFkVals[
+                                                fk.colNames[valueIndex]] =
+                                                valueFromRowMap(
+                                                    rowValues,
+                                                    tbl.cols[
+                                                        referencedColumnIndex]
+                                                        .dataName);
                                         }
                                     }
                                     if (!ca.newFkVals.empty()) updateCascadeActions.push_back(std::move(ca));
@@ -22676,17 +22799,17 @@ DBStatus StorageEngine::updateInternal(
                                 }
                             }
                         })) {
-                            dependencyScanFailed = true;
+                            dependencyScanStatus = DBStatus::IO_ERROR;
                             break;
                         }
                     }
                 }
-                if (dependencyScanFailed) {
+                if (dependencyScanStatus != DBStatus::OK) {
                     for (const auto& acquired : acquiredTables) {
                         lockManager_.unlock(acquired);
                     }
                     lockManager_.unlock(tablename);
-                    return DBStatus::IO_ERROR;
+                    return dependencyScanStatus;
                 }
             }
 
