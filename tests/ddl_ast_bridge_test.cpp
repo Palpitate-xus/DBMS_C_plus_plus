@@ -655,6 +655,46 @@ static void test_drop_index_uses_sql_name() {
     std::cout << "[DDL] standard DROP INDEX name resolution OK" << std::endl;
 }
 
+static void test_drop_schema_qualified_index() {
+    const std::string db = testDbPath("ddl_drop_schema_index");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE SCHEMA inventory", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE inventory.items (id INT, sku INT)", s));
+    auto createIndex = std::make_unique<dbms::CreateIndexStmt>();
+    createIndex->indexName = "items_sku_idx";
+    createIndex->tableName = "inventory.items";
+    dbms::IndexElem indexColumn;
+    indexColumn.column = "sku";
+    createIndex->columns.push_back(std::move(indexColumn));
+    dbms::StmtPtr createIndexStmt = std::move(createIndex);
+    assert(!ddl.execute(createIndexStmt, s));
+
+    const std::string physicalTable = "inventory__items";
+    assert(g_engine.getNamedIndex(
+        db, physicalTable, "items_sku_idx").has_value());
+    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
+    const auto* inventory = catalog.findNamespaceByName("inventory");
+    assert(inventory != nullptr);
+    assert(catalog.findClassByName(
+        "items_sku_idx", inventory->oid) != nullptr);
+
+    assert(!ddl.executeSql("DROP INDEX inventory.items_sku_idx", s));
+    assert(!g_engine.getNamedIndex(
+        db, physicalTable, "items_sku_idx").has_value());
+    assert(catalog.findClassByName(
+        "items_sku_idx", inventory->oid) == nullptr);
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[DDL] schema-qualified DROP INDEX OK" << std::endl;
+}
+
 static void test_comment_on() {
     std::string db = testDbPath("ddl_bridge_t4");
     cleanup(db);
@@ -890,6 +930,7 @@ int main() {
     test_create_index_sequence();
     test_table_index_flag_updates_catalog();
     test_drop_index_uses_sql_name();
+    test_drop_schema_qualified_index();
     test_create_database_schema();
     test_drop_database_evicts_catalog();
     test_comment_on();

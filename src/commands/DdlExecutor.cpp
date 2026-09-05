@@ -3797,7 +3797,16 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
                 if (dep.refclassid != PgClassOid_Class) continue;
                 const PgClassRow* ref = cat.findClass(dep.refobjid);
                 if (ref && ref->relkind == 'r') {
-                    tableName = ref->relname;
+                    const auto* tableNamespace =
+                        cat.findNamespace(ref->relnamespace);
+                    if (!tableNamespace) {
+                        std::cout << "DROP INDEX table namespace lookup failed"
+                                  << std::endl;
+                        return true;
+                    }
+                    tableName = tableNamespace->nspname == "public"
+                        ? ref->relname
+                        : tableNamespace->nspname + "__" + ref->relname;
                     tableOid = ref->oid;
                     break;
                 }
