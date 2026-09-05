@@ -118,6 +118,14 @@ static void test_make() {
     assert(callFn(eval, "make_time", {I(14), I(5), I(9)}).value == "14:05:09");
     assert(callFn(eval, "make_timestamp", {I(2026), I(6), I(26), I(14), I(5), I(9)}).value
            == "2026-06-26 14:05:09");
+    assert(callFn(eval, "make_time",
+                  {I(14), I(5),
+                   dbms::ExprValue("numeric", "9.25", false)}).value ==
+           "14:05:09.25");
+    assert(callFn(eval, "make_timestamp",
+                  {I(2026), I(6), I(26), I(14), I(5),
+                   dbms::ExprValue("numeric", "9.125", false)}).value ==
+           "2026-06-26 14:05:09.125");
     // Invalid month -> NULL.
     assert(callFn(eval, "make_date", {I(2026), I(13), I(1)}).isNull);
     assert(callFn(eval, "make_date", {I(2023), I(2), I(29)}).isNull);

@@ -210,6 +210,42 @@ static bool addIntervalSeconds(long long& target,
         target, static_cast<long long>(roundedMicros), 1);
 }
 
+static std::string formatTimeFields(long long hours, long long minutes,
+                                    const std::string& secondsText) {
+    if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59)
+        return "";
+
+    long double seconds = 0;
+    try {
+        size_t consumed = 0;
+        seconds = std::stold(secondsText, &consumed);
+        if (consumed != secondsText.size() || !std::isfinite(seconds) ||
+            seconds < 0 || seconds >= 60) {
+            return "";
+        }
+    } catch (...) {
+        return "";
+    }
+
+    const long long secondMicros =
+        static_cast<long long>(std::round(seconds * 1000000.0L));
+    if (secondMicros < 0 || secondMicros >= 60000000LL) return "";
+
+    const long long wholeSeconds = secondMicros / 1000000LL;
+    const long long fraction = secondMicros % 1000000LL;
+    char buffer[32];
+    std::snprintf(buffer, sizeof(buffer), "%02lld:%02lld:%02lld", hours,
+                  minutes, wholeSeconds);
+    std::string result = buffer;
+    if (fraction != 0) {
+        std::string digits = std::to_string(fraction);
+        digits.insert(digits.begin(), 6 - digits.size(), '0');
+        while (!digits.empty() && digits.back() == '0') digits.pop_back();
+        result += "." + digits;
+    }
+    return result;
+}
+
 static bool scaleIntervalField(long long value, long double scale,
                                long long& result) {
     const long double scaled = static_cast<long double>(value) * scale;
@@ -5056,14 +5092,8 @@ void ExprEvaluator::registerBuiltins() {
             return ExprValue("time", "", true);
         const int64_t h = a[0].asInt();
         const int64_t m = a[1].asInt();
-        const double seconds = a[2].asDouble();
-        if (h < 0 || h > 23 || m < 0 || m > 59 ||
-            !std::isfinite(seconds) || seconds < 0 || seconds >= 60) {
-            return ExprValue("time", "", true);
-        }
-        const int timeSeconds = static_cast<int>(h * 3600 + m * 60) +
-            static_cast<int>(seconds);
-        return ExprValue("time", formatTimeSeconds(timeSeconds), false);
+        const std::string result = formatTimeFields(h, m, a[2].value);
+        return ExprValue("time", result, result.empty());
     };
     // make_timestamp(y, m, d, h, mi, s) -> 'YYYY-MM-DD HH:MM:SS'
     functions_["make_timestamp"] = [](const std::vector<ExprValue>& a) {
@@ -5074,20 +5104,16 @@ void ExprEvaluator::registerBuiltins() {
         const int64_t d = a[2].asInt();
         const int64_t h = a[3].asInt();
         const int64_t mi = a[4].asInt();
-        const double seconds = a[5].asDouble();
         if (y < 1 || y > 9999 || mo < 1 || mo > 12 || d < 1 || d > 31 ||
-            h < 0 || h > 23 || mi < 0 || mi > 59 ||
-            !std::isfinite(seconds) || seconds < 0 || seconds >= 60) {
+            h < 0 || h > 23 || mi < 0 || mi > 59) {
             return ExprValue("timestamp", "", true);
         }
         Date date(static_cast<int>(y), static_cast<int>(mo),
                   static_cast<int>(d));
         if (date.year == 0) return ExprValue("timestamp", "", true);
-        const int timeSeconds = static_cast<int>(h * 3600 + mi * 60) +
-            static_cast<int>(seconds);
-        return ExprValue("timestamp",
-                         str(date) + " " + formatTimeSeconds(timeSeconds),
-                         false);
+        const std::string time = formatTimeFields(h, mi, a[5].value);
+        if (time.empty()) return ExprValue("timestamp", "", true);
+        return ExprValue("timestamp", str(date) + " " + time, false);
     };
     // date_trunc(field, source) -> truncate timestamp to the given precision
     functions_["date_trunc"] = [](const std::vector<ExprValue>& a) {
