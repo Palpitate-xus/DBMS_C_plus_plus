@@ -555,13 +555,19 @@ static void test_table_index_flag_updates_catalog() {
     Session s;
     setupSession(s, db);
     dbms::DdlExecutor ddl;
-    assert(!ddl.executeSql("CREATE TABLE indexed_table (a INT, b INT)", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE indexed_table (id INT PRIMARY KEY, a INT, b INT)", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE unique_indexed_table (value INT UNIQUE)", s));
 
     dbms::CatalogManager& initial = g_engine.catalogService().get(db);
     const auto* relation =
         initial.resolveRelation("indexed_table", {"public"});
-    assert(relation != nullptr && !relation->relhasindex);
+    assert(relation != nullptr && relation->relhasindex);
     const dbms::Oid tableOid = relation->oid;
+    const auto* uniqueRelation =
+        initial.resolveRelation("unique_indexed_table", {"public"});
+    assert(uniqueRelation != nullptr && uniqueRelation->relhasindex);
 
     assert(!ddl.executeSql(
         "CREATE INDEX indexed_table_a_idx ON indexed_table (a)", s));
@@ -622,7 +628,7 @@ static void test_table_index_flag_updates_catalog() {
 
     assert(!ddl.executeSql("DROP INDEX indexed_table_b_idx", s));
     relation = indexed.findClass(tableOid);
-    assert(relation != nullptr && !relation->relhasindex);
+    assert(relation != nullptr && relation->relhasindex);
     {
         dbms::CatalogManager durable(
             (fs::path(g_engine.dbPath(db)) / "pg_catalog").string());
@@ -630,12 +636,39 @@ static void test_table_index_flag_updates_catalog() {
             durable.findNamespaceByName("public");
         assert(durableNamespace != nullptr);
         const auto* durableTable = durable.findClass(tableOid);
-        assert(durableTable != nullptr && !durableTable->relhasindex);
+        assert(durableTable != nullptr && durableTable->relhasindex);
         assert(durable.findClassByName(
                    "indexed_table_a_idx", durableNamespace->oid) == nullptr);
         assert(durable.findClassByName(
                    "indexed_table_b_idx", durableNamespace->oid) == nullptr);
     }
+
+    assert(!ddl.executeSql(
+        "ALTER TABLE indexed_table DROP CONSTRAINT indexed_table_pkey", s));
+    relation = indexed.findClass(tableOid);
+    assert(relation != nullptr && !relation->relhasindex);
+    {
+        dbms::CatalogManager durable(
+            (fs::path(g_engine.dbPath(db)) / "pg_catalog").string());
+        const auto* durableTable = durable.findClass(tableOid);
+        assert(durableTable != nullptr && !durableTable->relhasindex);
+    }
+
+    assert(!ddl.executeSql(
+        "ALTER TABLE indexed_table ADD CONSTRAINT restored_pkey "
+        "PRIMARY KEY (id)", s));
+    relation = indexed.findClass(tableOid);
+    assert(relation != nullptr && relation->relhasindex);
+    {
+        dbms::CatalogManager durable(
+            (fs::path(g_engine.dbPath(db)) / "pg_catalog").string());
+        const auto* durableTable = durable.findClass(tableOid);
+        assert(durableTable != nullptr && durableTable->relhasindex);
+    }
+    assert(!ddl.executeSql(
+        "ALTER TABLE indexed_table DROP CONSTRAINT restored_pkey", s));
+    relation = indexed.findClass(tableOid);
+    assert(relation != nullptr && !relation->relhasindex);
 
     g_engine.catalogService().evict(db);
     dbms::CatalogManager& unindexed = g_engine.catalogService().get(db);

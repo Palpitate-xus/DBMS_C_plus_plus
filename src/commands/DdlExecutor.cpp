@@ -461,6 +461,30 @@ static int16_t tableCheckConstraintCount(const TableSchema& table) {
     return static_cast<int16_t>(count);
 }
 
+static bool tableSchemaHasImplicitIndex(const TableSchema& table) {
+    if (table.hasPrimaryKey()) return true;
+    for (size_t column = 0; column < table.len; ++column) {
+        if (table.cols[column].isUnique) return true;
+    }
+    return false;
+}
+
+static bool storageTableHasIndex(const std::string& dbname,
+                                 const std::string& physicalTableName) {
+    const TableSchema table =
+        g_engine.getTableSchema(dbname, physicalTableName);
+    return tableSchemaHasImplicitIndex(table) ||
+           !g_engine.getIndexedColumns(dbname, physicalTableName).empty() ||
+           !g_engine.getCompositeIndexes(dbname, physicalTableName).empty() ||
+           !g_engine.getHashIndexedColumns(dbname, physicalTableName).empty() ||
+           !g_engine.getBloomIndexedColumns(dbname, physicalTableName).empty() ||
+           !g_engine.getFullTextIndexedColumns(dbname, physicalTableName).empty() ||
+           !g_engine.getGinIndexedColumns(dbname, physicalTableName).empty() ||
+           !g_engine.getGiSTIndexedColumns(dbname, physicalTableName).empty() ||
+           !g_engine.getBrinIndexedColumns(dbname, physicalTableName).empty() ||
+           !g_engine.getSPGiSTIndexedColumns(dbname, physicalTableName).empty();
+}
+
 static void registerTableInCatalog(CatalogManager& cat, const TableSchema& tbl,
                                    const std::string& logicalSchema,
                                    const std::string& logicalName) {
@@ -479,6 +503,7 @@ static void registerTableInCatalog(CatalogManager& cat, const TableSchema& tbl,
     cls.relkind = 'r';
     cls.relnatts = static_cast<int16_t>(tbl.len);
     cls.relchecks = tableCheckConstraintCount(tbl);
+    cls.relhasindex = tableSchemaHasImplicitIndex(tbl);
     cls.relpersistence = tbl.isUnlogged ? 'u' : 'p';
     if (!tbl.owner.empty()) {
         const auto owner = authCatalog().getAuthIdByName(tbl.owner);
@@ -726,6 +751,23 @@ static bool synchronizeTableCheckCountInCatalog(
             });
     } catch (const std::exception& error) {
         std::cerr << "ALTER TABLE CHECK catalog update failed: "
+                  << error.what() << std::endl;
+        return false;
+    }
+}
+
+static bool synchronizeTableIndexFlagInCatalog(
+    const std::string& dbname, const std::string& physicalTableName) {
+    try {
+        const bool hasIndex =
+            storageTableHasIndex(dbname, physicalTableName);
+        return updateTableClassInCatalog(
+            dbname, physicalTableName,
+            [&](PgClassRow& relation) {
+                relation.relhasindex = hasIndex;
+            });
+    } catch (const std::exception& error) {
+        std::cerr << "ALTER TABLE index catalog update failed: "
                   << error.what() << std::endl;
         return false;
     }
@@ -1637,6 +1679,14 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     s.currentDB, tableName, constraintName, !tc.notValid, tc.notValid,
                     tc.deferrable, tc.initiallyDeferred);
                 if (!alterStatusOk(status, "Constraint")) return true;
+                if (!tableIsTemporary &&
+                    (type == "primary key" || type == "unique") &&
+                    !synchronizeTableIndexFlagInCatalog(
+                        s.currentDB, tableName)) {
+                    std::cout << "ALTER TABLE index catalog update failed"
+                              << std::endl;
+                    return true;
+                }
                 if (type == "check" && !tableIsTemporary &&
                     !synchronizeTableCheckCountInCatalog(
                         s.currentDB, tableName)) {
@@ -1670,6 +1720,13 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     !synchronizeTableCheckCountInCatalog(
                         s.currentDB, tableName)) {
                     std::cout << "ALTER TABLE CHECK catalog update failed"
+                              << std::endl;
+                    return true;
+                }
+                if (!tableIsTemporary && !isExclusion &&
+                    !synchronizeTableIndexFlagInCatalog(
+                        s.currentDB, tableName)) {
+                    std::cout << "ALTER TABLE index catalog update failed"
                               << std::endl;
                     return true;
                 }
@@ -4593,16 +4650,8 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
             }
         }
         if (tableOid != INVALID_OID) {
-            bool hasRemainingIndex = false;
-            for (const auto& dependency :
-                 cat.findRefs(PgClassOid_Class, tableOid, -1)) {
-                if (dependency.classid != PgClassOid_Class) continue;
-                const auto* dependent = cat.findClass(dependency.objid);
-                if (dependent && dependent->relkind == 'i') {
-                    hasRemainingIndex = true;
-                    break;
-                }
-            }
+            const bool hasRemainingIndex =
+                storageTableHasIndex(s.currentDB, tableName);
             const auto* tableRelation = cat.findClass(tableOid);
             if (!tableRelation) {
                 std::cout << "DROP INDEX table catalog update failed"
