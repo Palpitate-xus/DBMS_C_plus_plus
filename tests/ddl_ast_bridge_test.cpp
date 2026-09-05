@@ -510,6 +510,51 @@ static void test_create_index_sequence() {
     std::cout << "[DDL] index/sequence OK" << std::endl;
 }
 
+static void test_table_index_flag_updates_catalog() {
+    const std::string db = testDbPath("ddl_bridge_table_index_flag");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE indexed_table (a INT, b INT)", s));
+
+    dbms::CatalogManager& initial = g_engine.catalogService().get(db);
+    const auto* relation =
+        initial.resolveRelation("indexed_table", {"public"});
+    assert(relation != nullptr && !relation->relhasindex);
+    const dbms::Oid tableOid = relation->oid;
+
+    assert(!ddl.executeSql(
+        "CREATE INDEX indexed_table_a_idx ON indexed_table (a)", s));
+    assert(!ddl.executeSql(
+        "CREATE INDEX indexed_table_b_idx ON indexed_table (b)", s));
+    relation = initial.findClass(tableOid);
+    assert(relation != nullptr && relation->relhasindex);
+
+    g_engine.catalogService().evict(db);
+    dbms::CatalogManager& indexed = g_engine.catalogService().get(db);
+    relation = indexed.findClass(tableOid);
+    assert(relation != nullptr && relation->relhasindex);
+
+    assert(!ddl.executeSql("DROP INDEX indexed_table_a_idx", s));
+    relation = indexed.findClass(tableOid);
+    assert(relation != nullptr && relation->relhasindex);
+
+    assert(!ddl.executeSql("DROP INDEX indexed_table_b_idx", s));
+    relation = indexed.findClass(tableOid);
+    assert(relation != nullptr && !relation->relhasindex);
+
+    g_engine.catalogService().evict(db);
+    dbms::CatalogManager& unindexed = g_engine.catalogService().get(db);
+    relation = unindexed.findClass(tableOid);
+    assert(relation != nullptr && !relation->relhasindex);
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[DDL] table index flag updates catalog OK" << std::endl;
+}
+
 static void test_create_database_schema() {
     std::string db = testDbPath("ddl_bridge_t3");
     cleanup(db);
@@ -843,6 +888,7 @@ int main() {
     test_check_constraint_count_updates_catalog();
     test_schema_qualified_rename_preserves_schema();
     test_create_index_sequence();
+    test_table_index_flag_updates_catalog();
     test_drop_index_uses_sql_name();
     test_create_database_schema();
     test_drop_database_evicts_catalog();

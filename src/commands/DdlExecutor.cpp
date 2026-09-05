@@ -3721,6 +3721,16 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
             dep.refobjsubid = 0;
             dep.deptype = 'a';
             cat.addDepend(dep);
+
+            const auto* currentTable = cat.findClass(tableOid);
+            if (!currentTable) {
+                throw std::runtime_error("indexed table catalog row disappeared");
+            }
+            PgClassRow updatedTable = *currentTable;
+            updatedTable.relhasindex = true;
+            if (!cat.updateClass(tableOid, updatedTable)) {
+                throw std::runtime_error("cannot update indexed table catalog row");
+            }
             catalogRegistered = true;
         }
     } catch (const std::exception& e) {
@@ -3778,6 +3788,7 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
         std::string tableName;
         std::optional<StorageEngine::NamedIndexInfo> named;
         Oid indexOid = INVALID_OID;
+        Oid tableOid = INVALID_OID;
 
         if (indexRel && indexRel->relkind == 'i') {
             indexOid = indexRel->oid;
@@ -3785,7 +3796,11 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
             for (const auto& dep : deps) {
                 if (dep.refclassid != PgClassOid_Class) continue;
                 const PgClassRow* ref = cat.findClass(dep.refobjid);
-                if (ref && ref->relkind == 'r') { tableName = ref->relname; break; }
+                if (ref && ref->relkind == 'r') {
+                    tableName = ref->relname;
+                    tableOid = ref->oid;
+                    break;
+                }
             }
         }
 
@@ -3879,6 +3894,41 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
             std::string error;
             if (!cat.dropObject(PgClassOid_Class, indexOid, behavior, &error)) {
                 std::cout << "ERROR: " << error << std::endl;
+                return true;
+            }
+        }
+        if (tableOid == INVALID_OID) {
+            const auto tableQn = CatalogService::logicalName(tableName);
+            const std::string tableSchema = tableQn.schema.empty()
+                ? "public" : tableQn.schema;
+            const auto* tableRelation = cat.resolveRelation(
+                tableQn.name, {tableSchema});
+            if (tableRelation && tableRelation->relkind == 'r') {
+                tableOid = tableRelation->oid;
+            }
+        }
+        if (tableOid != INVALID_OID) {
+            bool hasRemainingIndex = false;
+            for (const auto& dependency :
+                 cat.findRefs(PgClassOid_Class, tableOid, -1)) {
+                if (dependency.classid != PgClassOid_Class) continue;
+                const auto* dependent = cat.findClass(dependency.objid);
+                if (dependent && dependent->relkind == 'i') {
+                    hasRemainingIndex = true;
+                    break;
+                }
+            }
+            const auto* tableRelation = cat.findClass(tableOid);
+            if (!tableRelation) {
+                std::cout << "DROP INDEX table catalog update failed"
+                          << std::endl;
+                return true;
+            }
+            PgClassRow updatedTable = *tableRelation;
+            updatedTable.relhasindex = hasRemainingIndex;
+            if (!cat.updateClass(tableOid, updatedTable)) {
+                std::cout << "DROP INDEX table catalog update failed"
+                          << std::endl;
                 return true;
             }
         }
