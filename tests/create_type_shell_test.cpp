@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <string>
 #include "test_utils.h"
@@ -42,6 +43,12 @@ static bool shellTypeFileContains(const std::string& db, const std::string& name
         if (line == name) return true;
     }
     return false;
+}
+
+static std::string readFile(const fs::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(input),
+            std::istreambuf_iterator<char>()};
 }
 
 static std::map<std::string, std::string> parseUdtMetaLine(const std::string& line) {
@@ -167,6 +174,58 @@ static void test_drop_composite_still_works() {
     std::cout << "[CTYPE] drop composite type OK" << std::endl;
 }
 
+static void test_composite_metadata_is_validated_and_atomic() {
+    const std::string db = testDbPath("ct_composite_atomicity");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    dbms::StorageEngine::CompositeType first;
+    first.name = "first_pair";
+    first.fields = {{"left_value", "int"}, {"right_value", "text"}};
+    dbms::StorageEngine::CompositeType second = first;
+    second.name = "second_pair";
+    assert(g_engine.createCompositeType(db, first) == dbms::DBStatus::OK);
+    assert(g_engine.createCompositeType(db, second) == dbms::DBStatus::OK);
+
+    dbms::StorageEngine::CompositeType invalid = first;
+    invalid.name = "invalid_pair";
+    invalid.fields[0].first = "left|injected";
+    assert(g_engine.createCompositeType(db, invalid) ==
+           dbms::DBStatus::INVALID_ARGUMENT);
+
+    const fs::path path = fs::path(db) / ".types";
+    const fs::path savedPath = fs::path(db) / ".types.saved";
+    const std::string originalBytes = readFile(path);
+    fs::rename(path, savedPath);
+    assert(fs::create_directory(path));
+    dbms::StorageEngine::CompositeType changed = first;
+    changed.fields[1].second = "varchar(40)";
+    assert(g_engine.alterCompositeType(db, first.name, changed) ==
+           dbms::DBStatus::IO_ERROR);
+    assert(g_engine.dropCompositeType(db, first.name) ==
+           dbms::DBStatus::IO_ERROR);
+    fs::remove(path);
+    fs::rename(savedPath, path);
+    assert(readFile(path) == originalBytes);
+
+    assert(g_engine.alterCompositeType(db, first.name, changed) ==
+           dbms::DBStatus::OK);
+    dbms::StorageEngine reloaded;
+    const auto persisted = reloaded.getCompositeType(db, first.name);
+    assert(persisted.fields.size() == 2);
+    assert(persisted.fields[1].second == "varchar(40)");
+    assert(reloaded.isCompositeType(db, second.name));
+
+    assert(g_engine.dropCompositeType(db, first.name) ==
+           dbms::DBStatus::OK);
+    dbms::StorageEngine afterDrop;
+    assert(!afterDrop.isCompositeType(db, first.name));
+    assert(afterDrop.isCompositeType(db, second.name));
+
+    cleanup(db);
+    std::cout << "[CTYPE] composite metadata atomicity OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_drop_enum_type();
@@ -174,6 +233,7 @@ int main() {
     test_range_type_create_drop();
     test_base_type_create_drop();
     test_drop_composite_still_works();
+    test_composite_metadata_is_validated_and_atomic();
     std::cout << "[CTYPE] all passed" << std::endl;
     return 0;
 }

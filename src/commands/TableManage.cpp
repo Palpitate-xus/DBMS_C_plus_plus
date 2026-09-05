@@ -38679,120 +38679,155 @@ static std::filesystem::path compositeTypePath(const std::string& dbname) {
     return std::filesystem::path(dbname) / ".types";
 }
 
+static bool validCompositeTypeDefinition(
+    const StorageEngine::CompositeType& type) {
+    if (!validMetadataObjectName(type.name) || type.fields.empty() ||
+        type.fields.size() > MAX_COLUMNS) {
+        return false;
+    }
+    for (const auto& field : type.fields) {
+        if (!validMetadataObjectName(field.first) || field.second.empty() ||
+            field.second.find('|') != std::string::npos ||
+            field.second.find('\n') != std::string::npos ||
+            field.second.find('\r') != std::string::npos) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool loadCompositeTypes(
+    const std::filesystem::path& path,
+    std::vector<StorageEngine::CompositeType>& types) {
+    types.clear();
+    if (!std::filesystem::exists(path)) return true;
+    std::ifstream input(path);
+    if (!input) return false;
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.empty()) continue;
+        const size_t firstSeparator = line.find('|');
+        if (firstSeparator == std::string::npos || firstSeparator == 0) {
+            return false;
+        }
+        StorageEngine::CompositeType type;
+        type.name = line.substr(0, firstSeparator);
+        size_t position = firstSeparator + 1;
+        while (position < line.size()) {
+            const size_t nextSeparator = line.find('|', position);
+            const std::string field = nextSeparator == std::string::npos
+                ? line.substr(position)
+                : line.substr(position, nextSeparator - position);
+            const size_t colon = field.find(':');
+            if (colon == std::string::npos || colon == 0 ||
+                colon + 1 >= field.size()) {
+                return false;
+            }
+            type.fields.emplace_back(
+                field.substr(0, colon), field.substr(colon + 1));
+            position = nextSeparator == std::string::npos
+                ? line.size() : nextSeparator + 1;
+        }
+        if (!validCompositeTypeDefinition(type)) return false;
+        types.push_back(std::move(type));
+    }
+    return !input.bad();
+}
+
+static std::string serializeCompositeTypes(
+    const std::vector<StorageEngine::CompositeType>& types) {
+    std::ostringstream serialized;
+    for (const auto& type : types) {
+        serialized << type.name;
+        for (const auto& field : type.fields) {
+            serialized << '|' << field.first << ':' << field.second;
+        }
+        serialized << '\n';
+    }
+    return serialized.str();
+}
+
 DBStatus StorageEngine::createCompositeType(const std::string& dbname, const CompositeType& ct) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    auto path = compositeTypePath(dbname);
-    if (isCompositeType(dbname, ct.name)) return DBStatus::TABLE_ALREADY_EXISTS;
-    std::ofstream ofs(path, std::ios::app);
-    if (!ofs) return DBStatus::INVALID_VALUE;
-    ofs << ct.name;
-    for (const auto& f : ct.fields) {
-        ofs << "|" << f.first << ":" << f.second;
+    if (!validCompositeTypeDefinition(ct)) return DBStatus::INVALID_ARGUMENT;
+    const auto path = compositeTypePath(dbname);
+    std::vector<CompositeType> types;
+    if (!loadCompositeTypes(path, types)) return DBStatus::IO_ERROR;
+    for (const auto& existing : types) {
+        if (existing.name == ct.name) return DBStatus::TABLE_ALREADY_EXISTS;
     }
-    ofs << '\n';
-    return DBStatus::OK;
+    types.push_back(ct);
+    return index_file::writeAtomically(path, serializeCompositeTypes(types))
+        ? DBStatus::OK : DBStatus::IO_ERROR;
 }
 
 DBStatus StorageEngine::alterCompositeType(const std::string& dbname, const std::string& name,
                                            const CompositeType& ct) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    auto path = compositeTypePath(dbname);
+    if (!validMetadataObjectName(name) ||
+        !validCompositeTypeDefinition(ct)) {
+        return DBStatus::INVALID_ARGUMENT;
+    }
+    const auto path = compositeTypePath(dbname);
     if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
-    if (ct.name != name && isCompositeType(dbname, ct.name)) return DBStatus::TABLE_ALREADY_EXISTS;
-    std::ifstream ifs(path);
     std::vector<CompositeType> types;
-    std::string line;
+    if (!loadCompositeTypes(path, types)) return DBStatus::IO_ERROR;
+    if (ct.name != name &&
+        std::any_of(types.begin(), types.end(), [&](const CompositeType& type) {
+            return type.name == ct.name;
+        })) {
+        return DBStatus::TABLE_ALREADY_EXISTS;
+    }
     bool found = false;
-    while (std::getline(ifs, line)) {
-        size_t sp = line.find('|');
-        if (sp == std::string::npos) continue;
-        CompositeType current;
-        current.name = line.substr(0, sp);
-        size_t pos = sp + 1;
-        while (pos < line.size()) {
-            size_t next = line.find('|', pos);
-            std::string fieldDef = (next == std::string::npos) ? line.substr(pos) : line.substr(pos, next - pos);
-            size_t colon = fieldDef.find(':');
-            if (colon != std::string::npos) {
-                current.fields.emplace_back(fieldDef.substr(0, colon), fieldDef.substr(colon + 1));
-            }
-            pos = (next == std::string::npos) ? line.size() : next + 1;
-        }
-        if (current.name == name) {
-            types.push_back(ct);
+    for (auto& type : types) {
+        if (type.name == name) {
+            type = ct;
             found = true;
-        } else {
-            types.push_back(current);
         }
     }
     if (!found) return DBStatus::TABLE_NOT_FOUND;
-    std::ofstream ofs(path, std::ios::trunc);
-    if (!ofs) return DBStatus::INVALID_VALUE;
-    for (const auto& t : types) {
-        ofs << t.name;
-        for (const auto& f : t.fields) ofs << "|" << f.first << ":" << f.second;
-        ofs << '\n';
-    }
-    return DBStatus::OK;
+    return index_file::writeAtomically(path, serializeCompositeTypes(types))
+        ? DBStatus::OK : DBStatus::IO_ERROR;
 }
 
 DBStatus StorageEngine::dropCompositeType(const std::string& dbname, const std::string& name) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    auto path = compositeTypePath(dbname);
+    if (!validMetadataObjectName(name)) return DBStatus::INVALID_ARGUMENT;
+    const auto path = compositeTypePath(dbname);
     if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
-    std::ifstream ifs(path);
-    std::vector<std::string> lines;
-    std::string line;
+    std::vector<CompositeType> types;
+    if (!loadCompositeTypes(path, types)) return DBStatus::IO_ERROR;
     bool found = false;
-    while (std::getline(ifs, line)) {
-        size_t sp = line.find('|');
-        if (sp != std::string::npos && line.substr(0, sp) == name) {
+    std::vector<CompositeType> retained;
+    retained.reserve(types.size());
+    for (auto& type : types) {
+        if (type.name == name) {
             found = true;
         } else {
-            lines.push_back(line);
+            retained.push_back(std::move(type));
         }
     }
     if (!found) return DBStatus::TABLE_NOT_FOUND;
-    std::ofstream ofs(path, std::ios::trunc);
-    for (const auto& l : lines) ofs << l << '\n';
-    return DBStatus::OK;
+    return index_file::writeAtomically(
+               path, serializeCompositeTypes(retained))
+        ? DBStatus::OK : DBStatus::IO_ERROR;
 }
 
 StorageEngine::CompositeType StorageEngine::getCompositeType(const std::string& dbname, const std::string& name) const {
     CompositeType result;
-    auto path = compositeTypePath(dbname);
-    if (!std::filesystem::exists(path)) return result;
-    std::ifstream ifs(path);
-    std::string line;
-    while (std::getline(ifs, line)) {
-        size_t sp = line.find('|');
-        if (sp == std::string::npos || line.substr(0, sp) != name) continue;
-        result.name = name;
-        size_t pos = sp + 1;
-        while (pos < line.size()) {
-            size_t next = line.find('|', pos);
-            std::string fieldDef = (next == std::string::npos) ? line.substr(pos) : line.substr(pos, next - pos);
-            size_t colon = fieldDef.find(':');
-            if (colon != std::string::npos) {
-                result.fields.emplace_back(fieldDef.substr(0, colon), fieldDef.substr(colon + 1));
-            }
-            pos = (next == std::string::npos) ? line.size() : next + 1;
-        }
-        break;
+    std::vector<CompositeType> types;
+    if (!loadCompositeTypes(compositeTypePath(dbname), types)) return result;
+    for (auto& type : types) {
+        if (type.name == name) return type;
     }
     return result;
 }
 
 std::vector<std::string> StorageEngine::getCompositeTypeNames(const std::string& dbname) const {
     std::vector<std::string> result;
-    auto path = compositeTypePath(dbname);
-    if (!std::filesystem::exists(path)) return result;
-    std::ifstream ifs(path);
-    std::string line;
-    while (std::getline(ifs, line)) {
-        size_t sp = line.find('|');
-        if (sp != std::string::npos) result.push_back(line.substr(0, sp));
-    }
+    std::vector<CompositeType> types;
+    if (!loadCompositeTypes(compositeTypePath(dbname), types)) return result;
+    for (const auto& type : types) result.push_back(type.name);
     return result;
 }
 
