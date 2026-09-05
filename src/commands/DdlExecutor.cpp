@@ -60,8 +60,31 @@ bool parseInt64Strict(const std::string& token, int64_t& value) {
     if (token.empty()) return false;
     const char* begin = token.data();
     const char* end = begin + token.size();
+    if (*begin == '+') {
+        ++begin;
+        if (begin == end) return false;
+    }
     const auto result = std::from_chars(begin, end, value);
     return result.ec == std::errc{} && result.ptr == end;
+}
+
+bool parseInt64Tokens(const std::vector<std::string>& tokens,
+                      size_t position, int64_t& value,
+                      size_t& consumed) {
+    consumed = 0;
+    if (position >= tokens.size()) return false;
+    std::string token = tokens[position];
+    consumed = 1;
+    if (token == "+" || token == "-") {
+        if (position + 1 >= tokens.size()) return false;
+        token += tokens[position + 1];
+        consumed = 2;
+    }
+    if (!parseInt64Strict(token, value)) {
+        consumed = 0;
+        return false;
+    }
+    return true;
 }
 
 bool likeSourceHasExtendedStatistics(const std::string& dbname,
@@ -5252,13 +5275,14 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
         for (size_t i = 0; i < tokens.size(); ++i) {
             std::string tok = lower(tokens[i]);
             auto readValue = [&](int64_t& target, const char* name) {
-                if (i + 1 >= tokens.size() ||
-                    !parseInt64Strict(tokens[i + 1], target)) {
+                size_t consumed = 0;
+                if (!parseInt64Tokens(
+                        tokens, i + 1, target, consumed)) {
                     std::cout << "SQL syntax error: invalid " << name
                               << " value" << std::endl;
                     return false;
                 }
-                ++i;
+                i += consumed;
                 return true;
             };
             if (tok == "start") {
@@ -5275,10 +5299,17 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
                     info.restartValueSpecified = true;
                 } else if (i + 1 < tokens.size()) {
                     int64_t restartValue = 0;
-                    if (parseInt64Strict(tokens[i + 1], restartValue)) {
+                    size_t consumed = 0;
+                    if (parseInt64Tokens(
+                            tokens, i + 1, restartValue, consumed)) {
                         info.restart = restartValue;
                         info.restartValueSpecified = true;
-                        ++i;
+                        i += consumed;
+                    } else if (tokens[i + 1] == "+" ||
+                               tokens[i + 1] == "-") {
+                        std::cout << "SQL syntax error: invalid RESTART value"
+                                  << std::endl;
+                        return true;
                     }
                 }
             } else if (tok == "increment") {

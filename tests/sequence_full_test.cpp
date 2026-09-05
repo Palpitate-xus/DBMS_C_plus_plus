@@ -264,8 +264,44 @@ static void test_sequence_numeric_input_fails_closed() {
     assert(ddl.executeSql("ALTER SEQUENCE good CACHE", s));
     assert(g_engine.nextval(db, "good") == 1);
 
+    const auto descendingParsed = parser.parse(
+        "CREATE SEQUENCE descending START -1 INCREMENT BY -2 "
+        "MINVALUE -9 MAXVALUE -1");
+    assert(descendingParsed.success && descendingParsed.stmt);
+    const auto* descendingCreate =
+        dynamic_cast<const dbms::CreateObjectStmt*>(
+            descendingParsed.stmt.get());
+    assert(descendingCreate);
+    assert(descendingCreate->options.at("start") == "-1");
+    assert(descendingCreate->options.at("increment") == "-2");
+    assert(descendingCreate->options.at("minvalue") == "-9");
+    assert(descendingCreate->options.at("maxvalue") == "-1");
+    assert(!ddl.execute(descendingParsed.stmt, s));
+    assert(g_engine.nextval(db, "descending") == -1);
+    assert(g_engine.nextval(db, "descending") == -3);
+    assert(!ddl.executeSql(
+        "ALTER SEQUENCE descending RESTART WITH -7 INCREMENT BY -1", s));
+    assert(g_engine.nextval(db, "descending") == -7);
+    assert(g_engine.nextval(db, "descending") == -8);
+    assert(!ddl.executeSql(
+        "ALTER SEQUENCE descending START WITH -5", s));
+    assert(g_engine.nextval(db, "descending") == -9);
+    assert(!ddl.executeSql("ALTER SEQUENCE descending RESTART", s));
+    assert(g_engine.nextval(db, "descending") == -5);
+
+    assert(!ddl.executeSql(
+        "CREATE SEQUENCE signed_positive START +2 INCREMENT +3 MAXVALUE +20",
+        s));
+    assert(g_engine.nextval(db, "signed_positive") == 2);
+    assert(g_engine.nextval(db, "signed_positive") == 5);
+    assert(ddl.executeSql("ALTER SEQUENCE descending RESTART -", s));
+    assert(!parser.parse(
+        "CREATE SEQUENCE overflow START -9223372036854775809").success);
+
     dbms::StorageEngine restarted;
     assert(restarted.nextval(db, "good") == 2);
+    assert(restarted.nextval(db, "descending") == -6);
+    assert(restarted.nextval(db, "signed_positive") == 8);
 
     const auto corruptPath = std::filesystem::path(db) / "corrupt.seq";
     {

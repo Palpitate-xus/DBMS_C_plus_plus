@@ -136,6 +136,10 @@ static bool parseInt64Token(const std::string& token, int64_t& value) {
     if (token.empty()) return false;
     const char* begin = token.data();
     const char* end = begin + token.size();
+    if (*begin == '+') {
+        ++begin;
+        if (begin == end) return false;
+    }
     const auto result = std::from_chars(begin, end, value);
     return result.ec == std::errc{} && result.ptr == end;
 }
@@ -5396,10 +5400,19 @@ StmtPtr SQLParser::parseCreateSequence(const std::vector<std::string>& tokens, s
     };
     auto numericOption = [&](const std::string& key, size_t skip) {
         if (pos + skip >= tokens.size() || tokens[pos + skip] == ";") return false;
+        const size_t valuePosition = pos + skip;
+        std::string valueToken = tokens[valuePosition];
+        size_t consumed = 1;
+        if ((valueToken == "+" || valueToken == "-") &&
+            valuePosition + 1 < tokens.size() &&
+            tokens[valuePosition + 1] != ";") {
+            valueToken += tokens[valuePosition + 1];
+            consumed = 2;
+        }
         int64_t ignored = 0;
-        if (!parseInt64Token(tokens[pos + skip], ignored)) return false;
-        stmt->options[key] = tokens[pos + skip];
-        pos += skip + 1;
+        if (!parseInt64Token(valueToken, ignored)) return false;
+        stmt->options[key] = std::move(valueToken);
+        pos = valuePosition + consumed;
         return true;
     };
 
