@@ -3174,7 +3174,12 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             }
         }
         TableSchema srcSchema = g_engine.getTableSchema(s.currentDB, src);
-        for (size_t i = 0; i < srcSchema.len && tbl.len < MAX_COLUMNS; ++i) {
+        for (size_t i = 0; i < srcSchema.len; ++i) {
+            if (tbl.len >= MAX_COLUMNS) {
+                std::cout << "ERROR: table cannot have more than "
+                          << MAX_COLUMNS << " columns" << std::endl;
+                return true;
+            }
             Column c = srcSchema.cols[i];
             if (!lc.includingDefaults) c.defaultValue.clear();
             if (!lc.includingConstraints) {
@@ -3221,9 +3226,12 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             std::cout << "Invalid column type: " << typeError << std::endl;
             return true;
         }
-        const size_t previousColumnCount = tbl.len;
+        if (tbl.len >= MAX_COLUMNS) {
+            std::cout << "ERROR: table cannot have more than "
+                      << MAX_COLUMNS << " columns" << std::endl;
+            return true;
+        }
         tbl.append(column);
-        if (tbl.len == previousColumnCount) continue;
         for (size_t checkIndex = 1; checkIndex < cd.checkExprs.size();
              ++checkIndex) {
             CheckConstraint check;
@@ -3448,7 +3456,11 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             return true;
         }
         for (const auto& f : ct.fields) {
-            if (tbl.len >= MAX_COLUMNS) break;
+            if (tbl.len >= MAX_COLUMNS) {
+                std::cout << "ERROR: table cannot have more than "
+                          << MAX_COLUMNS << " columns" << std::endl;
+                return true;
+            }
             ColumnDef cd;
             cd.name = f.first;
             cd.isNull = true;

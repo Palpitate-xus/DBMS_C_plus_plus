@@ -944,10 +944,21 @@ static bool validateTableSchemaIdentifiers(const TableSchema& tbl, std::string* 
         return true;
     };
     if (reject(tbl.tablename, MAX_TABLE_NAME_LEN, "table name")) return false;
+    if (tbl.len > MAX_COLUMNS || tbl.fkLen > MAX_COLUMNS) {
+        if (error) *error = "table exceeds the current column or constraint limit";
+        return false;
+    }
+    std::set<std::string> columnNames;
     for (size_t i = 0; i < tbl.len; ++i) {
         if (reject(tbl.cols[i].dataName, MAX_COL_NAME_LEN, "column name") ||
             reject(tbl.cols[i].dataType, MAX_TYPE_NAME_LEN, "type name") ||
             reject(tbl.cols[i].checkConstraintName, MAX_COL_NAME_LEN, "constraint name")) {
+            return false;
+        }
+        if (!columnNames.insert(tbl.cols[i].dataName).second) {
+            if (error) {
+                *error = "duplicate column name: " + tbl.cols[i].dataName;
+            }
             return false;
         }
         if (tbl.cols[i].checkExpr.size() >

@@ -5,6 +5,7 @@
 
 #include <cassert>
 #include <iostream>
+#include <string>
 
 extern dbms::StorageEngine g_engine;
 
@@ -22,6 +23,44 @@ int main() {
     session.permission = 1;
     session.currentDB = database;
     dbms::DdlExecutor ddl;
+
+    assert(ddl.executeSql(
+        "CREATE TABLE duplicate_columns (id INT, id TEXT)", session));
+    assert(!g_engine.tableExists(database, "duplicate_columns"));
+
+    dbms::TableSchema directDuplicate;
+    directDuplicate.tablename = "direct_duplicate_columns";
+    directDuplicate.append(dbms::makeIntColumn("id", true, 2));
+    directDuplicate.append(dbms::makeIntColumn("id", true, 2));
+    std::string directError;
+    assert(g_engine.createTable(
+               database, directDuplicate, &directError) ==
+           dbms::DBStatus::INVALID_ARGUMENT);
+    assert(directError.find("duplicate column") != std::string::npos);
+    assert(!g_engine.tableExists(database, directDuplicate.tablename));
+
+    std::string maximumColumnsSql = "CREATE TABLE maximum_columns (";
+    for (size_t i = 0; i < dbms::MAX_COLUMNS; ++i) {
+        if (i != 0) maximumColumnsSql += ", ";
+        maximumColumnsSql += "c" + std::to_string(i) + " INT";
+    }
+    maximumColumnsSql += ")";
+    assert(!ddl.executeSql(maximumColumnsSql, session));
+    assert(g_engine.getTableSchema(database, "maximum_columns").len ==
+           dbms::MAX_COLUMNS);
+
+    std::string tooManyColumnsSql = "CREATE TABLE too_many_columns (";
+    for (size_t i = 0; i <= dbms::MAX_COLUMNS; ++i) {
+        if (i != 0) tooManyColumnsSql += ", ";
+        tooManyColumnsSql += "c" + std::to_string(i) + " INT";
+    }
+    tooManyColumnsSql += ")";
+    assert(ddl.executeSql(tooManyColumnsSql, session));
+    assert(!g_engine.tableExists(database, "too_many_columns"));
+    assert(ddl.executeSql(
+        "CREATE TABLE like_overflow (LIKE maximum_columns, extra INT)",
+        session));
+    assert(!g_engine.tableExists(database, "like_overflow"));
 
     assert(ddl.executeSql(
         "CREATE TABLE missing_pk (id INT, PRIMARY KEY (missing))",
