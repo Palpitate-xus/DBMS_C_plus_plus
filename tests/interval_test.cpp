@@ -67,6 +67,7 @@ static void test_interval_canonical() {
     check(db, ddl, s, id, "90 minutes", "01:30:00");
     check(db, ddl, s, id, "04:05:06", "04:05:06");
     check(db, ddl, s, id, "25 hours", "25:00:00");
+    check(db, ddl, s, id, "10000000 hours", "10000000:00:00");
     check(db, ddl, s, id, "1 day 2 hours", "1 day 02:00:00");
     check(db, ddl, s, id, "1 year 2 mons 3 days 04:05:06", "1 year 2 mons 3 days 04:05:06");
     check(db, ddl, s, id, "2 weeks", "14 days");
@@ -91,6 +92,18 @@ static void test_interval_invalid() {
     assert(g_engine.insert(db, "t", {{"id","2"}, {"v","1 fortnight"}}) == dbms::DBStatus::INVALID_VALUE);
     assert(g_engine.insert(db, "t", {{"id","3"}, {"v","year"}}) == dbms::DBStatus::INVALID_VALUE);
     assert(g_engine.insert(db, "t", {{"id","4"}, {"v","1 year bogus"}}) == dbms::DBStatus::INVALID_VALUE);
+    // Numeric conversion and the canonical long-long fields must stay in
+    // range. These inputs previously threw from stod or invoked an
+    // out-of-range floating-to-integer conversion.
+    assert(g_engine.insert(
+               db, "t", {{"id","5"}, {"v",std::string(400, '9') + " years"}}) ==
+           dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insert(
+               db, "t", {{"id","6"}, {"v","9999999999999999999 days"}}) ==
+           dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insert(
+               db, "t", {{"id","7"}, {"v","9999999999999999999 hours"}}) ==
+           dbms::DBStatus::INVALID_VALUE);
 
     auto rows = g_engine.query(db, "t", {}, {"id"}, {});
     assert(rows.empty());

@@ -8137,21 +8137,26 @@ static bool parseInterval(const std::string& in, long long& months, long long& d
         while (i < n && std::isdigit(static_cast<unsigned char>(in[i]))) { ++i; sawDigit = true; }
         if (i < n && in[i] == '.') { ++i; while (i < n && std::isdigit(static_cast<unsigned char>(in[i]))) { ++i; sawDigit = true; } }
         if (!sawDigit) return false;
-        double value = std::stod(in.substr(start, i - start));
+        double value = 0;
+        if (!parseFiniteDouble(in.substr(start, i - start), value))
+            return false;
 
         if (i < n && in[i] == ':') {
             // time: value is HH; parse :MM[:SS[.f]]
             ++i;
             size_t ms = i; while (i < n && std::isdigit(static_cast<unsigned char>(in[i]))) ++i;
             if (i == ms) return false;
-            double mm = std::stod(in.substr(ms, i - ms));
+            double mm = 0;
+            if (!parseFiniteDouble(in.substr(ms, i - ms), mm))
+                return false;
             double ss = 0;
             if (i < n && in[i] == ':') {
                 ++i; size_t ss0 = i;
                 while (i < n && std::isdigit(static_cast<unsigned char>(in[i]))) ++i;
                 if (i < n && in[i] == '.') { ++i; while (i < n && std::isdigit(static_cast<unsigned char>(in[i]))) ++i; }
                 if (i == ss0) return false;
-                ss = std::stod(in.substr(ss0, i - ss0));
+                if (!parseFiniteDouble(in.substr(ss0, i - ss0), ss))
+                    return false;
             }
             double sign = (value < 0 || (in[start] == '-')) ? -1.0 : 1.0;
             double absH = std::fabs(value);
@@ -8163,7 +8168,9 @@ static bool parseInterval(const std::string& in, long long& months, long long& d
             // SQL year-month shorthand: Y-M
             ++i; size_t m0 = i;
             while (i < n && std::isdigit(static_cast<unsigned char>(in[i]))) ++i;
-            double mo = std::stod(in.substr(m0, i - m0));
+            double mo = 0;
+            if (!parseFiniteDouble(in.substr(m0, i - m0), mo))
+                return false;
             monthsD += value * 12 + mo;
             any = true;
             continue;
@@ -8184,11 +8191,29 @@ static bool parseInterval(const std::string& in, long long& months, long long& d
     }
     if (!any) return false;
     if (ago) { monthsD = -monthsD; daysD = -daysD; secondsD = -secondsD; }
+    if (!std::isfinite(monthsD) || !std::isfinite(daysD) ||
+        !std::isfinite(secondsD)) {
+        return false;
+    }
     // Cascade fractional parts downward (PG: month=30d, day=24h).
     double im = std::trunc(monthsD);
     daysD += (monthsD - im) * 30;
     double id = std::trunc(daysD);
     secondsD += (daysD - id) * 86400;
+    // Floating-to-integer conversion outside the destination range is
+    // undefined behavior. Use the exactly representable 2^63 boundaries and
+    // exclude LLONG_MIN because downstream formatting takes the magnitude.
+    const double integerLower =
+        static_cast<double>(std::numeric_limits<long long>::lowest());
+    const double integerUpper = -integerLower;
+    auto fitsCanonicalField = [&](double value) {
+        return std::isfinite(value) && value > integerLower &&
+               value < integerUpper;
+    };
+    if (!fitsCanonicalField(im) || !fitsCanonicalField(id) ||
+        !fitsCanonicalField(secondsD)) {
+        return false;
+    }
     months = static_cast<long long>(im);
     days = static_cast<long long>(id);
     seconds = secondsD;
