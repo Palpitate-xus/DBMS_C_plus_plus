@@ -1,6 +1,7 @@
 #include "commands/DdlExecutor.h"
 #include "commands/TableManage.h"
 #include "Session.h"
+#include "catalog/CatalogService.h"
 #include "catalog/type_registry.h"
 #include "table_schema.h"
 #include <cassert>
@@ -81,8 +82,57 @@ static void test_ctas_star() {
     assert(rows.count("2 bob 25 "));
     assert(rows.count("3 carol 40 "));
 
+    auto& catalog = g_engine.catalogService().get(db);
+    const auto* relation = catalog.resolveRelation("cp", {"public"});
+    assert(relation != nullptr && relation->relname == "cp" &&
+           relation->relnatts == 3);
+    const dbms::Oid relationOid = relation->oid;
+    assert(catalog.findAttribute(relationOid, "id") != nullptr);
+    assert(catalog.findAttribute(relationOid, "name") != nullptr);
+    assert(catalog.findAttribute(relationOid, "age") != nullptr);
+
+    g_engine.catalogService().evict(db);
+    auto& reloaded = g_engine.catalogService().get(db);
+    relation = reloaded.resolveRelation("cp", {"public"});
+    assert(relation != nullptr && relation->oid == relationOid);
+
+    g_engine.catalogService().evict(db);
     cleanup(db);
     std::cout << "[CTAS] SELECT * precise types + mapping OK" << std::endl;
+}
+
+static void test_schema_qualified_ctas_catalog_identity() {
+    const std::string db = testDbPath("ctas_schema_catalog");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    seed(db, ddl, s);
+    assert(!ddl.executeSql("CREATE SCHEMA analytics", s));
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE analytics.cp AS SELECT id, age FROM src", s));
+    assert(g_engine.tableExists(db, "analytics__cp"));
+
+    auto& catalog = g_engine.catalogService().get(db);
+    const auto* analytics = catalog.findNamespaceByName("analytics");
+    assert(analytics != nullptr);
+    const auto* relation = catalog.findClassByName("cp", analytics->oid);
+    assert(relation != nullptr && relation->relnatts == 2);
+    const dbms::Oid relationOid = relation->oid;
+    assert(catalog.findAttribute(relationOid, "id") != nullptr);
+    assert(catalog.findAttribute(relationOid, "age") != nullptr);
+    assert(catalog.resolveRelation("cp", {"public"}) == nullptr);
+
+    g_engine.catalogService().evict(db);
+    auto& reloaded = g_engine.catalogService().get(db);
+    relation = reloaded.resolveRelation("cp", {"analytics"});
+    assert(relation != nullptr && relation->oid == relationOid);
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[CTAS] schema-qualified catalog identity OK" << std::endl;
 }
 
 static void test_ctas_with_no_data() {
@@ -160,6 +210,7 @@ static void test_ctas_no_data_with_projection() {
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_ctas_star();
+    test_schema_qualified_ctas_catalog_identity();
     test_ctas_with_no_data();
     test_ctas_with_data_explicit();
     test_ctas_projection();

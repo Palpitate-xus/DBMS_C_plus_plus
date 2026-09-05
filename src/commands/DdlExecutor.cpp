@@ -2866,7 +2866,16 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             try {
                 if (!temporary) {
                     dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
-                    registerTableInCatalog(cat, g_engine.getTableSchema(s.currentDB, tname), tname, s.currentDB);
+                    CatalogManager::QualifiedName qn;
+                    if (!CatalogManager::parseQualifiedName(
+                            stmt->tableName, qn)) {
+                        qn.schema.clear();
+                        qn.name = stmt->tableName;
+                    }
+                    if (qn.schema.empty()) qn.schema = "public";
+                    registerTableInCatalog(
+                        cat, g_engine.getTableSchema(s.currentDB, tname),
+                        qn.schema, qn.name);
                 }
             } catch (const std::exception& e) {
                 std::cerr << "WARNING: CTAS catalog registration failed: " << e.what() << std::endl;
