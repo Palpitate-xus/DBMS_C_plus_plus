@@ -4545,6 +4545,50 @@ static void parseConstraintDeferrability(const std::vector<std::string>& tokens,
     }
 }
 
+static std::string parseReferentialAction(
+    const std::vector<std::string>& tokens, size_t& pos) {
+    if (pos >= tokens.size()) return "invalid";
+    const std::string action = SQLParser::toLower(tokens[pos++]);
+    if (action == "cascade" || action == "restrict") return action;
+    if (action == "set") {
+        if (pos >= tokens.size()) return "invalid";
+        const std::string target = SQLParser::toLower(tokens[pos]);
+        if (target == "null") {
+            ++pos;
+            return "setnull";
+        }
+        if (target == "default") {
+            ++pos;
+            return "setdefault";
+        }
+        return "invalid";
+    }
+    if (action == "no") {
+        if (pos < tokens.size() &&
+            SQLParser::toLower(tokens[pos]) == "action") {
+            ++pos;
+            return "noaction";
+        }
+        return "invalid";
+    }
+    return "invalid";
+}
+
+static void parseReferentialActions(
+    const std::vector<std::string>& tokens, size_t& pos,
+    TableConstraint& constraint) {
+    while (pos + 1 < tokens.size() &&
+           SQLParser::toLower(tokens[pos]) == "on") {
+        const std::string event = SQLParser::toLower(tokens[pos + 1]);
+        if (event != "delete" && event != "update") break;
+        pos += 2;
+        const std::string action = parseReferentialAction(tokens, pos);
+        std::string& destination = event == "delete"
+            ? constraint.onDelete : constraint.onUpdate;
+        destination = destination.empty() ? action : "invalid";
+    }
+}
+
 // ============================================================================
 // CREATE 子命令解析（Phase 1.2 逐步完善）
 // ============================================================================
@@ -4707,19 +4751,7 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                                     if (c != ",") tc.refColumns.push_back(c);
                                 }
                             }
-                            // ON DELETE / ON UPDATE
-                            while (pos < tokens.size()) {
-                                std::string w = toLower(tokens[pos]);
-                                if (w == "on") {
-                                    if (pos + 2 < tokens.size() && toLower(tokens[pos + 1]) == "delete") {
-                                        pos += 2;
-                                        tc.onDelete = toLower(tokens[pos++]);
-                                    } else if (pos + 2 < tokens.size() && toLower(tokens[pos + 1]) == "update") {
-                                        pos += 2;
-                                        tc.onUpdate = toLower(tokens[pos++]);
-                                    } else break;
-                                } else break;
-                            }
+                            parseReferentialActions(tokens, pos, tc);
                         }
                         parseConstraintDeferrability(tokens, pos, tc);
                         stmt->constraints.push_back(std::move(tc));
@@ -4788,18 +4820,7 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                             if (c != ",") tc.refColumns.push_back(c);
                         }
                     }
-                    while (pos < tokens.size()) {
-                        std::string w = toLower(tokens[pos]);
-                        if (w == "on") {
-                            if (pos + 2 < tokens.size() && toLower(tokens[pos + 1]) == "delete") {
-                                pos += 2;
-                                tc.onDelete = toLower(tokens[pos++]);
-                            } else if (pos + 2 < tokens.size() && toLower(tokens[pos + 1]) == "update") {
-                                pos += 2;
-                                tc.onUpdate = toLower(tokens[pos++]);
-                            } else break;
-                        } else break;
-                    }
+                    parseReferentialActions(tokens, pos, tc);
                 }
                 parseConstraintDeferrability(tokens, pos, tc);
                 stmt->constraints.push_back(std::move(tc));
@@ -5000,6 +5021,8 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                             tc.columns.push_back(col.name);
                             tc.refTable = refTable;
                             if (!refCol.empty()) tc.refColumns.push_back(refCol);
+                            parseReferentialActions(tokens, pos, tc);
+                            parseConstraintDeferrability(tokens, pos, tc);
                             stmt->constraints.push_back(std::move(tc));
                         }
                     } else {
@@ -7374,7 +7397,13 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
             }
             while (pos < tokens.size() && tokens[pos] != "," && tokens[pos] != ";") {
                 const std::string option = toLower(tokens[pos]);
-                if (option == "not" && pos + 1 < tokens.size() &&
+                if (option == "on" &&
+                    sub.constraint.type == "FOREIGN KEY" &&
+                    pos + 1 < tokens.size() &&
+                    (toLower(tokens[pos + 1]) == "delete" ||
+                     toLower(tokens[pos + 1]) == "update")) {
+                    parseReferentialActions(tokens, pos, sub.constraint);
+                } else if (option == "not" && pos + 1 < tokens.size() &&
                     toLower(tokens[pos + 1]) == "valid") {
                     sub.constraint.notValid = true;
                     pos += 2;

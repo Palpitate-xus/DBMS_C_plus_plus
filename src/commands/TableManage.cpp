@@ -926,6 +926,33 @@ static DBStatus persistMetadata(const std::filesystem::path& path,
     return index_file::writeAtomically(path, contents) ? DBStatus::OK : DBStatus::IO_ERROR;
 }
 
+static bool normalizeForeignKeyAction(const std::string& action,
+                                      std::string& normalized) {
+    std::string compact;
+    compact.reserve(action.size());
+    for (const char c : action) {
+        if (std::isspace(static_cast<unsigned char>(c)) || c == '_') {
+            continue;
+        }
+        compact.push_back(static_cast<char>(
+            std::tolower(static_cast<unsigned char>(c))));
+    }
+    if (compact.empty() || compact == "restrict" ||
+        compact == "noaction") {
+        normalized = "restrict";
+        return true;
+    }
+    if (compact == "cascade") {
+        normalized = "cascade";
+        return true;
+    }
+    if (compact == "setnull") {
+        normalized = "setnull";
+        return true;
+    }
+    return false;
+}
+
 static bool validateTableSchemaIdentifiers(const TableSchema& tbl, std::string* error) {
     auto reject = [&](const std::string& value, size_t fieldSize, const char* kind) {
         if (validStoredIdentifier(value, fieldSize)) return false;
@@ -962,8 +989,17 @@ static bool validateTableSchemaIdentifiers(const TableSchema& tbl, std::string* 
         }
     }
     for (size_t i = 0; i < tbl.fkLen; ++i) {
+        std::string normalizedDelete;
+        std::string normalizedUpdate;
         if (reject(tbl.fks[i].name, MAX_TABLE_NAME_LEN, "constraint name") ||
-            reject(tbl.fks[i].refTable, MAX_TABLE_NAME_LEN, "table name")) {
+            reject(tbl.fks[i].refTable, MAX_TABLE_NAME_LEN, "table name") ||
+            !normalizeForeignKeyAction(
+                tbl.fks[i].onDelete, normalizedDelete) ||
+            !normalizeForeignKeyAction(
+                tbl.fks[i].onUpdate, normalizedUpdate)) {
+            if (error && error->empty()) {
+                *error = "unsupported foreign key referential action";
+            }
             return false;
         }
         for (const auto& name : tbl.fks[i].colNames) {
@@ -12554,6 +12590,17 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
     for (size_t foreignKeyIndex = 0;
          foreignKeyIndex < tblWithVersion.fkLen; ++foreignKeyIndex) {
         ForeignKey& foreignKey = tblWithVersion.fks[foreignKeyIndex];
+        std::string normalizedDelete;
+        std::string normalizedUpdate;
+        if (!normalizeForeignKeyAction(
+                foreignKey.onDelete, normalizedDelete) ||
+            !normalizeForeignKeyAction(
+                foreignKey.onUpdate, normalizedUpdate)) {
+            if (error) *error = "unsupported foreign key referential action";
+            return DBStatus::INVALID_VALUE;
+        }
+        foreignKey.onDelete = std::move(normalizedDelete);
+        foreignKey.onUpdate = std::move(normalizedUpdate);
         if (foreignKey.refTable.empty()) {
             if (error) *error = "foreign key referenced table is empty";
             return DBStatus::INVALID_VALUE;
@@ -15516,6 +15563,12 @@ DBStatus StorageEngine::alterTableAddFKConstraint(const std::string& dbname,
                                                      const std::string& onDelete,
                                                      const std::string& onUpdate) {
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
+    std::string normalizedDelete;
+    std::string normalizedUpdate;
+    if (!normalizeForeignKeyAction(onDelete, normalizedDelete) ||
+        !normalizeForeignKeyAction(onUpdate, normalizedUpdate)) {
+        return DBStatus::INVALID_VALUE;
+    }
     if (!validStoredIdentifier(name, MAX_TABLE_NAME_LEN) ||
         !validStoredIdentifier(refTable, MAX_TABLE_NAME_LEN)) return DBStatus::INVALID_VALUE;
     if (localCols.empty() ||
@@ -15649,8 +15702,8 @@ DBStatus StorageEngine::alterTableAddFKConstraint(const std::string& dbname,
     fk.colNames = localCols;
     fk.refCols = definition.referencedColumnNames;
     fk.refTable = refTable;
-    fk.onDelete = onDelete.empty() ? "restrict" : onDelete;
-    fk.onUpdate = onUpdate.empty() ? "restrict" : onUpdate;
+    fk.onDelete = std::move(normalizedDelete);
+    fk.onUpdate = std::move(normalizedUpdate);
     tbl.appendFK(fk);
     writeSchemaFile(dbname, tablename, tbl);
     return finish(DBStatus::OK);
