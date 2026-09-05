@@ -3602,16 +3602,17 @@ void ExprEvaluator::registerBuiltins() {
         }
         return std::string(buf);
     };
-    auto float8Unary = [&](const std::vector<ExprValue>& a, double (*fn)(double)) {
+    auto float8Unary = [float8Text](const std::vector<ExprValue>& a,
+                                    double (*fn)(double)) {
         if (a.empty() || a[0].isNull) return ExprValue("double precision", "", true);
         return ExprValue("double precision", float8Text(fn(a[0].asDouble())), false);
     };
-    functions_["sin"]   = [&](const auto& a) { return float8Unary(a, std::sin); };
-    functions_["cos"]   = [&](const auto& a) { return float8Unary(a, std::cos); };
-    functions_["tan"]   = [&](const auto& a) { return float8Unary(a, std::tan); };
-    functions_["asin"]  = [&](const auto& a) { return float8Unary(a, std::asin); };
-    functions_["acos"]  = [&](const auto& a) { return float8Unary(a, std::acos); };
-    functions_["atan"]  = [&](const auto& a) { return float8Unary(a, std::atan); };
+    functions_["sin"]   = [float8Unary](const auto& a) { return float8Unary(a, std::sin); };
+    functions_["cos"]   = [float8Unary](const auto& a) { return float8Unary(a, std::cos); };
+    functions_["tan"]   = [float8Unary](const auto& a) { return float8Unary(a, std::tan); };
+    functions_["asin"]  = [float8Unary](const auto& a) { return float8Unary(a, std::asin); };
+    functions_["acos"]  = [float8Unary](const auto& a) { return float8Unary(a, std::acos); };
+    functions_["atan"]  = [float8Unary](const auto& a) { return float8Unary(a, std::atan); };
     // PG presents exp/ln/log/sqrt as numeric with fixed display scales:
     //   exp: 15 frac digits for integer input, 16 for fractional input;
     //   ln/log/log10: 16 for fractional or (ln) any input, bare for exact int log of int;
@@ -3625,15 +3626,15 @@ void ExprEvaluator::registerBuiltins() {
     auto argHasDot = [](const std::vector<ExprValue>& a) -> bool {
         return !a.empty() && !a[0].isNull && a[0].value.find('.') != std::string::npos;
     };
-    functions_["exp"] = [&](const auto& a) {
+    functions_["exp"] = [numericFixed, argHasDot](const auto& a) {
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
         return numericFixed(expl(a[0].asDouble()), argHasDot(a) ? 16 : 15);
     };
-    functions_["ln"] = [&](const auto& a) {
+    functions_["ln"] = [numericFixed](const auto& a) {
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
         return numericFixed(logl(a[0].asDouble()), 16);
     };
-    functions_["sqrt"] = [&](const auto& a) {
+    functions_["sqrt"] = [numericFixed, argHasDot](const auto& a) {
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
         long double v = sqrtl(a[0].asDouble());
         if (!argHasDot(a)) {
@@ -3642,7 +3643,8 @@ void ExprEvaluator::registerBuiltins() {
         }
         return numericFixed(v, 15);
     };
-    functions_["log"] = [&](const std::vector<ExprValue>& a) {
+    functions_["log"] = [numericFixed, argHasDot](
+                            const std::vector<ExprValue>& a) {
         // log(x) = base-10 log; log(b, x) = base-b log.
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
         if (a.size() >= 2) {
@@ -3655,16 +3657,16 @@ void ExprEvaluator::registerBuiltins() {
             return ExprValue("numeric", std::to_string(static_cast<long long>(v)), false);
         return numericFixed(v, 16);
     };
-    functions_["log10"] = [&](const auto& a) {
+    functions_["log10"] = [numericFixed, argHasDot](const auto& a) {
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
         long double v = log10l(a[0].asDouble());
         if (!argHasDot(a) && v == floorl(v))
             return ExprValue("numeric", std::to_string(static_cast<long long>(v)), false);
         return numericFixed(v, 16);
     };
-    functions_["cbrt"]  = [&](const auto& a) { return float8Unary(a, std::cbrt); };
-    functions_["ceil"]  = [&](const auto& a) { return unaryMath(a, std::ceil); };
-    functions_["floor"] = [&](const auto& a) { return unaryMath(a, std::floor); };
+    functions_["cbrt"]  = [float8Unary](const auto& a) { return float8Unary(a, std::cbrt); };
+    functions_["ceil"]  = [unaryMath](const auto& a) { return unaryMath(a, std::ceil); };
+    functions_["floor"] = [unaryMath](const auto& a) { return unaryMath(a, std::floor); };
     functions_["trunc"] = [](const std::vector<ExprValue>& a) {
         // trunc(x) truncates toward zero; trunc(x, n) keeps n decimal places.
         if (a.empty() || a[0].isNull) return ExprValue("double precision", "", true);
@@ -3699,7 +3701,7 @@ void ExprEvaluator::registerBuiltins() {
         return ExprValue("double precision", std::to_string(tv), false);
     };
 
-    functions_["atan2"] = [&](const std::vector<ExprValue>& a) {
+    functions_["atan2"] = [float8Text](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull)
             return ExprValue("double precision", "", true);
         return ExprValue("double precision",
@@ -3780,43 +3782,43 @@ void ExprEvaluator::registerBuiltins() {
         double v = a[0].asDouble();
         return ExprValue("integer", std::to_string(v > 0 ? 1 : (v < 0 ? -1 : 0)), false);
     };
-    functions_["pi"] = [&](const std::vector<ExprValue>&) {
+    functions_["pi"] = [float8Text](const std::vector<ExprValue>&) {
         return ExprValue("double precision", float8Text(std::atan(1.0) * 4.0), false);
     };
     functions_["random"] = [](const std::vector<ExprValue>&) {
         return ExprValue("double precision", std::to_string(static_cast<double>(std::rand()) / RAND_MAX), false);
     };
     // pow — alias of power; ceiling — alias of ceil
-    functions_["pow"] = [&](const std::vector<ExprValue>& a) {
+    functions_["pow"] = [float8Text](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull)
             return ExprValue("double precision", "", true);
         return ExprValue("double precision",
                          float8Text(std::pow(a[0].asDouble(), a[1].asDouble())), false);
     };
-    functions_["ceiling"] = [&](const auto& a) { return unaryMath(a, std::ceil); };
+    functions_["ceiling"] = [unaryMath](const auto& a) { return unaryMath(a, std::ceil); };
     // degrees / radians
-    functions_["degrees"] = [&](const std::vector<ExprValue>& a) {
+    functions_["degrees"] = [float8Text](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("double precision", "", true);
         return ExprValue("double precision",
                          float8Text(a[0].asDouble() * 180.0 / (std::atan(1.0) * 4.0)), false);
     };
-    functions_["radians"] = [&](const std::vector<ExprValue>& a) {
+    functions_["radians"] = [float8Text](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("double precision", "", true);
         return ExprValue("double precision",
                          float8Text(a[0].asDouble() * (std::atan(1.0) * 4.0) / 180.0), false);
     };
     // cot — cotangent
-    functions_["cot"] = [&](const std::vector<ExprValue>& a) {
+    functions_["cot"] = [float8Text](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("double precision", "", true);
         return ExprValue("double precision", float8Text(1.0 / std::tan(a[0].asDouble())), false);
     };
     // Hyperbolic functions
-    functions_["sinh"]  = [&](const auto& a) { return float8Unary(a, std::sinh); };
-    functions_["cosh"]  = [&](const auto& a) { return float8Unary(a, std::cosh); };
-    functions_["tanh"]  = [&](const auto& a) { return float8Unary(a, std::tanh); };
-    functions_["asinh"] = [&](const auto& a) { return float8Unary(a, std::asinh); };
-    functions_["acosh"] = [&](const auto& a) { return float8Unary(a, std::acosh); };
-    functions_["atanh"] = [&](const auto& a) { return float8Unary(a, std::atanh); };
+    functions_["sinh"]  = [float8Unary](const auto& a) { return float8Unary(a, std::sinh); };
+    functions_["cosh"]  = [float8Unary](const auto& a) { return float8Unary(a, std::cosh); };
+    functions_["tanh"]  = [float8Unary](const auto& a) { return float8Unary(a, std::tanh); };
+    functions_["asinh"] = [float8Unary](const auto& a) { return float8Unary(a, std::asinh); };
+    functions_["acosh"] = [float8Unary](const auto& a) { return float8Unary(a, std::acosh); };
+    functions_["atanh"] = [float8Unary](const auto& a) { return float8Unary(a, std::atanh); };
     // gcd / lcm — integer greatest common divisor / least common multiple
     functions_["gcd"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("bigint", "", true);
@@ -5045,7 +5047,8 @@ void ExprEvaluator::registerBuiltins() {
         }
         return o;
     };
-    auto justifyCommon = [&](const std::string& in, int mode) -> std::string {
+    auto justifyCommon = [intervalToTextPg](const std::string& in,
+                                             int mode) -> std::string {
         IntervalParts p = parseIntervalText(in);
         if (!p.ok) return in;
         long long months = p.months, days = p.days, micros = p.micros;
@@ -5074,14 +5077,14 @@ void ExprEvaluator::registerBuiltins() {
                       lv.find("nan") == std::string::npos;
         return ExprValue("bool", finite ? "t" : "f", false);
     };
-    functions_["justify_hours"] = [&](const std::vector<ExprValue>& a) -> ExprValue {
+    functions_["justify_hours"] = [justifyCommon](const std::vector<ExprValue>& a) -> ExprValue {
         return ExprValue("interval", justifyCommon(a.empty() ? "" : a[0].value, 0), a.empty() || a[0].isNull);
     };
-    functions_["justify_days"] = [&](const std::vector<ExprValue>& a) -> ExprValue {
+    functions_["justify_days"] = [justifyCommon](const std::vector<ExprValue>& a) -> ExprValue {
         return ExprValue("interval", justifyCommon(a.empty() ? "" : a[0].value, 1), a.empty() || a[0].isNull);
     };
     // age(ts, ts): PG calendar difference as interval.
-    functions_["age"] = [&](const std::vector<ExprValue>& a) -> ExprValue {
+    functions_["age"] = [intervalToTextPg](const std::vector<ExprValue>& a) -> ExprValue {
         if (a.size() < 2 || a[0].isNull || a[1].isNull)
             return ExprValue("interval", "", true);
         auto splitTs = [](const std::string& v, long long& Y, long long& Mo,
@@ -5144,7 +5147,7 @@ void ExprEvaluator::registerBuiltins() {
     // PG returns boolean true/false.  The subquery text arrives as
     // the single argument; parse the table and conditions, then ask
     // the storage engine whether any row satisfies them.
-    functions_["exists"] = [&](const std::vector<ExprValue>& a) -> ExprValue {
+    functions_["exists"] = [this](const std::vector<ExprValue>& a) -> ExprValue {
         if (a.empty() || a[0].isNull) return ExprValue("boolean", "", true);
         std::string sub = a[0].value;
         // the argument arrives wrapped by the caller: strip one
@@ -5209,7 +5212,7 @@ void ExprEvaluator::registerBuiltins() {
         (void)scanFailed;
         return ExprValue("boolean", any ? "t" : "f", false);
     };
-    functions_["justify_interval"] = [&](const std::vector<ExprValue>& a) -> ExprValue {
+    functions_["justify_interval"] = [justifyCommon](const std::vector<ExprValue>& a) -> ExprValue {
         return ExprValue("interval", justifyCommon(a.empty() ? "" : a[0].value, 2), a.empty() || a[0].isNull);
     };
     functions_["to_char"] = [](const std::vector<ExprValue>& a) -> ExprValue {

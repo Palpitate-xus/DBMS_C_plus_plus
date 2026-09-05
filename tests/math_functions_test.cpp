@@ -43,6 +43,24 @@ static bool approxT(const dbms::ExprValue& r, double want, double tol) {
     return !r.isNull && std::fabs(std::stod(r.value) - want) < tol;
 }
 
+__attribute__((noinline)) static void overwriteConstructorStack() {
+    volatile unsigned char bytes[32768];
+    for (size_t i = 0; i < sizeof(bytes); ++i)
+        bytes[i] = static_cast<unsigned char>(i);
+}
+
+static void test_callback_lifetimes() {
+    dbms::ExprEvaluator eval;
+    overwriteConstructorStack();
+
+    assert(approx(callFn(eval, "sin", {D(0.5)}), std::sin(0.5)));
+    auto justified = callFn(
+        eval, "justify_hours",
+        {dbms::ExprValue("interval", "25:00:00", false)});
+    assert(!justified.isNull && justified.value == "1 day 01:00:00");
+    std::cout << "[MATHFN] callback lifetimes OK" << std::endl;
+}
+
 static void test_pow_log() {
     dbms::ExprEvaluator eval;
     assert(approx(callFn(eval, "pow", {D(2), D(10)}), 1024.0));
@@ -105,6 +123,7 @@ static void test_width_bucket() {
 }
 
 int main() {
+    test_callback_lifetimes();
     test_pow_log();
     test_trunc_round();
     test_angles();
