@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -3212,6 +3213,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     // (parent columns first, in declaration order, then this table's own;
     // same-named columns are not duplicated). The relationship is recorded
     // in <db>/.inherits so SELECT/UPDATE/DELETE can expand children.
+    std::vector<std::string> inheritedParents;
     if (!stmt->inherits.empty()) {
         std::set<std::string> ownCols;
         for (size_t i = 0; i < tbl.len; ++i) ownCols.insert(tbl.cols[i].dataName);
@@ -3236,6 +3238,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                 std::cout << "Parent table " << parentRaw << " not found" << std::endl;
                 return true;
             }
+            inheritedParents.push_back(parent);
             TableSchema parentSchema = g_engine.getTableSchema(s.currentDB, parent);
             for (size_t i = 0; i < parentSchema.len && merged.len < MAX_COLUMNS; ++i) {
                 const Column& pc = parentSchema.cols[i];
@@ -3453,18 +3456,59 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         }
     }
 
-    // Record inheritance edges now that the child table exists.
-    txn.markSnapshotDirty();
-    if (!stmt->inherits.empty()) {
-        std::filesystem::path inhPath = std::filesystem::path(g_engine.dbPath(s.currentDB)) / ".inherits";
-        std::ofstream ofs(inhPath, std::ios::app);
-        if (ofs) {
-            for (const auto& parentRaw : stmt->inherits) {
-                ofs << resolveTableName(s, parentRaw) << "|" << tname << "\n";
+    // Prepare the database-wide inheritance graph before creating any physical
+    // relation.  Publishing it is deferred until the child exists, but an
+    // unreadable/non-regular graph must fail without leaving a table behind.
+    std::filesystem::path inheritancePath;
+    std::string inheritanceMetadata;
+    if (!inheritedParents.empty()) {
+        inheritancePath = std::filesystem::path(g_engine.dbPath(s.currentDB)) /
+            ".inherits";
+        std::error_code inheritanceError;
+        if (std::filesystem::exists(inheritancePath, inheritanceError)) {
+            if (!std::filesystem::is_regular_file(
+                    inheritancePath, inheritanceError) || inheritanceError) {
+                std::cout << "Could not inspect inheritance metadata"
+                          << std::endl;
+                return true;
             }
+            std::ifstream input(inheritancePath, std::ios::binary);
+            if (!input) {
+                std::cout << "Could not read inheritance metadata" << std::endl;
+                return true;
+            }
+            inheritanceMetadata.assign(
+                std::istreambuf_iterator<char>(input),
+                std::istreambuf_iterator<char>());
+            if (input.bad()) {
+                std::cout << "Could not read inheritance metadata" << std::endl;
+                return true;
+            }
+        } else if (inheritanceError) {
+            std::cout << "Could not inspect inheritance metadata" << std::endl;
+            return true;
+        }
+
+        std::set<std::pair<std::string, std::string>> existingEdges;
+        std::istringstream existingLines(inheritanceMetadata);
+        std::string line;
+        while (std::getline(existingLines, line)) {
+            const size_t separator = line.find('|');
+            if (separator == std::string::npos) continue;
+            existingEdges.emplace(line.substr(0, separator),
+                                  line.substr(separator + 1));
+        }
+        for (const auto& parent : inheritedParents) {
+            if (!existingEdges.emplace(parent, tname).second) continue;
+            if (!inheritanceMetadata.empty() &&
+                inheritanceMetadata.back() != '\n') {
+                inheritanceMetadata.push_back('\n');
+            }
+            inheritanceMetadata += parent + "|" + tname + "\n";
         }
     }
 
+    txn.markSnapshotDirty();
     DBStatus res = g_engine.createTable(s.currentDB, tbl);
     if (res != DBStatus::OK) {
         std::cout << "CREATE TABLE failed" << std::endl;
@@ -3473,6 +3517,13 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     // Constraint metadata and catalog registration happen after the physical
     // relation exists.  Keep the relation in the rollback log immediately.
     txn.recordCreate(DdlObjectKind::Table, tname);
+
+    if (!inheritedParents.empty() &&
+        !index_file::writeAtomically(
+            inheritancePath, inheritanceMetadata)) {
+        std::cout << "Could not persist inheritance metadata" << std::endl;
+        return true;
+    }
 
     for (const auto& [columnName, comment] : likeColumnComments) {
         const DBStatus commentStatus = g_engine.commentOnColumn(

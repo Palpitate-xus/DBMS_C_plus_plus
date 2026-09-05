@@ -165,12 +165,41 @@ static void test_drop_removes_inheritance_edges() {
     std::cout << "[INHERIT] DROP removes graph edges OK" << std::endl;
 }
 
+static void test_create_inherits_metadata_failure_is_atomic() {
+    const std::string db = testDbPath("inh_create_io_failure");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    assert(!ddl.executeSql("CREATE TABLE parent (id INT)", s));
+    const fs::path inheritancePath =
+        fs::path(g_engine.dbPath(db)) / ".inherits";
+    assert(fs::create_directory(inheritancePath));
+
+    assert(ddl.executeSql(
+        "CREATE TABLE child (payload INT) INHERITS (parent)", s));
+    assert(!g_engine.tableExists(db, "child"));
+    assert(g_engine.getInheritedChildren(db, "parent").empty());
+    {
+        dbms::StorageEngine restarted;
+        assert(!restarted.tableExists(db, "child"));
+        assert(restarted.getInheritedChildren(db, "parent").empty());
+    }
+
+    cleanup(db);
+    std::cout << "[INHERIT] CREATE metadata failure is atomic OK"
+              << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_inherit_parser();
     test_inherit_execution();
     test_table_rename_updates_inheritance_graph();
     test_drop_removes_inheritance_edges();
+    test_create_inherits_metadata_failure_is_atomic();
     std::cout << "[INHERIT] all passed" << std::endl;
     return 0;
 }
