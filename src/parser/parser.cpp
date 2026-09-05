@@ -6425,32 +6425,60 @@ StmtPtr SQLParser::parseCreateCollation(const std::vector<std::string>& tokens, 
             }
         }
     }
-    // Parse optional FROM / provider locale specification
+    if (pos >= tokens.size() || tokens[pos] == ";") return stmt;
+
+    if (toLower(tokens[pos]) == "from") {
+        ++pos;
+        if (pos >= tokens.size() || tokens[pos] == ";") return nullptr;
+        std::string source = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos >= tokens.size() || tokens[pos] == ";") return nullptr;
+            source += "." + tokens[pos++];
+        }
+        if (pos < tokens.size() && tokens[pos] != ";") return nullptr;
+        stmt->options["source"] = source;
+        return stmt;
+    }
+
+    if (tokens[pos] != "(") return nullptr;
+    ++pos;
+    bool sawOption = false;
     while (pos < tokens.size() && tokens[pos] != ";") {
-        std::string kw = toLower(tokens[pos]);
-        if (kw == "from" && pos + 1 < tokens.size()) {
+        if (tokens[pos] == ")") {
+            if (!sawOption) return nullptr;
             ++pos;
-            std::string rest;
-            while (pos < tokens.size() && tokens[pos] != ";") {
-                if (!rest.empty()) rest += " ";
-                rest += tokens[pos++];
-            }
-            // Try to extract provider= and locale= from the rest
-            std::istringstream iss(rest);
-            std::string tok;
-            while (iss >> tok) {
-                std::string lower = toLower(tok);
-                if (lower.substr(0, 8) == "provider" && lower.size() > 9 && lower[8] == '=') {
-                    stmt->options["provider"] = lower.substr(9);
-                } else if (lower.substr(0, 6) == "locale" && lower.size() > 7 && lower[6] == '=') {
-                    stmt->options["locale"] = lower.substr(7);
-                }
-            }
-        } else {
-            ++pos;
+            if (pos < tokens.size() && tokens[pos] != ";") return nullptr;
+            return stmt;
+        }
+        const std::string key = toLower(tokens[pos++]);
+        if (key != "provider" && key != "locale" &&
+            key != "lc_collate" && key != "lc_ctype" &&
+            key != "deterministic" && key != "rules" &&
+            key != "version") {
+            return nullptr;
+        }
+        if (stmt->options.count(key) != 0 || pos >= tokens.size() ||
+            tokens[pos] != "=") {
+            return nullptr;
+        }
+        ++pos;
+        if (pos >= tokens.size() || tokens[pos] == "," ||
+            tokens[pos] == ")" || tokens[pos] == ";") {
+            return nullptr;
+        }
+        stmt->options[key] = stripQuotes(tokens[pos++]);
+        sawOption = true;
+        if (pos >= tokens.size() || tokens[pos] == ";") return nullptr;
+        if (tokens[pos] == ")") continue;
+        if (tokens[pos] != ",") return nullptr;
+        ++pos;
+        if (pos >= tokens.size() || tokens[pos] == ")" ||
+            tokens[pos] == ";") {
+            return nullptr;
         }
     }
-    return stmt;
+    return nullptr;
 }
 
 StmtPtr SQLParser::parseCreateConversion(const std::vector<std::string>& tokens, size_t& pos) {
@@ -7228,13 +7256,37 @@ StmtPtr SQLParser::parseDropCollation(const std::vector<std::string>& tokens, si
     if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
         stmt->ifExists = true; pos += 2;
     }
+    bool expectName = true;
+    bool behaviorSeen = false;
     while (pos < tokens.size() && tokens[pos] != ";") {
-        std::string w = toLower(tokens[pos]);
-        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
-        if (w == "restrict") { ++pos; continue; }
-        if (w == ",") { ++pos; continue; }
-        stmt->objectNames.push_back(tokens[pos++]);
+        const std::string word = toLower(tokens[pos]);
+        if (!expectName && (word == "cascade" || word == "restrict")) {
+            if (behaviorSeen) return nullptr;
+            behaviorSeen = true;
+            stmt->cascade = word == "cascade";
+            ++pos;
+            if (pos < tokens.size() && tokens[pos] != ";") return nullptr;
+            break;
+        }
+        if (expectName) {
+            if (tokens[pos] == "," || word == "cascade" ||
+                word == "restrict") return nullptr;
+            std::string name = tokens[pos++];
+            if (pos < tokens.size() && tokens[pos] == ".") {
+                ++pos;
+                if (pos >= tokens.size() || tokens[pos] == ";" ||
+                    tokens[pos] == ",") return nullptr;
+                name += "." + tokens[pos++];
+            }
+            stmt->objectNames.push_back(std::move(name));
+            expectName = false;
+            continue;
+        }
+        if (tokens[pos] != ",") return nullptr;
+        ++pos;
+        expectName = true;
     }
+    if (expectName && !stmt->objectNames.empty()) return nullptr;
     return stmt;
 }
 

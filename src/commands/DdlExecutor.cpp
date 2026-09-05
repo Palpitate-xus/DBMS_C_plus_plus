@@ -6866,24 +6866,90 @@ bool DdlExecutor::executeCreateCollation(const CreateObjectStmt* stmt, Session& 
     if (!checkDB(s)) return true;
 
     DdlTransaction txn(s);
+    txn.enableSnapshotRollback();
     if (!txn.begin()) {
         std::cout << "DDL transaction begin failed" << std::endl;
         return true;
     }
 
-    std::string cname = resolveTableName(s, stmt->objectName);
+    if (stmt->objectName.empty()) {
+        std::cout << "CREATE COLLATION requires a name" << std::endl;
+        return true;
+    }
+    const std::string schemaName = stmt->schema.empty()
+        ? "public" : stmt->schema;
+    if (!g_engine.schemaExists(s.currentDB, schemaName)) {
+        std::cout << "Schema " << schemaName << " does not exist" << std::endl;
+        return true;
+    }
+    const std::string cname = schemaName == "public"
+        ? stmt->objectName : schemaName + "__" + stmt->objectName;
+
+    if (stmt->options.count("source") != 0) {
+        std::cout << "CREATE COLLATION FROM is not supported" << std::endl;
+        return true;
+    }
+    if (stmt->options.count("rules") != 0 ||
+        stmt->options.count("version") != 0) {
+        std::cout << "CREATE COLLATION rules/version options are not supported"
+                  << std::endl;
+        return true;
+    }
+
     auto itProvider = stmt->options.find("provider");
     auto itLocale = stmt->options.find("locale");
-    std::string provider = (itProvider != stmt->options.end()) ? itProvider->second : "libc";
-    std::string locale = (itLocale != stmt->options.end()) ? itLocale->second : "C";
+    std::string provider = itProvider == stmt->options.end()
+        ? "libc" : toLower(stripQuotes(itProvider->second));
+    if (provider != "libc") {
+        std::cout << "CREATE COLLATION currently supports only provider libc"
+                  << std::endl;
+        return true;
+    }
+    std::string locale = itLocale == stmt->options.end()
+        ? "" : stripQuotes(itLocale->second);
+    const auto itCollate = stmt->options.find("lc_collate");
+    const auto itCtype = stmt->options.find("lc_ctype");
+    const std::string lcCollate = itCollate == stmt->options.end()
+        ? "" : stripQuotes(itCollate->second);
+    const std::string lcCtype = itCtype == stmt->options.end()
+        ? "" : stripQuotes(itCtype->second);
+    const auto conflictsWithLocale = [&](const std::string& candidate) {
+        return !candidate.empty() && !locale.empty() && candidate != locale;
+    };
+    if (conflictsWithLocale(lcCollate) || conflictsWithLocale(lcCtype) ||
+        (!lcCollate.empty() && !lcCtype.empty() && lcCollate != lcCtype)) {
+        std::cout << "CREATE COLLATION requires one representable locale"
+                  << std::endl;
+        return true;
+    }
+    if (locale.empty()) locale = !lcCollate.empty() ? lcCollate : lcCtype;
+    if (locale.empty()) locale = "C";
 
+    const auto deterministic = stmt->options.find("deterministic");
+    if (deterministic != stmt->options.end()) {
+        const std::string value = toLower(stripQuotes(deterministic->second));
+        if (value != "true" && value != "on" && value != "1") {
+            std::cout << "Nondeterministic collations are not supported"
+                      << std::endl;
+            return true;
+        }
+    }
+
+    txn.markSnapshotDirty();
     const DBStatus res = g_engine.createCollation(s.currentDB, cname, provider, locale);
     if (res == DBStatus::TABLE_ALREADY_EXISTS) {
+        if (stmt->ifNotExists) {
+            if (!txn.commit()) return true;
+            std::cout << "NOTICE: collation " << cname
+                      << " already exists, skipping" << std::endl;
+            return false;
+        }
         std::cout << "Collation " << cname << " already exists" << std::endl;
         return true;
     }
     if (res != DBStatus::OK) {
-        std::cout << "CREATE COLLATION failed" << std::endl;
+        std::cout << "CREATE COLLATION failed (SQLSTATE "
+                  << sqlstateForDBStatus(res) << ")" << std::endl;
         return true;
     }
 
@@ -6909,11 +6975,33 @@ bool DdlExecutor::executeDropCollation(const DropStmt* stmt, Session& s) {
         std::cout << "SQL syntax error: DROP COLLATION name" << std::endl;
         return true;
     }
-    std::string cname = resolveTableName(s, stmt->objectNames[0]);
+    if (stmt->objectNames.size() != 1) {
+        std::cout << "DROP COLLATION with multiple targets is not supported"
+                  << std::endl;
+        return true;
+    }
+    CatalogManager::QualifiedName qualifiedName;
+    if (!CatalogManager::parseQualifiedName(
+            stmt->objectNames.front(), qualifiedName) ||
+        qualifiedName.name.empty()) {
+        std::cout << "DROP COLLATION has an invalid name" << std::endl;
+        return true;
+    }
+    const std::string schemaName = qualifiedName.schema.empty()
+        ? "public" : qualifiedName.schema;
+    const std::string cname = schemaName == "public"
+        ? qualifiedName.name : schemaName + "__" + qualifiedName.name;
     txn.markSnapshotDirty();
     const DBStatus status = g_engine.dropCollation(s.currentDB, cname);
+    if (status == DBStatus::TABLE_NOT_FOUND && stmt->ifExists) {
+        if (!txn.commit()) return true;
+        std::cout << "NOTICE: collation " << cname
+                  << " does not exist, skipping" << std::endl;
+        return false;
+    }
     if (status != DBStatus::OK) {
-        std::cout << "Collation " << cname << " not found" << std::endl;
+        std::cout << "DROP COLLATION failed (SQLSTATE "
+                  << sqlstateForDBStatus(status) << ")" << std::endl;
         return true;
     }
     txn.recordDrop(DdlObjectKind::Collation, cname);

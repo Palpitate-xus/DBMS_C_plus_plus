@@ -29,6 +29,69 @@ static std::string readBytes(const fs::path& path) {
             std::istreambuf_iterator<char>()};
 }
 
+static bool decodeHex(const std::string& encoded, std::string& value) {
+    if (encoded.size() % 2 != 0) return false;
+    auto nibble = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    value.clear();
+    for (size_t i = 0; i < encoded.size(); i += 2) {
+        const int high = nibble(encoded[i]);
+        const int low = nibble(encoded[i + 1]);
+        if (high < 0 || low < 0) return false;
+        value.push_back(static_cast<char>((high << 4) | low));
+    }
+    return true;
+}
+
+static bool readStoredCollation(const fs::path& path,
+                                const std::string& expectedName,
+                                std::string& provider,
+                                std::string& locale) {
+    static const std::string prefix = "DBMS_COLLATION_V2:";
+    std::ifstream input(path, std::ios::binary);
+    std::string line;
+    while (std::getline(input, line)) {
+        std::string name;
+        std::string storedProvider;
+        std::string storedLocale;
+        if (line.rfind(prefix, 0) == 0) {
+            const size_t nameEnd = line.find('|', prefix.size());
+            const size_t providerEnd = nameEnd == std::string::npos
+                ? std::string::npos : line.find('|', nameEnd + 1);
+            if (nameEnd == std::string::npos ||
+                providerEnd == std::string::npos ||
+                !decodeHex(line.substr(
+                    prefix.size(), nameEnd - prefix.size()), name) ||
+                !decodeHex(line.substr(
+                    nameEnd + 1, providerEnd - nameEnd - 1),
+                    storedProvider) ||
+                !decodeHex(line.substr(providerEnd + 1), storedLocale)) {
+                continue;
+            }
+        } else {
+            const size_t nameEnd = line.find('|');
+            const size_t providerEnd = nameEnd == std::string::npos
+                ? std::string::npos : line.find('|', nameEnd + 1);
+            if (nameEnd == std::string::npos ||
+                providerEnd == std::string::npos) continue;
+            name = line.substr(0, nameEnd);
+            storedProvider = line.substr(
+                nameEnd + 1, providerEnd - nameEnd - 1);
+            storedLocale = line.substr(providerEnd + 1);
+        }
+        if (name == expectedName) {
+            provider = std::move(storedProvider);
+            locale = std::move(storedLocale);
+            return true;
+        }
+    }
+    return false;
+}
+
 static void test_collation_provider() {
     using namespace dbms::collation;
     assert(normalizeName("C") == "c");
@@ -326,6 +389,78 @@ static void test_collation_metadata_is_atomic_and_backward_compatible() {
     std::cout << "[COLLATION] metadata atomicity OK" << std::endl;
 }
 
+static void test_collation_ddl_preserves_options_and_namespace() {
+    std::string db = testDbPath("collation_ddl_options");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE SCHEMA app", s));
+
+    assert(!ddl.executeSql(
+        "CREATE COLLATION app.us_locale "
+        "(provider = LiBc, locale = 'en_US.UTF-8', deterministic = true)",
+        s));
+    assert(!ddl.executeSql(
+        "CREATE COLLATION app.c_locale "
+        "(provider=libc, lc_collate='C', lc_ctype='C')", s));
+    const fs::path metadata = fs::path(db) / ".collations";
+    std::string provider;
+    std::string locale;
+    assert(readStoredCollation(
+        metadata, "app__us_locale", provider, locale));
+    assert(provider == "libc");
+    assert(locale == "en_US.UTF-8");
+    assert(readStoredCollation(
+        metadata, "app__c_locale", provider, locale));
+    assert(provider == "libc");
+    assert(locale == "C");
+
+    const std::string originalBytes = readBytes(metadata);
+    assert(!ddl.executeSql(
+        "CREATE COLLATION IF NOT EXISTS app.us_locale "
+        "(provider=libc, locale='different')", s));
+    assert(readBytes(metadata) == originalBytes);
+    assert(ddl.executeSql(
+        "CREATE COLLATION app.us_locale (provider=libc, locale='C')", s));
+    assert(ddl.executeSql(
+        "CREATE COLLATION missing.bad (provider=libc, locale='C')", s));
+    assert(ddl.executeSql(
+        "CREATE COLLATION app.icu_locale (provider=icu, locale='en-US')", s));
+    assert(ddl.executeSql(
+        "CREATE COLLATION app.conflict "
+        "(lc_collate='C', lc_ctype='en_US.UTF-8')", s));
+    assert(ddl.executeSql(
+        "CREATE COLLATION app.nondeterministic "
+        "(provider=libc, locale='C', deterministic=false)", s));
+    assert(ddl.executeSql("CREATE COLLATION app.copy FROM app.us_locale", s));
+    assert(ddl.executeSql(
+        "CREATE COLLATION app.invalid (provider libc, locale='C')", s));
+
+    assert(!ddl.executeSql(
+        "CREATE COLLATION public.public_locale "
+        "(provider=libc, locale='C')", s));
+    assert(readStoredCollation(
+        metadata, "public_locale", provider, locale));
+    assert(!ddl.executeSql(
+        "DROP COLLATION IF EXISTS app.absent", s));
+
+    assert(ddl.executeSql(
+        "DROP COLLATION app.us_locale, app.c_locale", s));
+    auto names = g_engine.getCollationNames(db);
+    assert(std::find(names.begin(), names.end(), "app__us_locale") !=
+           names.end());
+    assert(std::find(names.begin(), names.end(), "app__c_locale") !=
+           names.end());
+    assert(!ddl.executeSql("DROP COLLATION app.us_locale", s));
+    assert(!ddl.executeSql("DROP COLLATION app.c_locale", s));
+    assert(!ddl.executeSql("DROP COLLATION public.public_locale", s));
+
+    cleanup(db);
+    std::cout << "[COLLATION] DDL options and namespace OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_collation_provider();
@@ -336,6 +471,7 @@ int main() {
     test_collate_with_index();
     test_collate_schema_persistence();
     test_collation_metadata_is_atomic_and_backward_compatible();
+    test_collation_ddl_preserves_options_and_namespace();
     std::cout << "[COLLATION] all passed" << std::endl;
     return 0;
 }
