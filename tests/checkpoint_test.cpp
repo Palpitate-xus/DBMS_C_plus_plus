@@ -36,8 +36,29 @@ int main() {
         pool.markDirty(0);
         pool.unpinPage(0);
 
+        // Clock eviction is a writeback path too. A failed WAL/durability
+        // barrier must keep the only dirty copy cached, and a successful
+        // barrier must run while the old disk image is still untouched.
+        bool evictionBarrierCalled = false;
+        pool.setEvictionWritebackBarrier([&]() {
+            evictionBarrierCalled = true;
+            return false;
+        });
+        assert(pool.fetchPage(1) == nullptr);
+        assert(evictionBarrierCalled);
+        const auto dirtyAfterEvictionFailure = pool.getFrameInfo();
+        assert(dirtyAfterEvictionFailure.size() == 1);
+        assert(dirtyAfterEvictionFailure.front().pageId == 0);
+        assert(dirtyAfterEvictionFailure.front().dirty);
+        evictionBarrierCalled = false;
+        pool.setEvictionWritebackBarrier([&]() {
+            evictionBarrierCalled = true;
+            return std::filesystem::file_size(poolPath) == 0;
+        });
+
         char* other = pool.fetchPage(1);
         assert(other != nullptr);
+        assert(evictionBarrierCalled);
         pool.unpinPage(1);
         char* reloaded = pool.fetchPage(0);
         assert(reloaded != nullptr);

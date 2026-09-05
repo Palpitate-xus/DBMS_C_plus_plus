@@ -294,11 +294,19 @@ std::optional<size_t> BufferPool::evictFrame() {
                 continue; // second chance
             }
 
-            // A dirty page must be written successfully before its only
-            // cached copy is discarded. Leave the frame and mapping intact
-            // on failure; checkpoint/fsync provides durable ordering.
-            if (f.dirty && !writeToDisk(f.pageId, f.data.data())) {
-                return std::nullopt;
+            // A dirty page must cross its owner's durability boundary before
+            // it can reach the data file. For heap buffers this flushes WAL;
+            // otherwise an asynchronous data-file writeback could survive a
+            // crash without the before/after image needed by recovery. Leave
+            // the frame and mapping intact when either step fails.
+            if (f.dirty) {
+                if (evictionWritebackBarrier_ &&
+                    !evictionWritebackBarrier_()) {
+                    return std::nullopt;
+                }
+                if (!writeToDisk(f.pageId, f.data.data())) {
+                    return std::nullopt;
+                }
             }
             pageMap_.erase(f.pageId);
             f.pageId = static_cast<uint32_t>(-1);

@@ -64,6 +64,14 @@ public:
         pageValidator_ = std::move(validator);
     }
 
+    // Install the durability boundary that must succeed before clock-sweep
+    // writes a dirty victim. Heap owners use this to enforce WAL-before-data
+    // even when cache pressure, rather than a checkpoint, triggers writeback.
+    void setEvictionWritebackBarrier(std::function<bool()> barrier) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        evictionWritebackBarrier_ = std::move(barrier);
+    }
+
     // Designate a structural page that must be written only after every
     // other dirty frame has reached stable storage.  PageAllocator uses page
     // zero here: publishing numPages before a newly appended heap page would
@@ -153,6 +161,10 @@ private:
     // Optional structural page whose contents publish the preceding data
     // pages.  It is flushed last and cannot be evicted while dirty.
     std::optional<uint32_t> writeLastPage_;
+
+    // Called under mutex_ immediately before a dirty clock victim is written.
+    // Failure leaves both the frame and page-map entry intact.
+    std::function<bool()> evictionWritebackBarrier_;
 
     // Clock sweep hand
     size_t clockHand_ = 0;

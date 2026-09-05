@@ -5372,6 +5372,24 @@ std::vector<std::string> StorageEngine::listTablespaces(const std::string& dbnam
 // ========================================================================
 // Page Allocator
 // ========================================================================
+namespace {
+
+bool installHeapEvictionWalBarrier(const StorageEngine& engine,
+                                   const std::string& dbname,
+                                   PageAllocator& allocator) {
+    WALManager* wal = engine.getWAL(dbname);
+    if (!wal || !allocator.bufferPool()) return false;
+    // Capture the manager, not StorageEngine::getWAL(): eviction holds the
+    // buffer-pool mutex, while getWAL takes cacheMutex_. Background writeback
+    // takes those locks in the opposite order. The database-cache teardown
+    // path erases allocators before their corresponding WAL manager.
+    allocator.bufferPool()->setEvictionWritebackBarrier([wal]() {
+        return wal->XLogFlush(wal->currentWriteLsn());
+    });
+    return true;
+}
+
+}  // namespace
 
 PageAllocator* StorageEngine::getPageAllocator(const std::string& dbname,
                                                 const std::string& tablename) const {
@@ -5396,7 +5414,9 @@ PageAllocator* StorageEngine::getPageAllocator(const std::string& dbname,
     std::filesystem::path dt = dataPath(dbname, tablename);
 
     auto pa = std::make_unique<PageAllocator>(dt.string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
-    if (!pa->open()) return nullptr;
+    if (!installHeapEvictionWalBarrier(*this, dbname, *pa) || !pa->open()) {
+        return nullptr;
+    }
     PageAllocator* ptr = pa.get();
     pageAllocators_[key] = std::move(pa);
     return ptr;
@@ -20965,13 +20985,15 @@ DBStatus StorageEngine::insertInternal(
     std::unique_ptr<PageAllocator> partPa;
     if (!targetPartition.empty() && !targetSubPartition.empty()) {
         partPa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, targetPartition, targetSubPartition).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
-        if (!partPa->open()) {
+        if (!installHeapEvictionWalBarrier(*this, dbname, *partPa) ||
+            !partPa->open()) {
             return failBeforeHeapInsert(DBStatus::INVALID_VALUE);
         }
         pa = partPa.get();
     } else if (!targetPartition.empty()) {
         partPa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, targetPartition).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
-        if (!partPa->open()) {
+        if (!installHeapEvictionWalBarrier(*this, dbname, *partPa) ||
+            !partPa->open()) {
             return failBeforeHeapInsert(DBStatus::INVALID_VALUE);
         }
         pa = partPa.get();
