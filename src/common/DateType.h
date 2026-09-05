@@ -179,10 +179,28 @@ inline std::string transstr(int64_t t) {
 }
 
 inline std::string str(Date t) {
-    // ISO 8601 date text like PostgreSQL: zero-padded month and day.
-    char buf[16];
-    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", t.year, t.month, t.day);
-    return buf;
+    // Input parsing and on-disk dates use a four-digit civil year. Refuse an
+    // invalid/out-of-domain Date instead of truncating a large integer into a
+    // fixed stack buffer and returning a different, malformed value.
+    if (t.year < 1 || t.year > 9999 || t.month < 1 || t.month > 12 ||
+        t.day < 1) {
+        return "";
+    }
+    const bool leap =
+        ((t.year % 4 == 0 && t.year % 100 != 0) || t.year % 400 == 0);
+    const int maximumDay = DAYS[t.month] - DAYS[t.month + 1] +
+        (t.month == 2 && leap ? 1 : 0);
+    if (t.day > maximumDay) return "";
+
+    std::string result = std::to_string(t.year);
+    result.insert(result.begin(), 4 - result.size(), '0');
+    result.push_back('-');
+    if (t.month < 10) result.push_back('0');
+    result += std::to_string(t.month);
+    result.push_back('-');
+    if (t.day < 10) result.push_back('0');
+    result += std::to_string(t.day);
+    return result;
 }
 
 inline std::ostream& operator<<(std::ostream& ost, Date a) {
@@ -317,6 +335,7 @@ inline std::string formatTimestampSeconds(int64_t ts) {
     uint32_t dd = doy - (153 * mp + 2) / 5 + 1;
     uint32_t mm = mp + (mp < 10 ? 3 : -9);
     if (mm <= 2) ++yy;
+    if (yy < 1 || yy > 9999) return "";
     Date d;
     d.year = static_cast<int>(yy);
     d.month = static_cast<int>(mm);
@@ -339,9 +358,18 @@ inline std::string formatTimestampSeconds(int64_t ts) {
 inline std::string formatTimestampWithTz(int64_t utcSeconds, int tzOffsetMinutes) {
     if (isInfiniteTimestamp(utcSeconds))
         return formatTimestampSeconds(utcSeconds);
-    int64_t localSeconds = utcSeconds + tzOffsetMinutes * 60LL;
-    if (localSeconds < 0) localSeconds = 0;
-    std::string base = formatTimestampSeconds(localSeconds);
+    if (tzOffsetMinutes < -(15 * 60 + 59) ||
+        tzOffsetMinutes > 15 * 60 + 59) {
+        return "";
+    }
+    __int128 adjusted = static_cast<__int128>(utcSeconds) +
+        static_cast<__int128>(tzOffsetMinutes) * 60;
+    if (adjusted < 0) adjusted = 0;
+    // A finite timestamp plus an offset must not overflow or turn into the
+    // positive-infinity sentinel by coincidence.
+    if (adjusted >= TIMESTAMP_POSITIVE_INFINITY) return "";
+    std::string base =
+        formatTimestampSeconds(static_cast<int64_t>(adjusted));
     if (base.empty()) return "";
     // Append timezone offset: [+-]HH:MM
     int absOff = std::abs(tzOffsetMinutes);

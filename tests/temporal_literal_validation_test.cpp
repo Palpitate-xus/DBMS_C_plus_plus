@@ -4,6 +4,7 @@
 
 #include <cassert>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -12,6 +13,23 @@ extern dbms::StorageEngine g_engine;
 
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
+
+    // Formatting must obey the same four-digit civil-date domain accepted
+    // by the parser. Huge finite timestamp values previously wrapped the
+    // computed year through int and/or returned a silently truncated date.
+    assert(str(Date(9999, 12, 31)) == "9999-12-31");
+    assert(str(Date(std::numeric_limits<int>::max(), 1, 1)).empty());
+    assert(formatTimestampSeconds(
+               parseTimestampToSeconds("9999-12-31 23:59:59")) ==
+           "9999-12-31 23:59:59");
+    assert(formatTimestampSeconds(
+               std::numeric_limits<int64_t>::max() - 1).empty());
+    assert(formatTimestampWithTz(
+               std::numeric_limits<int64_t>::max() - 1, 60).empty());
+    assert(formatTimestampWithTz(
+               parseTimestampToSeconds("2024-01-01 00:00:00"),
+               std::numeric_limits<int>::min()).empty());
+
     const std::string testName = "temporal_literal_validation";
     const std::string database = testDbPath(testName);
     cleanupTestDb(testName);
