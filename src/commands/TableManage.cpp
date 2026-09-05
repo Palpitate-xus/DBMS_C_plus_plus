@@ -20507,7 +20507,6 @@ DBStatus StorageEngine::removeInternal(
 
                 for (const auto& otherTable : allTables) {
                     if (dependencyScanStatus != DBStatus::OK) break;
-                    if (otherTable == tablename) continue;
                     TableSchema otherTbl = getTableSchema(dbname, otherTable);
                     for (size_t fi = 0; fi < otherTbl.fkLen; ++fi) {
                         const ForeignKey& fk = otherTbl.fks[fi];
@@ -20575,6 +20574,13 @@ DBStatus StorageEngine::removeInternal(
                                 if (allMatch) { matched = true; break; }
                             }
                             if (matched) {
+                                // A self-referencing row selected by this same
+                                // DELETE disappears with its referenced row;
+                                // it cannot leave a dangling reference.
+                                if (otherTable == tablename &&
+                                    toDelete.count(orid) != 0) {
+                                    return;
+                                }
                                 if (fk.onDelete == "cascade") {
                                     cascadeActions.push_back({otherTable, orid});
                                 } else if (fk.onDelete == "setnull") {
@@ -22118,6 +22124,221 @@ DBStatus StorageEngine::updateInternal(
             else assignedNullColumnIndices.erase(columnIndex);
         }
 
+        // Handle the special case where the row whose referenced key is
+        // changing also references that old key through a self-FK. Recursive
+        // DML cannot update this same active RID, so fold CASCADE/SET NULL
+        // into the pending row image before constraints are evaluated.
+        const auto pendingColumnIsNull = [&](size_t columnIndex) {
+            return columnIndex < tbl.len &&
+                tbl.cols[columnIndex].generatedKind != 'v' &&
+                (assignedNullColumnIndices.count(columnIndex) != 0 ||
+                 (columnIndex < oldNullColumns.size() &&
+                  oldNullColumns[columnIndex] &&
+                  assignedColumnIndices.count(columnIndex) == 0));
+        };
+        SqlRow selfReferentialAssignments;
+        for (size_t foreignKeyIndex = 0;
+             foreignKeyIndex < tbl.fkLen; ++foreignKeyIndex) {
+            const ForeignKey& foreignKey = tbl.fks[foreignKeyIndex];
+            if (foreignKey.refTable != tablename) continue;
+
+            ValidatedForeignKeyDefinition definition;
+            if (validateForeignKeyDefinition(
+                    tbl, tbl, foreignKey.colNames, foreignKey.refCols,
+                    definition) != DBStatus::OK) {
+                lockManager_.unlock(tablename);
+                return DBStatus::CORRUPTED_DATA;
+            }
+
+            bool referencedKeyChanged = false;
+            bool oldRowReferencesOldKey = true;
+            std::vector<std::string> oldReferencedValues;
+            oldReferencedValues.reserve(
+                definition.referencedColumnIndices.size());
+            for (size_t valueIndex = 0;
+                 valueIndex < definition.localColumnIndices.size();
+                 ++valueIndex) {
+                const size_t localColumnIndex =
+                    definition.localColumnIndices[valueIndex];
+                const size_t referencedColumnIndex =
+                    definition.referencedColumnIndices[valueIndex];
+                const bool oldLocalIsNull =
+                    localColumnIndex < oldNullColumns.size() &&
+                    oldNullColumns[localColumnIndex];
+                const bool oldReferencedIsNull =
+                    referencedColumnIndex < oldNullColumns.size() &&
+                    oldNullColumns[referencedColumnIndex];
+                const bool newReferencedIsNull =
+                    pendingColumnIsNull(referencedColumnIndex);
+                const Column& referencedColumn =
+                    tbl.cols[referencedColumnIndex];
+                const std::string oldReferencedValue =
+                    oldReferencedIsNull
+                    ? std::string()
+                    : canonicalColumnKeyValue(
+                          referencedColumn,
+                          valueFromRowMap(
+                              oldLogicalValues,
+                              referencedColumn.dataName));
+                const std::string newReferencedValue =
+                    newReferencedIsNull
+                    ? std::string()
+                    : canonicalColumnKeyValue(
+                          referencedColumn,
+                          valueFromRowMap(
+                              rowValues,
+                              referencedColumn.dataName));
+                referencedKeyChanged = referencedKeyChanged ||
+                    oldReferencedIsNull != newReferencedIsNull ||
+                    (!oldReferencedIsNull && !newReferencedIsNull &&
+                     oldReferencedValue != newReferencedValue);
+                if (oldLocalIsNull || oldReferencedIsNull ||
+                    canonicalColumnKeyValue(
+                        referencedColumn,
+                        valueFromRowMap(
+                            oldLogicalValues,
+                            tbl.cols[localColumnIndex].dataName)) !=
+                        oldReferencedValue) {
+                    oldRowReferencesOldKey = false;
+                }
+                oldReferencedValues.push_back(oldReferencedValue);
+            }
+            if (!referencedKeyChanged || !oldRowReferencesOldKey) continue;
+
+            if (foreignKey.onUpdate == "cascade") {
+                for (size_t valueIndex = 0;
+                     valueIndex < definition.localColumnIndices.size();
+                     ++valueIndex) {
+                    const size_t localColumnIndex =
+                        definition.localColumnIndices[valueIndex];
+                    const size_t referencedColumnIndex =
+                        definition.referencedColumnIndices[valueIndex];
+                    const std::string& localColumnName =
+                        tbl.cols[localColumnIndex].dataName;
+                    if (pendingColumnIsNull(referencedColumnIndex)) {
+                        selfReferentialAssignments[localColumnName] =
+                            std::nullopt;
+                    } else {
+                        selfReferentialAssignments[localColumnName] =
+                            valueFromRowMap(
+                                rowValues,
+                                tbl.cols[referencedColumnIndex].dataName);
+                    }
+                }
+            } else if (foreignKey.onUpdate == "setnull") {
+                for (const size_t localColumnIndex :
+                     definition.localColumnIndices) {
+                    selfReferentialAssignments[
+                        tbl.cols[localColumnIndex].dataName] = std::nullopt;
+                }
+            } else {
+                bool newRowStillReferencesOldKey = true;
+                for (size_t valueIndex = 0;
+                     valueIndex < definition.localColumnIndices.size();
+                     ++valueIndex) {
+                    const size_t localColumnIndex =
+                        definition.localColumnIndices[valueIndex];
+                    if (pendingColumnIsNull(localColumnIndex) ||
+                        canonicalColumnKeyValue(
+                            tbl.cols[definition.referencedColumnIndices[
+                                valueIndex]],
+                            valueFromRowMap(
+                                rowValues,
+                                tbl.cols[localColumnIndex].dataName)) !=
+                            oldReferencedValues[valueIndex]) {
+                        newRowStillReferencesOldKey = false;
+                        break;
+                    }
+                }
+                if (newRowStillReferencesOldKey) {
+                    lockManager_.unlock(tablename);
+                    return DBStatus::INVALID_VALUE;
+                }
+            }
+        }
+        if (!selfReferentialAssignments.empty()) {
+            std::map<std::string, std::string> actionValues;
+            std::set<std::string> actionNullColumns;
+            splitSqlRow(
+                selfReferentialAssignments, actionValues,
+                actionNullColumns);
+            std::map<size_t, std::string> preparedActionValues;
+            std::set<size_t> preparedActionNullColumns;
+            const DBStatus actionPrepareStatus = prepareColumnUpdates(
+                actionValues, actionNullColumns, preparedActionValues,
+                preparedActionNullColumns, true);
+            if (actionPrepareStatus != DBStatus::OK) {
+                lockManager_.unlock(tablename);
+                return actionPrepareStatus;
+            }
+            for (const auto& [columnIndex, value] : preparedActionValues) {
+                const bool assignsNull =
+                    preparedActionNullColumns.count(columnIndex) != 0;
+                rowValues[tbl.cols[columnIndex].dataName] =
+                    assignsNull ? std::string() : value;
+                assignedColumnIndices.insert(columnIndex);
+                if (assignsNull) {
+                    assignedNullColumnIndices.insert(columnIndex);
+                } else {
+                    assignedNullColumnIndices.erase(columnIndex);
+                }
+            }
+
+            // A generated column may depend on a local FK column changed by
+            // the folded referential action. Recompute it before CHECK/index
+            // validation, just as an ordinary UPDATE would.
+            std::map<std::string, std::string> generatedActionValues;
+            std::set<std::string> generatedActionNullColumns;
+            for (size_t columnIndex = 0;
+                 columnIndex < tbl.len; ++columnIndex) {
+                const Column& column = tbl.cols[columnIndex];
+                if (column.generatedExpr.empty() ||
+                    column.generatedKind == 'v') {
+                    continue;
+                }
+                std::string computed;
+                bool computedNull = false;
+                if (!evalExpressionSqlValue(
+                        column.generatedExpr, rowValues, updateTypeHints,
+                        dbname, computed, computedNull)) {
+                    lockManager_.unlock(tablename);
+                    return DBStatus::INVALID_VALUE;
+                }
+                generatedActionValues[column.dataName] =
+                    computedNull ? std::string() : computed;
+                if (computedNull) {
+                    generatedActionNullColumns.insert(column.dataName);
+                }
+            }
+            if (!generatedActionValues.empty()) {
+                std::map<size_t, std::string> preparedGeneratedValues;
+                std::set<size_t> preparedGeneratedNullColumns;
+                const DBStatus generatedPrepareStatus =
+                    prepareColumnUpdates(
+                        generatedActionValues,
+                        generatedActionNullColumns,
+                        preparedGeneratedValues,
+                        preparedGeneratedNullColumns, true);
+                if (generatedPrepareStatus != DBStatus::OK) {
+                    lockManager_.unlock(tablename);
+                    return generatedPrepareStatus;
+                }
+                for (const auto& [columnIndex, value] :
+                     preparedGeneratedValues) {
+                    const bool assignsNull =
+                        preparedGeneratedNullColumns.count(columnIndex) != 0;
+                    rowValues[tbl.cols[columnIndex].dataName] =
+                        assignsNull ? std::string() : value;
+                    assignedColumnIndices.insert(columnIndex);
+                    if (assignsNull) {
+                        assignedNullColumnIndices.insert(columnIndex);
+                    } else {
+                        assignedNullColumnIndices.erase(columnIndex);
+                    }
+                }
+            }
+        }
+
         std::set<std::string> finalNullColumnNames;
         for (size_t i = 0; i < tbl.len; ++i) {
             if (assignedNullColumnIndices.count(i) != 0 ||
@@ -22674,7 +22895,6 @@ DBStatus StorageEngine::updateInternal(
 
                 for (const auto& otherTable : allTables) {
                     if (dependencyScanStatus != DBStatus::OK) break;
-                    if (otherTable == tablename) continue;
                     TableSchema otherTbl = getTableSchema(dbname, otherTable);
                     for (size_t fi = 0; fi < otherTbl.fkLen; ++fi) {
                         const ForeignKey& fk = otherTbl.fks[fi];
@@ -22766,6 +22986,11 @@ DBStatus StorageEngine::updateInternal(
                                 }
                             }
                             if (matched) {
+                                // The active parent RID's self-reference was
+                                // folded into rowValues before validation.
+                                if (otherTable == tablename && orid == rid) {
+                                    return;
+                                }
                                 if (fk.onUpdate == "cascade") {
                                     UpdateCascadeAction ca;
                                     ca.table = otherTable;
