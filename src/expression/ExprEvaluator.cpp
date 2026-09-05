@@ -400,30 +400,59 @@ static bool parseTimeZoneOffset(const std::string& name, long long& offsetMinute
     if (low == "utc" || low == "gmt" || low == "z") { offsetMinutes = 0; return true; }
     if (low.rfind("utc", 0) == 0 || low.rfind("gmt", 0) == 0) s = s.substr(3);
     // [+-]HH[:MM] or [+-]HHMM
-    if (s.empty()) return false;
-    int sign = 1;
-    size_t i = 0;
-    if (s[0] == '+') { sign = 1; i = 1; }
-    else if (s[0] == '-') { sign = -1; i = 1; }
-    std::string rest = s.substr(i);
-    if (rest.empty() || rest.find_first_not_of("0123456789:") != std::string::npos) return false;
+    if (s.size() < 2 || (s[0] != '+' && s[0] != '-')) return false;
+    const int sign = s[0] == '-' ? -1 : 1;
+    const std::string rest = s.substr(1);
+    const auto parseDigits = [](const std::string& text,
+                                long long& value) {
+        if (text.empty()) return false;
+        value = 0;
+        for (const unsigned char ch : text) {
+            if (!std::isdigit(ch)) return false;
+            value = value * 10 + static_cast<long long>(ch - '0');
+        }
+        return true;
+    };
     long long hh = 0, mm = 0;
-    if (rest.find(':') != std::string::npos) {
-        if (std::sscanf(rest.c_str(), "%lld:%lld", &hh, &mm) != 2) return false;
+    const size_t colon = rest.find(':');
+    if (colon != std::string::npos) {
+        if (colon < 1 || colon > 2 ||
+            rest.find(':', colon + 1) != std::string::npos ||
+            rest.size() - colon - 1 != 2 ||
+            !parseDigits(rest.substr(0, colon), hh) ||
+            !parseDigits(rest.substr(colon + 1), mm)) {
+            return false;
+        }
     } else {
         if (rest.size() == 4) {
-            hh = std::stoll(rest.substr(0, 2));
-            mm = std::stoll(rest.substr(2));
-        } else if (rest.size() <= 2) {
-            hh = std::stoll(rest); mm = 0;
+            if (!parseDigits(rest.substr(0, 2), hh) ||
+                !parseDigits(rest.substr(2), mm)) {
+                return false;
+            }
+        } else if (rest.size() <= 2 && parseDigits(rest, hh)) {
+            mm = 0;
         } else {
             return false;
         }
     }
+    if (hh > 15 || mm > 59) return false;
     // POSIX-style numeric zones invert the sign (UTC+8 means UTC-8),
     // while IANA named zones above keep the natural sign.
     offsetMinutes = -sign * (hh * 60 + mm);
     return true;
+}
+
+static std::string formatTimeZoneOffset(long long offsetMinutes) {
+    const long long absoluteMinutes = std::llabs(offsetMinutes);
+    const long long hours = absoluteMinutes / 60;
+    const long long minutes = absoluteMinutes % 60;
+    std::ostringstream out;
+    out << (offsetMinutes < 0 ? '-' : '+') << std::setfill('0')
+        << std::setw(2) << hours;
+    if (minutes != 0) {
+        out << ':' << std::setw(2) << minutes;
+    }
+    return out.str();
 }
 
 // JSON helpers defined later in this file; forward-declared for the JSON
@@ -3057,14 +3086,9 @@ void ExprEvaluator::registerBuiltins() {
             inTn != "timestamp") {
             return ExprValue("timestamp", out, false);
         }
-        char ob[8];
-        long long ah = offMin / 60, am = offMin % 60;
         // PG renders whole-hour offsets without minutes (+00, +09).
-        if (ah < 0 && am == 0) snprintf(ob, sizeof ob, "-%02lld", -ah);
-        else if (ah >= 0 && am == 0) snprintf(ob, sizeof ob, "+%02lld", ah);
-        else if (ah < 0) snprintf(ob, sizeof ob, "-%02lld:%02lld", -ah, am);
-        else snprintf(ob, sizeof ob, "+%02lld:%02lld", ah, am);
-        return ExprValue("timestamptz", out + ob, false);
+        return ExprValue(
+            "timestamptz", out + formatTimeZoneOffset(offMin), false);
     };
 
     // ------------------ full-text search ------------------

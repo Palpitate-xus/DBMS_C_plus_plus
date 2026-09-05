@@ -90,6 +90,26 @@ static void test_at_time_zone() {
     auto d = eval("timezone('UTC+8', '2024-06-01 00:30:00')");
     assert(d.ok && d.value == "2024-05-31 16:30:00");
 
+    // A negative result offset must render its minute component without a
+    // second minus sign.
+    auto e = eval(
+        "timezone('UTC+05:30', "
+        "'2024-06-01 10:00:00'::timestamp)");
+    assert(e.ok && !e.isNull);
+    assert(e.value == "2024-06-01 04:30:00-05:30");
+
+    // PostgreSQL timezone displacements are strictly below 16 hours and the
+    // minute field and separators must be well formed.
+    auto invalidHour = eval(
+        "timezone('UTC+16', '2024-06-01 10:00:00'::timestamp)");
+    auto invalidMinute = eval(
+        "timezone('UTC+05:60', '2024-06-01 10:00:00'::timestamp)");
+    auto invalidShape = eval(
+        "timezone('UTC+05:30:20', '2024-06-01 10:00:00'::timestamp)");
+    assert(invalidHour.ok && invalidHour.isNull);
+    assert(invalidMinute.ok && invalidMinute.isNull);
+    assert(invalidShape.ok && invalidShape.isNull);
+
     std::cout << "[IV] AT TIME ZONE / timezone() OK" << std::endl;
 }
 
