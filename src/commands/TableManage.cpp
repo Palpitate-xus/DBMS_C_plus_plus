@@ -13583,6 +13583,13 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
+    if ((tbl.partitionType != TableSchema::PartitionType::None &&
+         tbl.partitionKey == colName) ||
+        (tbl.subPartitionType != TableSchema::PartitionType::None &&
+         tbl.subPartitionKey == colName)) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
 
     // Composite PRIMARY KEY and UNIQUE metadata stores physical column
     // positions. A constrained member cannot be dropped without CASCADE,
@@ -13720,22 +13727,14 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
     for (const auto& cn : brinCols) std::filesystem::remove(brinIndexPath(dbname, tablename, cn));
 
     if (tbl.partitionType != TableSchema::PartitionType::None) {
-        std::vector<std::string> partitions;
-        if (tbl.partitionType == TableSchema::PartitionType::Range) {
-            for (const auto& p : tbl.rangePartitions) partitions.push_back(p.first);
-        } else if (tbl.partitionType == TableSchema::PartitionType::List) {
-            for (const auto& p : tbl.listPartitions) partitions.push_back(p.first);
-            if (!tbl.defaultPartitionName.empty()) partitions.push_back(tbl.defaultPartitionName);
-        } else if (tbl.partitionType == TableSchema::PartitionType::Hash) {
-            for (size_t i = 0; i < tbl.hashPartitions; ++i) partitions.push_back("p" + std::to_string(i));
-        }
-        for (const auto& p : partitions) {
-            std::filesystem::remove(partitionDataPath(dbname, tablename, p));
-            if (tbl.subPartitionType == TableSchema::PartitionType::Hash) {
-                for (size_t i = 0; i < tbl.subHashPartitions; ++i) {
-                    std::filesystem::remove(partitionDataPath(dbname, tablename, p, "sp" + std::to_string(i)));
-                }
-            }
+        for (const auto& leaf : partitionLeaves(tbl)) {
+            const auto path = leaf.subPartition.empty()
+                ? partitionDataPath(
+                      dbname, tablename, leaf.partition)
+                : partitionDataPath(
+                      dbname, tablename, leaf.partition,
+                      leaf.subPartition);
+            std::filesystem::remove(path);
         }
     }
     auto oldToastDir = toastDir(dbname, tablename);
@@ -13754,29 +13753,17 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
         pa->open();
         pageAllocators_[key] = std::move(pa);
     } else {
-        std::vector<std::string> partitions;
-        if (tbl.partitionType == TableSchema::PartitionType::Range) {
-            for (const auto& p : tbl.rangePartitions) partitions.push_back(p.first);
-        } else if (tbl.partitionType == TableSchema::PartitionType::List) {
-            for (const auto& p : tbl.listPartitions) partitions.push_back(p.first);
-            if (!tbl.defaultPartitionName.empty()) partitions.push_back(tbl.defaultPartitionName);
-        } else if (tbl.partitionType == TableSchema::PartitionType::Hash) {
-            for (size_t i = 0; i < tbl.hashPartitions; ++i) partitions.push_back("p" + std::to_string(i));
-        }
-        for (const auto& p : partitions) {
+        for (const auto& leaf : partitionLeaves(tbl)) {
+            const auto path = leaf.subPartition.empty()
+                ? partitionDataPath(
+                      dbname, tablename, leaf.partition)
+                : partitionDataPath(
+                      dbname, tablename, leaf.partition,
+                      leaf.subPartition);
             auto pa = std::make_unique<PageAllocator>(
-                partitionDataPath(dbname, tablename, p).string(), tbl.rowSize(), pageSize, tbl.formatVersion);
+                path.string(), tbl.rowSize(), pageSize, tbl.formatVersion);
             pa->open();
             pa->close();
-            if (tbl.subPartitionType == TableSchema::PartitionType::Hash) {
-                for (size_t i = 0; i < tbl.subHashPartitions; ++i) {
-                    auto subPa = std::make_unique<PageAllocator>(
-                        partitionDataPath(dbname, tablename, p, "sp" + std::to_string(i)).string(),
-                        tbl.rowSize(), pageSize, tbl.formatVersion);
-                    subPa->open();
-                    subPa->close();
-                }
-            }
         }
     }
     bool hasVarLen = false;
@@ -14040,6 +14027,8 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
             }
         }
     }
+    if (tbl.partitionKey == oldName) tbl.partitionKey = newName;
+    if (tbl.subPartitionKey == oldName) tbl.subPartitionKey = newName;
     std::vector<std::pair<std::string, TableSchema>> referencingSchemas;
     for (const std::string& otherTableName : getTableNames(dbname)) {
         if (otherTableName == tablename) continue;
