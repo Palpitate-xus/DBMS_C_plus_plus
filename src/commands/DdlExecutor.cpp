@@ -5022,7 +5022,57 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
         }
     }
 
+    // Defaults are stored in table metadata rather than as pg_attrdef catalog
+    // objects, so the catalog plan cannot see their normal dependency on an
+    // automatically dropped sequence. Defaults in tables that are themselves
+    // being dropped need no action; every surviving reference blocks
+    // RESTRICT and is cleared by CASCADE.
+    std::set<std::string> droppedTableStorageNames{tname};
+    for (const auto& action : physicalCascadeActions) {
+        if (action.kind == PhysicalCascadeAction::Kind::Table) {
+            droppedTableStorageNames.insert(action.name);
+        }
+    }
+    std::set<std::pair<std::string, std::string>> defaultsToClear;
+    for (const auto& sequenceName : droppedSequenceStorageNames) {
+        for (const auto& dependency :
+             findDefaultNextvalDeps(s.currentDB, sequenceName)) {
+            if (droppedTableStorageNames.count(dependency.first) != 0) {
+                continue;
+            }
+            if (!stmt->cascade) {
+                std::cout << "ERROR: cannot drop table " << logicalName
+                          << " because default on " << dependency.first
+                          << "." << dependency.second
+                          << " depends on owned sequence " << sequenceName
+                          << std::endl;
+                return true;
+            }
+            defaultsToClear.insert(dependency);
+        }
+    }
+
     txn.markSnapshotDirty();
+    std::set<std::string> changedDefaultTables;
+    for (const auto& dependency : defaultsToClear) {
+        if (g_engine.alterTableDropDefault(
+                s.currentDB, dependency.first,
+                dependency.second) != DBStatus::OK) {
+            std::cout << "DROP TABLE failed to clear default on "
+                      << dependency.first << "." << dependency.second
+                      << std::endl;
+            return true;
+        }
+        changedDefaultTables.insert(dependency.first);
+    }
+    for (const auto& changedTable : changedDefaultTables) {
+        if (!synchronizeTableAttributesInCatalog(
+                s.currentDB, changedTable)) {
+            std::cout << "DROP TABLE default catalog update failed for "
+                      << changedTable << std::endl;
+            return true;
+        }
+    }
     for (const auto& action : physicalCascadeActions) {
         if (!dropPhysicalCascadeAction(g_engine, s.currentDB, action)) {
             std::cout << "DROP TABLE dependency cleanup failed for "

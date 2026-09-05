@@ -151,6 +151,67 @@ static void test_drop_table_restrict_removes_automatic_dependents() {
               << std::endl;
 }
 
+static void test_owned_sequence_defaults_obey_drop_behavior() {
+    const std::string db = testDbPath("drop_owned_sequence_defaults");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE SCHEMA app", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE app.owner (id INT, keep INT)", s));
+    assert(!ddl.executeSql(
+        "CREATE SEQUENCE app.owner_id_seq OWNED BY app.owner.id", s));
+    assert(!ddl.executeSql(
+        "ALTER TABLE app.owner ALTER COLUMN id "
+        "SET DEFAULT nextval('app.owner_id_seq')", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE sequence_consumer "
+        "(value INT DEFAULT nextval('app.owner_id_seq'))", s));
+    s.sequenceLastValues["app.owner_id_seq"] = 41;
+
+    // The owner's own default disappears with the table, but a default on a
+    // surviving table is a normal dependency and must block RESTRICT.
+    assert(ddl.executeSql("DROP TABLE app.owner RESTRICT", s));
+    assert(g_engine.tableExists(db, "app__owner"));
+    assert(g_engine.sequenceExists(db, "app.owner_id_seq"));
+    assert(!g_engine.getTableSchema(
+        db, "sequence_consumer").cols[0].defaultValue.empty());
+    assert(s.sequenceLastValues["app.owner_id_seq"] == 41);
+
+    assert(!ddl.executeSql("DROP TABLE app.owner CASCADE", s));
+    assert(!g_engine.tableExists(db, "app__owner"));
+    assert(!g_engine.sequenceExists(db, "app.owner_id_seq"));
+    assert(g_engine.getTableSchema(
+        db, "sequence_consumer").cols[0].defaultValue.empty());
+    assert(s.sequenceLastValues.count("app.owner_id_seq") == 0);
+
+    {
+        dbms::CatalogManager durable(
+            (fs::path(g_engine.dbPath(db)) / "pg_catalog").string());
+        const auto* publicNamespace =
+            durable.findNamespaceByName("public");
+        const auto* appNamespace = durable.findNamespaceByName("app");
+        assert(publicNamespace && appNamespace);
+        assert(durable.findClassByName(
+                   "owner", appNamespace->oid) == nullptr);
+        assert(durable.findClassByName(
+                   "owner_id_seq", appNamespace->oid) == nullptr);
+        const auto* consumer = durable.findClassByName(
+            "sequence_consumer", publicNamespace->oid);
+        const auto* column = consumer
+            ? durable.findAttribute(consumer->oid, "value") : nullptr;
+        assert(column && !column->atthasdef);
+    }
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[DROP-CASCADE] owned sequence defaults obey behavior OK"
+              << std::endl;
+}
+
 static void test_multi_table_drop_fails_before_mutation() {
     const std::string db = testDbPath("drop_multiple_preflight");
     cleanup(db);
@@ -293,6 +354,7 @@ int main() {
     test_drop_table_cascade_removes_dependents();
     test_schema_table_cascade_resolves_index_owner();
     test_drop_table_restrict_removes_automatic_dependents();
+    test_owned_sequence_defaults_obey_drop_behavior();
     test_multi_table_drop_fails_before_mutation();
     test_drop_removes_named_table_sidecars();
     test_drop_purges_authorization_state();
