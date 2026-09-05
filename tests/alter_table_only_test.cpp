@@ -6,7 +6,9 @@
 #include <algorithm>
 #include <cassert>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
@@ -15,6 +17,12 @@ namespace fs = std::filesystem;
 static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser"; s.permission = 1; s.currentDB = db;
+}
+
+static std::string readFile(const fs::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(input),
+            std::istreambuf_iterator<char>()};
 }
 
 // Test ALTER TABLE ONLY parser support
@@ -43,6 +51,33 @@ static void test_set_tablespace() {
     assert(g_engine.insert(db, "t", {{"id", "42"}}) == dbms::DBStatus::OK);
     size_t rows = 0;
     g_engine.forEachRow(db, "t", [&](uint32_t, uint16_t, const char*, size_t) { ++rows; });
+    assert(rows == 1);
+
+    // Keep the cached schema readable while replacing its path with a
+    // same-timestamp directory. The final atomic publication must fail and
+    // every relation fork already moved to the target tablespace must return
+    // to pg_default.
+    const fs::path schemaPath = fs::path(db) / "t.stc";
+    const fs::path savedSchemaPath = fs::path(db) / "t.stc.saved";
+    const std::string originalSchemaBytes = readFile(schemaPath);
+    assert(g_engine.getTableSchema(db, "t").tablespace == "pg_default");
+    const auto schemaTimestamp = fs::last_write_time(schemaPath);
+    fs::rename(schemaPath, savedSchemaPath);
+    assert(fs::create_directory(schemaPath));
+    fs::last_write_time(schemaPath, schemaTimestamp);
+    assert(g_engine.alterTableTablespace(db, "t", "my_space") ==
+           dbms::DBStatus::IO_ERROR);
+    assert(fs::exists(fs::path(db) / "t.dt"));
+    assert(!fs::exists(fs::path(location) / db / "t.dt"));
+    fs::remove(schemaPath);
+    fs::rename(savedSchemaPath, schemaPath);
+    assert(readFile(schemaPath) == originalSchemaBytes);
+    dbms::StorageEngine failedMoveRestart;
+    assert(failedMoveRestart.getTableSchema(db, "t").tablespace ==
+           "pg_default");
+    rows = 0;
+    failedMoveRestart.forEachRow(
+        db, "t", [&](uint32_t, uint16_t, const char*, size_t) { ++rows; });
     assert(rows == 1);
 
     auto res = g_engine.alterTableTablespace(db, "t", "my_space");

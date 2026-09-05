@@ -16292,25 +16292,16 @@ DBStatus StorageEngine::alterTableTablespace(const std::string& dbname,
         }
 
         tbl.tablespace = targetTablespace;
-        const auto schemaTmp = schemaPath(dbname, tablename).string() + ".tablespace.tmp";
-        {
-            std::ofstream out(schemaTmp, std::ios::binary | std::ios::trunc);
-            if (!out) throw std::runtime_error("could not write tablespace schema");
-            writeSchema(out, tbl);
-            if (!out) throw std::runtime_error("could not write tablespace schema");
-        }
-        std::filesystem::rename(schemaTmp, schemaPath(dbname, tablename), ec);
-        invalidateCatalogSchema(dbname, tablename);
-        if (ec) {
-            std::filesystem::remove(schemaTmp, ec);
-            throw std::runtime_error("could not publish tablespace schema");
+        if (!writeSchemaFile(dbname, tablename, tbl)) {
+            rollbackMove();
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
         }
     } catch (...) {
         rollbackMove();
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
-    invalidateCatalogSchema(dbname, tablename);
     lockManager_.unlock(tablename);
     return DBStatus::OK;
 }
