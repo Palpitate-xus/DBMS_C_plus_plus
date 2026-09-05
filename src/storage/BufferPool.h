@@ -98,6 +98,12 @@ public:
     // in-memory copy of the page.
     bool flush();
 
+    // Background writeback: do nothing when the pool is clean or any dirty
+    // frame is pinned. Once eligible frames are frozen under mutex_, invoke
+    // the caller's WAL barrier and only then write them. Returning true can
+    // therefore mean either "flushed" or "safely deferred".
+    bool flushDirtyUnpinned(const std::function<bool()>& walBarrier);
+
     // Whether a cached page currently carries unwritten changes.
     bool isPageDirty(uint32_t pageId) const;
 

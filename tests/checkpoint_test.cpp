@@ -79,6 +79,44 @@ int main() {
         assert(reloaded != nullptr);
         assert(std::memcmp(reloaded, "durable-page", 12) == 0);
         pool.unpinPage(0);
+
+        // Background writeback must defer a dirty pinned frame without even
+        // invoking its WAL barrier. Once unpinned, the barrier runs while the
+        // old disk image is still present, then the new image is written.
+        char* backgroundPage = pool.fetchPage(0);
+        assert(backgroundPage != nullptr);
+        std::memcpy(backgroundPage, "background!!", 12);
+        pool.markDirty(0);
+        bool barrierCalled = false;
+        assert(pool.flushDirtyUnpinned([&]() {
+            barrierCalled = true;
+            return true;
+        }));
+        assert(!barrierCalled);
+        pool.unpinPage(0);
+        assert(!pool.flushDirtyUnpinned([] { return false; }));
+        const auto dirtyAfterBarrierFailure = pool.getFrameInfo();
+        assert(dirtyAfterBarrierFailure.size() == 1);
+        assert(dirtyAfterBarrierFailure.front().dirty);
+        assert(pool.flushDirtyUnpinned([&]() {
+            barrierCalled = true;
+            std::ifstream disk(poolPath, std::ios::binary);
+            char oldBytes[12]{};
+            assert(disk.read(oldBytes, sizeof(oldBytes)));
+            return std::memcmp(oldBytes, "durable-page", 12) == 0;
+        }));
+        assert(barrierCalled);
+        pool.invalidatePage(0);
+        reloaded = pool.fetchPage(0);
+        assert(reloaded != nullptr);
+        assert(std::memcmp(reloaded, "background!!", 12) == 0);
+        pool.unpinPage(0);
+        barrierCalled = false;
+        assert(pool.flushDirtyUnpinned([&]() {
+            barrierCalled = true;
+            return true;
+        }));
+        assert(!barrierCalled);  // a clean pool performs no fsync/barrier
         pool.close();
         std::filesystem::remove(poolPath);
         std::cout << "[CHECKPOINT] BufferPool eviction/pin safety OK\n";
@@ -131,6 +169,28 @@ int main() {
             assert(recovered.numPages() == 1);
             assert(std::filesystem::file_size(extentPath) ==
                    PgPage::PAGE_SIZE);
+
+            // The same allocator must also retry its own marker in place;
+            // restoring the old disk image underneath a live cache would
+            // lose frames already made clean by a completed writeback.
+            assert(recovered.allocPage() == 1);
+            struct rlimit savedLimit {};
+            assert(::getrlimit(RLIMIT_FSIZE, &savedLimit) == 0);
+            struct rlimit shortLimit = savedLimit;
+            shortLimit.rlim_cur =
+                std::min<rlim_t>(shortLimit.rlim_max, 12000);
+            const auto savedHandler = std::signal(SIGXFSZ, SIG_IGN);
+            assert(shortLimit.rlim_cur > PgPage::PAGE_SIZE);
+            assert(::setrlimit(RLIMIT_FSIZE, &shortLimit) == 0);
+            assert(!recovered.flush());
+            assert(std::filesystem::exists(
+                extentPath.string() + ".extent_pending"));
+            assert(::setrlimit(RLIMIT_FSIZE, &savedLimit) == 0);
+            std::signal(SIGXFSZ, savedHandler);
+            assert(recovered.flush());
+            assert(recovered.numPages() == 2);
+            assert(std::filesystem::file_size(extentPath) ==
+                   2 * PgPage::PAGE_SIZE);
         }
         assert(!std::filesystem::exists(
             extentPath.string() + ".extent_pending"));

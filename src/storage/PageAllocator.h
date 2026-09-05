@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -74,6 +75,14 @@ public:
     // Flush all dirty pages and propagate write/fsync failures.
     bool flush();
 
+    // Background writeback. Dirty pinned pages are deferred, and the WAL
+    // barrier runs only after the remaining frames are frozen.
+    bool flushDirtyUnpinned(const std::function<bool()>& walBarrier);
+
+    // Force one transaction-owned data page through the allocator's marker
+    // serialization. Used by COMMIT after its terminal WAL is durable.
+    bool flushPage(uint32_t pageId);
+
 private:
     std::string filename_;
     size_t rowSize_;
@@ -84,7 +93,11 @@ private:
     mutable std::mutex allocMutex_;
     mutable std::mutex flushMutex_;
     bool durableHeaderPresent_ = false;
+    bool pendingAllocationFlush_ = false;
 
+    bool prepareAllocationFlushMarker(std::string& markerPath,
+                                      std::string& markerBytes);
+    bool finishAllocationFlushMarker(const std::string& markerPath);
     bool flushWithAllocationMarker(bool allocationOnly);
     bool recoverPendingAllocationFlush();
     bool validateFileHeader(const DataFileHeader& fh) const;

@@ -572,6 +572,28 @@ bool BufferPool::flush() {
     return flushUnlocked();
 }
 
+bool BufferPool::flushDirtyUnpinned(
+    const std::function<bool()>& walBarrier) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    bool hasDirtyFrame = false;
+    for (const auto& frame : frames_) {
+        if (!frame.dirty || frame.pageId == static_cast<uint32_t>(-1) ||
+            frame.pageId == kOrphanedPage) {
+            continue;
+        }
+        hasDirtyFrame = true;
+        if (frame.pinCount != 0) {
+            // A pin holder can still be changing bytes without mutex_. Defer
+            // the whole pool so a structural write-last page cannot publish
+            // a data page that is only partly updated.
+            return true;
+        }
+    }
+    if (!hasDirtyFrame) return true;
+    if (!walBarrier || !walBarrier()) return false;
+    return flushUnlocked();
+}
+
 bool BufferPool::isPageDirty(uint32_t pageId) const {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto it = pageMap_.find(pageId);

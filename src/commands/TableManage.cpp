@@ -1918,19 +1918,21 @@ void StorageEngine::backgroundWalFlush() {
 
 void StorageEngine::backgroundBufferFlush() {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
-    // bgwriter: write out dirty pages from each buffer pool.  NOTE: this
-    // whole-pool flush runs without engine page locks — it can race a
-    // concurrent statement mutating a cached page, which is acceptable
-    // here because the committing statement's own pages are flushed
-    // synchronously at commit (see commitTransaction) under the page
-    // locks it already holds; the bgwriter's possibly-torn copy is
-    // overwritten by the next commit's flush of that page.
+    // bgwriter: freeze only unpinned dirty pools, establish the matching WAL
+    // durability boundary while their buffer mutex is held, then write. A
+    // pinned dirty frame defers the whole allocator so page zero can never
+    // publish a page that a statement is still changing.
     for (auto& kv : pageAllocators_) {
         PageAllocator* pa = kv.second.get();
-        if (pa) {
-            // PageAllocator serializes full writeback and protects a dirty
-            // extent header with its recoverable publication marker.
-            pa->flush();
+        const size_t separator = kv.first.find('/');
+        if (!pa || separator == std::string::npos || separator == 0) continue;
+        const std::string dbname = kv.first.substr(0, separator);
+        WALManager* wal = getWAL(dbname);
+        if (!wal || !pa->flushDirtyUnpinned([wal]() {
+                return wal->XLogFlush(wal->currentWriteLsn());
+            })) {
+            std::cerr << "[background] heap writeback failed for "
+                      << kv.first << std::endl;
         }
     }
 }
@@ -37181,7 +37183,7 @@ DBStatus StorageEngine::commitTransaction() {
     // already-durable COMMIT must never be followed by a contradictory ABORT.
     bool heapWritebackOk = true;
     for (const auto& page : commitHeapPages) {
-        if (!page.allocator->bufferPool()->flushPage(page.pageId)) {
+        if (!page.allocator->flushPage(page.pageId)) {
             heapWritebackOk = false;
         }
     }

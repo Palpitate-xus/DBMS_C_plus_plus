@@ -523,6 +523,10 @@ uint32_t PageAllocator::numPages() const {
 std::optional<bool> PageAllocator::pageExistsOnDisk(uint32_t pageId) const {
     if (!isOpen() || pageSize_ == 0) return std::nullopt;
     std::lock_guard<std::mutex> flushLock(flushMutex_);
+    // A marker owned by this live allocator means physical publication is
+    // incomplete but recoverable. Report the page as not-yet-published
+    // rather than trying to interpret a deliberately transitional file.
+    if (pendingAllocationFlush_) return false;
     DurableAllocationState state;
     if (!captureDurableAllocationState(
             filename_, rowSize_, pageSize_, formatVersion_,
@@ -571,12 +575,8 @@ bool PageAllocator::flushAllocationStateForCommit() {
     return flushWithAllocationMarker(true);
 }
 
-bool PageAllocator::flushWithAllocationMarker(bool allocationOnly) {
-    if (!recoverPendingAllocationFlush()) return false;
-    if (!bp_->isPageDirty(0)) {
-        return allocationOnly ? true : bp_->flush();
-    }
-
+bool PageAllocator::prepareAllocationFlushMarker(
+    std::string& markerPath, std::string& markerBytes) {
     char* headerBuffer = bp_->fetchPage(0);
     if (!headerBuffer) return false;
     DataFileHeader currentHeader{};
@@ -601,19 +601,112 @@ bool PageAllocator::flushWithAllocationMarker(bool allocationOnly) {
         return false;
     }
 
-    const std::filesystem::path marker =
-        allocationFlushMarkerPath(filename_);
-    const std::string markerBytes =
-        encodeAllocationFlushMarker(previous, pageSize_);
-    if (!index_file::writeAtomically(marker, markerBytes)) return false;
+    markerPath = allocationFlushMarkerPath(filename_).string();
+    markerBytes = encodeAllocationFlushMarker(previous, pageSize_);
+    return true;
+}
+
+bool PageAllocator::finishAllocationFlushMarker(
+    const std::string& markerPath) {
+    if (removeFileDurably(markerPath)) {
+        pendingAllocationFlush_ = false;
+        durableHeaderPresent_ = true;
+        return true;
+    }
+    // unlink may have succeeded while only the directory fsync failed. The
+    // live process should retain the successfully flushed cache/disk state;
+    // after a crash the old directory entry may reappear and startup recovery
+    // can still consume it before opening the cache.
+    std::error_code ec;
+    const bool exists = std::filesystem::exists(markerPath, ec);
+    if (!ec && !exists) {
+        pendingAllocationFlush_ = false;
+        durableHeaderPresent_ = true;
+    }
+    return false;
+}
+
+bool PageAllocator::flushWithAllocationMarker(bool allocationOnly) {
+    if (!recoverPendingAllocationFlush()) return false;
+    if (!bp_->isPageDirty(0)) {
+        if (pendingAllocationFlush_) {
+            if (!finishAllocationFlushMarker(
+                    allocationFlushMarkerPath(filename_).string())) {
+                return false;
+            }
+        }
+        return allocationOnly ? true : bp_->flush();
+    }
+
+    std::string markerPath =
+        allocationFlushMarkerPath(filename_).string();
+    std::string markerBytes;
+    if (!pendingAllocationFlush_) {
+        if (!prepareAllocationFlushMarker(markerPath, markerBytes) ||
+            !index_file::writeAtomically(markerPath, markerBytes)) {
+            return false;
+        }
+        pendingAllocationFlush_ = true;
+    }
 
     // BufferPool writes every dirty data page, syncs main/TDE files, and only
     // then writes and syncs page zero.  The durable marker repairs a torn
     // final header or truncates an only-partly-published new extent on open.
     if (!bp_->flush()) return false;
-    if (!removeFileDurably(marker)) return false;
-    durableHeaderPresent_ = true;
+    return finishAllocationFlushMarker(markerPath);
+}
+
+bool PageAllocator::flushDirtyUnpinned(
+    const std::function<bool()>& walBarrier) {
+    if (!isOpen()) return false;
+    std::lock_guard<std::mutex> flushLock(flushMutex_);
+    std::lock_guard<std::mutex> allocLock(allocMutex_);
+    if (!recoverPendingAllocationFlush()) return false;
+
+    bool headerDirty = bp_->isPageDirty(0);
+    std::string markerPath =
+        allocationFlushMarkerPath(filename_).string();
+    if (pendingAllocationFlush_ && !headerDirty) {
+        if (!finishAllocationFlushMarker(markerPath)) return false;
+        headerDirty = bp_->isPageDirty(0);
+    }
+    std::string markerBytes;
+    if (headerDirty && !pendingAllocationFlush_ &&
+        !prepareAllocationFlushMarker(markerPath, markerBytes)) {
+        return false;
+    }
+
+    bool writebackStarted = false;
+    const bool ok = bp_->flushDirtyUnpinned([&]() {
+        // BufferPool holds its mutex here. No eligible frame can be pinned or
+        // changed between this durability boundary and physical writeback.
+        if (!walBarrier || !walBarrier()) return false;
+        if (headerDirty && !pendingAllocationFlush_) {
+            if (!index_file::writeAtomically(markerPath, markerBytes)) {
+                return false;
+            }
+            pendingAllocationFlush_ = true;
+        }
+        writebackStarted = true;
+        return true;
+    });
+    if (!ok) return false;
+    if (writebackStarted && pendingAllocationFlush_) {
+        return finishAllocationFlushMarker(markerPath);
+    }
     return true;
+}
+
+bool PageAllocator::flushPage(uint32_t pageId) {
+    if (!isOpen() || pageId == 0) return false;
+    std::lock_guard<std::mutex> flushLock(flushMutex_);
+    std::lock_guard<std::mutex> allocLock(allocMutex_);
+    if (!recoverPendingAllocationFlush()) return false;
+    if (pendingAllocationFlush_ &&
+        !flushWithAllocationMarker(/*allocationOnly=*/true)) {
+        return false;
+    }
+    return bp_->flushPage(pageId);
 }
 
 bool PageAllocator::recoverPendingAllocationFlush() {
@@ -622,7 +715,15 @@ bool PageAllocator::recoverPendingAllocationFlush() {
     std::error_code ec;
     const bool exists = std::filesystem::exists(marker, ec);
     if (ec) return false;
-    if (!exists) return true;
+    if (!exists) {
+        pendingAllocationFlush_ = false;
+        return true;
+    }
+    // A marker created by this live allocator protects an in-progress or
+    // retryable flush. Restoring its old disk image underneath the live cache
+    // would lose clean frames after a marker-cleanup failure. Only startup
+    // (buffer pool still closed) rolls a foreign/crash marker back.
+    if (bp_ && bp_->isOpen()) return pendingAllocationFlush_;
 
     DurableAllocationState previous;
     if (!readAllocationFlushMarker(
@@ -632,6 +733,7 @@ bool PageAllocator::recoverPendingAllocationFlush() {
     if (!restoreAllocationState(filename_, previous)) return false;
     if (!removeFileDurably(marker)) return false;
     durableHeaderPresent_ = previous.hasHeader;
+    pendingAllocationFlush_ = false;
     return true;
 }
 
