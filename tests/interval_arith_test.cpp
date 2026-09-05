@@ -212,6 +212,29 @@ static void test_justify_ops() {
     std::cout << "[IV] justify interval bounds OK" << std::endl;
 }
 
+static void test_make_interval_bounds() {
+    auto ordinary = eval("make_interval(days => 3, hours => 2)");
+    assert(ordinary.ok && ordinary.value == "3 days 02:00:00");
+
+    auto yearOverflow = eval(
+        "make_interval(years => 9223372036854775807)");
+    assert(yearOverflow.ok && yearOverflow.isNull);
+
+    auto monthOverflow = eval(
+        "make_interval(months => 9223372036854775807, years => 1)");
+    assert(monthOverflow.ok && monthOverflow.isNull);
+
+    auto weekOverflow = eval(
+        "make_interval(weeks => 9223372036854775807)");
+    assert(weekOverflow.ok && weekOverflow.isNull);
+
+    auto hourOverflow = eval(
+        "make_interval(hours => 9223372036854775807)");
+    assert(hourOverflow.ok && hourOverflow.isNull);
+
+    std::cout << "[IV] make_interval bounds OK" << std::endl;
+}
+
 static void test_at_time_zone() {
     // UTC wall clock read at a POSIX numeric zone (sign inverted: UTC+8 = UTC-8)
     auto a = eval("'2024-06-01 00:30:00'::timestamp AT TIME ZONE 'UTC+8'");
@@ -257,6 +280,7 @@ int main() {
     test_add_sub();
     test_interval_ops();
     test_justify_ops();
+    test_make_interval_bounds();
     test_at_time_zone();
     std::cout << "[IV] all tests passed" << std::endl;
     return 0;

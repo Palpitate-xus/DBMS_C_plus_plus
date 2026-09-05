@@ -173,6 +173,18 @@ static bool combineIntervalField(long long left, long long right,
     return true;
 }
 
+static bool addScaledIntervalField(long long& target, long long value,
+                                   long long scale) {
+    const __int128 total = static_cast<__int128>(target) +
+        static_cast<__int128>(value) * scale;
+    if (total <= std::numeric_limits<long long>::lowest() ||
+        total > std::numeric_limits<long long>::max()) {
+        return false;
+    }
+    target = static_cast<long long>(total);
+    return true;
+}
+
 static bool scaleIntervalField(long long value, long double scale,
                                long long& result) {
     const long double scaled = static_cast<long double>(value) * scale;
@@ -2052,13 +2064,23 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
             if (nv.isNull) continue;
             long long n = nv.asInt();
             std::string k = toLower(na.name);
-            if (k == "years") mi_months += n * 12;
-            else if (k == "months") mi_months += n;
-            else if (k == "weeks") mi_days += n * 7;
-            else if (k == "days") mi_days += n;
-            else if (k == "hours") mi_micros += n * 3600000000LL;
-            else if (k == "mins") mi_micros += n * 60000000LL;
-            else if (k == "secs") mi_micros += n * 1000000LL;
+            bool valid = true;
+            if (k == "years")
+                valid = addScaledIntervalField(mi_months, n, 12);
+            else if (k == "months")
+                valid = addScaledIntervalField(mi_months, n, 1);
+            else if (k == "weeks")
+                valid = addScaledIntervalField(mi_days, n, 7);
+            else if (k == "days")
+                valid = addScaledIntervalField(mi_days, n, 1);
+            else if (k == "hours")
+                valid = addScaledIntervalField(
+                    mi_micros, n, 3600000000LL);
+            else if (k == "mins")
+                valid = addScaledIntervalField(mi_micros, n, 60000000LL);
+            else if (k == "secs")
+                valid = addScaledIntervalField(mi_micros, n, 1000000LL);
+            if (!valid) return ExprValue("interval", "", true);
         }
         return ExprValue("interval", intervalToText(mi_months, mi_days, mi_micros), false);
     }
