@@ -205,7 +205,8 @@ static void test_sequence_owned_by_drop_table() {
     setupSession(s, db);
     dbms::DdlExecutor ddl;
 
-    bool err = ddl.executeSql("CREATE TABLE t (id INT PRIMARY KEY)", s);
+    bool err = ddl.executeSql(
+        "CREATE TABLE t (drop_me INT, id INT PRIMARY KEY)", s);
     assert(!err);
     err = ddl.executeSql("CREATE SEQUENCE s1 OWNED BY t.id", s);
     assert(!err);
@@ -253,7 +254,34 @@ static void test_sequence_owned_by_drop_table() {
     legacyOwnership.refobjsubid = 0;
     legacyOwnership.deptype = 'a';
     cat.addDepend(legacyOwnership);
+    cat.setDescription(
+        tableOid, dbms::PgClassOid_Class, 1, "removed column");
+    cat.setDescription(
+        tableOid, dbms::PgClassOid_Class, ownerColumnNumber,
+        "owned column");
     assert(cat.persistAll());
+    assert(g_engine.commentOnColumn(
+               db, "t", "drop_me", "must not reappear") ==
+           dbms::DBStatus::OK);
+
+    assert(!ddl.executeSql("ALTER TABLE t DROP COLUMN drop_me", s));
+    const auto* compactedOwner = cat.findAttribute(tableOid, "id");
+    assert(compactedOwner && compactedOwner->attnum == 1);
+    const auto compactedOwnerships = cat.findDepends(
+        dbms::PgClassOid_Class, sequenceOid, 0);
+    assert(std::count_if(
+               compactedOwnerships.begin(), compactedOwnerships.end(),
+               [&](const dbms::PgDependRow& dependency) {
+                   return dependency.deptype == 'a' &&
+                          dependency.refobjid == tableOid &&
+                          dependency.refobjsubid == 1;
+               }) == 1);
+    assert(cat.getDescription(
+               tableOid, dbms::PgClassOid_Class, 1) == "owned column");
+    assert(cat.getDescription(
+               tableOid, dbms::PgClassOid_Class, 2).empty());
+    assert(!ddl.executeSql("ALTER TABLE t ADD COLUMN drop_me INT", s));
+    assert(g_engine.getColumnComment(db, "t", "drop_me").empty());
 
     assert(!ddl.executeSql("ALTER TABLE t RENAME TO renamed_t", s));
     dbms::SequenceInfo currentInfo;
@@ -278,7 +306,7 @@ static void test_sequence_owned_by_drop_table() {
     const auto* renamedColumn = renamedTable
         ? cat.findAttribute(renamedTable->oid, "sequence_id") : nullptr;
     assert(renamedTable && renamedTable->oid == tableOid);
-    assert(renamedColumn && renamedColumn->attnum == ownerColumnNumber);
+    assert(renamedColumn && renamedColumn->attnum == 1);
 
     err = ddl.executeSql("DROP TABLE renamed_t", s);
     assert(!err);

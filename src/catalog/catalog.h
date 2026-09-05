@@ -106,6 +106,10 @@ public:
     // pg_class.relnatts aligned with the replacement set.
     bool replaceAttributes(Oid relOid,
                            const std::vector<PgAttributeRow>& attributes);
+    // The storage format compacts physical column positions after DROP
+    // COLUMN. Keep every catalog subobject number aligned, rejecting the
+    // operation if an inbound dependency on the removed column remains.
+    bool remapColumnMetadataAfterDrop(Oid relOid, int32_t droppedAttnum);
     bool dropAttributes(Oid relOid);
 
     // =====================================================================

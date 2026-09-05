@@ -561,6 +561,70 @@ bool CatalogManager::replaceAttributes(
     return true;
 }
 
+bool CatalogManager::remapColumnMetadataAfterDrop(
+    Oid relOid, int32_t droppedAttnum) {
+    if (relOid == INVALID_OID || droppedAttnum <= 0) return false;
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (classByOid_.count(relOid) == 0) return false;
+    const bool attributeExists = std::any_of(
+        attributes_.begin(), attributes_.end(),
+        [&](const PgAttributeRow& attribute) {
+            return attribute.attrelid == relOid &&
+                   attribute.attnum == droppedAttnum;
+        });
+    if (!attributeExists) return false;
+
+    std::vector<PgDependRow> remappedDependencies;
+    remappedDependencies.reserve(depends_.size());
+    for (const auto& current : depends_) {
+        PgDependRow dependency = current;
+        const bool droppedColumnOwnsDependency =
+            dependency.classid == PgClassOid_Class &&
+            dependency.objid == relOid &&
+            dependency.objsubid == droppedAttnum;
+        if (droppedColumnOwnsDependency) continue;
+
+        if (dependency.refclassid == PgClassOid_Class &&
+            dependency.refobjid == relOid &&
+            dependency.refobjsubid == droppedAttnum) {
+            // The dependent object must be removed by the DDL caller before
+            // catalog positions are compacted. Silently retaining or erasing
+            // it would either retarget it or bypass RESTRICT semantics.
+            return false;
+        }
+        if (dependency.classid == PgClassOid_Class &&
+            dependency.objid == relOid &&
+            dependency.objsubid > droppedAttnum) {
+            --dependency.objsubid;
+        }
+        if (dependency.refclassid == PgClassOid_Class &&
+            dependency.refobjid == relOid &&
+            dependency.refobjsubid > droppedAttnum) {
+            --dependency.refobjsubid;
+        }
+        remappedDependencies.push_back(std::move(dependency));
+    }
+
+    std::vector<PgDescriptionRow> remappedDescriptions;
+    remappedDescriptions.reserve(descriptions_.size());
+    for (const auto& current : descriptions_) {
+        PgDescriptionRow description = current;
+        if (description.classoid == PgClassOid_Class &&
+            description.objoid == relOid) {
+            if (description.objsubid == droppedAttnum) continue;
+            if (description.objsubid > droppedAttnum) {
+                --description.objsubid;
+            }
+        }
+        remappedDescriptions.push_back(std::move(description));
+    }
+
+    depends_ = std::move(remappedDependencies);
+    descriptions_ = std::move(remappedDescriptions);
+    return true;
+}
+
 bool CatalogManager::dropAttributes(Oid relOid) {
     std::lock_guard<std::mutex> lock(mutex_);
     return dropAttributesUnlocked(relOid);

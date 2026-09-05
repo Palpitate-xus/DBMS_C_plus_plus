@@ -1342,18 +1342,57 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     std::cout << "SQL syntax error: DROP COLUMN requires a name" << std::endl;
                     return true;
                 }
+                if (!g_engine.getColumnComment(
+                         s.currentDB, tableName, sub.name).empty() &&
+                    g_engine.commentOnColumn(
+                        s.currentDB, tableName, sub.name, "") !=
+                        DBStatus::OK) {
+                    std::cout << "ALTER TABLE DROP COLUMN comment cleanup failed"
+                              << std::endl;
+                    return true;
+                }
                 status = g_engine.alterTableDropColumn(s.currentDB, tableName, sub.name);
                 if (status == DBStatus::INVALID_VALUE && sub.ifExists) {
                     std::cout << "NOTICE: column does not exist, skipping" << std::endl;
                     break;
                 }
                 if (!alterStatusOk(status, "Column")) return true;
-                if (!tableIsTemporary &&
-                    !synchronizeTableAttributesInCatalog(
-                        s.currentDB, tableName)) {
-                    std::cout << "ALTER TABLE DROP COLUMN catalog update failed"
-                              << std::endl;
-                    return true;
+                if (!tableIsTemporary) {
+                    try {
+                        CatalogManager& catalog =
+                            g_engine.catalogService().get(s.currentDB);
+                        const auto qualifiedName =
+                            CatalogService::logicalName(tableName);
+                        const std::string schemaName =
+                            qualifiedName.schema.empty()
+                                ? "public" : qualifiedName.schema;
+                        const auto* relation = catalog.resolveRelation(
+                            qualifiedName.name, {schemaName});
+                        const auto* droppedAttribute = relation
+                            ? catalog.findAttribute(relation->oid, sub.name)
+                            : nullptr;
+                        if (relation &&
+                            (!droppedAttribute ||
+                             !catalog.remapColumnMetadataAfterDrop(
+                                 relation->oid,
+                                 droppedAttribute->attnum))) {
+                            std::cout
+                                << "ALTER TABLE DROP COLUMN has dependent catalog objects"
+                                << std::endl;
+                            return true;
+                        }
+                    } catch (const std::exception& error) {
+                        std::cout << "ALTER TABLE DROP COLUMN catalog remap failed: "
+                                  << error.what() << std::endl;
+                        return true;
+                    }
+                    if (!synchronizeTableAttributesInCatalog(
+                            s.currentDB, tableName)) {
+                        std::cout
+                            << "ALTER TABLE DROP COLUMN catalog update failed"
+                            << std::endl;
+                        return true;
+                    }
                 }
                 break;
             case AlterTableStmt::Action::RenameColumn:
