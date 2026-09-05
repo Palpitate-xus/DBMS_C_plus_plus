@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 
 #include "BufferPool.h"
@@ -46,6 +47,11 @@ public:
 
     // Total number of pages in the file (including page 0).
     uint32_t numPages() const;
+
+    // Whether the page already has a complete physical extent in the data
+    // file. nullopt reports an unavailable or structurally invalid file;
+    // false is the normal state for a newly allocated, WAL-backed page.
+    std::optional<bool> pageExistsOnDisk(uint32_t pageId) const;
 
     // Direct access to the underlying buffer pool.
     BufferPool* bufferPool() { return bp_.get(); }

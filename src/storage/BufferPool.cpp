@@ -549,9 +549,14 @@ bool BufferPool::flushPage(uint32_t pageId) {
     const auto it = pageMap_.find(pageId);
     if (it == pageMap_.end()) return true;  // not cached: nothing to write
     Frame& frame = frames_[it->second];
-    if (!frame.dirty) return true;
-    if (!writeToDisk(pageId, frame.data.data())) return false;
-    if (PageCrypto::enabled() && (tdeFd_ < 0 || ::fsync(tdeFd_) != 0)) return false;
+    if (!writeToDisk(pageId, frame.data.data())) {
+        frame.dirty = true;
+        return false;
+    }
+    if (PageCrypto::enabled() && (tdeFd_ < 0 || ::fsync(tdeFd_) != 0)) {
+        frame.dirty = true;
+        return false;
+    }
     frame.dirty = false;
     return true;
 }

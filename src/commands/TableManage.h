@@ -1852,6 +1852,9 @@ private:
         std::set<std::string> txnWrittenRelations;
         std::set<std::string> txnReadPages;       // relation-qualified page SIREAD
         std::set<std::string> txnWrittenPages;
+        // Physical heap pages that this transaction must consider for
+        // transaction-scoped writeback, independent of SSI bookkeeping.
+        std::set<std::pair<std::string, uint32_t>> txnHeapWritebackPages;
         std::set<SsiIndexPredicate> txnReadIndexPredicates;
         std::set<SsiIndexKey> txnWrittenIndexKeys;
         // Pages whose pre-image has already been logged in this transaction.

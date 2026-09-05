@@ -210,6 +210,15 @@ uint32_t PageAllocator::numPages() const {
     return numPages_;
 }
 
+std::optional<bool> PageAllocator::pageExistsOnDisk(uint32_t pageId) const {
+    if (!isOpen() || pageSize_ == 0) return std::nullopt;
+    std::error_code ec;
+    const uintmax_t bytes = std::filesystem::file_size(filename_, ec);
+    if (ec || bytes % pageSize_ != 0) return std::nullopt;
+    const uintmax_t pageCount = bytes / pageSize_;
+    return pageId < pageCount;
+}
+
 
 char* PageAllocator::fetchPage(uint32_t pageId) {
     if (!isOpen()) return nullptr;

@@ -25386,16 +25386,18 @@ DBStatus StorageEngine::updateInternal(
                     ? retireStatus : rollbackStatus;
             }
 
-            // Commit durability needs both sides of a cross-page version
+            // Commit writeback needs both sides of a cross-page version
             // chain, irrespective of whether SSI bookkeeping is enabled.
-            transactionContext().txnWrittenPages.insert(
-                ssiPageKey(dbname, tablename, pageId));
-            transactionContext().txnWrittenPages.insert(
-                ssiPageKey(dbname, tablename, newPageId));
+            transactionContext().txnHeapWritebackPages.insert(
+                {tablename, pageId});
+            transactionContext().txnHeapWritebackPages.insert(
+                {tablename, newPageId});
             if (transactionContext().txnIsolationLevel ==
                 IsolationLevel::SERIALIZABLE) {
                 const std::string newRidKey =
                     ssiRidKey(dbname, tablename, actualRid);
+                transactionContext().txnWrittenPages.insert(
+                    ssiPageKey(dbname, tablename, newPageId));
                 transactionContext().txnWrittenRids.insert(newRidKey);
                 std::lock_guard<std::mutex> ssiLock(ssiMutex_);
                 ssiWriteSets_[transactionContext().currentTxnId].insert(
@@ -36264,16 +36266,19 @@ void StorageEngine::logTxnInsert(const std::string& tableName, int64_t rowIdx,
     entry.rowIdx = rowIdx;
     entry.rowData = rowData;
     transactionContext().txnLog.push_back(std::move(entry));
+    uint32_t pageId = 0;
+    uint16_t slotId = 0;
+    decodeRid(rowIdx, pageId, slotId);
+    (void)slotId;
+    transactionContext().txnHeapWritebackPages.insert({tableName, pageId});
     if (transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE) {
         TableSchema tbl = getTableSchema(transactionContext().txnDB, tableName);
         recordSsiIndexKeys(
             transactionContext().txnDB, tableName, rowData, tbl);
         std::string key = ssiRidKey(transactionContext().txnDB, tableName, rowIdx);
         std::string relation = ssiRelationKey(transactionContext().txnDB, tableName);
-        uint32_t pageId = 0;
-        uint16_t slotId = 0;
-        decodeRid(rowIdx, pageId, slotId);
-        std::string page = ssiPageKey(transactionContext().txnDB, tableName, pageId);
+        std::string page = ssiPageKey(
+            transactionContext().txnDB, tableName, pageId);
         transactionContext().txnWrittenRids.insert(key);
         transactionContext().txnWrittenRelations.insert(relation);
         transactionContext().txnWrittenPages.insert(page);
@@ -36292,15 +36297,18 @@ void StorageEngine::logTxnUpdate(const std::string& tableName, int64_t rowIdx,
     entry.rowIdx = rowIdx;
     entry.rowData = oldRowData;
     transactionContext().txnLog.push_back(std::move(entry));
+    uint32_t pageId = 0;
+    uint16_t slotId = 0;
+    decodeRid(rowIdx, pageId, slotId);
+    (void)slotId;
+    transactionContext().txnHeapWritebackPages.insert({tableName, pageId});
     if (transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE) {
         TableSchema tbl = getTableSchema(transactionContext().txnDB, tableName);
         recordSsiIndexKeys(transactionContext().txnDB, tableName, oldRowData, tbl);
         std::string key = ssiRidKey(transactionContext().txnDB, tableName, rowIdx);
         std::string relation = ssiRelationKey(transactionContext().txnDB, tableName);
-        uint32_t pageId = 0;
-        uint16_t slotId = 0;
-        decodeRid(rowIdx, pageId, slotId);
-        std::string page = ssiPageKey(transactionContext().txnDB, tableName, pageId);
+        std::string page = ssiPageKey(
+            transactionContext().txnDB, tableName, pageId);
         transactionContext().txnWrittenRids.insert(key);
         transactionContext().txnWrittenRelations.insert(relation);
         transactionContext().txnWrittenPages.insert(page);
@@ -36319,15 +36327,18 @@ void StorageEngine::logTxnDelete(const std::string& tableName, int64_t rowIdx,
     entry.rowIdx = rowIdx;
     entry.rowData = oldRowData;
     transactionContext().txnLog.push_back(std::move(entry));
+    uint32_t pageId = 0;
+    uint16_t slotId = 0;
+    decodeRid(rowIdx, pageId, slotId);
+    (void)slotId;
+    transactionContext().txnHeapWritebackPages.insert({tableName, pageId});
     if (transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE) {
         TableSchema tbl = getTableSchema(transactionContext().txnDB, tableName);
         recordSsiIndexKeys(transactionContext().txnDB, tableName, oldRowData, tbl);
         std::string key = ssiRidKey(transactionContext().txnDB, tableName, rowIdx);
         std::string relation = ssiRelationKey(transactionContext().txnDB, tableName);
-        uint32_t pageId = 0;
-        uint16_t slotId = 0;
-        decodeRid(rowIdx, pageId, slotId);
-        std::string page = ssiPageKey(transactionContext().txnDB, tableName, pageId);
+        std::string page = ssiPageKey(
+            transactionContext().txnDB, tableName, pageId);
         transactionContext().txnWrittenRids.insert(key);
         transactionContext().txnWrittenRelations.insert(relation);
         transactionContext().txnWrittenPages.insert(page);
@@ -36730,6 +36741,7 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
     transactionContext().txnWrittenRelations.clear();
     transactionContext().txnReadPages.clear();
     transactionContext().txnWrittenPages.clear();
+    transactionContext().txnHeapWritebackPages.clear();
     transactionContext().txnReadIndexPredicates.clear();
     transactionContext().txnWrittenIndexKeys.clear();
     if (transactionContext().txnIsolationLevel != IsolationLevel::READ_UNCOMMITTED) {
@@ -37060,51 +37072,98 @@ DBStatus StorageEngine::commitTransaction() {
     // reconstruct.
     const std::string committingDb = transactionContext().txnDB;
     const uint64_t committingTxnId = transactionContext().currentTxnId;
-    // Durability before publishing COMMIT.  Heap durability: flush ONLY
-    // the pages this transaction itself wrote (txnWrittenPages, recorded
-    // by logTxnInsert/Update/Delete).  Those pages are still protected by
-    // this transaction's page locks, so the flush cannot race a concurrent
-    // writer — unlike the previous whole-pool flush (the jbd2 world-stop
-    // amplifier: 207MB/90s under 4-client load) and unlike deferring to
-    // the bgwriter (which takes no page locks and would tear pages).
-    // Pages dirtied by earlier transactions are the bgwriter's job.
-    {
-        const auto& ctx = transactionContext();
-        for (const auto& page : ctx.txnWrittenPages) {
-            // key format: dbname  table  "page"  pageId
-            const size_t p1 = page.find('\x1f');
-            const size_t p2 = page.find('\x1f', p1 + 1);
-            const size_t p3 = page.find('\x1f', p2 + 1);
-            if (p1 == std::string::npos || p2 == std::string::npos ||
-                p3 == std::string::npos) {
-                continue;
-            }
-            const std::string pageDb = page.substr(0, p1);
-            const std::string pageTable = page.substr(p1 + 1, p2 - p1 - 1);
-            const uint32_t pageId = static_cast<uint32_t>(
-                std::strtoul(page.c_str() + p3 + 1, nullptr, 10));
-            if (pageDb != committingDb) continue;
-            PageAllocator* pa = getPageAllocator(pageDb, pageTable);
-            if (pa && pa->bufferPool() &&
-                !pa->bufferPool()->flushPage(pageId)) {
-                rollbackTransaction();
-                return DBStatus::IO_ERROR;
-            }
+    // Resolve the exact heap pages before the commit becomes irrevocable.
+    struct CommitHeapPage {
+        std::string tablename;
+        uint32_t pageId = 0;
+        PageAllocator* allocator = nullptr;
+    };
+    std::vector<CommitHeapPage> commitHeapPages;
+    for (const auto& [tableName, pageId] :
+         transactionContext().txnHeapWritebackPages) {
+        if (tableName.empty() || pageId == 0) {
+            rollbackTransaction();
+            return DBStatus::CORRUPTED_DATA;
         }
+        // A relation can legitimately disappear after its last DML (for
+        // example INSERT followed by DROP in one DDL-capable transaction).
+        if (!tableExists(committingDb, tableName)) continue;
+        PageAllocator* allocator = getPageAllocator(committingDb, tableName);
+        if (!allocator || !allocator->bufferPool()) {
+            rollbackTransaction();
+            return DBStatus::IO_ERROR;
+        }
+        const std::optional<bool> existsOnDisk =
+            allocator->pageExistsOnDisk(pageId);
+        if (!existsOnDisk.has_value()) {
+            rollbackTransaction();
+            return DBStatus::IO_ERROR;
+        }
+        // Extending only the data page would leave the on-disk allocator
+        // header's numPages behind and make the relation fail validation
+        // after an immediate crash. A fresh extent remains dirty so its WAL
+        // image can recreate both the allocation and page during redo.
+        if (!*existsOnDisk) continue;
+        commitHeapPages.push_back({tableName, pageId, allocator});
     }
+
     if (!flushDatabaseCaches(committingDb, /*heapPages=*/false)) {
         rollbackTransaction();
         return DBStatus::IO_ERROR;
     }
+
+    // DML releases short-lived page locks after each mutation. Reacquire the
+    // written pages in the set's deterministic order and hold them across the
+    // WAL durability boundary plus writeback. This prevents both user writers
+    // and a simultaneous commit from changing a frame while it is copied.
+    size_t lockedCommitHeapPages = 0;
+    const auto releaseCommitHeapPageLocks = [&]() {
+        while (lockedCommitHeapPages > 0) {
+            const auto& page = commitHeapPages[lockedCommitHeapPages - 1];
+            lockManager_.pageUnlock(
+                committingDb, page.tablename, page.pageId);
+            --lockedCommitHeapPages;
+        }
+    };
+    for (const auto& page : commitHeapPages) {
+        if (!lockManager_.pageLockExclusive(
+                committingDb, page.tablename, page.pageId)) {
+            releaseCommitHeapPageLocks();
+            rollbackTransaction();
+            return DBStatus::LOCK_CONFLICT;
+        }
+        ++lockedCommitHeapPages;
+    }
+
     WALManager* wal = getWAL(committingDb);
     if (!wal) {
+        releaseCommitHeapPageLocks();
         rollbackTransaction();
         return DBStatus::IO_ERROR;
     }
     const Lsn commitLsn = walXactCommit(committingDb, committingTxnId);
     if (commitLsn == INVALID_LSN || !wal->XLogFlush(commitLsn)) {
+        releaseCommitHeapPageLocks();
         rollbackTransaction();
         return DBStatus::IO_ERROR;
+    }
+
+    // WAL is now the durable source of truth, including every page image that
+    // preceded the COMMIT record. Write back only this transaction's pages;
+    // on failure retain their dirty bits for checkpoint/bgwriter retry. An
+    // already-durable COMMIT must never be followed by a contradictory ABORT.
+    bool heapWritebackOk = true;
+    for (const auto& page : commitHeapPages) {
+        if (!page.allocator->bufferPool()->flushPage(page.pageId)) {
+            heapWritebackOk = false;
+        }
+    }
+    releaseCommitHeapPageLocks();
+    if (!heapWritebackOk) {
+        std::cerr
+            << "[storage] COMMIT WAL is durable but heap writeback failed for "
+            << committingDb << ":" << committingTxnId
+            << "; retaining dirty pages for retry" << std::endl;
     }
 
     // Logical decoding (P2-5): stream buffered row changes into every
@@ -37193,6 +37252,7 @@ DBStatus StorageEngine::commitTransaction() {
         ssiInEdges_.clear();
     }
     transactionContext().txnLog.clear();
+    transactionContext().txnHeapWritebackPages.clear();
     transactionContext().specializedIndexTables.clear();
     // Logical decoding: rollback discards buffered changes — subscribers
     // never see uncommitted work.
@@ -38245,6 +38305,7 @@ DBStatus StorageEngine::rollbackTransaction() {
     transactionContext().txnWrittenRelations.clear();
     transactionContext().txnReadPages.clear();
     transactionContext().txnWrittenPages.clear();
+    transactionContext().txnHeapWritebackPages.clear();
     transactionContext().txnReadIndexPredicates.clear();
     transactionContext().txnWrittenIndexKeys.clear();
 
@@ -38810,6 +38871,7 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
     transactionContext().txnWrittenRelations.clear();
     transactionContext().txnReadPages.clear();
     transactionContext().txnWrittenPages.clear();
+    transactionContext().txnHeapWritebackPages.clear();
     transactionContext().txnReadIndexPredicates.clear();
     transactionContext().txnWrittenIndexKeys.clear();
 
