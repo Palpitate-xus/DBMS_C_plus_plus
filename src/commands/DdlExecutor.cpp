@@ -335,14 +335,13 @@ static int16_t tableCheckConstraintCount(const TableSchema& table) {
 static void registerTableInCatalog(CatalogManager& cat, const TableSchema& tbl,
                                    const std::string& logicalSchema,
                                    const std::string& logicalName) {
-    Oid nspOid = INVALID_OID;
     const auto* ns = cat.findNamespaceByName(logicalSchema);
     if (!ns) {
-        // Defensive: CREATE TABLE should only reference an existing schema,
-        // but create it if missing to keep catalog consistent.
-        nspOid = cat.createNamespace(logicalSchema, 10); // owner=10 (bootstrap)
-    } else {
-        nspOid = ns->oid;
+        throw std::runtime_error("table schema has no catalog entry");
+    }
+    const Oid nspOid = ns->oid;
+    if (cat.findClassByName(logicalName, nspOid)) {
+        throw std::runtime_error("table name already exists in catalog");
     }
 
     PgClassRow cls;
@@ -2774,6 +2773,7 @@ static bool executeCreateTableAs(const CreateTableStmt* stmt, Session& s,
         }
     }
 
+    transaction.markSnapshotDirty();
     DBStatus res = g_engine.createTable(s.currentDB, newTbl);
     if (res != DBStatus::OK) {
         std::cout << "CTAS: create table failed" << std::endl;
@@ -2912,7 +2912,9 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
+    const bool outerTransaction = g_engine.inTransaction();
     DdlTransaction txn(s);
+    if (!outerTransaction) txn.enableSnapshotRollback();
     if (!txn.begin()) {
         std::cout << "DDL transaction begin failed" << std::endl;
         return true;
@@ -2934,6 +2936,34 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         std::cout << "ERROR: schema \"" << targetSchema
                   << "\" does not exist" << std::endl;
         return true;
+    }
+    CatalogManager* tableCatalog = nullptr;
+    if (!temporary) {
+        try {
+            tableCatalog = &g_engine.catalogService().get(s.currentDB);
+            const PgNamespaceRow* targetNamespace =
+                tableCatalog->findNamespaceByName(targetSchema);
+            if (!targetNamespace) {
+                std::cout << "ERROR: schema \"" << targetSchema
+                          << "\" has no catalog entry" << std::endl;
+                return true;
+            }
+            if (tableCatalog->findClassByName(
+                    targetName.name, targetNamespace->oid)) {
+                if (stmt->ifNotExists) {
+                    std::cout << "NOTICE: relation \"" << stmt->tableName
+                              << "\" already exists, skipping" << std::endl;
+                    return false;
+                }
+                std::cout << "ERROR: relation \"" << stmt->tableName
+                          << "\" already exists" << std::endl;
+                return true;
+            }
+        } catch (const std::exception& error) {
+            std::cout << "CREATE TABLE catalog preflight failed: "
+                      << error.what() << std::endl;
+            return true;
+        }
     }
     const std::string tname = temporary
                                   ? tempTablePrefix(s, stmt->tableName)
@@ -2992,6 +3022,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         child.subPartitionKey.clear();
         child.subHashPartitions = 0;
 
+        txn.markSnapshotDirty();
         if (g_engine.createTable(s.currentDB, child) != DBStatus::OK) {
             std::cout << "CREATE TABLE partition failed" << std::endl;
             return true;
@@ -3005,23 +3036,23 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             return true;
         }
 
-        try {
-            if (!temporary) {
-                CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
-                CatalogManager::QualifiedName qn;
-                if (!CatalogManager::parseQualifiedName(stmt->tableName, qn)) {
-                    qn.schema = "";
-                    qn.name = stmt->tableName;
+        if (!temporary) {
+            try {
+                CatalogManager& cat = *tableCatalog;
+                registerTableInCatalog(
+                    cat, child, targetSchema, targetName.name);
+                if (!cat.persistAll()) {
+                    throw std::runtime_error(
+                        "cannot persist partition catalog");
                 }
-                if (qn.schema.empty()) qn.schema = "public";
-                registerTableInCatalog(cat, child, qn.schema, qn.name);
+            } catch (const std::exception& e) {
+                std::cout << "CREATE TABLE partition catalog registration failed: "
+                          << e.what() << std::endl;
+                return true;
             }
-        } catch (const std::exception& e) {
-            std::cerr << "WARNING: partition catalog registration failed: "
-                      << e.what() << std::endl;
         }
         if (!temporary) {
-            g_engine.applyDefaultPrivileges(s.currentDB, "public", "table", tname,
+            g_engine.applyDefaultPrivileges(s.currentDB, targetSchema, "table", tname,
                                             effectiveSessionRole(s));
         }
         registerTemporaryTable();
@@ -3031,29 +3062,25 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
 
     // CREATE TABLE ... AS SELECT ...
     if (!stmt->asSelect.empty()) {
-        bool err = executeCreateTableAs(stmt, s, tname, txn);
-        if (!err) {
+        if (executeCreateTableAs(stmt, s, tname, txn)) return true;
+        if (!temporary) {
             try {
-                if (!temporary) {
-                    dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
-                    CatalogManager::QualifiedName qn;
-                    if (!CatalogManager::parseQualifiedName(
-                            stmt->tableName, qn)) {
-                        qn.schema.clear();
-                        qn.name = stmt->tableName;
-                    }
-                    if (qn.schema.empty()) qn.schema = "public";
-                    registerTableInCatalog(
-                        cat, g_engine.getTableSchema(s.currentDB, tname),
-                        qn.schema, qn.name);
+                CatalogManager& cat = *tableCatalog;
+                registerTableInCatalog(
+                    cat, g_engine.getTableSchema(s.currentDB, tname),
+                    targetSchema, targetName.name);
+                if (!cat.persistAll()) {
+                    throw std::runtime_error("cannot persist CTAS catalog");
                 }
             } catch (const std::exception& e) {
-                std::cerr << "WARNING: CTAS catalog registration failed: " << e.what() << std::endl;
+                std::cout << "CTAS catalog registration failed: "
+                          << e.what() << std::endl;
+                return true;
             }
-            registerTemporaryTable();
-            if (!txn.commit()) return true;
         }
-        return err;
+        registerTemporaryTable();
+        if (!txn.commit()) return true;
+        return false;
     }
 
     TableSchema tbl;
@@ -3342,6 +3369,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     }
 
     // Record inheritance edges now that the child table exists.
+    txn.markSnapshotDirty();
     if (!stmt->inherits.empty()) {
         std::filesystem::path inhPath = std::filesystem::path(g_engine.dbPath(s.currentDB)) / ".inherits";
         std::ofstream ofs(inhPath, std::ios::app);
@@ -3402,56 +3430,47 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                 tc.deferrable, tc.initiallyDeferred), "Constraint")) return true;
     }
     if (!temporary) {
-        g_engine.applyDefaultPrivileges(s.currentDB, "public", "table", tname,
+        g_engine.applyDefaultPrivileges(s.currentDB, targetSchema, "table", tname,
                                         effectiveSessionRole(s));
     }
 
-    // Register the table in the catalog (best-effort; storage is the authority).
-    try {
-        if (!temporary) {
-            CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
-            CatalogManager::QualifiedName qn;
-            if (!CatalogManager::parseQualifiedName(stmt->tableName, qn)) {
-                qn.schema = "";
-                qn.name = stmt->tableName;
+    if (!temporary) {
+        try {
+            CatalogManager& cat = *tableCatalog;
+            registerTableInCatalog(
+                cat, tbl, targetSchema, targetName.name);
+            const PgClassRow* tableRelation = cat.findClassByName(
+                targetName.name,
+                cat.findNamespaceByName(targetSchema)->oid);
+            if (!tableRelation || tableRelation->relkind != 'r') {
+                throw std::runtime_error("created table catalog row is missing");
             }
-            if (qn.schema.empty()) qn.schema = "public";
-            registerTableInCatalog(cat, tbl, qn.schema, qn.name);
-        }
-    } catch (const std::exception& e) {
-        std::cerr << "WARNING: catalog registration failed: " << e.what() << std::endl;
-    }
-
-    // Register sequence ownership for columns with DEFAULT nextval('seqname').
-    try {
-        if (!temporary) {
-            dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
-            const auto* nsPublic = cat.findNamespaceByName("public");
-            auto tableRel = cat.resolveRelation(tname, {"public"});
-            if (nsPublic && tableRel) {
-                for (size_t i = 0; i < tbl.len; ++i) {
-                    std::string seq = extractNextvalSequence(tbl.cols[i].defaultValue);
-                    if (seq.empty()) continue;
-                    // Use bare sequence name for catalog lookup.
-                    std::string bareSeq = seq;
-                    size_t dot = bareSeq.rfind('.');
-                    if (dot != std::string::npos) bareSeq = bareSeq.substr(dot + 1);
-                    auto seqRel = cat.resolveRelation(bareSeq, {"public"});
-                    if (!seqRel) continue;
-                    PgDependRow dep;
-                    dep.classid = dbms::PgClassOid_Class;
-                    dep.objid = seqRel->oid;
-                    dep.objsubid = 0;
-                    dep.refclassid = dbms::PgClassOid_Class;
-                    dep.refobjid = tableRel->oid;
-                    dep.refobjsubid = 0;
-                    dep.deptype = 'a';
-                    cat.addDepend(dep);
-                }
+            const Oid tableOid = tableRelation->oid;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                const std::string sequenceName =
+                    extractNextvalSequence(tbl.cols[i].defaultValue);
+                if (sequenceName.empty()) continue;
+                const PgClassRow* sequence = cat.resolveRelation(
+                    sequenceName, {targetSchema, "public"});
+                if (!sequence || sequence->relkind != 'S') continue;
+                PgDependRow dependency;
+                dependency.classid = PgClassOid_Class;
+                dependency.objid = sequence->oid;
+                dependency.objsubid = 0;
+                dependency.refclassid = PgClassOid_Class;
+                dependency.refobjid = tableOid;
+                dependency.refobjsubid = 0;
+                dependency.deptype = 'a';
+                cat.addDepend(dependency);
             }
+            if (!cat.persistAll()) {
+                throw std::runtime_error("cannot persist table catalog");
+            }
+        } catch (const std::exception& e) {
+            std::cout << "CREATE TABLE catalog registration failed: "
+                      << e.what() << std::endl;
+            return true;
         }
-    } catch (const std::exception& e) {
-        std::cerr << "WARNING: sequence ownership registration failed: " << e.what() << std::endl;
     }
 
     registerTemporaryTable();

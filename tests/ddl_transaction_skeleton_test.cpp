@@ -331,22 +331,37 @@ static void test_explicit_transaction_ddl_rollback_and_savepoint() {
     assert(!ddl.executeSql("CREATE TABLE outer_second (id INT PRIMARY KEY)", s));
     assert(g_engine.tableExists(db, "outer_first"));
     assert(g_engine.tableExists(db, "outer_second"));
+    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
+    assert(catalog.resolveRelation("outer_first", {"public"}) != nullptr);
+    assert(catalog.resolveRelation("outer_second", {"public"}) != nullptr);
     assert(g_engine.prepareTransaction("ddl_prepare_rejected") ==
            dbms::DBStatus::INVALID_VALUE);
     assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
     assert(!g_engine.tableExists(db, "outer_first"));
     assert(!g_engine.tableExists(db, "outer_second"));
+    assert(catalog.resolveRelation("outer_first", {"public"}) == nullptr);
+    assert(catalog.resolveRelation("outer_second", {"public"}) == nullptr);
 
     assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
     assert(!ddl.executeSql("CREATE TABLE savepoint_first (id INT PRIMARY KEY)", s));
     assert(g_engine.savepoint("after_first") == dbms::DBStatus::OK);
     assert(!ddl.executeSql("CREATE TABLE savepoint_second (id INT PRIMARY KEY)", s));
+    assert(catalog.resolveRelation("savepoint_first", {"public"}) != nullptr);
+    assert(catalog.resolveRelation("savepoint_second", {"public"}) != nullptr);
     assert(g_engine.rollbackToSavepoint("after_first") == dbms::DBStatus::OK);
     assert(g_engine.tableExists(db, "savepoint_first"));
     assert(!g_engine.tableExists(db, "savepoint_second"));
+    assert(catalog.resolveRelation("savepoint_first", {"public"}) != nullptr);
+    assert(catalog.resolveRelation("savepoint_second", {"public"}) == nullptr);
     assert(g_engine.commitTransaction() == dbms::DBStatus::OK);
     assert(g_engine.tableExists(db, "savepoint_first"));
 
+    g_engine.catalogService().evict(db);
+    dbms::CatalogManager& reloaded = g_engine.catalogService().get(db);
+    assert(reloaded.resolveRelation("savepoint_first", {"public"}) != nullptr);
+    assert(reloaded.resolveRelation("savepoint_second", {"public"}) == nullptr);
+
+    g_engine.catalogService().evict(db);
     cleanup(db);
     std::cout << "[DDL-TXN] explicit transaction DDL rollback and savepoint OK" << std::endl;
 }

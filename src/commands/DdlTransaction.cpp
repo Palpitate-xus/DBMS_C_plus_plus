@@ -54,6 +54,41 @@ bool undoIndexCreate(StorageEngine& engine, const std::string& db,
                               CatalogManager::DropBehavior::Cascade, &error);
 }
 
+bool undoTableCreate(StorageEngine& engine, const std::string& db,
+                     const DdlTransaction::RecordedOp& op) {
+    const DBStatus storageStatus = engine.dropTable(db, op.name);
+    if (storageStatus != DBStatus::OK &&
+        storageStatus != DBStatus::TABLE_NOT_FOUND) {
+        return false;
+    }
+
+    auto& catalog = engine.catalogService().get(db);
+    const auto name = CatalogService::logicalName(op.name);
+    const std::string logicalName = name.schema.empty()
+        ? name.name : name.schema + "." + name.name;
+    const PgClassRow* relation =
+        catalog.resolveRelation(logicalName, {"public"});
+    if (!relation) return true;
+    if (relation->relkind != 'r') return false;
+
+    const Oid relationOid = relation->oid;
+    std::string error;
+    if (!catalog.dropObject(
+            PgClassOid_Class, relationOid,
+            CatalogManager::DropBehavior::Cascade, &error)) {
+        return false;
+    }
+    // A dirty physical snapshot is about to replace the entire database
+    // directory and evict this CatalogManager. Do not retry the failing
+    // catalog publication that caused the statement rollback; the snapshot
+    // is the authoritative durable undo in this path.
+    if (engine.hasTransactionBackup() &&
+        engine.transactionBackupDirty()) {
+        return true;
+    }
+    return catalog.persistAll();
+}
+
 } // anonymous namespace
 
 DdlTransaction::DdlTransaction(Session& session)
@@ -265,8 +300,7 @@ bool DdlTransaction::undoCreate(StorageEngine& engine, const std::string& db,
             engine.dropSchema(db, op.name, true);
             break;
         case DdlObjectKind::Table:
-            engine.dropTable(db, op.name);
-            break;
+            return undoTableCreate(engine, db, op);
         case DdlObjectKind::Index:
             return undoIndexCreate(engine, db, op);
         case DdlObjectKind::Sequence:

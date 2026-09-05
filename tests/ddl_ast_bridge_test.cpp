@@ -11,6 +11,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <unistd.h>
 #include "test_utils.h"
 
 // Stubs for main.cpp helpers referenced by DdlExecutor (provided by tests/test_stubs.cpp)
@@ -993,6 +994,34 @@ static void test_index_metadata_failures_are_not_success() {
     std::cout << "[DDL] index metadata storage errors propagate OK" << std::endl;
 }
 
+static void test_table_catalog_persistence_failure_rolls_back() {
+    const std::string db = testDbPath("table_catalog_persist_error");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    const fs::path blockedTemporary =
+        fs::path(db) / "pg_catalog" /
+        ("pg_class.cat.tmp." +
+         std::to_string(static_cast<unsigned long long>(::getpid())));
+    fs::create_directories(blockedTemporary);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(ddl.executeSql("CREATE TABLE must_rollback (id INT)", s));
+    assert(!g_engine.tableExists(db, "must_rollback"));
+
+    fs::remove_all(blockedTemporary);
+    g_engine.catalogService().evict(db);
+    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
+    assert(catalog.resolveRelation("must_rollback", {"public"}) == nullptr);
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[DDL] table catalog persistence failure rollback OK"
+              << std::endl;
+}
+
 int main() {
     cleanupAllTestData();
     dbms::TypeRegistry::instance().bootstrap();
@@ -1019,6 +1048,7 @@ int main() {
     test_database_storage_errors_are_not_success();
     test_domain_storage_errors_are_not_success();
     test_index_metadata_failures_are_not_success();
+    test_table_catalog_persistence_failure_rolls_back();
     std::cout << "[DDL] all passed" << std::endl;
     return 0;
 }
