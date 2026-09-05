@@ -102,6 +102,10 @@ public:
     const PgAttributeRow* findAttribute(Oid relOid, const std::string& attname) const;
     bool renameAttribute(Oid relOid, const std::string& oldName,
                          const std::string& newName);
+    // Atomically replace a relation's live user-column rows and keep
+    // pg_class.relnatts aligned with the replacement set.
+    bool replaceAttributes(Oid relOid,
+                           const std::vector<PgAttributeRow>& attributes);
     bool dropAttributes(Oid relOid);
 
     // =====================================================================

@@ -191,6 +191,84 @@ static void test_alter_column_rename_updates_catalog() {
               << std::endl;
 }
 
+static void test_alter_column_definitions_update_catalog() {
+    const std::string db = testDbPath("ddl_bridge_column_catalog");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE TABLE catalog_columns (removed INT, retained VARCHAR(20))", s));
+
+    dbms::CatalogManager& initialCatalog =
+        g_engine.catalogService().get(db);
+    const auto* relation =
+        initialCatalog.resolveRelation("catalog_columns", {"public"});
+    assert(relation != nullptr && relation->relnatts == 2);
+    const dbms::Oid relationOid = relation->oid;
+    const auto* retained =
+        initialCatalog.findAttribute(relationOid, "retained");
+    assert(retained != nullptr && retained->attnum == 2);
+    const dbms::Oid originalType = retained->atttypid;
+
+    assert(!ddl.executeSql(
+        "ALTER TABLE catalog_columns ADD COLUMN added BIGINT DEFAULT 7", s));
+    relation = initialCatalog.findClass(relationOid);
+    assert(relation != nullptr && relation->relnatts == 3);
+    const auto* added = initialCatalog.findAttribute(relationOid, "added");
+    assert(added != nullptr && added->attnum == 3 && added->atthasdef);
+
+    assert(!ddl.executeSql(
+        "ALTER TABLE catalog_columns ALTER COLUMN retained TYPE BIGINT", s));
+    retained = initialCatalog.findAttribute(relationOid, "retained");
+    assert(retained != nullptr && retained->atttypid != originalType &&
+           retained->attlen == 8);
+
+    assert(!ddl.executeSql(
+        "ALTER TABLE catalog_columns ALTER COLUMN retained SET DEFAULT 9", s));
+    assert(!ddl.executeSql(
+        "ALTER TABLE catalog_columns ALTER COLUMN retained SET NOT NULL", s));
+    retained = initialCatalog.findAttribute(relationOid, "retained");
+    assert(retained != nullptr && retained->atthasdef && retained->attnotnull);
+
+    assert(!ddl.executeSql(
+        "ALTER TABLE catalog_columns ALTER COLUMN retained DROP DEFAULT", s));
+    assert(!ddl.executeSql(
+        "ALTER TABLE catalog_columns ALTER COLUMN retained DROP NOT NULL", s));
+    retained = initialCatalog.findAttribute(relationOid, "retained");
+    assert(retained != nullptr && !retained->atthasdef &&
+           !retained->attnotnull);
+
+    assert(!ddl.executeSql(
+        "ALTER TABLE catalog_columns DROP COLUMN removed", s));
+    relation = initialCatalog.findClass(relationOid);
+    assert(relation != nullptr && relation->relnatts == 2);
+    assert(initialCatalog.findAttribute(relationOid, "removed") == nullptr);
+    retained = initialCatalog.findAttribute(relationOid, "retained");
+    added = initialCatalog.findAttribute(relationOid, "added");
+    assert(retained != nullptr && retained->attnum == 1);
+    assert(added != nullptr && added->attnum == 2 && added->atthasdef);
+
+    g_engine.catalogService().evict(db);
+    dbms::CatalogManager& reloaded = g_engine.catalogService().get(db);
+    relation = reloaded.findClass(relationOid);
+    assert(relation != nullptr && relation->relnatts == 2);
+    assert(reloaded.findAttribute(relationOid, "removed") == nullptr);
+    retained = reloaded.findAttribute(relationOid, "retained");
+    added = reloaded.findAttribute(relationOid, "added");
+    assert(retained != nullptr && retained->attnum == 1 &&
+           retained->attlen == 8 && !retained->atthasdef &&
+           !retained->attnotnull);
+    assert(added != nullptr && added->attnum == 2 && added->atthasdef);
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[DDL] ALTER column definitions update catalog OK"
+              << std::endl;
+}
+
 static void test_schema_qualified_rename_preserves_schema() {
     const std::string db = testDbPath("ddl_bridge_schema_rename");
     cleanup(db);
@@ -589,6 +667,7 @@ int main() {
     test_create_table_registers_in_catalog();
     test_alter_table_rename_updates_catalog();
     test_alter_column_rename_updates_catalog();
+    test_alter_column_definitions_update_catalog();
     test_schema_qualified_rename_preserves_schema();
     test_create_index_sequence();
     test_drop_index_uses_sql_name();

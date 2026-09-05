@@ -4,6 +4,7 @@
 #include <sstream>
 #include <iostream>
 #include <algorithm>
+#include <limits>
 #include <set>
 #include <functional>
 #include <fcntl.h>
@@ -499,6 +500,49 @@ bool CatalogManager::renameAttribute(
     }
     if (!target) return false;
     target->attname = newName;
+    return true;
+}
+
+bool CatalogManager::replaceAttributes(
+    Oid relOid, const std::vector<PgAttributeRow>& attributes) {
+    if (relOid == INVALID_OID ||
+        attributes.size() >
+            static_cast<size_t>(std::numeric_limits<int16_t>::max())) {
+        return false;
+    }
+
+    std::set<std::string> names;
+    std::set<int16_t> numbers;
+    for (const auto& attribute : attributes) {
+        if (attribute.attrelid != relOid || attribute.attname.empty() ||
+            attribute.attnum <= 0 ||
+            !names.insert(attribute.attname).second ||
+            !numbers.insert(attribute.attnum).second) {
+            return false;
+        }
+    }
+    for (size_t index = 0; index < attributes.size(); ++index) {
+        if (numbers.count(static_cast<int16_t>(index + 1)) == 0) {
+            return false;
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto classIt = classByOid_.find(relOid);
+    if (classIt == classByOid_.end() ||
+        classIt->second >= classes_.size()) {
+        return false;
+    }
+    std::vector<PgAttributeRow> replacement;
+    replacement.reserve(attributes_.size() + attributes.size());
+    for (const auto& current : attributes_) {
+        if (current.attrelid != relOid) replacement.push_back(current);
+    }
+    replacement.insert(
+        replacement.end(), attributes.begin(), attributes.end());
+    attributes_.swap(replacement);
+    classes_[classIt->second].relnatts =
+        static_cast<int16_t>(attributes.size());
     return true;
 }
 

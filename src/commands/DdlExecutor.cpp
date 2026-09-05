@@ -283,6 +283,9 @@ static bool anyTypeExists(const std::string& dbname, const std::string& name) {
 static Oid ensureTypeInCatalog(CatalogManager& cat, Oid nspOid, const Column& col) {
     Oid typid = mapBuiltinTypeNameToOid(col.dataType);
     if (typid != INVALID_OID) return typid;
+    if (const auto* existing = cat.findTypeByName(col.dataType, nspOid)) {
+        return existing->oid;
+    }
 
     PgTypeRow typ;
     typ.typname = col.dataType;
@@ -291,6 +294,31 @@ static Oid ensureTypeInCatalog(CatalogManager& cat, Oid nspOid, const Column& co
     typ.typtype = 'b';
     typ.typcategory = 'U';
     return cat.createType(typ);
+}
+
+static PgAttributeRow catalogAttributeForColumn(
+    CatalogManager& cat, Oid relationOid, Oid namespaceOid,
+    const Column& column, size_t columnIndex,
+    const PgAttributeRow* previous = nullptr) {
+    PgAttributeRow attribute = previous ? *previous : PgAttributeRow{};
+    attribute.attrelid = relationOid;
+    attribute.attnum = static_cast<int16_t>(columnIndex + 1);
+    attribute.attname = column.dataName;
+    attribute.atttypid = ensureTypeInCatalog(cat, namespaceOid, column);
+    attribute.attlen = column.isVariableLength
+        ? static_cast<int16_t>(-1)
+        : static_cast<int16_t>(column.dsize);
+    attribute.attndims = column.isArray ? 1 : 0;
+    attribute.atttypmod = -1;
+    attribute.attnotnull = !column.isNull;
+    attribute.atthasdef = !column.defaultValue.empty();
+    attribute.attstorage = column.isVariableLength ? 'x' : 'p';
+    attribute.attidentity = column.isAutoIncrement ? 'd' : '\0';
+    attribute.attgenerated = column.generatedExpr.empty()
+        ? '\0' : (column.generatedKind == 'v' ? 'v' : 's');
+    attribute.attislocal = true;
+    attribute.attisdropped = false;
+    return attribute;
 }
 
 static void registerTableInCatalog(CatalogManager& cat, const TableSchema& tbl,
@@ -319,22 +347,8 @@ static void registerTableInCatalog(CatalogManager& cat, const TableSchema& tbl,
     Oid classOid = cat.createClass(cls);
 
     for (size_t i = 0; i < tbl.len; ++i) {
-        const Column& col = tbl.cols[i];
-        PgAttributeRow attr;
-        attr.attrelid = classOid;
-        attr.attnum = static_cast<int16_t>(i + 1);
-        attr.attname = col.dataName;
-        attr.atttypid = ensureTypeInCatalog(cat, nspOid, col);
-        attr.attlen = col.isVariableLength ? -1 : static_cast<int16_t>(col.dsize);
-        attr.atttypmod = -1;
-        attr.attnotnull = !col.isNull;
-        attr.atthasdef = !col.defaultValue.empty();
-        attr.attstorage = col.isVariableLength ? 'x' : 'p';
-        attr.attislocal = true;
-        attr.attisdropped = false;
-        if (col.isAutoIncrement) attr.attidentity = 'd';
-        if (!col.generatedExpr.empty()) attr.attgenerated = col.generatedKind == 'v' ? 'v' : 's';
-        cat.addAttribute(attr);
+        cat.addAttribute(catalogAttributeForColumn(
+            cat, classOid, nspOid, tbl.cols[i], i));
     }
 
     for (size_t i = 0; i < tbl.fkLen; ++i) {
@@ -347,6 +361,60 @@ static void registerTableInCatalog(CatalogManager& cat, const TableSchema& tbl,
         dep.refobjsubid = 0;
         dep.deptype = 'n';
         cat.addDepend(dep);
+    }
+}
+
+static bool synchronizeTableAttributesInCatalog(
+    const std::string& dbname, const std::string& physicalTableName) {
+    try {
+        CatalogManager& catalog = g_engine.catalogService().get(dbname);
+        const auto qualifiedName =
+            CatalogService::logicalName(physicalTableName);
+        const std::string schemaName = qualifiedName.schema.empty()
+            ? "public" : qualifiedName.schema;
+        const auto* relation = catalog.resolveRelation(
+            qualifiedName.name, {schemaName});
+        // Storage-only relations intentionally remain outside pg_catalog.
+        if (!relation) return true;
+        const Oid relationOid = relation->oid;
+        const Oid namespaceOid = relation->relnamespace;
+
+        const TableSchema table =
+            g_engine.getTableSchema(dbname, physicalTableName);
+        if (table.len == 0) return false;
+        const std::vector<PgAttributeRow> previous =
+            catalog.findAttributes(relationOid);
+        std::vector<PgAttributeRow> replacement;
+        replacement.reserve(table.len);
+        for (size_t columnIndex = 0; columnIndex < table.len;
+             ++columnIndex) {
+            const Column& column = table.cols[columnIndex];
+            const PgAttributeRow* retained = nullptr;
+            for (const auto& attribute : previous) {
+                if (attribute.attname == column.dataName) {
+                    retained = &attribute;
+                    break;
+                }
+            }
+            if (!retained) {
+                for (const auto& attribute : previous) {
+                    if (attribute.attnum ==
+                        static_cast<int16_t>(columnIndex + 1)) {
+                        retained = &attribute;
+                        break;
+                    }
+                }
+            }
+            replacement.push_back(catalogAttributeForColumn(
+                catalog, relationOid, namespaceOid, column,
+                columnIndex, retained));
+        }
+        return catalog.replaceAttributes(relationOid, replacement) &&
+               catalog.persistAll();
+    } catch (const std::exception& error) {
+        std::cerr << "ALTER TABLE column catalog update failed: "
+                  << error.what() << std::endl;
+        return false;
     }
 }
 
@@ -719,6 +787,13 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     break;
                 }
                 if (!alterStatusOk(status, "Column")) return true;
+                if (!tableIsTemporary &&
+                    !synchronizeTableAttributesInCatalog(
+                        s.currentDB, tableName)) {
+                    std::cout << "ALTER TABLE ADD COLUMN catalog update failed"
+                              << std::endl;
+                    return true;
+                }
                 break;
             }
             case AlterTableStmt::Action::DropColumn:
@@ -732,6 +807,13 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     break;
                 }
                 if (!alterStatusOk(status, "Column")) return true;
+                if (!tableIsTemporary &&
+                    !synchronizeTableAttributesInCatalog(
+                        s.currentDB, tableName)) {
+                    std::cout << "ALTER TABLE DROP COLUMN catalog update failed"
+                              << std::endl;
+                    return true;
+                }
                 break;
             case AlterTableStmt::Action::RenameColumn:
                 if (sub.name.empty() || sub.newName.empty()) {
@@ -861,6 +943,13 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     return true;
                 }
                 if (!alterStatusOk(status, "Column")) return true;
+                if (!tableIsTemporary &&
+                    !synchronizeTableAttributesInCatalog(
+                        s.currentDB, tableName)) {
+                    std::cout << "ALTER COLUMN catalog update failed"
+                              << std::endl;
+                    return true;
+                }
                 break;
             }
             case AlterTableStmt::Action::SetStatistics: {
