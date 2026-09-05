@@ -4837,14 +4837,11 @@ bool DdlExecutor::executeCreateMaterializedView(const CreateViewStmt* stmt, Sess
     dbms::TableSchema tbl;
     tbl.tablename = backingTable;
     tbl.owner = effectiveSessionRole(s);
-    for (const auto& cname : colNames) {
-        dbms::Column col;
-        col.dataName = cname;
-        col.dataType = "varchar";
-        col.isVariableLength = true;
-        col.dsize = 255;
-        col.isNull = true;
-        tbl.append(col);
+    for (size_t outputColumn = 0;
+         outputColumn < selectedSourceColumns.size(); ++outputColumn) {
+        tbl.append(makeColumnFromSource(
+            srcTbl.cols[selectedSourceColumns[outputColumn]],
+            colNames[outputColumn]));
     }
 
     if (g_engine.tableExists(s.currentDB, backingTable)) {

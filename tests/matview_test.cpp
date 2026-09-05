@@ -71,6 +71,17 @@ static void test_create_matview_select_star() {
     assert(g_engine.isMaterializedView(db, "mv"));
     assert(!g_engine.getMaterializedViewSQL(db, "mv").empty());
 
+    const auto backingSchema = g_engine.getTableSchema(db, backing);
+    assert(backingSchema.len == 2);
+    assert(backingSchema.cols[0].dataName == "id");
+    assert(backingSchema.cols[0].dataType == "int");
+    assert(backingSchema.cols[0].isNull);
+    assert(!backingSchema.cols[0].isPrimaryKey);
+    assert(!backingSchema.cols[0].isUnique);
+    assert(backingSchema.cols[1].dataName == "name");
+    assert(backingSchema.cols[1].dataType == "varchar");
+    assert(backingSchema.cols[1].dsize == 50);
+
     auto rows = g_engine.query(db, backing, {}, {"id", "name"}, {});
     assert(rows.size() == 2);
 
