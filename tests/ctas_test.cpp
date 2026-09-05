@@ -135,6 +135,68 @@ static void test_schema_qualified_ctas_catalog_identity() {
     std::cout << "[CTAS] schema-qualified catalog identity OK" << std::endl;
 }
 
+static void test_ctas_drops_source_column_constraints() {
+    const std::string db = testDbPath("ctas_plain_columns");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE constrained_source ("
+        "id INT PRIMARY KEY, "
+        "code INT UNIQUE NOT NULL DEFAULT 9 CHECK (code > 0), "
+        "base INT, "
+        "doubled INT GENERATED ALWAYS AS (base * 2) STORED)", s));
+    assert(g_engine.insert(
+               db, "constrained_source",
+               {{"id", "1"}, {"code", "5"}, {"base", "3"}}) ==
+           dbms::DBStatus::OK);
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE plain_copy AS SELECT * FROM constrained_source", s));
+    const auto copy = g_engine.getTableSchema(db, "plain_copy");
+    assert(copy.len == 4);
+    for (size_t column = 0; column < copy.len; ++column) {
+        assert(copy.cols[column].isNull);
+        assert(!copy.cols[column].isPrimaryKey);
+        assert(!copy.cols[column].isUnique);
+        assert(!copy.cols[column].isAutoIncrement);
+        assert(copy.cols[column].defaultValue.empty());
+        assert(copy.cols[column].checkExpr.empty());
+        assert(copy.cols[column].checkConstraintName.empty());
+        assert(copy.cols[column].generatedExpr.empty());
+        assert(copy.cols[column].generatedKind == 0);
+    }
+
+    // Duplicates, formerly invalid CHECK values, omitted values, and an
+    // explicit value for the former generated column are all legal now.
+    assert(g_engine.insert(
+               db, "plain_copy",
+               {{"id", "1"}, {"code", "5"}, {"base", "4"},
+                {"doubled", "999"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(
+               db, "plain_copy", {{"code", "-1"}}) ==
+           dbms::DBStatus::OK);
+
+    auto& catalog = g_engine.catalogService().get(db);
+    const auto* relation =
+        catalog.resolveRelation("plain_copy", {"public"});
+    assert(relation != nullptr && !relation->relhasindex &&
+           relation->relchecks == 0);
+    for (const auto& attribute : catalog.findAttributes(relation->oid)) {
+        assert(!attribute.attnotnull);
+        assert(!attribute.atthasdef);
+        assert(attribute.attidentity == '\0');
+        assert(attribute.attgenerated == '\0');
+    }
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[CTAS] source constraints are not copied OK" << std::endl;
+}
+
 static void test_ctas_with_no_data() {
     std::string db = testDbPath("ctas_nodata");
     cleanup(db);
@@ -211,6 +273,7 @@ int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_ctas_star();
     test_schema_qualified_ctas_catalog_identity();
+    test_ctas_drops_source_column_constraints();
     test_ctas_with_no_data();
     test_ctas_with_data_explicit();
     test_ctas_projection();

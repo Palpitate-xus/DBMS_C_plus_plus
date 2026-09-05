@@ -2594,6 +2594,19 @@ static bool parseSimpleSelect(const std::string& selectSql,
 static dbms::Column makeColumnFromSource(const dbms::Column& src, const std::string& name) {
     dbms::Column col = src;
     col.dataName = name;
+    // CTAS derives names and data types from query output; it does not clone
+    // the source relation's column constraints or value-generation behavior.
+    col.isNull = true;
+    col.isPrimaryKey = false;
+    col.isUnique = false;
+    col.isAutoIncrement = false;
+    col.defaultValue.clear();
+    col.checkExpr.clear();
+    col.checkConstraintName.clear();
+    col.deferrable = false;
+    col.initiallyDeferred = false;
+    col.generatedExpr.clear();
+    col.generatedKind = 0;
     return col;
 }
 
