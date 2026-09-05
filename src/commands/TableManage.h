@@ -1711,8 +1711,10 @@ private:
     void captureCatalogSnapshot();
     void clearCatalogSnapshot();
     void invalidateCatalogSchema(const std::string& dbname, const std::string& tablename);
-    // Write a schema file and invalidate every cached copy of it.
-    void writeSchemaFile(const std::string& dbname, const std::string& tablename,
+    // Atomically persist a schema file and invalidate every cached copy only
+    // after publication succeeds.
+    bool writeSchemaFile(const std::string& dbname,
+                         const std::string& tablename,
                          const TableSchema& tbl);
     void invalidateCatalogTableList(const std::string& dbname);
 
