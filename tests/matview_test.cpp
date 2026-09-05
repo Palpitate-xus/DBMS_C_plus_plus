@@ -1,6 +1,7 @@
 #include "commands/DdlExecutor.h"
 #include "commands/TableManage.h"
 #include "Session.h"
+#include "catalog/CatalogService.h"
 #include "catalog/type_registry.h"
 #include <algorithm>
 #include <cassert>
@@ -85,6 +86,27 @@ static void test_create_matview_select_star() {
     auto rows = g_engine.query(db, backing, {}, {"id", "name"}, {});
     assert(rows.size() == 2);
 
+    dbms::CatalogManager& initialCatalog =
+        g_engine.catalogService().get(db);
+    const auto* relation = initialCatalog.resolveRelation("mv", {"public"});
+    assert(relation != nullptr);
+    assert(relation->relkind == 'm');
+    assert(relation->relnatts == 2);
+    assert(relation->relispopulated);
+    const dbms::Oid relationOid = relation->oid;
+    const auto attributes = initialCatalog.findAttributes(relationOid);
+    assert(attributes.size() == 2);
+    assert(attributes[0].attname == "id");
+    assert(attributes[1].attname == "name");
+
+    g_engine.catalogService().evict(db);
+    dbms::CatalogManager& reloadedCatalog =
+        g_engine.catalogService().get(db);
+    relation = reloadedCatalog.findClass(relationOid);
+    assert(relation != nullptr && relation->relkind == 'm');
+    assert(relation->relispopulated);
+
+    g_engine.catalogService().evict(db);
     cleanup(db);
     std::cout << "[MATVIEW] CREATE SELECT * OK" << std::endl;
 }
@@ -259,6 +281,12 @@ static void test_create_matview_with_no_data() {
     auto rows = g_engine.query(db, backing, {}, {}, {});
     assert(rows.empty());                               // but no rows
 
+    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
+    const auto* relation = catalog.resolveRelation("mv", {"public"});
+    assert(relation != nullptr && relation->relkind == 'm');
+    assert(!relation->relispopulated);
+
+    g_engine.catalogService().evict(db);
     cleanup(db);
     std::cout << "[MATVIEW] WITH NO DATA OK" << std::endl;
 }

@@ -376,6 +376,38 @@ static void registerTableInCatalog(CatalogManager& cat, const TableSchema& tbl,
     }
 }
 
+static void registerMaterializedViewInCatalog(
+    CatalogManager& catalog, const TableSchema& output,
+    const std::string& logicalSchema, const std::string& logicalName,
+    bool populated) {
+    const auto* viewNamespace =
+        catalog.findNamespaceByName(logicalSchema);
+    if (!viewNamespace) {
+        throw std::runtime_error("materialized-view schema has no catalog entry");
+    }
+    const Oid namespaceOid = viewNamespace->oid;
+    if (catalog.findClassByName(logicalName, namespaceOid)) {
+        throw std::runtime_error("materialized-view name already exists");
+    }
+
+    PgClassRow relation;
+    relation.relname = logicalName;
+    relation.relnamespace = namespaceOid;
+    relation.relkind = 'm';
+    relation.relnatts = static_cast<int16_t>(output.len);
+    relation.relispopulated = populated;
+    if (!output.owner.empty()) {
+        const auto owner = authCatalog().getAuthIdByName(output.owner);
+        if (owner) relation.relowner = owner->oid;
+    }
+    const Oid relationOid = catalog.createClass(relation);
+    for (size_t column = 0; column < output.len; ++column) {
+        catalog.addAttribute(catalogAttributeForColumn(
+            catalog, relationOid, namespaceOid, output.cols[column],
+            column));
+    }
+}
+
 static bool synchronizeTableAttributesInCatalog(
     const std::string& dbname, const std::string& physicalTableName) {
     try {
@@ -4926,6 +4958,26 @@ bool DdlExecutor::executeCreateMaterializedView(const CreateViewStmt* stmt, Sess
             return true;
         }
         ofs << selectSql;
+    }
+
+    try {
+        CatalogManager::QualifiedName qualifiedName;
+        if (!CatalogManager::parseQualifiedName(viewname, qualifiedName)) {
+            throw std::runtime_error("invalid materialized-view name");
+        }
+        const std::string schemaName = qualifiedName.schema.empty()
+            ? "public" : qualifiedName.schema;
+        CatalogManager& catalog =
+            g_engine.catalogService().get(s.currentDB);
+        registerMaterializedViewInCatalog(
+            catalog, tbl, schemaName, qualifiedName.name, stmt->withData);
+        if (!catalog.persistAll()) {
+            throw std::runtime_error("cannot persist materialized-view catalog");
+        }
+    } catch (const std::exception& error) {
+        std::cout << "CREATE MATERIALIZED VIEW: catalog registration failed: "
+                  << error.what() << std::endl;
+        return true;
     }
 
     txn.recordCreate(DdlObjectKind::MaterializedView, viewname);
