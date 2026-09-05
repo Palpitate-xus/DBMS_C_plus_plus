@@ -408,6 +408,61 @@ static void registerMaterializedViewInCatalog(
     }
 }
 
+static Oid registerViewInCatalog(
+    CatalogManager& catalog, const TableSchema* output,
+    const std::string& logicalSchema, const std::string& logicalName,
+    const std::string& owner, Oid replaceOid = INVALID_OID) {
+    const auto* viewNamespace = catalog.findNamespaceByName(logicalSchema);
+    if (!viewNamespace) {
+        throw std::runtime_error("view schema has no catalog entry");
+    }
+    const Oid namespaceOid = viewNamespace->oid;
+
+    Oid relationOid = replaceOid;
+    if (relationOid == INVALID_OID) {
+        if (catalog.findClassByName(logicalName, namespaceOid)) {
+            throw std::runtime_error("view name already exists");
+        }
+        PgClassRow relation;
+        relation.relname = logicalName;
+        relation.relnamespace = namespaceOid;
+        relation.relkind = 'v';
+        relation.relnatts = output
+            ? static_cast<int16_t>(output->len) : 0;
+        const auto ownerRole = authCatalog().getAuthIdByName(owner);
+        if (ownerRole) relation.relowner = ownerRole->oid;
+        relationOid = catalog.createClass(relation);
+    } else {
+        const PgClassRow* current = catalog.findClass(relationOid);
+        if (!current || current->relkind != 'v' ||
+            current->relnamespace != namespaceOid ||
+            current->relname != logicalName) {
+            throw std::runtime_error("cannot replace non-view catalog object");
+        }
+        if (output) {
+            PgClassRow replacement = *current;
+            replacement.relnatts = static_cast<int16_t>(output->len);
+            if (!catalog.updateClass(relationOid, replacement)) {
+                throw std::runtime_error("cannot update view catalog row");
+            }
+        }
+    }
+
+    if (output) {
+        std::vector<PgAttributeRow> attributes;
+        attributes.reserve(output->len);
+        for (size_t column = 0; column < output->len; ++column) {
+            attributes.push_back(catalogAttributeForColumn(
+                catalog, relationOid, namespaceOid, output->cols[column],
+                column));
+        }
+        if (!catalog.replaceAttributes(relationOid, attributes)) {
+            throw std::runtime_error("cannot replace view attributes");
+        }
+    }
+    return relationOid;
+}
+
 static bool synchronizeTableAttributesInCatalog(
     const std::string& dbname, const std::string& physicalTableName) {
     try {
@@ -617,6 +672,8 @@ bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
             return executeDropType(dynamic_cast<const DropStmt*>(stmt.get()), s);
         case SqlCommand::CreateView:
             return executeCreateView(dynamic_cast<const CreateViewStmt*>(stmt.get()), s);
+        case SqlCommand::DropView:
+            return executeDropView(dynamic_cast<const DropStmt*>(stmt.get()), s);
         case SqlCommand::CreateTrigger:
             return executeCreateTrigger(dynamic_cast<const CreateTriggerStmt*>(stmt.get()), s);
         case SqlCommand::DropTrigger:
@@ -696,6 +753,7 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         case dbms::SqlCommand::CreateType:
         case dbms::SqlCommand::DropType:
         case dbms::SqlCommand::CreateView:
+        case dbms::SqlCommand::DropView:
         case dbms::SqlCommand::CreateTrigger:
         case dbms::SqlCommand::DropTrigger:
         case dbms::SqlCommand::CreateFunction:
@@ -3402,7 +3460,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
 }
 
 struct PhysicalCascadeAction {
-    enum class Kind { Table, Index, Sequence };
+    enum class Kind { Table, Index, Sequence, View, MaterializedView };
 
     Kind kind = Kind::Table;
     std::string name;
@@ -3424,6 +3482,22 @@ static bool catalogTableStorageName(const CatalogManager& catalog,
     storageName = relationNamespace->nspname == "public"
         ? relation.relname
         : relationNamespace->nspname + "__" + relation.relname;
+    return true;
+}
+
+static bool catalogViewStorageName(const CatalogManager& catalog,
+                                   const PgClassRow& relation,
+                                   std::string& storageName,
+                                   std::string& error) {
+    const PgNamespaceRow* relationNamespace =
+        catalog.findNamespace(relation.relnamespace);
+    if (!relationNamespace) {
+        error = "relation namespace is missing";
+        return false;
+    }
+    storageName = relationNamespace->nspname == "public"
+        ? relation.relname
+        : relationNamespace->nspname + "." + relation.relname;
     return true;
 }
 
@@ -3461,6 +3535,18 @@ static bool buildPhysicalCascadeActions(
         }
         if (rel.relkind == 'S') {
             actions.push_back({PhysicalCascadeAction::Kind::Sequence, rel.relname, "", "", ""});
+            continue;
+        }
+        if (rel.relkind == 'v' || rel.relkind == 'm') {
+            std::string viewName;
+            if (!catalogViewStorageName(
+                    catalog, rel, viewName, error)) {
+                return false;
+            }
+            const auto kind = rel.relkind == 'v'
+                ? PhysicalCascadeAction::Kind::View
+                : PhysicalCascadeAction::Kind::MaterializedView;
+            actions.push_back({kind, viewName, "", "", ""});
             continue;
         }
         if (rel.relkind != 'i') continue;
@@ -3516,6 +3602,11 @@ static bool dropPhysicalCascadeAction(StorageEngine& engine,
         status = engine.dropTable(dbname, action.name);
     } else if (action.kind == PhysicalCascadeAction::Kind::Sequence) {
         status = engine.dropSequence(dbname, action.name);
+    } else if (action.kind == PhysicalCascadeAction::Kind::View) {
+        status = engine.dropView(dbname, action.name);
+    } else if (action.kind ==
+               PhysicalCascadeAction::Kind::MaterializedView) {
+        status = engine.dropMaterializedView(dbname, action.name);
     } else {
         status = engine.dropIndexByAccessMethod(dbname, action.tableName,
                                                 action.key, action.accessMethod);
@@ -3627,6 +3718,10 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
         std::string err;
         if (!catalogManager->applyDropPlan(catalogDropPlan, &err)) {
             std::cout << "DROP TABLE catalog cleanup failed: " << err << std::endl;
+            return true;
+        }
+        if (!catalogManager->persistAll()) {
+            std::cout << "DROP TABLE catalog persistence failed" << std::endl;
             return true;
         }
     }
@@ -4766,7 +4861,7 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
     if (!checkDB(s)) return true;
 
     DdlTransaction txn(s);
-    if (stmt->replace) txn.enableSnapshotRollback();
+    txn.enableSnapshotRollback();
     if (!txn.begin()) {
         std::cout << "DDL transaction begin failed" << std::endl;
         return true;
@@ -4812,17 +4907,142 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
         }
     }
 
+    const std::string physicalRelationName = schemaName == "public"
+        ? qualifiedName.name
+        : schemaName + "__" + qualifiedName.name;
+    if (g_engine.tableExists(s.currentDB, physicalRelationName) ||
+        g_engine.isMaterializedView(s.currentDB, viewname)) {
+        std::cout << "ERROR: relation \"" << viewname
+                  << "\" already exists" << std::endl;
+        return true;
+    }
+
+    std::string resolvedBaseTable;
+    if (!baseTable.empty()) {
+        resolvedBaseTable = resolveTableName(s, baseTable);
+        if (!g_engine.tableExists(s.currentDB, resolvedBaseTable) &&
+            !g_engine.viewExists(s.currentDB, baseTable) &&
+            !g_engine.isMaterializedView(s.currentDB, baseTable)) {
+            std::cout << "ERROR: relation \"" << baseTable
+                      << "\" does not exist" << std::endl;
+            return true;
+        }
+    }
+
+    TableSchema output;
+    output.owner = effectiveSessionRole(s);
+    bool outputKnown = false;
+    std::vector<std::string> selectColumns;
+    std::string parsedSource;
+    std::vector<std::string> ignoredConditions;
+    if (parseSimpleSelect(
+            viewSql, selectColumns, parsedSource, ignoredConditions)) {
+        const std::string sourceStorageName =
+            resolveTableName(s, parsedSource);
+        if (g_engine.tableExists(s.currentDB, sourceStorageName)) {
+            const TableSchema source =
+                g_engine.getTableSchema(s.currentDB, sourceStorageName);
+            outputKnown = source.len != 0;
+            if (selectColumns.size() == 1 && selectColumns.front() == "*") {
+                for (size_t column = 0; column < source.len; ++column) {
+                    output.append(makeColumnFromSource(
+                        source.cols[column], source.cols[column].dataName));
+                }
+            } else {
+                for (const std::string& projection : selectColumns) {
+                    std::string sourceName = projection;
+                    std::string outputName;
+                    const std::string lowerProjection = toLower(projection);
+                    const size_t asPosition = lowerProjection.find(" as ");
+                    if (asPosition != std::string::npos) {
+                        sourceName = trim(projection.substr(0, asPosition));
+                        outputName = trim(projection.substr(asPosition + 4));
+                    }
+                    const size_t qualifier = sourceName.rfind('.');
+                    if (qualifier != std::string::npos) {
+                        sourceName = sourceName.substr(qualifier + 1);
+                    }
+                    if (outputName.empty()) outputName = sourceName;
+
+                    const Column* sourceColumn = nullptr;
+                    for (size_t column = 0; column < source.len; ++column) {
+                        if (toLower(source.cols[column].dataName) ==
+                            toLower(sourceName)) {
+                            sourceColumn = &source.cols[column];
+                            break;
+                        }
+                    }
+                    if (!sourceColumn) {
+                        outputKnown = false;
+                        output = TableSchema{};
+                        break;
+                    }
+                    output.append(makeColumnFromSource(
+                        *sourceColumn, outputName));
+                }
+            }
+            if (outputKnown && !stmt->columnNames.empty()) {
+                if (stmt->columnNames.size() != output.len) {
+                    std::cout << "ERROR: CREATE VIEW column list has "
+                              << stmt->columnNames.size()
+                              << " names but query returns " << output.len
+                              << " columns" << std::endl;
+                    return true;
+                }
+                for (size_t column = 0; column < output.len; ++column) {
+                    output.cols[column].dataName = stmt->columnNames[column];
+                }
+            }
+        }
+    }
+
     std::string checkOption = stmt->checkOption;
     std::string storeSql = viewSql;
     if (!baseTable.empty()) storeSql += "\nBASE_TABLE:" + baseTable + "\n";
     if (!checkOption.empty()) storeSql += "WITH_CHECK_OPTION:" + checkOption + "\n";
 
-    if (stmt->replace && g_engine.viewExists(s.currentDB, viewname)) {
-        txn.markSnapshotDirty();
-        g_engine.dropView(s.currentDB, viewname);
+    CatalogManager* catalog = nullptr;
+    Oid existingViewOid = INVALID_OID;
+    try {
+        catalog = &g_engine.catalogService().get(s.currentDB);
+        const PgNamespaceRow* viewNamespace =
+            catalog->findNamespaceByName(schemaName);
+        if (!viewNamespace) {
+            throw std::runtime_error("view schema has no catalog entry");
+        }
+        const PgClassRow* existing = catalog->findClassByName(
+            qualifiedName.name, viewNamespace->oid);
+        if (existing) {
+            if (existing->relkind != 'v') {
+                std::cout << "ERROR: relation \"" << viewname
+                          << "\" already exists" << std::endl;
+                return true;
+            }
+            if (!stmt->replace) {
+                std::cout << "View " << viewname << " already exists"
+                          << std::endl;
+                return true;
+            }
+            existingViewOid = existing->oid;
+        }
+    } catch (const std::exception& error) {
+        std::cout << "CREATE VIEW: catalog lookup failed: "
+                  << error.what() << std::endl;
+        return true;
     }
 
-    if (stmt->replace) txn.markSnapshotDirty();
+    const bool physicalViewExisted =
+        g_engine.viewExists(s.currentDB, viewname);
+    txn.markSnapshotDirty();
+    if (stmt->replace && physicalViewExisted) {
+        const DBStatus dropStatus =
+            g_engine.dropView(s.currentDB, viewname);
+        if (dropStatus != DBStatus::OK) {
+            std::cout << "CREATE OR REPLACE VIEW: old definition removal failed"
+                      << std::endl;
+            return true;
+        }
+    }
     DBStatus res = g_engine.createView(s.currentDB, viewname, storeSql);
     if (res == DBStatus::TABLE_ALREADY_EXISTS) {
         std::cout << "View " << viewname << " already exists" << std::endl;
@@ -4834,12 +5054,177 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
         return true;
     }
 
-    txn.recordCreate(DdlObjectKind::View, viewname);
+    try {
+        const TableSchema* catalogOutput = outputKnown ? &output : nullptr;
+        const Oid viewOid = registerViewInCatalog(
+            *catalog, catalogOutput, schemaName, qualifiedName.name,
+            effectiveSessionRole(s), existingViewOid);
+
+        // CREATE OR REPLACE changes the referenced relation set. Preserve
+        // the namespace dependency installed by createClass(), but remove
+        // the old relation dependencies before publishing the new one.
+        for (const auto& dependency :
+             catalog->findDepends(PgClassOid_Class, viewOid)) {
+            if (dependency.refclassid != PgClassOid_Class) continue;
+            catalog->removeDepend(
+                dependency.classid, dependency.objid, dependency.objsubid,
+                dependency.refclassid, dependency.refobjid,
+                dependency.refobjsubid);
+        }
+        if (!baseTable.empty()) {
+            const PgClassRow* baseRelation =
+                catalog->resolveRelation(baseTable, {"public"});
+            if (baseRelation && baseRelation->oid != viewOid) {
+                PgDependRow dependency;
+                dependency.classid = PgClassOid_Class;
+                dependency.objid = viewOid;
+                dependency.objsubid = 0;
+                dependency.refclassid = PgClassOid_Class;
+                dependency.refobjid = baseRelation->oid;
+                dependency.refobjsubid = 0;
+                dependency.deptype = 'n';
+                catalog->addDepend(dependency);
+            }
+        }
+        if (!catalog->persistAll()) {
+            throw std::runtime_error("cannot persist view catalog");
+        }
+    } catch (const std::exception& error) {
+        std::cout << "CREATE VIEW: catalog registration failed: "
+                  << error.what() << std::endl;
+        return true;
+    }
+
+    if (stmt->replace &&
+        (physicalViewExisted || existingViewOid != INVALID_OID)) {
+        txn.recordUpdate(DdlObjectKind::View, viewname);
+    } else {
+        txn.recordCreate(DdlObjectKind::View, viewname);
+    }
     if (!txn.commit()) return true;
     std::cout << "CREATE VIEW succeeded"
               << (baseTable.empty() ? "" : " (updatable)")
               << (checkOption.empty() ? "" : " [with check option " + checkOption + "]")
               << std::endl;
+    return false;
+}
+
+// ----------------------------------------------------------------------------
+// DROP VIEW
+// ----------------------------------------------------------------------------
+
+bool DdlExecutor::executeDropView(const DropStmt* stmt, Session& s) {
+    if (!stmt) return false;
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+
+    DdlTransaction txn(s);
+    txn.enableSnapshotRollback();
+    if (!txn.begin()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
+    if (stmt->objectNames.empty()) {
+        std::cout << "SQL syntax error: DROP VIEW name" << std::endl;
+        return true;
+    }
+    if (stmt->objectNames.size() != 1) {
+        std::cout << "DROP VIEW with multiple targets is not supported"
+                  << std::endl;
+        return true;
+    }
+
+    const std::string& viewName = stmt->objectNames.front();
+    CatalogManager* catalog = nullptr;
+    const PgClassRow* relation = nullptr;
+    try {
+        catalog = &g_engine.catalogService().get(s.currentDB);
+        relation = catalog->resolveRelation(viewName, {"public"});
+    } catch (const std::exception& error) {
+        std::cout << "DROP VIEW: catalog lookup failed: "
+                  << error.what() << std::endl;
+        return true;
+    }
+
+    const bool physicalExists =
+        g_engine.viewExists(s.currentDB, viewName);
+    if (relation && relation->relkind != 'v') {
+        std::cout << "ERROR: \"" << viewName << "\" is not a view"
+                  << std::endl;
+        return true;
+    }
+    if (!physicalExists && !relation) {
+        if (stmt->ifExists) {
+            std::cout << "NOTICE: view \"" << viewName
+                      << "\" does not exist, skipping" << std::endl;
+            return !txn.commit();
+        }
+        std::cout << "ERROR: view \"" << viewName
+                  << "\" does not exist" << std::endl;
+        return true;
+    }
+
+    CatalogManager::DropPlan catalogPlan;
+    bool hasCatalogPlan = false;
+    Oid viewOid = INVALID_OID;
+    if (relation) {
+        viewOid = relation->oid;
+        const auto behavior = stmt->cascade
+            ? CatalogManager::DropBehavior::Cascade
+            : CatalogManager::DropBehavior::Restrict;
+        catalogPlan = catalog->planDrop(
+            PgClassOid_Class, viewOid, behavior);
+        if (!catalogPlan.ok()) {
+            std::cout << "ERROR: " << catalogPlan.error << std::endl;
+            return true;
+        }
+        hasCatalogPlan = true;
+    }
+
+    std::vector<PhysicalCascadeAction> cascadeActions;
+    if (stmt->cascade && hasCatalogPlan) {
+        std::string error;
+        if (!buildPhysicalCascadeActions(
+                *catalog, g_engine, s.currentDB, viewOid,
+                catalogPlan, cascadeActions, error)) {
+            std::cout << "DROP VIEW CASCADE planning failed: "
+                      << error << std::endl;
+            return true;
+        }
+    }
+
+    txn.markSnapshotDirty();
+    for (const auto& action : cascadeActions) {
+        if (!dropPhysicalCascadeAction(
+                g_engine, s.currentDB, action)) {
+            std::cout << "DROP VIEW CASCADE physical cleanup failed for "
+                      << action.name << std::endl;
+            return true;
+        }
+    }
+    const DBStatus dropStatus =
+        g_engine.dropView(s.currentDB, viewName);
+    if (dropStatus != DBStatus::OK &&
+        !(dropStatus == DBStatus::TABLE_NOT_FOUND && hasCatalogPlan)) {
+        std::cout << "DROP VIEW physical cleanup failed" << std::endl;
+        return true;
+    }
+    if (hasCatalogPlan) {
+        std::string error;
+        if (!catalog->applyDropPlan(catalogPlan, &error)) {
+            std::cout << "DROP VIEW catalog cleanup failed: "
+                      << error << std::endl;
+            return true;
+        }
+        if (!catalog->persistAll()) {
+            std::cout << "DROP VIEW catalog persistence failed" << std::endl;
+            return true;
+        }
+    }
+
+    txn.recordDrop(DdlObjectKind::View, viewName);
+    if (!txn.commit()) return true;
+    std::cout << "DROP VIEW succeeded" << std::endl;
     return false;
 }
 

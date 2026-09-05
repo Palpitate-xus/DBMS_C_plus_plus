@@ -366,7 +366,7 @@ static void test_drop_and_replace_restore_before_outer_row_undo() {
 
     assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "drop_restore", {{"id", "2"}}) == dbms::DBStatus::OK);
-    assert(!ddl.executeSql("DROP TABLE drop_restore", s));
+    assert(!ddl.executeSql("DROP TABLE drop_restore CASCADE", s));
     assert(!g_engine.tableExists(db, "drop_restore"));
     assert(g_engine.savepoint("after_drop") == dbms::DBStatus::INVALID_VALUE);
     // A second full-snapshot DDL statement is rejected rather than silently
