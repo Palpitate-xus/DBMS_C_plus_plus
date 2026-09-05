@@ -983,11 +983,15 @@ public:
     // targetPartitions: empty = all partitions; only effective for partitioned tables
     // registerSiread: register relation/tuple/page SSI coverage automatically;
     // predicate-aware callers may disable it and register only matched rows.
+    // indexMaintenanceView: visit the physical tuple versions that should be
+    // represented by eagerly maintained indexes, including active INSERTs and
+    // excluding versions removed by active UPDATE/DELETE operations.
     bool forEachRow(const std::string& dbname, const std::string& tablename,
                     const std::function<void(uint32_t pageId, uint16_t slotId, const char* data, size_t len)>& callback,
                     const ReadView* readView = nullptr,
                     const std::vector<std::string>& targetPartitions = {},
-                    bool registerSiread = true) const;
+                    bool registerSiread = true,
+                    bool indexMaintenanceView = false) const;
     // Relation-aware scan that applies the current session's RLS SELECT/command
     // policies before invoking the callback. Returns false when a policy cannot
     // be parsed or evaluated; callers must treat that as a statement error or

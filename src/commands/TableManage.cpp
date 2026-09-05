@@ -2292,6 +2292,282 @@ bool syncDirectoryDurably(const std::filesystem::path& path) {
     return synced && closed;
 }
 
+constexpr std::string_view kReindexSwapMarkerSuffix = ".reindex_swap";
+
+class ResourceUnlockGuard {
+public:
+    ResourceUnlockGuard(LockManager& manager, const std::string& resource)
+        : manager_(manager), resource_(resource) {}
+    ResourceUnlockGuard(const ResourceUnlockGuard&) = delete;
+    ResourceUnlockGuard& operator=(const ResourceUnlockGuard&) = delete;
+    ~ResourceUnlockGuard() { manager_.unlock(resource_); }
+
+private:
+    LockManager& manager_;
+    const std::string& resource_;
+};
+
+struct ReindexSwapEntry {
+    std::filesystem::path target;
+    std::filesystem::path temporary;
+    std::filesystem::path backup;
+};
+
+std::filesystem::path reindexSidecar(const std::filesystem::path& path) {
+    return std::filesystem::path(path.string() + ".tde");
+}
+
+bool normalizedAbsolutePath(const std::filesystem::path& path,
+                            std::filesystem::path& normalized) {
+    std::error_code error;
+    normalized = std::filesystem::absolute(path, error).lexically_normal();
+    return !error && !normalized.empty();
+}
+
+bool inspectRegularFile(const std::filesystem::path& path, bool& exists) {
+    std::error_code error;
+    exists = std::filesystem::exists(path, error);
+    if (error) return false;
+    return !exists ||
+           (std::filesystem::is_regular_file(path, error) && !error);
+}
+
+bool removeRegularFileIfPresent(const std::filesystem::path& path) {
+    bool exists = false;
+    if (!inspectRegularFile(path, exists)) return false;
+    if (!exists) return true;
+    std::error_code error;
+    return std::filesystem::remove(path, error) && !error;
+}
+
+bool syncRegularFileDurably(const std::filesystem::path& path) {
+    const int descriptor = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (descriptor < 0) return false;
+    const bool synced = ::fsync(descriptor) == 0;
+    const bool closed = ::close(descriptor) == 0;
+    return synced && closed;
+}
+
+bool copyRegularFileDurably(const std::filesystem::path& source,
+                            const std::filesystem::path& destination) {
+    bool sourceExists = false;
+    if (!inspectRegularFile(source, sourceExists) || !sourceExists ||
+        !removeRegularFileIfPresent(destination)) {
+        return false;
+    }
+    std::error_code error;
+    if (!std::filesystem::copy_file(
+            source, destination,
+            std::filesystem::copy_options::none, error) || error) {
+        return false;
+    }
+    return syncRegularFileDurably(destination);
+}
+
+bool validReindexSwapEntry(const ReindexSwapEntry& entry,
+                           const std::filesystem::path& relationRoot,
+                           const std::string& tablename) {
+    std::filesystem::path target;
+    std::filesystem::path temporary;
+    std::filesystem::path backup;
+    std::filesystem::path root;
+    if (!normalizedAbsolutePath(entry.target, target) ||
+        !normalizedAbsolutePath(entry.temporary, temporary) ||
+        !normalizedAbsolutePath(entry.backup, backup) ||
+        !normalizedAbsolutePath(relationRoot, root) ||
+        target.parent_path() != root || temporary.parent_path() != root ||
+        backup.parent_path() != root) {
+        return false;
+    }
+
+    const std::string targetName = target.filename().string();
+    const bool primary = targetName == tablename + ".idx";
+    const bool secondary =
+        targetName.rfind(tablename + "_", 0) == 0 &&
+        targetName.size() > tablename.size() + 5 &&
+        targetName.compare(targetName.size() - 4, 4, ".idx") == 0;
+    const bool composite =
+        targetName.rfind(tablename + ".idx_", 0) == 0 &&
+        targetName.size() > tablename.size() + 5;
+    if (!primary && !secondary && !composite) return false;
+
+    const std::string temporaryName = temporary.filename().string();
+    const std::string backupName = backup.filename().string();
+    return temporaryName.rfind(targetName + ".reindex.tmp.", 0) == 0 &&
+           backupName.rfind(targetName + ".reindex.old.", 0) == 0;
+}
+
+bool serializeReindexSwapPlan(const std::vector<ReindexSwapEntry>& entries,
+                              std::string& serialized) {
+    if (entries.empty() || entries.size() > 4096) return false;
+    std::ostringstream output;
+    output << "DBMS_REINDEX_SWAP_V1\n" << entries.size() << '\n';
+    for (const auto& entry : entries) {
+        output << std::quoted(entry.target.string()) << ' '
+               << std::quoted(entry.temporary.string()) << ' '
+               << std::quoted(entry.backup.string()) << '\n';
+    }
+    if (!output) return false;
+    serialized = output.str();
+    return true;
+}
+
+bool readReindexSwapPlan(const std::filesystem::path& marker,
+                         const std::filesystem::path& relationRoot,
+                         const std::string& tablename,
+                         std::vector<ReindexSwapEntry>& entries) {
+    entries.clear();
+    std::ifstream input(marker);
+    std::string magic;
+    size_t count = 0;
+    if (!std::getline(input, magic) || magic != "DBMS_REINDEX_SWAP_V1" ||
+        !(input >> count) || count == 0 || count > 4096) {
+        return false;
+    }
+
+    std::set<std::filesystem::path> targets;
+    for (size_t i = 0; i < count; ++i) {
+        std::string targetText;
+        std::string temporaryText;
+        std::string backupText;
+        if (!(input >> std::quoted(targetText) >> std::quoted(temporaryText) >>
+              std::quoted(backupText))) {
+            return false;
+        }
+        ReindexSwapEntry entry{
+            std::filesystem::path(targetText),
+            std::filesystem::path(temporaryText),
+            std::filesystem::path(backupText)};
+        if (!validReindexSwapEntry(entry, relationRoot, tablename)) return false;
+        if (!normalizedAbsolutePath(entry.target, entry.target) ||
+            !normalizedAbsolutePath(entry.temporary, entry.temporary) ||
+            !normalizedAbsolutePath(entry.backup, entry.backup) ||
+            !targets.insert(entry.target).second) {
+            return false;
+        }
+        entries.push_back(std::move(entry));
+    }
+    std::string trailing;
+    return !(input >> trailing) && input.eof() && !input.bad();
+}
+
+bool recoverReindexSwapPlan(const std::vector<ReindexSwapEntry>& entries,
+                            const std::filesystem::path& marker) {
+    std::set<std::filesystem::path> directories;
+    for (const auto& entry : entries) {
+        const auto targetSidecar = reindexSidecar(entry.target);
+        const auto temporarySidecar = reindexSidecar(entry.temporary);
+        const auto backupSidecar = reindexSidecar(entry.backup);
+        const auto restoreMain =
+            std::filesystem::path(entry.backup.string() + ".restore");
+        const auto restoreSidecar = reindexSidecar(restoreMain);
+        directories.insert(entry.target.parent_path());
+
+        bool backupExists = false;
+        bool backupSidecarExists = false;
+        if (!inspectRegularFile(entry.backup, backupExists) ||
+            !inspectRegularFile(backupSidecar, backupSidecarExists)) {
+            return false;
+        }
+
+        if (backupExists) {
+            if (!copyRegularFileDurably(entry.backup, restoreMain)) return false;
+            if (backupSidecarExists) {
+                if (!copyRegularFileDurably(
+                        backupSidecar, restoreSidecar)) {
+                    return false;
+                }
+            } else {
+                bool targetSidecarExists = false;
+                if (!inspectRegularFile(
+                        targetSidecar, targetSidecarExists) ||
+                    !targetSidecarExists) {
+                    return false;
+                }
+            }
+
+            std::error_code error;
+            std::filesystem::rename(restoreMain, entry.target, error);
+            if (error) return false;
+            if (backupSidecarExists) {
+                std::filesystem::rename(
+                    restoreSidecar, targetSidecar, error);
+                if (error) return false;
+            }
+            if (!syncDirectoryDurably(entry.target.parent_path())) return false;
+        } else {
+            bool targetExists = false;
+            bool targetSidecarExists = false;
+            bool temporaryExists = false;
+            bool temporarySidecarExists = false;
+            if (!inspectRegularFile(entry.target, targetExists) ||
+                !inspectRegularFile(targetSidecar, targetSidecarExists) ||
+                !inspectRegularFile(entry.temporary, temporaryExists) ||
+                !inspectRegularFile(
+                    temporarySidecar, temporarySidecarExists) ||
+                (temporaryExists && !temporarySidecarExists)) {
+                return false;
+            }
+
+            // A marker is published only after every replacement pair is
+            // durable. If no rollback main exists but a temporary remains,
+            // either the old index was already absent (for example during an
+            // ALTER rewrite) or the crash preceded the first backup rename.
+            // Roll the complete replacement forward. Renaming the main file
+            // first makes the only intermediate state recognizable by the
+            // remaining temporary sidecar on the next recovery attempt.
+            std::error_code error;
+            if (temporaryExists) {
+                if (!removeRegularFileIfPresent(entry.target)) return false;
+                std::filesystem::rename(
+                    entry.temporary, entry.target, error);
+                if (error) return false;
+                targetExists = true;
+            }
+            if (temporarySidecarExists) {
+                if (!targetExists ||
+                    !removeRegularFileIfPresent(targetSidecar)) {
+                    return false;
+                }
+                std::filesystem::rename(
+                    temporarySidecar, targetSidecar, error);
+                if (error) return false;
+                targetSidecarExists = true;
+            }
+            if (!targetExists || !targetSidecarExists ||
+                !syncDirectoryDurably(entry.target.parent_path())) {
+                return false;
+            }
+        }
+
+        // Remove the main backup first. If recovery crashes during cleanup,
+        // the absence of that file proves the complete target pair should be
+        // retained; a leftover sidecar backup is then only garbage.
+        if (!removeRegularFileIfPresent(entry.backup) ||
+            !removeRegularFileIfPresent(backupSidecar) ||
+            !removeRegularFileIfPresent(entry.temporary) ||
+            !removeRegularFileIfPresent(temporarySidecar) ||
+            !removeRegularFileIfPresent(restoreMain) ||
+            !removeRegularFileIfPresent(restoreSidecar)) {
+            return false;
+        }
+    }
+    for (const auto& directory : directories) {
+        if (!syncDirectoryDurably(directory)) return false;
+    }
+    if (!removeRegularFileIfPresent(marker)) return false;
+    return syncDirectoryDurably(marker.parent_path());
+}
+
+bool recoverReindexSwapMarker(const std::filesystem::path& marker,
+                              const std::filesystem::path& relationRoot,
+                              const std::string& tablename) {
+    std::vector<ReindexSwapEntry> entries;
+    return readReindexSwapPlan(
+               marker, relationRoot, tablename, entries) &&
+           recoverReindexSwapPlan(entries, marker);
+}
+
 bool clearSpecializedIndexDirty(const StorageEngine& engine,
                                 const std::string& dbname,
                                 const std::string& tablename) {
@@ -5589,13 +5865,17 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                                 const std::function<void(uint32_t, uint16_t, const char*, size_t)>& callback,
                                 const ReadView* readView,
                                 const std::vector<std::string>& targetPartitions,
-                                bool registerSiread) const {
-    if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
+                                bool registerSiread,
+                                bool indexMaintenanceView) const {
+    if (!indexMaintenanceView && transactionContext().inTransaction &&
+        dbname == transactionContext().txnDB) {
         transactionContext().hasRead = true;
     }
     const ReadView* rv = readView;
     ReadView autocommitView;
-    if (!rv && transactionContext().inTransaction) {
+    if (indexMaintenanceView) {
+        rv = nullptr;
+    } else if (!rv && transactionContext().inTransaction) {
         rv = &transactionContext().readView;
     } else if (!rv) {
         // Autocommit readers still need MVCC filtering: transactional DELETE
@@ -5628,14 +5908,75 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
     }
 
     // Helper: visibility check, SSI tracking, header stripping, then callback
+    const CommitLog* indexCommitLog =
+        indexMaintenanceView ? getCommitLog(dbname) : nullptr;
+    std::set<uint64_t> indexActiveTransactions;
+    if (indexMaintenanceView) {
+        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        for (uint64_t xid : activeTransactions_) {
+            const auto database = activeTransactionDatabases_.find(xid);
+            if (database != activeTransactionDatabases_.end() &&
+                database->second == dbname) {
+                indexActiveTransactions.insert(xid);
+            }
+        }
+    }
+    const auto belongsInPhysicalIndex = [
+        indexCommitLog, &indexActiveTransactions,
+        fmtVer = tbl.formatVersion
+    ](const char* data, size_t len) {
+        if (!usesHeapTupleHeader(fmtVer)) return true;
+        if (!data || len < sizeof(HeapTupleHeaderData)) return false;
+
+        const auto* tuple = castHeapHeader(data);
+        const uint64_t xmin = tuple->t_fields.t_xmin;
+        if (xminInvalid(tuple)) return false;
+        if (xmin != 0 && indexCommitLog) {
+            const auto status =
+                indexCommitLog->getStatus(static_cast<TxnId>(xmin));
+            if (status == CommitLog::Status::Aborted) return false;
+            if (status == CommitLog::Status::InProgress &&
+                !indexActiveTransactions.count(xmin) &&
+                !xminCommitted(tuple)) {
+                // Missing/truncated CLOG also decodes as IN_PROGRESS. Only a
+                // live backend or a committed hint proves that such an xmin
+                // still owns an eagerly inserted index entry.
+                return false;
+            }
+        }
+
+        const uint64_t xmax = tuple->t_fields.t_xmax;
+        if (xmax == 0 || xmaxInvalid(tuple) || xmaxIsLock(tuple)) return true;
+        if (!indexCommitLog) {
+            return !indexActiveTransactions.count(xmax) &&
+                !xmaxCommitted(tuple);
+        }
+
+        const auto status =
+            indexCommitLog->getStatus(static_cast<TxnId>(xmax));
+        if (status == CommitLog::Status::Aborted) return true;
+        if (status == CommitLog::Status::Committed ||
+            status == CommitLog::Status::SubCommitted) {
+            return false;
+        }
+        // An active delete/update has already removed this version's entry.
+        // An orphan IN_PROGRESS xmax is treated like an aborted delete unless
+        // its committed hint proves otherwise.
+        return !indexActiveTransactions.count(xmax) &&
+            !xmaxCommitted(tuple);
+    };
+
     auto emitRow = [
         &callback, rv, this, dbname, tablename, registerSiread,
+        indexMaintenanceView, &belongsInPhysicalIndex,
         fmtVer = tbl.formatVersion, natts = tbl.len
     ](uint32_t pid, uint16_t sid, const char* data, size_t len) {
         if (len == 0) return;
         size_t hdrLen = rowHeaderSize(fmtVer, natts);
         if (len <= hdrLen) return;
-        if (rv) {
+        if (indexMaintenanceView) {
+            if (!belongsInPhysicalIndex(data, len)) return;
+        } else if (rv) {
             if (!rv->isVisible(data, len, fmtVer)) return;
         }
         if (registerSiread && this->transactionContext().inTransaction &&
@@ -10121,56 +10462,153 @@ DBStatus StorageEngine::dropCompositeIndex(const std::string& dbname,
 
 DBStatus StorageEngine::reindex(const std::string& dbname,
                                  const std::string& tablename) {
-    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
-    TableSchema tbl = getTableSchema(dbname, tablename);
-
-    // 1. Rebuild primary key index
-    std::filesystem::path pkPath = indexPath(dbname, tablename);
-    std::string pkKey = dbname + "/" + tablename;
-    {
-        auto it = pkIndexCache_.find(pkKey);
-        if (it != pkIndexCache_.end()) {
-            it->second->close();
-            pkIndexCache_.erase(it);
-        }
+    if (!lockManager_.lockMetadata(tablename)) {
+        return DBStatus::LOCK_CONFLICT;
     }
-    std::filesystem::remove(pkPath);
-    BPTree* pkIdx = getPKIndex(dbname, tablename);
-    if (!pkIdx) return DBStatus::INVALID_VALUE;
-    if (tbl.hasPrimaryKey() && !forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
-                                           const char* data, size_t len) {
-            std::string row(data, len);
-            std::string pkVal = extractPKValue(row, tbl);
-            if (!pkVal.empty()) {
-                pkIdx->insert(pkVal, encodeRid(pageId, slotId));
-            }
-        })) return DBStatus::IO_ERROR;
+    ResourceUnlockGuard tableLockGuard(lockManager_, tablename);
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    if (!tableExists(dbname, tablename)) {
+        return DBStatus::TABLE_NOT_FOUND;
+    }
+    const std::filesystem::path reindexRelationRoot =
+        relationDir(dbname, tablename);
 
-    // 2. Rebuild ordinary and expression secondary indexes.  Partial-index
-    // membership is recomputed from each row rather than inferred from the
-    // indexed key alone.
-    for (const auto& metadata : getIndexMetadata(dbname, tablename)) {
-        std::filesystem::path idxPath = secondaryIndexPath(
-            dbname, tablename, metadata.name);
-        std::string cacheKey =
-            dbname + "/" + tablename + "/" + metadata.name;
-        {
-            auto it = secondaryIndexCache_.find(cacheKey);
-            if (it != secondaryIndexCache_.end()) {
-                it->second->close();
-                secondaryIndexCache_.erase(it);
-            }
+    struct PendingIndex {
+        ReindexSwapEntry swap;
+        std::string cacheKey;
+        bool primary = false;
+        std::unique_ptr<BPTree> tree;
+    };
+
+    static std::atomic<uint64_t> temporarySequence{0};
+    std::vector<PendingIndex> pending;
+    const std::filesystem::path swapMarker =
+        dbPath(dbname) /
+        ("." + tablename + std::string(kReindexSwapMarkerSuffix));
+    bool swapMarkerPublished = false;
+    const auto cleanupPending = [&]() {
+        for (auto& index : pending) {
+            if (index.tree) index.tree->close();
+            removeRegularFileIfPresent(index.swap.temporary);
+            removeRegularFileIfPresent(reindexSidecar(index.swap.temporary));
         }
-        std::filesystem::remove(idxPath);
-        BPTree* idx = getSecondaryIndex(
-            dbname, tablename, metadata.name);
-        if (!idx) return DBStatus::IO_ERROR;
+    };
+    const auto evictLiveCaches = [&]() {
+        for (const auto& index : pending) {
+            if (index.primary) pkIndexCache_.erase(index.cacheKey);
+            else secondaryIndexCache_.erase(index.cacheKey);
+        }
+    };
+    const auto finishFailure = [&](DBStatus status) {
+        if (swapMarkerPublished) {
+            // Recovery may publish a replacement even when the marker's
+            // directory fsync was the operation that failed. Never leave a
+            // cached descriptor pointing at the generation recovery replaced.
+            evictLiveCaches();
+            std::vector<ReindexSwapEntry> entries;
+            entries.reserve(pending.size());
+            for (const auto& index : pending) entries.push_back(index.swap);
+            if (!recoverReindexSwapPlan(entries, swapMarker)) {
+                status = DBStatus::IO_ERROR;
+            }
+        } else {
+            cleanupPending();
+        }
+        return status;
+    };
+    const auto createPending = [&](const std::filesystem::path& target,
+                                   std::string cacheKey,
+                                   bool primary) -> BPTree* {
+        PendingIndex index;
+        if (!normalizedAbsolutePath(target, index.swap.target)) return nullptr;
+        const uint64_t sequence = temporarySequence.fetch_add(1);
+        const std::string uniqueSuffix =
+            std::to_string(static_cast<unsigned long long>(::getpid())) + "." +
+            std::to_string(sequence);
+        index.swap.temporary = std::filesystem::path(
+            index.swap.target.string() + ".reindex.tmp." + uniqueSuffix);
+        index.swap.backup = std::filesystem::path(
+            index.swap.target.string() + ".reindex.old." + uniqueSuffix);
+        index.cacheKey = std::move(cacheKey);
+        index.primary = primary;
+
+        if (!validReindexSwapEntry(
+                index.swap, reindexRelationRoot, tablename) ||
+            !removeRegularFileIfPresent(index.swap.temporary) ||
+            !removeRegularFileIfPresent(
+                reindexSidecar(index.swap.temporary)) ||
+            !removeRegularFileIfPresent(index.swap.backup) ||
+            !removeRegularFileIfPresent(reindexSidecar(index.swap.backup))) {
+            return nullptr;
+        }
+        index.tree = std::make_unique<BPTree>(index.swap.temporary);
+        if (!index.tree->open()) {
+            index.tree->close();
+            removeRegularFileIfPresent(index.swap.temporary);
+            removeRegularFileIfPresent(
+                reindexSidecar(index.swap.temporary));
+            return nullptr;
+        }
+        pending.push_back(std::move(index));
+        return pending.back().tree.get();
+    };
+    const auto finishTree = [&](BPTree* tree) {
+        if (!tree || !tree->flush()) return false;
+        tree->close();
+        return true;
+    };
+
+    const TableSchema tbl = getTableSchema(dbname, tablename);
+    const auto secondaryIndexes = getIndexMetadata(dbname, tablename);
+    const auto compositeIndexes = getCompositeIndexes(dbname, tablename);
+    const std::string tableKey = dbname + "/" + tablename;
+
+    // Build every replacement beside the live files. The metadata lock keeps
+    // DML and rollback maintenance out of the scan; the physical-index view
+    // deliberately includes active INSERT versions and excludes versions
+    // removed by active UPDATE/DELETE operations. A later COMMIT requires no
+    // extra index write, while a later ROLLBACK repairs the replacement in the
+    // same way it repaired the old tree.
+    BPTree* primary = createPending(
+        indexPath(dbname, tablename), tableKey, true);
+    if (!primary) return finishFailure(DBStatus::IO_ERROR);
+    bool primaryWriteFailed = false;
+    if (tbl.hasPrimaryKey() &&
+        !forEachRow(dbname, tablename,
+                    [&](uint32_t pageId, uint16_t slotId,
+                        const char* data, size_t len) {
+            if (primaryWriteFailed) return;
+            const std::string row(data, len);
+            const std::string key = extractPKValue(row, tbl);
+            if (!key.empty()) {
+                primaryWriteFailed = !primary->insert(
+                    key, encodeRid(pageId, slotId));
+            }
+        }, nullptr, {}, false, true)) {
+        return finishFailure(DBStatus::IO_ERROR);
+    }
+    if (primaryWriteFailed || !finishTree(primary)) {
+        return finishFailure(DBStatus::IO_ERROR);
+    }
+
+    // Ordinary and expression secondary indexes recompute partial-index
+    // membership for every row instead of inferring it from the key alone.
+    for (const auto& metadata : secondaryIndexes) {
+        const std::string cacheKey =
+            tableKey + "/" + metadata.name;
+        BPTree* tree = createPending(
+            secondaryIndexPath(dbname, tablename, metadata.name),
+            cacheKey, false);
+        if (!tree) return finishFailure(DBStatus::IO_ERROR);
+
         bool metadataValid = true;
-        if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
-                                           const char* data, size_t len) {
-            if (!metadataValid) return;
-            std::string row(data, len);
+        bool writeFailed = false;
+        if (!forEachRow(dbname, tablename,
+                        [&](uint32_t pageId, uint16_t slotId,
+                            const char* data, size_t len) {
+            if (!metadataValid || writeFailed) return;
+            const std::string row(data, len);
             EvaluatedIndexEntry entry;
             if (!secondaryIndexEntryFromBuffer(
                     *this, metadata, tbl, row, dbname, entry)) {
@@ -10178,44 +10616,191 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
                 return;
             }
             if (entry.included && !entry.key.empty()) {
-                idx->insertMulti(entry.key, encodeRid(pageId, slotId));
+                writeFailed = !tree->insertMulti(
+                    entry.key, encodeRid(pageId, slotId));
             }
-        })) return DBStatus::IO_ERROR;
-        if (!metadataValid) return DBStatus::CORRUPTED_DATA;
+        }, nullptr, {}, false, true)) {
+            return finishFailure(DBStatus::IO_ERROR);
+        }
+        if (!metadataValid) {
+            return finishFailure(DBStatus::CORRUPTED_DATA);
+        }
+        if (writeFailed || !finishTree(tree)) {
+            return finishFailure(DBStatus::IO_ERROR);
+        }
     }
 
-    // 3. Rebuild composite indexes
-    auto compIdxs = getCompositeIndexes(dbname, tablename);
-    for (const auto& ci : compIdxs) {
-        std::filesystem::path p = relationDir(dbname, tablename) / (tablename + ".idx_" + ci.name);
-        std::string cacheKey = dbname + "/" + tablename + "/C/" + ci.name;
-        {
-            auto it = secondaryIndexCache_.find(cacheKey);
-            if (it != secondaryIndexCache_.end()) {
-                it->second->close();
-                secondaryIndexCache_.erase(it);
-            }
-        }
-        std::filesystem::remove(p);
-        BPTree* idx = getCompositeIndexTree(dbname, tablename, ci.name);
-        if (!idx) return DBStatus::IO_ERROR;
+    for (const auto& metadata : compositeIndexes) {
+        const std::string cacheKey =
+            tableKey + "/C/" + metadata.name;
+        BPTree* tree = createPending(
+            reindexRelationRoot /
+                (tablename + ".idx_" + metadata.name),
+            cacheKey, false);
+        if (!tree) return finishFailure(DBStatus::IO_ERROR);
+
         bool metadataValid = true;
-        if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
-                                           const char* data, size_t len) {
-            if (!metadataValid) return;
-            std::string row(data, len);
+        bool writeFailed = false;
+        if (!forEachRow(dbname, tablename,
+                        [&](uint32_t pageId, uint16_t slotId,
+                            const char* data, size_t len) {
+            if (!metadataValid || writeFailed) return;
+            const std::string row(data, len);
             EvaluatedIndexEntry entry;
             if (!compositeIndexEntryFromBuffer(
-                    *this, ci, tbl, row, dbname, entry)) {
+                    *this, metadata, tbl, row, dbname, entry)) {
                 metadataValid = false;
                 return;
             }
             if (entry.included && !entry.key.empty()) {
-                idx->insertMulti(entry.key, encodeRid(pageId, slotId));
+                writeFailed = !tree->insertMulti(
+                    entry.key, encodeRid(pageId, slotId));
             }
-        })) return DBStatus::IO_ERROR;
-        if (!metadataValid) return DBStatus::CORRUPTED_DATA;
+        }, nullptr, {}, false, true)) {
+            return finishFailure(DBStatus::IO_ERROR);
+        }
+        if (!metadataValid) {
+            return finishFailure(DBStatus::CORRUPTED_DATA);
+        }
+        if (writeFailed || !finishTree(tree)) {
+            return finishFailure(DBStatus::IO_ERROR);
+        }
     }
+
+    // A B+ tree and its TDE authentication sidecar are one logical file. Keep
+    // the old pair as a rollback generation and publish a durable swap plan
+    // before the first rename. Startup can then repair a crash at any point
+    // between the individual filesystem operations.
+    std::vector<ReindexSwapEntry> swapEntries;
+    swapEntries.reserve(pending.size());
+    std::set<std::filesystem::path> uniqueTargets;
+    for (auto& index : pending) {
+        index.tree.reset();
+
+        BPTree* cached = nullptr;
+        if (index.primary) {
+            const auto existing = pkIndexCache_.find(index.cacheKey);
+            if (existing != pkIndexCache_.end()) cached = existing->second.get();
+        } else {
+            const auto existing = secondaryIndexCache_.find(index.cacheKey);
+            if (existing != secondaryIndexCache_.end()) {
+                cached = existing->second.get();
+            }
+        }
+        // A rollback generation is useful only if every dirty main/sidecar
+        // page has reached disk before its path is renamed into the backup.
+        if (cached && !cached->flush()) {
+            return finishFailure(DBStatus::IO_ERROR);
+        }
+
+        bool targetExists = false;
+        bool targetSidecarExists = false;
+        bool temporaryExists = false;
+        bool temporarySidecarExists = false;
+        bool backupExists = false;
+        bool backupSidecarExists = false;
+        if (!inspectRegularFile(index.swap.target, targetExists) ||
+            !inspectRegularFile(
+                reindexSidecar(index.swap.target), targetSidecarExists) ||
+            !inspectRegularFile(index.swap.temporary, temporaryExists) ||
+            !inspectRegularFile(
+                reindexSidecar(index.swap.temporary),
+                temporarySidecarExists) ||
+            !inspectRegularFile(index.swap.backup, backupExists) ||
+            !inspectRegularFile(
+                reindexSidecar(index.swap.backup), backupSidecarExists) ||
+            (targetExists && !targetSidecarExists) || !temporaryExists ||
+            !temporarySidecarExists || backupExists || backupSidecarExists ||
+            !validReindexSwapEntry(
+                index.swap, reindexRelationRoot, tablename) ||
+            !uniqueTargets.insert(index.swap.target).second) {
+            return finishFailure(DBStatus::IO_ERROR);
+        }
+        swapEntries.push_back(index.swap);
+    }
+
+    // fsync on each tree makes its bytes durable, but a newly created temp
+    // filename is not crash-stable until its containing directory is synced.
+    // The marker must never outlive the only recoverable replacement files.
+    if (!syncDirectoryDurably(reindexRelationRoot)) {
+        return finishFailure(DBStatus::IO_ERROR);
+    }
+
+    bool existingMarker = false;
+    if (!inspectRegularFile(swapMarker, existingMarker) || existingMarker) {
+        return finishFailure(DBStatus::IO_ERROR);
+    }
+    std::string serializedSwapPlan;
+    if (!serializeReindexSwapPlan(swapEntries, serializedSwapPlan) ||
+        !index_file::writeAtomically(swapMarker, serializedSwapPlan)) {
+        bool markerExists = false;
+        if (inspectRegularFile(swapMarker, markerExists) && markerExists) {
+            swapMarkerPublished = true;
+        }
+        return finishFailure(DBStatus::IO_ERROR);
+    }
+    swapMarkerPublished = true;
+
+    // No reader can hold a table lock while the metadata lock is held. Close
+    // every descriptor for the live generations before renaming them.
+    evictLiveCaches();
+
+    for (const auto& entry : swapEntries) {
+        std::error_code error;
+        bool targetExists = false;
+        bool targetSidecarExists = false;
+        if (!inspectRegularFile(entry.target, targetExists) ||
+            !inspectRegularFile(
+                reindexSidecar(entry.target), targetSidecarExists)) {
+            return finishFailure(DBStatus::IO_ERROR);
+        }
+        if (targetExists) {
+            std::filesystem::rename(entry.target, entry.backup, error);
+            if (error) return finishFailure(DBStatus::IO_ERROR);
+        }
+        if (targetSidecarExists) {
+            std::filesystem::rename(
+                reindexSidecar(entry.target),
+                reindexSidecar(entry.backup), error);
+            if (error) return finishFailure(DBStatus::IO_ERROR);
+        }
+        std::filesystem::rename(entry.temporary, entry.target, error);
+        if (error) return finishFailure(DBStatus::IO_ERROR);
+        std::filesystem::rename(
+            reindexSidecar(entry.temporary), reindexSidecar(entry.target),
+            error);
+        if (error) return finishFailure(DBStatus::IO_ERROR);
+    }
+
+    std::set<std::filesystem::path> parentDirectories;
+    for (const auto& entry : swapEntries) {
+        parentDirectories.insert(entry.target.parent_path());
+    }
+    for (const auto& directory : parentDirectories) {
+        if (!syncDirectoryDurably(directory)) {
+            return finishFailure(DBStatus::IO_ERROR);
+        }
+    }
+
+    // Removing the main backup commits this individual pair. Remove it before
+    // the sidecar backup so crash recovery never restores an old main file
+    // beside a new sidecar.
+    for (const auto& entry : swapEntries) {
+        if (!removeRegularFileIfPresent(entry.backup) ||
+            !removeRegularFileIfPresent(reindexSidecar(entry.backup))) {
+            return finishFailure(DBStatus::IO_ERROR);
+        }
+    }
+    for (const auto& directory : parentDirectories) {
+        if (!syncDirectoryDurably(directory)) {
+            return finishFailure(DBStatus::IO_ERROR);
+        }
+    }
+    if (!removeRegularFileIfPresent(swapMarker) ||
+        !syncDirectoryDurably(swapMarker.parent_path())) {
+        return finishFailure(DBStatus::IO_ERROR);
+    }
+    swapMarkerPublished = false;
 
     return DBStatus::OK;
 }
@@ -33025,6 +33610,90 @@ bool StorageEngine::recoverAllDatabases() {
             dbname = entry.path().filename().string();
         } catch (...) { continue; }
         if (!isDatabaseDirectory(dbname)) continue;
+
+        // REINDEX publishes each B+ tree together with its TDE sidecar. A
+        // durable marker makes the multi-rename exchange recoverable before
+        // WAL or any relation cache opens the potentially interrupted pair.
+        std::vector<std::filesystem::path> reindexMarkers;
+        std::vector<std::pair<std::string, std::filesystem::path>>
+            orphanMarkerTemps;
+        std::error_code markerScanError;
+        for (std::filesystem::directory_iterator markerIt(
+                 dbPath(dbname),
+                 std::filesystem::directory_options::skip_permission_denied,
+                 markerScanError), markerEnd;
+             !markerScanError && markerIt != markerEnd;
+             markerIt.increment(markerScanError)) {
+            const std::string filename =
+                markerIt->path().filename().string();
+            const std::string suffix(kReindexSwapMarkerSuffix);
+            if (filename.size() > suffix.size() + 1 && filename.front() == '.' &&
+                filename.compare(
+                    filename.size() - suffix.size(), suffix.size(), suffix) == 0) {
+                reindexMarkers.push_back(markerIt->path());
+            } else if (!filename.empty() && filename.front() == '.') {
+                const size_t temporarySuffix =
+                    filename.find(suffix + ".tmp.");
+                if (temporarySuffix > 1 &&
+                    temporarySuffix != std::string::npos) {
+                    orphanMarkerTemps.emplace_back(
+                        filename.substr(1, temporarySuffix - 1),
+                        markerIt->path());
+                }
+            }
+        }
+        if (markerScanError) {
+            std::cerr << "[recovery] cannot inspect REINDEX swaps for "
+                      << dbname << std::endl;
+            return false;
+        }
+        for (const auto& marker : reindexMarkers) {
+            const std::string filename = marker.filename().string();
+            const size_t tableLength =
+                filename.size() - 1 - kReindexSwapMarkerSuffix.size();
+            const std::string tableName = filename.substr(1, tableLength);
+            lockManager_.setResourceNamespace(dbname);
+            if (tableName.empty() ||
+                !lockManager_.lockMetadata(tableName)) {
+                std::cerr << "[recovery] invalid or unrecoverable REINDEX swap for "
+                          << dbname << "/" << tableName << std::endl;
+                return false;
+            }
+            ResourceUnlockGuard markerLockGuard(lockManager_, tableName);
+            bool markerExists = false;
+            const bool markerValid =
+                inspectRegularFile(marker, markerExists);
+            if (!markerValid ||
+                (markerExists &&
+                 (!tableExists(dbname, tableName) ||
+                  !recoverReindexSwapMarker(
+                      marker, relationDir(dbname, tableName), tableName)))) {
+                std::cerr << "[recovery] invalid or unrecoverable REINDEX swap for "
+                          << dbname << "/" << tableName << std::endl;
+                return false;
+            }
+        }
+        bool removedMarkerTemp = false;
+        for (const auto& [tableName, temporary] : orphanMarkerTemps) {
+            lockManager_.setResourceNamespace(dbname);
+            if (!lockManager_.lockMetadata(tableName)) {
+                std::cerr << "[recovery] cannot lock REINDEX marker temp "
+                          << temporary << std::endl;
+                return false;
+            }
+            ResourceUnlockGuard markerLockGuard(lockManager_, tableName);
+            if (!removeRegularFileIfPresent(temporary)) {
+                std::cerr << "[recovery] cannot remove REINDEX marker temp "
+                          << temporary << std::endl;
+                return false;
+            }
+            removedMarkerTemp = true;
+        }
+        if (removedMarkerTemp && !syncDirectoryDurably(dbPath(dbname))) {
+            std::cerr << "[recovery] cannot sync REINDEX cleanup for "
+                      << dbname << std::endl;
+            return false;
+        }
 
         const auto walPath = dbPath(dbname) / "pg_wal";
         const auto targetPath = walPath / "recovery_target";
