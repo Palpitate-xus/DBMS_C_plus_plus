@@ -7,6 +7,7 @@
 #include "commands/DdlExecutor.h"
 #include "commands/TableManage.h"
 #include "Session.h"
+#include "catalog/CatalogService.h"
 #include "catalog/type_registry.h"
 #include <cassert>
 #include <filesystem>
@@ -249,12 +250,50 @@ static void test_partition_by_range_ddl() {
     assert(!ddl.executeSql(
         "CREATE TABLE p2025 PARTITION OF sales FOR VALUES FROM (2025) TO (2026)", s));
 
+    dbms::CatalogManager& catalog =
+        g_engine.catalogService().get(db);
+    const auto* salesRelation =
+        catalog.resolveRelation("sales", {"public"});
+    const auto* firstPartition =
+        catalog.resolveRelation("p2020", {"public"});
+    const auto* secondPartition =
+        catalog.resolveRelation("p2025", {"public"});
+    assert(salesRelation && salesRelation->relhassubclass);
+    assert(firstPartition && firstPartition->relispartition);
+    assert(secondPartition && secondPartition->relispartition);
+    const dbms::Oid salesOid = salesRelation->oid;
+    const dbms::Oid firstPartitionOid = firstPartition->oid;
+    const dbms::Oid secondPartitionOid = secondPartition->oid;
+    {
+        dbms::CatalogManager durable(
+            (fs::path(g_engine.dbPath(db)) / "pg_catalog").string());
+        assert(durable.findClass(salesOid)->relhassubclass);
+        assert(durable.findClass(firstPartitionOid)->relispartition);
+        assert(durable.findClass(secondPartitionOid)->relispartition);
+    }
+
     // Insert rows and verify routing.
     assert(g_engine.insert(db, "sales", {{"id", "1"}, {"yr", "2020"}}) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "sales", {{"id", "2"}, {"yr", "2025"}}) == dbms::DBStatus::OK);
 
     auto rows = g_engine.query(db, "sales", {}, {"id", "yr"});
     assert(rows.size() == 2);
+
+    assert(!ddl.executeSql(
+        "ALTER TABLE sales DETACH PARTITION p2020", s));
+    assert(catalog.findClass(salesOid)->relhassubclass);
+    assert(!catalog.findClass(firstPartitionOid)->relispartition);
+    assert(!ddl.executeSql(
+        "ALTER TABLE sales DETACH PARTITION p2025", s));
+    assert(!catalog.findClass(salesOid)->relhassubclass);
+    assert(!catalog.findClass(secondPartitionOid)->relispartition);
+    {
+        dbms::CatalogManager durable(
+            (fs::path(g_engine.dbPath(db)) / "pg_catalog").string());
+        assert(!durable.findClass(salesOid)->relhassubclass);
+        assert(!durable.findClass(firstPartitionOid)->relispartition);
+        assert(!durable.findClass(secondPartitionOid)->relispartition);
+    }
 
     cleanup(db);
     std::cout << "[OPTS] PARTITION BY RANGE via DDL OK" << std::endl;

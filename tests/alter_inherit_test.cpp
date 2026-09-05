@@ -9,6 +9,7 @@
 #include "commands/TableManage.h"
 #include "parser/parser.h"
 #include "Session.h"
+#include "catalog/CatalogService.h"
 #include "catalog/type_registry.h"
 #include <cassert>
 #include <filesystem>
@@ -86,6 +87,12 @@ static void test_inherit_execution() {
     assert(!ddl.executeSql("ALTER TABLE child INHERIT p1", s));
     assert(g_engine.getInheritedChildren(db, "p1") ==
            std::vector<std::string>{"child"});
+    dbms::CatalogManager& catalog =
+        g_engine.catalogService().get(db);
+    const auto* parentRelation =
+        catalog.resolveRelation("p1", {"public"});
+    assert(parentRelation && parentRelation->relhassubclass);
+    const dbms::Oid parentOid = parentRelation->oid;
     assert(!fs::exists(fs::path(db) / ".child.inherits"));
 
     {
@@ -96,6 +103,7 @@ static void test_inherit_execution() {
 
     assert(!ddl.executeSql("ALTER TABLE child NO INHERIT p1", s));
     assert(g_engine.getInheritedChildren(db, "p1").empty());
+    assert(!catalog.findClass(parentOid)->relhassubclass);
     assert(ddl.executeSql("ALTER TABLE child INHERIT missing_parent", s));
     assert(ddl.executeSql("ALTER TABLE missing_child INHERIT p1", s));
     assert(ddl.executeSql("ALTER TABLE child INHERIT child", s));
@@ -209,14 +217,22 @@ static void test_drop_removes_inheritance_edges() {
     assert(!ddl.executeSql("CREATE TABLE parent (id INT)", s));
     assert(!ddl.executeSql(
         "CREATE TABLE child (payload INT) INHERITS (parent)", s));
+    dbms::CatalogManager& catalog =
+        g_engine.catalogService().get(db);
+    const auto* parentRelation =
+        catalog.resolveRelation("parent", {"public"});
+    assert(parentRelation && parentRelation->relhassubclass);
+    const dbms::Oid parentOid = parentRelation->oid;
     assert(!ddl.executeSql("DROP TABLE child", s));
     assert(g_engine.getInheritedChildren(db, "parent").empty());
+    assert(!catalog.findClass(parentOid)->relhassubclass);
 
     // Reusing the child's name without INHERITS must not resurrect the old
     // edge. Dropping the parent must likewise detach a surviving child.
     assert(!ddl.executeSql("CREATE TABLE child (id INT, payload INT)", s));
     assert(g_engine.getInheritedChildren(db, "parent").empty());
     assert(!ddl.executeSql("ALTER TABLE child INHERIT parent", s));
+    assert(catalog.findClass(parentOid)->relhassubclass);
     assert(!ddl.executeSql("DROP TABLE parent", s));
     assert(g_engine.getInheritedChildren(db, "parent").empty());
     assert(g_engine.tableExists(db, "child"));

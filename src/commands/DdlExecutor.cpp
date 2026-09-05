@@ -524,6 +524,22 @@ static bool tableSchemaHasImplicitIndex(const TableSchema& table) {
     return false;
 }
 
+static bool tableSchemaHasPartitionChildren(const TableSchema& table) {
+    switch (table.partitionType) {
+        case TableSchema::PartitionType::Range:
+            return !table.rangePartitions.empty() ||
+                   !table.defaultPartitionName.empty();
+        case TableSchema::PartitionType::List:
+            return !table.listPartitions.empty() ||
+                   !table.defaultPartitionName.empty();
+        case TableSchema::PartitionType::Hash:
+            return table.hashPartitions != 0;
+        case TableSchema::PartitionType::None:
+            return false;
+    }
+    return false;
+}
+
 static bool storageTableHasIndex(const std::string& dbname,
                                  const std::string& physicalTableName) {
     const TableSchema table =
@@ -559,6 +575,7 @@ static void registerTableInCatalog(CatalogManager& cat, const TableSchema& tbl,
     cls.relnatts = static_cast<int16_t>(tbl.len);
     cls.relchecks = tableCheckConstraintCount(tbl);
     cls.relhasindex = tableSchemaHasImplicitIndex(tbl);
+    cls.relhassubclass = tableSchemaHasPartitionChildren(tbl);
     cls.relpersistence = tbl.isUnlogged ? 'u' : 'p';
     if (!tbl.owner.empty()) {
         const auto owner = authCatalog().getAuthIdByName(tbl.owner);
@@ -823,6 +840,48 @@ static bool synchronizeTableIndexFlagInCatalog(
             });
     } catch (const std::exception& error) {
         std::cerr << "ALTER TABLE index catalog update failed: "
+                  << error.what() << std::endl;
+        return false;
+    }
+}
+
+static bool updateTableHierarchyFlagsInCatalog(
+    CatalogManager& catalog, const std::string& dbname,
+    const std::string& physicalTableName,
+    std::optional<bool> isPartition = std::nullopt) {
+    const auto qualifiedName =
+        CatalogService::logicalName(physicalTableName);
+    const std::string schemaName = qualifiedName.schema.empty()
+        ? "public" : qualifiedName.schema;
+    const auto* relation = catalog.resolveRelation(
+        qualifiedName.name, {schemaName});
+    // Storage-only relations intentionally remain outside pg_catalog.
+    if (!relation) return true;
+    if (!g_engine.tableExists(dbname, physicalTableName)) return false;
+
+    PgClassRow replacement = *relation;
+    const TableSchema table =
+        g_engine.getTableSchema(dbname, physicalTableName);
+    replacement.relhassubclass =
+        tableSchemaHasPartitionChildren(table) ||
+        !g_engine.getInheritedChildren(
+            dbname, physicalTableName).empty();
+    if (isPartition.has_value()) {
+        replacement.relispartition = *isPartition;
+    }
+    return catalog.updateClass(replacement.oid, replacement);
+}
+
+static bool synchronizeTableHierarchyFlagsInCatalog(
+    const std::string& dbname, const std::string& physicalTableName,
+    std::optional<bool> isPartition = std::nullopt) {
+    try {
+        CatalogManager& catalog = g_engine.catalogService().get(dbname);
+        return updateTableHierarchyFlagsInCatalog(
+                   catalog, dbname, physicalTableName, isPartition) &&
+               catalog.persistAll();
+    } catch (const std::exception& error) {
+        std::cerr << "table hierarchy catalog update failed: "
                   << error.what() << std::endl;
         return false;
     }
@@ -1611,6 +1670,25 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 status = g_engine.attachPartition(s.currentDB, tableName, sub.name,
                                                   sub.partitionSpec);
                 if (!alterStatusOk(status, "Partition")) return true;
+                if (!tableIsTemporary &&
+                    !synchronizeTableHierarchyFlagsInCatalog(
+                        s.currentDB, tableName)) {
+                    std::cout << "ALTER TABLE partition catalog update failed"
+                              << std::endl;
+                    return true;
+                }
+                if (!tableIsTemporary) {
+                    const std::string partitionTableName =
+                        resolveTableName(s, sub.name);
+                    if (g_engine.tableExists(
+                            s.currentDB, partitionTableName) &&
+                        !synchronizeTableHierarchyFlagsInCatalog(
+                            s.currentDB, partitionTableName, true)) {
+                        std::cout << "ALTER TABLE partition catalog update failed"
+                                  << std::endl;
+                        return true;
+                    }
+                }
                 break;
             case AlterTableStmt::Action::DetachPartition:
                 if (sub.name.empty()) {
@@ -1619,6 +1697,25 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 }
                 status = g_engine.detachPartition(s.currentDB, tableName, sub.name);
                 if (!alterStatusOk(status, "Partition")) return true;
+                if (!tableIsTemporary &&
+                    !synchronizeTableHierarchyFlagsInCatalog(
+                        s.currentDB, tableName)) {
+                    std::cout << "ALTER TABLE partition catalog update failed"
+                              << std::endl;
+                    return true;
+                }
+                if (!tableIsTemporary) {
+                    const std::string partitionTableName =
+                        resolveTableName(s, sub.name);
+                    if (g_engine.tableExists(
+                            s.currentDB, partitionTableName) &&
+                        !synchronizeTableHierarchyFlagsInCatalog(
+                            s.currentDB, partitionTableName, false)) {
+                        std::cout << "ALTER TABLE partition catalog update failed"
+                                  << std::endl;
+                        return true;
+                    }
+                }
                 break;
             case AlterTableStmt::Action::SetSchema:
                 status = g_engine.alterTableSetSchema(s.currentDB, tableName, sub.newName);
@@ -1994,6 +2091,13 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 if (graphChanged &&
                     !index_file::writeAtomically(path, rewritten.str())) {
                     std::cout << "Could not persist inheritance metadata"
+                              << std::endl;
+                    return true;
+                }
+                if (!tableIsTemporary &&
+                    !synchronizeTableHierarchyFlagsInCatalog(
+                        s.currentDB, parentName)) {
+                    std::cout << "ALTER TABLE inheritance catalog update failed"
                               << std::endl;
                     return true;
                 }
@@ -3356,6 +3460,13 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                 CatalogManager& cat = *tableCatalog;
                 registerTableInCatalog(
                     cat, child, targetSchema, targetName.name);
+                if (!updateTableHierarchyFlagsInCatalog(
+                        cat, s.currentDB, parent) ||
+                    !updateTableHierarchyFlagsInCatalog(
+                        cat, s.currentDB, tname, true)) {
+                    throw std::runtime_error(
+                        "cannot update partition catalog flags");
+                }
                 if (!cat.persistAll()) {
                     throw std::runtime_error(
                         "cannot persist partition catalog");
@@ -4098,6 +4209,13 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                 throw std::runtime_error("created table catalog row is missing");
             }
             const Oid tableOid = tableRelation->oid;
+            for (const auto& parent : inheritedParents) {
+                if (!updateTableHierarchyFlagsInCatalog(
+                        cat, s.currentDB, parent)) {
+                    throw std::runtime_error(
+                        "cannot update inheritance catalog flags");
+                }
+            }
             for (size_t i = 0; i < tbl.len; ++i) {
                 const std::string sequenceName =
                     extractNextvalSequence(tbl.cols[i].defaultValue);
@@ -4325,6 +4443,18 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
         return true;
     }
 
+    std::vector<std::string> inheritanceParents;
+    for (const auto& candidate :
+         g_engine.getTableNames(s.currentDB)) {
+        if (candidate == tname) continue;
+        const auto children =
+            g_engine.getInheritedChildren(s.currentDB, candidate);
+        if (std::find(children.begin(), children.end(), tname) !=
+            children.end()) {
+            inheritanceParents.push_back(candidate);
+        }
+    }
+
     // Build the catalog-side CASCADE/RESTRICT plan without mutating catalog
     // state. Physical storage must be removed before applying this plan.
     // A rejected plan (e.g. RESTRICT with dependents) must not mark the
@@ -4386,13 +4516,26 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
         std::cout << "DROP TABLE failed" << std::endl;
         return true;
     }
-    if (hasCatalogDropPlan && catalogManager) {
-        std::string err;
-        if (!catalogManager->applyDropPlan(catalogDropPlan, &err)) {
-            std::cout << "DROP TABLE catalog cleanup failed: " << err << std::endl;
-            return true;
+    bool catalogChanged = false;
+    if (catalogManager) {
+        if (hasCatalogDropPlan) {
+            std::string err;
+            if (!catalogManager->applyDropPlan(catalogDropPlan, &err)) {
+                std::cout << "DROP TABLE catalog cleanup failed: " << err << std::endl;
+                return true;
+            }
+            catalogChanged = true;
         }
-        if (!catalogManager->persistAll()) {
+        for (const auto& parent : inheritanceParents) {
+            if (!updateTableHierarchyFlagsInCatalog(
+                    *catalogManager, s.currentDB, parent)) {
+                std::cout << "DROP TABLE inheritance catalog update failed"
+                          << std::endl;
+                return true;
+            }
+            catalogChanged = true;
+        }
+        if (catalogChanged && !catalogManager->persistAll()) {
             std::cout << "DROP TABLE catalog persistence failed" << std::endl;
             return true;
         }
