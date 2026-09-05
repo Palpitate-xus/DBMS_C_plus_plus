@@ -5,7 +5,9 @@
 #include "catalog/type_registry.h"
 #include <cassert>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <set>
 #include "test_utils.h"
 
@@ -19,6 +21,12 @@ static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
     s.permission = 1;
     s.currentDB = db;
+}
+
+static std::string readBytes(const fs::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(input),
+            std::istreambuf_iterator<char>()};
 }
 
 static void test_collation_provider() {
@@ -263,6 +271,61 @@ static void test_collate_schema_persistence() {
     std::cout << "[COLLATION] schema persistence OK" << std::endl;
 }
 
+static void test_collation_metadata_is_atomic_and_backward_compatible() {
+    using dbms::DBStatus;
+
+    std::string db = testDbPath("collation_metadata_atomicity");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == DBStatus::OK);
+    const fs::path metadata = fs::path(db) / ".collations";
+    {
+        std::ofstream legacy(metadata, std::ios::binary);
+        legacy << "legacy|libc|C\nneighbor|icu|en_US.UTF-8\n";
+        assert(legacy.good());
+    }
+
+    dbms::StorageEngine engine;
+    assert((engine.getCollationNames(db) ==
+            std::vector<std::string>{"legacy", "neighbor"}));
+    assert(engine.createCollation(
+               db, "special", "provider|variant", "line\nlocale") ==
+           DBStatus::OK);
+
+    const std::string migrated = readBytes(metadata);
+    assert(migrated.rfind("DBMS_COLLATION_V2:", 0) == 0);
+    assert(migrated.find("legacy|libc|C") == std::string::npos);
+    assert(migrated.find("provider|variant") == std::string::npos);
+    assert(migrated.find("line\nlocale") == std::string::npos);
+
+    dbms::StorageEngine reopened;
+    assert((reopened.getCollationNames(db) ==
+            std::vector<std::string>{"legacy", "neighbor", "special"}));
+    assert(engine.createCollation(db, "special", "libc", "C") ==
+           DBStatus::TABLE_ALREADY_EXISTS);
+    assert(engine.createCollation(db, "bad|name", "libc", "C") ==
+           DBStatus::INVALID_ARGUMENT);
+    assert(readBytes(metadata) == migrated);
+
+    const fs::perms originalPermissions = fs::status(db).permissions();
+    fs::permissions(db, fs::perms::owner_read | fs::perms::owner_exec,
+                    fs::perm_options::replace);
+    const DBStatus createStatus =
+        engine.createCollation(db, "blocked", "libc", "C");
+    const DBStatus dropStatus = engine.dropCollation(db, "legacy");
+    fs::permissions(db, originalPermissions, fs::perm_options::replace);
+    assert(createStatus == DBStatus::IO_ERROR);
+    assert(dropStatus == DBStatus::IO_ERROR);
+    assert(readBytes(metadata) == migrated);
+
+    assert(engine.dropCollation(db, "legacy") == DBStatus::OK);
+    dbms::StorageEngine afterDrop;
+    assert((afterDrop.getCollationNames(db) ==
+            std::vector<std::string>{"neighbor", "special"}));
+
+    cleanup(db);
+    std::cout << "[COLLATION] metadata atomicity OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_collation_provider();
@@ -272,6 +335,7 @@ int main() {
     test_collate_binary_collations();
     test_collate_with_index();
     test_collate_schema_persistence();
+    test_collation_metadata_is_atomic_and_backward_compatible();
     std::cout << "[COLLATION] all passed" << std::endl;
     return 0;
 }

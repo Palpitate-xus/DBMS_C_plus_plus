@@ -2695,27 +2695,148 @@ std::filesystem::path StorageEngine::viewsDir(const std::string& dbname) const {
     return dbPath(dbname) / ".views";
 }
 
+namespace {
+
+struct StoredCollation {
+    std::string name;
+    std::string provider;
+    std::string locale;
+};
+
+constexpr const char* COLLATION_METADATA_V2_PREFIX = "DBMS_COLLATION_V2:";
+
+std::string encodeCollationField(const std::string& value) {
+    static constexpr char hex[] = "0123456789abcdef";
+    std::string encoded;
+    encoded.reserve(value.size() * 2);
+    for (unsigned char byte : value) {
+        encoded.push_back(hex[byte >> 4]);
+        encoded.push_back(hex[byte & 0x0f]);
+    }
+    return encoded;
+}
+
+bool decodeCollationField(const std::string& encoded, std::string& value) {
+    if (encoded.size() % 2 != 0) return false;
+    auto nibble = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+
+    value.clear();
+    value.reserve(encoded.size() / 2);
+    for (size_t i = 0; i < encoded.size(); i += 2) {
+        const int high = nibble(encoded[i]);
+        const int low = nibble(encoded[i + 1]);
+        if (high < 0 || low < 0) {
+            value.clear();
+            return false;
+        }
+        value.push_back(static_cast<char>((high << 4) | low));
+    }
+    return true;
+}
+
+bool validStoredCollation(const StoredCollation& collation) {
+    return validMetadataObjectName(collation.name) &&
+           collation.provider.find('\0') == std::string::npos &&
+           collation.locale.find('\0') == std::string::npos;
+}
+
+bool parseCollationRecord(const std::string& line, StoredCollation& collation) {
+    collation = {};
+    if (line.rfind(COLLATION_METADATA_V2_PREFIX, 0) == 0) {
+        const size_t prefixLength =
+            std::char_traits<char>::length(COLLATION_METADATA_V2_PREFIX);
+        const size_t nameEnd = line.find('|', prefixLength);
+        if (nameEnd == std::string::npos) return false;
+        const size_t providerEnd = line.find('|', nameEnd + 1);
+        if (providerEnd == std::string::npos ||
+            line.find('|', providerEnd + 1) != std::string::npos) {
+            return false;
+        }
+        if (!decodeCollationField(
+                line.substr(prefixLength, nameEnd - prefixLength),
+                collation.name) ||
+            !decodeCollationField(
+                line.substr(nameEnd + 1, providerEnd - nameEnd - 1),
+                collation.provider) ||
+            !decodeCollationField(
+                line.substr(providerEnd + 1), collation.locale)) {
+            return false;
+        }
+    } else {
+        const size_t nameEnd = line.find('|');
+        if (nameEnd == std::string::npos) return false;
+        const size_t providerEnd = line.find('|', nameEnd + 1);
+        if (providerEnd == std::string::npos) return false;
+        collation.name = line.substr(0, nameEnd);
+        collation.provider = line.substr(nameEnd + 1, providerEnd - nameEnd - 1);
+        collation.locale = line.substr(providerEnd + 1);
+    }
+    return validStoredCollation(collation);
+}
+
+bool loadStoredCollations(const std::filesystem::path& path,
+                          std::vector<StoredCollation>& collations) {
+    collations.clear();
+    std::error_code error;
+    const bool exists = std::filesystem::exists(path, error);
+    if (error) return false;
+    if (!exists) return true;
+
+    std::ifstream input(path);
+    if (!input) return false;
+    std::unordered_set<std::string> names;
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.empty()) continue;
+        StoredCollation collation;
+        if (!parseCollationRecord(line, collation) ||
+            !names.insert(collation.name).second) {
+            return false;
+        }
+        collations.push_back(std::move(collation));
+    }
+    return !input.bad();
+}
+
+std::string serializeStoredCollations(
+    const std::vector<StoredCollation>& collations) {
+    std::ostringstream serialized;
+    for (const auto& collation : collations) {
+        serialized << COLLATION_METADATA_V2_PREFIX
+                   << encodeCollationField(collation.name) << '|'
+                   << encodeCollationField(collation.provider) << '|'
+                   << encodeCollationField(collation.locale) << '\n';
+    }
+    return serialized.str();
+}
+
+} // namespace
+
 DBStatus StorageEngine::createCollation(const std::string& dbname,
                                         const std::string& collationName,
                                         const std::string& provider,
                                         const std::string& locale) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    const StoredCollation requested{collationName, provider, locale};
+    if (!validStoredCollation(requested)) return DBStatus::INVALID_ARGUMENT;
     const auto path = dbPath(dbname) / ".collations";
-    if (std::filesystem::exists(path)) {
-        std::ifstream input(path);
-        if (!input) return DBStatus::IO_ERROR;
-        std::string line;
-        while (std::getline(input, line)) {
-            if (line.substr(0, line.find('|')) == collationName) {
-                return DBStatus::TABLE_ALREADY_EXISTS;
-            }
+    std::vector<StoredCollation> collations;
+    if (!loadStoredCollations(path, collations)) return DBStatus::IO_ERROR;
+    for (const auto& existing : collations) {
+        if (existing.name == collationName) {
+            return DBStatus::TABLE_ALREADY_EXISTS;
         }
     }
-    std::ofstream output(path, std::ios::app);
-    if (!output) return DBStatus::IO_ERROR;
-    output << collationName << '|' << provider << '|' << locale << '\n';
-    output.flush();
-    return output ? DBStatus::OK : DBStatus::IO_ERROR;
+    collations.push_back(requested);
+    return index_file::writeAtomically(
+               path, serializeStoredCollations(collations))
+        ? DBStatus::OK : DBStatus::IO_ERROR;
 }
 
 DBStatus StorageEngine::createView(const std::string& dbname,
@@ -2748,65 +2869,52 @@ DBStatus StorageEngine::dropView(const std::string& dbname,
 
 DBStatus StorageEngine::dropCollation(const std::string& dbname,
                                       const std::string& collationName) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    if (!validMetadataObjectName(collationName)) {
+        return DBStatus::INVALID_ARGUMENT;
+    }
     const auto path = dbPath(dbname) / ".collations";
-    if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
+    std::error_code pathError;
+    const bool exists = std::filesystem::exists(path, pathError);
+    if (pathError) return DBStatus::IO_ERROR;
+    if (!exists) return DBStatus::TABLE_NOT_FOUND;
 
-    std::ifstream input(path);
-    if (!input) return DBStatus::IO_ERROR;
-    std::vector<std::string> retained;
-    std::string line;
+    std::vector<StoredCollation> collations;
+    if (!loadStoredCollations(path, collations)) return DBStatus::IO_ERROR;
+    std::vector<StoredCollation> retained;
+    retained.reserve(collations.size());
     bool found = false;
-    while (std::getline(input, line)) {
-        const size_t separator = line.find('|');
-        const std::string name = line.substr(0, separator);
-        if (name == collationName) {
+    for (auto& collation : collations) {
+        if (collation.name == collationName) {
             found = true;
         } else {
-            retained.push_back(line);
+            retained.push_back(std::move(collation));
         }
     }
     if (!found) return DBStatus::TABLE_NOT_FOUND;
-
     if (retained.empty()) {
-        std::error_code error;
-        if (!std::filesystem::remove(path, error) || error) return DBStatus::IO_ERROR;
+        std::error_code removeError;
+        if (!std::filesystem::remove(path, removeError) || removeError ||
+            !syncDirectoryDurably(path.parent_path())) {
+            return DBStatus::IO_ERROR;
+        }
         return DBStatus::OK;
     }
-
-    const auto temporary = path.string() + ".tmp." +
-        std::to_string(static_cast<unsigned long long>(std::hash<std::thread::id>{}(
-            std::this_thread::get_id())));
-    {
-        std::ofstream output(temporary, std::ios::trunc);
-        if (!output) return DBStatus::IO_ERROR;
-        for (const auto& retainedLine : retained) output << retainedLine << '\n';
-        output.flush();
-        if (!output) return DBStatus::IO_ERROR;
-    }
-    std::error_code error;
-    std::filesystem::rename(temporary, path, error);
-    if (error) {
-        std::filesystem::remove(temporary);
-        return DBStatus::IO_ERROR;
-    }
-    return DBStatus::OK;
+    return index_file::writeAtomically(
+               path, serializeStoredCollations(retained))
+        ? DBStatus::OK : DBStatus::IO_ERROR;
 }
 
 std::vector<std::string> StorageEngine::getCollationNames(
     const std::string& dbname) const {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::vector<std::string> result;
     if (!databaseExists(dbname)) return result;
     const auto path = dbPath(dbname) / ".collations";
-    std::ifstream input(path);
-    if (!input) return result;
-    std::string line;
-    while (std::getline(input, line)) {
-        const size_t separator = line.find('|');
-        if (separator != std::string::npos && separator != 0) {
-            result.push_back(line.substr(0, separator));
-        }
-    }
+    std::vector<StoredCollation> collations;
+    if (!loadStoredCollations(path, collations)) return result;
+    for (const auto& collation : collations) result.push_back(collation.name);
     return result;
 }
 
