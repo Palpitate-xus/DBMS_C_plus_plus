@@ -1356,6 +1356,15 @@ private:
     // heaps before the terminal WAL record. Index files keep their flush +
     // WAL-image bookkeeping in all modes.
     bool flushDatabaseCaches(const std::string& dbname, bool heapPages = true);
+    // Transaction boundaries must not write or clear buffers owned by an
+    // unrelated active transaction. Flush only exact relation-cache keys for
+    // the supplied tables while their IX tokens are held.
+    bool flushTableCaches(const std::string& dbname,
+                          const std::set<std::string>& tablenames,
+                          bool heapPages = true);
+    bool flushSelectedCaches(const std::string& dbname,
+                             const std::set<std::string>* tablenames,
+                             bool heapPages);
     void closeDatabaseCaches(const std::string& dbname);
     bool refreshPreparedTableCaches(const std::string& dbname,
                                     const std::string& tablename);

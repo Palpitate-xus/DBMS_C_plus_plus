@@ -2,10 +2,12 @@
 
 #include "storage/BufferPool.h"
 #include "storage/PageAllocator.h"
+#include "access/BPTree.h"
 #include "TableManage.h"
 #include "Config.h"
 #include "WAL.h"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <csignal>
 #include <filesystem>
@@ -224,6 +226,9 @@ int main() {
     std::filesystem::remove_all(dbname);
     std::filesystem::remove_all(dbname + ".txn_backup");
     std::filesystem::remove_all(".txnid");
+    std::filesystem::remove(
+        std::filesystem::path("info") / ".prepared" /
+        "checkpoint_scoped_prepare");
 
     {
         StorageEngine engine;
@@ -358,6 +363,125 @@ int main() {
         assert(heapPageIsDirty());
         assert(engine.rollbackTransaction() == DBStatus::OK);
         std::cout << "[CHECKPOINT] BEGIN leaves peer dirty pages untouched OK\n";
+
+        // ROLLBACK must publish only its own undo. A database-wide cache
+        // flush used to clear an unrelated active transaction's dirty page,
+        // and could copy it while that peer still had the frame pinned.
+        TableSchema peerDirtyTable = tbl;
+        peerDirtyTable.tablename = "peer_dirty";
+        assert(engine.createTable(dbname, peerDirtyTable) == DBStatus::OK);
+        std::atomic<bool> peerDirtyReady{false};
+        std::atomic<bool> releasePeerDirty{false};
+        DBStatus peerDirtyBegin = DBStatus::IO_ERROR;
+        DBStatus peerDirtyInsert = DBStatus::IO_ERROR;
+        DBStatus peerDirtyRollback = DBStatus::IO_ERROR;
+        std::thread dirtyPeer([&]() {
+            peerDirtyBegin = engine.beginTransaction(dbname);
+            if (peerDirtyBegin == DBStatus::OK) {
+                peerDirtyInsert = engine.insert(
+                    dbname, peerDirtyTable.tablename, {{"id", "10"}});
+            }
+            peerDirtyReady.store(true, std::memory_order_release);
+            while (!releasePeerDirty.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            if (peerDirtyBegin == DBStatus::OK) {
+                peerDirtyRollback = engine.rollbackTransaction();
+            }
+        });
+        while (!peerDirtyReady.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        assert(peerDirtyBegin == DBStatus::OK);
+        assert(peerDirtyInsert == DBStatus::OK);
+        BPTree* peerDirtyIndex =
+            engine.getPKIndex(dbname, peerDirtyTable.tablename);
+        assert(peerDirtyIndex != nullptr && peerDirtyIndex->hasDirtyPages());
+
+        // COMMIT must likewise leave an unrelated transaction's index and
+        // heap generations private. The old database-wide index flush made
+        // the peer's uncommitted key durable here.
+        assert(engine.beginTransaction(dbname) == DBStatus::OK);
+        assert(engine.insert(dbname, "t", {{"id", "4"}}) == DBStatus::OK);
+        assert(engine.commitTransaction() == DBStatus::OK);
+        assert(peerDirtyIndex->hasDirtyPages());
+
+        assert(engine.beginTransaction(dbname) == DBStatus::OK);
+        assert(engine.insert(dbname, "t", {{"id", "5"}}) == DBStatus::OK);
+        assert(engine.rollbackTransaction() == DBStatus::OK);
+        PageAllocator* peerDirtyAllocator =
+            engine.getPageAllocator(dbname, peerDirtyTable.tablename);
+        assert(peerDirtyAllocator != nullptr &&
+               peerDirtyAllocator->bufferPool() != nullptr);
+        const auto peerDirtyFrames =
+            peerDirtyAllocator->bufferPool()->getFrameInfo();
+        assert(std::any_of(
+            peerDirtyFrames.begin(), peerDirtyFrames.end(),
+            [](const BufferPool::FrameInfo& frame) {
+                return frame.pageId != 0 && frame.dirty;
+            }));
+        assert(peerDirtyIndex->hasDirtyPages());
+        releasePeerDirty.store(true, std::memory_order_release);
+        dirtyPeer.join();
+        assert(peerDirtyRollback == DBStatus::OK);
+        std::cout << "[CHECKPOINT] commit/rollback leave peer dirty caches untouched OK\n";
+
+        // PREPARE is also a hand-off flush, but only for the transaction's
+        // tables. It must not publish a different active transaction merely
+        // because both happen to use the same database cache.
+        TableSchema prepareOwnerTable = tbl;
+        prepareOwnerTable.tablename = "prepare_owner";
+        assert(engine.createTable(dbname, prepareOwnerTable) == DBStatus::OK);
+        TableSchema preparePeerTable = tbl;
+        preparePeerTable.tablename = "prepare_peer";
+        assert(engine.createTable(dbname, preparePeerTable) == DBStatus::OK);
+        std::atomic<bool> preparePeerReady{false};
+        std::atomic<bool> releasePreparePeer{false};
+        DBStatus preparePeerBegin = DBStatus::IO_ERROR;
+        DBStatus preparePeerInsert = DBStatus::IO_ERROR;
+        DBStatus preparePeerRollback = DBStatus::IO_ERROR;
+        std::thread preparePeer([&]() {
+            preparePeerBegin = engine.beginTransaction(dbname);
+            if (preparePeerBegin == DBStatus::OK) {
+                preparePeerInsert = engine.insert(
+                    dbname, preparePeerTable.tablename, {{"id", "20"}});
+            }
+            preparePeerReady.store(true, std::memory_order_release);
+            while (!releasePreparePeer.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            if (preparePeerBegin == DBStatus::OK) {
+                preparePeerRollback = engine.rollbackTransaction();
+            }
+        });
+        while (!preparePeerReady.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        assert(preparePeerBegin == DBStatus::OK);
+        assert(preparePeerInsert == DBStatus::OK);
+        assert(engine.beginTransaction(dbname) == DBStatus::OK);
+        assert(engine.insert(
+                   dbname, prepareOwnerTable.tablename, {{"id", "21"}}) ==
+               DBStatus::OK);
+        assert(engine.prepareTransaction("checkpoint_scoped_prepare") ==
+               DBStatus::OK);
+        PageAllocator* preparePeerAllocator =
+            engine.getPageAllocator(dbname, preparePeerTable.tablename);
+        assert(preparePeerAllocator != nullptr &&
+               preparePeerAllocator->bufferPool() != nullptr);
+        const auto preparePeerFrames =
+            preparePeerAllocator->bufferPool()->getFrameInfo();
+        assert(std::any_of(
+            preparePeerFrames.begin(), preparePeerFrames.end(),
+            [](const BufferPool::FrameInfo& frame) {
+                return frame.pageId != 0 && frame.dirty;
+            }));
+        assert(engine.rollbackPrepared("checkpoint_scoped_prepare") ==
+               DBStatus::OK);
+        releasePreparePeer.store(true, std::memory_order_release);
+        preparePeer.join();
+        assert(preparePeerRollback == DBStatus::OK);
+        std::cout << "[CHECKPOINT] prepare leaves peer dirty pages untouched OK\n";
 
         assert(engine.checkpoint(dbname));
     }

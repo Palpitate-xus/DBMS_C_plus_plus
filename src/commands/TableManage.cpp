@@ -5443,10 +5443,53 @@ static bool readWholeBinaryFile(const std::filesystem::path& path,
 }
 
 bool StorageEngine::flushDatabaseCaches(const std::string& dbname, bool heapPages) {
+    return flushSelectedCaches(dbname, nullptr, heapPages);
+}
+
+bool StorageEngine::flushTableCaches(
+    const std::string& dbname,
+    const std::set<std::string>& tablenames,
+    bool heapPages) {
+    if (tablenames.empty()) return true;
+    return flushSelectedCaches(dbname, &tablenames, heapPages);
+}
+
+bool StorageEngine::flushSelectedCaches(
+    const std::string& dbname,
+    const std::set<std::string>* tablenames,
+    bool heapPages) {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     const std::string tablePrefix = dbname + "/";
     const std::string hashPrefix = dbname + ".";
     const std::string toastPrefix = dbname + ":";
+    const auto slashKeySelected = [&](const std::string& key) {
+        if (!tablenames) return key.rfind(tablePrefix, 0) == 0;
+        for (const auto& table : *tablenames) {
+            const std::string relationKey = tablePrefix + table;
+            if (key == relationKey ||
+                (key.size() > relationKey.size() &&
+                 key.compare(0, relationKey.size(), relationKey) == 0 &&
+                 (key[relationKey.size()] == '/' ||
+                  key[relationKey.size()] == '#'))) {
+                return true;
+            }
+        }
+        return false;
+    };
+    const auto hashKeySelected = [&](const std::string& key) {
+        if (!tablenames) return key.rfind(hashPrefix, 0) == 0;
+        for (const auto& table : *tablenames) {
+            if (key.rfind(hashPrefix + table + ".", 0) == 0) return true;
+        }
+        return false;
+    };
+    const auto toastKeySelected = [&](const std::string& key) {
+        if (!tablenames) return key.rfind(toastPrefix, 0) == 0;
+        for (const auto& table : *tablenames) {
+            if (key == toastPrefix + table) return true;
+        }
+        return false;
+    };
 
     bool ok = true;
     auto flushWalLoggedIndex = [&](const std::filesystem::path& path,
@@ -5488,34 +5531,34 @@ bool StorageEngine::flushDatabaseCaches(const std::string& dbname, bool heapPage
     };
     if (heapPages) {
         for (const auto& [key, allocator] : pageAllocators_) {
-            if (key.rfind(tablePrefix, 0) == 0 && allocator && !allocator->flush()) {
+            if (slashKeySelected(key) && allocator && !allocator->flush()) {
                 ok = false;
             }
         }
     }
     for (const auto& [key, index] : pkIndexCache_) {
-        if (key.rfind(tablePrefix, 0) == 0 && index &&
+        if (slashKeySelected(key) && index &&
             !flushWalLoggedIndex(index->filePath(), index->hasDirtyPages(),
                                  [&] { return index->flush(); })) {
             ok = false;
         }
     }
     for (const auto& [key, index] : secondaryIndexCache_) {
-        if (key.rfind(tablePrefix, 0) == 0 && index &&
+        if (slashKeySelected(key) && index &&
             !flushWalLoggedIndex(index->filePath(), index->hasDirtyPages(),
                                  [&] { return index->flush(); })) {
             ok = false;
         }
     }
     for (const auto& [key, index] : hashIndexCache_) {
-        if (key.rfind(hashPrefix, 0) == 0 && index &&
+        if (hashKeySelected(key) && index &&
             !flushWalLoggedIndex(index->filePath(), index->hasDirtyData(),
                                  [&] { return index->flush(); })) {
             ok = false;
         }
     }
     for (const auto& [key, index] : bloomIndexCache_) {
-        if (key.rfind(hashPrefix, 0) == 0 && index &&
+        if (hashKeySelected(key) && index &&
             !flushWalLoggedIndex(index->filePath(), index->hasDirtyData(),
                                  [&] { return index->flush(); })) {
             ok = false;
@@ -5523,13 +5566,13 @@ bool StorageEngine::flushDatabaseCaches(const std::string& dbname, bool heapPage
     }
     if (heapPages) {
         for (const auto& [key, allocator] : toastPageAllocators_) {
-            if (key.rfind(toastPrefix, 0) == 0 && allocator && !allocator->flush()) {
+            if (toastKeySelected(key) && allocator && !allocator->flush()) {
                 ok = false;
             }
         }
     }
     for (const auto& [key, index] : toastIndexes_) {
-        if (key.rfind(toastPrefix, 0) == 0 && index &&
+        if (toastKeySelected(key) && index &&
             !flushWalLoggedIndex(index->filePath(), index->hasDirtyPages(),
                                  [&] { return index->flush(); })) {
             ok = false;
@@ -37181,7 +37224,9 @@ DBStatus StorageEngine::commitTransaction() {
         return DBStatus::IO_ERROR;
     }
 
-    if (!flushDatabaseCaches(committingDb, /*heapPages=*/false)) {
+    if (!flushTableCaches(
+            committingDb, committingContext.specializedIndexTables,
+            /*heapPages=*/false)) {
         rollbackTransaction();
         return DBStatus::IO_ERROR;
     }
@@ -37735,6 +37780,9 @@ DBStatus StorageEngine::rollbackTransaction() {
     lockManager_.setResourceNamespace(transactionContext().txnDB);
 
     auto& rollbackContext = transactionContext();
+    const bool databaseWideUndo =
+        rollbackContext.transactionBackupDirty ||
+        !rollbackContext.ddlUndoActions.empty();
     for (const auto& entry : rollbackContext.txnLog) {
         rollbackContext.specializedIndexTables.insert(entry.tableName);
     }
@@ -38329,7 +38377,10 @@ DBStatus StorageEngine::rollbackTransaction() {
     // one boundary before advertising ABORT; otherwise a new backend can
     // reopen the pre-rollback B-tree/hash sidecars even though this backend's
     // in-memory indexes are correct.
-    const bool undoFlushOk = flushDatabaseCaches(rollbackDb);
+    const bool undoFlushOk = databaseWideUndo
+        ? flushDatabaseCaches(rollbackDb)
+        : flushTableCaches(
+              rollbackDb, rollbackContext.specializedIndexTables);
 
     // Write WAL ABORT marker after undo.
     WALManager* wal = getWAL(transactionContext().txnDB);
@@ -38832,11 +38883,23 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
         }
     }
 
-    // The preparing backend may own dirty heap, index, FSM or visibility-map
-    // pages that a different backend will never see in its private caches.
-    // PREPARE is therefore the hand-off boundary: publish all physical
-    // effects before the prepared record can be completed elsewhere.
-    if (!flushDatabaseCaches(transactionContext().txnDB)) {
+    auto& preparingContext = transactionContext();
+    for (const auto& entry : preparingContext.txnLog) {
+        preparingContext.specializedIndexTables.insert(entry.tableName);
+    }
+    // PREPARE is a physical hand-off to a potentially different backend.
+    // Reacquire each modified table's writer token and retain it as prepared
+    // ownership, so the selected heap/index caches cannot change while they
+    // are published. Unrelated active tables stay entirely untouched.
+    for (const auto& tableName : preparingContext.specializedIndexTables) {
+        if (!tableExists(preparingContext.txnDB, tableName)) continue;
+        if (!lockManager_.lockIntentExclusive(tableName)) {
+            return DBStatus::LOCK_CONFLICT;
+        }
+    }
+    if (!flushTableCaches(
+            preparingContext.txnDB,
+            preparingContext.specializedIndexTables)) {
         return DBStatus::IO_ERROR;
     }
 
@@ -39085,7 +39148,7 @@ DBStatus StorageEngine::commitPrepared(const std::string& xid) {
 
     // WAL COMMIT PREPARED marker. Keep the prepared transaction durable and
     // retryable if WAL insertion or fsync fails.
-    if (!flushDatabaseCaches(savedDB)) {
+    if (!flushTableCaches(savedDB, specializedTables)) {
         lockManager_.unlockAll();
         return DBStatus::IO_ERROR;
     }
