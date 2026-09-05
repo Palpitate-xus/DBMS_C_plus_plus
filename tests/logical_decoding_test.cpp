@@ -301,12 +301,90 @@ static void test_end_to_end_streaming() {
     std::cout << "[LOGICAL] end-to-end streaming OK" << std::endl;
 }
 
+static void test_prepared_transaction_streaming() {
+    const std::string db = testDbPath("logical_prepared");
+    const std::string slotName = "logical_prepared_slot";
+    if (g_engine.databaseExists(db)) g_engine.dropDatabase(db);
+    cleanupTestDb("logical_prepared");
+    assert(g_engine.createDatabase(db, "utf8") == DBStatus::OK);
+
+    TableSchema table;
+    table.tablename = "prepared_rows";
+    table.append(makeIntColumn("id", false, 2, true));
+    table.append(makeVarCharColumn("value", false, 32));
+    assert(g_engine.createTable(db, table) == DBStatus::OK);
+
+    Publication pub;
+    pub.name = "logical_prepared_pub";
+    pub.owner = "admin";
+    pub.tables = {table.tablename};
+    std::string error;
+    assert(PublicationCatalog::instance().create(db, pub, error));
+
+    auto& replication = ReplicationManager::instance();
+    assert(replication.createReplicationSlot(
+        slotName, "logical", "test_decoding"));
+    auto& changes = LogicalChangeStore::instance();
+    StorageEngine completingBackend;
+
+    assert(g_engine.beginTransaction(db) == DBStatus::OK);
+    assert(g_engine.insert(
+               db, table.tablename,
+               {{"id", "1"}, {"value", "prepared value"}}) ==
+           DBStatus::OK);
+    const uint64_t committedXid = g_engine.currentTxnId();
+    assert(g_engine.prepareTransaction("logical_prepared_commit") ==
+           DBStatus::OK);
+    assert(changes.depth(slotName) == 0);
+    assert(completingBackend.commitPrepared("logical_prepared_commit") ==
+           DBStatus::OK);
+    assert(changes.depth(slotName) == 1);
+
+    auto peek = changes.peek(slotName, 0, 10);
+    assert(peek.batches.size() == 1);
+    assert(peek.batches[0].xid == committedXid);
+    assert(peek.batches[0].changes.size() == 1);
+    assert(peek.batches[0].changes[0].op == LogicalChange::Op::Insert);
+    assert(peek.batches[0].changes[0].table == table.tablename);
+    assert(peek.batches[0].changes[0].newRow == "1|prepared value");
+    changes.acknowledge(slotName, peek.nextLsn);
+    assert(changes.depth(slotName) == 0);
+
+    // PREPARE must detach the originating backend's logical buffer. An
+    // otherwise-empty transaction must not republish the prepared change.
+    assert(g_engine.beginTransaction(db) == DBStatus::OK);
+    assert(g_engine.commitTransaction() == DBStatus::OK);
+    assert(changes.depth(slotName) == 0);
+
+    assert(g_engine.beginTransaction(db) == DBStatus::OK);
+    assert(g_engine.insert(
+               db, table.tablename,
+               {{"id", "2"}, {"value", "rolled back value"}}) ==
+           DBStatus::OK);
+    assert(g_engine.prepareTransaction("logical_prepared_rollback") ==
+           DBStatus::OK);
+    assert(completingBackend.rollbackPrepared("logical_prepared_rollback") ==
+           DBStatus::OK);
+    assert(changes.depth(slotName) == 0);
+
+    assert(g_engine.beginTransaction(db) == DBStatus::OK);
+    assert(g_engine.commitTransaction() == DBStatus::OK);
+    assert(changes.depth(slotName) == 0);
+
+    assert(replication.dropReplicationSlot(slotName));
+    assert(PublicationCatalog::instance().drop(db, pub.name, error));
+    assert(g_engine.dropDatabase(db) == DBStatus::OK);
+    cleanupTestDb("logical_prepared");
+    std::cout << "[LOGICAL] prepared commit/rollback streaming OK" << std::endl;
+}
+
 int main() {
     test_output_plugins();
     test_publication_catalog();
     test_publication_tracks_table_rename();
     test_change_store();
     test_end_to_end_streaming();
+    test_prepared_transaction_streaming();
     std::cout << "[LOGICAL] all tests passed" << std::endl;
     return 0;
 }

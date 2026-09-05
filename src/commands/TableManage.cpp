@@ -33500,7 +33500,7 @@ bool StorageEngine::rebuildIndexesAfterRecovery(
 // ========================================================================
 
 struct PreparedTransactionRecord {
-    static constexpr int CURRENT_FORMAT = 5;
+    static constexpr int CURRENT_FORMAT = 6;
     static constexpr int MINIMUM_FORMAT = 2;
     int format = 0;
     uint64_t txnId = 0;
@@ -33515,6 +33515,7 @@ struct PreparedTransactionRecord {
         int64_t previousRowIdx = -1;
     };
     std::vector<LogEntry> log;
+    std::vector<LogicalChange> logicalChanges;
     std::vector<LockManager::PreparedLockInfo> locks;
 };
 
@@ -33555,6 +33556,26 @@ static bool preparedHexDecode(const std::string& value, std::string& result) {
         result.push_back(static_cast<char>((high << 4) | low));
     }
     return true;
+}
+
+static void publishLogicalChanges(
+    const std::vector<LogicalChange>& changes, uint64_t xid,
+    uint64_t commitLsn) {
+    if (changes.empty()) return;
+
+    LogicalChangeBatch batch;
+    batch.xid = xid;
+    batch.commitLsn = commitLsn;
+    batch.changes.reserve(changes.size());
+    for (auto change : changes) {
+        change.xid = xid;
+        change.commitLsn = commitLsn;
+        batch.changes.push_back(std::move(change));
+    }
+    for (const auto& slot : ReplicationManager::instance().listSlots()) {
+        if (slot.slotType != "logical") continue;
+        LogicalChangeStore::instance().append(slot.name, batch);
+    }
 }
 
 static const char* preparedLockModeName(LockManager::LockMode mode) {
@@ -37050,27 +37071,22 @@ DBStatus StorageEngine::commitTransaction() {
     {
         auto& txn = transactionContext();
         if (!txn.txnLogicalChanges.empty()) {
-            LogicalChangeBatch batch;
-            batch.xid = committingTxnId;
-            batch.commitLsn = static_cast<uint64_t>(commitLsn);
+            std::vector<LogicalChange> changes;
+            changes.reserve(txn.txnLogicalChanges.size());
             for (const auto& c : txn.txnLogicalChanges) {
                 LogicalChange lc;
                 lc.table = c.table;
                 lc.op = static_cast<LogicalChange::Op>(c.op);
                 lc.oldRow = c.oldRow;
                 lc.newRow = c.newRow;
-                lc.xid = committingTxnId;
-                lc.commitLsn = static_cast<uint64_t>(commitLsn);
-                batch.changes.push_back(std::move(lc));
+                changes.push_back(std::move(lc));
             }
             // Publication membership was already checked when the change
             // was buffered; every logical slot receives the batch and its
             // consumer side filters (a slot's plugin controls only the
             // output format).
-            for (const auto& slot : ReplicationManager::instance().listSlots()) {
-                if (slot.slotType != "logical") continue;
-                LogicalChangeStore::instance().append(slot.name, batch);
-            }
+            publishLogicalChanges(
+                changes, committingTxnId, static_cast<uint64_t>(commitLsn));
             txn.txnLogicalChanges.clear();
         }
     }
@@ -38491,6 +38507,37 @@ static bool readPreparedRecord(const std::filesystem::path& path,
                     return false;
                 }
                 record.log.push_back(std::move(entry));
+            } else if (line.rfind("LOGICAL ", 0) == 0) {
+                if (!hasFormat || record.format < 6) return false;
+                std::istringstream logicalLine(line.substr(8));
+                std::string op;
+                std::string encodedTable;
+                std::string encodedOldRow;
+                std::string encodedNewRow;
+                std::string extra;
+                if (!(logicalLine >> op >> encodedTable >> encodedOldRow >>
+                      encodedNewRow) ||
+                    (logicalLine >> extra)) {
+                    return false;
+                }
+                LogicalChange change;
+                if (op == "INSERT") {
+                    change.op = LogicalChange::Op::Insert;
+                } else if (op == "UPDATE") {
+                    change.op = LogicalChange::Op::Update;
+                } else if (op == "DELETE") {
+                    change.op = LogicalChange::Op::Delete;
+                } else {
+                    return false;
+                }
+                if (!preparedHexDecode(encodedTable, change.table) ||
+                    change.table.empty() ||
+                    !validStoredIdentifier(change.table, MAX_TABLE_NAME_LEN) ||
+                    !preparedHexDecode(encodedOldRow, change.oldRow) ||
+                    !preparedHexDecode(encodedNewRow, change.newRow)) {
+                    return false;
+                }
+                record.logicalChanges.push_back(std::move(change));
             } else if (!line.empty()) {
                 return false;
             }
@@ -38652,6 +38699,20 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
                  << preparedHexEncode(entry.rowData) << " "
                  << preparedHexEncode(entry.newRowData) << "\n";
     }
+    for (const auto& change : transactionContext().txnLogicalChanges) {
+        const char* op = nullptr;
+        if (change.op == 0) op = "INSERT";
+        else if (change.op == 1) op = "UPDATE";
+        else if (change.op == 2) op = "DELETE";
+        if (!op || change.table.empty() ||
+            !validStoredIdentifier(change.table, MAX_TABLE_NAME_LEN)) {
+            return DBStatus::CORRUPTED_DATA;
+        }
+        prepared << "LOGICAL " << op << " "
+                 << preparedHexEncode(change.table) << " "
+                 << preparedHexEncode(change.oldRow) << " "
+                 << preparedHexEncode(change.newRow) << "\n";
+    }
     if (!writePreparedFileAtomically(pfile, prepared.str())) {
         return DBStatus::IO_ERROR;
     }
@@ -38675,6 +38736,7 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
 
     // Clear transaction state but KEEP locks (2PC semantics)
     transactionContext().txnLog.clear();
+    transactionContext().txnLogicalChanges.clear();
     transactionContext().specializedIndexTables.clear();
     transactionContext().snapshotImported = false;
     transactionContext().hasRead = false;
@@ -38833,6 +38895,12 @@ DBStatus StorageEngine::commitPrepared(const std::string& xid) {
         lockManager_.unlockAll();
         return DBStatus::IO_ERROR;
     }
+
+    // PREPARE persisted the publication-filtered row images. Publish them
+    // only after the terminal COMMIT record is durable, matching ordinary
+    // commit semantics without retaining backend-local state.
+    publishLogicalChanges(
+        record.logicalChanges, savedTxnId, static_cast<uint64_t>(commitLsn));
 
     CommitLog* clog = getCommitLog(savedDB);
     if (clog) {
