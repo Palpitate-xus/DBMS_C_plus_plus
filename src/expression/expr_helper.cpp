@@ -3,9 +3,11 @@
 #include "parser/parser.h"
 #include "parser/ast.h"
 
+#include <algorithm>
 #include <cctype>
 #include <memory>
 #include <sstream>
+#include <vector>
 
 namespace dbms {
 
@@ -63,108 +65,360 @@ std::string canonicalTypeName(const std::string& storageType) {
     return t;
 }
 
-bool parsedExpressionReferencesColumn(
-    const Expr* expression, const std::string& columnName) {
-    if (!expression) return false;
+bool countParsedColumnReferences(
+    const Expr* expression, const std::string& columnName, size_t& count) {
+    if (!expression) return true;
     switch (expression->type) {
         case ExprType::Literal:
         case ExprType::Parameter:
         case ExprType::A_Star:
-            return false;
+            return true;
         case ExprType::ColumnRef: {
             const auto* column =
                 dynamic_cast<const ColumnRefExpr*>(expression);
-            return !column || column->column == columnName;
+            if (!column) return false;
+            if (column->column == columnName) ++count;
+            return true;
         }
         case ExprType::UnaryOp: {
             const auto* unary =
                 dynamic_cast<const UnaryOpExpr*>(expression);
-            return !unary || parsedExpressionReferencesColumn(
-                unary->operand.get(), columnName);
+            return unary && countParsedColumnReferences(
+                unary->operand.get(), columnName, count);
         }
         case ExprType::BinaryOp: {
             const auto* binary =
                 dynamic_cast<const BinaryOpExpr*>(expression);
-            return !binary ||
-                parsedExpressionReferencesColumn(
-                    binary->left.get(), columnName) ||
-                parsedExpressionReferencesColumn(
-                    binary->right.get(), columnName);
+            return binary &&
+                countParsedColumnReferences(
+                    binary->left.get(), columnName, count) &&
+                countParsedColumnReferences(
+                    binary->right.get(), columnName, count);
         }
         case ExprType::FunctionCall: {
             const auto* function =
                 dynamic_cast<const FunctionCallExpr*>(expression);
-            if (!function) return true;
+            if (!function) return false;
             for (const auto& argument : function->args) {
-                if (parsedExpressionReferencesColumn(
-                        argument.get(), columnName)) return true;
+                if (!countParsedColumnReferences(
+                        argument.get(), columnName, count)) return false;
             }
             for (const auto& argument : function->namedArgs) {
-                if (parsedExpressionReferencesColumn(
-                        argument.value.get(), columnName)) return true;
+                if (!countParsedColumnReferences(
+                        argument.value.get(), columnName, count)) return false;
             }
-            if (parsedExpressionReferencesColumn(
-                    function->filter.get(), columnName)) return true;
+            if (!countParsedColumnReferences(
+                    function->filter.get(), columnName, count)) return false;
             for (const auto& partition : function->over.partitionBy) {
-                if (parsedExpressionReferencesColumn(
-                        partition.get(), columnName)) return true;
+                if (!countParsedColumnReferences(
+                        partition.get(), columnName, count)) return false;
             }
             for (const auto& order : function->over.orderBy) {
-                if (parsedExpressionReferencesColumn(
-                        order.first.get(), columnName)) return true;
+                if (!countParsedColumnReferences(
+                        order.first.get(), columnName, count)) return false;
             }
-            return parsedExpressionReferencesColumn(
-                       function->over.frameStart.get(), columnName) ||
-                   parsedExpressionReferencesColumn(
-                       function->over.frameEnd.get(), columnName);
+            return countParsedColumnReferences(
+                       function->over.frameStart.get(), columnName, count) &&
+                   countParsedColumnReferences(
+                       function->over.frameEnd.get(), columnName, count);
         }
         case ExprType::CastExpr: {
             const auto* cast = dynamic_cast<const CastExpr*>(expression);
-            return !cast || parsedExpressionReferencesColumn(
-                cast->operand.get(), columnName);
+            return cast && countParsedColumnReferences(
+                cast->operand.get(), columnName, count);
         }
         case ExprType::CaseExpr: {
             const auto* caseExpression =
                 dynamic_cast<const CaseExpr*>(expression);
-            if (!caseExpression) return true;
-            if (parsedExpressionReferencesColumn(
-                    caseExpression->switchExpr.get(), columnName)) {
-                return true;
+            if (!caseExpression ||
+                !countParsedColumnReferences(
+                    caseExpression->switchExpr.get(), columnName, count)) {
+                return false;
             }
             for (const auto& clause : caseExpression->whenClauses) {
-                if (parsedExpressionReferencesColumn(
-                        clause.first.get(), columnName) ||
-                    parsedExpressionReferencesColumn(
-                        clause.second.get(), columnName)) {
-                    return true;
+                if (!countParsedColumnReferences(
+                        clause.first.get(), columnName, count) ||
+                    !countParsedColumnReferences(
+                        clause.second.get(), columnName, count)) {
+                    return false;
                 }
             }
-            return parsedExpressionReferencesColumn(
-                caseExpression->elseExpr.get(), columnName);
+            return countParsedColumnReferences(
+                caseExpression->elseExpr.get(), columnName, count);
         }
         case ExprType::ArrayExpr: {
             const auto* array =
                 dynamic_cast<const ArrayExpr*>(expression);
-            if (!array) return true;
+            if (!array) return false;
             for (const auto& element : array->elements) {
-                if (parsedExpressionReferencesColumn(
-                        element.get(), columnName)) return true;
+                if (!countParsedColumnReferences(
+                        element.get(), columnName, count)) return false;
             }
-            return false;
+            return true;
         }
         case ExprType::RowExpr: {
             const auto* row = dynamic_cast<const RowExpr*>(expression);
-            if (!row) return true;
+            if (!row) return false;
             for (const auto& element : row->elements) {
-                if (parsedExpressionReferencesColumn(
-                        element.get(), columnName)) return true;
+                if (!countParsedColumnReferences(
+                        element.get(), columnName, count)) return false;
             }
-            return false;
+            return true;
         }
         case ExprType::Subquery:
-            return true;
+            // Stored row expressions must not hide bindings in a subquery.
+            return false;
     }
-    return true;
+    return false;
+}
+
+const Expr* parseStoredExpression(
+    const std::string& expression, ParseResult& parsed) {
+    SQLParser parser;
+    parsed = parser.parse("SELECT " + expression);
+    if (!parsed.success || !parsed.stmt) return nullptr;
+    const auto* select = dynamic_cast<const SelectStmt*>(parsed.stmt.get());
+    if (!select || select->selectList.size() != 1 ||
+        !select->selectList.front().expr) {
+        return nullptr;
+    }
+    return select->selectList.front().expr.get();
+}
+
+enum class SourceTokenKind { Identifier, String, Symbol };
+
+struct SourceToken {
+    size_t begin = 0;
+    size_t end = 0;
+    SourceTokenKind kind = SourceTokenKind::Symbol;
+    std::string text;
+};
+
+bool isExpressionSymbol(char c) {
+    switch (c) {
+        case '(':
+        case ')':
+        case ',':
+        case ';':
+        case '*':
+        case '=':
+        case '<':
+        case '>':
+        case '+':
+        case '-':
+        case '/':
+        case '%':
+        case '^':
+        case '~':
+        case '!':
+        case '|':
+        case '&':
+        case '#':
+        case '@':
+        case '?':
+        case ':':
+        case '[':
+        case ']':
+        case '.':
+            return true;
+        default:
+            return false;
+    }
+}
+
+std::optional<std::vector<SourceToken>> lexExpressionSource(
+    const std::string& expression) {
+    std::vector<SourceToken> tokens;
+    const auto append = [&](size_t begin, size_t end, SourceTokenKind kind) {
+        tokens.push_back(
+            {begin, end, kind, expression.substr(begin, end - begin)});
+    };
+
+    for (size_t index = 0; index < expression.size();) {
+        const unsigned char current =
+            static_cast<unsigned char>(expression[index]);
+        if (std::isspace(current)) {
+            ++index;
+            continue;
+        }
+        if (expression.compare(index, 2, "--") == 0) {
+            const size_t newline = expression.find('\n', index + 2);
+            index = newline == std::string::npos
+                ? expression.size() : newline + 1;
+            continue;
+        }
+        if (expression.compare(index, 2, "/*") == 0) {
+            const size_t close = expression.find("*/", index + 2);
+            if (close == std::string::npos) return std::nullopt;
+            index = close + 2;
+            continue;
+        }
+
+        if (expression[index] == '$') {
+            size_t delimiterEnd = index + 1;
+            bool validTag = true;
+            if (delimiterEnd < expression.size() &&
+                std::isdigit(static_cast<unsigned char>(
+                    expression[delimiterEnd]))) {
+                validTag = false;
+            }
+            while (validTag && delimiterEnd < expression.size() &&
+                   (std::isalnum(static_cast<unsigned char>(
+                        expression[delimiterEnd])) ||
+                    expression[delimiterEnd] == '_')) {
+                ++delimiterEnd;
+            }
+            if (validTag && delimiterEnd < expression.size() &&
+                expression[delimiterEnd] == '$') {
+                const std::string delimiter = expression.substr(
+                    index, delimiterEnd - index + 1);
+                const size_t close = expression.find(
+                    delimiter, delimiterEnd + 1);
+                if (close == std::string::npos) return std::nullopt;
+                const size_t end = close + delimiter.size();
+                append(index, end, SourceTokenKind::String);
+                index = end;
+                continue;
+            }
+        }
+
+        if (expression[index] == '\'') {
+            const size_t begin = index++;
+            bool closed = false;
+            while (index < expression.size()) {
+                if (expression[index] != '\'') {
+                    ++index;
+                    continue;
+                }
+                if (index + 1 < expression.size() &&
+                    expression[index + 1] == '\'') {
+                    index += 2;
+                    continue;
+                }
+                size_t backslashCount = 0;
+                for (size_t cursor = index;
+                     cursor > begin + 1 && expression[cursor - 1] == '\\';
+                     --cursor) {
+                    ++backslashCount;
+                }
+                if (backslashCount % 2 != 0) {
+                    ++index;
+                    continue;
+                }
+                ++index;
+                closed = true;
+                break;
+            }
+            if (!closed) return std::nullopt;
+            append(begin, index, SourceTokenKind::String);
+            continue;
+        }
+
+        if (expression[index] == '"') {
+            const size_t begin = index++;
+            bool closed = false;
+            while (index < expression.size()) {
+                if (expression[index] != '"') {
+                    ++index;
+                    continue;
+                }
+                if (index + 1 < expression.size() &&
+                    expression[index + 1] == '"') {
+                    index += 2;
+                    continue;
+                }
+                ++index;
+                closed = true;
+                break;
+            }
+            if (!closed) return std::nullopt;
+            append(begin, index, SourceTokenKind::Identifier);
+            continue;
+        }
+
+        if (isExpressionSymbol(expression[index])) {
+            const size_t begin = index;
+            size_t length = 1;
+            if (index + 1 < expression.size()) {
+                const std::string two = expression.substr(index, 2);
+                if (two == "<=" || two == ">=" || two == "<>" ||
+                    two == "!=" || two == "::" || two == "||" ||
+                    two == "->" || two == "~*" || two == "!~" ||
+                    two == "@@" || two == "&&" || two == "<<" ||
+                    two == ">>" || two == "=>" || two == "#>" ||
+                    two == "@>" || two == "<@") {
+                    length = 2;
+                }
+            }
+            if (index + 2 < expression.size()) {
+                const std::string three = expression.substr(index, 3);
+                if (three == "->>" || three == "#>>" || three == "!~*") {
+                    length = 3;
+                }
+            }
+            index += length;
+            append(begin, index, SourceTokenKind::Symbol);
+            continue;
+        }
+
+        const size_t begin = index;
+        while (index < expression.size() &&
+               !std::isspace(static_cast<unsigned char>(expression[index])) &&
+               expression[index] != '\'' && expression[index] != '"' &&
+               !isExpressionSymbol(expression[index])) {
+            ++index;
+        }
+        if (begin == index) return std::nullopt;
+        append(begin, index, SourceTokenKind::Identifier);
+    }
+    return tokens;
+}
+
+bool tokenIs(const SourceToken& token, const std::string& text) {
+    return token.text == text;
+}
+
+bool tokenIsKeyword(const SourceToken& token, const std::string& keyword) {
+    return token.kind == SourceTokenKind::Identifier &&
+           toLower(token.text) == keyword;
+}
+
+std::vector<size_t> columnReferenceSourceTokens(
+    const std::vector<SourceToken>& tokens, const std::string& columnName) {
+    std::vector<size_t> references;
+    for (size_t index = 0; index < tokens.size(); ++index) {
+        if (tokens[index].kind != SourceTokenKind::Identifier ||
+            tokens[index].text != columnName) {
+            continue;
+        }
+        const SourceToken* previous =
+            index > 0 ? &tokens[index - 1] : nullptr;
+        const SourceToken* next =
+            index + 1 < tokens.size() ? &tokens[index + 1] : nullptr;
+
+        // A name before '.' is a schema/table qualifier. A name before '('
+        // is a function, and a name before '=>' is a named argument.
+        if (next && (tokenIs(*next, ".") || tokenIs(*next, "(") ||
+                     tokenIs(*next, "=>"))) {
+            continue;
+        }
+        if (next && tokenIs(*next, "=") && index + 2 < tokens.size() &&
+            tokenIs(tokens[index + 2], ">")) {
+            continue;
+        }
+
+        // These grammar positions name types/collations rather than row
+        // values. If a more exotic construct remains ambiguous, the AST
+        // reference-count check below rejects the whole rewrite safely.
+        if (previous &&
+            (tokenIs(*previous, "::") ||
+             tokenIsKeyword(*previous, "as") ||
+             tokenIsKeyword(*previous, "collate"))) {
+            continue;
+        }
+        references.push_back(index);
+    }
+    return references;
 }
 
 } // namespace
@@ -172,16 +426,80 @@ bool parsedExpressionReferencesColumn(
 std::optional<bool> ExprHelper::referencesColumn(
     const std::string& exprSql, const std::string& columnName) {
     if (exprSql.empty()) return false;
-    SQLParser parser;
-    ParseResult parsed = parser.parse("SELECT " + exprSql);
-    if (!parsed.success || !parsed.stmt) return std::nullopt;
-    const auto* select = dynamic_cast<const SelectStmt*>(parsed.stmt.get());
-    if (!select || select->selectList.size() != 1 ||
-        !select->selectList.front().expr) {
+    ParseResult parsed;
+    const Expr* expression = parseStoredExpression(exprSql, parsed);
+    if (!expression) return std::nullopt;
+    size_t count = 0;
+    if (!countParsedColumnReferences(expression, columnName, count)) {
+        // Unsupported AST shapes remain conservative for DDL dependency
+        // checks: callers must not remove a possibly referenced column.
+        return true;
+    }
+    return count != 0;
+}
+
+std::optional<std::string> ExprHelper::renameColumnReferences(
+    const std::string& exprSql, const std::string& oldName,
+    const std::string& newName) {
+    if (exprSql.empty() || oldName == newName) return exprSql;
+
+    const auto sourceTokens = lexExpressionSource(exprSql);
+    if (!sourceTokens) return std::nullopt;
+    const bool containsOldIdentifier = std::any_of(
+        sourceTokens->begin(), sourceTokens->end(),
+        [&](const SourceToken& token) {
+            return token.kind == SourceTokenKind::Identifier &&
+                   token.text == oldName;
+        });
+    if (!containsOldIdentifier) return exprSql;
+
+    ParseResult parsed;
+    const Expr* expression = parseStoredExpression(exprSql, parsed);
+    if (!expression) return std::nullopt;
+    size_t oldReferenceCount = 0;
+    size_t existingNewReferenceCount = 0;
+    if (!countParsedColumnReferences(
+            expression, oldName, oldReferenceCount) ||
+        !countParsedColumnReferences(
+            expression, newName, existingNewReferenceCount)) {
         return std::nullopt;
     }
-    return parsedExpressionReferencesColumn(
-        select->selectList.front().expr.get(), columnName);
+    if (oldReferenceCount == 0) return exprSql;
+
+    const std::vector<size_t> referenceTokens =
+        columnReferenceSourceTokens(*sourceTokens, oldName);
+    if (referenceTokens.size() != oldReferenceCount) return std::nullopt;
+
+    std::string rewritten;
+    rewritten.reserve(exprSql.size() +
+        oldReferenceCount *
+            (newName.size() > oldName.size()
+                 ? newName.size() - oldName.size() : 0));
+    size_t cursor = 0;
+    for (const size_t tokenIndex : referenceTokens) {
+        const SourceToken& token = sourceTokens->at(tokenIndex);
+        rewritten.append(exprSql, cursor, token.begin - cursor);
+        rewritten += newName;
+        cursor = token.end;
+    }
+    rewritten.append(exprSql, cursor, std::string::npos);
+
+    ParseResult rewrittenParse;
+    const Expr* rewrittenExpression =
+        parseStoredExpression(rewritten, rewrittenParse);
+    if (!rewrittenExpression) return std::nullopt;
+    size_t remainingOldReferences = 0;
+    size_t rewrittenNewReferences = 0;
+    if (!countParsedColumnReferences(
+            rewrittenExpression, oldName, remainingOldReferences) ||
+        !countParsedColumnReferences(
+            rewrittenExpression, newName, rewrittenNewReferences) ||
+        remainingOldReferences != 0 ||
+        rewrittenNewReferences !=
+            existingNewReferenceCount + oldReferenceCount) {
+        return std::nullopt;
+    }
+    return rewritten;
 }
 
 static ExprEvalResult evalStringImpl(

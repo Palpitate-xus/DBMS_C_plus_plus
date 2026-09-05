@@ -14065,6 +14065,39 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
         }
     }
 
+    // CHECK, DEFAULT and generated expressions persist logical names as SQL
+    // text. Resolve every source occurrence through the parsed AST before
+    // publishing the new schema; blind substring replacement would corrupt
+    // literals, same-named functions and table/schema qualifiers.
+    const auto rewriteExpression = [&](std::string& expression) {
+        const auto rewritten = ExprHelper::renameColumnReferences(
+            expression, oldName, newName);
+        if (!rewritten) return false;
+        expression = *rewritten;
+        return true;
+    };
+    for (size_t columnIndex = 0; columnIndex < tbl.len; ++columnIndex) {
+        Column& column = tbl.cols[columnIndex];
+        if (!rewriteExpression(column.defaultValue) ||
+            !rewriteExpression(column.checkExpr) ||
+            !rewriteExpression(column.generatedExpr) ||
+            column.defaultValue.size() > MAX_COL_NAME_LEN ||
+            column.checkExpr.size() >
+                std::numeric_limits<uint16_t>::max() ||
+            column.generatedExpr.size() >
+                std::numeric_limits<uint16_t>::max()) {
+            lockManager_.unlock(tablename);
+            return DBStatus::INVALID_VALUE;
+        }
+    }
+    for (CheckConstraint& check : tbl.additionalCheckConstraints) {
+        if (!rewriteExpression(check.expression) ||
+            check.expression.size() > MAX_PERSISTED_CHECK_EXPRESSION) {
+            lockManager_.unlock(tablename);
+            return DBStatus::INVALID_VALUE;
+        }
+    }
+
     // Foreign keys store logical column names rather than physical indices.
     // Rewrite both the renamed table's local/self-referencing bindings and
     // every inbound reference before publishing the new column name.

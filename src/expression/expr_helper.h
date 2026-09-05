@@ -73,6 +73,14 @@ public:
     // nullopt means the stored expression could not be parsed safely.
     static std::optional<bool> referencesColumn(
         const std::string& exprSql, const std::string& columnName);
+
+    // Rewrite references to one logical column while preserving the original
+    // SQL text around them. Function names, qualifiers, type names and string
+    // literals are left untouched. nullopt means the expression could not be
+    // parsed or mapped back to its source tokens without ambiguity.
+    static std::optional<std::string> renameColumnReferences(
+        const std::string& exprSql, const std::string& oldName,
+        const std::string& newName);
 };
 
 } // namespace dbms
