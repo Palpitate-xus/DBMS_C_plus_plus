@@ -15228,40 +15228,62 @@ DBStatus StorageEngine::alterTableOwner(const std::string& dbname,
     if (!ownerAccount) return DBStatus::INVALID_ARGUMENT;
 
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
-    TableSchema tbl = getTableSchema(dbname, tablename);
-    tbl.owner = owner;
-    {
-        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
-        if (!out) {
-            lockManager_.unlock(tablename);
-            return DBStatus::INVALID_VALUE;
-        }
-        writeSchema(out, tbl);
-        if (!out) {
-            lockManager_.unlock(tablename);
-            return DBStatus::INVALID_VALUE;
-        }
-    }
-    invalidateCatalogSchema(dbname, tablename);
+    const TableSchema originalSchema = getTableSchema(dbname, tablename);
+    TableSchema updatedSchema = originalSchema;
+    updatedSchema.owner = owner;
 
+    CatalogManager* catalog = nullptr;
+    std::optional<PgClassRow> originalRelation;
     try {
-        auto& catalog = catalogService().get(dbname);
-        const auto* relation = catalog.resolveRelation(tablename, {"public"});
+        auto& tableCatalog = catalogService().get(dbname);
+        const auto qualifiedName = CatalogService::logicalName(tablename);
+        const std::string schemaName = qualifiedName.schema.empty()
+            ? "public" : qualifiedName.schema;
+        const auto* relation = tableCatalog.resolveRelation(
+            qualifiedName.name, {schemaName});
         if (relation) {
-            auto updated = *relation;
-            updated.relowner = ownerAccount->oid;
-            if (!catalog.updateClass(relation->oid, updated)) {
-                lockManager_.unlock(tablename);
-                return DBStatus::INVALID_VALUE;
-            }
-            if (!catalog.persistAll()) {
-                lockManager_.unlock(tablename);
-                return DBStatus::IO_ERROR;
-            }
+            catalog = &tableCatalog;
+            originalRelation = *relation;
         }
     } catch (...) {
         lockManager_.unlock(tablename);
-        return DBStatus::INVALID_VALUE;
+        return DBStatus::IO_ERROR;
+    }
+
+    if (!writeSchemaFile(dbname, tablename, updatedSchema)) {
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
+    }
+
+    if (catalog && originalRelation) {
+        PgClassRow updatedRelation = *originalRelation;
+        updatedRelation.relowner = ownerAccount->oid;
+        bool catalogUpdated = false;
+        bool catalogPersisted = false;
+        try {
+            catalogUpdated = catalog->updateClass(
+                originalRelation->oid, updatedRelation);
+            if (catalogUpdated) catalogPersisted = catalog->persistAll();
+        } catch (...) {
+            catalogPersisted = false;
+        }
+        if (!catalogUpdated || !catalogPersisted) {
+            // pg_class may have been published before a later catalog file
+            // failed. Restore both the in-memory row and every durable copy;
+            // persistAll deliberately keeps visiting files after an error.
+            if (catalogUpdated) {
+                try {
+                    if (catalog->updateClass(
+                            originalRelation->oid, *originalRelation)) {
+                        (void)catalog->persistAll();
+                    }
+                } catch (...) {
+                }
+            }
+            (void)writeSchemaFile(dbname, tablename, originalSchema);
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
+        }
     }
 
     lockManager_.unlock(tablename);
