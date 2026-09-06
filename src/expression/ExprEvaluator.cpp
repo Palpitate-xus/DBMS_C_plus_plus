@@ -3906,14 +3906,15 @@ void ExprEvaluator::registerBuiltins() {
     };
     functions_["substring"] = evaluateTextSubstring;
     functions_["round"] = [](const std::vector<ExprValue>& a) {
-        if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
+        if (a.empty() || a[0].isNull ||
+            (a.size() >= 2 && a[1].isNull)) {
+            return ExprValue("numeric", "", true);
+        }
         if (isNumericTypeName(a[0].typeName)) {
             auto n = tryParseNumeric(a[0].value);
             if (n) {
                 int scale = 0;
                 if (a.size() >= 2) {
-                    if (a[1].isNull)
-                        return ExprValue("numeric", "", true);
                     long long requestedScale = 0;
                     if (!parseInt64Exact(a[1].value, requestedScale) ||
                         requestedScale < std::numeric_limits<int>::lowest() ||
@@ -4078,9 +4079,12 @@ void ExprEvaluator::registerBuiltins() {
     functions_["floor"] = [unaryMath](const auto& a) { return unaryMath(a, std::floor); };
     functions_["trunc"] = [](const std::vector<ExprValue>& a) {
         // trunc(x) truncates toward zero; trunc(x, n) keeps n decimal places.
-        if (a.empty() || a[0].isNull) return ExprValue("double precision", "", true);
+        if (a.empty() || a[0].isNull ||
+            (a.size() >= 2 && a[1].isNull)) {
+            return ExprValue("double precision", "", true);
+        }
         double v = a[0].asDouble();
-        if (a.size() >= 2 && !a[1].isNull) {
+        if (a.size() >= 2) {
             int n = static_cast<int>(a[1].asInt());
             if (isNumericTypeName(a[0].typeName)) {
                 auto nv = tryParseNumeric(a[0].value);
