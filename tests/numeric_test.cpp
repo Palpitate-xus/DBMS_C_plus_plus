@@ -3,6 +3,7 @@
 #include <iostream>
 #include <limits>
 #include <string>
+#include <vector>
 
 using dbms::Numeric;
 
@@ -21,6 +22,19 @@ static void test_basic_io() {
     assert(Numeric("NaN").toString() == "NaN");
     assert(Numeric("Infinity").toString() == "Infinity");
     assert(Numeric("-Infinity").toString() == "-Infinity");
+    assert(Numeric("  1.25\t").toString() == "1.25");
+
+    const std::vector<std::string> invalid = {
+        "", "   ", "+", "-", ".", "1 2", "1 . 2"};
+    for (const auto& input : invalid) {
+        bool rejected = false;
+        try {
+            (void)Numeric(input);
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        assert(rejected);
+    }
     std::cout << "[NUMERIC] basic I/O OK" << std::endl;
 }
 

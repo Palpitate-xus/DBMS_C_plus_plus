@@ -171,12 +171,18 @@ Numeric::Numeric(int64_t v) {
 Numeric::Numeric(const std::string& s) : Numeric(fromString(s)) {}
 
 Numeric Numeric::fromString(const std::string& s) {
-    std::string str;
-    str.reserve(s.size());
-    for (char ch : s) {
-        if (!std::isspace(static_cast<unsigned char>(ch))) str.push_back(ch);
+    size_t begin = 0;
+    while (begin < s.size() &&
+           std::isspace(static_cast<unsigned char>(s[begin]))) {
+        ++begin;
     }
-    if (str.empty()) return Numeric(0);
+    size_t end = s.size();
+    while (end > begin &&
+           std::isspace(static_cast<unsigned char>(s[end - 1]))) {
+        --end;
+    }
+    if (begin == end) throw std::invalid_argument("invalid numeric: empty");
+    const std::string str = s.substr(begin, end - begin);
     if (str == "NaN" || str == "nan") return nan();
     if (str == "Infinity" || str == "inf" || str == "+Infinity" || str == "+inf")
         return infinity(1);
@@ -194,17 +200,21 @@ Numeric Numeric::fromString(const std::string& s) {
     std::string intPart;
     std::string fracPart;
     bool sawDot = false;
+    bool sawDigit = false;
     for (; pos < str.size(); ++pos) {
         char ch = str[pos];
         if (ch == '.') {
             if (sawDot) throw std::invalid_argument("invalid numeric: multiple dots");
             sawDot = true;
         } else if (ch >= '0' && ch <= '9') {
+            sawDigit = true;
             if (sawDot) fracPart.push_back(ch); else intPart.push_back(ch);
         } else {
             throw std::invalid_argument("invalid numeric character");
         }
     }
+    if (!sawDigit)
+        throw std::invalid_argument("invalid numeric: no digits");
 
     // Drop leading zeros from integer part.
     size_t leading = 0;
