@@ -66,6 +66,20 @@ static void test_callback_lifetimes() {
 static void test_pow_log() {
     dbms::ExprEvaluator eval;
     assert(approx(callFn(eval, "pow", {D(2), D(10)}), 1024.0));
+    assert(callFn(eval, "power",
+                  {I(2), I(std::numeric_limits<int64_t>::min())})
+               .value == "0");
+    bool overflowRejected = false;
+    try {
+        (void)callFn(
+            eval, "power",
+            {I(2), I(std::numeric_limits<int64_t>::max())});
+    } catch (const std::runtime_error& error) {
+        overflowRejected =
+            std::string(error.what()).find("SQLSTATE 22003") !=
+            std::string::npos;
+    }
+    assert(overflowRejected);
     assert(approx(callFn(eval, "log", {D(100)}), 2.0));            // base-10
     assert(approx(callFn(eval, "log", {D(2), D(8)}), 3.0));        // base-2 of 8
     assert(approx(callFn(eval, "log10", {D(1000)}), 3.0));

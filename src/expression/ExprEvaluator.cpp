@@ -3911,25 +3911,44 @@ void ExprEvaluator::registerBuiltins() {
         };
         // Small integer exponent on a decimal base: PG multiplies exactly
         // in numeric arithmetic (power_var_int).
-        if (isIntVal(a[1])) {
-            long long e = a[1].asInt();
+        long long integerExponent = 0;
+        if (isIntVal(a[1]) &&
+            parseInt64Exact(a[1].value, integerExponent)) {
+            const long long e = integerExponent;
             auto nb = tryParseNumeric(a[0].value);
-            if (nb && std::llabs(e) <= 1000) {
-                Numeric r(1);
-                Numeric base = (e < 0) ? (Numeric(1) / *nb) : *nb;
-                long long n = std::llabs(e);
-                for (long long i = 0; i < n; ++i) r = r * base;
-                if (isIntVal(a[0]) && isIntVal(a[1])) {
-                    std::string rs = r.toString();
-                    if (rs.find('.') == std::string::npos)
-                        return ExprValue("double precision", rs, false);
+            if (nb && e >= -1000 && e <= 1000) {
+                try {
+                    Numeric r(1);
+                    Numeric base = (e < 0) ? (Numeric(1) / *nb) : *nb;
+                    const long long exponentMagnitude = e < 0 ? -e : e;
+                    for (long long i = 0; i < exponentMagnitude; ++i)
+                        r = r * base;
+                    if (!r.isFinite()) {
+                        throw std::runtime_error(
+                            "numeric value out of range (SQLSTATE 22003)");
+                    }
+                    if (isIntVal(a[0]) && isIntVal(a[1])) {
+                        std::string rs = r.toString();
+                        if (rs.find('.') == std::string::npos)
+                            return ExprValue("double precision", rs, false);
+                    }
+                    long double rl =
+                        std::strtold(r.toString().c_str(), nullptr);
+                    return ExprValue(
+                        "double precision",
+                        r.withScale(displayScale(rl)).toString(), false);
+                } catch (const std::invalid_argument&) {
+                    throw std::runtime_error(
+                        "numeric value out of range (SQLSTATE 22003)");
                 }
-                long double rl = std::strtold(r.toString().c_str(), nullptr);
-                return ExprValue("double precision", r.withScale(displayScale(rl)).toString(), false);
             }
         }
         // PG numeric power computes exp/ln in extended precision; long double matches its 16-digit output.
         long double lv = powl(a[0].asDouble(), a[1].asDouble());
+        if (!std::isfinite(lv)) {
+            throw std::runtime_error(
+                "numeric value out of range (SQLSTATE 22003)");
+        }
         double v = static_cast<double>(lv);
         if (isIntVal(a[0]) && isIntVal(a[1]) && v == std::floor(v) && std::fabs(v) < 1e15)
             return ExprValue("double precision", std::to_string(static_cast<long long>(v)), false);
