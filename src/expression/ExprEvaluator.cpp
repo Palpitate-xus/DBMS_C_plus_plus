@@ -1305,6 +1305,11 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
                     throw std::runtime_error("division by zero (SQLSTATE 22012)");
                 res = *nl / *nr;
             }
+            else if (op == "%") {
+                if (nr->sign() == 0)
+                    throw std::runtime_error("division by zero (SQLSTATE 22012)");
+                return ExprValue("numeric", "", true);
+            }
             else return ExprValue("numeric", "", true);
             // PG display scale from the operand TEXTS: +/- max,
             // * sum, / division scale.
@@ -1362,7 +1367,12 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
             if (b == 0) throw std::runtime_error("division by zero (SQLSTATE 22012)");
             res = a / b;
         }
-        else if (op == "%") res = (b == 0) ? 0 : std::fmod(a, b);
+        else if (op == "%") {
+            if (b == 0)
+                throw std::runtime_error(
+                    "division by zero (SQLSTATE 22012)");
+            res = std::fmod(a, b);
+        }
         else if (op == "^") res = std::pow(a, b);
         // PostgreSQL float8 output: shortest decimal string that round-trips
         // to the same double (extra_float_digits >= 1 semantics).  A plain
@@ -1434,7 +1444,12 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
             integerOutOfRange();
         res = a / b;
     }
-    else if (op == "%") res = (b == 0) ? 0 : a % b;
+    else if (op == "%") {
+        if (b == 0)
+            throw std::runtime_error("division by zero (SQLSTATE 22012)");
+        res = (a == std::numeric_limits<int64_t>::lowest() && b == -1)
+            ? 0 : a % b;
+    }
     else if (op == "^") res = static_cast<int64_t>(std::pow(static_cast<double>(a), static_cast<double>(b)));
     return ExprValue("integer", std::to_string(res), false);
 }

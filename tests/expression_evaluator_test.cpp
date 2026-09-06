@@ -121,6 +121,31 @@ static void test_arithmetic() {
     expectOverflow("*", "9223372036854775807", "2");
     expectOverflow("/", "-9223372036854775808", "-1");
 
+    auto expectDivisionByZero = [&](const std::string& left,
+                                    const std::string& right) {
+        auto expression = std::make_unique<BinaryOpExpr>();
+        expression->op = "%";
+        expression->left = makeLit(left);
+        expression->right = makeLit(right);
+        bool rejected = false;
+        try {
+            (void)eval.eval(expression.get(), {});
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("SQLSTATE 22012") !=
+                       std::string::npos;
+        }
+        assert(rejected);
+    };
+    expectDivisionByZero("10", "0");
+    expectDivisionByZero("10.5", "0.0");
+
+    auto minimumModulo = std::make_unique<BinaryOpExpr>();
+    minimumModulo->op = "%";
+    minimumModulo->left = makeLit("-9223372036854775808");
+    minimumModulo->right = makeLit("-1");
+    ExprValue minimumModuloResult = eval.eval(minimumModulo.get(), {});
+    assert(minimumModuloResult.value == "0");
+
     std::cout << "[EXPR] arithmetic OK" << std::endl;
 }
 
