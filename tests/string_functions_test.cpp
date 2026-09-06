@@ -12,6 +12,7 @@
 #include <cassert>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -49,9 +50,22 @@ static void test_substr() {
     dbms::ExprEvaluator eval;
     assert(callFn(eval, "substr", {S("alphabet"), I(3)}).value == "phabet");
     assert(callFn(eval, "substr", {S("alphabet"), I(3), I(2)}).value == "ph");
+    assert(callFn(eval, "substr", {S("aé中z"), I(2), I(2)}).value ==
+           "é中");
+    assert(callFn(eval, "substring", {S("aé中z"), I(2), I(2)}).value ==
+           "é中");
     // Non-positive start clamps; length window shrinks accordingly (PG semantics).
     assert(callFn(eval, "substr", {S("alphabet"), I(0), I(2)}).value == "a");
     assert(callFn(eval, "substr", {S("alphabet"), I(20)}).value == "");
+    bool negativeLengthRejected = false;
+    try {
+        (void)callFn(eval, "substring", {S("alphabet"), I(2), I(-1)});
+    } catch (const std::runtime_error& error) {
+        negativeLengthRejected =
+            std::string(error.what()).find("SQLSTATE 22011") !=
+            std::string::npos;
+    }
+    assert(negativeLengthRejected);
     std::cout << "[STRFN] substr OK" << std::endl;
 }
 

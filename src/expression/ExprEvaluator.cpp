@@ -2495,6 +2495,50 @@ static size_t utf8ByteAt(const std::string& s, size_t charIdx) {
     }
     return s.size();
 }
+
+static ExprValue evaluateTextSubstring(const std::vector<ExprValue>& args) {
+    if (args.empty() || args[0].isNull)
+        return ExprValue("text", "", true);
+    if (args.size() < 2) return ExprValue("text", args[0].value, false);
+    if (args[1].isNull || (args.size() >= 3 && args[2].isNull))
+        return ExprValue("text", "", true);
+
+    long long from = 0;
+    if (!parseInt64Exact(args[1].value, from))
+        return ExprValue("text", "", true);
+    const bool hasLength = args.size() >= 3;
+    long long length = 0;
+    if (hasLength) {
+        if (!parseInt64Exact(args[2].value, length))
+            return ExprValue("text", "", true);
+        if (length < 0) {
+            throw std::runtime_error(
+                "negative substring length not allowed (SQLSTATE 22011)");
+        }
+    }
+
+    const size_t total = utf8CharCount(args[0].value);
+    const __int128 requestedEnd = hasLength
+        ? static_cast<__int128>(from) + length
+        : static_cast<__int128>(total) + 1;
+    const __int128 requestedStart = std::max<__int128>(from, 1);
+    if (requestedStart > static_cast<__int128>(total))
+        return ExprValue("text", "", false);
+
+    const size_t beginCharacter =
+        static_cast<size_t>(requestedStart - 1);
+    __int128 endCharacterWide = requestedEnd - 1;
+    if (endCharacterWide < static_cast<__int128>(beginCharacter))
+        endCharacterWide = beginCharacter;
+    if (endCharacterWide > static_cast<__int128>(total))
+        endCharacterWide = total;
+    const size_t endCharacter = static_cast<size_t>(endCharacterWide);
+    const size_t beginByte = utf8ByteAt(args[0].value, beginCharacter);
+    const size_t endByte = utf8ByteAt(args[0].value, endCharacter);
+    return ExprValue(
+        "text", args[0].value.substr(beginByte, endByte - beginByte), false);
+}
+
 static std::string trimStr(const std::string& s) {
     size_t b = 0, e = s.size();
     while (b < e && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
@@ -3717,16 +3761,7 @@ void ExprEvaluator::registerBuiltins() {
         for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
         return ExprValue("text", s, false);
     };
-    functions_["substring"] = [](const std::vector<ExprValue>& a) {
-        if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
-        std::string s = a[0].value;
-        if (a.size() < 2) return ExprValue("text", s, false);
-        size_t from = static_cast<size_t>(a[1].asInt());
-        if (from > 0) --from;
-        size_t len = (a.size() >= 3) ? static_cast<size_t>(a[2].asInt()) : std::string::npos;
-        if (from >= s.size()) return ExprValue("text", "", false);
-        return ExprValue("text", s.substr(from, len), false);
-    };
+    functions_["substring"] = evaluateTextSubstring;
     functions_["round"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
         if (isNumericTypeName(a[0].typeName)) {
@@ -4319,21 +4354,7 @@ void ExprEvaluator::registerBuiltins() {
         return ExprValue("text", std::string(1, static_cast<char>(v)), false);
     };
     // substr — PostgreSQL alias of substring(str, from[, len])
-    functions_["substr"] = [](const std::vector<ExprValue>& a) {
-        if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
-        std::string s = a[0].value;
-        if (a.size() < 2) return ExprValue("text", s, false);
-        int64_t from = a[1].asInt();
-        int64_t len = (a.size() >= 3) ? a[2].asInt() : -1;
-        // PG semantics: 1-based; clamp a non-positive start, adjusting length.
-        int64_t end = (len >= 0) ? from + len : static_cast<int64_t>(s.size()) + 1;
-        int64_t start = from < 1 ? 1 : from;
-        if (end < start) end = start;
-        if (start > static_cast<int64_t>(s.size())) return ExprValue("text", "", false);
-        size_t b = static_cast<size_t>(start - 1);
-        size_t e = std::min(static_cast<size_t>(end - 1), s.size());
-        return ExprValue("text", s.substr(b, e - b), false);
-    };
+    functions_["substr"] = evaluateTextSubstring;
     // char_length / character_length — UTF-8 character count
     functions_["char_length"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
