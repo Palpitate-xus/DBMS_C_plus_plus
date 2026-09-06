@@ -151,6 +151,10 @@ static void test_overlay_quote() {
     assert(callFn(eval, "overlay", {S("abcdef"), S("XY"), I(3)}).value == "abXYef");
     assert(callFn(eval, "overlay",
                   {S("abc"), S(""), I(2), I(1)}).value == "ac");
+    assert(callFn(eval, "overlay",
+                  {S("aé中z"), S("X"), I(2), I(2)}).value == "aXz");
+    assert(callFn(eval, "overlay",
+                  {S("aé中z"), S("界"), I(2)}).value == "a界中z");
     assert(callFn(eval, "quote_literal", {S("O'Brien")}).value == "'O''Brien'");
     assert(callFn(eval, "quote_ident", {S("simple")}).value == "simple");
     assert(callFn(eval, "quote_ident", {S("Mixed Case")}).value == "\"Mixed Case\"");

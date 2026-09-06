@@ -4684,15 +4684,32 @@ void ExprEvaluator::registerBuiltins() {
         }
         const std::string& s = a[0].value;
         const std::string& repl = a[1].value;
-        int64_t start = a[2].asInt();
-        int64_t count = (a.size() >= 4 && !a[3].isNull)
-                            ? a[3].asInt()
-                            : static_cast<int64_t>(repl.size());
+        long long start = 0;
+        if (!parseInt64Exact(a[2].value, start))
+            return ExprValue("text", "", true);
+        long long count = 0;
+        if (a.size() >= 4) {
+            if (!parseInt64Exact(a[3].value, count))
+                return ExprValue("text", "", true);
+        } else {
+            count = static_cast<long long>(utf8CharCount(repl));
+        }
         if (start < 1) start = 1;
         if (count < 0) count = 0;
-        size_t b = std::min(static_cast<size_t>(start - 1), s.size());
-        size_t removed = std::min(static_cast<size_t>(count), s.size() - b);
-        std::string out = s.substr(0, b) + repl + s.substr(b + removed);
+        const size_t characters = utf8CharCount(s);
+        const uint64_t requestedBegin = static_cast<uint64_t>(start - 1);
+        const size_t beginCharacter = requestedBegin >= characters
+            ? characters : static_cast<size_t>(requestedBegin);
+        const uint64_t requestedCount = static_cast<uint64_t>(count);
+        const size_t removedCharacters =
+            requestedCount >= characters - beginCharacter
+                ? characters - beginCharacter
+                : static_cast<size_t>(requestedCount);
+        const size_t beginByte = utf8ByteAt(s, beginCharacter);
+        const size_t endByte =
+            utf8ByteAt(s, beginCharacter + removedCharacters);
+        std::string out =
+            s.substr(0, beginByte) + repl + s.substr(endByte);
         return ExprValue("text", out, false);
     };
     // quote_literal — single-quote a value, doubling embedded quotes
