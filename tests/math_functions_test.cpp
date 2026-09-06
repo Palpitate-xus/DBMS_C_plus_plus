@@ -143,6 +143,9 @@ static void test_int_math() {
     assert(callFn(eval, "div", {I(9), I(0)}).isNull);             // division by zero -> NULL
     assert(callFn(eval, "factorial", {I(5)}).value == "120");
     assert(callFn(eval, "factorial", {I(0)}).value == "1");
+    assert(callFn(eval, "factorial", {I(21)}).value ==
+           "51090942171709440000");
+    expectOutOfRange("factorial", {I(450)});
     std::cout << "[MATHFN] gcd/lcm/div/factorial OK" << std::endl;
 }
 

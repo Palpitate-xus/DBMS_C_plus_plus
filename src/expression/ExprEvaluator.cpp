@@ -4079,11 +4079,19 @@ void ExprEvaluator::registerBuiltins() {
     // factorial(n) — n! for small non-negative n
     functions_["factorial"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
-        int64_t n = a[0].asInt();
+        long long n = 0;
+        if (!parseInt64Exact(a[0].value, n))
+            return ExprValue("numeric", "", true);
         if (n < 0) return ExprValue("numeric", "", true);
-        int64_t r = 1;
-        for (int64_t i = 2; i <= n; ++i) r *= i;
-        return ExprValue("numeric", std::to_string(r), false);
+        Numeric result(1);
+        for (long long i = 2; i <= n; ++i) {
+            result *= Numeric(i);
+            if (result.precision() > Numeric::kMaxPrecision) {
+                throw std::runtime_error(
+                    "numeric value out of range (SQLSTATE 22003)");
+            }
+        }
+        return ExprValue("numeric", result.toString(), false);
     };
     // width_bucket(operand, low, high, count) — histogram bucket index (1..count)
     functions_["width_bucket"] = [](const std::vector<ExprValue>& a) {
