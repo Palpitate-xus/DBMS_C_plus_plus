@@ -224,6 +224,9 @@ static void test_make_interval_bounds() {
     auto partialPositional = eval("make_interval(2)");
     assert(partialPositional.ok && partialPositional.value == "2 years");
 
+    auto nullNamedArgument = eval("make_interval(days => NULL)");
+    assert(nullNamedArgument.ok && nullNamedArgument.isNull);
+
     auto fractionalSeconds = eval("make_interval(secs => 1.5)");
     assert(fractionalSeconds.ok &&
            fractionalSeconds.value == "00:00:01.500000");

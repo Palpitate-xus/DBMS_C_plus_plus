@@ -2221,7 +2221,8 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
 
         for (const auto& na : e->namedArgs) {
             ExprValue nv = eval(na.value.get(), ctx);
-            if (nv.isNull) continue;
+            if (nv.isNull)
+                return ExprValue("interval", "", true);
             std::string k = toLower(na.name);
             const bool valid = k == "secs"
                 ? addIntervalSeconds(mi_micros, nv.value)
