@@ -2202,6 +2202,12 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
                     mi_micros, value, 60000000LL);
             return true;
         };
+        auto addIntegerArgument = [&](const std::string& key,
+                                      const ExprValue& argument) {
+            long long value = 0;
+            return parseInt64Exact(argument.value, value) &&
+                   addIntegerField(key, value);
+        };
 
         static const char* positionalNames[] = {
             "years", "months", "weeks", "days", "hours", "mins",
@@ -2212,8 +2218,7 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
             const bool valid = !args[i].isNull &&
                 (i == 6
                      ? addIntervalSeconds(mi_micros, args[i].value)
-                     : addIntegerField(positionalNames[i],
-                                       args[i].asInt()));
+                     : addIntegerArgument(positionalNames[i], args[i]));
             if (!valid) {
                 return ExprValue("interval", "", true);
             }
@@ -2233,7 +2238,7 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
             }
             const bool valid = k == "secs"
                 ? addIntervalSeconds(mi_micros, nv.value)
-                : addIntegerField(k, nv.asInt());
+                : addIntegerArgument(k, nv);
             if (!valid)
                 return ExprValue("interval", "", true);
         }

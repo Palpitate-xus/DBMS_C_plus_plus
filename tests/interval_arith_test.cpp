@@ -232,6 +232,13 @@ static void test_make_interval_bounds() {
            unknownNamedArgument.error.find("SQLSTATE 42883") !=
                std::string::npos);
 
+    auto fractionalDays = eval("make_interval(days => 1.5)");
+    assert(fractionalDays.ok && fractionalDays.isNull);
+
+    auto invalidPositionalDays = eval(
+        "make_interval(0, 0, 0, 'not-a-number')");
+    assert(invalidPositionalDays.ok && invalidPositionalDays.isNull);
+
     auto fractionalSeconds = eval("make_interval(secs => 1.5)");
     assert(fractionalSeconds.ok &&
            fractionalSeconds.value == "00:00:01.500000");
