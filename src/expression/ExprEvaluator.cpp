@@ -4678,8 +4678,10 @@ void ExprEvaluator::registerBuiltins() {
 
     // overlay(string, newsub, start[, count]) — replace count chars at 1-based start
     functions_["overlay"] = [](const std::vector<ExprValue>& a) {
-        if (a.size() < 3 || a[0].isNull || a[1].isNull || a[2].isNull)
+        if (a.size() < 3 || a[0].isNull || a[1].isNull || a[2].isNull ||
+            (a.size() >= 4 && a[3].isNull)) {
             return ExprValue("text", "", true);
+        }
         const std::string& s = a[0].value;
         const std::string& repl = a[1].value;
         int64_t start = a[2].asInt();
