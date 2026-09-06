@@ -4695,10 +4695,18 @@ void ExprEvaluator::registerBuiltins() {
     // ------------------------------------------------------------------------
     // Array functions (operate on the '{...}' array literal text)
     // ------------------------------------------------------------------------
+    auto parseArrayDimension = [](const std::vector<ExprValue>& arguments,
+                                  long long& dimension) {
+        return arguments.size() >= 2 && !arguments[1].isNull &&
+               parseInt64Exact(arguments[1].value, dimension);
+    };
     // array_length(arr, dim) — element count along dimension 1 (or 2); NULL if empty/unknown dim
-    functions_["array_length"] = [](const std::vector<ExprValue>& a) {
+    functions_["array_length"] =
+        [parseArrayDimension](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
-        int dim = (a.size() >= 2 && !a[1].isNull) ? static_cast<int>(a[1].asInt()) : 1;
+        long long dim = 0;
+        if (!parseArrayDimension(a, dim))
+            return ExprValue("integer", "", true);
         std::vector<std::string> elems;
         if (!parseArrayElements(a[0].value, elems) || elems.empty())
             return ExprValue("integer", "", true);
@@ -4741,17 +4749,30 @@ void ExprEvaluator::registerBuiltins() {
         return ExprValue("integer", std::to_string(n), false);
     };
     // array_lower(arr, dim) — PG arrays default to lower bound 1
-    functions_["array_lower"] = [](const std::vector<ExprValue>& a) {
+    functions_["array_lower"] =
+        [parseArrayDimension](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
+        long long dim = 0;
+        if (!parseArrayDimension(a, dim))
+            return ExprValue("integer", "", true);
         std::vector<std::string> elems;
         if (!parseArrayElements(a[0].value, elems) || elems.empty())
             return ExprValue("integer", "", true);
-        return ExprValue("integer", "1", false);
+        if (dim == 1) return ExprValue("integer", "1", false);
+        if (dim == 2) {
+            std::vector<std::string> sub;
+            if (parseArrayElements(elems[0], sub) && !sub.empty())
+                return ExprValue("integer", "1", false);
+        }
+        return ExprValue("integer", "", true);
     };
     // array_upper(arr, dim) — upper bound == length for the default lower bound 1
-    functions_["array_upper"] = [](const std::vector<ExprValue>& a) {
+    functions_["array_upper"] =
+        [parseArrayDimension](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
-        int dim = (a.size() >= 2 && !a[1].isNull) ? static_cast<int>(a[1].asInt()) : 1;
+        long long dim = 0;
+        if (!parseArrayDimension(a, dim))
+            return ExprValue("integer", "", true);
         std::vector<std::string> elems;
         if (!parseArrayElements(a[0].value, elems) || elems.empty())
             return ExprValue("integer", "", true);

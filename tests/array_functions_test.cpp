@@ -43,6 +43,19 @@ static void test_dims() {
     assert(callFn(eval, "array_ndims", {A("{{1,2},{3,4}}")}).value == "2");
     assert(callFn(eval, "array_lower", {A("{7,8,9}"), I(1)}).value == "1");
     assert(callFn(eval, "array_upper", {A("{7,8,9}"), I(1)}).value == "3");
+    assert(callFn(eval, "array_lower",
+                  {A("{{1,2},{3,4}}"), I(2)}).value == "1");
+    assert(callFn(eval, "array_lower",
+                  {A("{{1,2},{3,4}}"), I(3)}).isNull);
+    const dbms::ExprValue nullDimension("integer", "", true);
+    assert(callFn(eval, "array_length",
+                  {A("{1,2,3}"), nullDimension}).isNull);
+    assert(callFn(eval, "array_lower",
+                  {A("{1,2,3}"), nullDimension}).isNull);
+    assert(callFn(eval, "array_upper",
+                  {A("{1,2,3}"), nullDimension}).isNull);
+    assert(callFn(eval, "array_upper",
+                  {A("{1,2,3}"), I(4294967297LL)}).isNull);
     std::cout << "[ARRFN] dims OK" << std::endl;
 }
 
