@@ -3905,7 +3905,29 @@ void ExprEvaluator::registerBuiltins() {
         return ExprValue("text", s, false);
     };
     functions_["substring"] = evaluateTextSubstring;
-    functions_["round"] = [](const std::vector<ExprValue>& a) {
+    auto scaleFloatingDecimal = [](double value, int scale,
+                                   bool roundToNearest) {
+        if (!std::isfinite(value) || value == 0.0) return value;
+
+        // A double can represent decimal exponents down to roughly -324
+        // (including subnormals) and finite values only through 1e308.
+        // Outside that window the correctly scaled double is known without
+        // constructing a zero or infinite pow(10, scale) multiplier.
+        if (scale >= 324) return value;
+        if (scale < -std::numeric_limits<double>::max_exponent10)
+            return std::copysign(0.0, value);
+
+        const double quantum = std::pow(10.0, -scale);
+        if (quantum == 0.0) return value;
+        if (!std::isfinite(quantum)) return std::copysign(0.0, value);
+
+        const double scaled = value / quantum;
+        if (!std::isfinite(scaled)) return value;
+        const double integral = roundToNearest
+            ? std::nearbyint(scaled) : std::trunc(scaled);
+        return integral * quantum;
+    };
+    functions_["round"] = [scaleFloatingDecimal](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull ||
             (a.size() >= 2 && a[1].isNull)) {
             return ExprValue("numeric", "", true);
@@ -3944,8 +3966,7 @@ void ExprEvaluator::registerBuiltins() {
                     "integer out of range (SQLSTATE 22003)");
             }
             const int p = static_cast<int>(requestedScale);
-            double mult = std::pow(10.0, p);
-            v = std::nearbyint(v * mult) / mult;
+            v = scaleFloatingDecimal(v, p, true);
         } else {
             v = std::nearbyint(v);
         }
@@ -4084,7 +4105,7 @@ void ExprEvaluator::registerBuiltins() {
     functions_["cbrt"]  = [float8Unary](const auto& a) { return float8Unary(a, std::cbrt); };
     functions_["ceil"]  = [unaryMath](const auto& a) { return unaryMath(a, std::ceil); };
     functions_["floor"] = [unaryMath](const auto& a) { return unaryMath(a, std::floor); };
-    functions_["trunc"] = [](const std::vector<ExprValue>& a) {
+    functions_["trunc"] = [scaleFloatingDecimal](const std::vector<ExprValue>& a) {
         // trunc(x) truncates toward zero; trunc(x, n) keeps n decimal places.
         if (a.empty() || a[0].isNull ||
             (a.size() >= 2 && a[1].isNull)) {
@@ -4158,8 +4179,8 @@ void ExprEvaluator::registerBuiltins() {
                     "integer out of range (SQLSTATE 22003)");
             }
             const int n = static_cast<int>(requestedScale);
-            double mult = std::pow(10.0, n);
-            std::string ts2 = std::to_string(std::trunc(v * mult) / mult);
+            std::string ts2 = std::to_string(
+                scaleFloatingDecimal(v, n, false));
             while (!ts2.empty() && ts2.back() == '0') ts2.pop_back();
             if (!ts2.empty() && ts2.back() == '.') ts2.pop_back();
             return ExprValue("numeric", ts2, false);

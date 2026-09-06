@@ -145,6 +145,12 @@ static void test_trunc_round() {
                        std::string::npos;
         }
         assert(rejected);
+        assert(approx(callFn(eval, function,
+                             {D(1.25), I(std::numeric_limits<int>::max())}),
+                      1.25));
+        assert(callFn(eval, function,
+                      {D(1.25), I(std::numeric_limits<int>::min())})
+                   .value == "0");
     }
     assert(approx(callFn(eval, "ceiling", {D(4.2)}), 5.0));
     const dbms::ExprValue largeNumeric(
