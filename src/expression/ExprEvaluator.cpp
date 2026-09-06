@@ -4614,11 +4614,31 @@ void ExprEvaluator::registerBuiltins() {
         const std::string& s = a[0].value;
         const std::string& from = a[1].value;
         const std::string& to = a[2].value;
+        auto characters = [](const std::string& text) {
+            std::vector<std::string> result;
+            const size_t count = utf8CharCount(text);
+            result.reserve(count);
+            for (size_t i = 0; i < count; ++i) {
+                const size_t begin = utf8ByteAt(text, i);
+                const size_t end = utf8ByteAt(text, i + 1);
+                result.push_back(text.substr(begin, end - begin));
+            }
+            return result;
+        };
+        const std::vector<std::string> inputCharacters = characters(s);
+        const std::vector<std::string> fromCharacters = characters(from);
+        const std::vector<std::string> toCharacters = characters(to);
         std::string out;
-        for (char c : s) {
-            size_t idx = from.find(c);
-            if (idx == std::string::npos) out.push_back(c);
-            else if (idx < to.size()) out.push_back(to[idx]);
+        for (const std::string& character : inputCharacters) {
+            const auto match = std::find(
+                fromCharacters.begin(), fromCharacters.end(), character);
+            if (match == fromCharacters.end()) {
+                out += character;
+                continue;
+            }
+            const size_t index = static_cast<size_t>(
+                std::distance(fromCharacters.begin(), match));
+            if (index < toCharacters.size()) out += toCharacters[index];
             // else: char is deleted
         }
         return ExprValue("text", out, false);

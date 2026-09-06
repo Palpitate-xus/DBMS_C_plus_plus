@@ -142,6 +142,10 @@ static void test_concat_ws_starts_translate() {
     assert(callFn(eval, "starts_with", {S("alphabet"), S("alph")}).value == "t");
     assert(callFn(eval, "starts_with", {S("alphabet"), S("beta")}).value == "f");
     assert(callFn(eval, "translate", {S("12345"), S("143"), S("ax")}).value == "a2x5");  // 1->a, 4->x, 3 deleted
+    assert(callFn(eval, "translate",
+                  {S("aé中"), S("é中"), S("界")}).value == "a界");
+    assert(callFn(eval, "translate",
+                  {S("xé"), S("xé"), S("中a")}).value == "中a");
     std::cout << "[STRFN] concat_ws/starts_with/translate OK" << std::endl;
 }
 
