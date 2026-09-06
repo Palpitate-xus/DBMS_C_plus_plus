@@ -4085,7 +4085,12 @@ void ExprEvaluator::registerBuiltins() {
         if (n < 0) return ExprValue("numeric", "", true);
         Numeric result(1);
         for (long long i = 2; i <= n; ++i) {
-            result *= Numeric(i);
+            try {
+                result *= Numeric(i);
+            } catch (const std::invalid_argument&) {
+                throw std::runtime_error(
+                    "numeric value out of range (SQLSTATE 22003)");
+            }
             if (result.precision() > Numeric::kMaxPrecision) {
                 throw std::runtime_error(
                     "numeric value out of range (SQLSTATE 22003)");

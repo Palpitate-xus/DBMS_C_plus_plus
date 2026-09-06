@@ -82,6 +82,23 @@ static void test_scale_precision() {
     assert(Numeric("123.456").withScale(5).toString() == "123.45600");
     assert(Numeric("123.456").withPrecision(4).toString() == "123.5");
     assert(Numeric("0.00123").withPrecision(2).toString() == "0.0012");
+
+    const Numeric maximum(std::string(Numeric::kMaxPrecision, '9'));
+    bool additionRejected = false;
+    try {
+        (void)(maximum + Numeric(1));
+    } catch (const std::invalid_argument&) {
+        additionRejected = true;
+    }
+    assert(additionRejected);
+
+    bool multiplicationRejected = false;
+    try {
+        (void)(maximum * Numeric(9));
+    } catch (const std::invalid_argument&) {
+        multiplicationRejected = true;
+    }
+    assert(multiplicationRejected);
     std::cout << "[NUMERIC] scale/precision OK" << std::endl;
 }
 

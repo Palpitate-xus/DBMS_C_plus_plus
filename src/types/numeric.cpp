@@ -242,6 +242,8 @@ void Numeric::normalize() {
         sign_ = 1;
     }
     precision_ = static_cast<int>(digits_.size());
+    if (precision_ > kMaxPrecision)
+        throw std::invalid_argument("numeric precision exceeds maximum");
 }
 
 int Numeric::sign() const {
