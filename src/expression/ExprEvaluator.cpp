@@ -4016,11 +4016,28 @@ void ExprEvaluator::registerBuiltins() {
         if (a.empty() || a[0].isNull) return ExprValue("double precision", "", true);
         return ExprValue("double precision", float8Text(fn(a[0].asDouble())), false);
     };
+    auto boundedFloat8 = [float8Text](const std::vector<ExprValue>& a,
+                                      double (*fn)(double), double lower,
+                                      double upper) {
+        if (a.empty() || a[0].isNull)
+            return ExprValue("double precision", "", true);
+        const double argument = a[0].asDouble();
+        if (argument < lower || argument > upper) {
+            throw std::runtime_error(
+                "input is out of range (SQLSTATE 22003)");
+        }
+        return ExprValue(
+            "double precision", float8Text(fn(argument)), false);
+    };
     functions_["sin"]   = [float8Unary](const auto& a) { return float8Unary(a, std::sin); };
     functions_["cos"]   = [float8Unary](const auto& a) { return float8Unary(a, std::cos); };
     functions_["tan"]   = [float8Unary](const auto& a) { return float8Unary(a, std::tan); };
-    functions_["asin"]  = [float8Unary](const auto& a) { return float8Unary(a, std::asin); };
-    functions_["acos"]  = [float8Unary](const auto& a) { return float8Unary(a, std::acos); };
+    functions_["asin"]  = [boundedFloat8](const auto& a) {
+        return boundedFloat8(a, std::asin, -1.0, 1.0);
+    };
+    functions_["acos"]  = [boundedFloat8](const auto& a) {
+        return boundedFloat8(a, std::acos, -1.0, 1.0);
+    };
     functions_["atan"]  = [float8Unary](const auto& a) { return float8Unary(a, std::atan); };
     // PG presents exp/ln/log/sqrt as numeric with fixed display scales:
     //   exp: 15 frac digits for integer input, 16 for fractional input;
@@ -4353,8 +4370,14 @@ void ExprEvaluator::registerBuiltins() {
     functions_["cosh"]  = [float8Unary](const auto& a) { return float8Unary(a, std::cosh); };
     functions_["tanh"]  = [float8Unary](const auto& a) { return float8Unary(a, std::tanh); };
     functions_["asinh"] = [float8Unary](const auto& a) { return float8Unary(a, std::asinh); };
-    functions_["acosh"] = [float8Unary](const auto& a) { return float8Unary(a, std::acosh); };
-    functions_["atanh"] = [float8Unary](const auto& a) { return float8Unary(a, std::atanh); };
+    functions_["acosh"] = [boundedFloat8](const auto& a) {
+        return boundedFloat8(
+            a, std::acosh, 1.0,
+            std::numeric_limits<double>::infinity());
+    };
+    functions_["atanh"] = [boundedFloat8](const auto& a) {
+        return boundedFloat8(a, std::atanh, -1.0, 1.0);
+    };
     // gcd / lcm — integer greatest common divisor / least common multiple
     functions_["gcd"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("bigint", "", true);

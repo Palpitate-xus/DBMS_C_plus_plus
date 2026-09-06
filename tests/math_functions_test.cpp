@@ -189,6 +189,22 @@ static void test_hyperbolic() {
     assert(approx(callFn(eval, "asinh", {D(0)}), 0.0));
     assert(approx(callFn(eval, "acosh", {D(1)}), 0.0));
     assert(approx(callFn(eval, "atanh", {D(0)}), 0.0));
+    auto expectOutOfRange = [&](const std::string& function, double value) {
+        bool rejected = false;
+        try {
+            (void)callFn(eval, function, {D(value)});
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("SQLSTATE 22003") !=
+                       std::string::npos;
+        }
+        assert(rejected);
+    };
+    expectOutOfRange("asin", 2.0);
+    expectOutOfRange("acos", -2.0);
+    expectOutOfRange("acosh", 0.5);
+    expectOutOfRange("atanh", 2.0);
+    assert(std::isinf(std::stod(callFn(eval, "atanh", {D(1)}).value)));
+    assert(std::isinf(std::stod(callFn(eval, "atanh", {D(-1)}).value)));
     std::cout << "[MATHFN] hyperbolic OK" << std::endl;
 }
 
