@@ -4383,9 +4383,16 @@ void ExprEvaluator::registerBuiltins() {
     };
     functions_["reverse"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
-        std::string s = a[0].value;
-        std::reverse(s.begin(), s.end());
-        return ExprValue("text", s, false);
+        const std::string& input = a[0].value;
+        std::string result;
+        result.reserve(input.size());
+        const size_t characters = utf8CharCount(input);
+        for (size_t i = characters; i > 0; --i) {
+            const size_t begin = utf8ByteAt(input, i - 1);
+            const size_t end = utf8ByteAt(input, i);
+            result.append(input, begin, end - begin);
+        }
+        return ExprValue("text", result, false);
     };
     functions_["ascii"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull || a[0].value.empty()) return ExprValue("integer", "", true);
