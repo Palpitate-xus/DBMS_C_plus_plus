@@ -5083,14 +5083,18 @@ void ExprEvaluator::registerBuiltins() {
         };
         return ExprValue("integer", std::to_string(count(elems)), false);
     };
-    // array_ndims(arr) — number of dimensions (leading '{' count)
+    // array_ndims(arr) — number of non-empty nested array dimensions
     functions_["array_ndims"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
-        std::string s = a[0].value;
-        size_t b = 0;
-        while (b < s.size() && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
+        std::string current = a[0].value;
         int n = 0;
-        while (b < s.size() && s[b] == '{') { ++n; ++b; }
+        while (true) {
+            std::vector<std::string> elements;
+            if (!parseArrayElements(current, elements) || elements.empty())
+                break;
+            ++n;
+            current = elements.front();
+        }
         if (n == 0) return ExprValue("integer", "", true);
         return ExprValue("integer", std::to_string(n), false);
     };

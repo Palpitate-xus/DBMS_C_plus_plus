@@ -41,6 +41,9 @@ static void test_dims() {
     assert(callFn(eval, "cardinality", {A("{1,2,3}")}).value == "3");
     assert(callFn(eval, "array_ndims", {A("{1,2,3}")}).value == "1");
     assert(callFn(eval, "array_ndims", {A("{{1,2},{3,4}}")}).value == "2");
+    assert(callFn(eval, "array_ndims", {A("{}")}).isNull);
+    assert(callFn(eval, "array_ndims",
+                  {A("{ {1,2}, {3,4} }")}).value == "2");
     assert(callFn(eval, "array_dims", {A("{1,2,3}")}).value == "[1:3]");
     assert(callFn(eval, "array_dims",
                   {A("{{1,2},{3,4},{5,6}}")}).value ==
