@@ -3959,26 +3959,54 @@ void ExprEvaluator::registerBuiltins() {
     functions_["mod"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull)
             return ExprValue("integer", "", true);
-        bool frac = a[0].value.find('.') != std::string::npos ||
-                    a[1].value.find('.') != std::string::npos;
-        if (frac) {
-            // PG mod(numeric, numeric) keeps the exact decimal scale:
-            // mod(10.5, 3) = 1.5.  fmod with the larger fraction count.
-            double x = a[0].asDouble(), y = a[1].asDouble();
-            if (y == 0) return ExprValue("numeric", "", true);
-            double m = std::fmod(x, y);
-            size_t d0 = a[0].value.find('.');
-            size_t d1 = a[1].value.find('.');
-            size_t s0 = (d0 == std::string::npos) ? 0 : a[0].value.size() - d0 - 1;
-            size_t s1 = (d1 == std::string::npos) ? 0 : a[1].value.size() - d1 - 1;
-            size_t sc = s0 > s1 ? s0 : s1;
-            char buf[64];
-            std::snprintf(buf, sizeof(buf), "%.*f", (int)sc, m);
-            return ExprValue("numeric", buf, false);
+        auto isDecimal = [](const ExprValue& value) {
+            const std::string type = toLower(value.typeName);
+            return type == "numeric" || type == "decimal" ||
+                   value.value.find('.') != std::string::npos;
+        };
+        if (isDecimal(a[0]) || isDecimal(a[1])) {
+            const auto left = tryParseNumeric(a[0].value);
+            const auto right = tryParseNumeric(a[1].value);
+            if (!left || !right || !left->isFinite() || !right->isFinite())
+                return ExprValue("numeric", "", true);
+            if (right->sign() == 0)
+                return ExprValue("numeric", "", true);
+            try {
+                const Numeric quotient = *left / *right;
+                std::string integralQuotient = quotient.toString();
+                const size_t decimalPoint = integralQuotient.find('.');
+                if (decimalPoint != std::string::npos)
+                    integralQuotient.resize(decimalPoint);
+                if (integralQuotient.empty() || integralQuotient == "-")
+                    integralQuotient += '0';
+                Numeric remainder =
+                    *left - Numeric(integralQuotient) * *right;
+                auto textScale = [](const std::string& value) {
+                    const size_t point = value.find('.');
+                    return point == std::string::npos
+                        ? 0 : static_cast<int>(value.size() - point - 1);
+                };
+                const int scale = std::max(
+                    textScale(a[0].value), textScale(a[1].value));
+                return ExprValue(
+                    "numeric", remainder.withScale(scale).toString(), false);
+            } catch (const std::invalid_argument&) {
+                throw std::runtime_error(
+                    "numeric value out of range (SQLSTATE 22003)");
+            }
         }
-        int64_t b = a[1].asInt();
-        if (b == 0) return ExprValue("integer", "", true);
-        return ExprValue("integer", std::to_string(a[0].asInt() % b), false);
+        long long left = 0;
+        long long right = 0;
+        if (!parseInt64Exact(a[0].value, left) ||
+            !parseInt64Exact(a[1].value, right)) {
+            throw std::runtime_error(
+                "integer out of range (SQLSTATE 22003)");
+        }
+        if (right == 0) return ExprValue("integer", "", true);
+        const long long remainder =
+            left == std::numeric_limits<int64_t>::lowest() && right == -1
+                ? 0 : left % right;
+        return ExprValue("integer", std::to_string(remainder), false);
     };
     functions_["sign"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);

@@ -162,6 +162,20 @@ static void test_int_math() {
                   {I(std::numeric_limits<int64_t>::min()), I(-1)}).value ==
            "9223372036854775808");
     assert(callFn(eval, "div", {I(9), I(0)}).isNull);             // division by zero -> NULL
+    assert(callFn(
+               eval, "mod",
+               {dbms::ExprValue(
+                    "numeric", "100000000000000000000001", false),
+                I(3)})
+               .value == "2");
+    assert(callFn(
+               eval, "mod",
+               {dbms::ExprValue("numeric", "10.50", false),
+                dbms::ExprValue("numeric", "3.0", false)})
+               .value == "1.50");
+    assert(callFn(eval, "mod",
+                  {I(std::numeric_limits<int64_t>::min()), I(-1)})
+               .value == "0");
     assert(callFn(eval, "factorial", {I(5)}).value == "120");
     assert(callFn(eval, "factorial", {I(0)}).value == "1");
     assert(callFn(eval, "factorial", {I(21)}).value ==
