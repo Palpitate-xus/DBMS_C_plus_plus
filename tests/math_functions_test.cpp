@@ -66,6 +66,19 @@ static void test_callback_lifetimes() {
 static void test_pow_log() {
     dbms::ExprEvaluator eval;
     assert(approx(callFn(eval, "pow", {D(2), D(10)}), 1024.0));
+    const auto largeExponential = callFn(eval, "exp", {D(200)});
+    assert(!largeExponential.isNull &&
+           std::fabs(std::log(std::stold(largeExponential.value)) - 200.0L) <
+               1e-12L);
+    bool exponentialOverflowRejected = false;
+    try {
+        (void)callFn(eval, "exp", {D(12000)});
+    } catch (const std::runtime_error& error) {
+        exponentialOverflowRejected =
+            std::string(error.what()).find("SQLSTATE 22003") !=
+            std::string::npos;
+    }
+    assert(exponentialOverflowRejected);
     assert(callFn(eval, "power",
                   {I(2), I(std::numeric_limits<int64_t>::min())})
                .value == "0");

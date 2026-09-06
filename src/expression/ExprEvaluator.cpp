@@ -3999,9 +3999,9 @@ void ExprEvaluator::registerBuiltins() {
     //   sqrt: 15 for fractional input, bare for integer input.
     // Values are computed in long double to reproduce PG's 16th digit.
     auto numericFixed = [](long double v, int frac) {
-        char buf[80];
-        std::snprintf(buf, sizeof buf, "%.*Lf", frac, v);
-        return ExprValue("numeric", std::string(buf), false);
+        std::ostringstream out;
+        out << std::fixed << std::setprecision(frac) << v;
+        return ExprValue("numeric", out.str(), false);
     };
     auto argHasDot = [](const std::vector<ExprValue>& a) -> bool {
         return !a.empty() && !a[0].isNull && a[0].value.find('.') != std::string::npos;
@@ -4015,7 +4015,12 @@ void ExprEvaluator::registerBuiltins() {
     };
     functions_["exp"] = [numericFixed, argHasDot](const auto& a) {
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
-        return numericFixed(expl(a[0].asDouble()), argHasDot(a) ? 16 : 15);
+        const long double result = expl(a[0].asDouble());
+        if (!std::isfinite(result)) {
+            throw std::runtime_error(
+                "numeric value out of range (SQLSTATE 22003)");
+        }
+        return numericFixed(result, argHasDot(a) ? 16 : 15);
     };
     functions_["ln"] =
         [numericFixed, requireLogarithmArgument](const auto& a) {
