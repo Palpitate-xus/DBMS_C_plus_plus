@@ -196,11 +196,12 @@ inline Date dateAddYears(Date d, int64_t years) {
 inline std::string transstr(int64_t t) {
     if (t == 0) return "0";
     std::string tem;
-    bool neg = t < 0;
-    if (neg) t = -t;
-    while (t) {
-        tem = static_cast<char>(t % 10 + '0') + tem;
-        t /= 10;
+    const bool neg = t < 0;
+    uint64_t magnitude = static_cast<uint64_t>(t);
+    if (neg) magnitude = uint64_t{0} - magnitude;
+    while (magnitude) {
+        tem = static_cast<char>(magnitude % 10 + '0') + tem;
+        magnitude /= 10;
     }
     return neg ? "-" + tem : tem;
 }

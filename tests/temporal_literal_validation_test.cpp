@@ -17,6 +17,8 @@ int main() {
     // Formatting must obey the same four-digit civil-date domain accepted
     // by the parser. Huge finite timestamp values previously wrapped the
     // computed year through int and/or returned a silently truncated date.
+    assert(transstr(std::numeric_limits<int64_t>::min()) ==
+           "-9223372036854775808");
     assert(str(Date(9999, 12, 31)) == "9999-12-31");
     assert(str(Date(std::numeric_limits<int>::max(), 1, 1)).empty());
     assert(str(dateAddMonths(Date(2024, 1, 31), 1)) == "2024-02-29");
