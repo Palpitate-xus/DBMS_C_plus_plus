@@ -27863,16 +27863,39 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     body = body.substr(1, body.size() - 2);
                 days = 0; months = 0;
                 std::stringstream ss(body);
-                long long n;
-                std::string unit;
-                while (ss >> n >> unit) {
-                    if (unit == "day" || unit == "days") days += n;
-                    else if (unit == "week" || unit == "weeks") days += n * 7;
-                    else if (unit == "month" || unit == "months" || unit == "mon" || unit == "mons") months += n;
-                    else if (unit == "year" || unit == "years") months += n * 12;
+                auto addScaled = [](long long& target, long long value,
+                                    long long scale) {
+                    const __int128 total = static_cast<__int128>(target) +
+                        static_cast<__int128>(value) * scale;
+                    if (total < std::numeric_limits<long long>::lowest() ||
+                        total > std::numeric_limits<long long>::max()) {
+                        return false;
+                    }
+                    target = static_cast<long long>(total);
+                    return true;
+                };
+                bool parsedAny = false;
+                while (true) {
+                    ss >> std::ws;
+                    if (ss.eof()) break;
+                    long long n = 0;
+                    std::string unit;
+                    if (!(ss >> n >> unit)) return false;
+                    parsedAny = true;
+                    bool valid = false;
+                    if (unit == "day" || unit == "days")
+                        valid = addScaled(days, n, 1);
+                    else if (unit == "week" || unit == "weeks")
+                        valid = addScaled(days, n, 7);
+                    else if (unit == "month" || unit == "months" ||
+                             unit == "mon" || unit == "mons")
+                        valid = addScaled(months, n, 1);
+                    else if (unit == "year" || unit == "years")
+                        valid = addScaled(months, n, 12);
                     else return false;
+                    if (!valid) return false;
                 }
-                return true;
+                return parsedAny;
             };
             bool lDate = lt == "date" || (lt.empty() && looksDate(lv));
             bool rDate = rt == "date" || (rt.empty() && looksDate(rv));
@@ -27884,7 +27907,15 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 return std::to_string(a.convert() - b.convert());
             }
             long long ivDays = 0, ivMonths = 0;
-            if (lDate && parseInterval(expr.funcArgs[2], ivDays, ivMonths)) {
+            std::string intervalOperand;
+            for (char c : expr.funcArgs[2])
+                intervalOperand += static_cast<char>(
+                    tolower(static_cast<unsigned char>(c)));
+            const bool rInterval =
+                intervalOperand.compare(0, 9, "interval ") == 0;
+            if (lDate && rInterval) {
+                if (!parseInterval(expr.funcArgs[2], ivDays, ivMonths))
+                    return "";
                 Date a(lv.c_str());
                 if (a.year == 0) return "";
                 long long sign = (op == "-") ? -1 : 1;

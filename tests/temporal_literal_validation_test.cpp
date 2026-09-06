@@ -78,6 +78,18 @@ int main() {
     assert(g_engine.queryExpr(database, "events", {}, {largeMonthShift}) ==
            std::vector<std::string>{" "});
 
+    dbms::StorageEngine::SelectExpr largeYearShift = largeMonthShift;
+    largeYearShift.funcArgs[2] =
+        "INTERVAL '9223372036854775807 years'";
+    assert(g_engine.queryExpr(database, "events", {}, {largeYearShift}) ==
+           std::vector<std::string>{" "});
+
+    dbms::StorageEngine::SelectExpr largeWeekShift = largeMonthShift;
+    largeWeekShift.funcArgs[2] =
+        "INTERVAL '9223372036854775807 weeks'";
+    assert(g_engine.queryExpr(database, "events", {}, {largeWeekShift}) ==
+           std::vector<std::string>{" "});
+
     const std::vector<std::pair<std::string, std::string>> invalidValues = {
         {"date_value", "2024-00-01"},
         {"date_value", "2024-01-00"},
