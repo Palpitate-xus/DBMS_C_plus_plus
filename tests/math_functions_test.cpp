@@ -99,6 +99,15 @@ static void test_trunc_round() {
     assert(callFn(eval, "round",
                   {dbms::ExprValue("numeric", "149", false), I(-19)})
                .value == "0");
+    bool negativeSquareRootRejected = false;
+    try {
+        (void)callFn(eval, "sqrt", {D(-1)});
+    } catch (const std::runtime_error& error) {
+        negativeSquareRootRejected =
+            std::string(error.what()).find("SQLSTATE 2201F") !=
+            std::string::npos;
+    }
+    assert(negativeSquareRootRejected);
     std::cout << "[MATHFN] trunc/ceiling OK" << std::endl;
 }
 

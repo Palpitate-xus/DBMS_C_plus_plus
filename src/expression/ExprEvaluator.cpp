@@ -4016,7 +4016,13 @@ void ExprEvaluator::registerBuiltins() {
     };
     functions_["sqrt"] = [numericFixed, argHasDot](const auto& a) {
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
-        long double v = sqrtl(a[0].asDouble());
+        const long double input = a[0].asDouble();
+        if (input < 0) {
+            throw std::runtime_error(
+                "cannot take square root of a negative number "
+                "(SQLSTATE 2201F)");
+        }
+        long double v = sqrtl(input);
         if (!argHasDot(a)) {
             if (v == floorl(v)) return ExprValue("numeric", std::to_string(static_cast<long long>(v)), false);
             return numericFixed(v, 15);
