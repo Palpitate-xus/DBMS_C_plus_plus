@@ -172,6 +172,10 @@ static void test_null_propagation() {
     assert(callFn(eval, "lpad", {nullArg, I(5)}).isNull);
     assert(callFn(eval, "initcap", {nullArg}).isNull);
     assert(callFn(eval, "strpos", {S("x"), nullArg}).isNull);
+    assert(callFn(eval, "btrim", {S(" x "), nullArg}).isNull);
+    assert(callFn(eval, "trim", {S(" x "), nullArg}).isNull);
+    assert(callFn(eval, "ltrim", {S(" x "), nullArg}).isNull);
+    assert(callFn(eval, "rtrim", {S(" x "), nullArg}).isNull);
     assert(callFn(eval, "overlay",
                   {S("abc"), S("X"), I(2), nullArg}).isNull);
     std::cout << "[STRFN] NULL propagation OK" << std::endl;

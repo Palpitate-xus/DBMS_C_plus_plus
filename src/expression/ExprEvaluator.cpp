@@ -4361,6 +4361,10 @@ void ExprEvaluator::registerBuiltins() {
         size_t idx = 0;
         if (!a.empty() && (a[0].value == "both" || a[0].value == "leading" || a[0].value == "trailing")) { dir = a[0].value; idx = 1; }
         if (a.size() <= idx || a[idx].isNull) return ExprValue("text", "", true);
+        if ((idx == 0 && a.size() > 1 && a[1].isNull) ||
+            (idx == 1 && a.size() > 2 && a[2].isNull)) {
+            return ExprValue("text", "", true);
+        }
         std::string s, chars = " \t\n\r\f\v";
         if (idx == 1 && a.size() > 2) { chars = a[1].value; s = a[2].value; }
         else if (idx == 0 && a.size() > 1) { s = a[0].value; chars = a[1].value; }
@@ -4381,7 +4385,10 @@ void ExprEvaluator::registerBuiltins() {
         return ExprValue("text", s.substr(b, e - b), false);
     };
     functions_["ltrim"] = [](const std::vector<ExprValue>& a) {
-        if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
+        if (a.empty() || a[0].isNull ||
+            (a.size() >= 2 && a[1].isNull)) {
+            return ExprValue("text", "", true);
+        }
         const std::string& s = a[0].value;
         std::string chars = (a.size() >= 2 && !a[1].isNull) ? a[1].value : " \t\n\r\f\v";
         size_t b = 0;
@@ -4389,7 +4396,10 @@ void ExprEvaluator::registerBuiltins() {
         return ExprValue("text", s.substr(b), false);
     };
     functions_["rtrim"] = [](const std::vector<ExprValue>& a) {
-        if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
+        if (a.empty() || a[0].isNull ||
+            (a.size() >= 2 && a[1].isNull)) {
+            return ExprValue("text", "", true);
+        }
         const std::string& s = a[0].value;
         std::string chars = (a.size() >= 2 && !a[1].isNull) ? a[1].value : " \t\n\r\f\v";
         if (s.empty()) return ExprValue("text", s, false);
@@ -4515,7 +4525,10 @@ void ExprEvaluator::registerBuiltins() {
     };
     // btrim(str[, chars]) — trim matching characters (default whitespace) from both ends
     functions_["btrim"] = [](const std::vector<ExprValue>& a) {
-        if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
+        if (a.empty() || a[0].isNull ||
+            (a.size() >= 2 && a[1].isNull)) {
+            return ExprValue("text", "", true);
+        }
         const std::string& s = a[0].value;
         std::string chars = (a.size() >= 2 && !a[1].isNull) ? a[1].value : " \t\n\r\f\v";
         size_t b = 0, e = s.size();
