@@ -202,6 +202,20 @@ static void test_angles() {
     assert(approxT(callFn(eval, "degrees", {D(pi)}), 180.0, 1e-3));
     assert(approxT(callFn(eval, "radians", {D(180)}), pi, 1e-3));
     assert(approxT(callFn(eval, "cot", {D(pi / 4.0)}), 1.0, 1e-3));
+    const dbms::ExprValue infinity(
+        "double precision", "Infinity", false);
+    const dbms::ExprValue nan("double precision", "NaN", false);
+    for (const std::string function : {"sin", "cos", "tan", "cot"}) {
+        bool rejected = false;
+        try {
+            (void)callFn(eval, function, {infinity});
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("SQLSTATE 22003") !=
+                       std::string::npos;
+        }
+        assert(rejected);
+        assert(callFn(eval, function, {nan}).value == "NaN");
+    }
     std::cout << "[MATHFN] degrees/radians/cot OK" << std::endl;
 }
 

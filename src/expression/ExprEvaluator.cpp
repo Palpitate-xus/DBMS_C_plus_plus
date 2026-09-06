@@ -4031,9 +4031,14 @@ void ExprEvaluator::registerBuiltins() {
         return ExprValue(
             "double precision", float8Text(fn(argument)), false);
     };
-    functions_["sin"]   = [float8Unary](const auto& a) { return float8Unary(a, std::sin); };
-    functions_["cos"]   = [float8Unary](const auto& a) { return float8Unary(a, std::cos); };
-    functions_["tan"]   = [float8Unary](const auto& a) { return float8Unary(a, std::tan); };
+    auto finiteFloat8 = [boundedFloat8](const std::vector<ExprValue>& a,
+                                        double (*fn)(double)) {
+        const double maximum = std::numeric_limits<double>::max();
+        return boundedFloat8(a, fn, -maximum, maximum);
+    };
+    functions_["sin"]   = [finiteFloat8](const auto& a) { return finiteFloat8(a, std::sin); };
+    functions_["cos"]   = [finiteFloat8](const auto& a) { return finiteFloat8(a, std::cos); };
+    functions_["tan"]   = [finiteFloat8](const auto& a) { return finiteFloat8(a, std::tan); };
     functions_["asin"]  = [boundedFloat8](const auto& a) {
         return boundedFloat8(a, std::asin, -1.0, 1.0);
     };
@@ -4358,9 +4363,10 @@ void ExprEvaluator::registerBuiltins() {
                          float8Text(a[0].asDouble() * (std::atan(1.0) * 4.0) / 180.0), false);
     };
     // cot — cotangent
-    functions_["cot"] = [float8Text](const std::vector<ExprValue>& a) {
-        if (a.empty() || a[0].isNull) return ExprValue("double precision", "", true);
-        return ExprValue("double precision", float8Text(1.0 / std::tan(a[0].asDouble())), false);
+    functions_["cot"] = [finiteFloat8](const std::vector<ExprValue>& a) {
+        return finiteFloat8(a, [](double value) {
+            return 1.0 / std::tan(value);
+        });
     };
     // Hyperbolic functions
     functions_["sinh"]  = [float8Unary](const auto& a) { return float8Unary(a, std::sinh); };
