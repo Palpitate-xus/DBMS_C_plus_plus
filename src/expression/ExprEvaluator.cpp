@@ -4177,9 +4177,9 @@ void ExprEvaluator::registerBuiltins() {
         double v = static_cast<double>(lv);
         if (isIntVal(a[0]) && isIntVal(a[1]) && v == std::floor(v) && std::fabs(v) < 1e15)
             return ExprValue("double precision", std::to_string(static_cast<long long>(v)), false);
-        char buf[64];
-        std::snprintf(buf, sizeof buf, "%.*Lf", displayScale(lv), lv);
-        return ExprValue("double precision", std::string(buf), false);
+        std::ostringstream out;
+        out << std::fixed << std::setprecision(displayScale(lv)) << lv;
+        return ExprValue("double precision", out.str(), false);
     };
     functions_["mod"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull)

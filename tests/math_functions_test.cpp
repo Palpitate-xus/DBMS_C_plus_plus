@@ -79,6 +79,10 @@ static void test_pow_log() {
             std::string::npos;
     }
     assert(exponentialOverflowRejected);
+    const auto largePower = callFn(eval, "power", {D(10), D(100.5)});
+    assert(!largePower.isNull &&
+           std::fabs(std::log10(std::stold(largePower.value)) - 100.5L) <
+               1e-12L);
     assert(callFn(eval, "power",
                   {I(2), I(std::numeric_limits<int64_t>::min())})
                .value == "0");
