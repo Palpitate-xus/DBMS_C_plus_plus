@@ -4061,9 +4061,20 @@ void ExprEvaluator::registerBuiltins() {
     // div(y, x) — integer quotient of y / x, truncated toward zero
     functions_["div"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("numeric", "", true);
-        int64_t x = a[1].asInt();
-        if (x == 0) return ExprValue("numeric", "", true);
-        return ExprValue("numeric", std::to_string(a[0].asInt() / x), false);
+        const auto dividend = tryParseNumeric(a[0].value);
+        const auto divisor = tryParseNumeric(a[1].value);
+        if (!dividend || !divisor || divisor->sign() == 0)
+            return ExprValue("numeric", "", true);
+
+        const Numeric quotient = *dividend / *divisor;
+        std::string result = quotient.toString();
+        if (quotient.isFinite()) {
+            const size_t decimalPoint = result.find('.');
+            if (decimalPoint != std::string::npos)
+                result.resize(decimalPoint);
+            if (result.empty() || result == "-") result += "0";
+        }
+        return ExprValue("numeric", result, false);
     };
     // factorial(n) — n! for small non-negative n
     functions_["factorial"] = [](const std::vector<ExprValue>& a) {

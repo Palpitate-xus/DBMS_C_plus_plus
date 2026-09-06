@@ -130,6 +130,16 @@ static void test_int_math() {
         "lcm", {I(std::numeric_limits<int64_t>::max()), I(2)});
 
     assert(callFn(eval, "div", {I(9), I(4)}).value == "2");
+    assert(callFn(eval, "div",
+                  {dbms::ExprValue(
+                       "numeric", "100000000000000000000000", false),
+                   I(3)}).value == "33333333333333333333333");
+    assert(callFn(eval, "div",
+                  {dbms::ExprValue("numeric", "-10.5", false),
+                   I(3)}).value == "-3");
+    assert(callFn(eval, "div",
+                  {I(std::numeric_limits<int64_t>::min()), I(-1)}).value ==
+           "9223372036854775808");
     assert(callFn(eval, "div", {I(9), I(0)}).isNull);             // division by zero -> NULL
     assert(callFn(eval, "factorial", {I(5)}).value == "120");
     assert(callFn(eval, "factorial", {I(0)}).value == "1");
