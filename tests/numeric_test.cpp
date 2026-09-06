@@ -82,6 +82,9 @@ static void test_scale_precision() {
     assert(Numeric("123.456").withScale(5).toString() == "123.45600");
     assert(Numeric("123.456").withPrecision(4).toString() == "123.5");
     assert(Numeric("0.00123").withPrecision(2).toString() == "0.0012");
+    assert(Numeric("149").withScale(-2).toString() == "100");
+    assert(Numeric("150").withScale(-2).toString() == "200");
+    assert(Numeric("-150").withScale(-2).toString() == "-200");
 
     const Numeric maximum(std::string(Numeric::kMaxPrecision, '9'));
     bool additionRejected = false;

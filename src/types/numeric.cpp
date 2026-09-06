@@ -513,13 +513,35 @@ Numeric Numeric::withScale(int newScale, RoundingMode mode) const {
     if (nan_ || inf_) return *this;
     Numeric r;
     if (newScale >= scale_) {
+        const int64_t addedDigits =
+            static_cast<int64_t>(newScale) - scale_;
+        if (addedDigits > kMaxPrecision -
+                              static_cast<int64_t>(digits_.size())) {
+            throw std::invalid_argument(
+                "numeric precision exceeds maximum");
+        }
         r.digits_ = digits_;
-        r.digits_.insert(r.digits_.end(), newScale - scale_, 0);
+        r.digits_.insert(r.digits_.end(),
+                         static_cast<size_t>(addedDigits), 0);
         r.scale_ = newScale;
     } else {
-        int drop = scale_ - newScale;
-        r.digits_ = divideByPowerOf10(digits_, drop);
-        r.scale_ = newScale;
+        const int64_t droppedDigits =
+            static_cast<int64_t>(scale_) - newScale;
+        if (droppedDigits > static_cast<int64_t>(digits_.size()))
+            return Numeric(0);
+        r.digits_ = divideByPowerOf10(
+            digits_, static_cast<int>(droppedDigits));
+        if (newScale < 0 && !isAllZero(r.digits_)) {
+            const int64_t integerZeros = -static_cast<int64_t>(newScale);
+            if (integerZeros > kMaxPrecision -
+                                   static_cast<int64_t>(r.digits_.size())) {
+                throw std::invalid_argument(
+                    "numeric precision exceeds maximum");
+            }
+            r.digits_.insert(r.digits_.end(),
+                             static_cast<size_t>(integerZeros), 0);
+        }
+        r.scale_ = std::max(0, newScale);
     }
     r.sign_ = sign_;
     r.normalize();
