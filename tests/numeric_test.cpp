@@ -1,6 +1,7 @@
 #include "types/numeric.h"
 #include <cassert>
 #include <iostream>
+#include <limits>
 #include <string>
 
 using dbms::Numeric;
@@ -9,6 +10,8 @@ static void test_basic_io() {
     assert(Numeric(0).toString() == "0");
     assert(Numeric(123).toString() == "123");
     assert(Numeric(-456).toString() == "-456");
+    assert(Numeric(std::numeric_limits<int64_t>::min()).toString() ==
+           "-9223372036854775808");
     assert(Numeric("123.45").toString() == "123.45");
     assert(Numeric("-0.0012300").toString() == "-0.0012300");
     assert(Numeric(".5").toString() == "0.5");

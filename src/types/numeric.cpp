@@ -157,7 +157,9 @@ Numeric::Numeric(int64_t v) {
         return;
     }
     sign_ = (v > 0) ? 1 : -1;
-    uint64_t uv = static_cast<uint64_t>(std::llabs(v));
+    uint64_t uv = v < 0
+        ? static_cast<uint64_t>(-(v + 1)) + 1
+        : static_cast<uint64_t>(v);
     while (uv > 0) {
         digits_.push_back(static_cast<uint8_t>(uv % 10));
         uv /= 10;
