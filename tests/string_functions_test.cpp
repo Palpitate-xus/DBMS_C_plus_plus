@@ -96,6 +96,10 @@ static void test_trim_chars() {
     assert(callFn(eval, "ltrim", {S("xxhixx"), S("x")}).value == "hixx");
     assert(callFn(eval, "rtrim", {S("xxhixx"), S("x")}).value == "xxhi");
     assert(callFn(eval, "trim", {S("...hi.."), S(".")}).value == "hi");
+    assert(callFn(eval, "btrim", {S("éhelloé"), S("é")}).value ==
+           "hello");
+    assert(callFn(eval, "ltrim", {S("丰x"), S("中估")}).value ==
+           "丰x");
     // Default whitespace behavior still works with one arg.
     assert(callFn(eval, "trim", {S("  hi  ")}).value == "hi");
     std::cout << "[STRFN] trim with chars OK" << std::endl;

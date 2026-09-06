@@ -2560,6 +2560,41 @@ static std::string encodeUtf8CodePoint(uint32_t codePoint) {
     return result;
 }
 
+static std::vector<std::string> splitUtf8Characters(
+    const std::string& text) {
+    std::vector<std::string> result;
+    const size_t count = utf8CharCount(text);
+    result.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        const size_t begin = utf8ByteAt(text, i);
+        const size_t end = utf8ByteAt(text, i + 1);
+        result.push_back(text.substr(begin, end - begin));
+    }
+    return result;
+}
+
+static std::string trimUtf8Characters(const std::string& text,
+                                      const std::string& trimCharacters,
+                                      bool trimLeading,
+                                      bool trimTrailing) {
+    const std::vector<std::string> input = splitUtf8Characters(text);
+    const std::vector<std::string> trimSet =
+        splitUtf8Characters(trimCharacters);
+    const auto shouldTrim = [&](const std::string& character) {
+        return std::find(trimSet.begin(), trimSet.end(), character) !=
+               trimSet.end();
+    };
+    size_t begin = 0;
+    size_t end = input.size();
+    if (trimLeading)
+        while (begin < end && shouldTrim(input[begin])) ++begin;
+    if (trimTrailing)
+        while (end > begin && shouldTrim(input[end - 1])) --end;
+    const size_t beginByte = utf8ByteAt(text, begin);
+    const size_t endByte = utf8ByteAt(text, end);
+    return text.substr(beginByte, endByte - beginByte);
+}
+
 static ExprValue evaluateTextSubstring(const std::vector<ExprValue>& args) {
     if (args.empty() || args[0].isNull)
         return ExprValue("text", "", true);
@@ -4370,19 +4405,15 @@ void ExprEvaluator::registerBuiltins() {
         else if (idx == 0 && a.size() > 1) { s = a[0].value; chars = a[1].value; }
         else s = a[idx].value;
         if (dir == "leading") {
-            size_t b = 0;
-            while (b < s.size() && chars.find(s[b]) != std::string::npos) ++b;
-            return ExprValue("text", s.substr(b), false);
+            return ExprValue(
+                "text", trimUtf8Characters(s, chars, true, false), false);
         }
         if (dir == "trailing") {
-            size_t e = s.size();
-            while (e > 0 && chars.find(s[e - 1]) != std::string::npos) --e;
-            return ExprValue("text", s.substr(0, e), false);
+            return ExprValue(
+                "text", trimUtf8Characters(s, chars, false, true), false);
         }
-        size_t b = 0, e = s.size();
-        while (b < e && chars.find(s[b]) != std::string::npos) ++b;
-        while (e > b && chars.find(s[e - 1]) != std::string::npos) --e;
-        return ExprValue("text", s.substr(b, e - b), false);
+        return ExprValue(
+            "text", trimUtf8Characters(s, chars, true, true), false);
     };
     functions_["ltrim"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull ||
@@ -4391,9 +4422,8 @@ void ExprEvaluator::registerBuiltins() {
         }
         const std::string& s = a[0].value;
         std::string chars = (a.size() >= 2 && !a[1].isNull) ? a[1].value : " \t\n\r\f\v";
-        size_t b = 0;
-        while (b < s.size() && chars.find(s[b]) != std::string::npos) ++b;
-        return ExprValue("text", s.substr(b), false);
+        return ExprValue(
+            "text", trimUtf8Characters(s, chars, true, false), false);
     };
     functions_["rtrim"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull ||
@@ -4402,10 +4432,8 @@ void ExprEvaluator::registerBuiltins() {
         }
         const std::string& s = a[0].value;
         std::string chars = (a.size() >= 2 && !a[1].isNull) ? a[1].value : " \t\n\r\f\v";
-        if (s.empty()) return ExprValue("text", s, false);
-        size_t e = s.size();
-        while (e > 0 && chars.find(s[e - 1]) != std::string::npos) --e;
-        return ExprValue("text", s.substr(0, e), false);
+        return ExprValue(
+            "text", trimUtf8Characters(s, chars, false, true), false);
     };
     functions_["replace"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 3 || a[0].isNull || a[1].isNull || a[2].isNull)
@@ -4531,10 +4559,8 @@ void ExprEvaluator::registerBuiltins() {
         }
         const std::string& s = a[0].value;
         std::string chars = (a.size() >= 2 && !a[1].isNull) ? a[1].value : " \t\n\r\f\v";
-        size_t b = 0, e = s.size();
-        while (b < e && chars.find(s[b]) != std::string::npos) ++b;
-        while (e > b && chars.find(s[e - 1]) != std::string::npos) --e;
-        return ExprValue("text", s.substr(b, e - b), false);
+        return ExprValue(
+            "text", trimUtf8Characters(s, chars, true, true), false);
     };
     // split_part(str, delim, n) — n-th field (1-based; negative counts from the end)
     functions_["split_part"] = [](const std::vector<ExprValue>& a) {
