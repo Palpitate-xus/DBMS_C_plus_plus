@@ -120,6 +120,20 @@ static void test_arithmetic() {
     expectOverflow("-", "-9223372036854775808", "1");
     expectOverflow("*", "9223372036854775807", "2");
     expectOverflow("/", "-9223372036854775808", "-1");
+    expectOverflow("^", "10", "1000");
+
+    auto exponent = std::make_unique<BinaryOpExpr>();
+    exponent->op = "^";
+    exponent->left = makeLit("2");
+    exponent->right = makeLit("-3");
+    ExprValue exponentResult = eval.eval(exponent.get(), {});
+    assert(exponentResult.typeName == "double precision");
+    assert(exponentResult.value == "0.125");
+
+    exponent->left = makeLit("10");
+    exponent->right = makeLit("100");
+    exponentResult = eval.eval(exponent.get(), {});
+    assert(exponentResult.value == "1e+100");
 
     auto unaryOverflow = std::make_unique<UnaryOpExpr>();
     unaryOverflow->op = "-";
