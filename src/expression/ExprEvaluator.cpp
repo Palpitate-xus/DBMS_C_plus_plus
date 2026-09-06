@@ -2224,6 +2224,13 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
             if (nv.isNull)
                 return ExprValue("interval", "", true);
             std::string k = toLower(na.name);
+            if (k != "years" && k != "months" && k != "weeks" &&
+                k != "days" && k != "hours" && k != "mins" &&
+                k != "secs") {
+                throw std::runtime_error(
+                    "function make_interval has no argument named \"" + k +
+                    "\" (SQLSTATE 42883)");
+            }
             const bool valid = k == "secs"
                 ? addIntervalSeconds(mi_micros, nv.value)
                 : addIntegerField(k, nv.asInt());

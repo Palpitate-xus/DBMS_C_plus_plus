@@ -227,6 +227,11 @@ static void test_make_interval_bounds() {
     auto nullNamedArgument = eval("make_interval(days => NULL)");
     assert(nullNamedArgument.ok && nullNamedArgument.isNull);
 
+    auto unknownNamedArgument = eval("make_interval(dayz => 1)");
+    assert(!unknownNamedArgument.ok &&
+           unknownNamedArgument.error.find("SQLSTATE 42883") !=
+               std::string::npos);
+
     auto fractionalSeconds = eval("make_interval(secs => 1.5)");
     assert(fractionalSeconds.ok &&
            fractionalSeconds.value == "00:00:01.500000");
