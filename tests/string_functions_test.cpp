@@ -11,6 +11,7 @@
 #include "parser/ast.h"
 #include <cassert>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -102,6 +103,12 @@ static void test_trim_chars() {
 
 static void test_split_strpos() {
     dbms::ExprEvaluator eval;
+    assert(callFn(eval, "left",
+                  {S("abc"), I(std::numeric_limits<int64_t>::min())})
+               .value.empty());
+    assert(callFn(eval, "right",
+                  {S("abc"), I(std::numeric_limits<int64_t>::min())})
+               .value.empty());
     assert(callFn(eval, "split_part", {S("a,b,c"), S(","), I(2)}).value == "b");
     assert(callFn(eval, "split_part", {S("a,b,c"), S(","), I(-1)}).value == "c");
     assert(callFn(eval, "split_part", {S("a,b,c"), S(","), I(9)}).value == "");

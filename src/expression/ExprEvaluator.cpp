@@ -4423,8 +4423,12 @@ void ExprEvaluator::registerBuiltins() {
         int64_t n = a[1].asInt();
         const std::string& s = a[0].value;
         size_t total = utf8CharCount(s);
-        size_t take = (n < 0) ? (static_cast<size_t>(-n) >= total ? 0 : total - static_cast<size_t>(-n))
-                            : (static_cast<size_t>(n) >= total ? total : static_cast<size_t>(n));
+        const uint64_t magnitude = n < 0
+            ? uint64_t{0} - static_cast<uint64_t>(n)
+            : static_cast<uint64_t>(n);
+        size_t take = n < 0
+            ? (magnitude >= total ? 0 : total - static_cast<size_t>(magnitude))
+            : (magnitude >= total ? total : static_cast<size_t>(magnitude));
         return ExprValue("text", s.substr(0, utf8ByteAt(s, take)), false);
     };
     functions_["right"] = [](const std::vector<ExprValue>& a) {
@@ -4432,8 +4436,12 @@ void ExprEvaluator::registerBuiltins() {
         int64_t n = a[1].asInt();
         const std::string& s = a[0].value;
         size_t total = utf8CharCount(s);
-        size_t skip = (n < 0) ? (static_cast<size_t>(-n) >= total ? total : static_cast<size_t>(-n))
-                            : (static_cast<size_t>(n) >= total ? 0 : total - static_cast<size_t>(n));
+        const uint64_t magnitude = n < 0
+            ? uint64_t{0} - static_cast<uint64_t>(n)
+            : static_cast<uint64_t>(n);
+        size_t skip = n < 0
+            ? (magnitude >= total ? total : static_cast<size_t>(magnitude))
+            : (magnitude >= total ? 0 : total - static_cast<size_t>(magnitude));
         return ExprValue("text", s.substr(utf8ByteAt(s, skip)), false);
     };
     functions_["repeat"] = [](const std::vector<ExprValue>& a) {
