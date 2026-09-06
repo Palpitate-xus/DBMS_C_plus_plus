@@ -19,6 +19,13 @@ int main() {
     // computed year through int and/or returned a silently truncated date.
     assert(str(Date(9999, 12, 31)) == "9999-12-31");
     assert(str(Date(std::numeric_limits<int>::max(), 1, 1)).empty());
+    assert(str(dateAddMonths(Date(2024, 1, 31), 1)) == "2024-02-29");
+    assert(str(dateAddMonths(
+                   Date(2024, 1, 31),
+                   std::numeric_limits<int64_t>::max())).empty());
+    assert(str(dateAddYears(
+                   Date(2024, 1, 31),
+                   std::numeric_limits<int64_t>::max())).empty());
     assert(formatTimestampSeconds(
                parseTimestampToSeconds("9999-12-31 23:59:59")) ==
            "9999-12-31 23:59:59");

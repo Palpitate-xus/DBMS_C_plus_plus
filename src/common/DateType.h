@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
@@ -153,17 +154,31 @@ inline int64_t operator-(Date a, Date b) {
     return a.convert() - b.convert();
 }
 
-inline Date dateAddMonths(Date d, int months) {
-    int m = d.month + months;
-    int y = d.year;
-    while (m > 12) { m -= 12; y++; }
-    while (m < 1) { m += 12; y--; }
-    int maxDay = DAYS[m] - DAYS[m + 1] + (m == 2) * ((!(y % 4) && y % 100) || !(y % 400));
-    if (d.day > maxDay) d.day = maxDay;
-    return Date(y, m, d.day);
+inline Date dateAddMonthOffset(Date d, __int128 months) {
+    const Date validated(d.year, d.month, d.day);
+    if (d.year < 1 || d.year > 9999 || validated.year == 0) return Date{};
+
+    const __int128 monthIndex =
+        static_cast<__int128>(d.year - 1) * 12 + (d.month - 1) + months;
+    const __int128 maximumMonthIndex =
+        static_cast<__int128>(9999) * 12 - 1;
+    if (monthIndex < 0 || monthIndex > maximumMonthIndex) return Date{};
+
+    const int year = static_cast<int>(monthIndex / 12) + 1;
+    const int month = static_cast<int>(monthIndex % 12) + 1;
+    const bool leap =
+        ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0);
+    const int maximumDay = DAYS[month] - DAYS[month + 1] +
+        (month == 2 && leap ? 1 : 0);
+    return Date(year, month, std::min(d.day, maximumDay));
 }
-inline Date dateAddYears(Date d, int years) {
-    return dateAddMonths(d, years * 12);
+
+inline Date dateAddMonths(Date d, int64_t months) {
+    return dateAddMonthOffset(d, months);
+}
+
+inline Date dateAddYears(Date d, int64_t years) {
+    return dateAddMonthOffset(d, static_cast<__int128>(years) * 12);
 }
 
 inline std::string transstr(int64_t t) {
