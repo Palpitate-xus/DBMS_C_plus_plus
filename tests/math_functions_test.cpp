@@ -11,7 +11,9 @@
 #include <cassert>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -105,6 +107,28 @@ static void test_int_math() {
     assert(callFn(eval, "gcd", {I(-12), I(18)}).value == "6");
     assert(callFn(eval, "lcm", {I(4), I(6)}).value == "12");
     assert(callFn(eval, "lcm", {I(0), I(5)}).value == "0");
+    assert(callFn(eval, "gcd",
+                  {I(std::numeric_limits<int64_t>::min()), I(2)}).value ==
+           "2");
+
+    auto expectOutOfRange = [&](const std::string& function,
+                                const std::vector<dbms::ExprValue>& args) {
+        bool rejected = false;
+        try {
+            (void)callFn(eval, function, args);
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("SQLSTATE 22003") !=
+                       std::string::npos;
+        }
+        assert(rejected);
+    };
+    expectOutOfRange(
+        "abs", {I(std::numeric_limits<int64_t>::min())});
+    expectOutOfRange(
+        "gcd", {I(std::numeric_limits<int64_t>::min()), I(0)});
+    expectOutOfRange(
+        "lcm", {I(std::numeric_limits<int64_t>::max()), I(2)});
+
     assert(callFn(eval, "div", {I(9), I(4)}).value == "2");
     assert(callFn(eval, "div", {I(9), I(0)}).isNull);             // division by zero -> NULL
     assert(callFn(eval, "factorial", {I(5)}).value == "120");

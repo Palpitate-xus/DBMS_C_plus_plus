@@ -41,6 +41,13 @@ static bool isNumericTypeName(const std::string& s) {
            t == "int" || t == "bigint" || t == "smallint";
 }
 
+static bool isIntegerTypeName(const std::string& s) {
+    const std::string type = toLower(s);
+    return type == "integer" || type == "int" || type == "int2" ||
+           type == "int4" || type == "int8" || type == "bigint" ||
+           type == "smallint";
+}
+
 static std::optional<Numeric> tryParseNumeric(const std::string& s) {
     try {
         return Numeric(s);
@@ -921,13 +928,7 @@ ExprValue ExprEvaluator::evalUnaryOp(const UnaryOpExpr* e, const RowContext& ctx
     if (op == "-") {
         if (v.isNull) return v;
         if (v.value.empty()) return ExprValue(v.typeName, "0", false);
-        const std::string valueType = toLower(v.typeName);
-        const bool integerType =
-            valueType == "integer" || valueType == "int" ||
-            valueType == "int2" || valueType == "int4" ||
-            valueType == "int8" || valueType == "bigint" ||
-            valueType == "smallint";
-        if (integerType) {
+        if (isIntegerTypeName(v.typeName)) {
             long long integer = 0;
             if (!parseInt64Exact(v.value, integer) ||
                 integer == std::numeric_limits<int64_t>::lowest()) {
@@ -3654,6 +3655,17 @@ void ExprEvaluator::registerBuiltins() {
 
     functions_["abs"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
+        if (isIntegerTypeName(a[0].typeName)) {
+            long long value = 0;
+            if (!parseInt64Exact(a[0].value, value) ||
+                value == std::numeric_limits<int64_t>::lowest()) {
+                throw std::runtime_error(
+                    "integer out of range (SQLSTATE 22003)");
+            }
+            return ExprValue(
+                a[0].typeName,
+                std::to_string(value < 0 ? -value : value), false);
+        }
         if (isNumericTypeName(a[0].typeName)) {
             auto n = tryParseNumeric(a[0].value);
             if (n) return ExprValue("numeric", (n->sign() < 0 ? -(*n) : *n).toString(), false);
@@ -3990,17 +4002,61 @@ void ExprEvaluator::registerBuiltins() {
     // gcd / lcm — integer greatest common divisor / least common multiple
     functions_["gcd"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("bigint", "", true);
-        int64_t x = std::llabs(a[0].asInt()), y = std::llabs(a[1].asInt());
-        while (y) { int64_t t = x % y; x = y; y = t; }
+        long long left = 0;
+        long long right = 0;
+        if (!parseInt64Exact(a[0].value, left) ||
+            !parseInt64Exact(a[1].value, right)) {
+            throw std::runtime_error(
+                "integer out of range (SQLSTATE 22003)");
+        }
+        auto magnitude = [](const long long value) -> uint64_t {
+            return value < 0
+                ? static_cast<uint64_t>(-(value + 1)) + 1
+                : static_cast<uint64_t>(value);
+        };
+        uint64_t x = magnitude(left);
+        uint64_t y = magnitude(right);
+        while (y) { uint64_t t = x % y; x = y; y = t; }
+        if (x > static_cast<uint64_t>(
+                    std::numeric_limits<int64_t>::max())) {
+            throw std::runtime_error(
+                "integer out of range (SQLSTATE 22003)");
+        }
         return ExprValue("bigint", std::to_string(x), false);
     };
     functions_["lcm"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("bigint", "", true);
-        int64_t x = std::llabs(a[0].asInt()), y = std::llabs(a[1].asInt());
+        long long left = 0;
+        long long right = 0;
+        if (!parseInt64Exact(a[0].value, left) ||
+            !parseInt64Exact(a[1].value, right)) {
+            throw std::runtime_error(
+                "integer out of range (SQLSTATE 22003)");
+        }
+        auto magnitude = [](const long long value) -> uint64_t {
+            return value < 0
+                ? static_cast<uint64_t>(-(value + 1)) + 1
+                : static_cast<uint64_t>(value);
+        };
+        const uint64_t x = magnitude(left);
+        const uint64_t y = magnitude(right);
         if (x == 0 || y == 0) return ExprValue("bigint", "0", false);
-        int64_t g = x, b = y;
-        while (b) { int64_t t = g % b; g = b; b = t; }
-        return ExprValue("bigint", std::to_string(x / g * y), false);
+        uint64_t gcd = x;
+        uint64_t divisor = y;
+        while (divisor) {
+            const uint64_t remainder = gcd % divisor;
+            gcd = divisor;
+            divisor = remainder;
+        }
+        const unsigned __int128 result =
+            static_cast<unsigned __int128>(x / gcd) * y;
+        if (result > static_cast<unsigned __int128>(
+                         std::numeric_limits<int64_t>::max())) {
+            throw std::runtime_error(
+                "integer out of range (SQLSTATE 22003)");
+        }
+        return ExprValue(
+            "bigint", std::to_string(static_cast<uint64_t>(result)), false);
     };
     // div(y, x) — integer quotient of y / x, truncated toward zero
     functions_["div"] = [](const std::vector<ExprValue>& a) {
