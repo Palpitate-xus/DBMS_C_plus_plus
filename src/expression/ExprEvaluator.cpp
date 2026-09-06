@@ -4006,13 +4006,23 @@ void ExprEvaluator::registerBuiltins() {
     auto argHasDot = [](const std::vector<ExprValue>& a) -> bool {
         return !a.empty() && !a[0].isNull && a[0].value.find('.') != std::string::npos;
     };
+    auto requireLogarithmArgument = [](long double value,
+                                       bool allowOne = true) {
+        if (value <= 0 || (!allowOne && value == 1)) {
+            throw std::runtime_error(
+                "invalid argument for logarithm (SQLSTATE 2201E)");
+        }
+    };
     functions_["exp"] = [numericFixed, argHasDot](const auto& a) {
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
         return numericFixed(expl(a[0].asDouble()), argHasDot(a) ? 16 : 15);
     };
-    functions_["ln"] = [numericFixed](const auto& a) {
+    functions_["ln"] =
+        [numericFixed, requireLogarithmArgument](const auto& a) {
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
-        return numericFixed(logl(a[0].asDouble()), 16);
+        const long double value = a[0].asDouble();
+        requireLogarithmArgument(value);
+        return numericFixed(logl(value), 16);
     };
     functions_["sqrt"] = [numericFixed, argHasDot](const auto& a) {
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
@@ -4029,23 +4039,31 @@ void ExprEvaluator::registerBuiltins() {
         }
         return numericFixed(v, 15);
     };
-    functions_["log"] = [numericFixed, argHasDot](
+    functions_["log"] = [numericFixed, argHasDot,
+                          requireLogarithmArgument](
                             const std::vector<ExprValue>& a) {
         // log(x) = base-10 log; log(b, x) = base-b log.
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
         if (a.size() >= 2) {
             if (a[1].isNull) return ExprValue("numeric", "", true);
             long double b = a[0].asDouble(), x = a[1].asDouble();
+            requireLogarithmArgument(b, false);
+            requireLogarithmArgument(x);
             return numericFixed(logl(x) / logl(b), 16);
         }
-        long double v = log10l(a[0].asDouble());
+        const long double value = a[0].asDouble();
+        requireLogarithmArgument(value);
+        long double v = log10l(value);
         if (!argHasDot(a) && v == floorl(v))
             return ExprValue("numeric", std::to_string(static_cast<long long>(v)), false);
         return numericFixed(v, 16);
     };
-    functions_["log10"] = [numericFixed, argHasDot](const auto& a) {
+    functions_["log10"] = [numericFixed, argHasDot,
+                             requireLogarithmArgument](const auto& a) {
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
-        long double v = log10l(a[0].asDouble());
+        const long double value = a[0].asDouble();
+        requireLogarithmArgument(value);
+        long double v = log10l(value);
         if (!argHasDot(a) && v == floorl(v))
             return ExprValue("numeric", std::to_string(static_cast<long long>(v)), false);
         return numericFixed(v, 16);

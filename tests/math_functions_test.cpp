@@ -84,6 +84,21 @@ static void test_pow_log() {
     assert(approx(callFn(eval, "log", {D(2), D(8)}), 3.0));        // base-2 of 8
     assert(approx(callFn(eval, "log10", {D(1000)}), 3.0));
     assert(approx(callFn(eval, "ln", {D(1)}), 0.0));
+    auto expectInvalidLog = [&](const std::string& function,
+                                const std::vector<dbms::ExprValue>& args) {
+        bool rejected = false;
+        try {
+            (void)callFn(eval, function, args);
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("SQLSTATE 2201E") !=
+                       std::string::npos;
+        }
+        assert(rejected);
+    };
+    expectInvalidLog("ln", {D(0)});
+    expectInvalidLog("log10", {D(-1)});
+    expectInvalidLog("log", {D(1), D(10)});
+    expectInvalidLog("log", {D(2), D(0)});
     std::cout << "[MATHFN] pow/log OK" << std::endl;
 }
 
