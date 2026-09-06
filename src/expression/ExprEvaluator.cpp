@@ -1308,7 +1308,16 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
             else if (op == "%") {
                 if (nr->sign() == 0)
                     throw std::runtime_error("division by zero (SQLSTATE 22012)");
-                return ExprValue("numeric", "", true);
+                if (!nl->isFinite() || !nr->isFinite())
+                    return ExprValue("numeric", "", true);
+                const Numeric quotient = *nl / *nr;
+                std::string integralQuotient = quotient.toString();
+                const size_t decimalPoint = integralQuotient.find('.');
+                if (decimalPoint != std::string::npos)
+                    integralQuotient.resize(decimalPoint);
+                if (integralQuotient.empty() || integralQuotient == "-")
+                    integralQuotient += "0";
+                res = *nl - Numeric(integralQuotient) * *nr;
             }
             else return ExprValue("numeric", "", true);
             // PG display scale from the operand TEXTS: +/- max,
@@ -1318,7 +1327,10 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
                 return (d == std::string::npos) ? 0 : (int)(s.size() - d - 1);
             };
             int tsL = textScale(l.value), tsR = textScale(r.value);
-            if (op == "/") return ExprValue("numeric", res.toString(), false);            int target = std::max(tsL, tsR);            if (op == "*") target = tsL + tsR;
+            if (op == "/")
+                return ExprValue("numeric", res.toString(), false);
+            int target = std::max(tsL, tsR);
+            if (op == "*") target = tsL + tsR;
             Numeric rs2 = res.withScale(target);
             std::string s = rs2.toString();
             int cur = 0;

@@ -296,6 +296,26 @@ static void test_numeric() {
         assert(eval.eval(bin.get(), {}).asBool());
     }
 
+    // Numeric modulo is exact and preserves the wider input scale.
+    {
+        auto bin = std::make_unique<BinaryOpExpr>();
+        bin->op = "%";
+        bin->left = makeNumLit("10.50");
+        bin->right = makeNumLit("3.000");
+        ExprValue v = eval.eval(bin.get(), {});
+        assert(!v.isNull && v.value == "1.500");
+
+        bin->left = makeNumLit("-10.5");
+        bin->right = makeNumLit("3");
+        v = eval.eval(bin.get(), {});
+        assert(!v.isNull && v.value == "-1.5");
+
+        bin->left = makeNumLit("100000000000000000000000000000.5");
+        bin->right = makeNumLit("3");
+        v = eval.eval(bin.get(), {});
+        assert(!v.isNull && v.value == "1.5");
+    }
+
     // Cast to numeric.
     {
         auto cast = std::make_unique<CastExpr>();
