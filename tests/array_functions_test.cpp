@@ -37,6 +37,14 @@ static void test_dims() {
     assert(callFn(eval, "array_length", {A("{}"), I(1)}).isNull);
     assert(callFn(eval, "array_length", {A("{{1,2},{3,4},{5,6}}"), I(1)}).value == "3");
     assert(callFn(eval, "array_length", {A("{{1,2},{3,4},{5,6}}"), I(2)}).value == "2");
+    const dbms::ExprValue threeDimensional(
+        "integer[]", "{{{1,2},{3,4}},{{5,6},{7,8}}}", false);
+    assert(callFn(eval, "array_length", {threeDimensional, I(3)}).value ==
+           "2");
+    assert(callFn(eval, "array_lower", {threeDimensional, I(3)}).value ==
+           "1");
+    assert(callFn(eval, "array_upper", {threeDimensional, I(3)}).value ==
+           "2");
     assert(callFn(eval, "cardinality", {A("{{1,2},{3,4},{5,6}}")}).value == "6");
     assert(callFn(eval, "cardinality", {A("{1,2,3}")}).value == "3");
     assert(callFn(eval, "array_ndims", {A("{1,2,3}")}).value == "1");

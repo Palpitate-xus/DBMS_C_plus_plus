@@ -5046,24 +5046,30 @@ void ExprEvaluator::registerBuiltins() {
         return arguments.size() >= 2 && !arguments[1].isNull &&
                parseInt64Exact(arguments[1].value, dimension);
     };
-    // array_length(arr, dim) — element count along dimension 1 (or 2); NULL if empty/unknown dim
+    auto arrayExtent = [](const std::string& array,
+                          long long dimension) -> std::optional<size_t> {
+        if (dimension <= 0) return std::nullopt;
+        std::string current = array;
+        while (dimension-- > 0) {
+            std::vector<std::string> elements;
+            if (!parseArrayElements(current, elements) || elements.empty())
+                return std::nullopt;
+            if (dimension == 0) return elements.size();
+            current = elements.front();
+        }
+        return std::nullopt;
+    };
+    // array_length(arr, dim) — element count along the requested dimension
     functions_["array_length"] =
-        [parseArrayDimension](const std::vector<ExprValue>& a) {
+        [parseArrayDimension, arrayExtent](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
         long long dim = 0;
         if (!parseArrayDimension(a, dim))
             return ExprValue("integer", "", true);
-        std::vector<std::string> elems;
-        if (!parseArrayElements(a[0].value, elems) || elems.empty())
-            return ExprValue("integer", "", true);
-        if (dim == 1) return ExprValue("integer", std::to_string(elems.size()), false);
-        if (dim == 2) {
-            std::vector<std::string> sub;
-            if (!parseArrayElements(elems[0], sub) || sub.empty())
-                return ExprValue("integer", "", true);
-            return ExprValue("integer", std::to_string(sub.size()), false);
-        }
-        return ExprValue("integer", "", true);
+        const auto extent = arrayExtent(a[0].value, dim);
+        return extent
+            ? ExprValue("integer", std::to_string(*extent), false)
+            : ExprValue("integer", "", true);
     };
     // cardinality(arr) — total number of elements across all dimensions
     functions_["cardinality"] = [](const std::vector<ExprValue>& a) {
@@ -5100,40 +5106,26 @@ void ExprEvaluator::registerBuiltins() {
     };
     // array_lower(arr, dim) — PG arrays default to lower bound 1
     functions_["array_lower"] =
-        [parseArrayDimension](const std::vector<ExprValue>& a) {
+        [parseArrayDimension, arrayExtent](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
         long long dim = 0;
         if (!parseArrayDimension(a, dim))
             return ExprValue("integer", "", true);
-        std::vector<std::string> elems;
-        if (!parseArrayElements(a[0].value, elems) || elems.empty())
-            return ExprValue("integer", "", true);
-        if (dim == 1) return ExprValue("integer", "1", false);
-        if (dim == 2) {
-            std::vector<std::string> sub;
-            if (parseArrayElements(elems[0], sub) && !sub.empty())
-                return ExprValue("integer", "1", false);
-        }
-        return ExprValue("integer", "", true);
+        return arrayExtent(a[0].value, dim)
+            ? ExprValue("integer", "1", false)
+            : ExprValue("integer", "", true);
     };
     // array_upper(arr, dim) — upper bound == length for the default lower bound 1
     functions_["array_upper"] =
-        [parseArrayDimension](const std::vector<ExprValue>& a) {
+        [parseArrayDimension, arrayExtent](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
         long long dim = 0;
         if (!parseArrayDimension(a, dim))
             return ExprValue("integer", "", true);
-        std::vector<std::string> elems;
-        if (!parseArrayElements(a[0].value, elems) || elems.empty())
-            return ExprValue("integer", "", true);
-        if (dim == 1) return ExprValue("integer", std::to_string(elems.size()), false);
-        if (dim == 2) {
-            std::vector<std::string> sub;
-            if (!parseArrayElements(elems[0], sub) || sub.empty())
-                return ExprValue("integer", "", true);
-            return ExprValue("integer", std::to_string(sub.size()), false);
-        }
-        return ExprValue("integer", "", true);
+        const auto extent = arrayExtent(a[0].value, dim);
+        return extent
+            ? ExprValue("integer", std::to_string(*extent), false)
+            : ExprValue("integer", "", true);
     };
     // array_append(arr, elem) — append element, returning the new array literal
     functions_["array_append"] = [](const std::vector<ExprValue>& a) {
