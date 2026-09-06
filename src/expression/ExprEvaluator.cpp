@@ -921,6 +921,21 @@ ExprValue ExprEvaluator::evalUnaryOp(const UnaryOpExpr* e, const RowContext& ctx
     if (op == "-") {
         if (v.isNull) return v;
         if (v.value.empty()) return ExprValue(v.typeName, "0", false);
+        const std::string valueType = toLower(v.typeName);
+        const bool integerType =
+            valueType == "integer" || valueType == "int" ||
+            valueType == "int2" || valueType == "int4" ||
+            valueType == "int8" || valueType == "bigint" ||
+            valueType == "smallint";
+        if (integerType) {
+            long long integer = 0;
+            if (!parseInt64Exact(v.value, integer) ||
+                integer == std::numeric_limits<int64_t>::lowest()) {
+                throw std::runtime_error(
+                    "integer out of range (SQLSTATE 22003)");
+            }
+            return ExprValue(v.typeName, std::to_string(-integer), false);
+        }
         if (isNumericTypeName(v.typeName)) {
             auto n = tryParseNumeric(v.value);
             // Keep the operand's type: like PG, -int4 stays int4 and only

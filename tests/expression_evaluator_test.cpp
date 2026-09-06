@@ -121,6 +121,20 @@ static void test_arithmetic() {
     expectOverflow("*", "9223372036854775807", "2");
     expectOverflow("/", "-9223372036854775808", "-1");
 
+    auto unaryOverflow = std::make_unique<UnaryOpExpr>();
+    unaryOverflow->op = "-";
+    auto minimumInteger = makeLit("-9223372036854775808");
+    minimumInteger->typeName = "integer";
+    unaryOverflow->operand = std::move(minimumInteger);
+    bool unaryRejected = false;
+    try {
+        (void)eval.eval(unaryOverflow.get(), {});
+    } catch (const std::runtime_error& error) {
+        unaryRejected = std::string(error.what()).find("SQLSTATE 22003") !=
+                        std::string::npos;
+    }
+    assert(unaryRejected);
+
     auto expectDivisionByZero = [&](const std::string& left,
                                     const std::string& right) {
         auto expression = std::make_unique<BinaryOpExpr>();
