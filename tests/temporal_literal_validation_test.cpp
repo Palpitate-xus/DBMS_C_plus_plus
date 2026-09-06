@@ -68,6 +68,16 @@ int main() {
                 {"timestamptz_value", "2024-02-29 23:59:59+15:59"}}) ==
            dbms::DBStatus::OK);
 
+    dbms::StorageEngine::SelectExpr largeMonthShift;
+    largeMonthShift.displayName = "shifted";
+    largeMonthShift.isScalar = true;
+    largeMonthShift.funcName = "arith";
+    largeMonthShift.funcArgs = {
+        "date_value", "+",
+        "INTERVAL '9223372036854775807 months'"};
+    assert(g_engine.queryExpr(database, "events", {}, {largeMonthShift}) ==
+           std::vector<std::string>{" "});
+
     const std::vector<std::pair<std::string, std::string>> invalidValues = {
         {"date_value", "2024-00-01"},
         {"date_value", "2024-01-00"},

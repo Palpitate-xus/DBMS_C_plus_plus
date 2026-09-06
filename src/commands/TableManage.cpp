@@ -27888,7 +27888,8 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 Date a(lv.c_str());
                 if (a.year == 0) return "";
                 long long sign = (op == "-") ? -1 : 1;
-                Date r = dateAddMonths(a, static_cast<int>(sign * ivMonths));
+                Date r = dateAddMonthOffset(
+                    a, static_cast<__int128>(sign) * ivMonths);
                 if (ivDays != 0)
                     r = (sign > 0) ? (r + ivDays) : (r - ivDays);
                 if (r.year == 0) return "";
