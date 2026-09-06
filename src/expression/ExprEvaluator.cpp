@@ -4679,7 +4679,6 @@ void ExprEvaluator::registerBuiltins() {
     // overlay(string, newsub, start[, count]) — replace count chars at 1-based start
     functions_["overlay"] = [](const std::vector<ExprValue>& a) {
         std::vector<ExprValue> aa; for (auto& x : a) if (!x.value.empty()) aa.push_back(x); const std::vector<ExprValue>& ovArgs = (aa.size() >= 3 && a.size() != aa.size()) ? aa : a;
-        { std::string dbg = "[EVO] args=" + std::to_string(a.size()); for (auto& x : a) dbg += " [" + x.value + "]"; dbg += "\n"; fprintf(stderr, "%s", dbg.c_str()); }
         if (ovArgs.size() < 3 || ovArgs[0].isNull || ovArgs[1].isNull || ovArgs[2].isNull)
             return ExprValue("text", "", true);
         const std::string& s = ovArgs[0].value;
