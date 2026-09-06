@@ -4342,12 +4342,7 @@ void ExprEvaluator::registerBuiltins() {
         return ExprValue("double precision", std::to_string(static_cast<double>(std::rand()) / RAND_MAX), false);
     };
     // pow — alias of power; ceiling — alias of ceil
-    functions_["pow"] = [float8Text](const std::vector<ExprValue>& a) {
-        if (a.size() < 2 || a[0].isNull || a[1].isNull)
-            return ExprValue("double precision", "", true);
-        return ExprValue("double precision",
-                         float8Text(std::pow(a[0].asDouble(), a[1].asDouble())), false);
-    };
+    functions_["pow"] = functions_["power"];
     functions_["ceiling"] = [unaryMath](const auto& a) { return unaryMath(a, std::ceil); };
     // degrees / radians
     functions_["degrees"] = [float8Text](const std::vector<ExprValue>& a) {

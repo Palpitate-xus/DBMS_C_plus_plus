@@ -86,6 +86,10 @@ static void test_pow_log() {
     assert(callFn(eval, "power",
                   {I(2), I(std::numeric_limits<int64_t>::min())})
                .value == "0");
+    const dbms::ExprValue largePowerBase(
+        "numeric", "12345678901234567890", false);
+    assert(callFn(eval, "pow", {largePowerBase, I(2)}).value ==
+           callFn(eval, "power", {largePowerBase, I(2)}).value);
     bool overflowRejected = false;
     try {
         (void)callFn(
@@ -97,6 +101,16 @@ static void test_pow_log() {
             std::string::npos;
     }
     assert(overflowRejected);
+    bool aliasOverflowRejected = false;
+    try {
+        (void)callFn(
+            eval, "pow", {I(2), I(std::numeric_limits<int64_t>::max())});
+    } catch (const std::runtime_error& error) {
+        aliasOverflowRejected =
+            std::string(error.what()).find("SQLSTATE 22003") !=
+            std::string::npos;
+    }
+    assert(aliasOverflowRejected);
     assert(approx(callFn(eval, "log", {D(100)}), 2.0));            // base-10
     assert(approx(callFn(eval, "log", {D(2), D(8)}), 3.0));        // base-2 of 8
     assert(approx(callFn(eval, "log10", {D(1000)}), 3.0));
