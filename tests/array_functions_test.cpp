@@ -73,6 +73,12 @@ static void test_position() {
     assert(callFn(eval, "array_position", {A("{10,20,30}"), I(20)}).value == "2");
     assert(callFn(eval, "array_position", {A("{10,20,30}"), I(99)}).isNull);
     assert(callFn(eval, "array_position", {S("{a,b,c}"), S("c")}).value == "3");
+    const dbms::ExprValue nullValue("unknown", "", true);
+    assert(callFn(eval, "array_position",
+                  {A("{10,NULL,30}"), nullValue}).value == "2");
+    assert(callFn(eval, "array_position",
+                  {S("{NULL,\"NULL\"}"),
+                   dbms::ExprValue("text", "'NULL'", false)}).value == "2");
     std::cout << "[ARRFN] position OK" << std::endl;
 }
 

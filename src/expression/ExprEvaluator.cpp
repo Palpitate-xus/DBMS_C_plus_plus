@@ -4848,9 +4848,17 @@ void ExprEvaluator::registerBuiltins() {
         std::vector<std::string> elems;
         if (!parseArrayElements(a[0].value, elems)) return ExprValue("integer", "", true);
         for (size_t i = 0; i < elems.size(); ++i) {
-            std::string v = arrayElemUnquote(elems[i]);
-            if (!a[1].isNull && v == a[1].value)
+            const std::string token = trimStr(elems[i]);
+            const bool quoted = token.size() >= 2 &&
+                token.front() == '"' && token.back() == '"';
+            const bool elementIsNull =
+                !quoted && toLower(token) == "null";
+            const std::string value = arrayElemUnquote(token);
+            if ((a[1].isNull && elementIsNull) ||
+                (!a[1].isNull && !elementIsNull &&
+                 value == a[1].value)) {
                 return ExprValue("integer", std::to_string(i + 1), false);
+            }
         }
         return ExprValue("integer", "", true);
     };
