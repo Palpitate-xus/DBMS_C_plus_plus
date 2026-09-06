@@ -3688,7 +3688,12 @@ void ExprEvaluator::registerBuiltins() {
     };
     functions_["length"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
-        return ExprValue("integer", std::to_string(a[0].value.size()), false);
+        const std::string type = toLower(a[0].typeName);
+        const bool byteLength = type == "bytea" || type == "binary" ||
+                                type == "varbinary";
+        const size_t length = byteLength
+            ? a[0].value.size() : utf8CharCount(a[0].value);
+        return ExprValue("integer", std::to_string(length), false);
     };
     functions_["lower"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
@@ -4329,14 +4334,16 @@ void ExprEvaluator::registerBuiltins() {
         size_t e = std::min(static_cast<size_t>(end - 1), s.size());
         return ExprValue("text", s.substr(b, e - b), false);
     };
-    // char_length / character_length — character count (bytes for our ASCII storage)
+    // char_length / character_length — UTF-8 character count
     functions_["char_length"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
-        return ExprValue("integer", std::to_string(a[0].value.size()), false);
+        return ExprValue(
+            "integer", std::to_string(utf8CharCount(a[0].value)), false);
     };
     functions_["character_length"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
-        return ExprValue("integer", std::to_string(a[0].value.size()), false);
+        return ExprValue(
+            "integer", std::to_string(utf8CharCount(a[0].value)), false);
     };
     functions_["octet_length"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);

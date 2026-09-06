@@ -37,7 +37,9 @@ static dbms::ExprValue I(int64_t v) { return dbms::ExprValue("integer", std::to_
 static void test_length_family() {
     dbms::ExprEvaluator eval;
     assert(callFn(eval, "char_length", {S("hello")}).value == "5");
-    assert(callFn(eval, "character_length", {S("héllo")}).value == "6");  // bytes for non-ASCII
+    assert(callFn(eval, "length", {S("héllo")}).value == "5");
+    assert(callFn(eval, "character_length", {S("héllo")}).value == "5");
+    assert(callFn(eval, "octet_length", {S("héllo")}).value == "6");
     assert(callFn(eval, "octet_length", {S("abc")}).value == "3");
     assert(callFn(eval, "bit_length", {S("abc")}).value == "24");
     std::cout << "[STRFN] length family OK" << std::endl;
