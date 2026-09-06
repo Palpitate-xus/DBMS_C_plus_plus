@@ -112,6 +112,22 @@ int main() {
     checkUnsignedColumn(database, "ubigint_values", 4,
                         "9223372036854775807", "9223372036854775808");
 
+    dbms::StorageEngine::SelectExpr overflowDivision;
+    overflowDivision.displayName = "result";
+    overflowDivision.isScalar = true;
+    overflowDivision.funcName = "arith";
+    overflowDivision.funcArgs = {
+        "-9223372036854775808", "/", "-1"};
+    assert(g_engine.queryExpr(database, "utiny_values", {},
+                              {overflowDivision}) ==
+           std::vector<std::string>{" "});
+
+    dbms::StorageEngine::SelectExpr minimumModulo = overflowDivision;
+    minimumModulo.funcArgs[1] = "%";
+    assert(g_engine.queryExpr(database, "utiny_values", {},
+                              {minimumModulo}) ==
+           std::vector<std::string>{"0 "});
+
     cleanupTestDb(testName);
     finalCleanupTestData();
     std::cout << "[INTEGER BOUNDS] overflow and width checks OK" << std::endl;

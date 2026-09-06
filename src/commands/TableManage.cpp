@@ -27820,8 +27820,12 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 try {
                     int64_t l = std::stoll(lv);
                     int64_t r = std::stoll(rv);
-                    if (r != 0) return std::to_string(l / r);
-                    return "";
+                    if (r == 0 ||
+                        (l == std::numeric_limits<int64_t>::lowest() &&
+                         r == -1)) {
+                        return "";
+                    }
+                    return std::to_string(l / r);
                 } catch (...) { }
             }
         }
@@ -28135,8 +28139,18 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                                } catch (...) { divResult.clear(); }
                            }
                            break;
-                case '%': { int64_t l = static_cast<int64_t>(acc), r = static_cast<int64_t>(rhs);
-                           if (r == 0) return ""; acc = static_cast<double>(l % r); break; }
+                case '%': {
+                    int64_t l = static_cast<int64_t>(acc);
+                    int64_t r = static_cast<int64_t>(rhs);
+                    if (r == 0) return "";
+                    if (l == std::numeric_limits<int64_t>::lowest() &&
+                        r == -1) {
+                        acc = 0.0;
+                    } else {
+                        acc = static_cast<double>(l % r);
+                    }
+                    break;
+                }
                 default: return "";
             }
             isString = false;
