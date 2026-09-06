@@ -4083,26 +4083,67 @@ void ExprEvaluator::registerBuiltins() {
             (a.size() >= 2 && a[1].isNull)) {
             return ExprValue("double precision", "", true);
         }
+        if (isNumericTypeName(a[0].typeName)) {
+            auto value = tryParseNumeric(a[0].value);
+            if (value) {
+                long long requestedScale = 0;
+                if (a.size() >= 2 &&
+                    (!parseInt64Exact(a[1].value, requestedScale) ||
+                     requestedScale < std::numeric_limits<int>::lowest() ||
+                     requestedScale > std::numeric_limits<int>::max())) {
+                    throw std::runtime_error(
+                        "integer out of range (SQLSTATE 22003)");
+                }
+
+                if (!value->isFinite())
+                    return ExprValue("numeric", value->toString(), false);
+
+                std::string text = value->toString();
+                if (requestedScale >= 0) {
+                    const int scale = static_cast<int>(requestedScale);
+                    if (scale >= value->scale()) {
+                        try {
+                            return ExprValue(
+                                "numeric", value->withScale(scale).toString(),
+                                false);
+                        } catch (const std::invalid_argument&) {
+                            throw std::runtime_error(
+                                "numeric value out of range (SQLSTATE 22003)");
+                        }
+                    }
+
+                    const size_t decimalPoint = text.find('.');
+                    text.resize(decimalPoint + (scale == 0 ? 0 : 1 + scale));
+                    return ExprValue(
+                        "numeric", Numeric(text).toString(), false);
+                }
+
+                const bool negative = !text.empty() && text.front() == '-';
+                const size_t integerStart = negative ? 1 : 0;
+                const size_t decimalPoint = text.find('.');
+                std::string integerPart = text.substr(
+                    integerStart, decimalPoint - integerStart);
+                const uint64_t places =
+                    static_cast<uint64_t>(-(requestedScale + 1)) + 1;
+                if (places >= integerPart.size())
+                    return ExprValue("numeric", "0", false);
+
+                integerPart.replace(integerPart.size() - places,
+                                    static_cast<size_t>(places),
+                                    static_cast<size_t>(places), '0');
+                const bool isZero = std::all_of(
+                    integerPart.begin(), integerPart.end(),
+                    [](char digit) { return digit == '0'; });
+                return ExprValue(
+                    "numeric",
+                    negative && !isZero ? "-" + integerPart : integerPart,
+                    false);
+            }
+        }
+
         double v = a[0].asDouble();
         if (a.size() >= 2) {
             int n = static_cast<int>(a[1].asInt());
-            if (isNumericTypeName(a[0].typeName)) {
-                auto nv = tryParseNumeric(a[0].value);
-                if (nv && n >= 0) {
-                    std::string s = nv->toString();
-                    size_t dot = s.find('.');
-                    int have = (dot == std::string::npos) ? 0 : static_cast<int>(s.size() - dot - 1);
-                    if (have < n) {
-                        if (dot == std::string::npos) { s.push_back('.'); dot = s.size() - 1; }
-                        s.append(n - have, '0');
-                    } else if (have > n) {
-                        s.resize(dot + 1 + n);
-                        if (!s.empty() && s.back() == '.') s.pop_back();
-                        if (s == "-" || s == "-0") s = "0";
-                    }
-                    return ExprValue("numeric", s, false);
-                }
-            }
             double mult = std::pow(10.0, n);
             std::string ts2 = std::to_string(std::trunc(v * mult) / mult);
             while (!ts2.empty() && ts2.back() == '0') ts2.pop_back();
