@@ -163,6 +163,18 @@ static void test_width_bucket() {
     assert(callFn(eval, "width_bucket", {D(-1), D(0), D(10), I(5)}).value == "0");     // below low
     assert(callFn(eval, "width_bucket", {D(20), D(0), D(10), I(5)}).value == "6");     // above high -> count+1
     assert(callFn(eval, "width_bucket", {D(0), D(0), D(10), I(5)}).value == "1");      // at low edge
+    bool overflowRejected = false;
+    try {
+        (void)callFn(
+            eval, "width_bucket",
+            {D(20), D(0), D(10),
+             I(std::numeric_limits<int64_t>::max())});
+    } catch (const std::runtime_error& error) {
+        overflowRejected =
+            std::string(error.what()).find("SQLSTATE 22003") !=
+            std::string::npos;
+    }
+    assert(overflowRejected);
     std::cout << "[MATHFN] width_bucket OK" << std::endl;
 }
 

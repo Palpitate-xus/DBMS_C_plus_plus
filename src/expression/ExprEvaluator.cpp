@@ -4111,11 +4111,25 @@ void ExprEvaluator::registerBuiltins() {
         if (count <= 0 || lo == hi) return ExprValue("integer", "", true);
         bool reversed = lo > hi;
         if (reversed) std::swap(lo, hi);
+        auto pastLastBucket = [count]() -> int64_t {
+            if (count == std::numeric_limits<int64_t>::max()) {
+                throw std::runtime_error(
+                    "integer out of range (SQLSTATE 22003)");
+            }
+            return count + 1;
+        };
         int64_t bucket;
-        if (v < lo) bucket = reversed ? count + 1 : 0;
-        else if (v >= hi) bucket = reversed ? 0 : count + 1;
+        if (v < lo) bucket = reversed ? pastLastBucket() : 0;
+        else if (v >= hi) bucket = reversed ? 0 : pastLastBucket();
         else {
-            int64_t b = static_cast<int64_t>((v - lo) / (hi - lo) * static_cast<double>(count)) + 1;
+            long double rawBucket = std::floor(
+                (static_cast<long double>(v) - lo) /
+                (static_cast<long double>(hi) - lo) * count) + 1;
+            if (!std::isfinite(rawBucket))
+                return ExprValue("integer", "", true);
+            rawBucket = std::max(
+                1.0L, std::min(rawBucket, static_cast<long double>(count)));
+            int64_t b = static_cast<int64_t>(rawBucket);
             bucket = reversed ? count - b + 1 : b;
         }
         return ExprValue("integer", std::to_string(bucket), false);
