@@ -114,6 +114,12 @@ static void test_initcap_tohex() {
     dbms::ExprEvaluator eval;
     assert(callFn(eval, "initcap", {S("hi THERE ji-ha")}).value == "Hi There Ji-Ha");
     assert(callFn(eval, "reverse", {S("aé中")}).value == "中éa");
+    assert(callFn(eval, "ascii", {S("é")}).value == "233");
+    assert(callFn(eval, "ascii", {S("中")}).value == "20013");
+    assert(callFn(eval, "chr", {I(233)}).value == "é");
+    assert(callFn(eval, "chr", {I(20013)}).value == "中");
+    assert(callFn(eval, "chr", {I(0)}).isNull);
+    assert(callFn(eval, "chr", {I(0x110000)}).isNull);
     assert(callFn(eval, "to_hex", {I(255)}).value == "ff");
     assert(callFn(eval, "to_hex", {I(0)}).value == "0");
     assert(callFn(eval, "to_hex", {I(4096)}).value == "1000");

@@ -2496,6 +2496,70 @@ static size_t utf8ByteAt(const std::string& s, size_t charIdx) {
     return s.size();
 }
 
+static bool decodeFirstUtf8CodePoint(const std::string& text,
+                                     uint32_t& codePoint) {
+    if (text.empty()) return false;
+    const auto byte = [&](size_t index) {
+        return static_cast<unsigned char>(text[index]);
+    };
+    const unsigned char first = byte(0);
+    if (first < 0x80) {
+        codePoint = first;
+        return true;
+    }
+    auto continuation = [&](size_t index) {
+        return index < text.size() && (byte(index) & 0xc0) == 0x80;
+    };
+    if (first >= 0xc2 && first <= 0xdf && continuation(1)) {
+        codePoint = ((first & 0x1f) << 6) | (byte(1) & 0x3f);
+        return true;
+    }
+    if (first >= 0xe0 && first <= 0xef && continuation(1) &&
+        continuation(2) && !(first == 0xe0 && byte(1) < 0xa0) &&
+        !(first == 0xed && byte(1) >= 0xa0)) {
+        codePoint = ((first & 0x0f) << 12) |
+                    ((byte(1) & 0x3f) << 6) | (byte(2) & 0x3f);
+        return true;
+    }
+    if (first >= 0xf0 && first <= 0xf4 && continuation(1) &&
+        continuation(2) && continuation(3) &&
+        !(first == 0xf0 && byte(1) < 0x90) &&
+        !(first == 0xf4 && byte(1) > 0x8f)) {
+        codePoint = ((first & 0x07) << 18) |
+                    ((byte(1) & 0x3f) << 12) |
+                    ((byte(2) & 0x3f) << 6) | (byte(3) & 0x3f);
+        return true;
+    }
+    return false;
+}
+
+static std::string encodeUtf8CodePoint(uint32_t codePoint) {
+    if (codePoint == 0 || codePoint > 0x10ffff ||
+        (codePoint >= 0xd800 && codePoint <= 0xdfff)) {
+        return "";
+    }
+    std::string result;
+    if (codePoint <= 0x7f) {
+        result.push_back(static_cast<char>(codePoint));
+    } else if (codePoint <= 0x7ff) {
+        result.push_back(static_cast<char>(0xc0 | (codePoint >> 6)));
+        result.push_back(static_cast<char>(0x80 | (codePoint & 0x3f)));
+    } else if (codePoint <= 0xffff) {
+        result.push_back(static_cast<char>(0xe0 | (codePoint >> 12)));
+        result.push_back(
+            static_cast<char>(0x80 | ((codePoint >> 6) & 0x3f)));
+        result.push_back(static_cast<char>(0x80 | (codePoint & 0x3f)));
+    } else {
+        result.push_back(static_cast<char>(0xf0 | (codePoint >> 18)));
+        result.push_back(
+            static_cast<char>(0x80 | ((codePoint >> 12) & 0x3f)));
+        result.push_back(
+            static_cast<char>(0x80 | ((codePoint >> 6) & 0x3f)));
+        result.push_back(static_cast<char>(0x80 | (codePoint & 0x3f)));
+    }
+    return result;
+}
+
 static ExprValue evaluateTextSubstring(const std::vector<ExprValue>& args) {
     if (args.empty() || args[0].isNull)
         return ExprValue("text", "", true);
@@ -4396,13 +4460,22 @@ void ExprEvaluator::registerBuiltins() {
     };
     functions_["ascii"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull || a[0].value.empty()) return ExprValue("integer", "", true);
-        return ExprValue("integer", std::to_string(static_cast<int>(static_cast<unsigned char>(a[0].value[0]))), false);
+        uint32_t codePoint = 0;
+        if (!decodeFirstUtf8CodePoint(a[0].value, codePoint))
+            return ExprValue("integer", "", true);
+        return ExprValue(
+            "integer", std::to_string(codePoint), false);
     };
     functions_["chr"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
-        int v = static_cast<int>(a[0].asInt());
-        if (v < 0 || v > 255) return ExprValue("text", "", true);
-        return ExprValue("text", std::string(1, static_cast<char>(v)), false);
+        long long value = 0;
+        if (!parseInt64Exact(a[0].value, value) || value <= 0 ||
+            value > 0x10ffff) {
+            return ExprValue("text", "", true);
+        }
+        const std::string result =
+            encodeUtf8CodePoint(static_cast<uint32_t>(value));
+        return ExprValue("text", result, result.empty());
     };
     // substr — PostgreSQL alias of substring(str, from[, len])
     functions_["substr"] = evaluateTextSubstring;
