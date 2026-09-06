@@ -149,6 +149,8 @@ static void test_overlay_quote() {
     dbms::ExprEvaluator eval;
     assert(callFn(eval, "overlay", {S("Txxxxas"), S("hom"), I(2), I(4)}).value == "Thomas");
     assert(callFn(eval, "overlay", {S("abcdef"), S("XY"), I(3)}).value == "abXYef");
+    assert(callFn(eval, "overlay",
+                  {S("abc"), S(""), I(2), I(1)}).value == "ac");
     assert(callFn(eval, "quote_literal", {S("O'Brien")}).value == "'O''Brien'");
     assert(callFn(eval, "quote_ident", {S("simple")}).value == "simple");
     assert(callFn(eval, "quote_ident", {S("Mixed Case")}).value == "\"Mixed Case\"");

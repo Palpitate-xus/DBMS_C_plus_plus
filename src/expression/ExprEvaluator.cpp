@@ -4678,14 +4678,13 @@ void ExprEvaluator::registerBuiltins() {
 
     // overlay(string, newsub, start[, count]) — replace count chars at 1-based start
     functions_["overlay"] = [](const std::vector<ExprValue>& a) {
-        std::vector<ExprValue> aa; for (auto& x : a) if (!x.value.empty()) aa.push_back(x); const std::vector<ExprValue>& ovArgs = (aa.size() >= 3 && a.size() != aa.size()) ? aa : a;
-        if (ovArgs.size() < 3 || ovArgs[0].isNull || ovArgs[1].isNull || ovArgs[2].isNull)
+        if (a.size() < 3 || a[0].isNull || a[1].isNull || a[2].isNull)
             return ExprValue("text", "", true);
-        const std::string& s = ovArgs[0].value;
-        const std::string& repl = ovArgs[1].value;
-        int64_t start = ovArgs[2].asInt();
-        int64_t count = (ovArgs.size() >= 4 && !ovArgs[3].isNull)
-                            ? ovArgs[3].asInt()
+        const std::string& s = a[0].value;
+        const std::string& repl = a[1].value;
+        int64_t start = a[2].asInt();
+        int64_t count = (a.size() >= 4 && !a[3].isNull)
+                            ? a[3].asInt()
                             : static_cast<int64_t>(repl.size());
         if (start < 1) start = 1;
         if (count < 0) count = 0;
