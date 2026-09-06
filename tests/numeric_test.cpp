@@ -16,6 +16,8 @@ static void test_basic_io() {
     assert(Numeric("-0.0012300").toString() == "-0.0012300");
     assert(Numeric(".5").toString() == "0.5");
     assert(Numeric("00042.00").toString() == "42.00");
+    assert((-Numeric(0)).toString() == "0");
+    assert((-Numeric("0.000")).toString() == "0");
     assert(Numeric("NaN").toString() == "NaN");
     assert(Numeric("Infinity").toString() == "Infinity");
     assert(Numeric("-Infinity").toString() == "-Infinity");

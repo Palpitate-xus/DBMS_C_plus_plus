@@ -276,6 +276,7 @@ std::string Numeric::toString() const {
 
 Numeric Numeric::operator-() const {
     if (nan_) return *this;
+    if (!inf_ && sign() == 0) return *this;
     Numeric r = *this;
     r.sign_ = -r.sign_;
     return r;
