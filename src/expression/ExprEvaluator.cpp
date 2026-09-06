@@ -4004,6 +4004,8 @@ void ExprEvaluator::registerBuiltins() {
     // dtoa), tried from the fewest significant digits upward.
     auto float8Text = [](double v) {
         if (v != v) return std::string("NaN");
+        if (std::isinf(v))
+            return std::string(std::signbit(v) ? "-Infinity" : "Infinity");
         char buf[64];
         for (int prec = 15; prec <= 17; ++prec) {
             std::snprintf(buf, sizeof buf, "%.*g", prec, v);

@@ -149,7 +149,7 @@ static void test_trunc_round() {
         eval, "trunc",
         {dbms::ExprValue("double precision", "Infinity", false)});
     assert(infiniteFloatTrunc.typeName == "double precision");
-    assert(std::isinf(std::stod(infiniteFloatTrunc.value)));
+    assert(infiniteFloatTrunc.value == "Infinity");
     const dbms::ExprValue largeFractionalNumeric(
         "numeric", "123456789012345678901234567890.987", false);
     assert(callFn(eval, "trunc", {largeFractionalNumeric}).value ==
@@ -227,8 +227,8 @@ static void test_hyperbolic() {
     expectOutOfRange("acos", -2.0);
     expectOutOfRange("acosh", 0.5);
     expectOutOfRange("atanh", 2.0);
-    assert(std::isinf(std::stod(callFn(eval, "atanh", {D(1)}).value)));
-    assert(std::isinf(std::stod(callFn(eval, "atanh", {D(-1)}).value)));
+    assert(callFn(eval, "atanh", {D(1)}).value == "Infinity");
+    assert(callFn(eval, "atanh", {D(-1)}).value == "-Infinity");
     std::cout << "[MATHFN] hyperbolic OK" << std::endl;
 }
 
