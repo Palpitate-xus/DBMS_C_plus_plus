@@ -144,11 +144,23 @@ inline bool operator<=(Date a, Date b) {
     if (a.month != b.month) return a.month < b.month;
     return a.day <= b.day;
 }
+inline Date dateAddDayOffset(Date date, __int128 days) {
+    const Date validated(date.year, date.month, date.day);
+    if (date.year < 1 || date.year > 9999 || validated.year == 0)
+        return Date{};
+    const int64_t minimumDay = Date(1, 1, 1).convert();
+    const int64_t maximumDay = Date(9999, 12, 31).convert();
+    const __int128 shifted =
+        static_cast<__int128>(date.convert()) + days;
+    if (shifted < minimumDay || shifted > maximumDay) return Date{};
+    return DISCONV(static_cast<int64_t>(shifted));
+}
+
 inline Date operator+(Date a, int64_t b) {
-    return DISCONV(a.convert() + b);
+    return dateAddDayOffset(a, b);
 }
 inline Date operator-(Date a, int64_t b) {
-    return DISCONV(a.convert() - b);
+    return dateAddDayOffset(a, -static_cast<__int128>(b));
 }
 inline int64_t operator-(Date a, Date b) {
     return a.convert() - b.convert();

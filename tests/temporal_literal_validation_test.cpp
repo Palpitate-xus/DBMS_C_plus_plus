@@ -26,6 +26,13 @@ int main() {
     assert(str(dateAddYears(
                    Date(2024, 1, 31),
                    std::numeric_limits<int64_t>::max())).empty());
+    assert(str(Date(2024, 2, 28) + 1) == "2024-02-29");
+    assert(str(Date(9999, 12, 31) + 1).empty());
+    assert(str(Date(1, 1, 1) - 1).empty());
+    assert(str(Date(2024, 1, 1) +
+               std::numeric_limits<int64_t>::max()).empty());
+    assert(str(Date(2024, 1, 1) -
+               std::numeric_limits<int64_t>::min()).empty());
     assert(formatTimestampSeconds(
                parseTimestampToSeconds("9999-12-31 23:59:59")) ==
            "9999-12-31 23:59:59");
