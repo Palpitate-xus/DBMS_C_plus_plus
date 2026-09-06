@@ -140,6 +140,16 @@ static void test_trunc_round() {
     assert(callFn(eval, "trunc", {D(1.25), nullScale}).isNull);
     assert(approx(callFn(eval, "trunc", {D(42.789)}), 42.0));
     assert(approx(callFn(eval, "trunc", {D(2.71828), I(2)}), 2.71));
+    const auto largeFloatTrunc = callFn(
+        eval, "trunc",
+        {dbms::ExprValue("double precision", "1e20", false)});
+    assert(largeFloatTrunc.typeName == "double precision");
+    assert(largeFloatTrunc.value == "1e+20");
+    const auto infiniteFloatTrunc = callFn(
+        eval, "trunc",
+        {dbms::ExprValue("double precision", "Infinity", false)});
+    assert(infiniteFloatTrunc.typeName == "double precision");
+    assert(std::isinf(std::stod(infiniteFloatTrunc.value)));
     const dbms::ExprValue largeFractionalNumeric(
         "numeric", "123456789012345678901234567890.987", false);
     assert(callFn(eval, "trunc", {largeFractionalNumeric}).value ==

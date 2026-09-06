@@ -4122,7 +4122,8 @@ void ExprEvaluator::registerBuiltins() {
     functions_["cbrt"]  = [float8Unary](const auto& a) { return float8Unary(a, std::cbrt); };
     functions_["ceil"]  = [unaryMath](const auto& a) { return unaryMath(a, std::ceil); };
     functions_["floor"] = [unaryMath](const auto& a) { return unaryMath(a, std::floor); };
-    functions_["trunc"] = [scaleFloatingDecimal](const std::vector<ExprValue>& a) {
+    functions_["trunc"] = [scaleFloatingDecimal,
+                            float8Text](const std::vector<ExprValue>& a) {
         // trunc(x) truncates toward zero; trunc(x, n) keeps n decimal places.
         if (a.empty() || a[0].isNull ||
             (a.size() >= 2 && a[1].isNull)) {
@@ -4202,9 +4203,8 @@ void ExprEvaluator::registerBuiltins() {
             if (!ts2.empty() && ts2.back() == '.') ts2.pop_back();
             return ExprValue("numeric", ts2, false);
         }
-        double tv = std::trunc(v);
-        if (tv == (long long)tv) return ExprValue("numeric", std::to_string((long long)tv), false);
-        return ExprValue("double precision", std::to_string(tv), false);
+        return ExprValue(
+            "double precision", float8Text(std::trunc(v)), false);
     };
 
     functions_["atan2"] = [float8Text](const std::vector<ExprValue>& a) {
