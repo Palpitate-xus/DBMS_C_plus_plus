@@ -77,6 +77,14 @@ static void test_pad() {
     assert(callFn(eval, "rpad", {S("hi"), I(5)}).value == "hi   ");
     assert(callFn(eval, "rpad", {S("hi"), I(5), S("xy")}).value == "hixyx");
     assert(callFn(eval, "rpad", {S("hello"), I(3)}).value == "hel");
+    assert(callFn(eval, "lpad", {S("é"), I(2), S("界")}).value ==
+           "界é");
+    assert(callFn(eval, "rpad", {S("é"), I(3), S("界a")}).value ==
+           "é界a");
+    assert(callFn(eval, "lpad", {S("éx"), I(1), S("z")}).value ==
+           "é");
+    const dbms::ExprValue nullFill("text", "", true);
+    assert(callFn(eval, "lpad", {S("hi"), I(5), nullFill}).isNull);
     std::cout << "[STRFN] lpad/rpad OK" << std::endl;
 }
 

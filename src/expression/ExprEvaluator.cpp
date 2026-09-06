@@ -2539,6 +2539,50 @@ static ExprValue evaluateTextSubstring(const std::vector<ExprValue>& args) {
         "text", args[0].value.substr(beginByte, endByte - beginByte), false);
 }
 
+static ExprValue evaluateTextPad(const std::vector<ExprValue>& args,
+                                 bool padLeft) {
+    if (args.size() < 2 || args[0].isNull || args[1].isNull ||
+        (args.size() >= 3 && args[2].isNull)) {
+        return ExprValue("text", "", true);
+    }
+    long long requestedLength = 0;
+    if (!parseInt64Exact(args[1].value, requestedLength))
+        return ExprValue("text", "", true);
+    if (requestedLength <= 0) return ExprValue("text", "", false);
+
+    const size_t targetLength = static_cast<size_t>(requestedLength);
+    const size_t inputLength = utf8CharCount(args[0].value);
+    if (inputLength >= targetLength) {
+        return ExprValue(
+            "text",
+            args[0].value.substr(
+                0, utf8ByteAt(args[0].value, targetLength)),
+            false);
+    }
+
+    const std::string fill = args.size() >= 3 ? args[2].value : " ";
+    if (fill.empty()) return ExprValue("text", args[0].value, false);
+    std::vector<std::string> fillCharacters;
+    const size_t fillLength = utf8CharCount(fill);
+    fillCharacters.reserve(fillLength);
+    for (size_t i = 0; i < fillLength; ++i) {
+        const size_t begin = utf8ByteAt(fill, i);
+        const size_t end = utf8ByteAt(fill, i + 1);
+        fillCharacters.push_back(fill.substr(begin, end - begin));
+    }
+    if (fillCharacters.empty())
+        return ExprValue("text", args[0].value, false);
+
+    std::string padding;
+    const size_t needed = targetLength - inputLength;
+    for (size_t i = 0; i < needed; ++i)
+        padding += fillCharacters[i % fillCharacters.size()];
+    return ExprValue(
+        "text", padLeft ? padding + args[0].value
+                         : args[0].value + padding,
+        false);
+}
+
 static std::string trimStr(const std::string& s) {
     size_t b = 0, e = s.size();
     while (b < e && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
@@ -4376,35 +4420,10 @@ void ExprEvaluator::registerBuiltins() {
     };
     // lpad / rpad — pad (or truncate) a string to a target length with a fill string
     functions_["lpad"] = [](const std::vector<ExprValue>& a) {
-        if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
-        const std::string& s = a[0].value;
-        int64_t len = a[1].asInt();
-        std::string fill = (a.size() >= 3 && !a[2].isNull) ? a[2].value : " ";
-        if (len <= 0) return ExprValue("text", "", false);
-        if (static_cast<int64_t>(s.size()) >= len)
-            return ExprValue("text", s.substr(0, static_cast<size_t>(len)), false);
-        if (fill.empty()) return ExprValue("text", s, false);
-        std::string pad;
-        while (static_cast<int64_t>(pad.size() + s.size()) < len) pad += fill;
-        pad = pad.substr(0, static_cast<size_t>(len) - s.size());
-        return ExprValue("text", pad + s, false);
+        return evaluateTextPad(a, true);
     };
     functions_["rpad"] = [](const std::vector<ExprValue>& a) {
-        if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
-        const std::string& s = a[0].value;
-        int64_t len = a[1].asInt();
-        std::string fill = (a.size() >= 3 && !a[2].isNull) ? a[2].value : " ";
-        if (len <= 0) return ExprValue("text", "", false);
-        if (static_cast<int64_t>(s.size()) >= len)
-            return ExprValue("text", s.substr(0, static_cast<size_t>(len)), false);
-        if (fill.empty()) return ExprValue("text", s, false);
-        std::string out = s;
-        size_t fi = 0;
-        while (static_cast<int64_t>(out.size()) < len) {
-            out += fill[fi % fill.size()];
-            ++fi;
-        }
-        return ExprValue("text", out, false);
+        return evaluateTextPad(a, false);
     };
     // btrim(str[, chars]) — trim matching characters (default whitespace) from both ends
     functions_["btrim"] = [](const std::vector<ExprValue>& a) {
