@@ -5171,22 +5171,18 @@ void ExprEvaluator::registerBuiltins() {
     // array_dims(arr) — dimensions as PG text, e.g. [1:3].
     functions_["array_dims"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
-        std::vector<std::string> elems;
-        std::string t = trimStr(a[0].value);
-        if (t.size() >= 2 && t.front() == 0x7B && t.back() == 0x7D) {
-            std::string inner = t.substr(1, t.size() - 2);
-            std::string cur;
-            int d = 0;
-            for (char c : inner) {
-                if (c == 0x7B || c == 0x5B) ++d;
-                else if (c == 0x7D || c == 0x5D) --d;
-                if (c == 44 && d == 0) { elems.push_back(trimStr(cur)); cur.clear(); }
-                else cur += c;
-            }
-            if (!trimStr(cur).empty()) elems.push_back(trimStr(cur));
+        std::string current = a[0].value;
+        std::string dimensions;
+        while (true) {
+            std::vector<std::string> elements;
+            if (!parseArrayElements(current, elements) || elements.empty())
+                break;
+            dimensions +=
+                "[1:" + std::to_string(elements.size()) + "]";
+            current = elements.front();
         }
-        if (elems.empty()) return ExprValue("text", "", true);
-        return ExprValue("text", "[1:" + std::to_string(elems.size()) + "]", false);
+        if (dimensions.empty()) return ExprValue("text", "", true);
+        return ExprValue("text", dimensions, false);
     };
 
     functions_["array_position"] = [](const std::vector<ExprValue>& a) {
