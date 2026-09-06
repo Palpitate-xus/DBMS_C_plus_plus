@@ -3714,22 +3714,26 @@ void ExprEvaluator::registerBuiltins() {
         if (isNumericTypeName(a[0].typeName)) {
             auto n = tryParseNumeric(a[0].value);
             if (n) {
-                int p = (a.size() >= 2) ? static_cast<int>(a[1].asInt()) : 0;
-                if (p < 0) {
-                    // Negative scale: round to tens/hundreds/... PG renders
-                    // an integral result with no decimal point.
-                    long long k = 1;
-                    for (int i = 0; i < -p; ++i) k *= 10;
-                    long long scaled = (n->withScale(0).toString() == "-") ? 0 : std::strtoll(n->withScale(0).toString().c_str(), nullptr, 10);
-                    long long neg = (scaled < 0) ? -1 : 1;
-                    long long av = scaled < 0 ? -scaled : scaled;
-                    long long rem = av % k;
-                    long long base = av - rem;
-                    if (rem * 2 >= k) base += k;
-                    long long outv = base * neg;
-                    return ExprValue("numeric", std::to_string(outv), false);
+                int scale = 0;
+                if (a.size() >= 2) {
+                    if (a[1].isNull)
+                        return ExprValue("numeric", "", true);
+                    long long requestedScale = 0;
+                    if (!parseInt64Exact(a[1].value, requestedScale) ||
+                        requestedScale < std::numeric_limits<int>::lowest() ||
+                        requestedScale > std::numeric_limits<int>::max()) {
+                        throw std::runtime_error(
+                            "integer out of range (SQLSTATE 22003)");
+                    }
+                    scale = static_cast<int>(requestedScale);
                 }
-                return ExprValue("numeric", n->withScale(p).toString(), false);
+                try {
+                    return ExprValue(
+                        "numeric", n->withScale(scale).toString(), false);
+                } catch (const std::invalid_argument&) {
+                    throw std::runtime_error(
+                        "numeric value out of range (SQLSTATE 22003)");
+                }
             }
         }
         // float8 round: half-to-even (rint), like PG float8.

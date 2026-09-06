@@ -78,6 +78,13 @@ static void test_trunc_round() {
     assert(approx(callFn(eval, "trunc", {D(42.789)}), 42.0));
     assert(approx(callFn(eval, "trunc", {D(2.71828), I(2)}), 2.71));
     assert(approx(callFn(eval, "ceiling", {D(4.2)}), 5.0));
+    const dbms::ExprValue largeNumeric(
+        "numeric", "123456789012345678901234567890", false);
+    assert(callFn(eval, "round", {largeNumeric, I(-2)}).value ==
+           "123456789012345678901234567900");
+    assert(callFn(eval, "round",
+                  {dbms::ExprValue("numeric", "149", false), I(-19)})
+               .value == "0");
     std::cout << "[MATHFN] trunc/ceiling OK" << std::endl;
 }
 
