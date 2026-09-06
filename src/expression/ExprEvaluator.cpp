@@ -3936,7 +3936,14 @@ void ExprEvaluator::registerBuiltins() {
         // float8 round: half-to-even (rint), like PG float8.
         double v = a[0].asDouble();
         if (a.size() >= 2) {
-            int p = static_cast<int>(a[1].asInt());
+            long long requestedScale = 0;
+            if (!parseInt64Exact(a[1].value, requestedScale) ||
+                requestedScale < std::numeric_limits<int>::lowest() ||
+                requestedScale > std::numeric_limits<int>::max()) {
+                throw std::runtime_error(
+                    "integer out of range (SQLSTATE 22003)");
+            }
+            const int p = static_cast<int>(requestedScale);
             double mult = std::pow(10.0, p);
             v = std::nearbyint(v * mult) / mult;
         } else {
@@ -4143,7 +4150,14 @@ void ExprEvaluator::registerBuiltins() {
 
         double v = a[0].asDouble();
         if (a.size() >= 2) {
-            int n = static_cast<int>(a[1].asInt());
+            long long requestedScale = 0;
+            if (!parseInt64Exact(a[1].value, requestedScale) ||
+                requestedScale < std::numeric_limits<int>::lowest() ||
+                requestedScale > std::numeric_limits<int>::max()) {
+                throw std::runtime_error(
+                    "integer out of range (SQLSTATE 22003)");
+            }
+            const int n = static_cast<int>(requestedScale);
             double mult = std::pow(10.0, n);
             std::string ts2 = std::to_string(std::trunc(v * mult) / mult);
             while (!ts2.empty() && ts2.back() == '0') ts2.pop_back();

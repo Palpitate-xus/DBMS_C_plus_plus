@@ -134,6 +134,18 @@ static void test_trunc_round() {
            "123456789012345678901234567800");
     assert(callFn(eval, "trunc", {largeFractionalNumeric, I(-40)}).value ==
            "0");
+    const dbms::ExprValue oversizedScale(
+        "bigint", "2147483648", false);
+    for (const std::string function : {"round", "trunc"}) {
+        bool rejected = false;
+        try {
+            (void)callFn(eval, function, {D(1.25), oversizedScale});
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("SQLSTATE 22003") !=
+                       std::string::npos;
+        }
+        assert(rejected);
+    }
     assert(approx(callFn(eval, "ceiling", {D(4.2)}), 5.0));
     const dbms::ExprValue largeNumeric(
         "numeric", "123456789012345678901234567890", false);
