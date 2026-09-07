@@ -74,6 +74,20 @@ static void test_format() {
            "|  \"my table\"|");
     assert(callFn(eval, "format", {S("|%-8L|"), S("x")}).value ==
            "|'x'     |");
+    assert(callFn(eval, "format", {S("|%*s|"), I(10), S("foo")}).value ==
+           "|       foo|");
+    assert(callFn(eval, "format", {S("|%*s|"), I(-10), S("foo")}).value ==
+           "|foo       |");
+    assert(callFn(eval, "format",
+                  {S("|%1$*2$s|"), S("foo"), I(10)}).value ==
+           "|       foo|");
+    assert(callFn(eval, "format",
+                  {S("|%*2$s|"), S("first"), I(10), S("third")}).value ==
+           "|     third|");
+    assert(callFn(eval, "format", {S("|%-*s|"), I(8), S("x")}).value ==
+           "|x       |");
+    assert(callFn(eval, "format", {S("|%*s|"), NULLV(), S("x")}).value ==
+           "|x|");
 
     const auto expectPositionError = [&](const std::string& format) {
         bool rejected = false;
@@ -87,6 +101,16 @@ static void test_format() {
     };
     expectPositionError("%0$s");
     expectPositionError("%4$s");
+    expectPositionError("%*0$s");
+    bool invalidWidthRejected = false;
+    try {
+        (void)callFn(eval, "format", {S("%*s"), S("5.5"), S("x")});
+    } catch (const std::runtime_error& error) {
+        invalidWidthRejected =
+            std::string(error.what()).find("SQLSTATE 22P02") !=
+            std::string::npos;
+    }
+    assert(invalidWidthRejected);
     std::cout << "[FORMATFN] format OK" << std::endl;
 }
 

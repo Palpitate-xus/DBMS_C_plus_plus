@@ -6405,7 +6405,7 @@ void ExprEvaluator::registerBuiltins() {
                     "unterminated format() type specifier (SQLSTATE 22023)");
             }
             size_t specifierIndex = i + 1;
-            size_t argumentIndex = argi;
+            size_t argumentIndex = 0;
             bool explicitPosition = false;
             if (std::isdigit(static_cast<unsigned char>(
                     fmt[specifierIndex]))) {
@@ -6452,19 +6452,63 @@ void ExprEvaluator::registerBuiltins() {
             }
             size_t width = 0;
             bool hasWidth = false;
-            while (specifierIndex < fmt.size() &&
-                   std::isdigit(static_cast<unsigned char>(
-                       fmt[specifierIndex]))) {
+            bool dynamicWidth = false;
+            bool explicitWidthPosition = false;
+            size_t widthArgumentIndex = 0;
+            if (specifierIndex < fmt.size() &&
+                fmt[specifierIndex] == '*') {
                 hasWidth = true;
-                const size_t digit = static_cast<size_t>(
-                    fmt[specifierIndex] - '0');
-                if (width >
-                    (std::numeric_limits<size_t>::max() - digit) / 10) {
-                    throw std::runtime_error(
-                        "format() width is out of range (SQLSTATE 22023)");
-                }
-                width = width * 10 + digit;
+                dynamicWidth = true;
                 ++specifierIndex;
+                if (specifierIndex < fmt.size() &&
+                    std::isdigit(static_cast<unsigned char>(
+                        fmt[specifierIndex]))) {
+                    size_t position = 0;
+                    while (specifierIndex < fmt.size() &&
+                           std::isdigit(static_cast<unsigned char>(
+                               fmt[specifierIndex]))) {
+                        const size_t digit = static_cast<size_t>(
+                            fmt[specifierIndex] - '0');
+                        if (position >
+                            (std::numeric_limits<size_t>::max() - digit) /
+                                10) {
+                            throw std::runtime_error(
+                                "format() argument position is out of range "
+                                "(SQLSTATE 22023)");
+                        }
+                        position = position * 10 + digit;
+                        ++specifierIndex;
+                    }
+                    if (specifierIndex >= fmt.size() ||
+                        fmt[specifierIndex] != '$') {
+                        throw std::runtime_error(
+                            "invalid format() width specification "
+                            "(SQLSTATE 22023)");
+                    }
+                    if (position == 0) {
+                        throw std::runtime_error(
+                            "format() arguments are numbered from 1 "
+                            "(SQLSTATE 22023)");
+                    }
+                    explicitWidthPosition = true;
+                    widthArgumentIndex = position;
+                    ++specifierIndex;
+                }
+            } else {
+                while (specifierIndex < fmt.size() &&
+                       std::isdigit(static_cast<unsigned char>(
+                           fmt[specifierIndex]))) {
+                    hasWidth = true;
+                    const size_t digit = static_cast<size_t>(
+                        fmt[specifierIndex] - '0');
+                    if (width >
+                        (std::numeric_limits<size_t>::max() - digit) / 10) {
+                        throw std::runtime_error(
+                            "format() width is out of range (SQLSTATE 22023)");
+                    }
+                    width = width * 10 + digit;
+                    ++specifierIndex;
+                }
             }
             if (specifierIndex >= fmt.size()) {
                 throw std::runtime_error(
@@ -6482,12 +6526,46 @@ void ExprEvaluator::registerBuiltins() {
                 continue;
             }
             if (spec == 's' || spec == 'I' || spec == 'L') {
-                if (!explicitPosition) argumentIndex = argi++;
+                if (dynamicWidth) {
+                    const size_t dynamicWidthIndex = explicitWidthPosition
+                        ? widthArgumentIndex : argi;
+                    if (dynamicWidthIndex >= a.size()) {
+                        throw std::runtime_error(
+                            "too few arguments for format() (SQLSTATE 22023)");
+                    }
+                    argi = dynamicWidthIndex + 1;
+                    if (!a[dynamicWidthIndex].isNull) {
+                        int64_t parsedWidth = 0;
+                        const SignedIntegerParseResult parsed =
+                            parseSignedInteger(
+                                a[dynamicWidthIndex].value, parsedWidth);
+                        if (parsed == SignedIntegerParseResult::OutOfRange ||
+                            parsedWidth < std::numeric_limits<int32_t>::min() ||
+                            parsedWidth > std::numeric_limits<int32_t>::max()) {
+                            throw std::runtime_error(
+                                "format() width is out of range "
+                                "(SQLSTATE 22003)");
+                        }
+                        if (parsed != SignedIntegerParseResult::Ok) {
+                            throw std::runtime_error(
+                                "invalid input syntax for type integer: '" +
+                                a[dynamicWidthIndex].value +
+                                "' (SQLSTATE 22P02)");
+                        }
+                        if (parsedWidth < 0) {
+                            leftJustify = true;
+                            width = static_cast<size_t>(-parsedWidth);
+                        } else {
+                            width = static_cast<size_t>(parsedWidth);
+                        }
+                    }
+                }
+                if (!explicitPosition) argumentIndex = argi;
                 if (argumentIndex >= a.size()) {
                     throw std::runtime_error(
                         "too few arguments for format() (SQLSTATE 22023)");
                 }
-                if (explicitPosition) argi = argumentIndex + 1;
+                argi = argumentIndex + 1;
                 const ExprValue& arg = a[argumentIndex];
                 std::string rendered;
                 if (spec == 's') rendered = arg.isNull ? "" : arg.value;
