@@ -2524,6 +2524,106 @@ static ExprValue castToBoolean(const ExprValue& value) {
     return ExprValue("boolean", *parsed ? "t" : "f", false);
 }
 
+static bool isTextCastSourceType(const std::string& sourceType) {
+    return sourceType.empty() || sourceType == "unknown" ||
+           sourceType == "text" || sourceType == "varchar" ||
+           sourceType == "character varying" || sourceType == "char" ||
+           sourceType == "character" || sourceType == "bpchar" ||
+           sourceType.rfind("varchar(", 0) == 0 ||
+           sourceType.rfind("character(", 0) == 0 ||
+           sourceType.rfind("character varying(", 0) == 0;
+}
+
+static bool isTimestampCastSourceType(const std::string& sourceType) {
+    return sourceType == "timestamp" || sourceType == "timestamptz" ||
+           sourceType == "timestamp without time zone" ||
+           sourceType == "timestamp with time zone";
+}
+
+static bool resemblesTemporalFieldText(const std::string& text) {
+    bool hasDigit = false;
+    for (const unsigned char ch : text) {
+        if (std::isdigit(ch)) {
+            hasDigit = true;
+            continue;
+        }
+        if (std::isspace(ch) || ch == '-' || ch == '+' || ch == ':' ||
+            ch == '.' || ch == 'T' || ch == 't' || ch == 'Z' || ch == 'z') {
+            continue;
+        }
+        return false;
+    }
+    return hasDigit;
+}
+
+[[noreturn]] static void throwTemporalCastError(
+    const std::string& targetType, const std::string& value) {
+    if (resemblesTemporalFieldText(value)) {
+        throw std::runtime_error(
+            "date/time field value out of range: '" + value +
+            "' (SQLSTATE 22008)");
+    }
+    throw std::runtime_error(
+        "invalid input syntax for type " + targetType + ": '" + value +
+        "' (SQLSTATE 22007)");
+}
+
+[[noreturn]] static void throwUnsupportedTemporalCast(
+    const std::string& sourceType, const std::string& targetType) {
+    throw std::runtime_error(
+        "cannot cast type " + sourceType + " to " + targetType +
+        " (SQLSTATE 42846)");
+}
+
+static ExprValue castToDate(const ExprValue& value) {
+    const std::string sourceType = toLower(value.typeName);
+    const bool dateSource = sourceType == "date";
+    const bool timestampSource = isTimestampCastSourceType(sourceType);
+    if (!dateSource && !timestampSource &&
+        !isTextCastSourceType(sourceType)) {
+        throwUnsupportedTemporalCast(sourceType, "date");
+    }
+
+    std::string text = trimStr(value.value);
+    const std::string lowered = toLower(text);
+    if (lowered == "infinity" || lowered == "-infinity")
+        return ExprValue("date", lowered, false);
+    if (timestampSource) {
+        const size_t separator = text.find_first_of(" T");
+        if (separator != std::string::npos) text.resize(separator);
+    }
+
+    const Date date(text.c_str());
+    if (date.year == 0) throwTemporalCastError("date", trimStr(value.value));
+    return ExprValue("date", str(date), false);
+}
+
+static ExprValue castToTimestamp(const ExprValue& value,
+                                 const std::string& targetType) {
+    const std::string sourceType = toLower(value.typeName);
+    const bool dateSource = sourceType == "date";
+    if (!dateSource && !isTimestampCastSourceType(sourceType) &&
+        !isTextCastSourceType(sourceType)) {
+        throwUnsupportedTemporalCast(sourceType, targetType);
+    }
+
+    std::string text = trimStr(value.value);
+    const std::string lowered = toLower(text);
+    if (lowered == "infinity" || lowered == "-infinity")
+        return ExprValue(targetType, lowered, false);
+    if (dateSource) {
+        const Date date(text.c_str());
+        if (date.year == 0) throwTemporalCastError(targetType, text);
+        text = str(date) + " 00:00:00";
+    }
+
+    const int64_t timestamp = parseTimestampToSeconds(text);
+    if (timestamp == 0) throwTemporalCastError(targetType, text);
+    const std::string formatted = formatTimestampSeconds(timestamp);
+    if (formatted.empty()) throwTemporalCastError(targetType, text);
+    return ExprValue(targetType, formatted, false);
+}
+
 ExprValue ExprEvaluator::evalCast(const CastExpr* e, const RowContext& ctx) const {
     if (e) {
         ExprValue v = eval(e->operand.get(), ctx);
@@ -2603,17 +2703,11 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
     if (target == "text" || target.find("char") != std::string::npos || target == "varchar") {
         return ExprValue(targetTypeName, v.value, false);
     }
-    if (target == "date") {
-        Date d(v.value.c_str());
-        if (d.year == 0) return ExprValue("date", "", true);
-        return ExprValue("date", str(d), false);
-    }
-    if (target == "timestamp" || target == "timestamptz") {
-        int64_t ts = parseTimestampToSeconds(v.value);
-        if (ts == 0 && v.value != "1970-01-01 00:00:00")
-            return ExprValue(target, "", true);
-        return ExprValue(target, formatTimestampSeconds(ts), false);
-    }
+    if (target == "date") return castToDate(v);
+    if (target == "timestamp" || target == "timestamp without time zone")
+        return castToTimestamp(v, "timestamp");
+    if (target == "timestamptz" || target == "timestamp with time zone")
+        return castToTimestamp(v, "timestamptz");
 
     // Default passthrough
     return ExprValue(targetTypeName, v.value, false);

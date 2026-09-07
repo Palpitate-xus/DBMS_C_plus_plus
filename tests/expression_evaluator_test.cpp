@@ -461,6 +461,25 @@ static void test_cast() {
     expectCastError("numeric", "1", "boolean", "42846");
     expectCastError("double precision", "1", "boolean", "42846");
 
+    expectCastError("character varying", "garbage", "date", "22007");
+    expectCastError("character varying", "2023-02-29", "date", "22008");
+    expectCastError("character varying", "2024-01-01 garbage",
+                    "timestamp", "22007");
+    expectCastError("character varying", "2024-01-01 24:00:01",
+                    "timestamp", "22008");
+    expectCastError("integer", "1", "date", "42846");
+    assert(evaluateCast("timestamp", "2024-01-02 03:04:05", "date").value ==
+           "2024-01-02");
+    assert(evaluateCast("date", "2024-01-02", "timestamp").value ==
+           "2024-01-02 00:00:00");
+    assert(evaluateCast("date", "2024-01-02",
+                        "timestamp without time zone").value ==
+           "2024-01-02 00:00:00");
+    assert(evaluateCast("character varying", "infinity", "date").value ==
+           "infinity");
+    assert(evaluateCast("character varying", "-Infinity", "timestamp").value ==
+           "-infinity");
+
     expectCastError("character varying", "not-numeric", "numeric",
                     "22P02");
     expectCastError("boolean", "t", "numeric", "42846");
