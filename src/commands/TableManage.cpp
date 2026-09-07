@@ -30373,9 +30373,12 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 "expression (SQLSTATE 21000)");
         }
         if (rows.empty()) return "NULL";
-        std::string firstRow = trim(rows[0]);
-        size_t sp = firstRow.find(' ');
-        return (sp == std::string::npos) ? firstRow : trim(firstRow.substr(0, sp));
+        std::string firstRow = rows.front();
+        // query() appends exactly one output-field delimiter. This scalar
+        // path selects one column, so removing the first space would truncate
+        // a legitimate text value (and trim() would lose boundary spaces).
+        if (!firstRow.empty() && firstRow.back() == ' ') firstRow.pop_back();
+        return firstRow;
     }
     // Array functions
     if ((expr.funcName == "array_dims" ||

@@ -65,6 +65,21 @@ int main() {
     assert(emptyRows.size() == 1);
     assert(emptyRows.front() == "NULL ");
 
+    dbms::TableSchema textInner;
+    textInner.tablename = "scalar_text";
+    textInner.formatVersion = dbms::DATA_FILE_FORMAT_VERSION;
+    textInner.append(dbms::makeIntColumn("id", false, 4, true));
+    textInner.append(dbms::makeTextColumn("value", false));
+    assert(g_engine.createTable(database, textInner) == dbms::DBStatus::OK);
+    assert(g_engine.insert(database, "scalar_text",
+                           {{"id", "1"}, {"value", "two words"}}) ==
+           dbms::DBStatus::OK);
+    expression.funcArgs = {"select value from scalar_text"};
+    const auto textRows = g_engine.queryExpr(
+        database, "scalar_outer", {}, {expression});
+    assert(textRows.size() == 1);
+    assert(textRows.front() == "two words ");
+
     cleanupTestDb(testName);
     finalCleanupTestData();
     std::cout << "[SCALAR SUBQUERY PROJECTION CARDINALITY] passed\n";
