@@ -1673,6 +1673,8 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
 // LIKE / SIMILAR TO
 // ----------------------------------------------------------------------------
 
+[[noreturn]] static void throwInvalidRegularExpression();
+
 bool ExprEvaluator::likeMatch(const std::string& text, const std::string& pattern) {
     size_t ti = 0, pi = 0, star = std::string::npos, match = 0;
     while (ti < text.size()) {
@@ -1709,8 +1711,8 @@ bool ExprEvaluator::similarToMatch(const std::string& text, const std::string& p
     try {
         std::regex re(anchored, std::regex::ECMAScript);
         return std::regex_search(text, re);
-    } catch (...) {
-        return false;
+    } catch (const std::regex_error&) {
+        throwInvalidRegularExpression();
     }
 }
 
@@ -1755,8 +1757,8 @@ static bool similarToMatchEscape(const std::string& text, const std::string& pat
     try {
         std::regex re("^(" + tr + ")$", std::regex::ECMAScript);
         return std::regex_search(text, re);
-    } catch (...) {
-        return false;
+    } catch (const std::regex_error&) {
+        throwInvalidRegularExpression();
     }
 }
 
@@ -1765,7 +1767,6 @@ static bool similarToMatchEscape(const std::string& text, const std::string& pat
 // ----------------------------------------------------------------------------
 
 static ExprValue tsMatch(const std::string& vecText, const std::string& query);
-[[noreturn]] static void throwInvalidRegularExpression();
 
 ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& ctx) const {
     if (!e || !e->left || !e->right) return ExprValue{};

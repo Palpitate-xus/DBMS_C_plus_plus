@@ -371,6 +371,36 @@ static void test_like() {
         expectNull(op, "'text'", "NULL");
     }
 
+    for (const auto& op : {"similar to", "not similar to"}) {
+        auto expression = std::make_unique<BinaryOpExpr>();
+        expression->op = op;
+        expression->left = makeLit("'abc'");
+        expression->right = makeLit("'['");
+        bool rejected = false;
+        try {
+            (void)eval.eval(expression.get(), {});
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("SQLSTATE 2201B") !=
+                       std::string::npos;
+        }
+        assert(rejected);
+    }
+    for (const auto& name : {"similar to escape", "not similar to escape"}) {
+        auto expression = std::make_unique<FunctionCallExpr>();
+        expression->funcName = name;
+        expression->args.push_back(makeLit("'abc'"));
+        expression->args.push_back(makeLit("'['"));
+        expression->args.push_back(makeLit("'#'"));
+        bool rejected = false;
+        try {
+            (void)eval.eval(expression.get(), {});
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("SQLSTATE 2201B") !=
+                       std::string::npos;
+        }
+        assert(rejected);
+    }
+
     std::cout << "[EXPR] like OK" << std::endl;
 }
 
