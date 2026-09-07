@@ -40,6 +40,8 @@ int main() {
     const std::string database = testDbPath("restore_validation_db");
     const std::string invalidBackup =
         testDbPath("restore_validation_invalid_backup");
+    const std::string brokenBackup =
+        testDbPath("restore_validation_broken_backup");
     const std::string validBackup =
         testDbPath("restore_validation_valid_backup");
 
@@ -69,6 +71,24 @@ int main() {
         }
         assert(!engine.physicalRestore(database, invalidBackup));
         assertOriginalDatabase(engine, database, "invalid-source rejection");
+
+        // Passing the marker check is not enough to make every source entry
+        // readable. A copy failure must occur before the live database is
+        // replaced, not after it has already been deleted.
+        std::filesystem::create_directories(brokenBackup);
+        {
+            std::ofstream marker(
+                std::filesystem::path(brokenBackup) /
+                    ".dbms_physical_backup",
+                std::ios::binary);
+            marker << "DBMS_PHYSICAL_BACKUP_V1\n";
+            assert(marker.good());
+        }
+        std::filesystem::create_symlink(
+            "missing-target",
+            std::filesystem::path(brokenBackup) / "broken-entry");
+        assert(!engine.physicalRestore(database, brokenBackup));
+        assertOriginalDatabase(engine, database, "copy-failure rejection");
 
         assert(engine.physicalBackup(database, validBackup));
     }

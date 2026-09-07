@@ -35835,6 +35835,7 @@ bool StorageEngine::physicalBackup(const std::string& dbname, const std::string&
 bool StorageEngine::physicalRestore(const std::string& dbname, const std::string& backupPath) {
     auto src = std::filesystem::path(backupPath);
     auto dst = dbPath(dbname);
+    std::filesystem::path stagedDatabase;
     try {
         // Validate the complete source and every destructive destination
         // before removing the current database. In particular, aliases and
@@ -35870,11 +35871,44 @@ bool StorageEngine::physicalRestore(const std::string& dbname, const std::string
             }
         }
 
-        // Remove existing database if present
-        if (std::filesystem::exists(dst)) {
-            std::filesystem::remove_all(dst);
+        // Materialize the complete replacement beside the destination before
+        // touching the live database. A marker-bearing backup can still
+        // contain an unreadable/truncated entry; copying directly into dst
+        // after remove_all(dst) turned that ordinary restore error into data
+        // loss.
+        static std::atomic<uint64_t> restoreSequence{0};
+        const auto siblingPath = [&](std::string_view purpose) {
+            return std::filesystem::path(
+                dst.string() + "." + std::string(purpose) + "." +
+                std::to_string(::getpid()) + "." +
+                std::to_string(restoreSequence.fetch_add(
+                    1, std::memory_order_relaxed)));
+        };
+        std::error_code fileError;
+        const auto parent = dst.parent_path().empty()
+            ? std::filesystem::path(".") : dst.parent_path();
+        std::filesystem::create_directories(parent, fileError);
+        if (fileError) return false;
+        for (size_t attempt = 0; attempt < 1000; ++attempt) {
+            auto candidate = siblingPath("restore_staging");
+            fileError.clear();
+            if (std::filesystem::create_directory(candidate, fileError)) {
+                stagedDatabase = std::move(candidate);
+                break;
+            }
+            if (fileError &&
+                !std::filesystem::exists(candidate)) {
+                return false;
+            }
         }
-        std::filesystem::create_directories(dst);
+        if (stagedDatabase.empty()) return false;
+        const auto discardStagedDatabase = [&]() {
+            if (stagedDatabase.empty()) return;
+            std::error_code cleanupError;
+            std::filesystem::remove_all(stagedDatabase, cleanupError);
+            stagedDatabase.clear();
+        };
+
         for (const auto& entry : std::filesystem::directory_iterator(src)) {
             const auto filename = entry.path().filename().string();
             if (filename == kPhysicalBackupMarker || filename == ".lockmgr" ||
@@ -35883,7 +35917,7 @@ bool StorageEngine::physicalRestore(const std::string& dbname, const std::string
                 filename.rfind(".sql_stats.tmp.", 0) == 0) {
                 continue;
             }
-            auto destPath = dst / entry.path().filename();
+            auto destPath = stagedDatabase / entry.path().filename();
             if (entry.is_directory() && entry.path().filename() == "wal_archive") {
                 // Skip wal_archive in root, restore it separately
                 continue;
@@ -35896,6 +35930,58 @@ bool StorageEngine::physicalRestore(const std::string& dbname, const std::string
                     std::filesystem::copy_options::overwrite_existing);
             }
         }
+
+        // Publish with a reversible pair of sibling renames. Keep the old
+        // directory until the staged tree owns the canonical name so a rename
+        // failure can restore it without reconstructing any files.
+        std::filesystem::path previousDatabase;
+        const bool destinationExists = std::filesystem::exists(dst, fileError);
+        if (fileError) {
+            discardStagedDatabase();
+            return false;
+        }
+        if (destinationExists) {
+            for (size_t attempt = 0; attempt < 1000; ++attempt) {
+                auto candidate = siblingPath("restore_previous");
+                fileError.clear();
+                if (!std::filesystem::exists(candidate, fileError) &&
+                    !fileError) {
+                    previousDatabase = std::move(candidate);
+                    break;
+                }
+            }
+            if (previousDatabase.empty()) {
+                discardStagedDatabase();
+                return false;
+            }
+            std::filesystem::rename(dst, previousDatabase, fileError);
+            if (fileError) {
+                discardStagedDatabase();
+                return false;
+            }
+        }
+        fileError.clear();
+        std::filesystem::rename(stagedDatabase, dst, fileError);
+        if (fileError) {
+            if (destinationExists) {
+                std::error_code restoreError;
+                std::filesystem::rename(
+                    previousDatabase, dst, restoreError);
+            }
+            discardStagedDatabase();
+            return false;
+        }
+        stagedDatabase.clear();
+        if (destinationExists) {
+            fileError.clear();
+            std::filesystem::remove_all(previousDatabase, fileError);
+            if (fileError) {
+                std::cerr << "[storage] restored database but could not remove "
+                          << "the previous directory: " << previousDatabase
+                          << std::endl;
+            }
+        }
+
         // Restore WAL archive
         auto srcArchive = src / "wal_archive";
         if (std::filesystem::exists(srcArchive)) {
@@ -35930,6 +36016,10 @@ bool StorageEngine::physicalRestore(const std::string& dbname, const std::string
         }
         return true;
     } catch (...) {
+        if (!stagedDatabase.empty()) {
+            std::error_code cleanupError;
+            std::filesystem::remove_all(stagedDatabase, cleanupError);
+        }
         return false;
     }
 }
