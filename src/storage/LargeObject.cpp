@@ -108,6 +108,9 @@ bool LargeObjectManager::write(int loId, size_t offset, const std::string& data)
     fs.flush();
     if (!fs) return false;
 
+    // Seeking beyond EOF does not extend a file when no bytes are written.
+    if (data.empty()) return true;
+
     size_t end = offset + data.size();
     if (end > sizes_[loId]) sizes_[loId] = end;
     return true;
