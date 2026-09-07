@@ -47,6 +47,19 @@ static void expectInvalidRegex(dbms::ExprEvaluator& eval,
     assert(rejected);
 }
 
+static void expectInvalidParameter(dbms::ExprEvaluator& eval,
+                                   const std::string& function,
+                                   std::vector<dbms::ExprValue> args) {
+    bool rejected = false;
+    try {
+        (void)callFn(eval, function, args);
+    } catch (const std::runtime_error& error) {
+        rejected = std::string(error.what()).find("SQLSTATE 22023") !=
+                   std::string::npos;
+    }
+    assert(rejected);
+}
+
 static void test_replace() {
     dbms::ExprEvaluator eval;
     // First match only by default.
@@ -121,12 +134,25 @@ static void test_invalid_patterns() {
     std::cout << "[REGEXFN] invalid patterns OK" << std::endl;
 }
 
+static void test_invalid_positions() {
+    dbms::ExprEvaluator eval;
+    expectInvalidParameter(eval, "regexp_count", {S("abc"), S("a"), I(0)});
+    expectInvalidParameter(eval, "regexp_count", {S("abc"), S("a"), I(-1)});
+    expectInvalidParameter(eval, "regexp_substr", {S("abc"), S("a"), I(0)});
+    expectInvalidParameter(
+        eval, "regexp_substr", {S("abc"), S("a"), I(1), I(0)});
+    expectInvalidParameter(
+        eval, "regexp_substr", {S("abc"), S("a"), I(1), I(-1)});
+    std::cout << "[REGEXFN] invalid positions OK" << std::endl;
+}
+
 int main() {
     test_replace();
     test_match();
     test_split();
     test_count_substr();
     test_invalid_patterns();
+    test_invalid_positions();
     std::cout << "[REGEXFN] all passed" << std::endl;
     return 0;
 }

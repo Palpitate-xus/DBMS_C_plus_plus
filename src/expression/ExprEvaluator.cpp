@@ -3682,6 +3682,17 @@ static std::regex buildRegex(const std::string& pattern, const std::string& flag
         "invalid regular expression (SQLSTATE 2201B)");
 }
 
+static int64_t parsePositiveRegexParameter(const ExprValue& value,
+                                           const std::string& name) {
+    long long parsed = 0;
+    if (!parseInt64Exact(value.value, parsed) || parsed < 1) {
+        throw std::runtime_error(
+            "invalid value for parameter \"" + name + "\": " +
+            value.value + " (SQLSTATE 22023)");
+    }
+    return parsed;
+}
+
 // Translate a PostgreSQL replacement string (\1..\9 backrefs, \& whole match,
 // \\ literal backslash) into the std::regex_replace ($1, $&) form, escaping any
 // literal '$'.
@@ -6326,7 +6337,7 @@ void ExprEvaluator::registerBuiltins() {
         const std::string s = textArgumentValue(a[0]);
         size_t start = 0;
         if (a.size() >= 3 && !a[2].isNull) {
-            int64_t st = a[2].asInt();
+            const int64_t st = parsePositiveRegexParameter(a[2], "start");
             start = utf8StartByte(s, st);
         }
         std::string sub = s.substr(start);
@@ -6349,11 +6360,11 @@ void ExprEvaluator::registerBuiltins() {
         const std::string s = textArgumentValue(a[0]);
         size_t start = 0;
         if (a.size() >= 3 && !a[2].isNull) {
-            int64_t st = a[2].asInt();
+            const int64_t st = parsePositiveRegexParameter(a[2], "start");
             start = utf8StartByte(s, st);
         }
-        int64_t which = (a.size() >= 4 && !a[3].isNull) ? a[3].asInt() : 1;
-        if (which < 1) which = 1;
+        const int64_t which = (a.size() >= 4 && !a[3].isNull)
+            ? parsePositiveRegexParameter(a[3], "n") : 1;
         std::string sub = s.substr(start);
         try {
             auto it = std::sregex_iterator(sub.begin(), sub.end(), re);
