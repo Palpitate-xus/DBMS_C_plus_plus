@@ -173,6 +173,10 @@ static void test_dow_doy_century() {
     assert(callFn(eval, "extract",
                   {F("julian"), TS("2000-01-01 12:00:00")}).value ==
            "2451545.500000");
+    assert(callFn(eval, "extract",
+                  {F("julian"),
+                   TS("2000-01-01 00:00:00.5")}).value ==
+           "2451545.000006");
     // century / millennium.
     assert(callFn(eval, "extract", {F("century"), F("2026-06-26")}).value == "21");
     assert(callFn(eval, "extract", {F("decade"), F("2026-06-26")}).value == "202");

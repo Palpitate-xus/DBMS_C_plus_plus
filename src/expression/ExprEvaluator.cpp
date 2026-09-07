@@ -8408,7 +8408,7 @@ void ExprEvaluator::registerBuiltins() {
             return v;
         };
         int y = num(0, 4), mo = num(5, 2), d = num(8, 2);
-        int h = num(11, 2), mi = num(14, 2), se = num(17, 2);
+        int h = num(11, 2), mi = num(14, 2);
         auto sundayBasedWeekday = [](int year, int month, int day) {
             static const int offsets[] = {
                 0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4
@@ -8491,8 +8491,10 @@ void ExprEvaluator::registerBuiltins() {
                 365LL * shiftedYear + shiftedYear / 4 -
                 shiftedYear / 100 + shiftedYear / 400 - 32045;
             const long double dayFraction =
-                static_cast<long double>(h * 3600 + mi * 60 + se) /
-                86400.0L;
+                (static_cast<long double>(h * 3600 + mi * 60) *
+                     1000000.0L +
+                 static_cast<long double>(secondMicros)) /
+                86400000000.0L;
             std::ostringstream out;
             out << std::fixed << std::setprecision(6)
                 << static_cast<long double>(julianDay) + dayFraction;
