@@ -5173,7 +5173,10 @@ void ExprEvaluator::registerBuiltins() {
         long long n = 0;
         if (!parseInt64Exact(a[0].value, n))
             return ExprValue("numeric", "", true);
-        if (n < 0) return ExprValue("numeric", "", true);
+        if (n < 0)
+            throw std::runtime_error(
+                "factorial of a negative number is undefined "
+                "(SQLSTATE 22003)");
         Numeric result(1);
         for (long long i = 2; i <= n; ++i) {
             try {
