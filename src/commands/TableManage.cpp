@@ -27822,13 +27822,13 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
 
     // Math functions with PG-exact presentation semantics live in the expression
     // evaluator (float8 shortest-repr, numeric display scales, banker's rounding).
-    // Delegate the whole family there; on evaluator failure fall through
-    // to the legacy engine handlers below.
+    // Delegate the whole family there and preserve its SQL errors; falling
+    // through to the legacy handlers would turn domain errors into values.
     static const std::set<std::string> kEvaluatorMath = {
         "round", "ceil", "floor", "trunc", "power", "pow", "exp", "ln", "log",
         "log10", "sqrt", "cbrt", "sin", "cos", "tan", "asin", "acos", "atan",
         "atan2", "cot", "degrees", "radians", "pi", "sinh", "cosh", "tanh",
-        "asinh", "acosh", "atanh", "mod", "sign", "div"
+        "asinh", "acosh", "atanh", "mod", "sign", "div", "width_bucket"
     };
     if (kEvaluatorMath.count(expr.funcName)) {
         std::string synth = expr.funcName + "(";
@@ -27836,7 +27836,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         bool hasNull = false;
         for (const auto& marg : expr.funcArgs) {
             std::string mv = getVal(marg);
-            if (mv == "NULL") hasNull = true;
+            if (scalarValueIsNull(marg, mv)) hasNull = true;
             if (!first) synth += ",";
             first = false;
             // Column reference: carry the declared type through a ::cast so
@@ -27856,7 +27856,10 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         synth += ")";
         if (hasNull) return "NULL";
         auto res = dbms::ExprHelper::evalString(synth, {}, {}, dbname);
-        if (res.ok) return res.value;
+        if (res.ok) return res.isNull ? "NULL" : res.value;
+        throw std::runtime_error(
+            res.error.empty() ? "failed to evaluate math function"
+                              : res.error);
     }
     // Arithmetic projection: col op val op val ... evaluated left-to-right
     // (no precedence), for + - * / % on numeric operands.  Operands may be
