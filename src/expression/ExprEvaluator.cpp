@@ -6858,7 +6858,7 @@ void ExprEvaluator::registerBuiltins() {
         if (a.size() < 4 || a[0].isNull || a[1].isNull || a[2].isNull || a[3].isNull)
             return ExprValue("integer", "", true);
         double v = a[0].asDouble(), lo = a[1].asDouble(), hi = a[2].asDouble();
-        int64_t count = a[3].asInt();
+        const int64_t count = parseInt32Argument(a[3]);
         if (count <= 0) {
             throw std::runtime_error(
                 "count must be greater than zero (SQLSTATE 2201G)");

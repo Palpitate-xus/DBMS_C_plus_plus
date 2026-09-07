@@ -83,6 +83,10 @@ int main() {
     expectSqlState(database, "mod", {"5", "0"}, "22012");
     expectSqlState(database, "width_bucket", {"1", "0", "10", "0"},
                    "2201G");
+    expectSqlState(database, "width_bucket",
+                   {"1", "0", "10", "'5x'"}, "22P02");
+    expectSqlState(database, "width_bucket",
+                   {"1", "0", "10", "2147483648"}, "22003");
     expectSqlState(database, "power", {"0", "-1"}, "2201F");
     expectSqlState(database, "trunc",
                    {"1.2", "999999999999999999999"}, "22003");

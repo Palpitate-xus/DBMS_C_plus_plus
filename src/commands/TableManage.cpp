@@ -27847,31 +27847,30 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         "asinh", "acosh", "atanh", "mod", "sign", "div", "width_bucket"
     };
     if (kEvaluatorMath.count(expr.funcName)) {
-        std::string synth = expr.funcName + "(";
-        bool first = true;
-        bool hasNull = false;
-        for (const auto& marg : expr.funcArgs) {
-            std::string mv = getVal(marg);
-            if (scalarValueIsNull(marg, mv)) hasNull = true;
-            if (!first) synth += ",";
-            first = false;
-            // Column reference: carry the declared type through a ::cast so
-            // the evaluator picks the right semantics (float8 vs numeric).
-            std::string colType;
-            for (size_t ci = 0; ci < tbl.len; ++ci) {
-                if (tbl.cols[ci].dataName == marg) { colType = tbl.cols[ci].dataType; break; }
-            }
-            if (!colType.empty()) {
-                synth += "cast(" + mv + " as " + colType + ")";
-            } else if (!mv.empty() && mv.find_first_not_of("-+.eE0123456789 ") == std::string::npos && mv.find_first_of("0123456789") != std::string::npos) {
-                synth += mv;
-            } else {
-                synth += '"' + mv + '"';
-            }
+        std::map<std::string, std::string> rowContext;
+        std::map<std::string, std::string> typeHints;
+        std::set<std::string> nullColumns;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            bool valueIsNull = false;
+            const std::string value = engine && !dbname.empty()
+                ? engine->extractColumnValue(
+                      rowBuffer, tbl, i, dbname, true, &valueIsNull)
+                : StorageEngine::extractColumnValueStatic(
+                      rowBuffer, tbl, i);
+            rowContext[tbl.cols[i].dataName] = value;
+            typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+            if (valueIsNull || (!engine && value.empty()))
+                nullColumns.insert(tbl.cols[i].dataName);
         }
-        synth += ")";
-        if (hasNull) return "NULL";
-        auto res = dbms::ExprHelper::evalString(synth, {}, {}, dbname);
+        std::string expressionSql = expr.funcName + "(";
+        for (size_t i = 0; i < expr.funcArgs.size(); ++i) {
+            if (i != 0) expressionSql += ",";
+            expressionSql += expr.funcArgs[i];
+        }
+        expressionSql += ")";
+        auto res = dbms::ExprHelper::evalStringWithNulls(
+            expressionSql, rowContext, nullColumns, typeHints, dbname,
+            expr.sessionUser);
         if (res.ok) return res.isNull ? "NULL" : res.value;
         throw std::runtime_error(
             res.error.empty() ? "failed to evaluate math function"
