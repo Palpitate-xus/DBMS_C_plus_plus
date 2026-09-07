@@ -435,6 +435,13 @@ static void test_cast() {
     expectCastError("character varying", "not-numeric", "numeric",
                     "22P02");
     expectCastError("boolean", "t", "numeric", "42846");
+    assert(evaluateCast("character varying", "1.25e3", "numeric").value ==
+           "1250");
+    assert(evaluateCast("double precision", "1e-20", "numeric").value ==
+           "0.00000000000000000001");
+    expectCastError("character varying", "1e", "numeric", "22P02");
+    expectCastError("character varying", "1e999999999999999999999",
+                    "numeric", "22003");
     assert(evaluateNumericTypmod("12.345", {"4", "2"}).value == "12.35");
     assert(evaluateNumericTypmod("7", {"4", "2"}).value == "7.00");
     expectNumericTypmodError("999.99", {"4", "2"}, "22003");

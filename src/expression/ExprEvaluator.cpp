@@ -2413,9 +2413,17 @@ static ExprValue castToNumeric(const ExprValue& value,
         throw std::runtime_error(
             "cannot cast type boolean to numeric (SQLSTATE 42846)");
     }
-    auto numeric = tryParseNumeric(value.value);
-    if (!numeric)
+    std::optional<Numeric> numeric;
+    try {
+        numeric.emplace(value.value);
+    } catch (const std::invalid_argument& error) {
+        const std::string message = error.what();
+        if (message.find("exceeds maximum") != std::string::npos ||
+            message.find("out of range") != std::string::npos) {
+            throwNumericCastOverflow();
+        }
         throwNumericCastSyntaxError(trimStr(value.value));
+    }
     if (!spec.hasTypmod)
         return ExprValue("numeric", numeric->toString(), false);
     if (numeric->isNaN())

@@ -35,6 +35,12 @@ static void test_encode_vectors() {
 
     assert(encodePostgresNumeric("-42.00", raw));
     assert(raw == numericWire(1, 0, 0x4000, 2, {42}));
+
+    assert(encodePostgresNumeric("1e3", raw));
+    assert(raw == numericWire(1, 0, 0x0000, 0, {1000}));
+
+    assert(encodePostgresNumeric("-4.2e-3", raw));
+    assert(raw == numericWire(1, -1, 0x4000, 4, {42}));
     std::cout << "[PG NUMERIC] encode vectors OK" << std::endl;
 }
 
@@ -57,8 +63,6 @@ static void test_reject_malformed() {
     assert(!decodePostgresNumeric(numericWire(1, 0, 0x0000, 0, {10000}), text));
     assert(!decodePostgresNumeric({0, 1, 0, 0, 0, 0, 0, 0}, text));
 
-    std::vector<uint8_t> raw;
-    assert(!encodePostgresNumeric("1e3", raw));
     std::cout << "[PG NUMERIC] malformed input rejection OK" << std::endl;
 }
 

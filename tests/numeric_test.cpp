@@ -17,15 +17,24 @@ static void test_basic_io() {
     assert(Numeric("-0.0012300").toString() == "-0.0012300");
     assert(Numeric(".5").toString() == "0.5");
     assert(Numeric("00042.00").toString() == "42.00");
+    assert(Numeric("1e3").toString() == "1000");
+    assert(Numeric("1.25e3").toString() == "1250");
+    assert(Numeric("1.2300e2").toString() == "123.00");
+    assert(Numeric("-4.2E-3").toString() == "-0.0042");
+    assert(Numeric(".5e+2").toString() == "50");
+    assert(Numeric("5.e1").toString() == "50");
     assert((-Numeric(0)).toString() == "0");
     assert((-Numeric("0.000")).toString() == "0");
     assert(Numeric("NaN").toString() == "NaN");
+    assert(Numeric("NAN").toString() == "NaN");
     assert(Numeric("Infinity").toString() == "Infinity");
+    assert(Numeric("+INFINITY").toString() == "Infinity");
     assert(Numeric("-Infinity").toString() == "-Infinity");
     assert(Numeric("  1.25\t").toString() == "1.25");
 
     const std::vector<std::string> invalid = {
-        "", "   ", "+", "-", ".", "1 2", "1 . 2"};
+        "", "   ", "+", "-", ".", "1 2", "1 . 2", "e1", "1e",
+        "1e+", "1e2e3"};
     for (const auto& input : invalid) {
         bool rejected = false;
         try {
@@ -35,6 +44,13 @@ static void test_basic_io() {
         }
         assert(rejected);
     }
+    bool exponentRangeRejected = false;
+    try {
+        (void)Numeric("1e999999999999999999999");
+    } catch (const std::invalid_argument&) {
+        exponentRangeRejected = true;
+    }
+    assert(exponentRangeRejected);
     std::cout << "[NUMERIC] basic I/O OK" << std::endl;
 }
 

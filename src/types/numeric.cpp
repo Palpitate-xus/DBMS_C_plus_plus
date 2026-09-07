@@ -183,10 +183,16 @@ Numeric Numeric::fromString(const std::string& s) {
     }
     if (begin == end) throw std::invalid_argument("invalid numeric: empty");
     const std::string str = s.substr(begin, end - begin);
-    if (str == "NaN" || str == "nan") return nan();
-    if (str == "Infinity" || str == "inf" || str == "+Infinity" || str == "+inf")
+    std::string keyword = str;
+    std::transform(keyword.begin(), keyword.end(), keyword.begin(),
+                   [](unsigned char ch) {
+                       return static_cast<char>(std::tolower(ch));
+                   });
+    if (keyword == "nan") return nan();
+    if (keyword == "infinity" || keyword == "inf" ||
+        keyword == "+infinity" || keyword == "+inf")
         return infinity(1);
-    if (str == "-Infinity" || str == "-inf") return infinity(-1);
+    if (keyword == "-infinity" || keyword == "-inf") return infinity(-1);
 
     Numeric n;
     size_t pos = 0;
@@ -201,11 +207,18 @@ Numeric Numeric::fromString(const std::string& s) {
     std::string fracPart;
     bool sawDot = false;
     bool sawDigit = false;
+    bool sawExponent = false;
     for (; pos < str.size(); ++pos) {
         char ch = str[pos];
         if (ch == '.') {
             if (sawDot) throw std::invalid_argument("invalid numeric: multiple dots");
             sawDot = true;
+        } else if (ch == 'e' || ch == 'E') {
+            if (!sawDigit)
+                throw std::invalid_argument("invalid numeric exponent");
+            sawExponent = true;
+            ++pos;
+            break;
         } else if (ch >= '0' && ch <= '9') {
             sawDigit = true;
             if (sawDot) fracPart.push_back(ch); else intPart.push_back(ch);
@@ -216,15 +229,73 @@ Numeric Numeric::fromString(const std::string& s) {
     if (!sawDigit)
         throw std::invalid_argument("invalid numeric: no digits");
 
+    int64_t exponent = 0;
+    if (sawExponent) {
+        int exponentSign = 1;
+        if (pos < str.size() && (str[pos] == '+' || str[pos] == '-')) {
+            if (str[pos] == '-') exponentSign = -1;
+            ++pos;
+        }
+        if (pos == str.size())
+            throw std::invalid_argument("invalid numeric exponent");
+
+        int64_t magnitude = 0;
+        bool exponentDigit = false;
+        for (; pos < str.size(); ++pos) {
+            const char ch = str[pos];
+            if (ch < '0' || ch > '9')
+                throw std::invalid_argument("invalid numeric exponent");
+            exponentDigit = true;
+            const int digit = ch - '0';
+            if (magnitude >
+                (std::numeric_limits<int64_t>::max() - digit) / 10) {
+                throw std::invalid_argument("numeric exponent out of range");
+            }
+            magnitude = magnitude * 10 + digit;
+        }
+        if (!exponentDigit)
+            throw std::invalid_argument("invalid numeric exponent");
+        exponent = exponentSign > 0 ? magnitude : -magnitude;
+    }
+
     // Drop leading zeros from integer part.
     size_t leading = 0;
     while (leading + 1 < intPart.size() && intPart[leading] == '0') ++leading;
     intPart = intPart.substr(leading);
 
-    n.scale_ = static_cast<int>(fracPart.size());
     n.digits_.reserve(intPart.size() + fracPart.size());
     for (char ch : intPart) n.digits_.push_back(static_cast<uint8_t>(ch - '0'));
     for (char ch : fracPart) n.digits_.push_back(static_cast<uint8_t>(ch - '0'));
+
+    if (isAllZero(n.digits_)) return Numeric(0);
+    stripLeadingZeros(n.digits_);
+
+    if (fracPart.size() > static_cast<size_t>(
+                                  std::numeric_limits<int64_t>::max() -
+                                  kMaxPrecision)) {
+        throw std::invalid_argument("numeric scale exceeds maximum");
+    }
+    const int64_t fractionalScale =
+        static_cast<int64_t>(fracPart.size());
+    if (exponent > fractionalScale + kMaxPrecision ||
+        exponent < fractionalScale - kMaxPrecision) {
+        throw std::invalid_argument("numeric exponent out of range");
+    }
+    const int64_t resultingScale = fractionalScale - exponent;
+    if (resultingScale < 0) {
+        const uint64_t zeros = static_cast<uint64_t>(-(resultingScale + 1)) + 1;
+        const uint64_t availableDigits = n.digits_.size() < kMaxPrecision
+            ? static_cast<uint64_t>(kMaxPrecision - n.digits_.size()) : 0;
+        if (zeros > availableDigits) {
+            throw std::invalid_argument("numeric precision exceeds maximum");
+        }
+        n.digits_.insert(n.digits_.end(), static_cast<size_t>(zeros), 0);
+        n.scale_ = 0;
+    } else {
+        if (resultingScale > kMaxPrecision)
+            throw std::invalid_argument("numeric scale exceeds maximum");
+        n.scale_ = static_cast<int>(resultingScale);
+    }
 
     n.normalize();
     if (n.precision_ > kMaxPrecision) {
