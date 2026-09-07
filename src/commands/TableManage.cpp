@@ -30350,6 +30350,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             }
         }
         std::set<std::string> subSelectCols;
+        size_t subSelectCount = 0;
         // Inline split colsStr by comma (avoid dependency on main.cpp's splitSelectColumns)
         {
             std::string cur;
@@ -30358,13 +30359,25 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 if (ch == '(') depth++;
                 else if (ch == ')') depth--;
                 if (ch == ',' && depth == 0) {
-                    subSelectCols.insert(trim(cur));
+                    const std::string column = trim(cur);
+                    if (!column.empty()) {
+                        subSelectCols.insert(column);
+                        ++subSelectCount;
+                    }
                     cur.clear();
                 } else {
                     cur.push_back(ch);
                 }
             }
-            if (!trim(cur).empty()) subSelectCols.insert(trim(cur));
+            const std::string column = trim(cur);
+            if (!column.empty()) {
+                subSelectCols.insert(column);
+                ++subSelectCount;
+            }
+        }
+        if (subSelectCount != 1) {
+            throw std::runtime_error(
+                "subquery must return only one column (SQLSTATE 42601)");
         }
         auto rows = engine->query(dbname, subTname, subConds, subSelectCols);
         if (rows.size() > 1) {

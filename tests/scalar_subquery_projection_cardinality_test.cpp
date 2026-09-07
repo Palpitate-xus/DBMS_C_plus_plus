@@ -80,6 +80,19 @@ int main() {
     assert(textRows.size() == 1);
     assert(textRows.front() == "two words ");
 
+    expression.funcArgs = {"select id,value from scalar_text"};
+    rejected = false;
+    try {
+        (void)g_engine.queryExpr(
+            database, "scalar_outer", {}, {expression});
+    } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        rejected = message.find("subquery must return only one column") !=
+                       std::string::npos &&
+                   message.find("SQLSTATE 42601") != std::string::npos;
+    }
+    assert(rejected);
+
     cleanupTestDb(testName);
     finalCleanupTestData();
     std::cout << "[SCALAR SUBQUERY PROJECTION CARDINALITY] passed\n";
