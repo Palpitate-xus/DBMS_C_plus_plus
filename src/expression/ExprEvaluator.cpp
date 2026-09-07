@@ -4851,19 +4851,41 @@ void ExprEvaluator::registerBuiltins() {
     functions_["overlaps"] = [](const std::vector<ExprValue>& a) {
         // (s1, e1) OVERLAPS (s2, e2): ISO-format text compares lexicographically.
         // Swap each pair so start <= end, apply the PG point/interval rules.
+        // With one NULL endpoint, the non-NULL endpoint is the only known
+        // boundary.  A result is true only when it is strictly inside the
+        // other period; otherwise the missing endpoint leaves it unknown.
         if (a.size() != 4) return ExprValue("boolean", "", true);
-        for (const auto& v : a) if (v.isNull) return ExprValue("boolean", "", true);
+        if ((a[0].isNull && a[1].isNull) ||
+            (a[2].isNull && a[3].isNull)) {
+            return ExprValue("boolean", "", true);
+        }
         size_t s1 = 0, e1 = 1, s2 = 2, e2 = 3;
-        if (a[s1].value > a[e1].value) std::swap(s1, e1);
-        if (a[s2].value > a[e2].value) std::swap(s2, e2);
-        bool p1 = a[s1].value == a[e1].value;
-        bool p2 = a[s2].value == a[e2].value;
-        bool m;
-        if (p1 && p2) m = a[s1].value == a[s2].value;
-        else if (p1)  m = a[s2].value <= a[s1].value && a[s1].value < a[e2].value;
-        else if (p2)  m = a[s1].value <= a[s2].value && a[s2].value < a[e1].value;
-        else          m = a[s1].value < a[e2].value && a[s2].value < a[e1].value;
-        return ExprValue("boolean", m ? "t" : "f", false);
+        if (a[s1].isNull ||
+            (!a[e1].isNull && a[s1].value > a[e1].value)) {
+            std::swap(s1, e1);
+        }
+        if (a[s2].isNull ||
+            (!a[e2].isNull && a[s2].value > a[e2].value)) {
+            std::swap(s2, e2);
+        }
+
+        if (a[s1].value > a[s2].value) {
+            if (a[e2].isNull) return ExprValue("boolean", "", true);
+            if (a[s1].value < a[e2].value)
+                return ExprValue("boolean", "t", false);
+            if (a[e1].isNull) return ExprValue("boolean", "", true);
+            return ExprValue("boolean", "f", false);
+        }
+        if (a[s1].value < a[s2].value) {
+            if (a[e1].isNull) return ExprValue("boolean", "", true);
+            if (a[s2].value < a[e1].value)
+                return ExprValue("boolean", "t", false);
+            if (a[e2].isNull) return ExprValue("boolean", "", true);
+            return ExprValue("boolean", "f", false);
+        }
+        if (a[e1].isNull || a[e2].isNull)
+            return ExprValue("boolean", "", true);
+        return ExprValue("boolean", "t", false);
     };
 
     functions_["timezone"] = [](const std::vector<ExprValue>& a) {

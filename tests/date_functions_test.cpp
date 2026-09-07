@@ -36,6 +36,7 @@ static dbms::ExprValue TS(const std::string& v) { return dbms::ExprValue("timest
 static dbms::ExprValue TSTZ(const std::string& v) { return dbms::ExprValue("timestamptz", v, false); }
 static dbms::ExprValue IV(const std::string& v) { return dbms::ExprValue("interval", v, false); }
 static dbms::ExprValue I(int64_t v) { return dbms::ExprValue("integer", std::to_string(v), false); }
+static dbms::ExprValue NullDate() { return dbms::ExprValue("date", "", true); }
 
 static void test_extract_date_part() {
     dbms::ExprEvaluator eval;
@@ -339,6 +340,42 @@ static void test_overlaps_point_boundaries() {
     std::cout << "[DATEFN] overlaps point boundaries OK" << std::endl;
 }
 
+static void test_overlaps_null_semantics() {
+    dbms::ExprEvaluator eval;
+
+    // A period with one unknown endpoint can still be known to overlap when
+    // its known endpoint lies strictly inside the other period.  Boundary and
+    // outside cases remain unknown because the missing endpoint may extend in
+    // either direction.
+    const auto knownTrue = callFn(
+        eval, "overlaps",
+        {D("2026-01-02"), NullDate(),
+         D("2026-01-01"), D("2026-01-03")});
+    assert(!knownTrue.isNull && knownTrue.value == "t");
+    const auto swappedNull = callFn(
+        eval, "overlaps",
+        {NullDate(), D("2026-01-02"),
+         D("2026-01-01"), D("2026-01-03")});
+    assert(!swappedNull.isNull && swappedNull.value == "t");
+    const auto secondPeriod = callFn(
+        eval, "overlaps",
+        {D("2026-01-01"), D("2026-01-03"),
+         D("2026-01-02"), NullDate()});
+    assert(!secondPeriod.isNull && secondPeriod.value == "t");
+
+    assert(callFn(eval, "overlaps",
+                  {D("2026-01-01"), NullDate(),
+                   D("2026-01-01"), D("2026-01-03")}).isNull);
+    assert(callFn(eval, "overlaps",
+                  {D("2026-01-04"), NullDate(),
+                   D("2026-01-01"), D("2026-01-03")}).isNull);
+    assert(callFn(eval, "overlaps",
+                  {NullDate(), NullDate(),
+                   D("2026-01-01"), D("2026-01-03")}).isNull);
+
+    std::cout << "[DATEFN] overlaps NULL semantics OK" << std::endl;
+}
+
 int main() {
     test_extract_date_part();
     test_dow_doy_century();
@@ -348,6 +385,7 @@ int main() {
     test_template_parsing();
     test_current_family();
     test_overlaps_point_boundaries();
+    test_overlaps_null_semantics();
     std::cout << "[DATEFN] all passed" << std::endl;
     return 0;
 }
