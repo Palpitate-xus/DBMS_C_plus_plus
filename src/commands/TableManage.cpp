@@ -19798,8 +19798,29 @@ static bool isValidJson(const std::string& s) {
         if (c == '"') {
             ++i;
             while (i < s.size() && s[i] != '"') {
-                if (s[i] == '\\' && i + 1 < s.size()) i += 2;
-                else ++i;
+                const unsigned char byte =
+                    static_cast<unsigned char>(s[i]);
+                if (byte < 0x20) return false;
+                if (s[i] != '\\') {
+                    ++i;
+                    continue;
+                }
+                if (i + 1 >= s.size()) return false;
+                const char escaped = s[i + 1];
+                if (escaped == '"' || escaped == '\\' || escaped == '/' ||
+                    escaped == 'b' || escaped == 'f' || escaped == 'n' ||
+                    escaped == 'r' || escaped == 't') {
+                    i += 2;
+                    continue;
+                }
+                if (escaped != 'u' || i + 5 >= s.size()) return false;
+                for (size_t digit = i + 2; digit <= i + 5; ++digit) {
+                    if (!std::isxdigit(
+                            static_cast<unsigned char>(s[digit]))) {
+                        return false;
+                    }
+                }
+                i += 6;
             }
             if (i >= s.size()) return false;
             ++i;
