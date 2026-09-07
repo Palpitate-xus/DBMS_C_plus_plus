@@ -175,6 +175,19 @@ static void test_initcap_tohex() {
     std::cout << "[STRFN] initcap/to_hex OK" << std::endl;
 }
 
+static void test_bpchar_text_inputs() {
+    dbms::ExprEvaluator eval;
+    assert(callFn(eval, "replace", {C("ab  "), C("a "), C("x  ")}).value ==
+           "xb");
+    assert(callFn(eval, "position", {S(" "), C("ab  ")}).value == "0");
+    assert(callFn(eval, "position", {C("b "), C("ab  ")}).value == "2");
+    assert(callFn(eval, "left", {C("ab  "), I(4)}).value == "ab");
+    assert(callFn(eval, "right", {C("ab  "), I(1)}).value == "b");
+    assert(callFn(eval, "repeat", {C("ab  "), I(2)}).value == "abab");
+    assert(callFn(eval, "ascii", {C("   ")}).value == "0");
+    std::cout << "[STRFN] bpchar text inputs OK" << std::endl;
+}
+
 static void test_concat_ws_starts_translate() {
     dbms::ExprEvaluator eval;
     assert(callFn(eval, "concat_ws", {S(","), S("a"), S("b"), S("c")}).value == "a,b,c");
@@ -245,6 +258,7 @@ int main() {
     test_trim_chars();
     test_split_strpos();
     test_initcap_tohex();
+    test_bpchar_text_inputs();
     test_concat_ws_starts_translate();
     test_overlay_quote();
     test_null_propagation();

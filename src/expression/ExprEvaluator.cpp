@@ -5377,9 +5377,9 @@ void ExprEvaluator::registerBuiltins() {
     functions_["replace"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 3 || a[0].isNull || a[1].isNull || a[2].isNull)
             return ExprValue("text", "", true);
-        std::string s = a[0].value;
-        const std::string& from = a[1].value;
-        const std::string& to = a[2].value;
+        std::string s = textArgumentValue(a[0]);
+        const std::string from = textArgumentValue(a[1]);
+        const std::string to = textArgumentValue(a[2]);
         if (from.empty()) return ExprValue("text", s, false);
         size_t pos = 0;
         while ((pos = s.find(from, pos)) != std::string::npos) {
@@ -5391,14 +5391,18 @@ void ExprEvaluator::registerBuiltins() {
     functions_["position"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull)
             return ExprValue("integer", "", true);
-        size_t pos = a[1].value.find(a[0].value);
+        const std::string needle = textArgumentValue(a[0]);
+        const std::string haystack = textArgumentValue(a[1]);
+        size_t pos = haystack.find(needle);
         if (pos == std::string::npos) return ExprValue("integer", "0", false);
-        return ExprValue("integer", std::to_string(utf8CharCount(a[1].value.substr(0, pos)) + 1), false);
+        return ExprValue(
+            "integer", std::to_string(utf8CharCount(haystack.substr(0, pos)) + 1),
+            false);
     };
     functions_["left"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
         int64_t n = a[1].asInt();
-        const std::string& s = a[0].value;
+        const std::string s = textArgumentValue(a[0]);
         size_t total = utf8CharCount(s);
         const uint64_t magnitude = n < 0
             ? uint64_t{0} - static_cast<uint64_t>(n)
@@ -5411,7 +5415,7 @@ void ExprEvaluator::registerBuiltins() {
     functions_["right"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
         int64_t n = a[1].asInt();
-        const std::string& s = a[0].value;
+        const std::string s = textArgumentValue(a[0]);
         size_t total = utf8CharCount(s);
         const uint64_t magnitude = n < 0
             ? uint64_t{0} - static_cast<uint64_t>(n)
@@ -5425,9 +5429,10 @@ void ExprEvaluator::registerBuiltins() {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
         int64_t n = a[1].asInt();
         if (n <= 0) return ExprValue("text", "", false);
+        const std::string input = textArgumentValue(a[0]);
         std::string s;
-        s.reserve(a[0].value.size() * static_cast<size_t>(n));
-        for (int64_t i = 0; i < n; ++i) s += a[0].value;
+        s.reserve(input.size() * static_cast<size_t>(n));
+        for (int64_t i = 0; i < n; ++i) s += input;
         return ExprValue("text", s, false);
     };
     functions_["reverse"] = [](const std::vector<ExprValue>& a) {
@@ -5445,9 +5450,10 @@ void ExprEvaluator::registerBuiltins() {
     };
     functions_["ascii"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
-        if (a[0].value.empty()) return ExprValue("integer", "0", false);
+        const std::string input = textArgumentValue(a[0]);
+        if (input.empty()) return ExprValue("integer", "0", false);
         uint32_t codePoint = 0;
-        if (!decodeFirstUtf8CodePoint(a[0].value, codePoint))
+        if (!decodeFirstUtf8CodePoint(input, codePoint))
             return ExprValue("integer", "", true);
         return ExprValue(
             "integer", std::to_string(codePoint), false);
