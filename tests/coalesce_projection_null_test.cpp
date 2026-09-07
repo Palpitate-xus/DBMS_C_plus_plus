@@ -42,13 +42,16 @@ int main() {
     schema.append(dbms::makeIntColumn("id", false, 4, true));
     schema.append(dbms::makeTextColumn("null_text", true));
     schema.append(dbms::makeTextColumn("empty_text", false));
+    schema.append(dbms::makeTextColumn("literal_null", false));
     schema.append(dbms::makeTextColumn("value_text", false));
     assert(g_engine.createTable(database, schema) == dbms::DBStatus::OK);
-    assert(g_engine.insert(database, "coalesce_values",
-                           {{"id", "1"},
-                            {"null_text", "NULL"},
-                            {"empty_text", ""},
-                            {"value_text", "value"}}) ==
+    dbms::StorageEngine::SqlRow row;
+    row["id"] = "1";
+    row["null_text"] = std::nullopt;
+    row["empty_text"] = "";
+    row["literal_null"] = "NULL";
+    row["value_text"] = "value";
+    assert(g_engine.insertRow(database, "coalesce_values", row) ==
            dbms::DBStatus::OK);
 
     assert(projectCoalesce(database, {"null_text", "'fallback'"}) ==
@@ -61,6 +64,16 @@ int main() {
                .empty());
     assert(projectCoalesce(database, {"empty_text", "'fallback'"})
                .empty());
+    assert(projectCoalesce(database, {"literal_null", "'fallback'"}) ==
+           "NULL");
+    assert(projectCoalesce(database, {"upper('null')", "'fallback'"}) ==
+           "NULL");
+    assert(projectCoalesce(
+               database,
+               {"nullif(value_text,value_text)",
+                "upper('null')", "'fallback'"}) == "NULL");
+    assert(projectCoalesce(
+               database, {"'first'", "1 / 0"}) == "first");
     assert(projectCoalesce(database, {"null_text", "value_text"}) ==
            "value");
     assert(projectCoalesce(

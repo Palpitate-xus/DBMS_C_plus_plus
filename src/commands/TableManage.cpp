@@ -29444,28 +29444,37 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         return (d.year == 0) ? "NULL" : str(d);
     }
     if (expr.funcName == "coalesce") {
-        for (const auto& arg : expr.funcArgs) {
-            std::string v = getVal(arg);
-            // Skip only SQL NULL args; an empty string is a real value and is
-            // returned as-is.
-            bool directColumn = false;
-            for (size_t i = 0; i < tbl.len; ++i) {
-                if (tbl.cols[i].dataName == arg) {
-                    directColumn = true;
-                    break;
-                }
-            }
-            const bool quoted = arg.size() >= 2 &&
-                ((arg.front() == '\'' && arg.back() == '\'') ||
-                 (arg.front() == '"' && arg.back() == '"'));
-            const bool isNull = directColumn
-                ? scalarArgColumnIsNull(
-                      arg, rowBuffer, tbl, engine, dbname)
-                : (!quoted && v == "NULL");
-            if (isNull) continue;
-            return v;
+        std::map<std::string, std::string> rowContext;
+        std::map<std::string, std::string> typeHints;
+        std::set<std::string> nullColumns;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            bool valueIsNull = false;
+            const std::string value = engine && !dbname.empty()
+                ? engine->extractColumnValue(
+                      rowBuffer, tbl, i, dbname, true, &valueIsNull)
+                : StorageEngine::extractColumnValueStatic(
+                      rowBuffer, tbl, i);
+            rowContext[tbl.cols[i].dataName] = value;
+            typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+            if (valueIsNull || (!engine && value.empty()))
+                nullColumns.insert(tbl.cols[i].dataName);
         }
-        return "NULL";
+        std::string expression = "coalesce(";
+        for (size_t i = 0; i < expr.funcArgs.size(); ++i) {
+            if (i != 0) expression += ",";
+            expression += expr.funcArgs[i];
+        }
+        expression += ")";
+        const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
+            expression, rowContext, nullColumns, typeHints, dbname,
+            expr.sessionUser);
+        if (!evaluated.ok) {
+            throw std::runtime_error(
+                evaluated.error.empty()
+                    ? "failed to evaluate coalesce"
+                    : evaluated.error);
+        }
+        return evaluated.isNull ? "NULL" : evaluated.value;
     }
     if (expr.funcName == "nullif" && expr.funcArgs.size() >= 2) {
         std::map<std::string, std::string> rowContext;
