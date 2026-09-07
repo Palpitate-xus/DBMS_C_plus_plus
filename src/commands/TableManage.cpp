@@ -30367,6 +30367,11 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             if (!trim(cur).empty()) subSelectCols.insert(trim(cur));
         }
         auto rows = engine->query(dbname, subTname, subConds, subSelectCols);
+        if (rows.size() > 1) {
+            throw std::runtime_error(
+                "more than one row returned by a subquery used as an "
+                "expression (SQLSTATE 21000)");
+        }
         if (rows.empty()) return "";
         std::string firstRow = trim(rows[0]);
         size_t sp = firstRow.find(' ');
