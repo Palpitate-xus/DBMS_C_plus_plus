@@ -448,7 +448,6 @@ Numeric Numeric::operator/(const Numeric& rhs) const {
             return infinity(sign_ * rhs.sign_);
         }
         // rhs is infinite, this is finite
-        if (sign() == 0) return nan();
         return Numeric(0);
     }
     if (rhs.sign() == 0) {

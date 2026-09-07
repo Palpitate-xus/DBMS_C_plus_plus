@@ -435,6 +435,10 @@ static void test_int_math() {
     assert(callFn(eval, "div",
                   {I(std::numeric_limits<int64_t>::min()), I(-1)}).value ==
            "9223372036854775808");
+    assert(callFn(eval, "div", {N("2"), N("Infinity")}).value == "0");
+    assert(callFn(eval, "div", {N("0"), N("Infinity")}).value == "0");
+    assert(callFn(eval, "div", {N("Infinity"), N("Infinity")}).value ==
+           "NaN");
     expectDivisionByZero("div", {I(9), I(0)});
     expectDivisionByZero("mod", {I(9), I(0)});
     expectDivisionByZero(

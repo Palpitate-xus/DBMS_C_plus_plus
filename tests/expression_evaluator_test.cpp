@@ -809,6 +809,22 @@ static void test_numeric() {
         assert(!v.isNull && v.value == "1.5");
     }
 
+    // Numeric special values participate in division; an infinite divisor
+    // is not a zero divisor.
+    {
+        auto bin = std::make_unique<BinaryOpExpr>();
+        bin->op = "/";
+        bin->left = makeNumLit("2");
+        bin->right = makeNumLit("Infinity");
+        ExprValue v = eval.eval(bin.get(), {});
+        assert(!v.isNull && v.value == "0");
+
+        bin->left = makeNumLit("Infinity");
+        bin->right = makeNumLit("Infinity");
+        v = eval.eval(bin.get(), {});
+        assert(!v.isNull && v.value == "NaN");
+    }
+
     // Cast to numeric.
     {
         auto cast = std::make_unique<CastExpr>();

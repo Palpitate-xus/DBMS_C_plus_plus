@@ -93,6 +93,10 @@ static void test_division() {
     assert((Numeric("-15") / Numeric("3")).toString() == "-5.0000000000000000");
     assert((Numeric("7.0") / Numeric("7")).toString() == "1.00000000000000000000");
     assert((Numeric("7") / Numeric("1")).toString() == "7.0000000000000000");
+    assert((Numeric("2") / Numeric("Infinity")).toString() == "0");
+    assert((Numeric("0") / Numeric("Infinity")).toString() == "0");
+    assert((Numeric("Infinity") / Numeric("2")).toString() == "Infinity");
+    assert((Numeric("Infinity") / Numeric("Infinity")).toString() == "NaN");
     std::cout << "[NUMERIC] division OK" << std::endl;
 }
 

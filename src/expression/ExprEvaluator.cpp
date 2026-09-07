@@ -1629,7 +1629,7 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
             else if (op == "-") res = *nl - *nr;
             else if (op == "*") res = *nl * *nr;
             else if (op == "/") {
-                if (nr->sign() == 0)
+                if (nr->isFinite() && nr->sign() == 0)
                     throw std::runtime_error("division by zero (SQLSTATE 22012)");
                 res = *nl / *nr;
             }
@@ -1691,7 +1691,7 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
             else if (op == "-") res = *nl2 - *nr2;
             else if (op == "*") res = *nl2 * *nr2;
             else if (op == "/") {
-                if (nr2->sign() == 0)
+                if (nr2->isFinite() && nr2->sign() == 0)
                     throw std::runtime_error("division by zero (SQLSTATE 22012)");
                 res = *nl2 / *nr2;
             } else return ExprValue("numeric", "", true);
@@ -6009,9 +6009,9 @@ void ExprEvaluator::registerBuiltins() {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("numeric", "", true);
         const auto dividend = tryParseNumeric(a[0].value);
         const auto divisor = tryParseNumeric(a[1].value);
-        if (!dividend || !divisor || !divisor->isFinite())
+        if (!dividend || !divisor)
             return ExprValue("numeric", "", true);
-        if (divisor->sign() == 0)
+        if (divisor->isFinite() && divisor->sign() == 0)
             throw std::runtime_error(
                 "division by zero (SQLSTATE 22012)");
 
