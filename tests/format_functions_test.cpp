@@ -84,9 +84,20 @@ static void test_nvl_ifnull() {
     std::cout << "[FORMATFN] nvl/ifnull OK" << std::endl;
 }
 
+static void test_quote_nullable() {
+    dbms::ExprEvaluator eval;
+    assert(callFn(eval, "quote_nullable", {NULLV()}).value == "NULL");
+    assert(!callFn(eval, "quote_nullable", {NULLV()}).isNull);
+    assert(callFn(eval, "quote_nullable", {S("O'Brien")}).value ==
+           "'O''Brien'");
+
+    std::cout << "[FORMATFN] quote_nullable OK" << std::endl;
+}
+
 int main() {
     test_format();
     test_nvl_ifnull();
+    test_quote_nullable();
     std::cout << "[FORMATFN] all passed" << std::endl;
     return 0;
 }

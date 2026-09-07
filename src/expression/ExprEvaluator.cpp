@@ -6191,6 +6191,14 @@ void ExprEvaluator::registerBuiltins() {
         return ExprValue(
             "text", sqlQuoteLiteral(textArgumentValue(a[0])), false);
     };
+    // quote_nullable — quote non-NULL values like quote_literal, but render a
+    // SQL NULL as the non-NULL text "NULL" for safe dynamic SQL assembly.
+    functions_["quote_nullable"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull)
+            return ExprValue("text", "NULL", false);
+        return ExprValue(
+            "text", sqlQuoteLiteral(textArgumentValue(a[0])), false);
+    };
     // quote_ident — double-quote an identifier when it is not a simple lower-case name
     functions_["quote_ident"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
