@@ -79,10 +79,27 @@ static void test_missing_and_null() {
     std::cout << "[JSONPATH] missing/null OK" << std::endl;
 }
 
+static void test_string_escapes() {
+    dbms::ExprEvaluator eval;
+    const std::string doc =
+        "{\"escaped\":\"line\\nbreak\",\"unicode\":\"\\u732b\","
+        "\"music\":\"\\ud834\\udd1e\",\"line\\nbreak\":7}";
+    assert(callFn(eval, "json_extract_path_text",
+                  {J(doc), K("escaped")}).value == "line\nbreak");
+    assert(callFn(eval, "json_extract_path_text",
+                  {J(doc), K("unicode")}).value == "猫");
+    assert(callFn(eval, "json_extract_path_text",
+                  {J(doc), K("music")}).value == "𝄞");
+    assert(callFn(eval, "json_extract_path_text",
+                  {J(doc), K("line\nbreak")}).value == "7");
+    std::cout << "[JSONPATH] string escapes OK" << std::endl;
+}
+
 int main() {
     test_object_path();
     test_array_index();
     test_missing_and_null();
+    test_string_escapes();
     std::cout << "[JSONPATH] all passed" << std::endl;
     return 0;
 }

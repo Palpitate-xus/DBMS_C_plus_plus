@@ -824,6 +824,7 @@ static std::string trimStr(const std::string& s);
 static bool jsonStep(const std::string& cur, const std::string& key, std::string& out);
 static bool jsonTopLevelSplit(const std::string& s, char open, char close,
                               std::vector<std::string>& out);
+static bool jsonUnquoteString(const std::string& token, std::string& out);
 
 // Split a SQL array literal '{e1,e2,...}' (or a bare non-array scalar,
 // which yields one element) into its element texts. Handles nested arrays
@@ -1872,10 +1873,8 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         if (t == "null" || t.empty()) return ExprValue("text", "", true);
         if (t.size() >= 2 && t.front() == '"' && t.back() == '"') {
             std::string o;
-            for (size_t i = 1; i + 1 < t.size(); ++i) {
-                if (t[i] == '\\' && i + 2 < t.size()) o.push_back(t[++i]);
-                else o.push_back(t[i]);
-            }
+            if (!jsonUnquoteString(t, o))
+                return ExprValue("text", "", true);
             return ExprValue("text", o, false);
         }
         return ExprValue("text", t, false);
@@ -3631,6 +3630,75 @@ static std::string jsonQuoteStr(const std::string& v) {
     return out;
 }
 
+static bool jsonUnquoteString(const std::string& token, std::string& out) {
+    const std::string text = trimStr(token);
+    if (text.size() < 2 || text.front() != '"' || text.back() != '"')
+        return false;
+
+    auto parseHexUnit = [&](size_t begin, uint32_t& value) {
+        if (begin + 4 > text.size() - 1) return false;
+        value = 0;
+        for (size_t i = begin; i < begin + 4; ++i) {
+            const char c = text[i];
+            uint32_t digit = 0;
+            if (c >= '0' && c <= '9') digit = static_cast<uint32_t>(c - '0');
+            else if (c >= 'a' && c <= 'f') digit = static_cast<uint32_t>(c - 'a' + 10);
+            else if (c >= 'A' && c <= 'F') digit = static_cast<uint32_t>(c - 'A' + 10);
+            else return false;
+            value = (value << 4) | digit;
+        }
+        return true;
+    };
+
+    out.clear();
+    for (size_t i = 1; i + 1 < text.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(text[i]);
+        if (c != '\\') {
+            if (c < 0x20) return false;
+            out.push_back(static_cast<char>(c));
+            continue;
+        }
+        if (++i >= text.size() - 1) return false;
+        switch (text[i]) {
+            case '"': out.push_back('"'); break;
+            case '\\': out.push_back('\\'); break;
+            case '/': out.push_back('/'); break;
+            case 'b': out.push_back('\b'); break;
+            case 'f': out.push_back('\f'); break;
+            case 'n': out.push_back('\n'); break;
+            case 'r': out.push_back('\r'); break;
+            case 't': out.push_back('\t'); break;
+            case 'u': {
+                uint32_t codePoint = 0;
+                if (!parseHexUnit(i + 1, codePoint)) return false;
+                i += 4;
+                if (codePoint >= 0xd800 && codePoint <= 0xdbff) {
+                    if (i + 6 >= text.size() || text[i + 1] != '\\' ||
+                        text[i + 2] != 'u') {
+                        return false;
+                    }
+                    uint32_t low = 0;
+                    if (!parseHexUnit(i + 3, low) || low < 0xdc00 ||
+                        low > 0xdfff) {
+                        return false;
+                    }
+                    codePoint = 0x10000 + ((codePoint - 0xd800) << 10) +
+                                (low - 0xdc00);
+                    i += 6;
+                } else if (codePoint >= 0xdc00 && codePoint <= 0xdfff) {
+                    return false;
+                }
+                const std::string encoded = encodeUtf8CodePoint(codePoint);
+                if (encoded.empty()) return false;
+                out += encoded;
+                break;
+            }
+            default: return false;
+        }
+    }
+    return true;
+}
+
 // Render an ExprValue as a compact JSON value.
 static std::string toJsonValue(const ExprValue& v) {
     if (v.isNull) return "null";
@@ -3669,8 +3737,11 @@ static bool jsonStep(const std::string& cur, const std::string& key, std::string
             }
             if (colon == std::string::npos) continue;
             std::string k = trimStr(m.substr(0, colon));
-            std::string ku = (k.size() >= 2 && k.front() == '"' && k.back() == '"')
-                                 ? k.substr(1, k.size() - 2) : k;
+            std::string ku = k;
+            if (k.size() >= 2 && k.front() == '"' && k.back() == '"' &&
+                !jsonUnquoteString(k, ku)) {
+                continue;
+            }
             if (ku == key) { out = trimStr(m.substr(colon + 1)); return true; }
         }
         return false;
@@ -6371,10 +6442,8 @@ void ExprEvaluator::registerBuiltins() {
         if (t == "null") return ExprValue("text", "", true);
         if (t.size() >= 2 && t.front() == '"' && t.back() == '"') {
             std::string o;
-            for (size_t i = 1; i + 1 < t.size(); ++i) {
-                if (t[i] == '\\' && i + 2 < t.size()) o.push_back(t[++i]);
-                else o.push_back(t[i]);
-            }
+            if (!jsonUnquoteString(t, o))
+                return ExprValue("text", "", true);
             return ExprValue("text", o, false);
         }
         return ExprValue("text", t, false);

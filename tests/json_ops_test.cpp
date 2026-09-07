@@ -46,6 +46,9 @@ static void test_arrow() {
     auto n = eval(kDoc + " ->> 'n'");
     assert(n.ok && n.value == "42");
 
+    auto escaped = eval("'{\"v\":\"line\\nbreak\"}' ->> 'v'");
+    assert(escaped.ok && escaped.value == "line\nbreak");
+
     // missing key -> SQL NULL for both forms
     auto m1 = eval(kDoc + " -> 'nope'");
     assert(m1.ok && m1.isNull);
