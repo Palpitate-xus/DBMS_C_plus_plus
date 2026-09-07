@@ -63,6 +63,10 @@ int main() {
                .empty());
     assert(projectCoalesce(database, {"null_text", "value_text"}) ==
            "value");
+    assert(projectCoalesce(
+               database,
+               {"nullif(value_text,value_text)", "'fallback'"}) ==
+           "fallback");
 
     cleanupTestDb(testName);
     finalCleanupTestData();

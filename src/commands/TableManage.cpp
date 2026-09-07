@@ -29243,9 +29243,32 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         return "NULL";
     }
     if (expr.funcName == "nullif" && expr.funcArgs.size() >= 2) {
-        std::string v1 = getVal(expr.funcArgs[0]);
-        std::string v2 = getVal(expr.funcArgs[1]);
-        return (v1 == v2) ? "" : v1;
+        std::map<std::string, std::string> rowContext;
+        std::map<std::string, std::string> typeHints;
+        std::set<std::string> nullColumns;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            bool valueIsNull = false;
+            const std::string value = engine && !dbname.empty()
+                ? engine->extractColumnValue(
+                      rowBuffer, tbl, i, dbname, true, &valueIsNull)
+                : StorageEngine::extractColumnValueStatic(
+                      rowBuffer, tbl, i);
+            rowContext[tbl.cols[i].dataName] = value;
+            typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+            if (valueIsNull || (!engine && value.empty()))
+                nullColumns.insert(tbl.cols[i].dataName);
+        }
+        const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
+            "nullif(" + expr.funcArgs[0] + "," +
+                expr.funcArgs[1] + ")",
+            rowContext, nullColumns, typeHints, dbname,
+            expr.sessionUser);
+        if (!evaluated.ok) {
+            throw std::runtime_error(
+                evaluated.error.empty() ? "failed to evaluate nullif"
+                                        : evaluated.error);
+        }
+        return evaluated.isNull ? "NULL" : evaluated.value;
     }
     if (expr.funcName == "replace" && expr.funcArgs.size() >= 3) {
         std::string str = getVal(expr.funcArgs[0]);
