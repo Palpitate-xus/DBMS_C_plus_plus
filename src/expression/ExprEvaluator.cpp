@@ -6239,17 +6239,37 @@ void ExprEvaluator::registerBuiltins() {
         size_t argi = 1;
         std::string out;
         for (size_t i = 0; i < fmt.size(); ++i) {
-            if (fmt[i] != '%' || i + 1 >= fmt.size()) { out.push_back(fmt[i]); continue; }
+            if (fmt[i] != '%') {
+                out.push_back(fmt[i]);
+                continue;
+            }
+            if (i + 1 >= fmt.size()) {
+                throw std::runtime_error(
+                    "unterminated format() type specifier (SQLSTATE 22023)");
+            }
             char spec = fmt[i + 1];
             if (spec == '%') { out.push_back('%'); ++i; continue; }
             if (spec == 's' || spec == 'I' || spec == 'L') {
                 ++i;
-                ExprValue arg = (argi < a.size()) ? a[argi++] : ExprValue("text", "", true);
+                if (argi >= a.size()) {
+                    throw std::runtime_error(
+                        "too few arguments for format() (SQLSTATE 22023)");
+                }
+                const ExprValue& arg = a[argi++];
                 if (spec == 's') out += arg.isNull ? "" : arg.value;
-                else if (spec == 'I') out += sqlQuoteIdent(arg.isNull ? "" : arg.value);
+                else if (spec == 'I') {
+                    if (arg.isNull) {
+                        throw std::runtime_error(
+                            "null values cannot be formatted as an SQL "
+                            "identifier (SQLSTATE 22004)");
+                    }
+                    out += sqlQuoteIdent(arg.value);
+                }
                 else /* L */ out += arg.isNull ? "NULL" : sqlQuoteLiteral(arg.value);
             } else {
-                out.push_back('%');  // unknown spec: keep the percent literally
+                throw std::runtime_error(
+                    "unrecognized format() type specifier \"" +
+                    std::string(1, spec) + "\" (SQLSTATE 22023)");
             }
         }
         return ExprValue("text", out, false);

@@ -279,6 +279,31 @@ static void test_overlay_quote() {
     std::cout << "[STRFN] overlay/quote OK" << std::endl;
 }
 
+static void test_format_validation() {
+    dbms::ExprEvaluator eval;
+    const dbms::ExprValue nullArg("text", "", true);
+    const auto expectError = [&](const std::vector<dbms::ExprValue>& args,
+                                 const std::string& sqlstate) {
+        bool rejected = false;
+        try {
+            (void)callFn(eval, "format", args);
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("SQLSTATE " + sqlstate) !=
+                       std::string::npos;
+        }
+        assert(rejected);
+    };
+
+    expectError({S("%s %s"), S("one")}, "22023");
+    expectError({S("%I"), nullArg}, "22004");
+    expectError({S("%q"), S("value")}, "22023");
+    expectError({S("trailing %")}, "22023");
+    assert(callFn(eval, "format", {S("%s|%L"), nullArg, nullArg}).value ==
+           "|NULL");
+
+    std::cout << "[STRFN] format validation OK" << std::endl;
+}
+
 static void test_null_propagation() {
     dbms::ExprEvaluator eval;
     dbms::ExprValue nullArg("text", "", true);
@@ -305,6 +330,7 @@ int main() {
     test_bpchar_text_inputs();
     test_concat_ws_starts_translate();
     test_overlay_quote();
+    test_format_validation();
     test_null_propagation();
     std::cout << "[STRFN] all passed" << std::endl;
     return 0;
