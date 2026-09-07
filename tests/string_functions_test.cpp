@@ -268,6 +268,11 @@ static void test_overlay_quote() {
     assert(invalidStartRejected);
     assert(callFn(eval, "quote_literal", {S("O'Brien")}).value == "'O''Brien'");
     assert(callFn(eval, "quote_ident", {S("simple")}).value == "simple");
+    assert(callFn(eval, "quote_ident", {S("select")}).value == "\"select\"");
+    assert(callFn(eval, "quote_ident", {S("user")}).value == "\"user\"");
+    assert(callFn(eval, "quote_ident", {S("between")}).value ==
+           "\"between\"");
+    assert(callFn(eval, "quote_ident", {S("text")}).value == "text");
     assert(callFn(eval, "quote_ident", {S("Mixed Case")}).value == "\"Mixed Case\"");
     assert(callFn(eval, "quote_literal", {C("ab  ")}).value == "'ab'");
     assert(callFn(eval, "quote_ident", {C("ab  ")}).value == "ab");

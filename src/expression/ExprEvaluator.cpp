@@ -4106,12 +4106,50 @@ static bool typeIsRange(const std::string& typeName) {
 // SQL identifier quoting (quote_ident / format %I): only quote when not a simple
 // lower-case identifier; double embedded quotes.
 static std::string sqlQuoteIdent(const std::string& s) {
+    // quote_ident leaves only unreserved keywords bare. PostgreSQL also
+    // quotes column-name and type/function-name keywords because their use is
+    // context-sensitive and would not be safe in arbitrary generated SQL.
+    static const std::set<std::string> keywordsRequiringQuotes = {
+        "all", "analyse", "analyze", "and", "any", "array", "as",
+        "asc", "asymmetric", "authorization", "between", "bigint",
+        "binary", "bit", "boolean", "both", "case", "cast", "char",
+        "character", "check", "coalesce", "collate", "collation",
+        "column", "concurrently", "constraint", "create", "cross",
+        "current_catalog", "current_date", "current_role",
+        "current_schema", "current_time", "current_timestamp",
+        "current_user", "dec", "decimal", "default", "deferrable",
+        "desc", "distinct", "do", "else", "end", "except", "exists",
+        "extract", "false", "fetch", "float", "for", "foreign",
+        "freeze", "from", "full", "grant", "greatest", "group",
+        "grouping", "having", "ilike", "in", "initially", "inner",
+        "inout", "int", "integer", "intersect", "interval", "into",
+        "is", "isnull", "join", "json", "json_array",
+        "json_arrayagg", "json_exists", "json_object",
+        "json_objectagg", "json_query", "json_scalar",
+        "json_serialize", "json_table", "json_value", "lateral",
+        "leading", "least", "left", "like", "limit", "localtime",
+        "localtimestamp", "merge_action", "national", "natural",
+        "nchar", "none", "normalize", "not", "notnull", "null",
+        "nullif", "numeric", "offset", "on", "only", "or", "order",
+        "out", "outer", "overlaps", "overlay", "placing", "position",
+        "precision", "primary", "real", "references", "returning",
+        "right", "row", "select", "session_user", "setof", "similar",
+        "smallint", "some", "substring", "symmetric", "system_user",
+        "table", "tablesample", "then", "time", "timestamp", "to",
+        "trailing", "treat", "trim", "true", "union", "unique",
+        "user", "using", "values", "varchar", "variadic", "verbose",
+        "when", "where", "window", "with", "xmlattributes",
+        "xmlconcat", "xmlelement", "xmlexists", "xmlforest",
+        "xmlnamespaces", "xmlparse", "xmlpi", "xmlroot",
+        "xmlserialize", "xmltable"
+    };
     bool simple = !s.empty();
     for (size_t i = 0; i < s.size() && simple; ++i) {
         unsigned char c = static_cast<unsigned char>(s[i]);
         bool ok = (c == '_') || std::islower(c) || (std::isdigit(c) && i > 0);
         if (!ok) simple = false;
     }
+    if (simple && keywordsRequiringQuotes.count(s) != 0) simple = false;
     if (simple) return s;
     std::string out = "\"";
     for (char c : s) { if (c == '"') out += "\"\""; else out.push_back(c); }
