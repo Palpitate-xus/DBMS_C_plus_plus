@@ -6182,9 +6182,18 @@ void ExprEvaluator::registerBuiltins() {
         bool hasNullStr = (a.size() >= 3 && !a[2].isNull);
         std::string nullStr = hasNullStr ? a[2].value : "";
         std::vector<std::string> parts;
-        if (a[1].isNull) {
-            // NULL delimiter: split into individual characters.
-            for (char c : s) parts.push_back(std::string(1, c));
+        if (s.empty()) {
+            // PostgreSQL represents an empty input as an empty array, not an
+            // array containing one empty string.
+        } else if (a[1].isNull) {
+            // NULL delimiter: split into individual characters, preserving
+            // complete UTF-8 code points.
+            const size_t characters = utf8CharCount(s);
+            for (size_t i = 0; i < characters; ++i) {
+                const size_t begin = utf8ByteAt(s, i);
+                const size_t end = utf8ByteAt(s, i + 1);
+                parts.push_back(s.substr(begin, end - begin));
+            }
         } else {
             const std::string& delim = a[1].value;
             if (delim.empty()) { parts.push_back(s); }

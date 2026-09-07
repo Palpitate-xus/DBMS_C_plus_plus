@@ -141,6 +141,12 @@ static void test_join_split() {
 
     assert(callFn(eval, "string_to_array", {S("a,b,c"), S(",")}).value == "{a,b,c}");
     assert(callFn(eval, "string_to_array", {S("x"), S(",")}).value == "{x}");
+    assert(callFn(eval, "string_to_array", {S(""), S(",")}).value == "{}");
+    const dbms::ExprValue nullDelimiter("text", "", true);
+    assert(callFn(eval, "string_to_array",
+                  {S("猫狗"), nullDelimiter}).value == "{猫,狗}");
+    assert(callFn(eval, "string_to_array",
+                  {S(""), nullDelimiter}).value == "{}");
     // null_string maps a matching field to NULL.
     assert(callFn(eval, "string_to_array", {S("1,*,3"), S(","), S("*")}).value == "{1,NULL,3}");
     // Round-trip a value that needs quoting.
