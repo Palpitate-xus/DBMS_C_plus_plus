@@ -9,6 +9,7 @@
 #include <set>
 #include <string>
 #include <sys/file.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace dbms {
@@ -76,6 +77,12 @@ void CommitLog::loadSegment(uint64_t segNo) const {
         std::error_code ec;
         seg.fileTime = std::filesystem::last_write_time(path, ec);
         seg.fileTimeValid = !ec;
+        struct stat status {};
+        if (::stat(path.c_str(), &status) == 0) {
+            seg.fileDevice = static_cast<uint64_t>(status.st_dev);
+            seg.fileInode = static_cast<uint64_t>(status.st_ino);
+            seg.fileIdentityValid = true;
+        }
     }
 
     segments_[segNo] = std::move(seg);
@@ -88,15 +95,27 @@ void CommitLog::refreshSegmentIfChanged(uint64_t segNo) const {
     const std::string path = segmentPath(segNo);
     std::error_code ec;
     if (!std::filesystem::exists(path, ec) || ec) {
-        if (it->second.fileTimeValid) {
+        if (it->second.fileTimeValid || it->second.fileIdentityValid) {
             it->second.data.assign(kSegmentFileSize, 0);
             it->second.fileTimeValid = false;
+            it->second.fileIdentityValid = false;
         }
         return;
     }
 
     const auto stamp = std::filesystem::last_write_time(path, ec);
-    if (ec || (it->second.fileTimeValid && it->second.fileTime == stamp)) return;
+    if (ec) return;
+    struct stat status {};
+    const bool identityValid = ::stat(path.c_str(), &status) == 0;
+    const uint64_t device = identityValid
+        ? static_cast<uint64_t>(status.st_dev) : 0;
+    const uint64_t inode = identityValid
+        ? static_cast<uint64_t>(status.st_ino) : 0;
+    if (it->second.fileTimeValid && it->second.fileTime == stamp &&
+        it->second.fileIdentityValid && identityValid &&
+        it->second.fileDevice == device && it->second.fileInode == inode) {
+        return;
+    }
 
     std::vector<uint8_t> data(kSegmentFileSize, 0);
     std::ifstream ifs(path, std::ios::binary);
@@ -105,6 +124,9 @@ void CommitLog::refreshSegmentIfChanged(uint64_t segNo) const {
     it->second.data = std::move(data);
     it->second.fileTime = stamp;
     it->second.fileTimeValid = true;
+    it->second.fileDevice = device;
+    it->second.fileInode = inode;
+    it->second.fileIdentityValid = identityValid;
 }
 
 void CommitLog::ensureSegment(uint64_t segNo) const {
@@ -213,6 +235,14 @@ bool CommitLog::saveSegment(uint64_t segNo, int heldLockFd) {
     std::error_code ec;
     it->second.fileTime = std::filesystem::last_write_time(path, ec);
     it->second.fileTimeValid = !ec;
+    struct stat status {};
+    if (::stat(path.c_str(), &status) == 0) {
+        it->second.fileDevice = static_cast<uint64_t>(status.st_dev);
+        it->second.fileInode = static_cast<uint64_t>(status.st_ino);
+        it->second.fileIdentityValid = true;
+    } else {
+        it->second.fileIdentityValid = false;
+    }
     it->second.dirty = false;
     return true;
 }
@@ -342,7 +372,10 @@ void CommitLog::truncate(TxnId oldestXid) {
             // The unlink happened but directory durability is uncertain. Keep
             // the in-memory image authoritative for this backend.
             auto it = segments_.find(segNo);
-            if (it != segments_.end()) it->second.fileTimeValid = false;
+            if (it != segments_.end()) {
+                it->second.fileTimeValid = false;
+                it->second.fileIdentityValid = false;
+            }
         }
     }
 }

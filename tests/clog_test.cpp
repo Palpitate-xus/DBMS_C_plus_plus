@@ -83,6 +83,35 @@ int main() {
         std::cout << "[CLOG TEST] cross-backend refresh OK\n";
     }
 
+    // Modification timestamps alone are not a reliable replacement token:
+    // filesystems may expose a coarse timestamp, and an atomic rename can
+    // therefore install a different inode with the same mtime.
+    {
+        const std::string identityDir = "clog_identity_refresh_dir";
+        std::filesystem::remove_all(identityDir);
+        std::filesystem::create_directories(identityDir);
+        const auto segment =
+            std::filesystem::path(identityDir) / "pg_xact" / "0";
+        {
+            CommitLog seed(identityDir);
+            seed.setStatus(250, CommitLog::Status::Aborted);
+            assert(seed.flush());
+        }
+
+        CommitLog observer(identityDir);
+        assert(observer.getStatus(251) == CommitLog::Status::InProgress);
+        const auto originalTime = std::filesystem::last_write_time(segment);
+
+        CommitLog writer(identityDir);
+        writer.setStatus(251, CommitLog::Status::Committed);
+        assert(writer.flush());
+        std::filesystem::last_write_time(segment, originalTime);
+
+        assert(observer.getStatus(251) == CommitLog::Status::Committed);
+        std::filesystem::remove_all(identityDir);
+        std::cout << "[CLOG TEST] replacement identity refresh OK\n";
+    }
+
     // Truncation removes only segments that are safely persisted, while
     // retaining a segment if its durable save cannot acquire the file lock.
     {
