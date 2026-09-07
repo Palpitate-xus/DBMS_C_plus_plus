@@ -17,6 +17,7 @@
 | 188 | 标量 `SELECT *` 未展开，单列表返回错误值，多列空表也未报错 | 按可见关系名展开星号，在扫描前校验列数，并保留值和 NULL 状态 | 普通 / 限定 / 别名星号、外层引用及遮蔽、空表、多列拒绝、多行拒绝、解锁与既有标量回归通过 |
 | 189 | 带别名的自相关 EXISTS 覆盖外层限定列及 NULL 标记，EXISTS / NOT EXISTS 判断错误 | 内层限定列只绑定可见别名，保留外层值及 NULL 状态 | 自相关匹配、NOT EXISTS、内外层 NULL、裸列遮蔽、既有 EXISTS、标量自相关及关系锁回归通过 |
 | 190 | EXISTS 命中后仍计算后续行的谓词，可触发无关的除零错误 | 命中后跳过后续表达式求值；底层物理扫描仍继续 | EXISTS / NOT EXISTS 首行命中、无命中、命中前除零及解锁测试通过；缺表、TOAST、关联和关系锁回归通过 |
+| 191 | 工作区的集合聚合实现绕过 FILTER / 输入排序，并混淆 NULL、空字符串和数组转义 | 串行 / 并行共用 AST 参数求值、类型化排序、NULL / FILTER / DISTINCT 处理及数组编码；错误通过算子返回 | 集合聚合专项（含 300 行并行、空输入）、parallel_exec、Volcano SELECT 回归通过 |
 
 ## 后续复查
 
@@ -26,4 +27,4 @@
 | --- | --- |
 | 投影子查询的 SQL 子句解析 | 验证 ORDER BY / LIMIT、引号内关键字和多种空白符组合，补充回归后逐项处理 |
 
-用户原有的 `src/executor/ExecutionPlan.cpp`、`src/main.cpp` 和 `tests/compat/cases/grouping_sets_expr.sql` 改动未纳入这些提交。
+第 178–190 项未纳入原有工作区改动。用户随后要求完成工作区和本清单，现按 [收尾计划](review-closeout-plan.md) 继续：集合聚合改动已整理，临时 `DSH_DBG156` 调试输出已移除，分组表达式 SQL 正在补充验证。

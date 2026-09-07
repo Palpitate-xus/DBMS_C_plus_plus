@@ -6,6 +6,8 @@
 #include "process/RuntimeStats.h"
 #include "types/numeric.h"
 #include "expression/expr_helper.h"
+#include "expression/ExprEvaluator.h"
+#include "parser/parser.h"
 
 #include <algorithm>
 #include <atomic>
@@ -2388,6 +2390,137 @@ bool HashJoinOp::open() {
 }
 
 // ========================================================================
+// Collection aggregates share one implementation across serial and parallel
+// grouping. Keep values and NULL bits separate all the way to finalization.
+// ========================================================================
+template <typename InputRow>
+static std::string collectionAggregate(
+    const TableSchema& table, const std::vector<InputRow>& input,
+    const std::vector<size_t>& rowIds, const StorageEngine::AggItem& item,
+    const std::string& function) {
+    SQLParser parser;
+    auto parsed = parser.parse("SELECT " + function + "(" + item.arg + ")");
+    const auto* select = dynamic_cast<const SelectStmt*>(parsed.stmt.get());
+    const auto* call = select && select->selectList.size() == 1
+        ? dynamic_cast<const FunctionCallExpr*>(select->selectList[0].expr.get())
+        : nullptr;
+    if (!parsed.success || !call) {
+        throw std::runtime_error("invalid collection aggregate (SQLSTATE 42601)");
+    }
+    const bool array = function == "array_agg";
+    if (call->args.size() != (array ? 1u : 2u)) {
+        throw std::runtime_error("invalid aggregate argument count (SQLSTATE 42883)");
+    }
+    const std::string orderSql = item.orderBy.empty() ? call->orderBy : item.orderBy;
+    auto parsedOrder = parser.parse("SELECT 1" +
+        (orderSql.empty() ? std::string{} : " ORDER BY " + orderSql));
+    const auto* order = dynamic_cast<const SelectStmt*>(parsedOrder.stmt.get());
+    if (!parsedOrder.success || !order) {
+        throw std::runtime_error("invalid aggregate ORDER BY (SQLSTATE 42601)");
+    }
+    ExprEvaluator evaluator;
+    const auto filters = StorageEngine::parseConditions(item.filterConds);
+    struct Entry {
+        std::vector<ExprValue> args;
+        std::vector<ExprValue> keys;
+    };
+    std::vector<Entry> entries;
+    for (size_t rowId : rowIds) {
+        const auto& row = input[rowId];
+        bool passes = true;
+        for (const auto& filter : filters) {
+            size_t column = 0;
+            while (column < table.len && table.cols[column].dataName != filter.colName)
+                ++column;
+            const bool isNull = column < table.len && row.nulls[column];
+            const bool matched = filter.op == "isnull" ? isNull :
+                filter.op == "isnotnull" ? !isNull :
+                !isNull && StorageEngine::evalConditionOnRow(filter, row.raw, table);
+            if (!matched) {
+                passes = false;
+                break;
+            }
+        }
+        if (!passes) continue;
+        RowContext context;
+        for (size_t i = 0; i < table.len; ++i) {
+            const ExprValue value(table.cols[i].dataType, row.values[i], row.nulls[i]);
+            context.set(table.cols[i].dataName, value);
+            context.set(table.tablename + "." + table.cols[i].dataName, value);
+        }
+        Entry entry;
+        const auto evaluate = [&](const Expr* expression) {
+            auto value = evaluator.eval(expression, context);
+            if (value.isUnknown())
+                throw std::runtime_error("unsupported aggregate expression (SQLSTATE 0A000)");
+            return value;
+        };
+        for (const auto& argument : call->args) entry.args.push_back(evaluate(argument.get()));
+        if (!array && entry.args[0].isNull) continue;
+        for (const auto& key : order->orderBy) entry.keys.push_back(evaluate(key.expr.get()));
+        entries.push_back(std::move(entry));
+    }
+    // Use typed SQL comparison: text '10' sorts before '2', integer 10 after 2.
+    BinaryOpExpr less;
+    less.op = "<";
+    auto left = std::make_unique<ColumnRefExpr>();
+    left->column = "sort_left";
+    auto right = std::make_unique<ColumnRefExpr>();
+    right->column = "sort_right";
+    less.left = std::move(left);
+    less.right = std::move(right);
+    std::stable_sort(entries.begin(), entries.end(), [&](const Entry& a, const Entry& b) {
+        for (size_t i = 0; i < order->orderBy.size(); ++i) {
+            const auto& key = order->orderBy[i];
+            const auto& av = a.keys[i];
+            const auto& bv = b.keys[i];
+            if (av.isNull || bv.isNull) {
+                if (av.isNull != bv.isNull) return av.isNull == key.nullsFirst;
+                continue;
+            }
+            RowContext context;
+            context.set("sort_left", av);
+            context.set("sort_right", bv);
+            if (evaluator.eval(&less, context).asBool()) return key.asc;
+            context.set("sort_left", bv);
+            context.set("sort_right", av);
+            if (evaluator.eval(&less, context).asBool()) return !key.asc;
+        }
+        return false;
+    });
+    const auto quoteElement = [](const ExprValue& value) {
+        if (value.isNull) return std::string("NULL");
+        std::string lower = value.value;
+        for (char& ch : lower) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        const bool quote = value.value.empty() || lower == "null" ||
+            value.value.find_first_of(",{}\"\\ \t\n\r\f\v") != std::string::npos;
+        if (!quote) return value.value;
+        std::string result = "\"";
+        for (char ch : value.value) {
+            if (ch == '\\' || ch == '"') result += '\\';
+            result += ch;
+        }
+        return result + '"';
+    };
+    std::set<std::string> seen;
+    std::string result;
+    bool first = true;
+    for (const auto& entry : entries) {
+        if (call->distinct) {
+            std::string key;
+            for (const auto& value : entry.args)
+                key += value.isNull ? "N;" : "V" + std::to_string(value.value.size()) + ":" + value.value;
+            if (!seen.insert(key).second) continue;
+        }
+        if (!first) result += array ? "," : (entry.args[1].isNull ? "" : entry.args[1].value);
+        result += array ? quoteElement(entry.args[0]) : entry.args[0].value;
+        first = false;
+    }
+    if (first) return "NULL";
+    return array ? "{" + result + "}" : result;
+}
+
+// ========================================================================
 // ParallelGroupAggregateOp
 // ========================================================================
 ParallelGroupAggregateOp::ParallelGroupAggregateOp(
@@ -2399,7 +2532,7 @@ ParallelGroupAggregateOp::ParallelGroupAggregateOp(
       items_(items), havingConds_(havingConds),
       workers_(workers < 1 ? 1 : workers) {}
 
-bool ParallelGroupAggregateOp::open() {
+bool ParallelGroupAggregateOp::open() try {
     rows_.clear();
     pos_ = 0;
     usedParallelWorkers_ = false;
@@ -2408,6 +2541,7 @@ bool ParallelGroupAggregateOp::open() {
     struct InputRow {
         std::string raw;
         std::vector<std::string> values;
+        std::vector<bool> nulls;
     };
     std::vector<InputRow> input;
     std::string raw;
@@ -2417,6 +2551,7 @@ bool ParallelGroupAggregateOp::open() {
         row.values.reserve(tbl_.len);
         for (size_t i = 0; i < tbl_.len; ++i) {
             row.values.push_back(StorageEngine::extractColumnValueStatic(row.raw, tbl_, i));
+            row.nulls.push_back(child_->lastColumnIsNull(i));
         }
         input.push_back(std::move(row));
     }
@@ -2502,6 +2637,7 @@ bool ParallelGroupAggregateOp::open() {
 
     // ---- merge local buckets (order preserved within each group) ----
     Buckets groups;
+    if (groupByCols_.empty() && input.empty()) groups[""] = {};
     for (const auto& buckets : localB) {
         for (const auto& kv : buckets) {
             auto& merged = groups[kv.first];
@@ -2511,7 +2647,8 @@ bool ParallelGroupAggregateOp::open() {
 
     // ---- finalize each group on this thread (aggregates + HAVING) ----
     static const std::set<std::string> supported = {
-        "count", "sum", "avg", "min", "max", "bool_and", "bool_or", "every"
+        "count", "sum", "avg", "min", "max", "bool_and", "bool_or", "every",
+        "string_agg", "array_agg"
     };
     auto parseNumber = [](const std::string& value, long double& out) {
         try {
@@ -2536,6 +2673,8 @@ bool ParallelGroupAggregateOp::open() {
                                 const StorageEngine::AggItem& item) -> std::string {
         std::string func = item.func;
         for (char& c : func) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (func == "string_agg" || func == "array_agg")
+            return collectionAggregate(tbl_, input, rowIds, item, func);
         const bool distinct = func == "count" && item.arg.size() > 9 &&
             item.arg.substr(0, 9) == "distinct ";
         std::string arg = distinct ? item.arg.substr(9) : item.arg;
@@ -2702,13 +2841,20 @@ bool ParallelGroupAggregateOp::open() {
         }
         for (const auto& item : items_) values.push_back(computeAggregate(group.second, item));
         std::string output;
-        for (const auto& value : values) {
-            if (!output.empty()) output.push_back(' ');
-            output += value.empty() ? "NULL" : value;
+        for (size_t i = 0; i < values.size(); ++i) {
+            if (i != 0) output.push_back(' ');
+            output += values[i].empty() && i < groupByCols_.size() ? "NULL" : values[i];
         }
         rows_.push_back(std::move(output));
     }
     return true;
+}
+
+catch (const std::exception& error) {
+    rows_.clear();
+    child_->close();
+    setError(error.what());
+    return false;
 }
 
 bool ParallelGroupAggregateOp::next(std::string& outRow) {
@@ -3125,7 +3271,7 @@ GroupAggregateOp::GroupAggregateOp(
     : child_(std::move(child)), tbl_(tbl), groupByCols_(groupByCols),
       groupingSets_(groupingSets), items_(items), havingConds_(havingConds) {}
 
-bool GroupAggregateOp::open() {
+bool GroupAggregateOp::open() try {
     rows_.clear();
     pos_ = 0;
     if (!child_->open()) return false;
@@ -3184,7 +3330,8 @@ bool GroupAggregateOp::open() {
     };
 
     static const std::set<std::string> supported = {
-        "count", "sum", "avg", "min", "max", "bool_and", "bool_or", "every"
+        "count", "sum", "avg", "min", "max", "bool_and", "bool_or", "every",
+        "string_agg", "array_agg"
     };
     for (const auto& item : items_) {
         std::string func = item.func;
@@ -3232,6 +3379,8 @@ bool GroupAggregateOp::open() {
         std::string arg = distinct ? item.arg.substr(9) : item.arg;
         const size_t argIndex = arg == "*" ? tbl_.len : columnIndex(arg);
         const auto filters = StorageEngine::parseConditions(item.filterConds);
+        if (func == "string_agg" || func == "array_agg")
+            return collectionAggregate(tbl_, input, rowIds, item, func);
         std::set<std::string> distinctValues;
         int64_t count = 0;
         long double sum = 0;
@@ -3414,14 +3563,21 @@ bool GroupAggregateOp::open() {
             }
             for (const auto& item : items_) values.push_back(computeAggregate(group.second, item));
             std::string output;
-            for (const auto& value : values) {
-                if (!output.empty()) output.push_back(' ');
-                output += value.empty() ? "NULL" : value;
+        for (size_t i = 0; i < values.size(); ++i) {
+            if (i != 0) output.push_back(' ');
+            output += values[i].empty() && i < groupByCols_.size() ? "NULL" : values[i];
             }
             rows_.push_back(std::move(output));
         }
     }
     return true;
+}
+
+catch (const std::exception& error) {
+    rows_.clear();
+    child_->close();
+    setError(error.what());
+    return false;
 }
 
 bool GroupAggregateOp::next(std::string& outRow) {
