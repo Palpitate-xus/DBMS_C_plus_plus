@@ -7,8 +7,11 @@
 // ============================================================================
 
 #include "expression/ExprEvaluator.h"
+#include "expression/expr_helper.h"
 #include "parser/ast.h"
 #include <cassert>
+#include <cstdio>
+#include <ctime>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -37,6 +40,15 @@ static dbms::ExprValue TSTZ(const std::string& v) { return dbms::ExprValue("time
 static dbms::ExprValue IV(const std::string& v) { return dbms::ExprValue("interval", v, false); }
 static dbms::ExprValue I(int64_t v) { return dbms::ExprValue("integer", std::to_string(v), false); }
 static dbms::ExprValue NullDate() { return dbms::ExprValue("date", "", true); }
+
+static std::string utcNow(const char* format) {
+    const std::time_t now = std::time(nullptr);
+    std::tm utc{};
+    ::gmtime_r(&now, &utc);
+    char buffer[40];
+    std::strftime(buffer, sizeof(buffer), format, &utc);
+    return buffer;
+}
 
 static void test_extract_date_part() {
     dbms::ExprEvaluator eval;
@@ -309,12 +321,44 @@ static void test_template_parsing() {
 }
 
 static void test_current_family() {
+    const std::string beforeDate = utcNow("%Y-%m-%d");
+    const std::string beforeTimestamp = utcNow("%Y-%m-%d %H:%M:%S");
+    const std::string beforeTime = utcNow("%H:%M:%S");
     dbms::ExprEvaluator eval;
-    assert(!callFn(eval, "current_timestamp", {}).isNull);
-    assert(!callFn(eval, "localtimestamp", {}).isNull);
-    assert(!callFn(eval, "clock_timestamp", {}).isNull);
-    assert(callFn(eval, "current_time", {}).value == "12:00:00");
-    assert(callFn(eval, "localtime", {}).value == "12:00:00");
+    const auto currentDate = callFn(eval, "current_date", {});
+    const auto currentTimestamp = callFn(eval, "current_timestamp", {});
+    const auto localTimestamp = callFn(eval, "localtimestamp", {});
+    const auto transactionTimestamp =
+        callFn(eval, "transaction_timestamp", {});
+    const auto statementTimestamp = callFn(eval, "statement_timestamp", {});
+    const auto now = callFn(eval, "now", {});
+    const auto clockTimestamp = callFn(eval, "clock_timestamp", {});
+    const auto currentTime = callFn(eval, "current_time", {});
+    const auto localTime = callFn(eval, "localtime", {});
+    const std::string afterDate = utcNow("%Y-%m-%d");
+    const std::string afterTimestamp = utcNow("%Y-%m-%d %H:%M:%S");
+    const std::string afterTime = utcNow("%H:%M:%S");
+
+    const auto currentValue = [](const std::string& value,
+                                 const std::string& before,
+                                 const std::string& after) {
+        return value == before || value == after;
+    };
+    assert(currentValue(currentDate.value, beforeDate, afterDate));
+    assert(currentValue(localTimestamp.value,
+                        beforeTimestamp, afterTimestamp));
+    assert(currentTimestamp.value == localTimestamp.value + "+00");
+    assert(transactionTimestamp.value == currentTimestamp.value);
+    assert(statementTimestamp.value == currentTimestamp.value);
+    assert(now.value == currentTimestamp.value);
+    assert(currentValue(clockTimestamp.value,
+                        beforeTimestamp + "+00", afterTimestamp + "+00"));
+    assert(currentValue(localTime.value, beforeTime, afterTime));
+    assert(currentTime.value == localTime.value + "+00");
+
+    const auto bareDate = dbms::ExprHelper::evalString("current_date", {});
+    assert(bareDate.ok && !bareDate.isNull &&
+           currentValue(bareDate.value, beforeDate, afterDate));
     std::cout << "[DATEFN] current_* family OK" << std::endl;
 }
 

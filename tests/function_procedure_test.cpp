@@ -123,6 +123,11 @@ static void test_builtin_volatility() {
     assert(eval.volatility("abs") == 'i');
     assert(eval.volatility("length") == 'i');
     assert(eval.volatility("now") == 's');
+    assert(eval.volatility("current_date") == 's');
+    assert(eval.volatility("current_timestamp") == 's');
+    assert(eval.volatility("transaction_timestamp") == 's');
+    assert(eval.volatility("statement_timestamp") == 's');
+    assert(eval.volatility("clock_timestamp") == 'v');
     assert(eval.volatility("random") == 'v');
     assert(eval.volatility("nextval") == 'v');
     assert(eval.volatility("unknown_func") == 'v');

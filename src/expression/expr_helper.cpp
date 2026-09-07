@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <ctime>
 #include <memory>
 #include <sstream>
 #include <vector>
@@ -18,6 +19,14 @@ std::string toLower(std::string s) {
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     }
     return s;
+}
+
+std::string formatUtcClock(std::time_t value, const char* format) {
+    std::tm utc{};
+    if (::gmtime_r(&value, &utc) == nullptr) return "";
+    char buffer[40];
+    if (std::strftime(buffer, sizeof(buffer), format, &utc) == 0) return "";
+    return buffer;
 }
 
 bool looksLikeNumber(const std::string& s) {
@@ -649,13 +658,18 @@ static ExprEvalResult evalStringImpl(
     }
     // SQL-standard date/time special values, resolvable as bare identifiers
     // (PG exposes current_date/current_timestamp/localtimestamp both ways).
-    // The evaluator's fixed session clock keeps results deterministic.
+    // This layer currently uses UTC as its session timezone.
     {
-        ctx.set("current_date", ExprValue("date", "2026-06-20", false));
+        const std::time_t clock = std::time(nullptr);
+        const std::string date = formatUtcClock(clock, "%Y-%m-%d");
+        const std::string timestamp =
+            formatUtcClock(clock, "%Y-%m-%d %H:%M:%S");
+        ctx.set("current_date", ExprValue("date", date, date.empty()));
         ctx.set("current_timestamp",
-                ExprValue("timestamptz", "2026-06-20 12:00:00", false));
+                ExprValue("timestamptz", timestamp + "+00",
+                          timestamp.empty()));
         ctx.set("localtimestamp",
-                ExprValue("timestamp", "2026-06-20 12:00:00", false));
+                ExprValue("timestamp", timestamp, timestamp.empty()));
     }
 
     ExprEvaluator evaluator;

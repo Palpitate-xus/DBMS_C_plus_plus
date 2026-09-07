@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <functional>
 #include <iomanip>
 #include <iostream>
@@ -33,6 +34,14 @@ namespace dbms {
 static std::string toLower(std::string s) {
     for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return s;
+}
+
+static std::string formatUtcClock(std::time_t value, const char* format) {
+    std::tm utc{};
+    if (::gmtime_r(&value, &utc) == nullptr) return "";
+    char buffer[40];
+    if (std::strftime(buffer, sizeof(buffer), format, &utc) == 0) return "";
+    return buffer;
 }
 
 // Exact decimal types (PG rounds these half-up); float types take the
@@ -4951,6 +4960,13 @@ static ExprValue tsMatch(const std::string& vecText, const std::string& query) {
 }
 
 void ExprEvaluator::registerBuiltins() {
+    const std::time_t stableClock = std::time(nullptr);
+    const std::string stableDate =
+        formatUtcClock(stableClock, "%Y-%m-%d");
+    const std::string stableTimestamp =
+        formatUtcClock(stableClock, "%Y-%m-%d %H:%M:%S");
+    const std::string stableTime =
+        formatUtcClock(stableClock, "%H:%M:%S");
     // ARRAY[...] constructor (emitted by the parser as a function call so it
     // composes with the expression grammar). Renders the canonical
     // {e1,e2,...} literal text; NULL elements render as NULL.
@@ -5370,9 +5386,9 @@ void ExprEvaluator::registerBuiltins() {
         bool n = a.empty() || a[0].isNull;
         return ExprValue("boolean", n ? "f" : "t", false);
     };
-    functions_["now"] = [](const std::vector<ExprValue>&) {
-        // Return current timestamp as string; Wave 0 uses a fixed reference
-        return ExprValue("timestamp", "2026-06-20 12:00:00", false);
+    functions_["now"] = [stableTimestamp](const std::vector<ExprValue>&) {
+        return ExprValue(
+            "timestamptz", stableTimestamp + "+00", stableTimestamp.empty());
     };
 
     // ------------------------------------------------------------------------
@@ -7581,31 +7597,39 @@ void ExprEvaluator::registerBuiltins() {
     // ------------------------------------------------------------------------
     // Date/time functions
     // ------------------------------------------------------------------------
-    functions_["current_date"] = [](const std::vector<ExprValue>&) {
-        return ExprValue("date", "2026-06-20", false);
+    functions_["current_date"] = [stableDate](const std::vector<ExprValue>&) {
+        return ExprValue("date", stableDate, stableDate.empty());
     };
-    // Reference "current" timestamps — fixed within a session like now(), so
-    // expression evaluation stays deterministic.
-    functions_["current_timestamp"] = [](const std::vector<ExprValue>&) {
-        return ExprValue("timestamp with time zone", "2026-06-20 12:00:00", false);
+    // Stable clock functions share the evaluator's creation-time snapshot.
+    // The engine currently has a fixed UTC session timezone.
+    functions_["current_timestamp"] = [stableTimestamp](const std::vector<ExprValue>&) {
+        return ExprValue("timestamptz", stableTimestamp + "+00",
+                         stableTimestamp.empty());
     };
-    functions_["localtimestamp"] = [](const std::vector<ExprValue>&) {
-        return ExprValue("timestamp", "2026-06-20 12:00:00", false);
+    functions_["localtimestamp"] = [stableTimestamp](const std::vector<ExprValue>&) {
+        return ExprValue(
+            "timestamp", stableTimestamp, stableTimestamp.empty());
     };
-    functions_["transaction_timestamp"] = [](const std::vector<ExprValue>&) {
-        return ExprValue("timestamp with time zone", "2026-06-20 12:00:00", false);
+    functions_["transaction_timestamp"] = [stableTimestamp](const std::vector<ExprValue>&) {
+        return ExprValue("timestamptz", stableTimestamp + "+00",
+                         stableTimestamp.empty());
     };
-    functions_["statement_timestamp"] = [](const std::vector<ExprValue>&) {
-        return ExprValue("timestamp with time zone", "2026-06-20 12:00:00", false);
+    functions_["statement_timestamp"] = [stableTimestamp](const std::vector<ExprValue>&) {
+        return ExprValue("timestamptz", stableTimestamp + "+00",
+                         stableTimestamp.empty());
     };
     functions_["clock_timestamp"] = [](const std::vector<ExprValue>&) {
-        return ExprValue("timestamp with time zone", "2026-06-20 12:00:00", false);
+        const std::string timestamp = formatUtcClock(
+            std::time(nullptr), "%Y-%m-%d %H:%M:%S");
+        return ExprValue(
+            "timestamptz", timestamp + "+00", timestamp.empty());
     };
-    functions_["current_time"] = [](const std::vector<ExprValue>&) {
-        return ExprValue("time with time zone", "12:00:00", false);
+    functions_["current_time"] = [stableTime](const std::vector<ExprValue>&) {
+        return ExprValue("time with time zone", stableTime + "+00",
+                         stableTime.empty());
     };
-    functions_["localtime"] = [](const std::vector<ExprValue>&) {
-        return ExprValue("time", "12:00:00", false);
+    functions_["localtime"] = [stableTime](const std::vector<ExprValue>&) {
+        return ExprValue("time", stableTime, stableTime.empty());
     };
 
     // Shared field extractor for extract() / date_part(); src is an ISO date or
@@ -8389,6 +8413,14 @@ void ExprEvaluator::registerBuiltins() {
     volatility_["trunc"] = 'i';
     volatility_["atan2"] = 'i';
     volatility_["now"] = 's';
+    volatility_["current_date"] = 's';
+    volatility_["current_timestamp"] = 's';
+    volatility_["localtimestamp"] = 's';
+    volatility_["transaction_timestamp"] = 's';
+    volatility_["statement_timestamp"] = 's';
+    volatility_["current_time"] = 's';
+    volatility_["localtime"] = 's';
+    volatility_["clock_timestamp"] = 'v';
     volatility_["current_user"] = 's';
     volatility_["session_user"] = 's';
     volatility_["nextval"] = 'v';
