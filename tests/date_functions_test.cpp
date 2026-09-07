@@ -108,6 +108,21 @@ static void test_extract_date_part() {
     assert(callFn(eval, "extract",
                   {F("timezone_hour"),
                    TSTZ("2026-06-26 14:35:09+00")}).value == "0");
+    auto offsetTimestamp = TSTZ("2024-01-01 00:30:00+02");
+    assert(callFn(eval, "extract",
+                  {F("year"), offsetTimestamp}).value == "2023");
+    assert(callFn(eval, "extract",
+                  {F("month"), offsetTimestamp}).value == "12");
+    assert(callFn(eval, "extract",
+                  {F("day"), offsetTimestamp}).value == "31");
+    assert(callFn(eval, "extract",
+                  {F("hour"), offsetTimestamp}).value == "22");
+    assert(callFn(eval, "extract",
+                  {F("dow"), offsetTimestamp}).value == "0");
+    assert(callFn(eval, "extract",
+                  {F("week"), offsetTimestamp}).value == "52");
+    assert(callFn(eval, "extract",
+                  {F("isoyear"), offsetTimestamp}).value == "2023");
 
     auto interval = IV("1 year 2 mons 3 days 04:05:06.25");
     assert(callFn(eval, "extract", {F("year"), interval}).value == "1");

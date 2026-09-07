@@ -8393,11 +8393,15 @@ void ExprEvaluator::registerBuiltins() {
         }
         const int64_t secondMicros =
             parsedTimestamp->micros % 60000000LL;
+        const std::string calendarSource = formatTimestampSeconds(
+            parsedTimestamp->micros / 1000000LL);
+        if (calendarSource.empty())
+            return ExprValue("numeric", "", true);
         auto num = [&](size_t off, size_t len) -> int {
-            if (src.size() < off + len) return 0;
+            if (calendarSource.size() < off + len) return 0;
             int v = 0;
             for (size_t i = off; i < off + len; ++i) {
-                char c = src[i];
+                char c = calendarSource[i];
                 if (c < '0' || c > '9') return 0;
                 v = v * 10 + (c - '0');
             }
