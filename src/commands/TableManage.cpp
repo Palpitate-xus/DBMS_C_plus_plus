@@ -28679,28 +28679,35 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         if (e == std::string::npos) return "";
         return val.substr(0, e + 1);
     }
-    if (expr.funcName == "left" && expr.funcArgs.size() >= 2) {
-        std::string val = getVal(expr.funcArgs[0]);
-        // PG: left(s, n) n>=0 first n chars; n<0 drops the last |n| chars.
-        try {
-            int n = std::stoi(getVal(expr.funcArgs[1]));
-            if (n >= 0) return val.substr(0, (size_t)n);
-            if ((size_t)(-n) >= val.size()) return "";
-            return val.substr(0, val.size() + n);
-        } catch (...) { return val; }
-    }
-    if (expr.funcName == "right" && expr.funcArgs.size() >= 2) {
-        std::string val = getVal(expr.funcArgs[0]);
-        // PG: right(s, n) n>=0 last n chars; n<0 drops the first |n| chars.
-        try {
-            int n = std::stoi(getVal(expr.funcArgs[1]));
-            if (n >= 0) {
-                if ((size_t)n >= val.size()) return val;
-                return val.substr(val.size() - n);
-            }
-            if ((size_t)(-n) >= val.size()) return "";
-            return val.substr(-n);
-        } catch (...) { return val; }
+    if ((expr.funcName == "left" || expr.funcName == "right") &&
+        expr.funcArgs.size() >= 2) {
+        std::map<std::string, std::string> rowContext;
+        std::map<std::string, std::string> typeHints;
+        std::set<std::string> nullColumns;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            bool valueIsNull = false;
+            const std::string value = engine && !dbname.empty()
+                ? engine->extractColumnValue(
+                      rowBuffer, tbl, i, dbname, true, &valueIsNull)
+                : StorageEngine::extractColumnValueStatic(
+                      rowBuffer, tbl, i);
+            rowContext[tbl.cols[i].dataName] = value;
+            typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+            if (valueIsNull || (!engine && value.empty()))
+                nullColumns.insert(tbl.cols[i].dataName);
+        }
+        const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
+            expr.funcName + "(" + expr.funcArgs[0] + "," +
+                expr.funcArgs[1] + ")",
+            rowContext, nullColumns, typeHints, dbname,
+            expr.sessionUser);
+        if (!evaluated.ok) {
+            throw std::runtime_error(
+                evaluated.error.empty()
+                    ? "failed to evaluate string slice"
+                    : evaluated.error);
+        }
+        return evaluated.isNull ? "NULL" : evaluated.value;
     }
     if (expr.funcName == "repeat" && expr.funcArgs.size() >= 2) {
         std::string val = getVal(expr.funcArgs[0]);
