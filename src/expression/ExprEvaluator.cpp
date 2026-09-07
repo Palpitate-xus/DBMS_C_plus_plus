@@ -6879,6 +6879,11 @@ void ExprEvaluator::registerBuiltins() {
     // ------------------------------------------------------------------------
     // String functions
     // ------------------------------------------------------------------------
+    functions_["if"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 3) return ExprValue("unknown", "", true);
+        return !a[0].isNull && a[0].asBool() ? a[1] : a[2];
+    };
+    functions_["iif"] = functions_["if"];
     functions_["concat"] = [](const std::vector<ExprValue>& a) {
         // PG concat() ignores NULL arguments rather than returning NULL.
         std::string s;

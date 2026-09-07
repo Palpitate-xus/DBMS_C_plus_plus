@@ -29511,17 +29511,35 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         }
         return evaluated.isNull ? "NULL" : evaluated.value;
     }
-    if ((expr.funcName == "if" || expr.funcName == "iif") && expr.funcArgs.size() >= 3) {
-        std::string cond = getVal(expr.funcArgs[0]);
-        std::string trueVal = getVal(expr.funcArgs[1]);
-        std::string falseVal = getVal(expr.funcArgs[2]);
-        bool isTrue = false;
-        if (cond == "true" || cond == "1") isTrue = true;
-        else if (cond == "false" || cond == "0" || cond.empty()) isTrue = false;
-        else {
-            try { isTrue = (std::stod(cond) != 0); } catch (...) { isTrue = !cond.empty(); }
+    if ((expr.funcName == "if" || expr.funcName == "iif") &&
+        expr.funcArgs.size() >= 3) {
+        std::map<std::string, std::string> rowContext;
+        std::map<std::string, std::string> typeHints;
+        std::set<std::string> nullColumns;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            bool valueIsNull = false;
+            const std::string value = engine && !dbname.empty()
+                ? engine->extractColumnValue(
+                      rowBuffer, tbl, i, dbname, true, &valueIsNull)
+                : StorageEngine::extractColumnValueStatic(
+                      rowBuffer, tbl, i);
+            rowContext[tbl.cols[i].dataName] = value;
+            typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+            if (valueIsNull || (!engine && value.empty()))
+                nullColumns.insert(tbl.cols[i].dataName);
         }
-        return isTrue ? trueVal : falseVal;
+        const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
+            expr.funcName + "(" + expr.funcArgs[0] + "," +
+                expr.funcArgs[1] + "," + expr.funcArgs[2] + ")",
+            rowContext, nullColumns, typeHints, dbname,
+            expr.sessionUser);
+        if (!evaluated.ok) {
+            throw std::runtime_error(
+                evaluated.error.empty()
+                    ? "failed to evaluate conditional function"
+                    : evaluated.error);
+        }
+        return evaluated.isNull ? "NULL" : evaluated.value;
     }
     if (expr.funcName == "power" && expr.funcArgs.size() >= 2) {
         try {
