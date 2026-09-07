@@ -27568,7 +27568,8 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             "substring", "substr", "translate", "replace", "split_part",
             "concat_ws_null", "to_char", "to_date", "to_number",
             "to_timestamp", "date_trunc", "date_part", "extract_",
-            "age", "justify_days", "justify_hours", "network",
+            "age", "year", "month", "day", "hour", "minute", "second",
+            "justify_days", "justify_hours", "network",
             "abbrev", "family", "host", "masklen", "set_masklen"
         };
         for (const char* sf : strictFns) {
@@ -28818,29 +28819,117 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     }
     // HOUR / MINUTE / SECOND - timestamp extraction functions
     if ((expr.funcName == "hour" || expr.funcName == "minute" || expr.funcName == "second") && !expr.funcArgs.empty()) {
-        std::string val = getVal(expr.funcArgs[0]);
-        // Parse time part: "YYYY-MM-DD HH:MM:SS" or "HH:MM:SS"
-        std::string timePart;
-        size_t sp = val.find(' ');
-        if (sp != std::string::npos) timePart = val.substr(sp + 1);
-        else timePart = val;
-        // Parse HH:MM:SS
-        int h = 0, m = 0, s = 0;
-        int tpos[2] = {0, 0};
-        int k = 0;
-        for (size_t i = 0; i < timePart.size() && k < 2; i++) {
-            if (timePart[i] == ':') tpos[k++] = static_cast<int>(i);
+        std::string timePart = trim(getVal(expr.funcArgs[0]));
+        bool timestampInput = false;
+        size_t separator = timePart.find(' ');
+        if (separator == std::string::npos) {
+            separator = timePart.find('T');
+            if (separator == std::string::npos)
+                separator = timePart.find('t');
         }
-        if (tpos[0] && tpos[1]) {
-            for (int i = 0; i < tpos[0]; i++) if (timePart[i] >= '0' && timePart[i] <= '9') h = h * 10 + timePart[i] - '0';
-            for (int i = tpos[0] + 1; i < tpos[1]; i++) if (timePart[i] >= '0' && timePart[i] <= '9') m = m * 10 + timePart[i] - '0';
-            for (size_t i = tpos[1] + 1; i < timePart.size(); i++) if (timePart[i] >= '0' && timePart[i] <= '9') s = s * 10 + timePart[i] - '0';
-        } else {
+        if (separator != std::string::npos) {
+            timestampInput = true;
+            if (Date(trim(timePart.substr(0, separator)).c_str()).year == 0)
+                return "";
+            timePart = trim(timePart.substr(separator + 1));
+        }
+
+        bool negative = false;
+        if (!timePart.empty() &&
+            (timePart.front() == '-' || timePart.front() == '+')) {
+            negative = timePart.front() == '-';
+            timePart.erase(timePart.begin());
+        }
+        const size_t firstColon = timePart.find(':');
+        const size_t secondColon = firstColon == std::string::npos
+            ? std::string::npos : timePart.find(':', firstColon + 1);
+        if (firstColon == std::string::npos ||
+            secondColon == std::string::npos) {
             return "";
         }
-        if (expr.funcName == "hour") return std::to_string(h);
-        if (expr.funcName == "minute") return std::to_string(m);
-        return std::to_string(s);
+
+        size_t zoneStart = std::string::npos;
+        for (size_t i = secondColon + 1; i < timePart.size(); ++i) {
+            if (timePart[i] == '+' || timePart[i] == '-' ||
+                timePart[i] == 'Z' || timePart[i] == 'z') {
+                zoneStart = i;
+                break;
+            }
+        }
+        const std::string zone = zoneStart == std::string::npos
+            ? "" : timePart.substr(zoneStart);
+        std::string clock = zoneStart == std::string::npos
+            ? timePart : timePart.substr(0, zoneStart);
+        if (clock.find(':', secondColon + 1) != std::string::npos)
+            return "";
+
+        auto parseDigits = [](const std::string& field,
+                              int64_t& output) {
+            if (field.empty()) return false;
+            output = 0;
+            for (const unsigned char c : field) {
+                if (!std::isdigit(c) ||
+                    output > (std::numeric_limits<int64_t>::max() -
+                              (c - '0')) / 10) {
+                    return false;
+                }
+                output = output * 10 + (c - '0');
+            }
+            return true;
+        };
+        auto validZone = [&](const std::string& value) {
+            if (value.empty()) return true;
+            if (value == "Z" || value == "z") return true;
+            if (value.front() != '+' && value.front() != '-') return false;
+            const std::string body = value.substr(1);
+            const size_t colon = body.find(':');
+            if (colon != std::string::npos &&
+                body.find(':', colon + 1) != std::string::npos) {
+                return false;
+            }
+            int64_t hours = 0;
+            int64_t minutes = 0;
+            if (!parseDigits(colon == std::string::npos
+                                 ? body : body.substr(0, colon),
+                             hours)) {
+                return false;
+            }
+            if (colon != std::string::npos &&
+                !parseDigits(body.substr(colon + 1), minutes)) {
+                return false;
+            }
+            return hours <= 15 && minutes <= 59;
+        };
+        if (!validZone(zone)) return "";
+
+        std::string secondsText = clock.substr(secondColon + 1);
+        const size_t fraction = secondsText.find('.');
+        if (fraction != std::string::npos) {
+            const std::string fractional = secondsText.substr(fraction + 1);
+            if (fractional.empty() ||
+                fractional.find_first_not_of("0123456789") !=
+                    std::string::npos) {
+                return "";
+            }
+            secondsText.resize(fraction);
+        }
+
+        int64_t hour = 0;
+        int64_t minute = 0;
+        int64_t second = 0;
+        if (!parseDigits(clock.substr(0, firstColon), hour) ||
+            !parseDigits(
+                clock.substr(firstColon + 1,
+                             secondColon - firstColon - 1),
+                minute) ||
+            !parseDigits(secondsText, second) || minute > 59 ||
+            second > 59 || (timestampInput && hour > 23)) {
+            return "";
+        }
+        if (expr.funcName == "hour")
+            return std::to_string(negative ? -hour : hour);
+        if (expr.funcName == "minute") return std::to_string(minute);
+        return std::to_string(second);
     }
     if (expr.funcName == "case_when") {
         // Args: cond1, val1, cond2, val2, ..., default
