@@ -117,6 +117,8 @@ static void test_contains() {
     assert(c12.ok && c12.value == "t");
     auto c13 = eval("'\"a\"' @> '\"\\u0061\"'");
     assert(c13.ok && c13.value == "t");
+    auto c14 = eval("'{\"a\":1}' @> '{\"\\u0061\":1}'");
+    assert(c14.ok && c14.value == "t");
 
     std::cout << "[JSON-OPS] @> / <@ OK" << std::endl;
 }

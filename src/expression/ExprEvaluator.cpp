@@ -1978,8 +1978,12 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
                     }
                     if (colon == std::string::npos) return false;
                     std::string k2 = trimStr(m.substr(0, colon));
-                    std::string ku = (k2.size() >= 2 && k2.front() == '"' && k2.back() == '"')
-                                         ? k2.substr(1, k2.size() - 2) : k2;
+                    std::string ku = k2;
+                    if (k2.size() >= 2 && k2.front() == '"' &&
+                        k2.back() == '"' &&
+                        !jsonUnquoteString(k2, ku)) {
+                        return false;
+                    }
                     std::string want = trimStr(m.substr(colon + 1));
                     std::string got;
                     if (!jsonStep(ct, ku, got)) return false;
