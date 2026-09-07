@@ -699,6 +699,25 @@ static void test_cast() {
     assert(evaluateCast("date", "2024-01-02",
                         "timestamp without time zone").value ==
            "2024-01-02 00:00:00");
+    assert(evaluateCast("character varying", "2024-01-02 03:04:05.5",
+                        "timestamp").value ==
+           "2024-01-02 03:04:05.5");
+    assert(evaluateCast("character varying",
+                        "2024-01-02 03:04:05.1234567",
+                        "timestamp").value ==
+           "2024-01-02 03:04:05.123457");
+    assert(evaluateCast("character varying",
+                        "2024-01-02 03:04:05.5+02",
+                        "timestamp").value ==
+           "2024-01-02 03:04:05.5");
+    assert(evaluateCast("character varying",
+                        "2024-01-02 03:04:05.5+02",
+                        "timestamptz").value ==
+           "2024-01-02 01:04:05.5+00");
+    assert(evaluateCast("timestamptz",
+                        "2024-01-02 03:04:05.5+02",
+                        "timestamp").value ==
+           "2024-01-02 01:04:05.5");
     assert(evaluateCast("character varying", "infinity", "date").value ==
            "infinity");
     assert(evaluateCast("character varying", "-Infinity", "timestamp").value ==

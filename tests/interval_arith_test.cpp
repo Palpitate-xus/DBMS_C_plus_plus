@@ -269,6 +269,15 @@ static void test_make_interval_bounds() {
 }
 
 static void test_at_time_zone() {
+    auto fractionalTz = eval(
+        "'2024-01-02 03:04:05.5+02'::timestamptz");
+    assert(fractionalTz.ok && !fractionalTz.isNull &&
+           fractionalTz.value == "2024-01-02 01:04:05.5+00");
+    auto fractionalNaive = eval(
+        "'2024-01-02 03:04:05.5+02'::timestamp");
+    assert(fractionalNaive.ok && !fractionalNaive.isNull &&
+           fractionalNaive.value == "2024-01-02 03:04:05.5");
+
     // UTC wall clock read at a POSIX numeric zone (sign inverted: UTC+8 = UTC-8)
     auto a = eval("'2024-06-01 00:30:00'::timestamp AT TIME ZONE 'UTC+8'");
     assert(a.ok && !a.isNull);

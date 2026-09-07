@@ -2961,10 +2961,93 @@ static ExprValue castToTimestamp(const ExprValue& value,
         text = str(date) + " 00:00:00";
     }
 
-    const int64_t timestamp = parseTimestampToSeconds(text);
-    if (timestamp == 0) throwTemporalCastError(targetType, text);
-    const std::string formatted = formatTimestampSeconds(timestamp);
-    if (formatted.empty()) throwTemporalCastError(targetType, text);
+    const size_t separator = text.find_first_of(" Tt");
+    std::string dateText = separator == std::string::npos
+        ? text : text.substr(0, separator);
+    std::string timeAndZone = separator == std::string::npos
+        ? "00:00:00" : trimStr(text.substr(separator + 1));
+    const Date parsedDate(dateText.c_str());
+    if (parsedDate.year == 0 || timeAndZone.empty() ||
+        timeAndZone.find_first_of(" \t\r\n") != std::string::npos) {
+        throwTemporalCastError(targetType, text);
+    }
+
+    size_t zonePosition = std::string::npos;
+    for (size_t i = 1; i < timeAndZone.size(); ++i) {
+        if (timeAndZone[i] == '+' || timeAndZone[i] == '-') {
+            zonePosition = i;
+            break;
+        }
+    }
+    std::string zone;
+    if (zonePosition != std::string::npos) {
+        zone = timeAndZone.substr(zonePosition);
+        timeAndZone.resize(zonePosition);
+    } else if (!timeAndZone.empty() &&
+               (timeAndZone.back() == 'Z' || timeAndZone.back() == 'z')) {
+        zone = timeAndZone.substr(timeAndZone.size() - 1);
+        timeAndZone.pop_back();
+    }
+
+    const size_t firstColon = timeAndZone.find(':');
+    const size_t secondColon = firstColon == std::string::npos
+        ? std::string::npos : timeAndZone.find(':', firstColon + 1);
+    if (firstColon == std::string::npos || secondColon == std::string::npos ||
+        timeAndZone.find(':', secondColon + 1) != std::string::npos) {
+        throwTemporalCastError(targetType, text);
+    }
+    const auto parseUnsignedField = [](const std::string& field,
+                                       long long& output) {
+        if (field.empty()) return false;
+        output = 0;
+        for (const unsigned char c : field) {
+            if (!std::isdigit(c)) return false;
+            output = output * 10 + (c - '0');
+        }
+        return true;
+    };
+    long long hours = 0;
+    long long minutes = 0;
+    if (!parseUnsignedField(timeAndZone.substr(0, firstColon), hours) ||
+        !parseUnsignedField(
+            timeAndZone.substr(firstColon + 1,
+                               secondColon - firstColon - 1), minutes)) {
+        throwTemporalCastError(targetType, text);
+    }
+
+    int dayCarry = 0;
+    const std::string formattedTime = formatTimeFields(
+        hours, minutes, timeAndZone.substr(secondColon + 1), &dayCarry);
+    if (formattedTime.empty()) throwTemporalCastError(targetType, text);
+    Date normalizedDate = parsedDate;
+    if (dayCarry != 0) normalizedDate = parsedDate + dayCarry;
+    if (normalizedDate.year == 0) throwTemporalCastError(targetType, text);
+
+    const size_t fractionPosition = formattedTime.find('.');
+    const std::string wholeTime = fractionPosition == std::string::npos
+        ? formattedTime : formattedTime.substr(0, fractionPosition);
+    const std::string fraction = fractionPosition == std::string::npos
+        ? "" : formattedTime.substr(fractionPosition);
+    const std::string localTimestamp = str(normalizedDate) + " " + wholeTime;
+
+    // Validate an explicit displacement even when a timestamp-without-zone
+    // target will ignore it, matching PostgreSQL's input rules.
+    const int64_t zonedTimestamp = parseTimestampToSeconds(
+        localTimestamp + zone);
+    if (zonedTimestamp == 0) throwTemporalCastError(targetType, text);
+
+    const bool sourceHasTimeZone =
+        sourceType == "timestamptz" ||
+        sourceType == "timestamp with time zone";
+    const bool convertToUtc = targetType == "timestamptz" ||
+                              sourceHasTimeZone;
+    std::string formatted = localTimestamp;
+    if (convertToUtc) {
+        formatted = formatTimestampSeconds(zonedTimestamp);
+        if (formatted.empty()) throwTemporalCastError(targetType, text);
+    }
+    formatted += fraction;
+    if (targetType == "timestamptz") formatted += "+00";
     return ExprValue(targetType, formatted, false);
 }
 
