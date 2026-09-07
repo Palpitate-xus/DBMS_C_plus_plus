@@ -30395,6 +30395,13 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         const std::set<std::string> subSelectCols{colsStr};
 
         if (!whereSql.empty() || !subAlias.empty()) {
+            // Opening an allocator for an unknown relation may initialize a
+            // new heap. Reject it before scanning so a SELECT stays read-only.
+            if (!engine->tableExists(dbname, subTname)) {
+                throw std::runtime_error(
+                    "relation \"" + subTname +
+                    "\" does not exist (SQLSTATE 42P01)");
+            }
             const TableSchema innerSchema =
                 engine->getTableSchema(dbname, subTname);
             std::set<std::string> innerColumnNames;
