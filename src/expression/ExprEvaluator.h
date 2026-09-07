@@ -119,6 +119,8 @@ private:
     static ExprValue applyArithmetic(const std::string& op, const ExprValue& l, const ExprValue& r);
     static std::optional<bool> rangesOverlap(const ExprValue& left,
                                              const ExprValue& right);
+    static std::optional<bool> rangeContains(const ExprValue& container,
+                                             const ExprValue& contained);
     static bool likeMatch(const std::string& text, const std::string& pattern);
     static bool similarToMatch(const std::string& text, const std::string& pattern);
 };

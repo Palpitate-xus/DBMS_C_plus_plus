@@ -151,12 +151,43 @@ static void test_overlap_operator() {
     std::cout << "[RANGEFN] overlap operator OK" << std::endl;
 }
 
+static void test_containment_operators() {
+    dbms::ExprEvaluator eval;
+    assert(callBinary(eval, "@>", R("[1,10)"), R("[3,5)")).value == "t");
+    assert(callBinary(eval, "<@", R("[3,5)"), R("[1,10)")).value == "t");
+    assert(callBinary(eval, "@>", R("[1,10)"),
+                      RT("integer", "3")).value == "t");
+    assert(callBinary(eval, "@>", R("[1,10)"),
+                      RT("integer", "10")).value == "f");
+    assert(callBinary(eval, "<@", RT("integer", "3"),
+                      R("[1,10)")).value == "t");
+
+    assert(callBinary(eval, "@>", R("[1,10)"), R("empty")).value == "t");
+    assert(callBinary(eval, "@>", R("empty"), R("empty")).value == "t");
+    assert(callBinary(eval, "@>", R("empty"),
+                      RT("integer", "1")).value == "f");
+    assert(callBinary(eval, "@>", RT("numrange", "(1,5]"),
+                      RT("numeric", "1")).value == "f");
+    assert(callBinary(eval, "@>", RT("numrange", "(1,5]"),
+                      RT("numeric", "5")).value == "t");
+
+    const auto nullRange = dbms::ExprValue("int4range", "", true);
+    assert(callBinary(eval, "@>", nullRange, RT("integer", "1")).isNull);
+
+    const auto arrayContains = callBinary(
+        eval, "@>", RT("integer[]", "{1,2}"), RT("integer[]", "{2}"));
+    assert(!arrayContains.isNull && arrayContains.value == "t");
+
+    std::cout << "[RANGEFN] containment operators OK" << std::endl;
+}
+
 int main() {
     test_bounds();
     test_bound_result_types();
     test_lower_upper_string_still_works();
     test_predicates();
     test_overlap_operator();
+    test_containment_operators();
     std::cout << "[RANGEFN] all passed" << std::endl;
     return 0;
 }

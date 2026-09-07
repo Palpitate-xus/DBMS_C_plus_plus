@@ -2172,6 +2172,11 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         // always have quoted keys.
         const ExprValue& cont = (op == "@>") ? l : r;   // container
         const ExprValue& item = (op == "@>") ? r : l;   // contained
+        if (typeIsRange(cont.typeName)) {
+            const auto contains = rangeContains(cont, item);
+            if (!contains) return ExprValue("boolean", "", true);
+            return ExprValue("boolean", *contains ? "t" : "f", false);
+        }
         if (cont.isNull || item.isNull) return ExprValue("boolean", "", true);
         auto looksSqlArray = [](const std::string& v) -> bool {
             std::string t = trimStr(v);
@@ -4299,6 +4304,61 @@ std::optional<bool> ExprEvaluator::rangesOverlap(const ExprValue& left,
         const int comparison = compareBounds(rhs.hi, lhs.lo);
         if (comparison < 0 ||
             (comparison == 0 && !(rhs.hiInc && lhs.loInc))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::optional<bool> ExprEvaluator::rangeContains(const ExprValue& container,
+                                                 const ExprValue& contained) {
+    if (container.isNull || contained.isNull) return std::nullopt;
+
+    const RangeParts outer = parseRangeLiteral(container.value);
+    if (!outer.valid) return std::nullopt;
+    const std::string boundType = rangeBoundType(container.typeName);
+    const auto compareBoundTo = [&](const std::string& bound,
+                                    const ExprValue& value) {
+        return compareValues(ExprValue(boundType, bound, false), value);
+    };
+
+    if (!typeIsRange(contained.typeName)) {
+        if (outer.empty) return false;
+        if (!outer.loInf) {
+            const int comparison = compareBoundTo(outer.lo, contained);
+            if (comparison > 0 || (comparison == 0 && !outer.loInc))
+                return false;
+        }
+        if (!outer.hiInf) {
+            const int comparison = compareBoundTo(outer.hi, contained);
+            if (comparison < 0 || (comparison == 0 && !outer.hiInc))
+                return false;
+        }
+        return true;
+    }
+
+    if (toLower(container.typeName) != toLower(contained.typeName))
+        return std::nullopt;
+    const RangeParts inner = parseRangeLiteral(contained.value);
+    if (!inner.valid) return std::nullopt;
+    if (inner.empty) return true;
+    if (outer.empty) return false;
+
+    if (!outer.loInf) {
+        if (inner.loInf) return false;
+        const int comparison = compareBoundTo(
+            outer.lo, ExprValue(boundType, inner.lo, false));
+        if (comparison > 0 ||
+            (comparison == 0 && inner.loInc && !outer.loInc)) {
+            return false;
+        }
+    }
+    if (!outer.hiInf) {
+        if (inner.hiInf) return false;
+        const int comparison = compareBoundTo(
+            outer.hi, ExprValue(boundType, inner.hi, false));
+        if (comparison < 0 ||
+            (comparison == 0 && inner.hiInc && !outer.hiInc)) {
             return false;
         }
     }
