@@ -2303,9 +2303,164 @@ static std::string formatFloatingCastValue(Floating value) {
     return output.str();
 }
 
+struct NumericCastSpec {
+    bool matches = false;
+    bool hasTypmod = false;
+    int precision = 0;
+    int scale = 0;
+};
+
+[[noreturn]] static void throwNumericCastSyntaxError(
+    const std::string& value) {
+    throw std::runtime_error(
+        "invalid input syntax for type numeric: '" + value +
+        "' (SQLSTATE 22P02)");
+}
+
+[[noreturn]] static void throwNumericCastOverflow() {
+    throw std::runtime_error(
+        "numeric field overflow (SQLSTATE 22003)");
+}
+
+[[noreturn]] static void throwNumericTypmodError(
+    const std::string& message) {
+    throw std::runtime_error(message + " (SQLSTATE 22023)");
+}
+
+static int parseNumericTypmodInteger(const std::string& text,
+                                     const std::string& field) {
+    int64_t parsed = 0;
+    if (parseSignedInteger(text, parsed) != SignedIntegerParseResult::Ok ||
+        parsed < std::numeric_limits<int>::min() ||
+        parsed > std::numeric_limits<int>::max()) {
+        throwNumericTypmodError("invalid NUMERIC " + field);
+    }
+    return static_cast<int>(parsed);
+}
+
+static NumericCastSpec parseNumericCastSpec(const std::string& target) {
+    NumericCastSpec spec;
+    std::string base;
+    if (target == "numeric" || target == "decimal") {
+        spec.matches = true;
+        return spec;
+    }
+    if (target.rfind("numeric(", 0) == 0) {
+        base = "numeric";
+    } else if (target.rfind("decimal(", 0) == 0) {
+        base = "decimal";
+    } else {
+        return spec;
+    }
+
+    spec.matches = true;
+    spec.hasTypmod = true;
+    const size_t open = base.size();
+    const size_t close = target.rfind(')');
+    if (close == std::string::npos || close != target.size() - 1 ||
+        close <= open + 1) {
+        throwNumericTypmodError("invalid NUMERIC type modifier");
+    }
+
+    const std::string body = target.substr(open + 1, close - open - 1);
+    const size_t comma = body.find(',');
+    if (comma != std::string::npos && body.find(',', comma + 1) !=
+                                         std::string::npos) {
+        throwNumericTypmodError("invalid NUMERIC type modifier");
+    }
+    const std::string precisionText =
+        comma == std::string::npos ? body : body.substr(0, comma);
+    const std::string scaleText =
+        comma == std::string::npos ? "0" : body.substr(comma + 1);
+    spec.precision = parseNumericTypmodInteger(precisionText, "precision");
+    spec.scale = parseNumericTypmodInteger(scaleText, "scale");
+    if (spec.precision < 1 || spec.precision > Numeric::kMaxPrecision) {
+        throwNumericTypmodError(
+            "NUMERIC precision " + std::to_string(spec.precision) +
+            " must be between 1 and " +
+            std::to_string(Numeric::kMaxPrecision));
+    }
+    if (spec.scale < -Numeric::kMaxPrecision ||
+        spec.scale > Numeric::kMaxPrecision) {
+        throwNumericTypmodError(
+            "NUMERIC scale " + std::to_string(spec.scale) +
+            " must be between -" + std::to_string(Numeric::kMaxPrecision) +
+            " and " + std::to_string(Numeric::kMaxPrecision));
+    }
+    return spec;
+}
+
+static std::string formatNumericCastValue(const Numeric& numeric,
+                                          int scale) {
+    std::string result = numeric.toString();
+    if (!numeric.isFinite() || scale <= 0) return result;
+
+    int currentScale = 0;
+    const size_t dot = result.find('.');
+    if (dot != std::string::npos)
+        currentScale = static_cast<int>(result.size() - dot - 1);
+    if (currentScale < scale) {
+        if (dot == std::string::npos) result.push_back('.');
+        result.append(static_cast<size_t>(scale - currentScale), '0');
+    }
+    return result;
+}
+
+static ExprValue castToNumeric(const ExprValue& value,
+                               const NumericCastSpec& spec) {
+    const std::string sourceType = toLower(value.typeName);
+    if (sourceType == "boolean" || sourceType == "bool") {
+        throw std::runtime_error(
+            "cannot cast type boolean to numeric (SQLSTATE 42846)");
+    }
+    auto numeric = tryParseNumeric(value.value);
+    if (!numeric)
+        throwNumericCastSyntaxError(trimStr(value.value));
+    if (!spec.hasTypmod)
+        return ExprValue("numeric", numeric->toString(), false);
+    if (numeric->isNaN())
+        return ExprValue("numeric", "NaN", false);
+    if (numeric->isInfinite()) throwNumericCastOverflow();
+
+    Numeric rounded;
+    try {
+        rounded = numeric->withScale(spec.scale);
+    } catch (const std::invalid_argument&) {
+        throwNumericCastOverflow();
+    }
+    const int allowedDigitsBeforeDecimal = spec.precision - spec.scale;
+    const int actualDigitsBeforeDecimal =
+        rounded.precision() - rounded.scale();
+    if (rounded.sign() != 0 &&
+        actualDigitsBeforeDecimal > allowedDigitsBeforeDecimal) {
+        throwNumericCastOverflow();
+    }
+    return ExprValue("numeric",
+                     formatNumericCastValue(rounded, spec.scale), false);
+}
+
 ExprValue ExprEvaluator::evalCast(const CastExpr* e, const RowContext& ctx) const {
     if (e) {
-        ExprValue v = eval(e->operand.get(), ctx);        std::string fullT = e->typeName;        if (!e->typeMods.empty()) {            fullT += "(";            for (size_t mi = 0; mi < e->typeMods.size(); ++mi) {                if (mi) fullT += ",";                fullT += e->typeMods[mi];            }            fullT += ")";        }        return evalCast(nullptr, ctx, v, fullT);
+        ExprValue v = eval(e->operand.get(), ctx);
+        std::string fullT = e->typeName;
+        if (!e->typeMods.empty()) {
+            std::vector<std::string> modifiers;
+            for (size_t i = 0; i < e->typeMods.size(); ++i) {
+                std::string modifier = e->typeMods[i];
+                if ((modifier == "+" || modifier == "-") &&
+                    i + 1 < e->typeMods.size()) {
+                    modifier += e->typeMods[++i];
+                }
+                if (modifier != ",") modifiers.push_back(std::move(modifier));
+            }
+            fullT += "(";
+            for (size_t i = 0; i < modifiers.size(); ++i) {
+                if (i) fullT += ",";
+                fullT += modifiers[i];
+            }
+            fullT += ")";
+        }
+        return evalCast(nullptr, ctx, v, fullT);
     }
     return ExprValue{};
 }
@@ -2316,27 +2471,27 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
     if (v.isNull) return ExprValue(targetTypeName, "", true);
     std::string target = toLower(targetTypeName);
     {
-        // ::type mod lists arrive space-joined WITHOUT the open paren
-        // ("numeric 4 , 2)"): rebuild canonical "numeric(4,2)".
-        size_t dpos = target.find_first_of("0123456789");
-        size_t rpos = target.find(')');
-        if (dpos != std::string::npos && rpos != std::string::npos && rpos > dpos) {
-            std::string base = target.substr(0, dpos);
-            while (!base.empty() && (base.back() == ' ' || base.back() == 9)) base.pop_back();
-            std::vector<int> nums;
-            for (size_t i = dpos; i < rpos; ++i)
-                if (std::isdigit((unsigned char)target[i])) {
-                    int v2 = 0;
-                    while (i < rpos && std::isdigit((unsigned char)target[i])) { v2 = v2 * 10 + (target[i] - '0'); ++i; }
-                    nums.push_back(v2);
+        // :: type modifier lists arrive space-joined without an opening
+        // parenthesis ("numeric 4 , 2)"). CAST nodes already contain the
+        // opening parenthesis. Canonicalize both forms while preserving a
+        // separated sign token in negative scales.
+        const size_t close = target.rfind(')');
+        if (close != std::string::npos) {
+            const size_t open = target.find('(');
+            const size_t modifierStart = open != std::string::npos
+                ? open + 1 : target.find_first_of("0123456789+-");
+            if (modifierStart != std::string::npos && close > modifierStart) {
+                std::string base = trimStr(target.substr(
+                    0, open != std::string::npos ? open : modifierStart));
+                std::string modifiers;
+                for (size_t i = modifierStart; i < close; ++i) {
+                    if (!std::isspace(
+                            static_cast<unsigned char>(target[i]))) {
+                        modifiers.push_back(target[i]);
+                    }
                 }
-            std::string rebuilt = base + "(";
-            for (size_t k2 = 0; k2 < nums.size(); ++k2) {
-                if (k2) rebuilt += ",";
-                rebuilt += std::to_string(nums[k2]);
+                target = base + "(" + modifiers + ")";
             }
-            rebuilt += ")";
-            target = rebuilt;
         }
     }
 
@@ -2360,55 +2515,8 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
         return ExprValue("double precision",
                          formatFloatingCastValue(converted), false);
     }
-    if (target.size() > 7 && target.compare(0, 8, "numeric(") == 0) {
-        // Typed numeric cast: round half-up to the declared scale
-        // (numeric(p,s) or numeric(p) -> scale 0).
-        int scale = 0;
-        {
-            // Mods may arrive comma- or space-joined:
-            // numeric(4,2) / numeric(4 2). Last number is the
-            // scale; a single number means scale 0.
-            std::vector<int> nums;
-            size_t p2 = target.find('(');
-            size_t e2 = target.find(')');
-            if (p2 != std::string::npos && e2 != std::string::npos && e2 > p2) {
-                std::string seg = target.substr(p2 + 1, e2 - p2 - 1);
-                size_t i2 = 0;
-                while (i2 < seg.size()) {
-                    if (std::isdigit((unsigned char)seg[i2])) {
-                        int v2 = 0;
-                        while (i2 < seg.size() && std::isdigit((unsigned char)seg[i2])) {
-                            v2 = v2 * 10 + (seg[i2] - '0'); ++i2;
-                        }
-                        nums.push_back(v2);
-                    } else ++i2;
-                }
-                if (nums.size() >= 2) scale = nums.back();
-            }
-            if (scale < 0) scale = 0;
-        }
-        auto n = tryParseNumeric(v.value);
-        if (n) {
-            Numeric rs = n->withScale(scale);
-            // Render with the declared scale: pad trailing zeros
-            // (withScale normalizes them away).
-            std::string s = rs.toString();
-            int cur = 0;
-            size_t dot = s.find('.');
-            if (dot != std::string::npos) cur = (int)(s.size() - dot - 1);
-            if (cur < scale) {
-                if (dot == std::string::npos) { s += '.'; }
-                s += std::string(scale - cur, '0');
-            }
-            return ExprValue("numeric", s, false);
-        }
-        return ExprValue("numeric", "", true);
-    }
-    if (target == "numeric" || target == "decimal") {
-        auto n = tryParseNumeric(v.value);
-        if (n) return ExprValue("numeric", n->toString(), false);
-        return ExprValue("numeric", "", true);
-    }
+    const NumericCastSpec numericSpec = parseNumericCastSpec(target);
+    if (numericSpec.matches) return castToNumeric(v, numericSpec);
     if (target == "text" || target.find("char") != std::string::npos || target == "varchar") {
         return ExprValue(targetTypeName, v.value, false);
     }

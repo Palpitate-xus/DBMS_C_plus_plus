@@ -370,6 +370,29 @@ static void test_cast() {
         }
         assert(rejected);
     };
+    auto evaluateNumericTypmod = [&](const std::string& sourceValue,
+                                     std::vector<std::string> modifiers) {
+        auto expression = std::make_unique<CastExpr>();
+        auto operand = std::make_unique<LiteralExpr>();
+        operand->value = sourceValue;
+        operand->typeName = "numeric";
+        expression->operand = std::move(operand);
+        expression->typeName = "numeric";
+        expression->typeMods = std::move(modifiers);
+        return eval.eval(expression.get(), {});
+    };
+    auto expectNumericTypmodError = [&](const std::string& sourceValue,
+                                        std::vector<std::string> modifiers,
+                                        const std::string& sqlstate) {
+        bool rejected = false;
+        try {
+            (void)evaluateNumericTypmod(sourceValue, std::move(modifiers));
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("SQLSTATE " + sqlstate) !=
+                       std::string::npos;
+        }
+        assert(rejected);
+    };
 
     assert(evaluateCast("integer", "32767", "smallint").value == "32767");
     assert(evaluateCast("integer", "-32768", "smallint").value == "-32768");
@@ -408,6 +431,33 @@ static void test_cast() {
     assert(evaluateCast("character varying", "NaN", "real").value ==
            "NaN");
     expectCastError("boolean", "t", "double precision", "42846");
+
+    expectCastError("character varying", "not-numeric", "numeric",
+                    "22P02");
+    expectCastError("boolean", "t", "numeric", "42846");
+    assert(evaluateNumericTypmod("12.345", {"4", "2"}).value == "12.35");
+    assert(evaluateNumericTypmod("7", {"4", "2"}).value == "7.00");
+    expectNumericTypmodError("999.99", {"4", "2"}, "22003");
+    assert(evaluateNumericTypmod("1499", {"2", "-", "3"}).value ==
+           "1000");
+    assert(evaluateNumericTypmod("0.00999", {"3", "5"}).value ==
+           "0.00999");
+    expectNumericTypmodError("0.01", {"3", "5"}, "22003");
+    assert(evaluateNumericTypmod("NaN", {"4", "2"}).value == "NaN");
+    expectNumericTypmodError("Infinity", {"4", "2"}, "22003");
+    expectNumericTypmodError("1", {"0", "0"}, "22023");
+    expectNumericTypmodError("1", {"2", "-", "1001"}, "22023");
+
+    auto postfixCast = std::make_unique<BinaryOpExpr>();
+    postfixCast->op = "::";
+    auto postfixValue = std::make_unique<LiteralExpr>();
+    postfixValue->value = "1499";
+    postfixValue->typeName = "numeric";
+    postfixCast->left = std::move(postfixValue);
+    auto postfixType = std::make_unique<LiteralExpr>();
+    postfixType->value = "numeric 2 , - 3)";
+    postfixCast->right = std::move(postfixType);
+    assert(eval.eval(postfixCast.get(), {}).value == "1000");
 
     std::cout << "[EXPR] cast OK" << std::endl;
 }
