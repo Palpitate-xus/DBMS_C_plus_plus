@@ -28531,20 +28531,76 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         }
         return evaluated.isNull ? "NULL" : evaluated.value;
     }
-    if (expr.funcName == "upper" && !expr.funcArgs.empty()) {
+    if ((expr.funcName == "upper" || expr.funcName == "lower") &&
+        !expr.funcArgs.empty()) {
+        std::string sourceType;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].dataName == expr.funcArgs[0]) {
+                sourceType = tbl.cols[i].dataType;
+                break;
+            }
+        }
+        std::string loweredArgument = trim(expr.funcArgs[0]);
+        for (char& c : loweredArgument) {
+            c = static_cast<char>(
+                std::tolower(static_cast<unsigned char>(c)));
+        }
+        bool rangeArgument = isRangeType(sourceType);
+        static const char* rangeTypes[] = {
+            "int4range", "int8range", "numrange", "daterange",
+            "tsrange", "tstzrange"};
+        for (const char* rangeType : rangeTypes) {
+            if (loweredArgument.find("::" + std::string(rangeType)) !=
+                    std::string::npos ||
+                loweredArgument.find(" as " + std::string(rangeType)) !=
+                    std::string::npos) {
+                rangeArgument = true;
+                break;
+            }
+        }
+        if (rangeArgument) {
+            std::map<std::string, std::string> rowContext;
+            std::map<std::string, std::string> typeHints;
+            std::set<std::string> nullColumns;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                bool valueIsNull = false;
+                const std::string value = engine && !dbname.empty()
+                    ? engine->extractColumnValue(
+                          rowBuffer, tbl, i, dbname, true, &valueIsNull)
+                    : StorageEngine::extractColumnValueStatic(
+                          rowBuffer, tbl, i);
+                rowContext[tbl.cols[i].dataName] = value;
+                typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+                if (valueIsNull || (!engine && value.empty()))
+                    nullColumns.insert(tbl.cols[i].dataName);
+            }
+            const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
+                expr.funcName + "(" + expr.funcArgs[0] + ")",
+                rowContext, nullColumns, typeHints, dbname,
+                expr.sessionUser);
+            if (!evaluated.ok) {
+                throw std::runtime_error(
+                    evaluated.error.empty()
+                        ? "failed to evaluate range bound"
+                        : evaluated.error);
+            }
+            return evaluated.isNull ? "NULL" : evaluated.value;
+        }
+
         std::string val = getVal(expr.funcArgs[0]);
         bool hasMultiByte = false;
         for (unsigned char c : val) if (c >= 0x80) { hasMultiByte = true; break; }
-        if (hasMultiByte) return toUpperUtf8(val);
-        for (char& c : val) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-        return val;
-    }
-    if (expr.funcName == "lower" && !expr.funcArgs.empty()) {
-        std::string val = getVal(expr.funcArgs[0]);
-        bool hasMultiByte = false;
-        for (unsigned char c : val) if (c >= 0x80) { hasMultiByte = true; break; }
-        if (hasMultiByte) return toLowerUtf8(val);
-        for (char& c : val) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (hasMultiByte) {
+            return expr.funcName == "upper"
+                ? toUpperUtf8(val) : toLowerUtf8(val);
+        }
+        for (char& c : val) {
+            c = expr.funcName == "upper"
+                ? static_cast<char>(std::toupper(
+                      static_cast<unsigned char>(c)))
+                : static_cast<char>(std::tolower(
+                      static_cast<unsigned char>(c)));
+        }
         return val;
     }
     if ((expr.funcName == "trim" || expr.funcName == "btrim" ||
