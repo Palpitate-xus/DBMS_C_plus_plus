@@ -6999,12 +6999,28 @@ void ExprEvaluator::registerBuiltins() {
     };
     functions_["repeat"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
-        int64_t n = a[1].asInt();
+        long long parsedCount = 0;
+        if (!parseInt64Exact(a[1].value, parsedCount)) {
+            throw std::runtime_error(
+                "invalid input syntax for type integer (SQLSTATE 22P02)");
+        }
+        if (parsedCount < std::numeric_limits<int32_t>::lowest() ||
+            parsedCount > std::numeric_limits<int32_t>::max()) {
+            throw std::runtime_error(
+                "integer out of range (SQLSTATE 22003)");
+        }
+        const int32_t n = static_cast<int32_t>(parsedCount);
         if (n <= 0) return ExprValue("text", "", false);
         const std::string input = textArgumentValue(a[0]);
+        constexpr size_t kMaxTextPayload = (size_t{1} << 30) - 4;
+        if (!input.empty() &&
+            static_cast<size_t>(n) > kMaxTextPayload / input.size()) {
+            throw std::runtime_error(
+                "requested text length exceeds the limit (SQLSTATE 54000)");
+        }
         std::string s;
         s.reserve(input.size() * static_cast<size_t>(n));
-        for (int64_t i = 0; i < n; ++i) s += input;
+        for (int32_t i = 0; i < n; ++i) s += input;
         return ExprValue("text", s, false);
     };
     functions_["reverse"] = [](const std::vector<ExprValue>& a) {

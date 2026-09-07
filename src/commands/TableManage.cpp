@@ -28885,14 +28885,32 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         return evaluated.isNull ? "NULL" : evaluated.value;
     }
     if (expr.funcName == "repeat" && expr.funcArgs.size() >= 2) {
-        std::string val = getVal(expr.funcArgs[0]);
-        // PG: repeat(s, n) concatenates s n times; n<=0 gives empty.
-        try {
-            int n = std::stoi(getVal(expr.funcArgs[1]));
-            std::string out;
-            for (int i = 0; i < n; ++i) out += val;
-            return out;
-        } catch (...) { return val; }
+        std::map<std::string, std::string> rowContext;
+        std::map<std::string, std::string> typeHints;
+        std::set<std::string> nullColumns;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            bool valueIsNull = false;
+            const std::string value = engine && !dbname.empty()
+                ? engine->extractColumnValue(
+                      rowBuffer, tbl, i, dbname, true, &valueIsNull)
+                : StorageEngine::extractColumnValueStatic(
+                      rowBuffer, tbl, i);
+            rowContext[tbl.cols[i].dataName] = value;
+            typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+            if (valueIsNull || (!engine && value.empty()))
+                nullColumns.insert(tbl.cols[i].dataName);
+        }
+        const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
+            "repeat(" + expr.funcArgs[0] + "," + expr.funcArgs[1] + ")",
+            rowContext, nullColumns, typeHints, dbname,
+            expr.sessionUser);
+        if (!evaluated.ok) {
+            throw std::runtime_error(
+                evaluated.error.empty()
+                    ? "failed to evaluate repeat"
+                    : evaluated.error);
+        }
+        return evaluated.isNull ? "NULL" : evaluated.value;
     }
     if ((expr.funcName == "gcd" || expr.funcName == "lcm") &&
         expr.funcArgs.size() >= 2) {
