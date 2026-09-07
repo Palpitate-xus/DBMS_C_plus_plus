@@ -28510,18 +28510,37 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     }
     if ((expr.funcName == "substring" || expr.funcName == "substr") &&
         expr.funcArgs.size() >= 2) {
-        std::string val = getVal(expr.funcArgs[0]);
-        int start = 0;
-        try { start = std::stoi(expr.funcArgs[1]) - 1; } catch (...) { start = 0; }
-        if (start < 0) start = 0;
-        if (start >= static_cast<int>(val.size())) return "";
-        if (expr.funcArgs.size() >= 3) {
-            int len = 0;
-            try { len = std::stoi(expr.funcArgs[2]); } catch (...) { len = 0; }
-            if (len < 0) len = 0;
-            return val.substr(start, len);
+        std::map<std::string, std::string> rowContext;
+        std::map<std::string, std::string> typeHints;
+        std::set<std::string> nullColumns;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            bool valueIsNull = false;
+            const std::string value = engine && !dbname.empty()
+                ? engine->extractColumnValue(
+                      rowBuffer, tbl, i, dbname, true, &valueIsNull)
+                : StorageEngine::extractColumnValueStatic(
+                      rowBuffer, tbl, i);
+            rowContext[tbl.cols[i].dataName] = value;
+            typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+            if (valueIsNull || (!engine && value.empty()))
+                nullColumns.insert(tbl.cols[i].dataName);
         }
-        return val.substr(start);
+        std::string expressionSql = expr.funcName + "(";
+        for (size_t i = 0; i < expr.funcArgs.size(); ++i) {
+            if (i) expressionSql += ',';
+            expressionSql += expr.funcArgs[i];
+        }
+        expressionSql += ')';
+        const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
+            expressionSql, rowContext, nullColumns, typeHints, dbname,
+            expr.sessionUser);
+        if (!evaluated.ok) {
+            throw std::runtime_error(
+                evaluated.error.empty()
+                    ? "failed to evaluate substring"
+                    : evaluated.error);
+        }
+        return evaluated.isNull ? "NULL" : evaluated.value;
     }
     if (expr.funcName == "concat") {
         // PG concat() skips NULL arguments entirely.
