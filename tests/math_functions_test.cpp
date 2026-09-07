@@ -278,6 +278,9 @@ static void test_hyperbolic() {
 
 static void test_int_math() {
     dbms::ExprEvaluator eval;
+    assert(callFn(eval, "abs", {N("-Infinity")}).value == "Infinity");
+    assert(callFn(eval, "abs", {N("Infinity")}).value == "Infinity");
+    assert(callFn(eval, "abs", {N("NaN")}).value == "NaN");
     const auto numericNan = callFn(
         eval, "sign", {dbms::ExprValue("numeric", "NaN", false)});
     assert(numericNan.typeName == "numeric" && numericNan.value == "NaN");

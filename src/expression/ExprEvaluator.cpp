@@ -5044,7 +5044,14 @@ void ExprEvaluator::registerBuiltins() {
         }
         if (isNumericTypeName(a[0].typeName)) {
             auto n = tryParseNumeric(a[0].value);
-            if (n) return ExprValue("numeric", (n->sign() < 0 ? -(*n) : *n).toString(), false);
+            if (n) {
+                if (n->isNaN())
+                    return ExprValue("numeric", "NaN", false);
+                if (n->isInfinite())
+                    return ExprValue("numeric", "Infinity", false);
+                return ExprValue(
+                    "numeric", (n->sign() < 0 ? -(*n) : *n).toString(), false);
+            }
         }
         double v = std::abs(a[0].asDouble());
         return ExprValue("numeric", std::to_string(v), false);
