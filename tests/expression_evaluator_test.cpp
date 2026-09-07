@@ -341,6 +341,55 @@ static void test_cast() {
     v = eval.eval(bin.get(), {});
     assert(v.value == "456");
 
+    auto evaluateCast = [&](const std::string& sourceType,
+                            const std::string& sourceValue,
+                            const std::string& targetType) {
+        auto expression = std::make_unique<CastExpr>();
+        auto operand = std::make_unique<LiteralExpr>();
+        operand->value = sourceValue;
+        operand->typeName = sourceType;
+        expression->operand = std::move(operand);
+        expression->typeName = targetType;
+        return eval.eval(expression.get(), {});
+    };
+    auto expectCastError = [&](const std::string& sourceType,
+                               const std::string& sourceValue,
+                               const std::string& targetType,
+                               const std::string& sqlstate) {
+        bool rejected = false;
+        try {
+            (void)evaluateCast(sourceType, sourceValue, targetType);
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("SQLSTATE " + sqlstate) !=
+                       std::string::npos;
+        }
+        if (!rejected) {
+            std::cerr << "cast " << sourceType << " value " << sourceValue
+                      << " to " << targetType << " did not report SQLSTATE "
+                      << sqlstate << std::endl;
+        }
+        assert(rejected);
+    };
+
+    assert(evaluateCast("integer", "32767", "smallint").value == "32767");
+    assert(evaluateCast("integer", "-32768", "smallint").value == "-32768");
+    expectCastError("integer", "32768", "smallint", "22003");
+    expectCastError("bigint", "2147483648", "integer", "22003");
+    expectCastError("character varying", "9223372036854775808", "bigint",
+                    "22003");
+    expectCastError("character varying", "3.7", "integer", "22P02");
+    expectCastError("character varying", "'true'", "integer", "22P02");
+
+    assert(evaluateCast("numeric", "2.5", "integer").value == "3");
+    assert(evaluateCast("numeric", "-2.5", "integer").value == "-3");
+    assert(evaluateCast("double precision", "2.5", "integer").value == "2");
+    assert(evaluateCast("double precision", "-2.5", "integer").value == "-2");
+    expectCastError("numeric", "2147483647.5", "integer", "22003");
+    expectCastError("double precision", "1e100", "integer", "22003");
+
+    assert(evaluateCast("boolean", "t", "integer").value == "1");
+    expectCastError("boolean", "t", "bigint", "42846");
+
     std::cout << "[EXPR] cast OK" << std::endl;
 }
 

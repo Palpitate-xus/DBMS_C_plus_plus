@@ -2090,6 +2090,135 @@ ExprValue ExprEvaluator::evalCase(const CaseExpr* e, const RowContext& ctx) cons
 // CAST
 // ----------------------------------------------------------------------------
 
+enum class IntegerCastTarget { SmallInt, Integer, BigInt };
+
+static const char* integerCastTypeName(IntegerCastTarget target) {
+    switch (target) {
+        case IntegerCastTarget::SmallInt: return "smallint";
+        case IntegerCastTarget::Integer:  return "integer";
+        case IntegerCastTarget::BigInt:   return "bigint";
+    }
+    return "integer";
+}
+
+[[noreturn]] static void throwIntegerCastRangeError(IntegerCastTarget target) {
+    throw std::runtime_error(
+        std::string(integerCastTypeName(target)) +
+        " out of range (SQLSTATE 22003)");
+}
+
+[[noreturn]] static void throwIntegerCastSyntaxError(
+    IntegerCastTarget target, const std::string& value) {
+    throw std::runtime_error(
+        "invalid input syntax for type " +
+        std::string(integerCastTypeName(target)) + ": '" + value +
+        "' (SQLSTATE 22P02)");
+}
+
+enum class SignedIntegerParseResult { Ok, Invalid, OutOfRange };
+
+static SignedIntegerParseResult parseSignedInteger(
+    const std::string& input, int64_t& result) {
+    const std::string text = trimStr(input);
+    if (text.empty()) return SignedIntegerParseResult::Invalid;
+    try {
+        size_t consumed = 0;
+        result = std::stoll(text, &consumed, 10);
+        return consumed == text.size() ? SignedIntegerParseResult::Ok
+                                       : SignedIntegerParseResult::Invalid;
+    } catch (const std::invalid_argument&) {
+        return SignedIntegerParseResult::Invalid;
+    } catch (const std::out_of_range&) {
+        return SignedIntegerParseResult::OutOfRange;
+    }
+}
+
+static bool integerFitsTarget(int64_t value, IntegerCastTarget target) {
+    switch (target) {
+        case IntegerCastTarget::SmallInt:
+            return value >= std::numeric_limits<int16_t>::min() &&
+                   value <= std::numeric_limits<int16_t>::max();
+        case IntegerCastTarget::Integer:
+            return value >= std::numeric_limits<int32_t>::min() &&
+                   value <= std::numeric_limits<int32_t>::max();
+        case IntegerCastTarget::BigInt:
+            return true;
+    }
+    return false;
+}
+
+static ExprValue castToInteger(const ExprValue& value,
+                               IntegerCastTarget target) {
+    const std::string sourceType = toLower(value.typeName);
+
+    if (sourceType == "boolean" || sourceType == "bool") {
+        if (target != IntegerCastTarget::Integer) {
+            throw std::runtime_error(
+                "cannot cast type boolean to " +
+                std::string(integerCastTypeName(target)) +
+                " (SQLSTATE 42846)");
+        }
+        return ExprValue("integer", value.asBool() ? "1" : "0", false);
+    }
+
+    const bool numericSource =
+        sourceType == "numeric" || sourceType == "decimal" ||
+        sourceType.rfind("numeric(", 0) == 0 ||
+        sourceType.rfind("decimal(", 0) == 0;
+    const bool floatingSource =
+        sourceType == "real" || sourceType == "float4" ||
+        sourceType == "float" || sourceType == "float8" ||
+        sourceType == "double" || sourceType == "double precision";
+
+    int64_t converted = 0;
+    if (floatingSource) {
+        const std::string text = trimStr(value.value);
+        double parsed = 0.0;
+        try {
+            size_t consumed = 0;
+            parsed = std::stod(text, &consumed);
+            if (consumed != text.size())
+                throwIntegerCastSyntaxError(target, text);
+        } catch (const std::invalid_argument&) {
+            throwIntegerCastSyntaxError(target, text);
+        } catch (const std::out_of_range&) {
+            throwIntegerCastRangeError(target);
+        }
+
+        const long double rounded =
+            std::nearbyint(static_cast<long double>(parsed));
+        const int bitWidth = target == IntegerCastTarget::SmallInt ? 16 :
+                             target == IntegerCastTarget::Integer ? 32 : 64;
+        const long double upperExclusive = std::ldexp(1.0L, bitWidth - 1);
+        if (!std::isfinite(rounded) || rounded < -upperExclusive ||
+            rounded >= upperExclusive) {
+            throwIntegerCastRangeError(target);
+        }
+        converted = static_cast<int64_t>(rounded);
+    } else {
+        std::string integerText = value.value;
+        if (numericSource) {
+            auto numeric = tryParseNumeric(value.value);
+            if (!numeric)
+                throwIntegerCastSyntaxError(target, trimStr(value.value));
+            if (!numeric->isFinite()) throwIntegerCastRangeError(target);
+            integerText = numeric->withScale(0).toString();
+        }
+
+        const SignedIntegerParseResult parsed =
+            parseSignedInteger(integerText, converted);
+        if (parsed == SignedIntegerParseResult::Invalid)
+            throwIntegerCastSyntaxError(target, trimStr(value.value));
+        if (parsed == SignedIntegerParseResult::OutOfRange)
+            throwIntegerCastRangeError(target);
+        if (!integerFitsTarget(converted, target))
+            throwIntegerCastRangeError(target);
+    }
+
+    return ExprValue(integerCastTypeName(target), std::to_string(converted),
+                     false);
+}
+
 ExprValue ExprEvaluator::evalCast(const CastExpr* e, const RowContext& ctx) const {
     if (e) {
         ExprValue v = eval(e->operand.get(), ctx);        std::string fullT = e->typeName;        if (!e->typeMods.empty()) {            fullT += "(";            for (size_t mi = 0; mi < e->typeMods.size(); ++mi) {                if (mi) fullT += ",";                fullT += e->typeMods[mi];            }            fullT += ")";        }        return evalCast(nullptr, ctx, v, fullT);
@@ -2130,38 +2259,13 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
     if (target == "boolean" || target == "bool") {
         return ExprValue("boolean", v.asBool() ? "t" : "f", false);
     }
-    if (target == "integer" || target == "int" || target == "int4") {
-        // Boolean text converts first: PG cast(true as int) = 1.
-        if (v.value == "t" || v.value == "true")
-            return ExprValue("integer", "1", false);
-        if (v.value == "f" || v.value == "false")
-            return ExprValue("integer", "0", false);
-        // Unparseable text is a hard error in PG: invalid input syntax
-        // for type integer (SQLSTATE 22P02).  Leading/trailing spaces are
-        // tolerated, as in PG.
-        {
-            const std::string t = trimStr(v.value);
-            bool ok = !t.empty();
-            size_t i = (t.size() > 0 && (t[0] == '+' || t[0] == '-')) ? 1 : 0;
-            bool digits = false;
-            for (; i < t.size(); ++i) {
-                if (std::isdigit(static_cast<unsigned char>(t[i]))) digits = true;
-                else if (t[i] == '.') { if (i == t.size() - 1 || t.find('.', i + 1) != std::string::npos) { ok = false; break; } }
-                else { ok = false; break; }
-            }
-            if (!ok || !digits)
-                throw std::runtime_error("invalid input syntax for type integer: " +
-                                         std::string("'") + t + "' (SQLSTATE 22P02)");
-        }
-        // PG cast rounds to nearest (half away from zero): 3.7 -> 4, -3.7 -> -4
-        const bool integral = v.value.find('.') == std::string::npos;
-        return ExprValue("integer", std::to_string(integral ? v.asInt() : static_cast<int64_t>(std::llround(v.asDouble()))), false);
-    }
+    if (target == "integer" || target == "int" || target == "int4")
+        return castToInteger(v, IntegerCastTarget::Integer);
     if (target == "bigint" || target == "int8") {
-        return ExprValue("bigint", std::to_string(v.asInt()), false);
+        return castToInteger(v, IntegerCastTarget::BigInt);
     }
     if (target == "smallint" || target == "int2") {
-        return ExprValue("smallint", std::to_string(static_cast<int16_t>(v.asInt())), false);
+        return castToInteger(v, IntegerCastTarget::SmallInt);
     }
     if (target == "real" || target == "float4") {
         std::ostringstream oss; oss << static_cast<float>(v.asDouble());
