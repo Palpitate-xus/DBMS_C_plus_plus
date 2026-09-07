@@ -465,6 +465,41 @@ static void test_pattern_escape_arguments() {
     std::cout << "[EXPR] pattern escape arguments OK" << std::endl;
 }
 
+static void test_like_escape_semantics() {
+    ExprEvaluator eval;
+    auto makeLit = [](const std::string& s) {
+        auto e = std::make_unique<LiteralExpr>();
+        e->value = s;
+        return e;
+    };
+    const auto evaluateCall = [&](const std::string& name,
+                                  const std::string& text,
+                                  const std::string& pattern,
+                                  const std::string& escape) {
+        auto expression = std::make_unique<FunctionCallExpr>();
+        expression->funcName = name;
+        expression->args.push_back(makeLit(text));
+        expression->args.push_back(makeLit(pattern));
+        expression->args.push_back(makeLit(escape));
+        return eval.eval(expression.get(), {}).asBool();
+    };
+
+    auto defaultEscape = std::make_unique<BinaryOpExpr>();
+    defaultEscape->op = "like";
+    defaultEscape->left = makeLit(R"('_')");
+    defaultEscape->right = makeLit(R"('\_')");
+    assert(eval.eval(defaultEscape.get(), {}).asBool());
+
+    assert(evaluateCall("like escape", R"('\x')", R"('\_')", "''"));
+    assert(evaluateCall("like escape", "'ab'", "'a#b'", "'#'"));
+    assert(evaluateCall("like escape", "'a_b'", "'a#_b'", "'#'"));
+    assert(evaluateCall("ilike escape", "'A%B'", "'a#%b'", "'#'"));
+    assert(evaluateCall("like escape", "'a_b'", "'a§_b'", "'§'"));
+    assert(!evaluateCall("like escape", "'a#'", "'a#'", "'#'"));
+
+    std::cout << "[EXPR] LIKE escape semantics OK" << std::endl;
+}
+
 static void test_cast() {
     ExprEvaluator eval;
     auto makeLit = [](const std::string& s) {
@@ -815,6 +850,7 @@ int main() {
     test_like();
     test_regex_operators();
     test_pattern_escape_arguments();
+    test_like_escape_semantics();
     test_cast();
     test_numeric();
     test_case();

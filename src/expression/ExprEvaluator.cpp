@@ -1675,24 +1675,68 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
 
 [[noreturn]] static void throwInvalidRegularExpression();
 
-bool ExprEvaluator::likeMatch(const std::string& text, const std::string& pattern) {
-    size_t ti = 0, pi = 0, star = std::string::npos, match = 0;
-    while (ti < text.size()) {
-        if (pi < pattern.size() && pattern[pi] == '%') {
-            // wildcard takes precedence over a literal '%' in the TEXT
-            star = pi++;
-            match = ti;
-        } else if (pi < pattern.size() && (pattern[pi] == '_' || pattern[pi] == text[ti])) {
-            ++ti; ++pi;
-        } else if (star != std::string::npos) {
-            pi = star + 1;
-            ti = ++match;
+static bool likeMatchWithEscape(const std::string& text,
+                                const std::string& pattern,
+                                const std::string& escape,
+                                bool foldCase = false) {
+    enum class TokenKind { Literal, AnyCharacter, AnySequence };
+    struct Token {
+        TokenKind kind;
+        unsigned char literal = 0;
+    };
+
+    std::vector<Token> tokens;
+    for (size_t i = 0; i < pattern.size();) {
+        if (!escape.empty() &&
+            pattern.compare(i, escape.size(), escape) == 0) {
+            i += escape.size();
+            // PostgreSQL treats a pattern ending in its escape character as
+            // an expression that cannot match, rather than as a literal.
+            if (i == pattern.size()) return false;
+            tokens.push_back(
+                {TokenKind::Literal, static_cast<unsigned char>(pattern[i++])});
+        } else if (pattern[i] == '%') {
+            tokens.push_back({TokenKind::AnySequence});
+            ++i;
+        } else if (pattern[i] == '_') {
+            tokens.push_back({TokenKind::AnyCharacter});
+            ++i;
         } else {
-            return false;
+            tokens.push_back(
+                {TokenKind::Literal, static_cast<unsigned char>(pattern[i++])});
         }
     }
-    while (pi < pattern.size() && pattern[pi] == '%') ++pi;
-    return pi == pattern.size();
+
+    std::vector<unsigned char> previous(text.size() + 1, 0);
+    std::vector<unsigned char> current(text.size() + 1, 0);
+    previous[0] = 1;
+    for (const auto& token : tokens) {
+        std::fill(current.begin(), current.end(), 0);
+        if (token.kind == TokenKind::AnySequence) {
+            current[0] = previous[0];
+            for (size_t i = 1; i <= text.size(); ++i) {
+                current[i] = previous[i] || current[i - 1];
+            }
+        } else {
+            for (size_t i = 1; i <= text.size(); ++i) {
+                bool matches = token.kind == TokenKind::AnyCharacter;
+                if (token.kind == TokenKind::Literal) {
+                    const unsigned char textByte =
+                        static_cast<unsigned char>(text[i - 1]);
+                    matches = foldCase
+                        ? std::tolower(textByte) == std::tolower(token.literal)
+                        : textByte == token.literal;
+                }
+                current[i] = previous[i - 1] && matches;
+            }
+        }
+        previous.swap(current);
+    }
+    return previous[text.size()] != 0;
+}
+
+bool ExprEvaluator::likeMatch(const std::string& text, const std::string& pattern) {
+    return likeMatchWithEscape(text, pattern, "\\");
 }
 
 bool ExprEvaluator::similarToMatch(const std::string& text, const std::string& pattern) {
@@ -1716,27 +1760,6 @@ bool ExprEvaluator::similarToMatch(const std::string& text, const std::string& p
     }
 }
 
-static bool likeMatchEscaped(const std::string& text, const std::string& pattern) {
-    // likeMatch plus 0x01<literal> escape markers (see LIKE ESCAPE).
-    size_t ti = 0, pi = 0, star = std::string::npos, match = 0;
-    while (ti < text.size()) {
-        if (pi + 1 < pattern.size() && pattern[pi] == 1) {
-            if (pattern[pi + 1] != text[ti]) return false;
-            ++ti; pi += 2;
-        } else if (pi < pattern.size() && pattern[pi] == 37) {
-            star = pi++; match = ti;
-        } else if (pi < pattern.size() &&
-                   (pattern[pi] == 95 || pattern[pi] == text[ti])) {
-            ++ti; ++pi;
-        } else if (star != std::string::npos) {
-            pi = star + 1; ti = ++match;
-        } else {
-            return false;
-        }
-    }
-    while (pi < pattern.size() && pattern[pi] == 37) ++pi;
-    return pi == pattern.size();
-}
 static bool similarToMatchEscape(const std::string& text, const std::string& pattern, char esc) {
     // Like similarToMatch but with an explicit SQL ESCAPE character:
     // esc followed by % or _ denotes the literal character.
@@ -2964,19 +2987,10 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
             return ExprValue("boolean", "", true);
         }
         validatePatternEscape(args[2]);
-        char esc = (!args[2].isNull && !args[2].value.empty()) ? args[2].value[0] : 92;
-        std::string pat;
-        const std::string& src = args[1].value;
-        for (size_t i = 0; i < src.size(); ++i) {
-            if (src[i] == esc && i + 1 < src.size() &&
-                (src[i + 1] == 37 || src[i + 1] == 95 || src[i + 1] == esc)) {
-                pat += static_cast<char>(1);
-                pat += src[++i];
-                continue;
-            }
-            pat += src[i];
-        }
-        bool m = likeMatchEscaped(args[0].value, pat);
+        const bool foldCase = name == "ilike escape" ||
+                              name == "not ilike escape";
+        bool m = likeMatchWithEscape(args[0].value, args[1].value,
+                                     args[2].value, foldCase);
         if (name.rfind("not ", 0) == 0) m = !m;
         return ExprValue("boolean", m ? "t" : "f", false);
     }
