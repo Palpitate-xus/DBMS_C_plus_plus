@@ -6979,6 +6979,21 @@ void ExprEvaluator::registerBuiltins() {
         } else if (field == "doy") {
             Date cur(y, mo, d), jan1(y, 1, 1);
             r = (cur.year != 0 && jan1.year != 0) ? cur.convert() - jan1.convert() + 1 : 0;
+        } else if (field == "julian") {
+            const int calendarOffset = (14 - mo) / 12;
+            const int shiftedYear = y + 4800 - calendarOffset;
+            const int shiftedMonth = mo + 12 * calendarOffset - 3;
+            const int64_t julianDay =
+                d + (153LL * shiftedMonth + 2) / 5 +
+                365LL * shiftedYear + shiftedYear / 4 -
+                shiftedYear / 100 + shiftedYear / 400 - 32045;
+            const long double dayFraction =
+                static_cast<long double>(h * 3600 + mi * 60 + se) /
+                86400.0L;
+            std::ostringstream out;
+            out << std::fixed << std::setprecision(6)
+                << static_cast<long double>(julianDay) + dayFraction;
+            return ExprValue("numeric", out.str(), false);
         } else if (field == "epoch") {
             // Timestamp: seconds since 1970-01-01 00:00:00, numeric
             // scale 6 (86400.000000).
