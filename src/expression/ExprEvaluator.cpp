@@ -954,6 +954,20 @@ static bool parseInt64Exact(const std::string& text, long long& value) {
     }
 }
 
+static int32_t parseInt32Argument(const ExprValue& argument) {
+    long long parsed = 0;
+    if (!parseInt64Exact(argument.value, parsed)) {
+        throw std::runtime_error(
+            "invalid input syntax for type integer (SQLSTATE 22P02)");
+    }
+    if (parsed < std::numeric_limits<int32_t>::lowest() ||
+        parsed > std::numeric_limits<int32_t>::max()) {
+        throw std::runtime_error(
+            "integer out of range (SQLSTATE 22003)");
+    }
+    return static_cast<int32_t>(parsed);
+}
+
 static std::string shiftDateByDays(const std::string& text, long long days,
                                    bool add) {
     Date input(text.c_str());
@@ -6973,7 +6987,7 @@ void ExprEvaluator::registerBuiltins() {
     };
     functions_["left"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
-        int64_t n = a[1].asInt();
+        int64_t n = parseInt32Argument(a[1]);
         const std::string s = textArgumentValue(a[0]);
         size_t total = utf8CharCount(s);
         const uint64_t magnitude = n < 0
@@ -6986,7 +7000,7 @@ void ExprEvaluator::registerBuiltins() {
     };
     functions_["right"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
-        int64_t n = a[1].asInt();
+        int64_t n = parseInt32Argument(a[1]);
         const std::string s = textArgumentValue(a[0]);
         size_t total = utf8CharCount(s);
         const uint64_t magnitude = n < 0
@@ -6999,17 +7013,7 @@ void ExprEvaluator::registerBuiltins() {
     };
     functions_["repeat"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
-        long long parsedCount = 0;
-        if (!parseInt64Exact(a[1].value, parsedCount)) {
-            throw std::runtime_error(
-                "invalid input syntax for type integer (SQLSTATE 22P02)");
-        }
-        if (parsedCount < std::numeric_limits<int32_t>::lowest() ||
-            parsedCount > std::numeric_limits<int32_t>::max()) {
-            throw std::runtime_error(
-                "integer out of range (SQLSTATE 22003)");
-        }
-        const int32_t n = static_cast<int32_t>(parsedCount);
+        const int32_t n = parseInt32Argument(a[1]);
         if (n <= 0) return ExprValue("text", "", false);
         const std::string input = textArgumentValue(a[0]);
         constexpr size_t kMaxTextPayload = (size_t{1} << 30) - 4;

@@ -4,6 +4,7 @@
 
 #include <cassert>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 
 extern dbms::StorageEngine g_engine;
@@ -26,6 +27,20 @@ std::string projectSlice(const std::string& database,
     std::string value = rows.front();
     value.pop_back();
     return value;
+}
+
+void expectSqlState(const std::string& database,
+                    const std::string& function,
+                    const std::string& count,
+                    const std::string& sqlState) {
+    bool rejected = false;
+    try {
+        (void)projectSlice(database, function, "'abcd'", count);
+    } catch (const std::runtime_error& error) {
+        rejected = std::string(error.what()).find(
+            "SQLSTATE " + sqlState) != std::string::npos;
+    }
+    assert(rejected);
 }
 
 }  // namespace
@@ -56,8 +71,11 @@ int main() {
     assert(projectSlice(database, "right", "'aé中z'", "-2") == "中z");
     assert(projectSlice(database, "left", "'abc'", "2147483647") ==
            "abc");
-    assert(projectSlice(database, "right", "'abc'", "-2147483649")
+    assert(projectSlice(database, "right", "'abc'", "-2147483648")
                .empty());
+    expectSqlState(database, "left", "'2x'", "22P02");
+    expectSqlState(database, "right", "2147483648", "22003");
+    expectSqlState(database, "right", "-2147483649", "22003");
     assert(projectSlice(database, "left", "empty_text", "2").empty());
     assert(projectSlice(database, "right", "null_text", "2") == "NULL");
 
