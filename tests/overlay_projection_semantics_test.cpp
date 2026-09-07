@@ -28,6 +28,19 @@ std::string projectOverlay(const std::string& database,
     return value;
 }
 
+void expectSqlState(const std::string& database,
+                    const std::vector<std::string>& arguments,
+                    const std::string& sqlState) {
+    bool rejected = false;
+    try {
+        (void)projectOverlay(database, arguments);
+    } catch (const std::runtime_error& error) {
+        rejected = std::string(error.what()).find(
+            "SQLSTATE " + sqlState) != std::string::npos;
+    }
+    assert(rejected);
+}
+
 }  // namespace
 
 int main() {
@@ -67,16 +80,16 @@ int main() {
            "ac");
     assert(projectOverlay(database, {"null_text", "'X'", "2"}) ==
            "NULL");
-
-    bool rejectedInvalidStart = false;
-    try {
-        (void)projectOverlay(database, {"'abcdef'", "'X'", "0"});
-    } catch (const std::runtime_error& error) {
-        rejectedInvalidStart =
-            std::string(error.what()).find("SQLSTATE 22011") !=
-            std::string::npos;
-    }
-    assert(rejectedInvalidStart);
+    assert(projectOverlay(database, {"'abcdef'", "'X'", "2", "-1"}) ==
+           "aXabcdef");
+    expectSqlState(database, {"'abcdef'", "'X'", "0"}, "22011");
+    expectSqlState(database, {"'abcdef'", "'X'", "'2x'"}, "22P02");
+    expectSqlState(database,
+                   {"'abcdef'", "'X'", "2147483648"}, "22003");
+    expectSqlState(database,
+                   {"'abcdef'", "'X'", "2", "'1x'"}, "22P02");
+    expectSqlState(database,
+                   {"'abcdef'", "'X'", "2", "-2147483649"}, "22003");
 
     cleanupTestDb(testName);
     finalCleanupTestData();

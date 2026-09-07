@@ -7333,13 +7333,10 @@ void ExprEvaluator::registerBuiltins() {
         }
         const std::string s = textArgumentValue(a[0]);
         const std::string repl = textArgumentValue(a[1]);
-        long long start = 0;
-        if (!parseInt64Exact(a[2].value, start))
-            return ExprValue("text", "", true);
+        const long long start = parseInt32Argument(a[2]);
         long long count = 0;
         if (a.size() >= 4) {
-            if (!parseInt64Exact(a[3].value, count))
-                return ExprValue("text", "", true);
+            count = parseInt32Argument(a[3]);
         } else {
             count = static_cast<long long>(utf8CharCount(repl));
         }
