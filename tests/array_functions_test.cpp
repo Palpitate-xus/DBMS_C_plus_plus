@@ -117,6 +117,17 @@ static void test_position() {
             std::string::npos;
     }
     assert(nullStartRejected);
+
+    bool multidimensionalRejected = false;
+    try {
+        (void)callFn(eval, "array_position",
+                     {A("{{1,2},{3,4}}"), I(1)});
+    } catch (const std::runtime_error& error) {
+        multidimensionalRejected =
+            std::string(error.what()).find("SQLSTATE 0A000") !=
+            std::string::npos;
+    }
+    assert(multidimensionalRejected);
     std::cout << "[ARRFN] position OK" << std::endl;
 }
 

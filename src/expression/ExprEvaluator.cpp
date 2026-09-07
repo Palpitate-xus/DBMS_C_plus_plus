@@ -6114,6 +6114,14 @@ void ExprEvaluator::registerBuiltins() {
         if (a.size() < 2 || a[0].isNull) return ExprValue("integer", "", true);
         std::vector<std::string> elems;
         if (!parseArrayElements(a[0].value, elems)) return ExprValue("integer", "", true);
+        for (const auto& elem : elems) {
+            std::vector<std::string> nested;
+            if (parseArrayElements(elem, nested)) {
+                throw std::runtime_error(
+                    "searching for elements in multidimensional arrays is "
+                    "not supported (SQLSTATE 0A000)");
+            }
+        }
         long long initialPosition = 1;
         if (a.size() >= 3) {
             if (a[2].isNull) {
