@@ -1360,15 +1360,41 @@ static ExprPtr parseRangeExpr(const std::vector<std::string>& tokens, size_t& po
         bin->left = std::move(left);
         if (pos < tokens.size() && tokens[pos] == "(") {
             ++pos;
-            auto list = std::make_unique<LiteralExpr>();
-            std::string val;
-            while (pos < tokens.size() && tokens[pos] != ")") {
-                if (!val.empty()) val += " ";
-                val += tokens[pos++];
+            if (pos < tokens.size() &&
+                SQLParser::toLower(tokens[pos]) == "select") {
+                // Subquery IN predicates are planned separately; retain their
+                // SQL text for that path rather than treating SELECT as a
+                // scalar list element.
+                auto list = std::make_unique<LiteralExpr>();
+                std::string value;
+                int depth = 1;
+                while (pos < tokens.size() && depth > 0) {
+                    if (tokens[pos] == "(") ++depth;
+                    else if (tokens[pos] == ")") --depth;
+                    if (depth > 0) {
+                        if (!value.empty()) value += " ";
+                        value += tokens[pos++];
+                    }
+                }
+                if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+                list->value = value;
+                bin->right = std::move(list);
+            } else {
+                auto list = std::make_unique<RowExpr>();
+                while (pos < tokens.size() && tokens[pos] != ")") {
+                    const size_t elementStart = pos;
+                    auto element = parseExpr(tokens, pos);
+                    if (!element || pos == elementStart) break;
+                    list->elements.push_back(std::move(element));
+                    if (pos < tokens.size() && tokens[pos] == ",") {
+                        ++pos;
+                        continue;
+                    }
+                    break;
+                }
+                if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+                bin->right = std::move(list);
             }
-            if (pos < tokens.size() && tokens[pos] == ")") ++pos;
-            list->value = val;
-            bin->right = std::move(list);
         } else {
             bin->right = parseConcatExpr(tokens, pos);
         }

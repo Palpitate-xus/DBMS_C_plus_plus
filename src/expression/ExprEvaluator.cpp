@@ -1848,6 +1848,26 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
     }
 
     ExprValue l = eval(e->left.get(), ctx);
+
+    // A scalar IN list is represented as a RowExpr so each member retains its
+    // own type, NULL bit, and expression tree. IN is an OR of equality
+    // comparisons; NOT IN negates that three-valued result.
+    if ((op == "in" || op == "not in") &&
+        dynamic_cast<const RowExpr*>(e->right.get())) {
+        const auto* list = static_cast<const RowExpr*>(e->right.get());
+        bool sawUnknown = l.isNull;
+        for (const auto& element : list->elements) {
+            const ExprValue candidate = eval(element.get(), ctx);
+            const ExprValue equal = applyComparison("=", l, candidate);
+            if (!equal.isNull && equal.asBool()) {
+                return ExprValue("boolean", op == "in" ? "t" : "f", false);
+            }
+            if (equal.isNull) sawUnknown = true;
+        }
+        if (sawUnknown) return ExprValue("boolean", "", true);
+        return ExprValue("boolean", op == "in" ? "f" : "t", false);
+    }
+
     ExprValue r = eval(e->right.get(), ctx);
 
     // Comparison
