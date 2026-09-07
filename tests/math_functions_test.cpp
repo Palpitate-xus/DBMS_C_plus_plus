@@ -310,11 +310,31 @@ static void test_int_math() {
 
 static void test_width_bucket() {
     dbms::ExprEvaluator eval;
+    auto expectInvalidArgument = [&](const std::vector<dbms::ExprValue>& args) {
+        bool rejected = false;
+        try {
+            (void)callFn(eval, "width_bucket", args);
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("SQLSTATE 2201G") !=
+                       std::string::npos;
+        }
+        assert(rejected);
+    };
     // PG doc example: width_bucket(5.35, 0.024, 10.06, 5) = 3
     assert(callFn(eval, "width_bucket", {D(5.35), D(0.024), D(10.06), I(5)}).value == "3");
     assert(callFn(eval, "width_bucket", {D(-1), D(0), D(10), I(5)}).value == "0");     // below low
     assert(callFn(eval, "width_bucket", {D(20), D(0), D(10), I(5)}).value == "6");     // above high -> count+1
     assert(callFn(eval, "width_bucket", {D(0), D(0), D(10), I(5)}).value == "1");      // at low edge
+    expectInvalidArgument({D(5), D(0), D(10), I(0)});
+    expectInvalidArgument({D(5), D(1), D(1), I(4)});
+    expectInvalidArgument({D(std::numeric_limits<double>::quiet_NaN()),
+                           D(0), D(10), I(4)});
+    expectInvalidArgument({D(5),
+                           D(-std::numeric_limits<double>::infinity()),
+                           D(std::numeric_limits<double>::infinity()), I(4)});
+    assert(callFn(eval, "width_bucket",
+                  {D(std::numeric_limits<double>::infinity()), D(0), D(10),
+                   I(4)}).value == "5");
     bool overflowRejected = false;
     try {
         (void)callFn(

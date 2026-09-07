@@ -5189,7 +5189,23 @@ void ExprEvaluator::registerBuiltins() {
             return ExprValue("integer", "", true);
         double v = a[0].asDouble(), lo = a[1].asDouble(), hi = a[2].asDouble();
         int64_t count = a[3].asInt();
-        if (count <= 0 || lo == hi) return ExprValue("integer", "", true);
+        if (count <= 0) {
+            throw std::runtime_error(
+                "count must be greater than zero (SQLSTATE 2201G)");
+        }
+        if (std::isnan(v) || std::isnan(lo) || std::isnan(hi)) {
+            throw std::runtime_error(
+                "operand, lower bound, and upper bound cannot be NaN "
+                "(SQLSTATE 2201G)");
+        }
+        if (!std::isfinite(lo) || !std::isfinite(hi)) {
+            throw std::runtime_error(
+                "lower and upper bounds must be finite (SQLSTATE 2201G)");
+        }
+        if (lo == hi) {
+            throw std::runtime_error(
+                "lower bound cannot equal upper bound (SQLSTATE 2201G)");
+        }
         bool reversed = lo > hi;
         if (reversed) std::swap(lo, hi);
         auto pastLastBucket = [count]() -> int64_t {
