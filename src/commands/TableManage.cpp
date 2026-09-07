@@ -30450,6 +30450,34 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             }
             const TableSchema innerSchema =
                 engine->getTableSchema(dbname, subTname);
+            const Expr* target = projection->selectList.front().expr.get();
+            const auto* starLiteral = dynamic_cast<const LiteralExpr*>(target);
+            const auto* starReference = dynamic_cast<const ColumnRefExpr*>(target);
+            const bool wildcard = (starLiteral && starLiteral->value == "*") ||
+                (starReference && starReference->column == "*");
+            std::string wildcardColumn;
+            if (wildcard) {
+                const TableSchema* expandedSchema = &innerSchema;
+                std::string qualifier = subAlias.empty() ? subTname : subAlias;
+                if (starReference) {
+                    if (!starReference->schema.empty() ||
+                        (starReference->table != qualifier &&
+                         starReference->table != tbl.tablename)) {
+                        throw std::runtime_error(
+                            "missing FROM-clause entry for table \"" +
+                            starReference->table + "\" (SQLSTATE 42P01)");
+                    }
+                    if (starReference->table != qualifier) {
+                        expandedSchema = &tbl;
+                        qualifier = tbl.tablename;
+                    }
+                }
+                if (expandedSchema->len != 1) {
+                    throw std::runtime_error(
+                        "subquery must return only one column (SQLSTATE 42601)");
+                }
+                wildcardColumn = qualifier + "." + expandedSchema->cols[0].dataName;
+            }
             std::set<std::string> innerColumnNames;
             for (size_t i = 0; i < innerSchema.len; ++i)
                 innerColumnNames.insert(innerSchema.cols[i].dataName);
@@ -30541,6 +30569,14 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                         }
                     }
 
+                    // A wildcard has already been expanded and checked
+                    // against the relation shape, including empty relations.
+                    if (wildcard) {
+                        scalarRows.emplace_back(
+                            rowContext.at(wildcardColumn),
+                            nullColumns.count(wildcardColumn) != 0);
+                        return;
+                    }
                     const auto selected =
                         dbms::ExprHelper::evalStringWithNulls(
                             colsStr, rowContext, nullColumns, typeHints,
