@@ -75,6 +75,15 @@ static void test_extract_date_part() {
            "9000.000");
     assert(callFn(eval, "extract", {F("microseconds"), ts}).value ==
            "9000000");
+    auto fractionalTs = TS("2024-01-01 12:34:56.123456");
+    assert(callFn(eval, "extract", {F("second"), fractionalTs}).value ==
+           "56.123456");
+    assert(callFn(eval, "extract", {F("milliseconds"), fractionalTs}).value ==
+           "56123.456");
+    assert(callFn(eval, "extract", {F("microseconds"), fractionalTs}).value ==
+           "56123456");
+    assert(callFn(eval, "date_part", {F("second"), fractionalTs}).value ==
+           "56.123456");
     assert(callFn(eval, "extract", {F("quarter"), ts}).value == "2");
     // date_part is an alias of extract.
     assert(callFn(eval, "date_part", {F("year"), ts}).value == "2026");
@@ -163,6 +172,10 @@ static void test_epoch() {
     assert(callFn(eval, "extract", {F("epoch"), TS("1970-01-02 00:00:00")}).value == "86400.000000");
     // A specific later instant.
     assert(callFn(eval, "extract", {F("epoch"), TS("1970-01-01 01:00:00")}).value == "3600.000000");
+    assert(callFn(eval, "extract",
+                  {F("epoch"),
+                   TS("1970-01-01 00:00:00.123456")}).value ==
+           "0.123456");
     assert(callFn(eval, "extract",
                   {F("epoch"), TS("infinity")}).value == "Infinity");
     assert(callFn(eval, "extract",

@@ -8373,8 +8373,13 @@ void ExprEvaluator::registerBuiltins() {
             return ExprValue("numeric", "0", false);
         }
 
-        const int64_t timestamp = parseTimestampToSeconds(src);
-        if (isInfiniteTimestamp(timestamp)) {
+        const bool withTimeZone = sourceType == "timestamptz" ||
+            sourceType == "timestamp with time zone";
+        const auto parsedTimestamp =
+            parseComparableTimestamp(src, withTimeZone);
+        if (!parsedTimestamp)
+            return ExprValue("numeric", "", true);
+        if (parsedTimestamp->infinity != 0) {
             const bool monotonicField =
                 field == "epoch" || field == "year" ||
                 field == "decade" || field == "century" ||
@@ -8383,12 +8388,11 @@ void ExprEvaluator::registerBuiltins() {
                 return ExprValue("numeric", "", true);
             return ExprValue(
                 "numeric",
-                timestamp == TIMESTAMP_POSITIVE_INFINITY
-                    ? "Infinity" : "-Infinity",
+                parsedTimestamp->infinity > 0 ? "Infinity" : "-Infinity",
                 false);
         }
-        if (timestamp == 0)
-            return ExprValue("numeric", "", true);
+        const int64_t secondMicros =
+            parsedTimestamp->micros % 60000000LL;
         auto num = [&](size_t off, size_t len) -> int {
             if (src.size() < off + len) return 0;
             int v = 0;
@@ -8425,12 +8429,22 @@ void ExprEvaluator::registerBuiltins() {
         else if (field == "day") r = d;
         else if (field == "hour") r = h;
         else if (field == "minute") r = mi;
-        else if (field == "second") r = se;
-        else if (field == "milliseconds") {
-            return ExprValue(
-                "numeric", std::to_string(se * 1000) + ".000", false);
+        else if (field == "second") {
+            if (secondMicros % 1000000LL == 0) {
+                r = secondMicros / 1000000LL;
+            } else {
+                return ExprValue(
+                    "numeric", formatMicrosNumeric(secondMicros), false);
+            }
         }
-        else if (field == "microseconds") r = se * 1000000LL;
+        else if (field == "milliseconds") {
+            std::string fraction = std::to_string(secondMicros % 1000);
+            fraction.insert(fraction.begin(), 3 - fraction.size(), '0');
+            return ExprValue(
+                "numeric", std::to_string(secondMicros / 1000) + "." +
+                    fraction, false);
+        }
+        else if (field == "microseconds") r = secondMicros;
         else if (field == "quarter") r = mo > 0 ? (mo - 1) / 3 + 1 : 0;
         else if (field == "decade") r = y / 10;
         else if (field == "century") r = y > 0 ? (y - 1) / 100 + 1 : 0;
@@ -8482,10 +8496,12 @@ void ExprEvaluator::registerBuiltins() {
         } else if (field == "epoch") {
             // Timestamp: seconds since 1970-01-01 00:00:00, numeric
             // scale 6 (86400.000000).
-            r = parseTimestampToSeconds(src) - parseTimestampToSeconds("1970-01-01 00:00:00");
-            char eb[64];
-            std::snprintf(eb, sizeof(eb), "%.6f", static_cast<double>(r));
-            return ExprValue("numeric", eb, false);
+            const __int128 epochMicros =
+                static_cast<__int128>(parsedTimestamp->micros) -
+                static_cast<__int128>(parseTimestampToSeconds(
+                    "1970-01-01 00:00:00")) * 1000000;
+            return ExprValue(
+                "numeric", formatMicrosNumeric(epochMicros), false);
         } else {
             return ExprValue("numeric", "", true);
         }
