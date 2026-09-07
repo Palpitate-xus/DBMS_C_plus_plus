@@ -28466,24 +28466,37 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         if (!s.empty() && s.back() == '.') s.pop_back();
         return s;
     }
-    if (expr.funcName == "length" && !expr.funcArgs.empty()) {
-        std::string val = getVal(expr.funcArgs[0]);
-        return std::to_string(val.size());
-    }
-    if ((expr.funcName == "char_length" || expr.funcName == "character_length") && !expr.funcArgs.empty()) {
-        std::string val = getVal(expr.funcArgs[0]);
-        // Count UTF-8 code points (not bytes)
-        size_t count = 0;
-        for (size_t i = 0; i < val.size(); ) {
-            unsigned char c = static_cast<unsigned char>(val[i]);
-            if (c < 0x80) { i += 1; }
-            else if ((c & 0xE0) == 0xC0) { i += 2; }
-            else if ((c & 0xF0) == 0xE0) { i += 3; }
-            else if ((c & 0xF8) == 0xF0) { i += 4; }
-            else { i += 1; } // invalid byte, skip
-            count++;
+    if ((expr.funcName == "length" || expr.funcName == "char_length" ||
+         expr.funcName == "character_length" ||
+         expr.funcName == "octet_length" ||
+         expr.funcName == "bit_length") &&
+        !expr.funcArgs.empty()) {
+        std::map<std::string, std::string> rowContext;
+        std::map<std::string, std::string> typeHints;
+        std::set<std::string> nullColumns;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            bool valueIsNull = false;
+            const std::string value = engine && !dbname.empty()
+                ? engine->extractColumnValue(
+                      rowBuffer, tbl, i, dbname, true, &valueIsNull)
+                : StorageEngine::extractColumnValueStatic(
+                      rowBuffer, tbl, i);
+            rowContext[tbl.cols[i].dataName] = value;
+            typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+            if (valueIsNull || (!engine && value.empty()))
+                nullColumns.insert(tbl.cols[i].dataName);
         }
-        return std::to_string(count);
+        const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
+            expr.funcName + "(" + expr.funcArgs[0] + ")",
+            rowContext, nullColumns, typeHints, dbname,
+            expr.sessionUser);
+        if (!evaluated.ok) {
+            throw std::runtime_error(
+                evaluated.error.empty()
+                    ? "failed to evaluate string length"
+                    : evaluated.error);
+        }
+        return evaluated.isNull ? "NULL" : evaluated.value;
     }
     if (expr.funcName == "upper" && !expr.funcArgs.empty()) {
         std::string val = getVal(expr.funcArgs[0]);
