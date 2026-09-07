@@ -1,5 +1,7 @@
 #include "LargeObject.h"
 
+#include "access/IndexFileUtil.h"
+
 #include <algorithm>
 #include <charconv>
 #include <cerrno>
@@ -155,10 +157,30 @@ size_t LargeObjectManager::size(int loId) const {
 }
 
 bool LargeObjectManager::importFile(int loId, const std::string& filePath) {
-    std::ifstream in(filePath, std::ios::binary);
+    std::ifstream in(filePath, std::ios::binary | std::ios::ate);
     if (!in) return false;
-    std::string data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    return write(loId, 0, data);
+    const std::streamoff end = in.tellg();
+    if (end < 0 ||
+        static_cast<uintmax_t>(end) >
+            static_cast<uintmax_t>(std::numeric_limits<size_t>::max()) ||
+        static_cast<uintmax_t>(end) >
+            static_cast<uintmax_t>(std::numeric_limits<std::streamsize>::max())) {
+        return false;
+    }
+
+    std::string data(static_cast<size_t>(end), '\0');
+    in.seekg(0, std::ios::beg);
+    if (!in) return false;
+    if (!data.empty() &&
+        !in.read(data.data(), static_cast<std::streamsize>(data.size()))) {
+        return false;
+    }
+
+    // Import replaces the object. Writing at offset zero would leave bytes
+    // from a previous, longer value at the end of the file.
+    if (!index_file::writeAtomically(loPath(loId), data)) return false;
+    sizes_[loId] = data.size();
+    return true;
 }
 
 bool LargeObjectManager::exportFile(int loId, const std::string& filePath) const {
