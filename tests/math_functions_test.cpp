@@ -170,6 +170,24 @@ static void test_trunc_round() {
     assert(callFn(eval, "trunc", {D(1.25), nullScale}).isNull);
     assert(approx(callFn(eval, "trunc", {D(42.789)}), 42.0));
     assert(approx(callFn(eval, "trunc", {D(2.71828), I(2)}), 2.71));
+    const auto roundedFloat = callFn(eval, "round", {D(1.5)});
+    assert(roundedFloat.typeName == "double precision" &&
+           roundedFloat.value == "2");
+    const auto roundedInteger = callFn(eval, "round", {I(2)});
+    assert(roundedInteger.typeName == "double precision" &&
+           roundedInteger.value == "2");
+    const auto truncatedInteger = callFn(eval, "trunc", {I(2)});
+    assert(truncatedInteger.typeName == "double precision" &&
+           truncatedInteger.value == "2");
+    const auto roundedInfinity = callFn(
+        eval, "round",
+        {dbms::ExprValue("double precision", "Infinity", false)});
+    assert(roundedInfinity.typeName == "double precision" &&
+           roundedInfinity.value == "Infinity");
+    const auto roundedNan = callFn(
+        eval, "round", {dbms::ExprValue("double precision", "NaN", false)});
+    assert(roundedNan.typeName == "double precision" &&
+           roundedNan.value == "NaN");
     const auto largeFloatTrunc = callFn(
         eval, "trunc",
         {dbms::ExprValue("double precision", "1e20", false)});

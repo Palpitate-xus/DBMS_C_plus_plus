@@ -5113,11 +5113,15 @@ void ExprEvaluator::registerBuiltins() {
         return integral * quantum;
     };
     functions_["round"] = [scaleFloatingDecimal](const std::vector<ExprValue>& a) {
-        if (a.empty() || a[0].isNull ||
-            (a.size() >= 2 && a[1].isNull)) {
-            return ExprValue("numeric", "", true);
+        if (a.empty()) return ExprValue("double precision", "", true);
+        const std::string inputType = toLower(a[0].typeName);
+        const bool exactNumeric = inputType == "numeric" ||
+                                  inputType == "decimal";
+        if (a[0].isNull || (a.size() >= 2 && a[1].isNull)) {
+            return ExprValue(
+                exactNumeric ? "numeric" : "double precision", "", true);
         }
-        if (isNumericTypeName(a[0].typeName)) {
+        if (exactNumeric) {
             auto n = tryParseNumeric(a[0].value);
             if (n) {
                 int scale = 0;
@@ -5155,9 +5159,8 @@ void ExprEvaluator::registerBuiltins() {
         } else {
             v = std::nearbyint(v);
         }
-        if (v == std::floor(v) && std::fabs(v) < 1e15)
-            return ExprValue("numeric", std::to_string(static_cast<long long>(v)), false);
-        return ExprValue("numeric", std::to_string(v), false);
+        return ExprValue(
+            "double precision", formatFloatingCastValue(v), false);
     };
     // Internal IS NULL / IS NOT NULL forms (rewritten from postfix syntax
     // by the projection router and the scalar executor).
@@ -5390,11 +5393,15 @@ void ExprEvaluator::registerBuiltins() {
     functions_["trunc"] = [scaleFloatingDecimal,
                             float8Text](const std::vector<ExprValue>& a) {
         // trunc(x) truncates toward zero; trunc(x, n) keeps n decimal places.
-        if (a.empty() || a[0].isNull ||
-            (a.size() >= 2 && a[1].isNull)) {
-            return ExprValue("double precision", "", true);
+        if (a.empty()) return ExprValue("double precision", "", true);
+        const std::string inputType = toLower(a[0].typeName);
+        const bool exactNumeric = inputType == "numeric" ||
+                                  inputType == "decimal";
+        if (a[0].isNull || (a.size() >= 2 && a[1].isNull)) {
+            return ExprValue(
+                exactNumeric ? "numeric" : "double precision", "", true);
         }
-        if (isNumericTypeName(a[0].typeName)) {
+        if (exactNumeric) {
             auto value = tryParseNumeric(a[0].value);
             if (value) {
                 long long requestedScale = 0;
@@ -5462,11 +5469,9 @@ void ExprEvaluator::registerBuiltins() {
                     "integer out of range (SQLSTATE 22003)");
             }
             const int n = static_cast<int>(requestedScale);
-            std::string ts2 = std::to_string(
-                scaleFloatingDecimal(v, n, false));
-            while (!ts2.empty() && ts2.back() == '0') ts2.pop_back();
-            if (!ts2.empty() && ts2.back() == '.') ts2.pop_back();
-            return ExprValue("numeric", ts2, false);
+            return ExprValue(
+                "double precision",
+                float8Text(scaleFloatingDecimal(v, n, false)), false);
         }
         return ExprValue(
             "double precision", float8Text(std::trunc(v)), false);
