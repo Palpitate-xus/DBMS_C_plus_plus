@@ -30377,36 +30377,22 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         if (wherePos != std::string::npos) {
             whereSql = trim(subSql.substr(wherePos + 5));
         }
-        std::set<std::string> subSelectCols;
-        size_t subSelectCount = 0;
-        // Inline split colsStr by comma (avoid dependency on main.cpp's splitSelectColumns)
-        {
-            std::string cur;
-            int depth = 0;
-            for (char ch : colsStr) {
-                if (ch == '(') depth++;
-                else if (ch == ')') depth--;
-                if (ch == ',' && depth == 0) {
-                    const std::string column = trim(cur);
-                    if (!column.empty()) {
-                        subSelectCols.insert(column);
-                        ++subSelectCount;
-                    }
-                    cur.clear();
-                } else {
-                    cur.push_back(ch);
-                }
-            }
-            const std::string column = trim(cur);
-            if (!column.empty()) {
-                subSelectCols.insert(column);
-                ++subSelectCount;
-            }
+        // Count parsed projection items: commas and parentheses inside SQL
+        // strings, quoted identifiers or function arguments are not columns.
+        SQLParser projectionParser;
+        auto parsedProjection = projectionParser.parse("SELECT " + colsStr);
+        const auto* projection =
+            dynamic_cast<const SelectStmt*>(parsedProjection.stmt.get());
+        if (!parsedProjection.success || !projection) {
+            throw std::runtime_error(
+                "invalid scalar subquery projection (SQLSTATE 42601)");
         }
-        if (subSelectCount != 1) {
+        if (projection->selectList.size() != 1 ||
+            !projection->selectList.front().expr) {
             throw std::runtime_error(
                 "subquery must return only one column (SQLSTATE 42601)");
         }
+        const std::set<std::string> subSelectCols{colsStr};
 
         if (!whereSql.empty() || !subAlias.empty()) {
             const TableSchema innerSchema =
