@@ -2061,19 +2061,25 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
     }
 
     // LIKE / ILIKE / SIMILAR TO
+    if ((op == "like" || op == "not like" ||
+         op == "ilike" || op == "not ilike" ||
+         op == "similar to" || op == "not similar to") &&
+        (l.isNull || r.isNull)) {
+        return ExprValue("boolean", "", true);
+    }
     if (op == "like" || op == "not like") {
-        bool m = !l.isNull && !r.isNull && likeMatch(l.value, r.value);
+        bool m = likeMatch(l.value, r.value);
         if (op == "not like") m = !m;
         return ExprValue("boolean", m ? "t" : "f", false);
     }
     if (op == "ilike" || op == "not ilike") {
         std::string lt = toLower(l.value), rt = toLower(r.value);
-        bool m = !l.isNull && !r.isNull && likeMatch(lt, rt);
+        bool m = likeMatch(lt, rt);
         if (op == "not ilike") m = !m;
         return ExprValue("boolean", m ? "t" : "f", false);
     }
     if (op == "similar to" || op == "not similar to") {
-        bool m = !l.isNull && !r.isNull && similarToMatch(l.value, r.value);
+        bool m = similarToMatch(l.value, r.value);
         if (op == "not similar to") m = !m;
         return ExprValue("boolean", m ? "t" : "f", false);
     }

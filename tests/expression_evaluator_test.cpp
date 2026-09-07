@@ -356,6 +356,21 @@ static void test_like() {
     bin->op = "not like";
     assert(!eval.eval(bin.get(), {}).asBool());
 
+    const auto expectNull = [&](const std::string& op,
+                                const std::string& left,
+                                const std::string& right) {
+        auto expression = std::make_unique<BinaryOpExpr>();
+        expression->op = op;
+        expression->left = makeLit(left);
+        expression->right = makeLit(right);
+        assert(eval.eval(expression.get(), {}).isNull);
+    };
+    for (const auto& op : {"like", "not like", "ilike", "not ilike",
+                           "similar to", "not similar to"}) {
+        expectNull(op, "NULL", "'%'");
+        expectNull(op, "'text'", "NULL");
+    }
+
     std::cout << "[EXPR] like OK" << std::endl;
 }
 
