@@ -3257,6 +3257,10 @@ static size_t logicalCharacterByteLength(const ExprValue& value) {
     return length;
 }
 
+static std::string textArgumentValue(const ExprValue& value) {
+    return value.value.substr(0, logicalCharacterByteLength(value));
+}
+
 static size_t utf8ByteAt(const std::string& s, size_t charIdx) {
     size_t n = 0, b = 0;
     while (b < s.size()) {
@@ -3370,7 +3374,8 @@ static std::string trimUtf8Characters(const std::string& text,
 static ExprValue evaluateTextSubstring(const std::vector<ExprValue>& args) {
     if (args.empty() || args[0].isNull)
         return ExprValue("text", "", true);
-    if (args.size() < 2) return ExprValue("text", args[0].value, false);
+    const std::string input = textArgumentValue(args[0]);
+    if (args.size() < 2) return ExprValue("text", input, false);
     if (args[1].isNull || (args.size() >= 3 && args[2].isNull))
         return ExprValue("text", "", true);
 
@@ -3388,7 +3393,7 @@ static ExprValue evaluateTextSubstring(const std::vector<ExprValue>& args) {
         }
     }
 
-    const size_t total = utf8CharCount(args[0].value);
+    const size_t total = utf8CharCount(input);
     const __int128 requestedEnd = hasLength
         ? static_cast<__int128>(from) + length
         : static_cast<__int128>(total) + 1;
@@ -3404,10 +3409,10 @@ static ExprValue evaluateTextSubstring(const std::vector<ExprValue>& args) {
     if (endCharacterWide > static_cast<__int128>(total))
         endCharacterWide = total;
     const size_t endCharacter = static_cast<size_t>(endCharacterWide);
-    const size_t beginByte = utf8ByteAt(args[0].value, beginCharacter);
-    const size_t endByte = utf8ByteAt(args[0].value, endCharacter);
+    const size_t beginByte = utf8ByteAt(input, beginCharacter);
+    const size_t endByte = utf8ByteAt(input, endCharacter);
     return ExprValue(
-        "text", args[0].value.substr(beginByte, endByte - beginByte), false);
+        "text", input.substr(beginByte, endByte - beginByte), false);
 }
 
 static ExprValue evaluateTextPad(const std::vector<ExprValue>& args,
@@ -4664,7 +4669,7 @@ void ExprEvaluator::registerBuiltins() {
             if (!r.valid || r.empty || r.loInf) return ExprValue(a[0].typeName, "", true);
             return ExprValue("numeric", r.lo, false);
         }
-        return ExprValue("text", toLower(a[0].value), false);
+        return ExprValue("text", toLower(textArgumentValue(a[0])), false);
     };
     functions_["upper"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
@@ -4674,7 +4679,7 @@ void ExprEvaluator::registerBuiltins() {
             if (!r.valid || r.empty || r.hiInf) return ExprValue(a[0].typeName, "", true);
             return ExprValue("numeric", r.hi, false);
         }
-        std::string s = a[0].value;
+        std::string s = textArgumentValue(a[0]);
         for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
         return ExprValue("text", s, false);
     };
@@ -5427,7 +5432,7 @@ void ExprEvaluator::registerBuiltins() {
     };
     functions_["reverse"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
-        const std::string& input = a[0].value;
+        const std::string input = textArgumentValue(a[0]);
         std::string result;
         result.reserve(input.size());
         const size_t characters = utf8CharCount(input);

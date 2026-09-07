@@ -35,6 +35,7 @@ static dbms::ExprValue callFn(dbms::ExprEvaluator& eval, const std::string& name
 
 static dbms::ExprValue S(const std::string& v) { return dbms::ExprValue("text", v, false); }
 static dbms::ExprValue I(int64_t v) { return dbms::ExprValue("integer", std::to_string(v), false); }
+static dbms::ExprValue C(const std::string& v) { return dbms::ExprValue("character", v, false); }
 
 static void test_length_family() {
     dbms::ExprEvaluator eval;
@@ -65,6 +66,8 @@ static void test_substr() {
            "é中");
     assert(callFn(eval, "substring", {S("aé中z"), I(2), I(2)}).value ==
            "é中");
+    assert(callFn(eval, "substring", {C("abcd  "), I(2), I(4)}).value ==
+           "bcd");
     // Non-positive start clamps; length window shrinks accordingly (PG semantics).
     assert(callFn(eval, "substr", {S("alphabet"), I(0), I(2)}).value == "a");
     assert(callFn(eval, "substr", {S("alphabet"), I(20)}).value == "");
@@ -144,6 +147,9 @@ static void test_initcap_tohex() {
     dbms::ExprEvaluator eval;
     assert(callFn(eval, "initcap", {S("hi THERE ji-ha")}).value == "Hi There Ji-Ha");
     assert(callFn(eval, "reverse", {S("aé中")}).value == "中éa");
+    assert(callFn(eval, "lower", {C("AB  ")}).value == "ab");
+    assert(callFn(eval, "upper", {C("ab  ")}).value == "AB");
+    assert(callFn(eval, "reverse", {C("ab  ")}).value == "ba");
     assert(callFn(eval, "ascii", {S("é")}).value == "233");
     assert(callFn(eval, "ascii", {S("中")}).value == "20013");
     assert(callFn(eval, "ascii", {S("")}).value == "0");
