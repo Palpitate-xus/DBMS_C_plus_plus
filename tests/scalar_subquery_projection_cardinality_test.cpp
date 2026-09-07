@@ -135,6 +135,20 @@ int main() {
     assert(shadowedNameRows.size() == 1);
     assert(shadowedNameRows.front() == "10 ");
 
+    expression.funcArgs = {
+        "select st.value from scalar_text AS st "
+        "where st.id = scalar_outer.id"};
+    const auto aliasedRows = g_engine.queryExpr(
+        database, "scalar_outer", {}, {expression});
+    assert(aliasedRows.size() == 1);
+    assert(aliasedRows.front() == "two words ");
+
+    expression.funcArgs = {"select st.value from scalar_text st"};
+    const auto implicitAliasRows = g_engine.queryExpr(
+        database, "scalar_outer", {}, {expression});
+    assert(implicitAliasRows.size() == 1);
+    assert(implicitAliasRows.front() == "two words ");
+
     expression.funcArgs = {"select id,value from scalar_text"};
     rejected = false;
     try {

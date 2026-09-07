@@ -30350,9 +30350,29 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::string colsStr = trim(subSql.substr(
             selectPos + 6, fromPos - selectPos - 6));
         size_t wherePos = findTopLevelKeyword("where", fromPos + 4);
-        std::string subTname = trim(subSql.substr(fromPos + 4,
+        const std::string fromClause = trim(subSql.substr(fromPos + 4,
             (wherePos != std::string::npos) ? (wherePos - fromPos - 4)
             : (subSql.size() - fromPos - 4)));
+        std::vector<std::string> fromParts;
+        {
+            std::istringstream tokens(fromClause);
+            std::string token;
+            while (tokens >> token) fromParts.push_back(token);
+        }
+        if (fromParts.empty() || fromParts.size() > 3) return "";
+        const std::string subTname = fromParts.front();
+        std::string subAlias;
+        if (fromParts.size() == 2) {
+            subAlias = fromParts[1];
+        } else if (fromParts.size() == 3) {
+            std::string aliasKeyword = fromParts[1];
+            for (char& ch : aliasKeyword) {
+                ch = static_cast<char>(
+                    std::tolower(static_cast<unsigned char>(ch)));
+            }
+            if (aliasKeyword != "as") return "";
+            subAlias = fromParts[2];
+        }
         std::string whereSql;
         if (wherePos != std::string::npos) {
             whereSql = trim(subSql.substr(wherePos + 5));
@@ -30388,7 +30408,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 "subquery must return only one column (SQLSTATE 42601)");
         }
 
-        if (!whereSql.empty()) {
+        if (!whereSql.empty() || !subAlias.empty()) {
             const TableSchema innerSchema =
                 engine->getTableSchema(dbname, subTname);
             std::set<std::string> innerColumnNames;
@@ -30450,23 +30470,35 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                             nullColumns.insert(bare);
                             nullColumns.insert(qualified);
                         }
+                        if (!subAlias.empty()) {
+                            const std::string aliased =
+                                subAlias + "." + bare;
+                            rowContext[aliased] = value;
+                            typeHints[aliased] =
+                                innerSchema.cols[i].dataType;
+                            nullColumns.erase(aliased);
+                            if (valueIsNull)
+                                nullColumns.insert(aliased);
+                        }
                     }
 
-                    const auto predicate =
-                        dbms::ExprHelper::evalStringWithNulls(
-                            whereSql, rowContext, nullColumns, typeHints,
-                            dbname, expr.sessionUser);
-                    if (!predicate.ok) {
-                        evaluationError = predicate.error.empty()
-                            ? "failed to evaluate scalar subquery predicate"
-                            : predicate.error;
-                        return;
-                    }
-                    if (predicate.isNull ||
-                        (predicate.value != "t" &&
-                         predicate.value != "true" &&
-                         predicate.value != "1")) {
-                        return;
+                    if (!whereSql.empty()) {
+                        const auto predicate =
+                            dbms::ExprHelper::evalStringWithNulls(
+                                whereSql, rowContext, nullColumns, typeHints,
+                                dbname, expr.sessionUser);
+                        if (!predicate.ok) {
+                            evaluationError = predicate.error.empty()
+                                ? "failed to evaluate scalar subquery predicate"
+                                : predicate.error;
+                            return;
+                        }
+                        if (predicate.isNull ||
+                            (predicate.value != "t" &&
+                             predicate.value != "true" &&
+                             predicate.value != "1")) {
+                            return;
+                        }
                     }
 
                     const auto selected =
