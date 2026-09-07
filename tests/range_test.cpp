@@ -89,7 +89,8 @@ static void test_infinite_bounds() {
     std::cout << "[RANGE] infinite bounds OK" << std::endl;
 }
 
-// Continuous ranges keep bound inclusivity; numrange / daterange.
+// Continuous numeric ranges keep bound inclusivity; discrete date ranges
+// canonicalize to inclusive-lower / exclusive-upper form.
 static void test_num_date_range() {
     std::string db = testDbPath("range_nd");
     cleanup(db);
@@ -105,6 +106,31 @@ static void test_num_date_range() {
     // numrange single inclusive point kept.
     assert(g_engine.insert(db, "t", {{"id","2"}, {"n","[2,2]"}, {"d","[2021-06-01,2021-06-02)"}}) == dbms::DBStatus::OK);
     assert(fetchOne(db, "t", {"=id 2"}, "n") == "[2,2]");
+
+    assert(g_engine.insert(db, "t", {{"id","3"}, {"n","[0,1)"},
+                                      {"d","[2021-06-01,2021-06-02]"}}) ==
+           dbms::DBStatus::OK);
+    assert(fetchOne(db, "t", {"=id 3"}, "d") ==
+           "[2021-06-01,2021-06-03)");
+    assert(g_engine.insert(db, "t", {{"id","4"}, {"n","[0,1)"},
+                                      {"d","(2021-06-01,2021-06-03)"}}) ==
+           dbms::DBStatus::OK);
+    assert(fetchOne(db, "t", {"=id 4"}, "d") ==
+           "[2021-06-02,2021-06-03)");
+    assert(g_engine.insert(db, "t", {{"id","5"}, {"n","[0,1)"},
+                                      {"d","[2021-06-01,2021-06-01]"}}) ==
+           dbms::DBStatus::OK);
+    assert(fetchOne(db, "t", {"=id 5"}, "d") ==
+           "[2021-06-01,2021-06-02)");
+    assert(g_engine.insert(db, "t", {{"id","6"}, {"n","[0,1)"},
+                                      {"d","[2021-06-01,2021-06-01)"}}) ==
+           dbms::DBStatus::OK);
+    assert(fetchOne(db, "t", {"=id 6"}, "d") == "empty");
+
+    assert(g_engine.update(db, "t", {{"d", "(2022-01-01,2022-01-03]"}},
+                           {"=id 4"}) == dbms::DBStatus::OK);
+    assert(fetchOne(db, "t", {"=id 4"}, "d") ==
+           "[2022-01-02,2022-01-04)");
 
     cleanup(db);
     std::cout << "[RANGE] numrange/daterange OK" << std::endl;

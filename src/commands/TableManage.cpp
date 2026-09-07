@@ -7628,7 +7628,8 @@ static bool normalizeRange(const std::string& in, const std::string& type, std::
 
     double loV = 0, hiV = 0;
     int64_t loI = 0, hiI = 0;
-    bool discrete = (type == "int4range" || type == "int8range");
+    const bool discrete = (type == "int4range" || type == "int8range");
+    const bool discreteDate = type == "daterange";
     auto parseBound = [&](const std::string& b, double& dv, int64_t& iv) -> bool {
         if (discrete) {
             try { size_t p = 0; long long v = std::stoll(b, &p); if (p != b.size()) return false;
@@ -7639,23 +7640,65 @@ static bool normalizeRange(const std::string& in, const std::string& type, std::
                   dv = v; return true; }
             catch (...) { return false; }
         } else if (type == "daterange") {
-            Date d(b.c_str()); if (d.year == 0) return false; dv = static_cast<double>(d.convert()); return true;
+            Date d(b.c_str());
+            if (d.year == 0) return false;
+            iv = d.convert();
+            dv = static_cast<double>(iv);
+            return true;
         }
         int64_t v = parseTimestampToSeconds(b); if (v == 0) return false; dv = static_cast<double>(v); return true;
     };
     if (!loInf && !parseBound(lo, loV, loI)) return false;
     if (!hiInf && !parseBound(hi, hiV, hiI)) return false;
+    if (!loInf && !hiInf && loV > hiV) return false;
 
     // Discrete integer ranges canonicalize to inclusive-lower / exclusive-upper.
     if (discrete) {
         if (!loInf) { if (lb == '(') loI += 1; lb = '['; loV = static_cast<double>(loI); }
         if (!hiInf) { if (ub == ']') hiI += 1; ub = ')'; hiV = static_cast<double>(hiI); }
+    } else if (discreteDate) {
+        if (!loInf) {
+            Date lowerDate(lo.c_str());
+            if (lb == '(') {
+                lowerDate = lowerDate + 1;
+                if (lowerDate.year == 0) {
+                    out = "empty";
+                    return true;
+                }
+            }
+            lb = '[';
+            loI = lowerDate.convert();
+            loV = static_cast<double>(loI);
+            lo = str(lowerDate);
+        }
+        if (!hiInf) {
+            Date upperDate(hi.c_str());
+            if (ub == ']') {
+                upperDate = upperDate + 1;
+                if (upperDate.year == 0) {
+                    hiInf = true;
+                    hi.clear();
+                } else {
+                    hiI = upperDate.convert();
+                    hiV = static_cast<double>(hiI);
+                    hi = str(upperDate);
+                }
+            } else {
+                hi = str(upperDate);
+            }
+            ub = ')';
+        }
     }
     if (loInf) lb = '(';   // infinite bounds are always exclusive
     if (hiInf) ub = ')';
 
     if (!loInf && !hiInf) {
-        if (loV > hiV) return false;  // lower must not exceed upper
+        if (loV > hiV) {
+            // Equal original date bounds can cross after canonicalizing an
+            // exclusive lower bound; the represented set is empty.
+            if (discreteDate) { out = "empty"; return true; }
+            return false;
+        }
         if (loV == hiV) {
             bool bothInclusive = (lb == '[' && ub == ']');
             if (!bothInclusive) { out = "empty"; return true; }
