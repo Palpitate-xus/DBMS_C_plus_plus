@@ -111,6 +111,21 @@ static void test_pow_log() {
             std::string::npos;
     }
     assert(aliasOverflowRejected);
+    for (const char* function : {"power", "pow"}) {
+        for (const auto& arguments :
+             {std::vector<dbms::ExprValue>{I(-1), D(0.5)},
+              std::vector<dbms::ExprValue>{I(0), I(-1)}}) {
+            bool domainRejected = false;
+            try {
+                (void)callFn(eval, function, arguments);
+            } catch (const std::runtime_error& error) {
+                domainRejected =
+                    std::string(error.what()).find("SQLSTATE 2201F") !=
+                    std::string::npos;
+            }
+            assert(domainRejected);
+        }
+    }
     assert(approx(callFn(eval, "log", {D(100)}), 2.0));            // base-10
     assert(approx(callFn(eval, "log", {D(2), D(8)}), 3.0));        // base-2 of 8
     assert(approx(callFn(eval, "log10", {D(1000)}), 3.0));

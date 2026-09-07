@@ -5263,6 +5263,14 @@ void ExprEvaluator::registerBuiltins() {
     // numeric exp/ln presentation, e.g. power(2.5,2) -> 6.2500000000000000).
     functions_["power"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("double precision", "", true);
+        const long double baseValue = a[0].asDouble();
+        const long double exponentValue = a[1].asDouble();
+        if ((baseValue == 0 && exponentValue < 0) ||
+            (baseValue < 0 && std::isfinite(exponentValue) &&
+             std::trunc(exponentValue) != exponentValue)) {
+            throw std::runtime_error(
+                "invalid argument for power function (SQLSTATE 2201F)");
+        }
         auto isIntVal = [](const ExprValue& e) {
             if (e.isNull) return false;
             std::string s = e.value;
