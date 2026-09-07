@@ -27747,10 +27747,12 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         bool anyRow = false;
         std::string evaluationError;
         const bool scanned = engine->forEachRow(dbname, innerTbl, [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
-            if (!evaluationError.empty()) return false;
+            // forEachRow has a void callback and continues the physical
+            // scan. Once EXISTS is decided, do not evaluate later rows.
+            if (anyRow || !evaluationError.empty()) return;
             if (whereSql.empty()) {
                 anyRow = true;
-                return false;
+                return;
             }
             NullRowBinding nullBinding(
                 engine, dbname, innerTbl,
@@ -27760,7 +27762,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 dbname, innerTbl, std::string(data, len), innerSch, &toastOk);
             if (!toastOk) {
                 evaluationError = "EXISTS subquery TOAST value read failed";
-                return false;
+                return;
             }
             auto rowContext = outerContext;
             auto typeHints = outerTypes;
@@ -27792,15 +27794,14 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 evaluationError = evaluated.error.empty()
                     ? "failed to evaluate EXISTS predicate"
                     : evaluated.error;
-                return false;
+                return;
             }
             if (evaluated.isNull ||
                 (evaluated.value != "t" && evaluated.value != "true" &&
                  evaluated.value != "1")) {
-                return true;
+                return;
             }
             anyRow = true;
-            return false;
         });
         if (!scanned) {
             throw std::runtime_error(
