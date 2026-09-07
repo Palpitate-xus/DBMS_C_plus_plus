@@ -821,6 +821,7 @@ static std::string formatTimeZoneOffset(long long offsetMinutes) {
 // JSON helpers defined later in this file; forward-declared for the JSON
 // operator evaluation (-> / ->> / #> / #>> / @> / <@) higher up.
 static std::string trimStr(const std::string& s);
+static std::string jsonTypeOf(const std::string& s);
 static bool jsonStep(const std::string& cur, const std::string& key, std::string& out);
 static bool jsonTopLevelSplit(const std::string& s, char open, char close,
                               std::vector<std::string>& out);
@@ -2013,7 +2014,24 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
                 }
                 return true;
             }
-            // Scalars (or mixed shapes) compare by trimmed text.
+            // JSONB scalar equality is semantic rather than lexical: numeric
+            // scale/exponent spelling and escaped string spelling do not
+            // affect the value.
+            if (ct.front() == '"' && it.front() == '"') {
+                std::string containerString;
+                std::string itemString;
+                return jsonUnquoteString(ct, containerString) &&
+                       jsonUnquoteString(it, itemString) &&
+                       containerString == itemString;
+            }
+            if (jsonTypeOf(ct) == "number" &&
+                jsonTypeOf(it) == "number") {
+                const auto containerNumber = tryParseNumeric(ct);
+                const auto itemNumber = tryParseNumeric(it);
+                return containerNumber && itemNumber &&
+                       *containerNumber == *itemNumber;
+            }
+            // Other scalars (or mixed shapes) have canonical spellings.
             return ct == it;
         };
         const bool res = contains(cont.value, item.value);

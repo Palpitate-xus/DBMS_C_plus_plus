@@ -111,6 +111,13 @@ static void test_contains() {
     auto c10 = eval("'[[1,2]]' @> '1'");
     assert(c10.ok && c10.value == "f");
 
+    auto c11 = eval("'[1.0]' @> '[1]'");
+    assert(c11.ok && c11.value == "t");
+    auto c12 = eval("'{\"n\":1.00}' @> '{\"n\":1e0}'");
+    assert(c12.ok && c12.value == "t");
+    auto c13 = eval("'\"a\"' @> '\"\\u0061\"'");
+    assert(c13.ok && c13.value == "t");
+
     std::cout << "[JSON-OPS] @> / <@ OK" << std::endl;
 }
 
