@@ -7713,8 +7713,9 @@ void ExprEvaluator::registerBuiltins() {
     // ------------------------------------------------------------------------
     auto parseArrayDimension = [](const std::vector<ExprValue>& arguments,
                                   long long& dimension) {
-        return arguments.size() >= 2 && !arguments[1].isNull &&
-               parseInt64Exact(arguments[1].value, dimension);
+        if (arguments.size() < 2 || arguments[1].isNull) return false;
+        dimension = parseInt32Argument(arguments[1]);
+        return true;
     };
     auto arrayExtent = [](const std::string& array,
                           long long dimension) -> std::optional<size_t> {
@@ -7941,10 +7942,7 @@ void ExprEvaluator::registerBuiltins() {
                 throw std::runtime_error(
                     "initial position must not be null (SQLSTATE 22004)");
             }
-            if (!parseInt64Exact(a[2].value, initialPosition)) {
-                throw std::runtime_error(
-                    "invalid input syntax for type integer (SQLSTATE 22P02)");
-            }
+            initialPosition = parseInt32Argument(a[2]);
         }
         size_t first = 0;
         if (initialPosition > 1) {

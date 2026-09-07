@@ -4,6 +4,7 @@
 
 #include <cassert>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 
 extern dbms::StorageEngine g_engine;
@@ -25,6 +26,19 @@ std::string projectArrayLength(const std::string& database,
     std::string value = rows.front();
     value.pop_back();
     return value;
+}
+
+void expectSqlState(const std::string& database,
+                    const std::string& dimension,
+                    const std::string& sqlState) {
+    bool rejected = false;
+    try {
+        (void)projectArrayLength(database, "flat_array", dimension);
+    } catch (const std::runtime_error& error) {
+        rejected = std::string(error.what()).find(
+            "SQLSTATE " + sqlState) != std::string::npos;
+    }
+    assert(rejected);
 }
 
 }  // namespace
@@ -69,6 +83,8 @@ int main() {
     assert(projectArrayLength(database, "empty_array", "1") == "NULL");
     assert(projectArrayLength(database, "null_array", "1") == "NULL");
     assert(projectArrayLength(database, "flat_array", "0") == "NULL");
+    expectSqlState(database, "'2x'", "22P02");
+    expectSqlState(database, "2147483648", "22003");
 
     cleanupTestDb(testName);
     finalCleanupTestData();

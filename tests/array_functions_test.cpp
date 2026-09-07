@@ -75,8 +75,16 @@ static void test_dims() {
                   {A("{1,2,3}"), nullDimension}).isNull);
     assert(callFn(eval, "array_upper",
                   {A("{1,2,3}"), nullDimension}).isNull);
-    assert(callFn(eval, "array_upper",
-                  {A("{1,2,3}"), I(4294967297LL)}).isNull);
+    bool oversizedDimensionRejected = false;
+    try {
+        (void)callFn(eval, "array_upper",
+                     {A("{1,2,3}"), I(4294967297LL)});
+    } catch (const std::runtime_error& error) {
+        oversizedDimensionRejected =
+            std::string(error.what()).find("SQLSTATE 22003") !=
+            std::string::npos;
+    }
+    assert(oversizedDimensionRejected);
     std::cout << "[ARRFN] dims OK" << std::endl;
 }
 

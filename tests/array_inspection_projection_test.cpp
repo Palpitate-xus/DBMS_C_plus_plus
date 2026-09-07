@@ -78,6 +78,20 @@ int main() {
     assert(projectArrayFunction(
                database, "array_position", {"null_element_array", "NULL"}) ==
            "2");
+    assert(projectArrayFunction(
+               database, "array_position", {"flat_array", "10", "-2"}) ==
+           "1");
+
+    bool rejectedStartRange = false;
+    try {
+        (void)projectArrayFunction(
+            database, "array_position",
+            {"flat_array", "10", "2147483648"});
+    } catch (const std::runtime_error& error) {
+        rejectedStartRange = std::string(error.what()).find(
+            "SQLSTATE 22003") != std::string::npos;
+    }
+    assert(rejectedStartRange);
 
     bool rejectedMultidimensional = false;
     try {
