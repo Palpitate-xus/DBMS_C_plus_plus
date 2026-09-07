@@ -142,8 +142,9 @@ bool LargeObjectManager::drop(int loId) {
     auto path = loPath(loId);
     std::error_code ec;
     std::filesystem::remove(path, ec);
+    if (ec) return false;
     sizes_.erase(loId);
-    return !ec;
+    return true;
 }
 
 size_t LargeObjectManager::size(int loId) const {
