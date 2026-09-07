@@ -41,6 +41,8 @@ int main() {
     };
     assert((project("subquery", "select payload from inner_rows where id = 1") ==
             std::vector<std::string>{payload + " "}));
+    assert((project("subquery", "select payload from inner_rows") ==
+            std::vector<std::string>{payload + " "}));
     assert((project("exists_sub", "select 1 from inner_rows where length(payload) = 10000") ==
             std::vector<std::string>{"t "}));
 
@@ -71,6 +73,14 @@ int main() {
         assert(rejected);
         assert(g_engine.getLockManager().captureCheckpoint().tableCounts.empty());
     }
+
+    bool plainRejected = false;
+    try {
+        (void)project("subquery", "select payload from inner_rows");
+    } catch (const std::runtime_error& error) {
+        plainRejected = std::string(error.what()).find("TOAST") != std::string::npos;
+    }
+    assert(plainRejected);
 
     // EXISTS without a predicate does not need to read its projection value.
     assert((project("exists_sub", "select payload from inner_rows") ==

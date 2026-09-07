@@ -29,6 +29,7 @@ int main() {
         std::filesystem::path(database) / "missing_rows.dt";
 
     for (const std::string sql : {
+             "select id from missing_rows",
              "select id from missing_rows where true",
              "select m.id from missing_rows m"}) {
         dbms::StorageEngine::SelectExpr expression;

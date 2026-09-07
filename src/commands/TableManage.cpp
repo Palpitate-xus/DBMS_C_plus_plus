@@ -30423,7 +30423,14 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         }
         const std::set<std::string> subSelectCols{colsStr};
 
-        if (!whereSql.empty() || !subAlias.empty()) {
+        // Virtual catalogs have a separate provider in query(). Ordinary
+        // relations must evaluate projections even without WHERE or an alias;
+        // treating "1", "id + 2" or "t.id" as literal column names loses them.
+        const bool virtualCatalog = dbname == "pg_catalog" ||
+            dbname == "information_schema" ||
+            (subTname.compare(0, 3, "pg_") == 0 &&
+             !engine->tableExists(dbname, subTname));
+        if (!whereSql.empty() || !subAlias.empty() || !virtualCatalog) {
             auto& innerLocks = engine->getLockManager();
             innerLocks.setResourceNamespace(dbname);
             const bool innerLocked = engine->inTransaction()
