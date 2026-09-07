@@ -51,6 +51,34 @@ static void test_add_sub() {
     assert(negativeInfiniteTimestampDifference.ok &&
            negativeInfiniteTimestampDifference.isNull);
 
+    auto fractionalTimestampDifference = eval(
+        "'2024-01-01 00:00:00.7'::timestamp - "
+        "'2024-01-01 00:00:00.1'::timestamp");
+    assert(fractionalTimestampDifference.ok &&
+           fractionalTimestampDifference.value == "00:00:00.600000");
+    auto negativeFractionalDifference = eval(
+        "'2024-01-01 00:00:00.1'::timestamp - "
+        "'2024-01-01 00:00:00.7'::timestamp");
+    assert(negativeFractionalDifference.ok &&
+           negativeFractionalDifference.value == "-00:00:00.600000");
+    auto zonedFractionalDifference = eval(
+        "'2024-01-01 00:00:00.7+01'::timestamptz - "
+        "'2023-12-31 23:00:00.1+00'::timestamptz");
+    assert(zonedFractionalDifference.ok &&
+           zonedFractionalDifference.value == "00:00:00.600000");
+    auto multiDayFractionalDifference = eval(
+        "'2024-01-02 00:00:00.7'::timestamp - "
+        "'2024-01-01 00:00:00.1'::timestamp");
+    assert(multiDayFractionalDifference.ok &&
+           multiDayFractionalDifference.value ==
+               "1 day 00:00:00.600000");
+    auto negativeMultiDayDifference = eval(
+        "'2024-01-01 00:00:00.1'::timestamp - "
+        "'2024-01-02 00:00:00.7'::timestamp");
+    assert(negativeMultiDayDifference.ok &&
+           negativeMultiDayDifference.value ==
+               "-1 day -00:00:00.600000");
+
     // days
     auto a = eval("'2024-03-10'::timestamp + '1 day'::interval");
     assert(a.ok && !a.isNull);

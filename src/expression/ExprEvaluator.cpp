@@ -1545,35 +1545,22 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
         // unknown/unknown text keeps the 42725 ambiguity error.
         if (op == "-" && (lt == "timestamp" || lt == "timestamptz" || lt == "datetime") &&
             (rt == "timestamp" || rt == "timestamptz" || rt == "datetime")) {
-            long long ls = parseTimestampToSeconds(l.value);
-            long long rs = parseTimestampToSeconds(r.value);
-            if (isInfiniteTimestamp(ls) || isInfiniteTimestamp(rs))
+            const auto leftTimestamp = parseComparableTimestamp(
+                l.value, lt == "timestamptz");
+            const auto rightTimestamp = parseComparableTimestamp(
+                r.value, rt == "timestamptz");
+            if (!leftTimestamp || !rightTimestamp ||
+                leftTimestamp->infinity != 0 ||
+                rightTimestamp->infinity != 0) {
                 return ExprValue("interval", "", true);
-            long long diff = ls - rs;
-            // PG renders the sign on each component:
-            // -1 days -00:30:00
-            long long sgn = (diff < 0) ? -1 : 1;
-            long long au = diff < 0 ? -diff : diff;
-            long long dd = sgn * (au / 86400);
-            long long us = sgn * ((au % 86400) * 1000000LL);
-            if (sgn < 0) {
-                // PG style: sign on each component (-1 days -00:30:00)
-                const char* dunit = "days";
-                char nb[56];
-                std::snprintf(nb, sizeof(nb), "-%lld %s -%02lld:%02lld:%02lld",
-                              au / 86400, dunit, (au % 86400) / 3600,
-                              ((au % 86400) % 3600) / 60, (au % 86400) % 60);
-                std::string s = nb;
-                if (au / 86400 == 0) {
-                    char tb[32];
-                    std::snprintf(tb, sizeof(tb), "-%02lld:%02lld:%02lld",
-                                  (au % 86400) / 3600, ((au % 86400) % 3600) / 60,
-                                  (au % 86400) % 60);
-                    s = tb;
-                }
-                return ExprValue("interval", s, false);
             }
-            return ExprValue("interval", intervalToText(0, dd, us), false);
+            constexpr long long microsPerDay = 86400000000LL;
+            const long long difference = leftTimestamp->micros -
+                                         rightTimestamp->micros;
+            const long long days = difference / microsPerDay;
+            const long long micros = difference % microsPerDay;
+            return ExprValue(
+                "interval", intervalToText(0, days, micros), false);
         }
         if (op == "-" && lDate && rInt) {
             long long days = 0;
