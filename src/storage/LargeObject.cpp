@@ -139,8 +139,9 @@ bool LargeObjectManager::truncate(int loId, size_t newSize) {
     auto path = loPath(loId);
     std::error_code ec;
     std::filesystem::resize_file(path, newSize, ec);
+    if (ec) return false;
     sizes_[loId] = newSize;
-    return !ec;
+    return true;
 }
 
 bool LargeObjectManager::drop(int loId) {
