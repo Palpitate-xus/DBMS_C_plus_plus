@@ -12,6 +12,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -114,6 +115,16 @@ static void test_epoch() {
 
 static void test_make() {
     dbms::ExprEvaluator eval;
+    auto expectDateError = [&](const std::vector<dbms::ExprValue>& args) {
+        bool rejected = false;
+        try {
+            (void)callFn(eval, "make_date", args);
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("SQLSTATE 22008") !=
+                       std::string::npos;
+        }
+        assert(rejected);
+    };
     assert(callFn(eval, "make_date", {I(2026), I(6), I(26)}).value == "2026-06-26");
     assert(callFn(eval, "make_time", {I(14), I(5), I(9)}).value == "14:05:09");
     assert(callFn(eval, "make_timestamp", {I(2026), I(6), I(26), I(14), I(5), I(9)}).value
@@ -126,13 +137,12 @@ static void test_make() {
                   {I(2026), I(6), I(26), I(14), I(5),
                    dbms::ExprValue("numeric", "9.125", false)}).value ==
            "2026-06-26 14:05:09.125");
-    // Invalid month -> NULL.
-    assert(callFn(eval, "make_date", {I(2026), I(13), I(1)}).isNull);
-    assert(callFn(eval, "make_date", {I(2023), I(2), I(29)}).isNull);
+    expectDateError({I(2026), I(13), I(1)});
+    expectDateError({I(2023), I(2), I(29)});
     assert(callFn(eval, "make_date", {I(2024), I(2), I(29)}).value ==
            "2024-02-29");
-    assert(callFn(eval, "make_date",
-                  {I(std::numeric_limits<int64_t>::max()), I(1), I(1)}).isNull);
+    expectDateError(
+        {I(std::numeric_limits<int64_t>::max()), I(1), I(1)});
     assert(callFn(eval, "make_time", {I(4294967296LL), I(0), I(0)}).isNull);
     assert(callFn(eval, "make_timestamp",
                   {I(2026), I(2), I(30), I(0), I(0), I(0)}).isNull);

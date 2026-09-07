@@ -6897,11 +6897,16 @@ void ExprEvaluator::registerBuiltins() {
         const int64_t y = a[0].asInt();
         const int64_t m = a[1].asInt();
         const int64_t d = a[2].asInt();
-        if (y < 1 || y > 9999 || m < 1 || m > 12 || d < 1 || d > 31)
-            return ExprValue("date", "", true);
+        if (y < 1 || y > 9999 || m < 1 || m > 12 || d < 1 || d > 31) {
+            throw std::runtime_error(
+                "date field value out of range (SQLSTATE 22008)");
+        }
         Date date(static_cast<int>(y), static_cast<int>(m),
                   static_cast<int>(d));
-        if (date.year == 0) return ExprValue("date", "", true);
+        if (date.year == 0) {
+            throw std::runtime_error(
+                "date field value out of range (SQLSTATE 22008)");
+        }
         return ExprValue("date", str(date), false);
     };
     // make_time(h, m, s) -> 'HH:MM:SS'
