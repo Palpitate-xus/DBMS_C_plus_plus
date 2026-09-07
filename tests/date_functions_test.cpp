@@ -211,6 +211,14 @@ static void test_date_trunc() {
     assert(callFn(eval, "date_trunc",
                   {F("decade"), TS("0005-06-01 00:00:00")}).isNull);
     assert(callFn(eval, "date_trunc", {F("month"), ts}).value == "2026-06-01 00:00:00");
+    assert(callFn(eval, "date_trunc", {F("week"), ts}).value ==
+           "2026-06-22 00:00:00");
+    assert(callFn(eval, "date_trunc",
+                  {F("week"), TS("2024-03-01 12:00:00")}).value ==
+           "2024-02-26 00:00:00");
+    assert(callFn(eval, "date_trunc",
+                  {F("week"), TS("2023-01-01 12:00:00")}).value ==
+           "2022-12-26 00:00:00");
     assert(callFn(eval, "date_trunc", {F("day"), ts}).value == "2026-06-26 00:00:00");
     assert(callFn(eval, "date_trunc", {F("hour"), ts}).value == "2026-06-26 14:00:00");
     assert(callFn(eval, "date_trunc", {F("minute"), ts}).value == "2026-06-26 14:35:00");

@@ -7077,6 +7077,30 @@ void ExprEvaluator::registerBuiltins() {
         else if (field == "year") { mo = 1; d = 1; h = mi = se = 0; }
         else if (field == "quarter") { mo = mo > 0 ? (mo - 1) / 3 * 3 + 1 : 1; d = 1; h = mi = se = 0; }
         else if (field == "month") { d = 1; h = mi = se = 0; }
+        else if (field == "week") {
+            static const int monthOffsets[] = {
+                0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4
+            };
+            const int adjustedYear = y - (mo < 3 ? 1 : 0);
+            const int sundayBased =
+                (adjustedYear + adjustedYear / 4 - adjustedYear / 100 +
+                 adjustedYear / 400 + monthOffsets[mo - 1] + d) % 7;
+            int daysToMonday = (sundayBased + 6) % 7;
+            while (daysToMonday-- > 0) {
+                if (d > 1) {
+                    --d;
+                    continue;
+                }
+                if (--mo == 0) {
+                    mo = 12;
+                    if (--y == 0)
+                        return ExprValue("timestamp", "", true);
+                }
+                d = 31;
+                while (Date(y, mo, d).year == 0) --d;
+            }
+            h = mi = se = 0;
+        }
         else if (field == "day") { h = mi = se = 0; }
         else if (field == "hour") { mi = se = 0; }
         else if (field == "minute") { se = 0; }
