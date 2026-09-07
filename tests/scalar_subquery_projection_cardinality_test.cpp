@@ -54,6 +54,17 @@ int main() {
     }
     assert(rejected);
 
+    dbms::TableSchema emptyInner;
+    emptyInner.tablename = "scalar_empty";
+    emptyInner.formatVersion = dbms::DATA_FILE_FORMAT_VERSION;
+    emptyInner.append(dbms::makeIntColumn("value", true, 4));
+    assert(g_engine.createTable(database, emptyInner) == dbms::DBStatus::OK);
+    expression.funcArgs = {"select value from scalar_empty"};
+    const auto emptyRows = g_engine.queryExpr(
+        database, "scalar_outer", {}, {expression});
+    assert(emptyRows.size() == 1);
+    assert(emptyRows.front() == "NULL ");
+
     cleanupTestDb(testName);
     finalCleanupTestData();
     std::cout << "[SCALAR SUBQUERY PROJECTION CARDINALITY] passed\n";

@@ -30372,7 +30372,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 "more than one row returned by a subquery used as an "
                 "expression (SQLSTATE 21000)");
         }
-        if (rows.empty()) return "";
+        if (rows.empty()) return "NULL";
         std::string firstRow = trim(rows[0]);
         size_t sp = firstRow.find(' ');
         return (sp == std::string::npos) ? firstRow : trim(firstRow.substr(0, sp));
