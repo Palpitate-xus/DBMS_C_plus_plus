@@ -29,6 +29,19 @@ static dbms::ExprValue callFn(dbms::ExprEvaluator& eval, const std::string& name
 
 static dbms::ExprValue S(const std::string& v) { return dbms::ExprValue("text", v, false); }
 
+static void expectInvalidEncoding(dbms::ExprEvaluator& eval,
+                                  const std::string& value,
+                                  const std::string& format) {
+    bool rejected = false;
+    try {
+        (void)callFn(eval, "decode", {S(value), S(format)});
+    } catch (const std::runtime_error& error) {
+        rejected = std::string(error.what()).find("SQLSTATE 22023") !=
+                   std::string::npos;
+    }
+    assert(rejected);
+}
+
 static void test_md5() {
     dbms::ExprEvaluator eval;
     assert(callFn(eval, "md5", {S("")}).value == "d41d8cd98f00b204e9800998ecf8427e");
@@ -46,7 +59,8 @@ static void test_hex() {
     // Round-trip with uppercase hex digits and whitespace tolerance on decode.
     assert(callFn(eval, "decode", {S("4D 61 6E"), S("hex")}).value == "Man");
     // Odd-length hex is rejected.
-    assert(callFn(eval, "decode", {S("616"), S("hex")}).isNull);
+    expectInvalidEncoding(eval, "616", "hex");
+    expectInvalidEncoding(eval, "zz", "hex");
     std::cout << "[ENCFN] hex OK" << std::endl;
 }
 
@@ -57,6 +71,7 @@ static void test_base64() {
     assert(callFn(eval, "encode", {S("Ma"), S("base64")}).value == "TWE=");
     assert(callFn(eval, "decode", {S("TWFu"), S("base64")}).value == "Man");
     assert(callFn(eval, "decode", {S("TQ=="), S("base64")}).value == "M");
+    expectInvalidEncoding(eval, "TW$u", "base64");
     // Round-trip a longer string.
     std::string msg = "hello, world!";
     auto enc = callFn(eval, "encode", {S(msg), S("base64")});

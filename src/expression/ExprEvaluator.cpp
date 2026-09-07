@@ -5758,11 +5758,15 @@ void ExprEvaluator::registerBuiltins() {
         const std::string& text = a[0].value;
         std::string out;
         if (fmt == "hex") {
-            if (!hexDecode(text, out)) return ExprValue("bytea", "", true);
+            if (!hexDecode(text, out))
+                throw std::runtime_error(
+                    "invalid hexadecimal data (SQLSTATE 22023)");
             return ExprValue("bytea", out, false);
         }
         if (fmt == "base64") {
-            if (!base64Decode(text, out)) return ExprValue("bytea", "", true);
+            if (!base64Decode(text, out))
+                throw std::runtime_error(
+                    "invalid base64 data (SQLSTATE 22023)");
             return ExprValue("bytea", out, false);
         }
         if (fmt == "escape") {
