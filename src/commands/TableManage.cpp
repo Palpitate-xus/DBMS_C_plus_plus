@@ -29190,8 +29190,9 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 return getVal(expr.funcArgs[i + 1]);
             }
         }
-        if (!expr.funcArgs.empty()) return getVal(expr.funcArgs.back());
-        return "";
+        if (expr.funcArgs.size() % 2 == 1)
+            return getVal(expr.funcArgs.back());
+        return "NULL";
     }
     if (expr.funcName == "cast" && expr.funcArgs.size() >= 2) {
         std::map<std::string, std::string> rowContext;
