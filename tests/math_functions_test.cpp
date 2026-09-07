@@ -207,8 +207,23 @@ static void test_trunc_round() {
                    .value == "0");
     }
     assert(approx(callFn(eval, "ceiling", {D(4.2)}), 5.0));
+    const auto numericCeil = callFn(eval, "ceil", {N("1.2")});
+    assert(numericCeil.typeName == "numeric" && numericCeil.value == "2");
+    const auto numericFloor = callFn(eval, "floor", {N("-1.2")});
+    assert(numericFloor.typeName == "numeric" && numericFloor.value == "-2");
+    assert(callFn(eval, "ceiling", {N("-1.2")}).value == "-1");
+    assert(callFn(eval, "ceil", {N("Infinity")}).value == "Infinity");
+    assert(callFn(eval, "floor", {N("-Infinity")}).value == "-Infinity");
+    assert(callFn(eval, "ceiling", {N("NaN")}).value == "NaN");
+    const auto floatingInfinity = callFn(
+        eval, "ceil", {dbms::ExprValue("double precision", "Infinity", false)});
+    assert(floatingInfinity.typeName == "double precision" &&
+           floatingInfinity.value == "Infinity");
     const dbms::ExprValue largeNumeric(
         "numeric", "123456789012345678901234567890", false);
+    assert(callFn(eval, "ceil",
+                  {N("123456789012345678901234567890.1")})
+               .value == "123456789012345678901234567891");
     assert(callFn(eval, "round", {largeNumeric, I(-2)}).value ==
            "123456789012345678901234567900");
     assert(callFn(eval, "round",

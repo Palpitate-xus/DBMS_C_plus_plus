@@ -5177,14 +5177,6 @@ void ExprEvaluator::registerBuiltins() {
     // ------------------------------------------------------------------------
     // Math functions
     // ------------------------------------------------------------------------
-    auto unaryMath = [](const std::vector<ExprValue>& a, double (*fn)(double),
-                        const std::string& outType = "double precision") {
-        if (a.empty() || a[0].isNull) return ExprValue(outType, "", true);
-        double v = fn(a[0].asDouble());
-        if (v == std::floor(v) && std::fabs(v) < 1e15)
-            return ExprValue(outType, std::to_string(static_cast<long long>(v)), false);
-        return ExprValue(outType, std::to_string(v), false);
-    };
     // PG float8 text output: shortest decimal that round-trips (Ryu-style
     // dtoa), tried from the fewest significant digits upward.
     auto float8Text = [](double v) {
@@ -5355,9 +5347,46 @@ void ExprEvaluator::registerBuiltins() {
             return ExprValue("numeric", std::to_string(static_cast<long long>(v)), false);
         return numericFixed(v, 16);
     };
+    auto integralRound = [float8Text](const std::vector<ExprValue>& a,
+                                      bool towardPositiveInfinity) {
+        if (a.empty())
+            return ExprValue("double precision", "", true);
+        const std::string type = toLower(a[0].typeName);
+        const bool exactNumeric = type == "numeric" || type == "decimal";
+        if (a[0].isNull) {
+            return ExprValue(
+                exactNumeric ? "numeric" : "double precision", "", true);
+        }
+        if (exactNumeric) {
+            const auto value = tryParseNumeric(a[0].value);
+            if (!value) return ExprValue("numeric", "", true);
+            if (!value->isFinite())
+                return ExprValue("numeric", value->toString(), false);
+
+            const std::string text = value->toString();
+            const size_t decimalPoint = text.find('.');
+            if (decimalPoint == std::string::npos)
+                return ExprValue("numeric", text, false);
+            const bool hasFraction = std::any_of(
+                text.begin() + static_cast<std::ptrdiff_t>(decimalPoint + 1),
+                text.end(), [](char digit) { return digit != '0'; });
+            std::string integerText = text.substr(0, decimalPoint);
+            if (integerText.empty() || integerText == "-") integerText += '0';
+            Numeric result(integerText);
+            if (hasFraction && towardPositiveInfinity && value->sign() > 0)
+                result += Numeric(1);
+            if (hasFraction && !towardPositiveInfinity && value->sign() < 0)
+                result -= Numeric(1);
+            return ExprValue("numeric", result.toString(), false);
+        }
+
+        const double result = towardPositiveInfinity
+            ? std::ceil(a[0].asDouble()) : std::floor(a[0].asDouble());
+        return ExprValue("double precision", float8Text(result), false);
+    };
     functions_["cbrt"]  = [float8Unary](const auto& a) { return float8Unary(a, std::cbrt); };
-    functions_["ceil"]  = [unaryMath](const auto& a) { return unaryMath(a, std::ceil); };
-    functions_["floor"] = [unaryMath](const auto& a) { return unaryMath(a, std::floor); };
+    functions_["ceil"]  = [integralRound](const auto& a) { return integralRound(a, true); };
+    functions_["floor"] = [integralRound](const auto& a) { return integralRound(a, false); };
     functions_["trunc"] = [scaleFloatingDecimal,
                             float8Text](const std::vector<ExprValue>& a) {
         // trunc(x) truncates toward zero; trunc(x, n) keeps n decimal places.
@@ -5604,7 +5633,7 @@ void ExprEvaluator::registerBuiltins() {
     };
     // pow — alias of power; ceiling — alias of ceil
     functions_["pow"] = functions_["power"];
-    functions_["ceiling"] = [unaryMath](const auto& a) { return unaryMath(a, std::ceil); };
+    functions_["ceiling"] = [integralRound](const auto& a) { return integralRound(a, true); };
     // degrees / radians
     functions_["degrees"] = [float8Text](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("double precision", "", true);
