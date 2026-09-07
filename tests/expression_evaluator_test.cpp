@@ -807,6 +807,21 @@ static void test_numeric() {
         bin->right = makeNumLit("3");
         v = eval.eval(bin.get(), {});
         assert(!v.isNull && v.value == "1.5");
+
+        bin->left = makeNumLit("2.00");
+        bin->right = makeNumLit("Infinity");
+        v = eval.eval(bin.get(), {});
+        assert(!v.isNull && v.value == "2.00");
+
+        bin->left = makeNumLit("Infinity");
+        bin->right = makeNumLit("2");
+        v = eval.eval(bin.get(), {});
+        assert(!v.isNull && v.value == "NaN");
+
+        bin->left = makeNumLit("NaN");
+        bin->right = makeNumLit("0");
+        v = eval.eval(bin.get(), {});
+        assert(!v.isNull && v.value == "NaN");
     }
 
     // Numeric special values participate in division; an infinite divisor

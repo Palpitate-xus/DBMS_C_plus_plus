@@ -1634,18 +1634,24 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
                 res = *nl / *nr;
             }
             else if (op == "%") {
-                if (nr->sign() == 0)
+                if (nl->isNaN() || nr->isNaN()) {
+                    res = Numeric::nan();
+                } else if (nr->isFinite() && nr->sign() == 0) {
                     throw std::runtime_error("division by zero (SQLSTATE 22012)");
-                if (!nl->isFinite() || !nr->isFinite())
-                    return ExprValue("numeric", "", true);
-                const Numeric quotient = *nl / *nr;
-                std::string integralQuotient = quotient.toString();
-                const size_t decimalPoint = integralQuotient.find('.');
-                if (decimalPoint != std::string::npos)
-                    integralQuotient.resize(decimalPoint);
-                if (integralQuotient.empty() || integralQuotient == "-")
-                    integralQuotient += "0";
-                res = *nl - Numeric(integralQuotient) * *nr;
+                } else if (nl->isInfinite()) {
+                    res = Numeric::nan();
+                } else if (nr->isInfinite()) {
+                    res = *nl;
+                } else {
+                    const Numeric quotient = *nl / *nr;
+                    std::string integralQuotient = quotient.toString();
+                    const size_t decimalPoint = integralQuotient.find('.');
+                    if (decimalPoint != std::string::npos)
+                        integralQuotient.resize(decimalPoint);
+                    if (integralQuotient.empty() || integralQuotient == "-")
+                        integralQuotient += "0";
+                    res = *nl - Numeric(integralQuotient) * *nr;
+                }
             }
             else return ExprValue("numeric", "", true);
             // PG display scale from the operand TEXTS: +/- max,
@@ -5777,21 +5783,31 @@ void ExprEvaluator::registerBuiltins() {
         if (isDecimal(a[0]) || isDecimal(a[1])) {
             const auto left = tryParseNumeric(a[0].value);
             const auto right = tryParseNumeric(a[1].value);
-            if (!left || !right || !left->isFinite() || !right->isFinite())
+            if (!left || !right)
                 return ExprValue("numeric", "", true);
-            if (right->sign() == 0)
+            if (!left->isNaN() && !right->isNaN() && right->isFinite() &&
+                right->sign() == 0) {
                 throw std::runtime_error(
                     "division by zero (SQLSTATE 22012)");
+            }
             try {
-                const Numeric quotient = *left / *right;
-                std::string integralQuotient = quotient.toString();
-                const size_t decimalPoint = integralQuotient.find('.');
-                if (decimalPoint != std::string::npos)
-                    integralQuotient.resize(decimalPoint);
-                if (integralQuotient.empty() || integralQuotient == "-")
-                    integralQuotient += '0';
-                Numeric remainder =
-                    *left - Numeric(integralQuotient) * *right;
+                Numeric remainder;
+                if (left->isNaN() || right->isNaN() ||
+                    left->isInfinite()) {
+                    remainder = Numeric::nan();
+                } else if (right->isInfinite()) {
+                    remainder = *left;
+                } else {
+                    const Numeric quotient = *left / *right;
+                    std::string integralQuotient = quotient.toString();
+                    const size_t decimalPoint = integralQuotient.find('.');
+                    if (decimalPoint != std::string::npos)
+                        integralQuotient.resize(decimalPoint);
+                    if (integralQuotient.empty() || integralQuotient == "-")
+                        integralQuotient += '0';
+                    remainder =
+                        *left - Numeric(integralQuotient) * *right;
+                }
                 auto textScale = [](const std::string& value) {
                     const size_t point = value.find('.');
                     return point == std::string::npos

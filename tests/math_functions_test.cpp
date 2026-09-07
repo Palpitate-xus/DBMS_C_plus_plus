@@ -455,6 +455,12 @@ static void test_int_math() {
                {dbms::ExprValue("numeric", "10.50", false),
                 dbms::ExprValue("numeric", "3.0", false)})
                .value == "1.50");
+    assert(callFn(eval, "mod", {N("2.00"), N("Infinity")}).value ==
+           "2.00");
+    assert(callFn(eval, "mod", {N("Infinity"), N("2")}).value == "NaN");
+    assert(callFn(eval, "mod", {N("Infinity"), N("Infinity")}).value ==
+           "NaN");
+    assert(callFn(eval, "mod", {N("NaN"), N("0")}).value == "NaN");
     assert(callFn(eval, "mod",
                   {I(std::numeric_limits<int64_t>::min()), I(-1)})
                .value == "0");
