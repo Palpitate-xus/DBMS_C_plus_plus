@@ -30353,74 +30353,9 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::string subTname = trim(subSql.substr(fromPos + 4,
             (wherePos != std::string::npos) ? (wherePos - fromPos - 4)
             : (subSql.size() - fromPos - 4)));
-        std::vector<std::string> subConds;
+        std::string whereSql;
         if (wherePos != std::string::npos) {
-            std::string condStr = trim(subSql.substr(wherePos + 5));
-            // Correlated subquery: replace outer column refs with their literal values
-            for (size_t i = 0; i < tbl.len; ++i) {
-                const std::string& colName = tbl.cols[i].dataName;
-                std::string colVal;
-                if (engine && !dbname.empty())
-                    colVal = engine->extractColumnValue(rowBuffer, tbl, i, dbname);
-                else
-                    colVal = StorageEngine::extractColumnValueStatic(rowBuffer, tbl, i);
-                // Quote string-type values
-                bool needQuote = (tbl.cols[i].dataType == "char" ||
-                                  tbl.cols[i].dataType == "varchar" ||
-                                  tbl.cols[i].dataType == "text" ||
-                                  tbl.cols[i].dataType == "binary" ||
-                                  tbl.cols[i].dataType == "varbinary" ||
-                                  tbl.cols[i].dataType == "blob" ||
-                                  tbl.cols[i].dataType == "date" ||
-                                  tbl.cols[i].dataType == "timestamp" ||
-                                  tbl.cols[i].dataType == "datetime" ||
-                                  tbl.cols[i].dataType == "time");
-                std::string replacement = needQuote ? ("'" + colVal + "'") : colVal;
-                // Replace whole-word occurrences of colName in condStr
-                std::string newCond;
-                size_t p = 0;
-                while (p < condStr.size()) {
-                    size_t found = condStr.find(colName, p);
-                    if (found == std::string::npos) {
-                        newCond += condStr.substr(p);
-                        break;
-                    }
-                    bool leftOk = (found == 0) || !isalnum(static_cast<unsigned char>(condStr[found-1]));
-                    bool rightOk = (found + colName.size() == condStr.size()) ||
-                                   !isalnum(static_cast<unsigned char>(condStr[found+colName.size()]));
-                    newCond += condStr.substr(p, found - p);
-                    if (leftOk && rightOk) {
-                        newCond += replacement;
-                    } else {
-                        newCond += condStr.substr(found, colName.size());
-                    }
-                    p = found + colName.size();
-                }
-                condStr = newCond;
-            }
-            // Transform col<op>value into <op>col value format expected by parseConditions
-            if (!condStr.empty()) {
-                size_t opStart = std::string::npos;
-                size_t opLen = 0;
-                for (size_t k = 0; k < condStr.size(); ++k) {
-                    char c = condStr[k];
-                    if (c == '>' || c == '<' || c == '=' || c == '!') {
-                        opStart = k;
-                        opLen = 1;
-                        if (k + 1 < condStr.size() && (condStr[k+1] == '=' || condStr[k+1] == '>')) {
-                            opLen = 2;
-                        }
-                        break;
-                    }
-                }
-                if (opStart != std::string::npos) {
-                    std::string opStr = condStr.substr(opStart, opLen);
-                    std::string before = condStr.substr(0, opStart);
-                    std::string after = condStr.substr(opStart + opLen);
-                    condStr = opStr + before + " " + after;
-                }
-                subConds.push_back(condStr);
-            }
+            whereSql = trim(subSql.substr(wherePos + 5));
         }
         std::set<std::string> subSelectCols;
         size_t subSelectCount = 0;
@@ -30452,7 +30387,118 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             throw std::runtime_error(
                 "subquery must return only one column (SQLSTATE 42601)");
         }
-        auto rows = engine->query(dbname, subTname, subConds, subSelectCols);
+
+        if (!whereSql.empty()) {
+            const TableSchema innerSchema =
+                engine->getTableSchema(dbname, subTname);
+            std::set<std::string> innerColumnNames;
+            for (size_t i = 0; i < innerSchema.len; ++i)
+                innerColumnNames.insert(innerSchema.cols[i].dataName);
+
+            std::map<std::string, std::string> outerContext;
+            std::map<std::string, std::string> outerTypes;
+            std::set<std::string> outerNulls;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                bool valueIsNull = false;
+                const std::string value = engine->extractColumnValue(
+                    rowBuffer, tbl, i, dbname, true, &valueIsNull);
+                const std::string qualified =
+                    tbl.tablename + "." + tbl.cols[i].dataName;
+                outerContext[qualified] = value;
+                outerTypes[qualified] = tbl.cols[i].dataType;
+                if (valueIsNull) outerNulls.insert(qualified);
+                if (!innerColumnNames.count(tbl.cols[i].dataName)) {
+                    outerContext[tbl.cols[i].dataName] = value;
+                    outerTypes[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+                    if (valueIsNull)
+                        outerNulls.insert(tbl.cols[i].dataName);
+                }
+            }
+
+            std::vector<std::pair<std::string, bool>> scalarRows;
+            std::string evaluationError;
+            const bool scanned = engine->forEachVisibleRow(
+                dbname, subTname, "SELECT",
+                [&](uint32_t pageId, uint16_t slotId, const char* data,
+                    size_t len) {
+                    if (!evaluationError.empty() || scalarRows.size() > 1)
+                        return;
+                    NullRowBinding nullBinding(
+                        engine, dbname, subTname,
+                        StorageEngine::encodeRid(pageId, slotId),
+                        innerSchema.len);
+                    const std::string innerRow(data, len);
+                    auto rowContext = outerContext;
+                    auto typeHints = outerTypes;
+                    auto nullColumns = outerNulls;
+                    for (size_t i = 0; i < innerSchema.len; ++i) {
+                        bool valueIsNull = false;
+                        const std::string value = engine->extractColumnValue(
+                            innerRow, innerSchema, i, dbname, true,
+                            &valueIsNull);
+                        const std::string bare =
+                            innerSchema.cols[i].dataName;
+                        const std::string qualified =
+                            subTname + "." + bare;
+                        rowContext[bare] = value;
+                        rowContext[qualified] = value;
+                        typeHints[bare] = innerSchema.cols[i].dataType;
+                        typeHints[qualified] = innerSchema.cols[i].dataType;
+                        nullColumns.erase(bare);
+                        nullColumns.erase(qualified);
+                        if (valueIsNull) {
+                            nullColumns.insert(bare);
+                            nullColumns.insert(qualified);
+                        }
+                    }
+
+                    const auto predicate =
+                        dbms::ExprHelper::evalStringWithNulls(
+                            whereSql, rowContext, nullColumns, typeHints,
+                            dbname, expr.sessionUser);
+                    if (!predicate.ok) {
+                        evaluationError = predicate.error.empty()
+                            ? "failed to evaluate scalar subquery predicate"
+                            : predicate.error;
+                        return;
+                    }
+                    if (predicate.isNull ||
+                        (predicate.value != "t" &&
+                         predicate.value != "true" &&
+                         predicate.value != "1")) {
+                        return;
+                    }
+
+                    const auto selected =
+                        dbms::ExprHelper::evalStringWithNulls(
+                            colsStr, rowContext, nullColumns, typeHints,
+                            dbname, expr.sessionUser);
+                    if (!selected.ok) {
+                        evaluationError = selected.error.empty()
+                            ? "failed to evaluate scalar subquery projection"
+                            : selected.error;
+                        return;
+                    }
+                    scalarRows.emplace_back(
+                        selected.value, selected.isNull);
+                });
+            if (!scanned) {
+                throw std::runtime_error(
+                    "failed to scan scalar subquery relation");
+            }
+            if (!evaluationError.empty())
+                throw std::runtime_error(evaluationError);
+            if (scalarRows.size() > 1) {
+                throw std::runtime_error(
+                    "more than one row returned by a subquery used as an "
+                    "expression (SQLSTATE 21000)");
+            }
+            if (scalarRows.empty() || scalarRows.front().second)
+                return "NULL";
+            return scalarRows.front().first;
+        }
+
+        auto rows = engine->query(dbname, subTname, {}, subSelectCols);
         if (rows.size() > 1) {
             throw std::runtime_error(
                 "more than one row returned by a subquery used as an "

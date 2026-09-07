@@ -89,11 +89,51 @@ int main() {
     assert(uppercaseRows.size() == 1);
     assert(uppercaseRows.front() == "two words ");
 
+    expression.funcArgs = {
+        "SELECT value FROM scalar_text WHERE fromage = 'cheddar'"};
+    const auto predicateRows = g_engine.queryExpr(
+        database, "scalar_outer", {}, {expression});
+    assert(predicateRows.size() == 1);
+    assert(predicateRows.front() == "two words ");
+
     expression.funcArgs = {"select fromage from scalar_text"};
     const auto keywordSubstringRows = g_engine.queryExpr(
         database, "scalar_outer", {}, {expression});
     assert(keywordSubstringRows.size() == 1);
     assert(keywordSubstringRows.front() == "cheddar ");
+
+    dbms::TableSchema correlatedInner;
+    correlatedInner.tablename = "scalar_correlated";
+    correlatedInner.formatVersion = dbms::DATA_FILE_FORMAT_VERSION;
+    correlatedInner.append(dbms::makeIntColumn("id", false, 4, true));
+    correlatedInner.append(dbms::makeIntColumn("outer_id", false, 4, true));
+    correlatedInner.append(dbms::makeIntColumn("value", false, 4));
+    assert(g_engine.createTable(database, correlatedInner) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(database, "scalar_correlated",
+                           {{"id", "2"},
+                            {"outer_id", "1"},
+                            {"value", "10"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(database, "scalar_correlated",
+                           {{"id", "1"},
+                            {"outer_id", "2"},
+                            {"value", "20"}}) ==
+           dbms::DBStatus::OK);
+    expression.funcArgs = {
+        "select value from scalar_correlated "
+        "where outer_id = scalar_outer.id"};
+    const auto correlatedRows = g_engine.queryExpr(
+        database, "scalar_outer", {}, {expression});
+    assert(correlatedRows.size() == 1);
+    assert(correlatedRows.front() == "10 ");
+
+    expression.funcArgs = {
+        "select value from scalar_correlated where id = 2"};
+    const auto shadowedNameRows = g_engine.queryExpr(
+        database, "scalar_outer", {}, {expression});
+    assert(shadowedNameRows.size() == 1);
+    assert(shadowedNameRows.front() == "10 ");
 
     expression.funcArgs = {"select id,value from scalar_text"};
     rejected = false;
