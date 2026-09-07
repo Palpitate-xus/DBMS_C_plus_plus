@@ -6114,7 +6114,24 @@ void ExprEvaluator::registerBuiltins() {
         if (a.size() < 2 || a[0].isNull) return ExprValue("integer", "", true);
         std::vector<std::string> elems;
         if (!parseArrayElements(a[0].value, elems)) return ExprValue("integer", "", true);
-        for (size_t i = 0; i < elems.size(); ++i) {
+        long long initialPosition = 1;
+        if (a.size() >= 3) {
+            if (a[2].isNull) {
+                throw std::runtime_error(
+                    "initial position must not be null (SQLSTATE 22004)");
+            }
+            if (!parseInt64Exact(a[2].value, initialPosition)) {
+                throw std::runtime_error(
+                    "invalid input syntax for type integer (SQLSTATE 22P02)");
+            }
+        }
+        size_t first = 0;
+        if (initialPosition > 1) {
+            if (static_cast<unsigned long long>(initialPosition) > elems.size())
+                return ExprValue("integer", "", true);
+            first = static_cast<size_t>(initialPosition - 1);
+        }
+        for (size_t i = first; i < elems.size(); ++i) {
             const std::string token = trimStr(elems[i]);
             const bool quoted = token.size() >= 2 &&
                 token.front() == '"' && token.back() == '"';

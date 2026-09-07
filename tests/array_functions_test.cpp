@@ -10,6 +10,7 @@
 #include <cassert>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -90,6 +91,14 @@ static void test_position() {
     dbms::ExprEvaluator eval;
     assert(callFn(eval, "array_position", {A("{10,20,30}"), I(20)}).value == "2");
     assert(callFn(eval, "array_position", {A("{10,20,30}"), I(99)}).isNull);
+    assert(callFn(eval, "array_position",
+                  {A("{10,20,10,20}"), I(10), I(2)}).value == "3");
+    assert(callFn(eval, "array_position",
+                  {A("{10,20,10,20}"), I(20), I(3)}).value == "4");
+    assert(callFn(eval, "array_position",
+                  {A("{10,20,30}"), I(10), I(-2)}).value == "1");
+    assert(callFn(eval, "array_position",
+                  {A("{10,20,30}"), I(10), I(99)}).isNull);
     assert(callFn(eval, "array_position", {S("{a,b,c}"), S("c")}).value == "3");
     const dbms::ExprValue nullValue("unknown", "", true);
     assert(callFn(eval, "array_position",
@@ -97,6 +106,17 @@ static void test_position() {
     assert(callFn(eval, "array_position",
                   {S("{NULL,\"NULL\"}"),
                    dbms::ExprValue("text", "'NULL'", false)}).value == "2");
+
+    bool nullStartRejected = false;
+    try {
+        (void)callFn(eval, "array_position",
+                     {A("{10,20,30}"), I(20), nullValue});
+    } catch (const std::runtime_error& error) {
+        nullStartRejected =
+            std::string(error.what()).find("SQLSTATE 22004") !=
+            std::string::npos;
+    }
+    assert(nullStartRejected);
     std::cout << "[ARRFN] position OK" << std::endl;
 }
 
