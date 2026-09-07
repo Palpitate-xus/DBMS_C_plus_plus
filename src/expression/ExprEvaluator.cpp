@@ -3212,6 +3212,23 @@ static size_t utf8CharCount(const std::string& s) {
     for (unsigned char c : s) if ((c & 0xC0) != 0x80) ++n;
     return n;
 }
+
+static bool isBlankPaddedCharacterType(const std::string& typeName) {
+    const std::string type = toLower(typeName);
+    return type == "char" || type == "character" || type == "bpchar" ||
+           type.rfind("char(", 0) == 0 ||
+           type.rfind("character(", 0) == 0 ||
+           type.rfind("bpchar(", 0) == 0;
+}
+
+static size_t logicalCharacterByteLength(const ExprValue& value) {
+    size_t length = value.value.size();
+    if (isBlankPaddedCharacterType(value.typeName)) {
+        while (length > 0 && value.value[length - 1] == ' ') --length;
+    }
+    return length;
+}
+
 static size_t utf8ByteAt(const std::string& s, size_t charIdx) {
     size_t n = 0, b = 0;
     while (b < s.size()) {
@@ -4606,7 +4623,9 @@ void ExprEvaluator::registerBuiltins() {
         const bool byteLength = type == "bytea" || type == "binary" ||
                                 type == "varbinary";
         const size_t length = byteLength
-            ? a[0].value.size() : utf8CharCount(a[0].value);
+            ? a[0].value.size()
+            : utf8CharCount(a[0].value.substr(
+                  0, logicalCharacterByteLength(a[0])));
         return ExprValue("integer", std::to_string(length), false);
     };
     functions_["lower"] = [](const std::vector<ExprValue>& a) {
@@ -5427,13 +5446,17 @@ void ExprEvaluator::registerBuiltins() {
     // char_length / character_length — UTF-8 character count
     functions_["char_length"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
-        return ExprValue(
-            "integer", std::to_string(utf8CharCount(a[0].value)), false);
+        return ExprValue("integer",
+                         std::to_string(utf8CharCount(a[0].value.substr(
+                             0, logicalCharacterByteLength(a[0])))),
+                         false);
     };
     functions_["character_length"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
-        return ExprValue(
-            "integer", std::to_string(utf8CharCount(a[0].value)), false);
+        return ExprValue("integer",
+                         std::to_string(utf8CharCount(a[0].value.substr(
+                             0, logicalCharacterByteLength(a[0])))),
+                         false);
     };
     functions_["octet_length"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
@@ -5441,7 +5464,9 @@ void ExprEvaluator::registerBuiltins() {
     };
     functions_["bit_length"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
-        return ExprValue("integer", std::to_string(a[0].value.size() * 8), false);
+        return ExprValue(
+            "integer", std::to_string(logicalCharacterByteLength(a[0]) * 8),
+            false);
     };
     // lpad / rpad — pad (or truncate) a string to a target length with a fill string
     functions_["lpad"] = [](const std::vector<ExprValue>& a) {

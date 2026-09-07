@@ -44,6 +44,16 @@ static void test_length_family() {
     assert(callFn(eval, "octet_length", {S("héllo")}).value == "6");
     assert(callFn(eval, "octet_length", {S("abc")}).value == "3");
     assert(callFn(eval, "bit_length", {S("abc")}).value == "24");
+    const dbms::ExprValue padded("character", "ab  ", false);
+    assert(callFn(eval, "length", {padded}).value == "2");
+    assert(callFn(eval, "char_length", {padded}).value == "2");
+    assert(callFn(eval, "character_length", {padded}).value == "2");
+    assert(callFn(eval, "octet_length", {padded}).value == "4");
+    assert(callFn(eval, "bit_length", {padded}).value == "16");
+    const dbms::ExprValue paddedUtf8("bpchar", "你好  ", false);
+    assert(callFn(eval, "length", {paddedUtf8}).value == "2");
+    assert(callFn(eval, "octet_length", {paddedUtf8}).value == "8");
+    assert(callFn(eval, "bit_length", {paddedUtf8}).value == "48");
     std::cout << "[STRFN] length family OK" << std::endl;
 }
 
