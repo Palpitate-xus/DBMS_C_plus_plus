@@ -3136,19 +3136,43 @@ static bool base64Decode(const std::string& in, std::string& out) {
         return -1;
     };
     out.clear();
-    int buf = 0, bits = 0;
+    auto fail = [&]() {
+        out.clear();
+        return false;
+    };
+    uint32_t buffer = 0;
+    int position = 0;
+    int padding = 0;
     for (char c : in) {
-        if (c == '=' ) break;
-        if (std::isspace(static_cast<unsigned char>(c))) continue;
-        int v = val(c);
-        if (v < 0) return false;
-        buf = (buf << 6) | v;
-        bits += 6;
-        if (bits >= 8) {
-            bits -= 8;
-            out.push_back(static_cast<char>((buf >> bits) & 0xFF));
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') continue;
+
+        int decoded = 0;
+        if (c == '=') {
+            if (padding == 0) {
+                if (position == 2)
+                    padding = 1;
+                else if (position == 3)
+                    padding = 2;
+                else
+                    return fail();
+            }
+        } else {
+            decoded = val(c);
+            if (decoded < 0) return fail();
+        }
+
+        buffer = (buffer << 6) | static_cast<uint32_t>(decoded);
+        if (++position == 4) {
+            out.push_back(static_cast<char>((buffer >> 16) & 0xff));
+            if (padding == 0 || padding > 1)
+                out.push_back(static_cast<char>((buffer >> 8) & 0xff));
+            if (padding == 0 || padding > 2)
+                out.push_back(static_cast<char>(buffer & 0xff));
+            buffer = 0;
+            position = 0;
         }
     }
+    if (position != 0) return fail();
     return true;
 }
 

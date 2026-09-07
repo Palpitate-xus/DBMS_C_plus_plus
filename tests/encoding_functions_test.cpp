@@ -71,7 +71,12 @@ static void test_base64() {
     assert(callFn(eval, "encode", {S("Ma"), S("base64")}).value == "TWE=");
     assert(callFn(eval, "decode", {S("TWFu"), S("base64")}).value == "Man");
     assert(callFn(eval, "decode", {S("TQ=="), S("base64")}).value == "M");
+    assert(callFn(eval, "decode", {S("T Q\n=\t="), S("base64")}).value ==
+           "M");
     expectInvalidEncoding(eval, "TW$u", "base64");
+    expectInvalidEncoding(eval, "TQ", "base64");
+    expectInvalidEncoding(eval, "TWE", "base64");
+    expectInvalidEncoding(eval, "A===", "base64");
     // Round-trip a longer string.
     std::string msg = "hello, world!";
     auto enc = callFn(eval, "encode", {S(msg), S("base64")});
