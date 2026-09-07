@@ -28780,23 +28780,27 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     if (expr.funcName == "extract" && expr.funcArgs.size() >= 2) {
         std::string val = getVal(expr.funcArgs[1]);
         if (val.empty() || val == "NULL" || val == "null") return "";
-        Date d(val.c_str());
-        std::string field = expr.funcArgs[0];
-        if (field == "year") return std::to_string(d.year);
-        if (field == "month") return std::to_string(d.month);
-        if (field == "day") return std::to_string(d.day);
-        if (field == "dow") {
-            static const int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
-            int yy = d.year - (d.month < 3 ? 1 : 0);
-            int w = (yy + yy/4 - yy/100 + yy/400 + t[(d.month > 0 ? d.month : 1) - 1] + d.day) % 7;
-            return std::to_string(w);
+        std::string field = getVal(expr.funcArgs[0]);
+        if (field.empty() ||
+            field.find_first_not_of(
+                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_") !=
+                std::string::npos) {
+            return "";
         }
-        if (field == "doy") {
-            Date jan1(d.year, 1, 1);
-            if (d.year == 0 || jan1.year == 0) return "";
-            return std::to_string(d.convert() - jan1.convert() + 1);
+        std::string sourceType = "text";
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].dataName == expr.funcArgs[1]) {
+                sourceType = tbl.cols[i].dataType;
+                break;
+            }
         }
-        return "";
+        const auto evaluated = dbms::ExprHelper::evalString(
+            "extract(" + field + " from __extract_value)",
+            {{"__extract_value", val}},
+            {{"__extract_value", sourceType}}, dbname,
+            expr.sessionUser);
+        if (!evaluated.ok || evaluated.isNull) return "";
+        return evaluated.value;
     }
     // YEAR / MONTH / DAY - date extraction functions
     if ((expr.funcName == "year" || expr.funcName == "month" || expr.funcName == "day") && !expr.funcArgs.empty()) {

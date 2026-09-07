@@ -66,9 +66,12 @@ std::string canonicalTypeName(const std::string& storageType) {
         return "text";
     }
     if (t == "bool" || t == "boolean") return "boolean";
-    if (t == "timestamp" || t == "timestamptz" || t == "datetime") return "timestamp";
+    if (t == "timestamp" || t == "datetime") return "timestamp";
+    if (t == "timestamptz" || t == "timestamp with time zone")
+        return "timestamptz";
     if (t == "date") return "date";
-    if (t == "time" || t == "timetz") return "time";
+    if (t == "time") return "time";
+    if (t == "timetz" || t == "time with time zone") return "timetz";
     if (t == "interval") return "interval";
     if (t == "uuid") return "uuid";
     return t;
