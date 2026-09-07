@@ -222,6 +222,35 @@ static void test_integer_range_casts() {
     std::cout << "[RANGEFN] integer range casts OK" << std::endl;
 }
 
+static void test_numeric_range_casts() {
+    dbms::ExprEvaluator eval;
+    assert(callCast(eval, T("[1.00,2e1)"), "numrange").value ==
+           "[1.00,20)");
+    const std::string precise =
+        "[100000000000000000000000000001,"
+        "100000000000000000000000000002)";
+    assert(callCast(eval, T(precise), "numrange").value == precise);
+    assert(callCast(eval, T("[1.0,1.00)"), "numrange").value == "empty");
+    assert(callCast(eval, T("[NaN,NaN]"), "numrange").value ==
+           "[NaN,NaN]");
+
+    bool reversedRejected = false;
+    try {
+        (void)callCast(eval, T("[2,1)"), "numrange");
+    } catch (const std::runtime_error& error) {
+        reversedRejected = std::string(error.what()).find("SQLSTATE 22000") !=
+                           std::string::npos;
+    }
+    assert(reversedRejected);
+
+    const auto parsedCast = dbms::ExprHelper::evalString(
+        "'[1.00,2e1)'::numrange", {});
+    assert(parsedCast.ok && !parsedCast.isNull &&
+           parsedCast.value == "[1.00,20)");
+
+    std::cout << "[RANGEFN] numeric range casts OK" << std::endl;
+}
+
 int main() {
     test_bounds();
     test_bound_result_types();
@@ -230,6 +259,7 @@ int main() {
     test_overlap_operator();
     test_containment_operators();
     test_integer_range_casts();
+    test_numeric_range_casts();
     std::cout << "[RANGEFN] all passed" << std::endl;
     return 0;
 }

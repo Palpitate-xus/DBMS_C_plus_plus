@@ -2446,6 +2446,7 @@ enum class IntegerCastTarget { SmallInt, Integer, BigInt };
 
 static ExprValue castToIntegerRange(const ExprValue& value,
                                     const std::string& targetType);
+static ExprValue castToNumericRange(const ExprValue& value);
 
 static const char* integerCastTypeName(IntegerCastTarget target) {
     switch (target) {
@@ -3156,6 +3157,7 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
         return castToTimestamp(v, "timestamptz");
     if (target == "int4range" || target == "int8range")
         return castToIntegerRange(v, target);
+    if (target == "numrange") return castToNumericRange(v);
 
     // Default passthrough
     return ExprValue(targetTypeName, v.value, false);
@@ -4335,6 +4337,49 @@ static ExprValue castToIntegerRange(const ExprValue& value,
         (range.loInf ? "" : std::to_string(lower)) + "," +
         (range.hiInf ? "" : std::to_string(upper)) + ")";
     return ExprValue(targetType, result, false);
+}
+
+static ExprValue castToNumericRange(const ExprValue& value) {
+    const RangeParts range = parseRangeLiteral(value.value);
+    if (!range.valid) {
+        throw std::runtime_error(
+            "invalid input syntax for type numrange: '" + value.value +
+            "' (SQLSTATE 22P02)");
+    }
+    if (range.empty) return ExprValue("numrange", "empty", false);
+
+    std::optional<Numeric> lower;
+    std::optional<Numeric> upper;
+    try {
+        if (!range.loInf) lower.emplace(range.lo);
+        if (!range.hiInf) upper.emplace(range.hi);
+    } catch (const std::invalid_argument& error) {
+        const std::string message = error.what();
+        if (message.find("exceeds maximum") != std::string::npos ||
+            message.find("out of range") != std::string::npos) {
+            throw std::runtime_error(
+                "numeric value out of range (SQLSTATE 22003)");
+        }
+        throw std::runtime_error(
+            "invalid input syntax for type numeric (SQLSTATE 22P02)");
+    }
+
+    if (lower && upper) {
+        if (*lower > *upper) {
+            throw std::runtime_error(
+                "range lower bound must be less than or equal to range "
+                "upper bound (SQLSTATE 22000)");
+        }
+        if (*lower == *upper && !(range.loInc && range.hiInc))
+            return ExprValue("numrange", "empty", false);
+    }
+
+    const std::string result =
+        std::string(range.loInf ? "(" : (range.loInc ? "[" : "(")) +
+        (lower ? lower->toString() : "") + "," +
+        (upper ? upper->toString() : "") +
+        (range.hiInf ? ")" : (range.hiInc ? "]" : ")"));
+    return ExprValue("numrange", result, false);
 }
 
 static bool typeIsRange(const std::string& typeName) {
