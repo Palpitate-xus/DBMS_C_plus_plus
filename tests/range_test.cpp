@@ -226,6 +226,41 @@ static void test_range_update() {
     std::cout << "[RANGE] update enforce/canonicalize OK" << std::endl;
 }
 
+static void test_timestamp_range_fractional_bounds() {
+    std::string db = testDbPath("range_ts_fraction");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE TABLE t (id INT PRIMARY KEY, r TSRANGE, z TSTZRANGE)", s));
+
+    assert(g_engine.insert(
+               db, "t", {{"id", "1"},
+                          {"r", "[2024-01-01 00:00:00.1,"
+                                "2024-01-01 00:00:00.9)"},
+                          {"z", "[2024-01-01 00:00:00.9+01,"
+                                "2023-12-31 23:00:01.1+00)"}}) ==
+           dbms::DBStatus::OK);
+    assert(fetchOne(db, "t", {"=id 1"}, "r") ==
+           "[\"2024-01-01 00:00:00.1\",\"2024-01-01 00:00:00.9\")");
+
+    assert(g_engine.insert(
+               db, "t", {{"id", "2"},
+                          {"r", "[2024-01-01 00:00:00.9,"
+                                "2024-01-01 00:00:00.1)"},
+                          {"z", "empty"}}) == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insert(
+               db, "t", {{"id", "3"},
+                          {"r", "[2024-01-01 00:00:00.1,"
+                                "2024-01-01 00:00:00.1)"},
+                          {"z", "empty"}}) == dbms::DBStatus::OK);
+    assert(fetchOne(db, "t", {"=id 3"}, "r") == "empty");
+
+    cleanup(db);
+    std::cout << "[RANGE] timestamp fractional bounds OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_int_range_canonical();
@@ -233,6 +268,7 @@ int main() {
     test_num_date_range();
     test_range_invalid();
     test_range_update();
+    test_timestamp_range_fractional_bounds();
     std::cout << "[RANGE] all passed" << std::endl;
     return 0;
 }

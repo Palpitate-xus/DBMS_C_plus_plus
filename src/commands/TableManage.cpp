@@ -7597,6 +7597,80 @@ static bool isRangeType(const std::string& dt) {
            dt == "tsrange" || dt == "tstzrange" || dt == "daterange";
 }
 
+static bool parseRangeTimestampMicros(const std::string& input,
+                                      bool withTimeZone,
+                                      int64_t& result) {
+    std::string text = trim(input);
+    std::string lowered = text;
+    for (char& c : lowered)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (lowered == "infinity") {
+        result = std::numeric_limits<int64_t>::max();
+        return true;
+    }
+    if (lowered == "-infinity") {
+        result = std::numeric_limits<int64_t>::min();
+        return true;
+    }
+
+    size_t separator = text.find_first_of(" Tt");
+    if (separator != std::string::npos && text[separator] != ' ')
+        text[separator] = ' ';
+    const size_t timeStart = separator == std::string::npos
+        ? text.size() : separator + 1;
+    size_t zonePosition = std::string::npos;
+    for (size_t i = timeStart; i < text.size(); ++i) {
+        if (text[i] == '+' || text[i] == '-') {
+            zonePosition = i;
+            break;
+        }
+    }
+    const bool hasZulu = !text.empty() &&
+        (text.back() == 'Z' || text.back() == 'z');
+    const size_t fractionEnd = zonePosition != std::string::npos
+        ? zonePosition : (hasZulu ? text.size() - 1 : text.size());
+    const size_t dot = text.find('.', timeStart);
+
+    int64_t micros = 0;
+    if (dot != std::string::npos) {
+        if (dot >= fractionEnd || dot + 1 == fractionEnd) return false;
+        size_t digits = 0;
+        for (size_t i = dot + 1; i < fractionEnd; ++i) {
+            if (text[i] < '0' || text[i] > '9') return false;
+            if (digits < 6) micros = micros * 10 + (text[i] - '0');
+            ++digits;
+        }
+        while (digits < 6) {
+            micros *= 10;
+            ++digits;
+        }
+        if (digits > 6 && text[dot + 7] >= '5') ++micros;
+        text.erase(dot, fractionEnd - dot);
+    }
+
+    if (!withTimeZone) {
+        zonePosition = std::string::npos;
+        for (size_t i = timeStart; i < text.size(); ++i) {
+            if (text[i] == '+' || text[i] == '-') {
+                zonePosition = i;
+                break;
+            }
+        }
+        if (zonePosition != std::string::npos) text.erase(zonePosition);
+        else if (!text.empty() &&
+                 (text.back() == 'Z' || text.back() == 'z')) text.pop_back();
+    }
+
+    int64_t seconds = parseTimestampToSeconds(text);
+    if (seconds == 0 || isInfiniteTimestamp(seconds)) return false;
+    if (micros == 1000000) {
+        ++seconds;
+        micros = 0;
+    }
+    result = seconds * 1000000LL + micros;
+    return true;
+}
+
 static bool normalizeRange(const std::string& in, const std::string& type, std::string& out) {
     std::string s = trim(in);
     if (s.size() == 5) {
@@ -7631,6 +7705,7 @@ static bool normalizeRange(const std::string& in, const std::string& type, std::
     std::optional<Numeric> loNumeric, hiNumeric;
     const bool discrete = (type == "int4range" || type == "int8range");
     const bool discreteDate = type == "daterange";
+    const bool timestampRange = type == "tsrange" || type == "tstzrange";
     auto parseBound = [&](const std::string& b, double& dv, int64_t& iv) -> bool {
         if (discrete) {
             try { size_t p = 0; long long v = std::stoll(b, &p); if (p != b.size()) return false;
@@ -7646,7 +7721,12 @@ static bool normalizeRange(const std::string& in, const std::string& type, std::
             dv = static_cast<double>(iv);
             return true;
         }
-        int64_t v = parseTimestampToSeconds(b); if (v == 0) return false; dv = static_cast<double>(v); return true;
+        int64_t v = 0;
+        if (!parseRangeTimestampMicros(b, type == "tstzrange", v))
+            return false;
+        iv = v;
+        dv = static_cast<double>(v);
+        return true;
     };
     if (type == "numrange") {
         try {
@@ -7668,6 +7748,8 @@ static bool normalizeRange(const std::string& in, const std::string& type, std::
             }
         } else if (type == "numrange") {
             if (*loNumeric > *hiNumeric) return false;
+        } else if (timestampRange) {
+            if (loI > hiI) return false;
         } else if (loV > hiV) {
             return false;
         }
@@ -7739,6 +7821,12 @@ static bool normalizeRange(const std::string& in, const std::string& type, std::
         } else if (type == "numrange") {
             if (*loNumeric > *hiNumeric) return false;
             if (*loNumeric == *hiNumeric && !(lb == '[' && ub == ']')) {
+                out = "empty";
+                return true;
+            }
+        } else if (timestampRange) {
+            if (loI > hiI) return false;
+            if (loI == hiI && !(lb == '[' && ub == ']')) {
                 out = "empty";
                 return true;
             }
