@@ -93,6 +93,23 @@ static void test_escape() {
     auto enc = callFn(eval, "encode", {S(raw), S("escape")});
     assert(enc.value == "x\\007y");
     assert(callFn(eval, "decode", {S(enc.value), S("escape")}).value == raw);
+    const auto zero = callFn(eval, "decode", {S("\\000"), S("escape")});
+    assert(zero.value.size() == 1 && zero.value[0] == '\0');
+    auto expectInvalidEscape = [&](const std::string& value) {
+        bool rejected = false;
+        try {
+            (void)callFn(eval, "decode", {S(value), S("escape")});
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("SQLSTATE 22P02") !=
+                       std::string::npos;
+        }
+        assert(rejected);
+    };
+    expectInvalidEscape("\\");
+    expectInvalidEscape("\\12");
+    expectInvalidEscape("\\128");
+    expectInvalidEscape("\\400");
+    expectInvalidEscape("\\x");
     std::cout << "[ENCFN] escape OK" << std::endl;
 }
 

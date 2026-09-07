@@ -5795,19 +5795,28 @@ void ExprEvaluator::registerBuiltins() {
         }
         if (fmt == "escape") {
             for (size_t i = 0; i < text.size(); ++i) {
-                if (text[i] == '\\' && i + 1 < text.size()) {
-                    if (text[i + 1] == '\\') { out.push_back('\\'); i += 1; }
-                    else if (i + 3 < text.size()) {
-                        int v = 0; bool ok = true;
-                        for (int k = 1; k <= 3; ++k) {
-                            char c = text[i + k];
-                            if (c < '0' || c > '7') { ok = false; break; }
-                            v = v * 8 + (c - '0');
-                        }
-                        if (ok) { out.push_back(static_cast<char>(v)); i += 3; }
-                        else out.push_back(text[i]);
-                    } else out.push_back(text[i]);
-                } else out.push_back(text[i]);
+                if (text[i] != '\\') {
+                    out.push_back(text[i]);
+                    continue;
+                }
+                if (i + 1 < text.size() && text[i + 1] == '\\') {
+                    out.push_back('\\');
+                    ++i;
+                    continue;
+                }
+                if (i + 3 >= text.size() || text[i + 1] < '0' ||
+                    text[i + 1] > '3' || text[i + 2] < '0' ||
+                    text[i + 2] > '7' || text[i + 3] < '0' ||
+                    text[i + 3] > '7') {
+                    throw std::runtime_error(
+                        "invalid input syntax for type bytea "
+                        "(SQLSTATE 22P02)");
+                }
+                const int value = (text[i + 1] - '0') * 64 +
+                                  (text[i + 2] - '0') * 8 +
+                                  (text[i + 3] - '0');
+                out.push_back(static_cast<char>(value));
+                i += 3;
             }
             return ExprValue("bytea", out, false);
         }
