@@ -6241,8 +6241,15 @@ void ExprEvaluator::registerBuiltins() {
     auto jsonArrayLenFn = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
         std::vector<std::string> elems;
-        if (!jsonTopLevelSplit(a[0].value, '[', ']', elems))
-            return ExprValue("integer", "", true);  // not a JSON array
+        if (!jsonTopLevelSplit(a[0].value, '[', ']', elems)) {
+            const std::string kind = jsonTypeOf(a[0].value);
+            throw std::runtime_error(
+                kind == "object"
+                    ? "cannot get array length of a non-array "
+                      "(SQLSTATE 22023)"
+                    : "cannot get array length of a scalar "
+                      "(SQLSTATE 22023)");
+        }
         return ExprValue("integer", std::to_string(elems.size()), false);
     };
     functions_["json_array_length"] = jsonArrayLenFn;

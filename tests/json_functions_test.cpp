@@ -10,6 +10,7 @@
 #include <cassert>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -56,8 +57,18 @@ static void test_array_length() {
     // Nested elements counted at top level only.
     assert(callFn(eval, "json_array_length", {J("[[1,2],[3,4],5]")}).value == "3");
     assert(callFn(eval, "json_array_length", {J("[\"a,b\",\"c\"]")}).value == "2");  // quoted comma
-    // Not an array -> NULL.
-    assert(callFn(eval, "json_array_length", {J("{\"a\":1}")}).isNull);
+    // Objects and scalars are valid JSON, but not valid arguments for this
+    // operation.
+    for (const auto& value : {J("{\"a\":1}"), J("42")}) {
+        bool rejected = false;
+        try {
+            (void)callFn(eval, "json_array_length", {value});
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("SQLSTATE 22023") !=
+                       std::string::npos;
+        }
+        assert(rejected);
+    }
     std::cout << "[JSONFN] array_length OK" << std::endl;
 }
 
