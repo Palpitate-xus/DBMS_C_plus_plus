@@ -2057,8 +2057,9 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         } catch (...) {
             return ExprValue("unknown", "", true);
         }
-        // PostgreSQL arrays are 1-based; negative = from the end.
-        if (idx < 0) idx = static_cast<long>(elems.size()) + idx + 1;
+        // Arrays built by this engine use PostgreSQL's default lower bound of
+        // one.  Non-positive subscripts are therefore out of range; they are
+        // not offsets counted from the end.
         if (idx < 1 || idx > static_cast<long>(elems.size()))
             return ExprValue("unknown", "", true); // out of range -> NULL (PG)
         return ExprValue("text", elems[static_cast<size_t>(idx - 1)], false);
@@ -2077,20 +2078,31 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         std::string hiS = colon == std::string::npos ? "" : b.substr(colon + 1);
         long n = static_cast<long>(elems.size());
         long lo = 1, hi = n;
-        auto parseBound = [](const std::string& s, long def, long nElem) -> long {
+        auto parseBound = [](const std::string& s, long def) -> long {
             if (s.empty()) return def;
             try {
+                // Unary expressions are serialized by the parser as "- 1"
+                // or "+ 1".  Compact only that separator so strict integer
+                // parsing still rejects arbitrary embedded whitespace.
+                std::string value = s;
+                if (value.size() > 1 && (value[0] == '-' || value[0] == '+')) {
+                    size_t digits = 1;
+                    while (digits < value.size() &&
+                           std::isspace(static_cast<unsigned char>(value[digits]))) {
+                        ++digits;
+                    }
+                    value = value.substr(0, 1) + value.substr(digits);
+                }
                 size_t cp = 0;
-                long v = std::stol(s, &cp);
-                if (cp != s.size()) return def;
-                if (v < 0) v = nElem + v + 1; // negative = from the end
+                long v = std::stol(value, &cp);
+                if (cp != value.size()) return def;
                 return v;
             } catch (...) {
                 return def;
             }
         };
-        lo = parseBound(loS, 1, n);
-        hi = parseBound(hiS, n, n);
+        lo = parseBound(loS, 1);
+        hi = parseBound(hiS, n);
         if (lo < 1) lo = 1;
         if (hi > n) hi = n;
         std::string out = "{";

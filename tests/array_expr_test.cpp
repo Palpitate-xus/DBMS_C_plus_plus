@@ -1,7 +1,7 @@
 // ============================================================================
 // array_expr_test — SQL array expression semantics:
 //   ARRAY[e1,e2,...] constructor
-//   arr[i]           1-based indexing (negative = from end; OOR -> NULL)
+//   arr[i]           1-based indexing (out-of-range -> NULL)
 //   arr[lo:hi]       inclusive slice, open bounds, result stays an array
 //   arr @> arr       element containment; <@ contained-by
 //   arr[i] on nested arrays
@@ -56,9 +56,13 @@ static void test_index() {
     auto b = eval("'{5,6,7}'[1]");
     assert(b.ok && b.value == "5");
 
-    // negative index = from the end
+    // Default PostgreSQL array bounds start at 1, so non-positive indexes
+    // are out of range rather than aliases counted from the end.
     auto c = eval("ARRAY[10,20,30][-1]");
-    assert(c.ok && c.value == "30");
+    assert(c.ok && c.isNull);
+
+    auto z = eval("ARRAY[10,20,30][0]");
+    assert(z.ok && z.isNull);
 
     // out of range -> NULL
     auto d = eval("ARRAY[10,20][5]");
@@ -92,6 +96,13 @@ static void test_slice() {
     // bounds beyond ends are clamped
     auto e = eval("ARRAY[1,2][0:9]");
     assert(e.ok && e.value == "{1,2}");
+
+    // Negative bounds are literal array subscripts, not offsets from the end.
+    auto f = eval("ARRAY[10,20,30][-1:2]");
+    assert(f.ok && f.value == "{10,20}");
+
+    auto g = eval("ARRAY[10,20,30][1:-1]");
+    assert(g.ok && g.value == "{}");
 
     std::cout << "[ARRAY] slicing OK" << std::endl;
 }
