@@ -8595,30 +8595,39 @@ void ExprEvaluator::registerBuiltins() {
     };
     // date_trunc(field, source) -> truncate timestamp to the given precision
     functions_["date_trunc"] = [](const std::vector<ExprValue>& a) {
-        if (a.size() < 2 || a[0].isNull || a[1].isNull)
+        if (a.size() < 2)
             return ExprValue("timestamp", "", true);
-        std::string field = toLower(a[0].value);
-        const std::string& src = a[1].value;
         const std::string sourceType = toLower(a[1].typeName);
+        const bool dateInput = sourceType == "date";
         const bool withTimeZone = sourceType == "timestamptz" ||
             sourceType == "timestamp with time zone";
+        const std::string resultType =
+            dateInput || withTimeZone ? "timestamptz" : "timestamp";
+        if (a[0].isNull || a[1].isNull)
+            return ExprValue(resultType, "", true);
+        std::string field = toLower(a[0].value);
+        const std::string& src = a[1].value;
         const auto parsedTimestamp =
             parseComparableTimestamp(src, withTimeZone);
         if (!parsedTimestamp)
-            return ExprValue("timestamp", "", true);
+            return ExprValue(resultType, "", true);
         if (parsedTimestamp->infinity != 0) {
-            return ExprValue("timestamp",
+            return ExprValue(resultType,
                              parsedTimestamp->infinity > 0
                                  ? "infinity" : "-infinity",
                              false);
         }
         int64_t fractionalMicros =
             parsedTimestamp->micros % 1000000LL;
+        const std::string calendarSource = formatTimestampSeconds(
+            parsedTimestamp->micros / 1000000LL);
+        if (calendarSource.empty())
+            return ExprValue(resultType, "", true);
         auto num = [&](size_t off, size_t len) -> int {
-            if (src.size() < off + len) return 0;
+            if (calendarSource.size() < off + len) return 0;
             int v = 0;
             for (size_t i = off; i < off + len; ++i) {
-                char c = src[i];
+                char c = calendarSource[i];
                 if (c < '0' || c > '9') return 0;
                 v = v * 10 + (c - '0');
             }
@@ -8637,7 +8646,7 @@ void ExprEvaluator::registerBuiltins() {
         else if (field == "decade") {
             y = y / 10 * 10;
             if (y == 0)
-                return ExprValue("timestamp", "", true); // BC unsupported
+                return ExprValue(resultType, "", true); // BC unsupported
             mo = 1; d = 1; h = mi = se = 0;
         }
         else if (field == "year") { mo = 1; d = 1; h = mi = se = 0; }
@@ -8660,7 +8669,7 @@ void ExprEvaluator::registerBuiltins() {
                 if (--mo == 0) {
                     mo = 12;
                     if (--y == 0)
-                        return ExprValue("timestamp", "", true);
+                        return ExprValue(resultType, "", true);
                 }
                 d = 31;
                 while (Date(y, mo, d).year == 0) --d;
@@ -8694,8 +8703,8 @@ void ExprEvaluator::registerBuiltins() {
                 fraction.pop_back();
             res += "." + fraction;
         }
-        if (sourceType == "date") res += "+00";
-        return ExprValue("timestamp", res, false);
+        if (dateInput || withTimeZone) res += "+00";
+        return ExprValue(resultType, res, false);
     };
     // to_char(value, fmt): format a date/timestamp/time or number as text. The
     // input is treated as temporal when its declared type is date/time/timestamp

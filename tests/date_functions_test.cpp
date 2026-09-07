@@ -256,7 +256,10 @@ static void test_make() {
 static void test_date_trunc() {
     dbms::ExprEvaluator eval;
     auto ts = TS("2026-06-26 14:35:09");
-    assert(callFn(eval, "date_trunc", {F("year"), ts}).value == "2026-01-01 00:00:00");
+    const auto truncatedYear =
+        callFn(eval, "date_trunc", {F("year"), ts});
+    assert(truncatedYear.value == "2026-01-01 00:00:00");
+    assert(truncatedYear.typeName == "timestamp");
     assert(callFn(eval, "date_trunc", {F("millennium"), ts}).value ==
            "2001-01-01 00:00:00");
     assert(callFn(eval, "date_trunc", {F("century"), ts}).value ==
@@ -294,6 +297,22 @@ static void test_date_trunc() {
     assert(callFn(eval, "date_trunc",
                   {F("microseconds"), fractionalTs}).value ==
            "2024-01-01 12:34:56.123456");
+    const auto truncatedDate =
+        callFn(eval, "date_trunc", {F("day"), D("2024-01-01")});
+    assert(truncatedDate.value == "2024-01-01 00:00:00+00");
+    assert(truncatedDate.typeName == "timestamptz");
+    const auto truncatedZoned = callFn(
+        eval, "date_trunc",
+        {F("day"), TSTZ("2024-01-01 00:30:00+02")});
+    assert(truncatedZoned.value == "2023-12-31 00:00:00+00");
+    assert(truncatedZoned.typeName == "timestamptz");
+    const auto truncatedZonedMillis = callFn(
+        eval, "date_trunc",
+        {F("milliseconds"),
+         TSTZ("2024-01-01 00:30:56.123456+02")});
+    assert(truncatedZonedMillis.value ==
+           "2023-12-31 22:30:56.123+00");
+    assert(truncatedZonedMillis.typeName == "timestamptz");
     assert(callFn(eval, "date_trunc", {F("quarter"), ts}).value == "2026-04-01 00:00:00");
     assert(callFn(eval, "date_trunc",
                   {F("day"), TS("infinity")}).value == "infinity");
