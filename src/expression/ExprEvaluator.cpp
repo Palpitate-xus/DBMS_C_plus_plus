@@ -1636,6 +1636,17 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
         lIv = iv.ok;
     }
     if (lIv || rIv) {
+        const auto shiftedTimestampValue = [](const ExprValue& source,
+                                              std::string shifted) {
+            const std::string sourceType = toLower(source.typeName);
+            const bool withTimeZone = sourceType == "timestamptz" ||
+                sourceType == "timestamp with time zone";
+            const std::string resultType = withTimeZone
+                ? "timestamptz" : "timestamp";
+            if (shifted.empty()) return ExprValue(resultType, "", true);
+            if (withTimeZone) shifted += "+00";
+            return ExprValue(resultType, std::move(shifted), false);
+        };
         if (op == "*" || op == "/") {
             IntervalParts iv;
             double k = 0;
@@ -1685,15 +1696,13 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
             IntervalParts iv = parseIntervalText(l.value);
             if (!iv.ok || !isTsLike(r)) return ExprValue("timestamp", "", true);
             std::string shifted = timestampShift(r.value, iv, true);
-            if (shifted.empty()) return ExprValue("timestamp", "", true);
-            return ExprValue("timestamp", shifted, false);
+            return shiftedTimestampValue(r, std::move(shifted));
         }
         if (rIv) {
             IntervalParts iv = parseIntervalText(r.value);
             if (!iv.ok || !isTsLike(l)) return ExprValue("timestamp", "", true);
             std::string shifted = timestampShift(l.value, iv, op == "+");
-            if (shifted.empty()) return ExprValue("timestamp", "", true);
-            return ExprValue("timestamp", shifted, false);
+            return shiftedTimestampValue(l, std::move(shifted));
         }
         return ExprValue("timestamp", "", true);
     }

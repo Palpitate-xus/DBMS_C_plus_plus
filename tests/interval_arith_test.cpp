@@ -94,6 +94,17 @@ static void test_add_sub() {
     assert(fractionalMonthRollover.ok &&
            fractionalMonthRollover.value ==
                "2024-02-29 00:00:00.500000");
+    auto timestamptzShift = eval(
+        "'2024-01-01 00:00:00.5+01'::timestamptz + "
+        "'0.25 seconds'::interval");
+    assert(timestamptzShift.ok &&
+           timestamptzShift.value == "2023-12-31 23:00:00.750000+00");
+    auto commutedTimestamptzShift = eval(
+        "'0.25 seconds'::interval + "
+        "'2024-01-01 00:00:00.5+01'::timestamptz");
+    assert(commutedTimestamptzShift.ok &&
+           commutedTimestamptzShift.value ==
+               "2023-12-31 23:00:00.750000+00");
 
     // days
     auto a = eval("'2024-03-10'::timestamp + '1 day'::interval");
