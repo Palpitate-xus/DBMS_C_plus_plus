@@ -147,6 +147,21 @@ static void test_invalid_positions() {
     std::cout << "[REGEXFN] invalid positions OK" << std::endl;
 }
 
+static void test_invalid_flags() {
+    dbms::ExprEvaluator eval;
+    expectInvalidParameter(
+        eval, "regexp_replace", {S("abc"), S("a"), S("x"), S("z")});
+    expectInvalidParameter(eval, "regexp_matches", {S("abc"), S("a"), S("z")});
+    expectInvalidParameter(eval, "regexp_match", {S("abc"), S("a"), S("g")});
+    expectInvalidParameter(
+        eval, "regexp_split_to_array", {S("abc"), S("a"), S("g")});
+    expectInvalidParameter(
+        eval, "regexp_count", {S("abc"), S("a"), I(1), S("g")});
+    expectInvalidParameter(
+        eval, "regexp_substr", {S("abc"), S("a"), I(1), I(1), S("g")});
+    std::cout << "[REGEXFN] invalid flags OK" << std::endl;
+}
+
 static void test_optional_nulls() {
     dbms::ExprEvaluator eval;
     assert(callFn(eval, "regexp_replace", {S("abc"), S("a"), S("x"), N()})
@@ -173,6 +188,7 @@ int main() {
     test_count_substr();
     test_invalid_patterns();
     test_invalid_positions();
+    test_invalid_flags();
     test_optional_nulls();
     std::cout << "[REGEXFN] all passed" << std::endl;
     return 0;
