@@ -92,6 +92,23 @@ static void test_mutate() {
            "{NULL}");
     assert(callFn(eval, "array_prepend", {NULLI(), NULLA()}).value ==
            "{NULL}");
+    assert(callFn(eval, "array_cat",
+                  {A("{1,2}"), A("{{3,4},{5,6}}")}).value ==
+           "{{1,2},{3,4},{5,6}}");
+    assert(callFn(eval, "array_cat",
+                  {A("{{1,2},{3,4}}"), A("{5,6}")}).value ==
+           "{{1,2},{3,4},{5,6}}");
+
+    bool incompatibleRejected = false;
+    try {
+        (void)callFn(eval, "array_cat",
+                     {A("{{1,2}}"), A("{{3,4,5}}")});
+    } catch (const std::runtime_error& error) {
+        incompatibleRejected =
+            std::string(error.what()).find("SQLSTATE 2202E") !=
+            std::string::npos;
+    }
+    assert(incompatibleRejected);
     std::cout << "[ARRFN] mutate OK" << std::endl;
 }
 

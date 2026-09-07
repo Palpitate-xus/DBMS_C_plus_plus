@@ -6702,6 +6702,33 @@ void ExprEvaluator::registerBuiltins() {
         }
         return std::nullopt;
     };
+    auto arrayShape = [](const std::string& array)
+        -> std::optional<std::vector<size_t>> {
+        std::function<std::optional<std::vector<size_t>>(
+            const std::string&)> inspect;
+        inspect = [&inspect](const std::string& value)
+            -> std::optional<std::vector<size_t>> {
+            std::vector<std::string> elements;
+            if (!parseArrayElements(value, elements)) return std::nullopt;
+            std::vector<size_t> shape{elements.size()};
+            if (elements.empty()) return shape;
+
+            const auto firstChild = inspect(elements.front());
+            for (size_t i = 1; i < elements.size(); ++i) {
+                const auto child = inspect(elements[i]);
+                if (child.has_value() != firstChild.has_value() ||
+                    (child && *child != *firstChild)) {
+                    return std::nullopt;
+                }
+            }
+            if (firstChild) {
+                shape.insert(
+                    shape.end(), firstChild->begin(), firstChild->end());
+            }
+            return shape;
+        };
+        return inspect(array);
+    };
     // array_length(arr, dim) — element count along the requested dimension
     functions_["array_length"] =
         [parseArrayDimension, arrayExtent](const std::vector<ExprValue>& a) {
@@ -6795,16 +6822,59 @@ void ExprEvaluator::registerBuiltins() {
         return ExprValue("ARRAY", out, false);
     };
     // array_cat(a, b) — concatenate two arrays
-    functions_["array_cat"] = [](const std::vector<ExprValue>& a) {
+    functions_["array_cat"] = [arrayShape](const std::vector<ExprValue>& a) {
         if (a.size() < 2) return ExprValue("ARRAY", "", true);
         std::vector<std::string> ea, eb;
         if (a[0].isNull && !a[1].isNull) return ExprValue("ARRAY", a[1].value, false);
         if (a[1].isNull && !a[0].isNull) return ExprValue("ARRAY", a[0].value, false);
         if (!parseArrayElements(a[0].value, ea) || !parseArrayElements(a[1].value, eb))
             return ExprValue("ARRAY", "", true);
-        ea.insert(ea.end(), eb.begin(), eb.end());
+        if (ea.empty()) return ExprValue("ARRAY", a[1].value, false);
+        if (eb.empty()) return ExprValue("ARRAY", a[0].value, false);
+
+        const auto leftShape = arrayShape(a[0].value);
+        const auto rightShape = arrayShape(a[1].value);
+        if (!leftShape || !rightShape) {
+            throw std::runtime_error(
+                "cannot concatenate incompatible arrays (SQLSTATE 2202E)");
+        }
+        std::vector<std::string> result;
+        if (leftShape->size() == rightShape->size()) {
+            if (!std::equal(leftShape->begin() + 1, leftShape->end(),
+                            rightShape->begin() + 1)) {
+                throw std::runtime_error(
+                    "cannot concatenate incompatible arrays "
+                    "(SQLSTATE 2202E)");
+            }
+            result = ea;
+            result.insert(result.end(), eb.begin(), eb.end());
+        } else if (leftShape->size() + 1 == rightShape->size()) {
+            if (!std::equal(leftShape->begin(), leftShape->end(),
+                            rightShape->begin() + 1)) {
+                throw std::runtime_error(
+                    "cannot concatenate incompatible arrays "
+                    "(SQLSTATE 2202E)");
+            }
+            result.push_back(a[0].value);
+            result.insert(result.end(), eb.begin(), eb.end());
+        } else if (rightShape->size() + 1 == leftShape->size()) {
+            if (!std::equal(rightShape->begin(), rightShape->end(),
+                            leftShape->begin() + 1)) {
+                throw std::runtime_error(
+                    "cannot concatenate incompatible arrays "
+                    "(SQLSTATE 2202E)");
+            }
+            result = ea;
+            result.push_back(a[1].value);
+        } else {
+            throw std::runtime_error(
+                "cannot concatenate incompatible arrays (SQLSTATE 2202E)");
+        }
         std::string out = "{";
-        for (size_t i = 0; i < ea.size(); ++i) { if (i) out += ","; out += ea[i]; }
+        for (size_t i = 0; i < result.size(); ++i) {
+            if (i) out += ",";
+            out += result[i];
+        }
         out += "}";
         return ExprValue("ARRAY", out, false);
     };
