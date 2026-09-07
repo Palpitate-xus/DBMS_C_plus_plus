@@ -5591,22 +5591,25 @@ void ExprEvaluator::registerBuiltins() {
         } else {
             count = static_cast<long long>(utf8CharCount(repl));
         }
-        if (start < 1) start = 1;
-        if (count < 0) count = 0;
+        if (start < 1) {
+            throw std::runtime_error(
+                "negative substring length not allowed (SQLSTATE 22011)");
+        }
         const size_t characters = utf8CharCount(s);
         const uint64_t requestedBegin = static_cast<uint64_t>(start - 1);
-        const size_t beginCharacter = requestedBegin >= characters
+        const size_t prefixCharacters = requestedBegin >= characters
             ? characters : static_cast<size_t>(requestedBegin);
-        const uint64_t requestedCount = static_cast<uint64_t>(count);
-        const size_t removedCharacters =
-            requestedCount >= characters - beginCharacter
-                ? characters - beginCharacter
-                : static_cast<size_t>(requestedCount);
-        const size_t beginByte = utf8ByteAt(s, beginCharacter);
-        const size_t endByte =
-            utf8ByteAt(s, beginCharacter + removedCharacters);
-        std::string out =
-            s.substr(0, beginByte) + repl + s.substr(endByte);
+        const __int128 suffixStart =
+            static_cast<__int128>(start) + count;
+        size_t suffixCharacter = 0;
+        if (suffixStart > 1) {
+            const __int128 zeroBased = suffixStart - 1;
+            suffixCharacter = zeroBased >= static_cast<__int128>(characters)
+                ? characters : static_cast<size_t>(zeroBased);
+        }
+        const size_t prefixByte = utf8ByteAt(s, prefixCharacters);
+        const size_t suffixByte = utf8ByteAt(s, suffixCharacter);
+        std::string out = s.substr(0, prefixByte) + repl + s.substr(suffixByte);
         return ExprValue("text", out, false);
     };
     // quote_literal — single-quote a value, doubling embedded quotes

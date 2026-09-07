@@ -163,6 +163,21 @@ static void test_overlay_quote() {
                   {S("aé中z"), S("X"), I(2), I(2)}).value == "aXz");
     assert(callFn(eval, "overlay",
                   {S("aé中z"), S("界"), I(2)}).value == "a界中z");
+    assert(callFn(eval, "overlay",
+                  {S("abcdef"), S("X"), I(2), I(-1)}).value ==
+           "aXabcdef");
+    assert(callFn(eval, "overlay",
+                  {S("abcdef"), S("X"), I(7), I(-2)}).value ==
+           "abcdefXef");
+    bool invalidStartRejected = false;
+    try {
+        (void)callFn(eval, "overlay", {S("abcdef"), S("X"), I(0)});
+    } catch (const std::runtime_error& error) {
+        invalidStartRejected =
+            std::string(error.what()).find("SQLSTATE 22011") !=
+            std::string::npos;
+    }
+    assert(invalidStartRejected);
     assert(callFn(eval, "quote_literal", {S("O'Brien")}).value == "'O''Brien'");
     assert(callFn(eval, "quote_ident", {S("simple")}).value == "simple");
     assert(callFn(eval, "quote_ident", {S("Mixed Case")}).value == "\"Mixed Case\"");
