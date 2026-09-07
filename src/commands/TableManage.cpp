@@ -29223,11 +29223,24 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             std::string v = getVal(arg);
             // Skip only SQL NULL args; an empty string is a real value and is
             // returned as-is.
-            if (v.empty() && scalarArgColumnIsNull(
-                    arg, rowBuffer, tbl, engine, dbname)) continue;
+            bool directColumn = false;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].dataName == arg) {
+                    directColumn = true;
+                    break;
+                }
+            }
+            const bool quoted = arg.size() >= 2 &&
+                ((arg.front() == '\'' && arg.back() == '\'') ||
+                 (arg.front() == '"' && arg.back() == '"'));
+            const bool isNull = directColumn
+                ? scalarArgColumnIsNull(
+                      arg, rowBuffer, tbl, engine, dbname)
+                : (!quoted && v == "NULL");
+            if (isNull) continue;
             return v;
         }
-        return "";
+        return "NULL";
     }
     if (expr.funcName == "nullif" && expr.funcArgs.size() >= 2) {
         std::string v1 = getVal(expr.funcArgs[0]);
