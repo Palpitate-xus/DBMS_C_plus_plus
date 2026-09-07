@@ -27746,12 +27746,22 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
 
         bool anyRow = false;
         std::string evaluationError;
-        const bool scanned = engine->forEachRow(dbname, innerTbl, [&](uint32_t, uint16_t, const char* data, size_t len) {
+        const bool scanned = engine->forEachRow(dbname, innerTbl, [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
+            if (!evaluationError.empty()) return false;
             if (whereSql.empty()) {
                 anyRow = true;
                 return false;
             }
-            const std::string innerRow(data, len);
+            NullRowBinding nullBinding(
+                engine, dbname, innerTbl,
+                StorageEngine::encodeRid(pageId, slotId), innerSch.len);
+            bool toastOk = false;
+            const std::string innerRow = engine->resolveToastValues(
+                dbname, innerTbl, std::string(data, len), innerSch, &toastOk);
+            if (!toastOk) {
+                evaluationError = "EXISTS subquery TOAST value read failed";
+                return false;
+            }
             auto rowContext = outerContext;
             auto typeHints = outerTypes;
             auto nullColumns = outerNulls;
@@ -30469,7 +30479,14 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                         engine, dbname, subTname,
                         StorageEngine::encodeRid(pageId, slotId),
                         innerSchema.len);
-                    const std::string innerRow(data, len);
+                    bool toastOk = false;
+                    const std::string innerRow = engine->resolveToastValues(
+                        dbname, subTname, std::string(data, len), innerSchema,
+                        &toastOk);
+                    if (!toastOk) {
+                        evaluationError = "scalar subquery TOAST value read failed";
+                        return;
+                    }
                     auto rowContext = outerContext;
                     auto typeHints = outerTypes;
                     auto nullColumns = outerNulls;
