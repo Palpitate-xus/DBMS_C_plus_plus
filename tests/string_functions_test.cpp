@@ -136,10 +136,23 @@ static void test_initcap_tohex() {
     assert(callFn(eval, "reverse", {S("aé中")}).value == "中éa");
     assert(callFn(eval, "ascii", {S("é")}).value == "233");
     assert(callFn(eval, "ascii", {S("中")}).value == "20013");
+    assert(callFn(eval, "ascii", {S("")}).value == "0");
     assert(callFn(eval, "chr", {I(233)}).value == "é");
     assert(callFn(eval, "chr", {I(20013)}).value == "中");
-    assert(callFn(eval, "chr", {I(0)}).isNull);
-    assert(callFn(eval, "chr", {I(0x110000)}).isNull);
+    auto expectChrError = [&](int64_t codePoint, const std::string& sqlstate) {
+        bool rejected = false;
+        try {
+            (void)callFn(eval, "chr", {I(codePoint)});
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("SQLSTATE " + sqlstate) !=
+                       std::string::npos;
+        }
+        assert(rejected);
+    };
+    expectChrError(-1, "22023");
+    expectChrError(0, "54000");
+    expectChrError(0xd800, "54000");
+    expectChrError(0x110000, "54000");
     assert(callFn(eval, "to_hex", {I(255)}).value == "ff");
     assert(callFn(eval, "to_hex", {I(0)}).value == "0");
     assert(callFn(eval, "to_hex", {I(4096)}).value == "1000");

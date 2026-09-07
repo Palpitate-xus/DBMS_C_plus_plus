@@ -5343,7 +5343,8 @@ void ExprEvaluator::registerBuiltins() {
         return ExprValue("text", result, false);
     };
     functions_["ascii"] = [](const std::vector<ExprValue>& a) {
-        if (a.empty() || a[0].isNull || a[0].value.empty()) return ExprValue("integer", "", true);
+        if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
+        if (a[0].value.empty()) return ExprValue("integer", "0", false);
         uint32_t codePoint = 0;
         if (!decodeFirstUtf8CodePoint(a[0].value, codePoint))
             return ExprValue("integer", "", true);
@@ -5353,13 +5354,24 @@ void ExprEvaluator::registerBuiltins() {
     functions_["chr"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
         long long value = 0;
-        if (!parseInt64Exact(a[0].value, value) || value <= 0 ||
-            value > 0x10ffff) {
+        if (!parseInt64Exact(a[0].value, value))
             return ExprValue("text", "", true);
+        if (value < 0) {
+            throw std::runtime_error(
+                "character number must be positive (SQLSTATE 22023)");
+        }
+        if (value == 0) {
+            throw std::runtime_error(
+                "null character not permitted (SQLSTATE 54000)");
+        }
+        if (value > 0x10ffff ||
+            (value >= 0xd800 && value <= 0xdfff)) {
+            throw std::runtime_error(
+                "requested character not valid for encoding (SQLSTATE 54000)");
         }
         const std::string result =
             encodeUtf8CodePoint(static_cast<uint32_t>(value));
-        return ExprValue("text", result, result.empty());
+        return ExprValue("text", result, false);
     };
     // substr — PostgreSQL alias of substring(str, from[, len])
     functions_["substr"] = evaluateTextSubstring;
