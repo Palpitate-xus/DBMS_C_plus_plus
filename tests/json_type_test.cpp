@@ -77,6 +77,24 @@ int main() {
                dbms::DBStatus::INVALID_VALUE);
     }
 
+    const std::vector<std::string> jsonTextOnly = {
+        R"("\ud800")", R"("\udc00")", R"("\u0000")",
+    };
+    for (const auto& value : jsonTextOnly) {
+        assert(g_engine.insert(database, "t",
+                               {{"id", std::to_string(id++)},
+                                {"j", value}}) == dbms::DBStatus::OK);
+        assert(g_engine.insert(database, "t",
+                               {{"id", std::to_string(id++)},
+                                {"jb", value}}) ==
+               dbms::DBStatus::INVALID_VALUE);
+    }
+    const std::string surrogatePair = R"("\ud834\udd1e")";
+    assert(g_engine.insert(database, "t",
+                           {{"id", std::to_string(id++)},
+                            {"j", surrogatePair},
+                            {"jb", surrogatePair}}) == dbms::DBStatus::OK);
+
     cleanup(database);
     std::cout << "[JSON-TYPE] validation passed" << std::endl;
     return 0;

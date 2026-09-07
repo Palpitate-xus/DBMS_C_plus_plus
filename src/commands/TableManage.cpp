@@ -19685,7 +19685,7 @@ static std::string buildRowBuffer(const TableSchema& tbl,
 // ========================================================================
 // JSON validator: structural + token-level validation
 // ========================================================================
-static bool isValidJson(const std::string& s) {
+static bool isValidJson(const std::string& s, bool binary) {
     if (s.empty()) return true;  // empty = NULL
     struct Token {
         enum Type { LBrace, RBrace, LBracket, RBracket, Colon, Comma,
@@ -19814,11 +19814,52 @@ static bool isValidJson(const std::string& s) {
                     continue;
                 }
                 if (escaped != 'u' || i + 5 >= s.size()) return false;
+                unsigned int codeUnit = 0;
                 for (size_t digit = i + 2; digit <= i + 5; ++digit) {
                     if (!std::isxdigit(
                             static_cast<unsigned char>(s[digit]))) {
                         return false;
                     }
+                    const char hex = s[digit];
+                    const unsigned int value =
+                        hex >= '0' && hex <= '9'
+                            ? static_cast<unsigned int>(hex - '0')
+                            : hex >= 'a' && hex <= 'f'
+                                  ? static_cast<unsigned int>(hex - 'a' + 10)
+                                  : static_cast<unsigned int>(hex - 'A' + 10);
+                    codeUnit = (codeUnit << 4) | value;
+                }
+                if (binary) {
+                    if (codeUnit == 0) return false;
+                    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+                        if (i + 11 >= s.size() || s[i + 6] != '\\' ||
+                            s[i + 7] != 'u') {
+                            return false;
+                        }
+                        unsigned int low = 0;
+                        for (size_t digit = i + 8; digit <= i + 11;
+                             ++digit) {
+                            const char hex = s[digit];
+                            if (!std::isxdigit(
+                                    static_cast<unsigned char>(hex))) {
+                                return false;
+                            }
+                            const unsigned int value =
+                                hex >= '0' && hex <= '9'
+                                    ? static_cast<unsigned int>(hex - '0')
+                                    : hex >= 'a' && hex <= 'f'
+                                          ? static_cast<unsigned int>(
+                                                hex - 'a' + 10)
+                                          : static_cast<unsigned int>(
+                                                hex - 'A' + 10);
+                            low = (low << 4) | value;
+                        }
+                        if (low < 0xdc00 || low > 0xdfff) return false;
+                        i += 12;
+                        continue;
+                    }
+                    if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff)
+                        return false;
                 }
                 i += 6;
             }
@@ -20617,7 +20658,7 @@ DBStatus StorageEngine::insertInternal(
         }
         // Validate JSON / JSONB columns
         if ((col.dataType == "json" || col.dataType == "jsonb") && !val.empty()) {
-            if (!isValidJson(val)) {
+            if (!isValidJson(val, col.dataType == "jsonb")) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }
@@ -23687,7 +23728,9 @@ DBStatus StorageEngine::updateInternal(
                             return DBStatus::INVALID_VALUE;
                     } else if (col.dataType == "json" ||
                                col.dataType == "jsonb") {
-                        if (!kv.second.empty() && !isValidJson(kv.second))
+                        if (!kv.second.empty() &&
+                            !isValidJson(kv.second,
+                                         col.dataType == "jsonb"))
                             return DBStatus::INVALID_VALUE;
                     } else if (col.dataType == "interval") {
                         if (!kv.second.empty()) {
