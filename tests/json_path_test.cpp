@@ -53,6 +53,13 @@ static void test_array_index() {
     assert(callFn(eval, "json_extract_path_text", {J(doc), K("d"), K("2"), K("e")}).value == "x");
     // jsonb variants share the implementation.
     assert(callFn(eval, "jsonb_extract_path", {J(doc), K("d"), K("0")}).value == "10");
+    // Negative JSON indexes count from the end.
+    assert(callFn(eval, "json_extract_path",
+                  {J(doc), K("d"), K("-1")}).value == "{\"e\":\"x\"}");
+    assert(callFn(eval, "json_extract_path_text",
+                  {J(doc), K("d"), K("-2")}).value == "20");
+    assert(callFn(eval, "json_extract_path",
+                  {J(doc), K("d"), K("-4")}).isNull);
     std::cout << "[JSONPATH] array index OK" << std::endl;
 }
 

@@ -39,6 +39,8 @@ static void test_arrow() {
     assert(a.ok && a.value == "\"y\"");
     auto at = eval(kDoc + " -> 'user' -> 'tags' ->> 1");
     assert(at.ok && at.value == "y");
+    auto last = eval(kDoc + " -> 'user' -> 'tags' ->> -1");
+    assert(last.ok && last.value == "y");
 
     // number field via ->> is text
     auto n = eval(kDoc + " ->> 'n'");

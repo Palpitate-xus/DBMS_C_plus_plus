@@ -3664,8 +3664,19 @@ static bool jsonStep(const std::string& cur, const std::string& key, std::string
         long idx = 0;
         try { size_t pos = 0; idx = std::stol(key, &pos); if (pos != key.size()) return false; }
         catch (...) { return false; }
-        if (idx < 0 || idx >= static_cast<long>(elems.size())) return false;
-        out = elems[static_cast<size_t>(idx)];
+        size_t actualIndex = 0;
+        if (idx < 0) {
+            const auto distanceFromEnd =
+                static_cast<unsigned long long>(-(idx + 1)) + 1;
+            if (distanceFromEnd > elems.size()) return false;
+            actualIndex = elems.size() -
+                          static_cast<size_t>(distanceFromEnd);
+        } else {
+            if (static_cast<unsigned long long>(idx) >= elems.size())
+                return false;
+            actualIndex = static_cast<size_t>(idx);
+        }
+        out = elems[actualIndex];
         return true;
     }
     return false;
