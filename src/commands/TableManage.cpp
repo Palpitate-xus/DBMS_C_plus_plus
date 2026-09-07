@@ -29274,6 +29274,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::string str = getVal(expr.funcArgs[0]);
         std::string from = getVal(expr.funcArgs[1]);
         std::string to = getVal(expr.funcArgs[2]);
+        if (from.empty()) return str;
         size_t pos = 0;
         while ((pos = str.find(from, pos)) != std::string::npos) {
             str.replace(pos, from.size(), to);
