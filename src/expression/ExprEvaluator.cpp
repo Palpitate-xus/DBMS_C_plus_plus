@@ -8810,14 +8810,66 @@ void ExprEvaluator::registerBuiltins() {
             return ExprValue("timestamp", "", true);
         const std::string sourceType = toLower(a[1].typeName);
         const bool dateInput = sourceType == "date";
+        const bool intervalInput =
+            sourceType.find("interval") != std::string::npos;
         const bool withTimeZone = sourceType == "timestamptz" ||
             sourceType == "timestamp with time zone";
-        const std::string resultType =
-            dateInput || withTimeZone ? "timestamptz" : "timestamp";
+        const std::string resultType = intervalInput ? "interval" :
+            (dateInput || withTimeZone ? "timestamptz" : "timestamp");
         if (a[0].isNull || a[1].isNull)
             return ExprValue(resultType, "", true);
         std::string field = toLower(a[0].value);
         const std::string& src = a[1].value;
+        if (intervalInput) {
+            const IntervalParts parsed = parseIntervalText(src);
+            if (!parsed.ok) return ExprValue("interval", "", true);
+            long long months = parsed.months;
+            long long days = parsed.days;
+            long long micros = parsed.micros;
+            if (field == "millennium") {
+                months = months / 12000 * 12000;
+                days = micros = 0;
+            } else if (field == "century") {
+                months = months / 1200 * 1200;
+                days = micros = 0;
+            } else if (field == "decade") {
+                months = months / 120 * 120;
+                days = micros = 0;
+            } else if (field == "year") {
+                months = months / 12 * 12;
+                days = micros = 0;
+            } else if (field == "quarter") {
+                months = months / 3 * 3;
+                days = micros = 0;
+            } else if (field == "month") {
+                days = micros = 0;
+            } else if (field == "day") {
+                micros = 0;
+            } else if (field == "hour") {
+                micros = micros / 3600000000LL * 3600000000LL;
+            } else if (field == "minute") {
+                micros = micros / 60000000LL * 60000000LL;
+            } else if (field == "second") {
+                micros = micros / 1000000LL * 1000000LL;
+            } else if (field == "milliseconds") {
+                micros = micros / 1000LL * 1000LL;
+            } else if (field != "microseconds") {
+                if (field == "week" || field == "timezone" ||
+                    field == "timezone_hour" ||
+                    field == "timezone_minute") {
+                    throw std::runtime_error(
+                        "unit \"" + field +
+                        "\" not supported for type interval "
+                        "(SQLSTATE 0A000)");
+                }
+                throw std::runtime_error(
+                    "unit \"" + field +
+                    "\" not recognized for type interval "
+                    "(SQLSTATE 22023)");
+            }
+            return ExprValue(
+                "interval", intervalToText(months, days, micros), false);
+        }
         const auto parsedTimestamp =
             parseComparableTimestamp(src, withTimeZone);
         if (!parsedTimestamp)

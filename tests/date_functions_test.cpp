@@ -315,6 +315,18 @@ static void test_make() {
 
 static void test_date_trunc() {
     dbms::ExprEvaluator eval;
+    auto expectDateTruncError = [&](const std::string& field,
+                                    const dbms::ExprValue& source,
+                                    const std::string& sqlstate) {
+        bool rejected = false;
+        try {
+            (void)callFn(eval, "date_trunc", {F(field), source});
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find(
+                           "SQLSTATE " + sqlstate) != std::string::npos;
+        }
+        assert(rejected);
+    };
     auto ts = TS("2026-06-26 14:35:09");
     const auto truncatedYear =
         callFn(eval, "date_trunc", {F("year"), ts});
@@ -373,6 +385,46 @@ static void test_date_trunc() {
     assert(truncatedZonedMillis.value ==
            "2023-12-31 22:30:56.123+00");
     assert(truncatedZonedMillis.typeName == "timestamptz");
+    auto interval = IV("1 year 2 mons 3 days 04:05:06.789123");
+    const auto truncatedInterval =
+        callFn(eval, "date_trunc", {F("hour"), interval});
+    assert(truncatedInterval.value == "1 year 2 mons 3 days 04:00:00");
+    assert(truncatedInterval.typeName == "interval");
+    assert(callFn(eval, "date_trunc",
+                  {F("year"), interval}).value == "1 year");
+    assert(callFn(eval, "date_trunc",
+                  {F("quarter"), interval}).value == "1 year");
+    assert(callFn(eval, "date_trunc",
+                  {F("day"), interval}).value ==
+           "1 year 2 mons 3 days");
+    assert(callFn(eval, "date_trunc",
+                  {F("minute"), interval}).value ==
+           "1 year 2 mons 3 days 04:05:00");
+    assert(callFn(eval, "date_trunc",
+                  {F("second"), interval}).value ==
+           "1 year 2 mons 3 days 04:05:06");
+    assert(callFn(eval, "date_trunc",
+                  {F("milliseconds"), interval}).value ==
+           "1 year 2 mons 3 days 04:05:06.789000");
+    assert(callFn(eval, "date_trunc",
+                  {F("microseconds"), interval}).value ==
+           "1 year 2 mons 3 days 04:05:06.789123");
+    assert(callFn(eval, "date_trunc",
+                  {F("milliseconds"),
+                   IV("-3 days -04:05:06.789123")}).value ==
+           "-3 days -04:05:06.789000");
+    auto longInterval =
+        IV("1234 years 8 mons 3 days 04:05:06.789123");
+    assert(callFn(eval, "date_trunc",
+                  {F("millennium"), longInterval}).value == "1000 years");
+    assert(callFn(eval, "date_trunc",
+                  {F("century"), longInterval}).value == "1200 years");
+    assert(callFn(eval, "date_trunc",
+                  {F("decade"), longInterval}).value == "1230 years");
+    assert(callFn(eval, "date_trunc",
+                  {F("quarter"), IV("-14 mons")}).value == "-1 year");
+    expectDateTruncError("week", interval, "0A000");
+    expectDateTruncError("epoch", interval, "22023");
     assert(callFn(eval, "date_trunc", {F("quarter"), ts}).value == "2026-04-01 00:00:00");
     assert(callFn(eval, "date_trunc",
                   {F("day"), TS("infinity")}).value == "infinity");
@@ -386,15 +438,7 @@ static void test_date_trunc() {
                   {F("day"), TS("2026x06x26 14:35:09")}).isNull);
     assert(callFn(eval, "date_trunc",
                   {F("day"), TS("not-a-timestamp")}).isNull);
-    bool invalidUnitRejected = false;
-    try {
-        (void)callFn(eval, "date_trunc", {F("not_a_unit"), ts});
-    } catch (const std::runtime_error& error) {
-        invalidUnitRejected =
-            std::string(error.what()).find("SQLSTATE 22023") !=
-            std::string::npos;
-    }
-    assert(invalidUnitRejected);
+    expectDateTruncError("not_a_unit", ts, "22023");
     std::cout << "[DATEFN] date_trunc OK" << std::endl;
 }
 
