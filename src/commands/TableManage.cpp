@@ -35747,22 +35747,63 @@ bool StorageEngine::physicalBackup(const std::string& dbname, const std::string&
     if (!databaseExists(dbname)) return false;
     auto src = dbPath(dbname);
     auto dst = std::filesystem::path(backupPath);
+    std::filesystem::path stagedBackup;
+    const auto discardStagedBackup = [&]() {
+        if (stagedBackup.empty()) return;
+        std::error_code cleanupError;
+        std::filesystem::remove_all(stagedBackup, cleanupError);
+        stagedBackup.clear();
+    };
     try {
-        if (!std::filesystem::exists(dst)) {
-            std::filesystem::create_directories(dst);
+        const auto archiveDir = walArchiveDir(dbname);
+        if (restorePathsOverlap(src, dst) ||
+            restorePathsOverlap(archiveDir, dst)) {
+            return false;
         }
+
+        static std::atomic<uint64_t> backupSequence{0};
+        const auto siblingPath = [&](std::string_view purpose) {
+            const auto siblingParent = dst.parent_path().empty()
+                ? std::filesystem::path(".") : dst.parent_path();
+            return siblingParent / std::filesystem::path(
+                "." + dst.filename().string() + "." +
+                std::string(purpose) + "." +
+                std::to_string(::getpid()) + "." +
+                std::to_string(backupSequence.fetch_add(
+                    1, std::memory_order_relaxed)));
+        };
+        std::error_code fileError;
+        const auto parent = dst.parent_path().empty()
+            ? std::filesystem::path(".") : dst.parent_path();
+        std::filesystem::create_directories(parent, fileError);
+        if (fileError) return false;
+        for (size_t attempt = 0; attempt < 1000; ++attempt) {
+            auto candidate = siblingPath("backup_staging");
+            fileError.clear();
+            if (std::filesystem::create_directory(candidate, fileError)) {
+                stagedBackup = std::move(candidate);
+                break;
+            }
+            if (fileError &&
+                !std::filesystem::exists(candidate)) {
+                return false;
+            }
+        }
+        if (stagedBackup.empty()) return false;
+
         for (const auto& entry : std::filesystem::directory_iterator(src)) {
             // Advisory lock and interrupted temporary files are runtime
             // coordination state, not database contents. Never copy them
             // into a backup snapshot.
             const auto filename = entry.path().filename().string();
-            if (filename == ".lockmgr" || filename == ".runtime_stats.lock" ||
+            if (filename == kPhysicalBackupMarker || filename == ".lockmgr" ||
+                filename == ".runtime_stats.lock" ||
                 filename == ".sql_stats.lock" ||
                 filename.rfind(".runtime_stats.tmp.", 0) == 0 ||
                 filename.rfind(".sql_stats.tmp.", 0) == 0) {
                 continue;
             }
-            auto destPath = dst / entry.path().filename();
+            auto destPath = stagedBackup / entry.path().filename();
             if (entry.is_directory()) {
                 std::filesystem::copy(entry.path(), destPath,
                     std::filesystem::copy_options::overwrite_existing |
@@ -35773,9 +35814,8 @@ bool StorageEngine::physicalBackup(const std::string& dbname, const std::string&
             }
         }
         // Also backup WAL archive if exists
-        auto archiveDir = walArchiveDir(dbname);
         if (std::filesystem::exists(archiveDir)) {
-            auto destArchive = dst / "wal_archive";
+            auto destArchive = stagedBackup / "wal_archive";
             std::filesystem::copy(archiveDir, destArchive,
                 std::filesystem::copy_options::overwrite_existing |
                 std::filesystem::copy_options::recursive);
@@ -35784,20 +35824,24 @@ bool StorageEngine::physicalBackup(const std::string& dbname, const std::string&
         // A database directory only contains tablespace markers for external
         // relations. Include the database's subdirectory from every marker so
         // physical backup/transaction snapshots are complete.
-        auto tablespaceBackup = dst / "tablespaces";
+        auto tablespaceBackup = stagedBackup / "tablespaces";
         auto markerSourceDir = src / "pg_tblspc";
         if (std::filesystem::exists(markerSourceDir)) {
             for (const auto& marker : std::filesystem::directory_iterator(markerSourceDir)) {
                 if (!marker.is_regular_file() || marker.path().extension() != ".path") continue;
                 std::ifstream in(marker.path());
                 std::string location;
-                if (!std::getline(in, location) || location.empty()) return false;
+                if (!std::getline(in, location) || location.empty()) {
+                    discardStagedBackup();
+                    return false;
+                }
                 auto relationRoot = std::filesystem::path(location) / dbname;
+                if (restorePathsOverlap(relationRoot, dst)) {
+                    discardStagedBackup();
+                    return false;
+                }
                 auto destination = tablespaceBackup / marker.path().stem();
                 std::filesystem::create_directories(tablespaceBackup);
-                if (std::filesystem::exists(destination)) {
-                    std::filesystem::remove_all(destination);
-                }
                 if (std::filesystem::exists(relationRoot)) {
                     std::filesystem::create_directories(destination);
                     for (const auto& relationEntry :
@@ -35820,12 +35864,65 @@ bool StorageEngine::physicalBackup(const std::string& dbname, const std::string&
                 }
             }
         }
-        const auto marker = dst / kPhysicalBackupMarker;
+        const auto marker = stagedBackup / kPhysicalBackupMarker;
         if (!index_file::writeAtomically(marker, "DBMS_PHYSICAL_BACKUP_V1\n")) {
+            discardStagedBackup();
             return false;
+        }
+
+        // Publish the complete generation only after every source has copied
+        // successfully. Keeping the prior destination under a sibling name
+        // makes a failed final rename reversible and prevents mixed backups.
+        std::filesystem::path previousBackup;
+        fileError.clear();
+        const bool destinationExists = std::filesystem::exists(dst, fileError);
+        if (fileError) {
+            discardStagedBackup();
+            return false;
+        }
+        if (destinationExists) {
+            for (size_t attempt = 0; attempt < 1000; ++attempt) {
+                auto candidate = siblingPath("backup_previous");
+                fileError.clear();
+                if (!std::filesystem::exists(candidate, fileError) &&
+                    !fileError) {
+                    previousBackup = std::move(candidate);
+                    break;
+                }
+            }
+            if (previousBackup.empty()) {
+                discardStagedBackup();
+                return false;
+            }
+            std::filesystem::rename(dst, previousBackup, fileError);
+            if (fileError) {
+                discardStagedBackup();
+                return false;
+            }
+        }
+        fileError.clear();
+        std::filesystem::rename(stagedBackup, dst, fileError);
+        if (fileError) {
+            if (destinationExists) {
+                std::error_code restoreError;
+                std::filesystem::rename(previousBackup, dst, restoreError);
+            }
+            discardStagedBackup();
+            return false;
+        }
+        stagedBackup.clear();
+        if (destinationExists) {
+            fileError.clear();
+            std::filesystem::remove_all(previousBackup, fileError);
+            if (fileError) {
+                std::cerr << "[storage] published backup but could not remove "
+                          << "the previous directory: " << previousBackup
+                          << std::endl;
+            }
         }
         return true;
     } catch (const std::exception& e) {
+        discardStagedBackup();
         std::cerr << "[storage] physical backup failed for " << dbname
                   << ": " << e.what() << std::endl;
         return false;
