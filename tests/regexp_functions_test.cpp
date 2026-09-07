@@ -33,6 +33,7 @@ static dbms::ExprValue callFn(dbms::ExprEvaluator& eval, const std::string& name
 static dbms::ExprValue S(const std::string& v) { return dbms::ExprValue("text", v, false); }
 static dbms::ExprValue I(int64_t v) { return dbms::ExprValue("integer", std::to_string(v), false); }
 static dbms::ExprValue C(const std::string& v) { return dbms::ExprValue("character", v, false); }
+static dbms::ExprValue N() { return dbms::ExprValue("text", "", true); }
 
 static void expectInvalidRegex(dbms::ExprEvaluator& eval,
                                const std::string& function,
@@ -146,6 +147,25 @@ static void test_invalid_positions() {
     std::cout << "[REGEXFN] invalid positions OK" << std::endl;
 }
 
+static void test_optional_nulls() {
+    dbms::ExprEvaluator eval;
+    assert(callFn(eval, "regexp_replace", {S("abc"), S("a"), S("x"), N()})
+               .isNull);
+    assert(callFn(eval, "regexp_match", {S("abc"), S("a"), N()}).isNull);
+    assert(callFn(eval, "regexp_matches", {S("abc"), S("a"), N()}).isNull);
+    assert(callFn(eval, "regexp_split_to_array", {S("abc"), S("a"), N()})
+               .isNull);
+    assert(callFn(eval, "regexp_count", {S("abc"), S("a"), N()}).isNull);
+    assert(callFn(eval, "regexp_count", {S("abc"), S("a"), I(1), N()})
+               .isNull);
+    assert(callFn(eval, "regexp_substr", {S("abc"), S("a"), N()}).isNull);
+    assert(callFn(eval, "regexp_substr", {S("abc"), S("a"), I(1), N()})
+               .isNull);
+    assert(callFn(eval, "regexp_substr",
+                  {S("abc"), S("a"), I(1), I(1), N()}).isNull);
+    std::cout << "[REGEXFN] optional NULLs OK" << std::endl;
+}
+
 int main() {
     test_replace();
     test_match();
@@ -153,6 +173,7 @@ int main() {
     test_count_substr();
     test_invalid_patterns();
     test_invalid_positions();
+    test_optional_nulls();
     std::cout << "[REGEXFN] all passed" << std::endl;
     return 0;
 }

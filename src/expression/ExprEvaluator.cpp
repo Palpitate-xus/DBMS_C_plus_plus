@@ -5794,7 +5794,9 @@ void ExprEvaluator::registerBuiltins() {
     // regexp_matches(text, pattern[, flags]) — PG set-returning form used
     // as a scalar: first match as a text array; capture groups when present.
     functions_["regexp_matches"] = [](const std::vector<ExprValue>& a) {
-        if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
+        if (a.size() < 2 || a[0].isNull || a[1].isNull ||
+            (a.size() >= 3 && a[2].isNull))
+            return ExprValue("text", "", true);
         auto fl = std::regex::ECMAScript;
         if (a.size() >= 3 && !a[2].isNull) {
             for (char c : textArgumentValue(a[2])) {
@@ -6258,7 +6260,8 @@ void ExprEvaluator::registerBuiltins() {
     // ------------------------------------------------------------------------
     // regexp_replace(source, pattern, replacement [, flags]) — 'g' = replace all
     functions_["regexp_replace"] = [](const std::vector<ExprValue>& a) {
-        if (a.size() < 3 || a[0].isNull || a[1].isNull || a[2].isNull)
+        if (a.size() < 3 || a[0].isNull || a[1].isNull || a[2].isNull ||
+            (a.size() >= 4 && a[3].isNull))
             return ExprValue("text", "", true);
         std::string flags = (a.size() >= 4 && !a[3].isNull)
             ? textArgumentValue(a[3]) : "";
@@ -6280,7 +6283,9 @@ void ExprEvaluator::registerBuiltins() {
     // regexp_match(string, pattern [, flags]) — capture groups of first match as
     // a text array; whole match if the pattern has no groups; NULL if no match
     functions_["regexp_match"] = [](const std::vector<ExprValue>& a) {
-        if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("ARRAY", "", true);
+        if (a.size() < 2 || a[0].isNull || a[1].isNull ||
+            (a.size() >= 3 && a[2].isNull))
+            return ExprValue("ARRAY", "", true);
         std::string flags = (a.size() >= 3 && !a[2].isNull)
             ? textArgumentValue(a[2]) : "";
         bool ok;
@@ -6304,7 +6309,9 @@ void ExprEvaluator::registerBuiltins() {
     };
     // regexp_split_to_array(string, pattern [, flags]) -> array of the parts
     functions_["regexp_split_to_array"] = [](const std::vector<ExprValue>& a) {
-        if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("ARRAY", "", true);
+        if (a.size() < 2 || a[0].isNull || a[1].isNull ||
+            (a.size() >= 3 && a[2].isNull))
+            return ExprValue("ARRAY", "", true);
         std::string flags = (a.size() >= 3 && !a[2].isNull)
             ? textArgumentValue(a[2]) : "";
         bool ok;
@@ -6328,7 +6335,10 @@ void ExprEvaluator::registerBuiltins() {
     };
     // regexp_count(string, pattern [, start [, flags]]) -> number of matches
     functions_["regexp_count"] = [](const std::vector<ExprValue>& a) {
-        if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("integer", "", true);
+        if (a.size() < 2 || a[0].isNull || a[1].isNull ||
+            (a.size() >= 3 && a[2].isNull) ||
+            (a.size() >= 4 && a[3].isNull))
+            return ExprValue("integer", "", true);
         std::string flags = (a.size() >= 4 && !a[3].isNull)
             ? textArgumentValue(a[3]) : "";
         bool ok;
@@ -6351,7 +6361,11 @@ void ExprEvaluator::registerBuiltins() {
     };
     // regexp_substr(string, pattern [, start [, N [, flags]]]) -> N-th match substring
     functions_["regexp_substr"] = [](const std::vector<ExprValue>& a) {
-        if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
+        if (a.size() < 2 || a[0].isNull || a[1].isNull ||
+            (a.size() >= 3 && a[2].isNull) ||
+            (a.size() >= 4 && a[3].isNull) ||
+            (a.size() >= 5 && a[4].isNull))
+            return ExprValue("text", "", true);
         std::string flags = (a.size() >= 5 && !a[4].isNull)
             ? textArgumentValue(a[4]) : "";
         bool ok;
