@@ -82,6 +82,30 @@ static void test_build() {
     // Nested: a pre-built JSON value is embedded as-is, not re-quoted.
     auto inner = callFn(eval, "json_build_array", {I(1), I(2)});
     assert(callFn(eval, "json_build_object", {S("arr"), inner}).value == "{\"arr\":[1,2]}");
+
+    const dbms::ExprValue nullKey("text", "", true);
+    struct InvalidObjectCall {
+        const char* function;
+        std::vector<dbms::ExprValue> arguments;
+        const char* sqlstate;
+    };
+    const std::vector<InvalidObjectCall> invalidCalls = {
+        {"json_build_object", {S("a"), I(1), S("b")}, "22023"},
+        {"jsonb_build_object", {S("a"), I(1), S("b")}, "22023"},
+        {"json_build_object", {nullKey, I(1)}, "22004"},
+        {"jsonb_build_object", {nullKey, I(1)}, "22023"},
+    };
+    for (const auto& invalid : invalidCalls) {
+        bool rejected = false;
+        try {
+            (void)callFn(eval, invalid.function, invalid.arguments);
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find(
+                           std::string("SQLSTATE ") + invalid.sqlstate) !=
+                       std::string::npos;
+        }
+        assert(rejected);
+    }
     std::cout << "[JSONFN] build OK" << std::endl;
 }
 

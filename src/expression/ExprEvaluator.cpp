@@ -6269,12 +6269,25 @@ void ExprEvaluator::registerBuiltins() {
     functions_["jsonb_build_array"] = jsonBuildArrayFn;
 
     // json_build_object(k1, v1, ...) -> compact JSON object (keys coerced to text)
-    auto jsonBuildObjectFn = [](const std::vector<ExprValue>& a) {
+    auto jsonBuildObjectFn = [](const std::vector<ExprValue>& a,
+                                bool binary) {
+        if (a.size() % 2 != 0) {
+            throw std::runtime_error(
+                "argument list must have even number of elements "
+                "(SQLSTATE 22023)");
+        }
         std::string out = "{";
         bool first = true;
         for (size_t i = 0; i + 1 < a.size(); i += 2) {
+            if (a[i].isNull) {
+                throw std::runtime_error(
+                    binary
+                        ? "key must not be null (SQLSTATE 22023)"
+                        : "null value not allowed for object key "
+                          "(SQLSTATE 22004)");
+            }
             if (!first) out += ",";
-            out += jsonQuoteStr(a[i].isNull ? "" : a[i].value);
+            out += jsonQuoteStr(a[i].value);
             out += ":";
             out += toJsonValue(a[i + 1]);
             first = false;
@@ -6282,8 +6295,14 @@ void ExprEvaluator::registerBuiltins() {
         out += "}";
         return ExprValue("json", out, false);
     };
-    functions_["json_build_object"] = jsonBuildObjectFn;
-    functions_["jsonb_build_object"] = jsonBuildObjectFn;
+    functions_["json_build_object"] = [jsonBuildObjectFn](
+        const std::vector<ExprValue>& a) {
+        return jsonBuildObjectFn(a, false);
+    };
+    functions_["jsonb_build_object"] = [jsonBuildObjectFn](
+        const std::vector<ExprValue>& a) {
+        return jsonBuildObjectFn(a, true);
+    };
 
     // to_json / to_jsonb -> JSON representation of the argument
     auto toJsonFn = [](const std::vector<ExprValue>& a) {
