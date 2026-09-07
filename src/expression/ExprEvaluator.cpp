@@ -1096,6 +1096,107 @@ ExprValue ExprEvaluator::applyComparison(const std::string& op,
 // Arithmetic
 // ----------------------------------------------------------------------------
 
+static bool isIntegralPowerText(const std::string& text) {
+    if (text.empty()) return false;
+    size_t index = (text.front() == '+' || text.front() == '-') ? 1 : 0;
+    if (index == text.size()) return false;
+    for (; index < text.size(); ++index) {
+        if (text[index] < '0' || text[index] > '9') return false;
+    }
+    return true;
+}
+
+static int numericPowerDisplayScale(long double value) {
+    if (value == 0) return 16;
+    if (!std::isfinite(value)) return 0;
+    const int integerDigits = static_cast<int>(
+        std::floor(std::log10(std::fabs(value)))) + 1;
+    return std::max(0, 17 - integerDigits);
+}
+
+static ExprValue evaluateNumericPowerOperator(const ExprValue& left,
+                                              const ExprValue& right) {
+    const auto base = tryParseNumeric(left.value);
+    const auto exponent = tryParseNumeric(right.value);
+    if (!base || !exponent) return ExprValue("numeric", "", true);
+
+    try {
+        long long integerExponent = 0;
+        if (parseInt64Exact(right.value, integerExponent) &&
+            integerExponent >= -1000 && integerExponent <= 1000) {
+            if (base->sign() == 0 && integerExponent < 0) {
+                throw std::runtime_error(
+                    "zero raised to a negative power is undefined "
+                    "(SQLSTATE 2201F)");
+            }
+
+            uint64_t magnitude = integerExponent < 0
+                ? static_cast<uint64_t>(-(integerExponent + 1)) + 1
+                : static_cast<uint64_t>(integerExponent);
+            Numeric result(1);
+            Numeric factor = *base;
+            while (magnitude != 0) {
+                if ((magnitude & 1U) != 0) result = result * factor;
+                magnitude >>= 1U;
+                if (magnitude != 0) factor = factor * factor;
+            }
+            if (integerExponent < 0) result = Numeric(1) / result;
+            if (!result.isFinite())
+                return ExprValue("numeric", result.toString(), false);
+            const std::string resultText = result.toString();
+            if (isIntegralPowerText(left.value) &&
+                isIntegralPowerText(right.value) &&
+                resultText.find('.') == std::string::npos) {
+                return ExprValue("numeric", resultText, false);
+            }
+            const long double approximate =
+                std::strtold(resultText.c_str(), nullptr);
+            return ExprValue(
+                "numeric",
+                result.withScale(
+                    numericPowerDisplayScale(approximate)).toString(),
+                false);
+        }
+
+        const long double baseValue =
+            std::strtold(left.value.c_str(), nullptr);
+        const long double exponentValue =
+            std::strtold(right.value.c_str(), nullptr);
+        if (baseValue == 0 && exponentValue < 0) {
+            throw std::runtime_error(
+                "zero raised to a negative power is undefined "
+                "(SQLSTATE 2201F)");
+        }
+        if (baseValue < 0 && std::isfinite(exponentValue) &&
+            std::trunc(exponentValue) != exponentValue) {
+            throw std::runtime_error(
+                "a negative number raised to a non-integer power yields "
+                "a complex result (SQLSTATE 2201F)");
+        }
+
+        const long double result = std::pow(baseValue, exponentValue);
+        if (std::isnan(result)) return ExprValue("numeric", "NaN", false);
+        if (std::isinf(result)) {
+            if (std::isfinite(baseValue) && std::isfinite(exponentValue)) {
+                throw std::runtime_error(
+                    "numeric value out of range (SQLSTATE 22003)");
+            }
+            return ExprValue(
+                "numeric", std::signbit(result) ? "-Infinity" : "Infinity",
+                false);
+        }
+
+        std::ostringstream output;
+        output << std::fixed
+               << std::setprecision(numericPowerDisplayScale(result))
+               << result;
+        return ExprValue("numeric", output.str(), false);
+    } catch (const std::invalid_argument&) {
+        throw std::runtime_error(
+            "numeric value out of range (SQLSTATE 22003)");
+    }
+}
+
 ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
                                          const ExprValue& l,
                                          const ExprValue& r) {
@@ -1308,10 +1409,21 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
                tl == "double precision" || tl == "float" || tl == "float8" ||
                tl == "real" || tl == "float4";
     };
-    if (isDecimalTyped(l.typeName) || isDecimalTyped(r.typeName)) {
+    auto isFloatingTyped = [](const std::string& type) {
+        const std::string lowered = toLower(type);
+        return lowered == "double precision" || lowered == "float" ||
+               lowered == "float8" || lowered == "real" ||
+               lowered == "float4";
+    };
+    const bool floatingPower =
+        op == "^" &&
+        (isFloatingTyped(l.typeName) || isFloatingTyped(r.typeName));
+    if ((isDecimalTyped(l.typeName) || isDecimalTyped(r.typeName)) &&
+        !floatingPower) {
         auto nl = tryParseNumeric(l.value);
         auto nr = tryParseNumeric(r.value);
         if (nl && nr) {
+            if (op == "^") return evaluateNumericPowerOperator(l, r);
             Numeric res;
             if (op == "+") res = *nl + *nr;
             else if (op == "-") res = *nl - *nr;
@@ -1403,8 +1515,17 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
             res = std::fmod(a, b);
         }
         else if (op == "^") {
+            if ((a == 0 && b < 0) ||
+                (a < 0 && std::isfinite(b) && std::trunc(b) != b)) {
+                throw std::runtime_error(
+                    "invalid argument for power function (SQLSTATE 2201F)");
+            }
             res = std::pow(a, b);
-            if (!std::isfinite(res)) {
+            if (std::isnan(res) && std::isfinite(a) && std::isfinite(b)) {
+                throw std::runtime_error(
+                    "invalid argument for power function (SQLSTATE 2201F)");
+            }
+            if (std::isinf(res) && std::isfinite(a) && std::isfinite(b)) {
                 throw std::runtime_error(
                     "numeric value out of range (SQLSTATE 22003)");
             }

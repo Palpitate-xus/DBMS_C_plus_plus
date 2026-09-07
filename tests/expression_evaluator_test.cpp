@@ -135,6 +135,55 @@ static void test_arithmetic() {
     exponentResult = eval.eval(exponent.get(), {});
     assert(exponentResult.value == "1e+100");
 
+    auto typedExponent = [&](const std::string& left,
+                             const std::string& leftType,
+                             const std::string& right,
+                             const std::string& rightType) {
+        auto expression = std::make_unique<BinaryOpExpr>();
+        expression->op = "^";
+        auto leftLiteral = makeLit(left);
+        leftLiteral->typeName = leftType;
+        expression->left = std::move(leftLiteral);
+        auto rightLiteral = makeLit(right);
+        rightLiteral->typeName = rightType;
+        expression->right = std::move(rightLiteral);
+        return eval.eval(expression.get(), {});
+    };
+    ExprValue numericExponent =
+        typedExponent("2.0", "numeric", "3", "integer");
+    assert(numericExponent.typeName == "numeric");
+    assert(numericExponent.value == "8.0000000000000000");
+    numericExponent = typedExponent(
+        "12345678901234567890", "numeric", "2", "integer");
+    assert(numericExponent.value ==
+           "152415787532388367501905199875019052100");
+    ExprValue floatExponent = typedExponent(
+        "2", "double precision", "3", "double precision");
+    assert(floatExponent.typeName == "double precision");
+    assert(floatExponent.value == "8");
+
+    for (const std::string type : {"numeric", "double precision"}) {
+        bool invalidPowerRejected = false;
+        try {
+            (void)typedExponent("-2", type, "0.5", type);
+        } catch (const std::runtime_error& error) {
+            invalidPowerRejected =
+                std::string(error.what()).find("SQLSTATE 2201F") !=
+                std::string::npos;
+        }
+        assert(invalidPowerRejected);
+
+        invalidPowerRejected = false;
+        try {
+            (void)typedExponent("0", type, "-1", type);
+        } catch (const std::runtime_error& error) {
+            invalidPowerRejected =
+                std::string(error.what()).find("SQLSTATE 2201F") !=
+                std::string::npos;
+        }
+        assert(invalidPowerRejected);
+    }
+
     auto unaryOverflow = std::make_unique<UnaryOpExpr>();
     unaryOverflow->op = "-";
     auto minimumInteger = makeLit("-9223372036854775808");
