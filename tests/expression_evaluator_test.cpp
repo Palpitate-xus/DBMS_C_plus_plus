@@ -430,6 +430,41 @@ static void test_regex_operators() {
     std::cout << "[EXPR] regex operators OK" << std::endl;
 }
 
+static void test_pattern_escape_arguments() {
+    ExprEvaluator eval;
+    auto makeLit = [](const std::string& s) {
+        auto e = std::make_unique<LiteralExpr>();
+        e->value = s;
+        return e;
+    };
+    const auto makeCall = [&](const std::string& name,
+                              const std::string& escape) {
+        auto expression = std::make_unique<FunctionCallExpr>();
+        expression->funcName = name;
+        expression->args.push_back(makeLit("'abc'"));
+        expression->args.push_back(makeLit("'a%'"));
+        expression->args.push_back(makeLit(escape));
+        return expression;
+    };
+
+    for (const auto& name : {"like escape", "not like escape",
+                             "ilike escape", "not ilike escape",
+                             "similar to escape", "not similar to escape"}) {
+        assert(eval.eval(makeCall(name, "NULL").get(), {}).isNull);
+
+        bool rejected = false;
+        try {
+            (void)eval.eval(makeCall(name, "'xy'").get(), {});
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("SQLSTATE 22025") !=
+                       std::string::npos;
+        }
+        assert(rejected);
+    }
+
+    std::cout << "[EXPR] pattern escape arguments OK" << std::endl;
+}
+
 static void test_cast() {
     ExprEvaluator eval;
     auto makeLit = [](const std::string& s) {
@@ -779,6 +814,7 @@ int main() {
     test_null();
     test_like();
     test_regex_operators();
+    test_pattern_escape_arguments();
     test_cast();
     test_numeric();
     test_case();

@@ -1762,6 +1762,14 @@ static bool similarToMatchEscape(const std::string& text, const std::string& pat
     }
 }
 
+static void validatePatternEscape(const ExprValue& escape) {
+    if (utf8CharCount(escape.value) > 1) {
+        throw std::runtime_error(
+            "invalid escape string: escape string must be empty or one "
+            "character (SQLSTATE 22025)");
+    }
+}
+
 // ----------------------------------------------------------------------------
 // Binary operators
 // ----------------------------------------------------------------------------
@@ -2951,9 +2959,11 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     // likeMatchEscaped handles as exact literals.
     if (name == "like escape" || name == "not like escape" ||
         name == "ilike escape" || name == "not ilike escape") {
-        if (args.size() < 3 || args[0].isNull || args[1].isNull) {
+        if (args.size() < 3 || args[0].isNull || args[1].isNull ||
+            args[2].isNull) {
             return ExprValue("boolean", "", true);
         }
+        validatePatternEscape(args[2]);
         char esc = (!args[2].isNull && !args[2].value.empty()) ? args[2].value[0] : 92;
         std::string pat;
         const std::string& src = args[1].value;
@@ -2972,9 +2982,11 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     }
 
     if (name == "similar to escape" || name == "not similar to escape") {
-        if (args.size() < 3 || args[0].isNull || args[1].isNull) {
+        if (args.size() < 3 || args[0].isNull || args[1].isNull ||
+            args[2].isNull) {
             return ExprValue("boolean", "", true);
         }
+        validatePatternEscape(args[2]);
         char esc = (!args[2].isNull && !args[2].value.empty()) ? args[2].value[0] : 92;
         bool m = similarToMatchEscape(args[0].value, args[1].value, esc);
         if (name[0] == 110) m = !m;  // "not ..."
