@@ -29493,23 +29493,32 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         } catch (...) { return "0"; }
     }
     if (expr.funcName == "split_part" && expr.funcArgs.size() >= 3) {
-        std::string str = getVal(expr.funcArgs[0]);
-        std::string delimiter = getVal(expr.funcArgs[1]);
-        try {
-            int part = std::stoi(getVal(expr.funcArgs[2]));
-            if (part <= 0) return "";
-            size_t pos = 0;
-            int current = 1;
-            while (current < part) {
-                pos = str.find(delimiter, pos);
-                if (pos == std::string::npos) return "";
-                pos += delimiter.size();
-                current++;
-            }
-            size_t end = str.find(delimiter, pos);
-            if (end == std::string::npos) return str.substr(pos);
-            return str.substr(pos, end - pos);
-        } catch (...) { return ""; }
+        std::map<std::string, std::string> rowContext;
+        std::map<std::string, std::string> typeHints;
+        std::set<std::string> nullColumns;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            bool valueIsNull = false;
+            const std::string value = engine && !dbname.empty()
+                ? engine->extractColumnValue(
+                      rowBuffer, tbl, i, dbname, true, &valueIsNull)
+                : StorageEngine::extractColumnValueStatic(
+                      rowBuffer, tbl, i);
+            rowContext[tbl.cols[i].dataName] = value;
+            typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+            if (valueIsNull || (!engine && value.empty()))
+                nullColumns.insert(tbl.cols[i].dataName);
+        }
+        const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
+            "split_part(" + expr.funcArgs[0] + "," +
+                expr.funcArgs[1] + "," + expr.funcArgs[2] + ")",
+            rowContext, nullColumns, typeHints, dbname,
+            expr.sessionUser);
+        if (!evaluated.ok) {
+            throw std::runtime_error(
+                evaluated.error.empty() ? "failed to evaluate split_part"
+                                        : evaluated.error);
+        }
+        return evaluated.isNull ? "NULL" : evaluated.value;
     }
     if (expr.funcName == "uuid_generate") {
         // Generate UUID v4: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
