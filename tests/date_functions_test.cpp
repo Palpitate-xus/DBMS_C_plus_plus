@@ -115,10 +115,11 @@ static void test_epoch() {
 
 static void test_make() {
     dbms::ExprEvaluator eval;
-    auto expectDateError = [&](const std::vector<dbms::ExprValue>& args) {
+    auto expectFieldError = [&](const std::string& function,
+                                const std::vector<dbms::ExprValue>& args) {
         bool rejected = false;
         try {
-            (void)callFn(eval, "make_date", args);
+            (void)callFn(eval, function, args);
         } catch (const std::runtime_error& error) {
             rejected = std::string(error.what()).find("SQLSTATE 22008") !=
                        std::string::npos;
@@ -137,18 +138,39 @@ static void test_make() {
                   {I(2026), I(6), I(26), I(14), I(5),
                    dbms::ExprValue("numeric", "9.125", false)}).value ==
            "2026-06-26 14:05:09.125");
-    expectDateError({I(2026), I(13), I(1)});
-    expectDateError({I(2023), I(2), I(29)});
+    expectFieldError("make_date", {I(2026), I(13), I(1)});
+    expectFieldError("make_date", {I(2023), I(2), I(29)});
     assert(callFn(eval, "make_date", {I(2024), I(2), I(29)}).value ==
            "2024-02-29");
-    expectDateError(
+    expectFieldError(
+        "make_date",
         {I(std::numeric_limits<int64_t>::max()), I(1), I(1)});
-    assert(callFn(eval, "make_time", {I(4294967296LL), I(0), I(0)}).isNull);
+
+    assert(callFn(eval, "make_time", {I(12), I(0), I(60)}).value ==
+           "12:01:00");
+    assert(callFn(eval, "make_time", {I(23), I(59), I(60)}).value ==
+           "24:00:00");
+    assert(callFn(eval, "make_time", {I(24), I(0), I(0)}).value ==
+           "24:00:00");
     assert(callFn(eval, "make_timestamp",
-                  {I(2026), I(2), I(30), I(0), I(0), I(0)}).isNull);
-    assert(callFn(eval, "make_timestamp",
-                  {I(std::numeric_limits<int64_t>::max()), I(1), I(1),
-                   I(0), I(0), I(0)}).isNull);
+                  {I(2024), I(2), I(28), I(23), I(59), I(60)}).value ==
+           "2024-02-29 00:00:00");
+    const auto rolledTimestamp = callFn(
+        eval, "make_timestamp",
+        {I(2023), I(12), I(31), I(24), I(0), I(0)});
+    assert(rolledTimestamp.value == "2024-01-01 00:00:00");
+
+    expectFieldError("make_time", {I(4294967296LL), I(0), I(0)});
+    expectFieldError("make_time", {I(24), I(1), I(0)});
+    expectFieldError(
+        "make_time",
+        {I(23), I(59), dbms::ExprValue("numeric", "60.1", false)});
+    expectFieldError("make_timestamp",
+                     {I(2026), I(2), I(30), I(0), I(0), I(0)});
+    expectFieldError(
+        "make_timestamp",
+        {I(std::numeric_limits<int64_t>::max()), I(1), I(1),
+         I(0), I(0), I(0)});
     std::cout << "[DATEFN] make_* OK" << std::endl;
 }
 

@@ -224,8 +224,10 @@ static bool addIntervalSeconds(long long& target,
 }
 
 static std::string formatTimeFields(long long hours, long long minutes,
-                                    const std::string& secondsText) {
-    if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59)
+                                    const std::string& secondsText,
+                                    int* dayCarry = nullptr) {
+    if (dayCarry) *dayCarry = 0;
+    if (hours < 0 || hours > 24 || minutes < 0 || minutes > 59)
         return "";
 
     long double seconds = 0;
@@ -233,7 +235,7 @@ static std::string formatTimeFields(long long hours, long long minutes,
         size_t consumed = 0;
         seconds = std::stold(secondsText, &consumed);
         if (consumed != secondsText.size() || !std::isfinite(seconds) ||
-            seconds < 0 || seconds >= 60) {
+            seconds < 0 || seconds > 60) {
             return "";
         }
     } catch (...) {
@@ -242,13 +244,29 @@ static std::string formatTimeFields(long long hours, long long minutes,
 
     const long long secondMicros =
         static_cast<long long>(std::round(seconds * 1000000.0L));
-    if (secondMicros < 0 || secondMicros >= 60000000LL) return "";
+    if (secondMicros < 0 || secondMicros > 60000000LL) return "";
 
-    const long long wholeSeconds = secondMicros / 1000000LL;
-    const long long fraction = secondMicros % 1000000LL;
+    constexpr long long microsPerSecond = 1000000LL;
+    constexpr long long microsPerMinute = 60 * microsPerSecond;
+    constexpr long long microsPerHour = 60 * microsPerMinute;
+    constexpr long long microsPerDay = 24 * microsPerHour;
+    long long totalMicros = hours * microsPerHour +
+                            minutes * microsPerMinute + secondMicros;
+    if (totalMicros > microsPerDay) return "";
+    if (dayCarry && totalMicros == microsPerDay) {
+        *dayCarry = 1;
+        totalMicros = 0;
+    }
+
+    const long long outputHours = totalMicros / microsPerHour;
+    const long long outputMinutes =
+        (totalMicros % microsPerHour) / microsPerMinute;
+    const long long wholeSeconds =
+        (totalMicros % microsPerMinute) / microsPerSecond;
+    const long long fraction = totalMicros % microsPerSecond;
     char buffer[32];
-    std::snprintf(buffer, sizeof(buffer), "%02lld:%02lld:%02lld", hours,
-                  minutes, wholeSeconds);
+    std::snprintf(buffer, sizeof(buffer), "%02lld:%02lld:%02lld",
+                  outputHours, outputMinutes, wholeSeconds);
     std::string result = buffer;
     if (fraction != 0) {
         std::string digits = std::to_string(fraction);
@@ -6916,7 +6934,11 @@ void ExprEvaluator::registerBuiltins() {
         const int64_t h = a[0].asInt();
         const int64_t m = a[1].asInt();
         const std::string result = formatTimeFields(h, m, a[2].value);
-        return ExprValue("time", result, result.empty());
+        if (result.empty()) {
+            throw std::runtime_error(
+                "time field value out of range (SQLSTATE 22008)");
+        }
+        return ExprValue("time", result, false);
     };
     // make_timestamp(y, m, d, h, mi, s) -> 'YYYY-MM-DD HH:MM:SS'
     functions_["make_timestamp"] = [](const std::vector<ExprValue>& a) {
@@ -6927,15 +6949,46 @@ void ExprEvaluator::registerBuiltins() {
         const int64_t d = a[2].asInt();
         const int64_t h = a[3].asInt();
         const int64_t mi = a[4].asInt();
-        if (y < 1 || y > 9999 || mo < 1 || mo > 12 || d < 1 || d > 31 ||
-            h < 0 || h > 23 || mi < 0 || mi > 59) {
-            return ExprValue("timestamp", "", true);
+        if (y < 1 || y > 9999 || mo < 1 || mo > 12 || d < 1 || d > 31) {
+            throw std::runtime_error(
+                "timestamp field value out of range (SQLSTATE 22008)");
         }
         Date date(static_cast<int>(y), static_cast<int>(mo),
                   static_cast<int>(d));
-        if (date.year == 0) return ExprValue("timestamp", "", true);
-        const std::string time = formatTimeFields(h, mi, a[5].value);
-        if (time.empty()) return ExprValue("timestamp", "", true);
+        if (date.year == 0) {
+            throw std::runtime_error(
+                "timestamp field value out of range (SQLSTATE 22008)");
+        }
+        int dayCarry = 0;
+        const std::string time =
+            formatTimeFields(h, mi, a[5].value, &dayCarry);
+        if (time.empty()) {
+            throw std::runtime_error(
+                "timestamp field value out of range (SQLSTATE 22008)");
+        }
+        if (dayCarry != 0) {
+            Date advanced(date.year, date.month, date.day + 1);
+            if (advanced.year == 0) {
+                int year = date.year;
+                int month = date.month + 1;
+                if (month > 12) {
+                    month = 1;
+                    ++year;
+                }
+                if (year > 9999) {
+                    throw std::runtime_error(
+                        "timestamp field value out of range "
+                        "(SQLSTATE 22008)");
+                }
+                advanced = Date(year, month, 1);
+            }
+            if (advanced.year == 0) {
+                throw std::runtime_error(
+                    "timestamp field value out of range "
+                    "(SQLSTATE 22008)");
+            }
+            date = advanced;
+        }
         return ExprValue("timestamp", str(date) + " " + time, false);
     };
     // date_trunc(field, source) -> truncate timestamp to the given precision
