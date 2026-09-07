@@ -3740,6 +3740,45 @@ static std::string toJsonValue(const ExprValue& v) {
     if (v.isNull) return "null";
     std::string t = v.typeName;
     for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    const bool arrayType = t == "array" ||
+        (t.size() >= 2 && t.compare(t.size() - 2, 2, "[]") == 0);
+    if (arrayType) {
+        std::string elementType = "text";
+        if (t != "array") {
+            elementType = t;
+            while (elementType.size() >= 2 &&
+                   elementType.compare(elementType.size() - 2, 2, "[]") == 0) {
+                elementType.resize(elementType.size() - 2);
+            }
+        }
+        std::function<std::optional<std::string>(const std::string&)> render =
+            [&](const std::string& array) -> std::optional<std::string> {
+                std::vector<std::string> elements;
+                if (!parseArrayElements(array, elements)) return std::nullopt;
+                std::string result = "[";
+                for (size_t i = 0; i < elements.size(); ++i) {
+                    if (i) result += ",";
+                    std::vector<std::string> nested;
+                    if (parseArrayElements(elements[i], nested)) {
+                        const auto nestedJson = render(elements[i]);
+                        if (!nestedJson) return std::nullopt;
+                        result += *nestedJson;
+                        continue;
+                    }
+                    const std::string token = trimStr(elements[i]);
+                    const bool quoted = token.size() >= 2 &&
+                        token.front() == '"' && token.back() == '"';
+                    const bool elementIsNull =
+                        !quoted && toLower(token) == "null";
+                    result += toJsonValue(ExprValue(
+                        elementType, arrayElemUnquote(token), elementIsNull));
+                }
+                result += "]";
+                return result;
+            };
+        const auto result = render(v.value);
+        return result ? *result : jsonQuoteStr(v.value);
+    }
     if (t == "boolean" || t == "bool") {
         std::string lv = v.value;
         for (char& c : lv) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));

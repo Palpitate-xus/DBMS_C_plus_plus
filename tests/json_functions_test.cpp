@@ -38,6 +38,8 @@ static dbms::ExprValue S(const std::string& v) { return dbms::ExprValue("text", 
 static dbms::ExprValue I(int64_t v) { return dbms::ExprValue("integer", std::to_string(v), false); }
 static dbms::ExprValue B(bool v) { return dbms::ExprValue("boolean", v ? "t" : "f", false); }
 static dbms::ExprValue F(const std::string& v) { return dbms::ExprValue("double precision", v, false); }
+static dbms::ExprValue IA(const std::string& v) { return dbms::ExprValue("integer[]", v, false); }
+static dbms::ExprValue TA(const std::string& v) { return dbms::ExprValue("text[]", v, false); }
 
 static void test_typeof() {
     dbms::ExprEvaluator eval;
@@ -132,6 +134,15 @@ static void test_to_json() {
            "\"-Infinity\"");
     assert(callFn(eval, "json_build_array", {F("Infinity")}).value ==
            "[\"Infinity\"]");
+    assert(callFn(eval, "to_json", {IA("{1,2,NULL}")}).value ==
+           "[1,2,null]");
+    assert(callFn(eval, "to_json", {IA("{{1,2},{3,4}}")}).value ==
+           "[[1,2],[3,4]]");
+    assert(callFn(eval, "to_json",
+                  {TA("{a,\"b,c\",NULL,\"NULL\"}")}).value ==
+           "[\"a\",\"b,c\",null,\"NULL\"]");
+    assert(callFn(eval, "json_build_array", {IA("{1,2}")}).value ==
+           "[[1,2]]");
     std::cout << "[JSONFN] to_json OK" << std::endl;
 }
 
