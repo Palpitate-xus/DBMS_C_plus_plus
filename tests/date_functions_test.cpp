@@ -281,6 +281,19 @@ static void test_date_trunc() {
            "2026-06-26 14:35:09");
     assert(callFn(eval, "date_trunc", {F("microseconds"), ts}).value ==
            "2026-06-26 14:35:09");
+    auto fractionalTs = TS("2024-01-01 12:34:56.123456");
+    assert(callFn(eval, "date_trunc",
+                  {F("minute"), fractionalTs}).value ==
+           "2024-01-01 12:34:00");
+    assert(callFn(eval, "date_trunc",
+                  {F("second"), fractionalTs}).value ==
+           "2024-01-01 12:34:56");
+    assert(callFn(eval, "date_trunc",
+                  {F("milliseconds"), fractionalTs}).value ==
+           "2024-01-01 12:34:56.123");
+    assert(callFn(eval, "date_trunc",
+                  {F("microseconds"), fractionalTs}).value ==
+           "2024-01-01 12:34:56.123456");
     assert(callFn(eval, "date_trunc", {F("quarter"), ts}).value == "2026-04-01 00:00:00");
     assert(callFn(eval, "date_trunc",
                   {F("day"), TS("infinity")}).value == "infinity");

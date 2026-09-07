@@ -8599,13 +8599,21 @@ void ExprEvaluator::registerBuiltins() {
             return ExprValue("timestamp", "", true);
         std::string field = toLower(a[0].value);
         const std::string& src = a[1].value;
-        const int64_t parsedTimestamp = parseTimestampToSeconds(src);
-        if (isInfiniteTimestamp(parsedTimestamp)) {
-            return ExprValue("timestamp",
-                             formatTimestampSeconds(parsedTimestamp), false);
-        }
-        if (parsedTimestamp == 0)
+        const std::string sourceType = toLower(a[1].typeName);
+        const bool withTimeZone = sourceType == "timestamptz" ||
+            sourceType == "timestamp with time zone";
+        const auto parsedTimestamp =
+            parseComparableTimestamp(src, withTimeZone);
+        if (!parsedTimestamp)
             return ExprValue("timestamp", "", true);
+        if (parsedTimestamp->infinity != 0) {
+            return ExprValue("timestamp",
+                             parsedTimestamp->infinity > 0
+                                 ? "infinity" : "-infinity",
+                             false);
+        }
+        int64_t fractionalMicros =
+            parsedTimestamp->micros % 1000000LL;
         auto num = [&](size_t off, size_t len) -> int {
             if (src.size() < off + len) return 0;
             int v = 0;
@@ -8669,12 +8677,24 @@ void ExprEvaluator::registerBuiltins() {
                 "unit \"" + field +
                 "\" not recognized for date_trunc (SQLSTATE 22023)");
         }
+        if (field == "milliseconds") {
+            fractionalMicros = fractionalMicros / 1000 * 1000;
+        } else if (field != "microseconds") {
+            fractionalMicros = 0;
+        }
         char buf[40];
         std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d", y, mo, d, h, mi, se);
         // PG date_trunc over a date input promotes to timestamptz and
         // renders with the zone suffix (+00); timestamp input stays plain.
         std::string res = buf;
-        if (toLower(a[1].typeName) == "date") res += "+00";
+        if (fractionalMicros != 0) {
+            std::string fraction = std::to_string(fractionalMicros);
+            fraction.insert(fraction.begin(), 6 - fraction.size(), '0');
+            while (!fraction.empty() && fraction.back() == '0')
+                fraction.pop_back();
+            res += "." + fraction;
+        }
+        if (sourceType == "date") res += "+00";
         return ExprValue("timestamp", res, false);
     };
     // to_char(value, fmt): format a date/timestamp/time or number as text. The
