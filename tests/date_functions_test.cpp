@@ -317,6 +317,28 @@ static void test_current_family() {
     std::cout << "[DATEFN] current_* family OK" << std::endl;
 }
 
+static void test_overlaps_point_boundaries() {
+    dbms::ExprEvaluator eval;
+
+    // OVERLAPS treats a non-empty period as [start, end).  A zero-length
+    // period at the left edge overlaps it, while one at the right edge does
+    // not.  Keep the result symmetric when the point is the second period.
+    assert(callFn(eval, "overlaps",
+                  {D("2026-01-02"), D("2026-01-02"),
+                   D("2026-01-02"), D("2026-01-03")}).value == "t");
+    assert(callFn(eval, "overlaps",
+                  {D("2026-01-03"), D("2026-01-03"),
+                   D("2026-01-02"), D("2026-01-03")}).value == "f");
+    assert(callFn(eval, "overlaps",
+                  {D("2026-01-02"), D("2026-01-03"),
+                   D("2026-01-03"), D("2026-01-03")}).value == "f");
+    assert(callFn(eval, "overlaps",
+                  {D("2026-01-02"), D("2026-01-02"),
+                   D("2026-01-02"), D("2026-01-02")}).value == "t");
+
+    std::cout << "[DATEFN] overlaps point boundaries OK" << std::endl;
+}
+
 int main() {
     test_extract_date_part();
     test_dow_doy_century();
@@ -325,6 +347,7 @@ int main() {
     test_date_trunc();
     test_template_parsing();
     test_current_family();
+    test_overlaps_point_boundaries();
     std::cout << "[DATEFN] all passed" << std::endl;
     return 0;
 }

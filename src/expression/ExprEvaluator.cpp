@@ -4860,8 +4860,8 @@ void ExprEvaluator::registerBuiltins() {
         bool p2 = a[s2].value == a[e2].value;
         bool m;
         if (p1 && p2) m = a[s1].value == a[s2].value;
-        else if (p1)  m = a[s2].value <= a[s1].value && a[s1].value <= a[e2].value;
-        else if (p2)  m = a[s1].value <= a[s2].value && a[s2].value <= a[e1].value;
+        else if (p1)  m = a[s2].value <= a[s1].value && a[s1].value < a[e2].value;
+        else if (p2)  m = a[s1].value <= a[s2].value && a[s2].value < a[e1].value;
         else          m = a[s1].value < a[e2].value && a[s2].value < a[e1].value;
         return ExprValue("boolean", m ? "t" : "f", false);
     };
