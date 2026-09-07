@@ -28819,18 +28819,35 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             return out;
         } catch (...) { return val; }
     }
-    if ((expr.funcName == "gcd" || expr.funcName == "lcm") && expr.funcArgs.size() >= 2) {
-        std::string a = getVal(expr.funcArgs[0]);
-        std::string b = getVal(expr.funcArgs[1]);
-        // PG: gcd/lcm operate on abs values; lcm = |a*b| / gcd.
-        try {
-            int64_t x = std::llabs(std::stoll(a)), y = std::llabs(std::stoll(b));
-            int64_t g = x, yy = y;
-            while (yy != 0) { int64_t tmp = g % yy; g = yy; yy = tmp; }
-            if (expr.funcName == "gcd") return std::to_string(g);
-            if (g == 0) return "0";
-            return std::to_string((x / g) * y);
-        } catch (...) { return ""; }
+    if ((expr.funcName == "gcd" || expr.funcName == "lcm") &&
+        expr.funcArgs.size() >= 2) {
+        std::map<std::string, std::string> rowContext;
+        std::map<std::string, std::string> typeHints;
+        std::set<std::string> nullColumns;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            bool valueIsNull = false;
+            const std::string value = engine && !dbname.empty()
+                ? engine->extractColumnValue(
+                      rowBuffer, tbl, i, dbname, true, &valueIsNull)
+                : StorageEngine::extractColumnValueStatic(
+                      rowBuffer, tbl, i);
+            rowContext[tbl.cols[i].dataName] = value;
+            typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+            if (valueIsNull || (!engine && value.empty()))
+                nullColumns.insert(tbl.cols[i].dataName);
+        }
+        const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
+            expr.funcName + "(" + expr.funcArgs[0] + "," +
+                expr.funcArgs[1] + ")",
+            rowContext, nullColumns, typeHints, dbname,
+            expr.sessionUser);
+        if (!evaluated.ok) {
+            throw std::runtime_error(
+                evaluated.error.empty()
+                    ? "failed to evaluate gcd/lcm"
+                    : evaluated.error);
+        }
+        return evaluated.isNull ? "NULL" : evaluated.value;
     }
     if (expr.funcName == "width_bucket" && expr.funcArgs.size() >= 4) {
         std::string os = getVal(expr.funcArgs[0]);
