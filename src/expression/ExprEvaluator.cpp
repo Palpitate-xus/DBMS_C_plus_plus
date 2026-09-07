@@ -5421,7 +5421,10 @@ void ExprEvaluator::registerBuiltins() {
         int64_t idx;
         if (n > 0) idx = n - 1;
         else if (n < 0) idx = static_cast<int64_t>(parts.size()) + n;
-        else return ExprValue("text", "", false);
+        else {
+            throw std::runtime_error(
+                "field position must not be zero (SQLSTATE 22023)");
+        }
         if (idx < 0 || idx >= static_cast<int64_t>(parts.size()))
             return ExprValue("text", "", false);
         return ExprValue("text", parts[static_cast<size_t>(idx)], false);

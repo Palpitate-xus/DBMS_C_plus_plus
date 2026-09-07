@@ -116,6 +116,15 @@ static void test_split_strpos() {
     assert(callFn(eval, "split_part", {S("a,b,c"), S(","), I(2)}).value == "b");
     assert(callFn(eval, "split_part", {S("a,b,c"), S(","), I(-1)}).value == "c");
     assert(callFn(eval, "split_part", {S("a,b,c"), S(","), I(9)}).value == "");
+    bool zeroFieldRejected = false;
+    try {
+        (void)callFn(eval, "split_part", {S("a,b,c"), S(","), I(0)});
+    } catch (const std::runtime_error& error) {
+        zeroFieldRejected =
+            std::string(error.what()).find("SQLSTATE 22023") !=
+            std::string::npos;
+    }
+    assert(zeroFieldRejected);
     assert(callFn(eval, "strpos", {S("high"), S("ig")}).value == "2");
     assert(callFn(eval, "strpos", {S("high"), S("zz")}).value == "0");
     std::cout << "[STRFN] split_part/strpos OK" << std::endl;
