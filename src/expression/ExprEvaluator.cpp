@@ -6164,15 +6164,25 @@ void ExprEvaluator::registerBuiltins() {
         std::string nullStr = hasNullStr ? a[2].value : "";
         std::string out;
         bool first = true;
-        for (const auto& e : elems) {
-            std::string low;
-            for (char c : e) low.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-            bool isNull = (low == "null");
-            if (isNull && !hasNullStr) continue;  // omit NULLs when no null_string given
-            if (!first) out += delim;
-            out += isNull ? nullStr : arrayElemUnquote(e);
-            first = false;
-        }
+        std::function<void(const std::vector<std::string>&)> appendElements =
+            [&](const std::vector<std::string>& values) {
+                for (const auto& raw : values) {
+                    std::vector<std::string> nested;
+                    if (parseArrayElements(raw, nested)) {
+                        appendElements(nested);
+                        continue;
+                    }
+                    const std::string token = trimStr(raw);
+                    const bool quoted = token.size() >= 2 &&
+                        token.front() == '"' && token.back() == '"';
+                    const bool isNull = !quoted && toLower(token) == "null";
+                    if (isNull && !hasNullStr) continue;
+                    if (!first) out += delim;
+                    out += isNull ? nullStr : arrayElemUnquote(token);
+                    first = false;
+                }
+            };
+        appendElements(elems);
         return ExprValue("text", out, false);
     };
     // string_to_array(str, delim [, null_string]) — split into an array literal

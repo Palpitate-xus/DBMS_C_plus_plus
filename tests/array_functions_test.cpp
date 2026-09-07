@@ -138,6 +138,11 @@ static void test_join_split() {
     // NULL element omitted by default, included with null_string.
     assert(callFn(eval, "array_to_string", {A("{1,NULL,3}"), S(",")}).value == "1,3");
     assert(callFn(eval, "array_to_string", {A("{1,NULL,3}"), S(","), S("*")}).value == "1,*,3");
+    assert(callFn(eval, "array_to_string",
+                  {A("{{1,2},{3,4}}"), S("|")}).value == "1|2|3|4");
+    assert(callFn(eval, "array_to_string",
+                  {A("{{1,NULL},{3,4}}"), S("|"), S("*")}).value ==
+           "1|*|3|4");
 
     assert(callFn(eval, "string_to_array", {S("a,b,c"), S(",")}).value == "{a,b,c}");
     assert(callFn(eval, "string_to_array", {S("x"), S(",")}).value == "{x}");
