@@ -162,7 +162,8 @@ static void test_interval_ops() {
     assert(e.ok && e.value == "01:00:00");
 
     auto divideByZero = eval("'2 hours'::interval / 0");
-    assert(divideByZero.ok && divideByZero.isNull);
+    assert(!divideByZero.ok &&
+           divideByZero.error.find("SQLSTATE 22012") != std::string::npos);
 
     auto addOverflow = eval(
         "'9223372036854775807 microseconds'::interval + "

@@ -1354,7 +1354,8 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
             }
             if (!iv.ok) return ExprValue("interval", "", true);
             if (op == "/" && k == 0)
-                return ExprValue("interval", "", true);
+                throw std::runtime_error(
+                    "division by zero (SQLSTATE 22012)");
             const long double scale = op == "*"
                 ? static_cast<long double>(k)
                 : 1.0L / static_cast<long double>(k);
