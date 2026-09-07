@@ -28,6 +28,7 @@ static dbms::ExprValue callFn(dbms::ExprEvaluator& eval, const std::string& name
 }
 
 static dbms::ExprValue S(const std::string& v) { return dbms::ExprValue("text", v, false); }
+static dbms::ExprValue C(const std::string& v) { return dbms::ExprValue("character", v, false); }
 
 static void expectInvalidEncoding(dbms::ExprEvaluator& eval,
                                   const std::string& value,
@@ -46,6 +47,8 @@ static void test_md5() {
     dbms::ExprEvaluator eval;
     assert(callFn(eval, "md5", {S("")}).value == "d41d8cd98f00b204e9800998ecf8427e");
     assert(callFn(eval, "md5", {S("abc")}).value == "900150983cd24fb0d6963f7d28e17f72");
+    assert(callFn(eval, "md5", {C("ab  ")}).value ==
+           "187ef4436122d1cc2f40dc2b92f0eba0");
     assert(callFn(eval, "md5", {S("The quick brown fox jumps over the lazy dog")}).value
            == "9e107d9d372bb6826bd81d3542a419d6");
     assert(callFn(eval, "md5", {dbms::ExprValue("text", "", true)}).isNull);
@@ -56,6 +59,8 @@ static void test_hex() {
     dbms::ExprEvaluator eval;
     assert(callFn(eval, "encode", {S("abc"), S("hex")}).value == "616263");
     assert(callFn(eval, "decode", {S("616263"), S("hex")}).value == "abc");
+    assert(callFn(eval, "decode", {C("6162  "), C("hex  ")}).value == "ab");
+    assert(callFn(eval, "encode", {S("ab"), C("hex  ")}).value == "6162");
     // Round-trip with uppercase hex digits and whitespace tolerance on decode.
     assert(callFn(eval, "decode", {S("4D 61 6E"), S("hex")}).value == "Man");
     // Odd-length hex is rejected.

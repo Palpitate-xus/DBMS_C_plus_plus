@@ -29,6 +29,7 @@ static dbms::ExprValue callFn(dbms::ExprEvaluator& eval, const std::string& name
 
 static dbms::ExprValue S(const std::string& v) { return dbms::ExprValue("text", v, false); }
 static dbms::ExprValue I(int64_t v) { return dbms::ExprValue("integer", std::to_string(v), false); }
+static dbms::ExprValue C(const std::string& v) { return dbms::ExprValue("character", v, false); }
 static dbms::ExprValue NULLV() { return dbms::ExprValue("text", "", true); }
 
 static void test_format() {
@@ -45,6 +46,10 @@ static void test_format() {
     assert(callFn(eval, "format", {S("val %L"), NULLV()}).value == "val NULL");
     // %s of NULL renders empty.
     assert(callFn(eval, "format", {S("[%s]"), NULLV()}).value == "[]");
+    assert(callFn(eval, "format", {C("%s  "), S("x")}).value == "x");
+    assert(callFn(eval, "format", {S("[%s]"), C("ab  ")}).value == "[ab  ]");
+    assert(callFn(eval, "format", {S("[%L]"), C("ab  ")}).value ==
+           "['ab  ']");
     std::cout << "[FORMATFN] format OK" << std::endl;
 }
 

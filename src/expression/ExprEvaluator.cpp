@@ -5755,12 +5755,14 @@ void ExprEvaluator::registerBuiltins() {
     // quote_literal — single-quote a value, doubling embedded quotes
     functions_["quote_literal"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
-        return ExprValue("text", sqlQuoteLiteral(a[0].value), false);
+        return ExprValue(
+            "text", sqlQuoteLiteral(textArgumentValue(a[0])), false);
     };
     // quote_ident — double-quote an identifier when it is not a simple lower-case name
     functions_["quote_ident"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
-        return ExprValue("text", sqlQuoteIdent(a[0].value), false);
+        return ExprValue(
+            "text", sqlQuoteIdent(textArgumentValue(a[0])), false);
     };
     // format(fmtstr, args...) — %s (string), %I (identifier), %L (literal), %% (percent)
     // regexp_matches(text, pattern[, flags]) — PG set-returning form used
@@ -5797,7 +5799,7 @@ void ExprEvaluator::registerBuiltins() {
 
     functions_["format"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
-        const std::string& fmt = a[0].value;
+        const std::string fmt = textArgumentValue(a[0]);
         size_t argi = 1;
         std::string out;
         for (size_t i = 0; i < fmt.size(); ++i) {
@@ -5828,12 +5830,12 @@ void ExprEvaluator::registerBuiltins() {
     // md5(text) — 32-char lowercase hex digest
     functions_["md5"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
-        return ExprValue("text", md5Hex(a[0].value), false);
+        return ExprValue("text", md5Hex(textArgumentValue(a[0])), false);
     };
     // encode(data, format) — format is 'hex', 'base64', or 'escape'
     functions_["encode"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
-        std::string fmt = toLower(a[1].value);
+        std::string fmt = toLower(textArgumentValue(a[1]));
         const std::string& data = a[0].value;
         if (fmt == "hex") return ExprValue("text", hexEncode(data), false);
         if (fmt == "base64") return ExprValue("text", base64Encode(data), false);
@@ -5856,8 +5858,8 @@ void ExprEvaluator::registerBuiltins() {
     // decode(text, format) — inverse of encode, returns the raw bytes as text
     functions_["decode"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("bytea", "", true);
-        std::string fmt = toLower(a[1].value);
-        const std::string& text = a[0].value;
+        std::string fmt = toLower(textArgumentValue(a[1]));
+        const std::string text = textArgumentValue(a[0]);
         std::string out;
         if (fmt == "hex") {
             if (!hexDecode(text, out))

@@ -252,6 +252,8 @@ static void test_overlay_quote() {
     assert(callFn(eval, "quote_literal", {S("O'Brien")}).value == "'O''Brien'");
     assert(callFn(eval, "quote_ident", {S("simple")}).value == "simple");
     assert(callFn(eval, "quote_ident", {S("Mixed Case")}).value == "\"Mixed Case\"");
+    assert(callFn(eval, "quote_literal", {C("ab  ")}).value == "'ab'");
+    assert(callFn(eval, "quote_ident", {C("ab  ")}).value == "ab");
     std::cout << "[STRFN] overlay/quote OK" << std::endl;
 }
 
