@@ -30,6 +30,9 @@ static dbms::ExprValue callFn(dbms::ExprEvaluator& eval, const std::string& name
 }
 
 static dbms::ExprValue R(const std::string& v) { return dbms::ExprValue("int4range", v, false); }
+static dbms::ExprValue RT(const std::string& type, const std::string& v) {
+    return dbms::ExprValue(type, v, false);
+}
 static dbms::ExprValue T(const std::string& v) { return dbms::ExprValue("text", v, false); }
 
 static void test_bounds() {
@@ -42,6 +45,35 @@ static void test_bounds() {
     // empty -> NULL bounds.
     assert(callFn(eval, "lower", {R("empty")}).isNull);
     std::cout << "[RANGEFN] bounds OK" << std::endl;
+}
+
+static void test_bound_result_types() {
+    dbms::ExprEvaluator eval;
+    assert(callFn(eval, "lower", {RT("int4range", "[1,10)")}).typeName ==
+           "integer");
+    assert(callFn(eval, "lower", {RT("int8range", "[1,10)")}).typeName ==
+           "bigint");
+    assert(callFn(eval, "lower", {RT("numrange", "[1.5,10.5)")}).typeName ==
+           "numeric");
+    assert(callFn(eval, "lower",
+                  {RT("daterange", "[2020-01-01,2020-01-02)")}).typeName ==
+           "date");
+    assert(callFn(eval, "lower",
+                  {RT("tsrange", "[2020-01-01,2020-01-02)")}).typeName ==
+           "timestamp");
+    assert(callFn(eval, "lower",
+                  {RT("tstzrange", "[2020-01-01+00,2020-01-02+00)")}).typeName ==
+           "timestamptz");
+
+    const auto unbounded = callFn(eval, "lower", {R("(,10)")});
+    assert(unbounded.isNull && unbounded.typeName == "integer");
+    const auto empty = callFn(eval, "upper", {RT("daterange", "empty")});
+    assert(empty.isNull && empty.typeName == "date");
+    const auto typedNull = callFn(
+        eval, "lower", {dbms::ExprValue("int8range", "", true)});
+    assert(typedNull.isNull && typedNull.typeName == "bigint");
+
+    std::cout << "[RANGEFN] bound result types OK" << std::endl;
 }
 
 static void test_lower_upper_string_still_works() {
@@ -75,6 +107,7 @@ static void test_predicates() {
 
 int main() {
     test_bounds();
+    test_bound_result_types();
     test_lower_upper_string_still_works();
     test_predicates();
     std::cout << "[RANGEFN] all passed" << std::endl;

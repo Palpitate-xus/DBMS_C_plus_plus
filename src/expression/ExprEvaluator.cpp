@@ -4253,6 +4253,18 @@ static bool typeIsRange(const std::string& typeName) {
     return t.find("range") != std::string::npos;
 }
 
+static std::string rangeBoundType(const std::string& typeName) {
+    const std::string type = toLower(typeName);
+    if (type == "int4range") return "integer";
+    if (type == "int8range") return "bigint";
+    if (type == "daterange") return "date";
+    if (type == "tsrange") return "timestamp";
+    if (type == "tstzrange") return "timestamptz";
+    // numrange and user-defined ranges historically use numeric bounds in
+    // this evaluator when subtype metadata is unavailable.
+    return "numeric";
+}
+
 // SQL identifier quoting (quote_ident / format %I): only quote when not a simple
 // lower-case identifier; double embedded quotes.
 static std::string sqlQuoteIdent(const std::string& s) {
@@ -5282,23 +5294,31 @@ void ExprEvaluator::registerBuiltins() {
         return ExprValue("integer", std::to_string(length), false);
     };
     functions_["lower"] = [](const std::vector<ExprValue>& a) {
-        if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
+        if (a.empty()) return ExprValue("text", "", true);
         // Overload: lower(anyrange) returns the lower bound (NULL if unbounded).
         if (typeIsRange(a[0].typeName)) {
+            const std::string boundType = rangeBoundType(a[0].typeName);
+            if (a[0].isNull) return ExprValue(boundType, "", true);
             RangeParts r = parseRangeLiteral(a[0].value);
-            if (!r.valid || r.empty || r.loInf) return ExprValue(a[0].typeName, "", true);
-            return ExprValue("numeric", r.lo, false);
+            if (!r.valid || r.empty || r.loInf)
+                return ExprValue(boundType, "", true);
+            return ExprValue(boundType, r.lo, false);
         }
+        if (a[0].isNull) return ExprValue("text", "", true);
         return ExprValue("text", toLower(textArgumentValue(a[0])), false);
     };
     functions_["upper"] = [](const std::vector<ExprValue>& a) {
-        if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
+        if (a.empty()) return ExprValue("text", "", true);
         // Overload: upper(anyrange) returns the upper bound (NULL if unbounded).
         if (typeIsRange(a[0].typeName)) {
+            const std::string boundType = rangeBoundType(a[0].typeName);
+            if (a[0].isNull) return ExprValue(boundType, "", true);
             RangeParts r = parseRangeLiteral(a[0].value);
-            if (!r.valid || r.empty || r.hiInf) return ExprValue(a[0].typeName, "", true);
-            return ExprValue("numeric", r.hi, false);
+            if (!r.valid || r.empty || r.hiInf)
+                return ExprValue(boundType, "", true);
+            return ExprValue(boundType, r.hi, false);
         }
+        if (a[0].isNull) return ExprValue("text", "", true);
         std::string s = textArgumentValue(a[0]);
         for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
         return ExprValue("text", s, false);
