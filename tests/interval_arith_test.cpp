@@ -79,6 +79,22 @@ static void test_add_sub() {
            negativeMultiDayDifference.value ==
                "-1 day -00:00:00.600000");
 
+    auto addFractionToFraction = eval(
+        "'2024-01-01 00:00:00.5'::timestamp + "
+        "'0.25 seconds'::interval");
+    assert(addFractionToFraction.ok &&
+           addFractionToFraction.value == "2024-01-01 00:00:00.750000");
+    auto subtractAcrossMidnight = eval(
+        "'2024-01-01 00:00:00.1'::timestamp - "
+        "'0.2 seconds'::interval");
+    assert(subtractAcrossMidnight.ok &&
+           subtractAcrossMidnight.value == "2023-12-31 23:59:59.900000");
+    auto fractionalMonthRollover = eval(
+        "'2024-01-31 00:00:00.5'::timestamp + '1 month'::interval");
+    assert(fractionalMonthRollover.ok &&
+           fractionalMonthRollover.value ==
+               "2024-02-29 00:00:00.500000");
+
     // days
     auto a = eval("'2024-03-10'::timestamp + '1 day'::interval");
     assert(a.ok && !a.isNull);

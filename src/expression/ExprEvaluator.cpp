@@ -850,16 +850,70 @@ static std::string shiftDateByDays(const std::string& text, long long days,
 // any time introduced by the interval. Months roll the calendar date (day
 // clamped to month length); days and microseconds shift with day carry.
 static std::string timestampShift(const std::string& ts, const IntervalParts& iv, bool add) {
-    int Y = 1970, Mo = 1, D = 1, h = 0, mi = 0;
-    long long s = 0;
-    const int parsed = std::sscanf(ts.c_str(), "%d-%d-%d %d:%d:%lld",
-                                   &Y, &Mo, &D, &h, &mi, &s);
-    const bool hasTime = ts.find(' ') != std::string::npos;
-    Date inputDate(Y, Mo, D);
-    if (parsed < 3 || (hasTime && parsed < 6) || inputDate.year == 0 ||
-        Y < 1 || Y > 9999 || h < 0 || h > 23 || mi < 0 || mi > 59 ||
-        s < 0 || s > 59) {
+    const std::string input = trimStr(ts);
+    const size_t separator = input.find_first_of(" Tt");
+    const bool hasTime = separator != std::string::npos;
+    const std::string dateText = hasTime
+        ? input.substr(0, separator) : input;
+    Date inputDate(dateText.c_str());
+    if (inputDate.year == 0 || inputDate.year < 1 || inputDate.year > 9999)
         return "";
+
+    long long h = 0, mi = 0, s = 0;
+    long long inputFraction = 0;
+    int inputDayCarry = 0;
+    if (hasTime) {
+        std::string timeText = trimStr(input.substr(separator + 1));
+        size_t zonePosition = std::string::npos;
+        for (size_t i = 1; i < timeText.size(); ++i) {
+            if (timeText[i] == '+' || timeText[i] == '-') {
+                zonePosition = i;
+                break;
+            }
+        }
+        if (zonePosition != std::string::npos) timeText.resize(zonePosition);
+        else if (!timeText.empty() &&
+                 (timeText.back() == 'Z' || timeText.back() == 'z')) {
+            timeText.pop_back();
+        }
+
+        const size_t firstColon = timeText.find(':');
+        const size_t secondColon = firstColon == std::string::npos
+            ? std::string::npos : timeText.find(':', firstColon + 1);
+        if (firstColon == std::string::npos ||
+            secondColon == std::string::npos ||
+            timeText.find(':', secondColon + 1) != std::string::npos) {
+            return "";
+        }
+        const auto parseUnsigned = [](const std::string& field,
+                                      long long& value) {
+            if (field.empty()) return false;
+            value = 0;
+            for (const unsigned char c : field) {
+                if (!std::isdigit(c)) return false;
+                value = value * 10 + (c - '0');
+            }
+            return true;
+        };
+        if (!parseUnsigned(timeText.substr(0, firstColon), h) ||
+            !parseUnsigned(timeText.substr(
+                firstColon + 1, secondColon - firstColon - 1), mi)) {
+            return "";
+        }
+        const std::string normalizedTime = formatTimeFields(
+            h, mi, timeText.substr(secondColon + 1), &inputDayCarry);
+        if (normalizedTime.empty() ||
+            std::sscanf(normalizedTime.c_str(), "%lld:%lld:%lld",
+                        &h, &mi, &s) != 3) {
+            return "";
+        }
+        const size_t dot = normalizedTime.find('.');
+        if (dot != std::string::npos) {
+            const std::string digits = normalizedTime.substr(dot + 1);
+            if (!parseInt64Exact(digits, inputFraction)) return "";
+            for (size_t i = digits.size(); i < 6; ++i)
+                inputFraction *= 10;
+        }
     }
 
     const __int128 direction = add ? 1 : -1;
@@ -869,7 +923,8 @@ static std::string timestampShift(const std::string& ts, const IntervalParts& iv
         return value >= minimumDay && value <= maximumDay;
     };
 
-    __int128 totalDays = static_cast<__int128>(civilToDays(Y, Mo, D)) +
+    __int128 totalDays = static_cast<__int128>(civilToDays(
+        inputDate.year, inputDate.month, inputDate.day)) + inputDayCarry +
         direction * iv.days;
     if (!dayInDomain(totalDays)) return "";
     if (iv.months != 0) {
@@ -894,6 +949,7 @@ static std::string timestampShift(const std::string& ts, const IntervalParts& iv
     constexpr long long MICROS_PER_DAY = 86400000000LL;
     __int128 totalMicros =
         (static_cast<__int128>(h) * 3600 + mi * 60 + s) * 1000000 +
+        inputFraction +
         direction * iv.micros;
     __int128 carryDays = totalMicros / MICROS_PER_DAY;
     totalMicros %= MICROS_PER_DAY;
