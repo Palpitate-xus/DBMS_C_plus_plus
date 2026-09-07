@@ -303,6 +303,10 @@ static void test_timestamp_range_casts() {
                     T("[2024-01-01 00:00:00.1,"
                       "2024-01-01 00:00:00.1)"),
                     "tsrange").value == "empty");
+    assert(callCast(eval,
+                    T("[2024-01-01 00:00:00.1234565,"
+                      "2024-01-01 00:00:00.1234564)"),
+                    "tsrange").value == "empty");
 
     bool reversedRejected = false;
     try {

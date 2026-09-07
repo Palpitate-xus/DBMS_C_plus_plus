@@ -7644,7 +7644,19 @@ static bool parseRangeTimestampMicros(const std::string& input,
             micros *= 10;
             ++digits;
         }
-        if (digits > 6 && text[dot + 7] >= '5') ++micros;
+        if (digits > 6) {
+            bool trailingNonzero = false;
+            for (size_t i = dot + 8; i < fractionEnd; ++i) {
+                if (text[i] != '0') {
+                    trailingNonzero = true;
+                    break;
+                }
+            }
+            const bool roundUp = text[dot + 7] > '5' ||
+                (text[dot + 7] == '5' &&
+                 (trailingNonzero || micros % 2 != 0));
+            if (roundUp) ++micros;
+        }
         text.erase(dot, fractionEnd - dot);
     }
 

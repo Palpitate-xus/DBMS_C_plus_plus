@@ -17,6 +17,15 @@ static ExprEvalResult eval(const std::string& exprText) {
 }
 
 static void test_add_sub() {
+    auto evenTieTimestamp = eval(
+        "'2024-01-01 00:00:00.1234565'::timestamp");
+    assert(evenTieTimestamp.ok && !evenTieTimestamp.isNull &&
+           evenTieTimestamp.value == "2024-01-01 00:00:00.123456");
+    auto oddTieTimestamp = eval(
+        "'2024-01-01 00:00:00.1234575'::timestamp");
+    assert(oddTieTimestamp.ok && !oddTieTimestamp.isNull &&
+           oddTieTimestamp.value == "2024-01-01 00:00:00.123458");
+
     auto datePlusDays = eval("'2024-03-10'::date + 7");
     assert(datePlusDays.ok && datePlusDays.value == "2024-03-17");
 

@@ -256,6 +256,12 @@ static void test_timestamp_range_fractional_bounds() {
                                 "2024-01-01 00:00:00.1)"},
                           {"z", "empty"}}) == dbms::DBStatus::OK);
     assert(fetchOne(db, "t", {"=id 3"}, "r") == "empty");
+    assert(g_engine.insert(
+               db, "t", {{"id", "4"},
+                          {"r", "[2024-01-01 00:00:00.1234565,"
+                                "2024-01-01 00:00:00.1234564)"},
+                          {"z", "empty"}}) == dbms::DBStatus::OK);
+    assert(fetchOne(db, "t", {"=id 4"}, "r") == "empty");
 
     cleanup(db);
     std::cout << "[RANGE] timestamp fractional bounds OK" << std::endl;

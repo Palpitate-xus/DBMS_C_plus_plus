@@ -371,7 +371,7 @@ static bool addIntervalSeconds(long long& target,
     }
 
     const long double roundedMicros =
-        std::round(seconds * 1000000.0L);
+        std::nearbyint(seconds * 1000000.0L);
     if (!std::isfinite(roundedMicros) ||
         roundedMicros <= static_cast<long double>(
                              std::numeric_limits<long long>::lowest()) ||
@@ -403,7 +403,8 @@ static std::string formatTimeFields(long long hours, long long minutes,
     }
 
     const long long secondMicros =
-        static_cast<long long>(std::round(seconds * 1000000.0L));
+        static_cast<long long>(
+            std::nearbyint(seconds * 1000000.0L));
     if (secondMicros < 0 || secondMicros > 60000000LL) return "";
 
     constexpr long long microsPerSecond = 1000000LL;
@@ -1430,7 +1431,19 @@ static std::optional<ComparableTimestamp> parseComparableTimestamp(
             micros *= 10;
             ++digits;
         }
-        if (digits > 6 && text[dot + 7] >= '5') ++micros;
+        if (digits > 6) {
+            bool trailingNonzero = false;
+            for (size_t i = dot + 8; i < fractionEnd; ++i) {
+                if (text[i] != '0') {
+                    trailingNonzero = true;
+                    break;
+                }
+            }
+            const bool roundUp = text[dot + 7] > '5' ||
+                (text[dot + 7] == '5' &&
+                 (trailingNonzero || micros % 2 != 0));
+            if (roundUp) ++micros;
+        }
         text.erase(dot, fractionEnd - dot);
     }
 
