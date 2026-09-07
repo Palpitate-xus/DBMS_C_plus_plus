@@ -5387,9 +5387,23 @@ void ExprEvaluator::registerBuiltins() {
         return ExprValue("integer", std::to_string(remainder), false);
     };
     functions_["sign"] = [](const std::vector<ExprValue>& a) {
-        if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
-        double v = a[0].asDouble();
-        return ExprValue("integer", std::to_string(v > 0 ? 1 : (v < 0 ? -1 : 0)), false);
+        if (a.empty() || a[0].isNull)
+            return ExprValue("double precision", "", true);
+        const std::string type = toLower(a[0].typeName);
+        if (type == "numeric" || type == "decimal") {
+            const auto value = tryParseNumeric(a[0].value);
+            if (!value) return ExprValue("numeric", "", true);
+            if (value->isNaN())
+                return ExprValue("numeric", "NaN", false);
+            int result = value->sign();
+            if (value->isInfinite())
+                result = value->toString().front() == '-' ? -1 : 1;
+            return ExprValue("numeric", std::to_string(result), false);
+        }
+        const double value = a[0].asDouble();
+        return ExprValue(
+            "double precision",
+            std::to_string(value > 0 ? 1 : (value < 0 ? -1 : 0)), false);
     };
     functions_["pi"] = [float8Text](const std::vector<ExprValue>&) {
         return ExprValue("double precision", float8Text(std::atan(1.0) * 4.0), false);

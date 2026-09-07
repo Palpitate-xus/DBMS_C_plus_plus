@@ -263,6 +263,20 @@ static void test_hyperbolic() {
 
 static void test_int_math() {
     dbms::ExprEvaluator eval;
+    const auto numericNan = callFn(
+        eval, "sign", {dbms::ExprValue("numeric", "NaN", false)});
+    assert(numericNan.typeName == "numeric" && numericNan.value == "NaN");
+    const auto numericInfinity = callFn(
+        eval, "sign", {dbms::ExprValue("numeric", "Infinity", false)});
+    assert(numericInfinity.typeName == "numeric" &&
+           numericInfinity.value == "1");
+    const auto floatNan = callFn(
+        eval, "sign",
+        {dbms::ExprValue("double precision", "NaN", false)});
+    assert(floatNan.typeName == "double precision" && floatNan.value == "0");
+    const auto integerSign = callFn(eval, "sign", {I(-7)});
+    assert(integerSign.typeName == "double precision" &&
+           integerSign.value == "-1");
     assert(callFn(eval, "gcd", {I(54), I(24)}).value == "6");
     assert(callFn(eval, "gcd", {I(-12), I(18)}).value == "6");
     assert(callFn(eval, "lcm", {I(4), I(6)}).value == "12");
