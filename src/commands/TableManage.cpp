@@ -28902,27 +28902,12 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         return evaluated.value;
     }
     if (expr.funcName == "convert" && expr.funcArgs.size() >= 2) {
-        // CONVERT(val, type) - alias for CAST
-        std::string val = getVal(expr.funcArgs[0]);
-        std::string targetType = getVal(expr.funcArgs[1]);
-        for (char& c : targetType) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        if (targetType == "int" || targetType == "integer") {
-            try { return std::to_string(static_cast<int64_t>(std::stoll(val))); } catch (...) { return "0"; }
-        }
-        if (targetType == "float") {
-            try { return std::to_string(std::stof(val)); } catch (...) { return "0"; }
-        }
-        if (targetType == "double") {
-            try { return std::to_string(std::stod(val)); } catch (...) { return "0"; }
-        }
-        if (targetType == "char" || targetType == "varchar" || targetType == "text") {
-            return val;
-        }
-        if (targetType == "date") {
-            Date d(val.c_str());
-            return (d.year == 0) ? "" : str(d);
-        }
-        return val;
+        StorageEngine::SelectExpr castExpression = expr;
+        castExpression.funcName = "cast";
+        castExpression.funcArgs = {
+            expr.funcArgs[0], getVal(expr.funcArgs[1])};
+        return applyScalarFunc(
+            castExpression, rowBuffer, tbl, engine, dbname);
     }
     if (expr.funcName == "to_number" && !expr.funcArgs.empty()) {
         std::string val = getVal(expr.funcArgs[0]);
