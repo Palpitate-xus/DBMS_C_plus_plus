@@ -185,11 +185,22 @@ bool LargeObjectManager::importFile(int loId, const std::string& filePath) {
 }
 
 bool LargeObjectManager::exportFile(int loId, const std::string& filePath) const {
-    std::string data = read(loId);
-    std::ofstream out(filePath, std::ios::binary);
+    // Open the source first. read() returns an empty string both for a valid
+    // zero-length object and for a missing/unreadable object, so using it here
+    // would report success and truncate the destination on source failure.
+    std::ifstream in(loPath(loId), std::ios::binary);
+    if (!in) return false;
+
+    std::ofstream out(filePath, std::ios::binary | std::ios::trunc);
     if (!out) return false;
-    out.write(data.data(), static_cast<std::streamsize>(data.size()));
-    return true;
+    char buffer[64 * 1024];
+    while (in && out) {
+        in.read(buffer, sizeof(buffer));
+        const std::streamsize bytes = in.gcount();
+        if (bytes > 0) out.write(buffer, bytes);
+    }
+    out.flush();
+    return !in.bad() && out.good();
 }
 
 std::string LargeObjectManager::loPath(int loId) const {
