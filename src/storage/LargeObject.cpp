@@ -152,6 +152,13 @@ size_t LargeObjectManager::size(int loId) const {
 }
 
 bool LargeObjectManager::importFile(int loId, const std::string& filePath) {
+    if (loId <= 0) return false;
+    std::error_code objectError;
+    if (!std::filesystem::is_regular_file(loPath(loId), objectError) ||
+        objectError) {
+        return false;
+    }
+
     std::ifstream in(filePath, std::ios::binary | std::ios::ate);
     if (!in) return false;
     const std::streamoff end = in.tellg();
