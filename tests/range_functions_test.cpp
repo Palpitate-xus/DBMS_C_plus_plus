@@ -280,6 +280,48 @@ static void test_date_range_casts() {
     std::cout << "[RANGEFN] date range casts OK" << std::endl;
 }
 
+static void test_timestamp_range_casts() {
+    dbms::ExprEvaluator eval;
+    const std::string timestampRange =
+        "[\"2024-01-01 00:00:00.1\",\"2024-01-01 00:00:00.9\")";
+    assert(callCast(eval,
+                    T("[2024-01-01 00:00:00.1,"
+                      "2024-01-01 00:00:00.9)"),
+                    "tsrange").value == timestampRange);
+    assert(callCast(eval,
+                    T("[2024-01-01 00:00:00.1,"
+                      "2024-01-01 00:00:00.1)"),
+                    "tsrange").value == "empty");
+
+    bool reversedRejected = false;
+    try {
+        (void)callCast(eval,
+                       T("[2024-01-01 00:00:00.9,"
+                         "2024-01-01 00:00:00.1)"),
+                       "tsrange");
+    } catch (const std::runtime_error& error) {
+        reversedRejected = std::string(error.what()).find("SQLSTATE 22000") !=
+                           std::string::npos;
+    }
+    assert(reversedRejected);
+
+    assert(callCast(
+               eval,
+               T("[2024-01-01 00:00:00.9+01,"
+                 "2023-12-31 23:00:01.1+00)"),
+               "tstzrange").value ==
+           "[\"2023-12-31 23:00:00.9+00\","
+           "\"2023-12-31 23:00:01.1+00\")");
+
+    const auto parsedCast = dbms::ExprHelper::evalString(
+        "'[2024-01-01 00:00:00.1,2024-01-01 00:00:00.9)'::tsrange",
+        {});
+    assert(parsedCast.ok && !parsedCast.isNull &&
+           parsedCast.value == timestampRange);
+
+    std::cout << "[RANGEFN] timestamp range casts OK" << std::endl;
+}
+
 int main() {
     test_bounds();
     test_bound_result_types();
@@ -290,6 +332,7 @@ int main() {
     test_integer_range_casts();
     test_numeric_range_casts();
     test_date_range_casts();
+    test_timestamp_range_casts();
     std::cout << "[RANGEFN] all passed" << std::endl;
     return 0;
 }

@@ -2448,6 +2448,8 @@ static ExprValue castToIntegerRange(const ExprValue& value,
                                     const std::string& targetType);
 static ExprValue castToNumericRange(const ExprValue& value);
 static ExprValue castToDateRange(const ExprValue& value);
+static ExprValue castToTimestampRange(const ExprValue& value,
+                                      const std::string& targetType);
 
 static const char* integerCastTypeName(IntegerCastTarget target) {
     switch (target) {
@@ -3243,6 +3245,8 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
         return castToIntegerRange(v, target);
     if (target == "numrange") return castToNumericRange(v);
     if (target == "daterange") return castToDateRange(v);
+    if (target == "tsrange" || target == "tstzrange")
+        return castToTimestampRange(v, target);
 
     // Default passthrough
     return ExprValue(targetTypeName, v.value, false);
@@ -4522,6 +4526,85 @@ static ExprValue castToDateRange(const ExprValue& value) {
         (range.loInf ? "" : str(lower)) + "," +
         (upperInfinite ? "" : str(upper)) + ")";
     return ExprValue("daterange", result, false);
+}
+
+static ExprValue castToTimestampRange(const ExprValue& value,
+                                      const std::string& targetType) {
+    const RangeParts range = parseRangeLiteral(value.value);
+    if (!range.valid) {
+        throw std::runtime_error(
+            "invalid input syntax for type " + targetType + ": '" +
+            value.value + "' (SQLSTATE 22P02)");
+    }
+    if (range.empty) return ExprValue(targetType, "empty", false);
+
+    const std::string subtype = targetType == "tstzrange"
+        ? "timestamptz" : "timestamp";
+    std::optional<std::string> lower;
+    std::optional<std::string> upper;
+    if (!range.loInf) {
+        lower = castToTimestamp(
+            ExprValue("text", range.lo, false), subtype).value;
+    }
+    if (!range.hiInf) {
+        upper = castToTimestamp(
+            ExprValue("text", range.hi, false), subtype).value;
+    }
+
+    const auto compareBounds = [](std::string left, std::string right) {
+        const std::string leftLower = toLower(left);
+        const std::string rightLower = toLower(right);
+        if (leftLower == rightLower) return 0;
+        if (leftLower == "-infinity" || rightLower == "infinity") return -1;
+        if (leftLower == "infinity" || rightLower == "-infinity") return 1;
+
+        const auto fixedPrecision = [](std::string timestamp) {
+            if (timestamp.size() >= 3 &&
+                timestamp.compare(timestamp.size() - 3, 3, "+00") == 0) {
+                timestamp.resize(timestamp.size() - 3);
+            }
+            const size_t dot = timestamp.find('.', 11);
+            if (dot == std::string::npos) {
+                timestamp += ".000000";
+            } else {
+                const size_t digits = timestamp.size() - dot - 1;
+                if (digits < 6) timestamp.append(6 - digits, '0');
+            }
+            return timestamp;
+        };
+        left = fixedPrecision(std::move(left));
+        right = fixedPrecision(std::move(right));
+        return left < right ? -1 : (left > right ? 1 : 0);
+    };
+
+    if (lower && upper) {
+        const int comparison = compareBounds(*lower, *upper);
+        if (comparison > 0) {
+            throw std::runtime_error(
+                "range lower bound must be less than or equal to range "
+                "upper bound (SQLSTATE 22000)");
+        }
+        if (comparison == 0 && !(range.loInc && range.hiInc))
+            return ExprValue(targetType, "empty", false);
+    }
+
+    const auto emitBound = [](const std::string& bound) {
+        if (bound.find_first_of(" ,\\\"") == std::string::npos)
+            return bound;
+        std::string output = "\"";
+        for (const char c : bound) {
+            if (c == '\\' || c == '"') output.push_back('\\');
+            output.push_back(c);
+        }
+        output.push_back('"');
+        return output;
+    };
+    const std::string result =
+        std::string(range.loInf ? "(" : (range.loInc ? "[" : "(")) +
+        (lower ? emitBound(*lower) : "") + "," +
+        (upper ? emitBound(*upper) : "") +
+        (range.hiInf ? ")" : (range.hiInc ? "]" : ")"));
+    return ExprValue(targetType, result, false);
 }
 
 static bool typeIsRange(const std::string& typeName) {
