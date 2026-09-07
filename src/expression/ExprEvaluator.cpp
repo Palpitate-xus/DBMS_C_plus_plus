@@ -823,19 +823,6 @@ static bool parseTimeZoneOffset(const std::string& name, long long& offsetMinute
     return true;
 }
 
-static std::string formatTimeZoneOffset(long long offsetMinutes) {
-    const long long absoluteMinutes = std::llabs(offsetMinutes);
-    const long long hours = absoluteMinutes / 60;
-    const long long minutes = absoluteMinutes % 60;
-    std::ostringstream out;
-    out << (offsetMinutes < 0 ? '-' : '+') << std::setfill('0')
-        << std::setw(2) << hours;
-    if (minutes != 0) {
-        out << ':' << std::setw(2) << minutes;
-    }
-    return out.str();
-}
-
 // JSON helpers defined later in this file; forward-declared for the JSON
 // operator evaluation (-> / ->> / #> / #>> / @> / <@) higher up.
 static std::string trimStr(const std::string& s);
@@ -995,25 +982,22 @@ ExprValue ExprEvaluator::evalUnaryOp(const UnaryOpExpr* e, const RowContext& ctx
         return ExprValue("boolean", v.asBool() ? "f" : "t", false);
     }
     if (op.rfind("at time zone", 0) == 0) {
-        // AT TIME ZONE <zone>: with a timestamp input, re-interpret the
-        // wall clock in that zone (shift by the zone offset to UTC and keep
-        // the naive rendering); with a timestamptz input, render the UTC
-        // instant at the zone's local wall clock. Offset-only zone model.
+        // AT TIME ZONE <zone>: timestamp input is a wall clock in the named
+        // zone and becomes a UTC timestamptz; timestamptz input is a UTC
+        // instant rendered as a local timestamp. Offset-only zone model.
         std::string zone = trimStr(e->op.substr(std::string("at time zone").size()));
         long long offMin = 0;
         if (v.isNull || !parseTimeZoneOffset(zone, offMin))
             return ExprValue("timestamp", "", true);
-        // Naive zone model: the input wall clock is read as UTC and
-        // rendered at the zone's local wall clock (local = utc + offset).
+        const std::string inputType = toLower(v.typeName);
+        const bool tzIn = inputType == "timestamptz" ||
+                          inputType == "timestamp with time zone";
         IntervalParts shift;
-        // Read the wall clock AS the zone: UTC = local - offset.
-        shift.micros = -offMin * 60000000LL;
+        shift.micros = (tzIn ? offMin : -offMin) * 60000000LL;
         std::string out = timestampShift(v.value, shift, true);
-        // Naive timestamp input becomes timestamptz; render with the UTC offset suffix.
-        bool tzIn = v.typeName.find("tz") != std::string::npos;
         if (!tzIn && !out.empty()) out += "+00";
         if (out.empty()) return ExprValue("timestamp", "", true);
-        return ExprValue("timestamp", out, false);
+        return ExprValue(tzIn ? "timestamp" : "timestamptz", out, false);
     }
     if (toLower(op) == "is null") {
         return ExprValue("boolean", v.isNull ? "t" : "f", false);
@@ -4914,21 +4898,20 @@ void ExprEvaluator::registerBuiltins() {
         long long offMin = 0;
         if (!parseTimeZoneOffset(a[0].value, offMin)) return ExprValue("timestamp", "", true);
         const std::string inTn = toLower(a[1].typeName);
+        const bool timestampIn = inTn == "timestamp" ||
+                                 inTn == "timestamp without time zone";
         IntervalParts shift;
-        shift.micros = offMin * 60000000LL;
+        shift.micros = (timestampIn ? -offMin : offMin) * 60000000LL;
         std::string out = timestampShift(a[1].value, shift, true);
         if (out.empty()) return ExprValue("timestamp", "", true);
         // PG: timezone(zone, timestamptz) -> timestamp (local wall time);
-        //     timezone(zone, timestamp)  -> timestamptz (attach the zone
-        //     offset to the result render).  Untyped literals keep the
-        //     plain render (PG misc behavior).
-        if (inTn.find("timestamptz") != std::string::npos ||
-            inTn != "timestamp") {
+        //     timezone(zone, timestamp)  -> timestamptz (UTC instant).
+        // Untyped literals resolve to the timestamptz overload here, as in
+        // PostgreSQL, and therefore keep the plain local rendering.
+        if (!timestampIn) {
             return ExprValue("timestamp", out, false);
         }
-        // PG renders whole-hour offsets without minutes (+00, +09).
-        return ExprValue(
-            "timestamptz", out + formatTimeZoneOffset(offMin), false);
+        return ExprValue("timestamptz", out + "+00", false);
     };
 
     // ------------------ full-text search ------------------

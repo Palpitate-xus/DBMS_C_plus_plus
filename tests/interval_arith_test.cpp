@@ -286,13 +286,27 @@ static void test_at_time_zone() {
     auto d = eval("timezone('UTC+8', '2024-06-01 00:30:00')");
     assert(d.ok && d.value == "2024-05-31 16:30:00");
 
-    // A negative result offset must render its minute component without a
-    // second minus sign.
+    // timestamp input is interpreted in the requested zone and converted to
+    // the session's UTC timestamptz rendering.
     auto e = eval(
         "timezone('UTC+05:30', "
         "'2024-06-01 10:00:00'::timestamp)");
     assert(e.ok && !e.isNull);
-    assert(e.value == "2024-06-01 04:30:00-05:30");
+    assert(e.value == "2024-06-01 15:30:00+00");
+
+    // timestamptz input follows the inverse overload: render the UTC instant
+    // as a timestamp without time zone in the requested local zone.
+    auto f = eval(
+        "timezone('UTC+05:30', "
+        "'2024-06-01 10:00:00+00'::timestamptz)");
+    assert(f.ok && !f.isNull);
+    assert(f.value == "2024-06-01 04:30:00");
+
+    auto g = eval(
+        "'2024-06-01 10:00:00+00'::timestamptz "
+        "AT TIME ZONE 'UTC+05:30'");
+    assert(g.ok && !g.isNull);
+    assert(g.value == "2024-06-01 04:30:00");
 
     // PostgreSQL timezone displacements are strictly below 16 hours and the
     // minute field and separators must be well formed.
