@@ -30458,8 +30458,12 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                             &valueIsNull);
                         const std::string bare =
                             innerSchema.cols[i].dataName;
+                        // An alias is the inner relation's visible name.
+                        // Binding its physical name as well would overwrite
+                        // the outer relation in a correlated self-subquery.
                         const std::string qualified =
-                            subTname + "." + bare;
+                            (subAlias.empty() ? subTname : subAlias) +
+                            "." + bare;
                         rowContext[bare] = value;
                         rowContext[qualified] = value;
                         typeHints[bare] = innerSchema.cols[i].dataType;
@@ -30469,16 +30473,6 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                         if (valueIsNull) {
                             nullColumns.insert(bare);
                             nullColumns.insert(qualified);
-                        }
-                        if (!subAlias.empty()) {
-                            const std::string aliased =
-                                subAlias + "." + bare;
-                            rowContext[aliased] = value;
-                            typeHints[aliased] =
-                                innerSchema.cols[i].dataType;
-                            nullColumns.erase(aliased);
-                            if (valueIsNull)
-                                nullColumns.insert(aliased);
                         }
                     }
 
