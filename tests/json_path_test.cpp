@@ -43,6 +43,8 @@ static void test_object_path() {
     // _text unquotes strings.
     assert(callFn(eval, "json_extract_path_text", {J(doc), K("a"), K("c")}).value == "hi");
     assert(callFn(eval, "json_extract_path_text", {J(doc), K("a"), K("b")}).value == "42");
+    assert(callFn(eval, "json_extract_path",
+                  {J("{\"a\":1,\"a\":2}"), K("a")}).value == "2");
     std::cout << "[JSONPATH] object path OK" << std::endl;
 }
 

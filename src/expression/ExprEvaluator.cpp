@@ -3725,6 +3725,7 @@ static bool jsonStep(const std::string& cur, const std::string& key, std::string
     if (t.front() == '{') {
         std::vector<std::string> members;
         if (!jsonTopLevelSplit(t, '{', '}', members)) return false;
+        bool found = false;
         for (const auto& m : members) {
             // Split "key": value at the first top-level colon (honoring quotes).
             bool inQ = false;
@@ -3742,9 +3743,12 @@ static bool jsonStep(const std::string& cur, const std::string& key, std::string
                 !jsonUnquoteString(k, ku)) {
                 continue;
             }
-            if (ku == key) { out = trimStr(m.substr(colon + 1)); return true; }
+            if (ku == key) {
+                out = trimStr(m.substr(colon + 1));
+                found = true;
+            }
         }
-        return false;
+        return found;
     }
     if (t.front() == '[') {
         std::vector<std::string> elems;

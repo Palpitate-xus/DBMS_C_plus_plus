@@ -49,6 +49,9 @@ static void test_arrow() {
     auto escaped = eval("'{\"v\":\"line\\nbreak\"}' ->> 'v'");
     assert(escaped.ok && escaped.value == "line\nbreak");
 
+    auto duplicate = eval("'{\"a\":1,\"a\":2}' ->> 'a'");
+    assert(duplicate.ok && duplicate.value == "2");
+
     // missing key -> SQL NULL for both forms
     auto m1 = eval(kDoc + " -> 'nope'");
     assert(m1.ok && m1.isNull);
