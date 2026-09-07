@@ -31,6 +31,7 @@ static dbms::ExprValue callFn(dbms::ExprEvaluator& eval, const std::string& name
 }
 
 static dbms::ExprValue J(const std::string& v) { return dbms::ExprValue("json", v, false); }
+static dbms::ExprValue JB(const std::string& v) { return dbms::ExprValue("jsonb", v, false); }
 static dbms::ExprValue K(const std::string& v) { return dbms::ExprValue("text", v, false); }
 
 static void test_object_path() {
@@ -54,7 +55,9 @@ static void test_array_index() {
     assert(callFn(eval, "json_extract_path", {J(doc), K("d"), K("1")}).value == "20");
     assert(callFn(eval, "json_extract_path_text", {J(doc), K("d"), K("2"), K("e")}).value == "x");
     // jsonb variants share the implementation.
-    assert(callFn(eval, "jsonb_extract_path", {J(doc), K("d"), K("0")}).value == "10");
+    const auto jsonbValue = callFn(
+        eval, "jsonb_extract_path", {JB(doc), K("d"), K("0")});
+    assert(jsonbValue.value == "10" && jsonbValue.typeName == "jsonb");
     // Negative JSON indexes count from the end.
     assert(callFn(eval, "json_extract_path",
                   {J(doc), K("d"), K("-1")}).value == "{\"e\":\"x\"}");

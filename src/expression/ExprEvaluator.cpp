@@ -6439,17 +6439,24 @@ void ExprEvaluator::registerBuiltins() {
     functions_["jsonb_array_length"] = jsonArrayLenFn;
 
     // json_build_array(VARIADIC) -> compact JSON array
-    auto jsonBuildArrayFn = [](const std::vector<ExprValue>& a) {
+    auto jsonBuildArrayFn = [](const std::vector<ExprValue>& a,
+                               const std::string& resultType) {
         std::string out = "[";
         for (size_t i = 0; i < a.size(); ++i) {
             if (i) out += ",";
             out += toJsonValue(a[i]);
         }
         out += "]";
-        return ExprValue("json", out, false);
+        return ExprValue(resultType, out, false);
     };
-    functions_["json_build_array"] = jsonBuildArrayFn;
-    functions_["jsonb_build_array"] = jsonBuildArrayFn;
+    functions_["json_build_array"] = [jsonBuildArrayFn](
+        const std::vector<ExprValue>& a) {
+        return jsonBuildArrayFn(a, "json");
+    };
+    functions_["jsonb_build_array"] = [jsonBuildArrayFn](
+        const std::vector<ExprValue>& a) {
+        return jsonBuildArrayFn(a, "jsonb");
+    };
 
     // json_build_object(k1, v1, ...) -> compact JSON object (keys coerced to text)
     auto jsonBuildObjectFn = [](const std::vector<ExprValue>& a,
@@ -6476,7 +6483,7 @@ void ExprEvaluator::registerBuiltins() {
             first = false;
         }
         out += "}";
-        return ExprValue("json", out, false);
+        return ExprValue(binary ? "jsonb" : "json", out, false);
     };
     functions_["json_build_object"] = [jsonBuildObjectFn](
         const std::vector<ExprValue>& a) {
@@ -6488,28 +6495,41 @@ void ExprEvaluator::registerBuiltins() {
     };
 
     // to_json / to_jsonb -> JSON representation of the argument
-    auto toJsonFn = [](const std::vector<ExprValue>& a) {
-        if (a.empty()) return ExprValue("json", "null", false);
-        return ExprValue("json", toJsonValue(a[0]), false);
+    auto toJsonFn = [](const std::vector<ExprValue>& a,
+                       const std::string& resultType) {
+        if (a.empty()) return ExprValue(resultType, "null", false);
+        return ExprValue(resultType, toJsonValue(a[0]), false);
     };
-    functions_["to_json"] = toJsonFn;
-    functions_["to_jsonb"] = toJsonFn;
+    functions_["to_json"] = [toJsonFn](const std::vector<ExprValue>& a) {
+        return toJsonFn(a, "json");
+    };
+    functions_["to_jsonb"] = [toJsonFn](const std::vector<ExprValue>& a) {
+        return toJsonFn(a, "jsonb");
+    };
 
     // json_extract_path(json, key, ...) -> the JSON sub-value at the key/index
     // path, or NULL if any step does not resolve.
-    auto jsonExtractFn = [](const std::vector<ExprValue>& a) {
-        if (a.empty() || a[0].isNull) return ExprValue("json", "", true);
+    auto jsonExtractFn = [](const std::vector<ExprValue>& a,
+                            const std::string& resultType) {
+        if (a.empty() || a[0].isNull) return ExprValue(resultType, "", true);
         std::string cur = a[0].value;
         for (size_t i = 1; i < a.size(); ++i) {
-            if (a[i].isNull) return ExprValue("json", "", true);
+            if (a[i].isNull) return ExprValue(resultType, "", true);
             std::string next;
-            if (!jsonStep(cur, a[i].value, next)) return ExprValue("json", "", true);
+            if (!jsonStep(cur, a[i].value, next))
+                return ExprValue(resultType, "", true);
             cur = next;
         }
-        return ExprValue("json", cur, false);
+        return ExprValue(resultType, cur, false);
     };
-    functions_["json_extract_path"] = jsonExtractFn;
-    functions_["jsonb_extract_path"] = jsonExtractFn;
+    functions_["json_extract_path"] = [jsonExtractFn](
+        const std::vector<ExprValue>& a) {
+        return jsonExtractFn(a, "json");
+    };
+    functions_["jsonb_extract_path"] = [jsonExtractFn](
+        const std::vector<ExprValue>& a) {
+        return jsonExtractFn(a, "jsonb");
+    };
 
     // json_extract_path_text(json, key, ...) -> the resolved value as text
     // (JSON strings are unquoted; JSON null becomes SQL NULL).
@@ -6537,7 +6557,11 @@ void ExprEvaluator::registerBuiltins() {
 
     // Operator forms: json -> key / json -> idx (rewritten from the
     // arrow syntax in expr_helper) share the path machinery.
-    functions_["json_get"] = jsonExtractFn;
+    functions_["json_get"] = [jsonExtractFn](
+        const std::vector<ExprValue>& a) {
+        const bool binary = !a.empty() && toLower(a[0].typeName) == "jsonb";
+        return jsonExtractFn(a, binary ? "jsonb" : "json");
+    };
     functions_["json_get_text"] = jsonExtractTextFn;
 
     // ------------------------------------------------------------------------

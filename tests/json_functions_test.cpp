@@ -79,7 +79,10 @@ static void test_build() {
     dbms::ExprEvaluator eval;
     assert(callFn(eval, "json_build_array", {I(1), S("a"), B(true)}).value == "[1,\"a\",true]");
     assert(callFn(eval, "json_build_array", {}).value == "[]");
+    assert(callFn(eval, "jsonb_build_array", {I(1)}).typeName == "jsonb");
     assert(callFn(eval, "json_build_object", {S("k"), I(5)}).value == "{\"k\":5}");
+    assert(callFn(eval, "jsonb_build_object",
+                  {S("k"), I(5)}).typeName == "jsonb");
     assert(callFn(eval, "json_build_object", {S("a"), S("x"), S("b"), I(2)}).value
            == "{\"a\":\"x\",\"b\":2}");
     // Nested: a pre-built JSON value is embedded as-is, not re-quoted.
@@ -116,6 +119,7 @@ static void test_to_json() {
     dbms::ExprEvaluator eval;
     assert(callFn(eval, "to_json", {S("hi")}).value == "\"hi\"");
     assert(callFn(eval, "to_json", {I(7)}).value == "7");
+    assert(callFn(eval, "to_jsonb", {I(7)}).typeName == "jsonb");
     assert(callFn(eval, "to_json", {B(false)}).value == "false");
     assert(callFn(eval, "to_json", {dbms::ExprValue("text", "", true)}).value == "null");
     // Embedded quotes are escaped.
