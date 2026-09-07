@@ -28643,17 +28643,33 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         } catch (...) { return val; }
     }
     if (expr.funcName == "translate" && expr.funcArgs.size() >= 3) {
-        // PG: map each char of from -> to; extra from chars delete.
-        std::string s = getVal(expr.funcArgs[0]);
-        std::string from = getVal(expr.funcArgs[1]);
-        std::string to = getVal(expr.funcArgs[2]);
-        std::string out;
-        for (char c : s) {
-            size_t idx = from.find(c);
-            if (idx == std::string::npos) out.push_back(c);
-            else if (idx < to.size()) out.push_back(to[idx]);
+        std::map<std::string, std::string> rowContext;
+        std::map<std::string, std::string> typeHints;
+        std::set<std::string> nullColumns;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            bool valueIsNull = false;
+            const std::string value = engine && !dbname.empty()
+                ? engine->extractColumnValue(
+                      rowBuffer, tbl, i, dbname, true, &valueIsNull)
+                : StorageEngine::extractColumnValueStatic(
+                      rowBuffer, tbl, i);
+            rowContext[tbl.cols[i].dataName] = value;
+            typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+            if (valueIsNull || (!engine && value.empty()))
+                nullColumns.insert(tbl.cols[i].dataName);
         }
-        return out;
+        const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
+            "translate(" + expr.funcArgs[0] + "," +
+                expr.funcArgs[1] + "," + expr.funcArgs[2] + ")",
+            rowContext, nullColumns, typeHints, dbname,
+            expr.sessionUser);
+        if (!evaluated.ok) {
+            throw std::runtime_error(
+                evaluated.error.empty()
+                    ? "failed to evaluate translate"
+                    : evaluated.error);
+        }
+        return evaluated.isNull ? "NULL" : evaluated.value;
     }
     if (expr.funcName == "strpos" && expr.funcArgs.size() >= 2) {
         // PG: strpos(s, sub) = 1-based position or 0.
