@@ -3427,17 +3427,17 @@ static ExprValue evaluateTextPad(const std::vector<ExprValue>& args,
     if (requestedLength <= 0) return ExprValue("text", "", false);
 
     const size_t targetLength = static_cast<size_t>(requestedLength);
-    const size_t inputLength = utf8CharCount(args[0].value);
+    const std::string input = textArgumentValue(args[0]);
+    const size_t inputLength = utf8CharCount(input);
     if (inputLength >= targetLength) {
         return ExprValue(
-            "text",
-            args[0].value.substr(
-                0, utf8ByteAt(args[0].value, targetLength)),
+            "text", input.substr(0, utf8ByteAt(input, targetLength)),
             false);
     }
 
-    const std::string fill = args.size() >= 3 ? args[2].value : " ";
-    if (fill.empty()) return ExprValue("text", args[0].value, false);
+    const std::string fill = args.size() >= 3
+        ? textArgumentValue(args[2]) : " ";
+    if (fill.empty()) return ExprValue("text", input, false);
     std::vector<std::string> fillCharacters;
     const size_t fillLength = utf8CharCount(fill);
     fillCharacters.reserve(fillLength);
@@ -3447,15 +3447,14 @@ static ExprValue evaluateTextPad(const std::vector<ExprValue>& args,
         fillCharacters.push_back(fill.substr(begin, end - begin));
     }
     if (fillCharacters.empty())
-        return ExprValue("text", args[0].value, false);
+        return ExprValue("text", input, false);
 
     std::string padding;
     const size_t needed = targetLength - inputLength;
     for (size_t i = 0; i < needed; ++i)
         padding += fillCharacters[i % fillCharacters.size()];
     return ExprValue(
-        "text", padLeft ? padding + args[0].value
-                         : args[0].value + padding,
+        "text", padLeft ? padding + input : input + padding,
         false);
 }
 
@@ -5340,9 +5339,15 @@ void ExprEvaluator::registerBuiltins() {
             return ExprValue("text", "", true);
         }
         std::string s, chars = " \t\n\r\f\v";
-        if (idx == 1 && a.size() > 2) { chars = a[1].value; s = a[2].value; }
-        else if (idx == 0 && a.size() > 1) { s = a[0].value; chars = a[1].value; }
-        else s = a[idx].value;
+        if (idx == 1 && a.size() > 2) {
+            chars = textArgumentValue(a[1]);
+            s = textArgumentValue(a[2]);
+        } else if (idx == 0 && a.size() > 1) {
+            s = textArgumentValue(a[0]);
+            chars = textArgumentValue(a[1]);
+        } else {
+            s = textArgumentValue(a[idx]);
+        }
         if (dir == "leading") {
             return ExprValue(
                 "text", trimUtf8Characters(s, chars, true, false), false);
@@ -5359,8 +5364,9 @@ void ExprEvaluator::registerBuiltins() {
             (a.size() >= 2 && a[1].isNull)) {
             return ExprValue("text", "", true);
         }
-        const std::string& s = a[0].value;
-        std::string chars = (a.size() >= 2 && !a[1].isNull) ? a[1].value : " \t\n\r\f\v";
+        const std::string s = textArgumentValue(a[0]);
+        std::string chars = (a.size() >= 2 && !a[1].isNull)
+            ? textArgumentValue(a[1]) : " \t\n\r\f\v";
         return ExprValue(
             "text", trimUtf8Characters(s, chars, true, false), false);
     };
@@ -5369,8 +5375,9 @@ void ExprEvaluator::registerBuiltins() {
             (a.size() >= 2 && a[1].isNull)) {
             return ExprValue("text", "", true);
         }
-        const std::string& s = a[0].value;
-        std::string chars = (a.size() >= 2 && !a[1].isNull) ? a[1].value : " \t\n\r\f\v";
+        const std::string s = textArgumentValue(a[0]);
+        std::string chars = (a.size() >= 2 && !a[1].isNull)
+            ? textArgumentValue(a[1]) : " \t\n\r\f\v";
         return ExprValue(
             "text", trimUtf8Characters(s, chars, false, true), false);
     };
@@ -5520,8 +5527,9 @@ void ExprEvaluator::registerBuiltins() {
             (a.size() >= 2 && a[1].isNull)) {
             return ExprValue("text", "", true);
         }
-        const std::string& s = a[0].value;
-        std::string chars = (a.size() >= 2 && !a[1].isNull) ? a[1].value : " \t\n\r\f\v";
+        const std::string s = textArgumentValue(a[0]);
+        std::string chars = (a.size() >= 2 && !a[1].isNull)
+            ? textArgumentValue(a[1]) : " \t\n\r\f\v";
         return ExprValue(
             "text", trimUtf8Characters(s, chars, true, true), false);
     };

@@ -97,6 +97,12 @@ static void test_pad() {
            "é界a");
     assert(callFn(eval, "lpad", {S("éx"), I(1), S("z")}).value ==
            "é");
+    assert(callFn(eval, "lpad", {C("ab  "), I(4), S("x")}).value ==
+           "xxab");
+    assert(callFn(eval, "rpad", {C("ab  "), I(4), S("x")}).value ==
+           "abxx");
+    assert(callFn(eval, "lpad", {C("ab  "), I(5), C("x  ")}).value ==
+           "xxxab");
     const dbms::ExprValue nullFill("text", "", true);
     assert(callFn(eval, "lpad", {S("hi"), I(5), nullFill}).isNull);
     std::cout << "[STRFN] lpad/rpad OK" << std::endl;
@@ -113,6 +119,11 @@ static void test_trim_chars() {
            "hello");
     assert(callFn(eval, "ltrim", {S("丰x"), S("中估")}).value ==
            "丰x");
+    assert(callFn(eval, "rtrim", {C("abxx  "), S("x")}).value == "ab");
+    assert(callFn(eval, "btrim", {C("xxabxx  "), S("x")}).value == "ab");
+    assert(callFn(eval, "trim", {C("abxx  "), S("x")}).value == "ab");
+    assert(callFn(eval, "trim", {S("trailing"), S("x"), C("abxx  ")})
+               .value == "ab");
     // Default whitespace behavior still works with one arg.
     assert(callFn(eval, "trim", {S("  hi  ")}).value == "hi");
     std::cout << "[STRFN] trim with chars OK" << std::endl;
