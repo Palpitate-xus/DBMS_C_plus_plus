@@ -3126,11 +3126,21 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     }
     if (name == "between" || name == "not between") {
         if (args.size() != 3) return ExprValue("boolean", "f", false);
-        ExprValue v = args[0], lo = args[1], hi = args[2];
-        bool r = !v.isNull && !lo.isNull && !hi.isNull &&
-                 compareValues(v, lo) >= 0 && compareValues(v, hi) <= 0;
-        if (name == "not between") r = !r;
-        return ExprValue("boolean", r ? "t" : "f", false);
+        const ExprValue lower = applyComparison(">=", args[0], args[1]);
+        const ExprValue upper = applyComparison("<=", args[0], args[2]);
+        ExprValue result;
+        if ((!lower.isNull && !lower.asBool()) ||
+            (!upper.isNull && !upper.asBool())) {
+            result = ExprValue("boolean", "f", false);
+        } else if (lower.isNull || upper.isNull) {
+            result = ExprValue("boolean", "", true);
+        } else {
+            result = ExprValue("boolean", "t", false);
+        }
+        if (name == "not between" && !result.isNull) {
+            result.value = result.asBool() ? "f" : "t";
+        }
+        return result;
     }
 
     // PG 42883: function <name>(<argtypes>) does not exist.

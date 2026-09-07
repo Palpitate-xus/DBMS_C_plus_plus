@@ -525,6 +525,40 @@ static void test_like_utf8_wildcards() {
     std::cout << "[EXPR] LIKE UTF-8 wildcards OK" << std::endl;
 }
 
+static void test_between_three_valued_logic() {
+    ExprEvaluator eval;
+    auto makeLit = [](const std::string& s) {
+        auto e = std::make_unique<LiteralExpr>();
+        e->value = s;
+        return e;
+    };
+    const auto evaluate = [&](const std::string& name,
+                              const std::string& value,
+                              const std::string& lower,
+                              const std::string& upper) {
+        auto expression = std::make_unique<FunctionCallExpr>();
+        expression->funcName = name;
+        expression->args.push_back(makeLit(value));
+        expression->args.push_back(makeLit(lower));
+        expression->args.push_back(makeLit(upper));
+        return eval.eval(expression.get(), {});
+    };
+
+    assert(evaluate("between", "NULL", "1", "2").isNull);
+    assert(evaluate("not between", "NULL", "1", "2").isNull);
+
+    const ExprValue falseAndNull = evaluate("between", "0", "1", "NULL");
+    assert(!falseAndNull.isNull && !falseAndNull.asBool());
+    const ExprValue notFalseAndNull =
+        evaluate("not between", "0", "1", "NULL");
+    assert(!notFalseAndNull.isNull && notFalseAndNull.asBool());
+
+    assert(evaluate("between", "1", "0", "NULL").isNull);
+    assert(evaluate("not between", "1", "0", "NULL").isNull);
+
+    std::cout << "[EXPR] BETWEEN three-valued logic OK" << std::endl;
+}
+
 static void test_cast() {
     ExprEvaluator eval;
     auto makeLit = [](const std::string& s) {
@@ -877,6 +911,7 @@ int main() {
     test_pattern_escape_arguments();
     test_like_escape_semantics();
     test_like_utf8_wildcards();
+    test_between_three_valued_logic();
     test_cast();
     test_numeric();
     test_case();
