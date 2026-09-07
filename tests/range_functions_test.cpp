@@ -251,6 +251,35 @@ static void test_numeric_range_casts() {
     std::cout << "[RANGEFN] numeric range casts OK" << std::endl;
 }
 
+static void test_date_range_casts() {
+    dbms::ExprEvaluator eval;
+    assert(callCast(eval, T("[2021-06-01,2021-06-02]"),
+                    "daterange").value ==
+           "[2021-06-01,2021-06-03)");
+    assert(callCast(eval, T("(2021-06-01,2021-06-03)"),
+                    "daterange").value ==
+           "[2021-06-02,2021-06-03)");
+    assert(callCast(eval, T("[2021-06-01,2021-06-01)"),
+                    "daterange").value == "empty");
+
+    bool reversedRejected = false;
+    try {
+        (void)callCast(eval, T("[2021-06-02,2021-06-01)"),
+                       "daterange");
+    } catch (const std::runtime_error& error) {
+        reversedRejected = std::string(error.what()).find("SQLSTATE 22000") !=
+                           std::string::npos;
+    }
+    assert(reversedRejected);
+
+    const auto parsedCast = dbms::ExprHelper::evalString(
+        "'[2021-06-01,2021-06-02]'::daterange", {});
+    assert(parsedCast.ok && !parsedCast.isNull &&
+           parsedCast.value == "[2021-06-01,2021-06-03)");
+
+    std::cout << "[RANGEFN] date range casts OK" << std::endl;
+}
+
 int main() {
     test_bounds();
     test_bound_result_types();
@@ -260,6 +289,7 @@ int main() {
     test_containment_operators();
     test_integer_range_casts();
     test_numeric_range_casts();
+    test_date_range_casts();
     std::cout << "[RANGEFN] all passed" << std::endl;
     return 0;
 }

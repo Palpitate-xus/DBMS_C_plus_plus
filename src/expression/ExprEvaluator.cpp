@@ -2447,6 +2447,7 @@ enum class IntegerCastTarget { SmallInt, Integer, BigInt };
 static ExprValue castToIntegerRange(const ExprValue& value,
                                     const std::string& targetType);
 static ExprValue castToNumericRange(const ExprValue& value);
+static ExprValue castToDateRange(const ExprValue& value);
 
 static const char* integerCastTypeName(IntegerCastTarget target) {
     switch (target) {
@@ -3158,6 +3159,7 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
     if (target == "int4range" || target == "int8range")
         return castToIntegerRange(v, target);
     if (target == "numrange") return castToNumericRange(v);
+    if (target == "daterange") return castToDateRange(v);
 
     // Default passthrough
     return ExprValue(targetTypeName, v.value, false);
@@ -4380,6 +4382,63 @@ static ExprValue castToNumericRange(const ExprValue& value) {
         (upper ? upper->toString() : "") +
         (range.hiInf ? ")" : (range.hiInc ? "]" : ")"));
     return ExprValue("numrange", result, false);
+}
+
+static ExprValue castToDateRange(const ExprValue& value) {
+    const RangeParts range = parseRangeLiteral(value.value);
+    if (!range.valid) {
+        throw std::runtime_error(
+            "invalid input syntax for type daterange: '" + value.value +
+            "' (SQLSTATE 22P02)");
+    }
+    if (range.empty) return ExprValue("daterange", "empty", false);
+
+    Date lower;
+    Date upper;
+    if (!range.loInf) {
+        lower = Date(range.lo.c_str());
+        if (lower.year == 0) {
+            throw std::runtime_error(
+                "date/time field value out of range: '" + range.lo +
+                "' (SQLSTATE 22008)");
+        }
+    }
+    if (!range.hiInf) {
+        upper = Date(range.hi.c_str());
+        if (upper.year == 0) {
+            throw std::runtime_error(
+                "date/time field value out of range: '" + range.hi +
+                "' (SQLSTATE 22008)");
+        }
+    }
+    if (!range.loInf && !range.hiInf) {
+        if (lower > upper) {
+            throw std::runtime_error(
+                "range lower bound must be less than or equal to range "
+                "upper bound (SQLSTATE 22000)");
+        }
+        if (lower == upper && !(range.loInc && range.hiInc))
+            return ExprValue("daterange", "empty", false);
+    }
+
+    bool upperInfinite = range.hiInf;
+    if (!range.loInf && !range.loInc) {
+        lower = lower + 1;
+        if (lower.year == 0)
+            return ExprValue("daterange", "empty", false);
+    }
+    if (!range.hiInf && range.hiInc) {
+        upper = upper + 1;
+        if (upper.year == 0) upperInfinite = true;
+    }
+    if (!range.loInf && !upperInfinite && lower >= upper)
+        return ExprValue("daterange", "empty", false);
+
+    const std::string result =
+        std::string(range.loInf ? "(" : "[") +
+        (range.loInf ? "" : str(lower)) + "," +
+        (upperInfinite ? "" : str(upper)) + ")";
+    return ExprValue("daterange", result, false);
 }
 
 static bool typeIsRange(const std::string& typeName) {
