@@ -264,6 +264,30 @@ static void test_comparisons() {
     bin->op = "=";
     assert(eval.eval(bin.get(), {}).asBool());
 
+    auto compareTyped = [&](const std::string& leftType,
+                            const std::string& leftValue,
+                            const std::string& op,
+                            const std::string& rightType,
+                            const std::string& rightValue) {
+        auto expression = std::make_unique<BinaryOpExpr>();
+        expression->op = op;
+        auto left = std::make_unique<LiteralExpr>();
+        left->typeName = leftType;
+        left->value = leftValue;
+        expression->left = std::move(left);
+        auto right = std::make_unique<LiteralExpr>();
+        right->typeName = rightType;
+        right->value = rightValue;
+        expression->right = std::move(right);
+        return eval.eval(expression.get(), {}).asBool();
+    };
+    assert(compareTyped("character", "ab  ", "=", "bpchar", "ab    "));
+    assert(compareTyped("character", "ab  ", "=", "character varying",
+                        "ab   "));
+    assert(compareTyped("character", "ab  ", "=", "text", "ab"));
+    assert(!compareTyped("character", "ab  ", "=", "text", "ab  "));
+    assert(compareTyped("character", "ab  ", "<", "bpchar", "abx   "));
+
     std::cout << "[EXPR] comparisons OK" << std::endl;
 }
 

@@ -1047,6 +1047,28 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
         return (ba > bb) - (ba < bb);
     }
 
+    const bool blankPaddedA = isBlankPaddedCharacterType(ta);
+    const bool blankPaddedB = isBlankPaddedCharacterType(tb);
+    auto isVaryingCharacter = [](const std::string& type) {
+        return type == "varchar" || type == "character varying" ||
+               type == "unknown" || type.rfind("varchar(", 0) == 0 ||
+               type.rfind("character varying(", 0) == 0;
+    };
+    const bool varyingA = isVaryingCharacter(ta);
+    const bool varyingB = isVaryingCharacter(tb);
+    const bool textualA = blankPaddedA || varyingA || ta == "text";
+    const bool textualB = blankPaddedB || varyingB || tb == "text";
+    if ((blankPaddedA || blankPaddedB) && textualA && textualB) {
+        std::string left = a.value;
+        std::string right = b.value;
+        auto trimPadding = [](std::string& value) {
+            while (!value.empty() && value.back() == ' ') value.pop_back();
+        };
+        if (blankPaddedA || (blankPaddedB && varyingA)) trimPadding(left);
+        if (blankPaddedB || (blankPaddedA && varyingB)) trimPadding(right);
+        return left < right ? -1 : (left > right ? 1 : 0);
+    }
+
     // Exact numeric comparison for explicit numeric/decimal types.
     if (isNumericTypeName(a.typeName) || isNumericTypeName(b.typeName)) {
         auto na = tryParseNumeric(a.value);
