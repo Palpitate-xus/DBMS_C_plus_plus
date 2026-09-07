@@ -193,6 +193,13 @@ bool LargeObjectManager::exportFile(int loId, const std::string& filePath) const
     std::ifstream in(loPath(loId), std::ios::binary);
     if (!in) return false;
 
+    // An export onto the same file is already complete. Compare filesystem
+    // identity so hard links and symbolic links cannot truncate the source
+    // before the streaming copy reads it.
+    std::error_code identityError;
+    if (std::filesystem::equivalent(loPath(loId), filePath, identityError))
+        return true;
+
     std::ofstream out(filePath, std::ios::binary | std::ios::trunc);
     if (!out) return false;
     char buffer[64 * 1024];
