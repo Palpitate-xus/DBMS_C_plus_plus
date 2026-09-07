@@ -27703,6 +27703,11 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             }
             whereSql = expr.funcArgs[0].substr(wstart, wend - wstart);
         }
+        if (!engine->tableExists(dbname, innerTbl)) {
+            throw std::runtime_error(
+                "relation \"" + innerTbl +
+                "\" does not exist (SQLSTATE 42P01)");
+        }
         TableSchema innerSch = engine->getTableSchema(dbname, innerTbl);
 
         std::set<std::string> innerColumnNames;
@@ -27731,7 +27736,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
 
         bool anyRow = false;
         std::string evaluationError;
-        engine->forEachRow(dbname, innerTbl, [&](uint32_t, uint16_t, const char* data, size_t len) {
+        const bool scanned = engine->forEachRow(dbname, innerTbl, [&](uint32_t, uint16_t, const char* data, size_t len) {
             if (whereSql.empty()) {
                 anyRow = true;
                 return false;
@@ -27781,6 +27786,10 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             anyRow = true;
             return false;
         });
+        if (!scanned) {
+            throw std::runtime_error(
+                "failed to scan EXISTS subquery relation (SQLSTATE 58030)");
+        }
         if (!evaluationError.empty())
             throw std::runtime_error(evaluationError);
         bool negate = expr.funcArgs.size() > 1 && expr.funcArgs[1] == "not";
