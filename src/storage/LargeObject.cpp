@@ -90,8 +90,8 @@ int LargeObjectManager::create() {
 }
 
 bool LargeObjectManager::write(int loId, size_t offset, const std::string& data) {
+    if (loId <= 0) return false;
     auto path = loPath(loId);
-    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
 
     if (offset > static_cast<size_t>(std::numeric_limits<std::streamoff>::max()) ||
         data.size() > static_cast<size_t>(std::numeric_limits<std::streamsize>::max()) ||
@@ -100,13 +100,7 @@ bool LargeObjectManager::write(int loId, size_t offset, const std::string& data)
     }
 
     std::fstream fs(path, std::ios::in | std::ios::out | std::ios::binary);
-    if (!fs) {
-        std::ofstream create(path, std::ios::binary);
-        if (!create) return false;
-        create.close();
-        fs.open(path, std::ios::in | std::ios::out | std::ios::binary);
-        if (!fs) return false;
-    }
+    if (!fs) return false;
 
     fs.seekp(static_cast<std::streamoff>(offset));
     if (!fs) return false;
