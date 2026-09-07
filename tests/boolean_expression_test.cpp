@@ -29,6 +29,15 @@ int main() {
         "enabled > false", {{"enabled", "true"}}, typeHints, &error));
     assert(error.empty());
 
+    auto result = dbms::ExprHelper::evalString("NULL IS UNKNOWN", {});
+    assert(result.ok && !result.isNull && result.value == "t");
+    result = dbms::ExprHelper::evalString("TRUE IS UNKNOWN", {});
+    assert(result.ok && !result.isNull && result.value == "f");
+    result = dbms::ExprHelper::evalString("NULL IS NOT UNKNOWN", {});
+    assert(result.ok && !result.isNull && result.value == "f");
+    result = dbms::ExprHelper::evalString("FALSE IS NOT UNKNOWN", {});
+    assert(result.ok && !result.isNull && result.value == "t");
+
     std::cout << "[BOOLEAN EXPRESSION] all passed\n";
     return 0;
 }

@@ -1031,6 +1031,11 @@ ExprValue ExprEvaluator::evalUnaryOp(const UnaryOpExpr* e, const RowContext& ctx
         if (op.find("not") != std::string::npos) r = !r;
         return ExprValue("boolean", r ? "t" : "f", false);
     }
+    if (op == "is unknown" || op == "is not unknown") {
+        bool r = v.isNull;
+        if (op == "is not unknown") r = !r;
+        return ExprValue("boolean", r ? "t" : "f", false);
+    }
 
     return ExprValue{};
 }
