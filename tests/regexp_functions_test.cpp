@@ -31,6 +31,7 @@ static dbms::ExprValue callFn(dbms::ExprEvaluator& eval, const std::string& name
 
 static dbms::ExprValue S(const std::string& v) { return dbms::ExprValue("text", v, false); }
 static dbms::ExprValue I(int64_t v) { return dbms::ExprValue("integer", std::to_string(v), false); }
+static dbms::ExprValue C(const std::string& v) { return dbms::ExprValue("character", v, false); }
 
 static void test_replace() {
     dbms::ExprEvaluator eval;
@@ -43,6 +44,8 @@ static void test_replace() {
                   {S("John Smith"), S("(\\w+) (\\w+)"), S("\\2 \\1")}).value == "Smith John");
     // Case-insensitive flag.
     assert(callFn(eval, "regexp_replace", {S("HELLO"), S("hello"), S("hi"), S("i")}).value == "hi");
+    assert(callFn(eval, "regexp_replace",
+                  {C("ab  "), C("b$  "), C("X  ")}).value == "aX");
     std::cout << "[REGEXFN] replace OK" << std::endl;
 }
 
@@ -52,6 +55,10 @@ static void test_match() {
            == "{bar,beque}");
     // No parenthesized groups -> single-element array with whole match.
     assert(callFn(eval, "regexp_match", {S("abc"), S("b")}).value == "{b}");
+    assert(callFn(eval, "regexp_match", {C("ab  "), C("b$  ")}).value ==
+           "{b}");
+    assert(callFn(eval, "regexp_matches", {C("ab  "), C("b$  ")}).value ==
+           "{b}");
     // No match -> NULL.
     assert(callFn(eval, "regexp_match", {S("abc"), S("(x)")}).isNull);
     std::cout << "[REGEXFN] match OK" << std::endl;
@@ -62,6 +69,8 @@ static void test_split() {
     assert(callFn(eval, "regexp_split_to_array", {S("a,b,c"), S(",")}).value == "{a,b,c}");
     assert(callFn(eval, "regexp_split_to_array", {S("the quick   brown"), S("\\s+")}).value
            == "{the,quick,brown}");
+    assert(callFn(eval, "regexp_split_to_array", {C("a,b  "), C(",  ")})
+               .value == "{a,b}");
     std::cout << "[REGEXFN] split OK" << std::endl;
 }
 
@@ -72,6 +81,10 @@ static void test_count_substr() {
     // Count from a start offset (skip the first 'o').
     assert(callFn(eval, "regexp_count", {S("hello world"), S("o"), I(6)}).value == "1");
     assert(callFn(eval, "regexp_substr", {S("foobar"), S("o+")}).value == "oo");
+    assert(callFn(eval, "regexp_count", {C("ab  "), C("b$  ")}).value ==
+           "1");
+    assert(callFn(eval, "regexp_substr", {C("ab  "), C("b$  ")}).value ==
+           "b");
     // 2nd match.
     assert(callFn(eval, "regexp_substr", {S("a1b2c3"), S("[0-9]"), I(1), I(2)}).value == "2");
     // No match -> NULL.

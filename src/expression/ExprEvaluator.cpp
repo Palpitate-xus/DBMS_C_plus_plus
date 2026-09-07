@@ -5769,14 +5769,16 @@ void ExprEvaluator::registerBuiltins() {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
         auto fl = std::regex::ECMAScript;
         if (a.size() >= 3 && !a[2].isNull) {
-            for (char c : a[2].value) {
+            for (char c : textArgumentValue(a[2])) {
                 if (c == 0x69) fl |= std::regex::icase;  // i
             }
         }
         try {
-            std::regex re(a[1].value, fl);
+            std::regex re(textArgumentValue(a[1]), fl);
+            const std::string input = textArgumentValue(a[0]);
             std::smatch m;
-            if (!std::regex_search(a[0].value, m, re)) return ExprValue("text", "", true);
+            if (!std::regex_search(input, m, re))
+                return ExprValue("text", "", true);
             std::string out = "{";
             if (m.size() > 1) {
                 for (size_t k = 1; k < m.size(); ++k) {
@@ -6230,16 +6232,19 @@ void ExprEvaluator::registerBuiltins() {
     functions_["regexp_replace"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 3 || a[0].isNull || a[1].isNull || a[2].isNull)
             return ExprValue("text", "", true);
-        std::string flags = (a.size() >= 4 && !a[3].isNull) ? a[3].value : "";
+        std::string flags = (a.size() >= 4 && !a[3].isNull)
+            ? textArgumentValue(a[3]) : "";
         bool ok;
-        std::regex re = buildRegex(a[1].value, flags, ok);
+        std::regex re = buildRegex(textArgumentValue(a[1]), flags, ok);
         if (!ok) return ExprValue("text", "", true);
-        std::string repl = translateReplacement(a[2].value);
+        std::string repl = translateReplacement(textArgumentValue(a[2]));
+        const std::string input = textArgumentValue(a[0]);
         auto fmtFlags = (flags.find('g') != std::string::npos)
                             ? std::regex_constants::format_default
                             : std::regex_constants::format_first_only;
         try {
-            return ExprValue("text", std::regex_replace(a[0].value, re, repl, fmtFlags), false);
+            return ExprValue(
+                "text", std::regex_replace(input, re, repl, fmtFlags), false);
         } catch (...) {
             return ExprValue("text", "", true);
         }
@@ -6248,12 +6253,15 @@ void ExprEvaluator::registerBuiltins() {
     // a text array; whole match if the pattern has no groups; NULL if no match
     functions_["regexp_match"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("ARRAY", "", true);
-        std::string flags = (a.size() >= 3 && !a[2].isNull) ? a[2].value : "";
+        std::string flags = (a.size() >= 3 && !a[2].isNull)
+            ? textArgumentValue(a[2]) : "";
         bool ok;
-        std::regex re = buildRegex(a[1].value, flags, ok);
+        std::regex re = buildRegex(textArgumentValue(a[1]), flags, ok);
         if (!ok) return ExprValue("ARRAY", "", true);
+        const std::string input = textArgumentValue(a[0]);
         std::smatch m;
-        if (!std::regex_search(a[0].value, m, re)) return ExprValue("ARRAY", "", true);  // NULL
+        if (!std::regex_search(input, m, re))
+            return ExprValue("ARRAY", "", true);  // NULL
         std::string out = "{";
         if (m.size() <= 1) {
             out += arrayElemQuote(m[0].str());
@@ -6269,11 +6277,12 @@ void ExprEvaluator::registerBuiltins() {
     // regexp_split_to_array(string, pattern [, flags]) -> array of the parts
     functions_["regexp_split_to_array"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("ARRAY", "", true);
-        std::string flags = (a.size() >= 3 && !a[2].isNull) ? a[2].value : "";
+        std::string flags = (a.size() >= 3 && !a[2].isNull)
+            ? textArgumentValue(a[2]) : "";
         bool ok;
-        std::regex re = buildRegex(a[1].value, flags, ok);
+        std::regex re = buildRegex(textArgumentValue(a[1]), flags, ok);
         if (!ok) return ExprValue("ARRAY", "", true);
-        const std::string& s = a[0].value;
+        const std::string s = textArgumentValue(a[0]);
         std::string out = "{";
         bool first = true;
         try {
@@ -6292,11 +6301,12 @@ void ExprEvaluator::registerBuiltins() {
     // regexp_count(string, pattern [, start [, flags]]) -> number of matches
     functions_["regexp_count"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("integer", "", true);
-        std::string flags = (a.size() >= 4 && !a[3].isNull) ? a[3].value : "";
+        std::string flags = (a.size() >= 4 && !a[3].isNull)
+            ? textArgumentValue(a[3]) : "";
         bool ok;
-        std::regex re = buildRegex(a[1].value, flags, ok);
+        std::regex re = buildRegex(textArgumentValue(a[1]), flags, ok);
         if (!ok) return ExprValue("integer", "", true);
-        const std::string& s = a[0].value;
+        const std::string s = textArgumentValue(a[0]);
         size_t start = 0;
         if (a.size() >= 3 && !a[2].isNull) {
             int64_t st = a[2].asInt();
@@ -6314,11 +6324,12 @@ void ExprEvaluator::registerBuiltins() {
     // regexp_substr(string, pattern [, start [, N [, flags]]]) -> N-th match substring
     functions_["regexp_substr"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
-        std::string flags = (a.size() >= 5 && !a[4].isNull) ? a[4].value : "";
+        std::string flags = (a.size() >= 5 && !a[4].isNull)
+            ? textArgumentValue(a[4]) : "";
         bool ok;
-        std::regex re = buildRegex(a[1].value, flags, ok);
+        std::regex re = buildRegex(textArgumentValue(a[1]), flags, ok);
         if (!ok) return ExprValue("text", "", true);
-        const std::string& s = a[0].value;
+        const std::string s = textArgumentValue(a[0]);
         size_t start = 0;
         if (a.size() >= 3 && !a[2].isNull) {
             int64_t st = a[2].asInt();
