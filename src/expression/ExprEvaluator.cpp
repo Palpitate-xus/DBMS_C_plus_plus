@@ -6818,6 +6818,19 @@ void ExprEvaluator::registerBuiltins() {
             if (field == "month")
                 return ExprValue("numeric",
                                  std::to_string(interval.months % 12), false);
+            if (field == "quarter")
+                return ExprValue(
+                    "numeric",
+                    std::to_string((interval.months % 12) / 3 + 1), false);
+            if (field == "decade")
+                return ExprValue(
+                    "numeric", std::to_string(interval.months / 120), false);
+            if (field == "century")
+                return ExprValue(
+                    "numeric", std::to_string(interval.months / 1200), false);
+            if (field == "millennium")
+                return ExprValue(
+                    "numeric", std::to_string(interval.months / 12000), false);
             if (field == "day")
                 return ExprValue("numeric", std::to_string(interval.days),
                                  false);
@@ -6840,6 +6853,26 @@ void ExprEvaluator::registerBuiltins() {
                 }
                 return ExprValue(
                     "numeric", formatMicrosNumeric(secondMicros), false);
+            }
+            if (field == "milliseconds") {
+                const long long secondMicros =
+                    interval.micros % 60000000LL;
+                const bool negative = secondMicros < 0;
+                const unsigned long long magnitude = negative
+                    ? static_cast<unsigned long long>(-secondMicros)
+                    : static_cast<unsigned long long>(secondMicros);
+                std::string fraction = std::to_string(magnitude % 1000);
+                fraction.insert(fraction.begin(), 3 - fraction.size(), '0');
+                return ExprValue(
+                    "numeric",
+                    (negative ? "-" : "") +
+                        std::to_string(magnitude / 1000) + "." + fraction,
+                    false);
+            }
+            if (field == "microseconds") {
+                return ExprValue(
+                    "numeric",
+                    std::to_string(interval.micros % 60000000LL), false);
             }
             return ExprValue("numeric", "", true);
         }

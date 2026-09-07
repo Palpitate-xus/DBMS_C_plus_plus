@@ -68,6 +68,18 @@ static void test_extract_date_part() {
     assert(callFn(eval, "extract", {F("minute"), interval}).value == "5");
     assert(callFn(eval, "extract", {F("second"), interval}).value ==
            "6.250000");
+    assert(callFn(eval, "extract", {F("milliseconds"), interval}).value ==
+           "6250.000");
+    assert(callFn(eval, "extract", {F("microseconds"), interval}).value ==
+           "6250000");
+    assert(callFn(eval, "extract",
+                  {F("quarter"), IV("14 months")}).value == "1");
+    assert(callFn(eval, "extract",
+                  {F("decade"), IV("25 years")}).value == "2");
+    assert(callFn(eval, "extract",
+                  {F("century"), IV("2345 years")}).value == "23");
+    assert(callFn(eval, "extract",
+                  {F("millennium"), IV("2345 years")}).value == "2");
     assert(callFn(eval, "date_part",
                   {F("dow"), interval}).isNull);
     std::cout << "[DATEFN] extract/date_part OK" << std::endl;
