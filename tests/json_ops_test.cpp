@@ -102,6 +102,15 @@ static void test_contains() {
     auto c7 = eval("'42' @> '42'");
     assert(c7.ok && c7.value == "t");
 
+    // PostgreSQL's JSONB containment has one mixed-shape exception: an array
+    // contains a directly held scalar, but not a scalar nested in a sub-array.
+    auto c8 = eval("'[1,2]' @> '1'");
+    assert(c8.ok && c8.value == "t");
+    auto c9 = eval("'[1,2]' @> '3'");
+    assert(c9.ok && c9.value == "f");
+    auto c10 = eval("'[[1,2]]' @> '1'");
+    assert(c10.ok && c10.value == "f");
+
     std::cout << "[JSON-OPS] @> / <@ OK" << std::endl;
 }
 

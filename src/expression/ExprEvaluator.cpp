@@ -1986,6 +1986,20 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
                 }
                 return true;
             }
+            if (ct.front() == '[' && it.front() != '[' &&
+                it.front() != '{') {
+                std::vector<std::string> elements;
+                if (!jsonTopLevelSplit(ct, '[', ']', elements)) return false;
+                for (const auto& element : elements) {
+                    const std::string candidate = trimStr(element);
+                    if (!candidate.empty() && candidate.front() != '[' &&
+                        candidate.front() != '{' &&
+                        contains(candidate, it)) {
+                        return true;
+                    }
+                }
+                return false;
+            }
             if (ct.front() == '[' && it.front() == '[') {
                 std::vector<std::string> ce, ie;
                 if (!jsonTopLevelSplit(ct, '[', ']', ce)) return false;
