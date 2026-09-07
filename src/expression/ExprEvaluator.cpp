@@ -3024,6 +3024,16 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     if (!e) return ExprValue{};
     std::string name = toLower(e->funcName);
 
+    // COALESCE is syntax-like in SQL: stop as soon as the first non-NULL
+    // argument is found, so unused arguments are never evaluated.
+    if (name == "coalesce") {
+        for (const auto& argument : e->args) {
+            ExprValue value = eval(argument.get(), ctx);
+            if (!value.isNull) return value;
+        }
+        return ExprValue("unknown", "", true);
+    }
+
     std::vector<ExprValue> args;
     for (const auto& a : e->args) args.push_back(eval(a.get(), ctx));
 
@@ -3126,10 +3136,6 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     if (it != functions_.end()) return it->second(args);
 
     // Built-in fallback for common functions even if not registered
-    if (name == "coalesce") {
-        for (const auto& a : args) if (!a.isNull) return a;
-        return ExprValue("unknown", "", true);
-    }
     if (name == "nullif") {
         if (args.size() < 2) return ExprValue("unknown", "", true);
         if (args[0].isNull || args[1].isNull) return args[0];

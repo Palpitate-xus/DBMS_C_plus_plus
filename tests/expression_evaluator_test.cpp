@@ -904,6 +904,24 @@ static void test_functions() {
         assert(v.value == "fallback");
     }
     {
+        int unusedEvaluations = 0;
+        eval.registerFunction(
+            "unused_coalesce_argument",
+            [&](const std::vector<ExprValue>&) {
+                ++unusedEvaluations;
+                return ExprValue("text", "unused", false);
+            });
+        auto f = std::make_unique<FunctionCallExpr>();
+        f->funcName = "coalesce";
+        f->args.push_back(makeLit("'first'"));
+        auto unused = std::make_unique<FunctionCallExpr>();
+        unused->funcName = "unused_coalesce_argument";
+        f->args.push_back(std::move(unused));
+        ExprValue v = eval.eval(f.get(), {});
+        assert(v.value == "first");
+        assert(unusedEvaluations == 0);
+    }
+    {
         auto f = std::make_unique<FunctionCallExpr>();
         f->funcName = "upper";
         f->args.push_back(makeLit("'abc'"));
