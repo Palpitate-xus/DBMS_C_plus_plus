@@ -291,6 +291,119 @@ static bool isStringLiteralToken(const std::string& s) {
     return s.size() >= 2 && s.front() == '\'' && s.back() == '\'';
 }
 
+static std::string normalizeEscapeStringToken(const std::string& token) {
+    // Convert E'...' into an equivalent standard-conforming quoted token so
+    // every downstream parser consumer sees the same decoded literal form.
+    if (token.size() < 3 || (token[0] != 'E' && token[0] != 'e') ||
+        token[1] != '\'' || token.back() != '\'') {
+        return token;
+    }
+    const auto hexValue = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    const auto appendCodePoint = [](std::string& output, uint32_t value) {
+        if (value <= 0x7f) {
+            output.push_back(static_cast<char>(value));
+        } else if (value <= 0x7ff) {
+            output.push_back(static_cast<char>(0xc0 | (value >> 6)));
+            output.push_back(static_cast<char>(0x80 | (value & 0x3f)));
+        } else if (value <= 0xffff) {
+            output.push_back(static_cast<char>(0xe0 | (value >> 12)));
+            output.push_back(
+                static_cast<char>(0x80 | ((value >> 6) & 0x3f)));
+            output.push_back(static_cast<char>(0x80 | (value & 0x3f)));
+        } else if (value <= 0x10ffff) {
+            output.push_back(static_cast<char>(0xf0 | (value >> 18)));
+            output.push_back(
+                static_cast<char>(0x80 | ((value >> 12) & 0x3f)));
+            output.push_back(
+                static_cast<char>(0x80 | ((value >> 6) & 0x3f)));
+            output.push_back(static_cast<char>(0x80 | (value & 0x3f)));
+        }
+    };
+
+    std::string decoded;
+    for (size_t i = 2; i + 1 < token.size(); ++i) {
+        const char c = token[i];
+        if (c == '\'' && i + 2 < token.size() && token[i + 1] == '\'') {
+            decoded.push_back('\'');
+            ++i;
+            continue;
+        }
+        if (c != '\\' || i + 2 >= token.size()) {
+            decoded.push_back(c);
+            continue;
+        }
+        const char escaped = token[++i];
+        switch (escaped) {
+            case 'b': decoded.push_back('\b'); continue;
+            case 'f': decoded.push_back('\f'); continue;
+            case 'n': decoded.push_back('\n'); continue;
+            case 'r': decoded.push_back('\r'); continue;
+            case 't': decoded.push_back('\t'); continue;
+            case '\n': continue;
+            default: break;
+        }
+        if (escaped >= '0' && escaped <= '7') {
+            unsigned int value = static_cast<unsigned int>(escaped - '0');
+            size_t digits = 1;
+            while (digits < 3 && i + 1 < token.size() - 1 &&
+                   token[i + 1] >= '0' && token[i + 1] <= '7') {
+                value = value * 8 +
+                        static_cast<unsigned int>(token[++i] - '0');
+                ++digits;
+            }
+            decoded.push_back(static_cast<char>(value & 0xff));
+            continue;
+        }
+        if (escaped == 'x') {
+            unsigned int value = 0;
+            size_t digits = 0;
+            while (digits < 2 && i + 1 < token.size() - 1) {
+                const int digit = hexValue(token[i + 1]);
+                if (digit < 0) break;
+                value = value * 16 + static_cast<unsigned int>(digit);
+                ++i;
+                ++digits;
+            }
+            if (digits != 0) {
+                decoded.push_back(static_cast<char>(value));
+                continue;
+            }
+        }
+        if (escaped == 'u' || escaped == 'U') {
+            const size_t required = escaped == 'u' ? 4 : 8;
+            uint32_t value = 0;
+            size_t digits = 0;
+            while (digits < required && i + 1 < token.size() - 1) {
+                const int digit = hexValue(token[i + 1]);
+                if (digit < 0) break;
+                value = value * 16 + static_cast<uint32_t>(digit);
+                ++i;
+                ++digits;
+            }
+            if (digits == required) {
+                appendCodePoint(decoded, value);
+                continue;
+            }
+        }
+        // PostgreSQL escape strings accept a backslash before an otherwise
+        // ordinary character as that character itself.
+        decoded.push_back(escaped);
+    }
+
+    std::string normalized = "'";
+    for (char c : decoded) {
+        normalized.push_back(c);
+        if (c == '\'') normalized.push_back('\'');
+    }
+    normalized.push_back('\'');
+    return normalized;
+}
+
 std::string SQLParser::trim(const std::string& s) {
     size_t a = 0;
     while (a < s.size() && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
@@ -303,6 +416,7 @@ std::vector<std::string> SQLParser::tokenize(const std::string& sql) {
     std::vector<std::string> tokens;
     std::string cur;
     bool inString = false;
+    bool inEscapeString = false;
     char stringChar = 0;
     bool inIdentifier = false; // "quoted identifier"
 
@@ -377,8 +491,10 @@ std::vector<std::string> SQLParser::tokenize(const std::string& sql) {
                 }
                 if (backslashCount % 2 == 0) {
                     inString = false;
-                    tokens.push_back(cur);
+                    tokens.push_back(inEscapeString
+                        ? normalizeEscapeStringToken(cur) : cur);
                     cur.clear();
+                    inEscapeString = false;
                 }
             }
             continue;
@@ -393,12 +509,20 @@ std::vector<std::string> SQLParser::tokenize(const std::string& sql) {
             continue;
         }
         if (c == '\'' || c == '"') {
+            if (c == '\'' && (cur == "E" || cur == "e")) {
+                inString = true;
+                inEscapeString = true;
+                stringChar = '\'';
+                cur += c;
+                continue;
+            }
             if (!cur.empty()) {
                 tokens.push_back(cur);
                 cur.clear();
             }
             if (c == '\'') {
                 inString = true;
+                inEscapeString = false;
                 stringChar = '\'';
             } else {
                 inIdentifier = true;
