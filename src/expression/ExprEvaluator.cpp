@@ -5002,7 +5002,8 @@ void ExprEvaluator::registerBuiltins() {
             if (!left || !right || !left->isFinite() || !right->isFinite())
                 return ExprValue("numeric", "", true);
             if (right->sign() == 0)
-                return ExprValue("numeric", "", true);
+                throw std::runtime_error(
+                    "division by zero (SQLSTATE 22012)");
             try {
                 const Numeric quotient = *left / *right;
                 std::string integralQuotient = quotient.toString();
@@ -5034,7 +5035,9 @@ void ExprEvaluator::registerBuiltins() {
             throw std::runtime_error(
                 "integer out of range (SQLSTATE 22003)");
         }
-        if (right == 0) return ExprValue("integer", "", true);
+        if (right == 0)
+            throw std::runtime_error(
+                "division by zero (SQLSTATE 22012)");
         const long long remainder =
             left == std::numeric_limits<int64_t>::lowest() && right == -1
                 ? 0 : left % right;
@@ -5148,8 +5151,11 @@ void ExprEvaluator::registerBuiltins() {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("numeric", "", true);
         const auto dividend = tryParseNumeric(a[0].value);
         const auto divisor = tryParseNumeric(a[1].value);
-        if (!dividend || !divisor || divisor->sign() == 0)
+        if (!dividend || !divisor || !divisor->isFinite())
             return ExprValue("numeric", "", true);
+        if (divisor->sign() == 0)
+            throw std::runtime_error(
+                "division by zero (SQLSTATE 22012)");
 
         const Numeric quotient = *dividend / *divisor;
         std::string result = quotient.toString();

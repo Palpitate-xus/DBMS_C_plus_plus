@@ -267,6 +267,17 @@ static void test_int_math() {
         }
         assert(rejected);
     };
+    auto expectDivisionByZero = [&](const std::string& function,
+                                    const std::vector<dbms::ExprValue>& args) {
+        bool rejected = false;
+        try {
+            (void)callFn(eval, function, args);
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("SQLSTATE 22012") !=
+                       std::string::npos;
+        }
+        assert(rejected);
+    };
     expectOutOfRange(
         "abs", {I(std::numeric_limits<int64_t>::min())});
     expectOutOfRange(
@@ -285,7 +296,11 @@ static void test_int_math() {
     assert(callFn(eval, "div",
                   {I(std::numeric_limits<int64_t>::min()), I(-1)}).value ==
            "9223372036854775808");
-    assert(callFn(eval, "div", {I(9), I(0)}).isNull);             // division by zero -> NULL
+    expectDivisionByZero("div", {I(9), I(0)});
+    expectDivisionByZero("mod", {I(9), I(0)});
+    expectDivisionByZero(
+        "mod", {dbms::ExprValue("numeric", "9.0", false),
+                dbms::ExprValue("numeric", "0.0", false)});
     assert(callFn(
                eval, "mod",
                {dbms::ExprValue(
