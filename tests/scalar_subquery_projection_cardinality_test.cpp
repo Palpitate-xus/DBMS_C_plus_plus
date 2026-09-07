@@ -70,15 +70,30 @@ int main() {
     textInner.formatVersion = dbms::DATA_FILE_FORMAT_VERSION;
     textInner.append(dbms::makeIntColumn("id", false, 4, true));
     textInner.append(dbms::makeTextColumn("value", false));
+    textInner.append(dbms::makeTextColumn("fromage", false));
     assert(g_engine.createTable(database, textInner) == dbms::DBStatus::OK);
     assert(g_engine.insert(database, "scalar_text",
-                           {{"id", "1"}, {"value", "two words"}}) ==
+                           {{"id", "1"},
+                            {"value", "two words"},
+                            {"fromage", "cheddar"}}) ==
            dbms::DBStatus::OK);
     expression.funcArgs = {"select value from scalar_text"};
     const auto textRows = g_engine.queryExpr(
         database, "scalar_outer", {}, {expression});
     assert(textRows.size() == 1);
     assert(textRows.front() == "two words ");
+
+    expression.funcArgs = {"SELECT value FROM scalar_text"};
+    const auto uppercaseRows = g_engine.queryExpr(
+        database, "scalar_outer", {}, {expression});
+    assert(uppercaseRows.size() == 1);
+    assert(uppercaseRows.front() == "two words ");
+
+    expression.funcArgs = {"select fromage from scalar_text"};
+    const auto keywordSubstringRows = g_engine.queryExpr(
+        database, "scalar_outer", {}, {expression});
+    assert(keywordSubstringRows.size() == 1);
+    assert(keywordSubstringRows.front() == "cheddar ");
 
     expression.funcArgs = {"select id,value from scalar_text"};
     rejected = false;

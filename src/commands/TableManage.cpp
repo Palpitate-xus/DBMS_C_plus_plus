@@ -30273,10 +30273,83 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     if (expr.funcName == "subquery" && !expr.funcArgs.empty() && engine) {
         // Simplified scalar subquery: funcArgs[0] = "select col from table [where ...]"
         std::string subSql = expr.funcArgs[0];
-        size_t fromPos = subSql.find("from");
+        const auto isIdentifierChar = [](char ch) {
+            const auto value = static_cast<unsigned char>(ch);
+            return std::isalnum(value) || ch == '_' || ch == '$';
+        };
+        const auto keywordMatchesAt = [&](size_t pos,
+                                          const std::string& keyword) {
+            if (pos + keyword.size() > subSql.size()) return false;
+            if (pos > 0 && isIdentifierChar(subSql[pos - 1])) return false;
+            if (pos + keyword.size() < subSql.size() &&
+                isIdentifierChar(subSql[pos + keyword.size()])) {
+                return false;
+            }
+            for (size_t i = 0; i < keyword.size(); ++i) {
+                if (std::tolower(static_cast<unsigned char>(subSql[pos + i])) !=
+                    std::tolower(static_cast<unsigned char>(keyword[i]))) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        const auto findTopLevelKeyword = [&](const std::string& keyword,
+                                             size_t start) {
+            bool inSingleQuote = false;
+            bool inDoubleQuote = false;
+            int depth = 0;
+            for (size_t i = start; i < subSql.size(); ++i) {
+                const char ch = subSql[i];
+                if (inSingleQuote) {
+                    if (ch == '\'' && i + 1 < subSql.size() &&
+                        subSql[i + 1] == '\'') {
+                        ++i;
+                    } else if (ch == '\'') {
+                        inSingleQuote = false;
+                    }
+                    continue;
+                }
+                if (inDoubleQuote) {
+                    if (ch == '"' && i + 1 < subSql.size() &&
+                        subSql[i + 1] == '"') {
+                        ++i;
+                    } else if (ch == '"') {
+                        inDoubleQuote = false;
+                    }
+                    continue;
+                }
+                if (ch == '\'') {
+                    inSingleQuote = true;
+                    continue;
+                }
+                if (ch == '"') {
+                    inDoubleQuote = true;
+                    continue;
+                }
+                if (ch == '(') {
+                    ++depth;
+                    continue;
+                }
+                if (ch == ')') {
+                    if (depth > 0) --depth;
+                    continue;
+                }
+                if (depth == 0 && keywordMatchesAt(i, keyword)) return i;
+            }
+            return std::string::npos;
+        };
+
+        size_t selectPos = 0;
+        while (selectPos < subSql.size() &&
+               std::isspace(static_cast<unsigned char>(subSql[selectPos]))) {
+            ++selectPos;
+        }
+        if (!keywordMatchesAt(selectPos, "select")) return "";
+        size_t fromPos = findTopLevelKeyword("from", selectPos + 6);
         if (fromPos == std::string::npos) return "";
-        std::string colsStr = trim(subSql.substr(6, fromPos - 6));
-        size_t wherePos = subSql.find("where", fromPos);
+        std::string colsStr = trim(subSql.substr(
+            selectPos + 6, fromPos - selectPos - 6));
+        size_t wherePos = findTopLevelKeyword("where", fromPos + 4);
         std::string subTname = trim(subSql.substr(fromPos + 4,
             (wherePos != std::string::npos) ? (wherePos - fromPos - 4)
             : (subSql.size() - fromPos - 4)));
