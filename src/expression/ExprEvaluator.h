@@ -117,6 +117,8 @@ private:
     static int compareValues(const ExprValue& a, const ExprValue& b);
     static ExprValue applyComparison(const std::string& op, const ExprValue& l, const ExprValue& r);
     static ExprValue applyArithmetic(const std::string& op, const ExprValue& l, const ExprValue& r);
+    static std::optional<bool> rangesOverlap(const ExprValue& left,
+                                             const ExprValue& right);
     static bool likeMatch(const std::string& text, const std::string& pattern);
     static bool similarToMatch(const std::string& text, const std::string& pattern);
 };

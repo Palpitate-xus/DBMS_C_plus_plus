@@ -29,6 +29,24 @@ static dbms::ExprValue callFn(dbms::ExprEvaluator& eval, const std::string& name
     return eval.eval(&call, ctx);
 }
 
+static dbms::ExprValue callBinary(dbms::ExprEvaluator& eval,
+                                  const std::string& op,
+                                  const dbms::ExprValue& left,
+                                  const dbms::ExprValue& right) {
+    dbms::RowContext ctx;
+    ctx.set("lhs", left);
+    ctx.set("rhs", right);
+    auto lhs = std::make_unique<dbms::ColumnRefExpr>();
+    lhs->column = "lhs";
+    auto rhs = std::make_unique<dbms::ColumnRefExpr>();
+    rhs->column = "rhs";
+    dbms::BinaryOpExpr expression;
+    expression.op = op;
+    expression.left = std::move(lhs);
+    expression.right = std::move(rhs);
+    return eval.eval(&expression, ctx);
+}
+
 static dbms::ExprValue R(const std::string& v) { return dbms::ExprValue("int4range", v, false); }
 static dbms::ExprValue RT(const std::string& type, const std::string& v) {
     return dbms::ExprValue(type, v, false);
@@ -105,11 +123,40 @@ static void test_predicates() {
     std::cout << "[RANGEFN] predicates OK" << std::endl;
 }
 
+static void test_overlap_operator() {
+    dbms::ExprEvaluator eval;
+    assert(callBinary(eval, "&&", R("[1,5)"), R("[4,8)")).value == "t");
+    assert(callBinary(eval, "&&", R("[1,5)"), R("[5,8)")).value == "f");
+    assert(callBinary(eval, "&&", R("empty"), R("[1,5)")).value == "f");
+    assert(callBinary(eval, "&&",
+                      RT("numrange", "[2,11)"),
+                      RT("numrange", "[10,20)")).value == "t");
+    assert(callBinary(eval, "&&",
+                      RT("daterange", "[2024-01-01,2024-02-01)"),
+                      RT("daterange", "[2024-01-15,2024-03-01)")).value == "t");
+    assert(callBinary(eval, "&&",
+                      RT("numrange", "[1,5]"),
+                      RT("numrange", "[5,8)")).value == "t");
+    assert(callBinary(eval, "&&",
+                      RT("numrange", "(,0)"),
+                      RT("numrange", "[0,)")).value == "f");
+
+    const auto nullRange = dbms::ExprValue("int4range", "", true);
+    assert(callBinary(eval, "&&", nullRange, R("[1,5)")).isNull);
+
+    const auto arrayOverlap = callBinary(
+        eval, "&&", RT("integer[]", "{1,2}"), RT("integer[]", "{2,3}"));
+    assert(!arrayOverlap.isNull && arrayOverlap.value == "t");
+
+    std::cout << "[RANGEFN] overlap operator OK" << std::endl;
+}
+
 int main() {
     test_bounds();
     test_bound_result_types();
     test_lower_upper_string_still_works();
     test_predicates();
+    test_overlap_operator();
     std::cout << "[RANGEFN] all passed" << std::endl;
     return 0;
 }

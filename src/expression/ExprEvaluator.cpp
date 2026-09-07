@@ -991,6 +991,7 @@ static bool jsonStep(const std::string& cur, const std::string& key, std::string
 static bool jsonTopLevelSplit(const std::string& s, char open, char close,
                               std::vector<std::string>& out);
 static bool jsonUnquoteString(const std::string& token, std::string& out);
+static bool typeIsRange(const std::string& typeName);
 
 // Split a SQL array literal '{e1,e2,...}' (or a bare non-array scalar,
 // which yields one element) into its element texts. Handles nested arrays
@@ -2132,6 +2133,11 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         return tsMatch(l.value, r.value);
     }
     if (op == "&&") {
+        if (typeIsRange(l.typeName) && typeIsRange(r.typeName)) {
+            const auto overlaps = rangesOverlap(l, r);
+            if (!overlaps) return ExprValue("boolean", "", true);
+            return ExprValue("boolean", *overlaps ? "t" : "f", false);
+        }
         // SQL array overlap: any element (as a set) shared by both sides.
         if (l.isNull || r.isNull) return ExprValue("boolean", "", true);
         auto splitElems = [](const std::string& v) {
@@ -4263,6 +4269,40 @@ static std::string rangeBoundType(const std::string& typeName) {
     // numrange and user-defined ranges historically use numeric bounds in
     // this evaluator when subtype metadata is unavailable.
     return "numeric";
+}
+
+std::optional<bool> ExprEvaluator::rangesOverlap(const ExprValue& left,
+                                                 const ExprValue& right) {
+    if (left.isNull || right.isNull) return std::nullopt;
+    if (toLower(left.typeName) != toLower(right.typeName)) return std::nullopt;
+
+    const RangeParts lhs = parseRangeLiteral(left.value);
+    const RangeParts rhs = parseRangeLiteral(right.value);
+    if (!lhs.valid || !rhs.valid) return std::nullopt;
+    if (lhs.empty || rhs.empty) return false;
+
+    const std::string boundType = rangeBoundType(left.typeName);
+    const auto compareBounds = [&](const std::string& a,
+                                   const std::string& b) {
+        return compareValues(ExprValue(boundType, a, false),
+                             ExprValue(boundType, b, false));
+    };
+
+    if (!lhs.hiInf && !rhs.loInf) {
+        const int comparison = compareBounds(lhs.hi, rhs.lo);
+        if (comparison < 0 ||
+            (comparison == 0 && !(lhs.hiInc && rhs.loInc))) {
+            return false;
+        }
+    }
+    if (!rhs.hiInf && !lhs.loInf) {
+        const int comparison = compareBounds(rhs.hi, lhs.lo);
+        if (comparison < 0 ||
+            (comparison == 0 && !(rhs.hiInc && lhs.loInc))) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // SQL identifier quoting (quote_ident / format %I): only quote when not a simple
