@@ -3273,6 +3273,15 @@ static size_t utf8ByteAt(const std::string& s, size_t charIdx) {
     return s.size();
 }
 
+static size_t utf8StartByte(const std::string& text, int64_t oneBasedStart) {
+    if (oneBasedStart <= 1) return 0;
+    const uint64_t characterIndex =
+        static_cast<uint64_t>(oneBasedStart - 1);
+    const size_t characters = utf8CharCount(text);
+    if (characterIndex >= characters) return text.size();
+    return utf8ByteAt(text, static_cast<size_t>(characterIndex));
+}
+
 static bool decodeFirstUtf8CodePoint(const std::string& text,
                                      uint32_t& codePoint) {
     if (text.empty()) return false;
@@ -6318,7 +6327,7 @@ void ExprEvaluator::registerBuiltins() {
         size_t start = 0;
         if (a.size() >= 3 && !a[2].isNull) {
             int64_t st = a[2].asInt();
-            if (st > 1) start = std::min(static_cast<size_t>(st - 1), s.size());
+            start = utf8StartByte(s, st);
         }
         std::string sub = s.substr(start);
         try {
@@ -6341,7 +6350,7 @@ void ExprEvaluator::registerBuiltins() {
         size_t start = 0;
         if (a.size() >= 3 && !a[2].isNull) {
             int64_t st = a[2].asInt();
-            if (st > 1) start = std::min(static_cast<size_t>(st - 1), s.size());
+            start = utf8StartByte(s, st);
         }
         int64_t which = (a.size() >= 4 && !a[3].isNull) ? a[3].asInt() : 1;
         if (which < 1) which = 1;

@@ -94,11 +94,15 @@ static void test_count_substr() {
     assert(callFn(eval, "regexp_count", {S("hello world"), S("o")}).value == "2");
     // Count from a start offset (skip the first 'o').
     assert(callFn(eval, "regexp_count", {S("hello world"), S("o"), I(6)}).value == "1");
+    assert(callFn(eval, "regexp_count", {S("éaa"), S("a"), I(3)}).value ==
+           "1");
     assert(callFn(eval, "regexp_substr", {S("foobar"), S("o+")}).value == "oo");
     assert(callFn(eval, "regexp_count", {C("ab  "), C("b$  ")}).value ==
            "1");
     assert(callFn(eval, "regexp_substr", {C("ab  "), C("b$  ")}).value ==
            "b");
+    assert(callFn(eval, "regexp_substr", {S("éab"), S("a"), I(3)})
+               .isNull);
     // 2nd match.
     assert(callFn(eval, "regexp_substr", {S("a1b2c3"), S("[0-9]"), I(1), I(2)}).value == "2");
     // No match -> NULL.
