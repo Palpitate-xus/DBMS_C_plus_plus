@@ -28514,12 +28514,40 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         for (char& c : val) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         return val;
     }
-    if (expr.funcName == "trim" && !expr.funcArgs.empty()) {
-        std::string val = getVal(expr.funcArgs[0]);
-        size_t a = 0, b = val.size();
-        while (a < b && val[a] == ' ') ++a;
-        while (b > a && val[b - 1] == ' ') --b;
-        return val.substr(a, b - a);
+    if ((expr.funcName == "trim" || expr.funcName == "btrim" ||
+         expr.funcName == "ltrim" || expr.funcName == "rtrim") &&
+        !expr.funcArgs.empty()) {
+        std::map<std::string, std::string> rowContext;
+        std::map<std::string, std::string> typeHints;
+        std::set<std::string> nullColumns;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            bool valueIsNull = false;
+            const std::string value = engine && !dbname.empty()
+                ? engine->extractColumnValue(
+                      rowBuffer, tbl, i, dbname, true, &valueIsNull)
+                : StorageEngine::extractColumnValueStatic(
+                      rowBuffer, tbl, i);
+            rowContext[tbl.cols[i].dataName] = value;
+            typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+            if (valueIsNull || (!engine && value.empty()))
+                nullColumns.insert(tbl.cols[i].dataName);
+        }
+        std::string expressionSql = expr.funcName + "(";
+        for (size_t i = 0; i < expr.funcArgs.size(); ++i) {
+            if (i) expressionSql += ',';
+            expressionSql += expr.funcArgs[i];
+        }
+        expressionSql += ')';
+        const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
+            expressionSql, rowContext, nullColumns, typeHints, dbname,
+            expr.sessionUser);
+        if (!evaluated.ok) {
+            throw std::runtime_error(
+                evaluated.error.empty()
+                    ? "failed to evaluate trim"
+                    : evaluated.error);
+        }
+        return evaluated.isNull ? "NULL" : evaluated.value;
     }
     if ((expr.funcName == "substring" || expr.funcName == "substr") &&
         expr.funcArgs.size() >= 2) {
@@ -28713,36 +28741,6 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     : evaluated.error);
         }
         return evaluated.isNull ? "NULL" : evaluated.value;
-    }
-    if (expr.funcName == "btrim" && !expr.funcArgs.empty()) {
-        std::string val = getVal(expr.funcArgs[0]);
-        // PG: btrim(s, chars) strips any of chars from both ends;
-        // one-arg form strips whitespace.
-        std::string set = " \t\r\n";
-        if (expr.funcArgs.size() >= 2) {
-            std::string a2 = getVal(expr.funcArgs[1]);
-            if (!a2.empty()) set = a2;
-        }
-        size_t b = val.find_first_not_of(set);
-        if (b == std::string::npos) return "";
-        size_t e = val.find_last_not_of(set);
-        return val.substr(b, e - b + 1);
-    }
-    if (expr.funcName == "ltrim" && expr.funcArgs.size() >= 2) {
-        std::string val = getVal(expr.funcArgs[0]);
-        std::string set = getVal(expr.funcArgs[1]);
-        if (set.empty()) return val;
-        size_t b = val.find_first_not_of(set);
-        if (b == std::string::npos) return "";
-        return val.substr(b);
-    }
-    if (expr.funcName == "rtrim" && expr.funcArgs.size() >= 2) {
-        std::string val = getVal(expr.funcArgs[0]);
-        std::string set = getVal(expr.funcArgs[1]);
-        if (set.empty()) return val;
-        size_t e = val.find_last_not_of(set);
-        if (e == std::string::npos) return "";
-        return val.substr(0, e + 1);
     }
     if ((expr.funcName == "left" || expr.funcName == "right") &&
         expr.funcArgs.size() >= 2) {
