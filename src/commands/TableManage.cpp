@@ -27804,20 +27804,36 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     // propagates (the whole point of the operator).
     if (expr.funcName == "isdistinct" || expr.funcName == "isnotdistinct") {
         if (expr.funcArgs.size() < 2) return "f";
-        std::string va = getVal(expr.funcArgs[0]);
-        std::string vb = getVal(expr.funcArgs[1]);
-        bool na = (va == "NULL" || va.empty());
-        bool nb = (vb == "NULL" || vb.empty());
-        bool distinct;
-        if (na && nb) distinct = false;
-        else if (na || nb) distinct = true;
-        else {
-            bool num = true;
-            double da = 0, db2 = 0;
-            try { da = std::stod(va); db2 = std::stod(vb); } catch (...) { num = false; }
-            distinct = num ? (da != db2) : (va != vb);
+        std::map<std::string, std::string> rowContext;
+        std::map<std::string, std::string> typeHints;
+        std::set<std::string> nullColumns;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            bool valueIsNull = false;
+            const std::string value = engine && !dbname.empty()
+                ? engine->extractColumnValue(
+                      rowBuffer, tbl, i, dbname, true, &valueIsNull)
+                : StorageEngine::extractColumnValueStatic(
+                      rowBuffer, tbl, i);
+            rowContext[tbl.cols[i].dataName] = value;
+            typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+            if (valueIsNull || (!engine && value.empty()))
+                nullColumns.insert(tbl.cols[i].dataName);
         }
-        return (expr.funcName == "isdistinct") == distinct ? "t" : "f";
+        const std::string operation = expr.funcName == "isdistinct"
+            ? " IS DISTINCT FROM "
+            : " IS NOT DISTINCT FROM ";
+        const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
+            "(" + expr.funcArgs[0] + ")" + operation +
+                "(" + expr.funcArgs[1] + ")",
+            rowContext, nullColumns, typeHints, dbname,
+            expr.sessionUser);
+        if (!evaluated.ok) {
+            throw std::runtime_error(
+                evaluated.error.empty()
+                    ? "failed to evaluate distinct comparison"
+                    : evaluated.error);
+        }
+        return evaluated.value;
     }
 
     // Math functions with PG-exact presentation semantics live in the expression
