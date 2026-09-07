@@ -968,6 +968,8 @@ static int32_t parseInt32Argument(const ExprValue& argument) {
     return static_cast<int32_t>(parsed);
 }
 
+constexpr size_t kMaxTextPayload = (size_t{1} << 30) - 4;
+
 static std::string shiftDateByDays(const std::string& text, long long days,
                                    bool add) {
     Date input(text.c_str());
@@ -4140,9 +4142,7 @@ static ExprValue evaluateTextPad(const std::vector<ExprValue>& args,
         (args.size() >= 3 && args[2].isNull)) {
         return ExprValue("text", "", true);
     }
-    long long requestedLength = 0;
-    if (!parseInt64Exact(args[1].value, requestedLength))
-        return ExprValue("text", "", true);
+    const int32_t requestedLength = parseInt32Argument(args[1]);
     if (requestedLength <= 0) return ExprValue("text", "", false);
 
     const size_t targetLength = static_cast<size_t>(requestedLength);
@@ -4168,8 +4168,20 @@ static ExprValue evaluateTextPad(const std::vector<ExprValue>& args,
     if (fillCharacters.empty())
         return ExprValue("text", input, false);
 
-    std::string padding;
     const size_t needed = targetLength - inputLength;
+    const size_t completeCycles = needed / fillCharacters.size();
+    const size_t remainder = needed % fillCharacters.size();
+    __int128 paddingBytes =
+        static_cast<__int128>(completeCycles) * fill.size();
+    for (size_t i = 0; i < remainder; ++i)
+        paddingBytes += fillCharacters[i].size();
+    if (paddingBytes + input.size() > kMaxTextPayload) {
+        throw std::runtime_error(
+            "requested text length exceeds the limit (SQLSTATE 54000)");
+    }
+
+    std::string padding;
+    padding.reserve(static_cast<size_t>(paddingBytes));
     for (size_t i = 0; i < needed; ++i)
         padding += fillCharacters[i % fillCharacters.size()];
     return ExprValue(
@@ -7016,7 +7028,6 @@ void ExprEvaluator::registerBuiltins() {
         const int32_t n = parseInt32Argument(a[1]);
         if (n <= 0) return ExprValue("text", "", false);
         const std::string input = textArgumentValue(a[0]);
-        constexpr size_t kMaxTextPayload = (size_t{1} << 30) - 4;
         if (!input.empty() &&
             static_cast<size_t>(n) > kMaxTextPayload / input.size()) {
             throw std::runtime_error(

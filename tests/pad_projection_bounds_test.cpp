@@ -4,6 +4,7 @@
 
 #include <cassert>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -26,6 +27,21 @@ std::string projectPad(const std::string& database,
     std::string value = rows.front();
     value.pop_back();
     return value;
+}
+
+void expectSqlState(const std::string& database,
+                    const std::string& function,
+                    const std::string& length,
+                    const std::string& sqlState) {
+    bool rejected = false;
+    try {
+        (void)projectPad(
+            database, function, {"'x'", length, "'a'"});
+    } catch (const std::runtime_error& error) {
+        rejected = std::string(error.what()).find(
+            "SQLSTATE " + sqlState) != std::string::npos;
+    }
+    assert(rejected);
 }
 
 }  // namespace
@@ -57,6 +73,9 @@ int main() {
            "é界界");
     assert(projectPad(database, "lpad", {"null_text", "3", "'x'"}) ==
            "NULL");
+    expectSqlState(database, "lpad", "'2x'", "22P02");
+    expectSqlState(database, "rpad", "2147483648", "22003");
+    expectSqlState(database, "lpad", "1073741824", "54000");
 
     cleanupTestDb(testName);
     finalCleanupTestData();
