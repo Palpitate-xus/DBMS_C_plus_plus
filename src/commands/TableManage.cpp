@@ -28666,20 +28666,37 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         return std::to_string(stringSearchPosition(a, b2));
     }
     if (expr.funcName == "overlay" && expr.funcArgs.size() >= 3) {
-        // PG: overlay(s placing r from start [for n]) replaces n
-        // chars (default: length of r) starting at start.
-        std::string s = getVal(expr.funcArgs[0]);
-        std::string r = getVal(expr.funcArgs[1]);
-        int start = 1, n = (int)r.size();
-        try { start = std::stoi(getVal(expr.funcArgs[2])); } catch (...) { return s; }
-        if (expr.funcArgs.size() >= 4) {
-            try { n = std::stoi(getVal(expr.funcArgs[3])); } catch (...) {}
+        std::map<std::string, std::string> rowContext;
+        std::map<std::string, std::string> typeHints;
+        std::set<std::string> nullColumns;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            bool valueIsNull = false;
+            const std::string value = engine && !dbname.empty()
+                ? engine->extractColumnValue(
+                      rowBuffer, tbl, i, dbname, true, &valueIsNull)
+                : StorageEngine::extractColumnValueStatic(
+                      rowBuffer, tbl, i);
+            rowContext[tbl.cols[i].dataName] = value;
+            typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+            if (valueIsNull || (!engine && value.empty()))
+                nullColumns.insert(tbl.cols[i].dataName);
         }
-        if (start < 1) return s;
-        size_t st = (size_t)(start - 1);
-        if (st > s.size()) return s + r;
-        if (st + n > s.size()) n = (int)(s.size() - st);
-        return s.substr(0, st) + r + s.substr(st + n);
+        std::string expressionSql = "overlay(";
+        for (size_t i = 0; i < expr.funcArgs.size(); ++i) {
+            if (i) expressionSql += ',';
+            expressionSql += expr.funcArgs[i];
+        }
+        expressionSql += ')';
+        const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
+            expressionSql, rowContext, nullColumns, typeHints, dbname,
+            expr.sessionUser);
+        if (!evaluated.ok) {
+            throw std::runtime_error(
+                evaluated.error.empty()
+                    ? "failed to evaluate overlay"
+                    : evaluated.error);
+        }
+        return evaluated.isNull ? "NULL" : evaluated.value;
     }
     if (expr.funcName == "btrim" && !expr.funcArgs.empty()) {
         std::string val = getVal(expr.funcArgs[0]);
