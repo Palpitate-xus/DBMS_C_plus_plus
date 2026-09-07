@@ -5502,7 +5502,17 @@ void ExprEvaluator::registerBuiltins() {
     // result exact -> bare integer; otherwise 16 fractional digits (PG's
     // numeric exp/ln presentation, e.g. power(2.5,2) -> 6.2500000000000000).
     functions_["power"] = [](const std::vector<ExprValue>& a) {
-        if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("double precision", "", true);
+        if (a.size() < 2)
+            return ExprValue("double precision", "", true);
+        const std::string leftType = toLower(a[0].typeName);
+        const std::string rightType = toLower(a[1].typeName);
+        const bool exactNumeric = leftType == "numeric" ||
+                                  leftType == "decimal" ||
+                                  rightType == "numeric" ||
+                                  rightType == "decimal";
+        const char* resultType = exactNumeric ? "numeric" : "double precision";
+        if (a[0].isNull || a[1].isNull)
+            return ExprValue(resultType, "", true);
         const long double baseValue = a[0].asDouble();
         const long double exponentValue = a[1].asDouble();
         if ((baseValue == 0 && exponentValue < 0) ||
@@ -5538,11 +5548,13 @@ void ExprEvaluator::registerBuiltins() {
                     const long long exponentMagnitude = e < 0 ? -e : e;
                     for (long long i = 0; i < exponentMagnitude; ++i)
                         r = r * base;
-                    if (!r.isFinite()) {
+                    if (!r.isFinite() && !exactNumeric) {
                         throw std::runtime_error(
                             "numeric value out of range (SQLSTATE 22003)");
                     }
-                    if (isIntVal(a[0]) && isIntVal(a[1])) {
+                    if (!r.isFinite())
+                        return ExprValue("numeric", r.toString(), false);
+                    if (!exactNumeric && isIntVal(a[0]) && isIntVal(a[1])) {
                         std::string rs = r.toString();
                         if (rs.find('.') == std::string::npos)
                             return ExprValue("double precision", rs, false);
@@ -5550,7 +5562,7 @@ void ExprEvaluator::registerBuiltins() {
                     long double rl =
                         std::strtold(r.toString().c_str(), nullptr);
                     return ExprValue(
-                        "double precision",
+                        resultType,
                         r.withScale(displayScale(rl)).toString(), false);
                 } catch (const std::invalid_argument&) {
                     throw std::runtime_error(
@@ -5560,16 +5572,22 @@ void ExprEvaluator::registerBuiltins() {
         }
         // PG numeric power computes exp/ln in extended precision; long double matches its 16-digit output.
         long double lv = powl(a[0].asDouble(), a[1].asDouble());
-        if (!std::isfinite(lv)) {
+        if (!std::isfinite(lv) && !exactNumeric) {
             throw std::runtime_error(
                 "numeric value out of range (SQLSTATE 22003)");
         }
+        if (!std::isfinite(lv)) {
+            return ExprValue(
+                "numeric", std::isnan(lv) ? "NaN" :
+                std::signbit(lv) ? "-Infinity" : "Infinity", false);
+        }
         double v = static_cast<double>(lv);
-        if (isIntVal(a[0]) && isIntVal(a[1]) && v == std::floor(v) && std::fabs(v) < 1e15)
+        if (!exactNumeric && isIntVal(a[0]) && isIntVal(a[1]) &&
+            v == std::floor(v) && std::fabs(v) < 1e15)
             return ExprValue("double precision", std::to_string(static_cast<long long>(v)), false);
         std::ostringstream out;
         out << std::fixed << std::setprecision(displayScale(lv)) << lv;
-        return ExprValue("double precision", out.str(), false);
+        return ExprValue(resultType, out.str(), false);
     };
     functions_["mod"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull)

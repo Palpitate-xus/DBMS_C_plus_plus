@@ -67,6 +67,20 @@ static void test_callback_lifetimes() {
 static void test_pow_log() {
     dbms::ExprEvaluator eval;
     assert(approx(callFn(eval, "pow", {D(2), D(10)}), 1024.0));
+    const auto exactPower = callFn(eval, "power", {N("2"), N("3")});
+    assert(exactPower.typeName == "numeric" &&
+           exactPower.value == "8.0000000000000000");
+    const auto mixedPower = callFn(eval, "power", {N("2"), I(3)});
+    assert(mixedPower.typeName == "numeric" &&
+           mixedPower.value == "8.0000000000000000");
+    const auto floatingPower = callFn(eval, "power", {I(2), I(3)});
+    assert(floatingPower.typeName == "double precision" &&
+           floatingPower.value == "8");
+    assert(callFn(eval, "power", {N("NaN"), N("0")}).value ==
+           "1.0000000000000000");
+    assert(callFn(eval, "power", {N("NaN"), N("2")}).value == "NaN");
+    assert(callFn(eval, "power", {N("-Infinity"), N("3")}).value ==
+           "-Infinity");
     const auto largeExponential = callFn(eval, "exp", {D(200)});
     assert(!largeExponential.isNull &&
            std::fabs(std::log(std::stold(largeExponential.value)) - 200.0L) <
