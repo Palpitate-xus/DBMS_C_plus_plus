@@ -4160,8 +4160,13 @@ static std::string sqlQuoteIdent(const std::string& s) {
 // SQL string-literal quoting (quote_literal / format %L): single-quote, doubling
 // embedded quotes.
 static std::string sqlQuoteLiteral(const std::string& s) {
-    std::string out = "'";
-    for (char c : s) { if (c == '\'') out += "''"; else out.push_back(c); }
+    const bool escapeSyntax = s.find('\\') != std::string::npos;
+    std::string out = escapeSyntax ? "E'" : "'";
+    for (char c : s) {
+        if (c == '\'') out += "''";
+        else if (c == '\\') out += "\\\\";
+        else out.push_back(c);
+    }
     out += "'";
     return out;
 }

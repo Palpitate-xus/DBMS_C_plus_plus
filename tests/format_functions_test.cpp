@@ -44,6 +44,8 @@ static void test_format() {
     assert(callFn(eval, "format", {S("col %I"), S("name")}).value == "col name");
     // %L quotes as a SQL literal; NULL -> NULL.
     assert(callFn(eval, "format", {S("val %L"), S("O'Brien")}).value == "val 'O''Brien'");
+    assert(callFn(eval, "format", {S("val %L"), S("a\\b")}).value ==
+           "val E'a\\\\b'");
     assert(callFn(eval, "format", {S("val %L"), NULLV()}).value == "val NULL");
     // %s of NULL renders empty.
     assert(callFn(eval, "format", {S("[%s]"), NULLV()}).value == "[]");
@@ -90,6 +92,8 @@ static void test_quote_nullable() {
     assert(!callFn(eval, "quote_nullable", {NULLV()}).isNull);
     assert(callFn(eval, "quote_nullable", {S("O'Brien")}).value ==
            "'O''Brien'");
+    assert(callFn(eval, "quote_nullable", {S("a\\b")}).value ==
+           "E'a\\\\b'");
 
     std::cout << "[FORMATFN] quote_nullable OK" << std::endl;
 }

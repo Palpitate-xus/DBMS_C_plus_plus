@@ -267,6 +267,8 @@ static void test_overlay_quote() {
     }
     assert(invalidStartRejected);
     assert(callFn(eval, "quote_literal", {S("O'Brien")}).value == "'O''Brien'");
+    assert(callFn(eval, "quote_literal", {S("a\\b")}).value ==
+           "E'a\\\\b'");
     assert(callFn(eval, "quote_ident", {S("simple")}).value == "simple");
     assert(callFn(eval, "quote_ident", {S("select")}).value == "\"select\"");
     assert(callFn(eval, "quote_ident", {S("user")}).value == "\"user\"");
