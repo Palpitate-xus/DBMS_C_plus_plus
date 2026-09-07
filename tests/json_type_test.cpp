@@ -58,7 +58,26 @@ int main() {
     assert(g_engine.update(database, "t", {{"j", invalidStrings.front()}},
                            {"=id 1"}) == dbms::DBStatus::INVALID_VALUE);
 
+    const std::string validNumbers = "[0,-0,1.25,1e2,-2.5E-3]";
+    assert(g_engine.insert(database, "t",
+                           {{"id", std::to_string(id++)},
+                            {"j", validNumbers}, {"jb", validNumbers}}) ==
+           dbms::DBStatus::OK);
+    const std::vector<std::string> invalidNumbers = {
+        "01", "-01", "1.", "1.e2", "[00.5]",
+    };
+    for (const auto& invalid : invalidNumbers) {
+        assert(g_engine.insert(database, "t",
+                               {{"id", std::to_string(id++)},
+                                {"j", invalid}}) ==
+               dbms::DBStatus::INVALID_VALUE);
+        assert(g_engine.insert(database, "t",
+                               {{"id", std::to_string(id++)},
+                                {"jb", invalid}}) ==
+               dbms::DBStatus::INVALID_VALUE);
+    }
+
     cleanup(database);
-    std::cout << "[JSON-TYPE] string validation passed" << std::endl;
+    std::cout << "[JSON-TYPE] validation passed" << std::endl;
     return 0;
 }

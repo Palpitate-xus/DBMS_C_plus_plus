@@ -19859,20 +19859,32 @@ static bool isValidJson(const std::string& s) {
         // Number
         if (c == '-' || (c >= '0' && c <= '9')) {
             if (c == '-') ++i;
-            bool hasDigits = false;
-            while (i < s.size() && s[i] >= '0' && s[i] <= '9') { ++i; hasDigits = true; }
-            if (!hasDigits) return false;
+            if (i >= s.size()) return false;
+            if (s[i] == '0') {
+                ++i;
+                if (i < s.size() && s[i] >= '0' && s[i] <= '9')
+                    return false;
+            } else if (s[i] >= '1' && s[i] <= '9') {
+                do {
+                    ++i;
+                } while (i < s.size() && s[i] >= '0' && s[i] <= '9');
+            } else {
+                return false;
+            }
             if (i < s.size() && s[i] == '.') {
                 ++i;
-                hasDigits = false;
-                while (i < s.size() && s[i] >= '0' && s[i] <= '9') { ++i; hasDigits = true; }
+                const size_t fractionStart = i;
+                while (i < s.size() && s[i] >= '0' && s[i] <= '9')
+                    ++i;
+                if (i == fractionStart) return false;
             }
             if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
                 ++i;
                 if (i < s.size() && (s[i] == '+' || s[i] == '-')) ++i;
-                hasDigits = false;
-                while (i < s.size() && s[i] >= '0' && s[i] <= '9') { ++i; hasDigits = true; }
-                if (!hasDigits) return false;
+                const size_t exponentStart = i;
+                while (i < s.size() && s[i] >= '0' && s[i] <= '9')
+                    ++i;
+                if (i == exponentStart) return false;
             }
             return true;
         }
