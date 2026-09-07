@@ -376,6 +376,33 @@ static void test_overlaps_null_semantics() {
     std::cout << "[DATEFN] overlaps NULL semantics OK" << std::endl;
 }
 
+static void test_overlaps_interval_endpoints() {
+    dbms::ExprEvaluator eval;
+
+    assert(callFn(eval, "overlaps",
+                  {TS("2026-01-01 00:00:00"), IV("2 days"),
+                   TS("2026-01-02 00:00:00"),
+                   TS("2026-01-04 00:00:00")}).value == "t");
+    assert(callFn(eval, "overlaps",
+                  {TS("2026-01-02 00:00:00"),
+                   TS("2026-01-04 00:00:00"),
+                   TS("2026-01-01 00:00:00"), IV("2 days")}).value == "t");
+    assert(callFn(eval, "overlaps",
+                  {TS("2026-01-03 00:00:00"), IV("-2 days"),
+                   TS("2026-01-02 00:00:00"),
+                   TS("2026-01-04 00:00:00")}).value == "t");
+    assert(callFn(eval, "overlaps",
+                  {TS("2026-01-01 00:00:00"), IV("1 day"),
+                   TS("2026-01-02 00:00:00"),
+                   TS("2026-01-04 00:00:00")}).value == "f");
+    assert(callFn(eval, "overlaps",
+                  {TS("2026-01-04 00:00:00"), IV("0 days"),
+                   TS("2026-01-02 00:00:00"),
+                   TS("2026-01-04 00:00:00")}).value == "f");
+
+    std::cout << "[DATEFN] overlaps interval endpoints OK" << std::endl;
+}
+
 int main() {
     test_extract_date_part();
     test_dow_doy_century();
@@ -386,6 +413,7 @@ int main() {
     test_current_family();
     test_overlaps_point_boundaries();
     test_overlaps_null_semantics();
+    test_overlaps_interval_endpoints();
     std::cout << "[DATEFN] all passed" << std::endl;
     return 0;
 }

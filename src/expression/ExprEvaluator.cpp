@@ -4855,35 +4855,56 @@ void ExprEvaluator::registerBuiltins() {
         // boundary.  A result is true only when it is strictly inside the
         // other period; otherwise the missing endpoint leaves it unknown.
         if (a.size() != 4) return ExprValue("boolean", "", true);
-        if ((a[0].isNull && a[1].isNull) ||
-            (a[2].isNull && a[3].isNull)) {
+        std::vector<ExprValue> period = a;
+        auto materializeIntervalEnd = [&](size_t start, size_t end) {
+            if (toLower(period[end].typeName) != "interval") return;
+            if (period[start].isNull || period[end].isNull) {
+                period[end] = ExprValue("timestamp", "", true);
+                return;
+            }
+            const IntervalParts interval = parseIntervalText(period[end].value);
+            const std::string endpoint = interval.ok
+                ? timestampShift(period[start].value, interval, true)
+                : "";
+            period[end] = ExprValue("timestamp", endpoint, endpoint.empty());
+            if (toLower(period[start].typeName) == "date" &&
+                period[start].value.size() == 10) {
+                period[start].value += " 00:00:00";
+                period[start].typeName = "timestamp";
+            }
+        };
+        materializeIntervalEnd(0, 1);
+        materializeIntervalEnd(2, 3);
+
+        if ((period[0].isNull && period[1].isNull) ||
+            (period[2].isNull && period[3].isNull)) {
             return ExprValue("boolean", "", true);
         }
         size_t s1 = 0, e1 = 1, s2 = 2, e2 = 3;
-        if (a[s1].isNull ||
-            (!a[e1].isNull && a[s1].value > a[e1].value)) {
+        if (period[s1].isNull ||
+            (!period[e1].isNull && period[s1].value > period[e1].value)) {
             std::swap(s1, e1);
         }
-        if (a[s2].isNull ||
-            (!a[e2].isNull && a[s2].value > a[e2].value)) {
+        if (period[s2].isNull ||
+            (!period[e2].isNull && period[s2].value > period[e2].value)) {
             std::swap(s2, e2);
         }
 
-        if (a[s1].value > a[s2].value) {
-            if (a[e2].isNull) return ExprValue("boolean", "", true);
-            if (a[s1].value < a[e2].value)
+        if (period[s1].value > period[s2].value) {
+            if (period[e2].isNull) return ExprValue("boolean", "", true);
+            if (period[s1].value < period[e2].value)
                 return ExprValue("boolean", "t", false);
-            if (a[e1].isNull) return ExprValue("boolean", "", true);
+            if (period[e1].isNull) return ExprValue("boolean", "", true);
             return ExprValue("boolean", "f", false);
         }
-        if (a[s1].value < a[s2].value) {
-            if (a[e1].isNull) return ExprValue("boolean", "", true);
-            if (a[s2].value < a[e1].value)
+        if (period[s1].value < period[s2].value) {
+            if (period[e1].isNull) return ExprValue("boolean", "", true);
+            if (period[s2].value < period[e1].value)
                 return ExprValue("boolean", "t", false);
-            if (a[e2].isNull) return ExprValue("boolean", "", true);
+            if (period[e2].isNull) return ExprValue("boolean", "", true);
             return ExprValue("boolean", "f", false);
         }
-        if (a[e1].isNull || a[e2].isNull)
+        if (period[e1].isNull || period[e2].isNull)
             return ExprValue("boolean", "", true);
         return ExprValue("boolean", "t", false);
     };
