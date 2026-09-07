@@ -480,6 +480,21 @@ static void test_cast() {
     assert(evaluateCast("character varying", "-Infinity", "timestamp").value ==
            "-infinity");
 
+    assert(evaluateCast("character varying", "abcdef", "varchar(3)").value ==
+           "abc");
+    assert(evaluateCast("character varying", "你好世界", "varchar(3)").value ==
+           "你好世");
+    assert(evaluateCast("character varying", "ab", "char(4)").value ==
+           "ab  ");
+    assert(evaluateCast("character varying", "abcdef", "char(3)").value ==
+           "abc");
+    assert(evaluateCast("character varying", "abcdef", "char").value ==
+           "a");
+    expectCastError("character varying", "x", "varchar(0)", "22023");
+    expectCastError("character varying", "x", "varchar(10485761)",
+                    "22023");
+    expectCastError("character varying", "abcdef", "text(3)", "42601");
+
     expectCastError("character varying", "not-numeric", "numeric",
                     "22P02");
     expectCastError("boolean", "t", "numeric", "42846");

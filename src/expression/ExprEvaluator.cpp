@@ -152,6 +152,8 @@ static std::string unquote(const std::string& s) {
 
 
 static std::string trimStr(const std::string& s);
+static size_t utf8CharCount(const std::string& s);
+static size_t utf8ByteAt(const std::string& s, size_t charIdx);
 
 // ----------------------------------------------------------------------------
 // Interval support
@@ -2624,6 +2626,106 @@ static ExprValue castToTimestamp(const ExprValue& value,
     return ExprValue(targetType, formatted, false);
 }
 
+enum class CharacterCastKind { None, Text, Varchar, Char };
+
+struct CharacterCastSpec {
+    CharacterCastKind kind = CharacterCastKind::None;
+    bool hasLength = false;
+    size_t length = 0;
+};
+
+[[noreturn]] static void throwCharacterTypmodError(
+    const std::string& message) {
+    throw std::runtime_error(message + " (SQLSTATE 22023)");
+}
+
+static CharacterCastSpec parseCharacterCastSpec(const std::string& target) {
+    CharacterCastSpec spec;
+    if (target == "text") {
+        spec.kind = CharacterCastKind::Text;
+        return spec;
+    }
+    if (target.rfind("text(", 0) == 0) {
+        throw std::runtime_error(
+            "type modifier is not allowed for type text (SQLSTATE 42601)");
+    }
+
+    std::string base;
+    if (target == "varchar" || target == "character varying") {
+        spec.kind = CharacterCastKind::Varchar;
+        return spec;
+    }
+    if (target == "char" || target == "character" || target == "bpchar") {
+        spec.kind = CharacterCastKind::Char;
+        spec.hasLength = true;
+        spec.length = 1;
+        return spec;
+    }
+    if (target.rfind("varchar(", 0) == 0) {
+        base = "varchar";
+        spec.kind = CharacterCastKind::Varchar;
+    } else if (target.rfind("character varying(", 0) == 0) {
+        base = "character varying";
+        spec.kind = CharacterCastKind::Varchar;
+    } else if (target.rfind("char(", 0) == 0) {
+        base = "char";
+        spec.kind = CharacterCastKind::Char;
+    } else if (target.rfind("character(", 0) == 0) {
+        base = "character";
+        spec.kind = CharacterCastKind::Char;
+    } else if (target.rfind("bpchar(", 0) == 0) {
+        base = "bpchar";
+        spec.kind = CharacterCastKind::Char;
+    } else {
+        return spec;
+    }
+
+    const size_t close = target.rfind(')');
+    if (close == std::string::npos || close != target.size() - 1 ||
+        close <= base.size() + 1) {
+        throwCharacterTypmodError("invalid length for type " + base);
+    }
+    const std::string lengthText =
+        target.substr(base.size() + 1, close - base.size() - 1);
+    int64_t length = 0;
+    if (parseSignedInteger(lengthText, length) !=
+        SignedIntegerParseResult::Ok) {
+        throwCharacterTypmodError("invalid length for type " + base);
+    }
+    constexpr int64_t maximumLength = 10485760;
+    if (length < 1) {
+        throwCharacterTypmodError(
+            "length for type " + base + " must be at least 1");
+    }
+    if (length > maximumLength) {
+        throwCharacterTypmodError(
+            "length for type " + base + " cannot exceed " +
+            std::to_string(maximumLength));
+    }
+    spec.hasLength = true;
+    spec.length = static_cast<size_t>(length);
+    return spec;
+}
+
+static ExprValue castToCharacter(const ExprValue& value,
+                                 const CharacterCastSpec& spec) {
+    std::string converted = value.value;
+    if (spec.hasLength) {
+        const size_t characters = utf8CharCount(converted);
+        if (characters > spec.length) {
+            converted.resize(utf8ByteAt(converted, spec.length));
+        } else if (spec.kind == CharacterCastKind::Char &&
+                   characters < spec.length) {
+            converted.append(spec.length - characters, ' ');
+        }
+    }
+
+    const char* resultType = spec.kind == CharacterCastKind::Text
+        ? "text" : spec.kind == CharacterCastKind::Varchar
+        ? "character varying" : "character";
+    return ExprValue(resultType, std::move(converted), false);
+}
+
 ExprValue ExprEvaluator::evalCast(const CastExpr* e, const RowContext& ctx) const {
     if (e) {
         ExprValue v = eval(e->operand.get(), ctx);
@@ -2700,9 +2802,9 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
     }
     const NumericCastSpec numericSpec = parseNumericCastSpec(target);
     if (numericSpec.matches) return castToNumeric(v, numericSpec);
-    if (target == "text" || target.find("char") != std::string::npos || target == "varchar") {
-        return ExprValue(targetTypeName, v.value, false);
-    }
+    const CharacterCastSpec characterSpec = parseCharacterCastSpec(target);
+    if (characterSpec.kind != CharacterCastKind::None)
+        return castToCharacter(v, characterSpec);
     if (target == "date") return castToDate(v);
     if (target == "timestamp" || target == "timestamp without time zone")
         return castToTimestamp(v, "timestamp");
