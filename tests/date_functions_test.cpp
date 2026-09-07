@@ -37,6 +37,8 @@ static dbms::ExprValue F(const std::string& v) { return dbms::ExprValue("text", 
 static dbms::ExprValue D(const std::string& v) { return dbms::ExprValue("date", v, false); }
 static dbms::ExprValue TS(const std::string& v) { return dbms::ExprValue("timestamp", v, false); }
 static dbms::ExprValue TSTZ(const std::string& v) { return dbms::ExprValue("timestamptz", v, false); }
+static dbms::ExprValue TIME(const std::string& v) { return dbms::ExprValue("time", v, false); }
+static dbms::ExprValue TIMETZ(const std::string& v) { return dbms::ExprValue("timetz", v, false); }
 static dbms::ExprValue IV(const std::string& v) { return dbms::ExprValue("interval", v, false); }
 static dbms::ExprValue I(int64_t v) { return dbms::ExprValue("integer", std::to_string(v), false); }
 static dbms::ExprValue NullDate() { return dbms::ExprValue("date", "", true); }
@@ -123,6 +125,45 @@ static void test_extract_date_part() {
                   {F("week"), offsetTimestamp}).value == "52");
     assert(callFn(eval, "extract",
                   {F("isoyear"), offsetTimestamp}).value == "2023");
+
+    auto time = TIME("12:34:56.123456");
+    assert(callFn(eval, "extract", {F("hour"), time}).value == "12");
+    assert(callFn(eval, "extract", {F("minute"), time}).value == "34");
+    assert(callFn(eval, "extract", {F("second"), time}).value ==
+           "56.123456");
+    assert(callFn(eval, "extract", {F("milliseconds"), time}).value ==
+           "56123.456");
+    assert(callFn(eval, "extract", {F("microseconds"), time}).value ==
+           "56123456");
+    assert(callFn(eval, "extract", {F("epoch"), time}).value ==
+           "45296.123456");
+    assert(callFn(eval, "date_part", {F("second"), time}).value ==
+           "56.123456");
+    assert(callFn(eval, "extract",
+                  {F("epoch"), TIME("24:00:00")}).value ==
+           "86400.000000");
+    expectExtractError("year", time, "0A000");
+    expectExtractError("timezone", time, "0A000");
+
+    auto zonedTime = TIMETZ("12:34:56.123456+05:30");
+    assert(callFn(eval, "extract", {F("hour"), zonedTime}).value == "12");
+    assert(callFn(eval, "extract", {F("timezone"), zonedTime}).value ==
+           "19800");
+    assert(callFn(eval, "extract",
+                  {F("timezone_hour"), zonedTime}).value == "5");
+    assert(callFn(eval, "extract",
+                  {F("timezone_minute"), zonedTime}).value == "30");
+    assert(callFn(eval, "extract", {F("epoch"), zonedTime}).value ==
+           "25496.123456");
+    auto negativeZonedTime = TIMETZ("12:34:56.123456-05:30");
+    assert(callFn(eval, "extract",
+                  {F("timezone_hour"), negativeZonedTime}).value == "-5");
+    assert(callFn(eval, "extract",
+                  {F("timezone_minute"), negativeZonedTime}).value ==
+           "-30");
+    assert(callFn(eval, "extract",
+                  {F("epoch"), negativeZonedTime}).value ==
+           "65096.123456");
 
     auto interval = IV("1 year 2 mons 3 days 04:05:06.25");
     assert(callFn(eval, "extract", {F("year"), interval}).value == "1");

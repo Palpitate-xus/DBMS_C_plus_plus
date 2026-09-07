@@ -437,6 +437,125 @@ static std::string formatTimeFields(long long hours, long long minutes,
     return result;
 }
 
+struct ExtractTimeParts {
+    int hour = 0;
+    int minute = 0;
+    int64_t secondMicros = 0;
+    int offsetMinutes = 0;
+};
+
+static std::optional<ExtractTimeParts> parseTimeForExtract(
+    const std::string& input) {
+    std::string text = trimStr(input);
+    if (text.empty()) return std::nullopt;
+
+    size_t zonePosition = std::string::npos;
+    for (size_t i = 1; i < text.size(); ++i) {
+        if (text[i] == '+' || text[i] == '-') {
+            zonePosition = i;
+            break;
+        }
+    }
+    const bool hasZulu = !text.empty() &&
+        (text.back() == 'Z' || text.back() == 'z');
+    if (hasZulu && zonePosition != std::string::npos)
+        return std::nullopt;
+
+    std::string zone;
+    if (hasZulu) {
+        zone = text.substr(text.size() - 1);
+        text.pop_back();
+    } else if (zonePosition != std::string::npos) {
+        zone = text.substr(zonePosition);
+        text.resize(zonePosition);
+    }
+
+    int offsetMinutes = 0;
+    if (!zone.empty() && zone != "Z" && zone != "z") {
+        const int sign = zone.front() == '-' ? -1 : 1;
+        const std::string displacement = zone.substr(1);
+        const size_t colon = displacement.find(':');
+        std::string hourText;
+        std::string minuteText;
+        if (colon != std::string::npos) {
+            if (colon < 1 || colon > 2 ||
+                displacement.find(':', colon + 1) != std::string::npos ||
+                displacement.size() - colon - 1 != 2) {
+                return std::nullopt;
+            }
+            hourText = displacement.substr(0, colon);
+            minuteText = displacement.substr(colon + 1);
+        } else if (displacement.size() == 4) {
+            hourText = displacement.substr(0, 2);
+            minuteText = displacement.substr(2);
+        } else if (displacement.size() >= 1 &&
+                   displacement.size() <= 2) {
+            hourText = displacement;
+            minuteText = "0";
+        } else {
+            return std::nullopt;
+        }
+        auto parseUnsigned = [](const std::string& value, int& result) {
+            if (value.empty()) return false;
+            result = 0;
+            for (const unsigned char c : value) {
+                if (!std::isdigit(c)) return false;
+                result = result * 10 + (c - '0');
+            }
+            return true;
+        };
+        int offsetHour = 0;
+        int offsetMinute = 0;
+        if (!parseUnsigned(hourText, offsetHour) ||
+            !parseUnsigned(minuteText, offsetMinute) ||
+            offsetHour > 15 || offsetMinute > 59) {
+            return std::nullopt;
+        }
+        offsetMinutes = sign * (offsetHour * 60 + offsetMinute);
+    }
+
+    const size_t firstColon = text.find(':');
+    const size_t secondColon = firstColon == std::string::npos
+        ? std::string::npos : text.find(':', firstColon + 1);
+    if (firstColon == std::string::npos ||
+        secondColon == std::string::npos ||
+        text.find(':', secondColon + 1) != std::string::npos) {
+        return std::nullopt;
+    }
+    auto parseUnsigned = [](const std::string& value, long long& result) {
+        if (value.empty()) return false;
+        result = 0;
+        for (const unsigned char c : value) {
+            if (!std::isdigit(c)) return false;
+            result = result * 10 + (c - '0');
+        }
+        return true;
+    };
+    long long hour = 0;
+    long long minute = 0;
+    if (!parseUnsigned(text.substr(0, firstColon), hour) ||
+        !parseUnsigned(text.substr(firstColon + 1,
+                                   secondColon - firstColon - 1), minute)) {
+        return std::nullopt;
+    }
+    const std::string normalized = formatTimeFields(
+        hour, minute, text.substr(secondColon + 1));
+    if (normalized.empty()) return std::nullopt;
+
+    ExtractTimeParts result;
+    result.hour = std::stoi(normalized.substr(0, 2));
+    result.minute = std::stoi(normalized.substr(3, 2));
+    result.secondMicros = std::stoll(normalized.substr(6, 2)) * 1000000LL;
+    const size_t dot = normalized.find('.');
+    if (dot != std::string::npos) {
+        std::string fraction = normalized.substr(dot + 1);
+        fraction.append(6 - fraction.size(), '0');
+        result.secondMicros += std::stoll(fraction);
+    }
+    result.offsetMinutes = offsetMinutes;
+    return result;
+}
+
 static bool scaleIntervalField(long long value, long double scale,
                                long long& result) {
     const long double scaled = static_cast<long double>(value) * scale;
@@ -8358,6 +8477,92 @@ void ExprEvaluator::registerBuiltins() {
                     "unit \"" + field +
                     "\" not supported for type date (SQLSTATE 0A000)");
             }
+        }
+        const bool timeInput = sourceType == "time" ||
+            sourceType == "time without time zone" ||
+            sourceType == "timetz" ||
+            sourceType == "time with time zone";
+        if (timeInput) {
+            const bool zonedTime = sourceType == "timetz" ||
+                sourceType == "time with time zone";
+            static const std::set<std::string> supportedTimeUnits = {
+                "hour", "minute", "second", "milliseconds",
+                "microseconds", "epoch", "timezone", "timezone_hour",
+                "timezone_minute"
+            };
+            if (!supportedTimeUnits.count(field) ||
+                (!zonedTime && (field == "timezone" ||
+                                field == "timezone_hour" ||
+                                field == "timezone_minute"))) {
+                throw std::runtime_error(
+                    "unit \"" + field + "\" not supported for type " +
+                    (zonedTime ? "time with time zone" :
+                                 "time without time zone") +
+                    " (SQLSTATE 0A000)");
+            }
+            const auto parsedTime = parseTimeForExtract(a[1].value);
+            if (!parsedTime)
+                return ExprValue("numeric", "", true);
+            if (field == "hour") {
+                return ExprValue(
+                    "numeric", std::to_string(parsedTime->hour), false);
+            }
+            if (field == "minute") {
+                return ExprValue(
+                    "numeric", std::to_string(parsedTime->minute), false);
+            }
+            if (field == "second") {
+                if (parsedTime->secondMicros % 1000000LL == 0) {
+                    return ExprValue(
+                        "numeric",
+                        std::to_string(
+                            parsedTime->secondMicros / 1000000LL),
+                        false);
+                }
+                return ExprValue(
+                    "numeric",
+                    formatMicrosNumeric(parsedTime->secondMicros), false);
+            }
+            if (field == "milliseconds") {
+                const uint64_t micros =
+                    static_cast<uint64_t>(parsedTime->secondMicros);
+                std::string fraction = std::to_string(micros % 1000);
+                fraction.insert(fraction.begin(), 3 - fraction.size(), '0');
+                return ExprValue(
+                    "numeric", std::to_string(micros / 1000) + "." +
+                        fraction, false);
+            }
+            if (field == "microseconds") {
+                return ExprValue(
+                    "numeric", std::to_string(parsedTime->secondMicros),
+                    false);
+            }
+            if (field == "timezone") {
+                return ExprValue(
+                    "numeric",
+                    std::to_string(parsedTime->offsetMinutes * 60), false);
+            }
+            if (field == "timezone_hour") {
+                return ExprValue(
+                    "numeric",
+                    std::to_string(parsedTime->offsetMinutes / 60), false);
+            }
+            if (field == "timezone_minute") {
+                return ExprValue(
+                    "numeric",
+                    std::to_string(parsedTime->offsetMinutes % 60), false);
+            }
+            const __int128 localMicros =
+                (static_cast<__int128>(parsedTime->hour) * 3600 +
+                 parsedTime->minute * 60) * 1000000 +
+                parsedTime->secondMicros;
+            const __int128 epochMicros = localMicros -
+                (zonedTime
+                     ? static_cast<__int128>(parsedTime->offsetMinutes) *
+                           60000000
+                     : 0);
+            return ExprValue(
+                "numeric", formatMicrosNumeric(epochMicros), false);
         }
         if (field == "timezone" || field == "timezone_hour" ||
             field == "timezone_minute") {
