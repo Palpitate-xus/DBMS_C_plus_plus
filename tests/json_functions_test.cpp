@@ -37,6 +37,7 @@ static dbms::ExprValue J(const std::string& v) { return dbms::ExprValue("json", 
 static dbms::ExprValue S(const std::string& v) { return dbms::ExprValue("text", v, false); }
 static dbms::ExprValue I(int64_t v) { return dbms::ExprValue("integer", std::to_string(v), false); }
 static dbms::ExprValue B(bool v) { return dbms::ExprValue("boolean", v ? "t" : "f", false); }
+static dbms::ExprValue F(const std::string& v) { return dbms::ExprValue("double precision", v, false); }
 
 static void test_typeof() {
     dbms::ExprEvaluator eval;
@@ -124,6 +125,13 @@ static void test_to_json() {
     assert(callFn(eval, "json_build_object",
                   {S("line\nbreak"), I(1)}).value ==
            "{\"line\\nbreak\":1}");
+    assert(callFn(eval, "to_json", {F("NaN")}).value == "\"NaN\"");
+    assert(callFn(eval, "to_json", {F("Infinity")}).value ==
+           "\"Infinity\"");
+    assert(callFn(eval, "to_json", {F("-Infinity")}).value ==
+           "\"-Infinity\"");
+    assert(callFn(eval, "json_build_array", {F("Infinity")}).value ==
+           "[\"Infinity\"]");
     std::cout << "[JSONFN] to_json OK" << std::endl;
 }
 

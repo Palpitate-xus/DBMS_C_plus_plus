@@ -3748,7 +3748,12 @@ static std::string toJsonValue(const ExprValue& v) {
     bool numeric = (t.find("int") != std::string::npos) || t == "numeric" || t == "decimal" ||
                    t.find("double") != std::string::npos || t == "real" || t == "float" ||
                    t == "smallint" || t == "bigint";
-    if (numeric && !v.value.empty()) return v.value;
+    if (numeric && !v.value.empty()) {
+        const auto parsed = tryParseNumeric(v.value);
+        if (parsed && !parsed->isFinite())
+            return jsonQuoteStr(parsed->toString());
+        return v.value;
+    }
     if (t == "json" || t == "jsonb") return v.value;  // already JSON
     return jsonQuoteStr(v.value);
 }
