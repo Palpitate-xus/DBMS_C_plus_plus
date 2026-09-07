@@ -27703,6 +27703,16 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             }
             whereSql = expr.funcArgs[0].substr(wstart, wend - wstart);
         }
+        auto& innerLocks = engine->getLockManager();
+        innerLocks.setResourceNamespace(dbname);
+        const bool innerLocked = engine->inTransaction()
+            ? innerLocks.lockIntentShared(innerTbl)
+            : innerLocks.lockShared(innerTbl);
+        if (!innerLocked) {
+            throw std::runtime_error(
+                "could not lock EXISTS subquery relation (SQLSTATE 55P03)");
+        }
+        ResourceUnlockGuard innerLockGuard(innerLocks, innerTbl);
         if (!engine->tableExists(dbname, innerTbl)) {
             throw std::runtime_error(
                 "relation \"" + innerTbl +
@@ -30404,6 +30414,16 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         const std::set<std::string> subSelectCols{colsStr};
 
         if (!whereSql.empty() || !subAlias.empty()) {
+            auto& innerLocks = engine->getLockManager();
+            innerLocks.setResourceNamespace(dbname);
+            const bool innerLocked = engine->inTransaction()
+                ? innerLocks.lockIntentShared(subTname)
+                : innerLocks.lockShared(subTname);
+            if (!innerLocked) {
+                throw std::runtime_error(
+                    "could not lock scalar subquery relation (SQLSTATE 55P03)");
+            }
+            ResourceUnlockGuard innerLockGuard(innerLocks, subTname);
             // Opening an allocator for an unknown relation may initialize a
             // new heap. Reject it before scanning so a SELECT stays read-only.
             if (!engine->tableExists(dbname, subTname)) {
