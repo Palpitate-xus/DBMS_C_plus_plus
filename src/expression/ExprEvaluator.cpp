@@ -5747,7 +5747,9 @@ void ExprEvaluator::registerBuiltins() {
             }
             return ExprValue("text", out, false);
         }
-        return ExprValue("text", "", true);  // unknown format
+        throw std::runtime_error(
+            "unrecognized encoding: \"" + a[1].value +
+            "\" (SQLSTATE 22023)");
     };
     // decode(text, format) — inverse of encode, returns the raw bytes as text
     functions_["decode"] = [](const std::vector<ExprValue>& a) {
@@ -5781,7 +5783,9 @@ void ExprEvaluator::registerBuiltins() {
             }
             return ExprValue("bytea", out, false);
         }
-        return ExprValue("bytea", "", true);
+        throw std::runtime_error(
+            "unrecognized encoding: \"" + a[1].value +
+            "\" (SQLSTATE 22023)");
     };
 
     // ------------------------------------------------------------------------

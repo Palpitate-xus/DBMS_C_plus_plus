@@ -9,6 +9,7 @@
 #include <cassert>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -75,11 +76,29 @@ static void test_escape() {
     std::cout << "[ENCFN] escape OK" << std::endl;
 }
 
+static void test_invalid_format() {
+    dbms::ExprEvaluator eval;
+    auto expectInvalidParameter = [&](const std::string& function) {
+        bool rejected = false;
+        try {
+            (void)callFn(eval, function, {S("abc"), S("rot13")});
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("SQLSTATE 22023") !=
+                       std::string::npos;
+        }
+        assert(rejected);
+    };
+    expectInvalidParameter("encode");
+    expectInvalidParameter("decode");
+    std::cout << "[ENCFN] invalid format OK" << std::endl;
+}
+
 int main() {
     test_md5();
     test_hex();
     test_base64();
     test_escape();
+    test_invalid_format();
     std::cout << "[ENCFN] all passed" << std::endl;
     return 0;
 }
