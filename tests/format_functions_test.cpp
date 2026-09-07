@@ -61,6 +61,19 @@ static void test_format() {
                .value == "two three one two");
     assert(callFn(eval, "format", {S("%1$I"), S("select")}).value ==
            "\"select\"");
+    assert(callFn(eval, "format", {S("|%10s|"), S("foo")}).value ==
+           "|       foo|");
+    assert(callFn(eval, "format", {S("|%-10s|"), S("foo")}).value ==
+           "|foo       |");
+    assert(callFn(eval, "format",
+                  {S("|%2$-10s|"), S("unused"), S("foo")}).value ==
+           "|foo       |");
+    assert(callFn(eval, "format", {S("|%5s|"), S("é")}).value ==
+           "|    é|");
+    assert(callFn(eval, "format", {S("|%12I|"), S("my table")}).value ==
+           "|  \"my table\"|");
+    assert(callFn(eval, "format", {S("|%-8L|"), S("x")}).value ==
+           "|'x'     |");
 
     const auto expectPositionError = [&](const std::string& format) {
         bool rejected = false;

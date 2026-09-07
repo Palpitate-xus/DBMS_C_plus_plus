@@ -6445,8 +6445,38 @@ void ExprEvaluator::registerBuiltins() {
                 throw std::runtime_error(
                     "unterminated format() type specifier (SQLSTATE 22023)");
             }
+            bool leftJustify = false;
+            if (fmt[specifierIndex] == '-') {
+                leftJustify = true;
+                ++specifierIndex;
+            }
+            size_t width = 0;
+            bool hasWidth = false;
+            while (specifierIndex < fmt.size() &&
+                   std::isdigit(static_cast<unsigned char>(
+                       fmt[specifierIndex]))) {
+                hasWidth = true;
+                const size_t digit = static_cast<size_t>(
+                    fmt[specifierIndex] - '0');
+                if (width >
+                    (std::numeric_limits<size_t>::max() - digit) / 10) {
+                    throw std::runtime_error(
+                        "format() width is out of range (SQLSTATE 22023)");
+                }
+                width = width * 10 + digit;
+                ++specifierIndex;
+            }
+            if (specifierIndex >= fmt.size()) {
+                throw std::runtime_error(
+                    "unterminated format() type specifier (SQLSTATE 22023)");
+            }
             char spec = fmt[specifierIndex];
             if (spec == '%') {
+                if (explicitPosition || leftJustify || hasWidth) {
+                    throw std::runtime_error(
+                        "unrecognized format() type specifier \"%\" "
+                        "(SQLSTATE 22023)");
+                }
                 out.push_back('%');
                 i = specifierIndex;
                 continue;
@@ -6459,16 +6489,24 @@ void ExprEvaluator::registerBuiltins() {
                 }
                 if (explicitPosition) argi = argumentIndex + 1;
                 const ExprValue& arg = a[argumentIndex];
-                if (spec == 's') out += arg.isNull ? "" : arg.value;
+                std::string rendered;
+                if (spec == 's') rendered = arg.isNull ? "" : arg.value;
                 else if (spec == 'I') {
                     if (arg.isNull) {
                         throw std::runtime_error(
                             "null values cannot be formatted as an SQL "
                             "identifier (SQLSTATE 22004)");
                     }
-                    out += sqlQuoteIdent(arg.value);
+                    rendered = sqlQuoteIdent(arg.value);
                 }
-                else /* L */ out += arg.isNull ? "NULL" : sqlQuoteLiteral(arg.value);
+                else /* L */ rendered = arg.isNull
+                    ? "NULL" : sqlQuoteLiteral(arg.value);
+                const size_t renderedWidth = utf8CharCount(rendered);
+                const size_t padding = hasWidth && width > renderedWidth
+                    ? width - renderedWidth : 0;
+                if (!leftJustify) out.append(padding, ' ');
+                out += rendered;
+                if (leftJustify) out.append(padding, ' ');
                 i = specifierIndex;
             } else {
                 throw std::runtime_error(
