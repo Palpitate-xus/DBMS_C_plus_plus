@@ -154,6 +154,8 @@ static std::string unquote(const std::string& s) {
 static std::string trimStr(const std::string& s);
 static size_t utf8CharCount(const std::string& s);
 static size_t utf8ByteAt(const std::string& s, size_t charIdx);
+static bool isBlankPaddedCharacterType(const std::string& typeName);
+static size_t logicalCharacterByteLength(const ExprValue& value);
 
 // ----------------------------------------------------------------------------
 // Interval support
@@ -2710,6 +2712,10 @@ static CharacterCastSpec parseCharacterCastSpec(const std::string& target) {
 static ExprValue castToCharacter(const ExprValue& value,
                                  const CharacterCastSpec& spec) {
     std::string converted = value.value;
+    if (spec.kind != CharacterCastKind::Char &&
+        isBlankPaddedCharacterType(value.typeName)) {
+        converted.resize(logicalCharacterByteLength(value));
+    }
     if (spec.hasLength) {
         const size_t characters = utf8CharCount(converted);
         if (characters > spec.length) {

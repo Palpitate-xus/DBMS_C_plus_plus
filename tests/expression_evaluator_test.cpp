@@ -490,6 +490,10 @@ static void test_cast() {
            "abc");
     assert(evaluateCast("character varying", "abcdef", "char").value ==
            "a");
+    assert(evaluateCast("character", "ab  ", "text").value == "ab");
+    assert(evaluateCast("bpchar", "ab  ", "varchar").value == "ab");
+    assert(evaluateCast("character", "ab  ", "char(6)").value ==
+           "ab    ");
     expectCastError("character varying", "x", "varchar(0)", "22023");
     expectCastError("character varying", "x", "varchar(10485761)",
                     "22023");
