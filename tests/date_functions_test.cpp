@@ -447,6 +447,24 @@ static void test_overlaps_interval_endpoints() {
     std::cout << "[DATEFN] overlaps interval endpoints OK" << std::endl;
 }
 
+static void test_age_fractional_seconds() {
+    dbms::ExprEvaluator eval;
+    assert(callFn(eval, "age",
+                  {TS("2024-01-01 00:00:00.5"),
+                   TS("2024-01-01 00:00:00")}).value ==
+           "00:00:00.500000");
+    assert(callFn(eval, "age",
+                  {TS("2024-01-01 00:00:00.000005"),
+                   TS("2024-01-01 00:00:00")}).value ==
+           "00:00:00.000005");
+    assert(callFn(eval, "age",
+                  {TS("2024-01-01 00:00:01.25"),
+                   TS("2024-01-01 00:00:00.75")}).value ==
+           "00:00:00.500000");
+
+    std::cout << "[DATEFN] age fractional seconds OK" << std::endl;
+}
+
 int main() {
     test_extract_date_part();
     test_dow_doy_century();
@@ -458,6 +476,7 @@ int main() {
     test_overlaps_point_boundaries();
     test_overlaps_null_semantics();
     test_overlaps_interval_endpoints();
+    test_age_fractional_seconds();
     std::cout << "[DATEFN] all passed" << std::endl;
     return 0;
 }

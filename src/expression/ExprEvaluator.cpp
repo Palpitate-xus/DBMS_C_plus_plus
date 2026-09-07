@@ -8075,9 +8075,15 @@ void ExprEvaluator::registerBuiltins() {
             long long hh = au / 3600000000LL; au %= 3600000000LL;
             long long mi = au / 60000000LL; au %= 60000000LL;
             long long se = au / 1000000LL;
+            long long frac = au % 1000000LL;
             char tb[64];
-            if (tn) std::snprintf(tb, sizeof tb, "-%02lld:%02lld:%02lld", hh, mi, se);
-            else std::snprintf(tb, sizeof tb, "%02lld:%02lld:%02lld", hh, mi, se);
+            if (frac) {
+                std::snprintf(tb, sizeof tb, "%s%02lld:%02lld:%02lld.%06lld",
+                              tn ? "-" : "", hh, mi, se, frac);
+            } else {
+                std::snprintf(tb, sizeof tb, "%s%02lld:%02lld:%02lld",
+                              tn ? "-" : "", hh, mi, se);
+            }
             if (!o.empty()) o += " ";
             o += tb;
         }
@@ -8170,8 +8176,17 @@ void ExprEvaluator::registerBuiltins() {
             if (v.size() > 11) {
                 std::sscanf(v.substr(11).c_str(), "%lld:%lld:%lld", &h, &mi, &se);
                 size_t dot = v.find(46, 11);
-                if (dot != std::string::npos)
-                    fr = std::strtoll(v.c_str() + dot + 1, nullptr, 10);
+                if (dot != std::string::npos) {
+                    size_t digits = 0;
+                    for (size_t i = dot + 1;
+                         i < v.size() && v[i] >= '0' && v[i] <= '9' &&
+                         digits < 6;
+                         ++i, ++digits) {
+                        fr = fr * 10 + (v[i] - '0');
+                    }
+                    if (digits == 0) return false;
+                    while (digits++ < 6) fr *= 10;
+                }
             }
             us = ((h * 3600 + mi * 60 + se) * 1000000LL) + fr;
             return true;
