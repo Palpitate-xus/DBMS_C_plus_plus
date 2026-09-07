@@ -5717,7 +5717,7 @@ void ExprEvaluator::registerBuiltins() {
             (idx == 1 && a.size() > 2 && a[2].isNull)) {
             return ExprValue("text", "", true);
         }
-        std::string s, chars = " \t\n\r\f\v";
+        std::string s, chars = " ";
         if (idx == 1 && a.size() > 2) {
             chars = textArgumentValue(a[1]);
             s = textArgumentValue(a[2]);
@@ -5745,7 +5745,7 @@ void ExprEvaluator::registerBuiltins() {
         }
         const std::string s = textArgumentValue(a[0]);
         std::string chars = (a.size() >= 2 && !a[1].isNull)
-            ? textArgumentValue(a[1]) : " \t\n\r\f\v";
+            ? textArgumentValue(a[1]) : " ";
         return ExprValue(
             "text", trimUtf8Characters(s, chars, true, false), false);
     };
@@ -5756,7 +5756,7 @@ void ExprEvaluator::registerBuiltins() {
         }
         const std::string s = textArgumentValue(a[0]);
         std::string chars = (a.size() >= 2 && !a[1].isNull)
-            ? textArgumentValue(a[1]) : " \t\n\r\f\v";
+            ? textArgumentValue(a[1]) : " ";
         return ExprValue(
             "text", trimUtf8Characters(s, chars, false, true), false);
     };
@@ -5908,7 +5908,7 @@ void ExprEvaluator::registerBuiltins() {
         }
         const std::string s = textArgumentValue(a[0]);
         std::string chars = (a.size() >= 2 && !a[1].isNull)
-            ? textArgumentValue(a[1]) : " \t\n\r\f\v";
+            ? textArgumentValue(a[1]) : " ";
         return ExprValue(
             "text", trimUtf8Characters(s, chars, true, true), false);
     };

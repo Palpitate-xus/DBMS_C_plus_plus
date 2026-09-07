@@ -126,6 +126,13 @@ static void test_trim_chars() {
                .value == "ab");
     // Default whitespace behavior still works with one arg.
     assert(callFn(eval, "trim", {S("  hi  ")}).value == "hi");
+    // PostgreSQL's default trim character is a space, not every ASCII
+    // whitespace character.
+    const std::string tabDelimited = "\t x \t";
+    assert(callFn(eval, "trim", {S(tabDelimited)}).value == tabDelimited);
+    assert(callFn(eval, "btrim", {S(tabDelimited)}).value == tabDelimited);
+    assert(callFn(eval, "ltrim", {S(tabDelimited)}).value == tabDelimited);
+    assert(callFn(eval, "rtrim", {S(tabDelimited)}).value == tabDelimited);
     std::cout << "[STRFN] trim with chars OK" << std::endl;
 }
 
