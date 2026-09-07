@@ -33,6 +33,7 @@ static dbms::ExprValue callFn(dbms::ExprEvaluator& eval, const std::string& name
 
 static dbms::ExprValue D(double v) { return dbms::ExprValue("double precision", std::to_string(v), false); }
 static dbms::ExprValue I(int64_t v) { return dbms::ExprValue("integer", std::to_string(v), false); }
+static dbms::ExprValue N(const std::string& v) { return dbms::ExprValue("numeric", v, false); }
 
 static bool approx(const dbms::ExprValue& r, double want) {
     return !r.isNull && std::fabs(std::stod(r.value) - want) < 1e-6;
@@ -130,6 +131,20 @@ static void test_pow_log() {
     assert(approx(callFn(eval, "log", {D(2), D(8)}), 3.0));        // base-2 of 8
     assert(approx(callFn(eval, "log10", {D(1000)}), 3.0));
     assert(approx(callFn(eval, "ln", {D(1)}), 0.0));
+    assert(callFn(eval, "exp", {N("NaN")}).value == "NaN");
+    assert(callFn(eval, "exp", {N("Infinity")}).value == "Infinity");
+    assert(callFn(eval, "exp", {N("-Infinity")}).value == "0");
+    assert(callFn(eval, "ln", {N("NaN")}).value == "NaN");
+    assert(callFn(eval, "ln", {N("Infinity")}).value == "Infinity");
+    assert(callFn(eval, "log", {N("NaN")}).value == "NaN");
+    assert(callFn(eval, "log10", {N("Infinity")}).value == "Infinity");
+    assert(callFn(eval, "sqrt", {N("NaN")}).value == "NaN");
+    assert(callFn(eval, "sqrt", {N("Infinity")}).value == "Infinity");
+    assert(callFn(eval, "log", {N("10"), N("Infinity")}).value ==
+           "Infinity");
+    assert(callFn(eval, "log", {N("Infinity"), N("10")}).value == "0");
+    assert(callFn(eval, "log", {N("NaN"), N("10")}).value == "NaN");
+    assert(callFn(eval, "log", {N("10"), N("NaN")}).value == "NaN");
     auto expectInvalidLog = [&](const std::string& function,
                                 const std::vector<dbms::ExprValue>& args) {
         bool rejected = false;

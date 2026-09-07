@@ -5246,6 +5246,15 @@ void ExprEvaluator::registerBuiltins() {
     };
     functions_["exp"] = [numericFixed, argHasDot](const auto& a) {
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
+        if (const auto exact = tryParseNumeric(a[0].value)) {
+            if (exact->isNaN()) return ExprValue("numeric", "NaN", false);
+            if (exact->isInfinite()) {
+                return ExprValue(
+                    "numeric",
+                    exact->toString().front() == '-' ? "0" : "Infinity",
+                    false);
+            }
+        }
         const long double result = expl(a[0].asDouble());
         if (!std::isfinite(result)) {
             throw std::runtime_error(
@@ -5256,12 +5265,22 @@ void ExprEvaluator::registerBuiltins() {
     functions_["ln"] =
         [numericFixed, requireLogarithmArgument](const auto& a) {
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
+        if (const auto exact = tryParseNumeric(a[0].value)) {
+            if (exact->isNaN()) return ExprValue("numeric", "NaN", false);
+            if (exact->isInfinite() && exact->toString().front() != '-')
+                return ExprValue("numeric", "Infinity", false);
+        }
         const long double value = a[0].asDouble();
         requireLogarithmArgument(value);
         return numericFixed(logl(value), 16);
     };
     functions_["sqrt"] = [numericFixed, argHasDot](const auto& a) {
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
+        if (const auto exact = tryParseNumeric(a[0].value)) {
+            if (exact->isNaN()) return ExprValue("numeric", "NaN", false);
+            if (exact->isInfinite() && exact->toString().front() != '-')
+                return ExprValue("numeric", "Infinity", false);
+        }
         const long double input = a[0].asDouble();
         if (input < 0) {
             throw std::runtime_error(
@@ -5282,10 +5301,30 @@ void ExprEvaluator::registerBuiltins() {
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
         if (a.size() >= 2) {
             if (a[1].isNull) return ExprValue("numeric", "", true);
+            const auto exactBase = tryParseNumeric(a[0].value);
+            const auto exactValue = tryParseNumeric(a[1].value);
+            if ((exactBase && exactBase->isNaN()) ||
+                (exactValue && exactValue->isNaN())) {
+                return ExprValue("numeric", "NaN", false);
+            }
             long double b = a[0].asDouble(), x = a[1].asDouble();
             requireLogarithmArgument(b, false);
             requireLogarithmArgument(x);
+            if (exactBase && exactBase->isInfinite()) {
+                if (exactValue && exactValue->isInfinite())
+                    return ExprValue("numeric", "NaN", false);
+                return ExprValue("numeric", "0", false);
+            }
+            if (exactValue && exactValue->isInfinite()) {
+                return ExprValue(
+                    "numeric", b > 1 ? "Infinity" : "-Infinity", false);
+            }
             return numericFixed(logl(x) / logl(b), 16);
+        }
+        if (const auto exact = tryParseNumeric(a[0].value)) {
+            if (exact->isNaN()) return ExprValue("numeric", "NaN", false);
+            if (exact->isInfinite() && exact->toString().front() != '-')
+                return ExprValue("numeric", "Infinity", false);
         }
         const long double value = a[0].asDouble();
         requireLogarithmArgument(value);
@@ -5297,6 +5336,11 @@ void ExprEvaluator::registerBuiltins() {
     functions_["log10"] = [numericFixed, argHasDot,
                              requireLogarithmArgument](const auto& a) {
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
+        if (const auto exact = tryParseNumeric(a[0].value)) {
+            if (exact->isNaN()) return ExprValue("numeric", "NaN", false);
+            if (exact->isInfinite() && exact->toString().front() != '-')
+                return ExprValue("numeric", "Infinity", false);
+        }
         const long double value = a[0].asDouble();
         requireLogarithmArgument(value);
         long double v = log10l(value);
