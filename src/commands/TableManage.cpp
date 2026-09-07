@@ -7633,6 +7633,9 @@ static bool normalizeRange(const std::string& in, const std::string& type, std::
     auto parseBound = [&](const std::string& b, double& dv, int64_t& iv) -> bool {
         if (discrete) {
             try { size_t p = 0; long long v = std::stoll(b, &p); if (p != b.size()) return false;
+                  if (type == "int4range" &&
+                      (v < std::numeric_limits<int32_t>::min() ||
+                       v > std::numeric_limits<int32_t>::max())) return false;
                   iv = v; dv = static_cast<double>(v); return true; }
             catch (...) { return false; }
         } else if (type == "numrange") {
@@ -7650,12 +7653,39 @@ static bool normalizeRange(const std::string& in, const std::string& type, std::
     };
     if (!loInf && !parseBound(lo, loV, loI)) return false;
     if (!hiInf && !parseBound(hi, hiV, hiI)) return false;
-    if (!loInf && !hiInf && loV > hiV) return false;
+    if (!loInf && !hiInf) {
+        if (discrete) {
+            if (loI > hiI) return false;
+            if (loI == hiI && !(lb == '[' && ub == ']')) {
+                out = "empty";
+                return true;
+            }
+        } else if (loV > hiV) {
+            return false;
+        }
+    }
 
     // Discrete integer ranges canonicalize to inclusive-lower / exclusive-upper.
     if (discrete) {
-        if (!loInf) { if (lb == '(') loI += 1; lb = '['; loV = static_cast<double>(loI); }
-        if (!hiInf) { if (ub == ']') hiI += 1; ub = ')'; hiV = static_cast<double>(hiI); }
+        const int64_t maximum = type == "int4range"
+            ? std::numeric_limits<int32_t>::max()
+            : std::numeric_limits<int64_t>::max();
+        if (!loInf) {
+            if (lb == '(') {
+                if (loI == maximum) return false;
+                ++loI;
+            }
+            lb = '[';
+            loV = static_cast<double>(loI);
+        }
+        if (!hiInf) {
+            if (ub == ']') {
+                if (hiI == maximum) return false;
+                ++hiI;
+            }
+            ub = ')';
+            hiV = static_cast<double>(hiI);
+        }
     } else if (discreteDate) {
         if (!loInf) {
             Date lowerDate(lo.c_str());
@@ -7693,15 +7723,22 @@ static bool normalizeRange(const std::string& in, const std::string& type, std::
     if (hiInf) ub = ')';
 
     if (!loInf && !hiInf) {
-        if (loV > hiV) {
-            // Equal original date bounds can cross after canonicalizing an
-            // exclusive lower bound; the represented set is empty.
-            if (discreteDate) { out = "empty"; return true; }
-            return false;
-        }
-        if (loV == hiV) {
-            bool bothInclusive = (lb == '[' && ub == ']');
-            if (!bothInclusive) { out = "empty"; return true; }
+        if (discrete) {
+            if (loI >= hiI) {
+                out = "empty";
+                return true;
+            }
+        } else {
+            if (loV > hiV) {
+                // Equal original date bounds can cross after canonicalizing
+                // an exclusive lower bound; the represented set is empty.
+                if (discreteDate) { out = "empty"; return true; }
+                return false;
+            }
+            if (loV == hiV) {
+                bool bothInclusive = (lb == '[' && ub == ']');
+                if (!bothInclusive) { out = "empty"; return true; }
+            }
         }
     }
 

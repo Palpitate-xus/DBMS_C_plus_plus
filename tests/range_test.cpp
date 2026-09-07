@@ -64,6 +64,12 @@ static void test_int_range_canonical() {
     assert(fetchOne(db, "t", {"=id 5"}, "r") == "empty");
     assert(g_engine.insert(db, "t", {{"id","6"}, {"r","empty"}}) == dbms::DBStatus::OK);
     assert(fetchOne(db, "t", {"=id 6"}, "r") == "empty");
+    assert(g_engine.insert(db, "t", {{"id","7"}, {"r","(5,5)"}}) == dbms::DBStatus::OK);
+    assert(fetchOne(db, "t", {"=id 7"}, "r") == "empty");
+    assert(g_engine.insert(db, "t", {{"id","8"}, {"r","(5,5]"}}) == dbms::DBStatus::OK);
+    assert(fetchOne(db, "t", {"=id 8"}, "r") == "empty");
+    assert(g_engine.insert(db, "t", {{"id","9"}, {"r","(5,6)"}}) == dbms::DBStatus::OK);
+    assert(fetchOne(db, "t", {"=id 9"}, "r") == "empty");
 
     cleanup(db);
     std::cout << "[RANGE] int4range canonicalization OK" << std::endl;
@@ -84,6 +90,24 @@ static void test_infinite_bounds() {
     assert(fetchOne(db, "t", {"=id 2"}, "r") == "(,101)");
     assert(g_engine.insert(db, "t", {{"id","3"}, {"r","(,)"}}) == dbms::DBStatus::OK);
     assert(fetchOne(db, "t", {"=id 3"}, "r") == "(,)");
+    assert(g_engine.insert(db, "t", {{"id","4"},
+                                      {"r","[9007199254740992,9007199254740993)"}}) ==
+           dbms::DBStatus::OK);
+    assert(fetchOne(db, "t", {"=id 4"}, "r") ==
+           "[9007199254740992,9007199254740993)");
+    assert(g_engine.insert(db, "t", {{"id","5"},
+                                      {"r","[9007199254740993,9007199254740992)"}}) ==
+           dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insert(db, "t", {{"id","6"},
+                                      {"r","[1,9223372036854775807]"}}) ==
+           dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insert(db, "t", {{"id","7"},
+                                      {"r","(9223372036854775807,)"}}) ==
+           dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insert(db, "t", {{"id","8"},
+                                      {"r","(9223372036854775807,9223372036854775807]"}}) ==
+           dbms::DBStatus::OK);
+    assert(fetchOne(db, "t", {"=id 8"}, "r") == "empty");
 
     cleanup(db);
     std::cout << "[RANGE] infinite bounds OK" << std::endl;
@@ -155,6 +179,10 @@ static void test_range_invalid() {
     assert(g_engine.insert(db, "t", {{"id","4"}, {"r","[1,x)"}}) == dbms::DBStatus::INVALID_VALUE);
     // invalid date bound.
     assert(g_engine.insert(db, "t", {{"id","5"}, {"d","[2020-13-01,2020-12-31)"}}) == dbms::DBStatus::INVALID_VALUE);
+    // int4range bounds use the int4 subtype, not the wider storage integer.
+    assert(g_engine.insert(db, "t", {{"id","6"},
+                                      {"r","[2147483648,2147483649)"}}) ==
+           dbms::DBStatus::INVALID_VALUE);
 
     auto rows = g_engine.query(db, "t", {}, {"id"}, {});
     assert(rows.empty());
