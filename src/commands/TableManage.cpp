@@ -30375,6 +30375,42 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         return (sp == std::string::npos) ? firstRow : trim(firstRow.substr(0, sp));
     }
     // Array functions
+    if ((expr.funcName == "array_dims" ||
+         expr.funcName == "cardinality" ||
+         expr.funcName == "array_position") &&
+        !expr.funcArgs.empty()) {
+        std::map<std::string, std::string> rowContext;
+        std::map<std::string, std::string> typeHints;
+        std::set<std::string> nullColumns;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            bool valueIsNull = false;
+            const std::string value = engine && !dbname.empty()
+                ? engine->extractColumnValue(
+                      rowBuffer, tbl, i, dbname, true, &valueIsNull)
+                : StorageEngine::extractColumnValueStatic(
+                      rowBuffer, tbl, i);
+            rowContext[tbl.cols[i].dataName] = value;
+            typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+            if (valueIsNull || (!engine && value.empty()))
+                nullColumns.insert(tbl.cols[i].dataName);
+        }
+        std::string expressionSql = expr.funcName + "(";
+        for (size_t i = 0; i < expr.funcArgs.size(); ++i) {
+            if (i != 0) expressionSql += ",";
+            expressionSql += expr.funcArgs[i];
+        }
+        expressionSql += ")";
+        const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
+            expressionSql, rowContext, nullColumns, typeHints, dbname,
+            expr.sessionUser);
+        if (!evaluated.ok) {
+            throw std::runtime_error(
+                evaluated.error.empty()
+                    ? "failed to evaluate array inspection function"
+                    : evaluated.error);
+        }
+        return evaluated.isNull ? "NULL" : evaluated.value;
+    }
     if (expr.funcName == "array_get" && expr.funcArgs.size() >= 2) {
         std::string arr = getVal(expr.funcArgs[0]);
         try {
