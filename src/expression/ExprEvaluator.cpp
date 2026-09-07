@@ -651,7 +651,7 @@ static IntervalParts parseIntervalText(const std::string& in) {
     auto addScaledDecimal = [&](long long& target, long double value,
                                 long double scale) {
         long long delta = 0;
-        return truncateToInteger(value * scale, delta) &&
+        return truncateToInteger(std::nearbyint(value * scale), delta) &&
                addScaled(target, delta, 1);
     };
     // SQL year-month shorthand "N-M"
@@ -747,6 +747,15 @@ static IntervalParts parseIntervalText(const std::string& in) {
                 for (size_t i = 0; i < kept; ++i)
                     fraction = fraction * 10 + (digits[i] - '0');
                 for (size_t i = kept; i < 6; ++i) fraction *= 10;
+                if (digits.size() > 6) {
+                    const bool trailingNonzero =
+                        digits.find_first_not_of('0', 7) !=
+                        std::string::npos;
+                    const bool roundUp = digits[6] > '5' ||
+                        (digits[6] == '5' &&
+                         (trailingNonzero || fraction % 2 != 0));
+                    if (roundUp) ++fraction;
+                }
             }
         }
         return addClockMicros(hours, minutes, seconds, fraction,

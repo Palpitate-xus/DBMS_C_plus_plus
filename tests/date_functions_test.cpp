@@ -178,6 +178,20 @@ static void test_extract_date_part() {
     assert(callFn(eval, "extract", {F("microseconds"), interval}).value ==
            "6250000");
     assert(callFn(eval, "extract",
+                  {F("second"), IV("00:00:00.1234565")}).value ==
+           "0.123456");
+    assert(callFn(eval, "extract",
+                  {F("second"), IV("00:00:00.1234575")}).value ==
+           "0.123458");
+    assert(callFn(eval, "extract",
+                  {F("second"), IV("00:00:00.9999999")}).value == "1");
+    assert(callFn(eval, "extract",
+                  {F("second"), IV("0.1234567 seconds")}).value ==
+           "0.123457");
+    assert(callFn(eval, "extract",
+                  {F("second"), IV("-0.1234567 seconds")}).value ==
+           "-0.123457");
+    assert(callFn(eval, "extract",
                   {F("quarter"), IV("14 months")}).value == "1");
     assert(callFn(eval, "extract",
                   {F("decade"), IV("25 years")}).value == "2");
