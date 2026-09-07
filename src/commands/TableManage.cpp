@@ -27662,6 +27662,34 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                (std::isalnum(static_cast<unsigned char>(low[tend])) || low[tend] == '_')) ++tend;
         std::string innerTbl = expr.funcArgs[0].substr(rest, tend - rest);
         if (innerTbl.empty()) return "f";
+
+        std::string innerAlias;
+        size_t aliasStart = tend;
+        while (aliasStart < low.size() &&
+               std::isspace(static_cast<unsigned char>(low[aliasStart]))) {
+            ++aliasStart;
+        }
+        if (low.compare(aliasStart, 3, "as ") == 0) {
+            aliasStart += 3;
+            while (aliasStart < low.size() &&
+                   std::isspace(static_cast<unsigned char>(low[aliasStart]))) {
+                ++aliasStart;
+            }
+        }
+        size_t aliasEnd = aliasStart;
+        while (aliasEnd < low.size() &&
+               (std::isalnum(static_cast<unsigned char>(low[aliasEnd])) ||
+                low[aliasEnd] == '_')) {
+            ++aliasEnd;
+        }
+        const std::string aliasCandidate =
+            low.substr(aliasStart, aliasEnd - aliasStart);
+        if (aliasCandidate != "where" && aliasCandidate != "group" &&
+            aliasCandidate != "order" && aliasCandidate != "limit") {
+            innerAlias = expr.funcArgs[0].substr(
+                aliasStart, aliasEnd - aliasStart);
+        }
+
         std::string whereSql;
         size_t wpos = low.find(" where ");
         if (wpos != std::string::npos) {
@@ -27675,116 +27703,86 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             }
             whereSql = expr.funcArgs[0].substr(wstart, wend - wstart);
         }
-        std::vector<StorageEngine::Condition> conds;
         TableSchema innerSch = engine->getTableSchema(dbname, innerTbl);
-        // Correlation: resolve identifier sides against the OUTER row
-        // when they are not inner-table columns.  "outer.col" (qualifier =
-        // outer table) and bare "col" (only in outer) both substitute the
-        // outer row's literal value; "inner.col" keeps the bare name.
-        auto isIdentifier = [](const std::string& s) {
-            if (s.empty()) return false;
-            for (char ch : s)
-                if (!(std::isalnum(static_cast<unsigned char>(ch)) || ch == '_' || ch == '.')) return false;
-            return true;
-        };
-        auto inInner = [&](const std::string& col) {
-            for (size_t i = 0; i < innerSch.len; ++i)
-                if (innerSch.cols[i].dataName == col) return true;
-            return false;
-        };
-        auto inOuter = [&](const std::string& col) {
-            for (size_t i = 0; i < tbl.len; ++i)
-                if (tbl.cols[i].dataName == col) return true;
-            return false;
-        };
-        auto resolveSide = [&](std::string& side, bool& sideIsColumn) {
-            sideIsColumn = false;
-            if (!isIdentifier(side)) return;
-            std::string qualifier, name = side;
-            size_t dot = side.find('.');
-            if (dot != std::string::npos) {
-                qualifier = side.substr(0, dot);
-                name = side.substr(dot + 1);
-                std::string qLow;
-                for (char ch : qualifier) qLow += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-                std::string innerLow;
-                for (char ch : innerTbl) innerLow += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-                std::string outerLow;
-                for (char ch : tbl.tablename) outerLow += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-                if (qLow == innerLow) { side = name; sideIsColumn = true; return; }
-                if (qLow == outerLow && inOuter(name)) {
-                    for (size_t i = 0; i < tbl.len; ++i)
-                        if (tbl.cols[i].dataName == name) {
-                            side = engine ? engine->extractColumnValue(rowBuffer, tbl, i, dbname, true)
-                                          : StorageEngine::extractColumnValueStatic(rowBuffer, tbl, i);
-                            return;
-                        }
-                }
-                side.clear();  // unknown qualifier
-                return;
+
+        std::set<std::string> innerColumnNames;
+        for (size_t i = 0; i < innerSch.len; ++i)
+            innerColumnNames.insert(innerSch.cols[i].dataName);
+
+        std::map<std::string, std::string> outerContext;
+        std::map<std::string, std::string> outerTypes;
+        std::set<std::string> outerNulls;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            bool valueIsNull = false;
+            const std::string value = engine->extractColumnValue(
+                rowBuffer, tbl, i, dbname, true, &valueIsNull);
+            const std::string qualified =
+                tbl.tablename + "." + tbl.cols[i].dataName;
+            outerContext[qualified] = value;
+            outerTypes[qualified] = tbl.cols[i].dataType;
+            if (valueIsNull) outerNulls.insert(qualified);
+            if (!innerColumnNames.count(tbl.cols[i].dataName)) {
+                outerContext[tbl.cols[i].dataName] = value;
+                outerTypes[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+                if (valueIsNull)
+                    outerNulls.insert(tbl.cols[i].dataName);
             }
-            if (inInner(name)) { sideIsColumn = true; return; }
-            if (inOuter(name)) {
-                for (size_t i = 0; i < tbl.len; ++i)
-                    if (tbl.cols[i].dataName == name) {
-                        side = engine ? engine->extractColumnValue(rowBuffer, tbl, i, dbname, true)
-                                      : StorageEngine::extractColumnValueStatic(rowBuffer, tbl, i);
-                        return;
-                    }
-            }
-        };
-        if (!whereSql.empty()) {
-            std::string w = whereSql;
-            for (auto& ch : w)
-                if (ch == '\t' || ch == '\n') ch = ' ';
-            std::string wl;
-            for (char ch : w) wl += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-            std::vector<std::string> parts;
-            size_t start = 0;
-            while (true) {
-                size_t ap = wl.find(" and ", start);
-                if (ap == std::string::npos) { parts.push_back(w.substr(start)); break; }
-                parts.push_back(w.substr(start, ap - start));
-                start = ap + 5;
-            }
-            for (const auto& p : parts) {
-                std::string pt = p;
-                while (!pt.empty() && std::isspace(static_cast<unsigned char>(pt.front()))) pt.erase(0, 1);
-                while (!pt.empty() && std::isspace(static_cast<unsigned char>(pt.back()))) pt.pop_back();
-                if (pt.empty()) continue;
-                static const char* ops9[] = {">=", "<=", "<>", "!=", "=", ">", "<"};
-                for (const char* op9 : ops9) {
-                    size_t op = pt.find(op9);
-                    if (op == std::string::npos || op == 0) continue;
-                    StorageEngine::Condition c;
-                    c.colName = pt.substr(0, op);
-                    while (!c.colName.empty() && std::isspace(static_cast<unsigned char>(c.colName.back())))
-                        c.colName.pop_back();
-                    std::string val = pt.substr(op + std::strlen(op9));
-                    while (!val.empty() && std::isspace(static_cast<unsigned char>(val.front()))) val.erase(0, 1);
-                    if (val.size() >= 2 && val.front() == '\'' && val.back() == '\'')
-                        val = val.substr(1, val.size() - 2);
-                    bool lhsIsColumn = false;
-                    resolveSide(c.colName, lhsIsColumn);
-                    resolveSide(val, lhsIsColumn);
-                    c.op = (std::string(op9) == "!=" ? "<>" : op9);
-                    c.value = val;
-                    if (!c.colName.empty() && !val.empty()) conds.push_back(c);
-                    break;
-                }
-            }
-            if (conds.size() != parts.size()) conds.clear();
         }
+
         bool anyRow = false;
+        std::string evaluationError;
         engine->forEachRow(dbname, innerTbl, [&](uint32_t, uint16_t, const char* data, size_t len) {
-            if (conds.empty() && whereSql.empty()) { anyRow = true; return false; }
-            std::string row(data, len);
-            for (const auto& c : conds)
-                if (!StorageEngine::evalConditionOnRow(c, row, innerSch))
-                    return true;
+            if (whereSql.empty()) {
+                anyRow = true;
+                return false;
+            }
+            const std::string innerRow(data, len);
+            auto rowContext = outerContext;
+            auto typeHints = outerTypes;
+            auto nullColumns = outerNulls;
+            for (size_t i = 0; i < innerSch.len; ++i) {
+                bool valueIsNull = false;
+                const std::string value = engine->extractColumnValue(
+                    innerRow, innerSch, i, dbname, true, &valueIsNull);
+                const std::string bare = innerSch.cols[i].dataName;
+                const std::string qualified = innerTbl + "." + bare;
+                rowContext[bare] = value;
+                rowContext[qualified] = value;
+                typeHints[bare] = innerSch.cols[i].dataType;
+                typeHints[qualified] = innerSch.cols[i].dataType;
+                nullColumns.erase(bare);
+                nullColumns.erase(qualified);
+                if (valueIsNull) {
+                    nullColumns.insert(bare);
+                    nullColumns.insert(qualified);
+                }
+                if (!innerAlias.empty()) {
+                    const std::string aliased = innerAlias + "." + bare;
+                    rowContext[aliased] = value;
+                    typeHints[aliased] = innerSch.cols[i].dataType;
+                    nullColumns.erase(aliased);
+                    if (valueIsNull) nullColumns.insert(aliased);
+                }
+            }
+            const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
+                whereSql, rowContext, nullColumns, typeHints, dbname,
+                expr.sessionUser);
+            if (!evaluated.ok) {
+                evaluationError = evaluated.error.empty()
+                    ? "failed to evaluate EXISTS predicate"
+                    : evaluated.error;
+                return false;
+            }
+            if (evaluated.isNull ||
+                (evaluated.value != "t" && evaluated.value != "true" &&
+                 evaluated.value != "1")) {
+                return true;
+            }
             anyRow = true;
             return false;
         });
+        if (!evaluationError.empty())
+            throw std::runtime_error(evaluationError);
         bool negate = expr.funcArgs.size() > 1 && expr.funcArgs[1] == "not";
         return (negate ? !anyRow : anyRow) ? "t" : "f";
     }
