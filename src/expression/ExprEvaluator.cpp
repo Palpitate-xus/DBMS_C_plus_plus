@@ -6888,6 +6888,45 @@ void ExprEvaluator::registerBuiltins() {
                 "\" not recognized for type interval (SQLSTATE 22023)");
         }
 
+        static const std::set<std::string> temporalUnits = {
+            "year", "month", "day", "hour", "minute", "second",
+            "milliseconds", "microseconds", "quarter", "decade",
+            "century", "millennium", "dow", "isodow", "doy", "week",
+            "isoyear", "julian", "epoch", "timezone", "timezone_hour",
+            "timezone_minute"
+        };
+        if (!temporalUnits.count(field)) {
+            throw std::runtime_error(
+                "unit \"" + field +
+                "\" not recognized for temporal type (SQLSTATE 22023)");
+        }
+        const std::string sourceType = toLower(a[1].typeName);
+        if (sourceType == "date") {
+            static const std::set<std::string> unsupportedDateUnits = {
+                "hour", "minute", "second", "milliseconds",
+                "microseconds", "timezone", "timezone_hour",
+                "timezone_minute"
+            };
+            if (unsupportedDateUnits.count(field)) {
+                throw std::runtime_error(
+                    "unit \"" + field +
+                    "\" not supported for type date (SQLSTATE 0A000)");
+            }
+        }
+        if (field == "timezone" || field == "timezone_hour" ||
+            field == "timezone_minute") {
+            const bool withTimeZone = sourceType == "timestamptz" ||
+                sourceType == "timestamp with time zone";
+            if (!withTimeZone) {
+                throw std::runtime_error(
+                    "unit \"" + field +
+                    "\" not supported for timestamp without time zone "
+                    "(SQLSTATE 0A000)");
+            }
+            // This evaluator's session/time-zone model is UTC-only.
+            return ExprValue("numeric", "0", false);
+        }
+
         const int64_t timestamp = parseTimestampToSeconds(src);
         if (isInfiniteTimestamp(timestamp)) {
             const bool monotonicField =

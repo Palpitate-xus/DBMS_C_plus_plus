@@ -31,7 +31,9 @@ static dbms::ExprValue callFn(dbms::ExprEvaluator& eval, const std::string& name
 }
 
 static dbms::ExprValue F(const std::string& v) { return dbms::ExprValue("text", v, false); }
+static dbms::ExprValue D(const std::string& v) { return dbms::ExprValue("date", v, false); }
 static dbms::ExprValue TS(const std::string& v) { return dbms::ExprValue("timestamp", v, false); }
+static dbms::ExprValue TSTZ(const std::string& v) { return dbms::ExprValue("timestamptz", v, false); }
 static dbms::ExprValue IV(const std::string& v) { return dbms::ExprValue("interval", v, false); }
 static dbms::ExprValue I(int64_t v) { return dbms::ExprValue("integer", std::to_string(v), false); }
 
@@ -75,6 +77,15 @@ static void test_extract_date_part() {
                   {F("year"), TS("infinity")}).value == "Infinity");
     assert(callFn(eval, "extract",
                   {F("month"), TS("infinity")}).isNull);
+    expectExtractError("hour", D("2026-06-26"), "0A000");
+    expectExtractError("timezone", ts, "0A000");
+    expectExtractError("not_a_unit", ts, "22023");
+    assert(callFn(eval, "extract",
+                  {F("timezone"), TSTZ("2026-06-26 14:35:09+00")}).value ==
+           "0");
+    assert(callFn(eval, "extract",
+                  {F("timezone_hour"),
+                   TSTZ("2026-06-26 14:35:09+00")}).value == "0");
 
     auto interval = IV("1 year 2 mons 3 days 04:05:06.25");
     assert(callFn(eval, "extract", {F("year"), interval}).value == "1");
