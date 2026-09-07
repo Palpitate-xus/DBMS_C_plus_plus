@@ -862,6 +862,29 @@ static void test_case() {
     ExprValue v = eval.eval(c.get(), {});
     assert(v.value == "big");
 
+    auto nullCase = std::make_unique<CaseExpr>();
+    nullCase->switchExpr = makeLit("NULL");
+    nullCase->whenClauses.emplace_back(makeLit("NULL"), makeLit("'matched'"));
+    nullCase->elseExpr = makeLit("'else'");
+    v = eval.eval(nullCase.get(), {});
+    assert(v.value == "else");
+
+    int switchEvaluations = 0;
+    eval.registerFunction("case_switch", [&](const std::vector<ExprValue>&) {
+        ++switchEvaluations;
+        return ExprValue("integer", "2", false);
+    });
+    auto simpleCase = std::make_unique<CaseExpr>();
+    auto switchCall = std::make_unique<FunctionCallExpr>();
+    switchCall->funcName = "case_switch";
+    simpleCase->switchExpr = std::move(switchCall);
+    simpleCase->whenClauses.emplace_back(makeLit("1"), makeLit("'one'"));
+    simpleCase->whenClauses.emplace_back(makeLit("2"), makeLit("'two'"));
+    simpleCase->elseExpr = makeLit("'else'");
+    v = eval.eval(simpleCase.get(), {});
+    assert(v.value == "two");
+    assert(switchEvaluations == 1);
+
     std::cout << "[EXPR] case OK" << std::endl;
 }
 

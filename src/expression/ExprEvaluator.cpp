@@ -2258,12 +2258,16 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
 
 ExprValue ExprEvaluator::evalCase(const CaseExpr* e, const RowContext& ctx) const {
     if (!e) return ExprValue{};
+    const bool simpleCase = static_cast<bool>(e->switchExpr);
+    const ExprValue switchValue = simpleCase
+        ? eval(e->switchExpr.get(), ctx) : ExprValue{};
     for (const auto& wc : e->whenClauses) {
         bool match = false;
-        if (e->switchExpr) {
-            ExprValue sw = eval(e->switchExpr.get(), ctx);
-            ExprValue cond = eval(wc.first.get(), ctx);
-            match = compareValues(sw, cond) == 0;
+        if (simpleCase) {
+            const ExprValue condition = eval(wc.first.get(), ctx);
+            const ExprValue equal =
+                applyComparison("=", switchValue, condition);
+            match = !equal.isNull && equal.asBool();
         } else {
             match = eval(wc.first.get(), ctx).asBool();
         }
