@@ -29198,11 +29198,11 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             Date date;
             int32_t timeSeconds = 0;
             if (!parseTemporalFormatValue(val, fmt, date, timeSeconds))
-                return "";
+                return "NULL";
             return str(date) + " " + formatTimeSeconds(timeSeconds) + "+00";
         }
         int64_t ts = parseTimestampToSeconds(val);
-        return (ts == 0) ? "" : formatTimestampSeconds(ts);
+        return (ts == 0) ? "NULL" : formatTimestampSeconds(ts);
     }
     if (expr.funcName == "to_date" && expr.funcArgs.size() >= 1) {
         std::string val = getVal(expr.funcArgs[0]);
@@ -29212,11 +29212,11 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             Date date;
             int32_t timeSeconds = 0;
             if (!parseTemporalFormatValue(val, fmt, date, timeSeconds))
-                return "";
+                return "NULL";
             return str(date);
         }
         Date d(val.c_str());
-        return (d.year == 0) ? "" : str(d);
+        return (d.year == 0) ? "NULL" : str(d);
     }
     if (expr.funcName == "coalesce") {
         for (const auto& arg : expr.funcArgs) {
