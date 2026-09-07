@@ -117,6 +117,13 @@ static void test_to_json() {
     assert(callFn(eval, "to_json", {dbms::ExprValue("text", "", true)}).value == "null");
     // Embedded quotes are escaped.
     assert(callFn(eval, "to_json", {S("a\"b")}).value == "\"a\\\"b\"");
+    assert(callFn(eval, "to_json", {S("a\nb\t\"\\")}).value ==
+           "\"a\\nb\\t\\\"\\\\\"");
+    assert(callFn(eval, "to_json", {S(std::string("x\x01y", 3))}).value ==
+           "\"x\\u0001y\"");
+    assert(callFn(eval, "json_build_object",
+                  {S("line\nbreak"), I(1)}).value ==
+           "{\"line\\nbreak\":1}");
     std::cout << "[JSONFN] to_json OK" << std::endl;
 }
 

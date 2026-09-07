@@ -3606,9 +3606,26 @@ static bool jsonTopLevelSplit(const std::string& s, char open, char close,
 
 static std::string jsonQuoteStr(const std::string& v) {
     std::string out = "\"";
-    for (char c : v) {
-        if (c == '"' || c == '\\') out.push_back('\\');
-        out.push_back(c);
+    static constexpr char hex[] = "0123456789abcdef";
+    for (unsigned char c : v) {
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\b': out += "\\b"; break;
+            case '\f': out += "\\f"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (c < 0x20) {
+                    out += "\\u00";
+                    out.push_back(hex[c >> 4]);
+                    out.push_back(hex[c & 0x0f]);
+                } else {
+                    out.push_back(static_cast<char>(c));
+                }
+                break;
+        }
     }
     out += "\"";
     return out;
