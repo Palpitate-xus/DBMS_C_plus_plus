@@ -5969,10 +5969,26 @@ void ExprEvaluator::registerBuiltins() {
         }
         return ExprValue("text", s, false);
     };
-    // to_hex(int) — hexadecimal text of a (non-negative interpreted) integer
+    // to_hex(int) — render the two's-complement width of the selected int4
+    // or int8 overload, matching PostgreSQL for negative values.
     functions_["to_hex"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
-        uint64_t v = static_cast<uint64_t>(a[0].asInt());
+        long long signedValue = 0;
+        if (!parseInt64Exact(a[0].value, signedValue)) {
+            throw std::runtime_error(
+                "invalid input syntax for type integer (SQLSTATE 22P02)");
+        }
+        const std::string type = toLower(a[0].typeName);
+        const bool int8 = type == "bigint" || type == "int8";
+        if (!int8 &&
+            (signedValue < std::numeric_limits<int32_t>::lowest() ||
+             signedValue > std::numeric_limits<int32_t>::max())) {
+            throw std::runtime_error(
+                "integer out of range (SQLSTATE 22003)");
+        }
+        uint64_t v = int8
+            ? static_cast<uint64_t>(signedValue)
+            : static_cast<uint32_t>(signedValue);
         if (v == 0) return ExprValue("text", "0", false);
         std::string out;
         const char* digits = "0123456789abcdef";

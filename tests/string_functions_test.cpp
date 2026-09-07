@@ -194,6 +194,16 @@ static void test_initcap_tohex() {
     assert(callFn(eval, "to_hex", {I(255)}).value == "ff");
     assert(callFn(eval, "to_hex", {I(0)}).value == "0");
     assert(callFn(eval, "to_hex", {I(4096)}).value == "1000");
+    assert(callFn(eval, "to_hex", {I(-1)}).value == "ffffffff");
+    assert(callFn(eval, "to_hex",
+                  {dbms::ExprValue("integer", "-2147483648", false)})
+               .value == "80000000");
+    assert(callFn(eval, "to_hex",
+                  {dbms::ExprValue("bigint", "-1", false)})
+               .value == "ffffffffffffffff");
+    assert(callFn(eval, "to_hex",
+                  {dbms::ExprValue("bigint", "-9223372036854775808", false)})
+               .value == "8000000000000000");
     std::cout << "[STRFN] initcap/to_hex OK" << std::endl;
 }
 
