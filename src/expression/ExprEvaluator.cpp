@@ -2444,6 +2444,9 @@ ExprValue ExprEvaluator::evalCase(const CaseExpr* e, const RowContext& ctx) cons
 
 enum class IntegerCastTarget { SmallInt, Integer, BigInt };
 
+static ExprValue castToIntegerRange(const ExprValue& value,
+                                    const std::string& targetType);
+
 static const char* integerCastTypeName(IntegerCastTarget target) {
     switch (target) {
         case IntegerCastTarget::SmallInt: return "smallint";
@@ -3151,6 +3154,8 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
         return castToTimestamp(v, "timestamp");
     if (target == "timestamptz" || target == "timestamp with time zone")
         return castToTimestamp(v, "timestamptz");
+    if (target == "int4range" || target == "int8range")
+        return castToIntegerRange(v, target);
 
     // Default passthrough
     return ExprValue(targetTypeName, v.value, false);
@@ -4256,6 +4261,80 @@ static RangeParts parseRangeLiteral(const std::string& text) {
     r.hiInf = r.hi.empty();
     r.valid = true;
     return r;
+}
+
+static ExprValue castToIntegerRange(const ExprValue& value,
+                                    const std::string& targetType) {
+    const RangeParts range = parseRangeLiteral(value.value);
+    if (!range.valid) {
+        throw std::runtime_error(
+            "invalid input syntax for type " + targetType + ": '" +
+            value.value + "' (SQLSTATE 22P02)");
+    }
+    if (range.empty) return ExprValue(targetType, "empty", false);
+
+    const int64_t minimum = targetType == "int4range"
+        ? std::numeric_limits<int32_t>::min()
+        : std::numeric_limits<int64_t>::min();
+    const int64_t maximum = targetType == "int4range"
+        ? std::numeric_limits<int32_t>::max()
+        : std::numeric_limits<int64_t>::max();
+    const auto parseBound = [&](const std::string& text) {
+        int64_t parsed = 0;
+        const SignedIntegerParseResult status =
+            parseSignedInteger(text, parsed);
+        if (status == SignedIntegerParseResult::Invalid) {
+            throw std::runtime_error(
+                "invalid input syntax for type " + targetType + ": '" +
+                value.value + "' (SQLSTATE 22P02)");
+        }
+        if (status == SignedIntegerParseResult::OutOfRange ||
+            parsed < minimum || parsed > maximum) {
+            throw std::runtime_error(
+                std::string(targetType == "int4range" ? "integer" : "bigint") +
+                " out of range (SQLSTATE 22003)");
+        }
+        return parsed;
+    };
+
+    int64_t lower = 0;
+    int64_t upper = 0;
+    if (!range.loInf) lower = parseBound(range.lo);
+    if (!range.hiInf) upper = parseBound(range.hi);
+    if (!range.loInf && !range.hiInf) {
+        if (lower > upper) {
+            throw std::runtime_error(
+                "range lower bound must be less than or equal to range "
+                "upper bound (SQLSTATE 22000)");
+        }
+        if (lower == upper && !(range.loInc && range.hiInc))
+            return ExprValue(targetType, "empty", false);
+    }
+
+    if (!range.loInf && !range.loInc) {
+        if (lower == maximum) {
+            throw std::runtime_error(
+                std::string(targetType == "int4range" ? "integer" : "bigint") +
+                " out of range (SQLSTATE 22003)");
+        }
+        ++lower;
+    }
+    if (!range.hiInf && range.hiInc) {
+        if (upper == maximum) {
+            throw std::runtime_error(
+                std::string(targetType == "int4range" ? "integer" : "bigint") +
+                " out of range (SQLSTATE 22003)");
+        }
+        ++upper;
+    }
+    if (!range.loInf && !range.hiInf && lower >= upper)
+        return ExprValue(targetType, "empty", false);
+
+    const std::string result =
+        std::string(range.loInf ? "(" : "[") +
+        (range.loInf ? "" : std::to_string(lower)) + "," +
+        (range.hiInf ? "" : std::to_string(upper)) + ")";
+    return ExprValue(targetType, result, false);
 }
 
 static bool typeIsRange(const std::string& typeName) {

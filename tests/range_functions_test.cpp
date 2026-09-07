@@ -7,10 +7,12 @@
 // ============================================================================
 
 #include "expression/ExprEvaluator.h"
+#include "expression/expr_helper.h"
 #include "parser/ast.h"
 #include <cassert>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -44,6 +46,19 @@ static dbms::ExprValue callBinary(dbms::ExprEvaluator& eval,
     expression.op = op;
     expression.left = std::move(lhs);
     expression.right = std::move(rhs);
+    return eval.eval(&expression, ctx);
+}
+
+static dbms::ExprValue callCast(dbms::ExprEvaluator& eval,
+                                const dbms::ExprValue& value,
+                                const std::string& targetType) {
+    dbms::RowContext ctx;
+    ctx.set("input", value);
+    auto input = std::make_unique<dbms::ColumnRefExpr>();
+    input->column = "input";
+    dbms::CastExpr expression;
+    expression.operand = std::move(input);
+    expression.typeName = targetType;
     return eval.eval(&expression, ctx);
 }
 
@@ -181,6 +196,32 @@ static void test_containment_operators() {
     std::cout << "[RANGEFN] containment operators OK" << std::endl;
 }
 
+static void test_integer_range_casts() {
+    dbms::ExprEvaluator eval;
+    const auto canonical = callCast(eval, T("(1,10]"), "int4range");
+    assert(canonical.typeName == "int4range" && canonical.value == "[2,11)");
+    assert(callCast(eval, T("(5,5)"), "int4range").value == "empty");
+
+    const std::string precise =
+        "[9007199254740992,9007199254740993)";
+    assert(callCast(eval, T(precise), "int8range").value == precise);
+    const auto parsedCast = dbms::ExprHelper::evalString(
+        "'(1,10]'::int4range", {});
+    assert(parsedCast.ok && !parsedCast.isNull &&
+           parsedCast.value == "[2,11)");
+
+    bool rejected = false;
+    try {
+        (void)callCast(eval, T("[2147483648,2147483649)"), "int4range");
+    } catch (const std::runtime_error& error) {
+        rejected = std::string(error.what()).find("SQLSTATE 22003") !=
+                   std::string::npos;
+    }
+    assert(rejected);
+
+    std::cout << "[RANGEFN] integer range casts OK" << std::endl;
+}
+
 int main() {
     test_bounds();
     test_bound_result_types();
@@ -188,6 +229,7 @@ int main() {
     test_predicates();
     test_overlap_operator();
     test_containment_operators();
+    test_integer_range_casts();
     std::cout << "[RANGEFN] all passed" << std::endl;
     return 0;
 }
