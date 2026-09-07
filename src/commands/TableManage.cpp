@@ -28854,142 +28854,52 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         return "";
     }
     if (expr.funcName == "cast" && expr.funcArgs.size() >= 2) {
-        // Parenthesized/arithmetic operand ("(v + 1)::text"): substitute
-        // column tokens with row values, then evaluate the arithmetic via
-        // the expression evaluator before the type conversion below.
-        {
-            std::string op0 = expr.funcArgs[0];
-            while (op0.size() >= 2 && op0.front() == '(' && op0.back() == ')') {
-                int dP = 0; bool bal = true;
-                for (size_t ip = 0; ip < op0.size(); ++ip) {
-                    if (op0[ip] == '(') ++dP;
-                    else if (op0[ip] == ')') { --dP; if (dP == 0 && ip + 1 != op0.size()) { bal = false; break; } }
-                }
-                if (!bal) break;
-                op0 = op0.substr(1, op0.size() - 2);
-            }
-            bool hasOp = false;
-            {
-                int d5 = 0; bool inQ5 = false;
-                for (char c5 : op0) {
-                    if (c5 == 39) inQ5 = !inQ5;
-                    if (inQ5) continue;
-                    if (c5 == '(') ++d5;
-                    else if (c5 == ')') --d5;
-                    else if (d5 == 0 && (c5 == '+' || c5 == '-' || c5 == '*' || c5 == '/')) { hasOp = true; break; }
-                }
-            }
-            if (hasOp) {
-                std::string synth;
-                std::string tok;
-                auto flushTok5 = [&](bool wantVal) {
-                    if (tok.empty()) return;
-                    bool ident = isalpha((unsigned char)tok[0]) || tok[0] == '_';
-                    for (char c6 : tok)
-                        if (!isalnum((unsigned char)c6) && c6 != '_') { ident = false; break; }
-                    if (wantVal && ident) {
-                        std::string v5 = getVal(tok);
-                        synth += v5;
-                    } else {
-                        synth += tok;
-                    }
-                    tok.clear();
-                };
-                for (char c7 : op0) {
-                    if (isalnum((unsigned char)c7) || c7 == '_') { tok += c7; continue; }
-                    flushTok5(true);
-                    synth += c7;
-                }
-                flushTok5(true);
-                if (!synth.empty()) {
-                    std::string trimmed = synth;
-                    while (!trimmed.empty() && (trimmed.front() == '(' || trimmed.front() == ' ')) trimmed.erase(0, 1);
-                    while (!trimmed.empty() && (trimmed.back() == ')' || trimmed.back() == ' ')) trimmed.pop_back();
-                    auto r5 = dbms::ExprHelper::evalString(trimmed, {}, {}, dbname);
-                    if (r5.ok && !r5.isNull) {
-                        StorageEngine::SelectExpr sub5;
-                        sub5.funcName = "cast";
-                        sub5.funcArgs = {r5.value, expr.funcArgs[1]};
-                        return applyScalarFunc(sub5, rowBuffer, tbl, engine, dbname);
-                    }
-                }
+        std::map<std::string, std::string> rowContext;
+        std::map<std::string, std::string> typeHints;
+        std::set<std::string> nullColumns;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            bool valueIsNull = false;
+            const std::string value = engine && !dbname.empty()
+                ? engine->extractColumnValue(
+                      rowBuffer, tbl, i, dbname, true, &valueIsNull)
+                : StorageEngine::extractColumnValueStatic(
+                      rowBuffer, tbl, i);
+            rowContext[tbl.cols[i].dataName] = value;
+            typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+            if (valueIsNull || (!engine && value.empty()))
+                nullColumns.insert(tbl.cols[i].dataName);
+        }
+
+        std::string targetType = trim(expr.funcArgs[1]);
+        for (char& c : targetType) {
+            c = static_cast<char>(
+                std::tolower(static_cast<unsigned char>(c)));
+        }
+        const bool tinyIntTarget = targetType == "tinyint";
+        if (targetType == "float") targetType = "real";
+        else if (targetType == "double") targetType = "double precision";
+        else if (targetType == "long") targetType = "bigint";
+        else if (targetType == "number") targetType = "numeric";
+        else if (tinyIntTarget) targetType = "integer";
+
+        const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
+            "cast(" + expr.funcArgs[0] + " as " + targetType + ")",
+            rowContext, nullColumns, typeHints, dbname, expr.sessionUser);
+        if (!evaluated.ok) {
+            throw std::runtime_error(
+                evaluated.error.empty() ? "failed to evaluate cast"
+                                        : evaluated.error);
+        }
+        if (evaluated.isNull) return "NULL";
+        if (tinyIntTarget) {
+            const int64_t converted = std::stoll(evaluated.value);
+            if (converted < std::numeric_limits<int8_t>::min() ||
+                converted > std::numeric_limits<int8_t>::max()) {
+                throw std::runtime_error(
+                    "tinyint out of range (SQLSTATE 22003)");
             }
         }
-        std::string val = getVal(expr.funcArgs[0]);
-        std::string targetType = expr.funcArgs[1];
-        if (targetType == "char" || targetType == "varchar" || targetType == "text" ||
-            targetType == "binary" || targetType == "varbinary" || targetType == "blob") {
-            return val;
-        }
-        if (targetType == "int" || targetType == "integer" || targetType == "tinyint" || targetType == "long") {
-            try {
-                // PG rounds to nearest, half away from zero (3.7 -> 4, -3.7 -> -4).
-                if (val.find('.') != std::string::npos)
-                    return std::to_string(static_cast<int64_t>(std::llround(std::stold(val))));
-                int64_t num = std::stoll(val);
-                return std::to_string(num);
-            } catch (...) { return "0"; }
-        }
-        if (targetType == "date") {
-            Date d(val.c_str());
-            return (d.year == 0) ? "" : str(d);
-        }
-        if (targetType == "timestamp") {
-            int64_t ts = parseTimestampToSeconds(val);
-            return (ts == 0) ? "" : formatTimestampSeconds(ts);
-        }
-        if (targetType.size() > 7 && targetType.substr(0, 8) == "numeric(") {
-            // numeric(p) -> scale 0; numeric(p,s) -> scale s; round
-            // half-up on the DECIMAL digits (22.345 -> 22.35).
-            int scale = 0;
-            {
-                size_t o = targetType.find(',');
-                size_t c2 = targetType.find(')');
-                if (o != std::string::npos && c2 != std::string::npos && c2 > o)
-                    scale = std::stoi(targetType.substr(o + 1, c2 - o - 1));
-                if (scale < 0) scale = 0;
-            }
-            try {
-                std::string s2 = val;
-                bool neg = (!s2.empty() && s2[0] == '-');
-                if (neg) s2 = s2.substr(1);
-                size_t dot = s2.find('.');
-                std::string ip = (dot == std::string::npos) ? s2 : s2.substr(0, dot);
-                std::string fp = (dot == std::string::npos) ? "" : s2.substr(dot + 1);
-                while ((int)fp.size() < scale + 1) fp += '0';
-                std::string keep = fp.substr(0, scale);
-                char next = fp[scale];
-                if (next >= '5') {
-                    std::string all = ip + keep;
-                    int carry = 1;
-                    for (int k = (int)all.size() - 1; k >= 0 && carry; --k) {
-                        int d2 = all[k] - '0' + carry;
-                        carry = d2 / 10;
-                        all[k] = static_cast<char>('0' + d2 % 10);
-                    }
-                    if (carry) all.insert(all.begin(), '1');
-                    if (scale > 0) {
-                        ip = all.substr(0, all.size() - scale);
-                        keep = all.substr(all.size() - scale);
-                    } else ip = all;
-                }
-                if (ip.empty()) ip = "0";
-                std::string out2 = (neg ? "-" : "") + ip;
-                if (scale > 0) out2 += "." + keep;
-                return out2;
-            } catch (...) { return val; }
-        }
-        if (targetType == "numeric" || targetType == "decimal" || targetType == "number") {
-            // plain numeric: value unchanged (1.1 -> 1.1)
-            return val;
-        }
-        if (targetType == "float") {
-            try { return std::to_string(std::stof(val)); } catch (...) { return "0"; }
-        }
-        if (targetType == "double" || targetType == "decimal") {
-            try { return std::to_string(std::stod(val)); } catch (...) { return "0"; }
-        }
-        return val;
+        return evaluated.value;
     }
     if (expr.funcName == "convert" && expr.funcArgs.size() >= 2) {
         // CONVERT(val, type) - alias for CAST
