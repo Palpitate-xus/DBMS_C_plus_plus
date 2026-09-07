@@ -30131,6 +30131,7 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
     std::vector<std::string> result;
     if (!tableExists(dbname, tablename)) return result;
     if (!lockManager_.lockShared(tablename)) return result;
+    ResourceUnlockGuard tableLockGuard(lockManager_, tablename);
 
     if (transactionContext().inTransaction && transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED) {
         refreshReadView();
@@ -30156,7 +30157,6 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
         }
     }
     if (scanFailed) {
-        lockManager_.unlock(tablename);
         return result;
     }
 
@@ -30395,7 +30395,6 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
             result.push_back(rowStr);
         }
     }
-    lockManager_.unlock(tablename);
     return result;
 }
 
