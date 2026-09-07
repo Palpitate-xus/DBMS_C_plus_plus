@@ -27770,7 +27770,10 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 const std::string value = engine->extractColumnValue(
                     innerRow, innerSch, i, dbname, true, &valueIsNull);
                 const std::string bare = innerSch.cols[i].dataName;
-                const std::string qualified = innerTbl + "." + bare;
+                // The alias hides the inner physical relation name. Keeping
+                // both would overwrite an outer reference in a self-query.
+                const std::string qualified =
+                    (innerAlias.empty() ? innerTbl : innerAlias) + "." + bare;
                 rowContext[bare] = value;
                 rowContext[qualified] = value;
                 typeHints[bare] = innerSch.cols[i].dataType;
@@ -27780,13 +27783,6 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 if (valueIsNull) {
                     nullColumns.insert(bare);
                     nullColumns.insert(qualified);
-                }
-                if (!innerAlias.empty()) {
-                    const std::string aliased = innerAlias + "." + bare;
-                    rowContext[aliased] = value;
-                    typeHints[aliased] = innerSch.cols[i].dataType;
-                    nullColumns.erase(aliased);
-                    if (valueIsNull) nullColumns.insert(aliased);
                 }
             }
             const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
