@@ -6247,15 +6247,61 @@ void ExprEvaluator::registerBuiltins() {
                 throw std::runtime_error(
                     "unterminated format() type specifier (SQLSTATE 22023)");
             }
-            char spec = fmt[i + 1];
-            if (spec == '%') { out.push_back('%'); ++i; continue; }
+            size_t specifierIndex = i + 1;
+            size_t argumentIndex = argi;
+            bool explicitPosition = false;
+            if (std::isdigit(static_cast<unsigned char>(
+                    fmt[specifierIndex]))) {
+                size_t position = 0;
+                const size_t positionStart = specifierIndex;
+                while (specifierIndex < fmt.size() &&
+                       std::isdigit(static_cast<unsigned char>(
+                           fmt[specifierIndex]))) {
+                    const size_t digit = static_cast<size_t>(
+                        fmt[specifierIndex] - '0');
+                    if (position >
+                        (std::numeric_limits<size_t>::max() - digit) / 10) {
+                        throw std::runtime_error(
+                            "format() argument position is out of range "
+                            "(SQLSTATE 22023)");
+                    }
+                    position = position * 10 + digit;
+                    ++specifierIndex;
+                }
+                if (specifierIndex < fmt.size() &&
+                    fmt[specifierIndex] == '$') {
+                    if (position == 0) {
+                        throw std::runtime_error(
+                            "format() arguments are numbered from 1 "
+                            "(SQLSTATE 22023)");
+                    }
+                    explicitPosition = true;
+                    argumentIndex = position;
+                    ++specifierIndex;
+                } else {
+                    // Digits without '$' are width syntax, handled by the
+                    // width parser rather than as a position.
+                    specifierIndex = positionStart;
+                }
+            }
+            if (specifierIndex >= fmt.size()) {
+                throw std::runtime_error(
+                    "unterminated format() type specifier (SQLSTATE 22023)");
+            }
+            char spec = fmt[specifierIndex];
+            if (spec == '%') {
+                out.push_back('%');
+                i = specifierIndex;
+                continue;
+            }
             if (spec == 's' || spec == 'I' || spec == 'L') {
-                ++i;
-                if (argi >= a.size()) {
+                if (!explicitPosition) argumentIndex = argi++;
+                if (argumentIndex >= a.size()) {
                     throw std::runtime_error(
                         "too few arguments for format() (SQLSTATE 22023)");
                 }
-                const ExprValue& arg = a[argi++];
+                if (explicitPosition) argi = argumentIndex + 1;
+                const ExprValue& arg = a[argumentIndex];
                 if (spec == 's') out += arg.isNull ? "" : arg.value;
                 else if (spec == 'I') {
                     if (arg.isNull) {
@@ -6266,6 +6312,7 @@ void ExprEvaluator::registerBuiltins() {
                     out += sqlQuoteIdent(arg.value);
                 }
                 else /* L */ out += arg.isNull ? "NULL" : sqlQuoteLiteral(arg.value);
+                i = specifierIndex;
             } else {
                 throw std::runtime_error(
                     "unrecognized format() type specifier \"" +

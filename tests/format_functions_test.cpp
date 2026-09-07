@@ -9,6 +9,7 @@
 #include <cassert>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -50,6 +51,27 @@ static void test_format() {
     assert(callFn(eval, "format", {S("[%s]"), C("ab  ")}).value == "[ab  ]");
     assert(callFn(eval, "format", {S("[%L]"), C("ab  ")}).value ==
            "['ab  ']");
+    assert(callFn(eval, "format", {S("%2$s %1$s"), S("one"), S("two")})
+               .value == "two one");
+    assert(callFn(eval, "format",
+                  {S("%2$s %s %1$s %s"), S("one"), S("two"),
+                   S("three"), S("four")})
+               .value == "two three one two");
+    assert(callFn(eval, "format", {S("%1$I"), S("select")}).value ==
+           "\"select\"");
+
+    const auto expectPositionError = [&](const std::string& format) {
+        bool rejected = false;
+        try {
+            (void)callFn(eval, "format", {S(format), S("one"), S("two")});
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("SQLSTATE 22023") !=
+                       std::string::npos;
+        }
+        assert(rejected);
+    };
+    expectPositionError("%0$s");
+    expectPositionError("%4$s");
     std::cout << "[FORMATFN] format OK" << std::endl;
 }
 
