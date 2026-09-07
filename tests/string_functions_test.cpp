@@ -140,6 +140,8 @@ static void test_split_strpos() {
     assert(callFn(eval, "split_part", {S("a,b,c"), S(","), I(2)}).value == "b");
     assert(callFn(eval, "split_part", {S("a,b,c"), S(","), I(-1)}).value == "c");
     assert(callFn(eval, "split_part", {S("a,b,c"), S(","), I(9)}).value == "");
+    assert(callFn(eval, "split_part", {C("a,b  "), C(",  "), I(2)})
+               .value == "b");
     bool zeroFieldRejected = false;
     try {
         (void)callFn(eval, "split_part", {S("a,b,c"), S(","), I(0)});
@@ -151,12 +153,14 @@ static void test_split_strpos() {
     assert(zeroFieldRejected);
     assert(callFn(eval, "strpos", {S("high"), S("ig")}).value == "2");
     assert(callFn(eval, "strpos", {S("high"), S("zz")}).value == "0");
+    assert(callFn(eval, "strpos", {C("ab  "), C("  ")}).value == "1");
     std::cout << "[STRFN] split_part/strpos OK" << std::endl;
 }
 
 static void test_initcap_tohex() {
     dbms::ExprEvaluator eval;
     assert(callFn(eval, "initcap", {S("hi THERE ji-ha")}).value == "Hi There Ji-Ha");
+    assert(callFn(eval, "initcap", {C("hi  ")}).value == "Hi");
     assert(callFn(eval, "reverse", {S("aé中")}).value == "中éa");
     assert(callFn(eval, "lower", {C("AB  ")}).value == "ab");
     assert(callFn(eval, "upper", {C("ab  ")}).value == "AB");
@@ -207,11 +211,14 @@ static void test_concat_ws_starts_translate() {
     assert(callFn(eval, "concat_ws", {S("-"), S("x"), nullArg, S("z")}).value == "x-z");
     assert(callFn(eval, "starts_with", {S("alphabet"), S("alph")}).value == "t");
     assert(callFn(eval, "starts_with", {S("alphabet"), S("beta")}).value == "f");
+    assert(callFn(eval, "starts_with", {C("ab  "), S("ab ")}).value == "f");
     assert(callFn(eval, "translate", {S("12345"), S("143"), S("ax")}).value == "a2x5");  // 1->a, 4->x, 3 deleted
     assert(callFn(eval, "translate",
                   {S("aé中"), S("é中"), S("界")}).value == "a界");
     assert(callFn(eval, "translate",
                   {S("xé"), S("xé"), S("中a")}).value == "中a");
+    assert(callFn(eval, "translate", {C("ab  "), C("a "), C("x ")})
+               .value == "xb");
     std::cout << "[STRFN] concat_ws/starts_with/translate OK" << std::endl;
 }
 
@@ -225,6 +232,8 @@ static void test_overlay_quote() {
                   {S("aé中z"), S("X"), I(2), I(2)}).value == "aXz");
     assert(callFn(eval, "overlay",
                   {S("aé中z"), S("界"), I(2)}).value == "a界中z");
+    assert(callFn(eval, "overlay", {C("abcdef  "), C("X  "), I(2), I(3)})
+               .value == "aXef");
     assert(callFn(eval, "overlay",
                   {S("abcdef"), S("X"), I(2), I(-1)}).value ==
            "aXabcdef");

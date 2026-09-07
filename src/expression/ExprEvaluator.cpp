@@ -5537,8 +5537,8 @@ void ExprEvaluator::registerBuiltins() {
     functions_["split_part"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 3 || a[0].isNull || a[1].isNull || a[2].isNull)
             return ExprValue("text", "", true);
-        const std::string& s = a[0].value;
-        const std::string& delim = a[1].value;
+        const std::string s = textArgumentValue(a[0]);
+        const std::string delim = textArgumentValue(a[1]);
         int64_t n = a[2].asInt();
         std::vector<std::string> parts;
         if (delim.empty()) {
@@ -5565,14 +5565,18 @@ void ExprEvaluator::registerBuiltins() {
     // strpos(string, substring) — 1-based position of first match, 0 if absent
     functions_["strpos"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("integer", "", true);
-        size_t pos = a[0].value.find(a[1].value);
+        const std::string input = textArgumentValue(a[0]);
+        const std::string substring = textArgumentValue(a[1]);
+        size_t pos = input.find(substring);
         if (pos == std::string::npos) return ExprValue("integer", "0", false);
-        return ExprValue("integer", std::to_string(utf8CharCount(a[0].value.substr(0, pos)) + 1), false);
+        return ExprValue(
+            "integer", std::to_string(utf8CharCount(input.substr(0, pos)) + 1),
+            false);
     };
     // initcap — capitalize the first letter of each word, lowercase the rest
     functions_["initcap"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
-        std::string s = a[0].value;
+        std::string s = textArgumentValue(a[0]);
         bool startWord = true;
         for (char& c : s) {
             unsigned char uc = static_cast<unsigned char>(c);
@@ -5614,8 +5618,8 @@ void ExprEvaluator::registerBuiltins() {
     // starts_with(str, prefix) — boolean prefix test
     functions_["starts_with"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("boolean", "", true);
-        const std::string& s = a[0].value;
-        const std::string& p = a[1].value;
+        const std::string s = textArgumentValue(a[0]);
+        const std::string p = textArgumentValue(a[1]);
         bool r = s.size() >= p.size() && s.compare(0, p.size(), p) == 0;
         return ExprValue("boolean", r ? "t" : "f", false);
     };
@@ -5624,9 +5628,9 @@ void ExprEvaluator::registerBuiltins() {
     functions_["translate"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 3 || a[0].isNull || a[1].isNull || a[2].isNull)
             return ExprValue("text", "", true);
-        const std::string& s = a[0].value;
-        const std::string& from = a[1].value;
-        const std::string& to = a[2].value;
+        const std::string s = textArgumentValue(a[0]);
+        const std::string from = textArgumentValue(a[1]);
+        const std::string to = textArgumentValue(a[2]);
         auto characters = [](const std::string& text) {
             std::vector<std::string> result;
             const size_t count = utf8CharCount(text);
@@ -5715,8 +5719,8 @@ void ExprEvaluator::registerBuiltins() {
             (a.size() >= 4 && a[3].isNull)) {
             return ExprValue("text", "", true);
         }
-        const std::string& s = a[0].value;
-        const std::string& repl = a[1].value;
+        const std::string s = textArgumentValue(a[0]);
+        const std::string repl = textArgumentValue(a[1]);
         long long start = 0;
         if (!parseInt64Exact(a[2].value, start))
             return ExprValue("text", "", true);
