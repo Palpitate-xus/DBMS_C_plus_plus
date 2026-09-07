@@ -500,6 +500,31 @@ static void test_like_escape_semantics() {
     std::cout << "[EXPR] LIKE escape semantics OK" << std::endl;
 }
 
+static void test_like_utf8_wildcards() {
+    ExprEvaluator eval;
+    auto makeLit = [](const std::string& s) {
+        auto e = std::make_unique<LiteralExpr>();
+        e->value = s;
+        return e;
+    };
+    const auto matches = [&](const std::string& text,
+                             const std::string& pattern) {
+        auto expression = std::make_unique<BinaryOpExpr>();
+        expression->op = "like";
+        expression->left = makeLit(text);
+        expression->right = makeLit(pattern);
+        return eval.eval(expression.get(), {}).asBool();
+    };
+
+    assert(matches("'你'", "'_'"));
+    assert(matches("'你好'", "'__'"));
+    assert(matches("'你好'", "'_好'"));
+    assert(matches("'甲乙丙'", "'%_丙'"));
+    assert(!matches("'你好'", "'___'"));
+
+    std::cout << "[EXPR] LIKE UTF-8 wildcards OK" << std::endl;
+}
+
 static void test_cast() {
     ExprEvaluator eval;
     auto makeLit = [](const std::string& s) {
@@ -851,6 +876,7 @@ int main() {
     test_regex_operators();
     test_pattern_escape_arguments();
     test_like_escape_semantics();
+    test_like_utf8_wildcards();
     test_cast();
     test_numeric();
     test_case();

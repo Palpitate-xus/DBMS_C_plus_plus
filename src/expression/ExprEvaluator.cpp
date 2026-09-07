@@ -1682,7 +1682,15 @@ static bool likeMatchWithEscape(const std::string& text,
     enum class TokenKind { Literal, AnyCharacter, AnySequence };
     struct Token {
         TokenKind kind;
-        unsigned char literal = 0;
+        std::string literal;
+    };
+
+    const auto codePointEnd = [](const std::string& value, size_t begin) {
+        const unsigned char lead = static_cast<unsigned char>(value[begin]);
+        const size_t width = lead < 0x80 ? 1
+            : (lead & 0xE0) == 0xC0 ? 2
+            : (lead & 0xF0) == 0xE0 ? 3 : 4;
+        return std::min(value.size(), begin + width);
     };
 
     std::vector<Token> tokens;
@@ -1693,46 +1701,62 @@ static bool likeMatchWithEscape(const std::string& text,
             // PostgreSQL treats a pattern ending in its escape character as
             // an expression that cannot match, rather than as a literal.
             if (i == pattern.size()) return false;
-            tokens.push_back(
-                {TokenKind::Literal, static_cast<unsigned char>(pattern[i++])});
+            const size_t end = codePointEnd(pattern, i);
+            tokens.push_back({TokenKind::Literal,
+                              pattern.substr(i, end - i)});
+            i = end;
         } else if (pattern[i] == '%') {
-            tokens.push_back({TokenKind::AnySequence});
+            tokens.push_back({TokenKind::AnySequence, {}});
             ++i;
         } else if (pattern[i] == '_') {
-            tokens.push_back({TokenKind::AnyCharacter});
+            tokens.push_back({TokenKind::AnyCharacter, {}});
             ++i;
         } else {
-            tokens.push_back(
-                {TokenKind::Literal, static_cast<unsigned char>(pattern[i++])});
+            const size_t end = codePointEnd(pattern, i);
+            tokens.push_back({TokenKind::Literal,
+                              pattern.substr(i, end - i)});
+            i = end;
         }
     }
 
-    std::vector<unsigned char> previous(text.size() + 1, 0);
-    std::vector<unsigned char> current(text.size() + 1, 0);
+    std::vector<std::string> textCharacters;
+    for (size_t i = 0; i < text.size();) {
+        const size_t end = codePointEnd(text, i);
+        textCharacters.push_back(text.substr(i, end - i));
+        i = end;
+    }
+
+    std::vector<unsigned char> previous(textCharacters.size() + 1, 0);
+    std::vector<unsigned char> current(textCharacters.size() + 1, 0);
     previous[0] = 1;
     for (const auto& token : tokens) {
         std::fill(current.begin(), current.end(), 0);
         if (token.kind == TokenKind::AnySequence) {
             current[0] = previous[0];
-            for (size_t i = 1; i <= text.size(); ++i) {
+            for (size_t i = 1; i <= textCharacters.size(); ++i) {
                 current[i] = previous[i] || current[i - 1];
             }
         } else {
-            for (size_t i = 1; i <= text.size(); ++i) {
+            for (size_t i = 1; i <= textCharacters.size(); ++i) {
                 bool matches = token.kind == TokenKind::AnyCharacter;
                 if (token.kind == TokenKind::Literal) {
-                    const unsigned char textByte =
-                        static_cast<unsigned char>(text[i - 1]);
-                    matches = foldCase
-                        ? std::tolower(textByte) == std::tolower(token.literal)
-                        : textByte == token.literal;
+                    const std::string& textCharacter = textCharacters[i - 1];
+                    if (foldCase && textCharacter.size() == 1 &&
+                        token.literal.size() == 1) {
+                        matches = std::tolower(static_cast<unsigned char>(
+                                      textCharacter[0])) ==
+                                  std::tolower(static_cast<unsigned char>(
+                                      token.literal[0]));
+                    } else {
+                        matches = textCharacter == token.literal;
+                    }
                 }
                 current[i] = previous[i - 1] && matches;
             }
         }
         previous.swap(current);
     }
-    return previous[text.size()] != 0;
+    return previous[textCharacters.size()] != 0;
 }
 
 bool ExprEvaluator::likeMatch(const std::string& text, const std::string& pattern) {
