@@ -7628,6 +7628,7 @@ static bool normalizeRange(const std::string& in, const std::string& type, std::
 
     double loV = 0, hiV = 0;
     int64_t loI = 0, hiI = 0;
+    std::optional<Numeric> loNumeric, hiNumeric;
     const bool discrete = (type == "int4range" || type == "int8range");
     const bool discreteDate = type == "daterange";
     auto parseBound = [&](const std::string& b, double& dv, int64_t& iv) -> bool {
@@ -7638,10 +7639,6 @@ static bool normalizeRange(const std::string& in, const std::string& type, std::
                        v > std::numeric_limits<int32_t>::max())) return false;
                   iv = v; dv = static_cast<double>(v); return true; }
             catch (...) { return false; }
-        } else if (type == "numrange") {
-            try { size_t p = 0; double v = std::stod(b, &p); if (p != b.size()) return false;
-                  dv = v; return true; }
-            catch (...) { return false; }
         } else if (type == "daterange") {
             Date d(b.c_str());
             if (d.year == 0) return false;
@@ -7651,8 +7648,17 @@ static bool normalizeRange(const std::string& in, const std::string& type, std::
         }
         int64_t v = parseTimestampToSeconds(b); if (v == 0) return false; dv = static_cast<double>(v); return true;
     };
-    if (!loInf && !parseBound(lo, loV, loI)) return false;
-    if (!hiInf && !parseBound(hi, hiV, hiI)) return false;
+    if (type == "numrange") {
+        try {
+            if (!loInf) loNumeric.emplace(lo);
+            if (!hiInf) hiNumeric.emplace(hi);
+        } catch (...) {
+            return false;
+        }
+    } else {
+        if (!loInf && !parseBound(lo, loV, loI)) return false;
+        if (!hiInf && !parseBound(hi, hiV, hiI)) return false;
+    }
     if (!loInf && !hiInf) {
         if (discrete) {
             if (loI > hiI) return false;
@@ -7660,6 +7666,8 @@ static bool normalizeRange(const std::string& in, const std::string& type, std::
                 out = "empty";
                 return true;
             }
+        } else if (type == "numrange") {
+            if (*loNumeric > *hiNumeric) return false;
         } else if (loV > hiV) {
             return false;
         }
@@ -7725,6 +7733,12 @@ static bool normalizeRange(const std::string& in, const std::string& type, std::
     if (!loInf && !hiInf) {
         if (discrete) {
             if (loI >= hiI) {
+                out = "empty";
+                return true;
+            }
+        } else if (type == "numrange") {
+            if (*loNumeric > *hiNumeric) return false;
+            if (*loNumeric == *hiNumeric && !(lb == '[' && ub == ']')) {
                 out = "empty";
                 return true;
             }

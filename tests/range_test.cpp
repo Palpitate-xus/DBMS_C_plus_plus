@@ -156,6 +156,21 @@ static void test_num_date_range() {
     assert(fetchOne(db, "t", {"=id 4"}, "d") ==
            "[2022-01-02,2022-01-04)");
 
+    const std::string preciseNumeric =
+        "[100000000000000000000000000001,"
+        "100000000000000000000000000002)";
+    assert(g_engine.insert(db, "t", {{"id","7"}, {"n", preciseNumeric},
+                                      {"d","empty"}}) == dbms::DBStatus::OK);
+    assert(fetchOne(db, "t", {"=id 7"}, "n") == preciseNumeric);
+    assert(g_engine.insert(
+               db, "t", {{"id","8"},
+                          {"n","[100000000000000000000000000002,"
+                               "100000000000000000000000000001)"},
+                          {"d","empty"}}) == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insert(db, "t", {{"id","9"}, {"n","[NaN,NaN]"},
+                                      {"d","empty"}}) == dbms::DBStatus::OK);
+    assert(fetchOne(db, "t", {"=id 9"}, "n") == "[NaN,NaN]");
+
     cleanup(db);
     std::cout << "[RANGE] numrange/daterange OK" << std::endl;
 }
