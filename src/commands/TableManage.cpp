@@ -28613,31 +28613,38 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         }
         return evaluated.isNull ? "NULL" : evaluated.value;
     }
-    if (expr.funcName == "concat") {
-        // PG concat() skips NULL arguments entirely.
-        std::string result;
-        for (const auto& arg : expr.funcArgs) {
-            if (arg == "NULL" || arg == "null") continue;
-            result += getVal(arg);
+    if (expr.funcName == "concat" || expr.funcName == "concat_ws") {
+        std::map<std::string, std::string> rowContext;
+        std::map<std::string, std::string> typeHints;
+        std::set<std::string> nullColumns;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            bool valueIsNull = false;
+            const std::string value = engine && !dbname.empty()
+                ? engine->extractColumnValue(
+                      rowBuffer, tbl, i, dbname, true, &valueIsNull)
+                : StorageEngine::extractColumnValueStatic(
+                      rowBuffer, tbl, i);
+            rowContext[tbl.cols[i].dataName] = value;
+            typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+            if (valueIsNull || (!engine && value.empty()))
+                nullColumns.insert(tbl.cols[i].dataName);
         }
-        return result;
-    }
-    if (expr.funcName == "concat_ws" && expr.funcArgs.size() >= 2) {
-        // PG concat_ws(sep, ...): NULL separator -> NULL; NULL args skipped.
-        if (expr.funcArgs[0] == "NULL" || expr.funcArgs[0] == "null") return "";
-        const std::string sep = getVal(expr.funcArgs[0]);
-        std::string result;
-        bool first = true;
-        for (size_t ai = 1; ai < expr.funcArgs.size(); ++ai) {
-            const std::string& arg = expr.funcArgs[ai];
-            if (arg == "NULL" || arg == "null") continue;
-            const std::string v = getVal(arg);
-            if (v.empty()) continue;  // stored-NULL column renders empty
-            if (!first) result += sep;
-            result += v;
-            first = false;
+        std::string expressionSql = expr.funcName + "(";
+        for (size_t i = 0; i < expr.funcArgs.size(); ++i) {
+            if (i) expressionSql += ',';
+            expressionSql += expr.funcArgs[i];
         }
-        return result;
+        expressionSql += ')';
+        const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
+            expressionSql, rowContext, nullColumns, typeHints, dbname,
+            expr.sessionUser);
+        if (!evaluated.ok) {
+            throw std::runtime_error(
+                evaluated.error.empty()
+                    ? "failed to evaluate concatenation"
+                    : evaluated.error);
+        }
+        return evaluated.isNull ? "NULL" : evaluated.value;
     }
     if (expr.funcName == "sign" && !expr.funcArgs.empty()) {
         std::string val = getVal(expr.funcArgs[0]);
