@@ -390,6 +390,25 @@ static void test_cast() {
     assert(evaluateCast("boolean", "t", "integer").value == "1");
     expectCastError("boolean", "t", "bigint", "42846");
 
+    assert(evaluateCast("numeric", "1.2345678901234567",
+                        "double precision").value ==
+           "1.2345678901234567");
+    assert(evaluateCast("numeric", "1.2345678901234567", "real").value ==
+           "1.2345679");
+    expectCastError("character varying", "not-a-number",
+                    "double precision", "22P02");
+    expectCastError("numeric", "1e100", "real", "22003");
+    expectCastError("character varying", "1e1000", "double precision",
+                    "22003");
+    expectCastError("double precision", "1e-46", "real", "22003");
+    assert(evaluateCast("double precision", "1e-45", "real").value ==
+           "1e-45");
+    assert(evaluateCast("character varying", "Infinity",
+                        "double precision").value == "Infinity");
+    assert(evaluateCast("character varying", "NaN", "real").value ==
+           "NaN");
+    expectCastError("boolean", "t", "double precision", "42846");
+
     std::cout << "[EXPR] cast OK" << std::endl;
 }
 

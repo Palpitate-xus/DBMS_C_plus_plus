@@ -4,6 +4,8 @@
 #include "types/numeric.h"
 
 #include <algorithm>
+#include <cerrno>
+#include <charconv>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
@@ -2219,6 +2221,88 @@ static ExprValue castToInteger(const ExprValue& value,
                      false);
 }
 
+[[noreturn]] static void throwFloatingCastSyntaxError(
+    const std::string& targetType, const std::string& value) {
+    throw std::runtime_error(
+        "invalid input syntax for type " + targetType + ": '" + value +
+        "' (SQLSTATE 22P02)");
+}
+
+[[noreturn]] static void throwFloatingCastRangeError(
+    const std::string& targetType) {
+    throw std::runtime_error(
+        "value out of range for type " + targetType +
+        " (SQLSTATE 22003)");
+}
+
+static void rejectBooleanFloatingCast(const ExprValue& value,
+                                      const std::string& targetType) {
+    const std::string sourceType = toLower(value.typeName);
+    if (sourceType == "boolean" || sourceType == "bool") {
+        throw std::runtime_error(
+            "cannot cast type boolean to " + targetType +
+            " (SQLSTATE 42846)");
+    }
+}
+
+static float parseRealCastValue(const ExprValue& value) {
+    rejectBooleanFloatingCast(value, "real");
+    const std::string text = trimStr(value.value);
+    if (text.empty()) throwFloatingCastSyntaxError("real", text);
+
+    errno = 0;
+    char* end = nullptr;
+    const float parsed = std::strtof(text.c_str(), &end);
+    const int parseError = errno;
+    if (end == text.c_str() || !end || *end != '\0')
+        throwFloatingCastSyntaxError("real", text);
+    // ERANGE is also reported for representable subnormal values. PostgreSQL
+    // preserves those, but rejects finite input that overflows to infinity or
+    // underflows all the way to zero.
+    if (parseError == ERANGE &&
+        (parsed == 0.0f || std::isinf(parsed))) {
+        throwFloatingCastRangeError("real");
+    }
+    return parsed;
+}
+
+static double parseDoubleCastValue(const ExprValue& value) {
+    rejectBooleanFloatingCast(value, "double precision");
+    const std::string text = trimStr(value.value);
+    if (text.empty())
+        throwFloatingCastSyntaxError("double precision", text);
+
+    errno = 0;
+    char* end = nullptr;
+    const double parsed = std::strtod(text.c_str(), &end);
+    const int parseError = errno;
+    if (end == text.c_str() || !end || *end != '\0')
+        throwFloatingCastSyntaxError("double precision", text);
+    if (parseError == ERANGE &&
+        (parsed == 0.0 || std::isinf(parsed))) {
+        throwFloatingCastRangeError("double precision");
+    }
+    return parsed;
+}
+
+template <typename Floating>
+static std::string formatFloatingCastValue(Floating value) {
+    if (std::isnan(value)) return "NaN";
+    if (std::isinf(value))
+        return std::signbit(value) ? "-Infinity" : "Infinity";
+
+    char buffer[64];
+    const auto converted = std::to_chars(
+        buffer, buffer + sizeof(buffer), value, std::chars_format::general);
+    if (converted.ec == std::errc())
+        return std::string(buffer, converted.ptr);
+
+    std::ostringstream output;
+    output << std::setprecision(std::numeric_limits<Floating>::max_digits10)
+           << value;
+    return output.str();
+}
+
 ExprValue ExprEvaluator::evalCast(const CastExpr* e, const RowContext& ctx) const {
     if (e) {
         ExprValue v = eval(e->operand.get(), ctx);        std::string fullT = e->typeName;        if (!e->typeMods.empty()) {            fullT += "(";            for (size_t mi = 0; mi < e->typeMods.size(); ++mi) {                if (mi) fullT += ",";                fullT += e->typeMods[mi];            }            fullT += ")";        }        return evalCast(nullptr, ctx, v, fullT);
@@ -2268,12 +2352,13 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
         return castToInteger(v, IntegerCastTarget::SmallInt);
     }
     if (target == "real" || target == "float4") {
-        std::ostringstream oss; oss << static_cast<float>(v.asDouble());
-        return ExprValue("real", oss.str(), false);
+        const float converted = parseRealCastValue(v);
+        return ExprValue("real", formatFloatingCastValue(converted), false);
     }
     if (target == "double precision" || target == "float8") {
-        std::ostringstream oss; oss << v.asDouble();
-        return ExprValue("double precision", oss.str(), false);
+        const double converted = parseDoubleCastValue(v);
+        return ExprValue("double precision",
+                         formatFloatingCastValue(converted), false);
     }
     if (target.size() > 7 && target.compare(0, 8, "numeric(") == 0) {
         // Typed numeric cast: round half-up to the declared scale
