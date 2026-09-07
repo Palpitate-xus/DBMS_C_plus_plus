@@ -7104,8 +7104,13 @@ void ExprEvaluator::registerBuiltins() {
         else if (field == "day") { h = mi = se = 0; }
         else if (field == "hour") { mi = se = 0; }
         else if (field == "minute") { se = 0; }
-        else if (field == "second") { /* keep */ }
-        else return ExprValue("timestamp", "", true);
+        else if (field == "second" || field == "milliseconds" ||
+                 field == "microseconds") { /* keep */ }
+        else {
+            throw std::runtime_error(
+                "unit \"" + field +
+                "\" not recognized for date_trunc (SQLSTATE 22023)");
+        }
         char buf[40];
         std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d", y, mo, d, h, mi, se);
         // PG date_trunc over a date input promotes to timestamptz and

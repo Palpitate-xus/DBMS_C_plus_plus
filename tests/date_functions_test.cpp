@@ -222,6 +222,10 @@ static void test_date_trunc() {
     assert(callFn(eval, "date_trunc", {F("day"), ts}).value == "2026-06-26 00:00:00");
     assert(callFn(eval, "date_trunc", {F("hour"), ts}).value == "2026-06-26 14:00:00");
     assert(callFn(eval, "date_trunc", {F("minute"), ts}).value == "2026-06-26 14:35:00");
+    assert(callFn(eval, "date_trunc", {F("milliseconds"), ts}).value ==
+           "2026-06-26 14:35:09");
+    assert(callFn(eval, "date_trunc", {F("microseconds"), ts}).value ==
+           "2026-06-26 14:35:09");
     assert(callFn(eval, "date_trunc", {F("quarter"), ts}).value == "2026-04-01 00:00:00");
     assert(callFn(eval, "date_trunc",
                   {F("day"), TS("infinity")}).value == "infinity");
@@ -235,6 +239,15 @@ static void test_date_trunc() {
                   {F("day"), TS("2026x06x26 14:35:09")}).isNull);
     assert(callFn(eval, "date_trunc",
                   {F("day"), TS("not-a-timestamp")}).isNull);
+    bool invalidUnitRejected = false;
+    try {
+        (void)callFn(eval, "date_trunc", {F("not_a_unit"), ts});
+    } catch (const std::runtime_error& error) {
+        invalidUnitRejected =
+            std::string(error.what()).find("SQLSTATE 22023") !=
+            std::string::npos;
+    }
+    assert(invalidUnitRejected);
     std::cout << "[DATEFN] date_trunc OK" << std::endl;
 }
 
