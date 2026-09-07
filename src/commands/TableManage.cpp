@@ -29477,51 +29477,39 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             result += *it;
         return result;
     }
-    if (expr.funcName == "greatest" && !expr.funcArgs.empty()) {
-        std::string best;
-        bool isFirst = true;
-        bool allNum = true;
-        for (const auto& a : expr.funcArgs) {
-            std::string v = getVal(a);
-            if (v.empty()) continue;
-            try { std::stod(v); } catch (...) { allNum = false; }
+    if ((expr.funcName == "greatest" || expr.funcName == "least") &&
+        !expr.funcArgs.empty()) {
+        std::map<std::string, std::string> rowContext;
+        std::map<std::string, std::string> typeHints;
+        std::set<std::string> nullColumns;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            bool valueIsNull = false;
+            const std::string value = engine && !dbname.empty()
+                ? engine->extractColumnValue(
+                      rowBuffer, tbl, i, dbname, true, &valueIsNull)
+                : StorageEngine::extractColumnValueStatic(
+                      rowBuffer, tbl, i);
+            rowContext[tbl.cols[i].dataName] = value;
+            typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+            if (valueIsNull || (!engine && value.empty()))
+                nullColumns.insert(tbl.cols[i].dataName);
         }
-        for (const auto& a : expr.funcArgs) {
-            std::string v = getVal(a);
-            if (v.empty()) continue;
-            if (isFirst) { best = v; isFirst = false; continue; }
-            if (allNum) {
-                try {
-                    if (std::stod(v) > std::stod(best)) best = v;
-                } catch (...) {}
-            } else {
-                if (v > best) best = v;
-            }
+        std::string expressionSql = expr.funcName + "(";
+        for (size_t i = 0; i < expr.funcArgs.size(); ++i) {
+            if (i) expressionSql += ',';
+            expressionSql += expr.funcArgs[i];
         }
-        return best;
-    }
-    if (expr.funcName == "least" && !expr.funcArgs.empty()) {
-        std::string best;
-        bool isFirst = true;
-        bool allNum = true;
-        for (const auto& a : expr.funcArgs) {
-            std::string v = getVal(a);
-            if (v.empty()) continue;
-            try { std::stod(v); } catch (...) { allNum = false; }
+        expressionSql += ')';
+        const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
+            expressionSql, rowContext, nullColumns, typeHints, dbname,
+            expr.sessionUser);
+        if (!evaluated.ok) {
+            throw std::runtime_error(
+                evaluated.error.empty()
+                    ? "failed to evaluate greatest/least"
+                    : evaluated.error);
         }
-        for (const auto& a : expr.funcArgs) {
-            std::string v = getVal(a);
-            if (v.empty()) continue;
-            if (isFirst) { best = v; isFirst = false; continue; }
-            if (allNum) {
-                try {
-                    if (std::stod(v) < std::stod(best)) best = v;
-                } catch (...) {}
-            } else {
-                if (v < best) best = v;
-            }
-        }
-        return best;
+        return evaluated.isNull ? "NULL" : evaluated.value;
     }
     if ((expr.funcName == "if" || expr.funcName == "iif") && expr.funcArgs.size() >= 3) {
         std::string cond = getVal(expr.funcArgs[0]);
