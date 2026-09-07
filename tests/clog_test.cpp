@@ -126,6 +126,37 @@ int main() {
         std::filesystem::remove_all(failureDir);
     }
 
+    // VACUUM/checkpoint may truncate immediately after a restart, before an
+    // old segment has ever been read into this backend's in-memory cache.
+    // Disk-only segments still need to be discovered and removed.
+    {
+        const std::string restartDir = "clog_restart_truncate_dir";
+        std::filesystem::remove_all(restartDir);
+        std::filesystem::create_directories(restartDir);
+        {
+            CommitLog writer(restartDir);
+            writer.setStatus(500, CommitLog::Status::Committed);
+            writer.setStatus(CommitLog::kXidsPerSegment + 500,
+                             CommitLog::Status::Aborted);
+            assert(writer.flush());
+        }
+
+        const auto oldSegment =
+            std::filesystem::path(restartDir) / "pg_xact" / "0";
+        assert(std::filesystem::exists(oldSegment));
+        {
+            CommitLog restarted(restartDir);
+            restarted.truncate(CommitLog::kXidsPerSegment + 1);
+        }
+        assert(!std::filesystem::exists(oldSegment));
+
+        CommitLog verifier(restartDir);
+        assert(verifier.getStatus(CommitLog::kXidsPerSegment + 500) ==
+               CommitLog::Status::Aborted);
+        std::filesystem::remove_all(restartDir);
+        std::cout << "[CLOG TEST] restart truncate discovery OK\n";
+    }
+
     std::filesystem::remove_all(testDir);
     std::cout << "[CLOG TEST] all passed\n";
     return 0;

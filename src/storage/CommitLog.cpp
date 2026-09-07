@@ -1,10 +1,12 @@
 #include "CommitLog.h"
 
+#include <charconv>
 #include <cerrno>
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <set>
 #include <string>
 #include <sys/file.h>
 #include <unistd.h>
@@ -276,14 +278,38 @@ void CommitLog::truncate(TxnId oldestXid) {
     if (oldestXid <= kXidsPerSegment) return; // 至少保留第一段
 
     uint64_t maxSeg = segmentNumber(oldestXid);
-    std::vector<uint64_t> toRemove;
+    std::set<uint64_t> toRemove;
     for (const auto& [segNo, _] : segments_) {
         if (segNo < maxSeg) {
-            toRemove.push_back(segNo);
+            toRemove.insert(segNo);
         }
     }
+
+    // A freshly started backend may not have read any old segment yet. Scan
+    // pg_xact as well as the cache so truncation does not depend on earlier
+    // visibility lookups in this process.
+    const std::filesystem::path clogDir =
+        std::filesystem::path(dataDir_) / "pg_xact";
+    std::error_code scanError;
+    std::filesystem::directory_iterator entry(clogDir, scanError);
+    const std::filesystem::directory_iterator end;
+    while (!scanError && entry != end) {
+        std::error_code fileError;
+        if (entry->is_regular_file(fileError) && !fileError) {
+            const std::string filename = entry->path().filename().string();
+            uint64_t segNo = 0;
+            const auto parsed = std::from_chars(
+                filename.data(), filename.data() + filename.size(),
+                segNo, 16);
+            if (parsed.ec == std::errc{} &&
+                parsed.ptr == filename.data() + filename.size() &&
+                segNo < maxSeg) {
+                toRemove.insert(segNo);
+            }
+        }
+        entry.increment(scanError);
+    }
     for (uint64_t segNo : toRemove) {
-        const std::filesystem::path clogDir = std::filesystem::path(dataDir_) / "pg_xact";
         const std::string lockPath = (clogDir / ".clog.lock").string();
         const int lockFd = ::open(lockPath.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
         if (lockFd < 0 || ::flock(lockFd, LOCK_EX) != 0) {
