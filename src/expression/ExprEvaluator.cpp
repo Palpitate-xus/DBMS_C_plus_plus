@@ -6916,6 +6916,24 @@ void ExprEvaluator::registerBuiltins() {
         };
         int y = num(0, 4), mo = num(5, 2), d = num(8, 2);
         int h = num(11, 2), mi = num(14, 2), se = num(17, 2);
+        auto sundayBasedWeekday = [](int year, int month, int day) {
+            static const int offsets[] = {
+                0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4
+            };
+            const int adjustedYear = year - (month < 3 ? 1 : 0);
+            return (adjustedYear + adjustedYear / 4 -
+                    adjustedYear / 100 + adjustedYear / 400 +
+                    offsets[month - 1] + day) % 7;
+        };
+        auto isoWeeksInYear = [&](int year) {
+            const int januaryFirst = sundayBasedWeekday(year, 1, 1);
+            const int isoJanuaryFirst = januaryFirst == 0
+                ? 7 : januaryFirst;
+            const bool leap =
+                (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+            return isoJanuaryFirst == 4 ||
+                   (isoJanuaryFirst == 3 && leap) ? 53 : 52;
+        };
         int64_t r = 0;
         if (field == "year") r = y;
         else if (field == "month") r = mo;
@@ -6927,11 +6945,30 @@ void ExprEvaluator::registerBuiltins() {
         else if (field == "decade") r = y / 10;
         else if (field == "century") r = y > 0 ? (y - 1) / 100 + 1 : 0;
         else if (field == "millennium") r = y > 0 ? (y - 1) / 1000 + 1 : 0;
+        else if (field == "week" || field == "isoyear") {
+            const Date current(y, mo, d);
+            const Date firstDay(y, 1, 1);
+            if (current.year == 0 || firstDay.year == 0)
+                return ExprValue("numeric", "", true);
+            const int dayOfYear = static_cast<int>(
+                current.convert() - firstDay.convert() + 1);
+            const int weekday = sundayBasedWeekday(y, mo, d);
+            const int isoWeekday = weekday == 0 ? 7 : weekday;
+            int isoYear = y;
+            int isoWeek = (dayOfYear - isoWeekday + 10) / 7;
+            if (isoWeek < 1) {
+                if (isoYear == 1)
+                    return ExprValue("numeric", "", true); // BC unsupported
+                --isoYear;
+                isoWeek = isoWeeksInYear(isoYear);
+            } else if (isoWeek > isoWeeksInYear(isoYear)) {
+                ++isoYear;
+                isoWeek = 1;
+            }
+            r = field == "week" ? isoWeek : isoYear;
+        }
         else if (field == "dow" || field == "isodow") {
-            // Sakamoto's algorithm: w = 0 (Sunday) .. 6 (Saturday)
-            static const int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
-            int yy = y - (mo < 3 ? 1 : 0);
-            int w = (yy + yy / 4 - yy / 100 + yy / 400 + t[(mo > 0 ? mo : 1) - 1] + d) % 7;
+            const int w = sundayBasedWeekday(y, mo, d);
             if (field == "isodow") r = (w == 0) ? 7 : w;  // 1=Mon .. 7=Sun
             else r = w;                                    // 0=Sun .. 6=Sat
         } else if (field == "doy") {

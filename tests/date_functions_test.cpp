@@ -107,6 +107,14 @@ static void test_dow_doy_century() {
     // day-of-year: Jan 1 -> 1, Feb 1 -> 32 (2026 not a leap year).
     assert(callFn(eval, "extract", {F("doy"), F("2026-01-01")}).value == "1");
     assert(callFn(eval, "extract", {F("doy"), F("2026-02-01")}).value == "32");
+    assert(callFn(eval, "extract", {F("week"), F("2021-01-01")}).value ==
+           "53");
+    assert(callFn(eval, "extract",
+                  {F("isoyear"), F("2021-01-01")}).value == "2020");
+    assert(callFn(eval, "extract", {F("week"), F("2021-01-04")}).value ==
+           "1");
+    assert(callFn(eval, "extract",
+                  {F("isoyear"), F("2021-01-04")}).value == "2021");
     // century / millennium.
     assert(callFn(eval, "extract", {F("century"), F("2026-06-26")}).value == "21");
     assert(callFn(eval, "extract", {F("decade"), F("2026-06-26")}).value == "202");
