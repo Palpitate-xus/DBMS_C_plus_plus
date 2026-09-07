@@ -5729,8 +5729,18 @@ void ExprEvaluator::registerBuiltins() {
         return boundedFloat8(a, std::atanh, -1.0, 1.0);
     };
     // gcd / lcm — integer greatest common divisor / least common multiple
-    functions_["gcd"] = [](const std::vector<ExprValue>& a) {
-        if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("bigint", "", true);
+    auto integerBinaryResultType = [](const std::vector<ExprValue>& a) {
+        for (size_t i = 0; i < std::min<size_t>(2, a.size()); ++i) {
+            const std::string type = toLower(a[i].typeName);
+            if (type == "bigint" || type == "int8")
+                return std::string("bigint");
+        }
+        return std::string("integer");
+    };
+    functions_["gcd"] = [integerBinaryResultType](const std::vector<ExprValue>& a) {
+        const std::string resultType = integerBinaryResultType(a);
+        if (a.size() < 2 || a[0].isNull || a[1].isNull)
+            return ExprValue(resultType, "", true);
         long long left = 0;
         long long right = 0;
         if (!parseInt64Exact(a[0].value, left) ||
@@ -5751,10 +5761,12 @@ void ExprEvaluator::registerBuiltins() {
             throw std::runtime_error(
                 "integer out of range (SQLSTATE 22003)");
         }
-        return ExprValue("bigint", std::to_string(x), false);
+        return ExprValue(resultType, std::to_string(x), false);
     };
-    functions_["lcm"] = [](const std::vector<ExprValue>& a) {
-        if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("bigint", "", true);
+    functions_["lcm"] = [integerBinaryResultType](const std::vector<ExprValue>& a) {
+        const std::string resultType = integerBinaryResultType(a);
+        if (a.size() < 2 || a[0].isNull || a[1].isNull)
+            return ExprValue(resultType, "", true);
         long long left = 0;
         long long right = 0;
         if (!parseInt64Exact(a[0].value, left) ||
@@ -5769,7 +5781,7 @@ void ExprEvaluator::registerBuiltins() {
         };
         const uint64_t x = magnitude(left);
         const uint64_t y = magnitude(right);
-        if (x == 0 || y == 0) return ExprValue("bigint", "0", false);
+        if (x == 0 || y == 0) return ExprValue(resultType, "0", false);
         uint64_t gcd = x;
         uint64_t divisor = y;
         while (divisor) {
@@ -5785,7 +5797,7 @@ void ExprEvaluator::registerBuiltins() {
                 "integer out of range (SQLSTATE 22003)");
         }
         return ExprValue(
-            "bigint", std::to_string(static_cast<uint64_t>(result)), false);
+            resultType, std::to_string(static_cast<uint64_t>(result)), false);
     };
     // div(y, x) — integer quotient of y / x, truncated toward zero
     functions_["div"] = [](const std::vector<ExprValue>& a) {

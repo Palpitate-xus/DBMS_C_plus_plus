@@ -357,9 +357,20 @@ static void test_int_math() {
     const auto integerSign = callFn(eval, "sign", {I(-7)});
     assert(integerSign.typeName == "double precision" &&
            integerSign.value == "-1");
-    assert(callFn(eval, "gcd", {I(54), I(24)}).value == "6");
+    const auto integerGcd = callFn(eval, "gcd", {I(54), I(24)});
+    assert(integerGcd.typeName == "integer" && integerGcd.value == "6");
     assert(callFn(eval, "gcd", {I(-12), I(18)}).value == "6");
-    assert(callFn(eval, "lcm", {I(4), I(6)}).value == "12");
+    const auto integerLcm = callFn(eval, "lcm", {I(4), I(6)});
+    assert(integerLcm.typeName == "integer" && integerLcm.value == "12");
+    const auto mixedGcd = callFn(
+        eval, "gcd",
+        {I(54), dbms::ExprValue("bigint", "24", false)});
+    assert(mixedGcd.typeName == "bigint" && mixedGcd.value == "6");
+    const auto bigintLcm = callFn(
+        eval, "lcm",
+        {dbms::ExprValue("bigint", "4", false),
+         dbms::ExprValue("bigint", "6", false)});
+    assert(bigintLcm.typeName == "bigint" && bigintLcm.value == "12");
     assert(callFn(eval, "lcm", {I(0), I(5)}).value == "0");
     assert(callFn(eval, "gcd",
                   {I(std::numeric_limits<int64_t>::min()), I(2)}).value ==
