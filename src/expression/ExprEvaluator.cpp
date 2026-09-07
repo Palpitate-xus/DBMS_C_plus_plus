@@ -2458,6 +2458,72 @@ static ExprValue castToNumeric(const ExprValue& value,
                      formatNumericCastValue(rounded, spec.scale), false);
 }
 
+static std::optional<bool> parseBooleanCastText(const std::string& input) {
+    const std::string text = toLower(trimStr(input));
+    if (text == "1") return true;
+    if (text == "0") return false;
+    if (text.empty()) return std::nullopt;
+
+    const std::pair<const char*, bool> names[] = {
+        {"true", true}, {"false", false}, {"yes", true},
+        {"no", false}, {"on", true}, {"off", false}};
+    std::optional<bool> result;
+    size_t matches = 0;
+    for (const auto& name : names) {
+        const std::string candidate = name.first;
+        if (text.size() <= candidate.size() &&
+            candidate.compare(0, text.size(), text) == 0) {
+            result = name.second;
+            ++matches;
+        }
+    }
+    return matches == 1 ? result : std::nullopt;
+}
+
+static ExprValue castToBoolean(const ExprValue& value) {
+    const std::string sourceType = toLower(value.typeName);
+    const bool booleanSource =
+        sourceType == "boolean" || sourceType == "bool";
+    const bool integerSource =
+        sourceType == "integer" || sourceType == "int" ||
+        sourceType == "int4";
+    const bool textSource =
+        sourceType.empty() || sourceType == "unknown" ||
+        sourceType == "text" || sourceType == "varchar" ||
+        sourceType == "character varying" || sourceType == "char" ||
+        sourceType == "character" || sourceType == "bpchar" ||
+        sourceType.rfind("varchar(", 0) == 0 ||
+        sourceType.rfind("character(", 0) == 0 ||
+        sourceType.rfind("character varying(", 0) == 0;
+
+    if (integerSource) {
+        int64_t integer = 0;
+        const SignedIntegerParseResult parsed =
+            parseSignedInteger(value.value, integer);
+        if (parsed == SignedIntegerParseResult::OutOfRange)
+            throwIntegerCastRangeError(IntegerCastTarget::Integer);
+        if (parsed != SignedIntegerParseResult::Ok) {
+            throw std::runtime_error(
+                "invalid input syntax for type integer: '" +
+                trimStr(value.value) + "' (SQLSTATE 22P02)");
+        }
+        return ExprValue("boolean", integer == 0 ? "f" : "t", false);
+    }
+
+    if (!booleanSource && !textSource) {
+        throw std::runtime_error(
+            "cannot cast type " + sourceType +
+            " to boolean (SQLSTATE 42846)");
+    }
+    const auto parsed = parseBooleanCastText(value.value);
+    if (!parsed) {
+        throw std::runtime_error(
+            "invalid input syntax for type boolean: '" +
+            trimStr(value.value) + "' (SQLSTATE 22P02)");
+    }
+    return ExprValue("boolean", *parsed ? "t" : "f", false);
+}
+
 ExprValue ExprEvaluator::evalCast(const CastExpr* e, const RowContext& ctx) const {
     if (e) {
         ExprValue v = eval(e->operand.get(), ctx);
@@ -2514,9 +2580,7 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
         }
     }
 
-    if (target == "boolean" || target == "bool") {
-        return ExprValue("boolean", v.asBool() ? "t" : "f", false);
-    }
+    if (target == "boolean" || target == "bool") return castToBoolean(v);
     if (target == "integer" || target == "int" || target == "int4")
         return castToInteger(v, IntegerCastTarget::Integer);
     if (target == "bigint" || target == "int8") {

@@ -447,6 +447,20 @@ static void test_cast() {
            "NaN");
     expectCastError("boolean", "t", "double precision", "42846");
 
+    assert(evaluateCast("character varying", "TRU", "boolean").value == "t");
+    assert(evaluateCast("character varying", "  yes  ", "boolean").value ==
+           "t");
+    assert(evaluateCast("character varying", "of", "boolean").value == "f");
+    assert(evaluateCast("character varying", "0", "boolean").value == "f");
+    expectCastError("character varying", "o", "boolean", "22P02");
+    expectCastError("character varying", "garbage", "boolean", "22P02");
+    assert(evaluateCast("integer", "0", "boolean").value == "f");
+    assert(evaluateCast("integer", "-2", "boolean").value == "t");
+    expectCastError("bigint", "1", "boolean", "42846");
+    expectCastError("smallint", "1", "boolean", "42846");
+    expectCastError("numeric", "1", "boolean", "42846");
+    expectCastError("double precision", "1", "boolean", "42846");
+
     expectCastError("character varying", "not-numeric", "numeric",
                     "22P02");
     expectCastError("boolean", "t", "numeric", "42846");
