@@ -202,6 +202,14 @@ static void test_date_trunc() {
     dbms::ExprEvaluator eval;
     auto ts = TS("2026-06-26 14:35:09");
     assert(callFn(eval, "date_trunc", {F("year"), ts}).value == "2026-01-01 00:00:00");
+    assert(callFn(eval, "date_trunc", {F("millennium"), ts}).value ==
+           "2001-01-01 00:00:00");
+    assert(callFn(eval, "date_trunc", {F("century"), ts}).value ==
+           "2001-01-01 00:00:00");
+    assert(callFn(eval, "date_trunc", {F("decade"), ts}).value ==
+           "2020-01-01 00:00:00");
+    assert(callFn(eval, "date_trunc",
+                  {F("decade"), TS("0005-06-01 00:00:00")}).isNull);
     assert(callFn(eval, "date_trunc", {F("month"), ts}).value == "2026-06-01 00:00:00");
     assert(callFn(eval, "date_trunc", {F("day"), ts}).value == "2026-06-26 00:00:00");
     assert(callFn(eval, "date_trunc", {F("hour"), ts}).value == "2026-06-26 14:00:00");

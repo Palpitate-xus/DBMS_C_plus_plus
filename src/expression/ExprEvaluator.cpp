@@ -7060,7 +7060,21 @@ void ExprEvaluator::registerBuiltins() {
         };
         int y = num(0, 4), mo = num(5, 2), d = num(8, 2);
         int h = num(11, 2), mi = num(14, 2), se = num(17, 2);
-        if (field == "year") { mo = 1; d = 1; h = mi = se = 0; }
+        if (field == "millennium") {
+            y = (y - 1) / 1000 * 1000 + 1;
+            mo = 1; d = 1; h = mi = se = 0;
+        }
+        else if (field == "century") {
+            y = (y - 1) / 100 * 100 + 1;
+            mo = 1; d = 1; h = mi = se = 0;
+        }
+        else if (field == "decade") {
+            y = y / 10 * 10;
+            if (y == 0)
+                return ExprValue("timestamp", "", true); // BC unsupported
+            mo = 1; d = 1; h = mi = se = 0;
+        }
+        else if (field == "year") { mo = 1; d = 1; h = mi = se = 0; }
         else if (field == "quarter") { mo = mo > 0 ? (mo - 1) / 3 * 3 + 1 : 1; d = 1; h = mi = se = 0; }
         else if (field == "month") { d = 1; h = mi = se = 0; }
         else if (field == "day") { h = mi = se = 0; }
