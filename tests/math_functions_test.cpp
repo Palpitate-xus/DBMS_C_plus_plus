@@ -314,6 +314,21 @@ static void test_int_math() {
     assert(callFn(eval, "abs", {N("-Infinity")}).value == "Infinity");
     assert(callFn(eval, "abs", {N("Infinity")}).value == "Infinity");
     assert(callFn(eval, "abs", {N("NaN")}).value == "NaN");
+    const auto absoluteDouble = callFn(eval, "abs", {D(-1.5)});
+    assert(absoluteDouble.typeName == "double precision" &&
+           absoluteDouble.value == "1.5");
+    const auto absoluteReal = callFn(
+        eval, "abs", {dbms::ExprValue("real", "-1.5", false)});
+    assert(absoluteReal.typeName == "real" && absoluteReal.value == "1.5");
+    const auto absoluteFloatInfinity = callFn(
+        eval, "abs",
+        {dbms::ExprValue("double precision", "-Infinity", false)});
+    assert(absoluteFloatInfinity.typeName == "double precision" &&
+           absoluteFloatInfinity.value == "Infinity");
+    const auto absoluteFloatNan = callFn(
+        eval, "abs", {dbms::ExprValue("real", "NaN", false)});
+    assert(absoluteFloatNan.typeName == "real" &&
+           absoluteFloatNan.value == "NaN");
     const auto numericNan = callFn(
         eval, "sign", {dbms::ExprValue("numeric", "NaN", false)});
     assert(numericNan.typeName == "numeric" && numericNan.value == "NaN");

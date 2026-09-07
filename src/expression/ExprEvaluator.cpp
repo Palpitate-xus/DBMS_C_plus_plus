@@ -5030,7 +5030,15 @@ void ExprEvaluator::registerBuiltins() {
     };
 
     functions_["abs"] = [](const std::vector<ExprValue>& a) {
-        if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
+        if (a.empty()) return ExprValue("numeric", "", true);
+        const std::string type = toLower(a[0].typeName);
+        if (a[0].isNull) {
+            const std::string resultType =
+                type == "real" || type == "float4" ? "real" :
+                type == "double precision" || type == "double" ||
+                type == "float8" ? "double precision" : a[0].typeName;
+            return ExprValue(resultType, "", true);
+        }
         if (isIntegerTypeName(a[0].typeName)) {
             long long value = 0;
             if (!parseInt64Exact(a[0].value, value) ||
@@ -5053,8 +5061,15 @@ void ExprEvaluator::registerBuiltins() {
                     "numeric", (n->sign() < 0 ? -(*n) : *n).toString(), false);
             }
         }
-        double v = std::abs(a[0].asDouble());
-        return ExprValue("numeric", std::to_string(v), false);
+        if (type == "real" || type == "float4") {
+            const float value = std::fabs(
+                static_cast<float>(a[0].asDouble()));
+            return ExprValue(
+                "real", formatFloatingCastValue(value), false);
+        }
+        const double value = std::fabs(a[0].asDouble());
+        return ExprValue(
+            "double precision", formatFloatingCastValue(value), false);
     };
     functions_["length"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
