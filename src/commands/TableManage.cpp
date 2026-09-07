@@ -27564,7 +27564,40 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         const bool quoted = arg.size() >= 2 &&
             ((arg.front() == '\'' && arg.back() == '\'') ||
              (arg.front() == '"' && arg.back() == '"'));
-        return !quoted && value == "NULL";
+        if (quoted || value != "NULL") return false;
+
+        std::string normalizedArg = trim(arg);
+        std::string loweredArg;
+        loweredArg.reserve(normalizedArg.size());
+        for (char c : normalizedArg) {
+            loweredArg += static_cast<char>(
+                std::tolower(static_cast<unsigned char>(c)));
+        }
+        if (loweredArg == "null") return true;
+
+        // A nested expression can legitimately produce the four-character
+        // text "NULL".  Re-evaluate it through the typed evaluator so its
+        // separate NULL bit, rather than its display text, decides strict
+        // propagation.
+        std::map<std::string, std::string> rowContext;
+        std::map<std::string, std::string> typeHints;
+        std::set<std::string> nullColumns;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            bool valueIsNull = false;
+            const std::string columnValue = engine && !dbname.empty()
+                ? engine->extractColumnValue(
+                      rowBuffer, tbl, i, dbname, true, &valueIsNull)
+                : StorageEngine::extractColumnValueStatic(
+                      rowBuffer, tbl, i);
+            rowContext[tbl.cols[i].dataName] = columnValue;
+            typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+            if (valueIsNull || (!engine && columnValue.empty()))
+                nullColumns.insert(tbl.cols[i].dataName);
+        }
+        const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
+            normalizedArg, rowContext, nullColumns, typeHints, dbname,
+            expr.sessionUser);
+        return evaluated.ok ? evaluated.isNull : true;
     };
     auto stringSearchPosition = [](const std::string& haystack,
                                    const std::string& needle) {
@@ -27600,10 +27633,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             if (expr.funcName != sf) continue;
             for (const auto& arg : expr.funcArgs) {
                 const std::string av = getVal(arg);
-                if ((av.empty() &&
-                     scalarArgColumnIsNull(
-                         arg, rowBuffer, tbl, engine, dbname)) ||
-                    av == "NULL") {
+                if (scalarValueIsNull(arg, av)) {
                     return "NULL";
                 }
             }
