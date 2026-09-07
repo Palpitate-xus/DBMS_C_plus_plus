@@ -58,6 +58,157 @@ static std::optional<Numeric> tryParseNumeric(const std::string& s) {
     }
 }
 
+static std::string normalizeDecimalMagnitude(std::string value) {
+    const size_t first = value.find_first_not_of('0');
+    if (first == std::string::npos) return "0";
+    value.erase(0, first);
+    return value;
+}
+
+static int compareDecimalMagnitudes(const std::string& left,
+                                    const std::string& right) {
+    if (left.size() != right.size())
+        return left.size() < right.size() ? -1 : 1;
+    if (left == right) return 0;
+    return left < right ? -1 : 1;
+}
+
+// Subtract two normalized unsigned decimal integers, with left >= right.
+static std::string subtractDecimalMagnitudes(const std::string& left,
+                                             const std::string& right) {
+    std::string result(left.size(), '0');
+    int borrow = 0;
+    size_t rightIndex = right.size();
+    for (size_t i = left.size(); i > 0; --i) {
+        int digit = left[i - 1] - '0' - borrow;
+        const int subtrahend = rightIndex > 0
+            ? right[--rightIndex] - '0' : 0;
+        if (digit < subtrahend) {
+            digit += 10;
+            borrow = 1;
+        } else {
+            borrow = 0;
+        }
+        result[i - 1] = static_cast<char>('0' + digit - subtrahend);
+    }
+    return normalizeDecimalMagnitude(std::move(result));
+}
+
+static std::pair<std::string, std::string> divideDecimalMagnitudes(
+    const std::string& dividend, const std::string& divisor) {
+    std::string quotient;
+    quotient.reserve(dividend.size());
+    std::string remainder = "0";
+    for (char digit : dividend) {
+        if (remainder == "0") remainder.assign(1, digit);
+        else remainder.push_back(digit);
+        remainder = normalizeDecimalMagnitude(std::move(remainder));
+
+        int quotientDigit = 0;
+        while (compareDecimalMagnitudes(remainder, divisor) >= 0) {
+            remainder = subtractDecimalMagnitudes(remainder, divisor);
+            ++quotientDigit;
+        }
+        quotient.push_back(static_cast<char>('0' + quotientDigit));
+    }
+    return {normalizeDecimalMagnitude(std::move(quotient)), remainder};
+}
+
+static std::string gcdDecimalMagnitudes(std::string left,
+                                        std::string right) {
+    while (right != "0") {
+        std::string remainder =
+            divideDecimalMagnitudes(left, right).second;
+        left = std::move(right);
+        right = std::move(remainder);
+    }
+    return left;
+}
+
+static std::string multiplyDecimalMagnitudes(const std::string& left,
+                                             const std::string& right) {
+    if (left == "0" || right == "0") return "0";
+    std::vector<int> digits(left.size() + right.size(), 0);
+    for (size_t i = left.size(); i > 0; --i) {
+        for (size_t j = right.size(); j > 0; --j) {
+            digits[i + j - 1] +=
+                (left[i - 1] - '0') * (right[j - 1] - '0');
+        }
+    }
+    for (size_t i = digits.size(); i > 1; --i) {
+        digits[i - 2] += digits[i - 1] / 10;
+        digits[i - 1] %= 10;
+    }
+    std::string result;
+    result.reserve(digits.size());
+    for (int digit : digits)
+        result.push_back(static_cast<char>('0' + digit));
+    return normalizeDecimalMagnitude(std::move(result));
+}
+
+static int numericTextScale(const std::string& input,
+                            const Numeric& parsed) {
+    if (parsed.sign() != 0) return parsed.scale();
+
+    size_t begin = 0;
+    while (begin < input.size() &&
+           std::isspace(static_cast<unsigned char>(input[begin]))) {
+        ++begin;
+    }
+    size_t end = input.size();
+    while (end > begin &&
+           std::isspace(static_cast<unsigned char>(input[end - 1]))) {
+        --end;
+    }
+    const size_t exponentPosition = input.find_first_of("eE", begin);
+    const size_t mantissaEnd = exponentPosition == std::string::npos ||
+            exponentPosition >= end
+        ? end : exponentPosition;
+    const size_t decimalPoint = input.find('.', begin);
+    int64_t fractionalDigits = 0;
+    if (decimalPoint != std::string::npos && decimalPoint < mantissaEnd) {
+        fractionalDigits = static_cast<int64_t>(
+            mantissaEnd - decimalPoint - 1);
+    }
+    int64_t exponent = 0;
+    if (exponentPosition != std::string::npos &&
+        exponentPosition + 1 < end) {
+        try {
+            exponent = std::stoll(input.substr(
+                exponentPosition + 1, end - exponentPosition - 1));
+        } catch (...) {
+            return parsed.scale();
+        }
+    }
+    const int64_t scale = std::max<int64_t>(0, fractionalDigits - exponent);
+    return static_cast<int>(std::min<int64_t>(scale, Numeric::kMaxPrecision));
+}
+
+static std::string numericMagnitudeAtScale(const Numeric& value,
+                                           int targetScale) {
+    std::string text = value.toString();
+    if (!text.empty() && (text.front() == '-' || text.front() == '+'))
+        text.erase(text.begin());
+    text.erase(std::remove(text.begin(), text.end(), '.'), text.end());
+    text = normalizeDecimalMagnitude(std::move(text));
+    if (text != "0" && targetScale > value.scale())
+        text.append(static_cast<size_t>(targetScale - value.scale()), '0');
+    return text;
+}
+
+static std::string formatScaledDecimalMagnitude(std::string digits,
+                                                int scale) {
+    digits = normalizeDecimalMagnitude(std::move(digits));
+    if (scale <= 0) return digits;
+    const size_t fractionalDigits = static_cast<size_t>(scale);
+    if (digits.size() <= fractionalDigits) {
+        return "0." + std::string(fractionalDigits - digits.size(), '0') +
+               digits;
+    }
+    digits.insert(digits.size() - fractionalDigits, 1, '.');
+    return digits;
+}
+
 bool ExprValue::asBool() const {
     if (isNull) return false;
     std::string v = toLower(value);
@@ -5737,7 +5888,60 @@ void ExprEvaluator::registerBuiltins() {
         }
         return std::string("integer");
     };
-    functions_["gcd"] = [integerBinaryResultType](const std::vector<ExprValue>& a) {
+    auto decimalGcdLcm = [](const std::vector<ExprValue>& a,
+                            bool leastCommonMultiple)
+        -> std::optional<ExprValue> {
+        bool numericOverload = false;
+        for (size_t i = 0; i < std::min<size_t>(2, a.size()); ++i) {
+            const std::string type = toLower(a[i].typeName);
+            if (type == "numeric" || type == "decimal" ||
+                type.rfind("numeric(", 0) == 0 ||
+                type.rfind("decimal(", 0) == 0) {
+                numericOverload = true;
+            }
+        }
+        if (!numericOverload) return std::nullopt;
+        if (a.size() < 2 || a[0].isNull || a[1].isNull)
+            return ExprValue("numeric", "", true);
+
+        const auto left = tryParseNumeric(a[0].value);
+        const auto right = tryParseNumeric(a[1].value);
+        if (!left || !right) {
+            throw std::runtime_error(
+                "invalid input syntax for type numeric (SQLSTATE 22P02)");
+        }
+        if (!left->isFinite() || !right->isFinite())
+            return ExprValue("numeric", "NaN", false);
+
+        const int scale = std::max(numericTextScale(a[0].value, *left),
+                                   numericTextScale(a[1].value, *right));
+        const std::string leftMagnitude =
+            numericMagnitudeAtScale(*left, scale);
+        const std::string rightMagnitude =
+            numericMagnitudeAtScale(*right, scale);
+        const std::string divisor =
+            gcdDecimalMagnitudes(leftMagnitude, rightMagnitude);
+        std::string result = divisor;
+        if (leastCommonMultiple) {
+            if (leftMagnitude == "0" || rightMagnitude == "0") {
+                result = "0";
+            } else {
+                const auto quotient =
+                    divideDecimalMagnitudes(leftMagnitude, divisor);
+                result = multiplyDecimalMagnitudes(
+                    quotient.first, rightMagnitude);
+                if (result.size() >
+                    static_cast<size_t>(Numeric::kMaxPrecision)) {
+                    throw std::runtime_error(
+                        "numeric value out of range (SQLSTATE 22003)");
+                }
+            }
+        }
+        return ExprValue(
+            "numeric", formatScaledDecimalMagnitude(result, scale), false);
+    };
+    functions_["gcd"] = [integerBinaryResultType, decimalGcdLcm](const std::vector<ExprValue>& a) {
+        if (const auto numeric = decimalGcdLcm(a, false)) return *numeric;
         const std::string resultType = integerBinaryResultType(a);
         if (a.size() < 2 || a[0].isNull || a[1].isNull)
             return ExprValue(resultType, "", true);
@@ -5763,7 +5967,8 @@ void ExprEvaluator::registerBuiltins() {
         }
         return ExprValue(resultType, std::to_string(x), false);
     };
-    functions_["lcm"] = [integerBinaryResultType](const std::vector<ExprValue>& a) {
+    functions_["lcm"] = [integerBinaryResultType, decimalGcdLcm](const std::vector<ExprValue>& a) {
+        if (const auto numeric = decimalGcdLcm(a, true)) return *numeric;
         const std::string resultType = integerBinaryResultType(a);
         if (a.size() < 2 || a[0].isNull || a[1].isNull)
             return ExprValue(resultType, "", true);

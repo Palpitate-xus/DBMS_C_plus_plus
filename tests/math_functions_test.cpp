@@ -371,6 +371,25 @@ static void test_int_math() {
         {dbms::ExprValue("bigint", "4", false),
          dbms::ExprValue("bigint", "6", false)});
     assert(bigintLcm.typeName == "bigint" && bigintLcm.value == "12");
+    const auto numericGcd = callFn(eval, "gcd", {N("10.50"), N("3.0")});
+    assert(numericGcd.typeName == "numeric" &&
+           numericGcd.value == "1.50");
+    const auto numericLcm = callFn(eval, "lcm", {N("10.50"), N("3.0")});
+    assert(numericLcm.typeName == "numeric" &&
+           numericLcm.value == "21.00");
+    assert(callFn(eval, "gcd", {N("0.0012"), N("0.0008")}).value ==
+           "0.0004");
+    assert(callFn(eval, "lcm", {N("0.0012"), N("0.0008")}).value ==
+           "0.0024");
+    assert(callFn(eval, "gcd", {N("0.00"), N("0.0")}).value == "0.00");
+    assert(callFn(eval, "lcm", {N("0.00"), N("1.20")}).value ==
+           "0.00");
+    assert(callFn(eval, "gcd",
+                  {N("12345678901234567890.12"), N("0.04")}).value ==
+           "0.04");
+    assert(callFn(eval, "gcd", {N("Infinity"), N("3")}).value ==
+           "NaN");
+    assert(callFn(eval, "lcm", {N("NaN"), N("3")}).value == "NaN");
     assert(callFn(eval, "lcm", {I(0), I(5)}).value == "0");
     assert(callFn(eval, "gcd",
                   {I(std::numeric_limits<int64_t>::min()), I(2)}).value ==
