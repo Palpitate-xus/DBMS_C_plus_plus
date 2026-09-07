@@ -7135,7 +7135,7 @@ void ExprEvaluator::registerBuiltins() {
             return ExprValue("text", "", true);
         const std::string s = textArgumentValue(a[0]);
         const std::string delim = textArgumentValue(a[1]);
-        int64_t n = a[2].asInt();
+        const int64_t n = parseInt32Argument(a[2]);
         std::vector<std::string> parts;
         if (delim.empty()) {
             parts.push_back(s);

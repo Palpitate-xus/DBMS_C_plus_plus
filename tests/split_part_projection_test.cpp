@@ -29,6 +29,19 @@ std::string projectSplitPart(const std::string& database,
     return value;
 }
 
+void expectSqlState(const std::string& database,
+                    const std::string& field,
+                    const std::string& sqlState) {
+    bool rejected = false;
+    try {
+        (void)projectSplitPart(database, "'a,b,c'", "','", field);
+    } catch (const std::runtime_error& error) {
+        rejected = std::string(error.what()).find(
+            "SQLSTATE " + sqlState) != std::string::npos;
+    }
+    assert(rejected);
+}
+
 }  // namespace
 
 int main() {
@@ -57,14 +70,10 @@ int main() {
     assert(projectSplitPart(database, "null_text", "','", "1") ==
            "NULL");
 
-    bool rejectedZero = false;
-    try {
-        (void)projectSplitPart(database, "'a,b,c'", "','", "0");
-    } catch (const std::runtime_error& error) {
-        rejectedZero = std::string(error.what()).find("SQLSTATE 22023") !=
-            std::string::npos;
-    }
-    assert(rejectedZero);
+    expectSqlState(database, "0", "22023");
+    expectSqlState(database, "'2x'", "22P02");
+    expectSqlState(database, "2147483648", "22003");
+    expectSqlState(database, "-2147483649", "22003");
 
     cleanupTestDb(testName);
     finalCleanupTestData();
