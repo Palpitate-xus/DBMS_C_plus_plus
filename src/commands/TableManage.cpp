@@ -29326,34 +29326,38 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         }
         return std::to_string(stringSearchPosition(str, substr));
     }
-    if (expr.funcName == "lpad" && expr.funcArgs.size() >= 2) {
-        std::string str = getVal(expr.funcArgs[0]);
-        try {
-            size_t target = static_cast<size_t>(std::stoul(getVal(expr.funcArgs[1])));
-            std::string pad = (expr.funcArgs.size() >= 3) ? getVal(expr.funcArgs[2]) : " ";
-            if (pad.empty()) return str;
-            if (str.size() >= target) return str.substr(0, target);
-            std::string out;
-            while (out.size() + str.size() < target) {
-                out += pad;
-            }
-            out = out.substr(0, target - str.size());
-            return out + str;
-        } catch (...) { return str; }
-    }
-    if (expr.funcName == "rpad" && expr.funcArgs.size() >= 2) {
-        std::string str = getVal(expr.funcArgs[0]);
-        try {
-            size_t target = static_cast<size_t>(std::stoul(getVal(expr.funcArgs[1])));
-            std::string pad = (expr.funcArgs.size() >= 3) ? getVal(expr.funcArgs[2]) : " ";
-            if (pad.empty()) return str;
-            if (str.size() >= target) return str.substr(0, target);
-            std::string out = str;
-            while (out.size() < target) {
-                out += pad;
-            }
-            return out.substr(0, target);
-        } catch (...) { return str; }
+    if ((expr.funcName == "lpad" || expr.funcName == "rpad") &&
+        expr.funcArgs.size() >= 2) {
+        std::map<std::string, std::string> rowContext;
+        std::map<std::string, std::string> typeHints;
+        std::set<std::string> nullColumns;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            bool valueIsNull = false;
+            const std::string value = engine && !dbname.empty()
+                ? engine->extractColumnValue(
+                      rowBuffer, tbl, i, dbname, true, &valueIsNull)
+                : StorageEngine::extractColumnValueStatic(
+                      rowBuffer, tbl, i);
+            rowContext[tbl.cols[i].dataName] = value;
+            typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+            if (valueIsNull || (!engine && value.empty()))
+                nullColumns.insert(tbl.cols[i].dataName);
+        }
+        std::string expressionSql = expr.funcName + "(";
+        for (size_t i = 0; i < expr.funcArgs.size(); ++i) {
+            if (i) expressionSql += ',';
+            expressionSql += expr.funcArgs[i];
+        }
+        expressionSql += ')';
+        const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
+            expressionSql, rowContext, nullColumns, typeHints, dbname,
+            expr.sessionUser);
+        if (!evaluated.ok) {
+            throw std::runtime_error(
+                evaluated.error.empty() ? "failed to evaluate padding"
+                                        : evaluated.error);
+        }
+        return evaluated.isNull ? "NULL" : evaluated.value;
     }
     if (expr.funcName == "reverse" && !expr.funcArgs.empty()) {
         std::string str = getVal(expr.funcArgs[0]);
