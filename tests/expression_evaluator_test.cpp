@@ -374,6 +374,32 @@ static void test_like() {
     std::cout << "[EXPR] like OK" << std::endl;
 }
 
+static void test_regex_operators() {
+    ExprEvaluator eval;
+    auto makeLit = [](const std::string& s) {
+        auto e = std::make_unique<LiteralExpr>();
+        e->value = s;
+        return e;
+    };
+
+    for (const auto& op : {"~", "~*", "!~", "!~*"}) {
+        auto expression = std::make_unique<BinaryOpExpr>();
+        expression->op = op;
+        expression->left = makeLit("'abc'");
+        expression->right = makeLit("'['");
+        bool rejected = false;
+        try {
+            (void)eval.eval(expression.get(), {});
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("SQLSTATE 2201B") !=
+                       std::string::npos;
+        }
+        assert(rejected);
+    }
+
+    std::cout << "[EXPR] regex operators OK" << std::endl;
+}
+
 static void test_cast() {
     ExprEvaluator eval;
     auto makeLit = [](const std::string& s) {
@@ -722,6 +748,7 @@ int main() {
     test_logical();
     test_null();
     test_like();
+    test_regex_operators();
     test_cast();
     test_numeric();
     test_case();

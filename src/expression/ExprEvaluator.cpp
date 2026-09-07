@@ -1765,6 +1765,7 @@ static bool similarToMatchEscape(const std::string& text, const std::string& pat
 // ----------------------------------------------------------------------------
 
 static ExprValue tsMatch(const std::string& vecText, const std::string& query);
+[[noreturn]] static void throwInvalidRegularExpression();
 
 ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& ctx) const {
     if (!e || !e->left || !e->right) return ExprValue{};
@@ -1809,20 +1810,14 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
     // POSIX-ish regex match operators: ~, ~* (case-insensitive), !~, !~*.
     if (op == "~" || op == "~*" || op == "!~" || op == "!~*") {
         if (l.isNull || r.isNull) return ExprValue("boolean", "", true);
-        bool m = false;
+        auto flags = std::regex::ECMAScript;
+        if (op == "~*" || op == "!~*") flags |= std::regex::icase;
+        bool m;
         try {
-            std::regex re(r.value);
+            std::regex re(r.value, flags);
             m = std::regex_search(l.value, re);
         } catch (const std::regex_error&) {
-            return ExprValue("boolean", "f", false);
-        }
-        if (op == "~*" || op == "!~*") {
-            try {
-                std::regex re2(r.value, std::regex::icase);
-                m = std::regex_search(l.value, re2);
-            } catch (const std::regex_error&) {
-                return ExprValue("boolean", "f", false);
-            }
+            throwInvalidRegularExpression();
         }
         if (op == "!~" || op == "!~*") m = !m;
         return ExprValue("boolean", m ? "t" : "f", false);
