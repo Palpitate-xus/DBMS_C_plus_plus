@@ -28806,16 +28806,42 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     // YEAR / MONTH / DAY - date extraction functions
     if ((expr.funcName == "year" || expr.funcName == "month" || expr.funcName == "day") && !expr.funcArgs.empty()) {
         std::string val = getVal(expr.funcArgs[0]);
-        Date d(val.c_str());
-        if (d.year == 0) {
-            // Try parsing as timestamp "YYYY-MM-DD HH:MM:SS"
-            size_t sp = val.find(' ');
-            if (sp != std::string::npos) d = Date(val.substr(0, sp).c_str());
+        std::string sourceType;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].dataName == expr.funcArgs[0]) {
+                sourceType = tbl.cols[i].dataType;
+                break;
+            }
         }
-        if (d.year == 0) return "";
-        if (expr.funcName == "year") return std::to_string(d.year);
-        if (expr.funcName == "month") return std::to_string(d.month);
-        return std::to_string(d.day);
+        std::string lowerType = sourceType;
+        for (char& c : lowerType) {
+            c = static_cast<char>(
+                std::tolower(static_cast<unsigned char>(c)));
+        }
+        const bool textSource = sourceType.empty() || lowerType == "text" ||
+            lowerType == "char" || lowerType == "varchar" ||
+            lowerType == "character" ||
+            lowerType == "character varying";
+        if (textSource) {
+            const size_t separator = val.find_first_of(" Tt");
+            const size_t timeStart = separator == std::string::npos
+                ? val.size() : separator + 1;
+            bool hasTimeZone = !val.empty() &&
+                (val.back() == 'Z' || val.back() == 'z');
+            for (size_t i = timeStart; !hasTimeZone && i < val.size(); ++i) {
+                if (val[i] == '+' || val[i] == '-') hasTimeZone = true;
+            }
+            sourceType = separator == std::string::npos
+                ? "date" : hasTimeZone ? "timestamptz" : "timestamp";
+        }
+        const auto evaluated = dbms::ExprHelper::evalString(
+            "extract(" + expr.funcName +
+                " from __date_component_value)",
+            {{"__date_component_value", val}},
+            {{"__date_component_value", sourceType}}, dbname,
+            expr.sessionUser);
+        if (!evaluated.ok || evaluated.isNull) return "";
+        return evaluated.value;
     }
     // HOUR / MINUTE / SECOND - timestamp extraction functions
     if ((expr.funcName == "hour" || expr.funcName == "minute" || expr.funcName == "second") && !expr.funcArgs.empty()) {
