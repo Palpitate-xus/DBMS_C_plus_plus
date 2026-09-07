@@ -29361,8 +29361,21 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     }
     if (expr.funcName == "reverse" && !expr.funcArgs.empty()) {
         std::string str = getVal(expr.funcArgs[0]);
-        std::reverse(str.begin(), str.end());
-        return str;
+        std::vector<std::string> characters;
+        for (size_t begin = 0; begin < str.size();) {
+            size_t end = begin + 1;
+            while (end < str.size() &&
+                   (static_cast<unsigned char>(str[end]) & 0xc0) == 0x80) {
+                ++end;
+            }
+            characters.push_back(str.substr(begin, end - begin));
+            begin = end;
+        }
+        std::string result;
+        result.reserve(str.size());
+        for (auto it = characters.rbegin(); it != characters.rend(); ++it)
+            result += *it;
+        return result;
     }
     if (expr.funcName == "greatest" && !expr.funcArgs.empty()) {
         std::string best;
