@@ -27553,6 +27553,30 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         }
         return arg;
     };
+    auto scalarValueIsNull = [&](const std::string& arg,
+                                 const std::string& value) {
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].dataName == arg) {
+                return scalarArgColumnIsNull(
+                    arg, rowBuffer, tbl, engine, dbname);
+            }
+        }
+        const bool quoted = arg.size() >= 2 &&
+            ((arg.front() == '\'' && arg.back() == '\'') ||
+             (arg.front() == '"' && arg.back() == '"'));
+        return !quoted && value == "NULL";
+    };
+    auto stringSearchPosition = [](const std::string& haystack,
+                                   const std::string& needle) {
+        const size_t bytePosition = haystack.find(needle);
+        if (bytePosition == std::string::npos) return size_t{0};
+        size_t characters = 0;
+        for (size_t i = 0; i < bytePosition; ++i) {
+            if ((static_cast<unsigned char>(haystack[i]) & 0xc0) != 0x80)
+                ++characters;
+        }
+        return characters + 1;
+    };
 
     // PG strict functions return NULL when any argument is NULL.  Column
     // arguments read as empty for physically-NULL values, so consult the
@@ -28603,9 +28627,11 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         // PG: strpos(s, sub) = 1-based position or 0.
         std::string a = getVal(expr.funcArgs[0]);
         std::string b2 = getVal(expr.funcArgs[1]);
-        if (b2.empty()) return "1";
-        size_t p = a.find(b2);
-        return (p == std::string::npos) ? "0" : std::to_string(p + 1);
+        if (scalarValueIsNull(expr.funcArgs[0], a) ||
+            scalarValueIsNull(expr.funcArgs[1], b2)) {
+            return "NULL";
+        }
+        return std::to_string(stringSearchPosition(a, b2));
     }
     if (expr.funcName == "overlay" && expr.funcArgs.size() >= 3) {
         // PG: overlay(s placing r from start [for n]) replaces n
@@ -29285,16 +29311,20 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     if (expr.funcName == "position" && expr.funcArgs.size() >= 2) {
         std::string substr = getVal(expr.funcArgs[0]);
         std::string str = getVal(expr.funcArgs[1]);
-        // NULL operand -> NULL (PG semantics), not 0
-        if (substr.empty() || str.empty()) return "NULL";
-        size_t pos = str.find(substr);
-        return (pos == std::string::npos) ? "0" : std::to_string(pos + 1);
+        if (scalarValueIsNull(expr.funcArgs[0], substr) ||
+            scalarValueIsNull(expr.funcArgs[1], str)) {
+            return "NULL";
+        }
+        return std::to_string(stringSearchPosition(str, substr));
     }
     if (expr.funcName == "instr" && expr.funcArgs.size() >= 2) {
         std::string str = getVal(expr.funcArgs[0]);
         std::string substr = getVal(expr.funcArgs[1]);
-        size_t pos = str.find(substr);
-        return (pos == std::string::npos) ? "0" : std::to_string(pos + 1);
+        if (scalarValueIsNull(expr.funcArgs[0], str) ||
+            scalarValueIsNull(expr.funcArgs[1], substr)) {
+            return "NULL";
+        }
+        return std::to_string(stringSearchPosition(str, substr));
     }
     if (expr.funcName == "lpad" && expr.funcArgs.size() >= 2) {
         std::string str = getVal(expr.funcArgs[0]);
