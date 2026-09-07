@@ -27794,7 +27794,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     if (expr.funcName == "is_null" || expr.funcName == "is_not_null") {
         if (expr.funcArgs.empty()) return "f";
         std::string v = getVal(expr.funcArgs[0]);
-        bool isNull = (v == "NULL" || v.empty());
+        bool isNull = scalarValueIsNull(expr.funcArgs[0], v);
         bool wantNull = (expr.funcName == "is_null");
         return (isNull == wantNull) ? "t" : "f";
     }
