@@ -244,7 +244,7 @@ static std::string toUpper(const std::string& s) {
     return r;
 }
 
-static bool isNumericToken(const std::string& s) {
+static bool isDecimalMantissaToken(const std::string& s) {
     if (s.empty()) return false;
     size_t i = 0;
     if (s[0] == '+' || s[0] == '-') i = 1;
@@ -259,6 +259,32 @@ static bool isNumericToken(const std::string& s) {
         return false;
     }
     return hasDigit;
+}
+
+static bool isNumericExponentPrefix(const std::string& s) {
+    return s.size() > 1 && (s.back() == 'e' || s.back() == 'E') &&
+           isDecimalMantissaToken(s.substr(0, s.size() - 1));
+}
+
+static bool terminatesTrailingDecimal(char ch) {
+    const unsigned char value = static_cast<unsigned char>(ch);
+    return !std::isalnum(value) && ch != '_' && ch != '.';
+}
+
+static bool isNumericToken(const std::string& s) {
+    if (s.empty()) return false;
+    size_t exponent = s.find_first_of("eE");
+    if (exponent == std::string::npos)
+        return isDecimalMantissaToken(s);
+    if (!isDecimalMantissaToken(s.substr(0, exponent))) return false;
+
+    size_t pos = exponent + 1;
+    if (pos < s.size() && (s[pos] == '+' || s[pos] == '-')) ++pos;
+    if (pos == s.size()) return false;
+    for (; pos < s.size(); ++pos) {
+        if (!std::isdigit(static_cast<unsigned char>(s[pos]))) return false;
+    }
+    return true;
 }
 
 static bool isStringLiteralToken(const std::string& s) {
@@ -392,13 +418,27 @@ std::vector<std::string> SQLParser::tokenize(const std::string& sql) {
             c == '/' || c == '%' || c == '^' || c == '~' || c == '!' ||
             c == '|' || c == '&' || c == '#' || c == '@' || c == '?' ||
             c == ':' || c == '[' || c == ']' || c == '.') {
-            // Decimal literal: keep "3.567" as ONE token. A '.' between two
-            // digit runs only folds when the left run is a bare number (so
-            // qualified identifiers like t.col and numeric-list syntax like
-            // "1." stay symbol-split).
-            if (c == '.' && isNumericToken(cur) &&
-                i + 1 < sql.size() &&
-                std::isdigit(static_cast<unsigned char>(sql[i + 1]))) {
+            // Keep decimal points in numeric tokens, including PostgreSQL's
+            // legal leading/trailing forms (.5 / 5.) and scientific 5.e1.
+            const bool startsLeadingDecimal =
+                c == '.' && cur.empty() && i + 1 < sql.size() &&
+                std::isdigit(static_cast<unsigned char>(sql[i + 1]));
+            const bool continuesDecimal =
+                c == '.' && isDecimalMantissaToken(cur) &&
+                cur.find('.') == std::string::npos &&
+                (i + 1 == sql.size() ||
+                 std::isdigit(static_cast<unsigned char>(sql[i + 1])) ||
+                 sql[i + 1] == 'e' || sql[i + 1] == 'E' ||
+                 terminatesTrailingDecimal(sql[i + 1]));
+            if (startsLeadingDecimal || continuesDecimal) {
+                cur += c;
+                continue;
+            }
+            // A sign immediately after a complete decimal mantissa plus e/E
+            // belongs to the exponent; ordinary arithmetic signs still split.
+            if ((c == '+' || c == '-') && i + 1 < sql.size() &&
+                std::isdigit(static_cast<unsigned char>(sql[i + 1])) &&
+                isNumericExponentPrefix(cur)) {
                 cur += c;
                 continue;
             }

@@ -285,6 +285,24 @@ int main() {
         std::cout << "[PARSER P1] ALTER TABLE OK\n";
     }
 
+    // Scientific numeric constants stay single literal tokens, including an
+    // exponent sign and leading/trailing decimal point forms.
+    {
+        auto r = parser.parse(
+            "SELECT 1e3, 1e-3, 1e+3, .5e2, 5.e1, 5., .5");
+        assert(r.success);
+        auto* s = asSelect(r.stmt);
+        assert(s && s->selectList.size() == 7);
+        const std::vector<std::string> expected = {
+            "1e3", "1e-3", "1e+3", ".5e2", "5.e1", "5.", ".5"};
+        for (size_t i = 0; i < expected.size(); ++i) {
+            const auto* literal = dynamic_cast<const LiteralExpr*>(
+                s->selectList[i].expr.get());
+            assert(literal && literal->value == expected[i]);
+        }
+        std::cout << "[PARSER P1] scientific numeric literals OK\n";
+    }
+
     // 9. SELECT GROUP BY ROLLUP/CUBE/GROUPING SETS
     {
         auto r = parser.parse("SELECT a, b FROM t GROUP BY ROLLUP(a), CUBE(b), GROUPING SETS((a),(b))");

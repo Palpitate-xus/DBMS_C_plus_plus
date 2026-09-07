@@ -869,6 +869,15 @@ static bool isNumericLiteral(const std::string& s) {
             hasDot = true;
             continue;
         }
+        if ((s[i] == 'e' || s[i] == 'E') && hasDigit) {
+            ++i;
+            if (i < s.size() && (s[i] == '+' || s[i] == '-')) ++i;
+            if (i == s.size()) return false;
+            for (; i < s.size(); ++i) {
+                if (s[i] < '0' || s[i] > '9') return false;
+            }
+            return true;
+        }
         return false;
     }
     return hasDigit;
@@ -892,7 +901,9 @@ ExprValue ExprEvaluator::evalLiteral(const LiteralExpr* e) const {
     }
 
     if (isNumericLiteral(raw)) {
-        if (raw.find('.') != std::string::npos) return ExprValue("numeric", raw, false);
+        if (raw.find('.') != std::string::npos ||
+            raw.find_first_of("eE") != std::string::npos)
+            return ExprValue("numeric", raw, false);
         return ExprValue("integer", raw, false);
     }
 

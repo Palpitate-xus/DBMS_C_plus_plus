@@ -21,6 +21,13 @@ static void test_literals() {
     }
     {
         LiteralExpr lit;
+        lit.value = "1e-3";
+        ExprValue v = eval.eval(&lit, {});
+        assert(v.typeName == "numeric");
+        assert(v.value == "1e-3");
+    }
+    {
+        LiteralExpr lit;
         lit.value = "'hello'";
         ExprValue v = eval.eval(&lit, {});
         assert(v.typeName == "character varying");
@@ -134,6 +141,14 @@ static void test_arithmetic() {
     exponent->right = makeLit("100");
     exponentResult = eval.eval(exponent.get(), {});
     assert(exponentResult.value == "1e+100");
+
+    auto scientificSum = std::make_unique<BinaryOpExpr>();
+    scientificSum->op = "+";
+    scientificSum->left = makeLit("1e-3");
+    scientificSum->right = makeLit("0.002");
+    ExprValue scientificResult = eval.eval(scientificSum.get(), {});
+    assert(scientificResult.typeName == "numeric");
+    assert(scientificResult.value == "0.003");
 
     auto typedExponent = [&](const std::string& left,
                              const std::string& leftType,
