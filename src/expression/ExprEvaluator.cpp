@@ -1202,6 +1202,76 @@ static bool looksLikeNumber(const std::string& s) {
     return hasDigit;
 }
 
+struct ComparableTimestamp {
+    int infinity = 0;  // -1 = -infinity, 0 = finite, 1 = infinity
+    int64_t micros = 0;
+};
+
+static std::optional<ComparableTimestamp> parseComparableTimestamp(
+    const std::string& input, bool withTimeZone) {
+    std::string text = trimStr(input);
+    const std::string lowered = toLower(text);
+    if (lowered == "infinity") return ComparableTimestamp{1, 0};
+    if (lowered == "-infinity") return ComparableTimestamp{-1, 0};
+
+    size_t separator = text.find_first_of(" Tt");
+    if (separator != std::string::npos && text[separator] != ' ')
+        text[separator] = ' ';
+    const size_t timeStart = separator == std::string::npos
+        ? text.size() : separator + 1;
+    size_t zonePosition = std::string::npos;
+    for (size_t i = timeStart; i < text.size(); ++i) {
+        if (text[i] == '+' || text[i] == '-') {
+            zonePosition = i;
+            break;
+        }
+    }
+    const bool hasZulu = !text.empty() &&
+        (text.back() == 'Z' || text.back() == 'z');
+    const size_t fractionEnd = zonePosition != std::string::npos
+        ? zonePosition : (hasZulu ? text.size() - 1 : text.size());
+    const size_t dot = text.find('.', timeStart);
+
+    int64_t micros = 0;
+    if (dot != std::string::npos) {
+        if (dot >= fractionEnd || dot + 1 == fractionEnd)
+            return std::nullopt;
+        size_t digits = 0;
+        for (size_t i = dot + 1; i < fractionEnd; ++i) {
+            if (text[i] < '0' || text[i] > '9') return std::nullopt;
+            if (digits < 6) micros = micros * 10 + (text[i] - '0');
+            ++digits;
+        }
+        while (digits < 6) {
+            micros *= 10;
+            ++digits;
+        }
+        if (digits > 6 && text[dot + 7] >= '5') ++micros;
+        text.erase(dot, fractionEnd - dot);
+    }
+
+    if (!withTimeZone) {
+        zonePosition = std::string::npos;
+        for (size_t i = timeStart; i < text.size(); ++i) {
+            if (text[i] == '+' || text[i] == '-') {
+                zonePosition = i;
+                break;
+            }
+        }
+        if (zonePosition != std::string::npos) text.erase(zonePosition);
+        else if (!text.empty() &&
+                 (text.back() == 'Z' || text.back() == 'z')) text.pop_back();
+    }
+
+    int64_t seconds = parseTimestampToSeconds(text);
+    if (seconds == 0 || isInfiniteTimestamp(seconds)) return std::nullopt;
+    if (micros == 1000000) {
+        ++seconds;
+        micros = 0;
+    }
+    return ComparableTimestamp{0, seconds * 1000000LL + micros};
+}
+
 int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
     if (a.isNull || b.isNull) return 0; // caller handles NULL
 
@@ -1272,9 +1342,22 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
             Date da(a.value.c_str()), db(b.value.c_str());
             return (da > db) - (da < db);
         }
-        int64_t sa = parseTimestampToSeconds(a.value);
-        int64_t sb = parseTimestampToSeconds(b.value);
-        return (sa > sb) - (sa < sb);
+        const bool zonedA = ta == "timestamptz" ||
+                            ta == "timestamp with time zone";
+        const bool zonedB = tb == "timestamptz" ||
+                            tb == "timestamp with time zone";
+        const auto parsedA = parseComparableTimestamp(a.value, zonedA);
+        const auto parsedB = parseComparableTimestamp(b.value, zonedB);
+        if (parsedA && parsedB) {
+            if (parsedA->infinity != parsedB->infinity)
+                return parsedA->infinity < parsedB->infinity ? -1 : 1;
+            if (parsedA->infinity != 0) return 0;
+            return (parsedA->micros > parsedB->micros) -
+                   (parsedA->micros < parsedB->micros);
+        }
+        // Invalid values normally cannot reach comparison after cast/storage
+        // validation; keep deterministic behavior for manually supplied data.
+        return a.value < b.value ? -1 : (a.value > b.value ? 1 : 0);
     }
 
     // Default string comparison

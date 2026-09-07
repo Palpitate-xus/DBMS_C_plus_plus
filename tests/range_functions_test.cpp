@@ -155,6 +155,12 @@ static void test_overlap_operator() {
     assert(callBinary(eval, "&&",
                       RT("numrange", "(,0)"),
                       RT("numrange", "[0,)")).value == "f");
+    assert(callBinary(
+               eval, "&&",
+               RT("tsrange", "[2024-01-01 00:00:00.1,"
+                             "2024-01-01 00:00:00.7)"),
+               RT("tsrange", "[2024-01-01 00:00:00.6,"
+                             "2024-01-01 00:00:00.9)")).value == "t");
 
     const auto nullRange = dbms::ExprValue("int4range", "", true);
     assert(callBinary(eval, "&&", nullRange, R("[1,5)")).isNull);
@@ -185,6 +191,11 @@ static void test_containment_operators() {
                       RT("numeric", "1")).value == "f");
     assert(callBinary(eval, "@>", RT("numrange", "(1,5]"),
                       RT("numeric", "5")).value == "t");
+    assert(callBinary(
+               eval, "@>",
+               RT("tsrange", "[2024-01-01 00:00:00.1,"
+                             "2024-01-01 00:00:00.7)"),
+               RT("timestamp", "2024-01-01 00:00:00.6")).value == "t");
 
     const auto nullRange = dbms::ExprValue("int4range", "", true);
     assert(callBinary(eval, "@>", nullRange, RT("integer", "1")).isNull);

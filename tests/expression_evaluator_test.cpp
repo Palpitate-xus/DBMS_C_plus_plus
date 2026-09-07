@@ -287,6 +287,12 @@ static void test_comparisons() {
     assert(compareTyped("character", "ab  ", "=", "text", "ab"));
     assert(!compareTyped("character", "ab  ", "=", "text", "ab  "));
     assert(compareTyped("character", "ab  ", "<", "bpchar", "abx   "));
+    assert(compareTyped("timestamp", "2024-01-01 00:00:00.7", ">",
+                        "timestamp", "2024-01-01 00:00:00.6"));
+    assert(!compareTyped("timestamp", "2024-01-01 00:00:00.7", "=",
+                         "timestamp", "2024-01-01 00:00:00.6"));
+    assert(compareTyped("timestamptz", "2024-01-01 00:00:00.7+01", "=",
+                        "timestamptz", "2023-12-31 23:00:00.7+00"));
 
     std::cout << "[EXPR] comparisons OK" << std::endl;
 }
