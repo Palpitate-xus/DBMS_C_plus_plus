@@ -37,6 +37,18 @@ static dbms::ExprValue I(int64_t v) { return dbms::ExprValue("integer", std::to_
 
 static void test_extract_date_part() {
     dbms::ExprEvaluator eval;
+    auto expectExtractError = [&](const std::string& field,
+                                  const dbms::ExprValue& source,
+                                  const std::string& sqlstate) {
+        bool rejected = false;
+        try {
+            (void)callFn(eval, "extract", {F(field), source});
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find(
+                           "SQLSTATE " + sqlstate) != std::string::npos;
+        }
+        assert(rejected);
+    };
     auto ts = TS("2026-06-26 14:35:09");
     assert(callFn(eval, "extract", {F("year"), ts}).value == "2026");
     assert(callFn(eval, "extract", {F("month"), ts}).value == "6");
@@ -80,8 +92,8 @@ static void test_extract_date_part() {
                   {F("century"), IV("2345 years")}).value == "23");
     assert(callFn(eval, "extract",
                   {F("millennium"), IV("2345 years")}).value == "2");
-    assert(callFn(eval, "date_part",
-                  {F("dow"), interval}).isNull);
+    expectExtractError("dow", interval, "0A000");
+    expectExtractError("not_a_unit", interval, "22023");
     std::cout << "[DATEFN] extract/date_part OK" << std::endl;
 }
 

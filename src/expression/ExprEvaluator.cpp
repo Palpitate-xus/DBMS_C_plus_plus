@@ -6874,7 +6874,18 @@ void ExprEvaluator::registerBuiltins() {
                     "numeric",
                     std::to_string(interval.micros % 60000000LL), false);
             }
-            return ExprValue("numeric", "", true);
+            static const std::set<std::string> unsupportedIntervalUnits = {
+                "dow", "isodow", "doy", "week", "isoyear", "julian",
+                "timezone", "timezone_hour", "timezone_minute"
+            };
+            if (unsupportedIntervalUnits.count(field)) {
+                throw std::runtime_error(
+                    "unit \"" + field +
+                    "\" not supported for type interval (SQLSTATE 0A000)");
+            }
+            throw std::runtime_error(
+                "unit \"" + field +
+                "\" not recognized for type interval (SQLSTATE 22023)");
         }
 
         const int64_t timestamp = parseTimestampToSeconds(src);
