@@ -465,6 +465,31 @@ static void test_age_fractional_seconds() {
     std::cout << "[DATEFN] age fractional seconds OK" << std::endl;
 }
 
+static void test_age_single_argument() {
+    dbms::ExprEvaluator eval;
+    const auto today = callFn(eval, "current_date", {});
+    assert(!today.isNull);
+
+    const auto oneArgument =
+        callFn(eval, "age", {TS("2000-01-15 12:34:56.5")});
+    const auto explicitMidnight = callFn(
+        eval, "age",
+        {TS(today.value + " 00:00:00"),
+         TS("2000-01-15 12:34:56.5")});
+    assert(!oneArgument.isNull);
+    assert(oneArgument.value == explicitMidnight.value);
+
+    const auto laterToday = callFn(
+        eval, "age", {TS(today.value + " 12:34:56.5")});
+    assert(laterToday.value == "-12:34:56.500000");
+
+    const auto nullArgument = callFn(
+        eval, "age", {dbms::ExprValue("timestamp", "", true)});
+    assert(nullArgument.isNull);
+
+    std::cout << "[DATEFN] age(timestamp) OK" << std::endl;
+}
+
 int main() {
     test_extract_date_part();
     test_dow_doy_century();
@@ -477,6 +502,7 @@ int main() {
     test_overlaps_null_semantics();
     test_overlaps_interval_endpoints();
     test_age_fractional_seconds();
+    test_age_single_argument();
     std::cout << "[DATEFN] all passed" << std::endl;
     return 0;
 }

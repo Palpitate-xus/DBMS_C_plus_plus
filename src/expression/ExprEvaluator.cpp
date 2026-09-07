@@ -8162,10 +8162,17 @@ void ExprEvaluator::registerBuiltins() {
         const auto result = justifyCommon(a[0].value, 1);
         return ExprValue("interval", result.value_or(""), !result);
     };
-    // age(ts, ts): PG calendar difference as interval.
-    functions_["age"] = [intervalToTextPg](const std::vector<ExprValue>& a) -> ExprValue {
-        if (a.size() < 2 || a[0].isNull || a[1].isNull)
+    // age(ts [, ts]): with one argument PostgreSQL subtracts the timestamp
+    // from current_date at midnight; two arguments subtract right from left.
+    functions_["age"] = [intervalToTextPg, stableDate](
+                            const std::vector<ExprValue>& a) -> ExprValue {
+        if (a.empty() || a[0].isNull ||
+            (a.size() >= 2 && a[1].isNull) || stableDate.empty())
             return ExprValue("interval", "", true);
+        const std::string lhs = a.size() == 1
+            ? stableDate + " 00:00:00"
+            : a[0].value;
+        const std::string& rhs = a.size() == 1 ? a[0].value : a[1].value;
         auto splitTs = [](const std::string& v, long long& Y, long long& Mo,
                           long long& D, long long& us) {
             int y = 0, mo = 0, d = 0;
@@ -8192,8 +8199,8 @@ void ExprEvaluator::registerBuiltins() {
             return true;
         };
         long long y1 = 0, m1 = 0, d1 = 0, us1 = 0, y2 = 0, m2 = 0, d2 = 0, us2 = 0;
-        if (!splitTs(a[0].value, y1, m1, d1, us1) ||
-            !splitTs(a[1].value, y2, m2, d2, us2))
+        if (!splitTs(lhs, y1, m1, d1, us1) ||
+            !splitTs(rhs, y2, m2, d2, us2))
             return ExprValue("interval", "", true);
         // PG renders a reversed age (earlier first) as the negated
         // swap: age(2020-01-01, 2026-05-06) = -6 years -4 mons -5 days.
