@@ -6941,6 +6941,11 @@ void ExprEvaluator::registerBuiltins() {
         else if (field == "hour") r = h;
         else if (field == "minute") r = mi;
         else if (field == "second") r = se;
+        else if (field == "milliseconds") {
+            return ExprValue(
+                "numeric", std::to_string(se * 1000) + ".000", false);
+        }
+        else if (field == "microseconds") r = se * 1000000LL;
         else if (field == "quarter") r = mo > 0 ? (mo - 1) / 3 + 1 : 0;
         else if (field == "decade") r = y / 10;
         else if (field == "century") r = y > 0 ? (y - 1) / 100 + 1 : 0;

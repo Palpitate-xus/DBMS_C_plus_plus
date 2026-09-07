@@ -56,6 +56,10 @@ static void test_extract_date_part() {
     assert(callFn(eval, "extract", {F("hour"), ts}).value == "14");
     assert(callFn(eval, "extract", {F("minute"), ts}).value == "35");
     assert(callFn(eval, "extract", {F("second"), ts}).value == "9");
+    assert(callFn(eval, "extract", {F("milliseconds"), ts}).value ==
+           "9000.000");
+    assert(callFn(eval, "extract", {F("microseconds"), ts}).value ==
+           "9000000");
     assert(callFn(eval, "extract", {F("quarter"), ts}).value == "2");
     // date_part is an alias of extract.
     assert(callFn(eval, "date_part", {F("year"), ts}).value == "2026");
