@@ -3668,6 +3668,11 @@ static std::regex buildRegex(const std::string& pattern, const std::string& flag
     }
 }
 
+[[noreturn]] static void throwInvalidRegularExpression() {
+    throw std::runtime_error(
+        "invalid regular expression (SQLSTATE 2201B)");
+}
+
 // Translate a PostgreSQL replacement string (\1..\9 backrefs, \& whole match,
 // \\ literal backslash) into the std::regex_replace ($1, $&) form, escaping any
 // literal '$'.
@@ -5794,7 +5799,7 @@ void ExprEvaluator::registerBuiltins() {
             out += "}";
             return ExprValue("text", out, false);
         } catch (const std::regex_error&) {
-            return ExprValue("text", "", true);
+            throwInvalidRegularExpression();
         }
     };
 
@@ -6239,7 +6244,7 @@ void ExprEvaluator::registerBuiltins() {
             ? textArgumentValue(a[3]) : "";
         bool ok;
         std::regex re = buildRegex(textArgumentValue(a[1]), flags, ok);
-        if (!ok) return ExprValue("text", "", true);
+        if (!ok) throwInvalidRegularExpression();
         std::string repl = translateReplacement(textArgumentValue(a[2]));
         const std::string input = textArgumentValue(a[0]);
         auto fmtFlags = (flags.find('g') != std::string::npos)
@@ -6260,7 +6265,7 @@ void ExprEvaluator::registerBuiltins() {
             ? textArgumentValue(a[2]) : "";
         bool ok;
         std::regex re = buildRegex(textArgumentValue(a[1]), flags, ok);
-        if (!ok) return ExprValue("ARRAY", "", true);
+        if (!ok) throwInvalidRegularExpression();
         const std::string input = textArgumentValue(a[0]);
         std::smatch m;
         if (!std::regex_search(input, m, re))
@@ -6284,7 +6289,7 @@ void ExprEvaluator::registerBuiltins() {
             ? textArgumentValue(a[2]) : "";
         bool ok;
         std::regex re = buildRegex(textArgumentValue(a[1]), flags, ok);
-        if (!ok) return ExprValue("ARRAY", "", true);
+        if (!ok) throwInvalidRegularExpression();
         const std::string s = textArgumentValue(a[0]);
         std::string out = "{";
         bool first = true;
@@ -6308,7 +6313,7 @@ void ExprEvaluator::registerBuiltins() {
             ? textArgumentValue(a[3]) : "";
         bool ok;
         std::regex re = buildRegex(textArgumentValue(a[1]), flags, ok);
-        if (!ok) return ExprValue("integer", "", true);
+        if (!ok) throwInvalidRegularExpression();
         const std::string s = textArgumentValue(a[0]);
         size_t start = 0;
         if (a.size() >= 3 && !a[2].isNull) {
@@ -6331,7 +6336,7 @@ void ExprEvaluator::registerBuiltins() {
             ? textArgumentValue(a[4]) : "";
         bool ok;
         std::regex re = buildRegex(textArgumentValue(a[1]), flags, ok);
-        if (!ok) return ExprValue("text", "", true);
+        if (!ok) throwInvalidRegularExpression();
         const std::string s = textArgumentValue(a[0]);
         size_t start = 0;
         if (a.size() >= 3 && !a[2].isNull) {

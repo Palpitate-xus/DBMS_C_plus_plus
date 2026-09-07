@@ -11,6 +11,7 @@
 #include <cassert>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -32,6 +33,19 @@ static dbms::ExprValue callFn(dbms::ExprEvaluator& eval, const std::string& name
 static dbms::ExprValue S(const std::string& v) { return dbms::ExprValue("text", v, false); }
 static dbms::ExprValue I(int64_t v) { return dbms::ExprValue("integer", std::to_string(v), false); }
 static dbms::ExprValue C(const std::string& v) { return dbms::ExprValue("character", v, false); }
+
+static void expectInvalidRegex(dbms::ExprEvaluator& eval,
+                               const std::string& function,
+                               std::vector<dbms::ExprValue> args) {
+    bool rejected = false;
+    try {
+        (void)callFn(eval, function, args);
+    } catch (const std::runtime_error& error) {
+        rejected = std::string(error.what()).find("SQLSTATE 2201B") !=
+                   std::string::npos;
+    }
+    assert(rejected);
+}
 
 static void test_replace() {
     dbms::ExprEvaluator eval;
@@ -92,11 +106,23 @@ static void test_count_substr() {
     std::cout << "[REGEXFN] count/substr OK" << std::endl;
 }
 
+static void test_invalid_patterns() {
+    dbms::ExprEvaluator eval;
+    expectInvalidRegex(eval, "regexp_replace", {S("abc"), S("("), S("x")});
+    expectInvalidRegex(eval, "regexp_match", {S("abc"), S("(")});
+    expectInvalidRegex(eval, "regexp_matches", {S("abc"), S("(")});
+    expectInvalidRegex(eval, "regexp_split_to_array", {S("abc"), S("(")});
+    expectInvalidRegex(eval, "regexp_count", {S("abc"), S("(")});
+    expectInvalidRegex(eval, "regexp_substr", {S("abc"), S("(")});
+    std::cout << "[REGEXFN] invalid patterns OK" << std::endl;
+}
+
 int main() {
     test_replace();
     test_match();
     test_split();
     test_count_substr();
+    test_invalid_patterns();
     std::cout << "[REGEXFN] all passed" << std::endl;
     return 0;
 }
