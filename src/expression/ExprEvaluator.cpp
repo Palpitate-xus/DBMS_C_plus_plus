@@ -6772,9 +6772,10 @@ void ExprEvaluator::registerBuiltins() {
     };
     // array_append(arr, elem) — append element, returning the new array literal
     functions_["array_append"] = [](const std::vector<ExprValue>& a) {
-        if (a.size() < 2 || a[0].isNull) return ExprValue("ARRAY", "", true);
+        if (a.size() < 2) return ExprValue("ARRAY", "", true);
         std::vector<std::string> elems;
-        if (!parseArrayElements(a[0].value, elems)) return ExprValue("ARRAY", "", true);
+        if (!a[0].isNull && !parseArrayElements(a[0].value, elems))
+            return ExprValue("ARRAY", "", true);
         elems.push_back(a[1].isNull ? "NULL" : arrayElemQuote(a[1].value));
         std::string out = "{";
         for (size_t i = 0; i < elems.size(); ++i) { if (i) out += ","; out += elems[i]; }
@@ -6783,9 +6784,10 @@ void ExprEvaluator::registerBuiltins() {
     };
     // array_prepend(elem, arr) — prepend element
     functions_["array_prepend"] = [](const std::vector<ExprValue>& a) {
-        if (a.size() < 2 || a[1].isNull) return ExprValue("ARRAY", "", true);
+        if (a.size() < 2) return ExprValue("ARRAY", "", true);
         std::vector<std::string> elems;
-        if (!parseArrayElements(a[1].value, elems)) return ExprValue("ARRAY", "", true);
+        if (!a[1].isNull && !parseArrayElements(a[1].value, elems))
+            return ExprValue("ARRAY", "", true);
         elems.insert(elems.begin(), a[0].isNull ? "NULL" : arrayElemQuote(a[0].value));
         std::string out = "{";
         for (size_t i = 0; i < elems.size(); ++i) { if (i) out += ","; out += elems[i]; }

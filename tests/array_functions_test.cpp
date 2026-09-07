@@ -31,6 +31,8 @@ static dbms::ExprValue callFn(dbms::ExprEvaluator& eval, const std::string& name
 static dbms::ExprValue A(const std::string& v) { return dbms::ExprValue("integer[]", v, false); }
 static dbms::ExprValue S(const std::string& v) { return dbms::ExprValue("text", v, false); }
 static dbms::ExprValue I(int64_t v) { return dbms::ExprValue("integer", std::to_string(v), false); }
+static dbms::ExprValue NULLA() { return dbms::ExprValue("integer[]", "", true); }
+static dbms::ExprValue NULLI() { return dbms::ExprValue("integer", "", true); }
 
 static void test_dims() {
     dbms::ExprEvaluator eval;
@@ -84,6 +86,12 @@ static void test_mutate() {
     assert(callFn(eval, "array_prepend", {I(0), A("{1,2}")}).value == "{0,1,2}");
     assert(callFn(eval, "array_cat", {A("{1,2}"), A("{3,4}")}).value == "{1,2,3,4}");
     assert(callFn(eval, "array_append", {A("{}"), I(9)}).value == "{9}");
+    assert(callFn(eval, "array_append", {NULLA(), I(9)}).value == "{9}");
+    assert(callFn(eval, "array_prepend", {I(9), NULLA()}).value == "{9}");
+    assert(callFn(eval, "array_append", {NULLA(), NULLI()}).value ==
+           "{NULL}");
+    assert(callFn(eval, "array_prepend", {NULLI(), NULLA()}).value ==
+           "{NULL}");
     std::cout << "[ARRFN] mutate OK" << std::endl;
 }
 
