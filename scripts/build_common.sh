@@ -41,6 +41,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/sql_literal_preservation_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/boolean_literal_boundary_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/limit_offset_boundary_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/sql_whitespace_boundary_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/gap_progress_test.py tests/pg_diff_runner_test.py)
     DBMS_CXXFLAGS=(-std=c++17 -O2 -pthread -Wall -Wextra)
     DBMS_LDFLAGS=(-pthread)

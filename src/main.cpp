@@ -379,9 +379,33 @@ static string foldConstants(const string& s);
 static size_t findTopLevelKeyword(const string& sql, const string& kw, size_t startPos);
 static string sqlProcessor(string raw) {
     raw = toLowerSql(raw);
-    raw.erase(remove(raw.begin(), raw.end(), '\n'), raw.end());
-    raw.erase(remove(raw.begin(), raw.end(), '\t'), raw.end());
-    raw.erase(remove(raw.begin(), raw.end(), '\r'), raw.end());
+    // Whitespace separates SQL tokens; deleting it joins keywords and names.
+    // Normalize runs only outside quotes. Whitespace inside a literal or a
+    // quoted identifier is data, including CR/LF and repeated spaces.
+    {
+        string normalized;
+        normalized.reserve(raw.size());
+        char quote = 0;
+        for (size_t i = 0; i < raw.size(); ++i) {
+            const char c = raw[i];
+            if (quote != 0) {
+                normalized += c;
+                if (c == quote) {
+                    if (i + 1 < raw.size() && raw[i + 1] == quote)
+                        normalized += raw[++i];
+                    else quote = 0;
+                }
+            } else if (c == '\'' || c == '"') {
+                quote = c;
+                normalized += c;
+            } else if (isspace(static_cast<unsigned char>(c))) {
+                if (normalized.empty() || normalized.back() != ' ') normalized += ' ';
+            } else {
+                normalized += c;
+            }
+        }
+        raw = std::move(normalized);
+    }
     // Trim leading/trailing whitespace
     size_t start = raw.find_first_not_of(' ');
     if (start == string::npos) raw.clear();

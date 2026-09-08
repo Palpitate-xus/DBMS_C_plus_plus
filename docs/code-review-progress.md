@@ -42,6 +42,7 @@
 | 206 | P0-16 | 差分工具为获取列名再次执行 SQL，使 nextval / DML RETURNING 等产生第二次副作用；改为 psql 描述语句，CSV 解码列名 | Python 差分回归 13 项通过（本项新增 4 项）；实际 PostgreSQL 对逗号 / 换行列名及无结果命令验证通过，描述不执行原查询；仍保留每语句重连的待改边界 |
 | 207 | P0-16 | 参考读取器启用 quiet 后仍按命令标签正则删行，用户文本 `CREATE TABLE` / `BEGIN` 等被丢弃；移除该数据过滤 | Python 差分回归 14 项通过；新增 5 种命令样文本断言修复前失败，实际 PostgreSQL `SELECT 'CREATE TABLE'` 保真通过 |
 | 208 | QRY-10 | LIMIT 0 被当作无限制，OFFSET 到达 / 超过末尾返回全部行；JOIN 的 LIMIT/OFFSET 被读进 ON 条件，且在聚合前截断输入。共用有界切片，区分显式零与 ALL，并在 JOIN 聚合输出后切片 | 18 项完整入口通过：普通 / 标量 / 分组 / 窗口 / JOIN / JOIN 聚合、零行、末尾 / 大 OFFSET、ALL、FETCH 0 和大 LIMIT；无 FROM、完整行数表达式及执行短路语义仍需后续统一管线处理 |
+| 209 | SQL-01 | 入口直接删除换行 / 制表符 / CR，将关键字与列名粘连，并修改字符串内容；现在仅把引号外的连续空白规范为分隔空格，引号内保持原值 | 6 项完整入口通过：跨行 SELECT / FROM / WHERE、CRLF ORDER BY 与 FETCH，以及 length 验证字符串中的 LF / TAB / CR / 连续空格未被修改。协议直接输出多行文本仍属于 P0-02 待迁移范围 |
 | 210 | P0-16 | 列描述输入只用 rstrip 删末尾分号，分号后有注释时仍会先执行 SQL；按字符串 / 标识符 / E-string / dollar quote / 嵌套注释边界去掉终止符，拒绝多语句输入 | Python 差分回归 17 项通过（新增 3 组）；断言发送给 psql 的内容不含语句终止符，多语句在调用前拒绝；实际 PostgreSQL 注释结尾描述通过 |
 
 本批新增的待修复复现（仍计入总清单）：
