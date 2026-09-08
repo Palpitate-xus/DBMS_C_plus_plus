@@ -64,6 +64,7 @@ int main() {
     expect({"string_agg", "upper(value), ';'", {">id 2"}, "id desc"}, "NULL;A,B;");
     expect({"array_agg", "id * (id + 1)", {">id 3"}, "id desc"}, "{30,20}");
     expect({"array_agg", "DISTINCT grp", {}, {}}, "{1}");
+    expect({"array_agg", "DISTINCT 5 - id", {}, {}}, "{0,1,2,3,4}");
     expect({"string_agg", "DISTINCT grp::text, '|'", {}, {}}, "1");
     expect({"string_agg", "value, sep", {">id 99"}, {}}, "NULL");
     expect({"array_agg", "value", {">id 99"}, {}}, "NULL");

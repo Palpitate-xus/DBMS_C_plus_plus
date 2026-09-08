@@ -2488,6 +2488,32 @@ static std::string collectionAggregate(
         }
         return false;
     });
+    // PostgreSQL implements DISTINCT aggregates by sorting their aggregate
+    // arguments before transition/deduplication when there is no explicit
+    // aggregate ORDER BY.  Preserving scan order here made results such as
+    // array_agg(DISTINCT int_column) observably incompatible.
+    if (call->distinct && order->orderBy.empty()) {
+        std::stable_sort(entries.begin(), entries.end(), [&](const Entry& a,
+                                                              const Entry& b) {
+            const size_t count = std::min(a.args.size(), b.args.size());
+            for (size_t i = 0; i < count; ++i) {
+                const auto& av = a.args[i];
+                const auto& bv = b.args[i];
+                if (av.isNull || bv.isNull) {
+                    if (av.isNull != bv.isNull) return !av.isNull; // NULLS LAST
+                    continue;
+                }
+                RowContext context;
+                context.set("sort_left", av);
+                context.set("sort_right", bv);
+                if (evaluator.eval(&less, context).asBool()) return true;
+                context.set("sort_left", bv);
+                context.set("sort_right", av);
+                if (evaluator.eval(&less, context).asBool()) return false;
+            }
+            return a.args.size() < b.args.size();
+        });
+    }
     const auto quoteElement = [](const ExprValue& value) {
         if (value.isNull) return std::string("NULL");
         std::string lower = value.value;
