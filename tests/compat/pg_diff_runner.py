@@ -320,12 +320,13 @@ def _reference_connection_settings():
             os.environ.get("PGREF_DATABASE", "postgres"), password)
 
 
-def decode_wire_result(messages):
+def decode_wire_result(messages, include_types=False):
     """Decode PostgreSQL protocol messages without altering field bytes."""
     rows = []
     state = None
     message = ""
     headers = []
+    type_oids = []
     command_tag = None
     for kind, body in messages:
         if kind == b"T":
@@ -334,7 +335,10 @@ def decode_wire_result(messages):
             for _ in range(count):
                 end = body.index(b"\x00", offset)
                 headers.append(body[offset:end].decode())
-                offset = end + 1 + 18
+                metadata = end + 1
+                type_oids.append(int.from_bytes(
+                    body[metadata + 6:metadata + 10], "big"))
+                offset = metadata + 18
         elif kind == b"D":
             count = int.from_bytes(body[0:2], "big")
             offset = 2
@@ -360,7 +364,8 @@ def decode_wire_result(messages):
                     message = value
         elif kind == b"C":
             command_tag = body.rstrip(b"\0").decode()
-    return rows, state, message, headers, command_tag
+    decoded = (rows, state, message, headers, command_tag)
+    return decoded + (type_oids,) if include_types else decoded
 
 
 def reference_multi(statements, client=None):
@@ -374,9 +379,11 @@ def reference_multi(statements, client=None):
         results = []
         for sql in statements:
             statement = describe_statement(sql)
-            decoded = decode_wire_result(client.simple_query(sock, statement))
-            rows, state, message, headers, command_tag = decoded
-            results.append((rows, state, command_tag, message, headers))
+            decoded = decode_wire_result(
+                client.simple_query(sock, statement), include_types=True)
+            rows, state, message, headers, command_tag, type_oids = decoded
+            results.append((rows, state, command_tag, message, headers,
+                            type_oids))
         return results
     finally:
         sock.close()
@@ -387,10 +394,12 @@ def reference_multi(statements, client=None):
 
 def ours_query(client, sock, sql, include_tag=False):
     """Run one statement on this DBMS; return (rows, sqlstate, message)."""
-    rows, state, message, headers, command_tag = decode_wire_result(
-        client.simple_query(sock, sql))
+    decoded = decode_wire_result(
+        client.simple_query(sock, sql), include_types=include_tag)
     if include_tag:
-        return rows, state, message, headers, command_tag
+        rows, state, message, headers, command_tag, type_oids = decoded
+        return rows, state, message, headers, command_tag, type_oids
+    rows, state, message, headers, command_tag = decoded
     return rows, state, message, headers
 
 
@@ -446,13 +455,18 @@ def run_case(name, stmts, client, sock):
         if len(response) == 4:  # compatibility with focused unit-test mocks
             rows, state, message, ohead = response
             otag = None
-        else:
+            otypes = None
+        elif len(response) == 5:
             rows, state, message, ohead, otag = response
-        ours.append((rows, state, message, ohead, otag))
+            otypes = None
+        else:
+            rows, state, message, ohead, otag, otypes = response
+        ours.append((rows, state, message, ohead, otag, otypes))
 
-    for sql, reference, (orows, ostate, omsg, ohead, otag) in zip(stmts, ref, ours):
+    for sql, reference, (orows, ostate, omsg, ohead, otag, otypes) in zip(stmts, ref, ours):
         rrows, rstate, rtag, rerr = reference[:4]
         rhead = reference[4] if len(reference) > 4 else None
+        rtypes = reference[5] if len(reference) > 5 else None
         if normalize_rows(rrows) != normalize_rows(orows):
             diffs.append("%s: rows differ\n  PG:   %r\n  ours: %r" % (sql, rrows, orows))
         if rstate != ostate:
@@ -460,6 +474,11 @@ def run_case(name, stmts, client, sock):
         if rstate is None and ostate is None and rtag != otag:
             diffs.append("%s: command tag differs: PG=%r ours=%r" %
                          (sql, rtag, otag))
+        if (rstate is None and ostate is None and
+                rtypes is not None and otypes is not None and
+                rtypes != otypes):
+            diffs.append("%s: column type OIDs differ: PG=%r ours=%r" %
+                         (sql, rtypes, otypes))
         if compare_headers and rstate is None and ostate is None and ohead:
             if rhead is None:
                 rhead = reference_headers(sql)

@@ -202,6 +202,7 @@ class DifferentialSessionTest(unittest.TestCase):
                          ["BEGIN", "SELECT 1"])
         self.assertEqual([result[2] for result in results],
                          ["BEGIN", "SELECT 1"])
+        self.assertEqual([result[5] for result in results], [[], []])
         sock.close.assert_called_once()
 
     def test_command_tag_mismatch_is_reported(self):
@@ -211,6 +212,15 @@ class DifferentialSessionTest(unittest.TestCase):
              mock.patch.object(RUNNER, "ours_query", return_value=ours):
             diffs = RUNNER.run_case("tag", ["SELECT 1"], None, None)
         self.assertTrue(any("command tag differs" in diff for diff in diffs), diffs)
+
+    def test_column_type_mismatch_is_reported(self):
+        reference = [([['1']], None, "SELECT 1", "", ["?column?"], [23])]
+        ours = ([['1']], None, "", ["?column?"], "SELECT 1", [25])
+        with mock.patch.object(RUNNER, "reference_multi", return_value=reference), \
+             mock.patch.object(RUNNER, "ours_query", return_value=ours):
+            diffs = RUNNER.run_case("type", ["SELECT 1"], None, None)
+        self.assertTrue(any("column type OIDs differ" in diff for diff in diffs),
+                        diffs)
 
 class DifferentialHeadersTest(unittest.TestCase):
     def test_zero_row_result_still_compares_headers(self):
