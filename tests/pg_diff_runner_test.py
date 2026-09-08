@@ -74,6 +74,78 @@ class DifferentialErrorsTest(unittest.TestCase):
         self.assertTrue(any("sqlstate differs" in diff for diff in diffs), diffs)
 
 
+class DifferentialSessionTest(unittest.TestCase):
+    def test_reference_case_uses_one_psql_session(self):
+        stdout = (
+            b"__PGDIFF_TOKEN_BEGIN_0__\n"
+            b"The command has no result, or the result has no columns.\n"
+            b"__PGDIFF_TOKEN_DESC_END_0__\n"
+            b"__PGDIFF_TOKEN_END_0__ false 00000 0\n"
+            b"__PGDIFF_TOKEN_BEGIN_1__\n"
+            b"?column?\x1finteger\n?column?\x1ftext\n"
+            b"__PGDIFF_TOKEN_DESC_END_1__\n"
+            b"1\x1ftemp value\n"
+            b"__PGDIFF_TOKEN_END_1__ false 00000 1\n"
+        )
+        stderr = (
+            b"__PGDIFF_TOKEN_ERROR_BEGIN_0__\n"
+            b"__PGDIFF_TOKEN_ERROR_END_0__\n"
+            b"__PGDIFF_TOKEN_ERROR_BEGIN_1__\n"
+            b"__PGDIFF_TOKEN_ERROR_END_1__\n"
+        )
+        output = subprocess.CompletedProcess([], 0, stdout, stderr)
+        fake_uuid = mock.Mock(hex="TOKEN")
+        with mock.patch.object(RUNNER.uuid, "uuid4", return_value=fake_uuid), \
+             mock.patch.object(RUNNER.subprocess, "run", return_value=output) as run:
+            results = RUNNER.reference_multi([
+                "BEGIN", "SELECT 1, 'temp value'",
+            ])
+        self.assertEqual(results, [
+            ([], None, None, "", []),
+            ([["1", "temp value"]], None, None, "",
+             ["?column?", "?column?"]),
+        ])
+        run.assert_called_once()
+        sent = run.call_args.kwargs["input"]
+        self.assertIn(b"BEGIN\n\\gdesc", sent)
+        self.assertIn(b"SELECT 1, 'temp value'\n\\gdesc", sent)
+
+    def test_reference_case_reads_each_statement_sqlstate(self):
+        stdout = (
+            b"__PGDIFF_TOKEN_BEGIN_0__\n"
+            b"__PGDIFF_TOKEN_DESC_END_0__\n"
+            b"__PGDIFF_TOKEN_END_0__ true 22012 0\n"
+            b"__PGDIFF_TOKEN_BEGIN_1__\n"
+            b"__PGDIFF_TOKEN_DESC_END_1__\n"
+            b"__PGDIFF_TOKEN_END_1__ true 25P02 0\n"
+        )
+        stderr = (
+            b"__PGDIFF_TOKEN_ERROR_BEGIN_0__\n"
+            b"ERROR:  22012\n"
+            b"__PGDIFF_TOKEN_ERROR_END_0__\n"
+            b"__PGDIFF_TOKEN_ERROR_BEGIN_1__\n"
+            b"ERROR:  25P02\n"
+            b"__PGDIFF_TOKEN_ERROR_END_1__\n"
+        )
+        output = subprocess.CompletedProcess([], 0, stdout, stderr)
+        fake_uuid = mock.Mock(hex="TOKEN")
+        with mock.patch.object(RUNNER.uuid, "uuid4", return_value=fake_uuid), \
+             mock.patch.object(RUNNER.subprocess, "run", return_value=output):
+            results = RUNNER.reference_multi(["SELECT 1/0", "SELECT 1"])
+        self.assertEqual([result[1] for result in results], ["22012", "25P02"])
+        self.assertEqual([result[3] for result in results],
+                         ["ERROR:  22012", "ERROR:  25P02"])
+
+    def test_run_case_uses_same_session_headers(self):
+        reference = [([["1"]], None, None, "", ["session column"])]
+        ours = ([['1']], None, "", ["session column"])
+        with mock.patch.object(RUNNER, "reference_multi", return_value=reference), \
+             mock.patch.object(RUNNER, "reference_headers") as describe, \
+             mock.patch.object(RUNNER, "ours_query", return_value=ours):
+            self.assertEqual(
+                RUNNER.run_case("session-header", ["SELECT 1"], None, None), [])
+        describe.assert_not_called()
+
 class DifferentialHeadersTest(unittest.TestCase):
     def test_headers_are_described_without_executing_query_again(self):
         output = subprocess.CompletedProcess([], 0, b"Column,Type\nlabel,bigint\n", b"")

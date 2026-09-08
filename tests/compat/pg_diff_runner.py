@@ -9,9 +9,9 @@ Usage:
     python3 tests/compat/pg_diff_runner.py [--case-dir DIR] [--only NAME]
 
 Case files (tests/compat/cases/*.sql) contain one statement per line;
-lines starting with `--` are comments. The reference currently reconnects
-for every statement; session/transaction cases and lossless reference row
-decoding remain work in progress (P0-16). Differences are reported directly;
+lines starting with `--` are comments. The reference uses one connection
+per case so session/transaction state is preserved. Lossless reference
+row decoding remains work in progress (P0-16). Differences are reported directly;
 this runner does not implement an allowlist or command-tag comparison yet.
 """
 
@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CONTAINER = os.environ.get("PGREF_CONTAINER", "pgref")
@@ -179,10 +180,102 @@ def reference_headers(sql):
 
 
 def reference_multi(statements):
-    """Run statements one-by-one, capturing per-statement outcomes."""
+    """Run one case in a single psql session, preserving transactional state."""
+    token = uuid.uuid4().hex
+    script = []
+    begin_markers = []
+    descriptor_end_markers = []
+    error_begin_markers = []
+    error_end_markers = []
+    end_prefixes = []
+    for index, sql in enumerate(statements):
+        statement = describe_statement(sql)
+        begin = "__PGDIFF_%s_BEGIN_%d__" % (token, index)
+        end = "__PGDIFF_%s_END_%d__" % (token, index)
+        descriptor_end = "__PGDIFF_%s_DESC_END_%d__" % (token, index)
+        error_begin = "__PGDIFF_%s_ERROR_BEGIN_%d__" % (token, index)
+        error_end = "__PGDIFF_%s_ERROR_END_%d__" % (token, index)
+        begin_markers.append(begin)
+        descriptor_end_markers.append(descriptor_end)
+        error_begin_markers.append(error_begin)
+        error_end_markers.append(error_end)
+        end_prefixes.append(end)
+        script.extend([
+            "\\echo " + begin,
+            statement,
+            "\\gdesc",
+            "\\echo " + descriptor_end,
+            "\\warn " + error_begin,
+            "\\g",
+            "\\warn " + error_end,
+            "\\echo " + end + " :ERROR :SQLSTATE :ROW_COUNT",
+        ])
+
+    proc = subprocess.run(
+        ["docker", "exec", "-i", CONTAINER,
+         "psql", "-U", "postgres", "-d", "postgres",
+         "-v", "ON_ERROR_STOP=0", "-v", "VERBOSITY=sqlstate",
+         "-X", "-q", "-A", "-t", "-F", "\x1f",
+         "-P", "null=NULLMARK"],
+        input=("\n".join(script) + "\n").encode(), capture_output=True)
+    stderr = proc.stderr.decode()
+    if proc.returncode != 0:
+        raise RuntimeError("reference psql failed: " + stderr.strip())
+
+    lines = proc.stdout.decode().splitlines()
     results = []
-    for sql in statements:
-        results.append(reference_query(sql + ";"))
+    cursor = 0
+    stderr_lines = stderr.splitlines()
+    stderr_cursor = 0
+    for index, (begin, descriptor_end, error_begin, error_end, end) in enumerate(zip(
+            begin_markers, descriptor_end_markers, error_begin_markers,
+            error_end_markers, end_prefixes)):
+        try:
+            begin_at = lines.index(begin, cursor)
+        except ValueError as exc:
+            raise RuntimeError("missing reference result marker: " + begin) from exc
+        try:
+            descriptor_end_at = lines.index(descriptor_end, begin_at + 1)
+        except ValueError as exc:
+            raise RuntimeError(
+                "missing reference descriptor marker: " + descriptor_end) from exc
+        end_at = None
+        status_match = None
+        for position in range(descriptor_end_at + 1, len(lines)):
+            if not lines[position].startswith(end + " "):
+                continue
+            status_match = re.fullmatch(
+                re.escape(end) + r"\s+(true|false)\s+([0-9A-Z]{5})\s+(\d+)",
+                lines[position])
+            if status_match:
+                end_at = position
+                break
+        if end_at is None or status_match is None:
+            raise RuntimeError("missing reference status marker: " + end)
+
+        descriptor_lines = lines[begin_at + 1:descriptor_end_at]
+        no_result = "The command has no result, or the result has no columns."
+        headers = [] if descriptor_lines == [no_result] else [
+            line.split("\x1f", 1)[0] for line in descriptor_lines
+        ]
+        rows = []
+        for line in lines[descriptor_end_at + 1:end_at]:
+            rows.append([None if value == "NULLMARK" else value
+                         for value in line.split("\x1f")])
+        failed = status_match.group(1) == "true"
+        state = status_match.group(2) if failed else None
+        try:
+            error_begin_at = stderr_lines.index(error_begin, stderr_cursor)
+            error_end_at = stderr_lines.index(error_end, error_begin_at + 1)
+        except ValueError as exc:
+            raise RuntimeError(
+                "missing reference diagnostic marker for statement %d" % index) from exc
+        diagnostic = "\n".join(
+            stderr_lines[error_begin_at + 1:error_end_at]).strip()
+        stderr_cursor = error_end_at + 1
+        results.append((rows, state, None, diagnostic, headers))
+        cursor = end_at + 1
+
     return results
 
 
@@ -284,13 +377,16 @@ def run_case(name, stmts, client, sock):
         rows, state, message, ohead = ours_query(client, sock, sql)
         ours.append((rows, state, message, ohead))
 
-    for sql, (rrows, rstate, rtag, rerr), (orows, ostate, omsg, ohead) in zip(stmts, ref, ours):
+    for sql, reference, (orows, ostate, omsg, ohead) in zip(stmts, ref, ours):
+        rrows, rstate, rtag, rerr = reference[:4]
+        rhead = reference[4] if len(reference) > 4 else None
         if normalize_rows(rrows) != normalize_rows(orows):
             diffs.append("%s: rows differ\n  PG:   %r\n  ours: %r" % (sql, rrows, orows))
         if rstate != ostate:
             diffs.append("%s: sqlstate differs: PG=%r ours=%r" % (sql, rstate, ostate))
         if compare_headers and rstate is None and ostate is None and orows and ohead:
-            rhead = reference_headers(sql)
+            if rhead is None:
+                rhead = reference_headers(sql)
             if rhead and rhead != ohead:
                 diffs.append("%s: headers differ\n  PG:   %r\n  ours: %r" % (sql, rhead, ohead))
     return diffs
