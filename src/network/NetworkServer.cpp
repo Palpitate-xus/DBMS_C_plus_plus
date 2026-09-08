@@ -1069,7 +1069,7 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
         return result;
     }
 
-    if (structuredDml.available) {
+    if (structuredDml.available && !structuredDml.metadataOnly) {
         result.resultSet = true;
         result.columns = structuredDml.columns;
         result.columnTypes = structuredDml.columnTypes;
@@ -1091,6 +1091,11 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
             for (const auto& line : lines) result.rows.push_back({line});
         } else {
             result.columns = splitProtocolFields(lines.front());
+            if (structuredDml.available && structuredDml.metadataOnly) {
+                if (!structuredDml.columns.empty())
+                    result.columns = structuredDml.columns;
+                result.columnTypes = structuredDml.columnTypes;
+            }
             for (size_t i = 1; i < lines.size(); ++i) {
                 // The legacy executor prints one column as the complete line.
                 // Splitting it on whitespace corrupts timestamp/time-like

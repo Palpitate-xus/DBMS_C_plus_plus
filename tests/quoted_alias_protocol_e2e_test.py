@@ -37,6 +37,31 @@ def main():
             assert state is None, (sql, state, message)
             assert headers == expected_headers, (sql, headers, expected_headers)
             assert rows == expected_rows, (sql, rows, expected_rows)
+
+        decoded = runner.decode_wire_result(
+            client.simple_query(
+                server["sock"],
+                'SELECT id AS "typed alias" FROM alias_rows WHERE id = 1;'),
+            include_types=True)
+        rows, state, message, headers, command_tag, type_oids = decoded
+        assert state is None, (state, message)
+        assert headers == ["typed alias"], headers
+        assert rows == [["1"]], rows
+        assert type_oids == [23], type_oids
+        assert command_tag == "SELECT 1", command_tag
+
+        for sql, expected_rows in [
+                ("SELECT i FROM generate_series(1, 3) AS t(i);",
+                 [["1"], ["2"], ["3"]]),
+                ("SELECT s FROM generate_series(2, 6, 2) AS t(s);",
+                 [["2"], ["4"], ["6"]])]:
+            decoded = runner.decode_wire_result(
+                client.simple_query(server["sock"], sql), include_types=True)
+            rows, state, message, headers, command_tag, type_oids = decoded
+            assert state is None, (sql, state, message)
+            assert rows == expected_rows, (sql, rows)
+            assert type_oids == [23], (sql, type_oids)
+            assert command_tag == "SELECT 3", (sql, command_tag)
         print("[QUOTED ALIAS PROTOCOL E2E] passed")
     finally:
         runner.stop_ours(server)

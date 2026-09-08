@@ -9035,24 +9035,60 @@ static std::vector<std::string> runDerivedSubQueryFull(const std::string& rawSql
     return rows;
 }
 
+static std::vector<std::string> inferIntegerLiteralDerivedTypes(
+    const std::string& sql, const std::vector<std::string>& colNames) {
+    if (colNames.size() != 1) return {};
+    const std::regex operand(
+        R"(^\s*select\s+([+-]?[0-9]+)\s+as\s+[a-zA-Z_][a-zA-Z0-9_]*\s*$)",
+        std::regex::icase);
+    bool bigint = false;
+    size_t start = 0;
+    while (start < sql.size()) {
+        size_t split = sql.find(" union all ", start);
+        const std::string part = sql.substr(
+            start, split == std::string::npos ? std::string::npos : split - start);
+        std::smatch match;
+        if (!std::regex_match(part, match, operand)) return {};
+        try {
+            const long long value = std::stoll(match[1].str());
+            bigint = bigint || value < std::numeric_limits<int32_t>::min() ||
+                     value > std::numeric_limits<int32_t>::max();
+        } catch (...) {
+            return {};
+        }
+        if (split == std::string::npos) break;
+        start = split + 11;
+    }
+    return {bigint ? "bigint" : "integer"};
+}
+
 // Helper: create a temp table from query rows and column names.
 // Returns the user-visible temp name (without __tmp_ prefix).
 static std::string createTempTableFromRows(Session& s,
                                            const std::vector<std::string>& rows,
                                            const std::vector<std::string>& colNames,
-                                           int& counter) {
+                                           int& counter,
+                                           const std::vector<std::string>& colTypes = {}) {
     std::string tmpName = "__cte_" + std::to_string(counter++);
     std::string actualName = tempTablePrefix(s, tmpName);
     TableSchema tmpTbl;
     tmpTbl.tablename = actualName;
     tmpTbl.isTemporary = true;
-    for (const auto& cname : colNames) {
+    for (size_t index = 0; index < colNames.size(); ++index) {
+        const auto& cname = colNames[index];
         Column col;
-        col.dataName = cname;
-        col.dataType = "varchar";
-        col.isVariableLength = true;
-        col.dsize = 255;
-        col.isNull = true;
+        const std::string type = index < colTypes.size() ? colTypes[index] : "";
+        if (type == "integer") {
+            col = makeIntColumn(cname, true, 2);
+        } else if (type == "bigint") {
+            col = makeIntColumn(cname, true, 3);
+        } else {
+            col.dataName = cname;
+            col.dataType = "varchar";
+            col.isVariableLength = true;
+            col.dsize = 255;
+            col.isNull = true;
+        }
         tmpTbl.append(col);
     }
     auto res = g_engine.createTable(s.currentDB, tmpTbl);
@@ -9535,7 +9571,9 @@ static std::string processDerivedTables(const std::string& sql, Session& s) {
         if (colNames.empty()) break;
 
         int counter = derivedCount;
-        std::string tmpName = createTempTableFromRows(s, rows, colNames, counter);
+        const auto colTypes = inferIntegerLiteralDerivedTypes(innerSelect, colNames);
+        std::string tmpName = createTempTableFromRows(
+            s, rows, colNames, counter, colTypes);
         if (tmpName.empty()) break;
         derivedCount = counter;
 
@@ -20868,18 +20906,41 @@ if (sql.rfind("backup database", 0) == 0) {
             }
         } else {
             // PG header order follows the SELECT list for plain columns.
+            vector<string> protocolColumns;
+            vector<string> protocolTypes;
             if (!projectionOrder.empty() && !projectionOrder.empty()) {
                 for (const auto& po : projectionOrder) {
                     size_t sep = po.find("\x01");
-                    cout << renderLegacyHeader(sep == string::npos ? po : po.substr(0, sep)) << ' ';
+                    const string header = sep == string::npos ? po : po.substr(0, sep);
+                    const string source = sep == string::npos ? po : po.substr(sep + 1);
+                    protocolColumns.push_back(header);
+                    string type = "text";
+                    for (size_t i = 0; i < tbl.len; ++i) {
+                        if (tbl.cols[i].dataName == source) {
+                            type = tbl.cols[i].dataType;
+                            break;
+                        }
+                    }
+                    protocolTypes.push_back(type);
+                    cout << renderLegacyHeader(header) << ' ';
                 }
             } else {
                 for (size_t i = 0; i < tbl.len; ++i) {
                     if (!selectAll && selectCols.find(tbl.cols[i].dataName) == selectCols.end()) continue;
+                    protocolColumns.push_back(tbl.cols[i].dataName);
+                    protocolTypes.push_back(tbl.cols[i].dataType);
                     cout << tbl.cols[i].dataName << ' ';
                 }
             }
             cout << '\n';
+            if (executeDepth == 1 && !protocolColumns.empty()) {
+                dbms::DmlResult metadata;
+                metadata.available = true;
+                metadata.metadataOnly = true;
+                metadata.columns = std::move(protocolColumns);
+                metadata.columnTypes = std::move(protocolTypes);
+                dbms::publishLastDmlResult(std::move(metadata));
+            }
 
             // Determine the first simple ORDER BY spec (if any) that the volcano
             // path can consume (only plain column ORDER BY without NULLS / expr).
