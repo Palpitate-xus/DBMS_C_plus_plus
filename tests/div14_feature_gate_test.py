@@ -13,6 +13,7 @@ has a real implementation.
 """
 
 import os
+from pathlib import Path
 import socket
 import struct
 import subprocess
@@ -168,7 +169,6 @@ def main():
             "ALTER OPERATOR CLASS oc USING btree RENAME TO oc2",
             "ALTER OPERATOR FAMILY of1 USING btree RENAME TO of2",
             "ALTER SUBSCRIPTION sub1 CONNECTION 'c2'",
-            "ALTER PUBLICATION p ADD TABLE t6d",
         ]
         for sql in gated_alter:
             expect_0a000(sock, sql, sql)
@@ -211,6 +211,36 @@ def main():
                 "%s must fail with type error mentioning %s: %r" % (sql, canon, err)
         # A canonical type still works in postgresql18 mode.
         expect_command_tag(sock, "CREATE TABLE t6d (a SMALLINT)", "pg type create")
+
+        # REPL-08: publication membership changes use the real publication
+        # catalog and persist atomically; they never reach .pg_compat_objects.
+        expect_command_tag(sock, "CREATE TABLE pub_member (a INT)",
+                           "publication member table")
+        expect_command_tag(sock, "CREATE PUBLICATION pub_gate FOR TABLE t6d",
+                           "create real publication")
+        expect_command_tag(sock, "ALTER PUBLICATION pub_gate ADD TABLE pub_member",
+                           "add publication member")
+        publication_path = os.path.join(work_dir, "info", "pub_gate.publication")
+        with open(publication_path, encoding="utf-8") as publication_file:
+            membership = publication_file.read().splitlines()[1:]
+        assert membership == ["t6d", "pub_member"], membership
+        persisted_before_error = Path(publication_path).read_bytes()
+        assert error_of(simple_query(
+            sock, "ALTER PUBLICATION pub_gate ADD TABLE pub_member")) is not None
+        assert error_of(simple_query(
+            sock, "ALTER PUBLICATION pub_gate DROP TABLE missing_member")) is not None
+        assert error_of(simple_query(
+            sock, "ALTER PUBLICATION pub_gate ADD TABLE missing_table")) is not None
+        assert Path(publication_path).read_bytes() == persisted_before_error
+        expect_command_tag(sock, "ALTER PUBLICATION pub_gate DROP TABLE t6d",
+                           "drop publication member")
+        expect_command_tag(sock, "ALTER PUBLICATION pub_gate SET TABLE t6d",
+                           "replace publication membership")
+        with open(publication_path, encoding="utf-8") as publication_file:
+            membership = publication_file.read().splitlines()[1:]
+        assert membership == ["t6d"], membership
+        expect_command_tag(sock, "DROP PUBLICATION pub_gate",
+                           "drop real publication")
 
         # DIV-07: MySQL-style fulltext shortcut syntax -> 42601.
         for sql, hint in [
@@ -311,8 +341,6 @@ def main():
                            "SET compatibility_mode")
         expect_0a000(sock, "CREATE EXTENSION hstore",
                      "extended CREATE EXTENSION")
-        expect_0a000(sock, "ALTER PUBLICATION p ADD TABLE t6d",
-                     "extended ALTER PUBLICATION")
         expect_0a000(sock,
                      "IMPORT FOREIGN SCHEMA fs FROM SERVER s1 INTO public",
                      "extended IMPORT FOREIGN SCHEMA")

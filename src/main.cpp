@@ -10947,6 +10947,100 @@ static bool handleDropPublicationSql(const string& sql, Session& s) {
     return false;
 }
 
+static bool handleAlterPublication(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    string rest = trim(sql.substr(17));
+    const size_t separator = rest.find(' ');
+    const string name = separator == string::npos
+        ? rest : trim(rest.substr(0, separator));
+    string action = separator == string::npos
+        ? string() : trim(rest.substr(separator + 1));
+    if (name.empty() || action.empty()) {
+        cout << "SQL syntax error: ALTER PUBLICATION requires an action" << endl;
+        return true;
+    }
+    auto publications = dbms::PublicationCatalog::instance().list(s.currentDB);
+    auto publication = find_if(
+        publications.begin(), publications.end(),
+        [&](const dbms::Publication& candidate) {
+            return candidate.name == name;
+        });
+    if (publication == publications.end()) {
+        cout << "ERROR: publication \"" << name << "\" does not exist" << endl;
+        return true;
+    }
+    enum class MembershipAction { Add, Drop, Set };
+    MembershipAction operation;
+    string tableList;
+    if (startsWithKeyword(action, "add table")) {
+        operation = MembershipAction::Add;
+        tableList = trim(action.substr(9));
+    } else if (startsWithKeyword(action, "drop table")) {
+        operation = MembershipAction::Drop;
+        tableList = trim(action.substr(10));
+    } else if (startsWithKeyword(action, "set table")) {
+        operation = MembershipAction::Set;
+        tableList = trim(action.substr(9));
+    } else {
+        cout << dbms::featureNotSupportedError("ALTER PUBLICATION action")
+             << endl;
+        return true;
+    }
+    vector<string> tables;
+    for (const auto& item : splitTopLevelComma(tableList)) {
+        const string table = stripQuotes(trim(item));
+        if (!table.empty()) tables.push_back(table);
+    }
+    if (tables.empty()) {
+        cout << "SQL syntax error: ALTER PUBLICATION TABLE requires a table"
+             << endl;
+        return true;
+    }
+    if (publication->publishAllTables) {
+        cout << "ERROR: cannot change membership of FOR ALL TABLES publication"
+             << endl;
+        return true;
+    }
+    if (operation != MembershipAction::Drop) {
+        for (const auto& table : tables) {
+            if (!g_engine.tableExists(s.currentDB, table)) {
+                cout << "ERROR: table " << table << " does not exist" << endl;
+                return true;
+            }
+        }
+    }
+    if (operation == MembershipAction::Set) {
+        publication->tables.clear();
+    }
+    for (const auto& table : tables) {
+        auto member = find(
+            publication->tables.begin(), publication->tables.end(), table);
+        if (operation == MembershipAction::Drop) {
+            if (member == publication->tables.end()) {
+                cout << "ERROR: table " << table
+                     << " is not part of publication " << name << endl;
+                return true;
+            }
+            publication->tables.erase(member);
+        } else if (member == publication->tables.end()) {
+            publication->tables.push_back(table);
+        } else if (operation == MembershipAction::Add) {
+            cout << "ERROR: table " << table
+                 << " is already part of publication " << name << endl;
+            return true;
+        }
+    }
+    string error;
+    if (!dbms::PublicationCatalog::instance().update(
+            s.currentDB, *publication, error)) {
+        cout << "ERROR: " << error << endl;
+        return true;
+    }
+    cout << "ALTER PUBLICATION succeeded" << endl;
+    return false;
+}
+
 // CREATE REPLICATION SLOT name LOGICAL plugin  (physical slots use the
 // engine API; the SQL surface only needs the logical ones for decoding).
 static bool handleCreateReplicationSlotSql(const string& sql, Session& s) {
@@ -11988,6 +12082,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
         string pre = sql;
         for (auto& c : pre) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         if (pre.rfind("create publication ", 0) == 0 ||
+            pre.rfind("alter publication ", 0) == 0 ||
             pre.rfind("create replication slot ", 0) == 0 ||
             pre.rfind("drop publication ", 0) == 0 ||
             pre.rfind("drop replication slot ", 0) == 0) {
@@ -12007,6 +12102,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
             if (pre.rfind("create publication ", 0) == 0)
                 return handleCreatePublication(sql, s);
+            if (pre.rfind("alter publication ", 0) == 0)
+                return handleAlterPublication(sql, s);
             if (pre.rfind("create replication slot ", 0) == 0)
                 return handleCreateReplicationSlotSql(sql, s);
             if (pre.rfind("drop publication ", 0) == 0)

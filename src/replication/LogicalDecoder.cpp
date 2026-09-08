@@ -237,6 +237,27 @@ bool PublicationCatalog::drop(const std::string& dbname, const std::string& name
     return true;
 }
 
+bool PublicationCatalog::update(const std::string& dbname,
+                                const Publication& pub,
+                                std::string& error) {
+    error.clear();
+    if (pub.name.empty()) {
+        error = "publication name is required";
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto path = publicationPath(dbname, pub.name);
+    if (!fs::exists(path)) {
+        error = "publication \"" + pub.name + "\" does not exist";
+        return false;
+    }
+    if (!index_file::writeAtomically(path, serializePublication(pub))) {
+        error = "cannot persist publication";
+        return false;
+    }
+    return true;
+}
+
 bool PublicationCatalog::exists(const std::string& dbname, const std::string& name) const {
     return fs::exists(publicationPath(dbname, name));
 }
