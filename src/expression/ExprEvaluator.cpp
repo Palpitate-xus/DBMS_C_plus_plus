@@ -897,7 +897,9 @@ static std::string intervalToText(long long months, long long days, long long mi
         if (value == 0) return;
         if (!out.empty()) out += " ";
         out += std::to_string(value);
-        out += (value == 1 || value == -1) ? singular : plural;
+        // PostgreSQL pluralizes negative interval fields: -1 days, -1 mons,
+        // and -1 years.  Only the positive value one uses the singular form.
+        out += (value == 1) ? singular : plural;
     };
     appendPart(months / 12, " year", " years");
     appendPart(months % 12, " mon", " mons");

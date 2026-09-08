@@ -86,7 +86,13 @@ static void test_add_sub() {
         "'2024-01-02 00:00:00.7'::timestamp");
     assert(negativeMultiDayDifference.ok &&
            negativeMultiDayDifference.value ==
-               "-1 day -00:00:00.600000");
+               "-1 days -00:00:00.600000");
+
+    auto negativeOneDayDifference = eval(
+        "'2024-03-14 09:30:00'::timestamp - "
+        "'2024-03-15 10:00:00'::timestamp");
+    assert(negativeOneDayDifference.ok &&
+           negativeOneDayDifference.value == "-1 days -00:30:00");
 
     auto addFractionToFraction = eval(
         "'2024-01-01 00:00:00.5'::timestamp + "
@@ -212,7 +218,7 @@ static void test_interval_ops() {
     auto allNegative = eval(
         "'0 seconds'::interval - '1 day 2 hours'::interval");
     assert(allNegative.ok &&
-           allNegative.value == "-1 day -02:00:00");
+           allNegative.value == "-1 days -02:00:00");
 
     auto mixedRoundTrip = eval(
         "('1 day'::interval - '2 hours'::interval) + "
