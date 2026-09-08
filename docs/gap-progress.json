@@ -16,7 +16,7 @@
     {"id":"P0-13","status":"deferred_by_user","evidence":[]},
     {"id":"P0-14","status":"unverified","evidence":[]},
     {"id":"P0-15","status":"unverified","evidence":[]},
-    {"id":"P0-16","status":"partial","evidence":["docs/code-review-progress.md","tests/compat/pg_diff_runner.py"],"tests":["tests/pg_diff_runner_test.py"],"commits":["2aa4582","0f2fe9e","ee31a8e","06dafab","7d088cc","b36897b","0305306"]},
+    {"id":"P0-16","status":"partial","evidence":["docs/code-review-progress.md","tests/compat/pg_diff_runner.py"],"tests":["tests/pg_diff_runner_test.py"],"commits":["2aa4582","0f2fe9e","ee31a8e","06dafab","7d088cc","b36897b","0305306","6461934"]},
     {"id":"SQL-01","status":"partial","evidence":["docs/code-review-progress.md"],"tests":["tests/parser_phase1_test.cpp","tests/cte_clause_boundary_e2e_test.py","tests/fetch_clause_boundary_e2e_test.py","tests/sql_literal_preservation_e2e_test.py","tests/boolean_literal_boundary_e2e_test.py","tests/sql_whitespace_boundary_e2e_test.py"],"commits":["18c4e20","89ca653","4091e72","c14257a","22d9d68","a992fce"]},
     {"id":"SQL-02","status":"unverified","evidence":[]},
     {"id":"SQL-03","status":"unverified","evidence":[]},
