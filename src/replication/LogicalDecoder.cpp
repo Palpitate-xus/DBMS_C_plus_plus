@@ -273,6 +273,35 @@ bool PublicationCatalog::update(const std::string& dbname,
     return true;
 }
 
+bool PublicationCatalog::rename(const std::string& dbname,
+                                const std::string& oldName,
+                                const std::string& newName,
+                                std::string& error) {
+    error.clear();
+    if (oldName.empty() || newName.empty()) {
+        error = "publication name is required";
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto oldPath = publicationPath(dbname, oldName);
+    const auto newPath = publicationPath(dbname, newName);
+    if (!fs::exists(oldPath)) {
+        error = "publication \"" + oldName + "\" does not exist";
+        return false;
+    }
+    if (fs::exists(newPath)) {
+        error = "publication \"" + newName + "\" already exists";
+        return false;
+    }
+    std::error_code filesystemError;
+    fs::rename(oldPath, newPath, filesystemError);
+    if (filesystemError) {
+        error = "cannot rename publication";
+        return false;
+    }
+    return true;
+}
+
 bool PublicationCatalog::exists(const std::string& dbname, const std::string& name) const {
     return fs::exists(publicationPath(dbname, name));
 }

@@ -75,6 +75,8 @@ public:
     bool create(const std::string& dbname, const Publication& pub, std::string& error);
     bool update(const std::string& dbname, const Publication& pub,
                 std::string& error);
+    bool rename(const std::string& dbname, const std::string& oldName,
+                const std::string& newName, std::string& error);
     bool drop(const std::string& dbname, const std::string& name, std::string& error);
     bool exists(const std::string& dbname, const std::string& name) const;
     std::vector<Publication> list(const std::string& dbname) const;

@@ -216,6 +216,8 @@ def main():
         # catalog and persist atomically; they never reach .pg_compat_objects.
         expect_command_tag(sock, "CREATE TABLE pub_member (a INT)",
                            "publication member table")
+        expect_command_tag(sock, "CREATE ROLE pub_owner",
+                           "publication owner role")
         expect_command_tag(
             sock,
             "CREATE PUBLICATION pub_gate FOR TABLE t6d "
@@ -274,8 +276,37 @@ def main():
         with open(publication_path, encoding="utf-8") as publication_file:
             membership = publication_file.read().splitlines()[1:]
         assert membership == ["t6d"], membership
-        expect_command_tag(sock, "DROP PUBLICATION pub_gate",
+        expect_command_tag(
+            sock, "CREATE PUBLICATION pub_collision FOR TABLE t6d",
+            "publication rename collision")
+        persisted_before_rename = Path(publication_path).read_bytes()
+        assert error_of(simple_query(
+            sock,
+            "ALTER PUBLICATION pub_gate RENAME TO pub_collision")) is not None
+        assert Path(publication_path).read_bytes() == persisted_before_rename
+        expect_command_tag(sock, "DROP PUBLICATION pub_collision",
+                           "drop publication rename collision")
+        expect_command_tag(sock,
+                           "ALTER PUBLICATION pub_gate RENAME TO pub_renamed",
+                           "rename publication")
+        renamed_path = os.path.join(work_dir, "info", "pub_renamed.publication")
+        assert not os.path.exists(publication_path)
+        assert Path(renamed_path).read_bytes() == persisted_before_rename
+        assert error_of(simple_query(
+            sock,
+            "ALTER PUBLICATION pub_renamed OWNER TO missing_pub_owner")) \
+            is not None
+        assert Path(renamed_path).read_bytes() == persisted_before_rename
+        expect_command_tag(sock,
+                           "ALTER PUBLICATION pub_renamed OWNER TO pub_owner",
+                           "change publication owner")
+        with open(renamed_path, encoding="utf-8") as publication_file:
+            publication_lines = publication_file.read().splitlines()
+        assert publication_lines[0].split()[0] == "pub_owner", publication_lines
+        expect_command_tag(sock, "DROP PUBLICATION pub_renamed",
                            "drop real publication")
+        expect_command_tag(sock, "DROP ROLE pub_owner",
+                           "drop publication owner role")
 
         # DIV-07: MySQL-style fulltext shortcut syntax -> 42601.
         for sql, hint in [

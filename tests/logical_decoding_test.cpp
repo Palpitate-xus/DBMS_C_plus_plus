@@ -134,9 +134,21 @@ static void test_publication_catalog() {
     assert(cat.create(db, all, error));
     assert(cat.publishes(db, "anything"));
 
-    assert(cat.drop(db, "mypub", error));
+    // Rename is atomic and refuses to overwrite another publication.
+    assert(!cat.rename(db, "mypub", "allpub", error));
+    assert(cat.exists(db, "mypub") && cat.exists(db, "allpub"));
+    assert(cat.rename(db, "mypub", "renamed_pub", error));
+    assert(!cat.exists(db, "mypub") && cat.exists(db, "renamed_pub"));
+    pubs = cat.list(db);
+    const auto renamed = std::find_if(
+        pubs.begin(), pubs.end(), [](const Publication& candidate) {
+            return candidate.name == "renamed_pub";
+        });
+    assert(renamed != pubs.end() && renamed->owner == "admin");
+
+    assert(cat.drop(db, "renamed_pub", error));
     assert(!cat.exists(db, "mypub"));
-    assert(!cat.drop(db, "mypub", error));
+    assert(!cat.drop(db, "renamed_pub", error));
     assert(cat.drop(db, "allpub", error));
     assert(cat.drop(db, "legacy", error));
     fs::remove_all(db);

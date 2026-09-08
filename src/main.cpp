@@ -11049,6 +11049,44 @@ static bool handleAlterPublication(const string& sql, Session& s) {
         cout << "ERROR: publication \"" << name << "\" does not exist" << endl;
         return true;
     }
+    if (startsWithKeyword(action, "rename to")) {
+        const string newName = stripQuotes(trim(action.substr(9)));
+        if (newName.empty()) {
+            cout << "ERROR: syntax error: ALTER PUBLICATION RENAME TO "
+                    "requires a name" << endl;
+            return true;
+        }
+        string error;
+        if (!dbms::PublicationCatalog::instance().rename(
+                s.currentDB, name, newName, error)) {
+            cout << "ERROR: " << error << endl;
+            return true;
+        }
+        cout << "ALTER PUBLICATION succeeded" << endl;
+        return false;
+    }
+    if (startsWithKeyword(action, "owner to")) {
+        const string owner = stripQuotes(trim(action.substr(8)));
+        if (owner.empty()) {
+            cout << "ERROR: syntax error: ALTER PUBLICATION OWNER TO "
+                    "requires a role" << endl;
+            return true;
+        }
+        if (!roleExists(owner)) {
+            cout << "ERROR: role \"" << owner << "\" does not exist" << endl;
+            return true;
+        }
+        dbms::Publication updated = *publication;
+        updated.owner = owner;
+        string error;
+        if (!dbms::PublicationCatalog::instance().update(
+                s.currentDB, updated, error)) {
+            cout << "ERROR: " << error << endl;
+            return true;
+        }
+        cout << "ALTER PUBLICATION succeeded" << endl;
+        return false;
+    }
     if (startsWithKeyword(action, "set") &&
         !startsWithKeyword(action, "set table")) {
         dbms::Publication updated = *publication;
