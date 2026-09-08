@@ -3,6 +3,7 @@
 
 import importlib.util
 from pathlib import Path
+import struct
 import subprocess
 import unittest
 from unittest import mock
@@ -97,7 +98,7 @@ class DifferentialSessionTest(unittest.TestCase):
         fake_uuid = mock.Mock(hex="TOKEN")
         with mock.patch.object(RUNNER.uuid, "uuid4", return_value=fake_uuid), \
              mock.patch.object(RUNNER.subprocess, "run", return_value=output) as run:
-            results = RUNNER.reference_multi([
+            results = RUNNER._reference_psql_multi([
                 "BEGIN", "SELECT 1, 'temp value'",
             ])
         self.assertEqual(results, [
@@ -131,7 +132,7 @@ class DifferentialSessionTest(unittest.TestCase):
         fake_uuid = mock.Mock(hex="TOKEN")
         with mock.patch.object(RUNNER.uuid, "uuid4", return_value=fake_uuid), \
              mock.patch.object(RUNNER.subprocess, "run", return_value=output):
-            results = RUNNER.reference_multi(["SELECT 1/0", "SELECT 1"])
+            results = RUNNER._reference_psql_multi(["SELECT 1/0", "SELECT 1"])
         self.assertEqual([result[1] for result in results], ["22012", "25P02"])
         self.assertEqual([result[3] for result in results],
                          ["ERROR:  22012", "ERROR:  25P02"])
@@ -145,6 +146,71 @@ class DifferentialSessionTest(unittest.TestCase):
             self.assertEqual(
                 RUNNER.run_case("session-header", ["SELECT 1"], None, None), [])
         describe.assert_not_called()
+
+    def test_wire_reference_preserves_null_and_control_characters(self):
+        def data_row(values):
+            body = struct.pack("!H", len(values))
+            for value in values:
+                if value is None:
+                    body += struct.pack("!i", -1)
+                else:
+                    encoded = value.encode()
+                    body += struct.pack("!i", len(encoded)) + encoded
+            return b"D", body
+
+        row_description = (
+            b"T", struct.pack("!H", 5) +
+            b"n\0" + b"\0" * 18 +
+            b"e\0" + b"\0" * 18 +
+            b"m\0" + b"\0" * 18 +
+            b"l\0" + b"\0" * 18 +
+            b"s\0" + b"\0" * 18)
+        messages = [
+            row_description,
+            data_row([None, "", "NULLMARK", "a\nb", "a\x1fb"]),
+            (b"C", b"SELECT 1\0"),
+        ]
+        self.assertEqual(RUNNER.decode_wire_result(messages), (
+            [[None, "", "NULLMARK", "a\nb", "a\x1fb"]],
+            None, "", ["n", "e", "m", "l", "s"], "SELECT 1"))
+
+    def test_wire_reference_reuses_one_connection(self):
+        class FakeClient:
+            def __init__(self):
+                self.started = []
+                self.queries = []
+
+            def startup(self, sock, user, database, password):
+                self.started.append((sock, user, database, password))
+
+            def simple_query(self, sock, sql):
+                self.queries.append((sock, sql))
+                return [(b"C", ("SELECT 1" if sql.startswith("SELECT")
+                                 else sql).encode() + b"\0")]
+
+        client = FakeClient()
+        sock = mock.Mock()
+        settings = ("127.0.0.1", 55432, "postgres", "postgres", "secret")
+        with mock.patch.object(RUNNER, "_reference_connection_settings",
+                               return_value=settings), \
+             mock.patch.object(RUNNER.socket, "create_connection",
+                               return_value=sock) as connect:
+            results = RUNNER.reference_multi(["BEGIN", "SELECT 1"], client)
+        connect.assert_called_once_with(("127.0.0.1", 55432), timeout=15)
+        self.assertEqual(len(client.started), 1)
+        self.assertEqual([query[1] for query in client.queries],
+                         ["BEGIN", "SELECT 1"])
+        self.assertEqual([result[2] for result in results],
+                         ["BEGIN", "SELECT 1"])
+        sock.close.assert_called_once()
+
+    def test_command_tag_mismatch_is_reported(self):
+        reference = [([['1']], None, "SELECT 1", "", ["?column?"])]
+        ours = ([['1']], None, "", ["?column?"], "SELECT 0")
+        with mock.patch.object(RUNNER, "reference_multi", return_value=reference), \
+             mock.patch.object(RUNNER, "ours_query", return_value=ours):
+            diffs = RUNNER.run_case("tag", ["SELECT 1"], None, None)
+        self.assertTrue(any("command tag differs" in diff for diff in diffs), diffs)
 
 class DifferentialHeadersTest(unittest.TestCase):
     def test_headers_are_described_without_executing_query_again(self):

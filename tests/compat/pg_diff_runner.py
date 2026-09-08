@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """P0-16 differential compatibility runner.
 
-Drives the same SQL case files against a reference PostgreSQL (docker
-`pgref` container, psql) and this DBMS (wire protocol), comparing decoded
+Drives the same SQL case files against a reference PostgreSQL (`pgref`
+container) and this DBMS through their wire protocols, comparing decoded
 rows without changing values, SQLSTATE, and optionally column headers.
 
 Usage:
@@ -11,14 +11,15 @@ Usage:
 Case files (tests/compat/cases/*.sql) contain one statement per line;
 lines starting with `--` are comments. The reference uses one connection
 per case so session/transaction state is preserved. Lossless reference
-row decoding remains work in progress (P0-16). Differences are reported directly;
-this runner does not implement an allowlist or command-tag comparison yet.
+row values, NULL metadata and command tags without delimiter parsing.
+Differences are reported directly; this runner does not implement an allowlist.
 """
 
 import argparse
 import csv
 import importlib.util
 import io
+import json
 import os
 import re
 import socket
@@ -179,8 +180,8 @@ def reference_headers(sql):
     return [row[0] for row in rows[1:]]
 
 
-def reference_multi(statements):
-    """Run one case in a single psql session, preserving transactional state."""
+def _reference_psql_multi(statements):
+    """Legacy psql framing retained only for focused parser unit tests."""
     token = uuid.uuid4().hex
     script = []
     begin_markers = []
@@ -279,41 +280,75 @@ def reference_multi(statements):
     return results
 
 
-# ------------------------------------------------------------------- our side
+def _reference_connection_settings():
+    """Resolve the published reference endpoint without exposing credentials."""
+    configured = all(os.environ.get(name) for name in
+                     ("PGREF_HOST", "PGREF_PORT", "PGREF_PASSWORD"))
+    if configured:
+        return (os.environ["PGREF_HOST"], int(os.environ["PGREF_PORT"]),
+                os.environ.get("PGREF_USER", "postgres"),
+                os.environ.get("PGREF_DATABASE", "postgres"),
+                os.environ["PGREF_PASSWORD"])
+
+    proc = subprocess.run(
+        ["docker", "inspect", CONTAINER], capture_output=True)
+    if proc.returncode != 0:
+        raise RuntimeError("cannot inspect reference PostgreSQL container: " +
+                           proc.stderr.decode().strip())
+    try:
+        inspected = json.loads(proc.stdout.decode())[0]
+        environment = inspected["Config"].get("Env") or []
+        password = next(item.split("=", 1)[1] for item in environment
+                        if item.startswith("POSTGRES_PASSWORD="))
+        bindings = inspected["NetworkSettings"]["Ports"].get("5432/tcp")
+        if bindings:
+            binding = bindings[0]
+            host = binding.get("HostIp") or "127.0.0.1"
+            if host in ("0.0.0.0", "::"):
+                host = "127.0.0.1"
+            port = int(binding["HostPort"])
+        else:
+            networks = inspected["NetworkSettings"].get("Networks") or {}
+            host = next(value["IPAddress"] for value in networks.values()
+                        if value.get("IPAddress"))
+            port = 5432
+    except (KeyError, StopIteration, TypeError, ValueError,
+            json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "reference PostgreSQL endpoint or password is unavailable") from exc
+    return (host, port, os.environ.get("PGREF_USER", "postgres"),
+            os.environ.get("PGREF_DATABASE", "postgres"), password)
 
 
-def ours_query(client, sock, sql):
-    """Run one statement on this DBMS; return (rows, sqlstate, message)."""
-    messages = client.simple_query(sock, sql)
+def decode_wire_result(messages):
+    """Decode PostgreSQL protocol messages without altering field bytes."""
     rows = []
     state = None
     message = ""
     headers = []
+    command_tag = None
     for kind, body in messages:
         if kind == b"T":
-            # RowDescription: per field: name NUL, then table oid (i16),
-            # attr number (i16), type oid (i32), typlen (i16), typmod (i32),
-            # format code (i16).
-            n = int.from_bytes(body[0:2], "big")
-            off = 2
-            for _ in range(n):
-                z = body.index(b"\x00", off)
-                headers.append(body[off:z].decode())
-                off = z + 1 + 18
+            count = int.from_bytes(body[0:2], "big")
+            offset = 2
+            for _ in range(count):
+                end = body.index(b"\x00", offset)
+                headers.append(body[offset:end].decode())
+                offset = end + 1 + 18
         elif kind == b"D":
-            # DataRow: int16 ncols, then int32 len + bytes each
-            n = int.from_bytes(body[0:2], "big")
-            off = 2
-            vals = []
-            for _ in range(n):
-                ln = int.from_bytes(body[off:off + 4], "big", signed=True)
-                off += 4
-                if ln == -1:
-                    vals.append(None)
+            count = int.from_bytes(body[0:2], "big")
+            offset = 2
+            values = []
+            for _ in range(count):
+                length = int.from_bytes(
+                    body[offset:offset + 4], "big", signed=True)
+                offset += 4
+                if length == -1:
+                    values.append(None)
                 else:
-                    vals.append(body[off:off + ln].decode())
-                    off += ln
-            rows.append(vals)
+                    values.append(body[offset:offset + length].decode())
+                    offset += length
+            rows.append(values)
         elif kind == b"E":
             for field in body.rstrip(b"\0").split(b"\0"):
                 if not field:
@@ -323,6 +358,39 @@ def ours_query(client, sock, sql):
                     state = value
                 elif tag == "M":
                     message = value
+        elif kind == b"C":
+            command_tag = body.rstrip(b"\0").decode()
+    return rows, state, message, headers, command_tag
+
+
+def reference_multi(statements, client=None):
+    """Execute a case through PostgreSQL's wire protocol in one session."""
+    if client is None:
+        client = load_protocol_client()
+    host, port, user, database, password = _reference_connection_settings()
+    sock = socket.create_connection((host, port), timeout=15)
+    try:
+        client.startup(sock, user, database, password=password)
+        results = []
+        for sql in statements:
+            statement = describe_statement(sql)
+            decoded = decode_wire_result(client.simple_query(sock, statement))
+            rows, state, message, headers, command_tag = decoded
+            results.append((rows, state, command_tag, message, headers))
+        return results
+    finally:
+        sock.close()
+
+
+# ------------------------------------------------------------------- our side
+
+
+def ours_query(client, sock, sql, include_tag=False):
+    """Run one statement on this DBMS; return (rows, sqlstate, message)."""
+    rows, state, message, headers, command_tag = decode_wire_result(
+        client.simple_query(sock, sql))
+    if include_tag:
+        return rows, state, message, headers, command_tag
     return rows, state, message, headers
 
 
@@ -368,22 +436,30 @@ def load_cases(case_dir, only=None):
 
 def run_case(name, stmts, client, sock):
     """Returns list of per-statement diff strings (empty when identical)."""
-    ref = reference_multi(stmts)
+    ref = reference_multi(stmts, client)
     diffs = []
     compare_headers = os.environ.get("PGDIFF_HEADERS", "1") == "1"
 
     ours = []
     for sql in stmts:
-        rows, state, message, ohead = ours_query(client, sock, sql)
-        ours.append((rows, state, message, ohead))
+        response = ours_query(client, sock, sql, include_tag=True)
+        if len(response) == 4:  # compatibility with focused unit-test mocks
+            rows, state, message, ohead = response
+            otag = None
+        else:
+            rows, state, message, ohead, otag = response
+        ours.append((rows, state, message, ohead, otag))
 
-    for sql, reference, (orows, ostate, omsg, ohead) in zip(stmts, ref, ours):
+    for sql, reference, (orows, ostate, omsg, ohead, otag) in zip(stmts, ref, ours):
         rrows, rstate, rtag, rerr = reference[:4]
         rhead = reference[4] if len(reference) > 4 else None
         if normalize_rows(rrows) != normalize_rows(orows):
             diffs.append("%s: rows differ\n  PG:   %r\n  ours: %r" % (sql, rrows, orows))
         if rstate != ostate:
             diffs.append("%s: sqlstate differs: PG=%r ours=%r" % (sql, rstate, ostate))
+        if rstate is None and ostate is None and rtag != otag:
+            diffs.append("%s: command tag differs: PG=%r ours=%r" %
+                         (sql, rtag, otag))
         if compare_headers and rstate is None and ostate is None and orows and ohead:
             if rhead is None:
                 rhead = reference_headers(sql)
