@@ -2520,6 +2520,54 @@ static std::string collectionAggregate(
     return array ? "{" + result + "}" : result;
 }
 
+template <typename InputRow>
+static std::vector<std::vector<ExprValue>> materializeGroupingKeys(
+    const TableSchema& table, const std::vector<InputRow>& input,
+    const std::vector<std::string>& keys) {
+    std::vector<ParseResult> parsed;
+    SQLParser parser;
+    for (const auto& key : keys) {
+        auto result = parser.parse("SELECT " + key);
+        const auto* select = dynamic_cast<const SelectStmt*>(result.stmt.get());
+        if (!result.success || !select || select->selectList.size() != 1 ||
+            !select->selectList[0].expr) {
+            throw std::runtime_error("invalid GROUP BY expression (SQLSTATE 42601)");
+        }
+        parsed.push_back(std::move(result));
+    }
+    // Evaluate before starting workers: expression errors are query failures,
+    // never uncaught exceptions in a worker or silently-empty grouping keys.
+    ExprEvaluator evaluator;
+    std::vector<std::vector<ExprValue>> result;
+    result.reserve(input.size());
+    for (const auto& row : input) {
+        RowContext context;
+        for (size_t i = 0; i < table.len; ++i) {
+            const ExprValue value(table.cols[i].dataType, row.values[i], row.nulls[i]);
+            context.set(table.cols[i].dataName, value);
+            context.set(table.tablename + "." + table.cols[i].dataName, value);
+        }
+        std::vector<ExprValue> values;
+        for (const auto& expression : parsed) {
+            const auto* select = static_cast<const SelectStmt*>(expression.stmt.get());
+            auto value = evaluator.eval(select->selectList[0].expr, context);
+            if (value.isUnknown())
+                throw std::runtime_error("unsupported GROUP BY expression (SQLSTATE 0A000)");
+            values.push_back(std::move(value));
+        }
+        result.push_back(std::move(values));
+    }
+    return result;
+}
+
+static std::string encodeGroupingKey(const ExprValue& value) {
+    return value.isNull ? "N;" : "V" + std::to_string(value.value.size()) + ":" + value.value;
+}
+
+static std::string displayGroupingKey(const ExprValue& value) {
+    return value.isNull ? "NULL" : value.value;
+}
+
 // ========================================================================
 // ParallelGroupAggregateOp
 // ========================================================================
@@ -2564,31 +2612,9 @@ bool ParallelGroupAggregateOp::open() try {
         }
         return tbl_.len;
     };
-    std::vector<size_t> setIndices;
-    // PG allows GROUP BY over expressions (v % 2, id / 10 ...).
-    // A spec that is not a table column is evaluated per row via
-    // the expression helper; a sentinel marks such positions.
-    std::vector<bool> isExprKey;
-    for (const auto& name : groupByCols_) {
-        const size_t index = columnIndex(name);
-        if (index >= tbl_.len) {
-            isExprKey.push_back(true);
-            setIndices.push_back(static_cast<size_t>(-1));
-        } else {
-            isExprKey.push_back(false);
-            setIndices.push_back(index);
-        }
-    }
-    auto rowValueMap = [&](size_t rowId) {
-        std::map<std::string, std::string> row;
-        for (size_t ci = 0; ci < tbl_.len; ++ci)
-            row[tbl_.cols[ci].dataName] = input[rowId].values[ci];
-        return row;
-    };
-    auto groupKeyValue = [&](size_t rowId, size_t keyPos) -> std::string {
-        if (!isExprKey[keyPos]) return input[rowId].values[setIndices[keyPos]];
-        const auto r = dbms::ExprHelper::evalString(groupByCols_[keyPos], rowValueMap(rowId));
-        return r.ok ? r.value : std::string();
+    const auto groupingKeys = materializeGroupingKeys(tbl_, input, groupByCols_);
+    const auto groupKeyValue = [&](size_t rowId, size_t keyPos) -> const ExprValue& {
+        return groupingKeys.at(rowId).at(keyPos);
     };
 
     // ---- parallel partition into local group buckets ----
@@ -2615,9 +2641,9 @@ bool ParallelGroupAggregateOp::open() try {
                 auto& buckets = localB[static_cast<size_t>(w)];
                 for (size_t rowId = begin; rowId < end; ++rowId) {
                     std::string key;
-                    for (size_t ki = 0; ki < setIndices.size(); ++ki) {
+                    for (size_t ki = 0; ki < groupByCols_.size(); ++ki) {
                         const auto& value = groupKeyValue(rowId, ki);
-                        key += std::to_string(value.size()) + ":" + value + "|";
+                        key += encodeGroupingKey(value);
                     }
                     buckets[key].push_back(rowId);
                 }
@@ -2627,9 +2653,9 @@ bool ParallelGroupAggregateOp::open() try {
     } else {
         for (size_t rowId = 0; rowId < n; ++rowId) {
             std::string key;
-            for (size_t ki = 0; ki < setIndices.size(); ++ki) {
+            for (size_t ki = 0; ki < groupByCols_.size(); ++ki) {
                 const auto& value = groupKeyValue(rowId, ki);
-                key += std::to_string(value.size()) + ":" + value + "|";
+                key += encodeGroupingKey(value);
             }
             localB[0][key].push_back(rowId);
         }
@@ -2837,13 +2863,13 @@ bool ParallelGroupAggregateOp::open() try {
         for (size_t gi = 0; gi < groupByCols_.size(); ++gi) {
             values.push_back(group.second.empty()
                 ? std::string("NULL")
-                : groupKeyValue(group.second.front(), gi));
+                : displayGroupingKey(groupKeyValue(group.second.front(), gi)));
         }
         for (const auto& item : items_) values.push_back(computeAggregate(group.second, item));
         std::string output;
         for (size_t i = 0; i < values.size(); ++i) {
             if (i != 0) output.push_back(' ');
-            output += values[i].empty() && i < groupByCols_.size() ? "NULL" : values[i];
+            output += values[i];
         }
         rows_.push_back(std::move(output));
     }
@@ -3305,28 +3331,9 @@ bool GroupAggregateOp::open() try {
     };
     // GROUP BY expressions: non-column keys are evaluated per row
     // (same semantics as GroupAggregateOp).
-    std::vector<size_t> setIndices;
-    std::vector<bool> isExprKey;
-    for (const auto& name : groupByCols_) {
-        const size_t index = columnIndex(name);
-        if (index >= tbl_.len) {
-            isExprKey.push_back(true);
-            setIndices.push_back(static_cast<size_t>(-1));
-        } else {
-            isExprKey.push_back(false);
-            setIndices.push_back(index);
-        }
-    }
-    auto rowValueMap = [&](size_t rowId) {
-        std::map<std::string, std::string> row;
-        for (size_t ci = 0; ci < tbl_.len; ++ci)
-            row[tbl_.cols[ci].dataName] = input[rowId].values[ci];
-        return row;
-    };
-    auto groupKeyValue = [&](size_t rowId, size_t keyPos) -> std::string {
-        if (!isExprKey[keyPos]) return input[rowId].values[setIndices[keyPos]];
-        const auto r = dbms::ExprHelper::evalString(groupByCols_[keyPos], rowValueMap(rowId));
-        return r.ok ? r.value : std::string();
+    const auto groupingKeys = materializeGroupingKeys(tbl_, input, groupByCols_);
+    const auto groupKeyValue = [&](size_t rowId, size_t keyPos) -> const ExprValue& {
+        return groupingKeys.at(rowId).at(keyPos);
     };
 
     static const std::set<std::string> supported = {
@@ -3533,7 +3540,9 @@ bool GroupAggregateOp::open() try {
             for (size_t gp = 0; gp < groupByCols_.size(); ++gp)
                 if (groupByCols_[gp] == name) { keyPos = gp; break; }
             const size_t index = columnIndex(name);
-            if (index >= tbl_.len && keyPos == static_cast<size_t>(-1)) return false;
+            if (keyPos == static_cast<size_t>(-1)) {
+                throw std::runtime_error("GROUPING SET key missing from GROUP BY (SQLSTATE 42601)");
+            }
             setIndices.push_back(index);
             setKeyPos.push_back(keyPos);
         }
@@ -3544,7 +3553,7 @@ bool GroupAggregateOp::open() try {
             std::string key;
             for (size_t ki = 0; ki < setIndices.size(); ++ki) {
                 const auto& value = groupKeyValue(rowId, setKeyPos[ki]);
-                key += std::to_string(value.size()) + ":" + value + "|";
+                key += encodeGroupingKey(value);
             }
             groups[key].push_back(rowId);
         }
@@ -3558,14 +3567,14 @@ bool GroupAggregateOp::open() try {
                 if (setIt == groupingSet.end() || group.second.empty()) {
                     values.push_back("NULL");
                 } else {
-                    values.push_back(groupKeyValue(group.second.front(), gi));
+                    values.push_back(displayGroupingKey(groupKeyValue(group.second.front(), gi)));
                 }
             }
             for (const auto& item : items_) values.push_back(computeAggregate(group.second, item));
             std::string output;
         for (size_t i = 0; i < values.size(); ++i) {
             if (i != 0) output.push_back(' ');
-            output += values[i].empty() && i < groupByCols_.size() ? "NULL" : values[i];
+            output += values[i];
             }
             rows_.push_back(std::move(output));
         }
