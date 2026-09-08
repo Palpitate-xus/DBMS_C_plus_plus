@@ -124,37 +124,82 @@ fs::path publicationPath(const std::string& dbname, const std::string& name) {
     return fs::path(dbname) / (name + ".publication");
 }
 
-Publication parsePublicationFile(const std::string& name, const std::string& content) {
-    Publication pub;
-    pub.name = name;
+bool parsePublicationFile(const std::string& name, const std::string& content,
+                          Publication& pub, std::string& error) {
+    error.clear();
+    if (!validPublicationName(name)) {
+        error = "invalid publication filename";
+        return false;
+    }
+    Publication parsed;
+    parsed.name = name;
     std::istringstream in(content);
     std::string line;
-    bool first = true;
-    while (std::getline(in, line)) {
-        if (line.empty()) continue;
-        if (first) {
-            // Current header: owner insert update delete truncate all-tables.
-            // The five-field legacy header did not have truncate; load it as
-            // disabled so an upgrade never starts publishing new events.
-            std::istringstream hdr(line);
-            std::string ins, upd, del, fourth, fifth;
-            hdr >> pub.owner >> ins >> upd >> del >> fourth;
-            pub.publishInsert = (ins == "1");
-            pub.publishUpdate = (upd == "1");
-            pub.publishDelete = (del == "1");
-            if (hdr >> fifth) {
-                pub.publishTruncate = (fourth == "1");
-                pub.publishAllTables = (fifth == "1");
-            } else {
-                pub.publishTruncate = false;
-                pub.publishAllTables = (fourth == "1");
-            }
-            first = false;
-            continue;
-        }
-        pub.tables.push_back(line);
+    if (!std::getline(in, line) || line.empty()) {
+        error = "invalid publication header";
+        return false;
     }
-    return pub;
+    std::vector<std::string> fields;
+    std::istringstream header(line);
+    std::string field;
+    while (header >> field) fields.push_back(field);
+    if (fields.size() != 5 && fields.size() != 6) {
+        error = "invalid publication header";
+        return false;
+    }
+    for (size_t index = 1; index < fields.size(); ++index) {
+        if (fields[index] != "0" && fields[index] != "1") {
+            error = "invalid publication flag";
+            return false;
+        }
+    }
+    parsed.owner = fields[0];
+    parsed.publishInsert = fields[1] == "1";
+    parsed.publishUpdate = fields[2] == "1";
+    parsed.publishDelete = fields[3] == "1";
+    if (fields.size() == 6) {
+        parsed.publishTruncate = fields[4] == "1";
+        parsed.publishAllTables = fields[5] == "1";
+    } else {
+        // The five-field legacy header did not have truncate.  Loading it as
+        // disabled prevents an upgrade from broadening publication output.
+        parsed.publishTruncate = false;
+        parsed.publishAllTables = fields[4] == "1";
+    }
+    while (std::getline(in, line)) {
+        if (line.empty() || line.find('\0') != std::string::npos ||
+            line.find('\r') != std::string::npos) {
+            error = "invalid publication table entry";
+            return false;
+        }
+        parsed.tables.push_back(line);
+    }
+    if (in.bad()) {
+        error = "cannot read publication data";
+        return false;
+    }
+    pub = std::move(parsed);
+    return true;
+}
+
+bool validatePublicationDefinition(const Publication& pub, std::string& error) {
+    if (pub.owner.empty() ||
+        std::any_of(pub.owner.begin(), pub.owner.end(), [](unsigned char ch) {
+            return ch == '\0' || ch == ' ' || ch == '\t' || ch == '\n' ||
+                   ch == '\r' || ch == '\f' || ch == '\v';
+        })) {
+        error = "invalid publication owner";
+        return false;
+    }
+    for (const auto& table : pub.tables) {
+        if (table.empty() || table.find('\0') != std::string::npos ||
+            table.find('\n') != std::string::npos ||
+            table.find('\r') != std::string::npos) {
+            error = "invalid publication table entry";
+            return false;
+        }
+    }
+    return true;
 }
 
 std::string serializePublication(const Publication& pub) {
@@ -201,8 +246,13 @@ bool rewritePublicationFiles(const std::string& dbname,
             error = "cannot read publication file";
             return false;
         }
-        Publication publication = parsePublicationFile(
-            filename.substr(0, filename.size() - 12), original);
+        Publication publication;
+        std::string parseError;
+        if (!parsePublicationFile(filename.substr(0, filename.size() - 12),
+                                  original, publication, parseError)) {
+            error = "invalid publication file: " + filename;
+            return false;
+        }
         if (!transform(publication)) continue;
         rewrites.push_back(
             {it->path(), std::move(original), serializePublication(publication)});
@@ -233,6 +283,7 @@ bool PublicationCatalog::create(const std::string& dbname, const Publication& pu
                                 std::string& error) {
     error.clear();
     if (!validatePublicationName(pub.name, error)) return false;
+    if (!validatePublicationDefinition(pub, error)) return false;
     std::lock_guard<std::mutex> lock(mutex_);
     if (exists(dbname, pub.name)) {
         error = "publication \"" + pub.name + "\" already exists";
@@ -345,10 +396,21 @@ bool PublicationCatalog::update(const std::string& dbname,
                                 std::string& error) {
     error.clear();
     if (!validatePublicationName(pub.name, error)) return false;
+    if (!validatePublicationDefinition(pub, error)) return false;
     std::lock_guard<std::mutex> lock(mutex_);
     const auto path = publicationPath(dbname, pub.name);
     if (!fs::exists(path)) {
         error = "publication \"" + pub.name + "\" does not exist";
+        return false;
+    }
+    std::ifstream input(path, std::ios::binary);
+    std::string existing((std::istreambuf_iterator<char>(input)),
+                         std::istreambuf_iterator<char>());
+    Publication parsed;
+    std::string parseError;
+    if (!input || input.bad() ||
+        !parsePublicationFile(pub.name, existing, parsed, parseError)) {
+        error = "invalid publication file: " + path.filename().string();
         return false;
     }
     if (!index_file::writeAtomically(path, serializePublication(pub))) {
@@ -376,6 +438,16 @@ bool PublicationCatalog::rename(const std::string& dbname,
         error = "publication \"" + newName + "\" already exists";
         return false;
     }
+    std::ifstream input(oldPath, std::ios::binary);
+    std::string existing((std::istreambuf_iterator<char>(input)),
+                         std::istreambuf_iterator<char>());
+    Publication parsed;
+    std::string parseError;
+    if (!input || input.bad() ||
+        !parsePublicationFile(oldName, existing, parsed, parseError)) {
+        error = "invalid publication file: " + oldPath.filename().string();
+        return false;
+    }
     std::error_code filesystemError;
     fs::rename(oldPath, newPath, filesystemError);
     if (filesystemError) {
@@ -391,23 +463,54 @@ bool PublicationCatalog::exists(const std::string& dbname, const std::string& na
 }
 
 std::vector<Publication> PublicationCatalog::list(const std::string& dbname) const {
+    std::vector<Publication> publications;
+    std::string error;
+    if (!list(dbname, publications, error)) publications.clear();
+    return publications;
+}
+
+bool PublicationCatalog::list(const std::string& dbname,
+                              std::vector<Publication>& publications,
+                              std::string& error) const {
     std::lock_guard<std::mutex> lock(mutex_);
+    publications.clear();
     std::vector<Publication> pubs;
+    error.clear();
     std::error_code ec;
-    if (!fs::is_directory(dbname, ec)) return pubs;
-    for (const auto& entry : fs::directory_iterator(dbname, ec)) {
+    if (!fs::is_directory(dbname, ec)) {
+        if (ec) {
+            error = "cannot inspect publication directory";
+            return false;
+        }
+        return true;
+    }
+    for (fs::directory_iterator it(dbname, ec), end;
+         !ec && it != end; it.increment(ec)) {
+        const auto& entry = *it;
         const std::string fn = entry.path().filename().string();
         if (fn.size() > 12 && fn.substr(fn.size() - 12) == ".publication") {
-            std::ifstream in(entry.path());
+            std::ifstream in(entry.path(), std::ios::binary);
             std::string content((std::istreambuf_iterator<char>(in)),
                                 std::istreambuf_iterator<char>());
-            pubs.push_back(
-                parsePublicationFile(fn.substr(0, fn.size() - 12), content));
+            Publication publication;
+            std::string parseError;
+            if (!in || in.bad() ||
+                !parsePublicationFile(fn.substr(0, fn.size() - 12), content,
+                                      publication, parseError)) {
+                error = "invalid publication file: " + fn;
+                return false;
+            }
+            pubs.push_back(std::move(publication));
         }
+    }
+    if (ec) {
+        error = "cannot inspect publication directory";
+        return false;
     }
     std::sort(pubs.begin(), pubs.end(),
               [](const Publication& a, const Publication& b) { return a.name < b.name; });
-    return pubs;
+    publications = std::move(pubs);
+    return true;
 }
 
 bool PublicationCatalog::renameTable(const std::string& dbname,
@@ -458,7 +561,10 @@ bool PublicationCatalog::removeTable(const std::string& dbname,
 
 bool PublicationCatalog::publishes(const std::string& dbname,
                                    const std::string& table) const {
-    for (const auto& pub : list(dbname)) {
+    std::vector<Publication> publications;
+    std::string error;
+    if (!list(dbname, publications, error)) return false;
+    for (const auto& pub : publications) {
         if (pub.publishAllTables) return true;
         if (std::find(pub.tables.begin(), pub.tables.end(), table) != pub.tables.end())
             return true;
@@ -469,7 +575,10 @@ bool PublicationCatalog::publishes(const std::string& dbname,
 bool PublicationCatalog::publishes(const std::string& dbname,
                                    const std::string& table,
                                    LogicalChange::Op operation) const {
-    for (const auto& pub : list(dbname)) {
+    std::vector<Publication> publications;
+    std::string error;
+    if (!list(dbname, publications, error)) return false;
+    for (const auto& pub : publications) {
         const bool member = pub.publishAllTables ||
             std::find(pub.tables.begin(), pub.tables.end(), table) !=
                 pub.tables.end();

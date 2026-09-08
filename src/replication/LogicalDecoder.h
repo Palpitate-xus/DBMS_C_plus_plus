@@ -90,6 +90,10 @@ public:
     // Remove explicit membership for a relation that is being dropped.
     bool removeTable(const std::string& dbname, const std::string& tableName,
                      std::string& error);
+    // Strict catalog scan.  A malformed or unreadable publication fails the
+    // whole scan so callers never operate on a partial catalog snapshot.
+    bool list(const std::string& dbname, std::vector<Publication>& publications,
+              std::string& error) const;
     // Does this publication stream changes of (dbname, table)?
     bool publishes(const std::string& dbname, const std::string& table) const;
     // Operation-aware membership check used by DML capture.  A table can be

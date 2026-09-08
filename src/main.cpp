@@ -11116,7 +11116,13 @@ static bool handleAlterPublication(const string& sql, Session& s) {
         cout << "SQL syntax error: ALTER PUBLICATION requires an action" << endl;
         return true;
     }
-    auto publications = dbms::PublicationCatalog::instance().list(s.currentDB);
+    vector<dbms::Publication> publications;
+    string publicationError;
+    if (!dbms::PublicationCatalog::instance().list(
+            s.currentDB, publications, publicationError)) {
+        cout << "ERROR: " << publicationError << endl;
+        return true;
+    }
     auto publication = find_if(
         publications.begin(), publications.end(),
         [&](const dbms::Publication& candidate) {
@@ -15430,7 +15436,13 @@ if (sql.rfind("backup database", 0) == 0) {
         }
         if (rest == "publications") {
             if (!checkDB(s)) return true;
-            const auto pubs = dbms::PublicationCatalog::instance().list(s.currentDB);
+            vector<dbms::Publication> pubs;
+            string publicationError;
+            if (!dbms::PublicationCatalog::instance().list(
+                    s.currentDB, pubs, publicationError)) {
+                cout << "ERROR: " << publicationError << endl;
+                return true;
+            }
             cout << "name owner insert update delete all_tables tables" << endl;
             for (const auto& p : pubs) {
                 string tables;

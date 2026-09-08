@@ -153,6 +153,15 @@ static void test_publication_catalog() {
            pubs[0].publishDelete && !pubs[0].publishTruncate);
     assert(!pubs[0].publishAllTables);
 
+    // Definitions that the line-oriented catalog cannot round-trip must be
+    // rejected before a malformed file becomes visible.
+    Publication invalidOwner = pub;
+    invalidOwner.name = "invalid_owner";
+    invalidOwner.owner = "owner with whitespace";
+    assert(!cat.create(db, invalidOwner, error));
+    assert(error.find("invalid publication owner") != std::string::npos);
+    assert(!cat.exists(db, invalidOwner.name));
+
     assert(cat.publishes(db, "orders"));
     assert(cat.publishes(db, "customers"));
     assert(!cat.publishes(db, "audit"));
@@ -228,6 +237,38 @@ static void test_publication_catalog() {
     assert(cat.drop(db, "allpub", error));
     assert(cat.drop(db, "legacy", error));
     fs::remove_all(db);
+
+    // A corrupt sidecar must fail the entire catalog scan.  It must not be
+    // treated as a permissive publication or be propagated by update/rename
+    // and table-DDL rewrite paths.
+    const std::string corruptDb = testDbPath("logical_pub_corrupt");
+    cleanupTestDb("logical_pub_corrupt");
+    fs::create_directories(corruptDb);
+    const fs::path corruptPath =
+        fs::path(corruptDb) / "corrupt.publication";
+    const std::string corruptBytes =
+        "admin 1 1 1 1 1 trailing\norders\n";
+    {
+        std::ofstream corrupt(corruptPath, std::ios::binary);
+        corrupt << corruptBytes;
+    }
+    std::vector<Publication> strictPublications;
+    assert(!cat.list(corruptDb, strictPublications, error));
+    assert(error.find("invalid publication file") != std::string::npos);
+    assert(strictPublications.empty());
+    assert(!cat.publishes(corruptDb, "orders"));
+    Publication replacement;
+    replacement.name = "corrupt";
+    replacement.owner = "admin";
+    replacement.tables = {"orders"};
+    assert(!cat.update(corruptDb, replacement, error));
+    assert(!cat.rename(corruptDb, "corrupt", "renamed", error));
+    assert(!cat.renameTable(corruptDb, "orders", "orders_v2", error));
+    std::ifstream unchanged(corruptPath, std::ios::binary);
+    const std::string after((std::istreambuf_iterator<char>(unchanged)),
+                            std::istreambuf_iterator<char>());
+    assert(after == corruptBytes);
+    fs::remove_all(corruptDb);
     std::cout << "[LOGICAL] publication catalog OK" << std::endl;
 }
 

@@ -473,6 +473,16 @@ def main():
         expect_command_tag(sock, "CREATE TABLE t6e (a TINYINT)",
                            "extended TINYINT")
 
+        # A malformed publication sidecar must fail the whole catalog scan;
+        # SHOW must not silently hide it or expose a partial snapshot.
+        corrupt_publication = Path(work_dir, "info", "corrupt.publication")
+        corrupt_publication.write_text(
+            "admin 1 1 1 1 1 trailing\norders\n", encoding="utf-8")
+        err = error_of(simple_query(sock, "SHOW PUBLICATIONS"))
+        assert err is not None and "invalid publication file" in err[1], \
+            "corrupt publication catalog must fail closed: %r" % (err,)
+        corrupt_publication.unlink()
+
         # Mode cannot flip inside a transaction (DIV framework: session-start
         # restricted).
         expect_command_tag(sock, "SET compatibility_mode = postgresql18",
