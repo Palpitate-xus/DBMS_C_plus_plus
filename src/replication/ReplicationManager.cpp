@@ -13,25 +13,30 @@ ReplicationManager& ReplicationManager::instance() {
 
 bool ReplicationManager::validSlotDefinition(const std::string& name,
                                              const std::string& type,
-                                             const std::string& plugin) {
+                                             const std::string& plugin,
+                                             const std::string& database) {
     if (name.empty() || name.size() > 63) return false;
     for (unsigned char c : name) {
         if (!(std::isalnum(c) || c == '_' || c == '-')) return false;
     }
     if (type != "physical" && type != "logical") return false;
-    return type == "physical" ? plugin.empty() : !plugin.empty();
+    return type == "physical"
+        ? plugin.empty() && database.empty()
+        : !plugin.empty() && !database.empty();
 }
 
 bool ReplicationManager::createReplicationSlot(const std::string& name,
                                                const std::string& type,
-                                               const std::string& plugin) {
+                                               const std::string& plugin,
+                                               const std::string& database) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!validSlotDefinition(name, type, plugin)) return false;
+    if (!validSlotDefinition(name, type, plugin, database)) return false;
     if (slots_.count(name)) return false;
     ReplicationSlot slot;
     slot.name = name;
     slot.slotType = type;
     slot.plugin = plugin;
+    slot.database = database;
     slot.active = false;
     slots_[name] = std::move(slot);
     return true;
@@ -89,10 +94,11 @@ std::vector<ReplicationManager::ReplicationSlot> ReplicationManager::listSlots()
     return result;
 }
 
-void ReplicationManager::publishLogicalBatch(const LogicalChangeBatch& batch) {
+void ReplicationManager::publishLogicalBatch(
+    const std::string& database, const LogicalChangeBatch& batch) {
     std::lock_guard<std::mutex> lock(mutex_);
     for (const auto& [name, slot] : slots_) {
-        if (slot.slotType != "logical") continue;
+        if (slot.slotType != "logical" || slot.database != database) continue;
         LogicalChangeStore::instance().append(name, batch);
     }
 }

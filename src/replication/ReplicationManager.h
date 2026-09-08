@@ -21,12 +21,14 @@ public:
         std::string name;
         std::string plugin;       // output plugin for logical decoding
         std::string slotType;     // "physical" or "logical"
+        std::string database;     // logical slots are bound to one database
         int64_t restartLsn = 0;
         bool active = false;
     };
 
     bool createReplicationSlot(const std::string& name, const std::string& type,
-                                const std::string& plugin = "");
+                                const std::string& plugin = "",
+                                const std::string& database = "");
     bool dropReplicationSlot(const std::string& name);
     // Return a snapshot; never expose an entry whose lifetime depends on the
     // internal mutex remaining held.
@@ -38,7 +40,8 @@ public:
     std::vector<ReplicationSlot> listSlots() const;
     // Publish a committed batch while holding the same manager lock used by
     // slot drop, so drop+discard cannot race with an old slot snapshot.
-    void publishLogicalBatch(const LogicalChangeBatch& batch);
+    void publishLogicalBatch(const std::string& database,
+                             const LogicalChangeBatch& batch);
 
     // Streaming replication state (8.1, 8.2)
     enum class StandbyMode { None, HotStandby, Recovery };
@@ -61,7 +64,8 @@ private:
     ReplicationManager() = default;
     static bool validSlotDefinition(const std::string& name,
                                     const std::string& type,
-                                    const std::string& plugin);
+                                    const std::string& plugin,
+                                    const std::string& database);
     mutable std::mutex mutex_;
     std::map<std::string, ReplicationSlot> slots_;
     StandbyMode standbyMode_ = StandbyMode::None;

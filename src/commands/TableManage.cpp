@@ -34938,7 +34938,8 @@ static bool preparedHexDecode(const std::string& value, std::string& result) {
 }
 
 static void publishLogicalChanges(
-    const std::vector<LogicalChange>& changes, uint64_t xid,
+    const std::string& database, const std::vector<LogicalChange>& changes,
+    uint64_t xid,
     uint64_t commitLsn) {
     if (changes.empty()) return;
 
@@ -34951,7 +34952,7 @@ static void publishLogicalChanges(
         change.commitLsn = commitLsn;
         batch.changes.push_back(std::move(change));
     }
-    ReplicationManager::instance().publishLogicalBatch(batch);
+    ReplicationManager::instance().publishLogicalBatch(database, batch);
 }
 
 static const char* preparedLockModeName(LockManager::LockMode mode) {
@@ -38766,11 +38767,11 @@ DBStatus StorageEngine::commitTransaction() {
                 changes.push_back(std::move(lc));
             }
             // Publication membership was already checked when the change
-            // was buffered; every logical slot receives the batch and its
-            // consumer side filters (a slot's plugin controls only the
-            // output format).
+            // was buffered; logical slots bound to this database receive the
+            // batch (a slot's plugin controls only the output format).
             publishLogicalChanges(
-                changes, committingTxnId, static_cast<uint64_t>(commitLsn));
+                committingDb, changes, committingTxnId,
+                static_cast<uint64_t>(commitLsn));
             txn.txnLogicalChanges.clear();
         }
     }
@@ -40612,7 +40613,8 @@ DBStatus StorageEngine::commitPrepared(const std::string& xid) {
     // only after the terminal COMMIT record is durable, matching ordinary
     // commit semantics without retaining backend-local state.
     publishLogicalChanges(
-        record.logicalChanges, savedTxnId, static_cast<uint64_t>(commitLsn));
+        savedDB, record.logicalChanges, savedTxnId,
+        static_cast<uint64_t>(commitLsn));
 
     CommitLog* clog = getCommitLog(savedDB);
     if (clog) {

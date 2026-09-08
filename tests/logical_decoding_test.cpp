@@ -366,7 +366,10 @@ static void test_end_to_end_streaming() {
     std::string error;
     assert(PublicationCatalog::instance().create(db, pub, error));
     auto& repl = ReplicationManager::instance();
-    assert(repl.createReplicationSlot("e2e_slot", "logical", "test_decoding"));
+    assert(repl.createReplicationSlot(
+        "e2e_slot", "logical", "test_decoding", db));
+    assert(repl.createReplicationSlot(
+        "other_db_slot", "logical", "test_decoding", "other_database"));
 
     // Committed transaction streams into the slot.
     assert(g_engine.beginTransaction(db) == DBStatus::OK);
@@ -374,6 +377,7 @@ static void test_end_to_end_streaming() {
     assert(g_engine.insert(db, "src_t", {{"id", "2"}, {"v", "two"}}) == DBStatus::OK);
     assert(g_engine.commitTransaction() == DBStatus::OK);
     assert(LogicalChangeStore::instance().depth("e2e_slot") == 1);
+    assert(LogicalChangeStore::instance().depth("other_db_slot") == 0);
 
     auto slot = repl.findSlot("e2e_slot");
     assert(slot && slot->slotType == "logical");
@@ -476,9 +480,10 @@ static void test_end_to_end_streaming() {
     assert(repl.dropReplicationSlot("e2e_slot"));
     assert(LogicalChangeStore::instance().depth("e2e_slot") == 0);
     assert(repl.createReplicationSlot(
-        "e2e_slot", "logical", "test_decoding"));
+        "e2e_slot", "logical", "test_decoding", db));
     assert(LogicalChangeStore::instance().depth("e2e_slot") == 0);
     assert(repl.dropReplicationSlot("e2e_slot"));
+    assert(repl.dropReplicationSlot("other_db_slot"));
     g_engine.dropDatabase(db);
     cleanupTestDb(db);
     std::cout << "[LOGICAL] end-to-end streaming OK" << std::endl;
@@ -506,7 +511,7 @@ static void test_prepared_transaction_streaming() {
 
     auto& replication = ReplicationManager::instance();
     assert(replication.createReplicationSlot(
-        slotName, "logical", "test_decoding"));
+        slotName, "logical", "test_decoding", db));
     auto& changes = LogicalChangeStore::instance();
     StorageEngine completingBackend;
 

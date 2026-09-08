@@ -3,6 +3,7 @@
 // ============================================================================
 
 #include "replication/ReplicationManager.h"
+#include "replication/LogicalDecoder.h"
 #include <cassert>
 #include <iostream>
 
@@ -13,7 +14,8 @@ static void test_replication_slots() {
 
     // Create slots
     assert(mgr.createReplicationSlot("slot1", "physical"));
-    assert(mgr.createReplicationSlot("slot2", "logical", "test_decoding"));
+    assert(mgr.createReplicationSlot(
+        "slot2", "logical", "test_decoding", "testdb"));
     assert(!mgr.createReplicationSlot("slot1", "physical"));  // duplicate
     assert(!mgr.createReplicationSlot("bad/name", "physical"));
     assert(!mgr.createReplicationSlot("bad_type", "unknown"));
@@ -29,6 +31,17 @@ static void test_replication_slots() {
     auto s2 = mgr.findSlot("slot2");
     assert(s2);
     assert(s2->plugin == "test_decoding");
+    assert(s2->database == "testdb");
+
+    LogicalChangeBatch batch;
+    batch.xid = 1;
+    batch.commitLsn = 1;
+    batch.changes.push_back(
+        {LogicalChange::Op::Insert, "t", "", "1", 1, 1});
+    mgr.publishLogicalBatch("otherdb", batch);
+    assert(LogicalChangeStore::instance().depth("slot2") == 0);
+    mgr.publishLogicalBatch("testdb", batch);
+    assert(LogicalChangeStore::instance().depth("slot2") == 1);
 
     assert(mgr.activateReplicationSlot("slot1"));
     assert(mgr.findSlot("slot1")->active);
@@ -43,6 +56,7 @@ static void test_replication_slots() {
     assert(mgr.dropReplicationSlot("slot1"));
     assert(!mgr.findSlot("slot1").has_value());
     assert(!mgr.dropReplicationSlot("slot1"));  // already dropped
+    assert(mgr.dropReplicationSlot("slot2"));
 
     std::cout << "[REPLICATION] slots OK" << std::endl;
 }

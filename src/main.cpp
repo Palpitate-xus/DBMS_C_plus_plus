@@ -11285,7 +11285,8 @@ static bool handleCreateReplicationSlotSql(const string& sql, Session& s) {
             cout << "ERROR: output plugin " << plugin << " is not available" << endl;
             return true;
         }
-        if (!dbms::ReplicationManager::instance().createReplicationSlot(name, "logical", plugin)) {
+        if (!dbms::ReplicationManager::instance().createReplicationSlot(
+                name, "logical", plugin, s.currentDB)) {
             cout << "ERROR: cannot create replication slot " << name << endl;
             return true;
         }
@@ -15472,7 +15473,8 @@ if (sql.rfind("backup database", 0) == 0) {
         if (rest.rfind("logical changes for slot ", 0) == 0) {
             string slotName = trim(rest.substr(25));
             auto slot = dbms::ReplicationManager::instance().findSlot(slotName);
-            if (!slot || slot->slotType != "logical") {
+            if (!slot || slot->slotType != "logical" ||
+                slot->database != s.currentDB) {
                 cout << "ERROR: logical replication slot " << slotName
                      << " does not exist" << endl;
                 return true;
@@ -15493,7 +15495,8 @@ if (sql.rfind("backup database", 0) == 0) {
         if (rest.rfind("logical confirm for slot ", 0) == 0) {
             string slotName = trim(rest.substr(24));
             auto slot = dbms::ReplicationManager::instance().findSlot(slotName);
-            if (!slot || slot->slotType != "logical") {
+            if (!slot || slot->slotType != "logical" ||
+                slot->database != s.currentDB) {
                 cout << "ERROR: logical replication slot " << slotName
                      << " does not exist" << endl;
                 return true;

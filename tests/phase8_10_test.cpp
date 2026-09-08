@@ -40,7 +40,8 @@ static void test_wal_shipping() {
 static void test_replication_slots() {
     auto& repl = dbms::ReplicationManager::instance();
     assert(repl.createReplicationSlot("test_slot", "physical"));
-    assert(repl.createReplicationSlot("log_slot", "logical", "test_decoding"));
+    assert(repl.createReplicationSlot(
+        "log_slot", "logical", "test_decoding", "phase8_db"));
 
     auto s = repl.findSlot("test_slot");
     assert(s.has_value());

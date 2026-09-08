@@ -55,14 +55,14 @@ int main() {
         batch.xid = round;
         batch.commitLsn = round;
         assert(manager.createReplicationSlot(
-            logicalSlot, "logical", "test_decoding"));
+            logicalSlot, "logical", "test_decoding", "concurrency_db"));
         std::atomic<bool> start{false};
         std::atomic<bool> dropped{false};
         std::thread publisher([&] {
             while (!start.load(std::memory_order_acquire)) {
                 std::this_thread::yield();
             }
-            manager.publishLogicalBatch(batch);
+            manager.publishLogicalBatch("concurrency_db", batch);
         });
         std::thread dropper([&] {
             while (!start.load(std::memory_order_acquire)) {
