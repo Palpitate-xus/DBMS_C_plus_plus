@@ -355,6 +355,13 @@ int main() {
         assert(r2.success);
         auto* s2 = asSelect(r2.stmt);
         assert(s2 && s2->fetchFirst && s2->limit == 5);
+        assert(s2->fromClause && s2->fromClause->type == FromItem::Type::Table);
+        assert(s2->fromClause->tableName == "t");
+        auto constantFetch = parser.parse("SELECT 42 FETCH FIRST ROW ONLY");
+        assert(constantFetch.success);
+        const auto* constantSelect = asSelect(constantFetch.stmt);
+        assert(constantSelect && constantSelect->selectList.size() == 1);
+        assert(!constantSelect->fromClause && constantSelect->fetchFirst && constantSelect->limit == 1);
 
         assert(!parser.parse("SELECT * FROM t LIMIT nope").success);
         assert(!parser.parse("SELECT * FROM t LIMIT -1").success);
@@ -364,6 +371,7 @@ int main() {
         assert(r3.success);
         auto* s3 = asSelect(r3.stmt);
         assert(s3 && s3->limit == 1);
+        assert(s3->fromClause && s3->fromClause->tableName == "t");
         std::cout << "[PARSER P1] LIMIT/FETCH OK\n";
     }
 

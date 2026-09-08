@@ -2478,7 +2478,7 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
             || toLower(tokens[pos]) == "order" || toLower(tokens[pos]) == "limit"
             || toLower(tokens[pos]) == "offset" || toLower(tokens[pos]) == "union"
             || toLower(tokens[pos]) == "intersect" || toLower(tokens[pos]) == "except"
-            || toLower(tokens[pos]) == "for") {
+            || toLower(tokens[pos]) == "for" || toLower(tokens[pos]) == "fetch") {
             break;
         }
         stmt->selectList.push_back(parseSelectItem(tokens, pos));
@@ -2497,7 +2497,7 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
                 std::string w = toLower(tokens[pos]);
                 if (w == "where" || w == "group" || w == "having" || w == "order"
                     || w == "limit" || w == "offset" || w == "union"
-                    || w == "intersect" || w == "except" || w == "for"
+                    || w == "intersect" || w == "except" || w == "for" || w == "fetch"
                     || w == ")" || w == ";") {
                     break;
                 }
