@@ -78,6 +78,26 @@ def main():
         assert aggregate_types == [20, 25], aggregate_types
         assert aggregate_tag == "SELECT 1", aggregate_tag
 
+        empty_aggregate_sql = (
+            "SELECT count(v), count(DISTINCT v), min(v) "
+            "FROM exact_aggregate_rows;")
+        empty_aggregate_decoded = runner.decode_wire_result(
+            client.simple_query(server["sock"], empty_aggregate_sql),
+            include_types=True)
+        empty_aggregate_rows, empty_aggregate_state, \
+            empty_aggregate_message, empty_aggregate_headers, \
+            empty_aggregate_tag, empty_aggregate_types = \
+            empty_aggregate_decoded
+        assert empty_aggregate_state is None, (
+            empty_aggregate_state, empty_aggregate_message)
+        assert empty_aggregate_rows == [["4", "4", ""]], \
+            empty_aggregate_rows
+        assert empty_aggregate_headers == ["count", "count", "min"], \
+            empty_aggregate_headers
+        assert empty_aggregate_types == [20, 20, 25], \
+            empty_aggregate_types
+        assert empty_aggregate_tag == "SELECT 1", empty_aggregate_tag
+
         grouped_aggregate_sql = (
             "SELECT g, string_agg(v, '|') AS joined "
             "FROM exact_aggregate_rows GROUP BY g ORDER BY g DESC;")

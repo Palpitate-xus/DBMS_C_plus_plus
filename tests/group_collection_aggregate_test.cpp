@@ -56,6 +56,13 @@ int main() {
             auto result = run(item, parallel);
             if (!result.ok) std::cerr << result.error << '\n';
             assert(result.ok);
+            if (result.rows != std::vector<std::string>{value}) {
+                std::cerr << item.func << '(' << item.arg << ") "
+                          << (parallel ? "parallel" : "serial")
+                          << " expected [" << value << "] got ["
+                          << (result.rows.empty() ? "<no row>" : result.rows.front())
+                          << "]\n";
+            }
             assert(result.rows == std::vector<std::string>{value});
         }
     };
@@ -93,6 +100,21 @@ int main() {
     const auto textParallel = run(textOrder, true);
     assert(textSerial.ok && textParallel.ok && textSerial.rows == textParallel.rows);
     assert(textSerial.rows.front().rfind("{1,10,100,", 0) == 0);
+
+    // Empty text is a non-NULL SQL value.  Both serial and parallel scalar
+    // aggregates must count/select it instead of using string emptiness as a
+    // surrogate NULL bit.
+    expect({"count", "value", {}, {}}, "299");
+    expect({"count", "distinct value", {}, {}}, "5");
+    expect({"min", "value", {}, {}}, "");
+    for (bool parallel : {false, true}) {
+        const auto emptyMinimum = run({"min", "value", {}, {}}, parallel);
+        assert(emptyMinimum.ok && emptyMinimum.structuredRowsAvailable);
+        assert(emptyMinimum.structuredRows ==
+               std::vector<std::vector<std::string>>{{""}});
+        assert(emptyMinimum.structuredNulls ==
+               std::vector<std::vector<bool>>{{false}});
+    }
 
     assert(g_engine.truncateTable(db, table.tablename) == dbms::DBStatus::OK);
     expect({"array_agg", "value", {}, {}}, "NULL");

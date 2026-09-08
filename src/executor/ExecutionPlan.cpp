@@ -1449,6 +1449,26 @@ static int compareWindowValue(const std::string& left, const std::string& right,
     return 0;
 }
 
+// Compare values after the caller has already excluded SQL NULL.  Empty text
+// remains a real value here; compareWindowValue intentionally cannot make that
+// distinction because its legacy callers do not carry a NULL bitmap.
+static int compareNonNullAggregateValue(const std::string& left,
+                                        const std::string& right) {
+    char* leftEnd = nullptr;
+    char* rightEnd = nullptr;
+    const double leftNumber = std::strtod(left.c_str(), &leftEnd);
+    const double rightNumber = std::strtod(right.c_str(), &rightEnd);
+    if (leftEnd != left.c_str() && *leftEnd == '\0' &&
+        rightEnd != right.c_str() && *rightEnd == '\0') {
+        if (leftNumber < rightNumber) return -1;
+        if (leftNumber > rightNumber) return 1;
+        return 0;
+    }
+    if (left < right) return -1;
+    if (left > right) return 1;
+    return 0;
+}
+
 static size_t windowColumnIndex(const TableSchema& tbl, const std::string& name) {
     for (size_t i = 0; i < tbl.len; ++i) {
         if (tbl.cols[i].dataName == name) return i;
@@ -2821,13 +2841,18 @@ bool ParallelGroupAggregateOp::open() try {
             } else {
                 value = argIndex < tbl_.len ? row.values[argIndex] : "";
             }
+            const bool valueIsNull = argIsExpr
+                ? value.empty()
+                : (argIndex < row.nulls.size() && row.nulls[argIndex]);
             if (func == "count") {
                 if (distinct) {
-                    if (!value.empty()) distinctValues.insert(value);
-                } else if (arg == "*" || !value.empty()) ++count;
+                    if (!valueIsNull) distinctValues.insert(value);
+                } else if (arg == "*" || !valueIsNull) {
+                    ++count;
+                }
                 continue;
             }
-            if (value.empty()) continue;
+            if (valueIsNull) continue;
             if (func == "sum" || func == "avg") {
                 long double number = 0;
                 if (!parseNumber(value, number)) continue;
@@ -2841,8 +2866,8 @@ bool ParallelGroupAggregateOp::open() try {
                 }
             } else if (func == "min" || func == "max") {
                 if (!hasValue || (func == "min"
-                        ? compareWindowValue(value, selected) < 0
-                        : compareWindowValue(value, selected) > 0)) {
+                        ? compareNonNullAggregateValue(value, selected) < 0
+                        : compareNonNullAggregateValue(value, selected) > 0)) {
                     selected = value; hasValue = true;
                 }
             } else if (func == "bool_and" || func == "every" || func == "bool_or") {
@@ -3510,19 +3535,20 @@ bool GroupAggregateOp::open() try {
             } else {
                 value = argIndex < tbl_.len ? row.values[argIndex] : std::string{};
             }
+            const bool valueIsNull = argIndex < tbl_.len
+                ? (argIndex < row.nulls.size() && row.nulls[argIndex])
+                : value.empty();
             if (func == "count") {
                 if (distinct) {
-                    if (!value.empty()) distinctValues.insert(value);
+                    if (!valueIsNull) distinctValues.insert(value);
                 } else if (arg == "*") {
                     ++count;
-                } else if (argIndex < row.nulls.size() && row.nulls[argIndex]) {
-                    // physically NULL: PG count(col) skips it
-                } else {
+                } else if (!valueIsNull) {
                     ++count;
                 }
                 continue;
             }
-            if (value.empty()) continue;
+            if (valueIsNull) continue;
             if (func == "sum" || func == "avg") {
                 long double number = 0;
                 if (!parseNumber(value, number)) continue;
@@ -3534,8 +3560,8 @@ bool GroupAggregateOp::open() try {
                 }
             } else if (func == "min" || func == "max") {
                 if (!hasValue || (func == "min"
-                        ? compareWindowValue(value, selected) < 0
-                        : compareWindowValue(value, selected) > 0)) {
+                        ? compareNonNullAggregateValue(value, selected) < 0
+                        : compareNonNullAggregateValue(value, selected) > 0)) {
                     selected = value;
                     hasValue = true;
                 }
