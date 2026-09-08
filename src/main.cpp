@@ -17768,7 +17768,14 @@ if (sql.rfind("backup database", 0) == 0) {
                         string prefix = alias + ".";
                         string replacement = mapping.second + ".";
                         size_t pos = 0;
-                        while ((pos = whereClause.find(prefix, pos)) != string::npos) {
+                        while ((pos = findTextOutsideQuotes(
+                                    whereClause, prefix, pos)) != string::npos) {
+                            if (pos > 0 &&
+                                (isalnum(static_cast<unsigned char>(whereClause[pos - 1])) ||
+                                 whereClause[pos - 1] == '_')) {
+                                pos += prefix.size();
+                                continue;
+                            }
                             whereClause.replace(pos, prefix.size(), replacement);
                             pos += replacement.size();
                         }

@@ -35,8 +35,9 @@ def main():
             "CREATE TABLE join_pred_left (id INT, txt TEXT);",
             "CREATE TABLE join_pred_right (id INT);",
             ("INSERT INTO join_pred_left VALUES "
-             "(1, 'a,b'), (2, 'x'), (3, NULL);"),
-            "INSERT INTO join_pred_right VALUES (1), (2), (3);",
+             "(1, 'a,b'), (2, 'x'), (3, NULL), "
+             "(4, 'l.id'), (5, 'r.id');"),
+            "INSERT INTO join_pred_right VALUES (1), (2), (3), (4), (5);",
         ]
         for sql in setup:
             _, state, message, _ = runner.ours_query(
@@ -119,6 +120,14 @@ def main():
               "JOIN join_pred_right r ON l.id = r.id "
               "WHERE l.txt IN ('a,b') ORDER BY l.id;"),
              [["1"]]),
+            (("SELECT l.id FROM join_pred_left l "
+              "JOIN join_pred_right r ON l.id = r.id "
+              "WHERE l.txt = 'l.id' ORDER BY l.id;"),
+             [["4"]]),
+            (("SELECT l.id FROM join_pred_left l "
+              "JOIN join_pred_right r ON l.id = r.id "
+              "WHERE l.txt = 'r.id' ORDER BY l.id;"),
+             [["5"]]),
             (("SELECT l.id FROM join_exact_left l "
               "JOIN join_exact_right r ON l.id = r.id "
               "WHERE l.id BETWEEN 2 AND 3 ORDER BY l.id;"),
