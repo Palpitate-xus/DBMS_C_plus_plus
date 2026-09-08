@@ -17433,20 +17433,45 @@ if (sql.rfind("backup database", 0) == 0) {
             if (!isTempTable(s, leftTableName) && !checkSelectColumnPermission(s, leftTableName, columns)) return true;
             if (!isTempTable(s, rightTableName) && !checkSelectColumnPermission(s, rightTableName, columns)) return true;
 
-            set<string> selectCols;
             bool selectAll = (columns == "*");
+            auto normalizeJoinColumn = [&](string column) {
+                column = trim(column);
+                const string lowerColumn = toLower(column);
+                const size_t asPos = lowerColumn.rfind(" as ");
+                if (asPos != string::npos) column = trim(column.substr(0, asPos));
+                const size_t dot = column.find('.');
+                if (dot == string::npos) return column;
+                const string qualifier = column.substr(0, dot);
+                const string name = column.substr(dot + 1);
+                if (qualifier == leftAlias || qualifier == leftTableName)
+                    return leftTable + "." + name;
+                if (qualifier == rightAlias || qualifier == rightTableName)
+                    return rightTable + "." + name;
+                return column;
+            };
+            set<string> selectCols;
+            vector<string> requestedCols;
+            vector<string> requestedHeaders;
             if (!selectAll) {
                 for (const auto& item : splitSelectColumns(columns)) {
-                    string col = trim(item);
-                    // Strip table aliases from SELECT columns
-                    for (const auto& alias : {leftAlias, rightAlias}) {
-                        if (alias.empty()) continue;
-                        string prefix = alias + ".";
-                        if (col.size() > prefix.size() && col.substr(0, prefix.size()) == prefix) {
-                            col = col.substr(prefix.size());
-                        }
+                    string expression = trim(item);
+                    string outputName;
+                    const string lowerExpression = toLower(expression);
+                    const size_t asPos = lowerExpression.rfind(" as ");
+                    if (asPos != string::npos) {
+                        outputName = decodeQuotedIdentifier(
+                            trim(expression.substr(asPos + 4)));
+                        expression = trim(expression.substr(0, asPos));
                     }
-                    selectCols.insert(col);
+                    string source = normalizeJoinColumn(expression);
+                    if (outputName.empty()) {
+                        const size_t dot = expression.rfind('.');
+                        outputName = dot == string::npos
+                            ? expression : expression.substr(dot + 1);
+                    }
+                    selectCols.insert(source);
+                    requestedCols.push_back(std::move(source));
+                    requestedHeaders.push_back(std::move(outputName));
                 }
             }
             // Pure aggregate over a join (count(*)/count(col)/sum/avg/
@@ -17454,14 +17479,21 @@ if (sql.rfind("backup database", 0) == 0) {
             // intercept here, run the join with ALL columns, and aggregate
             // the joined rows locally (PG semantics: count(*) counts joined
             // rows; count/sum/avg/min/max skip NULL cells).
-            struct JoinAggItem { string func; string arg; };
+            struct JoinAggItem { string func; string arg; string outputName; };
             vector<JoinAggItem> joinAggs;
             bool pureJoinAgg = !selectAll;
             if (pureJoinAgg) {
                 for (const auto& item : splitSelectColumns(columns)) {
                     string it = trim(item);
-                    string low;
-                    for (char c : it) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                    string low = toLower(it);
+                    string aggregateAlias;
+                    const size_t aggregateAsPos = low.rfind(" as ");
+                    if (aggregateAsPos != string::npos) {
+                        aggregateAlias = decodeQuotedIdentifier(
+                            trim(it.substr(aggregateAsPos + 4)));
+                        it = trim(it.substr(0, aggregateAsPos));
+                        low = toLower(it);
+                    }
                     static const char* fns[] = {"count", "sum", "avg", "min", "max"};
                     bool matched = false;
                     for (const char* fn : fns) {
@@ -17469,13 +17501,9 @@ if (sql.rfind("backup database", 0) == 0) {
                         if (low.compare(0, fl, fn) == 0 && low.size() > fl + 1
                             && low[fl] == '(' && low.back() == ')') {
                             string a = trim(it.substr(fl + 1, it.size() - fl - 2));
-                            for (const auto& alias : {leftAlias, rightAlias}) {
-                                if (alias.empty()) continue;
-                                string prefix = alias + ".";
-                                if (a.size() > prefix.size() && a.substr(0, prefix.size()) == prefix)
-                                    a = a.substr(prefix.size());
-                            }
-                            joinAggs.push_back({fn, a});
+                            if (a != "*") a = normalizeJoinColumn(a);
+                            joinAggs.push_back(
+                                {fn, a, aggregateAlias.empty() ? fn : aggregateAlias});
                             matched = true;
                             break;
                         }
@@ -17520,20 +17548,6 @@ if (sql.rfind("backup database", 0) == 0) {
             // in the *requested* order and every data row must be permuted
             // to match, otherwise values pair with the wrong headers when
             // the requested order differs from the FROM order.
-            vector<string> requestedCols;
-            if (!selectAll) {
-                for (const auto& item : splitSelectColumns(columns)) {
-                    string col = trim(item);
-                    for (const auto& alias : {leftAlias, rightAlias}) {
-                        if (alias.empty()) continue;
-                        string prefix = alias + ".";
-                        if (col.size() > prefix.size() && col.substr(0, prefix.size()) == prefix) {
-                            col = col.substr(prefix.size());
-                        }
-                    }
-                    if (!col.empty()) requestedCols.push_back(col);
-                }
-            }
             // Requested column -> position in the engine's row layout.
             // Qualified names resolve to their table; bare names prefer
             // the left table (the engine's colMap does the same).
@@ -17555,7 +17569,7 @@ if (sql.rfind("backup database", 0) == 0) {
                 return {-1, -1};
             };
             if (pureJoinAgg) {
-                for (const auto& ja : joinAggs) cout << ja.func << ' ';
+                for (const auto& ja : joinAggs) cout << ja.outputName << ' ';
                 cout << '\n';
             } else if (selectAll) {
                 // PG names SELECT * join columns unqualified (bare column
@@ -17565,13 +17579,13 @@ if (sql.rfind("backup database", 0) == 0) {
                 for (size_t i = 0; i < rightTbl.len; ++i)
                     cout << rightTbl.cols[i].dataName << ' ';
             } else {
-                for (const auto& c : requestedCols) cout << c << ' ';
+                for (const auto& name : requestedHeaders) cout << name << ' ';
             }
             cout << '\n';
+            dbms::DmlResult joinProtocolResult;
             if (shouldPublishQueryMetadata()) {
-                dbms::DmlResult metadata;
-                metadata.available = true;
-                metadata.metadataOnly = true;
+                joinProtocolResult.available = true;
+                joinProtocolResult.metadataOnly = true;
                 map<string, string> joinTypeHints;
                 for (size_t i = 0; i < leftTbl.len; ++i) {
                     const string& name = leftTbl.cols[i].dataName;
@@ -17590,36 +17604,39 @@ if (sql.rfind("backup database", 0) == 0) {
 
                 if (pureJoinAgg) {
                     for (const auto& aggregate : joinAggs) {
-                        metadata.columns.push_back(aggregate.func);
-                        metadata.columnTypes.push_back(
+                        joinProtocolResult.columns.push_back(aggregate.outputName);
+                        joinProtocolResult.columnTypes.push_back(
                             dbms::ExprHelper::inferResultType(
                                 aggregate.func + "(" + aggregate.arg + ")",
                                 joinTypeHints));
                     }
                 } else if (selectAll) {
                     for (size_t i = 0; i < leftTbl.len; ++i) {
-                        metadata.columns.push_back(leftTbl.cols[i].dataName);
-                        metadata.columnTypes.push_back(leftTbl.cols[i].dataType);
+                        joinProtocolResult.columns.push_back(leftTbl.cols[i].dataName);
+                        joinProtocolResult.columnTypes.push_back(leftTbl.cols[i].dataType);
                     }
                     for (size_t i = 0; i < rightTbl.len; ++i) {
-                        metadata.columns.push_back(rightTbl.cols[i].dataName);
-                        metadata.columnTypes.push_back(rightTbl.cols[i].dataType);
+                        joinProtocolResult.columns.push_back(rightTbl.cols[i].dataName);
+                        joinProtocolResult.columnTypes.push_back(rightTbl.cols[i].dataType);
                     }
                 } else {
-                    for (const string& column : requestedCols) {
-                        metadata.columns.push_back(column);
+                    for (size_t i = 0; i < requestedCols.size(); ++i) {
+                        const string& column = requestedCols[i];
+                        joinProtocolResult.columns.push_back(requestedHeaders[i]);
                         const auto position = enginePos(column);
                         string type = "text";
                         if (position.first == 0 && position.second >= 0)
                             type = leftTbl.cols[position.second].dataType;
                         else if (position.first == 1 && position.second >= 0)
                             type = rightTbl.cols[position.second].dataType;
-                        metadata.columnTypes.push_back(std::move(type));
+                        joinProtocolResult.columnTypes.push_back(std::move(type));
                     }
                 }
-                if (!metadata.columns.empty() &&
-                    metadata.columns.size() == metadata.columnTypes.size())
-                    dbms::publishLastDmlResult(std::move(metadata));
+                if (joinProtocolResult.columns.empty() ||
+                    joinProtocolResult.columns.size() !=
+                        joinProtocolResult.columnTypes.size()) {
+                    joinProtocolResult = {};
+                }
             }
 
             // Strip table aliases from WHERE condition tokens
@@ -17636,26 +17653,47 @@ if (sql.rfind("backup database", 0) == 0) {
             }
 
             vector<string> answers;
-            auto runJoin = [&](const vector<string>& conds) -> vector<string> {
+            vector<vector<string>> joinRows;
+            vector<vector<bool>> joinNulls;
+            auto runJoin = [&](const vector<string>& conds,
+                               vector<vector<string>>* rows,
+                               vector<vector<bool>>* nulls) -> vector<string> {
                 if (jt == JoinType::Left) {
                     return g_engine.leftJoin(s.currentDB, leftTable, rightTable,
-                                              leftOnCol, rightOnCol, conds, selectCols);
+                                              leftOnCol, rightOnCol, conds, selectCols,
+                                              rows, nulls);
                 } else if (jt == JoinType::Right) {
                     return g_engine.rightJoin(s.currentDB, leftTable, rightTable,
-                                               leftOnCol, rightOnCol, conds, selectCols);
+                                               leftOnCol, rightOnCol, conds, selectCols,
+                                               rows, nulls);
                 } else if (jt == JoinType::FullOuter) {
                     return g_engine.fullOuterJoin(s.currentDB, leftTable, rightTable,
-                                                   leftOnCol, rightOnCol, conds, selectCols);
+                                                   leftOnCol, rightOnCol, conds, selectCols,
+                                                   rows, nulls);
                 } else if (jt == JoinType::Cross) {
-                    return g_engine.crossJoin(s.currentDB, leftTable, rightTable, conds, selectCols);
+                    return g_engine.crossJoin(s.currentDB, leftTable, rightTable,
+                                              conds, selectCols, rows, nulls);
                 } else {
                     return g_engine.join(s.currentDB, leftTable, rightTable,
-                                          leftOnCol, rightOnCol, conds, selectCols);
+                                          leftOnCol, rightOnCol, conds, selectCols,
+                                          rows, nulls);
                 }
+            };
+            auto joinRowIdentity = [](const vector<string>& cells,
+                                      const vector<bool>& nulls) {
+                string key;
+                for (size_t i = 0; i < cells.size(); ++i) {
+                    const bool isNull = i < nulls.size() && nulls[i];
+                    key.push_back(isNull ? 'N' : 'V');
+                    key += to_string(cells[i].size());
+                    key.push_back(':');
+                    key += cells[i];
+                }
+                return key;
             };
 
             if (condTokens.empty()) {
-                answers = runJoin({});
+                answers = runJoin({}, &joinRows, &joinNulls);
             } else {
                 condTokens.insert(condTokens.begin(), "(");
                 condTokens.push_back(")");
@@ -17663,57 +17701,97 @@ if (sql.rfind("backup database", 0) == 0) {
                 auto groups = breakDownConditions(condTokens);
                 set<string> seen;
                 for (const auto& g : groups) {
-                    auto part = runJoin(g);
-                    for (const auto& row : part) {
-                        if (seen.insert(row).second) answers.push_back(row);
+                    vector<vector<string>> partRows;
+                    vector<vector<bool>> partNulls;
+                    auto part = runJoin(g, &partRows, &partNulls);
+                    if (partRows.size() != part.size() ||
+                        partNulls.size() != part.size()) {
+                        joinRows.clear();
+                        joinNulls.clear();
+                        continue;
+                    }
+                    for (size_t i = 0; i < part.size(); ++i) {
+                        const string key = joinRowIdentity(partRows[i], partNulls[i]);
+                        if (seen.insert(key).second) {
+                            answers.push_back(std::move(part[i]));
+                            joinRows.push_back(std::move(partRows[i]));
+                            joinNulls.push_back(std::move(partNulls[i]));
+                        }
                     }
                 }
             }
             if (isDistinct) {
                 vector<string> deduped;
+                vector<vector<string>> dedupedRows;
+                vector<vector<bool>> dedupedNulls;
                 set<string> seen;
-                for (const auto& row : answers) {
-                    if (seen.insert(row).second) deduped.push_back(row);
+                for (size_t i = 0; i < answers.size(); ++i) {
+                    if (i >= joinRows.size() || i >= joinNulls.size()) break;
+                    const string key = joinRowIdentity(joinRows[i], joinNulls[i]);
+                    if (seen.insert(key).second) {
+                        deduped.push_back(std::move(answers[i]));
+                        dedupedRows.push_back(std::move(joinRows[i]));
+                        dedupedNulls.push_back(std::move(joinNulls[i]));
+                    }
                 }
                 answers = std::move(deduped);
+                joinRows = std::move(dedupedRows);
+                joinNulls = std::move(dedupedNulls);
             }
             if (pureJoinAgg) {
-                // Aggregate the joined rows.  Cell layout: left columns
-                // then right columns, space-separated display values.
+                // Aggregate exact joined cells.  SQL NULL is carried by the
+                // bitmap; empty text and literal "NULL" remain ordinary values.
                 string outRow;
-                for (const auto& ja : joinAggs) {
+                vector<string> aggregateCells;
+                vector<bool> aggregateNulls;
+                for (size_t aggregateIndex = 0;
+                     aggregateIndex < joinAggs.size(); ++aggregateIndex) {
+                    const auto& ja = joinAggs[aggregateIndex];
                     // resolve argument column -> cell index
                     int cellIdx = -1;
+                    const Column* inputColumn = nullptr;
                     if (ja.arg != "*") {
-                        int base = 0;
-                        bool found = false;
-                        for (size_t i = 0; i < leftTbl.len && !found; ++i)
-                            if (leftTbl.cols[i].dataName == ja.arg) { cellIdx = base + (int)i; found = true; }
-                        base = (int)leftTbl.len;
-                        for (size_t i = 0; i < rightTbl.len && !found; ++i)
-                            if (rightTbl.cols[i].dataName == ja.arg) { cellIdx = base + (int)i; found = true; }
-                        if (!found) cellIdx = -1;
+                        const auto position = enginePos(ja.arg);
+                        if (position.first == 0 && position.second >= 0) {
+                            cellIdx = position.second;
+                            inputColumn = &leftTbl.cols[position.second];
+                        } else if (position.first == 1 && position.second >= 0) {
+                            cellIdx = static_cast<int>(leftTbl.len) + position.second;
+                            inputColumn = &rightTbl.cols[position.second];
+                        }
                     }
                     int64_t cnt = 0;
                     long double dsum = 0;
                     dbms::Numeric exactSum(0);
                     bool exactOk = true;
                     string mn, mx; bool hasV = false;
-                    for (const auto& row : answers) {
-                        vector<string> cells;
-                        {
-                            stringstream rs(row);
-                            string cell;
-                            while (rs >> cell) cells.push_back(cell);
+                    auto valueLess = [&](const string& left, const string& right) {
+                        string type = inputColumn ? toLower(inputColumn->dataType) : "";
+                        const bool numeric = type == "smallint" || type == "tinyint" ||
+                            type == "int" || type == "integer" || type == "long" ||
+                            type == "bigint" || type == "float" || type == "double" ||
+                            type == "real" || type == "decimal" || type == "numeric" ||
+                            type.find(" unsigned") != string::npos;
+                        if (numeric) {
+                            try { return dbms::Numeric(left) < dbms::Numeric(right); }
+                            catch (...) {}
                         }
+                        return left < right;
+                    };
+                    for (size_t rowIndex = 0; rowIndex < joinRows.size(); ++rowIndex) {
                         if (ja.arg == "*") { ++cnt; continue; }
-                        if (cellIdx < 0 || (size_t)cellIdx >= cells.size()) continue;
-                        const string& v = cells[cellIdx];
-                        if (v.empty() || v == "NULL" || v == "null") continue;
+                        if (cellIdx < 0 || static_cast<size_t>(cellIdx) >=
+                                joinRows[rowIndex].size() ||
+                            rowIndex >= joinNulls.size() ||
+                            static_cast<size_t>(cellIdx) >= joinNulls[rowIndex].size() ||
+                            joinNulls[rowIndex][cellIdx]) continue;
+                        const string& v = joinRows[rowIndex][cellIdx];
                         ++cnt;
                         if (ja.func == "count") continue;
                         if (ja.func == "min" || ja.func == "max") {
-                            bool better = !hasV || (ja.func == "min" ? v < mn : v > mx);
+                            const string& selected = ja.func == "min" ? mn : mx;
+                            bool better = !hasV || (ja.func == "min"
+                                ? valueLess(v, selected) : valueLess(selected, v));
                             if (better) { mn = mx = v; hasV = true; }
                             continue;
                         }
@@ -17724,8 +17802,9 @@ if (sql.rfind("backup database", 0) == 0) {
                         }
                     }
                     string val;
+                    bool valueIsNull = false;
                     if (ja.func == "count") val = to_string(cnt);
-                    else if (cnt == 0) val = "NULL";
+                    else if (cnt == 0) valueIsNull = true;
                     else if (ja.func == "sum") val = exactOk ? exactSum.toString() : to_string((double)dsum);
                     else if (ja.func == "avg") {
                         if (exactOk) {
@@ -17733,10 +17812,13 @@ if (sql.rfind("backup database", 0) == 0) {
                             catch (...) { val = to_string((double)(dsum / cnt)); }
                         } else val = to_string((double)(dsum / cnt));
                     }
-                    else val = hasV ? (ja.func == "min" ? mn : mx) : "NULL";
-                    outRow += val + ' ';
+                    else if (hasV) val = ja.func == "min" ? mn : mx;
+                    else valueIsNull = true;
+                    if (aggregateIndex != 0) outRow.push_back(' ');
+                    outRow += valueIsNull ? "NULL" : val;
+                    aggregateCells.push_back(valueIsNull ? string{} : val);
+                    aggregateNulls.push_back(valueIsNull);
                 }
-                while (!outRow.empty() && outRow.back() == ' ') outRow.pop_back();
                 // LIMIT/OFFSET applies to aggregate output, not join inputs.
                 vector<string> aggregateRows{std::move(outRow)};
                 applyLimitOffset(aggregateRows);
@@ -17744,60 +17826,114 @@ if (sql.rfind("backup database", 0) == 0) {
                     cout << row << endl;
                     log(s.username, row, getTime());
                 }
+                if (joinProtocolResult.available) {
+                    joinProtocolResult.metadataOnly = false;
+                    if (!aggregateRows.empty()) {
+                        joinProtocolResult.rows.push_back(std::move(aggregateCells));
+                        joinProtocolResult.nulls.push_back(std::move(aggregateNulls));
+                    }
+                    joinProtocolResult.commandTag =
+                        "SELECT " + to_string(joinProtocolResult.rows.size());
+                    dbms::publishLastDmlResult(std::move(joinProtocolResult));
+                }
                 return false;
             }
-            applyLimitOffset(answers);
+            auto applyStructuredJoinLimit = [&] {
+                size_t count = 0, offset = 0;
+                const bool finiteLimit = parseLimitOffset(count, offset);
+                if (offset >= answers.size()) {
+                    answers.clear();
+                    joinRows.clear();
+                    joinNulls.clear();
+                    return;
+                }
+                answers.erase(answers.begin(), answers.begin() + offset);
+                if (offset <= joinRows.size())
+                    joinRows.erase(joinRows.begin(), joinRows.begin() + offset);
+                if (offset <= joinNulls.size())
+                    joinNulls.erase(joinNulls.begin(), joinNulls.begin() + offset);
+                if (finiteLimit && count < answers.size()) {
+                    answers.resize(count);
+                    if (count < joinRows.size()) joinRows.resize(count);
+                    if (count < joinNulls.size()) joinNulls.resize(count);
+                }
+            };
+            applyStructuredJoinLimit();
             // Permute each row's cells into the requested projection order
             // (engine layout is left columns then right columns).
             if (!selectAll && !requestedCols.empty()) {
                 vector<string> permuted;
+                vector<vector<string>> permutedRows;
+                vector<vector<bool>> permutedNulls;
                 permuted.reserve(answers.size());
-                for (const auto& row : answers) {
+                permutedRows.reserve(answers.size());
+                permutedNulls.reserve(answers.size());
+                // Reconstruct which engine positions survived: the engine
+                // keeps left columns in order, then right columns.
+                vector<pair<int,int>> kept;
+                for (size_t i = 0; i < leftTbl.len; ++i) {
+                    string n = leftTbl.cols[i].dataName;
+                    if (selectCols.count(n) ||
+                        selectCols.count(leftTable + "." + n))
+                        kept.push_back({0, static_cast<int>(i)});
+                }
+                for (size_t i = 0; i < rightTbl.len; ++i) {
+                    string n = rightTbl.cols[i].dataName;
+                    if (selectCols.count(n) ||
+                        selectCols.count(rightTable + "." + n))
+                        kept.push_back({1, static_cast<int>(i)});
+                }
+                for (size_t rowIndex = 0; rowIndex < answers.size(); ++rowIndex) {
                     // Engine row cells: left columns then right columns, in
-                    // table order (the engine's filter also drops unselected
-                    // columns, so rebuild the mapping from what it kept).
-                    // Cells are space-separated display values.
-                    vector<string> cells;
-                    {
-                        stringstream rs(row);
-                        string cell;
-                        while (rs >> cell) cells.push_back(cell);
-                    }
-                    // Reconstruct which engine positions survived: the
-                    // engine keeps left cols in order, then right cols.
-                    vector<pair<int,int>> kept;   // {which, colIdx}
-                    for (size_t i = 0; i < leftTbl.len; ++i) {
-                        string n = leftTbl.cols[i].dataName;
-                        if (selectCols.count(n) || selectCols.count(leftTable + "." + n))
-                            kept.push_back({0, (int)i});
-                    }
-                    for (size_t i = 0; i < rightTbl.len; ++i) {
-                        string n = rightTbl.cols[i].dataName;
-                        if (selectCols.count(n) || selectCols.count(rightTable + "." + n))
-                            kept.push_back({1, (int)i});
-                    }
+                    // table order. Rebuild requested order from exact cells.
                     string out;
-                    if (cells.size() == kept.size()) {
-                        for (const auto& c : requestedCols) {
+                    vector<string> outCells;
+                    vector<bool> outNulls;
+                    if (rowIndex < joinRows.size() && rowIndex < joinNulls.size() &&
+                        joinRows[rowIndex].size() == kept.size() &&
+                        joinNulls[rowIndex].size() == kept.size()) {
+                        for (size_t targetIndex = 0;
+                             targetIndex < requestedCols.size(); ++targetIndex) {
+                            const auto& c = requestedCols[targetIndex];
                             auto want = enginePos(c);
                             int at = -1;
                             for (size_t k = 0; k < kept.size(); ++k) {
                                 if (kept[k] == want) { at = (int)k; break; }
                             }
-                            if (at >= 0) out += cells[at] + ' ';
-                            else out += "NULL ";
+                            const bool isNull = at < 0 || joinNulls[rowIndex][at];
+                            const string value = at < 0
+                                ? string{} : joinRows[rowIndex][at];
+                            if (targetIndex != 0) out.push_back(' ');
+                            out += isNull ? "NULL" : value;
+                            outCells.push_back(isNull ? string{} : value);
+                            outNulls.push_back(isNull);
                         }
-                        while (!out.empty() && out.back() == ' ') out.pop_back();
                         permuted.push_back(std::move(out));
+                        permutedRows.push_back(std::move(outCells));
+                        permutedNulls.push_back(std::move(outNulls));
                     } else {
-                        permuted.push_back(row);   // layout mismatch: keep as-is
+                        permuted.push_back(std::move(answers[rowIndex]));
                     }
                 }
                 answers = std::move(permuted);
+                joinRows = std::move(permutedRows);
+                joinNulls = std::move(permutedNulls);
             }
             for (const auto& row : answers) {
                 cout << row << endl;
                 log(s.username, row, getTime());
+            }
+            if (joinProtocolResult.available &&
+                joinRows.size() == answers.size() &&
+                joinNulls.size() == answers.size()) {
+                joinProtocolResult.metadataOnly = false;
+                joinProtocolResult.rows = std::move(joinRows);
+                joinProtocolResult.nulls = std::move(joinNulls);
+                joinProtocolResult.commandTag =
+                    "SELECT " + to_string(joinProtocolResult.rows.size());
+                dbms::publishLastDmlResult(std::move(joinProtocolResult));
+            } else if (joinProtocolResult.available) {
+                dbms::publishLastDmlResult(std::move(joinProtocolResult));
             }
             return false;
         }

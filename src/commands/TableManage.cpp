@@ -33194,8 +33194,12 @@ std::vector<std::string> StorageEngine::join(
     const std::string& leftCol,
     const std::string& rightCol,
     const std::vector<std::string>& conditions,
-    const std::set<std::string>& selectCols) {
+    const std::set<std::string>& selectCols,
+    std::vector<std::vector<std::string>>* structuredRows,
+    std::vector<std::vector<bool>>* structuredNulls) {
     std::vector<std::string> result;
+    if (structuredRows) structuredRows->clear();
+    if (structuredNulls) structuredNulls->clear();
     if (!tableExists(dbname, leftTable) || !tableExists(dbname, rightTable)) return result;
 
     // Lock both tables in alphabetical order to avoid deadlock
@@ -33447,6 +33451,8 @@ std::vector<std::string> StorageEngine::join(
 
             // Format output with SELECT columns
             std::string rowStr;
+            std::vector<std::string> cells;
+            std::vector<bool> nulls;
             for (size_t i = 0; i < leftTbl.len; ++i) {
                 std::string fullName = leftTable + "." + leftTbl.cols[i].dataName;
                 bool include = selectCols.empty();
@@ -33460,6 +33466,8 @@ std::vector<std::string> StorageEngine::join(
                     lr, leftTbl, leftTable, i, &valueIsNull);
                 if (valueIsNull) rowStr += "NULL ";
                 else rowStr += val + ' ';
+                cells.push_back(valueIsNull ? std::string{} : val);
+                nulls.push_back(valueIsNull);
             }
             for (size_t i = 0; i < rightTbl.len; ++i) {
                 std::string fullName = rightTable + "." + rightTbl.cols[i].dataName;
@@ -33474,8 +33482,14 @@ std::vector<std::string> StorageEngine::join(
                     *rr, rightTbl, rightTable, i, &valueIsNull);
                 if (valueIsNull) rowStr += "NULL ";
                 else rowStr += val + ' ';
+                cells.push_back(valueIsNull ? std::string{} : val);
+                nulls.push_back(valueIsNull);
             }
-            if (!rowStr.empty()) result.push_back(rowStr);
+            if (!rowStr.empty()) {
+                result.push_back(std::move(rowStr));
+                if (structuredRows) structuredRows->push_back(std::move(cells));
+                if (structuredNulls) structuredNulls->push_back(std::move(nulls));
+            }
         }
     }
     lockManager_.unlock(leftTable);
@@ -33494,8 +33508,12 @@ std::vector<std::string> StorageEngine::leftJoin(
     const std::string& leftCol,
     const std::string& rightCol,
     const std::vector<std::string>& conditions,
-    const std::set<std::string>& selectCols) {
+    const std::set<std::string>& selectCols,
+    std::vector<std::vector<std::string>>* structuredRows,
+    std::vector<std::vector<bool>>* structuredNulls) {
     std::vector<std::string> result;
+    if (structuredRows) structuredRows->clear();
+    if (structuredNulls) structuredNulls->clear();
     if (!tableExists(dbname, leftTable) || !tableExists(dbname, rightTable)) return result;
 
     if (leftTable < rightTable) {
@@ -33632,7 +33650,8 @@ std::vector<std::string> StorageEngine::leftJoin(
     }
 
     auto formatRow = [&](const JoinRow& lr, const JoinRow* rr,
-                         bool rightNull) -> std::string {
+                         bool rightNull, std::vector<std::string>& cells,
+                         std::vector<bool>& nulls) -> std::string {
         std::string rowStr;
         for (size_t i = 0; i < leftTbl.len; ++i) {
             std::string fullName = leftTable + "." + leftTbl.cols[i].dataName;
@@ -33643,17 +33662,26 @@ std::vector<std::string> StorageEngine::leftJoin(
                 lr, leftTbl, leftTable, i, &valueIsNull);
             if (valueIsNull) rowStr += "NULL ";
             else rowStr += val + ' ';
+            cells.push_back(valueIsNull ? std::string{} : val);
+            nulls.push_back(valueIsNull);
         }
         for (size_t i = 0; i < rightTbl.len; ++i) {
             std::string fullName = rightTable + "." + rightTbl.cols[i].dataName;
             bool include = selectCols.empty() || selectCols.find(rightTbl.cols[i].dataName) != selectCols.end() || selectCols.find(fullName) != selectCols.end();
             if (!include) continue;
-            if (rightNull) { rowStr += "NULL "; continue; }
+            if (rightNull) {
+                rowStr += "NULL ";
+                cells.emplace_back();
+                nulls.push_back(true);
+                continue;
+            }
             bool valueIsNull = false;
             std::string val = logicalValue(
                 *rr, rightTbl, rightTable, i, &valueIsNull);
             if (valueIsNull) rowStr += "NULL ";
             else rowStr += val + ' ';
+            cells.push_back(valueIsNull ? std::string{} : val);
+            nulls.push_back(valueIsNull);
         }
         return rowStr;
     };
@@ -33673,12 +33701,24 @@ std::vector<std::string> StorageEngine::leftJoin(
             }
             if (!whereMatch) continue;
             hasMatch = true;
-            std::string rowStr = formatRow(lr, &rr, false);
-            if (!rowStr.empty()) result.push_back(rowStr);
+            std::vector<std::string> cells;
+            std::vector<bool> nulls;
+            std::string rowStr = formatRow(lr, &rr, false, cells, nulls);
+            if (!rowStr.empty()) {
+                result.push_back(std::move(rowStr));
+                if (structuredRows) structuredRows->push_back(std::move(cells));
+                if (structuredNulls) structuredNulls->push_back(std::move(nulls));
+            }
         }
         if (!hasMatch) {
-            std::string rowStr = formatRow(lr, nullptr, true);
-            if (!rowStr.empty()) result.push_back(rowStr);
+            std::vector<std::string> cells;
+            std::vector<bool> nulls;
+            std::string rowStr = formatRow(lr, nullptr, true, cells, nulls);
+            if (!rowStr.empty()) {
+                result.push_back(std::move(rowStr));
+                if (structuredRows) structuredRows->push_back(std::move(cells));
+                if (structuredNulls) structuredNulls->push_back(std::move(nulls));
+            }
         }
     }
     lockManager_.unlock(leftTable);
@@ -33697,8 +33737,12 @@ std::vector<std::string> StorageEngine::rightJoin(
     const std::string& leftCol,
     const std::string& rightCol,
     const std::vector<std::string>& conditions,
-    const std::set<std::string>& selectCols) {
+    const std::set<std::string>& selectCols,
+    std::vector<std::vector<std::string>>* structuredRows,
+    std::vector<std::vector<bool>>* structuredNulls) {
     std::vector<std::string> result;
+    if (structuredRows) structuredRows->clear();
+    if (structuredNulls) structuredNulls->clear();
     if (!tableExists(dbname, leftTable) || !tableExists(dbname, rightTable)) return result;
 
     if (leftTable < rightTable) {
@@ -33835,18 +33879,26 @@ std::vector<std::string> StorageEngine::rightJoin(
     }
 
     auto formatRow = [&](const JoinRow* lr, const JoinRow& rr,
-                         bool leftNull) -> std::string {
+                         bool leftNull, std::vector<std::string>& cells,
+                         std::vector<bool>& nulls) -> std::string {
         std::string rowStr;
         for (size_t i = 0; i < leftTbl.len; ++i) {
             std::string fullName = leftTable + "." + leftTbl.cols[i].dataName;
             bool include = selectCols.empty() || selectCols.find(leftTbl.cols[i].dataName) != selectCols.end() || selectCols.find(fullName) != selectCols.end();
             if (!include) continue;
-            if (leftNull) { rowStr += "NULL "; continue; }
+            if (leftNull) {
+                rowStr += "NULL ";
+                cells.emplace_back();
+                nulls.push_back(true);
+                continue;
+            }
             bool valueIsNull = false;
             std::string val = logicalValue(
                 *lr, leftTbl, leftTable, i, &valueIsNull);
             if (valueIsNull) rowStr += "NULL ";
             else rowStr += val + ' ';
+            cells.push_back(valueIsNull ? std::string{} : val);
+            nulls.push_back(valueIsNull);
         }
         for (size_t i = 0; i < rightTbl.len; ++i) {
             std::string fullName = rightTable + "." + rightTbl.cols[i].dataName;
@@ -33857,6 +33909,8 @@ std::vector<std::string> StorageEngine::rightJoin(
                 rr, rightTbl, rightTable, i, &valueIsNull);
             if (valueIsNull) rowStr += "NULL ";
             else rowStr += val + ' ';
+            cells.push_back(valueIsNull ? std::string{} : val);
+            nulls.push_back(valueIsNull);
         }
         return rowStr;
     };
@@ -33876,12 +33930,24 @@ std::vector<std::string> StorageEngine::rightJoin(
             }
             if (!whereMatch) continue;
             hasMatch = true;
-            std::string rowStr = formatRow(&lr, rr, false);
-            if (!rowStr.empty()) result.push_back(rowStr);
+            std::vector<std::string> cells;
+            std::vector<bool> nulls;
+            std::string rowStr = formatRow(&lr, rr, false, cells, nulls);
+            if (!rowStr.empty()) {
+                result.push_back(std::move(rowStr));
+                if (structuredRows) structuredRows->push_back(std::move(cells));
+                if (structuredNulls) structuredNulls->push_back(std::move(nulls));
+            }
         }
         if (!hasMatch) {
-            std::string rowStr = formatRow(nullptr, rr, true);
-            if (!rowStr.empty()) result.push_back(rowStr);
+            std::vector<std::string> cells;
+            std::vector<bool> nulls;
+            std::string rowStr = formatRow(nullptr, rr, true, cells, nulls);
+            if (!rowStr.empty()) {
+                result.push_back(std::move(rowStr));
+                if (structuredRows) structuredRows->push_back(std::move(cells));
+                if (structuredNulls) structuredNulls->push_back(std::move(nulls));
+            }
         }
     }
     lockManager_.unlock(leftTable);
@@ -33896,24 +33962,52 @@ std::vector<std::string> StorageEngine::fullOuterJoin(
     const std::string& leftCol,
     const std::string& rightCol,
     const std::vector<std::string>& conditions,
-    const std::set<std::string>& selectCols) {
+    const std::set<std::string>& selectCols,
+    std::vector<std::vector<std::string>>* structuredRows,
+    std::vector<std::vector<bool>>* structuredNulls) {
     // FULL OUTER JOIN uses bag semantics.  LEFT and RIGHT each contain the
     // matched rows, so subtract exactly the INNER multiplicity from RIGHT
-    // before appending it.  A set would also collapse distinct source rows
-    // that happen to render identically.
-    auto leftResult = leftJoin(dbname, leftTable, rightTable, leftCol, rightCol, conditions, selectCols);
-    auto rightResult = rightJoin(dbname, leftTable, rightTable, leftCol, rightCol, conditions, selectCols);
-    auto innerResult = join(dbname, leftTable, rightTable, leftCol, rightCol, conditions, selectCols);
+    // before appending it.  Use the structured identity: display text can
+    // collide for values containing spaces, empty strings, or literal NULL.
+    std::vector<std::vector<std::string>> leftCells, rightCells, innerCells;
+    std::vector<std::vector<bool>> leftNulls, rightNulls, innerNulls;
+    auto leftResult = leftJoin(
+        dbname, leftTable, rightTable, leftCol, rightCol, conditions, selectCols,
+        &leftCells, &leftNulls);
+    auto rightResult = rightJoin(
+        dbname, leftTable, rightTable, leftCol, rightCol, conditions, selectCols,
+        &rightCells, &rightNulls);
+    join(
+        dbname, leftTable, rightTable, leftCol, rightCol, conditions, selectCols,
+        &innerCells, &innerNulls);
+    auto rowIdentity = [](const std::vector<std::string>& cells,
+                          const std::vector<bool>& nulls) {
+        std::string key;
+        for (size_t i = 0; i < cells.size(); ++i) {
+            const bool isNull = i < nulls.size() && nulls[i];
+            key.push_back(isNull ? 'N' : 'V');
+            key += std::to_string(cells[i].size());
+            key.push_back(':');
+            key += cells[i];
+        }
+        return key;
+    };
     std::unordered_map<std::string, size_t> innerCounts;
-    for (const auto& row : innerResult) ++innerCounts[row];
-    for (const auto& r : rightResult) {
-        auto it = innerCounts.find(r);
+    for (size_t i = 0; i < innerCells.size(); ++i)
+        ++innerCounts[rowIdentity(innerCells[i], innerNulls[i])];
+    for (size_t i = 0; i < rightResult.size(); ++i) {
+        const std::string key = rowIdentity(rightCells[i], rightNulls[i]);
+        auto it = innerCounts.find(key);
         if (it != innerCounts.end() && it->second > 0) {
             --it->second;
         } else {
-            leftResult.push_back(r);
+            leftResult.push_back(std::move(rightResult[i]));
+            leftCells.push_back(std::move(rightCells[i]));
+            leftNulls.push_back(std::move(rightNulls[i]));
         }
     }
+    if (structuredRows) *structuredRows = std::move(leftCells);
+    if (structuredNulls) *structuredNulls = std::move(leftNulls);
     return leftResult;
 }
 
@@ -33922,8 +34016,12 @@ std::vector<std::string> StorageEngine::crossJoin(
     const std::string& leftTable,
     const std::string& rightTable,
     const std::vector<std::string>& conditions,
-    const std::set<std::string>& selectCols) {
+    const std::set<std::string>& selectCols,
+    std::vector<std::vector<std::string>>* structuredRows,
+    std::vector<std::vector<bool>>* structuredNulls) {
     std::vector<std::string> result;
+    if (structuredRows) structuredRows->clear();
+    if (structuredNulls) structuredNulls->clear();
     if (!tableExists(dbname, leftTable) || !tableExists(dbname, rightTable)) return result;
 
     if (leftTable < rightTable) {
@@ -34043,6 +34141,8 @@ std::vector<std::string> StorageEngine::crossJoin(
             }
             if (!whereMatch) continue;
             std::string rowStr;
+            std::vector<std::string> cells;
+            std::vector<bool> nulls;
             for (size_t i = 0; i < leftTbl.len; ++i) {
                 std::string fullName = leftTable + "." + leftTbl.cols[i].dataName;
                 bool include = selectCols.empty() || selectCols.find(leftTbl.cols[i].dataName) != selectCols.end() || selectCols.find(fullName) != selectCols.end();
@@ -34052,6 +34152,8 @@ std::vector<std::string> StorageEngine::crossJoin(
                     lr, leftTbl, leftTable, i, &valueIsNull);
                 if (valueIsNull) rowStr += "NULL ";
                 else rowStr += val + ' ';
+                cells.push_back(valueIsNull ? std::string{} : val);
+                nulls.push_back(valueIsNull);
             }
             for (size_t i = 0; i < rightTbl.len; ++i) {
                 std::string fullName = rightTable + "." + rightTbl.cols[i].dataName;
@@ -34062,8 +34164,14 @@ std::vector<std::string> StorageEngine::crossJoin(
                     rr, rightTbl, rightTable, i, &valueIsNull);
                 if (valueIsNull) rowStr += "NULL ";
                 else rowStr += val + ' ';
+                cells.push_back(valueIsNull ? std::string{} : val);
+                nulls.push_back(valueIsNull);
             }
-            if (!rowStr.empty()) result.push_back(rowStr);
+            if (!rowStr.empty()) {
+                result.push_back(std::move(rowStr));
+                if (structuredRows) structuredRows->push_back(std::move(cells));
+                if (structuredNulls) structuredNulls->push_back(std::move(nulls));
+            }
         }
     }
     lockManager_.unlock(leftTable);
