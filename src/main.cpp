@@ -8,6 +8,7 @@
 #include <iostream>
 #include <map>
 #include <mutex>
+#include <regex>
 #include <set>
 #include <sstream>
 #include <string>
@@ -375,6 +376,7 @@ static string preprocessCaseWhen(string s);
 // SQL preprocessing
 // ========================================================================
 static string foldConstants(const string& s);
+static size_t findTopLevelKeyword(const string& sql, const string& kw, size_t startPos);
 static string sqlProcessor(string raw) {
     raw = toLowerSql(raw);
     raw.erase(remove(raw.begin(), raw.end(), '\n'), raw.end());
@@ -773,17 +775,39 @@ static string sqlProcessor(string raw) {
             }
         }
     }
-    // Convert SQL:2008 FETCH FIRST ... ROWS ONLY to LIMIT syntax
+    // The legacy outer SELECT executor consumes LIMIT/OFFSET. Lower only its
+    // own FETCH ONLY clause; inner queries are evaluated from their native AST.
+    // In particular, quoted text and a nested WITH TIES must remain untouched.
     {
-        size_t fetchPos = raw.find("fetch first");
+        const size_t fetchPos = findTopLevelKeyword(raw, "fetch", 0);
         if (fetchPos != string::npos) {
-            size_t rowsPos = raw.find(" rows ", fetchPos);
-            if (rowsPos != string::npos) {
-                string numStr = trim(raw.substr(fetchPos + 11, rowsPos - fetchPos - 11));
-                size_t onlyPos = raw.find("only", rowsPos);
-                size_t endPos = (onlyPos != string::npos) ? onlyPos + 4 : raw.size();
-                string replacement = "limit " + numStr;
-                raw = raw.substr(0, fetchPos) + replacement + raw.substr(endPos);
+            static const regex fetchClause(
+                R"(^fetch\s+(?:first|next)(?:\s+([0-9]+))?\s+rows?\s+(only\b|with\s+ties\b))");
+            const string tail = raw.substr(fetchPos);
+            smatch fetchMatch;
+            if (regex_search(tail, fetchMatch, fetchClause)) {
+                if (fetchMatch[2].str() != "only") {
+                    throw runtime_error("feature not supported: outer FETCH WITH TIES (SQLSTATE 0A000)");
+                }
+                const string count = fetchMatch[1].matched ? fetchMatch[1].str() : "1";
+                string replacement = "limit " + count;
+                size_t replacePos = fetchPos;
+                const size_t offsetPos = findTopLevelKeyword(raw, "offset", 0);
+                bool canRewrite = true;
+                if (offsetPos != string::npos && offsetPos < fetchPos) {
+                    static const regex offsetClause(R"(^offset\s+([0-9]+)(?:\s+rows?)?\s*$)");
+                    const string offsetText = raw.substr(offsetPos, fetchPos - offsetPos);
+                    smatch offsetMatch;
+                    canRewrite = regex_match(offsetText, offsetMatch, offsetClause);
+                    if (canRewrite) {
+                        replacement += " offset " + offsetMatch[1].str();
+                        replacePos = offsetPos;
+                    }
+                }
+                if (canRewrite) {
+                    raw.replace(replacePos, fetchPos + fetchMatch.length() - replacePos,
+                                replacement);
+                }
             }
         }
     }
@@ -999,22 +1023,25 @@ static vector<string> splitSelectColumns(const string& s) {
     return cols;
 }
 
-// Find a keyword at top-level (parenthesis depth 0), skipping content inside parens and single-quoted strings.
+// Find a keyword at top-level, skipping parentheses, strings and quoted identifiers.
 // Returns string::npos if not found. The match boundary is checked at word level.
 static size_t findTopLevelKeyword(const string& sql, const string& kw, size_t startPos = 0) {
     int depth = 0;
-    bool inStr = false;
+    char quote = 0;
     size_t klen = kw.size();
     auto isIdentifierChar = [](unsigned char ch) {
         return isalnum(ch) || ch == '_' || ch == '$';
     };
     for (size_t i = startPos; i < sql.size(); ++i) {
         char c = sql[i];
-        if (inStr) {
-            if (c == '\'') inStr = false;
+        if (quote != 0) {
+            if (c == quote) {
+                if (i + 1 < sql.size() && sql[i + 1] == quote) ++i;
+                else quote = 0;
+            }
             continue;
         }
-        if (c == '\'') { inStr = true; continue; }
+        if (c == '\'' || c == '"') { quote = c; continue; }
         if (c == '(') { depth++; continue; }
         if (c == ')') { depth--; continue; }
         if (depth == 0 && i + klen <= sql.size() && sql.compare(i, klen, kw) == 0) {

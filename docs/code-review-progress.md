@@ -34,6 +34,12 @@
 | 198 | P0-16 | 差分工具把空串与 NULL 合并，并修改用户返回的 `OID 123` 等字面值，真实错误被报告为无差异；改为逐值保真比较 | 4 个 Python 回归通过，其中 3 个修复前失败；空串 / NULL 的模拟两端差异现在会报告。完整差分框架仍未完成 |
 | 199 | SQL-01 / QRY-05 | CTE 处理器在整条 SQL 中查找 WITH，将字符串和子查询中的 WITH 删除；现在只处理当前语句开头的 WITH | 完整入口修复前将 `'with data'` 返回为 `'data'`；修复后 4 项字符串 / 嵌套 / 真正 CTE 回归通过 |
 | 200 | QRY-04 / QRY-10 | 标量 / EXISTS 投影子查询拒绝 FETCH WITH TIES；现在按全部排序键和 NULL 比较保留边界并列行，先 OFFSET 再检查标量基数 | C++ 行选择回归及完整 SQL 入口通过；覆盖单 / 多排序键、NULL 并列、OFFSET、零行、EXISTS 与 `21000`，缺 ORDER BY 报 `42601`；全功能子查询仍为 partial |
+| 201 | SQL-01 / QRY-10 | 入口 FETCH 重写会修改字符串并截断嵌套 WITH TIES；仅转换顶层 FETCH ONLY，跳过字符串 / 引号标识符 / 内层查询，支持 FIRST/NEXT、默认数量及 OFFSET | 7 个成功用例及顶层 WITH TIES 显式 `0A000` 通过；CTE 和 SQL 入口回归通过。顶层 WITH TIES 尚未实现，不再静默丢失并列语义 |
+
+本批新增的待修复复现（仍计入总清单）：
+
+- SQL-01 / QRY-01：`SELECT 'a'' b' AS value FROM t` 将转义单引号文本当作列名。
+- P0-02：`SELECT id AS "fetch first 1 rows only" FROM t` 的列名被按空格拆开，协议返回多列；结构化结果链路仍未完成。
 
 ## 上批局部收尾验收（2026-09-08）
 
