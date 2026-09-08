@@ -5,6 +5,8 @@
 > 对标基线：PostgreSQL 18.6
 > 文档定位：当前差距的权威清单；每项的代码落点、I/O 保真、性能和验收方案见 [postgresql-18-implementation-blueprint.md](postgresql-18-implementation-blueprint.md)；旧的 `all-gaps-todo.md`、`feature-gaps.md` 和 `postgresql-comparison.md` 保留作历史记录。
 
+> 2026-09-08 续做：总清单尚未完成。最新逐项状态见 [gap-progress.json](gap-progress.json)，执行顺序见 [总清单执行计划](full-gap-execution-plan.md)。原审计条目须按当前代码重新核实；局部 bug 修复不等于整个功能族完成。
+
 ## 1. 结论
 
 这个项目已经不是“玩具 SQL 解析器”：它有约 9.2 万行 C/C++ 核心代码、8 KiB 页式堆、Buffer Pool、FSM/VM、TOAST、WAL、CLOG、MVCC、锁管理器、B+Tree/Hash/GIN/BRIN/GiST/SP-GiST/Bloom 风格索引、Volcano 执行器、PostgreSQL v3 协议子集、SCRAM、PITR 子集，以及 158 个 C++ 测试文件和 7 个 Python 协议/E2E 测试文件。当前源码可成功编译。
