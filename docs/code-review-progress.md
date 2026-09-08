@@ -66,6 +66,7 @@
 | 230 | P0-02 / DML-01 / PROTO-02 | 结构化 DML 和 legacy DML 成功后都丢失受影响行数，协议固定返回 `UPDATE 0` / `DELETE 0`；存储层新增无行镜像开销的可选计数输出，事务失败时归零，两个执行入口均发布结构化 command tag，协议只对 DML 采用该标签 | 新协议 E2E 覆盖 UPDATE/DELETE 的 0、1、2 行；DML RETURNING、update/delete atomicity 相邻回归通过；实际 PostgreSQL `ddl_dml_basic` 差分通过，全量 122 组差分由 4 组失败降至 3 组 | `5f28d15` |
 | 231 | TYPE-06 / PROTO-05 | interval 文本格式把 `-1` 的年月日字段误用单数，timestamp 负差值输出 `-1 day`，与 PostgreSQL 的负数字段复数规则不一致；仅正数 `1` 使用单数 | `interval_arith_test` 增加负一天和负 interval 回归并通过；实际 PostgreSQL `ts_subtract` 差分通过，全量 122 组差分由 3 组失败降至 2 组 | `e8a158c` |
 | 232 | P0-02 / FUNC-05 / PROTO-08 | 未定型字符串或 NULL 传给 `sum` / `avg` 时，在重载解析前被降为 text 并误报 `42883`；按 AST 保留 unknown literal，报告 PostgreSQL 的候选函数不唯一 `42725`，协议层同时识别显式 SQLSTATE 标记 | 表达式回归覆盖 `sum('abc')`、`avg(NULL)` 和显式 text cast 对照；`constraint_expr_test` 与实际 PostgreSQL `errors` 差分通过，全量 122 组差分由 2 组失败降至 1 组 | `2bbcbec` |
+| 233 | P0-02 / PROTO-08 / DIV-01,05,09,10 | 默认 `postgresql18` 模式把项目专属语法统一误报为 feature-not-supported `0A000`；按 PostgreSQL parser 行为区分无效语法 `42601` 与单词 `SHOW` 参数不存在 `42704`，保留扩展模式功能和迁移提示 | DIV 门禁 E2E 覆盖 USE、DESC/DESCRIBE、VIEW、SHOW、备份/恢复/计划缓存及 replication slot；实际 PostgreSQL `div_commands` 差分通过，全量 122 组差分达到 `failed=0` | `250796e` |
 
 本批新增的待修复复现（仍计入总清单）：
 
@@ -78,7 +79,7 @@
 - Python 单元测试 31 项通过：总账校验 6 项、差分工具 25 项。
 - 当前 `build/dbms_review_main` 的 11 组 SQL / 协议 E2E 通过：review_sql、CTE、FETCH、子查询 SQLSTATE、转义文本、布尔边界、LIMIT/OFFSET、多行 SQL、窗口、EXPLAIN ANALYZE、PostgreSQL 协议。
 - 实际参考 PostgreSQL 的错误码、CSV 列描述、带注释的终止符及命令样文本读取验证通过；未对参考库做持久化数据修改。
-- 总账完整覆盖 273 项；目前 complete = 0、partial = 29、unverified = 229、用户延期 = 15。`--require-complete` 正确返回非零。局部问题的修复不代表对应功能族完成。
+- 总账完整覆盖 273 项；目前 complete = 0、partial = 33、unverified = 225、用户延期 = 15。`--require-complete` 正确返回非零。122 组差分归零不代表 273 项功能族完成。
 - 仓库只有 `ci.yml.disabled`，没有启用的 workflow；修复均为本地 commit，未 push。
 
 ## 上批局部收尾验收（2026-09-08）
