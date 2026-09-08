@@ -9483,11 +9483,16 @@ static std::string processCTEs(const std::string& sql, Session& s, bool& failed)
                 // Replace CTE name references in recursiveSql with the temp table name
                 std::string recSql = recursiveSql;
                 size_t rp = 0;
-                while ((rp = recSql.find(cteName, rp)) != std::string::npos) {
+                while ((rp = findTextOutsideQuotes(recSql, cteName, rp)) !=
+                       std::string::npos) {
                     // Word boundary check
-                    bool leftOk = (rp == 0) || !isalnum(static_cast<unsigned char>(recSql[rp - 1]));
+                    bool leftOk = (rp == 0) ||
+                                  !(isalnum(static_cast<unsigned char>(recSql[rp - 1])) ||
+                                    recSql[rp - 1] == '_');
                     bool rightOk = (rp + cteName.size() == recSql.size()) ||
-                                    !isalnum(static_cast<unsigned char>(recSql[rp + cteName.size()]));
+                                   !(isalnum(static_cast<unsigned char>(
+                                         recSql[rp + cteName.size()])) ||
+                                     recSql[rp + cteName.size()] == '_');
                     if (leftOk && rightOk) {
                         recSql = recSql.substr(0, rp) + tmpActualName + recSql.substr(rp + cteName.size());
                         rp += tmpActualName.size();
@@ -9537,8 +9542,11 @@ static std::string processCTEs(const std::string& sql, Session& s, bool& failed)
         // need word-boundary checks: a CTE named "c" must not rewrite the
         // 'c' inside "select".
         size_t replacePos = parenEnd + 1;
-        while ((replacePos = result.find(cteName + ".", replacePos)) != std::string::npos) {
-            bool leftOk = (replacePos == 0) || !isalnum(static_cast<unsigned char>(result[replacePos - 1]));
+        while ((replacePos = findTextOutsideQuotes(
+                    result, cteName + ".", replacePos)) != std::string::npos) {
+            bool leftOk = (replacePos == 0) ||
+                          !(isalnum(static_cast<unsigned char>(result[replacePos - 1])) ||
+                            result[replacePos - 1] == '_');
             bool rightOk = (replacePos + cteName.size() < result.size()) &&
                            !isalnum(static_cast<unsigned char>(result[replacePos + cteName.size() + 1]));
             if (leftOk && rightOk) {
@@ -9548,10 +9556,15 @@ static std::string processCTEs(const std::string& sql, Session& s, bool& failed)
             }
         }
         replacePos = parenEnd + 1;
-        while ((replacePos = result.find(cteName, replacePos)) != std::string::npos) {
-            bool leftOk = (replacePos == 0) || !isalnum(static_cast<unsigned char>(result[replacePos - 1]));
+        while ((replacePos = findTextOutsideQuotes(
+                    result, cteName, replacePos)) != std::string::npos) {
+            bool leftOk = (replacePos == 0) ||
+                          !(isalnum(static_cast<unsigned char>(result[replacePos - 1])) ||
+                            result[replacePos - 1] == '_');
             bool rightOk = (replacePos + cteName.size() == result.size()) ||
-                           !isalnum(static_cast<unsigned char>(result[replacePos + cteName.size()]));
+                           !(isalnum(static_cast<unsigned char>(
+                                 result[replacePos + cteName.size()])) ||
+                             result[replacePos + cteName.size()] == '_');
             if (leftOk && rightOk) {
                 result = result.substr(0, replacePos) + tmpName + result.substr(replacePos + cteName.size());
                 replacePos += tmpName.size();

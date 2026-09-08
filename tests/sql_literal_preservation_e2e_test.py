@@ -111,6 +111,15 @@ def main():
              [["d.id"]]),
             ("SELECT 'd.id' AS value FROM (SELECT 1 AS id) d;",
              [["d.id"]]),
+            ("WITH cteword AS (SELECT 1 AS id) "
+             "SELECT 'cteword' AS value FROM cteword;",
+             [["cteword"]]),
+            ("WITH cteword AS (SELECT 1 AS id) "
+             "SELECT 'before cteword after' AS value FROM cteword;",
+             [["before cteword after"]]),
+            ("WITH rows AS (SELECT 99 AS id) "
+             "SELECT id FROM rewrite_literal_rows WHERE id = 1;",
+             [["1"]]),
         ]
         for sql, expected in qualifier_literals:
             rows, state, message, _ = runner.ours_query(
