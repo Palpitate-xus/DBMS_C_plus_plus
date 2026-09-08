@@ -121,6 +121,17 @@ def main():
         assert ["LINE\nBREAK"] in or_rows, or_rows
         assert [None] in or_rows, or_rows
 
+        ordered_or_sql = (
+            "SELECT upper(v) AS rendered FROM exact_scalar_or_rows "
+            "WHERE id <= 4 OR id >= 2 ORDER BY id DESC;")
+        ordered_or_rows, ordered_or_state, ordered_or_message, _ = (
+            runner.ours_query(client, server["sock"], ordered_or_sql))
+        assert ordered_or_state is None, (
+            ordered_or_state, ordered_or_message)
+        assert ordered_or_rows == [
+            [None], ["LINE\nBREAK"], ["NULL"], ["SAME"], ["SAME"],
+        ], ordered_or_rows
+
         alias_values = [
             None if row[1] is None else row[1].upper()
             for row in expected

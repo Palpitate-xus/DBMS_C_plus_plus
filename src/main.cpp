@@ -21529,15 +21529,37 @@ if (sql.rfind("backup database", 0) == 0) {
                 condTokens.push_back(")");
                 for (auto& t : condTokens) t = modifyLogic(t);
                 auto groups = breakDownConditions(condTokens);
-                const bool orderUsesTableColumn = any_of(
-                    orderBySpecs.begin(), orderBySpecs.end(),
-                    [&](const auto& spec) {
-                        for (size_t i = 0; i < tbl.len; ++i) {
-                            if (tbl.cols[i].dataName == spec.colName)
-                                return true;
+                vector<dbms::StorageEngine::SelectExpr> mergeExprs =
+                    selectExprs;
+                struct HiddenOrderKey {
+                    const dbms::StorageEngine::OrderBySpec* spec;
+                    size_t cellIndex;
+                    string type;
+                };
+                vector<HiddenOrderKey> hiddenOrderKeys;
+                bool hasOutputOrderKey = false;
+                for (const auto& spec : orderBySpecs) {
+                    size_t tableIndex = tbl.len;
+                    for (size_t i = 0; i < tbl.len; ++i) {
+                        if (tbl.cols[i].dataName == spec.colName) {
+                            tableIndex = i;
+                            break;
                         }
-                        return false;
-                    });
+                    }
+                    if (tableIndex == tbl.len) {
+                        hasOutputOrderKey = true;
+                        continue;
+                    }
+                    dbms::StorageEngine::SelectExpr hidden;
+                    hidden.displayName = spec.colName;
+                    hidden.colName = spec.colName;
+                    hiddenOrderKeys.push_back(
+                        {&spec, mergeExprs.size(),
+                         tbl.cols[tableIndex].dataType});
+                    mergeExprs.push_back(std::move(hidden));
+                }
+                const bool hasMixedOrderKeys =
+                    hasOutputOrderKey && !hiddenOrderKeys.empty();
                 if (captureStructuredScalar && groups.size() == 1) {
                     answers = g_engine.queryExpr(
                         queryDb, tname, groups.front(), selectExprs,
@@ -21545,14 +21567,14 @@ if (sql.rfind("backup database", 0) == 0) {
                         &structuredScalarResult.nulls);
                     structuredScalarRows = true;
                 } else if (captureStructuredScalar && !groups.empty() &&
-                           !orderUsesTableColumn) {
+                           !hasMixedOrderKeys) {
                     set<int64_t> seenRowIds;
                     for (const auto& group : groups) {
                         vector<vector<string>> rows;
                         vector<vector<bool>> nulls;
                         vector<int64_t> rowIds;
                         auto part = g_engine.queryExpr(
-                            queryDb, tname, group, selectExprs, orderBySpecs,
+                            queryDb, tname, group, mergeExprs, {},
                             &rows, &nulls, &rowIds);
                         if (part.size() != rows.size() ||
                             part.size() != nulls.size() ||
@@ -21569,6 +21591,87 @@ if (sql.rfind("backup database", 0) == 0) {
                             structuredScalarResult.nulls.push_back(
                                 std::move(nulls[i]));
                         }
+                    }
+                    if (!hiddenOrderKeys.empty()) {
+                        vector<size_t> order;
+                        order.reserve(structuredScalarResult.rows.size());
+                        for (size_t i = 0;
+                             i < structuredScalarResult.rows.size(); ++i) {
+                            order.push_back(i);
+                        }
+                        std::stable_sort(
+                            order.begin(), order.end(),
+                            [&](size_t a, size_t b) {
+                                for (const auto& key : hiddenOrderKeys) {
+                                    const bool aNull =
+                                        structuredScalarResult.nulls[a][key.cellIndex];
+                                    const bool bNull =
+                                        structuredScalarResult.nulls[b][key.cellIndex];
+                                    if (aNull != bNull)
+                                        return aNull == key.spec->nullsFirst;
+                                    if (aNull) continue;
+                                    const string& av =
+                                        structuredScalarResult.rows[a][key.cellIndex];
+                                    const string& bv =
+                                        structuredScalarResult.rows[b][key.cellIndex];
+                                    const string type = toLower(key.type);
+                                    const bool numeric =
+                                        type == "smallint" || type == "int2" ||
+                                        type == "integer" || type == "int4" ||
+                                        type == "bigint" || type == "int8" ||
+                                        type == "numeric" || type == "decimal" ||
+                                        type == "real" || type == "float4" ||
+                                        type == "double" ||
+                                        type == "double precision" ||
+                                        type == "float8";
+                                    int comparison = 0;
+                                    if (numeric) {
+                                        try {
+                                            const dbms::Numeric an(av), bn(bv);
+                                            comparison = an < bn ? -1
+                                                : (bn < an ? 1 : 0);
+                                        } catch (...) {
+                                            comparison = ciTextCompare(av, bv);
+                                        }
+                                    } else {
+                                        comparison = ciTextCompare(av, bv);
+                                    }
+                                    if (comparison != 0) {
+                                        return key.spec->ascending
+                                            ? comparison < 0
+                                            : comparison > 0;
+                                    }
+                                }
+                                return false;
+                            });
+                        auto oldRows =
+                            std::move(structuredScalarResult.rows);
+                        auto oldNulls =
+                            std::move(structuredScalarResult.nulls);
+                        structuredScalarResult.rows.reserve(order.size());
+                        structuredScalarResult.nulls.reserve(order.size());
+                        for (size_t index : order) {
+                            structuredScalarResult.rows.push_back(
+                                std::move(oldRows[index]));
+                            structuredScalarResult.nulls.push_back(
+                                std::move(oldNulls[index]));
+                        }
+                    }
+                    answers.clear();
+                    for (size_t i = 0;
+                         i < structuredScalarResult.rows.size(); ++i) {
+                        structuredScalarResult.rows[i].resize(
+                            selectExprs.size());
+                        structuredScalarResult.nulls[i].resize(
+                            selectExprs.size());
+                        string rendered;
+                        for (size_t cell = 0; cell < selectExprs.size(); ++cell) {
+                            rendered += structuredScalarResult.nulls[i][cell]
+                                ? "NULL"
+                                : structuredScalarResult.rows[i][cell];
+                            rendered += ' ';
+                        }
+                        answers.push_back(std::move(rendered));
                     }
                     structuredScalarRows = true;
                 } else {
