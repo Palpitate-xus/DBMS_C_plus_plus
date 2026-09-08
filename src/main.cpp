@@ -18858,22 +18858,24 @@ if (sql.rfind("backup database", 0) == 0) {
                                 // Constant projection item over a table
                                 // (SELECT 1 FROM generate_series(1,3) g):
                                 // PG emits one row per input row with the
-                                // constant as the value.  Classify numeric
-                                // and quoted-string literals as scalar items.
+                                // constant as the value. Use the parser's
+                                // literal node, including SQL doubled quotes,
+                                // rather than looking for the first quote.
                                 bool isConstItem = false;
-                                if (item.size() >= 1 && item[0] == 39 && item.back() == 39 &&
-                                    item.find(39, 1) == item.size() - 1)
-                                    isConstItem = true;
-                                else {
-                                    bool numOk = !item.empty();
-                                    int dotSeen = 0;
-                                    for (size_t ci3 = (item[0] == '-' || item[0] == '+') ? 1 : 0;
-                                         ci3 < item.size(); ++ci3) {
-                                        char c4 = item[ci3];
-                                        if (c4 == '.') { if (++dotSeen > 1) { numOk = false; break; } }
-                                        else if (!isdigit(static_cast<unsigned char>(c4))) { numOk = false; break; }
+                                dbms::SQLParser literalParser;
+                                auto literalParsed = literalParser.parse("SELECT " + item);
+                                const auto* literalSelect = dynamic_cast<const dbms::SelectStmt*>(
+                                    literalParsed.stmt.get());
+                                if (literalParsed.success && literalSelect &&
+                                    literalSelect->selectList.size() == 1 &&
+                                    literalSelect->selectList.front().alias.empty() &&
+                                    !literalSelect->fromClause) {
+                                    const auto* literal = literalSelect->selectList.front().expr.get();
+                                    isConstItem = dynamic_cast<const dbms::LiteralExpr*>(literal) != nullptr;
+                                    if (const auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(literal)) {
+                                        isConstItem = (unary->op == "+" || unary->op == "-") &&
+                                            dynamic_cast<const dbms::LiteralExpr*>(unary->operand.get());
                                     }
-                                    isConstItem = numOk;
                                 }
                                 if (isConstItem) {
                                     if (!selectExprs.empty()) {
