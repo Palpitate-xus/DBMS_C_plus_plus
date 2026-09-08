@@ -1,5 +1,6 @@
 #include "TableManage.h"
 #include "common/DbError.h"
+#include "common/sha256.h"
 #include "utils/plpgsql.h"
 #include "replication/ReplicationManager.h"
 #include "parser/parser.h"
@@ -158,6 +159,7 @@ static bool isSessionTempPhysicalName(const std::string& name) {
 // databases. Mark them explicitly so startup recovery never replays their
 // WAL or follows their stale external-tablespace paths.
 static constexpr const char* kPhysicalBackupMarker = ".dbms_physical_backup";
+static constexpr const char* kPhysicalBackupManifest = ".dbms_backup_manifest";
 
 #include <algorithm>
 #include <cerrno>
@@ -36230,6 +36232,203 @@ static bool restorePathsOverlap(const std::filesystem::path& first,
            restorePathContains(normalizedSecond, normalizedFirst);
 }
 
+struct PhysicalBackupFileEntry {
+    uintmax_t size = 0;
+    std::string digest;
+
+    bool operator==(const PhysicalBackupFileEntry& other) const {
+        return size == other.size && digest == other.digest;
+    }
+};
+
+using PhysicalBackupDirectories = std::set<std::string>;
+using PhysicalBackupFiles =
+    std::map<std::string, PhysicalBackupFileEntry>;
+
+static std::string encodeBackupPath(const std::string& path) {
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string encoded;
+    encoded.reserve(path.size() * 2);
+    for (const unsigned char byte : path) {
+        encoded.push_back(digits[byte >> 4]);
+        encoded.push_back(digits[byte & 0x0f]);
+    }
+    return encoded;
+}
+
+static bool decodeBackupPath(const std::string& encoded,
+                             std::string& path) {
+    path.clear();
+    if (encoded.empty() || encoded.size() % 2 != 0) return false;
+    const auto nibble = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        return -1;
+    };
+    path.reserve(encoded.size() / 2);
+    for (size_t i = 0; i < encoded.size(); i += 2) {
+        const int high = nibble(encoded[i]);
+        const int low = nibble(encoded[i + 1]);
+        if (high < 0 || low < 0) return false;
+        const char value = static_cast<char>((high << 4) | low);
+        if (value == '\0') return false;
+        path.push_back(value);
+    }
+    return true;
+}
+
+static bool validBackupRelativePath(const std::string& value) {
+    if (value.empty()) return false;
+    const std::filesystem::path path(value);
+    if (path.is_absolute() || path.generic_string() != value) return false;
+    for (const auto& component : path) {
+        if (component.empty() || component == "." || component == "..") {
+            return false;
+        }
+    }
+    return value != kPhysicalBackupMarker &&
+           value != kPhysicalBackupManifest;
+}
+
+static bool digestBackupFile(const std::filesystem::path& path,
+                             PhysicalBackupFileEntry& entry) {
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(path, error) || error) return false;
+    entry.size = std::filesystem::file_size(path, error);
+    if (error) return false;
+
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return false;
+    SHA256 digest;
+    std::array<char, 64 * 1024> buffer{};
+    while (input) {
+        input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        const auto count = input.gcount();
+        if (count > 0) {
+            digest.append(buffer.data(), static_cast<size_t>(count));
+        }
+    }
+    if (!input.eof()) return false;
+    entry.digest = digest.finishHex();
+    return true;
+}
+
+static bool collectPhysicalBackupEntries(
+    const std::filesystem::path& root,
+    PhysicalBackupDirectories& directories,
+    PhysicalBackupFiles& files) {
+    directories.clear();
+    files.clear();
+    std::error_code error;
+    if (!std::filesystem::is_directory(root, error) || error) return false;
+
+    std::filesystem::recursive_directory_iterator iterator(root, error);
+    const std::filesystem::recursive_directory_iterator end;
+    if (error) return false;
+    for (; iterator != end; iterator.increment(error)) {
+        if (error) return false;
+        const auto& entry = *iterator;
+        if (entry.is_symlink(error) || error) return false;
+        const auto relative =
+            std::filesystem::relative(entry.path(), root, error);
+        if (error) return false;
+        const std::string name = relative.generic_string();
+        if (name == kPhysicalBackupMarker ||
+            name == kPhysicalBackupManifest) {
+            if (entry.is_directory(error) || error) return false;
+            continue;
+        }
+        if (!validBackupRelativePath(name)) return false;
+        if (entry.is_directory(error) && !error) {
+            if (!directories.insert(name).second) return false;
+            continue;
+        }
+        if (error || !entry.is_regular_file(error) || error) return false;
+        PhysicalBackupFileEntry file;
+        if (!digestBackupFile(entry.path(), file) ||
+            !files.emplace(name, std::move(file)).second) {
+            return false;
+        }
+    }
+    return !error;
+}
+
+static bool writePhysicalBackupManifest(const std::filesystem::path& root) {
+    PhysicalBackupDirectories directories;
+    PhysicalBackupFiles files;
+    if (!collectPhysicalBackupEntries(root, directories, files)) return false;
+
+    std::ostringstream output;
+    output << "DBMS_PHYSICAL_BACKUP_MANIFEST_V1\n";
+    for (const auto& directory : directories) {
+        output << "D\t" << encodeBackupPath(directory) << '\n';
+    }
+    for (const auto& [name, entry] : files) {
+        output << "F\t" << entry.size << '\t' << entry.digest << '\t'
+               << encodeBackupPath(name) << '\n';
+    }
+    return output.good() && index_file::writeAtomically(
+        root / kPhysicalBackupManifest, output.str());
+}
+
+static bool readPhysicalBackupManifest(
+    const std::filesystem::path& root,
+    PhysicalBackupDirectories& directories,
+    PhysicalBackupFiles& files) {
+    directories.clear();
+    files.clear();
+    const auto path = root / kPhysicalBackupManifest;
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(path, error) || error) return false;
+    const auto manifestSize = std::filesystem::file_size(path, error);
+    if (error || manifestSize > 64ULL * 1024ULL * 1024ULL) return false;
+
+    std::ifstream input(path, std::ios::binary);
+    std::string line;
+    if (!std::getline(input, line) ||
+        line != "DBMS_PHYSICAL_BACKUP_MANIFEST_V1") {
+        return false;
+    }
+    while (std::getline(input, line)) {
+        if (line.empty()) return false;
+        std::vector<std::string> fields;
+        size_t begin = 0;
+        for (;;) {
+            const size_t separator = line.find('\t', begin);
+            fields.push_back(line.substr(begin, separator - begin));
+            if (separator == std::string::npos) break;
+            begin = separator + 1;
+        }
+        std::string name;
+        if (fields.size() == 2 && fields[0] == "D") {
+            if (!decodeBackupPath(fields[1], name) ||
+                !validBackupRelativePath(name) ||
+                !directories.insert(name).second) {
+                return false;
+            }
+            continue;
+        }
+        if (fields.size() != 4 || fields[0] != "F" ||
+            !decodeBackupPath(fields[3], name) ||
+            !validBackupRelativePath(name)) {
+            return false;
+        }
+        uintmax_t size = 0;
+        const auto converted = std::from_chars(
+            fields[1].data(), fields[1].data() + fields[1].size(), size, 10);
+        if (converted.ec != std::errc{} ||
+            converted.ptr != fields[1].data() + fields[1].size() ||
+            fields[2].size() != 64 ||
+            !std::all_of(fields[2].begin(), fields[2].end(), [](char c) {
+                return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+            }) ||
+            !files.emplace(name, PhysicalBackupFileEntry{size, fields[2]}).second) {
+            return false;
+        }
+    }
+    return input.eof() && !input.bad();
+}
+
 static bool validPhysicalBackupSource(const std::filesystem::path& source) {
     if (!std::filesystem::is_directory(source)) return false;
     const auto marker = source / kPhysicalBackupMarker;
@@ -36239,7 +36438,18 @@ static bool validPhysicalBackupSource(const std::filesystem::path& source) {
     const std::string contents{
         std::istreambuf_iterator<char>(input),
         std::istreambuf_iterator<char>()};
-    return contents == "DBMS_PHYSICAL_BACKUP_V1\n";
+    if (contents != "DBMS_PHYSICAL_BACKUP_V2\n") return false;
+
+    PhysicalBackupDirectories expectedDirectories;
+    PhysicalBackupFiles expectedFiles;
+    PhysicalBackupDirectories actualDirectories;
+    PhysicalBackupFiles actualFiles;
+    return readPhysicalBackupManifest(
+               source, expectedDirectories, expectedFiles) &&
+           collectPhysicalBackupEntries(
+               source, actualDirectories, actualFiles) &&
+           expectedDirectories == actualDirectories &&
+           expectedFiles == actualFiles;
 }
 
 bool StorageEngine::physicalBackup(const std::string& dbname,
@@ -36313,7 +36523,8 @@ bool StorageEngine::physicalBackupLocked(
             // coordination state, not database contents. Never copy them
             // into a backup snapshot.
             const auto filename = entry.path().filename().string();
-            if (filename == kPhysicalBackupMarker || filename == ".lockmgr" ||
+            if (filename == kPhysicalBackupMarker ||
+                filename == kPhysicalBackupManifest || filename == ".lockmgr" ||
                 filename == ".runtime_stats.lock" ||
                 filename == ".sql_stats.lock" ||
                 filename.rfind(".runtime_stats.tmp.", 0) == 0 ||
@@ -36381,8 +36592,12 @@ bool StorageEngine::physicalBackupLocked(
                 }
             }
         }
+        if (!writePhysicalBackupManifest(stagedBackup)) {
+            discardStagedBackup();
+            return false;
+        }
         const auto marker = stagedBackup / kPhysicalBackupMarker;
-        if (!index_file::writeAtomically(marker, "DBMS_PHYSICAL_BACKUP_V1\n")) {
+        if (!index_file::writeAtomically(marker, "DBMS_PHYSICAL_BACKUP_V2\n")) {
             discardStagedBackup();
             return false;
         }
@@ -36541,7 +36756,8 @@ bool StorageEngine::physicalRestoreLocked(
 
         for (const auto& entry : std::filesystem::directory_iterator(src)) {
             const auto filename = entry.path().filename().string();
-            if (filename == kPhysicalBackupMarker || filename == ".lockmgr" ||
+            if (filename == kPhysicalBackupMarker ||
+                filename == kPhysicalBackupManifest || filename == ".lockmgr" ||
                 filename == ".runtime_stats.lock" || filename == ".sql_stats.lock" ||
                 filename.rfind(".runtime_stats.tmp.", 0) == 0 ||
                 filename.rfind(".sql_stats.tmp.", 0) == 0) {

@@ -26,6 +26,24 @@ public:
         return oss.str();
     }
 
+    // Incremental interface for hashing files and protocol streams without
+    // materializing the complete payload in memory. A SHA256 instance is
+    // single-use once finishHex() has been called.
+    void append(const char* input, size_t len) {
+        update(reinterpret_cast<const uint8_t*>(input), len);
+    }
+
+    std::string finishHex() {
+        uint8_t digest[32];
+        finalize(digest);
+        std::ostringstream oss;
+        for (const uint8_t byte : digest) {
+            oss << std::hex << std::setw(2) << std::setfill('0')
+                << static_cast<int>(byte);
+        }
+        return oss.str();
+    }
+
 private:
     uint32_t state[8] = {
         0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
