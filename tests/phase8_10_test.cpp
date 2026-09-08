@@ -13,28 +13,28 @@
 // === Phase 8: ReplicationManager ===
 static void test_streaming_replication() {
     auto& repl = dbms::ReplicationManager::instance();
-    repl.setStandbyMode(dbms::ReplicationManager::StandbyMode::HotStandby);
-    assert(repl.isActiveStandby());
-    assert(repl.standbyMode() == dbms::ReplicationManager::StandbyMode::HotStandby);
-    repl.setStandbyMode(dbms::ReplicationManager::StandbyMode::None);
+    assert(!repl.setStandbyMode(
+        dbms::ReplicationManager::StandbyMode::HotStandby));
     assert(!repl.isActiveStandby());
-    std::cout << "[P8] streaming replication OK" << std::endl;
+    assert(repl.standbyMode() == dbms::ReplicationManager::StandbyMode::None);
+    assert(repl.setStandbyMode(dbms::ReplicationManager::StandbyMode::None));
+    std::cout << "[P8] streaming replication capability gate OK" << std::endl;
 }
 
 static void test_sync_replication() {
     auto& repl = dbms::ReplicationManager::instance();
-    repl.setSyncReplication(true);
-    assert(repl.syncReplication());
-    repl.setSyncReplication(false);
+    assert(!repl.setSyncReplication(true));
     assert(!repl.syncReplication());
-    std::cout << "[P8] sync replication OK" << std::endl;
+    assert(repl.setSyncReplication(false));
+    std::cout << "[P8] sync replication capability gate OK" << std::endl;
 }
 
 static void test_wal_shipping() {
     auto& repl = dbms::ReplicationManager::instance();
-    repl.setPrimaryConnInfo("host=primary port=5432 user=replicator");
-    assert(!repl.primaryConnInfo().empty());
-    std::cout << "[P8] WAL shipping OK" << std::endl;
+    assert(!repl.setPrimaryConnInfo(
+        "host=primary port=5432 user=replicator"));
+    assert(repl.primaryConnInfo().empty());
+    std::cout << "[P8] WAL shipping capability gate OK" << std::endl;
 }
 
 static void test_replication_slots() {
@@ -57,10 +57,11 @@ static void test_replication_slots() {
 
 static void test_promote() {
     auto& repl = dbms::ReplicationManager::instance();
-    repl.setStandbyMode(dbms::ReplicationManager::StandbyMode::HotStandby);
-    assert(repl.promote());
+    assert(!repl.setStandbyMode(
+        dbms::ReplicationManager::StandbyMode::HotStandby));
+    assert(!repl.promote());
     assert(repl.standbyMode() == dbms::ReplicationManager::StandbyMode::None);
-    std::cout << "[P8] failover promote OK" << std::endl;
+    std::cout << "[P8] failover promote capability gate OK" << std::endl;
 }
 
 // === Phase 9: Process Manager ===

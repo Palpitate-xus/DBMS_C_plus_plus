@@ -54,20 +54,26 @@ public:
     void publishLogicalBatch(const std::string& database,
                              const LogicalChangeBatch& batch);
 
-    // Streaming replication state (8.1, 8.2)
+    // Physical replication is not implemented.  These compatibility-facing
+    // setters are fail-closed capability gates: only the disabled/default
+    // state is accepted, so callers cannot mistake an in-memory flag for a
+    // working standby, WAL receiver, or synchronous commit path.
     enum class StandbyMode { None, HotStandby, Recovery };
-    void setStandbyMode(StandbyMode mode);
+    bool setStandbyMode(StandbyMode mode);
     StandbyMode standbyMode() const;
 
-    // WAL shipping (8.8)
-    void setPrimaryConnInfo(const std::string& conninfo);
+    // Non-empty primary connection configuration is rejected until a WAL
+    // receiver exists.
+    bool setPrimaryConnInfo(const std::string& conninfo);
     std::string primaryConnInfo() const;
 
-    // Sync replication (8.4)
-    void setSyncReplication(bool on);
+    // Enabling synchronous replication is rejected until commit wait and
+    // remote write/flush/apply acknowledgement are implemented.
+    bool setSyncReplication(bool on);
     bool syncReplication() const;
 
-    // Failover/Promote (8.12)
+    // Promotion succeeds only for a real active standby; while the capability
+    // gate above is closed this therefore returns false.
     bool promote();
     bool isActiveStandby() const;
 

@@ -40,6 +40,10 @@ int main() {
     stateWriter.join();
     slotWriter.join();
 
+    assert(manager.standbyMode() == ReplicationManager::StandbyMode::None);
+    assert(!manager.isActiveStandby());
+    assert(!manager.syncReplication());
+    assert(manager.primaryConnInfo().empty());
     assert(manager.findSlot(slot).has_value());
     assert(manager.deactivateReplicationSlot(slot) || !manager.findSlot(slot)->active);
     assert(manager.dropReplicationSlot(slot));
@@ -78,7 +82,7 @@ int main() {
         assert(!manager.findSlot(logicalSlot));
         assert(LogicalChangeStore::instance().depth(logicalSlot) == 0);
     }
-    manager.setStandbyMode(ReplicationManager::StandbyMode::None);
+    assert(manager.setStandbyMode(ReplicationManager::StandbyMode::None));
     std::cout << "[REPLICATION CONCURRENCY] synchronized snapshot API OK\n";
     return 0;
 }

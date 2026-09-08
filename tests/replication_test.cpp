@@ -157,27 +157,27 @@ static void test_standby_mode() {
     auto& mgr = ReplicationManager::instance();
     assert(mgr.standbyMode() == ReplicationManager::StandbyMode::None);
 
-    mgr.setStandbyMode(ReplicationManager::StandbyMode::HotStandby);
-    assert(mgr.standbyMode() == ReplicationManager::StandbyMode::HotStandby);
-    assert(mgr.isActiveStandby());
-
-    // Promote
-    assert(mgr.promote());
+    assert(!mgr.setStandbyMode(ReplicationManager::StandbyMode::HotStandby));
     assert(mgr.standbyMode() == ReplicationManager::StandbyMode::None);
     assert(!mgr.isActiveStandby());
+    assert(!mgr.promote());
+    assert(mgr.setStandbyMode(ReplicationManager::StandbyMode::None));
 
-    std::cout << "[REPLICATION] standby/promote OK" << std::endl;
+    std::cout << "[REPLICATION] standby/promote capability gate OK" << std::endl;
 }
 
 static void test_wal_shipping_config() {
     auto& mgr = ReplicationManager::instance();
-    mgr.setPrimaryConnInfo("host=primary port=5432 user=replicator");
-    assert(mgr.primaryConnInfo() == "host=primary port=5432 user=replicator");
+    assert(!mgr.setPrimaryConnInfo(
+        "host=primary port=5432 user=replicator"));
+    assert(mgr.primaryConnInfo().empty());
+    assert(mgr.setPrimaryConnInfo(""));
 
-    mgr.setSyncReplication(true);
-    assert(mgr.syncReplication());
+    assert(!mgr.setSyncReplication(true));
+    assert(!mgr.syncReplication());
+    assert(mgr.setSyncReplication(false));
 
-    std::cout << "[REPLICATION] WAL shipping config OK" << std::endl;
+    std::cout << "[REPLICATION] physical/sync capability gate OK" << std::endl;
 }
 
 int main() {

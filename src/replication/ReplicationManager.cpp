@@ -267,9 +267,11 @@ bool ReplicationManager::promote() {
     return true;
 }
 
-void ReplicationManager::setStandbyMode(StandbyMode mode) {
+bool ReplicationManager::setStandbyMode(StandbyMode mode) {
     std::lock_guard<std::mutex> lock(mutex_);
-    standbyMode_ = mode;
+    if (mode != StandbyMode::None) return false;
+    standbyMode_ = StandbyMode::None;
+    return true;
 }
 
 ReplicationManager::StandbyMode ReplicationManager::standbyMode() const {
@@ -277,9 +279,11 @@ ReplicationManager::StandbyMode ReplicationManager::standbyMode() const {
     return standbyMode_;
 }
 
-void ReplicationManager::setPrimaryConnInfo(const std::string& conninfo) {
+bool ReplicationManager::setPrimaryConnInfo(const std::string& conninfo) {
     std::lock_guard<std::mutex> lock(mutex_);
-    primaryConnInfo_ = conninfo;
+    if (!conninfo.empty()) return false;
+    primaryConnInfo_.clear();
+    return true;
 }
 
 std::string ReplicationManager::primaryConnInfo() const {
@@ -287,9 +291,11 @@ std::string ReplicationManager::primaryConnInfo() const {
     return primaryConnInfo_;
 }
 
-void ReplicationManager::setSyncReplication(bool on) {
+bool ReplicationManager::setSyncReplication(bool on) {
     std::lock_guard<std::mutex> lock(mutex_);
-    syncReplication_ = on;
+    if (on) return false;
+    syncReplication_ = false;
+    return true;
 }
 
 bool ReplicationManager::syncReplication() const {
