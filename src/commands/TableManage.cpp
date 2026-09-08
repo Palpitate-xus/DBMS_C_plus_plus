@@ -36411,13 +36411,15 @@ static bool collectPhysicalBackupEntries(
     return !error;
 }
 
-static bool writePhysicalBackupManifest(const std::filesystem::path& root) {
+static bool writePhysicalBackupManifest(const std::filesystem::path& root,
+                                        const std::string& database) {
     PhysicalBackupDirectories directories;
     PhysicalBackupFiles files;
     if (!collectPhysicalBackupEntries(root, directories, files)) return false;
 
     std::ostringstream output;
-    output << "DBMS_PHYSICAL_BACKUP_MANIFEST_V1\n";
+    output << "DBMS_PHYSICAL_BACKUP_MANIFEST_V2\n";
+    output << "S\t" << encodeBackupPath(database) << '\n';
     for (const auto& directory : directories) {
         output << "D\t" << encodeBackupPath(directory) << '\n';
     }
@@ -36431,8 +36433,10 @@ static bool writePhysicalBackupManifest(const std::filesystem::path& root) {
 
 static bool readPhysicalBackupManifest(
     const std::filesystem::path& root,
+    std::string& sourceDatabase,
     PhysicalBackupDirectories& directories,
     PhysicalBackupFiles& files) {
+    sourceDatabase.clear();
     directories.clear();
     files.clear();
     const auto path = root / kPhysicalBackupManifest;
@@ -36444,7 +36448,13 @@ static bool readPhysicalBackupManifest(
     std::ifstream input(path, std::ios::binary);
     std::string line;
     if (!std::getline(input, line) ||
-        line != "DBMS_PHYSICAL_BACKUP_MANIFEST_V1") {
+        line != "DBMS_PHYSICAL_BACKUP_MANIFEST_V2") {
+        return false;
+    }
+    if (!std::getline(input, line) || line.rfind("S\t", 0) != 0 ||
+        line.find('\t', 2) != std::string::npos ||
+        !decodeBackupPath(line.substr(2), sourceDatabase) ||
+        !validStoredIdentifier(sourceDatabase, MAX_TABLE_NAME_LEN)) {
         return false;
     }
     while (std::getline(input, line)) {
@@ -36487,7 +36497,9 @@ static bool readPhysicalBackupManifest(
     return input.eof() && !input.bad();
 }
 
-static bool validPhysicalBackupSource(const std::filesystem::path& source) {
+static bool validPhysicalBackupSource(const std::filesystem::path& source,
+                                      std::string& sourceDatabase) {
+    sourceDatabase.clear();
     if (!std::filesystem::is_directory(source)) return false;
     const auto marker = source / kPhysicalBackupMarker;
     if (!std::filesystem::is_regular_file(marker)) return false;
@@ -36496,14 +36508,14 @@ static bool validPhysicalBackupSource(const std::filesystem::path& source) {
     const std::string contents{
         std::istreambuf_iterator<char>(input),
         std::istreambuf_iterator<char>()};
-    if (contents != "DBMS_PHYSICAL_BACKUP_V2\n") return false;
+    if (contents != "DBMS_PHYSICAL_BACKUP_V3\n") return false;
 
     PhysicalBackupDirectories expectedDirectories;
     PhysicalBackupFiles expectedFiles;
     PhysicalBackupDirectories actualDirectories;
     PhysicalBackupFiles actualFiles;
     return readPhysicalBackupManifest(
-               source, expectedDirectories, expectedFiles) &&
+               source, sourceDatabase, expectedDirectories, expectedFiles) &&
            collectPhysicalBackupEntries(
                source, actualDirectories, actualFiles) &&
            expectedDirectories == actualDirectories &&
@@ -36650,12 +36662,12 @@ bool StorageEngine::physicalBackupLocked(
                 }
             }
         }
-        if (!writePhysicalBackupManifest(stagedBackup)) {
+        if (!writePhysicalBackupManifest(stagedBackup, dbname)) {
             discardStagedBackup();
             return false;
         }
         const auto marker = stagedBackup / kPhysicalBackupMarker;
-        if (!index_file::writeAtomically(marker, "DBMS_PHYSICAL_BACKUP_V2\n")) {
+        if (!index_file::writeAtomically(marker, "DBMS_PHYSICAL_BACKUP_V3\n")) {
             discardStagedBackup();
             return false;
         }
@@ -36759,7 +36771,9 @@ bool StorageEngine::physicalRestoreLocked(
         // before removing the current database. In particular, aliases and
         // parent/child paths must not let remove_all(dst) erase the only
         // backup copy before directory iteration begins.
-        if (!validPhysicalBackupSource(src) ||
+        std::string sourceDatabase;
+        if (!validPhysicalBackupSource(src, sourceDatabase) ||
+            sourceDatabase != dbname ||
             restorePathsOverlap(src, dst) ||
             restorePathsOverlap(src, walArchiveDir(dbname))) {
             return false;
@@ -38695,7 +38709,7 @@ bool StorageEngine::createTransactionBackup() {
     // Removing UNLOGGED forks changes the snapshot's exact file set. Rebuild
     // and durably publish its manifest so crash rollback does not reject the
     // intentionally filtered transaction snapshot as corrupt.
-    if (!writePhysicalBackupManifest(backup) ||
+    if (!writePhysicalBackupManifest(backup, dbname) ||
         !syncPhysicalBackupTree(backup)) {
         std::filesystem::remove_all(backup, ec);
         return false;

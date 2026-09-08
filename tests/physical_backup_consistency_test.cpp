@@ -26,7 +26,6 @@ int main() {
 
     const std::string database = testDbPath("backup_consistency_source");
     const std::string backup = testDbPath("backup_consistency_image");
-    const std::string restored = testDbPath("backup_consistency_restored");
     const std::string rejected = testDbPath("backup_consistency_rejected");
 
     dbms::StorageEngine engine;
@@ -81,10 +80,11 @@ int main() {
     backupThread.join();
     assert(backupResult);
 
-    dbms::StorageEngine restoredEngine;
-    assert(restoredEngine.physicalRestore(restored, backup));
-    assert(restoredEngine.tableExists(restored, "t"));
-    assert(rowCount(restoredEngine, restored) == 1);
+    assert(engine.insert(database, "t", {{"id", "2"}}) ==
+           dbms::DBStatus::OK);
+    assert(engine.physicalRestore(database, backup));
+    assert(engine.tableExists(database, "t"));
+    assert(rowCount(engine, database) == 1);
 
     finalCleanupTestData();
     std::cout << "[PHYSICAL BACKUP CONSISTENCY] transaction snapshot OK\n";

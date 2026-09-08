@@ -13,8 +13,6 @@ int main() {
     dbms::TypeRegistry::instance().bootstrap();
 
     const std::string database = testDbPath("backup_replacement_source");
-    const std::string restoredDatabase =
-        testDbPath("backup_replacement_restored");
     const std::string backup = testDbPath("backup_replacement_image");
 
     dbms::StorageEngine engine;
@@ -58,10 +56,15 @@ int main() {
     // the new source into files left by the previous backup.
     assert(engine.physicalBackup(database, backup));
 
-    dbms::StorageEngine restored;
-    assert(restored.physicalRestore(restoredDatabase, backup));
-    assert(restored.tableExists(restoredDatabase, "current_table"));
-    assert(!restored.tableExists(restoredDatabase, "obsolete_table"));
+    dbms::TableSchema afterBackup;
+    afterBackup.tablename = "after_backup";
+    afterBackup.formatVersion = dbms::DATA_FILE_FORMAT_VERSION;
+    afterBackup.append(dbms::makeIntColumn("id", false, 4, true));
+    assert(engine.createTable(database, afterBackup) == dbms::DBStatus::OK);
+    assert(engine.physicalRestore(database, backup));
+    assert(engine.tableExists(database, "current_table"));
+    assert(!engine.tableExists(database, "obsolete_table"));
+    assert(!engine.tableExists(database, "after_backup"));
 
     finalCleanupTestData();
     std::cout << "[PHYSICAL BACKUP REPLACEMENT] passed\n";

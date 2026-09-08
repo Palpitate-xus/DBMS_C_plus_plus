@@ -38,7 +38,7 @@ int main() {
 
     const std::string database = testDbPath("backup_manifest_source");
     const std::string backup = testDbPath("backup_manifest_image");
-    const std::string restored = testDbPath("backup_manifest_restored");
+    const std::string wrongName = testDbPath("backup_manifest_wrong_name");
 
     dbms::StorageEngine engine;
     assert(engine.createDatabase(database, "utf8") == dbms::DBStatus::OK);
@@ -86,9 +86,12 @@ int main() {
     assertLiveDatabase(engine, database);
 
     assert(engine.physicalBackup(database, backup));
-    dbms::StorageEngine restoredEngine;
-    assert(restoredEngine.physicalRestore(restored, backup));
-    assert(rowCount(restoredEngine, restored) == 1);
+    assert(!engine.physicalRestore(wrongName, backup));
+    assert(!engine.databaseExists(wrongName));
+    assert(engine.insert(database, "t", {{"id", "2"}}) ==
+           dbms::DBStatus::OK);
+    assert(engine.physicalRestore(database, backup));
+    assert(rowCount(engine, database) == 1);
 
     finalCleanupTestData();
     std::cout << "[PHYSICAL BACKUP MANIFEST] corruption and file set verified\n";
