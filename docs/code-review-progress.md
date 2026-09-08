@@ -80,6 +80,7 @@
 | 244 | P0-02 / SQL-12 / QRY-01,10 / PROTO-04 | 普通列按输出 alias/ordinal 排序时只重排显示字符串，协议仍发布未排序结构化行；存储排序又以空字符串判断 NULL。建立 SELECT 输出列到存储列的映射并同步排列精确结果，NULL 排序改读真实 NULL 位 | 协议 E2E 覆盖反顺序投影、alias ORDER BY、空串、SQL NULL、文本 NULL、换行和边界空格；旧路径把空串与 NULL 一起放末尾，现按二进制文本序及 PG 默认 NULL 位置返回。122 组差分保持 `failed=0` | `866b947` |
 | 245 | P0-02 / SQL-12 / QRY-01,09,10 / PROTO-04 | 普通列 DISTINCT 与 LIMIT/OFFSET 会关闭结构化通道，随后按显示文本去重、切片并由协议反解析。允许基础普通投影保留精确结果，以 cells+NULL bitmap 为 DISTINCT 键，并同步切片显示行和结构化行 | 协议 E2E 覆盖重复文本、文本 `NULL`、SQL NULL、嵌入换行的 DISTINCT，以及跨 NULL/文本 NULL/换行的 LIMIT 3 OFFSET 2；精确协议与实际 PostgreSQL 122 组差分通过 | `cbcc771` |
 | 246 | P0-02 / SQL-12 / QRY-01,09,10 / PROTO-04 | DISTINCT ON 用分隔符拼接显示值作为分组键，把空串与 SQL NULL 合并且可能与值内分隔符碰撞；该语法还被排除在结构化协议通道外。改用值向量+NULL 位图作为键，并发布精确结果 | 协议 E2E 用重复空串、重复 SQL NULL 和重复文本 `NULL` 验证三组独立保留首行及反顺序投影；精确协议测试和实际 PostgreSQL 122 组差分保持 `failed=0` | `c1a6504` |
+| 247 | P0-02 / SQL-12 / QRY-01,10 / PROTO-04 | 表达式 ORDER BY 在投影后按显示行重算，无法访问未投影列，并把合法空串当 NULL。把表达式排序规格合入存储查询，在原始可见行上计算排序键并携带真实 NULL 位，结构化结果沿同一排列返回 | 协议 E2E 覆盖 `ORDER BY lower(v)` 使用未投影列，以及空串、边界空格、文本 NULL、SQL NULL 的完整顺序；精确协议测试和实际 PostgreSQL 122 组差分保持 `failed=0` | `24a0864` |
 
 本批新增的待修复复现（仍计入总清单）：
 
