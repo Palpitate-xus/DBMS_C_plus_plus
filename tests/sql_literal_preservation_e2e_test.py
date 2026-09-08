@@ -107,6 +107,10 @@ def main():
             ("SELECT 'r.id' AS value FROM rewrite_literal_rows AS r "
              "WHERE r.id = 1;",
              [["r.id"]]),
+            ("SELECT 'd.id' AS value FROM (SELECT 1 AS id) AS d;",
+             [["d.id"]]),
+            ("SELECT 'd.id' AS value FROM (SELECT 1 AS id) d;",
+             [["d.id"]]),
         ]
         for sql, expected in qualifier_literals:
             rows, state, message, _ = runner.ours_query(

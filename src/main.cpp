@@ -9704,7 +9704,14 @@ static std::string processDerivedTables(const std::string& sql, Session& s) {
         // parenStart / aliasExprStart for each removal.
         std::string aliasDot = alias + ".";
         size_t pos = 0;
-        while ((pos = result.find(aliasDot, pos)) != std::string::npos) {
+        while ((pos = findTextOutsideQuotes(result, aliasDot, pos)) !=
+               std::string::npos) {
+            if (pos > 0 &&
+                (isalnum(static_cast<unsigned char>(result[pos - 1])) ||
+                 result[pos - 1] == '_')) {
+                pos += aliasDot.size();
+                continue;
+            }
             result = result.substr(0, pos) + result.substr(pos + aliasDot.size());
             if (pos < parenStart) {
                 parenStart -= aliasDot.size();
