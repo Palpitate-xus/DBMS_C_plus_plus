@@ -17,7 +17,9 @@ public:
     static ReplicationManager& instance();
 
     // Configure and load the cluster-wide slot state file.  Loading replaces
-    // the in-memory catalog and resets all slots to inactive.
+    // the in-memory catalog and resets all slots to inactive.  Logical change
+    // payloads are not durable yet, so every reloaded logical slot is marked
+    // invalidated rather than pretending its stream is continuous.
     bool configureSlotStorage(const std::string& path, std::string& error);
 
     // Replication slot management (8.3)

@@ -65,12 +65,22 @@ static void test_replication_slots() {
     assert(mgr.activateReplicationSlot("slot2"));
 
     // Reloading the durable file simulates a process restart: identity and
-    // restart LSN survive, active and in-memory change queues do not.
+    // restart LSN survive, but the in-memory change queue does not.  Without
+    // WAL reconstruction the logical slot must fail closed as invalidated.
     assert(mgr.configureSlotStorage(statePath, storageError));
     s2 = mgr.findSlot("slot2");
     assert(s2 && s2->database == "testdb" && s2->restartLsn == 42);
     assert(!s2->active);
+    assert(s2->invalidated);
     assert(LogicalChangeStore::instance().depth("slot2") == 0);
+    assert(!mgr.activateReplicationSlot("slot2"));
+    assert(!mgr.confirmLogicalSlotLsn("slot2", 43));
+
+    // Recreate explicitly to establish a new stream after restart.
+    assert(mgr.dropReplicationSlot("slot2"));
+    assert(mgr.createReplicationSlot(
+        "slot2", "logical", "dbms_test_decoding", "testdb"));
+    assert(mgr.advanceSlotLsn("slot2", 42));
 
     batch.xid = 43;
     batch.commitLsn = 43;

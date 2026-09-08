@@ -79,6 +79,11 @@ bool ReplicationManager::configureSlotStorage(
                 return false;
             }
             slot.active = false;
+            // Only slot metadata is durable today.  A process restart loses
+            // every unconfirmed LogicalChangeStore batch, and there is no WAL
+            // decoder to reconstruct it.  Fail closed even when the persisted
+            // flag was false; the operator must drop/recreate the slot.
+            if (slot.slotType == "logical") slot.invalidated = true;
             loaded.emplace(slot.name, std::move(slot));
         }
         if (input.bad()) {
