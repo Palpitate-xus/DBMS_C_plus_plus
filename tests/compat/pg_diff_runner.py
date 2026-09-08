@@ -2,17 +2,17 @@
 """P0-16 differential compatibility runner.
 
 Drives the same SQL case files against a reference PostgreSQL (docker
-`pgref` container, psql) and this DBMS (wire protocol), normalizes
-unstable fields (OIDs, timings, counts wording), and diffs results:
-rows, SQLSTATE, and command tags.
+`pgref` container, psql) and this DBMS (wire protocol), comparing decoded
+rows without changing values, SQLSTATE, and optionally column headers.
 
 Usage:
     python3 tests/compat/pg_diff_runner.py [--case-dir DIR] [--only NAME]
 
 Case files (tests/compat/cases/*.sql) contain one statement per line;
-lines starting with `--` are comments. Each case runs in a fresh session.
-Any difference is reported and must be added, with a reason and expiry, to
-tests/compat/allowlist.yaml to be acknowledged; CI fails on unlisted diffs.
+lines starting with `--` are comments. The reference currently reconnects
+for every statement; session/transaction cases and lossless reference row
+decoding remain work in progress (P0-16). Differences are reported directly;
+this runner does not implement an allowlist or command-tag comparison yet.
 """
 
 import argparse
@@ -41,11 +41,11 @@ def load_protocol_client():
 # ---------------------------------------------------------------- reference
 
 def reference_query(sql):
-    """Run one statement on reference PG; return (rows, sqlstate, tag)."""
+    """Run one statement on reference PG; return (rows, sqlstate, tag, diagnostic)."""
     proc = subprocess.run(
         ["docker", "exec", "-i", CONTAINER,
          "psql", "-U", "postgres", "-d", "postgres",
-         "-v", "ON_ERROR_STOP=0", "-X", "-q", "-A", "-t",
+         "-v", "ON_ERROR_STOP=0", "-v", "VERBOSITY=sqlstate", "-X", "-q", "-A", "-t",
          "-F", "\x1f", "-P", "null=NULLMARK"],
         input=sql.encode(), capture_output=True)
     out = proc.stdout.decode()
@@ -72,17 +72,18 @@ def reference_query(sql):
         vals = line.split("\x1f")
         rows.append([None if v == "NULLMARK" else v for v in vals])
     state = None
-    # NOTICE/WARNING/HINT lines are diagnostics, not errors; only real
-    # ERROR lines (with or without a SQLSTATE marker) count.
-    errLines = [ln for ln in err.splitlines()
-                if ln.strip() and not ln.startswith(("NOTICE", "WARNING", "HINT"))]
-    m = re.search(r"\[(SQLSTATE ([0-9A-Z]{5}))\]", err)
+    # psql's sqlstate verbosity prints "ERROR:  22012". Default verbosity
+    # has no code, so previously every two errors were treated as equivalent.
+    # Do not infer SQLSTATE from translated message text or NOTICE/WARNING.
+    m = re.search(r"^ERROR:\s+([0-9A-Z]{5})\s*$", err, re.M)
     if m:
-        state = m.group(2)
-    elif any(ln.startswith("ERROR") for ln in errLines):
+        state = m.group(1)
+    elif any(ln.startswith("ERROR:") for ln in err.splitlines()):
+        # Unknown is a mismatch, not a wildcard for any error from our server.
         state = "ERROR"
+    if proc.returncode != 0 and state is None:
+        raise RuntimeError("reference psql failed: " + err.strip())
     tag = None
-    m2 = re.search(r"^([A-Z_]+ [A-Z_ ]+)$", err.strip(), re.M)
     return rows, state, tag, err.strip()
 
 
@@ -215,18 +216,10 @@ def run_case(name, stmts, client, sock):
         ours.append((rows, state, message, ohead))
 
     for sql, (rrows, rstate, rtag, rerr), (orows, ostate, omsg, ohead) in zip(stmts, ref, ours):
-        rstate_n = rstate
-        # psql reports bare ERROR without code when the message lacks one;
-        # compare presence rather than exact code in that case
-        if rstate == "ERROR" and ostate not in (None, "00000"):
-            rstate_n = ostate  # both errored; code compared only when PG prints it
         if normalize_rows(rrows) != normalize_rows(orows):
             diffs.append("%s: rows differ\n  PG:   %r\n  ours: %r" % (sql, rrows, orows))
-        if (rstate_n or None) != (ostate or None) and not (rstate_n is None and ostate is None):
-            if rstate_n == "ERROR" and ostate:
-                pass  # both error, code unknown on PG side
-            else:
-                diffs.append("%s: sqlstate differs: PG=%r ours=%r" % (sql, rstate_n, ostate))
+        if rstate != ostate:
+            diffs.append("%s: sqlstate differs: PG=%r ours=%r" % (sql, rstate, ostate))
         if compare_headers and orows and ohead:
             rhead = reference_headers(sql)
             if rhead and rhead != ohead:

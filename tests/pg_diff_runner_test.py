@@ -3,6 +3,7 @@
 
 import importlib.util
 from pathlib import Path
+import subprocess
 import unittest
 from unittest import mock
 
@@ -32,6 +33,38 @@ class DifferentialValuesTest(unittest.TestCase):
         with mock.patch.object(RUNNER, "reference_multi", return_value=[(rows, None, None, "")]), \
              mock.patch.object(RUNNER, "ours_query", return_value=(rows, None, "", [])):
             self.assertEqual(RUNNER.run_case("same", ["SELECT NULL, '', 'x'"], None, None), [])
+
+
+class DifferentialErrorsTest(unittest.TestCase):
+    def test_reference_requests_and_reads_sqlstate(self):
+        output = subprocess.CompletedProcess([], 0, b"", b"ERROR:  22012\n")
+        with mock.patch.object(RUNNER.subprocess, "run", return_value=output) as run:
+            _, state, _, _ = RUNNER.reference_query("SELECT 1/0;")
+        self.assertIn("VERBOSITY=sqlstate", run.call_args.args[0])
+        self.assertEqual(state, "22012")
+
+    def test_notice_is_not_an_error(self):
+        output = subprocess.CompletedProcess([], 0, b"", b"NOTICE:  00000\n")
+        with mock.patch.object(RUNNER.subprocess, "run", return_value=output):
+            self.assertIsNone(RUNNER.reference_query("DO ...;")[1])
+
+    def test_reference_tool_failure_is_not_a_successful_empty_result(self):
+        output = subprocess.CompletedProcess([], 1, b"", b"No such container: pgref\n")
+        with mock.patch.object(RUNNER.subprocess, "run", return_value=output):
+            with self.assertRaises(RuntimeError):
+                RUNNER.reference_query("SELECT 1;")
+
+    def test_unknown_reference_code_cannot_match_arbitrary_ours_code(self):
+        with mock.patch.object(RUNNER, "reference_multi", return_value=[([], "ERROR", None, "")]), \
+             mock.patch.object(RUNNER, "ours_query", return_value=([], "XX000", "", [])):
+            diffs = RUNNER.run_case("unknown-code", ["SELECT broken"], None, None)
+        self.assertTrue(any("sqlstate differs" in diff for diff in diffs), diffs)
+
+    def test_different_error_codes_are_reported(self):
+        with mock.patch.object(RUNNER, "reference_multi", return_value=[([], "22012", None, "")]), \
+             mock.patch.object(RUNNER, "ours_query", return_value=([], "XX000", "", [])):
+            diffs = RUNNER.run_case("wrong-code", ["SELECT 1/0"], None, None)
+        self.assertTrue(any("sqlstate differs" in diff for diff in diffs), diffs)
 
 
 if __name__ == "__main__":
