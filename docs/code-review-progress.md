@@ -68,10 +68,11 @@
 | 232 | P0-02 / FUNC-05 / PROTO-08 | 未定型字符串或 NULL 传给 `sum` / `avg` 时，在重载解析前被降为 text 并误报 `42883`；按 AST 保留 unknown literal，报告 PostgreSQL 的候选函数不唯一 `42725`，协议层同时识别显式 SQLSTATE 标记 | 表达式回归覆盖 `sum('abc')`、`avg(NULL)` 和显式 text cast 对照；`constraint_expr_test` 与实际 PostgreSQL `errors` 差分通过，全量 122 组差分由 2 组失败降至 1 组 | `2bbcbec` |
 | 233 | P0-02 / PROTO-08 / DIV-01,05,09,10 | 默认 `postgresql18` 模式把项目专属语法统一误报为 feature-not-supported `0A000`；按 PostgreSQL parser 行为区分无效语法 `42601` 与单词 `SHOW` 参数不存在 `42704`，保留扩展模式功能和迁移提示 | DIV 门禁 E2E 覆盖 USE、DESC/DESCRIBE、VIEW、SHOW、备份/恢复/计划缓存及 replication slot；实际 PostgreSQL `div_commands` 差分通过，全量 122 组差分达到 `failed=0` | `250796e` |
 | 234 | P0-02 / SQL-12 / QRY-01 / PROTO-04 | 普通表 SELECT 仍把行拼成空格/换行显示文本再由协议层反解析，混淆 SQL NULL、文本 `NULL`、空串、嵌入换行、引号和边界空格；基础表投影新增精确 cells/NULL bitmap 通道，并修正 StorageEngine 路径 DESC 默认 NULLS FIRST | 新协议 E2E 覆盖 7 种保真值、列重排及 4 种 NULL 排序；协议、派生类型、review SQL、3 个 C++ 排序/NULL 相邻回归通过，实际 PostgreSQL 122 组差分保持 `failed=0`。复杂 operator tuple 仍待结构化 | `03346a0` |
+| 235 | P0-02 / SQL-12 / QRY-01 / PROTO-04 | 普通表标量投影仍以显示行返回，文本 `NULL` 被误发为 SQL NULL，嵌入换行被拆行；拼接求值还把空串和文本 `NULL` 当成 NULL。为 `queryExpr` 增加精确 cells/NULL bitmap 重载，基础标量入口直接发布结构化结果，并以行 NULL 位而非值文本判断拼接传播 | 协议 E2E 覆盖 `upper`、`coalesce`、拼接以及空串、SQL NULL、文本 NULL、换行、引号和边界空格；表达式、NULL、排序、标量子查询及 6 个协议/SQL 相邻回归通过，实际 PostgreSQL 122 组差分保持 `failed=0`。输出别名排序、谓词、DISTINCT/LIMIT、SRF/UDF 及复杂 operator tuple 留待各自结构化迁移 | `8183624` |
 
 本批新增的待修复复现（仍计入总清单）：
 
-- P0-02：quoted alias 与无 FROM 普通投影已由第 211–212 项迁移；表查询、CTE / set operation、legacy scalar subquery 及二进制值仍存在显示文本边界，继续计入总清单。
+- P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–235 项迁移；谓词 / DISTINCT / LIMIT / 输出表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
 - P0-02 / TYPE：第 217 项已修复无 FROM 基础表达式的已知 OID 回退；表查询、复杂表达式、数组 / composite / domain、typmod 和 binary format 类型元数据仍需完整差分。
 
 ### 本批验证记录（第 197–220 项）
