@@ -21741,11 +21741,16 @@ if (sql.rfind("backup database", 0) == 0) {
                 shouldPublishQueryMetadata() &&
                 simpleStructuredPlainPredicate &&
                 semiJoins.empty() && existenceFilters.empty() &&
-                quantifiedSubqueries.empty() && exprOrderBySpecs.empty() &&
+                quantifiedSubqueries.empty() &&
                 !forUpdate && !noWait && !skipLocked && outfile.empty() &&
                 queryDb != "information_schema" && queryDb != "pg_catalog" &&
                 (s.onlyNext ||
                  g_engine.getInheritedChildren(queryDb, tname).empty());
+            vector<StorageEngine::OrderBySpec> structuredPlainOrderSpecs =
+                orderBySpecs;
+            structuredPlainOrderSpecs.insert(
+                structuredPlainOrderSpecs.end(), exprOrderBySpecs.begin(),
+                exprOrderBySpecs.end());
 
             // Determine the first simple ORDER BY spec (if any) that the volcano
             // path can consume (only plain column ORDER BY without NULLS / expr).
@@ -21827,7 +21832,8 @@ if (sql.rfind("backup database", 0) == 0) {
                 if (condTokens.empty()) {
                     if (captureStructuredPlain) {
                         answers = g_engine.query(
-                            queryDb, tname, {}, selectCols, orderBySpecs,
+                            queryDb, tname, {}, selectCols,
+                            structuredPlainOrderSpecs,
                             forUpdate, noWait, skipLocked,
                             s.timezoneOffsetMinutes, distinctOnCols,
                             &structuredPlainResult.rows,
@@ -21852,7 +21858,8 @@ if (sql.rfind("backup database", 0) == 0) {
                             vector<vector<bool>> branchNulls;
                             vector<int64_t> branchRowIds;
                             auto part = g_engine.query(
-                                queryDb, tname, g, selectCols, orderBySpecs,
+                                queryDb, tname, g, selectCols,
+                                structuredPlainOrderSpecs,
                                 forUpdate, noWait, skipLocked,
                                 s.timezoneOffsetMinutes, distinctOnCols,
                                 &branchRows, &branchNulls, &branchRowIds);
@@ -21875,11 +21882,13 @@ if (sql.rfind("backup database", 0) == 0) {
                         // Reapply the table-wide order to the merged row-id set
                         // so a later branch cannot append a value that belongs
                         // before rows already emitted by an earlier branch.
-                        if (groups.size() > 1 && !orderBySpecs.empty() &&
+                        if (groups.size() > 1 &&
+                            !structuredPlainOrderSpecs.empty() &&
                             mergedRowIds.size() > 1) {
                             vector<int64_t> globallyOrderedRowIds;
                             (void)g_engine.query(
-                                queryDb, tname, {}, selectCols, orderBySpecs,
+                                queryDb, tname, {}, selectCols,
+                                structuredPlainOrderSpecs,
                                 forUpdate, noWait, skipLocked,
                                 s.timezoneOffsetMinutes, distinctOnCols,
                                 nullptr, nullptr, &globallyOrderedRowIds);
@@ -21981,7 +21990,7 @@ if (sql.rfind("backup database", 0) == 0) {
             }
         }
         // Post-query expression sorting
-        if (!exprOrderBySpecs.empty()) {
+        if (!exprOrderBySpecs.empty() && !structuredPlainRows) {
             answers = g_engine.sortByExpression(s.currentDB, tname, std::move(answers), exprOrderBySpecs);
         }
         // Plain-path ORDER BY on output aliases or ordinals ("ORDER BY c",

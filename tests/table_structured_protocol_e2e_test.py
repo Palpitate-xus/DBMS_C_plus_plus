@@ -121,6 +121,17 @@ def main():
         assert plain_alias_rows == plain_alias_expected, (
             plain_alias_rows, plain_alias_expected)
 
+        expression_order_sql = (
+            "SELECT id FROM exact_table_rows ORDER BY lower(v);")
+        expression_order_rows, expression_order_state, \
+            expression_order_message, _ = runner.ours_query(
+                client, server["sock"], expression_order_sql)
+        assert expression_order_state is None, (
+            expression_order_state, expression_order_message)
+        assert expression_order_rows == [
+            ["2"], ["7"], ["1"], ["5"], ["4"], ["6"], ["3"],
+        ], expression_order_rows
+
         plain_distinct_sql = (
             "SELECT DISTINCT v FROM exact_scalar_or_rows ORDER BY v;")
         plain_distinct_rows, plain_distinct_state, plain_distinct_message, _ = (

@@ -27200,22 +27200,31 @@ std::vector<std::string> StorageEngine::query(
         struct ExprKey {
             size_t idx;
             std::vector<std::string> exprVals;
+            std::vector<bool> exprNulls;
         };
         std::vector<ExprKey> ekeys;
         ekeys.reserve(matchRows.size());
         for (size_t ri = 0; ri < matchRows.size(); ++ri) {
-            ExprKey ek{ri, {}};
+            ExprKey ek{ri, {}, {}};
             NullRowBinding nullBinding(
                 this, dbname, tbl.tablename, matchRows[ri].first, tbl.len);
             // Build column value map for expression evaluation
             std::map<std::string, std::string> rowData;
+            std::map<std::string, bool> rowNulls;
             for (size_t ci = 0; ci < tbl.len; ++ci) {
+                bool valueIsNull = false;
                 rowData[tbl.cols[ci].dataName] = extractColumnValue(
-                    matchRows[ri].second, tbl, ci, dbname, true);
+                    matchRows[ri].second, tbl, ci, dbname, true,
+                    &valueIsNull);
+                rowNulls[tbl.cols[ci].dataName] = valueIsNull ||
+                    (tbl.cols[ci].generatedKind != 'v' &&
+                     isColumnNullByRid(
+                         dbname, tbl.tablename, matchRows[ri].first, ci));
             }
             for (const auto& spec : orderBy) {
                 if (!spec.isExpression) continue;
                 std::string ev;
+                bool expressionIsNull = false;
                 auto getCol = [&](const std::string& name) -> std::string {
                     auto it = rowData.find(name);
                     return (it != rowData.end()) ? it->second : "";
@@ -27239,6 +27248,10 @@ std::vector<std::string> StorageEngine::query(
                     ev = argVal;
                 }
                 ek.exprVals.push_back(ev);
+                const auto nullIt = rowNulls.find(spec.exprArg);
+                if (nullIt != rowNulls.end())
+                    expressionIsNull = nullIt->second;
+                ek.exprNulls.push_back(expressionIsNull);
             }
             ekeys.push_back(std::move(ek));
         }
@@ -27248,8 +27261,8 @@ std::vector<std::string> StorageEngine::query(
                 if (!spec.isExpression) continue;
                 const std::string& av = a.exprVals[evi];
                 const std::string& bv = b.exprVals[evi];
-                bool aNull = av.empty();
-                bool bNull = bv.empty();
+                const bool aNull = a.exprNulls[evi];
+                const bool bNull = b.exprNulls[evi];
                 if (aNull && bNull) { ++evi; continue; }
                 if (aNull) return spec.nullsFirst;
                 if (bNull) return !spec.nullsFirst;
