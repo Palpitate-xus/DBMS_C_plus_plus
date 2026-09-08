@@ -179,6 +179,26 @@ bool ReplicationManager::advanceSlotLsn(const std::string& name, int64_t newRest
     return true;
 }
 
+bool ReplicationManager::confirmLogicalSlotLsn(
+    const std::string& name, int64_t confirmedLsn) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = slots_.find(name);
+    if (it == slots_.end() || it->second.slotType != "logical" ||
+        confirmedLsn < it->second.restartLsn) {
+        return false;
+    }
+    const int64_t previousRestartLsn = it->second.restartLsn;
+    it->second.restartLsn = confirmedLsn;
+    if (!persistSlotsLocked()) {
+        it->second.restartLsn = previousRestartLsn;
+        (void)persistSlotsLocked();
+        return false;
+    }
+    LogicalChangeStore::instance().acknowledge(
+        name, static_cast<uint64_t>(confirmedLsn));
+    return true;
+}
+
 std::vector<ReplicationManager::ReplicationSlot> ReplicationManager::listSlots() const {
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<ReplicationSlot> result;

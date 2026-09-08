@@ -41,6 +41,10 @@ public:
     bool deactivateReplicationSlot(const std::string& name);
     // Advance a slot's confirmed restart LSN (logical decoding flow).
     bool advanceSlotLsn(const std::string& name, int64_t newRestartLsn);
+    // Persist a logical slot's confirmed LSN before releasing retained
+    // changes.  On persistence failure both the LSN and stream stay intact.
+    bool confirmLogicalSlotLsn(const std::string& name,
+                               int64_t confirmedLsn);
     std::vector<ReplicationSlot> listSlots() const;
     // Publish a committed batch while holding the same manager lock used by
     // slot drop, so drop+discard cannot race with an old slot snapshot.

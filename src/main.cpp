@@ -15508,9 +15508,12 @@ if (sql.rfind("backup database", 0) == 0) {
                 return false;
             }
             const uint64_t confirmed = peek.nextLsn;
-            dbms::LogicalChangeStore::instance().acknowledge(slotName, confirmed);
-            dbms::ReplicationManager::instance().advanceSlotLsn(
-                slotName, static_cast<int64_t>(confirmed));
+            if (!dbms::ReplicationManager::instance().confirmLogicalSlotLsn(
+                    slotName, static_cast<int64_t>(confirmed))) {
+                cout << "ERROR: cannot confirm logical replication slot "
+                     << slotName << endl;
+                return true;
+            }
             cout << "confirmed up to lsn " << confirmed << endl;
             return false;
         }

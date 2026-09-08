@@ -63,6 +63,22 @@ static void test_replication_slots() {
     assert(!s2->active);
     assert(LogicalChangeStore::instance().depth("slot2") == 0);
 
+    batch.xid = 43;
+    batch.commitLsn = 43;
+    batch.changes[0].xid = 43;
+    batch.changes[0].commitLsn = 43;
+    mgr.publishLogicalBatch("testdb", batch);
+    assert(LogicalChangeStore::instance().depth("slot2") == 1);
+    std::filesystem::remove_all(stateDir);
+    assert(!mgr.confirmLogicalSlotLsn("slot2", 43));
+    s2 = mgr.findSlot("slot2");
+    assert(s2 && s2->restartLsn == 42);
+    assert(LogicalChangeStore::instance().depth("slot2") == 1);
+    std::filesystem::create_directories(stateDir);
+    assert(mgr.confirmLogicalSlotLsn("slot2", 43));
+    assert(mgr.findSlot("slot2")->restartLsn == 43);
+    assert(LogicalChangeStore::instance().depth("slot2") == 0);
+
     assert(mgr.activateReplicationSlot("slot1"));
     assert(mgr.findSlot("slot1")->active);
     assert(!mgr.dropReplicationSlot("slot1"));
