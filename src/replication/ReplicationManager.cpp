@@ -99,9 +99,10 @@ bool ReplicationManager::validSlotDefinition(const std::string& name,
     };
     if (!validPersistedText(plugin) || !validPersistedText(database))
         return false;
-    return type == "physical"
-        ? plugin.empty() && database.empty()
-        : !plugin.empty() && !database.empty();
+    if (type == "physical") return plugin.empty() && database.empty();
+    if (plugin.empty() || database.empty()) return false;
+    const auto plugins = LogicalDecoder::availablePlugins();
+    return std::find(plugins.begin(), plugins.end(), plugin) != plugins.end();
 }
 
 bool ReplicationManager::createReplicationSlot(const std::string& name,

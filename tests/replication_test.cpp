@@ -34,6 +34,8 @@ static void test_replication_slots() {
     assert(!mgr.createReplicationSlot("bad_type", "unknown"));
     assert(!mgr.createReplicationSlot("physical_plugin", "physical", "plugin"));
     assert(!mgr.createReplicationSlot("logical_no_plugin", "logical"));
+    assert(!mgr.createReplicationSlot(
+        "logical_bad_plugin", "logical", "missing_plugin", "testdb"));
 
     // Find
     auto s1 = mgr.findSlot("slot1");

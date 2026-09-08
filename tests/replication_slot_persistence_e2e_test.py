@@ -31,6 +31,23 @@ def main():
         assert "FATAL: invalid replication slot state header" in result.stderr, \
             result.stderr
 
+        Path(work_dir, ".replication_slots").write_text(
+            "DBMS_REPLICATION_SLOTS_V1\n"
+            '"bad_plugin" "logical" "missing_plugin" "db" 0\n',
+            encoding="utf-8")
+        result = subprocess.run(
+            [DBMS_MAIN, "--server", "0", "--insecure"],
+            cwd=work_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        assert result.returncode == 1, result
+        assert "FATAL: invalid replication slot state entry" in result.stderr, \
+            result.stderr
+
     print("[REPLICATION SLOT PERSISTENCE] corrupt startup state rejected")
 
 
