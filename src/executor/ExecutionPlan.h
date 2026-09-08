@@ -606,6 +606,7 @@ struct WindowFunctionSpec {
     size_t offset = 1;
     std::string defaultValue;
     bool hasDefault = false;
+    bool defaultIsNull = false;
     // A missing frame uses PostgreSQL's default: the whole partition without
     // ORDER BY, or RANGE UNBOUNDED PRECEDING .. CURRENT ROW with ORDER BY.
     bool hasFrame = false;
@@ -636,6 +637,9 @@ public:
 
     bool open() override;
     bool next(std::string& outRow) override;
+    bool supportsStructuredRows() const override { return true; }
+    bool lastStructuredRow(std::vector<std::string>& cells,
+                           std::vector<bool>& nulls) const override;
     void close() override;
     Operator* child() const { return child_.get(); }
     const std::vector<WindowFunctionSpec>& functions() const { return functions_; }
@@ -648,6 +652,8 @@ private:
     std::string finalOrderBy_;
     bool finalOrderAscending_;
     std::vector<std::string> rows_;
+    std::vector<std::vector<std::string>> structuredRows_;
+    std::vector<std::vector<bool>> structuredNulls_;
     size_t pos_ = 0;
 };
 
@@ -688,6 +694,13 @@ public:
 
     bool open() override;
     bool next(std::string& outRow) override;
+    bool supportsStructuredRows() const override {
+        return child_->supportsStructuredRows();
+    }
+    bool lastStructuredRow(std::vector<std::string>& cells,
+                           std::vector<bool>& nulls) const override {
+        return child_->lastStructuredRow(cells, nulls);
+    }
     void close() override;
     Operator* child() const { return child_.get(); }
     size_t limit() const { return limit_; }
@@ -708,6 +721,13 @@ public:
 
     bool open() override;
     bool next(std::string& outRow) override;
+    bool supportsStructuredRows() const override {
+        return child_->supportsStructuredRows();
+    }
+    bool lastStructuredRow(std::vector<std::string>& cells,
+                           std::vector<bool>& nulls) const override {
+        return child_->lastStructuredRow(cells, nulls);
+    }
     void close() override;
     Operator* child() const { return child_.get(); }
     size_t offset() const { return offset_; }

@@ -1404,6 +1404,7 @@ namespace {
 struct WindowInputRow {
     std::string raw;
     std::vector<std::string> values;
+    std::vector<bool> nulls;
 };
 
 static size_t sortColIndex(const TableSchema& tbl, const std::string& name) {
@@ -1469,6 +1470,15 @@ static int compareNonNullAggregateValue(const std::string& left,
     return 0;
 }
 
+static int compareWindowCell(const std::string& left, bool leftIsNull,
+                             const std::string& right, bool rightIsNull,
+                             bool nullsLast = true) {
+    if (leftIsNull && rightIsNull) return 0;
+    if (leftIsNull) return nullsLast ? 1 : -1;
+    if (rightIsNull) return nullsLast ? -1 : 1;
+    return compareNonNullAggregateValue(left, right);
+}
+
 static size_t windowColumnIndex(const TableSchema& tbl, const std::string& name) {
     for (size_t i = 0; i < tbl.len; ++i) {
         if (tbl.cols[i].dataName == name) return i;
@@ -1478,23 +1488,22 @@ static size_t windowColumnIndex(const TableSchema& tbl, const std::string& name)
 
 static bool sameWindowPartition(const WindowInputRow& left,
                                 const WindowInputRow& right,
-                                const std::vector<size_t>& columns) {
+    const std::vector<size_t>& columns) {
     for (size_t column : columns) {
-        if (left.values[column] != right.values[column]) return false;
+        if (left.nulls[column] != right.nulls[column]) return false;
+        if (!left.nulls[column] &&
+            left.values[column] != right.values[column]) return false;
     }
     return true;
 }
 
 static bool sameWindowPeer(const WindowInputRow& left,
                            const WindowInputRow& right,
-                           size_t orderColumn,
-                           size_t columnCount) {
+    size_t orderColumn,
+    size_t columnCount) {
     return orderColumn >= columnCount ||
-           compareWindowValue(left.values[orderColumn], right.values[orderColumn]) == 0;
-}
-
-static std::string displayWindowValue(const std::string& value) {
-    return value.empty() ? "NULL" : value;
+           compareWindowCell(left.values[orderColumn], left.nulls[orderColumn],
+                             right.values[orderColumn], right.nulls[orderColumn]) == 0;
 }
 
 static bool parseWindowNumber(const std::string& value, double& out) {
@@ -1502,6 +1511,27 @@ static bool parseWindowNumber(const std::string& value, double& out) {
     char* end = nullptr;
     out = std::strtod(value.c_str(), &end);
     return end != value.c_str() && *end == '\0' && std::isfinite(out);
+}
+
+static std::string renderWindowArrayElement(const std::string& value,
+                                            bool isNull) {
+    if (isNull) return "NULL";
+    bool quote = value.empty() || value == "NULL";
+    for (unsigned char c : value) {
+        if (std::isspace(c) || c == ',' || c == '{' || c == '}' ||
+            c == '"' || c == '\\') {
+            quote = true;
+            break;
+        }
+    }
+    if (!quote) return value;
+    std::string result = "\"";
+    for (char c : value) {
+        if (c == '"' || c == '\\') result.push_back('\\');
+        result.push_back(c);
+    }
+    result.push_back('"');
+    return result;
 }
 
 } // namespace
@@ -1517,6 +1547,8 @@ WindowOp::WindowOp(OpPtr child, const TableSchema& tbl,
 
 bool WindowOp::open() {
     rows_.clear();
+    structuredRows_.clear();
+    structuredNulls_.clear();
     pos_ = 0;
     if (!child_->open()) return false;
 
@@ -1526,8 +1558,10 @@ bool WindowOp::open() {
         WindowInputRow row;
         row.raw = std::move(raw);
         row.values.reserve(tbl_.len);
+        row.nulls.reserve(tbl_.len);
         for (size_t i = 0; i < tbl_.len; ++i) {
             row.values.push_back(StorageEngine::extractColumnValueStatic(row.raw, tbl_, i));
+            row.nulls.push_back(child_->lastColumnIsNull(i));
         }
         input.push_back(std::move(row));
     }
@@ -1536,6 +1570,8 @@ bool WindowOp::open() {
 
     std::vector<std::vector<std::string>> computed(
         input.size(), std::vector<std::string>(functions_.size()));
+    std::vector<std::vector<bool>> computedNulls(
+        input.size(), std::vector<bool>(functions_.size(), true));
     for (size_t functionIndex = 0; functionIndex < functions_.size(); ++functionIndex) {
         const auto& function = functions_[functionIndex];
         std::vector<size_t> partitionColumns;
@@ -1569,11 +1605,16 @@ bool WindowOp::open() {
             const auto& leftRow = input[left];
             const auto& rightRow = input[right];
             for (size_t column : partitionColumns) {
-                const int cmp = compareWindowValue(leftRow.values[column], rightRow.values[column]);
+                const int cmp = compareWindowCell(
+                    leftRow.values[column], leftRow.nulls[column],
+                    rightRow.values[column], rightRow.nulls[column]);
                 if (cmp != 0) return cmp < 0;
             }
             if (orderColumn < tbl_.len) {
-                const int cmp = compareWindowValue(leftRow.values[orderColumn], rightRow.values[orderColumn], function.orderAscending);
+                const int cmp = compareWindowCell(
+                    leftRow.values[orderColumn], leftRow.nulls[orderColumn],
+                    rightRow.values[orderColumn], rightRow.nulls[orderColumn],
+                    function.orderAscending);
                 if (cmp != 0) return function.orderAscending ? cmp < 0 : cmp > 0;
             }
             return left < right;
@@ -1749,10 +1790,13 @@ bool WindowOp::open() {
 
             if (function.name == "row_number") {
                 computed[rowIndex][functionIndex] = std::to_string(position - partitionStart + 1);
+                computedNulls[rowIndex][functionIndex] = false;
             } else if (function.name == "rank") {
                 computed[rowIndex][functionIndex] = std::to_string(rank);
+                computedNulls[rowIndex][functionIndex] = false;
             } else if (function.name == "dense_rank") {
                 computed[rowIndex][functionIndex] = std::to_string(denseRank);
+                computedNulls[rowIndex][functionIndex] = false;
             } else if (function.name == "lag" || function.name == "lead") {
                 const size_t offset = std::max<size_t>(1, function.offset);
                 const bool hasTarget = function.name == "lag"
@@ -1761,12 +1805,18 @@ bool WindowOp::open() {
                 if (hasTarget) {
                     const size_t targetPosition = function.name == "lag"
                         ? position - offset : position + offset;
+                    const auto& targetRow = input[order[targetPosition]];
                     computed[rowIndex][functionIndex] =
-                        displayWindowValue(input[order[targetPosition]].values[argumentColumn]);
+                        targetRow.values[argumentColumn];
+                    computedNulls[rowIndex][functionIndex] =
+                        targetRow.nulls[argumentColumn];
                 } else if (function.hasDefault) {
-                    computed[rowIndex][functionIndex] = displayWindowValue(function.defaultValue);
+                    computed[rowIndex][functionIndex] = function.defaultValue;
+                    computedNulls[rowIndex][functionIndex] =
+                        function.defaultIsNull;
                 } else {
-                    computed[rowIndex][functionIndex] = "NULL";
+                    computed[rowIndex][functionIndex].clear();
+                    computedNulls[rowIndex][functionIndex] = true;
                 }
             } else if (function.name == "ntile") {
                 int64_t bucketCount = 1;
@@ -1775,17 +1825,18 @@ bool WindowOp::open() {
                 const size_t bucket = (position - partitionStart) * static_cast<size_t>(bucketCount) /
                     std::max<size_t>(1, partitionSize) + 1;
                 computed[rowIndex][functionIndex] = std::to_string(bucket);
+                computedNulls[rowIndex][functionIndex] = false;
             } else if (function.name == "percent_rank") {
                 const double value = partitionEnd - partitionStart <= 1
                     ? 0.0 : static_cast<double>(rank - 1) /
                         static_cast<double>(partitionEnd - partitionStart - 1);
-                char buffer[64];
                 computed[rowIndex][functionIndex] = float8Shortest(value);
+                computedNulls[rowIndex][functionIndex] = false;
             } else if (function.name == "cume_dist") {
                 const double value = static_cast<double>(peerEnd - partitionStart) /
                     static_cast<double>(std::max<size_t>(1, partitionEnd - partitionStart));
-                char buffer[64];
                 computed[rowIndex][functionIndex] = float8Shortest(value);
+                computedNulls[rowIndex][functionIndex] = false;
             } else {
                 const auto [frameBegin, frameEnd] = frameBounds(position);
                 int64_t count = 0;
@@ -1796,10 +1847,12 @@ bool WindowOp::open() {
                 bool boolValue = function.name == "bool_and" || function.name == "every";
                 bool boolSeen = false;
                 std::string selected;
-                std::vector<std::string> arrayElements;
+                bool selectedIsNull = true;
+                std::vector<std::pair<std::string, bool>> arrayElements;
                 for (size_t framePosition = frameBegin; framePosition < frameEnd; ++framePosition) {
                     if (rowIsExcluded(framePosition, position)) continue;
                     std::string value;
+                    bool valueIsNull = false;
                     if (boolAggWithExpr) {
                         // Per-row comparison evaluation ("v > 5"): substitute
                         // column tokens with this row's values.
@@ -1822,27 +1875,32 @@ bool WindowOp::open() {
                         flushTok();
                         auto r2 = dbms::ExprHelper::evalString(synth, {}, {}, "");
                         value = (r2.ok && !r2.isNull) ? r2.value : std::string{};
+                        valueIsNull = !r2.ok || r2.isNull;
                     } else {
                         value = function.argument == "*"
                             ? std::string{} : input[order[framePosition]].values[argumentColumn];
+                        valueIsNull = function.argument != "*" &&
+                            input[order[framePosition]].nulls[argumentColumn];
                     }
                     if (function.name == "count") {
-                        if (function.argument == "*" || !value.empty()) ++count;
+                        if (function.argument == "*" || !valueIsNull) ++count;
                         continue;
                     }
                     if (function.name == "first_value" && !hasValue) {
-                        selected = displayWindowValue(value);
+                        selected = value;
+                        selectedIsNull = valueIsNull;
                         hasValue = true;
                         continue;
                     }
                     if (function.name == "last_value") {
-                        selected = displayWindowValue(value);
+                        selected = value;
+                        selectedIsNull = valueIsNull;
                         hasValue = true;
                         continue;
                     }
                     if (function.name == "bool_and" || function.name == "every" ||
                         function.name == "bool_or") {
-                        if (value.empty()) continue;
+                        if (valueIsNull) continue;
                         boolSeen = true;
                         const bool truthyW = value == "true" || value == "t" || value == "1";
                         if (function.name == "bool_or") boolValue = boolValue || truthyW;
@@ -1850,10 +1908,10 @@ bool WindowOp::open() {
                         continue;
                     }
                     if (function.name == "array_agg") {
-                        arrayElements.push_back(value.empty() ? std::string("NULL") : value);
+                        arrayElements.push_back({std::move(value), valueIsNull});
                         continue;
                     }
-                    if (value.empty()) continue;
+                    if (valueIsNull) continue;
                     int64_t number = 0;
                     if (function.name == "sum" || function.name == "avg") {
                         if (!parseInteger(value, number)) {
@@ -1874,34 +1932,50 @@ bool WindowOp::open() {
                         }
                     } else if (function.name == "min" || function.name == "max") {
                         if (!hasValue || (function.name == "min"
-                                ? compareWindowValue(value, selected) < 0
-                                : compareWindowValue(value, selected) > 0)) {
+                                ? compareNonNullAggregateValue(value, selected) < 0
+                                : compareNonNullAggregateValue(value, selected) > 0)) {
                             selected = value;
+                            selectedIsNull = false;
                             hasValue = true;
                         }
                     }
                 }
                 if (function.name == "array_agg") {
-                    std::string rendered = "{";
-                    for (size_t ei = 0; ei < arrayElements.size(); ++ei) {
-                        if (ei > 0) rendered += ",";
-                        rendered += arrayElements[ei];
+                    if (arrayElements.empty()) {
+                        computed[rowIndex][functionIndex].clear();
+                        computedNulls[rowIndex][functionIndex] = true;
+                    } else {
+                        std::string rendered = "{";
+                        for (size_t ei = 0; ei < arrayElements.size(); ++ei) {
+                            if (ei > 0) rendered += ",";
+                            rendered += renderWindowArrayElement(
+                                arrayElements[ei].first,
+                                arrayElements[ei].second);
+                        }
+                        rendered += "}";
+                        computed[rowIndex][functionIndex] = std::move(rendered);
+                        computedNulls[rowIndex][functionIndex] = false;
                     }
-                    rendered += "}";
-                    computed[rowIndex][functionIndex] = rendered;
                 } else if (function.name == "count") {
                     computed[rowIndex][functionIndex] = std::to_string(count);
+                    computedNulls[rowIndex][functionIndex] = false;
                 } else if (function.name == "sum") {
-                    if (count == 0) { computed[rowIndex][functionIndex] = "NULL"; }
+                    if (count == 0) {
+                        computed[rowIndex][functionIndex].clear();
+                        computedNulls[rowIndex][functionIndex] = true;
+                    }
                     else if (exactSumOk) {
                         try { computed[rowIndex][functionIndex] = exactSum.toString(); }
                         catch (...) { computed[rowIndex][functionIndex] = std::to_string(sum); }
+                        computedNulls[rowIndex][functionIndex] = false;
                     } else {
                         computed[rowIndex][functionIndex] = std::to_string(sum);
+                        computedNulls[rowIndex][functionIndex] = false;
                     }
                 } else if (function.name == "avg") {
                     if (count == 0) {
-                        computed[rowIndex][functionIndex] = "NULL";
+                        computed[rowIndex][functionIndex].clear();
+                        computedNulls[rowIndex][functionIndex] = true;
                     } else if (exactSumOk) {
                         // PG avg(numeric): exact division with select_div_scale
                         try {
@@ -1911,18 +1985,26 @@ bool WindowOp::open() {
                             computed[rowIndex][functionIndex] =
                                 std::to_string(static_cast<double>(sum) / count);
                         }
+                        computedNulls[rowIndex][functionIndex] = false;
                     } else {
                         computed[rowIndex][functionIndex] =
                             std::to_string(static_cast<double>(sum) / count);
+                        computedNulls[rowIndex][functionIndex] = false;
                     }
                 } else if (function.name == "bool_and" || function.name == "every" ||
                            function.name == "bool_or") {
-                    computed[rowIndex][functionIndex] = boolSeen ? (boolValue ? "t" : "f") : "NULL";
+                    computed[rowIndex][functionIndex] =
+                        boolSeen ? (boolValue ? "t" : "f") : std::string{};
+                    computedNulls[rowIndex][functionIndex] = !boolSeen;
                 } else if (function.name == "first_value" || function.name == "last_value" ||
                            function.name == "min" || function.name == "max") {
-                    computed[rowIndex][functionIndex] = hasValue ? selected : "NULL";
+                    computed[rowIndex][functionIndex] = hasValue
+                        ? selected : std::string{};
+                    computedNulls[rowIndex][functionIndex] =
+                        !hasValue || selectedIsNull;
                 } else {
-                    computed[rowIndex][functionIndex] = "NULL";
+                    computed[rowIndex][functionIndex].clear();
+                    computedNulls[rowIndex][functionIndex] = true;
                 }
             }
         }
@@ -1930,8 +2012,12 @@ bool WindowOp::open() {
 
     struct OutputRow {
         std::string text;
+        std::vector<std::string> cells;
+        std::vector<bool> nulls;
         std::string sortKey;
+        bool sortKeyNull = false;
         std::vector<std::string> keys;
+        std::vector<bool> keyNulls;
     };
     std::vector<OutputRow> output;
     output.reserve(input.size());
@@ -1961,37 +2047,62 @@ bool WindowOp::open() {
     if (!finalOrderBy_.empty() && finalOrderColumn >= tbl_.len) return false;
     for (size_t rowIndex = 0; rowIndex < input.size(); ++rowIndex) {
         std::string line;
-        for (const auto& target : targets_) {
+        std::vector<std::string> cells;
+        std::vector<bool> nulls;
+        cells.reserve(targets_.size());
+        nulls.reserve(targets_.size());
+        for (size_t targetIndex = 0; targetIndex < targets_.size(); ++targetIndex) {
+            const auto& target = targets_[targetIndex];
             std::string value;
+            bool isNull = false;
             if (target.isWindow) {
                 if (target.windowIndex >= functions_.size()) return false;
                 value = computed[rowIndex][target.windowIndex];
+                isNull = computedNulls[rowIndex][target.windowIndex];
             } else {
                 const size_t column = windowColumnIndex(tbl_, target.column);
                 if (column >= tbl_.len) return false;
                 value = input[rowIndex].values[column];
-                if (value.empty() && !tbl_.cols[column].isNull) value = "NULL";
+                isNull = input[rowIndex].nulls[column];
             }
-            if (!line.empty()) line.push_back(' ');
-            line += value;
+            if (targetIndex != 0) line.push_back(' ');
+            line += isNull ? "NULL" : value;
+            cells.push_back(std::move(value));
+            nulls.push_back(isNull);
         }
-        output.push_back({std::move(line),
-                          finalOrderColumn < tbl_.len
-                              ? input[rowIndex].values[finalOrderColumn] : "",
-                          input[rowIndex].values});
+        OutputRow row;
+        row.text = std::move(line);
+        row.cells = std::move(cells);
+        row.nulls = std::move(nulls);
+        if (finalOrderColumn < tbl_.len) {
+            row.sortKey = input[rowIndex].values[finalOrderColumn];
+            row.sortKeyNull = input[rowIndex].nulls[finalOrderColumn];
+        }
+        row.keys = input[rowIndex].values;
+        row.keyNulls = input[rowIndex].nulls;
+        output.push_back(std::move(row));
     }
     if (finalOrderColumn < tbl_.len || !finalPartitionColumns.empty()) {
         std::stable_sort(output.begin(), output.end(), [&](const OutputRow& left, const OutputRow& right) {
             for (size_t column : finalPartitionColumns) {
-                const int cmp = compareWindowValue(left.keys[column], right.keys[column]);
+                const int cmp = compareWindowCell(
+                    left.keys[column], left.keyNulls[column],
+                    right.keys[column], right.keyNulls[column]);
                 if (cmp != 0) return cmp < 0;
             }
             if (finalOrderColumn >= tbl_.len) return false;
-            const int cmp = compareWindowValue(left.sortKey, right.sortKey, finalOrderAscending_);
+            const int cmp = compareWindowCell(
+                left.sortKey, left.sortKeyNull,
+                right.sortKey, right.sortKeyNull,
+                finalOrderAscending_);
             return finalOrderAscending_ ? cmp < 0 : cmp > 0;
         });
     }
-    for (auto& row : output) rows_.push_back(std::move(row.text));
+    for (auto& row : output) {
+        rows_.push_back(std::move(row.text));
+        structuredRows_.push_back(std::move(row.cells));
+        structuredNulls_.push_back(std::move(row.nulls));
+    }
     return true;
 }
 
@@ -2003,8 +2114,18 @@ bool WindowOp::next(std::string& outRow) {
     return true;
 }
 
+bool WindowOp::lastStructuredRow(std::vector<std::string>& cells,
+                                 std::vector<bool>& nulls) const {
+    if (pos_ == 0 || pos_ > structuredRows_.size()) return false;
+    cells = structuredRows_[pos_ - 1];
+    nulls = structuredNulls_[pos_ - 1];
+    return true;
+}
+
 void WindowOp::close() {
     rows_.clear();
+    structuredRows_.clear();
+    structuredNulls_.clear();
     pos_ = 0;
 }
 

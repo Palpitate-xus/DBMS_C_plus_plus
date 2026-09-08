@@ -3653,10 +3653,14 @@ static bool convertToVolcanoWindowSpec(const WindowFunc& wf,
     }
     if (args.size() == 3) {
         string defaultValue = args[2];
-        if (defaultValue.size() >= 2 &&
+        const bool quoted = defaultValue.size() >= 2 &&
             ((defaultValue.front() == '\'' && defaultValue.back() == '\'') ||
-             (defaultValue.front() == '"' && defaultValue.back() == '"'))) {
+             (defaultValue.front() == '"' && defaultValue.back() == '"'));
+        if (quoted) {
             defaultValue = defaultValue.substr(1, defaultValue.size() - 2);
+        } else if (toLower(trim(defaultValue)) == "null") {
+            defaultValue.clear();
+            spec.defaultIsNull = true;
         }
         spec.defaultValue = defaultValue;
         spec.hasDefault = true;
@@ -20060,11 +20064,9 @@ if (sql.rfind("backup database", 0) == 0) {
             return string("text");
         };
 
-        auto publishWindowProtocolMetadata = [&] {
-            if (!shouldPublishQueryMetadata()) return;
+        auto buildWindowProtocolMetadata = [&] {
             dbms::DmlResult metadata;
-            metadata.available = true;
-            metadata.metadataOnly = true;
+            if (!shouldPublishQueryMetadata()) return metadata;
             for (const auto& rawTarget : splitSelectColumns(columns)) {
                 string item = trim(rawTarget);
                 string alias;
@@ -20111,7 +20113,16 @@ if (sql.rfind("backup database", 0) == 0) {
                 metadata.columnTypes.push_back(std::move(type));
             }
             if (!metadata.columns.empty() &&
-                metadata.columns.size() == metadata.columnTypes.size())
+                metadata.columns.size() == metadata.columnTypes.size()) {
+                metadata.available = true;
+                metadata.metadataOnly = true;
+            }
+            return metadata;
+        };
+
+        auto publishWindowProtocolMetadata = [&] {
+            auto metadata = buildWindowProtocolMetadata();
+            if (metadata.available)
                 dbms::publishLastDmlResult(std::move(metadata));
         };
 
@@ -21303,7 +21314,19 @@ if (sql.rfind("backup database", 0) == 0) {
                     cout << row << endl;
                     log(s.username, row, getTime());
                 }
-                publishWindowProtocolMetadata();
+                auto windowResult = buildWindowProtocolMetadata();
+                if (windowResult.available &&
+                    execution.structuredRowsAvailable &&
+                    execution.structuredRows.size() == windowAnswers.size() &&
+                    execution.structuredNulls.size() == windowAnswers.size()) {
+                    windowResult.metadataOnly = false;
+                    windowResult.rows = std::move(execution.structuredRows);
+                    windowResult.nulls = std::move(execution.structuredNulls);
+                    windowResult.commandTag =
+                        "SELECT " + std::to_string(windowResult.rows.size());
+                }
+                if (windowResult.available)
+                    dbms::publishLastDmlResult(std::move(windowResult));
                 return false;
             }
 
