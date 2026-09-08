@@ -116,6 +116,16 @@ StorageEngine g_engine;
 // results must only be published by the outer statement, never by a nested
 // subquery that happens to use the same execution path.
 static thread_local unsigned executeDepth = 0;
+// A derived table executes recursively, but still needs the inner query's
+// typed column descriptor to build its temporary relation. The protocol
+// normally accepts results only from depth 1; this scoped depth is the one
+// internal metadata-consumer exception.
+static thread_local unsigned metadataCaptureDepth = 0;
+
+static bool shouldPublishQueryMetadata() {
+    return executeDepth == 1 ||
+           (metadataCaptureDepth != 0 && executeDepth == metadataCaptureDepth);
+}
 
 // ========================================================================
 // Slow query log enhancements
@@ -6110,7 +6120,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
     // Keep the CLI rendering below for interactive users, but publish exact
     // cells for the network layer.  This bypasses whitespace/newline parsing
     // and carries SQL NULL separately from empty or literal "NULL" text.
-    if (executeDepth == 1 && !hasLegacyScalarSubquery) {
+    if (shouldPublishQueryMetadata() && !hasLegacyScalarSubquery) {
         dbms::DmlResult queryResult;
         queryResult.available = true;
         queryResult.columns = headers;
@@ -9005,14 +9015,27 @@ static std::vector<std::string> runDerivedSubQuery(const std::string& rawSql, Se
 // with captured output, so arbitrary SELECT shapes (aggregates, GROUP BY,
 // joins, nested derived tables, scalar functions) work inside FROM (...)
 // and WITH clauses.  Falls back to the minimal legacy parser on failure.
-static std::vector<std::string> runDerivedSubQueryFull(const std::string& rawSql, Session& s,
-                                                       std::vector<std::string>& outColNames) {
+static std::vector<std::string> runDerivedSubQueryFull(
+    const std::string& rawSql, Session& s,
+    std::vector<std::string>& outColNames,
+    std::vector<std::string>* outColTypes = nullptr) {
     std::stringstream captured;
+    const unsigned previousCaptureDepth = metadataCaptureDepth;
+    metadataCaptureDepth = executeDepth + 1;
+    dbms::clearLastDmlResult();
+    bool failed = false;
     {
         dbms::ScopedOutputCapture cap(captured);
-        bool failed = execute(rawSql, s);
-        if (failed) return {};
+        try {
+            failed = execute(rawSql, s);
+        } catch (...) {
+            metadataCaptureDepth = previousCaptureDepth;
+            throw;
+        }
     }
+    dbms::DmlResult nestedResult = dbms::takeLastDmlResult();
+    metadataCaptureDepth = previousCaptureDepth;
+    if (failed) return {};
     std::vector<std::string> lines;
     {
         std::string ln;
@@ -9031,6 +9054,14 @@ static std::vector<std::string> runDerivedSubQueryFull(const std::string& rawSql
         while (hss >> col) outColNames.push_back(col);
     }
     if (outColNames.empty()) return {};
+    if (outColTypes) {
+        outColTypes->clear();
+        if (nestedResult.available &&
+            nestedResult.columns.size() == outColNames.size() &&
+            nestedResult.columnTypes.size() == outColNames.size()) {
+            *outColTypes = std::move(nestedResult.columnTypes);
+        }
+    }
     std::vector<std::string> rows(lines.begin() + 1, lines.end());
     return rows;
 }
@@ -9078,16 +9109,15 @@ static std::string createTempTableFromRows(Session& s,
         const auto& cname = colNames[index];
         Column col;
         const std::string type = index < colTypes.size() ? colTypes[index] : "";
-        if (type == "integer") {
+        if (type == "smallint" || type == "int2") {
+            col = makeIntColumn(cname, true, 0);
+        } else if (type == "integer" || type == "int" || type == "int4") {
             col = makeIntColumn(cname, true, 2);
-        } else if (type == "bigint") {
+        } else if (type == "bigint" || type == "int8") {
             col = makeIntColumn(cname, true, 3);
         } else {
-            col.dataName = cname;
-            col.dataType = "varchar";
-            col.isVariableLength = true;
-            col.dsize = 255;
-            col.isNull = true;
+            col = makeVarCharColumn(cname, true, 65535);
+            if (!type.empty()) col.dataType = type;
         }
         tmpTbl.append(col);
     }
@@ -9405,13 +9435,16 @@ static std::string processCTEs(const std::string& sql, Session& s, bool& failed)
             }
         } else {
             // Non-recursive CTE: execute and store
-            auto rows = runDerivedSubQueryFull(innerSelect, s, colNames);
+            std::vector<std::string> colTypes;
+            auto rows = runDerivedSubQueryFull(
+                innerSelect, s, colNames, &colTypes);
             if (colNames.empty()) {
                 colNames.clear();
                 rows = runDerivedSubQuery(innerSelect, s, colNames);
             }
             if (colNames.empty()) break;
-            tmpName = createTempTableFromRows(s, rows, colNames, cteCount);
+            tmpName = createTempTableFromRows(
+                s, rows, colNames, cteCount, colTypes);
             if (tmpName.empty()) break;
         }
         } // end if (!isDmlCte)
@@ -9563,7 +9596,9 @@ static std::string processDerivedTables(const std::string& sql, Session& s) {
         std::string afterParen = trim(result.substr(parenEnd + 1));
         std::string innerSelect = trim(result.substr(parenStart + 1, parenEnd - parenStart - 1));
         std::vector<std::string> colNames;
-        auto rows = runDerivedSubQueryFull(innerSelect, s, colNames);
+        std::vector<std::string> colTypes;
+        auto rows = runDerivedSubQueryFull(
+            innerSelect, s, colNames, &colTypes);
         if (colNames.empty()) {
             colNames.clear();
             rows = runDerivedSubQuery(innerSelect, s, colNames);
@@ -9571,7 +9606,8 @@ static std::string processDerivedTables(const std::string& sql, Session& s) {
         if (colNames.empty()) break;
 
         int counter = derivedCount;
-        const auto colTypes = inferIntegerLiteralDerivedTypes(innerSelect, colNames);
+        if (colTypes.empty())
+            colTypes = inferIntegerLiteralDerivedTypes(innerSelect, colNames);
         std::string tmpName = createTempTableFromRows(
             s, rows, colNames, counter, colTypes);
         if (tmpName.empty()) break;
@@ -17810,11 +17846,28 @@ if (sql.rfind("backup database", 0) == 0) {
                     if (fp != string::npos) {
                         string subq = "from (" + expandedSql + ") as __view_" + tnameOrig;
                         expanded = expanded.substr(0, fp) + subq + expanded.substr(fp + pattern.size());
-                        return execute(expanded, s);
+                        const unsigned previousCaptureDepth = metadataCaptureDepth;
+                        metadataCaptureDepth = executeDepth + 1;
+                        try {
+                            const bool failed = execute(expanded, s);
+                            metadataCaptureDepth = previousCaptureDepth;
+                            return failed;
+                        } catch (...) {
+                            metadataCaptureDepth = previousCaptureDepth;
+                            throw;
+                        }
                     }
                     // Fallback: execute view standalone
-                    execute(expandedSql, s);
-                    return false;
+                    const unsigned previousCaptureDepth = metadataCaptureDepth;
+                    metadataCaptureDepth = executeDepth + 1;
+                    try {
+                        const bool failed = execute(expandedSql, s);
+                        metadataCaptureDepth = previousCaptureDepth;
+                        return failed;
+                    } catch (...) {
+                        metadataCaptureDepth = previousCaptureDepth;
+                        throw;
+                    }
                 }
             }
             cout << "Table " << tnameOrig << " not exist" << endl;
@@ -19605,7 +19658,7 @@ if (sql.rfind("backup database", 0) == 0) {
                 }
             }
             cout << '\n';
-            if (executeDepth == 1 && !groupProtocolColumns.empty() &&
+            if (shouldPublishQueryMetadata() && !groupProtocolColumns.empty() &&
                 groupProtocolColumns.size() == groupProtocolTypes.size()) {
                 dbms::DmlResult metadata;
                 metadata.available = true;
@@ -20136,7 +20189,7 @@ if (sql.rfind("backup database", 0) == 0) {
                     cout << renderLegacyHeader(selectExprs[ei].displayName) << ' ';
             }
             cout << '\n';
-            if (executeDepth == 1) {
+            if (shouldPublishQueryMetadata()) {
                 vector<string> protocolColumns;
                 vector<string> protocolTypes;
                 size_t ai = 0;
@@ -21139,7 +21192,7 @@ if (sql.rfind("backup database", 0) == 0) {
                 }
             }
             cout << '\n';
-            if (executeDepth == 1 && !protocolColumns.empty()) {
+            if (shouldPublishQueryMetadata() && !protocolColumns.empty()) {
                 dbms::DmlResult metadata;
                 metadata.available = true;
                 metadata.metadataOnly = true;
