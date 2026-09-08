@@ -151,6 +151,8 @@
 
 | 303 | P0-02 / SQL-12 / TYPE-02 / QRY-02 / QRY-05 / PROTO-04 | 派生表和非递归 CTE 虽能捕获内部查询的结构化结果，物化时仍只读取空格拼接的显示行并用流提取，导致含空格文本截断，空串、字面量 `NULL` 与 SQL NULL 全部丢失。内部查询现在输出精确 cells/NULL 位图，临时表通过可空 `SqlRow` 逐格插入；无结构化结果时才保留 legacy 回退 | `derived_type_protocol_e2e_test` 同时覆盖派生表与 CTE 的含空格、空串、字面量 `NULL`、SQL NULL、首尾空白、嵌入换行以及 int/text OID；CTE 边界、字面量、结构化协议、review SQL、DIV-14、O2 构建及实际 PostgreSQL `cases=122 failed=0` 通过 | `58509b2` |
 
+| 304 | P0-02 / SQL-12 / TYPE-02 / QRY-02 / QRY-03 / PROTO-04 | LATERAL 仍把左右结果拼成显示字符串再按空白物化，左值 NULL 又被替换成空字面量，导致空格文本、空串、字面量 `NULL`、SQL NULL 和多匹配行失真；空左表甚至把未处理的 LATERAL 语法交给普通 FROM 并报缺表。左扫描现在保留 RID/NULL，逐左行子查询保留结构化 cells/NULL，组合后通过 `SqlRow` 物化；空左表以 NULL 关联值探测右侧 descriptor 并返回有类型的空结果 | `derived_type_protocol_e2e_test` 覆盖 CROSS/逗号 LATERAL、左右空格/空串/字面量 `NULL`/SQL NULL、一个左行多个右行、空左表、列名、OID 和 tag；字面量、结构化协议、DIV-14、O2 构建及实际 PostgreSQL `cases=122 failed=0` 通过 | `94d03c7` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
