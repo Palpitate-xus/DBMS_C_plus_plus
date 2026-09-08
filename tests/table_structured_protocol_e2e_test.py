@@ -117,6 +117,27 @@ def main():
         assert plain_alias_rows == plain_alias_expected, (
             plain_alias_rows, plain_alias_expected)
 
+        plain_distinct_sql = (
+            "SELECT DISTINCT v FROM exact_scalar_or_rows ORDER BY v;")
+        plain_distinct_rows, plain_distinct_state, plain_distinct_message, _ = (
+            runner.ours_query(client, server["sock"], plain_distinct_sql))
+        assert plain_distinct_state is None, (
+            plain_distinct_state, plain_distinct_message)
+        assert plain_distinct_rows == [
+            ["NULL"], ["line\nbreak"], ["same"], [None],
+        ], plain_distinct_rows
+
+        plain_slice_sql = (
+            "SELECT v FROM exact_table_rows "
+            "ORDER BY id LIMIT 3 OFFSET 2;")
+        plain_slice_rows, plain_slice_state, plain_slice_message, _ = (
+            runner.ours_query(client, server["sock"], plain_slice_sql))
+        assert plain_slice_state is None, (
+            plain_slice_state, plain_slice_message)
+        assert plain_slice_rows == [
+            [None], ["NULL"], ["line1\nline2"],
+        ], plain_slice_rows
+
         scalar_cases = [
             (
                 "SELECT upper(v) AS rendered FROM exact_table_rows "

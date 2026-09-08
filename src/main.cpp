@@ -21742,8 +21742,7 @@ if (sql.rfind("backup database", 0) == 0) {
                 simpleStructuredPlainPredicate &&
                 semiJoins.empty() && existenceFilters.empty() &&
                 quantifiedSubqueries.empty() && exprOrderBySpecs.empty() &&
-                !isDistinct && distinctOnCols.empty() &&
-                limitPos == string::npos && offsetPos == string::npos &&
+                distinctOnCols.empty() &&
                 !forUpdate && !noWait && !skipLocked && outfile.empty() &&
                 queryDb != "information_schema" && queryDb != "pg_catalog" &&
                 (s.onlyNext ||
@@ -22256,6 +22255,27 @@ if (sql.rfind("backup database", 0) == 0) {
                 answers = std::move(dedupedAnswers);
                 structuredScalarResult.rows = std::move(dedupedRows);
                 structuredScalarResult.nulls = std::move(dedupedNulls);
+            } else if (structuredPlainRows &&
+                       structuredPlainResult.rows.size() == answers.size() &&
+                       structuredPlainResult.nulls.size() == answers.size()) {
+                set<pair<vector<string>, vector<bool>>> seen;
+                vector<string> dedupedAnswers;
+                vector<vector<string>> dedupedRows;
+                vector<vector<bool>> dedupedNulls;
+                for (size_t i = 0; i < answers.size(); ++i) {
+                    const auto key = make_pair(
+                        structuredPlainResult.rows[i],
+                        structuredPlainResult.nulls[i]);
+                    if (!seen.insert(key).second) continue;
+                    dedupedAnswers.push_back(std::move(answers[i]));
+                    dedupedRows.push_back(
+                        std::move(structuredPlainResult.rows[i]));
+                    dedupedNulls.push_back(
+                        std::move(structuredPlainResult.nulls[i]));
+                }
+                answers = std::move(dedupedAnswers);
+                structuredPlainResult.rows = std::move(dedupedRows);
+                structuredPlainResult.nulls = std::move(dedupedNulls);
             } else {
                 vector<string> deduped;
                 set<string> seen;
@@ -22269,25 +22289,31 @@ if (sql.rfind("backup database", 0) == 0) {
             structuredScalarRows &&
             structuredScalarResult.rows.size() == answers.size() &&
             structuredScalarResult.nulls.size() == answers.size();
-        if (canSliceStructuredScalar) {
+        const bool canSliceStructuredPlain =
+            structuredPlainRows &&
+            structuredPlainResult.rows.size() == answers.size() &&
+            structuredPlainResult.nulls.size() == answers.size();
+        if (canSliceStructuredScalar || canSliceStructuredPlain) {
+            auto& slicedRows = canSliceStructuredScalar
+                ? structuredScalarResult.rows : structuredPlainResult.rows;
+            auto& slicedNulls = canSliceStructuredScalar
+                ? structuredScalarResult.nulls : structuredPlainResult.nulls;
             size_t count = 0, offset = 0;
             const bool finiteLimit = parseLimitOffset(count, offset);
             if (offset >= answers.size()) {
                 answers.clear();
-                structuredScalarResult.rows.clear();
-                structuredScalarResult.nulls.clear();
+                slicedRows.clear();
+                slicedNulls.clear();
             } else {
                 answers.erase(answers.begin(), answers.begin() + offset);
-                structuredScalarResult.rows.erase(
-                    structuredScalarResult.rows.begin(),
-                    structuredScalarResult.rows.begin() + offset);
-                structuredScalarResult.nulls.erase(
-                    structuredScalarResult.nulls.begin(),
-                    structuredScalarResult.nulls.begin() + offset);
+                slicedRows.erase(
+                    slicedRows.begin(), slicedRows.begin() + offset);
+                slicedNulls.erase(
+                    slicedNulls.begin(), slicedNulls.begin() + offset);
                 if (finiteLimit && count < answers.size()) {
                     answers.resize(count);
-                    structuredScalarResult.rows.resize(count);
-                    structuredScalarResult.nulls.resize(count);
+                    slicedRows.resize(count);
+                    slicedNulls.resize(count);
                 }
             }
         } else {
