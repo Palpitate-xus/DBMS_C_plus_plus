@@ -81,6 +81,50 @@ def main():
         assert type_oids == [23, 25, 25], type_oids
         assert command_tag == "SELECT 4", command_tag
 
+        ordered_sql = (
+            "SELECT l.id, l.txt FROM join_exact_left l "
+            "JOIN join_exact_right r ON l.id = r.id "
+            "ORDER BY r.txt DESC NULLS LAST, l.id DESC LIMIT 2 OFFSET 1;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], ordered_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [["4", "a b"], ["2", None]], rows
+        assert headers == ["id", "txt"], headers
+        assert type_oids == [23, 25], type_oids
+        assert command_tag == "SELECT 2", command_tag
+
+        alias_order_sql = (
+            "SELECT l.id, r.txt AS value FROM join_exact_left l "
+            "JOIN join_exact_right r ON l.id = r.id "
+            "ORDER BY value ASC NULLS FIRST;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], alias_order_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [
+            ["3", None], ["2", ""], ["4", "NULL"], ["1", "r one"]
+        ], rows
+        assert headers == ["id", "value"], headers
+        assert type_oids == [23, 25], type_oids
+        assert command_tag == "SELECT 4", command_tag
+
+        ordinal_order_sql = (
+            "SELECT l.id, l.txt FROM join_exact_left l "
+            "JOIN join_exact_right r ON l.id = r.id ORDER BY 1 DESC;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], ordinal_order_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [
+            ["4", "a b"], ["3", "NULL"], ["2", None], ["1", ""]
+        ], rows
+        assert type_oids == [23, 25], type_oids
+        assert command_tag == "SELECT 4", command_tag
+
         left_sql = (
             "SELECT l.id, l.txt, r.txt FROM join_exact_left l "
             "LEFT JOIN join_exact_right r ON l.id = r.id ORDER BY l.id;")

@@ -17449,7 +17449,6 @@ if (sql.rfind("backup database", 0) == 0) {
                     return rightTable + "." + name;
                 return column;
             };
-            set<string> selectCols;
             vector<string> requestedCols;
             vector<string> requestedHeaders;
             if (!selectAll) {
@@ -17469,7 +17468,6 @@ if (sql.rfind("backup database", 0) == 0) {
                         outputName = dot == string::npos
                             ? expression : expression.substr(dot + 1);
                     }
-                    selectCols.insert(source);
                     requestedCols.push_back(std::move(source));
                     requestedHeaders.push_back(std::move(outputName));
                 }
@@ -17515,8 +17513,6 @@ if (sql.rfind("backup database", 0) == 0) {
 
 
             vector<string> condTokens;
-            // Aggregate interception needs every joined column available.
-            if (pureJoinAgg) selectCols.clear();
             if (wherePos != string::npos) {
                 size_t condEnd = (orderPos != string::npos) ? orderPos : sql.size();
                 string whereClause = trim(sql.substr(wherePos + 5, condEnd - wherePos - 5));
@@ -17655,27 +17651,28 @@ if (sql.rfind("backup database", 0) == 0) {
             vector<string> answers;
             vector<vector<string>> joinRows;
             vector<vector<bool>> joinNulls;
+            const set<string> allJoinColumns;
             auto runJoin = [&](const vector<string>& conds,
                                vector<vector<string>>* rows,
                                vector<vector<bool>>* nulls) -> vector<string> {
                 if (jt == JoinType::Left) {
                     return g_engine.leftJoin(s.currentDB, leftTable, rightTable,
-                                              leftOnCol, rightOnCol, conds, selectCols,
+                                              leftOnCol, rightOnCol, conds, allJoinColumns,
                                               rows, nulls);
                 } else if (jt == JoinType::Right) {
                     return g_engine.rightJoin(s.currentDB, leftTable, rightTable,
-                                               leftOnCol, rightOnCol, conds, selectCols,
+                                               leftOnCol, rightOnCol, conds, allJoinColumns,
                                                rows, nulls);
                 } else if (jt == JoinType::FullOuter) {
                     return g_engine.fullOuterJoin(s.currentDB, leftTable, rightTable,
-                                                   leftOnCol, rightOnCol, conds, selectCols,
+                                                   leftOnCol, rightOnCol, conds, allJoinColumns,
                                                    rows, nulls);
                 } else if (jt == JoinType::Cross) {
                     return g_engine.crossJoin(s.currentDB, leftTable, rightTable,
-                                              conds, selectCols, rows, nulls);
+                                              conds, allJoinColumns, rows, nulls);
                 } else {
                     return g_engine.join(s.currentDB, leftTable, rightTable,
-                                          leftOnCol, rightOnCol, conds, selectCols,
+                                          leftOnCol, rightOnCol, conds, allJoinColumns,
                                           rows, nulls);
                 }
             };
@@ -17719,24 +17716,6 @@ if (sql.rfind("backup database", 0) == 0) {
                         }
                     }
                 }
-            }
-            if (isDistinct) {
-                vector<string> deduped;
-                vector<vector<string>> dedupedRows;
-                vector<vector<bool>> dedupedNulls;
-                set<string> seen;
-                for (size_t i = 0; i < answers.size(); ++i) {
-                    if (i >= joinRows.size() || i >= joinNulls.size()) break;
-                    const string key = joinRowIdentity(joinRows[i], joinNulls[i]);
-                    if (seen.insert(key).second) {
-                        deduped.push_back(std::move(answers[i]));
-                        dedupedRows.push_back(std::move(joinRows[i]));
-                        dedupedNulls.push_back(std::move(joinNulls[i]));
-                    }
-                }
-                answers = std::move(deduped);
-                joinRows = std::move(dedupedRows);
-                joinNulls = std::move(dedupedNulls);
             }
             if (pureJoinAgg) {
                 // Aggregate exact joined cells.  SQL NULL is carried by the
@@ -17838,6 +17817,266 @@ if (sql.rfind("backup database", 0) == 0) {
                 }
                 return false;
             }
+            // Keep the complete two-relation row through projection so ORDER BY
+            // can reference a non-output column, as PostgreSQL permits.
+            vector<vector<string>> sourceRows = std::move(joinRows);
+            vector<vector<bool>> sourceNulls = std::move(joinNulls);
+            answers.clear();
+            joinRows.clear();
+            joinNulls.clear();
+            answers.reserve(sourceRows.size());
+            joinRows.reserve(sourceRows.size());
+            joinNulls.reserve(sourceRows.size());
+            auto sourceCellIndex = [&](const string& column) -> int {
+                const auto position = enginePos(column);
+                if (position.first == 0 && position.second >= 0)
+                    return position.second;
+                if (position.first == 1 && position.second >= 0)
+                    return static_cast<int>(leftTbl.len) + position.second;
+                return -1;
+            };
+            for (size_t rowIndex = 0; rowIndex < sourceRows.size(); ++rowIndex) {
+                if (rowIndex >= sourceNulls.size()) break;
+                vector<string> cells;
+                vector<bool> nulls;
+                if (selectAll) {
+                    cells = sourceRows[rowIndex];
+                    nulls = sourceNulls[rowIndex];
+                } else {
+                    cells.reserve(requestedCols.size());
+                    nulls.reserve(requestedCols.size());
+                    for (const auto& column : requestedCols) {
+                        const int at = sourceCellIndex(column);
+                        const bool isNull = at < 0 ||
+                            static_cast<size_t>(at) >= sourceRows[rowIndex].size() ||
+                            static_cast<size_t>(at) >= sourceNulls[rowIndex].size() ||
+                            sourceNulls[rowIndex][at];
+                        cells.push_back(isNull ? string{} : sourceRows[rowIndex][at]);
+                        nulls.push_back(isNull);
+                    }
+                }
+                string display;
+                for (size_t i = 0; i < cells.size(); ++i) {
+                    if (i != 0) display.push_back(' ');
+                    display += nulls[i] ? "NULL" : cells[i];
+                }
+                answers.push_back(std::move(display));
+                joinRows.push_back(std::move(cells));
+                joinNulls.push_back(std::move(nulls));
+            }
+
+            // DISTINCT applies to the projected row, not hidden ORDER BY cells.
+            if (isDistinct) {
+                vector<string> deduped;
+                vector<vector<string>> dedupedRows, dedupedSources;
+                vector<vector<bool>> dedupedNulls, dedupedSourceNulls;
+                set<string> seen;
+                for (size_t i = 0; i < answers.size(); ++i) {
+                    const string key = joinRowIdentity(joinRows[i], joinNulls[i]);
+                    if (!seen.insert(key).second) continue;
+                    deduped.push_back(std::move(answers[i]));
+                    dedupedRows.push_back(std::move(joinRows[i]));
+                    dedupedNulls.push_back(std::move(joinNulls[i]));
+                    dedupedSources.push_back(std::move(sourceRows[i]));
+                    dedupedSourceNulls.push_back(std::move(sourceNulls[i]));
+                }
+                answers = std::move(deduped);
+                joinRows = std::move(dedupedRows);
+                joinNulls = std::move(dedupedNulls);
+                sourceRows = std::move(dedupedSources);
+                sourceNulls = std::move(dedupedSourceNulls);
+            }
+
+            struct JoinOrderKey {
+                bool projected = false;
+                size_t index = 0;
+                bool ascending = true;
+                bool nullsFirst = false;
+                const Column* column = nullptr;
+            };
+            vector<JoinOrderKey> joinOrderKeys;
+            if (orderPos != string::npos) {
+                size_t orderEnd = sql.size();
+                if (limitPos != string::npos && limitPos > orderPos)
+                    orderEnd = min(orderEnd, limitPos);
+                if (offsetPos != string::npos && offsetPos > orderPos)
+                    orderEnd = min(orderEnd, offsetPos);
+                const string orderText = trim(
+                    sql.substr(orderPos + 8, orderEnd - orderPos - 8));
+                vector<string> parts;
+                string current;
+                int depth = 0;
+                char quote = '\0';
+                for (char c : orderText) {
+                    if ((c == '\'' || c == '"')) {
+                        if (quote == '\0') quote = c;
+                        else if (quote == c) quote = '\0';
+                    }
+                    if (quote == '\0') {
+                        if (c == '(') ++depth;
+                        else if (c == ')') --depth;
+                    }
+                    if (c == ',' && depth == 0 && quote == '\0') {
+                        parts.push_back(trim(current));
+                        current.clear();
+                    } else {
+                        current.push_back(c);
+                    }
+                }
+                if (!trim(current).empty()) parts.push_back(trim(current));
+
+                for (string part : parts) {
+                    string lowerPart = toLower(part);
+                    bool ascending = true;
+                    bool nullsSpecified = false;
+                    bool nullsFirst = false;
+                    const size_t nullsPos = lowerPart.rfind(" nulls ");
+                    if (nullsPos != string::npos) {
+                        const string placement = trim(
+                            lowerPart.substr(nullsPos + 7));
+                        if (placement != "first" && placement != "last") {
+                            cout << "ERROR: invalid JOIN ORDER BY NULLS clause" << endl;
+                            return true;
+                        }
+                        nullsFirst = placement == "first";
+                        nullsSpecified = true;
+                        part = trim(part.substr(0, nullsPos));
+                        lowerPart = toLower(part);
+                    }
+                    if (lowerPart.size() >= 5 &&
+                        lowerPart.compare(lowerPart.size() - 5, 5, " desc") == 0) {
+                        ascending = false;
+                        part = trim(part.substr(0, part.size() - 5));
+                    } else if (lowerPart.size() >= 4 &&
+                               lowerPart.compare(lowerPart.size() - 4, 4, " asc") == 0) {
+                        part = trim(part.substr(0, part.size() - 4));
+                    }
+                    if (!nullsSpecified) nullsFirst = !ascending;
+
+                    JoinOrderKey key;
+                    key.ascending = ascending;
+                    key.nullsFirst = nullsFirst;
+                    bool resolved = false;
+                    try {
+                        size_t consumed = 0;
+                        const size_t ordinal = stoull(part, &consumed);
+                        if (consumed == part.size() && ordinal > 0 &&
+                            ordinal <= (selectAll
+                                ? leftTbl.len + rightTbl.len
+                                : requestedCols.size())) {
+                            key.projected = true;
+                            key.index = ordinal - 1;
+                            resolved = true;
+                        }
+                    } catch (...) {}
+                    string decodedPart = decodeQuotedIdentifier(part);
+                    if (!resolved && !selectAll) {
+                        for (size_t i = 0; i < requestedHeaders.size(); ++i) {
+                            if (decodedPart == requestedHeaders[i]) {
+                                key.projected = true;
+                                key.index = i;
+                                resolved = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!resolved) {
+                        const string source = normalizeJoinColumn(part);
+                        const int at = sourceCellIndex(source);
+                        if (at >= 0) {
+                            key.index = static_cast<size_t>(at);
+                            const auto position = enginePos(source);
+                            key.column = position.first == 0
+                                ? &leftTbl.cols[position.second]
+                                : &rightTbl.cols[position.second];
+                            resolved = true;
+                        }
+                    }
+                    if (!resolved || part.find_first_of("()+-*/%") != string::npos) {
+                        cout << "ERROR: unsupported JOIN ORDER BY expression (SQLSTATE 0A000)"
+                             << endl;
+                        return true;
+                    }
+                    if (key.projected && !selectAll && key.index < requestedCols.size()) {
+                        const auto position = enginePos(requestedCols[key.index]);
+                        if (position.first == 0 && position.second >= 0)
+                            key.column = &leftTbl.cols[position.second];
+                        else if (position.first == 1 && position.second >= 0)
+                            key.column = &rightTbl.cols[position.second];
+                    } else if (key.projected && selectAll) {
+                        key.column = key.index < leftTbl.len
+                            ? &leftTbl.cols[key.index]
+                            : &rightTbl.cols[key.index - leftTbl.len];
+                    }
+                    if (isDistinct && !key.projected) {
+                        bool appearsInOutput = false;
+                        for (const auto& column : requestedCols)
+                            if (sourceCellIndex(column) == static_cast<int>(key.index))
+                                appearsInOutput = true;
+                        if (!appearsInOutput) {
+                            cout << "ERROR: for SELECT DISTINCT, ORDER BY expressions "
+                                    "must appear in select list (SQLSTATE 42P10)" << endl;
+                            return true;
+                        }
+                    }
+                    joinOrderKeys.push_back(key);
+                }
+            }
+
+            if (!joinOrderKeys.empty()) {
+                vector<size_t> order(answers.size());
+                iota(order.begin(), order.end(), 0);
+                auto compareValues = [](const string& left, const string& right,
+                                        const Column* column) {
+                    const string type = column ? toLower(column->dataType) : "";
+                    const bool numeric = type == "smallint" || type == "tinyint" ||
+                        type == "int" || type == "integer" || type == "long" ||
+                        type == "bigint" || type == "float" || type == "double" ||
+                        type == "real" || type == "decimal" || type == "numeric" ||
+                        type.find(" unsigned") != string::npos;
+                    if (numeric) {
+                        try {
+                            const dbms::Numeric leftNumber(left);
+                            const dbms::Numeric rightNumber(right);
+                            if (leftNumber < rightNumber) return -1;
+                            if (leftNumber > rightNumber) return 1;
+                            return 0;
+                        }
+                        catch (...) {}
+                    }
+                    if (left < right) return -1;
+                    if (left > right) return 1;
+                    return 0;
+                };
+                stable_sort(order.begin(), order.end(), [&](size_t left, size_t right) {
+                    for (const auto& key : joinOrderKeys) {
+                        const auto& leftCells = key.projected ? joinRows[left] : sourceRows[left];
+                        const auto& rightCells = key.projected ? joinRows[right] : sourceRows[right];
+                        const auto& leftNulls = key.projected ? joinNulls[left] : sourceNulls[left];
+                        const auto& rightNulls = key.projected ? joinNulls[right] : sourceNulls[right];
+                        const bool leftNull = key.index >= leftNulls.size() || leftNulls[key.index];
+                        const bool rightNull = key.index >= rightNulls.size() || rightNulls[key.index];
+                        if (leftNull != rightNull) return leftNull ? key.nullsFirst : !key.nullsFirst;
+                        if (leftNull) continue;
+                        const int comparison = compareValues(
+                            leftCells[key.index], rightCells[key.index], key.column);
+                        if (comparison != 0)
+                            return key.ascending ? comparison < 0 : comparison > 0;
+                    }
+                    return false;
+                });
+                auto reorder = [&](auto& values) {
+                    using Value = typename decay_t<decltype(values)>::value_type;
+                    vector<Value> sorted;
+                    sorted.reserve(values.size());
+                    for (size_t index : order) sorted.push_back(std::move(values[index]));
+                    values = std::move(sorted);
+                };
+                reorder(answers);
+                reorder(joinRows);
+                reorder(joinNulls);
+            }
+
             auto applyStructuredJoinLimit = [&] {
                 size_t count = 0, offset = 0;
                 const bool finiteLimit = parseLimitOffset(count, offset);
@@ -17848,77 +18087,15 @@ if (sql.rfind("backup database", 0) == 0) {
                     return;
                 }
                 answers.erase(answers.begin(), answers.begin() + offset);
-                if (offset <= joinRows.size())
-                    joinRows.erase(joinRows.begin(), joinRows.begin() + offset);
-                if (offset <= joinNulls.size())
-                    joinNulls.erase(joinNulls.begin(), joinNulls.begin() + offset);
+                joinRows.erase(joinRows.begin(), joinRows.begin() + offset);
+                joinNulls.erase(joinNulls.begin(), joinNulls.begin() + offset);
                 if (finiteLimit && count < answers.size()) {
                     answers.resize(count);
-                    if (count < joinRows.size()) joinRows.resize(count);
-                    if (count < joinNulls.size()) joinNulls.resize(count);
+                    joinRows.resize(count);
+                    joinNulls.resize(count);
                 }
             };
             applyStructuredJoinLimit();
-            // Permute each row's cells into the requested projection order
-            // (engine layout is left columns then right columns).
-            if (!selectAll && !requestedCols.empty()) {
-                vector<string> permuted;
-                vector<vector<string>> permutedRows;
-                vector<vector<bool>> permutedNulls;
-                permuted.reserve(answers.size());
-                permutedRows.reserve(answers.size());
-                permutedNulls.reserve(answers.size());
-                // Reconstruct which engine positions survived: the engine
-                // keeps left columns in order, then right columns.
-                vector<pair<int,int>> kept;
-                for (size_t i = 0; i < leftTbl.len; ++i) {
-                    string n = leftTbl.cols[i].dataName;
-                    if (selectCols.count(n) ||
-                        selectCols.count(leftTable + "." + n))
-                        kept.push_back({0, static_cast<int>(i)});
-                }
-                for (size_t i = 0; i < rightTbl.len; ++i) {
-                    string n = rightTbl.cols[i].dataName;
-                    if (selectCols.count(n) ||
-                        selectCols.count(rightTable + "." + n))
-                        kept.push_back({1, static_cast<int>(i)});
-                }
-                for (size_t rowIndex = 0; rowIndex < answers.size(); ++rowIndex) {
-                    // Engine row cells: left columns then right columns, in
-                    // table order. Rebuild requested order from exact cells.
-                    string out;
-                    vector<string> outCells;
-                    vector<bool> outNulls;
-                    if (rowIndex < joinRows.size() && rowIndex < joinNulls.size() &&
-                        joinRows[rowIndex].size() == kept.size() &&
-                        joinNulls[rowIndex].size() == kept.size()) {
-                        for (size_t targetIndex = 0;
-                             targetIndex < requestedCols.size(); ++targetIndex) {
-                            const auto& c = requestedCols[targetIndex];
-                            auto want = enginePos(c);
-                            int at = -1;
-                            for (size_t k = 0; k < kept.size(); ++k) {
-                                if (kept[k] == want) { at = (int)k; break; }
-                            }
-                            const bool isNull = at < 0 || joinNulls[rowIndex][at];
-                            const string value = at < 0
-                                ? string{} : joinRows[rowIndex][at];
-                            if (targetIndex != 0) out.push_back(' ');
-                            out += isNull ? "NULL" : value;
-                            outCells.push_back(isNull ? string{} : value);
-                            outNulls.push_back(isNull);
-                        }
-                        permuted.push_back(std::move(out));
-                        permutedRows.push_back(std::move(outCells));
-                        permutedNulls.push_back(std::move(outNulls));
-                    } else {
-                        permuted.push_back(std::move(answers[rowIndex]));
-                    }
-                }
-                answers = std::move(permuted);
-                joinRows = std::move(permutedRows);
-                joinNulls = std::move(permutedNulls);
-            }
             for (const auto& row : answers) {
                 cout << row << endl;
                 log(s.username, row, getTime());
