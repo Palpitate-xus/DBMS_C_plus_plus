@@ -22,6 +22,11 @@ def main():
             "CREATE TABLE typed_dates (id INT, d DATE);",
             ("INSERT INTO typed_dates VALUES "
              "(1, DATE '2024-01-10'), (2, NULL);"),
+            "CREATE TABLE typed_lateral_left (id INT);",
+            "INSERT INTO typed_lateral_left VALUES (1), (2);",
+            "CREATE TABLE typed_lateral_right (id INT, label TEXT);",
+            ("INSERT INTO typed_lateral_right VALUES "
+             "(1, 'one'), (2, 'two'), (3, 'unused');"),
             ("CREATE VIEW typed_view AS SELECT grp, sum(v) AS total "
              "FROM typed_src GROUP BY grp;"),
         ]
@@ -54,6 +59,15 @@ def main():
              [["2024"], [None]], [1700]),
             ("SELECT d + interval '1 day' FROM typed_dates ORDER BY id;",
              [["2024-01-11 00:00:00"], [None]], [1114]),
+            (("SELECT l.id, x.label FROM typed_lateral_left AS l "
+              "CROSS JOIN LATERAL "
+              "(SELECT label FROM typed_lateral_right WHERE id = l.id) AS x "
+              "ORDER BY l.id;"),
+             [["1", "one"], ["2", "two"]], [23, 25]),
+            (("SELECT l.id, x.label FROM typed_lateral_left l, LATERAL "
+              "(SELECT label FROM typed_lateral_right WHERE id = l.id) x "
+              "ORDER BY l.id;"),
+             [["1", "one"], ["2", "two"]], [23, 25]),
         ]
         for sql, expected_rows, expected_types in cases:
             decoded = runner.decode_wire_result(
@@ -63,6 +77,8 @@ def main():
             assert rows == expected_rows, (sql, rows, expected_rows)
             assert len(headers) == len(expected_types), (sql, headers)
             assert type_oids == expected_types, (sql, type_oids, expected_types)
+            if "lateral" in sql.lower():
+                assert headers == ["id", "label"], (sql, headers)
             assert command_tag == "SELECT %d" % len(expected_rows), (
                 sql, command_tag)
 

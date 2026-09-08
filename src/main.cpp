@@ -9736,47 +9736,65 @@ static std::string processLateralJoins(const std::string& sql, Session& s) {
         size_t parenEnd = findMatchingParen(result, parenStart);
         if (parenEnd == std::string::npos) break;
 
-        std::string afterParen = trim(result.substr(parenEnd + 1));
-        if (afterParen.size() < 3 || afterParen.substr(0, 3) != "as ") break;
-        std::string alias = trim(afterParen.substr(3));
-        size_t sp = alias.find(' ');
-        if (sp != std::string::npos) alias = alias.substr(0, sp);
+        // Parse the required derived-table alias and retain its exact end so
+        // the lateral FROM item can be replaced without consuming WHERE /
+        // ORDER BY or a following join.
+        size_t aliasStart = parenEnd + 1;
+        while (aliasStart < result.size() &&
+               isspace(static_cast<unsigned char>(result[aliasStart]))) {
+            ++aliasStart;
+        }
+        if (aliasStart + 2 < result.size() &&
+            result.compare(aliasStart, 2, "as") == 0 &&
+            isspace(static_cast<unsigned char>(result[aliasStart + 2]))) {
+            aliasStart += 2;
+            while (aliasStart < result.size() &&
+                   isspace(static_cast<unsigned char>(result[aliasStart]))) {
+                ++aliasStart;
+            }
+        }
+        size_t aliasEnd = aliasStart;
+        while (aliasEnd < result.size() &&
+               (isalnum(static_cast<unsigned char>(result[aliasEnd])) ||
+                result[aliasEnd] == '_')) {
+            ++aliasEnd;
+        }
+        std::string alias = result.substr(aliasStart, aliasEnd - aliasStart);
         if (alias.empty()) break;
 
         // Extract the inner SELECT
         std::string innerSelect = trim(result.substr(parenStart + 1, parenEnd - parenStart - 1));
 
-        // Determine left table: text between "from" and the lateral construct
+        // This materializer handles one simple left relation followed by
+        // either CROSS JOIN LATERAL or comma LATERAL.  Parse that relation as
+        // "table [AS] alias"; the old last-"join" split accidentally made
+        // "cross" part of the alias.
+        size_t fromPos = findTopLevelKeyword(result, "from");
+        if (fromPos == std::string::npos || fromPos >= latPos) break;
+        std::string leftFactor = trim(
+            result.substr(fromPos + 4, latPos - fromPos - 4));
+        if (!leftFactor.empty() && leftFactor.back() == ',') {
+            leftFactor = trim(leftFactor.substr(0, leftFactor.size() - 1));
+        } else {
+            const std::string crossJoin = "cross join";
+            if (leftFactor.size() < crossJoin.size() ||
+                leftFactor.compare(leftFactor.size() - crossJoin.size(),
+                                   crossJoin.size(), crossJoin) != 0) {
+                break;
+            }
+            leftFactor = trim(leftFactor.substr(
+                0, leftFactor.size() - crossJoin.size()));
+        }
+        std::vector<std::string> leftTokens = tokenize(leftFactor);
         std::string leftTableName, leftAlias;
-        size_t fromPos = result.rfind("from", latPos);
-        if (fromPos != std::string::npos) {
-            std::string afterFrom = trim(result.substr(fromPos + 4, latPos - fromPos - 4));
-            // afterFrom could be "t cross join " or "t, " or "t inner join u cross join "
-            // Find the last table reference before lateral
-            size_t lastJoin = afterFrom.rfind("join");
-            size_t lastComma = afterFrom.rfind(",");
-            std::string tableSegment;
-            if (lastJoin != std::string::npos) {
-                // Take text before "join" (e.g., "t cross" -> "t")
-                tableSegment = trim(afterFrom.substr(0, lastJoin));
-            } else if (lastComma != std::string::npos) {
-                // If comma is at end (e.g., "t,"), take text before comma
-                std::string afterComma = trim(afterFrom.substr(lastComma + 1));
-                if (afterComma.empty()) {
-                    tableSegment = trim(afterFrom.substr(0, lastComma));
-                } else {
-                    tableSegment = afterComma;
-                }
-            } else {
-                tableSegment = trim(afterFrom);
-            }
-            size_t spc = tableSegment.find(' ');
-            if (spc != std::string::npos) {
-                leftTableName = trim(tableSegment.substr(0, spc));
-                leftAlias = trim(tableSegment.substr(spc + 1));
-            } else {
-                leftTableName = tableSegment;
-            }
+        if (leftTokens.size() == 1) {
+            leftTableName = leftTokens[0];
+        } else if (leftTokens.size() == 2) {
+            leftTableName = leftTokens[0];
+            leftAlias = leftTokens[1];
+        } else if (leftTokens.size() == 3 && leftTokens[1] == "as") {
+            leftTableName = leftTokens[0];
+            leftAlias = leftTokens[2];
         }
         if (leftTableName.empty()) break;
 
@@ -9793,9 +9811,13 @@ static std::string processLateralJoins(const std::string& sql, Session& s) {
             leftRows.emplace_back(data, len);
         });
 
-        // Execute lateral subquery for each left row and collect results
+        // Execute the lateral subquery for each left row.  Materialize a
+        // combined left+right row instead of only collecting right rows and
+        // cross joining them again: the latter loses which result belonged to
+        // which left row and produces a Cartesian product.
         std::vector<std::string> allRows;
-        std::vector<std::string> colNames;
+        std::vector<std::string> rightColNames;
+        std::vector<std::string> rightColTypes;
         for (const auto& lrow : leftRows) {
             std::string replacedSql = innerSelect;
             // Replace left table column references with literal values
@@ -9810,49 +9832,148 @@ static std::string processLateralJoins(const std::string& sql, Session& s) {
                 bool isNum = leftTbl.cols[ci].dataType != "char" && !leftTbl.cols[ci].isVariableLength;
                 std::string lit = isNum ? escVal : "'" + escVal + "'";
 
-                for (const std::string& pref : {leftPrefix + ".", resolvedLeft + "."}) {
+                for (const std::string& pref :
+                     {leftPrefix + ".", leftTableName + ".",
+                      resolvedLeft + "."}) {
                     std::string place = pref + leftTbl.cols[ci].dataName;
                     size_t pos = 0;
-                    while ((pos = replacedSql.find(place, pos)) != std::string::npos) {
+                    while ((pos = findTextOutsideQuotes(
+                                replacedSql, place, pos)) != std::string::npos) {
+                        const size_t after = pos + place.size();
+                        if ((pos > 0 &&
+                             (isalnum(static_cast<unsigned char>(replacedSql[pos - 1])) ||
+                              replacedSql[pos - 1] == '_')) ||
+                            (after < replacedSql.size() &&
+                             (isalnum(static_cast<unsigned char>(replacedSql[after])) ||
+                              replacedSql[after] == '_'))) {
+                            pos = after;
+                            continue;
+                        }
                         replacedSql.replace(pos, place.size(), lit);
                         pos += lit.size();
                     }
                 }
             }
-            auto rows = runDerivedSubQuery(replacedSql, s, colNames);
+            std::vector<std::string> rowColNames;
+            std::vector<std::string> rowColTypes;
+            auto rows = runDerivedSubQueryFull(
+                replacedSql, s, rowColNames, &rowColTypes);
+            if (rowColNames.empty()) {
+                rows = runDerivedSubQuery(replacedSql, s, rowColNames);
+            }
+            if (rowColNames.empty()) break;
+            if (rightColNames.empty()) {
+                rightColNames = rowColNames;
+                rightColTypes = rowColTypes;
+            } else if (rightColNames != rowColNames) {
+                break;
+            }
             for (const auto& r : rows) {
-                allRows.push_back(r);
+                std::string combined;
+                for (size_t ci = 0; ci < leftTbl.len; ++ci) {
+                    if (!combined.empty()) combined += ' ';
+                    combined += g_engine.extractColumnValue(
+                        lrow, leftTbl, ci);
+                }
+                if (!r.empty()) {
+                    if (!combined.empty()) combined += ' ';
+                    combined += r;
+                }
+                allRows.push_back(std::move(combined));
             }
         }
 
-        if (colNames.empty()) break;
+        if (rightColNames.empty()) break;
+
+        std::vector<std::string> combinedColNames;
+        std::vector<std::string> combinedColTypes;
+        for (size_t ci = 0; ci < leftTbl.len; ++ci) {
+            combinedColNames.push_back("__lat_l_" + std::to_string(ci));
+            combinedColTypes.push_back(leftTbl.cols[ci].dataType);
+        }
+        for (size_t ci = 0; ci < rightColNames.size(); ++ci) {
+            combinedColNames.push_back("__lat_r_" + std::to_string(ci));
+            combinedColTypes.push_back(
+                ci < rightColTypes.size() ? rightColTypes[ci] : "");
+        }
 
         int counter = lateralCount;
-        std::string tmpName = createTempTableFromRows(s, allRows, colNames, counter);
+        std::string tmpName = createTempTableFromRows(
+            s, allRows, combinedColNames, counter, combinedColTypes);
         if (tmpName.empty()) break;
         lateralCount = counter;
 
-        // Replace the lateral join construct with temp table name first
-        size_t aliasEnd = parenEnd + 1;
-        while (aliasEnd < result.size() && isspace((unsigned char)result[aliasEnd])) ++aliasEnd;
-        if (aliasEnd + 2 < result.size() && result.substr(aliasEnd, 3) == "as ") {
-            aliasEnd += 3;
-            while (aliasEnd < result.size() && isspace((unsigned char)result[aliasEnd])) ++aliasEnd;
-            aliasEnd += alias.size();
+        // The temporary relation already contains the correctly paired left
+        // and right cells, so replace the whole FROM item, then remap all
+        // qualified references in SELECT and following clauses.
+        result = result.substr(0, fromPos + 4) + " " + tmpName +
+                 result.substr(aliasEnd);
+        auto replaceQualified = [&](const std::string& qualifier,
+                                    const std::string& column,
+                                    const std::string& replacement) {
+            if (qualifier.empty()) return;
+            const std::string needle = qualifier + "." + column;
+            size_t pos = 0;
+            while ((pos = findTextOutsideQuotes(result, needle, pos)) !=
+                   std::string::npos) {
+                const size_t after = pos + needle.size();
+                if ((pos > 0 &&
+                     (isalnum(static_cast<unsigned char>(result[pos - 1])) ||
+                      result[pos - 1] == '_')) ||
+                    (after < result.size() &&
+                     (isalnum(static_cast<unsigned char>(result[after])) ||
+                      result[after] == '_'))) {
+                    pos = after;
+                    continue;
+                }
+                result.replace(pos, needle.size(), replacement);
+                pos += replacement.size();
+            }
+        };
+        for (size_t ci = 0; ci < leftTbl.len; ++ci) {
+            const std::string& column = leftTbl.cols[ci].dataName;
+            replaceQualified(leftPrefix, column, combinedColNames[ci]);
+            replaceQualified(leftTableName, column, combinedColNames[ci]);
+            replaceQualified(resolvedLeft, column, combinedColNames[ci]);
         }
-        // If preceded by comma, replace comma with "cross join" to make a valid JOIN
-        size_t commaBefore = result.rfind(",", latPos);
-        if (commaBefore != std::string::npos && commaBefore > fromPos) {
-            result = result.substr(0, commaBefore) + " cross join " + tmpName + result.substr(aliasEnd);
-        } else {
-            result = result.substr(0, latPos) + tmpName + result.substr(aliasEnd);
+        for (size_t ci = 0; ci < rightColNames.size(); ++ci) {
+            replaceQualified(alias, rightColNames[ci],
+                             combinedColNames[leftTbl.len + ci]);
         }
 
-        // Then replace alias references with bare column names
-        std::string aliasDot = alias + ".";
-        size_t pos = 0;
-        while ((pos = result.find(aliasDot, pos)) != std::string::npos) {
-            result = result.substr(0, pos) + result.substr(pos + aliasDot.size());
+        // Internal synthetic names are necessary when left and right expose
+        // duplicate column names, but a direct qualified projection must
+        // still report the PostgreSQL column label rather than the synthetic
+        // storage name.
+        const size_t rewrittenFrom = findTopLevelKeyword(result, "from");
+        if (rewrittenFrom != std::string::npos && rewrittenFrom >= 6) {
+            std::vector<std::string> targets = splitSelectColumns(
+                trim(result.substr(6, rewrittenFrom - 6)));
+            bool changedTargets = false;
+            for (std::string& target : targets) {
+                const std::string clean = trim(target);
+                for (size_t ci = 0; ci < leftTbl.len; ++ci) {
+                    if (clean == combinedColNames[ci]) {
+                        target = clean + " as " + leftTbl.cols[ci].dataName;
+                        changedTargets = true;
+                    }
+                }
+                for (size_t ci = 0; ci < rightColNames.size(); ++ci) {
+                    if (clean == combinedColNames[leftTbl.len + ci]) {
+                        target = clean + " as " + rightColNames[ci];
+                        changedTargets = true;
+                    }
+                }
+            }
+            if (changedTargets) {
+                std::string targetList;
+                for (size_t ti = 0; ti < targets.size(); ++ti) {
+                    if (ti > 0) targetList += ", ";
+                    targetList += trim(targets[ti]);
+                }
+                result = "select " + targetList + " " +
+                         result.substr(rewrittenFrom);
+            }
         }
     }
 
