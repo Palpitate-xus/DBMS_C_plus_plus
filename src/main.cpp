@@ -16673,22 +16673,22 @@ if (sql.rfind("backup database", 0) == 0) {
         bool noWait = false;
         bool skipLocked = false;
         {
-            size_t skPos = sql.find("skip locked");
+            size_t skPos = findTopLevelKeyword(sql, "skip locked");
             if (skPos != string::npos) {
                 skipLocked = true;
                 sql = trim(sql.substr(0, skPos));
             }
-            size_t nwPos = sql.find("nowait");
+            size_t nwPos = findTopLevelKeyword(sql, "nowait");
             if (nwPos != string::npos) {
                 noWait = true;
                 sql = trim(sql.substr(0, nwPos));
             }
-            size_t fuPos = sql.find("for update");
+            size_t fuPos = findTopLevelKeyword(sql, "for update");
             if (fuPos != string::npos) {
                 forUpdate = true;
                 sql = trim(sql.substr(0, fuPos));
             }
-            size_t fsPos = sql.find("for share");
+            size_t fsPos = findTopLevelKeyword(sql, "for share");
             if (fsPos != string::npos) {
                 sql = trim(sql.substr(0, fsPos));
             }

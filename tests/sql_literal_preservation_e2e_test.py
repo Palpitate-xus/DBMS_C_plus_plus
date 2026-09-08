@@ -41,7 +41,9 @@ def main():
                  "(17, 'substring(x from y)'), (18, 'position(x in y)'), "
                  "(19, 'x is distinct from y'), "
                  "(20, 'x is not distinct from y'), "
-                 "(21, 'case when x then y else z end');")):
+                 "(21, 'case when x then y else z end'), "
+                 "(22, 'for update'), (23, 'for share'), "
+                 "(24, 'nowait'), (25, 'skip locked');")):
             _, state, message, _ = runner.ours_query(
                 client, server["sock"], sql)
             assert state is None, (sql, state, message)
@@ -80,6 +82,10 @@ def main():
             (19, "x is distinct from y"),
             (20, "x is not distinct from y"),
             (21, "case when x then y else z end"),
+            (22, "for update"),
+            (23, "for share"),
+            (24, "nowait"),
+            (25, "skip locked"),
         ]
         for row_id, value in rewrite_literals:
             sql = ("SELECT id FROM rewrite_literal_rows WHERE value = '" +
@@ -88,6 +94,19 @@ def main():
                 client, server["sock"], sql)
             assert state is None, (sql, state, message)
             assert rows == [[str(row_id)]], (sql, rows, row_id)
+        _, state, message, _ = runner.ours_query(
+            client, server["sock"], "BEGIN;")
+        assert state is None, (state, message)
+        for clause in ("FOR UPDATE NOWAIT", "FOR UPDATE SKIP LOCKED",
+                       "FOR SHARE"):
+            sql = "SELECT id FROM literal_rows WHERE id = 1 " + clause + ";"
+            rows, state, message, _ = runner.ours_query(
+                client, server["sock"], sql)
+            assert state is None, (sql, state, message)
+            assert rows == [["1"]], (sql, rows)
+        _, state, message, _ = runner.ours_query(
+            client, server["sock"], "COMMIT;")
+        assert state is None, (state, message)
         print("[SQL LITERAL PRESERVATION E2E] passed")
     finally:
         runner.stop_ours(server)
