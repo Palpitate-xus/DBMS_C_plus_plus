@@ -2888,9 +2888,20 @@ bool DdlExecutor::executeTruncate(const TruncateStmt* stmt, Session& s) {
     }
 
     if (!checkAndImplicitCommit(s)) return true;
+    DdlTransaction txn(s);
+    txn.enableSnapshotRollback();
+    if (!txn.begin()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
     for (const auto& name : targets) {
+        // TRUNCATE rewrites the heap and all RID-bearing sidecars. Mark the
+        // snapshot before the first physical change so a failure in any
+        // target restores every earlier target in this statement.
+        txn.markSnapshotDirty();
         const DBStatus result = g_engine.truncateTable(s.currentDB, name);
         if (result != DBStatus::OK) {
+            txn.rollback();
             std::cout << "TRUNCATE failed for table " << name << std::endl;
             return true;
         }
@@ -2902,6 +2913,11 @@ bool DdlExecutor::executeTruncate(const TruncateStmt* stmt, Session& s) {
                 }
             }
         }
+        g_engine.bufferLogicalTruncate(s.currentDB, name);
+    }
+    if (!txn.commit()) {
+        std::cout << "TRUNCATE commit failed" << std::endl;
+        return true;
     }
 
     std::cout << "TRUNCATE TABLE completed (" << targets.size() << " table(s))" << std::endl;

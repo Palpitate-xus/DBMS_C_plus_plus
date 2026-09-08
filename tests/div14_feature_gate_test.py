@@ -224,7 +224,7 @@ def main():
         publication_path = os.path.join(work_dir, "info", "pub_gate.publication")
         with open(publication_path, encoding="utf-8") as publication_file:
             publication_lines = publication_file.read().splitlines()
-        assert publication_lines[0].split()[1:] == ["1", "0", "0", "0"], \
+        assert publication_lines[0].split()[1:] == ["1", "0", "0", "0", "0"], \
             publication_lines
         expect_command_tag(sock, "ALTER PUBLICATION pub_gate ADD TABLE pub_member",
                            "add publication member")
@@ -237,12 +237,24 @@ def main():
             "change publication operations")
         with open(publication_path, encoding="utf-8") as publication_file:
             publication_lines = publication_file.read().splitlines()
-        assert publication_lines[0].split()[1:] == ["1", "0", "1", "0"], \
+        assert publication_lines[0].split()[1:] == ["1", "0", "1", "0", "0"], \
             publication_lines
+        expect_command_tag(
+            sock,
+            "ALTER PUBLICATION pub_gate SET (publish = 'truncate')",
+            "enable truncate publication operation")
+        with open(publication_path, encoding="utf-8") as publication_file:
+            publication_lines = publication_file.read().splitlines()
+        assert publication_lines[0].split()[1:] == ["0", "0", "0", "1", "0"], \
+            publication_lines
+        expect_command_tag(
+            sock,
+            "ALTER PUBLICATION pub_gate SET (publish = 'insert, delete')",
+            "restore publication operations")
         persisted_before_error = Path(publication_path).read_bytes()
         expect_0a000(
             sock,
-            "ALTER PUBLICATION pub_gate SET (publish = 'truncate')",
+            "ALTER PUBLICATION pub_gate SET (publish = 'merge')",
             "unsupported publication operation")
         expect_error(
             sock,

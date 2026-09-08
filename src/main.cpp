@@ -10904,6 +10904,7 @@ static PublicationOptionParseResult parsePublicationOptions(
     bool insert = false;
     bool update = false;
     bool remove = false;
+    bool truncate = false;
     bool sawOperation = false;
     size_t start = 0;
     while (start <= value.size()) {
@@ -10921,6 +10922,8 @@ static PublicationOptionParseResult parsePublicationOptions(
             update = true;
         } else if (operation == "delete") {
             remove = true;
+        } else if (operation == "truncate") {
+            truncate = true;
         } else {
             error = "publication operation " + operation;
             return PublicationOptionParseResult::Unsupported;
@@ -10935,6 +10938,7 @@ static PublicationOptionParseResult parsePublicationOptions(
     publication.publishInsert = insert;
     publication.publishUpdate = update;
     publication.publishDelete = remove;
+    publication.publishTruncate = truncate;
     return PublicationOptionParseResult::Ok;
 }
 

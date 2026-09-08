@@ -15,6 +15,7 @@
 #include "Session.h"
 #include <cassert>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include "test_utils.h"
 
@@ -41,13 +42,17 @@ static void test_output_plugins() {
     del.op = LogicalChange::Op::Delete;
     del.table = "t1";
     del.oldRow = "1|bob";
-    batch.changes = {ins, upd, del};
+    LogicalChange trunc;
+    trunc.op = LogicalChange::Op::Truncate;
+    trunc.table = "t1";
+    batch.changes = {ins, upd, del, trunc};
 
     std::string text;
     assert(LogicalDecoder::format("test_decoding", batch, text));
     assert(text.find("table t1: INSERT: 1|alice") != std::string::npos);
     assert(text.find("table t1: UPDATE: old-key 1|alice new-tuple 1|bob") != std::string::npos);
     assert(text.find("table t1: DELETE: old-key 1|bob") != std::string::npos);
+    assert(text.find("table t1: TRUNCATE") != std::string::npos);
     assert(text.find("xid 42") != std::string::npos);
 
     std::string binary;
@@ -60,6 +65,7 @@ static void test_output_plugins() {
     assert(xid == 42);
     assert(binary.size() >= 9);
     assert(binary[binary.size() - 9] == 'C');
+    assert(binary.size() >= 10 && binary[binary.size() - 10] == 'T');
     // Unknown plugin rejected.
     assert(!LogicalDecoder::format("nope", batch, binary));
     // Registry lists both plugins.
@@ -80,6 +86,7 @@ static void test_publication_catalog() {
     pub.owner = "admin";
     pub.tables = {"orders", "customers"};
     pub.publishUpdate = false;
+    pub.publishTruncate = false;
     std::string error;
     assert(cat.create(db, pub, error));
     assert(error.empty());
@@ -94,7 +101,7 @@ static void test_publication_catalog() {
     assert(pubs[0].owner == "admin");
     assert(pubs[0].tables.size() == 2);
     assert(pubs[0].publishInsert && !pubs[0].publishUpdate &&
-           pubs[0].publishDelete);
+           pubs[0].publishDelete && !pubs[0].publishTruncate);
     assert(!pubs[0].publishAllTables);
 
     assert(cat.publishes(db, "orders"));
@@ -103,6 +110,21 @@ static void test_publication_catalog() {
     assert(cat.publishes(db, "orders", LogicalChange::Op::Insert));
     assert(!cat.publishes(db, "orders", LogicalChange::Op::Update));
     assert(cat.publishes(db, "orders", LogicalChange::Op::Delete));
+    assert(!cat.publishes(db, "orders", LogicalChange::Op::Truncate));
+
+    // Legacy files had no truncate flag.  Loading them must leave the new
+    // operation disabled instead of silently broadening an old publication.
+    {
+        std::ofstream legacy(fs::path(db) / "legacy.publication");
+        legacy << "admin 1 1 1 0\norders\n";
+    }
+    pubs = cat.list(db);
+    const auto legacy = std::find_if(
+        pubs.begin(), pubs.end(), [](const Publication& candidate) {
+            return candidate.name == "legacy";
+        });
+    assert(legacy != pubs.end());
+    assert(!legacy->publishTruncate && !legacy->publishAllTables);
 
     // FOR ALL TABLES publication.
     Publication all;
@@ -116,6 +138,7 @@ static void test_publication_catalog() {
     assert(!cat.exists(db, "mypub"));
     assert(!cat.drop(db, "mypub", error));
     assert(cat.drop(db, "allpub", error));
+    assert(cat.drop(db, "legacy", error));
     fs::remove_all(db);
     std::cout << "[LOGICAL] publication catalog OK" << std::endl;
 }
@@ -341,6 +364,26 @@ static void test_end_to_end_streaming() {
         "e2e_slot", filteredPeek.nextLsn);
     assert(repl.advanceSlotLsn(
         "e2e_slot", static_cast<int64_t>(filteredPeek.nextLsn)));
+
+    // TRUNCATE is emitted once the DDL transaction commits and carries no
+    // row image.
+    assert(!ddl.executeSql("TRUNCATE TABLE src_t", s));
+    assert(LogicalChangeStore::instance().depth("e2e_slot") == 1);
+    auto truncatePeek = LogicalChangeStore::instance().peek(
+        "e2e_slot", filteredPeek.nextLsn, 100);
+    assert(truncatePeek.batches.size() == 1);
+    assert(truncatePeek.batches[0].changes.size() == 1);
+    assert(truncatePeek.batches[0].changes[0].op ==
+           LogicalChange::Op::Truncate);
+    assert(truncatePeek.batches[0].changes[0].oldRow.empty());
+    assert(truncatePeek.batches[0].changes[0].newRow.empty());
+    assert(LogicalDecoder::format(
+        "test_decoding", truncatePeek.batches[0], text));
+    assert(text.find("TRUNCATE") != std::string::npos);
+    LogicalChangeStore::instance().acknowledge(
+        "e2e_slot", truncatePeek.nextLsn);
+    assert(repl.advanceSlotLsn(
+        "e2e_slot", static_cast<int64_t>(truncatePeek.nextLsn)));
 
     assert(repl.dropReplicationSlot("e2e_slot"));
     g_engine.dropDatabase(db);

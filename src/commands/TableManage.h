@@ -94,6 +94,8 @@ public:
     DBStatus createTable(const std::string& dbname, const std::string& tablename, const TableSchema& tbl, std::string* error = nullptr);
     DBStatus dropTable(const std::string& dbname, const std::string& tablename);
     DBStatus truncateTable(const std::string& dbname, const std::string& tablename);
+    void bufferLogicalTruncate(const std::string& dbname,
+                               const std::string& tablename);
     DBStatus alterTableAddColumn(const std::string& dbname, const std::string& tablename,
                                   const Column& col);
     DBStatus alterTableDropColumn(const std::string& dbname, const std::string& tablename,
@@ -1934,7 +1936,7 @@ private:
         // and discarded on rollback.
         struct LogicalChangeBuf {
             std::string table;
-            int op = 0;  // 0=insert 1=update 2=delete
+            int op = 0;  // 0=insert 1=update 2=delete 3=truncate
             std::string oldRow;
             std::string newRow;
         };

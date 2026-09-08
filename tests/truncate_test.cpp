@@ -4,7 +4,9 @@
 #include "Session.h"
 #include "test_utils.h"
 #include <cassert>
+#include <future>
 #include <iostream>
+#include <thread>
 
 extern dbms::StorageEngine g_engine;
 
@@ -70,6 +72,38 @@ int main() {
     assert(!ddl.executeSql("TRUNCATE TABLE independent, independent_two", s));
     assert(rowCount(db, "independent") == 0);
     assert(rowCount(db, "independent_two") == 0);
+
+    // A failure after an earlier target was reset must restore the complete
+    // statement. Hold the second relation's metadata lock from another
+    // backend so the first reset succeeds before the second times out.
+    assert(!ddl.executeSql("CREATE TABLE atomic_first (id INT)", s));
+    assert(!ddl.executeSql("CREATE TABLE atomic_second (id INT)", s));
+    assert(g_engine.insert(db, "atomic_first", {{"id", "21"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "atomic_second", {{"id", "22"}}) ==
+           dbms::DBStatus::OK);
+    auto& locks = g_engine.getLockManager();
+    std::promise<void> locked;
+    std::promise<void> release;
+    auto releaseFuture = release.get_future();
+    std::thread holder([&] {
+        locks.setResourceNamespace(db);
+        assert(locks.lockMetadata("atomic_second"));
+        locked.set_value();
+        releaseFuture.wait();
+        locks.unlock("atomic_second");
+    });
+    locked.get_future().wait();
+    locks.setResourceNamespace(db);
+    locks.setLockTimeout(50);
+    assert(ddl.executeSql(
+        "TRUNCATE TABLE atomic_first, atomic_second", s));
+    release.set_value();
+    holder.join();
+    locks.setLockTimeout(0);
+    assert(rowCount(db, "atomic_first") == 1);
+    assert(rowCount(db, "atomic_second") == 1);
+    assert(!g_engine.hasTransactionBackup());
 
     assert(!ddl.executeSql(
         "CREATE TABLE identity_table (id INT PRIMARY KEY GENERATED ALWAYS AS IDENTITY, msg TEXT)", s));

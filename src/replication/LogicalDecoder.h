@@ -25,7 +25,7 @@ namespace dbms {
 // ============================================================================
 
 struct LogicalChange {
-    enum class Op { Insert, Update, Delete };
+    enum class Op { Insert, Update, Delete, Truncate };
     Op op = Op::Insert;
     std::string table;
     // Row images as bar-separated column values (the storage layer's
@@ -61,6 +61,7 @@ struct Publication {
     bool publishInsert = true;
     bool publishUpdate = true;
     bool publishDelete = true;
+    bool publishTruncate = true;
     bool publishAllTables = false;  // FOR ALL TABLES
     std::vector<std::string> tables;
 };

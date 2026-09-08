@@ -36,6 +36,9 @@ bool LogicalDecoder::format(const std::string& plugin, const LogicalChangeBatch&
                 case LogicalChange::Op::Delete:
                     os << " DELETE: old-key " << ch.oldRow;
                     break;
+                case LogicalChange::Op::Truncate:
+                    os << " TRUNCATE";
+                    break;
             }
             os << " (xid " << batch.xid << " lsn " << batch.commitLsn << ")\n";
         }
@@ -75,6 +78,9 @@ bool LogicalDecoder::format(const std::string& plugin, const LogicalChangeBatch&
                 case LogicalChange::Op::Delete:
                     os.put('D'); putStr(ch.oldRow);
                     break;
+                case LogicalChange::Op::Truncate:
+                    os.put('T');
+                    break;
             }
         }
         os.put('C'); putU64(batch.commitLsn);
@@ -107,14 +113,22 @@ Publication parsePublicationFile(const std::string& name, const std::string& con
     while (std::getline(in, line)) {
         if (line.empty()) continue;
         if (first) {
-            // header: owner pub-insert pub-update pub-delete all-tables
+            // Current header: owner insert update delete truncate all-tables.
+            // The five-field legacy header did not have truncate; load it as
+            // disabled so an upgrade never starts publishing new events.
             std::istringstream hdr(line);
-            std::string ins, upd, del, all;
-            hdr >> pub.owner >> ins >> upd >> del >> all;
+            std::string ins, upd, del, fourth, fifth;
+            hdr >> pub.owner >> ins >> upd >> del >> fourth;
             pub.publishInsert = (ins == "1");
             pub.publishUpdate = (upd == "1");
             pub.publishDelete = (del == "1");
-            pub.publishAllTables = (all == "1");
+            if (hdr >> fifth) {
+                pub.publishTruncate = (fourth == "1");
+                pub.publishAllTables = (fifth == "1");
+            } else {
+                pub.publishTruncate = false;
+                pub.publishAllTables = (fourth == "1");
+            }
             first = false;
             continue;
         }
@@ -127,6 +141,7 @@ std::string serializePublication(const Publication& pub) {
     std::ostringstream out;
     out << pub.owner << ' ' << (pub.publishInsert ? 1 : 0) << ' '
         << (pub.publishUpdate ? 1 : 0) << ' ' << (pub.publishDelete ? 1 : 0)
+        << ' ' << (pub.publishTruncate ? 1 : 0)
         << ' ' << (pub.publishAllTables ? 1 : 0) << '\n';
     for (const auto& t : pub.tables) out << t << '\n';
     return out.str();
@@ -351,6 +366,8 @@ bool PublicationCatalog::publishes(const std::string& dbname,
         if (operation == LogicalChange::Op::Update && pub.publishUpdate)
             return true;
         if (operation == LogicalChange::Op::Delete && pub.publishDelete)
+            return true;
+        if (operation == LogicalChange::Op::Truncate && pub.publishTruncate)
             return true;
     }
     return false;

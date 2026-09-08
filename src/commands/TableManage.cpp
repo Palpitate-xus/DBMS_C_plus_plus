@@ -14902,6 +14902,18 @@ DBStatus StorageEngine::truncateTable(const std::string& dbname,
     return finish(DBStatus::OK);
 }
 
+void StorageEngine::bufferLogicalTruncate(const std::string& dbname,
+                                          const std::string& tablename) {
+    if (!PublicationCatalog::instance().publishes(
+            dbname, tablename, LogicalChange::Op::Truncate)) {
+        return;
+    }
+    auto& txn = transactionContext();
+    if (txn.inTransaction && txn.txnDB == dbname) {
+        txn.txnLogicalChanges.push_back({tablename, 3, "", ""});
+    }
+}
+
 DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
                                              const std::string& tablename,
                                              const Column& col) {
@@ -40210,6 +40222,8 @@ static bool readPreparedRecord(const std::filesystem::path& path,
                     change.op = LogicalChange::Op::Update;
                 } else if (op == "DELETE") {
                     change.op = LogicalChange::Op::Delete;
+                } else if (op == "TRUNCATE") {
+                    change.op = LogicalChange::Op::Truncate;
                 } else {
                     return false;
                 }
@@ -40399,6 +40413,7 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
         if (change.op == 0) op = "INSERT";
         else if (change.op == 1) op = "UPDATE";
         else if (change.op == 2) op = "DELETE";
+        else if (change.op == 3) op = "TRUNCATE";
         if (!op || change.table.empty() ||
             !validStoredIdentifier(change.table, MAX_TABLE_NAME_LEN)) {
             return DBStatus::CORRUPTED_DATA;
