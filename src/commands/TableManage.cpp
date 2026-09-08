@@ -27342,6 +27342,77 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
     return true;
 }
 
+struct ParsedProjectionSubquery {
+    ParseResult parsed;
+    std::string columns;
+    std::string predicate;
+};
+
+static std::string projectionIdentifier(std::string name) {
+    if (name.size() >= 2 && name.front() == '"' && name.back() == '"') {
+        name = name.substr(1, name.size() - 2);
+        size_t position = 0;
+        while ((position = name.find("\"\"", position)) != std::string::npos) {
+            name.erase(position, 1);
+            ++position;
+        }
+    }
+    return name;
+}
+
+static ParsedProjectionSubquery parseProjectionSubquery(const std::string& sql) {
+    auto tokens = SQLParser::tokenize(sql);
+    if (!tokens.empty() && tokens.back() == ";") tokens.pop_back();
+    const auto join = [&](size_t begin, size_t end) {
+        std::string result;
+        for (size_t i = begin; i < end; ++i) {
+            if (i != begin) result += ' ';
+            result += tokens[i];
+        }
+        return result;
+    };
+    ParsedProjectionSubquery result;
+    SQLParser parser;
+    result.parsed = parser.parse(join(0, tokens.size()));
+    const auto* select = dynamic_cast<const SelectStmt*>(result.parsed.stmt.get());
+    if (!result.parsed.success || !select || select->selectList.empty()) {
+        throw std::runtime_error("invalid projection subquery (SQLSTATE 42601)");
+    }
+    if (!select->fromClause || select->fromClause->type != FromItem::Type::Table ||
+        !select->groupBy.empty() || select->having || select->distinct ||
+        select->setOp != SetOp::None || !select->ctes.empty() ||
+        !select->locking.empty() || !select->windowDefs.empty()) {
+        throw std::runtime_error("unsupported projection subquery shape (SQLSTATE 0A000)");
+    }
+    if (!select->orderBy.empty() || select->limit || select->offset || select->withTies) {
+        throw std::runtime_error("projection subquery row selection is not supported (SQLSTATE 0A000)");
+    }
+    // Slice complete lexer tokens, not substrings. Quoted text is one token
+    // and nested FROM (e.g. EXTRACT) is not a query-clause boundary. Keeping
+    // expression tokens also preserves parentheses and existing SQL-function
+    // normalization in ExprHelper, which an AST toString round-trip loses.
+    size_t from = tokens.size(), where = tokens.size(), endWhere = tokens.size();
+    int depth = 0;
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (tokens[i] == "(") { ++depth; continue; }
+        if (tokens[i] == ")") { --depth; continue; }
+        if (depth != 0) continue;
+        const std::string keyword = SQLParser::toLower(tokens[i]);
+        if (keyword == "from" && from == tokens.size()) from = i;
+        if (keyword == "where" && where == tokens.size()) where = i;
+        if (where != tokens.size() && i > where &&
+            (keyword == "order" || keyword == "limit" || keyword == "offset" ||
+             keyword == "fetch" || keyword == "group" || keyword == "having" ||
+             keyword == "for")) {
+            endWhere = i;
+            break;
+        }
+    }
+    result.columns = join(1, from);
+    if (where != tokens.size()) result.predicate = join(where + 1, endWhere);
+    return result;
+}
+
 // True when a scalar-function argument is SQL NULL for the current row.
 // Persisted columns consult the heap bitmap; VIRTUAL columns use the
 // evaluator's NULL result.  This distinguishes NULL from an empty string.
@@ -27650,59 +27721,11 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     // WHERE ...) FROM u").  funcArgs[0] carries the full inner SQL;
     // uncorrelated inner references resolve against the inner table.
     if (expr.funcName == "exists_sub" && engine && !expr.funcArgs.empty()) {
-        std::string low;
-        for (char ch : expr.funcArgs[0])
-            low += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-        size_t fpos = low.find(" from ");
-        if (fpos == std::string::npos) return "f";
-        size_t rest = fpos + 6;
-        while (rest < low.size() && std::isspace(static_cast<unsigned char>(low[rest]))) ++rest;
-        size_t tend = rest;
-        while (tend < low.size() &&
-               (std::isalnum(static_cast<unsigned char>(low[tend])) || low[tend] == '_')) ++tend;
-        std::string innerTbl = expr.funcArgs[0].substr(rest, tend - rest);
-        if (innerTbl.empty()) return "f";
-
-        std::string innerAlias;
-        size_t aliasStart = tend;
-        while (aliasStart < low.size() &&
-               std::isspace(static_cast<unsigned char>(low[aliasStart]))) {
-            ++aliasStart;
-        }
-        if (low.compare(aliasStart, 3, "as ") == 0) {
-            aliasStart += 3;
-            while (aliasStart < low.size() &&
-                   std::isspace(static_cast<unsigned char>(low[aliasStart]))) {
-                ++aliasStart;
-            }
-        }
-        size_t aliasEnd = aliasStart;
-        while (aliasEnd < low.size() &&
-               (std::isalnum(static_cast<unsigned char>(low[aliasEnd])) ||
-                low[aliasEnd] == '_')) {
-            ++aliasEnd;
-        }
-        const std::string aliasCandidate =
-            low.substr(aliasStart, aliasEnd - aliasStart);
-        if (aliasCandidate != "where" && aliasCandidate != "group" &&
-            aliasCandidate != "order" && aliasCandidate != "limit") {
-            innerAlias = expr.funcArgs[0].substr(
-                aliasStart, aliasEnd - aliasStart);
-        }
-
-        std::string whereSql;
-        size_t wpos = low.find(" where ");
-        if (wpos != std::string::npos) {
-            size_t wstart = wpos + 7;
-            size_t wend = low.size();
-            for (size_t kw = wstart; kw + 1 < low.size(); ++kw) {
-                if (low.compare(kw, 7, " group ") == 0 ||
-                    low.compare(kw, 7, " order ") == 0 ||
-                    low.compare(kw, 7, " limit ") == 0)
-                    { wend = kw; break; }
-            }
-            whereSql = expr.funcArgs[0].substr(wstart, wend - wstart);
-        }
+        auto subquery = parseProjectionSubquery(expr.funcArgs[0]);
+        const auto* select = static_cast<const SelectStmt*>(subquery.parsed.stmt.get());
+        const std::string innerTbl = projectionIdentifier(select->fromClause->tableName);
+        const std::string innerAlias = projectionIdentifier(select->fromClause->alias);
+        const std::string& whereSql = subquery.predicate;
         auto& innerLocks = engine->getLockManager();
         innerLocks.setResourceNamespace(dbname);
         const bool innerLocked = engine->inTransaction()
@@ -30297,122 +30320,13 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         return out;
     }
     if (expr.funcName == "subquery" && !expr.funcArgs.empty() && engine) {
-        // Simplified scalar subquery: funcArgs[0] = "select col from table [where ...]"
-        std::string subSql = expr.funcArgs[0];
-        const auto isIdentifierChar = [](char ch) {
-            const auto value = static_cast<unsigned char>(ch);
-            return std::isalnum(value) || ch == '_' || ch == '$';
-        };
-        const auto keywordMatchesAt = [&](size_t pos,
-                                          const std::string& keyword) {
-            if (pos + keyword.size() > subSql.size()) return false;
-            if (pos > 0 && isIdentifierChar(subSql[pos - 1])) return false;
-            if (pos + keyword.size() < subSql.size() &&
-                isIdentifierChar(subSql[pos + keyword.size()])) {
-                return false;
-            }
-            for (size_t i = 0; i < keyword.size(); ++i) {
-                if (std::tolower(static_cast<unsigned char>(subSql[pos + i])) !=
-                    std::tolower(static_cast<unsigned char>(keyword[i]))) {
-                    return false;
-                }
-            }
-            return true;
-        };
-        const auto findTopLevelKeyword = [&](const std::string& keyword,
-                                             size_t start) {
-            bool inSingleQuote = false;
-            bool inDoubleQuote = false;
-            int depth = 0;
-            for (size_t i = start; i < subSql.size(); ++i) {
-                const char ch = subSql[i];
-                if (inSingleQuote) {
-                    if (ch == '\'' && i + 1 < subSql.size() &&
-                        subSql[i + 1] == '\'') {
-                        ++i;
-                    } else if (ch == '\'') {
-                        inSingleQuote = false;
-                    }
-                    continue;
-                }
-                if (inDoubleQuote) {
-                    if (ch == '"' && i + 1 < subSql.size() &&
-                        subSql[i + 1] == '"') {
-                        ++i;
-                    } else if (ch == '"') {
-                        inDoubleQuote = false;
-                    }
-                    continue;
-                }
-                if (ch == '\'') {
-                    inSingleQuote = true;
-                    continue;
-                }
-                if (ch == '"') {
-                    inDoubleQuote = true;
-                    continue;
-                }
-                if (ch == '(') {
-                    ++depth;
-                    continue;
-                }
-                if (ch == ')') {
-                    if (depth > 0) --depth;
-                    continue;
-                }
-                if (depth == 0 && keywordMatchesAt(i, keyword)) return i;
-            }
-            return std::string::npos;
-        };
-
-        size_t selectPos = 0;
-        while (selectPos < subSql.size() &&
-               std::isspace(static_cast<unsigned char>(subSql[selectPos]))) {
-            ++selectPos;
-        }
-        if (!keywordMatchesAt(selectPos, "select")) return "";
-        size_t fromPos = findTopLevelKeyword("from", selectPos + 6);
-        if (fromPos == std::string::npos) return "";
-        std::string colsStr = trim(subSql.substr(
-            selectPos + 6, fromPos - selectPos - 6));
-        size_t wherePos = findTopLevelKeyword("where", fromPos + 4);
-        const std::string fromClause = trim(subSql.substr(fromPos + 4,
-            (wherePos != std::string::npos) ? (wherePos - fromPos - 4)
-            : (subSql.size() - fromPos - 4)));
-        std::vector<std::string> fromParts;
-        {
-            std::istringstream tokens(fromClause);
-            std::string token;
-            while (tokens >> token) fromParts.push_back(token);
-        }
-        if (fromParts.empty() || fromParts.size() > 3) return "";
-        const std::string subTname = fromParts.front();
-        std::string subAlias;
-        if (fromParts.size() == 2) {
-            subAlias = fromParts[1];
-        } else if (fromParts.size() == 3) {
-            std::string aliasKeyword = fromParts[1];
-            for (char& ch : aliasKeyword) {
-                ch = static_cast<char>(
-                    std::tolower(static_cast<unsigned char>(ch)));
-            }
-            if (aliasKeyword != "as") return "";
-            subAlias = fromParts[2];
-        }
-        std::string whereSql;
-        if (wherePos != std::string::npos) {
-            whereSql = trim(subSql.substr(wherePos + 5));
-        }
-        // Count parsed projection items: commas and parentheses inside SQL
-        // strings, quoted identifiers or function arguments are not columns.
-        SQLParser projectionParser;
-        auto parsedProjection = projectionParser.parse("SELECT " + colsStr);
+        auto subquery = parseProjectionSubquery(expr.funcArgs[0]);
         const auto* projection =
-            dynamic_cast<const SelectStmt*>(parsedProjection.stmt.get());
-        if (!parsedProjection.success || !projection) {
-            throw std::runtime_error(
-                "invalid scalar subquery projection (SQLSTATE 42601)");
-        }
+            static_cast<const SelectStmt*>(subquery.parsed.stmt.get());
+        const std::string subTname = projectionIdentifier(projection->fromClause->tableName);
+        const std::string subAlias = projectionIdentifier(projection->fromClause->alias);
+        const std::string& colsStr = subquery.columns;
+        const std::string& whereSql = subquery.predicate;
         if (projection->selectList.size() != 1 ||
             !projection->selectList.front().expr) {
             throw std::runtime_error(
