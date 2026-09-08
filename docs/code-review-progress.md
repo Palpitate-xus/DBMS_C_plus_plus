@@ -55,6 +55,7 @@
 | 219 | P0-02 / QRY-01,02 / TYPE-02 | 普通表 SELECT 只把 legacy header 文本交给协议，alias 列失去来源类型；FROM generate_series 又经全 varchar 临时 derived table，integer 列最终成为 text。新增 metadata-only 结果通道（只替换 RowDescription、不虚构结构化 rows），按投影来源发布表列类型，并为整数 literal derived table 保留 int4/int8 schema | 协议回归检查普通列 alias 和两种 FROM generate_series 的 rows、int4 OID、header 与 `SELECT 3` tag；完整协议、fromless、literal、review、LIMIT 相邻回归通过。`builtin_funcs_null` 中 4 个普通 generate_series 查询的类型差异归零，只剩 count/sum aggregate OID 两项待修复 | `e85488b` |
 | 220 | P0-02 / TYPE-02,16 / FUNC-02 / QRY-07 | legacy 聚合结果没有类型元数据，普通及分组 `count` / `sum`、分组表达式和 `array_agg` 均退化为 text OID；按 PostgreSQL 聚合返回规则推断数值、布尔、min/max、集合和 JSON/XML 类型，分组键保留原列或算术提升类型，并补常用内建数组 OID 映射 | 实际 PostgreSQL 的 `aggregates`、`agg_order*`、`group_by_expr`、`group_by_ordinal`、`grouping_functions`、`grouping_sets`（不含另列待办的 view 类型）及 `string_agg` 差分通过；协议专项检查 int4 输入的 sum/count 为 int8 OID 20，完整协议、fromless、quoted alias、review 和差分 runner 单元回归通过。差分另复现 `array_agg(DISTINCT ...)` 顺序和聚合 view schema 类型问题，保留为后续独立修复 | `8b6b5e4` |
 | 221 | FUNC-02 / QRY-07 | 结构化集合聚合对无显式 ORDER BY 的 DISTINCT 输入仅按扫描顺序去重，`array_agg(DISTINCT int)` 与 PostgreSQL 的类型化排序结果不同；在 transition/dedup 前按全部 aggregate arguments 做 NULLS LAST 的 SQL 类型排序 | 串行 / 并行集合聚合专项新增逆序算术输入，均得到 `{0,1,2,3,4}`；实际 PostgreSQL `array_agg` 全 case 差分由失败转为通过，`string_agg`、aggregate ORDER BY、普通 aggregates、review SQL 和 alias 协议相邻回归通过 | `f227ebd` |
+| 222 | P0-02 / CAT-16 / QRY-05,12 | 派生表 / CTE 通过捕获显示文本建临时表，所有非整数字段退化成 varchar；聚合 view 又有一层递归重写，内外结果 descriptor 都未传回协议。增加限定执行深度的内部 typed descriptor capture，按捕获类型建临时关系，并在 view rewrite 边界只转发最终查询元数据 | 新增协议 E2E 覆盖聚合 derived table、CTE、view、view predicate 及 int/numeric/text 类型；实际 PostgreSQL `grouping_sets_views` 差分由两处 OID 失败转为全通过，CTE、fromless、alias、完整协议、review SQL 和总账单元回归通过 | `2a32d48` |
 
 本批新增的待修复复现（仍计入总清单）：
 
@@ -67,7 +68,7 @@
 - Python 单元测试 31 项通过：总账校验 6 项、差分工具 25 项。
 - 当前 `build/dbms_review_main` 的 11 组 SQL / 协议 E2E 通过：review_sql、CTE、FETCH、子查询 SQLSTATE、转义文本、布尔边界、LIMIT/OFFSET、多行 SQL、窗口、EXPLAIN ANALYZE、PostgreSQL 协议。
 - 实际参考 PostgreSQL 的错误码、CSV 列描述、带注释的终止符及命令样文本读取验证通过；未对参考库做持久化数据修改。
-- 总账完整覆盖 273 项；目前 complete = 0、partial = 19、unverified = 239、用户延期 = 15。`--require-complete` 正确返回非零。24 个局部问题的修复不代表对应功能族完成。
+- 总账完整覆盖 273 项；目前 complete = 0、partial = 21、unverified = 237、用户延期 = 15。`--require-complete` 正确返回非零。26 个局部问题的修复不代表对应功能族完成。
 - 仓库只有 `ci.yml.disabled`，没有启用的 workflow；修复均为本地 commit，未 push。
 
 ## 上批局部收尾验收（2026-09-08）
