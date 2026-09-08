@@ -93,6 +93,18 @@ def main():
                 scalar_sql, scalar_rows, scalar_expected)
             assert scalar_headers == ["rendered"], scalar_headers
 
+        predicate_sql = (
+            "SELECT upper(v) AS rendered FROM exact_table_rows "
+            "WHERE id >= 2 AND id <= 7 ORDER BY id;")
+        predicate_rows, predicate_state, predicate_message, _ = (
+            runner.ours_query(client, server["sock"], predicate_sql))
+        assert predicate_state is None, (
+            predicate_state, predicate_message)
+        assert predicate_rows == [
+            [None if row[1] is None else row[1].upper()]
+            for row in expected[1:]
+        ], predicate_rows
+
         alias_values = [
             None if row[1] is None else row[1].upper()
             for row in expected

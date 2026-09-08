@@ -21504,7 +21504,7 @@ if (sql.rfind("backup database", 0) == 0) {
                     return expr.isScalar && expr.funcName == "unnest";
                 });
             const bool captureStructuredScalar =
-                shouldPublishQueryMetadata() && condTokens.empty() &&
+                shouldPublishQueryMetadata() &&
                 !structuredScalar && !hasSetReturningScalar &&
                 !isDistinct && distinctOnCols.empty() &&
                 exprOrderBySpecs.empty() &&
@@ -21529,11 +21529,21 @@ if (sql.rfind("backup database", 0) == 0) {
                 condTokens.push_back(")");
                 for (auto& t : condTokens) t = modifyLogic(t);
                 auto groups = breakDownConditions(condTokens);
-                set<string> seen;
-                for (const auto& g : groups) {
-                    auto part = g_engine.queryExpr(queryDb, tname, g, selectExprs, orderBySpecs);
-                    for (const auto& row : part) {
-                        if (seen.insert(row).second) answers.push_back(row);
+                if (captureStructuredScalar && groups.size() == 1) {
+                    answers = g_engine.queryExpr(
+                        queryDb, tname, groups.front(), selectExprs,
+                        orderBySpecs, &structuredScalarResult.rows,
+                        &structuredScalarResult.nulls);
+                    structuredScalarRows = true;
+                } else {
+                    set<string> seen;
+                    for (const auto& g : groups) {
+                        auto part = g_engine.queryExpr(
+                            queryDb, tname, g, selectExprs, orderBySpecs);
+                        for (const auto& row : part) {
+                            if (seen.insert(row).second)
+                                answers.push_back(row);
+                        }
                     }
                 }
             }
