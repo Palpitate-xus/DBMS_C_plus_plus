@@ -99,7 +99,7 @@
     {"id":"QRY-02","status":"unverified","evidence":[]},
     {"id":"QRY-03","status":"unverified","evidence":[]},
     {"id":"QRY-04","status":"partial","evidence":["docs/code-review-progress.md"]},
-    {"id":"QRY-05","status":"unverified","evidence":[]},
+    {"id":"QRY-05","status":"partial","evidence":["docs/code-review-progress.md"],"tests":["tests/cte_clause_boundary_e2e_test.py"]},
     {"id":"QRY-06","status":"unverified","evidence":[]},
     {"id":"QRY-07","status":"partial","evidence":["docs/code-review-progress.md"]},
     {"id":"QRY-08","status":"unverified","evidence":[]},

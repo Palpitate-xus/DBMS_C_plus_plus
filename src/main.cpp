@@ -8959,10 +8959,12 @@ bool execute(const std::string& rawSql, Session& s);
 static std::string processCTEs(const std::string& sql, Session& s, bool& failed) {
     failed = false;
     std::string result = sql;
-    size_t withPos = result.find("with ");
-    if (withPos == std::string::npos) return result;
+    const size_t withPos = result.find_first_not_of(" \t\r\n");
+    if (withPos == std::string::npos || result.compare(withPos, 4, "with") != 0 ||
+        withPos + 4 == result.size() ||
+        !isspace(static_cast<unsigned char>(result[withPos + 4]))) return result;
 
-    size_t pos = withPos + 5; // skip "with "
+    size_t pos = withPos + 4; // Only a leading WITH starts this statement's CTEs.
     int cteCount = 0;
 
     // Check for RECURSIVE keyword
