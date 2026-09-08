@@ -183,6 +183,7 @@ static constexpr const char* kPhysicalBackupManifest = ".dbms_backup_manifest";
 #include <string_view>
 #include <string>
 #include <sys/file.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 #include <vector>
 #include <cwctype>
@@ -36313,6 +36314,63 @@ static bool digestBackupFile(const std::filesystem::path& path,
     return true;
 }
 
+static bool syncPhysicalBackupFile(const std::filesystem::path& path) {
+    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    int result;
+    do {
+        result = ::fsync(fd);
+    } while (result != 0 && errno == EINTR);
+    const bool closeOk = (::close(fd) == 0);
+    return result == 0 && closeOk;
+}
+
+static bool syncPhysicalBackupTree(const std::filesystem::path& root) {
+    std::vector<std::filesystem::path> directories{root};
+    std::error_code error;
+    std::filesystem::recursive_directory_iterator iterator(root, error);
+    const std::filesystem::recursive_directory_iterator end;
+    if (error) return false;
+    for (; iterator != end; iterator.increment(error)) {
+        if (error) return false;
+        const auto& entry = *iterator;
+        if (entry.is_symlink(error) || error) return false;
+        if (entry.is_directory(error) && !error) {
+            directories.push_back(entry.path());
+            continue;
+        }
+        if (error || !entry.is_regular_file(error) || error ||
+            !syncPhysicalBackupFile(entry.path())) {
+            return false;
+        }
+    }
+    if (error) return false;
+    std::sort(directories.begin(), directories.end(),
+              [](const auto& left, const auto& right) {
+                  return std::distance(left.begin(), left.end()) >
+                         std::distance(right.begin(), right.end());
+              });
+    for (const auto& directory : directories) {
+        if (!index_file::syncDirectory(directory)) return false;
+    }
+    return true;
+}
+
+static bool exchangePhysicalBackupDirectories(
+    const std::filesystem::path& first,
+    const std::filesystem::path& second) {
+#ifdef SYS_renameat2
+    constexpr unsigned kRenameExchange = 2;
+    return ::syscall(SYS_renameat2, AT_FDCWD, first.c_str(), AT_FDCWD,
+                     second.c_str(), kRenameExchange) == 0;
+#else
+    (void)first;
+    (void)second;
+    errno = ENOTSUP;
+    return false;
+#endif
+}
+
 static bool collectPhysicalBackupEntries(
     const std::filesystem::path& root,
     PhysicalBackupDirectories& directories,
@@ -36601,11 +36659,14 @@ bool StorageEngine::physicalBackupLocked(
             discardStagedBackup();
             return false;
         }
+        if (!syncPhysicalBackupTree(stagedBackup)) {
+            discardStagedBackup();
+            return false;
+        }
 
-        // Publish the complete generation only after every source has copied
-        // successfully. Keeping the prior destination under a sibling name
-        // makes a failed final rename reversible and prevents mixed backups.
-        std::filesystem::path previousBackup;
+        // Publish only after every copied file and directory is durable. If a
+        // generation already exists, Linux rename-exchange keeps one complete
+        // generation at the canonical path through the entire replacement.
         fileError.clear();
         const bool destinationExists = std::filesystem::exists(dst, fileError);
         if (fileError) {
@@ -36613,44 +36674,56 @@ bool StorageEngine::physicalBackupLocked(
             return false;
         }
         if (destinationExists) {
-            for (size_t attempt = 0; attempt < 1000; ++attempt) {
-                auto candidate = siblingPath("backup_previous");
-                fileError.clear();
-                if (!std::filesystem::exists(candidate, fileError) &&
-                    !fileError) {
-                    previousBackup = std::move(candidate);
-                    break;
+            if (!exchangePhysicalBackupDirectories(stagedBackup, dst)) {
+                discardStagedBackup();
+                return false;
+            }
+            if (!index_file::syncDirectory(parent)) {
+                // The exchange is visible but not durably published. Swap it
+                // back, persist the rollback, and then discard the failed new
+                // generation now held at the staging name.
+                if (exchangePhysicalBackupDirectories(stagedBackup, dst) &&
+                    index_file::syncDirectory(parent)) {
+                    discardStagedBackup();
+                } else {
+                    std::cerr << "[storage] backup publication sync failed; "
+                              << "retained recoverable generations at " << dst
+                              << " and " << stagedBackup << std::endl;
+                    stagedBackup.clear();
                 }
-            }
-            if (previousBackup.empty()) {
-                discardStagedBackup();
                 return false;
             }
-            std::filesystem::rename(dst, previousBackup, fileError);
-            if (fileError) {
-                discardStagedBackup();
-                return false;
-            }
-        }
-        fileError.clear();
-        std::filesystem::rename(stagedBackup, dst, fileError);
-        if (fileError) {
-            if (destinationExists) {
-                std::error_code restoreError;
-                std::filesystem::rename(previousBackup, dst, restoreError);
-            }
-            discardStagedBackup();
-            return false;
-        }
-        stagedBackup.clear();
-        if (destinationExists) {
+            const std::filesystem::path oldBackup = stagedBackup;
+            stagedBackup.clear();
             fileError.clear();
-            std::filesystem::remove_all(previousBackup, fileError);
-            if (fileError) {
-                std::cerr << "[storage] published backup but could not remove "
-                          << "the previous directory: " << previousBackup
+            std::filesystem::remove_all(oldBackup, fileError);
+            if (fileError || !index_file::syncDirectory(parent)) {
+                std::cerr << "[storage] published backup but could not durably "
+                          << "remove the previous generation: " << oldBackup
                           << std::endl;
             }
+        } else {
+            fileError.clear();
+            std::filesystem::rename(stagedBackup, dst, fileError);
+            if (fileError) {
+                discardStagedBackup();
+                return false;
+            }
+            if (!index_file::syncDirectory(parent)) {
+                std::error_code rollbackError;
+                std::filesystem::rename(dst, stagedBackup, rollbackError);
+                if (!rollbackError) {
+                    (void)index_file::syncDirectory(parent);
+                    discardStagedBackup();
+                } else {
+                    stagedBackup.clear();
+                    std::cerr << "[storage] backup publication sync failed and "
+                              << "the new generation could not be moved back"
+                              << std::endl;
+                }
+                return false;
+            }
+            stagedBackup.clear();
         }
         return true;
     } catch (const std::exception& e) {

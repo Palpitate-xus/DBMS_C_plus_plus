@@ -20,11 +20,24 @@ inline void failNextDirectorySyncForTesting() {
     directorySyncFailureCountForTesting.store(1, std::memory_order_release);
 }
 
+inline void failDirectorySyncAfterForTesting(unsigned successfulCalls) {
+    directorySyncFailureCountForTesting.store(
+        successfulCalls + 1, std::memory_order_release);
+}
+
 inline bool syncDirectory(const std::filesystem::path& directory) {
-    if (directorySyncFailureCountForTesting.exchange(
-            0, std::memory_order_acq_rel) != 0) {
-        errno = EIO;
-        return false;
+    unsigned remaining = directorySyncFailureCountForTesting.load(
+        std::memory_order_acquire);
+    while (remaining != 0) {
+        if (directorySyncFailureCountForTesting.compare_exchange_weak(
+                remaining, remaining - 1, std::memory_order_acq_rel,
+                std::memory_order_acquire)) {
+            if (remaining == 1) {
+                errno = EIO;
+                return false;
+            }
+            break;
+        }
     }
     const int dirFd = ::open(directory.c_str(), O_RDONLY | O_DIRECTORY);
     if (dirFd < 0) return false;

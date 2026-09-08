@@ -1,5 +1,6 @@
 #include "catalog/type_registry.h"
 #include "commands/TableManage.h"
+#include "access/IndexFileUtil.h"
 #include "test_utils.h"
 
 #include <cassert>
@@ -37,6 +38,21 @@ int main() {
     assert(engine.createTable(database, current) == dbms::DBStatus::OK);
     assert(engine.insert(database, "current_table", {{"id", "2"}}) ==
            dbms::DBStatus::OK);
+
+    // Fail the parent-directory sync immediately after the atomic exchange.
+    // The old generation must be exchanged back before failure is reported.
+    unsigned backupDirectoryCount = 1;
+    for (const auto& entry :
+         std::filesystem::recursive_directory_iterator(backup)) {
+        if (entry.is_directory()) ++backupDirectoryCount;
+    }
+    dbms::index_file::failDirectorySyncAfterForTesting(
+        2 + backupDirectoryCount);
+    assert(!engine.physicalBackup(database, backup));
+    assert(std::filesystem::is_regular_file(
+        std::filesystem::path(backup) / "obsolete_table.stc"));
+    assert(!std::filesystem::exists(
+        std::filesystem::path(backup) / "current_table.stc"));
 
     // Reusing a destination must replace its complete generation, not merge
     // the new source into files left by the previous backup.
