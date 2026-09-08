@@ -10870,6 +10870,74 @@ static bool handleDropTablespace(const string& sql, Session& s) {
 // Logical decoding SQL surface (P2-5)
 // ----------------------------------------------------------------------------
 
+enum class PublicationOptionParseResult { Ok, SyntaxError, Unsupported };
+
+static PublicationOptionParseResult parsePublicationOptions(
+    const string& text, dbms::Publication& publication, string& error) {
+    error.clear();
+    const string options = trim(text);
+    if (options.size() < 2 || options.front() != '(' ||
+        options.back() != ')') {
+        error = "publication options must be enclosed in parentheses";
+        return PublicationOptionParseResult::SyntaxError;
+    }
+    const auto entries = splitTopLevelComma(
+        trim(options.substr(1, options.size() - 2)));
+    if (entries.size() != 1) {
+        error = "only the publish option is supported";
+        return PublicationOptionParseResult::Unsupported;
+    }
+    const string entry = trim(entries.front());
+    const size_t equals = entry.find('=');
+    if (equals == string::npos ||
+        toLower(trim(entry.substr(0, equals))) != "publish") {
+        error = "only the publish option is supported";
+        return PublicationOptionParseResult::Unsupported;
+    }
+    const string valueLiteral = trim(entry.substr(equals + 1));
+    if (valueLiteral.size() < 2 || valueLiteral.front() != '\'' ||
+        valueLiteral.back() != '\'') {
+        error = "publish must be a quoted operation list";
+        return PublicationOptionParseResult::SyntaxError;
+    }
+    const string value = valueLiteral.substr(1, valueLiteral.size() - 2);
+    bool insert = false;
+    bool update = false;
+    bool remove = false;
+    bool sawOperation = false;
+    size_t start = 0;
+    while (start <= value.size()) {
+        const size_t comma = value.find(',', start);
+        const string operation = toLower(trim(value.substr(
+            start, comma == string::npos ? string::npos : comma - start)));
+        if (operation.empty()) {
+            error = "publish operation list cannot be empty";
+            return PublicationOptionParseResult::SyntaxError;
+        }
+        sawOperation = true;
+        if (operation == "insert") {
+            insert = true;
+        } else if (operation == "update") {
+            update = true;
+        } else if (operation == "delete") {
+            remove = true;
+        } else {
+            error = "publication operation " + operation;
+            return PublicationOptionParseResult::Unsupported;
+        }
+        if (comma == string::npos) break;
+        start = comma + 1;
+    }
+    if (!sawOperation) {
+        error = "publish operation list cannot be empty";
+        return PublicationOptionParseResult::SyntaxError;
+    }
+    publication.publishInsert = insert;
+    publication.publishUpdate = update;
+    publication.publishDelete = remove;
+    return PublicationOptionParseResult::Ok;
+}
+
 static bool handleCreatePublication(const string& sql, Session& s) {
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
@@ -10910,10 +10978,17 @@ static bool handleCreatePublication(const string& sql, Session& s) {
     // WITH (publish = 'insert,update,delete')
     size_t withPos = findTopLevelKeyword(opts, "with");
     if (withPos != string::npos) {
-        string w = toLower(trim(opts.substr(withPos + 4)));
-        if (w.find("insert") == string::npos) pub.publishInsert = false;
-        if (w.find("update") == string::npos) pub.publishUpdate = false;
-        if (w.find("delete") == string::npos) pub.publishDelete = false;
+        string optionError;
+        const auto optionResult = parsePublicationOptions(
+            trim(opts.substr(withPos + 4)), pub, optionError);
+        if (optionResult == PublicationOptionParseResult::Unsupported) {
+            cout << dbms::featureNotSupportedError(optionError) << endl;
+            return true;
+        }
+        if (optionResult == PublicationOptionParseResult::SyntaxError) {
+            cout << "ERROR: syntax error: " << optionError << endl;
+            return true;
+        }
     }
     for (const auto& t : pub.tables) {
         if (!g_engine.tableExists(s.currentDB, t)) {
@@ -10969,6 +11044,29 @@ static bool handleAlterPublication(const string& sql, Session& s) {
     if (publication == publications.end()) {
         cout << "ERROR: publication \"" << name << "\" does not exist" << endl;
         return true;
+    }
+    if (startsWithKeyword(action, "set") &&
+        !startsWithKeyword(action, "set table")) {
+        dbms::Publication updated = *publication;
+        string optionError;
+        const auto optionResult = parsePublicationOptions(
+            trim(action.substr(3)), updated, optionError);
+        if (optionResult == PublicationOptionParseResult::Unsupported) {
+            cout << dbms::featureNotSupportedError(optionError) << endl;
+            return true;
+        }
+        if (optionResult == PublicationOptionParseResult::SyntaxError) {
+            cout << "ERROR: syntax error: " << optionError << endl;
+            return true;
+        }
+        string error;
+        if (!dbms::PublicationCatalog::instance().update(
+                s.currentDB, updated, error)) {
+            cout << "ERROR: " << error << endl;
+            return true;
+        }
+        cout << "ALTER PUBLICATION succeeded" << endl;
+        return false;
     }
     enum class MembershipAction { Add, Drop, Set };
     MembershipAction operation;

@@ -216,15 +216,38 @@ def main():
         # catalog and persist atomically; they never reach .pg_compat_objects.
         expect_command_tag(sock, "CREATE TABLE pub_member (a INT)",
                            "publication member table")
-        expect_command_tag(sock, "CREATE PUBLICATION pub_gate FOR TABLE t6d",
+        expect_command_tag(
+            sock,
+            "CREATE PUBLICATION pub_gate FOR TABLE t6d "
+            "WITH (publish = 'insert')",
                            "create real publication")
+        publication_path = os.path.join(work_dir, "info", "pub_gate.publication")
+        with open(publication_path, encoding="utf-8") as publication_file:
+            publication_lines = publication_file.read().splitlines()
+        assert publication_lines[0].split()[1:] == ["1", "0", "0", "0"], \
+            publication_lines
         expect_command_tag(sock, "ALTER PUBLICATION pub_gate ADD TABLE pub_member",
                            "add publication member")
-        publication_path = os.path.join(work_dir, "info", "pub_gate.publication")
         with open(publication_path, encoding="utf-8") as publication_file:
             membership = publication_file.read().splitlines()[1:]
         assert membership == ["t6d", "pub_member"], membership
+        expect_command_tag(
+            sock,
+            "ALTER PUBLICATION pub_gate SET (publish = 'insert, delete')",
+            "change publication operations")
+        with open(publication_path, encoding="utf-8") as publication_file:
+            publication_lines = publication_file.read().splitlines()
+        assert publication_lines[0].split()[1:] == ["1", "0", "1", "0"], \
+            publication_lines
         persisted_before_error = Path(publication_path).read_bytes()
+        expect_0a000(
+            sock,
+            "ALTER PUBLICATION pub_gate SET (publish = 'truncate')",
+            "unsupported publication operation")
+        expect_error(
+            sock,
+            "ALTER PUBLICATION pub_gate SET (publish = '')",
+            "42601", "empty publication operation list")
         assert error_of(simple_query(
             sock, "ALTER PUBLICATION pub_gate ADD TABLE pub_member")) is not None
         assert error_of(simple_query(
