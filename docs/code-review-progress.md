@@ -139,6 +139,8 @@
 
 | 297 | P0-01 / SQL-01 / SQL-02 / DIV-04 | SELECT 总入口用裸子串搜索 MySQL 式 `INTO OUTFILE`，普通文本值含该短语时也会在 PostgreSQL 模式误报 `42601`。扩展子句门禁现在只识别顶层、引号和括号之外的完整关键字 | `sql_literal_preservation_e2e_test` 先复现等值查询错误，再验证文本值原样返回；DIV-14 保留真实扩展命令门禁，完整协议、O2 构建及实际 PostgreSQL `cases=122 failed=0` 通过 | `0c84d74` |
 
+| 298 | P0-01 / SQL-01 / SQL-02 / SQL-04 / QRY-01 | 单表 SELECT 为绑定限定列，在整个投影文本中裸搜索并删除 `table.`/`alias.`；相同字节位于字符串常量时也被删除，`'rewrite_literal_rows.id'` 与 `'r.id'` 均错误返回 `'id'`。限定符重写现在跳过单/双引号与双写转义，并校验左侧标识符边界 | `sql_literal_preservation_e2e_test` 覆盖表名和 AS 别名两种文本常量，同时保留真实限定 WHERE；结构化表查询、DIV-14、O2 构建及实际 PostgreSQL `cases=122 failed=0` 通过 | `c09dcdf` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
