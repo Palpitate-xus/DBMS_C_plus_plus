@@ -43,10 +43,33 @@ def main():
         rows, state, message, headers, command_tag, type_oids = decoded
         assert state is None, (state, message)
         assert headers == [
-            "i", "n", "b", "d", "ts", "current_user", "pg_typeof",
+            "i", "n", "b", "d", "ts", "u", "pt",
         ], headers
         assert type_oids == [23, 1700, 16, 1082, 1114, 19, 2206], type_oids
         assert command_tag == "SELECT 1", command_tag
+
+        rows, state, message, headers = runner.ours_query(
+            client, server["sock"],
+            'SELECT current_user AS "who am I", session_user AS su, '
+            'user AS usr, current_database() AS db, current_schema() AS sch, '
+            'pg_typeof(1) AS type_name, version() AS banner;')
+        assert state is None, (state, message)
+        assert headers == [
+            "who am I", "su", "usr", "db", "sch", "type_name", "banner",
+        ], headers
+        assert len(rows) == 1 and len(rows[0]) == 7, rows
+
+        decoded = runner.decode_wire_result(
+            client.simple_query(
+                server["sock"],
+                'SELECT generate_series(1, 2) AS "series value";'),
+            include_types=True)
+        rows, state, message, headers, command_tag, type_oids = decoded
+        assert state is None, (state, message)
+        assert headers == ["series value"], headers
+        assert rows == [["1"], ["2"]], rows
+        assert type_oids == [23], type_oids
+        assert command_tag == "SELECT 2", command_tag
 
         rows, state, message, headers = runner.ours_query(
             client, server["sock"],

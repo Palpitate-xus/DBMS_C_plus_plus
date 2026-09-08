@@ -5709,30 +5709,30 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
 
         // Pseudo functions
         if (lowItem == "current_user") {
-            headers.push_back("current_user");
+            headers.push_back(disp == item ? "current_user" : disp);
             appendValue(s.currentRole.empty() ? s.username : s.currentRole,
                         false, "name");
             continue;
         }
         if (lowItem == "session_user") {
-            headers.push_back("session_user");
+            headers.push_back(disp == item ? "session_user" : disp);
             appendValue(s.username, false, "name");
             continue;
         }
         if (lowItem.rfind("generate_series", 0) == 0) {
             // Placeholder row; the SRF expansion below fills the series.
-            headers.push_back("generate_series");
+            headers.push_back(disp == item ? "generate_series" : disp);
             appendValue("", false, "integer");
             continue;
         }
         if (lowItem == "current_database()" || lowItem == "current_database ( )") {
-            headers.push_back("current_database");
+            headers.push_back(disp == item ? "current_database" : disp);
             appendValue(s.currentDB.empty() ? std::string("postgres") : s.currentDB,
                         false, "name");
             continue;
         }
         if (lowItem == "current_schema()" || lowItem == "current_schema ( )") {
-            headers.push_back("current_schema");
+            headers.push_back(disp == item ? "current_schema" : disp);
             appendValue("public", false, "name");
             continue;
         }
@@ -5750,12 +5750,12 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             else if (arg == "true" || arg == "false") tn = "boolean";
             else if (!arg.empty() && arg.front() == '{') tn = "text[]";
             else tn = "unknown";
-            headers.push_back("pg_typeof");
+            headers.push_back(disp == item ? "pg_typeof" : disp);
             appendValue(tn, false, "regtype");
             continue;
         }
         if (lowItem == "version()" || lowItem == "version ( )") {
-            headers.push_back("version");
+            headers.push_back(disp == item ? "version" : disp);
             // PG-compatible version banner (matches the reference server
             // shape: PostgreSQL <ver> (<distro>) on <arch>, compiled by ...).
             appendValue("PostgreSQL 17.2 (Debian 17.2-1.pgdg120+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 12.2.0-14) 12.2.0, 64-bit",
@@ -5765,7 +5765,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
         if (lowItem == "user" || lowItem == "current_user" || lowItem == "session_user") {
             // The bare keyword USER is a PG synonym for CURRENT_USER.
             if (lowItem == "user") {
-                headers.push_back("user");
+                headers.push_back(disp == item ? "user" : disp);
                 appendValue(s.username, false, "name");
                 continue;
             }
