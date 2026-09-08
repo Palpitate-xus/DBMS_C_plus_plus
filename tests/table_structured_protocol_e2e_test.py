@@ -21,6 +21,8 @@ def main():
              "(5, 'line1\nline2'), (6, 'say \"hi\"'), (7, ' lead ');"),
             "CREATE TABLE exact_null_order (id INT, v INT);",
             "INSERT INTO exact_null_order VALUES (1, NULL), (2, 1), (3, 2);",
+            "CREATE TABLE exact_scalar_text_order (v TEXT);",
+            "INSERT INTO exact_scalar_text_order VALUES ('2'), ('10'), (NULL);",
         ]
         for sql in setup:
             _, state, message, _ = runner.ours_query(
@@ -90,6 +92,47 @@ def main():
             assert scalar_rows == scalar_expected, (
                 scalar_sql, scalar_rows, scalar_expected)
             assert scalar_headers == ["rendered"], scalar_headers
+
+        alias_values = [
+            None if row[1] is None else row[1].upper()
+            for row in expected
+        ]
+        alias_expected = [[value] for value in sorted(
+            (value for value in alias_values if value is not None),
+            key=str.casefold)] + [[None]]
+        alias_sql = (
+            "SELECT upper(v) AS rendered FROM exact_table_rows "
+            "ORDER BY rendered;")
+        alias_rows, alias_state, alias_message, _ = runner.ours_query(
+            client, server["sock"], alias_sql)
+        assert alias_state is None, (alias_state, alias_message)
+        assert alias_rows == alias_expected, (alias_rows, alias_expected)
+
+        ordinal_values = [
+            None if row[1] is None else row[1] + "!"
+            for row in expected
+        ]
+        ordinal_expected = [[value] for value in sorted(
+            (value for value in ordinal_values if value is not None),
+            key=str.casefold, reverse=True)] + [[None]]
+        ordinal_sql = (
+            "SELECT v || '!' AS rendered FROM exact_table_rows "
+            "ORDER BY 1 DESC NULLS LAST;")
+        ordinal_rows, ordinal_state, ordinal_message, _ = runner.ours_query(
+            client, server["sock"], ordinal_sql)
+        assert ordinal_state is None, (ordinal_state, ordinal_message)
+        assert ordinal_rows == ordinal_expected, (
+            ordinal_rows, ordinal_expected)
+
+        typed_order_sql = (
+            "SELECT coalesce(v, 'z') AS rendered "
+            "FROM exact_scalar_text_order ORDER BY rendered;")
+        typed_order_rows, typed_order_state, typed_order_message, _ = (
+            runner.ours_query(client, server["sock"], typed_order_sql))
+        assert typed_order_state is None, (
+            typed_order_state, typed_order_message)
+        assert typed_order_rows == [["10"], ["2"], ["z"]], \
+            typed_order_rows
 
         order_cases = [
             ("SELECT id FROM exact_null_order ORDER BY v;",

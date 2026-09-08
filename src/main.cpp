@@ -21503,19 +21503,11 @@ if (sql.rfind("backup database", 0) == 0) {
                 [](const auto& expr) {
                     return expr.isScalar && expr.funcName == "unnest";
                 });
-            const bool scalarOrderUsesOnlyTableColumns = all_of(
-                orderBySpecs.begin(), orderBySpecs.end(),
-                [&](const auto& spec) {
-                    for (size_t i = 0; i < tbl.len; ++i) {
-                        if (tbl.cols[i].dataName == spec.colName) return true;
-                    }
-                    return false;
-                });
             const bool captureStructuredScalar =
                 shouldPublishQueryMetadata() && condTokens.empty() &&
                 !structuredScalar && !hasSetReturningScalar &&
                 !isDistinct && distinctOnCols.empty() &&
-                exprOrderBySpecs.empty() && scalarOrderUsesOnlyTableColumns &&
+                exprOrderBySpecs.empty() &&
                 limitPos == string::npos &&
                 offsetPos == string::npos && outfile.empty() &&
                 queryDb != "information_schema" && queryDb != "pg_catalog" &&
@@ -21797,6 +21789,75 @@ if (sql.rfind("backup database", 0) == 0) {
                 outKeys.push_back({idx, &spec});
             }
             if (allMapped && !outKeys.empty()) {
+                const bool hasStructuredScalarOrder =
+                    structuredScalarRows &&
+                    structuredScalarResult.rows.size() == answers.size() &&
+                    structuredScalarResult.nulls.size() == answers.size();
+                if (hasStructuredScalarOrder) {
+                    vector<size_t> order;
+                    order.reserve(answers.size());
+                    for (size_t i = 0; i < answers.size(); ++i)
+                        order.push_back(i);
+                    std::stable_sort(order.begin(), order.end(),
+                        [&](size_t a, size_t b) {
+                            for (const auto& k : outKeys) {
+                                const bool aNull =
+                                    k.first >= structuredScalarResult.nulls[a].size() ||
+                                    structuredScalarResult.nulls[a][k.first];
+                                const bool bNull =
+                                    k.first >= structuredScalarResult.nulls[b].size() ||
+                                    structuredScalarResult.nulls[b][k.first];
+                                if (aNull != bNull)
+                                    return aNull == k.second->nullsFirst;
+                                if (aNull) continue;
+                                const string& va =
+                                    structuredScalarResult.rows[a][k.first];
+                                const string& vb =
+                                    structuredScalarResult.rows[b][k.first];
+                                int cmp = 0;
+                                string resultType =
+                                    k.first < structuredScalarResult.columnTypes.size()
+                                        ? toLower(structuredScalarResult.columnTypes[k.first])
+                                        : string();
+                                const bool numericType =
+                                    resultType == "smallint" || resultType == "int2" ||
+                                    resultType == "integer" || resultType == "int4" ||
+                                    resultType == "bigint" || resultType == "int8" ||
+                                    resultType == "numeric" || resultType == "decimal" ||
+                                    resultType == "real" || resultType == "float4" ||
+                                    resultType == "double" ||
+                                    resultType == "double precision" ||
+                                    resultType == "float8";
+                                if (numericType) {
+                                    try {
+                                        dbms::Numeric na(va), nb(vb);
+                                        cmp = na < nb ? -1 : (nb < na ? 1 : 0);
+                                    } catch (...) {
+                                        cmp = ciTextCompare(va, vb);
+                                    }
+                                } else {
+                                    cmp = ciTextCompare(va, vb);
+                                }
+                                if (cmp != 0)
+                                    return k.second->ascending ? cmp < 0
+                                                                : cmp > 0;
+                            }
+                            return false;
+                        });
+                    auto oldAnswers = std::move(answers);
+                    auto oldRows = std::move(structuredScalarResult.rows);
+                    auto oldNulls = std::move(structuredScalarResult.nulls);
+                    answers.reserve(order.size());
+                    structuredScalarResult.rows.reserve(order.size());
+                    structuredScalarResult.nulls.reserve(order.size());
+                    for (size_t index : order) {
+                        answers.push_back(std::move(oldAnswers[index]));
+                        structuredScalarResult.rows.push_back(
+                            std::move(oldRows[index]));
+                        structuredScalarResult.nulls.push_back(
+                            std::move(oldNulls[index]));
+                    }
+                } else {
                 auto cellOf = [](const string& row, size_t want) -> string {
                     vector<string> cells;
                     size_t start = 0;
@@ -21833,6 +21894,7 @@ if (sql.rfind("backup database", 0) == 0) {
                         }
                         return false;
                     });
+                }
             }
         }
         // Post-query DISTINCT deduplication (skip if DISTINCT ON already handled in query())
