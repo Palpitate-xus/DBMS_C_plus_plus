@@ -44,12 +44,13 @@
 | 208 | QRY-10 | LIMIT 0 被当作无限制，OFFSET 到达 / 超过末尾返回全部行；JOIN 的 LIMIT/OFFSET 被读进 ON 条件，且在聚合前截断输入。共用有界切片，区分显式零与 ALL，并在 JOIN 聚合输出后切片 | 18 项完整入口通过：普通 / 标量 / 分组 / 窗口 / JOIN / JOIN 聚合、零行、末尾 / 大 OFFSET、ALL、FETCH 0 和大 LIMIT；无 FROM、完整行数表达式及执行短路语义仍需后续统一管线处理 | `0631974` |
 | 209 | SQL-01 | 入口直接删除换行 / 制表符 / CR，将关键字与列名粘连，并修改字符串内容；现在仅把引号外的连续空白规范为分隔空格，引号内保持原值 | 6 项完整入口通过：跨行 SELECT / FROM / WHERE、CRLF ORDER BY 与 FETCH，以及 length 验证字符串中的 LF / TAB / CR / 连续空格未被修改。协议直接输出多行文本仍属于 P0-02 待迁移范围 | `a992fce` |
 | 210 | P0-16 | 列描述输入只用 rstrip 删末尾分号，分号后有注释时仍会先执行 SQL；按字符串 / 标识符 / E-string / dollar quote / 嵌套注释边界去掉终止符，拒绝多语句输入 | Python 差分回归 17 项通过（新增 3 组）；断言发送给 psql 的内容不含语句终止符，多语句在调用前拒绝；实际 PostgreSQL 注释结尾描述通过 | `7d088cc` |
+| 211 | P0-02 | 旧 SELECT 文本结果按空白拆列，带空格的 quoted alias 被伪造为多列，identifier 中的 `""` 也会丢失；统一 quoted identifier 解码和 legacy header framing，协议适配器成对解码双引号 | 7 类 SQL / 协议回归通过：普通、表达式、聚合、分组、窗口、无 FROM 及 embedded quote alias；review、空白边界和 PostgreSQL 协议相邻回归通过。SELECT 全链路结构化结果仍未完成 | `3052136` |
 
 本批新增的待修复复现（仍计入总清单）：
 
-- P0-02：`SELECT id AS "fetch first 1 rows only" FROM t` 的列名被按空格拆开，协议返回多列；结构化结果链路仍未完成。
+- P0-02：quoted alias 的已知拆列问题已由第 211 项修复；SELECT 值仍通过显示文本反解析，空白、换行、NULL 和二进制值的无损结构化传递继续计入总清单。
 
-### 本批验证记录（第 197–210 项）
+### 本批验证记录（第 197–211 项）
 
 - 27 个 C++ 测试通过：15 个子查询回归、parser_phase1，以及表达式、布尔、数组、集合聚合、分组键、并行、Volcano、窗口、布尔聚合、分位数和异常解锁的 11 个相邻测试。使用当前生产库对象重新链接，在隔离目录运行。
 - Python 单元测试 23 项通过：总账校验 6 项、差分工具 17 项。

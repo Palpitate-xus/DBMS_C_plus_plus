@@ -2,7 +2,7 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "items": [
     {"id":"P0-01","status":"partial","evidence":["docs/code-review-progress.md"]},
-    {"id":"P0-02","status":"partial","evidence":["docs/code-review-progress.md","src/common/DbError.h"],"tests":["tests/subquery_sqlstate_e2e_test.py"],"commits":["417047a"]},
+    {"id":"P0-02","status":"partial","evidence":["docs/code-review-progress.md","src/common/DbError.h","src/network/NetworkServer.cpp"],"tests":["tests/subquery_sqlstate_e2e_test.py","tests/quoted_alias_protocol_e2e_test.py"],"commits":["417047a","3052136"]},
     {"id":"P0-03","status":"unverified","evidence":[]},
     {"id":"P0-04","status":"unverified","evidence":[]},
     {"id":"P0-05","status":"unverified","evidence":[]},
