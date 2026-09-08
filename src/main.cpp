@@ -18411,7 +18411,9 @@ if (sql.rfind("backup database", 0) == 0) {
                                 }
                             }
                             if (obA != string::npos) {
-                                aggOrderBy = trim(lowArg.substr(obA));
+                                // AggItem carries the sort keys, not a second
+                                // ORDER BY clause. Preserve quoted key text.
+                                aggOrderBy = trim(arg.substr(obA + 8));
                                 arg = arg.substr(0, obA);
                                 while (!arg.empty() && (isspace(static_cast<unsigned char>(arg.back())) || arg.back() == ','))
                                     arg.pop_back();
@@ -19293,8 +19295,9 @@ if (sql.rfind("backup database", 0) == 0) {
             bool canUseVolcanoGroup = !noWait && !skipLocked &&
                                       !hasWindow && (!hasScalar || arithGroupKeyOnly) &&
                                       distinctOnCols.empty() &&
-                                      (exprOrderBySpecs.empty() || arithGroupKeyOnly) &&
-                                      (orderBySpecs.empty() || arithGroupKeyOnly);
+                                      (exprOrderBySpecs.empty() || arithGroupKeyOnly);
+            // Simple output ORDER BY keys are applied below after grouping;
+            // they do not require falling back to the legacy aggregates.
             vector<vector<string>> volcanoGroupConditions;
             if (canUseVolcanoGroup && !condTokens.empty()) {
                 vector<string> condCopy = condTokens;
@@ -19314,7 +19317,8 @@ if (sql.rfind("backup database", 0) == 0) {
                 return find(groupByCols.begin(), groupByCols.end(), name) != groupByCols.end();
             };
             static const set<string> volcanoAggregateFunctions = {
-                "count", "sum", "avg", "min", "max", "bool_and", "bool_or", "every"
+                "count", "sum", "avg", "min", "max", "bool_and", "bool_or", "every",
+                "string_agg", "array_agg"
             };
             // GROUP BY expressions (v % 2, id / 10): HashAggOp evaluates
             // non-column keys per row, so they stay eligible here.
@@ -19330,7 +19334,11 @@ if (sql.rfind("backup database", 0) == 0) {
                 const bool boolAggExprArgG =
                     (func == "bool_and" || func == "bool_or" || func == "every") &&
                     arg != "*" && arg.find(' ') != string::npos;
-                if ((func != "count" || arg != "*") && !boolAggExprArgG) {
+                // Collection aggregates parse their complete argument list
+                // and sort expressions in the executor, including casts and
+                // per-row separators; they are not bare column references.
+                const bool collectionAgg = func == "string_agg" || func == "array_agg";
+                if ((func != "count" || arg != "*") && !boolAggExprArgG && !collectionAgg) {
                     if (func == "count" && arg.size() > 9 && arg.substr(0, 9) == "distinct ") {
                         arg = trim(arg.substr(9));
                     }
@@ -19793,7 +19801,7 @@ if (sql.rfind("backup database", 0) == 0) {
             if (forUpdate) { cout << "FOR UPDATE not supported with aggregate" << endl; return true; }
             bool canUseVolcanoAggregate = !noWait && !skipLocked &&
                 !hasWindow && !hasScalar && distinctOnCols.empty() &&
-                exprOrderBySpecs.empty() && orderBySpecs.empty();
+                exprOrderBySpecs.empty();
             auto hasAggregateColumn = [&](const string& name) {
                 for (size_t i = 0; i < tbl.len; ++i) {
                     if (tbl.cols[i].dataName == name) return true;
@@ -19801,7 +19809,8 @@ if (sql.rfind("backup database", 0) == 0) {
                 return false;
             };
             static const set<string> volcanoAggregateFunctions = {
-                "count", "sum", "avg", "min", "max", "bool_and", "bool_or", "every"
+                "count", "sum", "avg", "min", "max", "bool_and", "bool_or", "every",
+                "string_agg", "array_agg"
             };
             for (const auto& item : pureAgg) {
                 const string func = toLower(trim(item.func));
@@ -19812,7 +19821,8 @@ if (sql.rfind("backup database", 0) == 0) {
                 const bool boolAggExprArg =
                     (func == "bool_and" || func == "bool_or" || func == "every") &&
                     arg != "*" && arg.find(' ') != string::npos;
-                if ((func != "count" || arg != "*") && !boolAggExprArg) {
+                const bool collectionAgg = func == "string_agg" || func == "array_agg";
+                if ((func != "count" || arg != "*") && !boolAggExprArg && !collectionAgg) {
                     if (func == "count" && arg.size() > 9 && arg.substr(0, 9) == "distinct ") {
                         arg = trim(arg.substr(9));
                     }
