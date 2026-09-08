@@ -131,6 +131,8 @@
 
 | 293 | P0-01 / SQL-01 / SQL-02 / SQL-03 | 更早的全 SQL 表达式改写仍扫描引号内部：数组下标、量化数组、SUBSTRING/POSITION、IS DISTINCT FROM 和 CASE 形状的普通文本被改写；前四类错误返回空集，两个 DISTINCT 字符串条件错误放行整张表。现在这些改写复用引号感知扫描，括号匹配同时跳过双引号标识符；真实表达式路径保持原语义 | `sql_literal_preservation_e2e_test` 增加 7 类字符串复现；array、ANY/ALL、IS DISTINCT、SUBSTRING、POSITION、searched/simple CASE 专项及 JOIN、结构化协议、review SQL、DIV-14、O2 构建和实际 PostgreSQL `cases=122 failed=0` 全部通过 | `64751ae` |
 
+| 294 | P0-01 / SQL-01 / SQL-02 / QRY-11 | SELECT 用四次裸字符串搜索识别 `FOR UPDATE`、`FOR SHARE`、NOWAIT、SKIP LOCKED，关键字位于普通文本值时也会从该位置截断整条查询；四种等值查询均错误返回空集。锁定子句现在只在顶层、引号及括号之外识别 | `sql_literal_preservation_e2e_test` 覆盖四种文本值，并在显式事务中验证真实 `FOR UPDATE NOWAIT`、`FOR UPDATE SKIP LOCKED` 与 `FOR SHARE`；协议、结构化结果、DIV-14、O2 构建和实际 PostgreSQL `cases=122 failed=0` 全部通过 | `0b80a13` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
