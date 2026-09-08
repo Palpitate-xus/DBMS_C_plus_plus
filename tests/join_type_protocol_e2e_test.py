@@ -32,6 +32,11 @@ def main():
             "INSERT INTO join_collision_left VALUES (1, 'NULL');",
             ("INSERT INTO join_collision_right VALUES "
              "(2, 'b c'), (1, 'b c');"),
+            "CREATE TABLE join_pred_left (id INT, txt TEXT);",
+            "CREATE TABLE join_pred_right (id INT);",
+            ("INSERT INTO join_pred_left VALUES "
+             "(1, 'a,b'), (2, 'x'), (3, NULL);"),
+            "INSERT INTO join_pred_right VALUES (1), (2), (3);",
         ]
         for sql in setup:
             _, state, message, _ = runner.ours_query(
@@ -94,6 +99,26 @@ def main():
               "JOIN join_exact_right r ON l.id = r.id "
               "WHERE l.id IN (1, 4) ORDER BY l.id;"),
              [["1"], ["4"]]),
+            (("SELECT l.id FROM join_exact_left l "
+              "JOIN join_exact_right r ON l.id = r.id "
+              "WHERE l.txt IN ('', 'a b', 'NULL') ORDER BY l.id;"),
+             [["1"], ["3"], ["4"]]),
+            (("SELECT l.id FROM join_exact_left l "
+              "JOIN join_exact_right r ON l.id = r.id "
+              "WHERE l.txt IN ('a b') ORDER BY l.id;"),
+             [["4"]]),
+            (("SELECT l.id FROM join_exact_left l "
+              "JOIN join_exact_right r ON l.id = r.id "
+              "WHERE l.txt IN ('') ORDER BY l.id;"),
+             [["1"]]),
+            (("SELECT l.id FROM join_exact_left l "
+              "JOIN join_exact_right r ON l.id = r.id "
+              "WHERE l.id NOT IN (1, NULL) ORDER BY l.id;"),
+             []),
+            (("SELECT l.id FROM join_pred_left l "
+              "JOIN join_pred_right r ON l.id = r.id "
+              "WHERE l.txt IN ('a,b') ORDER BY l.id;"),
+             [["1"]]),
             (("SELECT l.id FROM join_exact_left l "
               "JOIN join_exact_right r ON l.id = r.id "
               "WHERE l.id BETWEEN 2 AND 3 ORDER BY l.id;"),

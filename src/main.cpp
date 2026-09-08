@@ -9996,14 +9996,9 @@ static std::string expandSubqueries(std::string sql, Session& s) {
         if (inner.size() >= 6 && inner.substr(0, 6) == "select") {
             values = runSubQuery(inner, s);
         } else {
-            size_t vpos = 0;
-            while (vpos < inner.size()) {
-                size_t comma = inner.find(',', vpos);
-                std::string val = trim((comma == string::npos) ? inner.substr(vpos) : inner.substr(vpos, comma - vpos));
-                values.push_back(val);
-                if (comma == string::npos) break;
-                vpos = comma + 1;
-            }
+            // A comma inside a quoted literal or nested expression is data,
+            // not an IN-list separator (for example IN ('a,b')).
+            values = splitTopLevelComma(inner);
         }
 
         std::string replacement;

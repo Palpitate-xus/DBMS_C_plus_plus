@@ -24,6 +24,24 @@ def main():
             rows, state, message, _ = runner.ours_query(client, server["sock"], sql)
             assert state is None, (sql, state, message)
             assert rows == [[expected]], (sql, rows, expected)
+        for sql in (
+                "CREATE TABLE literal_list_rows (id INT, value TEXT);",
+                ("INSERT INTO literal_list_rows VALUES "
+                 "(1, 'a,b'), (2, 'x'), (3, 'O''Brien, Jr.');")):
+            _, state, message, _ = runner.ours_query(
+                client, server["sock"], sql)
+            assert state is None, (sql, state, message)
+        list_cases = [
+            ("WHERE value IN ('a,b') ORDER BY id", [["1"]]),
+            ("WHERE value NOT IN ('a,b') ORDER BY id", [["2"], ["3"]]),
+            ("WHERE value IN ('O''Brien, Jr.') ORDER BY id", [["3"]]),
+        ]
+        for clause, expected in list_cases:
+            sql = "SELECT id FROM literal_list_rows " + clause + ";"
+            rows, state, message, _ = runner.ours_query(
+                client, server["sock"], sql)
+            assert state is None, (sql, state, message)
+            assert rows == expected, (sql, rows, expected)
         print("[SQL LITERAL PRESERVATION E2E] passed")
     finally:
         runner.stop_ours(server)
