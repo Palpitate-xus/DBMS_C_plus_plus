@@ -20167,99 +20167,113 @@ if (sql.rfind("backup database", 0) == 0) {
         bool structuredScalarRows = false;
         dbms::DmlResult structuredAggregateResult;
         bool structuredAggregateRows = false;
+        vector<size_t> groupProjectionSources;
+        bool groupProjectionComplete = false;
         if (!groupByCols.empty()) {
             if (forUpdate) { cout << "FOR UPDATE not supported with GROUP BY" << endl; return true; }
             vector<string> groupProtocolColumns;
             vector<string> groupProtocolTypes;
-            // Header for group keys: PG uses the SELECT-list alias for
-            // expression keys ("v % 2 AS parity" -> "parity"), "?column?"
-            // for an unaliased expression, and the plain column name for
-            // real columns.  Printing the raw expression text here made the
-            // protocol layer space-split it into phantom columns.
-            for (const auto& gc : groupByCols) {
-                string header = gc;
-                bool isExpr = gc.find_first_of("+-*/%") != string::npos;
-                for (const auto& itemRaw : splitSelectColumns(columns)) {
-                    string it2 = trim(itemRaw);
-                    size_t ap2 = toLower(it2).rfind(" as ");
-                    if (ap2 == string::npos) continue;
-                    if (trim(it2.substr(0, ap2)) == gc) {
-                        header = decodeQuotedIdentifier(trim(it2.substr(ap2 + 4)));
-                        isExpr = false;
-                        break;
-                    }
-                }
-                const string outputHeader = isExpr ? string("?column?") : header;
-                cout << renderLegacyHeader(outputHeader) << ' ';
-                groupProtocolColumns.push_back(outputHeader);
-                string groupType = groupExpressionProtocolType(gc);
-                for (size_t ci = 0; ci < tbl.len; ++ci)
-                    if (tbl.cols[ci].dataName == gc) {
-                        groupType = tbl.cols[ci].dataType;
-                        break;
-                    }
-                groupProtocolTypes.push_back(std::move(groupType));
-            }
             vector<dbms::StorageEngine::AggItem> pureAgg;
             for (const auto& it : aggItems) {
                 if (!it.func.empty()) pureAgg.push_back(it);
             }
-            // Header: use the SELECT-list display names (aliases honored, no
-            // space-splitting of expression text by the protocol layer).
-            // Skip empty-func items: bare group columns are already printed
-            // above from groupByCols.
-            {
-                size_t ai2 = 0;
-                for (size_t ei = 0; ei < exprTypes.size(); ++ei) {
-                    if (exprTypes[ei] == 0 || exprTypes[ei] == 1) {
-                        if (ai2 < aggItems.size() && !aggItems[ai2].func.empty()) {
-                            cout << renderLegacyHeader(selectExprs[ei].displayName) << ' ';
-                            groupProtocolColumns.push_back(selectExprs[ei].displayName);
-                            groupProtocolTypes.push_back(
-                                aggregateProtocolType(aggItems[ai2]));
-                        }
-                        ++ai2;
-                    } else if (exprTypes[ei] == 2) {
-                        if (ai2 < aggItems.size() && !aggItems[ai2].func.empty()) {
-                            cout << renderLegacyHeader(selectExprs[ei].displayName) << ' ';
-                            groupProtocolColumns.push_back(selectExprs[ei].displayName);
-                            groupProtocolTypes.push_back("text");
-                        }
-                        ++ai2;
-                    } else if (exprTypes[ei] == 3 &&
-                               selectExprs[ei].funcName == "subquery") {
-                        // Scalar subquery in a GROUP BY select list:
-                        // evaluated per output group below.  PG names the
-                        // column after the subquery's own select column.
-                        string subCol = selectExprs[ei].displayName;
-                        {
-                            const string& sq = selectExprs[ei].funcArgs[0];
-                            size_t sp = sq.find("select ");
-                            if (sp == 0) {
-                                size_t fp = sq.find(" from ");
-                                if (fp != string::npos)
-                                    subCol = trim(sq.substr(7, fp - 7));
-                            }
-                        }
-                        cout << subCol << ' ';
-                        groupProtocolColumns.push_back(subCol);
-                        groupProtocolTypes.push_back(inferSubQueryResultType(
-                            selectExprs[ei].funcArgs[0], s));
-                    } else if (exprTypes[ei] == 3 &&
-                               selectExprs[ei].funcName == "arith" &&
-                               arithRawText.count(ei) &&
-                               arithRawText[ei].find("(select") != string::npos) {
-                        // agg + (SELECT ...) in a GROUP BY select list:
-                        // evaluated per output group below; PG names an
-                        // unaliased arithmetic column ?column?.
-                        cout << renderLegacyHeader(selectExprs[ei].displayName) << ' ';
-                        groupProtocolColumns.push_back(selectExprs[ei].displayName);
-                        groupProtocolTypes.push_back(
-                            scalarSubqueryExpressionProtocolType(
-                                arithRawText[ei]));
-                    }
-                }
+            // GroupAggregate emits physical rows as all grouping keys followed
+            // by aggregate values.  SQL projection order is independent of
+            // that layout and may omit or repeat grouping keys, so build an
+            // explicit SELECT-output -> physical-cell mapping.
+            const vector<string> rawGroupItems = splitSelectColumns(columns);
+            vector<string> rawGroupBodies;
+            rawGroupBodies.reserve(rawGroupItems.size());
+            for (const auto& raw : rawGroupItems) {
+                string body = trim(raw);
+                const size_t asPos = toLower(body).rfind(" as ");
+                if (asPos != string::npos) body = trim(body.substr(0, asPos));
+                rawGroupBodies.push_back(std::move(body));
             }
+            auto groupKeyIndex = [&](size_t expressionIndex) -> size_t {
+                vector<string> candidates;
+                if (expressionIndex < selectExprs.size() &&
+                    !selectExprs[expressionIndex].colName.empty()) {
+                    candidates.push_back(selectExprs[expressionIndex].colName);
+                }
+                if (expressionIndex < rawGroupBodies.size())
+                    candidates.push_back(rawGroupBodies[expressionIndex]);
+                for (const auto& candidate : candidates) {
+                    const auto found = find(
+                        groupByCols.begin(), groupByCols.end(), candidate);
+                    if (found != groupByCols.end())
+                        return static_cast<size_t>(found - groupByCols.begin());
+                }
+                return groupByCols.size();
+            };
+            size_t aggregateItemIndex = 0;
+            size_t pureAggregateIndex = 0;
+            size_t extraResultIndex = groupByCols.size() + pureAgg.size();
+            groupProjectionComplete = true;
+            for (size_t ei = 0; ei < exprTypes.size(); ++ei) {
+                const size_t keyIndex = groupKeyIndex(ei);
+                if (keyIndex < groupByCols.size()) {
+                    const string& key = groupByCols[keyIndex];
+                    string type = groupExpressionProtocolType(key);
+                    for (size_t ci = 0; ci < tbl.len; ++ci) {
+                        if (tbl.cols[ci].dataName == key) {
+                            type = tbl.cols[ci].dataType;
+                            break;
+                        }
+                    }
+                    groupProtocolColumns.push_back(selectExprs[ei].displayName);
+                    groupProtocolTypes.push_back(std::move(type));
+                    groupProjectionSources.push_back(keyIndex);
+                    if (exprTypes[ei] == 0) ++aggregateItemIndex;
+                    continue;
+                }
+                if (exprTypes[ei] == 0 || exprTypes[ei] == 1 ||
+                    exprTypes[ei] == 2) {
+                    if (aggregateItemIndex >= aggItems.size() ||
+                        aggItems[aggregateItemIndex].func.empty()) {
+                        groupProjectionComplete = false;
+                        ++aggregateItemIndex;
+                        continue;
+                    }
+                    groupProtocolColumns.push_back(selectExprs[ei].displayName);
+                    groupProtocolTypes.push_back(exprTypes[ei] == 2
+                        ? string("text")
+                        : aggregateProtocolType(aggItems[aggregateItemIndex]));
+                    groupProjectionSources.push_back(
+                        groupByCols.size() + pureAggregateIndex++);
+                    ++aggregateItemIndex;
+                    continue;
+                }
+                if (exprTypes[ei] == 3 &&
+                    selectExprs[ei].funcName == "subquery" &&
+                    !selectExprs[ei].funcArgs.empty()) {
+                    string header = selectExprs[ei].displayName;
+                    const string& subquery = selectExprs[ei].funcArgs[0];
+                    if (subquery.rfind("select ", 0) == 0) {
+                        const size_t from = subquery.find(" from ");
+                        if (from != string::npos)
+                            header = trim(subquery.substr(7, from - 7));
+                    }
+                    groupProtocolColumns.push_back(std::move(header));
+                    groupProtocolTypes.push_back(
+                        inferSubQueryResultType(subquery, s));
+                    groupProjectionSources.push_back(extraResultIndex++);
+                    continue;
+                }
+                if (exprTypes[ei] == 3 &&
+                    selectExprs[ei].funcName == "arith" &&
+                    arithRawText.count(ei) &&
+                    arithRawText[ei].find("(select") != string::npos) {
+                    groupProtocolColumns.push_back(selectExprs[ei].displayName);
+                    groupProtocolTypes.push_back(
+                        scalarSubqueryExpressionProtocolType(arithRawText[ei]));
+                    groupProjectionSources.push_back(extraResultIndex++);
+                    continue;
+                }
+                groupProjectionComplete = false;
+            }
+            for (const auto& header : groupProtocolColumns)
+                cout << renderLegacyHeader(header) << ' ';
             cout << '\n';
             if (shouldPublishQueryMetadata() && !groupProtocolColumns.empty() &&
                 groupProtocolColumns.size() == groupProtocolTypes.size()) {
@@ -20440,6 +20454,63 @@ if (sql.rfind("backup database", 0) == 0) {
                             if (seen.insert(row).second) answers.push_back(row);
                         }
                     }
+                }
+            }
+            if (structuredAggregateRows) {
+                bool canProject = groupProjectionComplete &&
+                    groupProjectionSources.size() ==
+                        structuredAggregateResult.columns.size();
+                for (const auto& row : structuredAggregateResult.rows) {
+                    for (size_t source : groupProjectionSources) {
+                        if (source >= row.size()) {
+                            canProject = false;
+                            break;
+                        }
+                    }
+                    if (!canProject) break;
+                }
+                if (canProject) {
+                    vector<vector<string>> projectedRows;
+                    vector<vector<bool>> projectedNulls;
+                    projectedRows.reserve(structuredAggregateResult.rows.size());
+                    projectedNulls.reserve(structuredAggregateResult.nulls.size());
+                    for (size_t rowIndex = 0;
+                         rowIndex < structuredAggregateResult.rows.size();
+                         ++rowIndex) {
+                        vector<string> projectedRow;
+                        vector<bool> projectedNull;
+                        projectedRow.reserve(groupProjectionSources.size());
+                        projectedNull.reserve(groupProjectionSources.size());
+                        for (size_t source : groupProjectionSources) {
+                            projectedRow.push_back(
+                                structuredAggregateResult.rows[rowIndex][source]);
+                            projectedNull.push_back(
+                                source >= structuredAggregateResult.nulls[rowIndex].size() ||
+                                structuredAggregateResult.nulls[rowIndex][source]);
+                        }
+                        projectedRows.push_back(std::move(projectedRow));
+                        projectedNulls.push_back(std::move(projectedNull));
+                    }
+                    structuredAggregateResult.rows = std::move(projectedRows);
+                    structuredAggregateResult.nulls = std::move(projectedNulls);
+                    answers.clear();
+                    answers.reserve(structuredAggregateResult.rows.size());
+                    for (size_t rowIndex = 0;
+                         rowIndex < structuredAggregateResult.rows.size();
+                         ++rowIndex) {
+                        string rendered;
+                        for (size_t columnIndex = 0;
+                             columnIndex < structuredAggregateResult.rows[rowIndex].size();
+                             ++columnIndex) {
+                            if (columnIndex != 0) rendered.push_back(' ');
+                            rendered += structuredAggregateResult.nulls[rowIndex][columnIndex]
+                                ? "NULL"
+                                : structuredAggregateResult.rows[rowIndex][columnIndex];
+                        }
+                        answers.push_back(std::move(rendered));
+                    }
+                } else {
+                    structuredAggregateRows = false;
                 }
             }
             // Scalar subqueries in a GROUP BY select list: evaluate per
@@ -20737,6 +20808,52 @@ if (sql.rfind("backup database", 0) == 0) {
                      }
                  }
              }
+                // Legacy aggregate implementations still return the same
+                // physical layout (group keys, then aggregates, then extras).
+                // Keep their display rows aligned with the SELECT-list header
+                // when no exact structured row was available.
+                if (!structuredAggregateRows && groupProjectionComplete &&
+                    !groupProjectionSources.empty()) {
+                    bool identity =
+                        groupProjectionSources.size() == extraResultIndex;
+                    for (size_t i = 0; i < groupProjectionSources.size(); ++i) {
+                        if (groupProjectionSources[i] != i) {
+                            identity = false;
+                            break;
+                        }
+                    }
+                    if (!identity) {
+                        vector<string> projectedAnswers;
+                        projectedAnswers.reserve(answers.size());
+                        bool canProject = true;
+                        for (const auto& row : answers) {
+                            vector<string> cells;
+                            size_t start = 0;
+                            while (start <= row.size()) {
+                                const size_t separator = row.find(' ', start);
+                                if (separator == string::npos) {
+                                    cells.push_back(row.substr(start));
+                                    break;
+                                }
+                                cells.push_back(row.substr(
+                                    start, separator - start));
+                                start = separator + 1;
+                            }
+                            string projected;
+                            for (size_t source : groupProjectionSources) {
+                                if (source >= cells.size()) {
+                                    canProject = false;
+                                    break;
+                                }
+                                if (!projected.empty()) projected.push_back(' ');
+                                projected += cells[source];
+                            }
+                            if (!canProject) break;
+                            projectedAnswers.push_back(std::move(projected));
+                        }
+                        if (canProject) answers = std::move(projectedAnswers);
+                    }
+                }
                 // ORDER BY over aggregate output: map each spec to an output
                 // cell (group column, select alias, or aggregate expression)
                 // and sort the result rows.  PG compares NULLS LAST (ASC) /

@@ -97,6 +97,69 @@ def main():
         assert grouped_types == [23, 25], grouped_types
         assert grouped_tag == "SELECT 4", grouped_tag
 
+        reordered_group_sql = (
+            "SELECT string_agg(v, '|') AS joined, g "
+            "FROM exact_aggregate_rows GROUP BY g ORDER BY g;")
+        reordered_group_decoded = runner.decode_wire_result(
+            client.simple_query(server["sock"], reordered_group_sql),
+            include_types=True)
+        reordered_group_rows, reordered_group_state, \
+            reordered_group_message, reordered_group_headers, \
+            reordered_group_tag, reordered_group_types = \
+            reordered_group_decoded
+        assert reordered_group_state is None, (
+            reordered_group_state, reordered_group_message)
+        assert reordered_group_rows == [
+            ["hello world|line\nbreak", "1"],
+            ["NULL", "2"],
+            [None, "3"],
+            ["", "4"],
+        ], reordered_group_rows
+        assert reordered_group_headers == ["joined", "g"], \
+            reordered_group_headers
+        assert reordered_group_types == [25, 23], reordered_group_types
+        assert reordered_group_tag == "SELECT 4", reordered_group_tag
+
+        omitted_group_key_sql = (
+            "SELECT count(*) AS total FROM exact_aggregate_rows "
+            "GROUP BY g ORDER BY total DESC LIMIT 1;")
+        omitted_group_key_decoded = runner.decode_wire_result(
+            client.simple_query(server["sock"], omitted_group_key_sql),
+            include_types=True)
+        omitted_group_key_rows, omitted_group_key_state, \
+            omitted_group_key_message, omitted_group_key_headers, \
+            omitted_group_key_tag, omitted_group_key_types = \
+            omitted_group_key_decoded
+        assert omitted_group_key_state is None, (
+            omitted_group_key_state, omitted_group_key_message)
+        assert omitted_group_key_rows == [["2"]], omitted_group_key_rows
+        assert omitted_group_key_headers == ["total"], \
+            omitted_group_key_headers
+        assert omitted_group_key_types == [20], omitted_group_key_types
+        assert omitted_group_key_tag == "SELECT 1", omitted_group_key_tag
+
+        repeated_group_key_sql = (
+            "SELECT g, count(*), g AS again FROM exact_aggregate_rows "
+            "GROUP BY g ORDER BY g;")
+        repeated_group_key_decoded = runner.decode_wire_result(
+            client.simple_query(server["sock"], repeated_group_key_sql),
+            include_types=True)
+        repeated_group_key_rows, repeated_group_key_state, \
+            repeated_group_key_message, repeated_group_key_headers, \
+            repeated_group_key_tag, repeated_group_key_types = \
+            repeated_group_key_decoded
+        assert repeated_group_key_state is None, (
+            repeated_group_key_state, repeated_group_key_message)
+        assert repeated_group_key_rows == [
+            ["1", "2", "1"], ["2", "1", "2"],
+            ["3", "1", "3"], ["4", "1", "4"],
+        ], repeated_group_key_rows
+        assert repeated_group_key_headers == ["g", "count", "again"], \
+            repeated_group_key_headers
+        assert repeated_group_key_types == [23, 20, 23], \
+            repeated_group_key_types
+        assert repeated_group_key_tag == "SELECT 4", repeated_group_key_tag
+
         distinct_aggregate_sql = (
             "SELECT DISTINCT g, count(*) FROM exact_aggregate_rows "
             "GROUP BY GROUPING SETS ((g), (g)) ORDER BY g;")
