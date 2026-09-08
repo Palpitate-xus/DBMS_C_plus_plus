@@ -181,7 +181,7 @@
     {"id":"REPL-07","status":"partial","evidence":["docs/code-review-progress.md","src/replication/LogicalDecoder.cpp","src/replication/ReplicationManager.cpp"],"tests":["tests/logical_decoding_test.cpp","tests/replication_test.cpp","tests/replication_slot_persistence_e2e_test.py","tests/div14_feature_gate_test.py","tests/compat/pg_diff_runner.py"],"commits":["9cc992c"]},
     {"id":"REPL-08","status":"partial","evidence":["docs/code-review-progress.md","src/replication/LogicalDecoder.cpp","src/commands/TableManage.cpp","src/main.cpp","src/commands/DdlExecutor.cpp"],"tests":["tests/logical_decoding_test.cpp","tests/truncate_test.cpp","tests/div14_feature_gate_test.py","tests/compat/pg_diff_runner.py"],"commits":["967d249","5b5eb4f","88c7513","06fd56c","70dde64","a2822af","283a80b","a1fbfae","827d9aa"]},
     {"id":"REPL-09","status":"unverified","evidence":[]},
-    {"id":"REPL-10","status":"unverified","evidence":[]},
+    {"id":"REPL-10","status":"partial","evidence":["docs/code-review-progress.md","src/replication/LogicalDecoder.cpp","src/replication/ReplicationManager.cpp"],"tests":["tests/logical_decoding_test.cpp","tests/replication_test.cpp","tests/replication_concurrency_test.cpp","tests/phase8_10_test.cpp","tests/replication_slot_persistence_e2e_test.py","tests/div14_feature_gate_test.py","tests/compat/pg_diff_runner.py"],"commits":["d6bffd6"]},
     {"id":"BACKUP-01","status":"unverified","evidence":[]},
     {"id":"BACKUP-02","status":"unverified","evidence":[]},
     {"id":"BACKUP-03","status":"unverified","evidence":[]},
