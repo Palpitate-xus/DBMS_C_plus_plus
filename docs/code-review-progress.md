@@ -47,15 +47,16 @@
 | 211 | P0-02 | 旧 SELECT 文本结果按空白拆列，带空格的 quoted alias 被伪造为多列，identifier 中的 `""` 也会丢失；统一 quoted identifier 解码和 legacy header framing，协议适配器成对解码双引号 | 7 类 SQL / 协议回归通过：普通、表达式、聚合、分组、窗口、无 FROM 及 embedded quote alias；review、空白边界和 PostgreSQL 协议相邻回归通过。SELECT 全链路结构化结果仍未完成 | `3052136` |
 | 212 | P0-02 / QRY-01 | 无 FROM 的多列 SELECT 由协议层反解析显示文本，含空格 / 换行的值被拆成多行多列，空串、文本 `NULL` 与 SQL NULL 也无法区分；该入口现在发布精确 cells、独立 NULL bitmap 和 SELECT command tag，仅最外层语句可发布 | 新协议回归在修复前返回两行错位数据，修复后精确保真 7 列：空格、空串、文本 NULL、SQL NULL、换行、前后空格和 escaped quote；零行仍发送列描述。quoted alias、literal、空白、FETCH、LIMIT、review 及完整协议相邻回归通过；表查询和 legacy scalar subquery 仍待迁移 | `e6b692d` |
 | 213 | P0-16 | 差分工具为同一 case 的每条参考 SQL 启动新 psql，事务、临时对象和 SET 状态全部丢失，列描述还会在另一个 session 执行；改为每 case 一次 psql，通过随机 framing、`:SQLSTATE` / `:ROW_COUNT` 和 stderr markers 分离每条结果、错误及同 session `\gdesc` | Python 回归 20 项通过（新增 session、逐语句错误码、同 session header 3 项）；实际 PostgreSQL 的 BEGIN + TEMP TABLE + INSERT + SELECT + ROLLBACK 保持状态，事务错误依次得到 `22012` / `25P02`；只读 `arith_select` 差分通过。参考行无损编码和 command tag 比较仍待完成 | `b36897b` |
+| 214 | P0-16 | psql 的 `NULLMARK` / `\x1f` / 换行文本格式仍会把合法用户值改成 NULL 或拆成额外行列，且没有 command tag；参考端改走 PostgreSQL wire protocol，按 DataRow 长度和 `-1` NULL 标记解码，同一连接读取 RowDescription、ErrorResponse 与 CommandComplete，并与本项目逐语句比较 tag | Python 回归 23 项通过（新增控制字符 / NULL 无损、单连接和 tag mismatch）；实际 PG 对 NULL、空串、文本 `NULLMARK`、换行和 `chr(31)` 返回一个精确 5 列行及 `SELECT 1`，只读 `arith_select` 差分通过。当前参考容器为 PG 17.2，PG 18.6、manifest、并发 / crash / catalog 差分和零 allowlist 发布门仍未完成 | `0305306` |
 
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias 与无 FROM 普通投影已由第 211–212 项迁移；表查询、CTE / set operation、legacy scalar subquery 及二进制值仍存在显示文本边界，继续计入总清单。
 
-### 本批验证记录（第 197–213 项）
+### 本批验证记录（第 197–214 项）
 
 - 27 个 C++ 测试通过：15 个子查询回归、parser_phase1，以及表达式、布尔、数组、集合聚合、分组键、并行、Volcano、窗口、布尔聚合、分位数和异常解锁的 11 个相邻测试。使用当前生产库对象重新链接，在隔离目录运行。
-- Python 单元测试 26 项通过：总账校验 6 项、差分工具 20 项。
+- Python 单元测试 29 项通过：总账校验 6 项、差分工具 23 项。
 - 当前 `build/dbms_review_main` 的 11 组 SQL / 协议 E2E 通过：review_sql、CTE、FETCH、子查询 SQLSTATE、转义文本、布尔边界、LIMIT/OFFSET、多行 SQL、窗口、EXPLAIN ANALYZE、PostgreSQL 协议。
 - 实际参考 PostgreSQL 的错误码、CSV 列描述、带注释的终止符及命令样文本读取验证通过；未对参考库做持久化数据修改。
 - 总账完整覆盖 273 项；目前 complete = 0、partial = 11、unverified = 247、用户延期 = 15。`--require-complete` 正确返回非零。14 个局部问题的修复不代表 14 个功能族完成。
