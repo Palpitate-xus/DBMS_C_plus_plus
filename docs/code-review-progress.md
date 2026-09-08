@@ -147,6 +147,8 @@
 
 | 301 | P0-01 / SQL-01 / SQL-02 / SQL-04 / QRY-03 | JOIN WHERE 将关系别名改写为物理表名时使用裸子串替换，字符串值中的 `l.`/`r.` 也被改写，`l.txt='l.id'` 与 `l.txt='r.id'` 均错误返回空集。别名映射现在只在引号外执行，并校验左侧标识符边界 | `join_type_protocol_e2e_test` 在匹配 JOIN 行中覆盖左右别名文本，同时验证真实 ON/WHERE 限定列、精确 OID/tag；字面量、结构化协议、DIV-14、O2 构建及实际 PostgreSQL `cases=122 failed=0` 通过 | `dd80b26` |
 
+| 302 | P0-01 / SQL-01 / SQL-02 / SQL-04 / QRY-01 | SELECT 目标、JOIN、GROUP、WINDOW 与输出排序的多套别名解析器用裸 `find/rfind(" as ")`，把字符串数据中的 ` as ` 当作输出别名；无别名的 `'x as y'` 因而被截成非法列 `'x` 并报 `XX000`。新增“引号外最后匹配”扫描，并统一上述别名及 CAST 解析路径 | `sql_literal_preservation_e2e_test` 覆盖无别名、显式别名、多次 ` as ` 与 `CAST('x as y' AS TEXT)`；JOIN、GROUP、WINDOW、派生表、结构化协议、DIV-14、O2 构建及两次实际 PostgreSQL 差分最终保持 `cases=122 failed=0` | `ea6c878` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
