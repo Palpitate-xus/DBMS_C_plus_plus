@@ -538,8 +538,17 @@ std::vector<std::string> splitProtocolFields(const std::string& line) {
     // such as a quoted "hello world" arrive as one cell from the producer).
     std::string field;
     bool inDq = false;
-    for (char c : line) {
-        if (c == 34) { inDq = !inDq; continue; }
+    for (size_t i = 0; i < line.size(); ++i) {
+        const char c = line[i];
+        if (c == 34) {
+            if (inDq && i + 1 < line.size() && line[i + 1] == 34) {
+                field += c;
+                ++i;
+            } else {
+                inDq = !inDq;
+            }
+            continue;
+        }
         if (!inDq && std::isspace(static_cast<unsigned char>(c))) {
             if (!field.empty()) { fields.push_back(field); field.clear(); }
             continue;

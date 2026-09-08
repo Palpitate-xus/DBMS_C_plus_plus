@@ -302,6 +302,30 @@ static string stripQuotes(const string& s) {
     return s;
 }
 
+static string decodeQuotedIdentifier(const string& token) {
+    if (token.size() < 2 || token.front() != '"' || token.back() != '"')
+        return token;
+    string decoded;
+    for (size_t i = 1; i + 1 < token.size(); ++i) {
+        if (token[i] == '"' && i + 2 < token.size() && token[i + 1] == '"') ++i;
+        decoded += token[i];
+    }
+    return decoded;
+}
+
+// Legacy SELECT still renders through a text sink. Quote one header cell so
+// the protocol adapter can preserve spaces and embedded double quotes.
+static string renderLegacyHeader(const string& header) {
+    if (header.find_first_of(" \t\r\n\"") == string::npos) return header;
+    string rendered(1, '"');
+    for (char c : header) {
+        if (c == '"') rendered += '"';
+        rendered += c;
+    }
+    rendered += '"';
+    return rendered;
+}
+
 // Case-insensitive dictionary order for TEXT sorting, approximating the
 // en_US.utf8 locale PostgreSQL uses by default (primary strength).
 static int ciTextCompare(const string& a, const string& b) {
@@ -5422,6 +5446,8 @@ static std::vector<std::string> runSubQuery(const std::string& rawSql, Session& 
 
 static bool handleFromlessSelect(const string& sql, Session& s) {
     string cols = trim(string(sql.substr(6)));
+    if (!cols.empty() && cols.back() == ';') cols.pop_back();
+    cols = trim(cols);
     bool suppressDataRow = false;
     bool isDistinct = false;
     if (cols.size() >= 9 && cols.substr(0, 9) == "distinct ") {
@@ -5652,7 +5678,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                     // Quoted alias (AS "hello world"): legal with spaces;
                     // strip the double quotes for the header cell.
                     if (tail.size() >= 2 && tail.front() == 34 && tail.back() == 34) {
-                        disp = tail.substr(1, tail.size() - 2);
+                        disp = decodeQuotedIdentifier(tail);
                         expr = trim(item.substr(0, ai));
                     } else if (!tail.empty() &&
                         tail.find_first_of(" ,()+-*/%") == string::npos) {
@@ -6074,14 +6100,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
         // Single row: distinct is a no-op unless the row duplicates itself.
     }
 
-    for (const auto& h : headers) {
-        // Multi-word header cells are quoted so the protocol field splitter
-        // keeps them as one cell (P0-02).
-        if (h.find_first_of(" \t") != string::npos)
-            cout << '"' << h << "" << '"' << ' ';
-        else
-            cout << h << ' ';
-    }
+    for (const auto& h : headers) cout << renderLegacyHeader(h) << ' ';
     cout << '\n';
     if (suppressDataRow) return false;
     if (multiRowWidth > 0) {
@@ -18176,7 +18195,7 @@ if (sql.rfind("backup database", 0) == 0) {
                         if (tail.size() >= 2 && tail.front() == 34 &&
                             tail.back() == 34) {
                             asPos = ap;
-                            itemAlias = tail.substr(1, tail.size() - 2);
+                            itemAlias = decodeQuotedIdentifier(tail);
                             break;
                         }
                         if (!tail.empty() &&
@@ -19302,12 +19321,12 @@ if (sql.rfind("backup database", 0) == 0) {
                     size_t ap2 = toLower(it2).rfind(" as ");
                     if (ap2 == string::npos) continue;
                     if (trim(it2.substr(0, ap2)) == gc) {
-                        header = trim(it2.substr(ap2 + 4));
+                        header = decodeQuotedIdentifier(trim(it2.substr(ap2 + 4)));
                         isExpr = false;
                         break;
                     }
                 }
-                cout << (isExpr ? string("?column?") : header) << ' ';
+                cout << renderLegacyHeader(isExpr ? string("?column?") : header) << ' ';
             }
             vector<dbms::StorageEngine::AggItem> pureAgg;
             for (const auto& it : aggItems) {
@@ -19322,11 +19341,11 @@ if (sql.rfind("backup database", 0) == 0) {
                 for (size_t ei = 0; ei < exprTypes.size(); ++ei) {
                     if (exprTypes[ei] == 0 || exprTypes[ei] == 1) {
                         if (ai2 < aggItems.size() && !aggItems[ai2].func.empty())
-                            cout << selectExprs[ei].displayName << ' ';
+                            cout << renderLegacyHeader(selectExprs[ei].displayName) << ' ';
                         ++ai2;
                     } else if (exprTypes[ei] == 2) {
                         if (ai2 < aggItems.size() && !aggItems[ai2].func.empty())
-                            cout << selectExprs[ei].displayName << ' ';
+                            cout << renderLegacyHeader(selectExprs[ei].displayName) << ' ';
                         ++ai2;
                     } else if (exprTypes[ei] == 3 &&
                                selectExprs[ei].funcName == "subquery") {
@@ -19351,7 +19370,7 @@ if (sql.rfind("backup database", 0) == 0) {
                         // agg + (SELECT ...) in a GROUP BY select list:
                         // evaluated per output group below; PG names an
                         // unaliased arithmetic column ?column?.
-                                        cout << selectExprs[ei].displayName << ' ';
+                                        cout << renderLegacyHeader(selectExprs[ei].displayName) << ' ';
                     }
                 }
             }
@@ -19875,7 +19894,7 @@ if (sql.rfind("backup database", 0) == 0) {
             // space-splitting "sum(amt * 2)" into phantom protocol columns).
             for (size_t ei = 0; ei < exprTypes.size(); ++ei) {
                 if (exprTypes[ei] == 0 || exprTypes[ei] == 1)
-                    cout << selectExprs[ei].displayName << ' ';
+                    cout << renderLegacyHeader(selectExprs[ei].displayName) << ' ';
             }
             cout << '\n';
             vector<dbms::StorageEngine::AggItem> pureAgg;
@@ -20133,12 +20152,12 @@ if (sql.rfind("backup database", 0) == 0) {
                     string alias;
                     size_t asPos = item.rfind(" as ");
                     if (asPos != string::npos) {
-                        alias = trim(item.substr(asPos + 4));
+                        alias = decodeQuotedIdentifier(trim(item.substr(asPos + 4)));
                         item = trim(item.substr(0, asPos));
                     }
                     WindowFunc hwf;
                     if (parseWindowFunc(item, hwf, namedWindows))
-                        cout << (alias.empty() ? hwf.name : alias) << ' ';
+                        cout << renderLegacyHeader(alias.empty() ? hwf.name : alias) << ' ';
                     else
                         cout << item << ' ';
                 }
@@ -20160,7 +20179,7 @@ if (sql.rfind("backup database", 0) == 0) {
                     if (i < selectExprs.size() &&
                         selectExprs[i].displayName == selectExprs[i].colName)
                         aliasName.clear();
-                    cout << (aliasName.empty() ? aggItems[i].func : aliasName) << ' ';
+                    cout << renderLegacyHeader(aliasName.empty() ? aggItems[i].func : aliasName) << ' ';
                 } else if (exprTypes[i] == 1) {
                     cout << aggItems[i].func << "(" << aggItems[i].arg << ") ";
                 } else {
@@ -20785,7 +20804,7 @@ if (sql.rfind("backup database", 0) == 0) {
                     }
                 }
                 for (const auto& target : projectionTargets) {
-                    cout << (target.isScalar ? "?column?" : target.column) << ' ';
+                    cout << renderLegacyHeader(target.isScalar ? "?column?" : target.column) << ' ';
                 }
                 cout << '\n';
                 for (const auto& row : answers) {
@@ -20796,7 +20815,7 @@ if (sql.rfind("backup database", 0) == 0) {
             }
 
             for (const auto& expr : selectExprs) {
-                cout << expr.displayName << ' ';
+                cout << renderLegacyHeader(expr.displayName) << ' ';
             }
             cout << '\n';
             if (condTokens.empty()) {
@@ -20819,7 +20838,7 @@ if (sql.rfind("backup database", 0) == 0) {
             if (!projectionOrder.empty() && !projectionOrder.empty()) {
                 for (const auto& po : projectionOrder) {
                     size_t sep = po.find("\x01");
-                    cout << (sep == string::npos ? po : po.substr(0, sep)) << ' ';
+                    cout << renderLegacyHeader(sep == string::npos ? po : po.substr(0, sep)) << ' ';
                 }
             } else {
                 for (size_t i = 0; i < tbl.len; ++i) {
