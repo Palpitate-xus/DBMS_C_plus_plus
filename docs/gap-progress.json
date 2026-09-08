@@ -179,7 +179,7 @@
     {"id":"REPL-05","status":"unverified","evidence":[]},
     {"id":"REPL-06","status":"unverified","evidence":[]},
     {"id":"REPL-07","status":"unverified","evidence":[]},
-    {"id":"REPL-08","status":"partial","evidence":["docs/code-review-progress.md","src/replication/LogicalDecoder.cpp"],"tests":["tests/div14_feature_gate_test.py","tests/compat/pg_diff_runner.py"],"commits":["967d249"]},
+    {"id":"REPL-08","status":"partial","evidence":["docs/code-review-progress.md","src/replication/LogicalDecoder.cpp","src/commands/TableManage.cpp"],"tests":["tests/logical_decoding_test.cpp","tests/div14_feature_gate_test.py","tests/compat/pg_diff_runner.py"],"commits":["967d249","5b5eb4f"]},
     {"id":"REPL-09","status":"unverified","evidence":[]},
     {"id":"REPL-10","status":"unverified","evidence":[]},
     {"id":"BACKUP-01","status":"unverified","evidence":[]},

@@ -84,6 +84,7 @@
 | 248 | P0-03 / CAT-22 / DIV-14 | extended 模式仍允许未实现的 PostgreSQL 对象写入 `.pg_compat_objects` 并返回成功，形成不存在运行时能力的虚假 catalog。取消模式例外：无真实 runtime 的 CREATE/ALTER/DROP、IMPORT FOREIGN SCHEMA 与 LOAD 一律返回 `0A000`；extended 仅开放真实项目扩展 | DIV-14 协议 E2E 在默认及 extended 模式检查 `0A000`，并遍历数据目录确认未创建 compatibility store；实际 PostgreSQL 122 组差分保持 `failed=0` | `877932b` |
 | 249 | P0-03 / CAT-22 / DIV-14 | 通用兼容层按对象 kind 而非具体操作判断 runtime，导致真实 CREATE/DROP handler 存在的 publication 在未实现 ALTER 时仍写假记录成功。规定所有 runtime handler 必须在通用层前消费命令；任何落入通用层的对象操作一律不具备 runtime | 默认和 extended 模式的 `ALTER PUBLICATION ... ADD TABLE` 均返回 `0A000` 且不创建 compatibility store；DIV-14 E2E 与实际 PostgreSQL 122 组差分通过 | `db53209` |
 | 250 | REPL-08 | `ALTER PUBLICATION` 没有真实执行路径，只能被通用层拒绝或曾写假对象。新增 PublicationCatalog 原子 update 与专用 handler，支持 `ADD TABLE`、`DROP TABLE`、`SET TABLE`，在写入前验证 publication、表、重复/缺失成员和 FOR ALL TABLES 限制 | 协议 E2E 验证成员文件持久化及 ADD→DROP→SET；重复 ADD、缺失成员 DROP、缺表 ADD 后文件逐字节不变；实际 PostgreSQL 122 组差分保持 `failed=0`。列列表、row filter、partition root 和 publish options 仍属 REPL-08 | `967d249` |
+| 251 | REPL-08 | publication 的 INSERT / UPDATE / DELETE 标志虽被持久化，三个 DML 捕获路径却只检查表成员关系，禁用的操作仍会写入逻辑复制槽。新增按操作类型检查的 publication 谓词，并让插入、更新、删除分别传入真实操作类型 | `logical_decoding_test` 覆盖标志持久化、谓词判定及仅发布 INSERT 时执行 INSERT→UPDATE→DELETE 后槽内只有一条 INSERT；DIV-14 门禁与实际 PostgreSQL 122 组差分保持 `failed=0`。SQL publish options、列列表、row filter 与 partition root 仍属 REPL-08 | `5b5eb4f` |
 
 本批新增的待修复复现（仍计入总清单）：
 
