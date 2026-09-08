@@ -10,6 +10,7 @@
 
 #include "replication/LogicalDecoder.h"
 #include "replication/ReplicationManager.h"
+#include "access/IndexFileUtil.h"
 #include "commands/TableManage.h"
 #include "commands/DdlExecutor.h"
 #include "Session.h"
@@ -143,6 +144,14 @@ static void test_publication_catalog() {
                    "atomic_fail.publication.tmp.") != 0);
     }
 
+    // A directory fsync failure happens after atomic rename.  CREATE must
+    // remove that newly visible target before returning failure.
+    Publication syncFailedCreate = pub;
+    syncFailedCreate.name = "sync_failed_create";
+    index_file::failNextDirectorySyncForTesting();
+    assert(!cat.create(db, syncFailedCreate, error));
+    assert(!cat.exists(db, syncFailedCreate.name));
+
     // Persistence: list reloads from files.
     auto pubs = cat.list(db);
     assert(pubs.size() == 1);
@@ -152,6 +161,23 @@ static void test_publication_catalog() {
     assert(pubs[0].publishInsert && !pubs[0].publishUpdate &&
            pubs[0].publishDelete && !pubs[0].publishTruncate);
     assert(!pubs[0].publishAllTables);
+
+    // UPDATE must restore the original bytes if the replacement rename was
+    // visible but its directory sync failed.
+    const fs::path mypubPath = fs::path(db) / "mypub.publication";
+    std::ifstream originalInput(mypubPath, std::ios::binary);
+    const std::string originalBytes(
+        (std::istreambuf_iterator<char>(originalInput)),
+        std::istreambuf_iterator<char>());
+    Publication syncFailedUpdate = pub;
+    syncFailedUpdate.owner = "new_owner";
+    index_file::failNextDirectorySyncForTesting();
+    assert(!cat.update(db, syncFailedUpdate, error));
+    std::ifstream restoredInput(mypubPath, std::ios::binary);
+    const std::string restoredBytes(
+        (std::istreambuf_iterator<char>(restoredInput)),
+        std::istreambuf_iterator<char>());
+    assert(restoredBytes == originalBytes);
 
     // Definitions that the line-oriented catalog cannot round-trip must be
     // rejected before a malformed file becomes visible.
@@ -197,6 +223,10 @@ static void test_publication_catalog() {
     assert(cat.exists(db, "mypub") && cat.exists(db, "allpub"));
     assert(!cat.rename(db, "mypub", "../publication_escape", error));
     assert(cat.exists(db, "mypub") && !fs::exists(escapedPath));
+    index_file::failNextDirectorySyncForTesting();
+    assert(!cat.rename(db, "mypub", "sync_failed_rename", error));
+    assert(cat.exists(db, "mypub") &&
+           !cat.exists(db, "sync_failed_rename"));
     assert(cat.rename(db, "mypub", "renamed_pub", error));
     assert(!cat.exists(db, "mypub") && cat.exists(db, "renamed_pub"));
     pubs = cat.list(db);
@@ -214,6 +244,13 @@ static void test_publication_catalog() {
     assert(cat.create(db, firstDrop, error));
     assert(cat.create(db, secondDrop, error));
     std::vector<std::string> missing;
+    index_file::failNextDirectorySyncForTesting();
+    assert(!cat.drop(db, "drop_first", error));
+    assert(cat.exists(db, "drop_first"));
+    index_file::failNextDirectorySyncForTesting();
+    assert(!cat.dropMany(
+        db, {"drop_first", "drop_second"}, true, missing, error));
+    assert(cat.exists(db, "drop_first") && cat.exists(db, "drop_second"));
     assert(!cat.dropMany(
         db, {"drop_first", "../publication_escape"}, true,
         missing, error));

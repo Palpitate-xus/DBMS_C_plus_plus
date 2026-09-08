@@ -300,8 +300,7 @@ bool PublicationCatalog::create(const std::string& dbname, const Publication& pu
         // writeAtomically can report a directory-fsync error after rename.
         // The statement still failed, so remove any visible target rather
         // than leave a catalog object that makes a retry look like a duplicate.
-        std::error_code cleanupError;
-        fs::remove(path, cleanupError);
+        if (fs::exists(path)) (void)index_file::removeDurably(path);
         error = "cannot write publication file";
         return false;
     }
@@ -318,9 +317,18 @@ bool PublicationCatalog::drop(const std::string& dbname, const std::string& name
         error = "publication \"" + name + "\" does not exist";
         return false;
     }
-    std::error_code ec;
-    if (!fs::remove(path, ec)) {
-        error = "cannot remove publication file";
+    std::ifstream input(path, std::ios::binary);
+    std::string original((std::istreambuf_iterator<char>(input)),
+                         std::istreambuf_iterator<char>());
+    if (!input || input.bad()) {
+        error = "cannot read publication file";
+        return false;
+    }
+    if (!index_file::removeDurably(path)) {
+        bool restored = fs::exists(path);
+        if (!restored) restored = index_file::writeAtomically(path, original);
+        error = restored ? "cannot durably remove publication file"
+                         : "cannot remove publication file; rollback failed";
         return false;
     }
     return true;
@@ -373,9 +381,7 @@ bool PublicationCatalog::dropMany(const std::string& dbname,
         return false;
     }
     for (size_t index = 0; index < existing.size(); ++index) {
-        std::error_code filesystemError;
-        if (fs::remove(existing[index].path, filesystemError) &&
-            !filesystemError) {
+        if (index_file::removeDurably(existing[index].path)) {
             continue;
         }
         bool restored = true;
@@ -414,7 +420,17 @@ bool PublicationCatalog::update(const std::string& dbname,
         return false;
     }
     if (!index_file::writeAtomically(path, serializePublication(pub))) {
-        error = "cannot persist publication";
+        bool restored = false;
+        std::ifstream current(path, std::ios::binary);
+        if (current) {
+            const std::string currentBytes(
+                (std::istreambuf_iterator<char>(current)),
+                std::istreambuf_iterator<char>());
+            restored = !current.bad() && currentBytes == existing;
+        }
+        if (!restored) restored = index_file::writeAtomically(path, existing);
+        error = restored ? "cannot persist publication"
+                         : "cannot persist publication; rollback failed";
         return false;
     }
     return true;
@@ -452,6 +468,17 @@ bool PublicationCatalog::rename(const std::string& dbname,
     fs::rename(oldPath, newPath, filesystemError);
     if (filesystemError) {
         error = "cannot rename publication";
+        return false;
+    }
+    const auto parent = oldPath.parent_path().empty()
+        ? fs::path(".") : oldPath.parent_path();
+    if (!index_file::syncDirectory(parent)) {
+        std::error_code rollbackError;
+        fs::rename(newPath, oldPath, rollbackError);
+        const bool restored = !rollbackError &&
+            index_file::syncDirectory(parent);
+        error = restored ? "cannot durably rename publication"
+                         : "cannot rename publication; rollback failed";
         return false;
     }
     return true;

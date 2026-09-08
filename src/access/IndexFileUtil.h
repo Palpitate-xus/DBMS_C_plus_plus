@@ -12,6 +12,35 @@
 
 namespace dbms::index_file {
 
+// Deterministic one-shot injection used by durability regression tests.  The
+// state is process-local and remains dormant unless a test explicitly arms it.
+inline std::atomic<unsigned> directorySyncFailureCountForTesting{0};
+
+inline void failNextDirectorySyncForTesting() {
+    directorySyncFailureCountForTesting.store(1, std::memory_order_release);
+}
+
+inline bool syncDirectory(const std::filesystem::path& directory) {
+    if (directorySyncFailureCountForTesting.exchange(
+            0, std::memory_order_acq_rel) != 0) {
+        errno = EIO;
+        return false;
+    }
+    const int dirFd = ::open(directory.c_str(), O_RDONLY | O_DIRECTORY);
+    if (dirFd < 0) return false;
+    const bool ok = (::fsync(dirFd) == 0);
+    const bool closeOk = (::close(dirFd) == 0);
+    return ok && closeOk;
+}
+
+inline bool removeDurably(const std::filesystem::path& path) {
+    std::error_code error;
+    if (!std::filesystem::remove(path, error) || error) return false;
+    const auto parent = path.parent_path().empty()
+        ? std::filesystem::path(".") : path.parent_path();
+    return syncDirectory(parent);
+}
+
 // Replace an index file atomically and make both the file and its directory
 // durable.  Indexes are rebuildable, but a partially written file must never
 // be mistaken for a valid index after a crash.
@@ -47,11 +76,7 @@ inline bool writeAtomically(const std::filesystem::path& target,
         return false;
     }
 
-    const int dirFd = ::open(parent.c_str(), O_RDONLY | O_DIRECTORY);
-    if (dirFd < 0) return false;
-    const bool dirOk = (::fsync(dirFd) == 0);
-    ::close(dirFd);
-    return dirOk;
+    return syncDirectory(parent);
 }
 
 } // namespace dbms::index_file
