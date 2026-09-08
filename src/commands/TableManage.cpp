@@ -27385,8 +27385,8 @@ static ParsedProjectionSubquery parseProjectionSubquery(const std::string& sql) 
         !select->locking.empty() || !select->windowDefs.empty()) {
         throw std::runtime_error("unsupported projection subquery shape (SQLSTATE 0A000)");
     }
-    if (select->withTies) {
-        throw std::runtime_error("projection subquery WITH TIES is not supported (SQLSTATE 0A000)");
+    if (select->withTies && select->orderBy.empty()) {
+        throw std::runtime_error("WITH TIES cannot be specified without ORDER BY (SQLSTATE 42601)");
     }
     // Slice complete lexer tokens, not substrings. Quoted text is one token
     // and nested FROM (e.g. EXTRACT) is not a query-clause boundary. Keeping
@@ -30567,8 +30567,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 right->column = "sort_right";
                 less.left = std::move(left);
                 less.right = std::move(right);
-                std::stable_sort(candidates.begin(), candidates.end(),
-                    [&](const ScalarCandidate& a, const ScalarCandidate& b) {
+                const auto before = [&](const ScalarCandidate& a, const ScalarCandidate& b) {
                         for (size_t i = 0; i < a.keys.size(); ++i) {
                             const auto& order = projection->orderBy[i];
                             const auto& av = a.keys[i];
@@ -30586,10 +30585,19 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                             if (orderEvaluator.eval(&less, context).asBool()) return !order.asc;
                         }
                         return false;
-                    });
+                    };
+                std::stable_sort(candidates.begin(), candidates.end(), before);
                 const size_t skipped = std::min(remainingOffset, candidates.size());
                 candidates.erase(candidates.begin(), candidates.begin() + skipped);
-                if (candidates.size() > take) candidates.resize(take);
+                size_t retained = take;
+                // A scalar subquery needs at most two rows to prove a
+                // cardinality violation. WITH TIES may turn FETCH 1 into
+                // multiple rows; compare every ORDER BY key, including NULLs,
+                // before truncating away that evidence. OFFSET applies first.
+                if (projection->withTies && take == 1 && candidates.size() > 1 &&
+                    !before(candidates[0], candidates[1]) &&
+                    !before(candidates[1], candidates[0])) retained = 2;
+                if (candidates.size() > retained) candidates.resize(retained);
             }
             std::vector<std::pair<std::string, bool>> scalarRows;
             for (const auto& candidate : candidates) {

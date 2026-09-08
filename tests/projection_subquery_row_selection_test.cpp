@@ -83,10 +83,13 @@ int main() {
     assert(cardinality);
     const auto expectError = [&](const std::string& sql, const std::string& state) {
         bool rejected = false;
+        std::string actualError;
         try { (void)project(sql); }
         catch (const std::runtime_error& error) {
-            rejected = std::string(error.what()).find("SQLSTATE " + state) != std::string::npos;
+            actualError = error.what();
+            rejected = actualError.find("SQLSTATE " + state) != std::string::npos;
         }
+        if (!rejected) std::cerr << sql << " expected " << state << " got " << actualError << '\n';
         assert(rejected);
         assert(g_engine.getLockManager().captureCheckpoint().tableCounts.empty());
     };
@@ -94,7 +97,25 @@ int main() {
     expectError("select id from inner_rows order by 2 limit 0", "42P10");
     expectError("select id, payload from inner_rows limit 0", "42601");
     expectError("select id from missing_rows limit 0", "42P01");
-    expectError("select id from inner_rows order by id fetch first 1 row with ties", "0A000");
+    scalar("select id from inner_rows order by id fetch first 1 row with ties", "1");
+    scalar("select id from inner_rows order by id offset 1 rows fetch next 1 row with ties", "2");
+    scalar("select id from inner_rows order by rank desc fetch first 1 row with ties", "3");
+    scalar("select id from inner_rows order by id fetch first 0 rows with ties", "NULL");
+    expectError("select id from inner_rows fetch first 1 row with ties", "42601");
+    assert(g_engine.insertRow(db, "inner_rows",
+        {{"id", "4"}, {"payload", "40"}, {"rank", "10"}}) == dbms::DBStatus::OK);
+    expectError("select id from inner_rows order by rank desc nulls last fetch first 1 row with ties", "21000");
+    scalar("select id from inner_rows order by rank desc nulls last, id desc fetch first 1 row with ties", "4");
+    scalar("select rank from inner_rows order by rank desc nulls last offset 1 rows fetch next 1 row with ties", "10");
+    for (bool negate : {false, true}) {
+        assert((project("select 1 from inner_rows order by rank fetch first 1 row with ties", true, negate) ==
+                std::vector<std::string>{negate ? "f " : "t "}));
+        assert((project("select 1 from inner_rows order by rank fetch first 0 rows with ties", true, negate) ==
+                std::vector<std::string>{negate ? "t " : "f "}));
+    }
+    assert(g_engine.insertRow(db, "inner_rows",
+        {{"id", "5"}, {"payload", "50"}, {"rank", std::nullopt}}) == dbms::DBStatus::OK);
+    expectError("select id from inner_rows order by rank desc fetch first 1 row with ties", "21000");
     assert(g_engine.getLockManager().captureCheckpoint().tableCounts.empty());
     cleanupTestDb(name);
     finalCleanupTestData();

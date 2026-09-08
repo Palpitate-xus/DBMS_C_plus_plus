@@ -61,6 +61,10 @@ def main():
              "FROM diff_gsexpr WHERE id = 1;", [["3"]]),
             ("SELECT (SELECT id FROM diff_gsexpr LIMIT 1 OFFSET 1) AS picked "
              "FROM diff_gsexpr WHERE id = 1;", [["2"]]),
+            ("SELECT (SELECT id FROM diff_gsexpr ORDER BY id FETCH FIRST 1 ROW WITH TIES) "
+             "AS picked FROM diff_gsexpr WHERE id = 1;", [["1"]]),
+            ("SELECT EXISTS (SELECT 1 FROM diff_gsexpr ORDER BY v % 2 FETCH FIRST 1 ROW WITH TIES) "
+             "AS present FROM diff_gsexpr WHERE id = 1;", [["t"]]),
             ("SELECT EXISTS (SELECT 1 FROM diff_gsexpr LIMIT 0) AS present "
              "FROM diff_gsexpr WHERE id = 1;", [["f"]]),
             ("SELECT NOT EXISTS (SELECT 1 FROM diff_gsexpr LIMIT 1 OFFSET 3) AS absent "
@@ -73,6 +77,12 @@ def main():
             assert state is None, (statement, state, message)
             assert rows == expected_rows, (statement, rows, expected_rows)
         print("[REVIEW SQL E2E] projection subquery clauses passed")
+        _, state, message, _ = runner.ours_query(
+            client, server["sock"],
+            "SELECT (SELECT id FROM diff_gsexpr ORDER BY v % 2 FETCH FIRST 1 ROW WITH TIES) "
+            "AS picked FROM diff_gsexpr WHERE id = 1;")
+        assert state == "21000", (state, message)
+        print("[REVIEW SQL E2E] WITH TIES scalar cardinality passed")
     finally:
         runner.stop_ours(server)
 
