@@ -21792,7 +21792,8 @@ DBStatus StorageEngine::insertInternal(
         return abortIndexUpdate();
     }
     // Logical decoding: buffer the change for streaming at commit.
-    if (PublicationCatalog::instance().publishes(dbname, tablename)) {
+    if (PublicationCatalog::instance().publishes(
+            dbname, tablename, LogicalChange::Op::Insert)) {
         auto& txn = transactionContext();
         if (txn.inTransaction) {
             // Render every column in text form so subscribers see the same
@@ -23511,7 +23512,8 @@ DBStatus StorageEngine::removeInternal(
     }
     // Logical decoding: buffer the deletes (old images) for streaming at
     // commit.
-    if (PublicationCatalog::instance().publishes(dbname, tablename)) {
+    if (PublicationCatalog::instance().publishes(
+            dbname, tablename, LogicalChange::Op::Delete)) {
         auto& txn = transactionContext();
         if (txn.inTransaction) {
             size_t di = 0;
@@ -26198,7 +26200,8 @@ DBStatus StorageEngine::updateInternal(
 
         // Logical decoding: buffer the update (old/new images) for
         // streaming at commit.
-        if (PublicationCatalog::instance().publishes(dbname, tablename)) {
+        if (PublicationCatalog::instance().publishes(
+                dbname, tablename, LogicalChange::Op::Update)) {
             auto& txn = transactionContext();
             if (txn.inTransaction) {
                 std::string oldRendered, newRendered;

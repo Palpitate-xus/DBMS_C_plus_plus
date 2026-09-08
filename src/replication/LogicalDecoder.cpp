@@ -338,6 +338,24 @@ bool PublicationCatalog::publishes(const std::string& dbname,
     return false;
 }
 
+bool PublicationCatalog::publishes(const std::string& dbname,
+                                   const std::string& table,
+                                   LogicalChange::Op operation) const {
+    for (const auto& pub : list(dbname)) {
+        const bool member = pub.publishAllTables ||
+            std::find(pub.tables.begin(), pub.tables.end(), table) !=
+                pub.tables.end();
+        if (!member) continue;
+        if (operation == LogicalChange::Op::Insert && pub.publishInsert)
+            return true;
+        if (operation == LogicalChange::Op::Update && pub.publishUpdate)
+            return true;
+        if (operation == LogicalChange::Op::Delete && pub.publishDelete)
+            return true;
+    }
+    return false;
+}
+
 // ----------------------------------------------------------------------------
 // LogicalChangeStore
 // ----------------------------------------------------------------------------

@@ -79,6 +79,7 @@ static void test_publication_catalog() {
     pub.name = "mypub";
     pub.owner = "admin";
     pub.tables = {"orders", "customers"};
+    pub.publishUpdate = false;
     std::string error;
     assert(cat.create(db, pub, error));
     assert(error.empty());
@@ -92,12 +93,16 @@ static void test_publication_catalog() {
     assert(pubs[0].name == "mypub");
     assert(pubs[0].owner == "admin");
     assert(pubs[0].tables.size() == 2);
-    assert(pubs[0].publishInsert && pubs[0].publishUpdate && pubs[0].publishDelete);
+    assert(pubs[0].publishInsert && !pubs[0].publishUpdate &&
+           pubs[0].publishDelete);
     assert(!pubs[0].publishAllTables);
 
     assert(cat.publishes(db, "orders"));
     assert(cat.publishes(db, "customers"));
     assert(!cat.publishes(db, "audit"));
+    assert(cat.publishes(db, "orders", LogicalChange::Op::Insert));
+    assert(!cat.publishes(db, "orders", LogicalChange::Op::Update));
+    assert(cat.publishes(db, "orders", LogicalChange::Op::Delete));
 
     // FOR ALL TABLES publication.
     Publication all;
@@ -309,6 +314,33 @@ static void test_end_to_end_streaming() {
         "e2e_slot", autocommitPeek.nextLsn);
     assert(repl.advanceSlotLsn(
         "e2e_slot", static_cast<int64_t>(autocommitPeek.nextLsn)));
+
+    // Publication operation flags filter DML capture independently of table
+    // membership.  Keep INSERT enabled while disabling UPDATE and DELETE.
+    pub.publishUpdate = false;
+    pub.publishDelete = false;
+    assert(PublicationCatalog::instance().update(db, pub, error));
+    assert(g_engine.insert(
+               db, "src_t", {{"id", "5"}, {"v", "five"}}) ==
+           DBStatus::OK);
+    assert(LogicalChangeStore::instance().depth("e2e_slot") == 1);
+    assert(g_engine.update(
+               db, "src_t", {{"v", "updated"}}, {"=id 5"}) ==
+           DBStatus::OK);
+    assert(LogicalChangeStore::instance().depth("e2e_slot") == 1);
+    assert(g_engine.remove(db, "src_t", {"=id 5"}) == DBStatus::OK);
+    assert(LogicalChangeStore::instance().depth("e2e_slot") == 1);
+    auto filteredPeek = LogicalChangeStore::instance().peek(
+        "e2e_slot", autocommitPeek.nextLsn, 100);
+    assert(filteredPeek.batches.size() == 1);
+    assert(filteredPeek.batches[0].changes.size() == 1);
+    assert(filteredPeek.batches[0].changes[0].op ==
+           LogicalChange::Op::Insert);
+    assert(filteredPeek.batches[0].changes[0].newRow == "5|five");
+    LogicalChangeStore::instance().acknowledge(
+        "e2e_slot", filteredPeek.nextLsn);
+    assert(repl.advanceSlotLsn(
+        "e2e_slot", static_cast<int64_t>(filteredPeek.nextLsn)));
 
     assert(repl.dropReplicationSlot("e2e_slot"));
     g_engine.dropDatabase(db);

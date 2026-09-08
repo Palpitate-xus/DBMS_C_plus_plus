@@ -86,6 +86,10 @@ public:
                      std::string& error);
     // Does this publication stream changes of (dbname, table)?
     bool publishes(const std::string& dbname, const std::string& table) const;
+    // Operation-aware membership check used by DML capture.  A table can be
+    // a publication member while a specific change kind is disabled.
+    bool publishes(const std::string& dbname, const std::string& table,
+                   LogicalChange::Op operation) const;
 
 private:
     PublicationCatalog() = default;
