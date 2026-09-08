@@ -21529,11 +21529,47 @@ if (sql.rfind("backup database", 0) == 0) {
                 condTokens.push_back(")");
                 for (auto& t : condTokens) t = modifyLogic(t);
                 auto groups = breakDownConditions(condTokens);
+                const bool orderUsesTableColumn = any_of(
+                    orderBySpecs.begin(), orderBySpecs.end(),
+                    [&](const auto& spec) {
+                        for (size_t i = 0; i < tbl.len; ++i) {
+                            if (tbl.cols[i].dataName == spec.colName)
+                                return true;
+                        }
+                        return false;
+                    });
                 if (captureStructuredScalar && groups.size() == 1) {
                     answers = g_engine.queryExpr(
                         queryDb, tname, groups.front(), selectExprs,
                         orderBySpecs, &structuredScalarResult.rows,
                         &structuredScalarResult.nulls);
+                    structuredScalarRows = true;
+                } else if (captureStructuredScalar && !groups.empty() &&
+                           !orderUsesTableColumn) {
+                    set<int64_t> seenRowIds;
+                    for (const auto& group : groups) {
+                        vector<vector<string>> rows;
+                        vector<vector<bool>> nulls;
+                        vector<int64_t> rowIds;
+                        auto part = g_engine.queryExpr(
+                            queryDb, tname, group, selectExprs, orderBySpecs,
+                            &rows, &nulls, &rowIds);
+                        if (part.size() != rows.size() ||
+                            part.size() != nulls.size() ||
+                            part.size() != rowIds.size()) {
+                            throw std::runtime_error(
+                                "structured scalar row identity mismatch");
+                        }
+                        for (size_t i = 0; i < part.size(); ++i) {
+                            if (!seenRowIds.insert(rowIds[i]).second)
+                                continue;
+                            answers.push_back(std::move(part[i]));
+                            structuredScalarResult.rows.push_back(
+                                std::move(rows[i]));
+                            structuredScalarResult.nulls.push_back(
+                                std::move(nulls[i]));
+                        }
+                    }
                     structuredScalarRows = true;
                 } else {
                     set<string> seen;

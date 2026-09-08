@@ -591,7 +591,8 @@ public:
         const std::vector<SelectExpr>& exprs,
         const std::vector<OrderBySpec>& orderBy,
         std::vector<std::vector<std::string>>* structuredRows,
-        std::vector<std::vector<bool>>* structuredNulls);
+        std::vector<std::vector<bool>>* structuredNulls,
+        std::vector<int64_t>* structuredRowIds = nullptr);
 
     // information_schema virtual tables
     std::vector<std::string> queryInformationSchema(

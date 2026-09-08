@@ -23,6 +23,10 @@ def main():
             "INSERT INTO exact_null_order VALUES (1, NULL), (2, 1), (3, 2);",
             "CREATE TABLE exact_scalar_text_order (v TEXT);",
             "INSERT INTO exact_scalar_text_order VALUES ('2'), ('10'), (NULL);",
+            "CREATE TABLE exact_scalar_or_rows (id INT, v TEXT);",
+            ("INSERT INTO exact_scalar_or_rows VALUES "
+             "(1, 'same'), (2, 'same'), (3, 'NULL'), "
+             "(4, 'line\nbreak'), (5, NULL);"),
         ]
         for sql in setup:
             _, state, message, _ = runner.ours_query(
@@ -104,6 +108,18 @@ def main():
             [None if row[1] is None else row[1].upper()]
             for row in expected[1:]
         ], predicate_rows
+
+        or_sql = (
+            "SELECT upper(v) AS rendered FROM exact_scalar_or_rows "
+            "WHERE id <= 4 OR id >= 2;")
+        or_rows, or_state, or_message, _ = runner.ours_query(
+            client, server["sock"], or_sql)
+        assert or_state is None, (or_state, or_message)
+        assert len(or_rows) == 5, or_rows
+        assert or_rows.count(["SAME"]) == 2, or_rows
+        assert ["NULL"] in or_rows, or_rows
+        assert ["LINE\nBREAK"] in or_rows, or_rows
+        assert [None] in or_rows, or_rows
 
         alias_values = [
             None if row[1] is None else row[1].upper()

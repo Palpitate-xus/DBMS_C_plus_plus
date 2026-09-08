@@ -30914,7 +30914,7 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
                                                    const std::vector<SelectExpr>& exprs,
                                                    const std::vector<OrderBySpec>& orderBy) {
     return queryExpr(dbname, tablename, conditions, exprs, orderBy,
-                     nullptr, nullptr);
+                     nullptr, nullptr, nullptr);
 }
 
 std::vector<std::string> StorageEngine::queryExpr(
@@ -30923,10 +30923,12 @@ std::vector<std::string> StorageEngine::queryExpr(
     const std::vector<SelectExpr>& exprs,
     const std::vector<OrderBySpec>& orderBy,
     std::vector<std::vector<std::string>>* structuredRows,
-    std::vector<std::vector<bool>>* structuredNulls) {
+    std::vector<std::vector<bool>>* structuredNulls,
+    std::vector<int64_t>* structuredRowIds) {
     std::vector<std::string> result;
     if (structuredRows) structuredRows->clear();
     if (structuredNulls) structuredNulls->clear();
+    if (structuredRowIds) structuredRowIds->clear();
     if (!tableExists(dbname, tablename)) return result;
     if (!lockManager_.lockShared(tablename)) return result;
     ResourceUnlockGuard tableLockGuard(lockManager_, tablename);
@@ -31179,6 +31181,7 @@ std::vector<std::string> StorageEngine::queryExpr(
                 result.push_back(rowStr);
                 if (structuredRows) structuredRows->push_back(std::move(cells));
                 if (structuredNulls) structuredNulls->push_back(std::move(nulls));
+                if (structuredRowIds) structuredRowIds->push_back(mr.first);
             }
         } else {
             std::string rowStr;
@@ -31261,6 +31264,7 @@ std::vector<std::string> StorageEngine::queryExpr(
             result.push_back(rowStr);
             if (structuredRows) structuredRows->push_back(std::move(cells));
             if (structuredNulls) structuredNulls->push_back(std::move(nulls));
+            if (structuredRowIds) structuredRowIds->push_back(mr.first);
         }
     }
     return result;
