@@ -1678,6 +1678,10 @@ private:
     // transaction lock and flushed all durable state.
     bool physicalBackupLocked(const std::string& dbname,
                               const std::string& backupPath);
+    // Restore a physical generation after the caller has acquired the
+    // database transaction lock and discarded database-owned caches.
+    bool physicalRestoreLocked(const std::string& dbname,
+                               const std::string& backupPath);
 
     // Evaluate a single row against conditions, returning matching row indices
     std::set<int64_t> filterRows(const std::string& dbname, const std::string& tablename,

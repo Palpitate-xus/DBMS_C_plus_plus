@@ -36446,7 +36446,23 @@ bool StorageEngine::physicalBackupLocked(
     }
 }
 
-bool StorageEngine::physicalRestore(const std::string& dbname, const std::string& backupPath) {
+bool StorageEngine::physicalRestore(const std::string& dbname,
+                                    const std::string& backupPath) {
+    // Replacing a live database directory must not race a transaction or
+    // leave open allocators/indexes/WAL managers attached to the displaced
+    // files. A caller already inside any transaction cannot safely acquire
+    // this database-wide exclusive lock.
+    if (transactionContext().inTransaction) return false;
+    const auto databaseMutex = databaseTxnLockFor(dbname);
+    std::unique_lock<std::shared_mutex> databaseLock(*databaseMutex);
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    if (catalogService_) catalogService_->evict(dbname);
+    closeDatabaseCaches(dbname);
+    return physicalRestoreLocked(dbname, backupPath);
+}
+
+bool StorageEngine::physicalRestoreLocked(
+    const std::string& dbname, const std::string& backupPath) {
     auto src = std::filesystem::path(backupPath);
     auto dst = dbPath(dbname);
     std::filesystem::path stagedDatabase;
@@ -39975,7 +39991,7 @@ bool StorageEngine::restoreTransactionBackup(const std::string& dbname) {
     // replacing the directory so no stale file handles survive the restore.
     if (catalogService_) catalogService_->evict(dbname);
     closeDatabaseCaches(dbname);
-    const bool restored = physicalRestore(dbname, backup.string());
+    const bool restored = physicalRestoreLocked(dbname, backup.string());
     if (restored) {
         std::error_code ec;
         std::filesystem::remove_all(backup, ec);
