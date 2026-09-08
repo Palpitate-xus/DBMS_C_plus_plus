@@ -24,16 +24,12 @@ std::string defaultCompatibilityMode() {
 }
 
 bool compatKindHasRuntime(const std::string& kind) {
-    // Kinds whose CREATE/ALTER/DROP previously fell through to the generic
-    // compatibility-object record but do have a dedicated runtime handler
-    // dispatched *before* the compat layer.  They are listed here so the
-    // gate can stay honest if dispatch order changes.
-    static const std::unordered_set<std::string> kRuntimeKinds = {
-        // CREATE PUBLICATION has a real handler (write-path change capture
-        // publication registry) dispatched before the compat layer.
-        "publication",
-    };
-    return kRuntimeKinds.count(kind) > 0;
+    (void)kind;
+    // A real handler must consume the command before generic compatibility
+    // dispatch.  Falling through here proves that this specific operation
+    // has no runtime, even if another verb for the same kind does (for
+    // example CREATE/DROP PUBLICATION versus ALTER PUBLICATION).
+    return false;
 }
 
 bool compatKindAlwaysUnsupported(const std::string& kind) {

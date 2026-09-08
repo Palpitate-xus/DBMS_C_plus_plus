@@ -30,8 +30,8 @@ std::string defaultCompatibilityMode();
 
 // Object kinds understood by the compatibility-object layer in main.cpp.
 // Keep in sync with compatCreatePrefixes()/compatAlterDropPrefixes().
-// Returns true when the kind has a real runtime implementation behind it
-// (executor/planner/catalog effect), not just a stored definition record.
+// Generic compatibility dispatch has no runtime-backed object kind.  Real
+// handlers must consume their supported verb before this layer is reached.
 bool compatKindHasRuntime(const std::string& kind);
 
 // Kinds that must stay feature_not_supported in every compatibility mode

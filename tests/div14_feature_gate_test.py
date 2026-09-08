@@ -168,6 +168,7 @@ def main():
             "ALTER OPERATOR CLASS oc USING btree RENAME TO oc2",
             "ALTER OPERATOR FAMILY of1 USING btree RENAME TO of2",
             "ALTER SUBSCRIPTION sub1 CONNECTION 'c2'",
+            "ALTER PUBLICATION p ADD TABLE t6d",
         ]
         for sql in gated_alter:
             expect_0a000(sock, sql, sql)
@@ -310,6 +311,8 @@ def main():
                            "SET compatibility_mode")
         expect_0a000(sock, "CREATE EXTENSION hstore",
                      "extended CREATE EXTENSION")
+        expect_0a000(sock, "ALTER PUBLICATION p ADD TABLE t6d",
+                     "extended ALTER PUBLICATION")
         expect_0a000(sock,
                      "IMPORT FOREIGN SCHEMA fs FROM SERVER s1 INTO public",
                      "extended IMPORT FOREIGN SCHEMA")
