@@ -5904,7 +5904,8 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                 endsBracketA && !hasCatA) {
                 headers.push_back("array");
                 appendValue(r.value.empty() && r.isNull ? "NULL" : r.value,
-                            r.isNull, r.typeName);
+                            r.isNull,
+                            dbms::ExprHelper::inferResultType(expr));
                 continue;
             }
             // CAST target type names the column (PG: cast(1 as text) ->
@@ -6042,6 +6043,16 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
         }
         headerDone:;
         string protocolType = r.typeName;
+        const string inferredProtocolType =
+            dbms::ExprHelper::inferResultType(expr);
+        const string evaluatedProtocolType = toLower(trim(protocolType));
+        if (inferredProtocolType != "text" || protocolType.empty() ||
+            evaluatedProtocolType == "text" ||
+            evaluatedProtocolType == "character varying" ||
+            evaluatedProtocolType == "varchar" ||
+            evaluatedProtocolType == "unknown") {
+            protocolType = inferredProtocolType;
+        }
         // PostgreSQL resolves an otherwise-unconstrained string literal (and
         // expressions composed solely from such literals, e.g. CASE) to
         // text at the top-level SELECT boundary.  ExprEvaluator keeps the

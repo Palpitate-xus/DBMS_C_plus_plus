@@ -93,6 +93,10 @@ std::string protocolTypeName(std::string type) {
     if (type == "bool") return "boolean";
     if (type == "character varying") return "varchar";
     if (type == "character") return "bpchar";
+    if (type == "timestamp with time zone") return "timestamptz";
+    if (type == "timestamp without time zone") return "timestamp";
+    if (type == "time with time zone") return "timetz";
+    if (type == "time without time zone") return "time";
     return type;
 }
 
@@ -296,8 +300,13 @@ std::string inferAstResultType(
             name == "ceiling" || name == "floor" || name == "mod")
             return argType(0);
         if (name == "div") return "numeric";
-        if (name == "power")
-            return argType(0) == "numeric" ? "numeric" : "double precision";
+        if (name == "power") {
+            const std::string left = argType(0);
+            const std::string right = argType(1);
+            return left == "numeric" || right == "numeric"
+                ? "numeric" : "double precision";
+        }
+        if (name == "log" && call->args.size() == 2) return "numeric";
         if (name == "exp" || name == "ln" || name == "log" || name == "sqrt" ||
             name == "sin" || name == "cos" || name == "tan")
             return argType(0) == "numeric" ? "numeric" : "double precision";
@@ -682,6 +691,52 @@ std::string ExprHelper::inferResultType(
     }();
     const std::string lower = toLower(trimmed);
 
+    // JSON extraction operators preserve the JSON container type; their
+    // text variants deliberately return text.  Handle these before looking
+    // for a postfix cast because the cast belongs to the left operand.
+    if (lower.find("->>") != std::string::npos ||
+        lower.find("#>>") != std::string::npos) return "text";
+    if (lower.find("->") != std::string::npos ||
+        lower.find("#>") != std::string::npos) {
+        if (lower.find("::jsonb") != std::string::npos) return "jsonb";
+        if (lower.find("::json") != std::string::npos) return "json";
+    }
+    if (lower.rfind("date ", 0) == 0 &&
+        (lower.find(" + interval ") != std::string::npos ||
+         lower.find(" - interval ") != std::string::npos)) {
+        return "timestamp";
+    }
+    const size_t dateCast = lower.find("::date");
+    if (dateCast != std::string::npos) {
+        const size_t secondDateCast = lower.find("::date", dateCast + 6);
+        if (secondDateCast != std::string::npos &&
+            lower.find(" - ", dateCast + 6) != std::string::npos)
+            return "integer";
+        const size_t op = lower.find_first_of("+-", dateCast + 6);
+        if (op != std::string::npos) {
+            const std::string right = lower.substr(op + 1);
+            if (right.find_first_not_of(" \t\r\n0123456789") ==
+                std::string::npos)
+                return "date";
+        }
+    }
+    if (lower.find(" at time zone ") != std::string::npos) {
+        if (lower.find("::timestamptz") != std::string::npos ||
+            lower.rfind("timestamptz ", 0) == 0)
+            return "timestamp";
+        return "timestamptz";
+    }
+    if (lower.rfind("round(", 0) == 0 || lower.rfind("trunc(", 0) == 0) {
+        if (lower.find("::float8") != std::string::npos ||
+            lower.find("::double precision") != std::string::npos ||
+            lower.find("::real") != std::string::npos)
+            return "double precision";
+    }
+    if (lower.find(" @> ") != std::string::npos ||
+        lower.find(" <@ ") != std::string::npos ||
+        lower.find(" && ") != std::string::npos)
+        return "boolean";
+
     // The expression parser accepts PostgreSQL postfix casts while evaluating,
     // but older AST paths can leave the cast suffix outside the returned root.
     // Read a top-level suffix directly so protocol metadata follows the cast,
@@ -718,8 +773,36 @@ std::string ExprHelper::inferResultType(
         }
     }
     if (postfixCast != std::string::npos) {
-        const std::string target = trimmed.substr(postfixCast + 2);
-        if (!target.empty()) return protocolTypeName(target);
+        std::string rawTarget = toLower(trimmed.substr(postfixCast + 2));
+        const size_t first = rawTarget.find_first_not_of(" \t\r\n");
+        const size_t last = rawTarget.find_last_not_of(" \t\r\n");
+        rawTarget = first == std::string::npos
+            ? std::string{} : rawTarget.substr(first, last - first + 1);
+        bool completeType = !rawTarget.empty();
+        const size_t modifier = rawTarget.find('(');
+        if (modifier != std::string::npos) {
+            completeType = rawTarget.back() == ')' &&
+                rawTarget.find(')', modifier) == rawTarget.size() - 1;
+            for (size_t i = modifier + 1;
+                 completeType && i + 1 < rawTarget.size(); ++i) {
+                const unsigned char ch =
+                    static_cast<unsigned char>(rawTarget[i]);
+                completeType = std::isdigit(ch) || std::isspace(ch) ||
+                    rawTarget[i] == ',';
+            }
+        }
+        const std::string target = completeType
+            ? protocolTypeName(rawTarget) : std::string{};
+        static const std::set<std::string> postfixTypes = {
+            "smallint", "integer", "bigint", "numeric", "real",
+            "double precision", "boolean", "text", "varchar", "bpchar",
+            "date", "time", "timetz", "timestamp", "timestamptz",
+            "interval", "json", "jsonb", "uuid", "name", "regtype",
+            "smallint[]", "integer[]", "bigint[]", "numeric[]", "real[]",
+            "double precision[]", "boolean[]", "text[]", "varchar[]",
+            "date[]", "time[]", "timestamp[]", "timestamptz[]", "uuid[]"
+        };
+        if (completeType && postfixTypes.count(target)) return target;
     }
 
     // SQL preprocessing lowers CASE into an evaluator-only case_when wrapper.
@@ -760,8 +843,18 @@ std::string ExprHelper::inferResultType(
     for (const std::string& type : typedLiteralTypes) {
         const std::string prefix = type + " ";
         if (lower.rfind(prefix, 0) == 0 &&
-            trimmed.size() > prefix.size() && trimmed[prefix.size()] == '\'' &&
-            trimmed.back() == '\'') return type;
+            trimmed.size() > prefix.size() && trimmed[prefix.size()] == '\'') {
+            size_t close = prefix.size() + 1;
+            while (close < trimmed.size()) {
+                if (trimmed[close] != '\'') { ++close; continue; }
+                if (close + 1 < trimmed.size() && trimmed[close + 1] == '\'') {
+                    close += 2;
+                    continue;
+                }
+                break;
+            }
+            if (close + 1 == trimmed.size()) return type;
+        }
     }
     if (lower.rfind("case", 0) != 0 &&
         (lower.find(" between ") != std::string::npos ||
@@ -772,6 +865,15 @@ std::string ExprHelper::inferResultType(
         return "boolean";
     }
     if (lower.rfind("array[", 0) == 0 || lower.rfind("array [", 0) == 0) {
+        if (trimmed.find('\'') != std::string::npos) return "text[]";
+        if (trimmed.find('.') != std::string::npos) return "numeric[]";
+        return "integer[]";
+    }
+    for (const char* arrayFunction : {
+             "array_append(", "array_prepend(", "array_remove(",
+             "array_replace("}) {
+        if (lower.rfind(arrayFunction, 0) != 0 ||
+            lower.find("array[") == std::string::npos) continue;
         if (trimmed.find('\'') != std::string::npos) return "text[]";
         if (trimmed.find('.') != std::string::npos) return "numeric[]";
         return "integer[]";

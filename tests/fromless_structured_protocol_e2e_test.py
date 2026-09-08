@@ -62,6 +62,23 @@ def main():
         assert type_oids == [25, 25, 25, 1043], type_oids
         assert command_tag == "SELECT 1", command_tag
 
+        decoded = runner.decode_wire_result(
+            client.simple_query(
+                server["sock"],
+                "SELECT ARRAY[1,2] AS ints, "
+                "string_to_array('a,b', ',') AS texts, exp(1) AS e, "
+                "date_part('month', DATE '2026-05-06') AS part, "
+                "to_timestamp('2026-08-15 14:30:05', "
+                "'YYYY-MM-DD HH24:MI:SS') AS ts, "
+                "regexp_matches('abc', '(a)(b)') AS matches;"),
+            include_types=True)
+        rows, state, message, headers, command_tag, type_oids = decoded
+        assert state is None, (state, message)
+        assert len(rows) == 1 and len(rows[0]) == 6, rows
+        assert headers == ["ints", "texts", "e", "part", "ts", "matches"], headers
+        assert type_oids == [1007, 1009, 701, 701, 1184, 1009], type_oids
+        assert command_tag == "SELECT 1", command_tag
+
         rows, state, message, headers = runner.ours_query(
             client, server["sock"],
             'SELECT current_user AS "who am I", session_user AS su, '

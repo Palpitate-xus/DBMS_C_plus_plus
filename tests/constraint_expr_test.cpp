@@ -210,6 +210,39 @@ int main() {
                "case_when(=n 10,1,=n 20,2,0)", resultTypes) == "integer");
     assert(dbms::ExprHelper::inferResultType("cast(i,text)", resultTypes) ==
            "text");
+    assert(dbms::ExprHelper::inferResultType("exp(1)") == "double precision");
+    assert(dbms::ExprHelper::inferResultType(
+               "string_to_array('a,b', ',')") == "text[]");
+    assert(dbms::ExprHelper::inferResultType(
+               "date_part('month', DATE '2026-05-06')") ==
+           "double precision");
+    assert(dbms::ExprHelper::inferResultType(
+               "to_timestamp('2026-08-15', 'YYYY-MM-DD')") ==
+           "timestamptz");
+    assert(dbms::ExprHelper::inferResultType(
+               "regexp_matches('abc', '(a)(b)')") == "text[]");
+    assert(dbms::ExprHelper::inferResultType("log(2, 64)") == "numeric");
+    assert(dbms::ExprHelper::inferResultType(
+               "date '2026-01-31' + interval '1 month'") == "timestamp");
+    assert(dbms::ExprHelper::inferResultType(
+               "array_append(ARRAY[1,2], 3)") == "integer[]");
+    assert(dbms::ExprHelper::inferResultType(
+               "'{\"a\":1}'::json -> 'a'") == "json");
+    assert(dbms::ExprHelper::inferResultType("'123'::int + 1") == "integer");
+    assert(dbms::ExprHelper::inferResultType(
+               "'2024-03-15'::date + 7") == "date");
+    assert(dbms::ExprHelper::inferResultType(
+               "null::boolean AND true") == "boolean");
+    assert(dbms::ExprHelper::inferResultType(
+               "NULL::text IS NULL") == "boolean");
+    assert(dbms::ExprHelper::inferResultType(
+               "timestamp '2024-06-01 00:30:00' at time zone 'UTC'") ==
+           "timestamptz");
+    assert(dbms::ExprHelper::inferResultType("power(9, 0.5)") == "numeric");
+    assert(dbms::ExprHelper::inferResultType("round(2.5::float8)") ==
+           "double precision");
+    assert(dbms::ExprHelper::inferResultType(
+               "array[1,2,3] @> array[1,2]") == "boolean");
 
     dbms::TypeRegistry::instance().bootstrap();
     test_expr_helper_basic();
