@@ -19583,6 +19583,91 @@ if (sql.rfind("backup database", 0) == 0) {
             return string("text");
         };
 
+        auto windowProtocolType = [&](const WindowFunc& wf) {
+            if (wf.name == "row_number" || wf.name == "rank" ||
+                wf.name == "dense_rank") return string("bigint");
+            if (wf.name == "percent_rank" || wf.name == "cume_dist")
+                return string("double precision");
+            if (wf.name == "ntile") return string("integer");
+
+            if (wf.isAggregate || wf.name == "array_agg") {
+                dbms::StorageEngine::AggItem aggregate;
+                aggregate.func = wf.name;
+                aggregate.arg = wf.arg;
+                return aggregateProtocolType(aggregate);
+            }
+
+            if (wf.name == "lag" || wf.name == "lead" ||
+                wf.name == "first_value" || wf.name == "last_value" ||
+                wf.name == "nth_value") {
+                string source = trim(wf.arg);
+                size_t comma = source.find(',');
+                if (comma != string::npos) source.resize(comma);
+                size_t dot = source.rfind('.');
+                if (dot != string::npos) source = source.substr(dot + 1);
+                source = trim(source);
+                for (size_t ci = 0; ci < tbl.len; ++ci)
+                    if (tbl.cols[ci].dataName == source)
+                        return tbl.cols[ci].dataType;
+            }
+            return string("text");
+        };
+
+        auto publishWindowProtocolMetadata = [&] {
+            if (!shouldPublishQueryMetadata()) return;
+            dbms::DmlResult metadata;
+            metadata.available = true;
+            metadata.metadataOnly = true;
+            for (const auto& rawTarget : splitSelectColumns(columns)) {
+                string item = trim(rawTarget);
+                string alias;
+                size_t asPos = string::npos;
+                const string lowerItem = toLower(item);
+                int aliasDepth = 0;
+                bool aliasQuote = false;
+                for (size_t i = 0; i + 4 <= item.size(); ++i) {
+                    if (item[i] == '\'') {
+                        if (aliasQuote && i + 1 < item.size() &&
+                            item[i + 1] == '\'') { ++i; continue; }
+                        aliasQuote = !aliasQuote;
+                        continue;
+                    }
+                    if (aliasQuote) continue;
+                    if (item[i] == '(' || item[i] == '[') ++aliasDepth;
+                    else if (item[i] == ')' || item[i] == ']') {
+                        if (aliasDepth > 0) --aliasDepth;
+                    } else if (aliasDepth == 0 &&
+                               lowerItem.compare(i, 4, " as ") == 0) {
+                        asPos = i;
+                    }
+                }
+                if (asPos != string::npos) {
+                    alias = decodeQuotedIdentifier(trim(item.substr(asPos + 4)));
+                    item = trim(item.substr(0, asPos));
+                }
+                WindowFunc wf;
+                if (parseWindowFunc(item, wf, namedWindows)) {
+                    metadata.columns.push_back(alias.empty() ? wf.name : alias);
+                    metadata.columnTypes.push_back(windowProtocolType(wf));
+                    continue;
+                }
+                metadata.columns.push_back(alias.empty() ? item : alias);
+                string type = "text";
+                string source = item;
+                size_t dot = source.rfind('.');
+                if (dot != string::npos) source = source.substr(dot + 1);
+                for (size_t ci = 0; ci < tbl.len; ++ci)
+                    if (tbl.cols[ci].dataName == source) {
+                        type = tbl.cols[ci].dataType;
+                        break;
+                    }
+                metadata.columnTypes.push_back(std::move(type));
+            }
+            if (!metadata.columns.empty() &&
+                metadata.columns.size() == metadata.columnTypes.size())
+                dbms::publishLastDmlResult(std::move(metadata));
+        };
+
         vector<string> answers;
         if (!groupByCols.empty()) {
             if (forUpdate) { cout << "FOR UPDATE not supported with GROUP BY" << endl; return true; }
@@ -20513,6 +20598,7 @@ if (sql.rfind("backup database", 0) == 0) {
                     cout << row << endl;
                     log(s.username, row, getTime());
                 }
+                publishWindowProtocolMetadata();
                 return false;
             }
 
@@ -20534,6 +20620,7 @@ if (sql.rfind("backup database", 0) == 0) {
                 }
             }
             cout << '\n';
+            publishWindowProtocolMetadata();
 
             // Fetch all data (need all columns for window function computation)
             set<string> allCols;
