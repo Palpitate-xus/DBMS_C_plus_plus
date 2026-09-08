@@ -174,7 +174,7 @@
     {"id":"STO-08","status":"deferred_by_user","evidence":[]},
     {"id":"REPL-01","status":"unverified","evidence":[]},
     {"id":"REPL-02","status":"unverified","evidence":[]},
-    {"id":"REPL-03","status":"partial","evidence":["docs/code-review-progress.md","src/replication/ReplicationManager.cpp","src/replication/LogicalDecoder.cpp","src/commands/TableManage.cpp"],"tests":["tests/logical_decoding_test.cpp","tests/replication_test.cpp","tests/replication_concurrency_test.cpp","tests/div14_feature_gate_test.py","tests/compat/pg_diff_runner.py"],"commits":["a906842","406508d"]},
+    {"id":"REPL-03","status":"partial","evidence":["docs/code-review-progress.md","src/replication/ReplicationManager.cpp","src/replication/LogicalDecoder.cpp","src/commands/TableManage.cpp","src/main.cpp"],"tests":["tests/logical_decoding_test.cpp","tests/replication_test.cpp","tests/replication_concurrency_test.cpp","tests/phase8_10_test.cpp","tests/div14_feature_gate_test.py","tests/compat/pg_diff_runner.py"],"commits":["a906842","406508d","8cd647c"]},
     {"id":"REPL-04","status":"unverified","evidence":[]},
     {"id":"REPL-05","status":"unverified","evidence":[]},
     {"id":"REPL-06","status":"unverified","evidence":[]},

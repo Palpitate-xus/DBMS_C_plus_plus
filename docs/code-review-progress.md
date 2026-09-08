@@ -94,6 +94,7 @@
 | 258 | P0-04 / CAT-07 / REPL-08 | PublicationCatalog::create 直接用缓冲 `ofstream` 截断写；底层短写时函数可先返回成功，析构刷新失败被忽略，并留下截断 publication 文件。改用临时文件完整写入、文件 fsync、原子 rename、目录 fsync；失败清理临时文件和任何已可见目标，避免半对象阻塞重试 | `logical_decoding_test` 在 fork 子进程用 RLIMIT_FSIZE=8 和忽略 SIGXFSZ 稳定制造短写：旧路径返回成功/留下文件，修复后明确失败且目标和 `.tmp` 均不存在；完整 logical decoding、DIV-14 和 122/122 差分通过 | `827d9aa` |
 | 259 | REPL-03 | DROP replication slot 只删除 manager 条目，不清除同名 LogicalChangeStore 队列；重建同名槽会继承旧槽尚未确认的事务。为 change store 增加整槽 discard，并在成功删除非活动槽时同步清理，失败删除不影响队列 | `logical_decoding_test` 在槽中保留一批未确认变更后删除：旧实现删除后 depth 仍为 1；修复后为 0，重建同名逻辑槽也保持为空。logical decoding、replication manager、DIV-14 和 122/122 差分通过。槽持久化、WAL retention/xmin 及 drop 与 commit 的并发串行化仍待完成 | `a906842` |
 | 260 | REPL-03 | Commit 发布先复制逻辑槽列表、释放 manager 锁后才向 change store append；并发 DROP 可在两步之间删除并清空槽，随后旧快照再次写出孤儿队列。新增 manager 级 publishLogicalBatch，在与 drop/discard 相同的锁域内完成逻辑槽筛选和追加，使 publish-before-drop 与 drop-before-publish 两种顺序都收敛为无残留 | `replication_concurrency_test` 进行 200 轮 publish/drop 同时起跑，每轮验证 drop 成功、槽不存在且队列深度为 0；logical decoding、DIV-14 与 122/122 差分通过。跨进程槽持久化和 WAL retention 仍未完成 | `406508d` |
+| 261 | REPL-03 | 逻辑复制槽未记录所属 database，commit 和 COMMIT PREPARED 会把一个数据库的批次广播给集群内所有逻辑槽；扩展 SHOW/confirm 也能从其他数据库访问槽。为 logical slot 增加必填 database 绑定，physical slot 保持集群级；发布临界区按 database 精确筛选，SQL 创建传入当前库，读取/确认拒绝跨库槽 | `replication_test` 验证 manager 对 otherdb 发布不增加 testdb 槽深度、同库发布增加；`logical_decoding_test` 并存两个数据库槽并验证普通 commit 只进入同库槽，prepared commit 继续通过；并发、Phase 8、DIV-14 与 122/122 差分通过。持久化、WAL retention/xmin 仍未完成 | `8cd647c` |
 
 本批新增的待修复复现（仍计入总清单）：
 
