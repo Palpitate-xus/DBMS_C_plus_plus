@@ -1522,6 +1522,13 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
         return left < right ? -1 : (left > right ? 1 : 0);
     }
 
+    // A pair of text values stays textual even when both strings contain
+    // digits. Numeric coercion here changes ORDER BY, comparisons and
+    // GREATEST/LEAST (for example, text '10' must precede text '2').
+    if (textualA && textualB) {
+        return a.value < b.value ? -1 : (a.value > b.value ? 1 : 0);
+    }
+
     // Exact numeric comparison for explicit numeric/decimal types.
     if (isNumericTypeName(a.typeName) || isNumericTypeName(b.typeName)) {
         auto na = tryParseNumeric(a.value);

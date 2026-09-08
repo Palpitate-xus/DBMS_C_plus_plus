@@ -87,6 +87,11 @@ int main() {
     const auto parallel = run(ordered, true);
     assert(serial.ok && parallel.ok && serial.rows == parallel.rows);
     assert(serial.rows.front().rfind("{300,299,298,", 0) == 0);
+    const dbms::StorageEngine::AggItem textOrder{"array_agg", "id::text", {}, "id::text"};
+    const auto textSerial = run(textOrder, false);
+    const auto textParallel = run(textOrder, true);
+    assert(textSerial.ok && textParallel.ok && textSerial.rows == textParallel.rows);
+    assert(textSerial.rows.front().rfind("{1,10,100,", 0) == 0);
 
     assert(g_engine.truncateTable(db, table.tablename) == dbms::DBStatus::OK);
     expect({"array_agg", "value", {}, {}}, "NULL");
