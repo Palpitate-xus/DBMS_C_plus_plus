@@ -165,27 +165,12 @@ def ours_query(client, sock, sql):
 
 # --------------------------------------------------------------- normalizing
 
-UNSTABLE = [
-    (re.compile(r"\bOID ([0-9]+)\b"), "OID <n>"),
-]
-
-
 def normalize_rows(rows):
-    out = []
-    for row in rows:
-        nrow = []
-        for v in row:
-            # psql -A prints both NULL and '' as empty; our wire protocol
-            # also renders NULL as an empty cell.  Normalize empty -> None
-            # on both sides so NULL placement is compared, not spelling.
-            if v == "":
-                v = None
-            if isinstance(v, str):
-                for pat, rep in UNSTABLE:
-                    v = pat.sub(rep, v)
-            nrow.append(v)
-        out.append(nrow)
-    return out
+    # DataRow already distinguishes NULL (-1) from a zero-byte value. The
+    # reference reader also has a separate NULL marker. Changing values here
+    # hid real result mismatches, including empty text vs NULL and ordinary
+    # user strings such as "OID 123". Normalize container shape only.
+    return [list(row) for row in rows]
 
 
 def normalize_message(msg):

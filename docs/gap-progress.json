@@ -16,7 +16,7 @@
     {"id":"P0-13","status":"deferred_by_user","evidence":[]},
     {"id":"P0-14","status":"unverified","evidence":[]},
     {"id":"P0-15","status":"unverified","evidence":[]},
-    {"id":"P0-16","status":"unverified","evidence":[]},
+    {"id":"P0-16","status":"partial","evidence":["docs/code-review-progress.md"],"tests":["tests/pg_diff_runner_test.py"]},
     {"id":"SQL-01","status":"partial","evidence":["docs/code-review-progress.md"],"tests":["tests/parser_phase1_test.cpp"]},
     {"id":"SQL-02","status":"unverified","evidence":[]},
     {"id":"SQL-03","status":"unverified","evidence":[]},
