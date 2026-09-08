@@ -76,6 +76,7 @@
 | 240 | P0-02 / SQL-12 / QRY-01,09,10 / PROTO-04 | 标量 DISTINCT 用显示文本去重，混淆 SQL NULL、文本 `NULL` 与换行；LIMIT/OFFSET 只切显示行。改用完整 cells+NULL bitmap 作为 DISTINCT 键，并同步切片结构化 rows/nulls；同时在移除 DISTINCT 后建立 alias map，修复 `ORDER BY alias` | 协议 E2E 覆盖 DISTINCT 重复值、SQL NULL/文本 NULL/换行、alias 排序，以及 LIMIT 3 OFFSET 2 的精确保真；LIMIT/FETCH、协议及实际 PostgreSQL 122 组差分通过。DISTINCT ON 约束、collation 和 spill 仍属于 QRY-09 | `fd303b2` |
 | 241 | P0-02 / SQL-12 / QRY-01 / PROTO-04 | 普通列投影只有无 WHERE 时发布结构化行，简单筛选会退回显示文本并再次损坏 NULL、换行与边界空格。支持单个简单合取条件组直接收集结构化 cells/NULL bitmap；复杂表达式谓词继续由 Volcano 执行，避免 legacy 条件解析器静默误判 | 协议 E2E 覆盖双条件筛选、反顺序列及全部 7 类保真值；复杂 `(v > 5) IS NOT NULL` 差分回归通过，实际 PostgreSQL 122 组差分保持 `failed=0` | `4c3a9ef` |
 | 242 | P0-02 / SQL-12 / QRY-01 / PROTO-04 | 普通列 OR 查询按格式化后的投影文本去重，既会把投影值相同的不同物理行误删，也会破坏 SQL NULL、文本 `NULL` 和嵌入换行。为普通表结构化查询返回内部 row id，各 OR 分支按行身份合并并同步保留 cells/NULL bitmap | 协议 E2E 用重叠 OR 覆盖两个相同投影值、文本 NULL、SQL NULL 和嵌入换行，确认 5 条物理记录各返回一次；精确协议测试及实际 PostgreSQL 122 组差分通过。多 OR 的全局 ORDER BY 仍待下一项统一 | `eb57664` |
+| 243 | P0-02 / SQL-12 / QRY-01,10 / PROTO-04 | 普通列多 OR 查询让每个分支分别 ORDER BY 后再串接，后分支的新行可能属于全局结果最前面。取得同一可见整表的有序 row-id 序列，为已按身份合并的结果建立全局排名，并用同一排列同步重排显示行、精确 cells 和 NULL bitmap | 协议 E2E 覆盖重叠 OR 后按未投影 `id DESC` 排序，旧结果 `4,3,2,1,5` 现为 `5,4,3,2,1`，且 NULL、文本 NULL、换行与重复值均保真；实际 PostgreSQL 122 组差分保持 `failed=0` | `94410a9` |
 
 本批新增的待修复复现（仍计入总清单）：
 
