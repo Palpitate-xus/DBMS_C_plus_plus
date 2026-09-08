@@ -68,6 +68,17 @@ def main():
         assert one_column_rows == [[row[1]] for row in expected], \
             one_column_rows
 
+        filtered_plain_sql = (
+            "SELECT v, id FROM exact_table_rows "
+            "WHERE id >= 2 AND id <= 7 ORDER BY id;")
+        filtered_plain_rows, filtered_plain_state, filtered_plain_message, _ = (
+            runner.ours_query(client, server["sock"], filtered_plain_sql))
+        assert filtered_plain_state is None, (
+            filtered_plain_state, filtered_plain_message)
+        assert filtered_plain_rows == [
+            [row[1], row[0]] for row in expected[1:]
+        ], filtered_plain_rows
+
         scalar_cases = [
             (
                 "SELECT upper(v) AS rendered FROM exact_table_rows "

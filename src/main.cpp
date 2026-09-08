@@ -21731,8 +21731,15 @@ if (sql.rfind("backup database", 0) == 0) {
             // therefore asks StorageEngine for exact cells and a separate
             // NULL bitmap.  Complex operator shapes remain on their existing
             // path until those operators expose structured tuples too.
+            const string plainWhereLower = toLower(rawWhereClause);
+            const bool simpleStructuredPlainPredicate =
+                condTokens.empty() ||
+                (rawWhereClause.find_first_of("()") == string::npos &&
+                 plainWhereLower.find(" or ") == string::npos &&
+                 plainWhereLower.find(" is ") == string::npos);
             const bool captureStructuredPlain =
-                shouldPublishQueryMetadata() && condTokens.empty() &&
+                shouldPublishQueryMetadata() &&
+                simpleStructuredPlainPredicate &&
                 semiJoins.empty() && existenceFilters.empty() &&
                 quantifiedSubqueries.empty() && exprOrderBySpecs.empty() &&
                 !isDistinct && distinctOnCols.empty() &&
@@ -21839,11 +21846,25 @@ if (sql.rfind("backup database", 0) == 0) {
                     condTokens.push_back(")");
                     for (auto& t : condTokens) t = modifyLogic(t);
                     auto groups = breakDownConditions(condTokens);
-                    set<string> seen;
-                    for (const auto& g : groups) {
-                        auto part = g_engine.query(queryDb, tname, g, selectCols, orderBySpecs, forUpdate, noWait, skipLocked, s.timezoneOffsetMinutes, distinctOnCols);
-                        for (const auto& row : part) {
-                            if (seen.insert(row).second) answers.push_back(row);
+                    if (captureStructuredPlain && groups.size() == 1) {
+                        answers = g_engine.query(
+                            queryDb, tname, groups.front(), selectCols,
+                            orderBySpecs, forUpdate, noWait, skipLocked,
+                            s.timezoneOffsetMinutes, distinctOnCols,
+                            &structuredPlainResult.rows,
+                            &structuredPlainResult.nulls);
+                        structuredPlainRows = true;
+                    } else {
+                        set<string> seen;
+                        for (const auto& g : groups) {
+                            auto part = g_engine.query(
+                                queryDb, tname, g, selectCols, orderBySpecs,
+                                forUpdate, noWait, skipLocked,
+                                s.timezoneOffsetMinutes, distinctOnCols);
+                            for (const auto& row : part) {
+                                if (seen.insert(row).second)
+                                    answers.push_back(row);
+                            }
                         }
                     }
                 }
