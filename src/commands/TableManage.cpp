@@ -38692,6 +38692,14 @@ bool StorageEngine::createTransactionBackup() {
             }
         }
     }
+    // Removing UNLOGGED forks changes the snapshot's exact file set. Rebuild
+    // and durably publish its manifest so crash rollback does not reject the
+    // intentionally filtered transaction snapshot as corrupt.
+    if (!writePhysicalBackupManifest(backup) ||
+        !syncPhysicalBackupTree(backup)) {
+        std::filesystem::remove_all(backup, ec);
+        return false;
+    }
     context.txnBackupPath = backup.string();
     context.transactionBackupDirty = false;
     context.ddlUndoSizeAtBackup = context.ddlUndoActions.size();
