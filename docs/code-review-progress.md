@@ -141,6 +141,8 @@
 
 | 298 | P0-01 / SQL-01 / SQL-02 / SQL-04 / QRY-01 | 单表 SELECT 为绑定限定列，在整个投影文本中裸搜索并删除 `table.`/`alias.`；相同字节位于字符串常量时也被删除，`'rewrite_literal_rows.id'` 与 `'r.id'` 均错误返回 `'id'`。限定符重写现在跳过单/双引号与双写转义，并校验左侧标识符边界 | `sql_literal_preservation_e2e_test` 覆盖表名和 AS 别名两种文本常量，同时保留真实限定 WHERE；结构化表查询、DIV-14、O2 构建及实际 PostgreSQL `cases=122 failed=0` 通过 | `c09dcdf` |
 
+| 299 | P0-01 / SQL-01 / SQL-02 / SQL-04 / QRY-02 | 派生表物化后用裸字符串循环删除 `alias.`，投影字符串常量中的相同文本也被修改；`'d.id'` 在 AS 与裸别名两种语法下都错误返回 `'id'`。派生表限定符重写现在跳过引号和双写转义，并校验标识符左边界 | `sql_literal_preservation_e2e_test` 覆盖 `(SELECT ...) AS d` 与 `(SELECT ...) d`；真实派生表类型、DIV-14、O2 构建及实际 PostgreSQL `cases=122 failed=0` 通过 | `1cf2eee` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
