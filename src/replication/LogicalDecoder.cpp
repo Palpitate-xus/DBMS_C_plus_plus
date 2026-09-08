@@ -542,6 +542,11 @@ void LogicalChangeStore::acknowledge(const std::string& slotName, uint64_t confi
     if (stream.empty()) streams_.erase(it);
 }
 
+void LogicalChangeStore::discard(const std::string& slotName) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    streams_.erase(slotName);
+}
+
 size_t LogicalChangeStore::depth(const std::string& slotName) const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = streams_.find(slotName);

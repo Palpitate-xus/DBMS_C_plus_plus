@@ -124,6 +124,10 @@ public:
     // Drop everything up to (and including) confirmedLsn.
     void acknowledge(const std::string& slotName, uint64_t confirmedLsn);
 
+    // Remove every retained batch when the owning slot is dropped.  A later
+    // slot reusing the name must not inherit the previous slot's stream.
+    void discard(const std::string& slotName);
+
     // Bounded retention: at most kMaxRetained per slot (oldest dropped).
     static constexpr size_t kMaxRetained = 4096;
 

@@ -467,6 +467,17 @@ static void test_end_to_end_streaming() {
     assert(repl.advanceSlotLsn(
         "e2e_slot", static_cast<int64_t>(truncatePeek.nextLsn)));
 
+    // Dropping a slot must discard its retained stream.  Reusing the name
+    // must start empty rather than exposing changes owned by the old slot.
+    assert(g_engine.insert(
+               db, "src_t", {{"id", "6"}, {"v", "pending at drop"}}) ==
+           DBStatus::OK);
+    assert(LogicalChangeStore::instance().depth("e2e_slot") == 1);
+    assert(repl.dropReplicationSlot("e2e_slot"));
+    assert(LogicalChangeStore::instance().depth("e2e_slot") == 0);
+    assert(repl.createReplicationSlot(
+        "e2e_slot", "logical", "test_decoding"));
+    assert(LogicalChangeStore::instance().depth("e2e_slot") == 0);
     assert(repl.dropReplicationSlot("e2e_slot"));
     g_engine.dropDatabase(db);
     cleanupTestDb(db);

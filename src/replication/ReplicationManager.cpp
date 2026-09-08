@@ -1,4 +1,5 @@
 #include "ReplicationManager.h"
+#include "LogicalDecoder.h"
 
 #include <algorithm>
 #include <cctype>
@@ -42,6 +43,7 @@ bool ReplicationManager::dropReplicationSlot(const std::string& name) {
     if (it == slots_.end()) return false;
     if (it->second.active) return false;  // cannot drop active slot
     slots_.erase(it);
+    LogicalChangeStore::instance().discard(name);
     return true;
 }
 
