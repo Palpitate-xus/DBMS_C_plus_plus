@@ -48,6 +48,20 @@ def main():
         assert type_oids == [23, 1700, 16, 1082, 1114, 19, 2206], type_oids
         assert command_tag == "SELECT 1", command_tag
 
+        decoded = runner.decode_wire_result(
+            client.simple_query(
+                server["sock"],
+                "SELECT 'abc' AS plain, 'don''t' AS escaped, "
+                "CASE WHEN true THEN 'yes' ELSE 'no' END AS choice, "
+                "'kept'::varchar AS explicit_varchar;"),
+            include_types=True)
+        rows, state, message, headers, command_tag, type_oids = decoded
+        assert state is None, (state, message)
+        assert rows == [["abc", "don't", "yes", "kept"]], rows
+        assert headers == ["plain", "escaped", "choice", "explicit_varchar"], headers
+        assert type_oids == [25, 25, 25, 1043], type_oids
+        assert command_tag == "SELECT 1", command_tag
+
         rows, state, message, headers = runner.ours_query(
             client, server["sock"],
             'SELECT current_user AS "who am I", session_user AS su, '

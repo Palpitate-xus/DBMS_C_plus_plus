@@ -6041,7 +6041,24 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             headers.push_back(disp);
         }
         headerDone:;
-        appendValue(r.isNull ? "NULL" : r.value, r.isNull, r.typeName);
+        string protocolType = r.typeName;
+        // PostgreSQL resolves an otherwise-unconstrained string literal (and
+        // expressions composed solely from such literals, e.g. CASE) to
+        // text at the top-level SELECT boundary.  ExprEvaluator keeps the
+        // intermediate "character varying" marker for coercion; do not leak
+        // that implementation detail into RowDescription.  An explicit
+        // varchar cast remains varchar.
+        if (toLower(trim(protocolType)) == "character varying") {
+            string lowExpr = toLower(expr);
+            const bool explicitVarchar =
+                lowExpr.find("::varchar") != string::npos ||
+                lowExpr.find("::character varying") != string::npos ||
+                lowExpr.find(" as varchar") != string::npos ||
+                lowExpr.find(" as character varying") != string::npos;
+            if (!explicitVarchar) protocolType = "text";
+        }
+        appendValue(r.isNull ? "NULL" : r.value, r.isNull,
+                    std::move(protocolType));
     }
 
     size_t multiRowWidth = 0;  // >0 when a set-returning function expanded rows
