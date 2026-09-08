@@ -19,9 +19,9 @@ namespace dbms {
 // discards the buffer, so subscribers only ever see committed changes —
 // the same contract PostgreSQL's decode-at-commit gives.
 //
-// Output plugins: "pgoutput" emits a compact PostgreSQL-flavoured stream
-// (relation + change messages); "test_decoding" emits a readable text
-// format for debugging, like PG's contrib module.
+// Output plugins: "dbms_pgoutput_preview" emits a project-specific compact
+// stream (it deliberately does not claim PostgreSQL's reserved pgoutput
+// identity); "test_decoding" emits a readable debugging format.
 // ============================================================================
 
 struct LogicalChange {

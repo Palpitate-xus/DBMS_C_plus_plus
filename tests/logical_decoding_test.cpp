@@ -1,6 +1,6 @@
 // ============================================================================
 // logical_decoding_test — P2-5 logical decoding / publications:
-//   LogicalDecoder formats pgoutput (framed) and test_decoding (text)
+//   LogicalDecoder formats the DBMS preview stream and test_decoding text
 //   PublicationCatalog create/drop/list/publishes with persistence
 //   LogicalChangeStore append/peek/acknowledge including retention bounds
 //   end-to-end: publication + logical slot, DML buffered, commit streams
@@ -60,7 +60,8 @@ static void test_output_plugins() {
     assert(text.find("xid 42") != std::string::npos);
 
     std::string binary;
-    assert(LogicalDecoder::format("pgoutput", batch, binary));
+    assert(!LogicalDecoder::format("pgoutput", batch, binary));
+    assert(LogicalDecoder::format("dbms_pgoutput_preview", batch, binary));
     // Begins with 'B' + xid (little endian), ends with 'C' + commit LSN.
     assert(!binary.empty() && binary[0] == 'B');
     uint64_t xid = 0;
@@ -74,7 +75,9 @@ static void test_output_plugins() {
     assert(!LogicalDecoder::format("nope", batch, binary));
     // Registry lists both plugins.
     auto plugins = LogicalDecoder::availablePlugins();
-    assert(std::find(plugins.begin(), plugins.end(), "pgoutput") != plugins.end());
+    assert(std::find(plugins.begin(), plugins.end(), "pgoutput") == plugins.end());
+    assert(std::find(plugins.begin(), plugins.end(),
+                     "dbms_pgoutput_preview") != plugins.end());
     assert(std::find(plugins.begin(), plugins.end(), "test_decoding") != plugins.end());
     std::cout << "[LOGICAL] output plugins OK" << std::endl;
 }

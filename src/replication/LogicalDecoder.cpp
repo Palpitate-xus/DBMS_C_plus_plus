@@ -15,7 +15,7 @@ namespace fs = std::filesystem;
 // ----------------------------------------------------------------------------
 
 std::vector<std::string> LogicalDecoder::availablePlugins() {
-    return {"pgoutput", "test_decoding"};
+    return {"dbms_pgoutput_preview", "test_decoding"};
 }
 
 bool LogicalDecoder::format(const std::string& plugin, const LogicalChangeBatch& batch,
@@ -45,7 +45,7 @@ bool LogicalDecoder::format(const std::string& plugin, const LogicalChangeBatch&
         out = os.str();
         return true;
     }
-    if (plugin == "pgoutput") {
+    if (plugin == "dbms_pgoutput_preview") {
         // Compact binary-ish stream: message framing with a type byte.
         // 'B' begin(xid), 'R' relation(table), 'I'/'U'/'D' change, 'C'
         // commit(lsn).  Values are length-prefixed; rows keep the storage
