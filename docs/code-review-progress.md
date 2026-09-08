@@ -45,12 +45,13 @@
 | 209 | SQL-01 | 入口直接删除换行 / 制表符 / CR，将关键字与列名粘连，并修改字符串内容；现在仅把引号外的连续空白规范为分隔空格，引号内保持原值 | 6 项完整入口通过：跨行 SELECT / FROM / WHERE、CRLF ORDER BY 与 FETCH，以及 length 验证字符串中的 LF / TAB / CR / 连续空格未被修改。协议直接输出多行文本仍属于 P0-02 待迁移范围 | `a992fce` |
 | 210 | P0-16 | 列描述输入只用 rstrip 删末尾分号，分号后有注释时仍会先执行 SQL；按字符串 / 标识符 / E-string / dollar quote / 嵌套注释边界去掉终止符，拒绝多语句输入 | Python 差分回归 17 项通过（新增 3 组）；断言发送给 psql 的内容不含语句终止符，多语句在调用前拒绝；实际 PostgreSQL 注释结尾描述通过 | `7d088cc` |
 | 211 | P0-02 | 旧 SELECT 文本结果按空白拆列，带空格的 quoted alias 被伪造为多列，identifier 中的 `""` 也会丢失；统一 quoted identifier 解码和 legacy header framing，协议适配器成对解码双引号 | 7 类 SQL / 协议回归通过：普通、表达式、聚合、分组、窗口、无 FROM 及 embedded quote alias；review、空白边界和 PostgreSQL 协议相邻回归通过。SELECT 全链路结构化结果仍未完成 | `3052136` |
+| 212 | P0-02 / QRY-01 | 无 FROM 的多列 SELECT 由协议层反解析显示文本，含空格 / 换行的值被拆成多行多列，空串、文本 `NULL` 与 SQL NULL 也无法区分；该入口现在发布精确 cells、独立 NULL bitmap 和 SELECT command tag，仅最外层语句可发布 | 新协议回归在修复前返回两行错位数据，修复后精确保真 7 列：空格、空串、文本 NULL、SQL NULL、换行、前后空格和 escaped quote；零行仍发送列描述。quoted alias、literal、空白、FETCH、LIMIT、review 及完整协议相邻回归通过；表查询和 legacy scalar subquery 仍待迁移 | `e6b692d` |
 
 本批新增的待修复复现（仍计入总清单）：
 
-- P0-02：quoted alias 的已知拆列问题已由第 211 项修复；SELECT 值仍通过显示文本反解析，空白、换行、NULL 和二进制值的无损结构化传递继续计入总清单。
+- P0-02：quoted alias 与无 FROM 普通投影已由第 211–212 项迁移；表查询、CTE / set operation、legacy scalar subquery 及二进制值仍存在显示文本边界，继续计入总清单。
 
-### 本批验证记录（第 197–211 项）
+### 本批验证记录（第 197–212 项）
 
 - 27 个 C++ 测试通过：15 个子查询回归、parser_phase1，以及表达式、布尔、数组、集合聚合、分组键、并行、Volcano、窗口、布尔聚合、分位数和异常解锁的 11 个相邻测试。使用当前生产库对象重新链接，在隔离目录运行。
 - Python 单元测试 23 项通过：总账校验 6 项、差分工具 17 项。

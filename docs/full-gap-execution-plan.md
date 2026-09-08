@@ -17,7 +17,7 @@
 
 ## 后续优先队列
 
-1. P0-02：继续迁移 SELECT 的结构化结果输出。已复现带空格的列名被拆成多个协议列；还需统一 NULL、空串、空格、换行与二进制值的传递，不能靠显示文本反推数据。
+1. P0-02：继续迁移 SELECT 的结构化结果输出。quoted alias 和无 FROM 普通投影已迁移；表查询、CTE / set operation、legacy scalar subquery 及二进制值仍需统一 typed rows / NULL bitmap，不能靠显示文本反推数据。
 2. P0-01 / SQL-01 / QRY-10：删除剩余改变语义的字符串路径；继续处理无 FROM 查询、顶层 WITH TIES、LIMIT/OFFSET 表达式和执行短路，不能用部分行切片测试关闭整项。
 3. P0-16：参考端保持会话 / 事务状态、无损读取结果、比较 command tag；本批修复的值归一化、SQLSTATE、列描述和误删数据问题只是这一步的部分基础。
 4. 然后按 B2–B5 推进 catalog / 事务化 DDL、持久性、资源治理及剩余功能族，逐项补实测证据。用户跳过的安全 / TDE 专项仍不计完成。
