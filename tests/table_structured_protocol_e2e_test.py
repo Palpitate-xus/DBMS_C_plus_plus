@@ -79,6 +79,17 @@ def main():
             [row[1], row[0]] for row in expected[1:]
         ], filtered_plain_rows
 
+        plain_or_sql = (
+            "SELECT v FROM exact_scalar_or_rows "
+            "WHERE id <= 4 OR id >= 2;")
+        plain_or_rows, plain_or_state, plain_or_message, _ = (
+            runner.ours_query(client, server["sock"], plain_or_sql))
+        assert plain_or_state is None, (
+            plain_or_state, plain_or_message)
+        assert plain_or_rows == [
+            ["same"], ["same"], ["NULL"], ["line\nbreak"], [None],
+        ], plain_or_rows
+
         scalar_cases = [
             (
                 "SELECT upper(v) AS rendered FROM exact_table_rows "

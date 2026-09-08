@@ -567,7 +567,8 @@ public:
         int timezoneOffsetMinutes,
         const std::vector<std::string>& distinctOnCols,
         std::vector<std::vector<std::string>>* structuredRows,
-        std::vector<std::vector<bool>>* structuredNulls);
+        std::vector<std::vector<bool>>* structuredNulls,
+        std::vector<int64_t>* structuredRowIds = nullptr);
 
     // Scalar function expression for queryExpr
     struct SelectExpr {

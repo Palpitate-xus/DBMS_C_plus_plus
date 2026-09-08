@@ -21735,7 +21735,6 @@ if (sql.rfind("backup database", 0) == 0) {
             const bool simpleStructuredPlainPredicate =
                 condTokens.empty() ||
                 (rawWhereClause.find_first_of("()") == string::npos &&
-                 plainWhereLower.find(" or ") == string::npos &&
                  plainWhereLower.find(" is ") == string::npos);
             const bool captureStructuredPlain =
                 shouldPublishQueryMetadata() &&
@@ -21846,13 +21845,31 @@ if (sql.rfind("backup database", 0) == 0) {
                     condTokens.push_back(")");
                     for (auto& t : condTokens) t = modifyLogic(t);
                     auto groups = breakDownConditions(condTokens);
-                    if (captureStructuredPlain && groups.size() == 1) {
-                        answers = g_engine.query(
-                            queryDb, tname, groups.front(), selectCols,
-                            orderBySpecs, forUpdate, noWait, skipLocked,
-                            s.timezoneOffsetMinutes, distinctOnCols,
-                            &structuredPlainResult.rows,
-                            &structuredPlainResult.nulls);
+                    if (captureStructuredPlain) {
+                        set<int64_t> seenRowIds;
+                        for (const auto& g : groups) {
+                            vector<vector<string>> branchRows;
+                            vector<vector<bool>> branchNulls;
+                            vector<int64_t> branchRowIds;
+                            auto part = g_engine.query(
+                                queryDb, tname, g, selectCols, orderBySpecs,
+                                forUpdate, noWait, skipLocked,
+                                s.timezoneOffsetMinutes, distinctOnCols,
+                                &branchRows, &branchNulls, &branchRowIds);
+                            const size_t count = min(
+                                part.size(), min(branchRows.size(),
+                                                 branchNulls.size()));
+                            for (size_t i = 0;
+                                 i < count && i < branchRowIds.size(); ++i) {
+                                if (!seenRowIds.insert(branchRowIds[i]).second)
+                                    continue;
+                                answers.push_back(std::move(part[i]));
+                                structuredPlainResult.rows.push_back(
+                                    std::move(branchRows[i]));
+                                structuredPlainResult.nulls.push_back(
+                                    std::move(branchNulls[i]));
+                            }
+                        }
                         structuredPlainRows = true;
                     } else {
                         set<string> seen;

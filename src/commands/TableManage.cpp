@@ -26810,7 +26810,7 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
                                                const std::vector<std::string>& distinctOnCols) {
     return query(dbname, tablename, conditions, selectCols, orderBy,
                  forUpdate, noWait, skipLocked, timezoneOffsetMinutes,
-                 distinctOnCols, nullptr, nullptr);
+                 distinctOnCols, nullptr, nullptr, nullptr);
 }
 
 std::vector<std::string> StorageEngine::query(
@@ -26822,10 +26822,12 @@ std::vector<std::string> StorageEngine::query(
     int timezoneOffsetMinutes,
     const std::vector<std::string>& distinctOnCols,
     std::vector<std::vector<std::string>>* structuredRows,
-    std::vector<std::vector<bool>>* structuredNulls) {
+    std::vector<std::vector<bool>>* structuredNulls,
+    std::vector<int64_t>* structuredRowIds) {
     std::vector<std::string> result;
     if (structuredRows) structuredRows->clear();
     if (structuredNulls) structuredNulls->clear();
+    if (structuredRowIds) structuredRowIds->clear();
 
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
         transactionContext().hasRead = true;
@@ -27347,6 +27349,7 @@ std::vector<std::string> StorageEngine::query(
         if (structuredRows) structuredRows->push_back(std::move(structuredRow));
         if (structuredNulls)
             structuredNulls->push_back(std::move(structuredNullRow));
+        if (structuredRowIds) structuredRowIds->push_back(mr.first);
     }
     lockManager_.unlock(tablename);
     dbms::recordTableScan(dbname, tablename, matchRows.size(), usedIndex, conds.empty());
