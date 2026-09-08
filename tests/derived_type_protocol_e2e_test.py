@@ -17,6 +17,8 @@ def main():
         setup = [
             "CREATE TABLE typed_src (grp VARCHAR(4), v INT);",
             "INSERT INTO typed_src VALUES ('a', 1), ('a', 2), ('b', 4);",
+            "CREATE TABLE typed_multiplier (grp VARCHAR(4), mult NUMERIC);",
+            "INSERT INTO typed_multiplier VALUES ('a', 10.5), ('b', 2.0);",
             ("CREATE VIEW typed_view AS SELECT grp, sum(v) AS total "
              "FROM typed_src GROUP BY grp;"),
         ]
@@ -51,6 +53,30 @@ def main():
             assert len(headers) == len(expected_types), (sql, headers)
             assert type_oids == expected_types, (sql, type_oids, expected_types)
             assert command_tag == "SELECT %d" % len(expected_rows), (
+                sql, command_tag)
+
+        scalar_cases = [
+            ("SELECT (SELECT count(*) FROM typed_src) AS c;", [20], 1),
+            (("SELECT grp, count(*), "
+              "(SELECT mult FROM typed_multiplier "
+              "WHERE typed_multiplier.grp = typed_src.grp) "
+              "FROM typed_src GROUP BY grp ORDER BY grp;"),
+             [1043, 20, 1700], 2),
+            (("SELECT grp, sum(v) + "
+              "(SELECT mult FROM typed_multiplier "
+              "WHERE typed_multiplier.grp = typed_src.grp) "
+              "FROM typed_src GROUP BY grp ORDER BY grp;"),
+             [1043, 1700], 2),
+        ]
+        for sql, expected_types, expected_row_count in scalar_cases:
+            decoded = runner.decode_wire_result(
+                client.simple_query(server["sock"], sql), include_types=True)
+            rows, state, message, headers, command_tag, type_oids = decoded
+            assert state is None, (sql, state, message)
+            assert len(rows) == expected_row_count, (sql, rows)
+            assert len(headers) == len(expected_types), (sql, headers)
+            assert type_oids == expected_types, (sql, type_oids, expected_types)
+            assert command_tag == "SELECT %d" % expected_row_count, (
                 sql, command_tag)
         print("[DERIVED TYPE PROTOCOL E2E] passed")
     finally:

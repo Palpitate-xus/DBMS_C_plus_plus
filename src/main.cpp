@@ -5458,6 +5458,8 @@ static bool handleDoBlock(const string& sql, Session& s) {
 // arguments).  Output shape matches the tabular path: header line then one
 // value line, both via cout so protocol/CLI see the same result.
 static std::vector<std::string> runSubQuery(const std::string& rawSql, Session& s);
+static std::string inferSubQueryResultType(
+    const std::string& rawSql, const Session& s);
 
 static bool handleFromlessSelect(const string& sql, Session& s) {
     string cols = trim(string(sql.substr(6)));
@@ -5843,6 +5845,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             for (char c : inner) innerLow += static_cast<char>(tolower(static_cast<unsigned char>(c)));
             if (innerLow.compare(0, 7, "select ") == 0) {
                 hasLegacyScalarSubquery = true;
+                const string resultType = inferSubQueryResultType(inner, s);
                 auto rows = runSubQuery(inner, s);
                 string cell = "NULL";
                 if (!rows.empty()) {
@@ -5852,7 +5855,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                     if (!first.empty()) cell = first;
                 }
                 headers.push_back(disp == item ? "?column?" : disp);
-                appendValue(cell, cell == "NULL");
+                appendValue(cell, cell == "NULL", resultType);
                 continue;
             }
         }
@@ -6148,12 +6151,13 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
     // Keep the CLI rendering below for interactive users, but publish exact
     // cells for the network layer.  This bypasses whitespace/newline parsing
     // and carries SQL NULL separately from empty or literal "NULL" text.
-    if (shouldPublishQueryMetadata() && !hasLegacyScalarSubquery) {
+    if (shouldPublishQueryMetadata()) {
         dbms::DmlResult queryResult;
         queryResult.available = true;
         queryResult.columns = headers;
         queryResult.columnTypes = columnTypes;
-        if (!suppressDataRow) {
+        queryResult.metadataOnly = hasLegacyScalarSubquery;
+        if (!hasLegacyScalarSubquery && !suppressDataRow) {
             const size_t width = multiRowWidth > 0 ? multiRowWidth : values.size();
             if (width > 0) {
                 for (size_t offset = 0; offset + width <= values.size();
@@ -7936,6 +7940,37 @@ static std::map<std::string, std::string> parseSetClause(const std::string& sql,
 // ========================================================================
 // Subquery helpers
 // ========================================================================
+static std::string inferSubQueryResultType(
+    const std::string& rawSql, const Session& s) {
+    const std::string sql = sqlProcessor(rawSql);
+    const size_t fromPos = findTopLevelKeyword(sql, "from", 0);
+    if (fromPos == std::string::npos || fromPos <= 6) return "text";
+    const std::string projection = trim(sql.substr(6, fromPos - 6));
+
+    size_t relationEnd = sql.size();
+    for (const char* clause : {
+             "where", "group", "having", "window", "order", "limit",
+             "offset", "fetch", "for"}) {
+        const size_t at = findTopLevelKeyword(sql, clause, fromPos + 4);
+        if (at != std::string::npos) relationEnd = std::min(relationEnd, at);
+    }
+    std::string relation = trim(sql.substr(fromPos + 4,
+                                           relationEnd - fromPos - 4));
+    const size_t separator = relation.find_first_of(" \t\r\n,");
+    if (separator != std::string::npos) relation.resize(separator);
+    if (relation.empty() || !g_engine.tableExists(s.currentDB, relation))
+        return "text";
+
+    const TableSchema schema = g_engine.getTableSchema(s.currentDB, relation);
+    std::map<std::string, std::string> hints;
+    for (size_t i = 0; i < schema.len; ++i) {
+        hints[schema.cols[i].dataName] = schema.cols[i].dataType;
+        hints[relation + "." + schema.cols[i].dataName] =
+            schema.cols[i].dataType;
+    }
+    return dbms::ExprHelper::inferResultType(projection, hints);
+}
+
 static std::vector<std::string> runSubQuery(const std::string& rawSql, Session& s) {
     std::string sql = sqlProcessor(rawSql);
     size_t fromPos = sql.find("from");
@@ -19679,6 +19714,51 @@ if (sql.rfind("backup database", 0) == 0) {
                 dbms::publishLastDmlResult(std::move(metadata));
         };
 
+        auto scalarSubqueryExpressionProtocolType = [&](string expression) {
+            string fallback = "text";
+            size_t searchAt = 0;
+            while (true) {
+                const size_t subqueryAt = expression.find("(select", searchAt);
+                if (subqueryAt == string::npos) break;
+                const size_t close = findMatchingParen(expression, subqueryAt);
+                if (close == string::npos) break;
+                const string inner = trim(expression.substr(
+                    subqueryAt + 1, close - subqueryAt - 1));
+                const string type = inferSubQueryResultType(inner, s);
+                if (type != "text") fallback = type;
+                const string replacement = "(0::" + type + ")";
+                expression.replace(subqueryAt, close - subqueryAt + 1,
+                                   replacement);
+                searchAt = subqueryAt + replacement.size();
+            }
+            map<string, string> hints;
+            for (size_t ci = 0; ci < tbl.len; ++ci) {
+                hints[tbl.cols[ci].dataName] = tbl.cols[ci].dataType;
+                hints[tname + "." + tbl.cols[ci].dataName] =
+                    tbl.cols[ci].dataType;
+            }
+            const string inferred =
+                dbms::ExprHelper::inferResultType(expression, hints);
+            if (inferred == "text") return fallback;
+            auto numericRank = [](const string& type) {
+                const string normalized = toLower(trim(type));
+                if (normalized == "double precision" || normalized == "float8")
+                    return 6;
+                if (normalized == "real" || normalized == "float4") return 5;
+                if (normalized == "numeric" || normalized == "decimal") return 4;
+                if (normalized == "bigint" || normalized == "int8") return 3;
+                if (normalized == "integer" || normalized == "int4") return 2;
+                if (normalized == "smallint" || normalized == "int2") return 1;
+                return 0;
+            };
+            const int inferredRank = numericRank(inferred);
+            const int fallbackRank = numericRank(fallback);
+            if (inferredRank == 0 || fallbackRank == 0 ||
+                inferredRank >= fallbackRank)
+                return inferred;
+            return fallback;
+        };
+
         vector<string> answers;
         if (!groupByCols.empty()) {
             if (forUpdate) { cout << "FOR UPDATE not supported with GROUP BY" << endl; return true; }
@@ -19756,7 +19836,8 @@ if (sql.rfind("backup database", 0) == 0) {
                         }
                         cout << subCol << ' ';
                         groupProtocolColumns.push_back(subCol);
-                        groupProtocolTypes.push_back("text");
+                        groupProtocolTypes.push_back(inferSubQueryResultType(
+                            selectExprs[ei].funcArgs[0], s));
                     } else if (exprTypes[ei] == 3 &&
                                selectExprs[ei].funcName == "arith" &&
                                arithRawText.count(ei) &&
@@ -19766,7 +19847,9 @@ if (sql.rfind("backup database", 0) == 0) {
                         // unaliased arithmetic column ?column?.
                         cout << renderLegacyHeader(selectExprs[ei].displayName) << ' ';
                         groupProtocolColumns.push_back(selectExprs[ei].displayName);
-                        groupProtocolTypes.push_back("text");
+                        groupProtocolTypes.push_back(
+                            scalarSubqueryExpressionProtocolType(
+                                arithRawText[ei]));
                     }
                 }
             }
