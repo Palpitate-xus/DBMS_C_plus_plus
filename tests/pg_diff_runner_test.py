@@ -213,6 +213,15 @@ class DifferentialSessionTest(unittest.TestCase):
         self.assertTrue(any("command tag differs" in diff for diff in diffs), diffs)
 
 class DifferentialHeadersTest(unittest.TestCase):
+    def test_zero_row_result_still_compares_headers(self):
+        reference = [([], None, "SELECT 0", "", ["expected"])]
+        ours = ([], None, "", ["wrong"], "SELECT 0")
+        with mock.patch.object(RUNNER, "reference_multi", return_value=reference), \
+             mock.patch.object(RUNNER, "ours_query", return_value=ours):
+            diffs = RUNNER.run_case("zero-row-header", ["SELECT 1 WHERE false"],
+                                    None, None)
+        self.assertTrue(any("headers differ" in diff for diff in diffs), diffs)
+
     def test_headers_are_described_without_executing_query_again(self):
         output = subprocess.CompletedProcess([], 0, b"Column,Type\nlabel,bigint\n", b"")
         with mock.patch.object(RUNNER.subprocess, "run", return_value=output) as run:

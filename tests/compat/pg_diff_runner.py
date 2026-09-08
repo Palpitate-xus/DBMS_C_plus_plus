@@ -460,7 +460,7 @@ def run_case(name, stmts, client, sock):
         if rstate is None and ostate is None and rtag != otag:
             diffs.append("%s: command tag differs: PG=%r ours=%r" %
                          (sql, rtag, otag))
-        if compare_headers and rstate is None and ostate is None and orows and ohead:
+        if compare_headers and rstate is None and ostate is None and ohead:
             if rhead is None:
                 rhead = reference_headers(sql)
             if rhead and rhead != ohead:
