@@ -1035,8 +1035,10 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
             // "relation", DROP TABLE uses "table").
             result.sqlState = "42P01";
         } else if (result.errorMessage.find("operator is not unique") !=
-                std::string::npos) {
-            // 42725: ambiguous operator resolution (unknown + unknown).
+                       std::string::npos ||
+                   result.errorMessage.find("(SQLSTATE 42725)") !=
+                       std::string::npos) {
+            // 42725: ambiguous operator or function resolution.
             result.sqlState = "42725";
         } else if (result.errorMessage.find("invalid input syntax") != std::string::npos) {
             // 22P02: strict type-coercion failures (checked before the generic

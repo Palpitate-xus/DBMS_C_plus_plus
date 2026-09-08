@@ -3595,6 +3595,24 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     std::vector<ExprValue> args;
     for (const auto& a : e->args) args.push_back(eval(a.get(), ctx));
 
+    // SUM and AVG have several numeric overloads.  PostgreSQL cannot select
+    // one when their sole argument is an untyped string or NULL literal; a
+    // cast makes the call unambiguous (and may then produce 42883 for an
+    // unsupported type).  Preserve that distinction instead of treating the
+    // literal as text before function resolution.
+    if ((name == "sum" || name == "avg") && e->args.size() == 1 &&
+        e->args.front() && e->args.front()->type == ExprType::Literal) {
+        const auto* literal =
+            static_cast<const LiteralExpr*>(e->args.front().get());
+        const std::string literalName = toLower(literal->value);
+        if (literal->typeName.empty() &&
+            (isQuotedString(literal->value) || literalName == "null")) {
+            throw std::runtime_error(
+                "function " + name +
+                "(unknown) is not unique (SQLSTATE 42725)");
+        }
+    }
+
     // SIMILAR TO ... ESCAPE / NOT SIMILAR TO ... ESCAPE (parser wraps the
     // three-operand form into a FunctionCallExpr, mirroring LIKE ESCAPE).
     // LIKE ... ESCAPE / NOT LIKE ... ESCAPE (parser wraps the three-operand

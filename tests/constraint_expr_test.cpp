@@ -38,6 +38,13 @@ static void test_expr_helper_basic() {
     assert(r.ok);
     assert(r.value == "3");
 
+    r = dbms::ExprHelper::evalString("sum('abc')", {});
+    assert(!r.ok && r.error.find("SQLSTATE 42725") != std::string::npos);
+    r = dbms::ExprHelper::evalString("avg(NULL)", {});
+    assert(!r.ok && r.error.find("SQLSTATE 42725") != std::string::npos);
+    r = dbms::ExprHelper::evalString("sum('abc'::text)", {});
+    assert(!r.ok && r.error.find("SQLSTATE 42883") != std::string::npos);
+
     std::map<std::string, std::string> row = {{"x", "10"}, {"y", "20"}};
     std::map<std::string, std::string> types = {{"x", "int4"}, {"y", "int4"}};
     r = dbms::ExprHelper::evalString("x + y", row, types);
