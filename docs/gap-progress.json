@@ -11,7 +11,7 @@
     {"id":"P0-08","status":"unverified","evidence":[]},
     {"id":"P0-09","status":"unverified","evidence":[]},
     {"id":"P0-10","status":"unverified","evidence":[]},
-    {"id":"P0-11","status":"unverified","evidence":[]},
+    {"id":"P0-11","status":"partial","evidence":["docs/code-review-progress.md","docs/implementation-plan.md","src/replication/ReplicationManager.h","src/replication/ReplicationManager.cpp"],"tests":["tests/replication_test.cpp","tests/phase8_10_test.cpp","tests/replication_concurrency_test.cpp"],"commits":["c1a8e6e"]},
     {"id":"P0-12","status":"unverified","evidence":[]},
     {"id":"P0-13","status":"deferred_by_user","evidence":[]},
     {"id":"P0-14","status":"unverified","evidence":[]},
