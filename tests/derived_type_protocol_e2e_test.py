@@ -22,11 +22,14 @@ def main():
             "CREATE TABLE typed_dates (id INT, d DATE);",
             ("INSERT INTO typed_dates VALUES "
              "(1, DATE '2024-01-10'), (2, NULL);"),
-            "CREATE TABLE typed_lateral_left (id INT);",
-            "INSERT INTO typed_lateral_left VALUES (1), (2);",
+            "CREATE TABLE typed_lateral_left (id INT, payload TEXT);",
+            ("INSERT INTO typed_lateral_left VALUES "
+             "(1, 'left one'), (2, ''), (4, 'NULL'), (5, NULL);"),
+            "CREATE TABLE typed_lateral_empty (id INT);",
             "CREATE TABLE typed_lateral_right (id INT, label TEXT);",
             ("INSERT INTO typed_lateral_right VALUES "
-             "(1, 'one'), (2, 'two'), (3, 'unused');"),
+             "(1, 'right one'), (1, 'right uno'), (2, ''), (3, 'unused'), "
+             "(4, 'NULL'), (5, NULL);"),
             "CREATE TABLE typed_text_edges (id INT, txt TEXT);",
             ("INSERT INTO typed_text_edges VALUES "
              "(1, 'a b'), (2, ''), (3, 'NULL'), (4, NULL), "
@@ -63,15 +66,30 @@ def main():
              [["2024"], [None]], [1700]),
             ("SELECT d + interval '1 day' FROM typed_dates ORDER BY id;",
              [["2024-01-11 00:00:00"], [None]], [1114]),
-            (("SELECT l.id, x.label FROM typed_lateral_left AS l "
+            (("SELECT l.id, l.payload, x.label FROM typed_lateral_left AS l "
               "CROSS JOIN LATERAL "
               "(SELECT label FROM typed_lateral_right WHERE id = l.id) AS x "
-              "ORDER BY l.id;"),
-             [["1", "one"], ["2", "two"]], [23, 25]),
+              "ORDER BY l.id, x.label;"),
+             [["1", "left one", "right one"],
+              ["1", "left one", "right uno"], ["2", "", ""],
+              ["4", "NULL", "NULL"], ["5", None, None]],
+             [23, 25, 25]),
             (("SELECT l.id, x.label FROM typed_lateral_left l, LATERAL "
               "(SELECT label FROM typed_lateral_right WHERE id = l.id) x "
-              "ORDER BY l.id;"),
-             [["1", "one"], ["2", "two"]], [23, 25]),
+              "ORDER BY l.id, x.label;"),
+             [["1", "right one"], ["1", "right uno"], ["2", ""],
+              ["4", "NULL"],
+              ["5", None]],
+             [23, 25]),
+            (("SELECT e.id, x.label FROM typed_lateral_empty e "
+              "CROSS JOIN LATERAL "
+              "(SELECT label FROM typed_lateral_right WHERE id = e.id) x "
+              "ORDER BY e.id;"),
+             [], [23, 25]),
+            (("SELECT e.id, x.label FROM typed_lateral_empty AS e "
+              "CROSS JOIN LATERAL "
+              "(SELECT label FROM typed_lateral_right WHERE id = e.id) AS x;"),
+             [], [23, 25]),
             (("SELECT id, txt FROM "
               "(SELECT id, txt FROM typed_text_edges) AS d ORDER BY id;"),
              [["1", "a b"], ["2", ""], ["3", "NULL"], ["4", None],
@@ -92,7 +110,9 @@ def main():
             assert len(headers) == len(expected_types), (sql, headers)
             assert type_oids == expected_types, (sql, type_oids, expected_types)
             if "lateral" in sql.lower():
-                assert headers == ["id", "label"], (sql, headers)
+                expected_headers = (["id", "payload", "label"]
+                                    if "payload" in sql else ["id", "label"])
+                assert headers == expected_headers, (sql, headers)
             assert command_tag == "SELECT %d" % len(expected_rows), (
                 sql, command_tag)
 

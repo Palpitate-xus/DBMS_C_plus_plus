@@ -9915,11 +9915,19 @@ static std::string processLateralJoins(const std::string& sql, Session& s) {
         std::string leftPrefix = leftAlias.empty() ? leftTableName : leftAlias;
 
         // Read all left rows
-        std::vector<std::string> leftRows;
+        struct LateralLeftRow {
+            std::string data;
+            int64_t rid = -1;
+        };
+        std::vector<LateralLeftRow> leftRows;
         std::vector<std::string> leftColNames;
         for (size_t i = 0; i < leftTbl.len; ++i) leftColNames.push_back(leftTbl.cols[i].dataName);
-        g_engine.forEachRow(s.currentDB, resolvedLeft, [&](uint32_t, uint16_t, const char* data, size_t len) {
-            leftRows.emplace_back(data, len);
+        g_engine.forEachRow(s.currentDB, resolvedLeft, [&](uint32_t pageId,
+                                                           uint16_t slotId,
+                                                           const char* data,
+                                                           size_t len) {
+            leftRows.push_back({std::string(data, len),
+                                dbms::StorageEngine::encodeRid(pageId, slotId)});
         });
 
         // Execute the lateral subquery for each left row.  Materialize a
@@ -9927,9 +9935,13 @@ static std::string processLateralJoins(const std::string& sql, Session& s) {
         // cross joining them again: the latter loses which result belonged to
         // which left row and produces a Cartesian product.
         std::vector<std::string> allRows;
+        std::vector<std::vector<std::string>> allStructuredRows;
+        std::vector<std::vector<bool>> allStructuredNulls;
+        bool allRowsStructured = true;
         std::vector<std::string> rightColNames;
         std::vector<std::string> rightColTypes;
-        for (const auto& lrow : leftRows) {
+        for (const auto& leftRow : leftRows) {
+            const std::string& lrow = leftRow.data;
             std::string replacedSql = innerSelect;
             // Replace left table column references with literal values
             for (size_t ci = 0; ci < leftTbl.len; ++ci) {
@@ -9940,8 +9952,11 @@ static std::string processLateralJoins(const std::string& sql, Session& s) {
                     if (c == '\'') escVal += "''";
                     else escVal += c;
                 }
+                const bool isNull = g_engine.isColumnNullByRid(
+                    s.currentDB, resolvedLeft, leftRow.rid, ci);
                 bool isNum = leftTbl.cols[ci].dataType != "char" && !leftTbl.cols[ci].isVariableLength;
-                std::string lit = isNum ? escVal : "'" + escVal + "'";
+                std::string lit = isNull
+                    ? "null" : (isNum ? escVal : "'" + escVal + "'");
 
                 for (const std::string& pref :
                      {leftPrefix + ".", leftTableName + ".",
@@ -9967,10 +9982,16 @@ static std::string processLateralJoins(const std::string& sql, Session& s) {
             }
             std::vector<std::string> rowColNames;
             std::vector<std::string> rowColTypes;
+            std::vector<std::vector<std::string>> rowStructuredRows;
+            std::vector<std::vector<bool>> rowStructuredNulls;
+            bool rowStructuredAvailable = false;
             auto rows = runDerivedSubQueryFull(
-                replacedSql, s, rowColNames, &rowColTypes);
+                replacedSql, s, rowColNames, &rowColTypes,
+                &rowStructuredRows, &rowStructuredNulls,
+                &rowStructuredAvailable);
             if (rowColNames.empty()) {
                 rows = runDerivedSubQuery(replacedSql, s, rowColNames);
+                rowStructuredAvailable = false;
             }
             if (rowColNames.empty()) break;
             if (rightColNames.empty()) {
@@ -9978,6 +9999,32 @@ static std::string processLateralJoins(const std::string& sql, Session& s) {
                 rightColTypes = rowColTypes;
             } else if (rightColNames != rowColNames) {
                 break;
+            }
+            if (rowStructuredAvailable) {
+                for (size_t rowIndex = 0;
+                     rowIndex < rowStructuredRows.size(); ++rowIndex) {
+                    std::vector<std::string> combinedCells;
+                    std::vector<bool> combinedNulls;
+                    combinedCells.reserve(leftTbl.len + rowColNames.size());
+                    combinedNulls.reserve(leftTbl.len + rowColNames.size());
+                    for (size_t ci = 0; ci < leftTbl.len; ++ci) {
+                        const bool isNull = g_engine.isColumnNullByRid(
+                            s.currentDB, resolvedLeft, leftRow.rid, ci);
+                        combinedCells.push_back(g_engine.extractColumnValue(
+                            lrow, leftTbl, ci));
+                        combinedNulls.push_back(isNull);
+                    }
+                    combinedCells.insert(
+                        combinedCells.end(), rowStructuredRows[rowIndex].begin(),
+                        rowStructuredRows[rowIndex].end());
+                    combinedNulls.insert(
+                        combinedNulls.end(), rowStructuredNulls[rowIndex].begin(),
+                        rowStructuredNulls[rowIndex].end());
+                    allStructuredRows.push_back(std::move(combinedCells));
+                    allStructuredNulls.push_back(std::move(combinedNulls));
+                }
+            } else {
+                allRowsStructured = false;
             }
             for (const auto& r : rows) {
                 std::string combined;
@@ -9992,6 +10039,46 @@ static std::string processLateralJoins(const std::string& sql, Session& s) {
                 }
                 allRows.push_back(std::move(combined));
             }
+        }
+
+        // An empty left input still has a well-defined RowDescription and an
+        // empty LATERAL result.  Probe the inner query with NULL outer values
+        // to obtain its columns/types so we can materialize an empty combined
+        // relation instead of leaving raw LATERAL syntax for the legacy FROM
+        // parser to misread as a relation name.
+        if (leftRows.empty()) {
+            std::string probeSql = innerSelect;
+            for (size_t ci = 0; ci < leftTbl.len; ++ci) {
+                for (const std::string& pref :
+                     {leftPrefix + ".", leftTableName + ".",
+                      resolvedLeft + "."}) {
+                    const std::string place =
+                        pref + leftTbl.cols[ci].dataName;
+                    size_t pos = 0;
+                    while ((pos = findTextOutsideQuotes(
+                                probeSql, place, pos)) != std::string::npos) {
+                        const size_t after = pos + place.size();
+                        if ((pos > 0 &&
+                             (isalnum(static_cast<unsigned char>(probeSql[pos - 1])) ||
+                              probeSql[pos - 1] == '_')) ||
+                            (after < probeSql.size() &&
+                             (isalnum(static_cast<unsigned char>(probeSql[after])) ||
+                              probeSql[after] == '_'))) {
+                            pos = after;
+                            continue;
+                        }
+                        probeSql.replace(pos, place.size(), "null");
+                        pos += 4;
+                    }
+                }
+            }
+            std::vector<std::vector<std::string>> probeRows;
+            std::vector<std::vector<bool>> probeNulls;
+            bool probeStructured = false;
+            (void)runDerivedSubQueryFull(
+                probeSql, s, rightColNames, &rightColTypes,
+                &probeRows, &probeNulls, &probeStructured);
+            allRowsStructured = probeStructured;
         }
 
         if (rightColNames.empty()) break;
@@ -10010,7 +10097,9 @@ static std::string processLateralJoins(const std::string& sql, Session& s) {
 
         int counter = lateralCount;
         std::string tmpName = createTempTableFromRows(
-            s, allRows, combinedColNames, counter, combinedColTypes);
+            s, allRows, combinedColNames, counter, combinedColTypes,
+            allRowsStructured ? &allStructuredRows : nullptr,
+            allRowsStructured ? &allStructuredNulls : nullptr);
         if (tmpName.empty()) break;
         lateralCount = counter;
 
