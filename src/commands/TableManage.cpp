@@ -28189,6 +28189,12 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     }
 
     if (expr.funcName == "arith" && expr.funcArgs.size() == 3) {
+        if (scalarArgColumnIsNull(
+                expr.funcArgs[0], rowBuffer, tbl, engine, dbname) ||
+            scalarArgColumnIsNull(
+                expr.funcArgs[2], rowBuffer, tbl, engine, dbname)) {
+            return "NULL";
+        }
         // INTEGER division: int / int truncates toward zero (PG).
         auto isIntType = [](const std::string& dt) {
             return dt == "int" || dt == "integer" || dt == "int2" || dt == "int4" ||
@@ -29103,6 +29109,8 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     }
     if (expr.funcName == "extract" && expr.funcArgs.size() >= 2) {
         std::string val = getVal(expr.funcArgs[1]);
+        if (scalarValueIsNull(expr.funcArgs[1], val))
+            return "NULL";
         if (val.empty() || val == "NULL" || val == "null") return "";
         std::string field = getVal(expr.funcArgs[0]);
         if (field.empty() ||
@@ -30002,6 +30010,10 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     if (expr.funcName == "age" && expr.funcArgs.size() >= 2) {
         std::string tv = getVal(expr.funcArgs[0]);
         std::string sv = getVal(expr.funcArgs[1]);
+        if (scalarValueIsNull(expr.funcArgs[0], tv) ||
+            scalarValueIsNull(expr.funcArgs[1], sv)) {
+            return "NULL";
+        }
         auto stripKw = [](std::string& v) {
             if (v.size() > 5 && (v.compare(0, 5, "DATE ") == 0 || v.compare(0, 5, "date ") == 0)) {
                 v = v.substr(5);

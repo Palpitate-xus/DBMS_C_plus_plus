@@ -194,6 +194,8 @@ int main() {
     assert(dbms::ExprHelper::inferResultType("i IS DISTINCT FROM n", resultTypes) == "boolean");
     assert(dbms::ExprHelper::inferResultType("CAST(n AS integer)", resultTypes) == "integer");
     assert(dbms::ExprHelper::inferResultType("d + 1", resultTypes) == "date");
+    assert(dbms::ExprHelper::inferResultType(
+               "d - DATE '2024-01-01'", resultTypes) == "integer");
     assert(dbms::ExprHelper::inferResultType("length(v || 'x')", resultTypes) == "integer");
     assert(dbms::ExprHelper::inferResultType("power(i + 1, 2)", resultTypes) == "double precision");
     assert(dbms::ExprHelper::inferResultType("round(n)", resultTypes) == "numeric");

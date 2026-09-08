@@ -19,6 +19,9 @@ def main():
             "INSERT INTO typed_src VALUES ('a', 1), ('a', 2), ('b', 4);",
             "CREATE TABLE typed_multiplier (grp VARCHAR(4), mult NUMERIC);",
             "INSERT INTO typed_multiplier VALUES ('a', 10.5), ('b', 2.0);",
+            "CREATE TABLE typed_dates (id INT, d DATE);",
+            ("INSERT INTO typed_dates VALUES "
+             "(1, DATE '2024-01-10'), (2, NULL);"),
             ("CREATE VIEW typed_view AS SELECT grp, sum(v) AS total "
              "FROM typed_src GROUP BY grp;"),
         ]
@@ -43,6 +46,14 @@ def main():
             (("SELECT i, n, t FROM "
               "(SELECT 1 AS i, 1.5 AS n, 'x'::text AS t) AS d;"),
              [["1", "1.5", "x"]], [23, 1700, 25]),
+            ("SELECT d + 1 FROM typed_dates ORDER BY id;",
+             [["2024-01-11"], [None]], [1082]),
+            ("SELECT d - DATE '2024-01-01' FROM typed_dates ORDER BY id;",
+             [["9"], [None]], [23]),
+            ("SELECT extract(year FROM d) FROM typed_dates ORDER BY id;",
+             [["2024"], [None]], [1700]),
+            ("SELECT d + interval '1 day' FROM typed_dates ORDER BY id;",
+             [["2024-01-11 00:00:00"], [None]], [1114]),
         ]
         for sql, expected_rows, expected_types in cases:
             decoded = runner.decode_wire_result(

@@ -706,6 +706,39 @@ std::string ExprHelper::inferResultType(
          lower.find(" - interval ") != std::string::npos)) {
         return "timestamp";
     }
+    // Some projection paths preserve a typed literal as DATE '...' instead
+    // of lowering it to a CastExpr.  Recognize column - DATE '...' so the
+    // protocol advertises PostgreSQL's integer result type.
+    const size_t typedDateSubtract = lower.find(" - date ");
+    if (typedDateSubtract != std::string::npos) {
+        const auto trimCopy = [](std::string value) {
+            const size_t first = value.find_first_not_of(" \t\r\n");
+            if (first == std::string::npos) return std::string{};
+            const size_t last = value.find_last_not_of(" \t\r\n");
+            return value.substr(first, last - first + 1);
+        };
+        std::string left = trimCopy(lower.substr(0, typedDateSubtract));
+        const std::string right =
+            trimCopy(lower.substr(typedDateSubtract + 3));
+        while (left.size() >= 2 && left.front() == '(' && left.back() == ')')
+            left = trimCopy(left.substr(1, left.size() - 2));
+        const size_t qualifier = left.rfind('.');
+        const std::string bareLeft = qualifier == std::string::npos
+            ? left : left.substr(qualifier + 1);
+        std::string leftType;
+        for (const auto& hint : typeHints) {
+            const std::string key = toLower(hint.first);
+            if (key == left || key == bareLeft) {
+                leftType = canonicalTypeName(hint.second);
+                break;
+            }
+        }
+        if (leftType == "date" && right.size() >= 7 &&
+            right.rfind("date '", 0) == 0 &&
+            right.back() == static_cast<char>(39)) {
+            return "integer";
+        }
+    }
     const size_t dateCast = lower.find("::date");
     if (dateCast != std::string::npos) {
         const size_t secondDateCast = lower.find("::date", dateCast + 6);

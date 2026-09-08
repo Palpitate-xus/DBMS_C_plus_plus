@@ -5,6 +5,7 @@
 #include <cassert>
 #include <iostream>
 #include <string>
+#include <vector>
 
 extern dbms::StorageEngine g_engine;
 
@@ -27,6 +28,22 @@ std::string projectComponent(const std::string& database,
     return value;
 }
 
+std::string projectScalar(const std::string& database,
+                          const std::string& function,
+                          const std::vector<std::string>& arguments) {
+    dbms::StorageEngine::SelectExpr expression;
+    expression.displayName = function;
+    expression.isScalar = true;
+    expression.funcName = function;
+    expression.funcArgs = arguments;
+
+    const auto rows = g_engine.queryExpr(
+        database, "date_component_values", {}, {expression});
+    assert(rows.size() == 1 && !rows.front().empty());
+    std::string value = rows.front();
+    value.pop_back();
+    return value;
+}
 }  // namespace
 
 int main() {
@@ -63,6 +80,16 @@ int main() {
     assert(projectComponent(
                database, "year", "'2024-03-04 12:34:56+16:00'").empty());
     assert(projectComponent(database, "year", "null_date") == "NULL");
+    assert(projectScalar(
+               database, "arith", {"null_date", "+", "1"}) == "NULL");
+    assert(projectScalar(
+               database, "arith",
+               {"actual_date", "-", "DATE '2024-01-01'"}) == "63");
+    assert(projectScalar(
+               database, "extract", {"year", "null_date"}) == "NULL");
+    assert(projectScalar(
+               database, "age",
+               {"null_date", "DATE '2024-01-01'"}) == "NULL");
 
     cleanupTestDb(testName);
     finalCleanupTestData();
