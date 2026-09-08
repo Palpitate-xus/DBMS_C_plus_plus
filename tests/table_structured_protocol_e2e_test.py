@@ -90,6 +90,18 @@ def main():
             ["same"], ["same"], ["NULL"], ["line\nbreak"], [None],
         ], plain_or_rows
 
+        ordered_plain_or_sql = (
+            "SELECT v FROM exact_scalar_or_rows "
+            "WHERE id <= 4 OR id >= 2 ORDER BY id DESC;")
+        ordered_plain_or_rows, ordered_plain_or_state, \
+            ordered_plain_or_message, _ = runner.ours_query(
+                client, server["sock"], ordered_plain_or_sql)
+        assert ordered_plain_or_state is None, (
+            ordered_plain_or_state, ordered_plain_or_message)
+        assert ordered_plain_or_rows == [
+            [None], ["line\nbreak"], ["NULL"], ["same"], ["same"],
+        ], ordered_plain_or_rows
+
         scalar_cases = [
             (
                 "SELECT upper(v) AS rendered FROM exact_table_rows "

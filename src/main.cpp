@@ -8,6 +8,7 @@
 #include <iostream>
 #include <map>
 #include <mutex>
+#include <numeric>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -21847,6 +21848,7 @@ if (sql.rfind("backup database", 0) == 0) {
                     auto groups = breakDownConditions(condTokens);
                     if (captureStructuredPlain) {
                         set<int64_t> seenRowIds;
+                        vector<int64_t> mergedRowIds;
                         for (const auto& g : groups) {
                             vector<vector<string>> branchRows;
                             vector<vector<bool>> branchNulls;
@@ -21868,6 +21870,58 @@ if (sql.rfind("backup database", 0) == 0) {
                                     std::move(branchRows[i]));
                                 structuredPlainResult.nulls.push_back(
                                     std::move(branchNulls[i]));
+                                mergedRowIds.push_back(branchRowIds[i]);
+                            }
+                        }
+                        // Each OR branch is ordered independently by query().
+                        // Reapply the table-wide order to the merged row-id set
+                        // so a later branch cannot append a value that belongs
+                        // before rows already emitted by an earlier branch.
+                        if (groups.size() > 1 && !orderBySpecs.empty() &&
+                            mergedRowIds.size() > 1) {
+                            vector<int64_t> globallyOrderedRowIds;
+                            (void)g_engine.query(
+                                queryDb, tname, {}, selectCols, orderBySpecs,
+                                forUpdate, noWait, skipLocked,
+                                s.timezoneOffsetMinutes, distinctOnCols,
+                                nullptr, nullptr, &globallyOrderedRowIds);
+                            map<int64_t, size_t> globalRank;
+                            for (size_t i = 0;
+                                 i < globallyOrderedRowIds.size(); ++i) {
+                                globalRank.emplace(globallyOrderedRowIds[i], i);
+                            }
+                            vector<size_t> permutation(mergedRowIds.size());
+                            iota(permutation.begin(), permutation.end(), 0);
+                            stable_sort(
+                                permutation.begin(), permutation.end(),
+                                [&](size_t a, size_t b) {
+                                    const auto ai = globalRank.find(
+                                        mergedRowIds[a]);
+                                    const auto bi = globalRank.find(
+                                        mergedRowIds[b]);
+                                    const size_t ar = ai == globalRank.end()
+                                        ? globalRank.size() : ai->second;
+                                    const size_t br = bi == globalRank.end()
+                                        ? globalRank.size() : bi->second;
+                                    return ar < br;
+                                });
+                            auto unorderedAnswers = std::move(answers);
+                            auto unorderedRows = std::move(
+                                structuredPlainResult.rows);
+                            auto unorderedNulls = std::move(
+                                structuredPlainResult.nulls);
+                            answers.reserve(permutation.size());
+                            structuredPlainResult.rows.reserve(
+                                permutation.size());
+                            structuredPlainResult.nulls.reserve(
+                                permutation.size());
+                            for (size_t index : permutation) {
+                                answers.push_back(
+                                    std::move(unorderedAnswers[index]));
+                                structuredPlainResult.rows.push_back(
+                                    std::move(unorderedRows[index]));
+                                structuredPlainResult.nulls.push_back(
+                                    std::move(unorderedNulls[index]));
                             }
                         }
                         structuredPlainRows = true;
