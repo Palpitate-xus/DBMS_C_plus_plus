@@ -87,6 +87,7 @@
 | 251 | REPL-08 | publication 的 INSERT / UPDATE / DELETE 标志虽被持久化，三个 DML 捕获路径却只检查表成员关系，禁用的操作仍会写入逻辑复制槽。新增按操作类型检查的 publication 谓词，并让插入、更新、删除分别传入真实操作类型 | `logical_decoding_test` 覆盖标志持久化、谓词判定及仅发布 INSERT 时执行 INSERT→UPDATE→DELETE 后槽内只有一条 INSERT；DIV-14 门禁与实际 PostgreSQL 122 组差分保持 `failed=0`。SQL publish options、列列表、row filter 与 partition root 仍属 REPL-08 | `5b5eb4f` |
 | 252 | REPL-08 | CREATE 的 `publish` 选项靠子串搜索识别，非法值可能被静默接受，ALTER 又无法修改操作集合。增加结构化选项解析和 `ALTER PUBLICATION ... SET (publish=...)`，仅接受已实现的 insert/update/delete；空列表报 `42601`，truncate 及其他未实现选项报 `0A000`，失败前不写文件 | DIV-14 协议 E2E 验证 CREATE 初始标志、ALTER 持久化、错误 SQLSTATE 与失败原子性；`logical_decoding_test` 和实际 PostgreSQL 122 组差分通过。truncate 捕获、列列表、row filter 与 partition root 仍属 REPL-08 | `88c7513` |
 | 253 | P0-04 / CAT-07 / REPL-08 | 多表 TRUNCATE 逐表立即重置，后续目标失败会留下部分表已清空，也没有 publication 的 truncate 事件。将整个目标集放入带物理快照的 DDL 事务，失败恢复全部目标；扩展 publication 持久化和解码事件支持 truncate，并只在事务提交后发布。旧五字段 publication 文件按 truncate=false 迁移，避免升级后扩大事件范围 | `truncate_test` 用另一 backend 锁住第二个目标，复现首表已重置后的失败并验证两表数据完整恢复、快照清理；`logical_decoding_test` 覆盖旧格式迁移、启停过滤、文本/二进制解码及提交后槽事件；DIV-14 协议 E2E 和实际 PostgreSQL 122 组差分通过。TRUNCATE 的完整 PostgreSQL 事务/WAL 语义及 publication 列/行过滤仍未完成 | `06fd56c` |
+| 254 | REPL-08 | ALTER PUBLICATION 的 RENAME TO 与 OWNER TO 落入未实现门禁，无法修改真实 publication。增加 catalog rename 和专用 SQL 分支：重名时拒绝覆盖，成功时原子改名；OWNER TO 先校验角色，再用原子 update 持久化 | `logical_decoding_test` 验证重名失败、成功改名及重新扫描名称；DIV-14 协议 E2E 验证文件身份、失败字节不变、缺失角色拒绝和 owner 持久化；实际 PostgreSQL 122 组差分通过。权限细节、列列表、row filter 与 partition root 仍属 REPL-08 | `70dde64` |
 
 本批新增的待修复复现（仍计入总清单）：
 
