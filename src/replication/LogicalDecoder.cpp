@@ -495,16 +495,17 @@ LogicalChangeStore& LogicalChangeStore::instance() {
     return store;
 }
 
-void LogicalChangeStore::append(const std::string& slotName,
+bool LogicalChangeStore::append(const std::string& slotName,
                                 const LogicalChangeBatch& batch) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto& stream = streams_[slotName];
+    if (stream.size() >= kMaxRetained) return false;
     Entry e;
     e.startLsn = batch.commitLsn;
     e.endLsn = batch.commitLsn;
     e.batch = batch;
     stream.push_back(std::move(e));
-    while (stream.size() > kMaxRetained) stream.pop_front();
+    return true;
 }
 
 LogicalChangeStore::PeekResult LogicalChangeStore::peek(const std::string& slotName,

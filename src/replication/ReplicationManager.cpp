@@ -39,10 +39,13 @@ bool ReplicationManager::configureSlotStorage(
         }
         std::string header;
         if (!std::getline(input, header) ||
-            header != "DBMS_REPLICATION_SLOTS_V1") {
+            (header != "DBMS_REPLICATION_SLOTS_V1" &&
+             header != "DBMS_REPLICATION_SLOTS_V2")) {
             error = "invalid replication slot state header";
             return false;
         }
+        const bool hasInvalidationState =
+            header == "DBMS_REPLICATION_SLOTS_V2";
         std::string line;
         while (std::getline(input, line)) {
             if (line.empty()) continue;
@@ -54,6 +57,19 @@ bool ReplicationManager::configureSlotStorage(
                 slot.restartLsn < 0 ||
                 !validSlotDefinition(
                     slot.name, slot.slotType, slot.plugin, slot.database)) {
+                error = "invalid replication slot state entry";
+                return false;
+            }
+            if (hasInvalidationState) {
+                int invalidated = 0;
+                if (!(row >> invalidated) ||
+                    (invalidated != 0 && invalidated != 1)) {
+                    error = "invalid replication slot state entry";
+                    return false;
+                }
+                slot.invalidated = invalidated != 0;
+            }
+            if (slot.invalidated && slot.slotType != "logical") {
                 error = "invalid replication slot state entry";
                 return false;
             }
@@ -118,6 +134,7 @@ bool ReplicationManager::createReplicationSlot(const std::string& name,
     slot.plugin = plugin;
     slot.database = database;
     slot.active = false;
+    slot.invalidated = false;
     slots_[name] = std::move(slot);
     if (!persistSlotsLocked()) {
         slots_.erase(name);
@@ -154,7 +171,8 @@ ReplicationManager::findSlot(const std::string& name) const {
 bool ReplicationManager::activateReplicationSlot(const std::string& name) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = slots_.find(name);
-    if (it == slots_.end() || it->second.active) return false;
+    if (it == slots_.end() || it->second.active || it->second.invalidated)
+        return false;
     it->second.active = true;
     return true;
 }
@@ -187,7 +205,7 @@ bool ReplicationManager::confirmLogicalSlotLsn(
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = slots_.find(name);
     if (it == slots_.end() || it->second.slotType != "logical" ||
-        confirmedLsn < it->second.restartLsn) {
+        it->second.invalidated || confirmedLsn < it->second.restartLsn) {
         return false;
     }
     const int64_t previousRestartLsn = it->second.restartLsn;
@@ -214,20 +232,30 @@ std::vector<ReplicationManager::ReplicationSlot> ReplicationManager::listSlots()
 void ReplicationManager::publishLogicalBatch(
     const std::string& database, const LogicalChangeBatch& batch) {
     std::lock_guard<std::mutex> lock(mutex_);
-    for (const auto& [name, slot] : slots_) {
-        if (slot.slotType != "logical" || slot.database != database) continue;
-        LogicalChangeStore::instance().append(name, batch);
+    bool catalogChanged = false;
+    for (auto& [name, slot] : slots_) {
+        if (slot.slotType != "logical" || slot.database != database ||
+            slot.invalidated) {
+            continue;
+        }
+        if (LogicalChangeStore::instance().append(name, batch)) continue;
+        slot.invalidated = true;
+        slot.active = false;
+        LogicalChangeStore::instance().discard(name);
+        catalogChanged = true;
     }
+    if (catalogChanged) (void)persistSlotsLocked();
 }
 
 bool ReplicationManager::persistSlotsLocked() const {
     if (slotStoragePath_.empty()) return true;
     std::ostringstream output;
-    output << "DBMS_REPLICATION_SLOTS_V1\n";
+    output << "DBMS_REPLICATION_SLOTS_V2\n";
     for (const auto& [name, slot] : slots_) {
         output << std::quoted(name) << ' ' << std::quoted(slot.slotType) << ' '
                << std::quoted(slot.plugin) << ' '
-               << std::quoted(slot.database) << ' ' << slot.restartLsn << '\n';
+               << std::quoted(slot.database) << ' ' << slot.restartLsn << ' '
+               << (slot.invalidated ? 1 : 0) << '\n';
     }
     return index_file::writeAtomically(slotStoragePath_, output.str());
 }

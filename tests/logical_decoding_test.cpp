@@ -333,15 +333,28 @@ static void test_change_store() {
     assert(peek.batches.size() == 1);
     assert(peek.batches[0].xid == 2);
 
-    // Retention bound: the oldest batch is dropped beyond kMaxRetained.
-    for (uint64_t i = 0; i < LogicalChangeStore::kMaxRetained + 8; ++i) {
+    // Retention bound: overflow is reported without silently evicting the
+    // oldest unacknowledged batch.
+    store.discard("slot_x");
+    for (uint64_t i = 0; i < LogicalChangeStore::kMaxRetained; ++i) {
         LogicalChangeBatch b;
         b.xid = 100 + i;
         b.commitLsn = 1000 + i;
         b.changes.push_back({LogicalChange::Op::Insert, "t", "", "x", b.xid, b.commitLsn});
-        store.append("slot_x", b);
+        assert(store.append("slot_x", b));
     }
-    assert(store.depth("slot_x") <= LogicalChangeStore::kMaxRetained);
+    LogicalChangeBatch overflow;
+    overflow.xid = 999999;
+    overflow.commitLsn = 999999;
+    overflow.changes.push_back(
+        {LogicalChange::Op::Insert, "t", "", "overflow", 999999, 999999});
+    assert(!store.append("slot_x", overflow));
+    assert(store.depth("slot_x") == LogicalChangeStore::kMaxRetained);
+    peek = store.peek("slot_x", 0, LogicalChangeStore::kMaxRetained + 1);
+    assert(peek.batches.size() == LogicalChangeStore::kMaxRetained);
+    assert(peek.batches.front().commitLsn == 1000);
+    assert(peek.batches.back().commitLsn ==
+           1000 + LogicalChangeStore::kMaxRetained - 1);
     store.acknowledge("slot_x", 1000000);
     assert(store.depth("slot_x") == 0);
     peek = store.peek("slot_x", 0, 10);

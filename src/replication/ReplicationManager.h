@@ -28,6 +28,9 @@ public:
         std::string database;     // logical slots are bound to one database
         int64_t restartLsn = 0;
         bool active = false;
+        // Once retained output overflows, the stream has a gap and must not
+        // be consumed.  The flag is durable; recovery requires drop/recreate.
+        bool invalidated = false;
     };
 
     bool createReplicationSlot(const std::string& name, const std::string& type,

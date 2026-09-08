@@ -15462,10 +15462,11 @@ if (sql.rfind("backup database", 0) == 0) {
         }
         if (rest == "replication slots") {
             const auto slots = dbms::ReplicationManager::instance().listSlots();
-            cout << "name type plugin active changes" << endl;
+            cout << "name type plugin active invalidated changes" << endl;
             for (const auto& slot : slots) {
                 cout << slot.name << " " << slot.slotType << " " << slot.plugin << " "
                      << (slot.active ? "t" : "f") << " "
+                     << (slot.invalidated ? "t" : "f") << " "
                      << dbms::LogicalChangeStore::instance().depth(slot.name) << endl;
             }
             return false;
@@ -15477,6 +15478,11 @@ if (sql.rfind("backup database", 0) == 0) {
                 slot->database != s.currentDB) {
                 cout << "ERROR: logical replication slot " << slotName
                      << " does not exist" << endl;
+                return true;
+            }
+            if (slot->invalidated) {
+                cout << "ERROR: logical replication slot " << slotName
+                     << " is invalidated" << endl;
                 return true;
             }
             const auto peek = dbms::LogicalChangeStore::instance().peek(
@@ -15499,6 +15505,11 @@ if (sql.rfind("backup database", 0) == 0) {
                 slot->database != s.currentDB) {
                 cout << "ERROR: logical replication slot " << slotName
                      << " does not exist" << endl;
+                return true;
+            }
+            if (slot->invalidated) {
+                cout << "ERROR: logical replication slot " << slotName
+                     << " is invalidated" << endl;
                 return true;
             }
             const auto peek = dbms::LogicalChangeStore::instance().peek(

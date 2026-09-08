@@ -103,13 +103,17 @@ private:
 };
 
 // In-memory change stream per logical slot (bounded; subscribers drain via
-// peek/acknowledge which advances the slot's confirmed LSN).
+// peek/acknowledge which advances the slot's confirmed LSN).  The store never
+// evicts unacknowledged data: append reports overflow so the owning slot can
+// be invalidated instead of silently delivering a stream with a gap.
 class LogicalChangeStore {
 public:
     static LogicalChangeStore& instance();
 
     // Append a committed batch for a slot (called under the slot's lock).
-    void append(const std::string& slotName, const LogicalChangeBatch& batch);
+    // Returns false without changing the stream when the retention limit has
+    // been reached.
+    bool append(const std::string& slotName, const LogicalChangeBatch& batch);
 
     // Read up to maxChanges changes from fromLsn (exclusive).  Returns the
     // next LSN to resume from.
@@ -128,7 +132,8 @@ public:
     // slot reusing the name must not inherit the previous slot's stream.
     void discard(const std::string& slotName);
 
-    // Bounded retention: at most kMaxRetained per slot (oldest dropped).
+    // Bounded retention: at most kMaxRetained per slot.  Overflow must be
+    // handled by invalidating the slot; unacknowledged entries are not evicted.
     static constexpr size_t kMaxRetained = 4096;
 
     size_t depth(const std::string& slotName) const;

@@ -48,6 +48,40 @@ def main():
         assert "FATAL: invalid replication slot state entry" in result.stderr, \
             result.stderr
 
+        Path(work_dir, ".replication_slots").write_text(
+            "DBMS_REPLICATION_SLOTS_V2\n"
+            '"physical_invalidated" "physical" "" "" 0 1\n',
+            encoding="utf-8")
+        result = subprocess.run(
+            [DBMS_MAIN, "--server", "0", "--insecure"],
+            cwd=work_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        assert result.returncode == 1, result
+        assert "FATAL: invalid replication slot state entry" in result.stderr, \
+            result.stderr
+
+        Path(work_dir, ".replication_slots").write_text(
+            "DBMS_REPLICATION_SLOTS_V2\n"
+            '"bad_flag" "logical" "dbms_test_decoding" "db" 0 2\n',
+            encoding="utf-8")
+        result = subprocess.run(
+            [DBMS_MAIN, "--server", "0", "--insecure"],
+            cwd=work_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        assert result.returncode == 1, result
+        assert "FATAL: invalid replication slot state entry" in result.stderr, \
+            result.stderr
+
     print("[REPLICATION SLOT PERSISTENCE] corrupt startup state rejected")
 
 

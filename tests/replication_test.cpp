@@ -103,6 +103,32 @@ static void test_replication_slots() {
     assert(!mgr.dropReplicationSlot("slot1"));  // already dropped
     assert(mgr.dropReplicationSlot("slot2"));
 
+    // A full retained stream must invalidate the slot instead of dropping
+    // the oldest unacknowledged transaction and exposing a stream with a gap.
+    assert(mgr.createReplicationSlot(
+        "overflow_slot", "logical", "dbms_test_decoding", "overflow_db"));
+    for (uint64_t index = 0;
+         index < LogicalChangeStore::kMaxRetained; ++index) {
+        batch.xid = 1000 + index;
+        batch.commitLsn = 1000 + index;
+        assert(LogicalChangeStore::instance().append("overflow_slot", batch));
+    }
+    batch.xid = 999999;
+    batch.commitLsn = 999999;
+    mgr.publishLogicalBatch("overflow_db", batch);
+    auto overflowSlot = mgr.findSlot("overflow_slot");
+    assert(overflowSlot && overflowSlot->invalidated);
+    assert(!overflowSlot->active);
+    assert(LogicalChangeStore::instance().depth("overflow_slot") == 0);
+    assert(!mgr.activateReplicationSlot("overflow_slot"));
+    assert(!mgr.confirmLogicalSlotLsn("overflow_slot", 999999));
+
+    // Invalidation is durable, and V1 files remain readable for migration.
+    assert(mgr.configureSlotStorage(statePath, storageError));
+    overflowSlot = mgr.findSlot("overflow_slot");
+    assert(overflowSlot && overflowSlot->invalidated);
+    assert(mgr.dropReplicationSlot("overflow_slot"));
+
     // A persistence error rolls the in-memory catalog back as well.
     const std::string missingParentPath =
         (std::filesystem::path(stateDir) / "missing" / "slots.state").string();
