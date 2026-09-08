@@ -5657,10 +5657,13 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
     vector<string> headers;
     vector<string> values;
     vector<bool> valueNulls;
+    vector<string> columnTypes;
     bool hasLegacyScalarSubquery = false;
-    auto appendValue = [&](string value, bool isNull = false) {
+    auto appendValue = [&](string value, bool isNull = false,
+                           string typeName = "text") {
         values.push_back(std::move(value));
         valueNulls.push_back(isNull);
+        columnTypes.push_back(typeName.empty() ? "text" : std::move(typeName));
     };
     for (const string& item : items) {
         if (item.empty()) {
@@ -5707,28 +5710,30 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
         // Pseudo functions
         if (lowItem == "current_user") {
             headers.push_back("current_user");
-            appendValue(s.currentRole.empty() ? s.username : s.currentRole);
+            appendValue(s.currentRole.empty() ? s.username : s.currentRole,
+                        false, "name");
             continue;
         }
         if (lowItem == "session_user") {
             headers.push_back("session_user");
-            appendValue(s.username);
+            appendValue(s.username, false, "name");
             continue;
         }
         if (lowItem.rfind("generate_series", 0) == 0) {
             // Placeholder row; the SRF expansion below fills the series.
             headers.push_back("generate_series");
-            appendValue("");
+            appendValue("", false, "integer");
             continue;
         }
         if (lowItem == "current_database()" || lowItem == "current_database ( )") {
             headers.push_back("current_database");
-            appendValue(s.currentDB.empty() ? std::string("postgres") : s.currentDB);
+            appendValue(s.currentDB.empty() ? std::string("postgres") : s.currentDB,
+                        false, "name");
             continue;
         }
         if (lowItem == "current_schema()" || lowItem == "current_schema ( )") {
             headers.push_back("current_schema");
-            appendValue("public");
+            appendValue("public", false, "name");
             continue;
         }
         if (lowItem.substr(0, 10) == "pg_typeof(" || lowItem.substr(0, 10) == "pg_typeof (") {
@@ -5746,21 +5751,22 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             else if (!arg.empty() && arg.front() == '{') tn = "text[]";
             else tn = "unknown";
             headers.push_back("pg_typeof");
-            appendValue(tn);
+            appendValue(tn, false, "regtype");
             continue;
         }
         if (lowItem == "version()" || lowItem == "version ( )") {
             headers.push_back("version");
             // PG-compatible version banner (matches the reference server
             // shape: PostgreSQL <ver> (<distro>) on <arch>, compiled by ...).
-            appendValue("PostgreSQL 17.2 (Debian 17.2-1.pgdg120+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 12.2.0-14) 12.2.0, 64-bit");
+            appendValue("PostgreSQL 17.2 (Debian 17.2-1.pgdg120+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 12.2.0-14) 12.2.0, 64-bit",
+                        false, "text");
             continue;
         }
         if (lowItem == "user" || lowItem == "current_user" || lowItem == "session_user") {
             // The bare keyword USER is a PG synonym for CURRENT_USER.
             if (lowItem == "user") {
                 headers.push_back("user");
-                appendValue(s.username);
+                appendValue(s.username, false, "name");
                 continue;
             }
         }
@@ -5818,29 +5824,6 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             }
         }
 
-        // Typed literal item (DATE x, TIME x, TIMESTAMP x): PG
-        // evaluates the value and names the output column after the
-        // type keyword.  Strip the keyword from the expression only;
-        // the header rules below still see the original item text.
-        {
-            string lowIt;
-            for (char c : expr)
-                lowIt += static_cast<char>(tolower(static_cast<unsigned char>(c)));
-            static const char* tl4[] = { "timestamp", "timestamptz", "date", "time" };
-            for (const char* kw4 : tl4) {
-                const size_t kl4 = strlen(kw4);
-                if (lowIt.compare(0, kl4, kw4) != 0) continue;
-                size_t q4 = kl4;
-                while (q4 < expr.size() && isspace(static_cast<unsigned char>(expr[q4]))) ++q4;
-                if (q4 < expr.size() && expr[q4] == 39) {
-                    size_t cq4 = expr.find(39, q4 + 1);
-                    if (cq4 != string::npos && cq4 + 1 == expr.size())
-                        expr = expr.substr(q4);
-                    break;
-                }
-            }
-        }
-
         // Scalar subquery item: (SELECT ...) — evaluate the inner query
         // once and project its first row's first cell (PG semantics: a
         // scalar subquery in the projection list yields one value).
@@ -5890,7 +5873,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                 isspace(static_cast<unsigned char>(lowE[exE + 7]))) {
                 headers.push_back("exists");
                 appendValue(r.value.empty() && r.isNull ? "NULL" : r.value,
-                            r.isNull);
+                            r.isNull, r.typeName);
                 continue;
             }
             // ARRAY[...] literal projects as header "array" (PG
@@ -5911,7 +5894,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                 endsBracketA && !hasCatA) {
                 headers.push_back("array");
                 appendValue(r.value.empty() && r.isNull ? "NULL" : r.value,
-                            r.isNull);
+                            r.isNull, r.typeName);
                 continue;
             }
             // CAST target type names the column (PG: cast(1 as text) ->
@@ -6048,7 +6031,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             headers.push_back(disp);
         }
         headerDone:;
-        appendValue(r.isNull ? "NULL" : r.value, r.isNull);
+        appendValue(r.isNull ? "NULL" : r.value, r.isNull, r.typeName);
     }
 
     size_t multiRowWidth = 0;  // >0 when a set-returning function expanded rows
@@ -6131,6 +6114,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
         dbms::DmlResult queryResult;
         queryResult.available = true;
         queryResult.columns = headers;
+        queryResult.columnTypes = columnTypes;
         if (!suppressDataRow) {
             const size_t width = multiRowWidth > 0 ? multiRowWidth : values.size();
             if (width > 0) {

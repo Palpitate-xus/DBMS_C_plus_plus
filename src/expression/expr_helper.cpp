@@ -590,8 +590,13 @@ static ExprEvalResult evalStringImpl(
         for (size_t i = 0; i < sql.size();) {
             bool matched = false;
             for (const auto& kw : kws) {
+                bool keywordMatch = sql.size() >= i + kw.size();
+                for (size_t k = 0; keywordMatch && k < kw.size(); ++k) {
+                    keywordMatch = std::tolower(
+                        static_cast<unsigned char>(sql[i + k])) == kw[k];
+                }
                 if (sql.size() >= i + kw.size() + 2 &&
-                    sql.compare(i, kw.size(), kw) == 0 &&
+                    keywordMatch &&
                     sql[i + kw.size()] == 39) {
                     if (i == 0 || !isalnum((unsigned char)sql[i - 1])) {
                         size_t close = sql.find(39, i + kw.size() + 1);
@@ -701,6 +706,7 @@ static ExprEvalResult evalStringImpl(
     res.ok = true;
     res.isNull = v.isNull;
     res.value = v.value;
+    res.typeName = v.typeName;
     return res;
 }
 

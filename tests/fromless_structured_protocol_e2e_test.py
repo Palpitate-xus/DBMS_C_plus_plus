@@ -32,6 +32,22 @@ def main():
             "line1\nline2", "  padded  ", "a'b",
         ]], rows
 
+        decoded = runner.decode_wire_result(
+            client.simple_query(
+                server["sock"],
+                "SELECT 1 AS i, 1.5 AS n, true AS b, "
+                "DATE '2024-03-15' AS d, "
+                "TIMESTAMP '2024-03-15 10:30:00' AS ts, "
+                "current_user AS u, pg_typeof(1) AS pt;"),
+            include_types=True)
+        rows, state, message, headers, command_tag, type_oids = decoded
+        assert state is None, (state, message)
+        assert headers == [
+            "i", "n", "b", "d", "ts", "current_user", "pg_typeof",
+        ], headers
+        assert type_oids == [23, 1700, 16, 1082, 1114, 19, 2206], type_oids
+        assert command_tag == "SELECT 1", command_tag
+
         rows, state, message, headers = runner.ours_query(
             client, server["sock"],
             "SELECT 'still described' AS value WHERE false;")

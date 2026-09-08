@@ -30,6 +30,7 @@ static const std::unordered_map<std::string, Oid> kBuiltinTypeMap = {
     {"interval", 1186},
     {"timetz", 1266}, {"time with time zone", 1266},
     {"numeric", 1700}, {"decimal", 1700},
+    {"regtype", 2206},
     {"uuid", 2950},
     {"jsonb", 3802},
 };
