@@ -19376,9 +19376,148 @@ if (sql.rfind("backup database", 0) == 0) {
             return true;
         };
 
+        // Resolve the PostgreSQL result type of legacy aggregate expressions.
+        // The row values still come from the established aggregate executor,
+        // but the wire protocol must not describe every computed column as
+        // text.  Keep this deliberately conservative: when the argument type
+        // cannot be established from the table schema, return text rather
+        // than inventing a numeric OID.
+        auto aggregateProtocolType = [&](const dbms::StorageEngine::AggItem& item) {
+            const string func = toLower(trim(item.func));
+            if (func == "count" || func == "rank" || func == "dense_rank")
+                return string("bigint");
+            if (func == "bool_and" || func == "bool_or" || func == "every")
+                return string("boolean");
+            if (func == "grouping") return string("integer");
+            if (func == "string_agg") return string("text");
+            if (func == "json_agg") return string("json");
+            if (func == "jsonb_agg") return string("jsonb");
+            if (func == "xmlagg") return string("xml");
+
+            string arg = trim(item.arg);
+            if (arg.size() > 9 && toLower(arg.substr(0, 9)) == "distinct ")
+                arg = trim(arg.substr(9));
+
+            string inputType;
+            // A PostgreSQL-style cast controls the aggregate overload.
+            size_t castAt = arg.rfind("::");
+            if (castAt != string::npos) {
+                inputType = trim(arg.substr(castAt + 2));
+                size_t paren = inputType.find('(');
+                if (paren != string::npos) inputType.resize(paren);
+            }
+            if (inputType.empty()) {
+                // Qualified column references use the final identifier.
+                size_t dot = arg.rfind('.');
+                string column = dot == string::npos ? arg : arg.substr(dot + 1);
+                column = trim(column);
+                if (column.size() >= 2 && column.front() == 34 && column.back() == 34)
+                    column = decodeQuotedIdentifier(column);
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (tbl.cols[i].dataName == column) {
+                        inputType = tbl.cols[i].dataType;
+                        break;
+                    }
+                }
+            }
+            inputType = toLower(trim(inputType));
+            size_t typeParen = inputType.find('(');
+            if (typeParen != string::npos) inputType.resize(typeParen);
+            if (inputType == "int" || inputType == "int4" || inputType == "serial")
+                inputType = "integer";
+            else if (inputType == "int2" || inputType == "smallserial")
+                inputType = "smallint";
+            else if (inputType == "int8" || inputType == "bigserial")
+                inputType = "bigint";
+            else if (inputType == "decimal") inputType = "numeric";
+            else if (inputType == "float" || inputType == "float4" ||
+                     inputType == "float8" || inputType == "real" ||
+                     inputType == "double")
+                inputType = "double precision";
+            else if (inputType == "bool") inputType = "boolean";
+
+            if (func == "array_agg" && !inputType.empty())
+                return inputType + "[]";
+
+            if (func == "sum") {
+                if (inputType == "smallint" || inputType == "integer")
+                    return string("bigint");
+                if (inputType == "bigint" || inputType == "numeric")
+                    return string("numeric");
+                if (inputType == "double precision")
+                    return string("double precision");
+            }
+            if (func == "avg" || func == "stddev" || func == "stddev_samp" ||
+                func == "stddev_pop" || func == "variance" ||
+                func == "var_samp" || func == "var_pop") {
+                if (inputType == "double precision")
+                    return string("double precision");
+                if (inputType == "smallint" || inputType == "integer" ||
+                    inputType == "bigint" || inputType == "numeric")
+                    return string("numeric");
+            }
+            if ((func == "min" || func == "max" || func == "bit_and" ||
+                 func == "bit_or") && !inputType.empty())
+                return inputType;
+            return string("text");
+        };
+        auto groupExpressionProtocolType = [&](const string& expression) {
+            string expr = trim(expression);
+            size_t castAt = expr.rfind("::");
+            if (castAt != string::npos) {
+                string castType = toLower(trim(expr.substr(castAt + 2)));
+                size_t paren = castType.find('(');
+                if (paren != string::npos) castType.resize(paren);
+                return castType.empty() ? string("text") : castType;
+            }
+
+            string inferred;
+            auto precedence = [](const string& raw) {
+                string type = toLower(trim(raw));
+                if (type == "double" || type == "float" || type == "float4" ||
+                    type == "float8" || type == "real" ||
+                    type == "double precision") return 4;
+                if (type == "numeric" || type == "decimal") return 3;
+                if (type == "bigint" || type == "int8" || type == "bigserial") return 2;
+                if (type == "integer" || type == "int" || type == "int4" ||
+                    type == "smallint" || type == "int2" || type == "serial" ||
+                    type == "smallserial") return 1;
+                return 0;
+            };
+            int best = 0;
+            for (size_t ci = 0; ci < tbl.len; ++ci) {
+                const string& name = tbl.cols[ci].dataName;
+                size_t pos = expr.find(name);
+                bool referenced = false;
+                while (pos != string::npos) {
+                    const bool leftOk = pos == 0 ||
+                        (!isalnum(static_cast<unsigned char>(expr[pos - 1])) &&
+                         expr[pos - 1] != '_');
+                    const size_t end = pos + name.size();
+                    const bool rightOk = end == expr.size() ||
+                        (!isalnum(static_cast<unsigned char>(expr[end])) &&
+                         expr[end] != '_');
+                    if (leftOk && rightOk) { referenced = true; break; }
+                    pos = expr.find(name, pos + 1);
+                }
+                if (!referenced) continue;
+                const int rank = precedence(tbl.cols[ci].dataType);
+                if (rank > best) {
+                    best = rank;
+                    inferred = rank == 4 ? "double precision"
+                             : rank == 3 ? "numeric"
+                             : rank == 2 ? "bigint" : "integer";
+                }
+            }
+            if (!inferred.empty()) return inferred;
+            return string("text");
+        };
+
         vector<string> answers;
         if (!groupByCols.empty()) {
             if (forUpdate) { cout << "FOR UPDATE not supported with GROUP BY" << endl; return true; }
+            vector<string> groupProtocolColumns;
+            vector<string> groupProtocolTypes;
             // Header for group keys: PG uses the SELECT-list alias for
             // expression keys ("v % 2 AS parity" -> "parity"), "?column?"
             // for an unaliased expression, and the plain column name for
@@ -19397,7 +19536,16 @@ if (sql.rfind("backup database", 0) == 0) {
                         break;
                     }
                 }
-                cout << renderLegacyHeader(isExpr ? string("?column?") : header) << ' ';
+                const string outputHeader = isExpr ? string("?column?") : header;
+                cout << renderLegacyHeader(outputHeader) << ' ';
+                groupProtocolColumns.push_back(outputHeader);
+                string groupType = groupExpressionProtocolType(gc);
+                for (size_t ci = 0; ci < tbl.len; ++ci)
+                    if (tbl.cols[ci].dataName == gc) {
+                        groupType = tbl.cols[ci].dataType;
+                        break;
+                    }
+                groupProtocolTypes.push_back(std::move(groupType));
             }
             vector<dbms::StorageEngine::AggItem> pureAgg;
             for (const auto& it : aggItems) {
@@ -19411,12 +19559,19 @@ if (sql.rfind("backup database", 0) == 0) {
                 size_t ai2 = 0;
                 for (size_t ei = 0; ei < exprTypes.size(); ++ei) {
                     if (exprTypes[ei] == 0 || exprTypes[ei] == 1) {
-                        if (ai2 < aggItems.size() && !aggItems[ai2].func.empty())
+                        if (ai2 < aggItems.size() && !aggItems[ai2].func.empty()) {
                             cout << renderLegacyHeader(selectExprs[ei].displayName) << ' ';
+                            groupProtocolColumns.push_back(selectExprs[ei].displayName);
+                            groupProtocolTypes.push_back(
+                                aggregateProtocolType(aggItems[ai2]));
+                        }
                         ++ai2;
                     } else if (exprTypes[ei] == 2) {
-                        if (ai2 < aggItems.size() && !aggItems[ai2].func.empty())
+                        if (ai2 < aggItems.size() && !aggItems[ai2].func.empty()) {
                             cout << renderLegacyHeader(selectExprs[ei].displayName) << ' ';
+                            groupProtocolColumns.push_back(selectExprs[ei].displayName);
+                            groupProtocolTypes.push_back("text");
+                        }
                         ++ai2;
                     } else if (exprTypes[ei] == 3 &&
                                selectExprs[ei].funcName == "subquery") {
@@ -19434,6 +19589,8 @@ if (sql.rfind("backup database", 0) == 0) {
                             }
                         }
                         cout << subCol << ' ';
+                        groupProtocolColumns.push_back(subCol);
+                        groupProtocolTypes.push_back("text");
                     } else if (exprTypes[ei] == 3 &&
                                selectExprs[ei].funcName == "arith" &&
                                arithRawText.count(ei) &&
@@ -19441,11 +19598,22 @@ if (sql.rfind("backup database", 0) == 0) {
                         // agg + (SELECT ...) in a GROUP BY select list:
                         // evaluated per output group below; PG names an
                         // unaliased arithmetic column ?column?.
-                                        cout << renderLegacyHeader(selectExprs[ei].displayName) << ' ';
+                        cout << renderLegacyHeader(selectExprs[ei].displayName) << ' ';
+                        groupProtocolColumns.push_back(selectExprs[ei].displayName);
+                        groupProtocolTypes.push_back("text");
                     }
                 }
             }
             cout << '\n';
+            if (executeDepth == 1 && !groupProtocolColumns.empty() &&
+                groupProtocolColumns.size() == groupProtocolTypes.size()) {
+                dbms::DmlResult metadata;
+                metadata.available = true;
+                metadata.metadataOnly = true;
+                metadata.columns = std::move(groupProtocolColumns);
+                metadata.columnTypes = std::move(groupProtocolTypes);
+                dbms::publishLastDmlResult(std::move(metadata));
+            }
             // GROUP BY over expressions: the select list projects the
             // computed key as a scalar arith item ("v % 2 as parity").
             // Such items are group-key projections — allow them through.
@@ -19968,6 +20136,44 @@ if (sql.rfind("backup database", 0) == 0) {
                     cout << renderLegacyHeader(selectExprs[ei].displayName) << ' ';
             }
             cout << '\n';
+            if (executeDepth == 1) {
+                vector<string> protocolColumns;
+                vector<string> protocolTypes;
+                size_t ai = 0;
+                for (size_t ei = 0; ei < exprTypes.size(); ++ei) {
+                    if (exprTypes[ei] == 0 || exprTypes[ei] == 1) {
+                        if (ai >= aggItems.size()) break;
+                        protocolColumns.push_back(selectExprs[ei].displayName);
+                        if (exprTypes[ei] == 1) {
+                            protocolTypes.push_back(aggregateProtocolType(aggItems[ai]));
+                        } else {
+                            string type = "text";
+                            string source = aggItems[ai].arg;
+                            size_t dot = source.rfind('.');
+                            if (dot != string::npos) source = source.substr(dot + 1);
+                            for (size_t ci = 0; ci < tbl.len; ++ci) {
+                                if (tbl.cols[ci].dataName == source) {
+                                    type = tbl.cols[ci].dataType;
+                                    break;
+                                }
+                            }
+                            protocolTypes.push_back(std::move(type));
+                        }
+                        ++ai;
+                    } else if (exprTypes[ei] == 2) {
+                        ++ai;
+                    }
+                }
+                if (!protocolColumns.empty() &&
+                    protocolColumns.size() == protocolTypes.size()) {
+                    dbms::DmlResult metadata;
+                    metadata.available = true;
+                    metadata.metadataOnly = true;
+                    metadata.columns = std::move(protocolColumns);
+                    metadata.columnTypes = std::move(protocolTypes);
+                    dbms::publishLastDmlResult(std::move(metadata));
+                }
+            }
             vector<dbms::StorageEngine::AggItem> pureAgg;
             for (const auto& it : aggItems) {
                 if (!it.func.empty()) pureAgg.push_back(it);

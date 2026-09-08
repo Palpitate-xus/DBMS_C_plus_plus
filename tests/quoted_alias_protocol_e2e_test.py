@@ -62,6 +62,21 @@ def main():
             assert rows == expected_rows, (sql, rows)
             assert type_oids == [23], (sql, type_oids)
             assert command_tag == "SELECT 3", (sql, command_tag)
+
+        aggregate_cases = [
+            ("SELECT sum(i) AS total FROM generate_series(1, 4) AS t(i);",
+             [["10"]], [20]),
+            ("SELECT count(*) AS n FROM generate_series(1, 100, 10) AS t(i);",
+             [["10"]], [20]),
+        ]
+        for sql, expected_rows, expected_types in aggregate_cases:
+            decoded = runner.decode_wire_result(
+                client.simple_query(server["sock"], sql), include_types=True)
+            rows, state, message, headers, command_tag, type_oids = decoded
+            assert state is None, (sql, state, message)
+            assert rows == expected_rows, (sql, rows)
+            assert type_oids == expected_types, (sql, type_oids)
+            assert command_tag == "SELECT 1", (sql, command_tag)
         print("[QUOTED ALIAS PROTOCOL E2E] passed")
     finally:
         runner.stop_ours(server)
