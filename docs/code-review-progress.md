@@ -50,13 +50,14 @@
 | 214 | P0-16 | psql 的 `NULLMARK` / `\x1f` / 换行文本格式仍会把合法用户值改成 NULL 或拆成额外行列，且没有 command tag；参考端改走 PostgreSQL wire protocol，按 DataRow 长度和 `-1` NULL 标记解码，同一连接读取 RowDescription、ErrorResponse 与 CommandComplete，并与本项目逐语句比较 tag | Python 回归 23 项通过（新增控制字符 / NULL 无损、单连接和 tag mismatch）；实际 PG 对 NULL、空串、文本 `NULLMARK`、换行和 `chr(31)` 返回一个精确 5 列行及 `SELECT 1`，只读 `arith_select` 差分通过。当前参考容器为 PG 17.2，PG 18.6、manifest、并发 / crash / catalog 差分和零 allowlist 发布门仍未完成 | `0305306` |
 | 215 | P0-16 | header 差分被 `orows` 条件保护，零行 SELECT 即使 RowDescription 错误也会被判为一致；成功结果只要本项目返回列描述就比较参考 headers，不再依赖是否有 DataRow | 修复前的模拟零行错误列名无差异，修复后报告 `headers differ`；Python 回归 24 项通过，实际 `SELECT 1 WHERE false` 的零行 header / `SELECT 0` tag 差分通过 | `6461934` |
 | 216 | P0-16 | wire runner 读取 RowDescription 时只保留列名，类型错误无法发现；解码并逐列比较 PostgreSQL type OID | 模拟 `int4(23)` 对 `text(25)` 现在报告 `column type OIDs differ`，Python 回归 25 项通过；实际文本常量类型差分通过，而 `SELECT 1` 明确复现本项目错误返回 OID 25（PG 为 23），已作为下一项 P0-02 / TYPE 修复输入 | `9a32cdb` |
+| 217 | P0-02 / QRY-01 / TYPE-01,02,06,07,20,21 | 无 FROM 结构化结果未发布表达式类型，所有列默认 text；ExprHelper 现在保留 evaluator type，结果发布 `columnTypes`，补 regtype OID，并移除会丢掉类型的 typed-literal 预处理，类型关键字大小写均可识别 | 协议回归精确检查 int4 23、numeric 1700、bool 16、date 1082、timestamp 1114、name 19、regtype 2206 与 `SELECT 1` tag；`arith_select`、`bool_null`、`cast_arith`、`typed_fromless` 四组实际 PG 差分通过，literal / whitespace / review / FETCH / LIMIT / 完整协议相邻回归通过 | `655fdeb` |
 
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias 与无 FROM 普通投影已由第 211–212 项迁移；表查询、CTE / set operation、legacy scalar subquery 及二进制值仍存在显示文本边界，继续计入总清单。
-- P0-02 / TYPE：无 FROM 的结构化值尚未发布 `columnTypes`，`SELECT 1` 的 RowDescription 为 text OID 25，而参考 PostgreSQL 为 int4 OID 23。
+- P0-02 / TYPE：第 217 项已修复无 FROM 基础表达式的已知 OID 回退；表查询、复杂表达式、数组 / composite / domain、typmod 和 binary format 类型元数据仍需完整差分。
 
-### 本批验证记录（第 197–216 项）
+### 本批验证记录（第 197–217 项）
 
 - 27 个 C++ 测试通过：15 个子查询回归、parser_phase1，以及表达式、布尔、数组、集合聚合、分组键、并行、Volcano、窗口、布尔聚合、分位数和异常解锁的 11 个相邻测试。使用当前生产库对象重新链接，在隔离目录运行。
 - Python 单元测试 31 项通过：总账校验 6 项、差分工具 25 项。
