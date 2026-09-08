@@ -79,13 +79,91 @@ def reference_query(sql):
     return rows, state, tag, err.strip()
 
 
+def describe_statement(sql):
+    """Remove the sole SQL terminator, never letting psql execute it before gdesc.
+
+    Quotes/comments matter here: rstrip(';') leaves a terminator followed by
+    a comment, while splitting on every semicolon corrupts literal values.
+    Reference sessions use PostgreSQL's default standard-conforming strings;
+    E-strings, dollar quotes and nested block comments are handled explicitly.
+    """
+    end = None
+    i = 0
+    identifier_char = lambda c: c.isalnum() or c in "_$"
+    while i < len(sql):
+        if sql[i].isspace():
+            i += 1
+            continue
+        if sql.startswith("--", i):
+            while i < len(sql) and sql[i] not in "\r\n":
+                i += 1
+            continue
+        if sql.startswith("/*", i):
+            depth = 1
+            i += 2
+            while i < len(sql) and depth:
+                if sql.startswith("/*", i):
+                    depth += 1
+                    i += 2
+                elif sql.startswith("*/", i):
+                    depth -= 1
+                    i += 2
+                else:
+                    i += 1
+            if depth:
+                raise RuntimeError("unterminated comment in reference descriptor query")
+            continue
+        if sql[i] == ";":
+            if end is None:
+                end = i
+            i += 1
+            continue
+        if end is not None:
+            raise RuntimeError("reference description requires exactly one SQL statement")
+        if sql[i] in "'\"":
+            quote = sql[i]
+            escaped = quote == "'" and i > 0 and sql[i - 1] in "eE" and (
+                i < 2 or not identifier_char(sql[i - 2]))
+            i += 1
+            while i < len(sql):
+                if escaped and sql[i] == "\\":
+                    i += 2
+                elif sql[i] == quote:
+                    i += 1
+                    if i < len(sql) and sql[i] == quote:
+                        i += 1
+                    else:
+                        break
+                else:
+                    i += 1
+            else:
+                raise RuntimeError("unterminated quote in reference descriptor query")
+            continue
+        if sql[i] == "$" and (i == 0 or not identifier_char(sql[i - 1])):
+            tag = re.match(r"\$(?:[^\W\d]\w*)?\$", sql[i:])
+            if tag:
+                delimiter = tag.group(0)
+                close = sql.find(delimiter, i + len(delimiter))
+                if close < 0:
+                    raise RuntimeError("unterminated dollar quote in reference descriptor query")
+                i = close + len(delimiter)
+                continue
+        if sql[i] == "\\":
+            raise RuntimeError("psql meta-commands are not reference descriptor SQL")
+        i += 1
+    statement = sql[:end].rstrip() if end is not None else sql.rstrip()
+    if not statement.strip():
+        raise RuntimeError("reference description requires a SQL statement")
+    return statement
+
+
 def reference_headers(sql):
     """Describe one statement without executing volatile or modifying SQL twice."""
     proc = subprocess.run(
         ["docker", "exec", "-i", CONTAINER,
          "psql", "-U", "postgres", "-d", "postgres",
          "-v", "ON_ERROR_STOP=0", "-X", "-q", "--csv"],
-        input=(sql.rstrip().rstrip(";") + "\n\\gdesc\n").encode(), capture_output=True)
+        input=(describe_statement(sql) + "\n\\gdesc\n").encode(), capture_output=True)
     out = proc.stdout.decode()
     err = proc.stderr.decode()
     if proc.returncode != 0 or re.search(r"^(ERROR|FATAL):", err, re.M):

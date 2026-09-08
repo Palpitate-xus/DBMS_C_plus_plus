@@ -103,6 +103,28 @@ class DifferentialHeadersTest(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 RUNNER.reference_headers("SELECT 1")
 
+    def test_terminal_semicolon_before_comment_does_not_execute_the_query(self):
+        output = subprocess.CompletedProcess([], 0, b"Column,Type\nx,integer\n", b"")
+        with mock.patch.object(RUNNER.subprocess, "run", return_value=output) as run:
+            self.assertEqual(RUNNER.reference_headers("SELECT 1 AS x; -- trailing comment"), ["x"])
+        self.assertEqual(run.call_args.kwargs["input"], b"SELECT 1 AS x\n\\gdesc\n")
+
+    def test_multiple_statements_are_rejected_before_calling_psql(self):
+        with mock.patch.object(RUNNER.subprocess, "run") as run:
+            with self.assertRaises(RuntimeError):
+                RUNNER.reference_headers("SELECT 1; SELECT 2;")
+            run.assert_not_called()
+
+    def test_quoted_semicolons_and_comment_quotes_are_not_terminators(self):
+        statements = ["SELECT ';' AS x", 'SELECT 1 AS "semi;colon"',
+                      "SELECT $$semi;colon$$ AS x", "SELECT E'it\\'s;' AS x",
+                      "SELECT /* ' ; /* nested */ */ 1 AS x"]
+        output = subprocess.CompletedProcess([], 0, b"Column,Type\nx,text\n", b"")
+        for sql in statements:
+            with self.subTest(sql=sql), mock.patch.object(RUNNER.subprocess, "run", return_value=output) as run:
+                RUNNER.reference_headers(sql + "; -- end")
+                self.assertEqual(run.call_args.kwargs["input"], (sql + "\n\\gdesc\n").encode())
+
 
 if __name__ == "__main__":
     unittest.main()
