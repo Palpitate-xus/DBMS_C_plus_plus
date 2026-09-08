@@ -504,7 +504,7 @@ static string sqlProcessor(string raw) {
         string out;
         size_t i = 0;
         while (i < raw.size()) {
-            size_t bracketOpen = raw.find('[', i);
+            size_t bracketOpen = findTextOutsideQuotes(raw, "[", i);
             if (bracketOpen == string::npos) {
                 out += raw.substr(i);
                 break;
@@ -518,7 +518,7 @@ static string sqlProcessor(string raw) {
                 ++i;
                 continue;
             }
-            size_t bracketClose = raw.find(']', bracketOpen);
+            size_t bracketClose = findTextOutsideQuotes(raw, "]", bracketOpen);
             if (bracketClose == string::npos) {
                 out += raw.substr(i);
                 break;
@@ -542,14 +542,14 @@ static string sqlProcessor(string raw) {
     // = ANY still satisfiable by a non-null match).
     {
         auto rewriteQuantifiedArray = [](const string& in) -> string {
-            string low;
-            for (char c : in) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
             string out = in;
             for (size_t q = 0; ; ) {
                 // An ARRAY[...] literal has already been rewritten to
                 // array_get(array, e1, e2, ...) upstream; accept both forms.
-                const size_t anyPos = low.find(" any (array", q);
-                const size_t allPos = low.find(" all (array", q);
+                const size_t anyPos =
+                    findTextOutsideQuotes(out, " any (array", q);
+                const size_t allPos =
+                    findTextOutsideQuotes(out, " all (array", q);
                 bool isAny = true;
                 size_t found = anyPos;
                 if (anyPos == string::npos ||
@@ -572,14 +572,16 @@ static string sqlProcessor(string raw) {
                 // already-rewritten array_get(array, e1, e2) call form.
                 string elems;
                 size_t consumed = 0;
-                const size_t bOpen = out.find('[', found);
+                const size_t bOpen = findTextOutsideQuotes(out, "[", found);
                 if (bOpen != string::npos && bOpen > found) {
-                    const size_t bClose = out.find(']', bOpen);
+                    const size_t bClose =
+                        findTextOutsideQuotes(out, "]", bOpen);
                     if (bClose == string::npos || bClose < bOpen) { q = found + 1; continue; }
                     elems = out.substr(bOpen + 1, bClose - bOpen - 1);
                     consumed = bClose + 1;
                 } else {
-                    const size_t pOpen = out.find('(', found);
+                    const size_t pOpen =
+                        findTextOutsideQuotes(out, "(", found);
                     if (pOpen == string::npos) { q = found + 1; continue; }
                     size_t depth = 0, pClose = string::npos;
                     for (size_t i2 = pOpen; i2 < out.size(); ++i2) {
@@ -604,8 +606,6 @@ static string sqlProcessor(string raw) {
                     repl = " not in (" + joined + ") ";
                 } else { q = found + 1; continue; }
                 out = out.substr(0, opStart) + repl + out.substr(consumed);
-                low.clear();
-                for (char c : out) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
                 q = opStart + repl.size();
             }
             return out;
@@ -714,7 +714,8 @@ static string sqlProcessor(string raw) {
             size_t fromAt = string::npos;
             {
                 size_t scan = 0;
-                while ((scan = raw.find(" from ", scan)) != string::npos) {
+                while ((scan = findTextOutsideQuotes(
+                            raw, " from ", scan)) != string::npos) {
                     fromAt = scan;
                     scan += 6;
                 }
@@ -728,7 +729,7 @@ static string sqlProcessor(string raw) {
                     string low;
                     for (char c : h) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
                     size_t p = 0;
-                    while ((p = low.find(kw, p)) != string::npos) {
+                    while ((p = findTextOutsideQuotes(h, kw, p)) != string::npos) {
                         const bool leftOk = (p == 0) || (!isalnum(static_cast<unsigned char>(h[p - 1])) && h[p - 1] != (char)95);
                         const size_t after = p + kl;
                         const bool rightOk = (after >= low.size()) || (!isalnum(static_cast<unsigned char>(low[after])) && low[after] != (char)95);
@@ -761,7 +762,8 @@ static string sqlProcessor(string raw) {
         }
         size_t pos = 0;
         // IS NOT DISTINCT FROM first (longer match)
-        while ((pos = raw.find("is not distinct from", pos)) != string::npos) {
+        while ((pos = findTextOutsideQuotes(
+                    raw, "is not distinct from", pos)) != string::npos) {
             auto [leftStart, leftExpr] = extractExprBefore(pos);
             auto [rightEnd, rightExpr] = extractExprAfter(pos, 20);
             string replacement = "((" + leftExpr + " = " + rightExpr + ") or (" + leftExpr + " is null and " + rightExpr + " is null))";
@@ -769,7 +771,8 @@ static string sqlProcessor(string raw) {
             pos = leftStart + replacement.size();
         }
         pos = 0;
-        while ((pos = raw.find("is distinct from", pos)) != string::npos) {
+        while ((pos = findTextOutsideQuotes(
+                    raw, "is distinct from", pos)) != string::npos) {
             auto [leftStart, leftExpr] = extractExprBefore(pos);
             auto [rightEnd, rightExpr] = extractExprAfter(pos, 16);
             string replacement = "((" + leftExpr + " <> " + rightExpr + ") or (" + leftExpr + " is null and " + rightExpr + " is not null) or (" + leftExpr + " is not null and " + rightExpr + " is null))";
@@ -781,34 +784,26 @@ static string sqlProcessor(string raw) {
     // decodes; substr(...) is the historical alias and is normalized to
     // substring(...) as well.
     {
-        string low;
-        for (char c : raw) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
         size_t p = 0;
         while (true) {
-            const size_t s1 = low.find("substring(", p);
-            const size_t s2 = low.find("substr(", p);
+            const size_t s1 = findTextOutsideQuotes(raw, "substring(", p);
+            const size_t s2 = findTextOutsideQuotes(raw, "substr(", p);
             size_t hit = string::npos;
             size_t kwLen = 0;
             if (s1 != string::npos && (s2 == string::npos || s1 <= s2)) { hit = s1; kwLen = 10; }
             else if (s2 != string::npos) { hit = s2; kwLen = 7; }
             if (hit == string::npos) break;
             const size_t openAt = hit;
-            int depth = 0; size_t close = string::npos;
-            for (size_t i = openAt + kwLen - 1; i < raw.size(); ++i) {
-                if (raw[i] == '(') ++depth;
-                else if (raw[i] == ')') { if (--depth == 0) { close = i; break; } }
-            }
+            size_t close = findMatchingParen(raw, openAt + kwLen - 1);
             if (close == string::npos) { p = openAt + kwLen; continue; }
             string args = raw.substr(openAt + kwLen, close - openAt - kwLen);
-            string lowArgs;
-            for (char c : args) lowArgs += static_cast<char>(tolower(static_cast<unsigned char>(c)));
-            const size_t fAt = lowArgs.find(" from ");
+            const size_t fAt = findTextOutsideQuotes(args, " from ");
             string repl;
             if (fAt != string::npos) {
                 string base = args.substr(0, fAt);
                 string rest = args.substr(fAt + 6);
                 string lo, ln;
-                const size_t forAt = lowArgs.find(" for ", fAt);
+                const size_t forAt = findTextOutsideQuotes(args, " for ", fAt);
                 if (forAt != string::npos) {
                     lo = rest.substr(0, forAt - (fAt + 6));
                     ln = rest.substr(forAt - (fAt + 6) + 5);
@@ -824,8 +819,6 @@ static string sqlProcessor(string raw) {
             }
             if (!repl.empty()) {
                 raw = raw.substr(0, openAt) + repl + raw.substr(close + 1);
-                low.clear();
-                for (char c : raw) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
                 p = openAt + repl.size();
             } else {
                 p = close + 1;
@@ -835,28 +828,18 @@ static string sqlProcessor(string raw) {
     // position(sub in str) -> comma form (PG accepts both; the comma
     // form is what the argument splitter understands).
     {
-        string low;
-        for (char c : raw) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
         size_t p = 0;
-        while ((p = low.find("position(", p)) != string::npos) {
+        while ((p = findTextOutsideQuotes(raw, "position(", p)) != string::npos) {
             const size_t openAt = p;
-            int depth = 0; size_t close = string::npos;
-            for (size_t i = openAt + 8; i < raw.size(); ++i) {
-                if (raw[i] == '(') ++depth;
-                else if (raw[i] == ')') { if (--depth == 0) { close = i; break; } }
-            }
+            size_t close = findMatchingParen(raw, openAt + 8);
             if (close == string::npos) { p = openAt + 9; continue; }
             string args = raw.substr(openAt + 9, close - openAt - 9);
-            string lowArgs;
-            for (char c : args) lowArgs += static_cast<char>(tolower(static_cast<unsigned char>(c)));
-            const size_t inAt = lowArgs.find(" in ");
+            const size_t inAt = findTextOutsideQuotes(args, " in ");
             if (inAt != string::npos) {
                 string sub = args.substr(0, inAt);
                 string str = args.substr(inAt + 4);
                 string repl = "position(" + sub + "," + str + ")";
                 raw = raw.substr(0, openAt) + repl + raw.substr(close + 1);
-                low.clear();
-                for (char c : raw) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
                 p = openAt + repl.size();
             } else {
                 p = close + 1;
@@ -974,7 +957,7 @@ static string preprocessCaseWhen(string s) {
         // "<expr> = <value>" before the searched-case loop below.
         size_t simplePos = pos;
         while (true) {
-            size_t cp = s.find("case ", simplePos);
+            size_t cp = findTextOutsideQuotes(s, "case ", simplePos);
             if (cp == string::npos) break;
             size_t after = cp + 5;
             if (s.compare(after, 4, "when") == 0) { simplePos = cp + 5; continue; }
@@ -1001,7 +984,7 @@ static string preprocessCaseWhen(string s) {
             s = s.substr(0, cp) + "case " + trim(rebuilt) + s.substr(endPos2 + 1);
             simplePos = cp + 4;
         }
-        size_t casePos = s.find("case when", pos);
+        size_t casePos = findTextOutsideQuotes(s, "case when", pos);
         if (casePos == string::npos) break;
         size_t endPos = s.find("end", casePos);
         if (endPos == string::npos) break;

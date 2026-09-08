@@ -36,7 +36,12 @@ def main():
                  "(7, 'plain ilike word'), (8, 'plain regexp word'), "
                  "(9, 'plain contains word'), (10, 'plain overlaps word'), "
                  "(11, 'x / 0'), (12, 'x is null'), "
-                 "(13, 'x is not null'), (14, 'x similar to y');")):
+                 "(13, 'x is not null'), (14, 'x similar to y'), "
+                 "(15, 'x[1]'), (16, 'x = any (array[1])'), "
+                 "(17, 'substring(x from y)'), (18, 'position(x in y)'), "
+                 "(19, 'x is distinct from y'), "
+                 "(20, 'x is not distinct from y'), "
+                 "(21, 'case when x then y else z end');")):
             _, state, message, _ = runner.ours_query(
                 client, server["sock"], sql)
             assert state is None, (sql, state, message)
@@ -68,6 +73,13 @@ def main():
             (12, "x is null"),
             (13, "x is not null"),
             (14, "x similar to y"),
+            (15, "x[1]"),
+            (16, "x = any (array[1])"),
+            (17, "substring(x from y)"),
+            (18, "position(x in y)"),
+            (19, "x is distinct from y"),
+            (20, "x is not distinct from y"),
+            (21, "case when x then y else z end"),
         ]
         for row_id, value in rewrite_literals:
             sql = ("SELECT id FROM rewrite_literal_rows WHERE value = '" +
