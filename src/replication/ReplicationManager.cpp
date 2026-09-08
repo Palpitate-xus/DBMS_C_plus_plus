@@ -3,7 +3,6 @@
 #include "access/IndexFileUtil.h"
 
 #include <algorithm>
-#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -87,7 +86,10 @@ bool ReplicationManager::validSlotDefinition(const std::string& name,
                                              const std::string& database) {
     if (name.empty() || name.size() > 63) return false;
     for (unsigned char c : name) {
-        if (!(std::isalnum(c) || c == '_' || c == '-')) return false;
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+              c == '_')) {
+            return false;
+        }
     }
     if (type != "physical" && type != "logical") return false;
     const auto validPersistedText = [](const std::string& value) {

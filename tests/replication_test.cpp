@@ -28,6 +28,9 @@ static void test_replication_slots() {
         "slot2", "logical", "test_decoding", "testdb"));
     assert(!mgr.createReplicationSlot("slot1", "physical"));  // duplicate
     assert(!mgr.createReplicationSlot("bad/name", "physical"));
+    assert(!mgr.createReplicationSlot("bad-slot", "physical"));
+    assert(!mgr.createReplicationSlot("Upper_slot", "physical"));
+    assert(!mgr.createReplicationSlot(std::string(64, 'a'), "physical"));
     assert(!mgr.createReplicationSlot("bad_type", "unknown"));
     assert(!mgr.createReplicationSlot("physical_plugin", "physical", "plugin"));
     assert(!mgr.createReplicationSlot("logical_no_plugin", "logical"));
