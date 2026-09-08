@@ -16,6 +16,10 @@ class ReplicationManager {
 public:
     static ReplicationManager& instance();
 
+    // Configure and load the cluster-wide slot state file.  Loading replaces
+    // the in-memory catalog and resets all slots to inactive.
+    bool configureSlotStorage(const std::string& path, std::string& error);
+
     // Replication slot management (8.3)
     struct ReplicationSlot {
         std::string name;
@@ -66,8 +70,10 @@ private:
                                     const std::string& type,
                                     const std::string& plugin,
                                     const std::string& database);
+    bool persistSlotsLocked() const;
     mutable std::mutex mutex_;
     std::map<std::string, ReplicationSlot> slots_;
+    std::string slotStoragePath_;
     StandbyMode standbyMode_ = StandbyMode::None;
     std::string primaryConnInfo_;
     bool syncReplication_ = false;

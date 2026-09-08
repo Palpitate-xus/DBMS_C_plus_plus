@@ -1,14 +1,84 @@
 #include "ReplicationManager.h"
 #include "LogicalDecoder.h"
+#include "access/IndexFileUtil.h"
 
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <sstream>
 
 namespace dbms {
 
 ReplicationManager& ReplicationManager::instance() {
     static ReplicationManager mgr;
     return mgr;
+}
+
+bool ReplicationManager::configureSlotStorage(
+    const std::string& path, std::string& error) {
+    error.clear();
+    if (path.empty()) {
+        error = "replication slot storage path is required";
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::map<std::string, ReplicationSlot> loaded;
+    std::error_code filesystemError;
+    const bool stateExists = std::filesystem::exists(path, filesystemError);
+    if (filesystemError) {
+        error = "cannot inspect replication slot state";
+        return false;
+    }
+    if (stateExists) {
+        std::ifstream input(path, std::ios::binary);
+        if (!input) {
+            error = "cannot read replication slot state";
+            return false;
+        }
+        std::string header;
+        if (!std::getline(input, header) ||
+            header != "DBMS_REPLICATION_SLOTS_V1") {
+            error = "invalid replication slot state header";
+            return false;
+        }
+        std::string line;
+        while (std::getline(input, line)) {
+            if (line.empty()) continue;
+            ReplicationSlot slot;
+            std::istringstream row(line);
+            if (!(row >> std::quoted(slot.name) >> std::quoted(slot.slotType) >>
+                  std::quoted(slot.plugin) >> std::quoted(slot.database) >>
+                  slot.restartLsn) ||
+                slot.restartLsn < 0 ||
+                !validSlotDefinition(
+                    slot.name, slot.slotType, slot.plugin, slot.database)) {
+                error = "invalid replication slot state entry";
+                return false;
+            }
+            std::string trailing;
+            if (row >> trailing || loaded.count(slot.name) != 0) {
+                error = "invalid replication slot state entry";
+                return false;
+            }
+            slot.active = false;
+            loaded.emplace(slot.name, std::move(slot));
+        }
+        if (input.bad()) {
+            error = "cannot read replication slot state";
+            return false;
+        }
+    }
+
+    for (const auto& [name, slot] : slots_) {
+        (void)slot;
+        LogicalChangeStore::instance().discard(name);
+    }
+    slots_ = std::move(loaded);
+    slotStoragePath_ = path;
+    return true;
 }
 
 bool ReplicationManager::validSlotDefinition(const std::string& name,
@@ -20,6 +90,13 @@ bool ReplicationManager::validSlotDefinition(const std::string& name,
         if (!(std::isalnum(c) || c == '_' || c == '-')) return false;
     }
     if (type != "physical" && type != "logical") return false;
+    const auto validPersistedText = [](const std::string& value) {
+        return std::none_of(value.begin(), value.end(), [](unsigned char c) {
+            return c == '\0' || c == '\n' || c == '\r';
+        });
+    };
+    if (!validPersistedText(plugin) || !validPersistedText(database))
+        return false;
     return type == "physical"
         ? plugin.empty() && database.empty()
         : !plugin.empty() && !database.empty();
@@ -39,6 +116,11 @@ bool ReplicationManager::createReplicationSlot(const std::string& name,
     slot.database = database;
     slot.active = false;
     slots_[name] = std::move(slot);
+    if (!persistSlotsLocked()) {
+        slots_.erase(name);
+        (void)persistSlotsLocked();
+        return false;
+    }
     return true;
 }
 
@@ -47,7 +129,13 @@ bool ReplicationManager::dropReplicationSlot(const std::string& name) {
     auto it = slots_.find(name);
     if (it == slots_.end()) return false;
     if (it->second.active) return false;  // cannot drop active slot
+    const ReplicationSlot removed = it->second;
     slots_.erase(it);
+    if (!persistSlotsLocked()) {
+        slots_.emplace(name, removed);
+        (void)persistSlotsLocked();
+        return false;
+    }
     LogicalChangeStore::instance().discard(name);
     return true;
 }
@@ -81,7 +169,13 @@ bool ReplicationManager::advanceSlotLsn(const std::string& name, int64_t newRest
     auto it = slots_.find(name);
     if (it == slots_.end()) return false;
     if (newRestartLsn < it->second.restartLsn) return false;  // never rewind
+    const int64_t previousRestartLsn = it->second.restartLsn;
     it->second.restartLsn = newRestartLsn;
+    if (!persistSlotsLocked()) {
+        it->second.restartLsn = previousRestartLsn;
+        (void)persistSlotsLocked();
+        return false;
+    }
     return true;
 }
 
@@ -101,6 +195,18 @@ void ReplicationManager::publishLogicalBatch(
         if (slot.slotType != "logical" || slot.database != database) continue;
         LogicalChangeStore::instance().append(name, batch);
     }
+}
+
+bool ReplicationManager::persistSlotsLocked() const {
+    if (slotStoragePath_.empty()) return true;
+    std::ostringstream output;
+    output << "DBMS_REPLICATION_SLOTS_V1\n";
+    for (const auto& [name, slot] : slots_) {
+        output << std::quoted(name) << ' ' << std::quoted(slot.slotType) << ' '
+               << std::quoted(slot.plugin) << ' '
+               << std::quoted(slot.database) << ' ' << slot.restartLsn << '\n';
+    }
+    return index_file::writeAtomically(slotStoragePath_, output.str());
 }
 
 bool ReplicationManager::promote() {

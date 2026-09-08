@@ -23120,6 +23120,12 @@ int main(int argc, char* argv[]) {
     dbms::QueryPlanner::setParallelWorkers(g_config.maxParallelWorkersPerGather);
     syncPlannerCostModel(g_config);
     syncConnectionRuntimeConfig(g_config);
+    std::string replicationStateError;
+    if (!dbms::ReplicationManager::instance().configureSlotStorage(
+            ".replication_slots", replicationStateError)) {
+        std::cerr << "FATAL: " << replicationStateError << std::endl;
+        return 1;
+    }
     // TDE: load the keyring before any data file opens.
     if (!g_config.tdeKeyring.empty()) {
         std::string tdeError;

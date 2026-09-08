@@ -4,13 +4,23 @@
 
 #include "replication/ReplicationManager.h"
 #include "replication/LogicalDecoder.h"
+#include "test_utils.h"
 #include <cassert>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 
 using namespace dbms;
 
 static void test_replication_slots() {
     auto& mgr = ReplicationManager::instance();
+    const std::string stateDir = testDbPath("replication_slot_state");
+    cleanupTestDb("replication_slot_state");
+    std::filesystem::create_directories(stateDir);
+    const std::string statePath =
+        (std::filesystem::path(stateDir) / "slots.state").string();
+    std::string storageError;
+    assert(mgr.configureSlotStorage(statePath, storageError));
 
     // Create slots
     assert(mgr.createReplicationSlot("slot1", "physical"));
@@ -42,6 +52,16 @@ static void test_replication_slots() {
     assert(LogicalChangeStore::instance().depth("slot2") == 0);
     mgr.publishLogicalBatch("testdb", batch);
     assert(LogicalChangeStore::instance().depth("slot2") == 1);
+    assert(mgr.advanceSlotLsn("slot2", 42));
+    assert(mgr.activateReplicationSlot("slot2"));
+
+    // Reloading the durable file simulates a process restart: identity and
+    // restart LSN survive, active and in-memory change queues do not.
+    assert(mgr.configureSlotStorage(statePath, storageError));
+    s2 = mgr.findSlot("slot2");
+    assert(s2 && s2->database == "testdb" && s2->restartLsn == 42);
+    assert(!s2->active);
+    assert(LogicalChangeStore::instance().depth("slot2") == 0);
 
     assert(mgr.activateReplicationSlot("slot1"));
     assert(mgr.findSlot("slot1")->active);
@@ -57,6 +77,27 @@ static void test_replication_slots() {
     assert(!mgr.findSlot("slot1").has_value());
     assert(!mgr.dropReplicationSlot("slot1"));  // already dropped
     assert(mgr.dropReplicationSlot("slot2"));
+
+    // A persistence error rolls the in-memory catalog back as well.
+    const std::string missingParentPath =
+        (std::filesystem::path(stateDir) / "missing" / "slots.state").string();
+    assert(mgr.configureSlotStorage(missingParentPath, storageError));
+    assert(!mgr.createReplicationSlot("not_persisted", "physical"));
+    assert(!mgr.findSlot("not_persisted"));
+
+    // Malformed durable state is rejected without replacing the live state.
+    {
+        std::ofstream corrupt(statePath, std::ios::trunc);
+        corrupt << "BROKEN_SLOT_STATE\n";
+    }
+    assert(!mgr.configureSlotStorage(statePath, storageError));
+    assert(storageError.find("header") != std::string::npos);
+    assert(!mgr.findSlot("not_persisted"));
+    {
+        std::ofstream valid(statePath, std::ios::trunc);
+        valid << "DBMS_REPLICATION_SLOTS_V1\n";
+    }
+    assert(mgr.configureSlotStorage(statePath, storageError));
 
     std::cout << "[REPLICATION] slots OK" << std::endl;
 }
@@ -92,6 +133,7 @@ int main() {
     test_replication_slots();
     test_standby_mode();
     test_wal_shipping_config();
+    cleanupTestDb("replication_slot_state");
     std::cout << "[REPLICATION] all passed" << std::endl;
     return 0;
 }
