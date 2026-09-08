@@ -50,4 +50,15 @@ std::string featureNotSupportedError(const std::string& command) {
            " is not implemented (SQLSTATE 0A000)";
 }
 
+std::string postgresSyntaxError(const std::string& command) {
+    return "ERROR: syntax error: " + command +
+           " is not PostgreSQL syntax (SQLSTATE 42601)";
+}
+
+std::string unrecognizedConfigurationParameterError(
+    const std::string& parameter) {
+    return "ERROR: unrecognized configuration parameter \"" + parameter +
+           "\" (SQLSTATE 42704)";
+}
+
 } // namespace dbms

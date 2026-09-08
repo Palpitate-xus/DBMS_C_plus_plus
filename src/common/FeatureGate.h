@@ -43,4 +43,13 @@ bool compatKindAlwaysUnsupported(const std::string& kind);
 //   "ERROR: feature not supported: CREATE EXTENSION is not implemented (SQLSTATE 0A000)"
 std::string featureNotSupportedError(const std::string& command);
 
+// Reject project-only SQL in postgresql18 mode using the SQLSTATE that the
+// PostgreSQL parser would expose, while retaining an actionable hint.
+std::string postgresSyntaxError(const std::string& command);
+
+// SHOW <project-name> is parsed by PostgreSQL as a GUC lookup, so an unknown
+// single-token name is an undefined object rather than unsupported syntax.
+std::string unrecognizedConfigurationParameterError(
+    const std::string& parameter);
+
 } // namespace dbms

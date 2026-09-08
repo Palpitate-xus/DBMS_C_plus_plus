@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DIV-14 regression: capability-gated commands must fail with 0A000.
+"""DIV compatibility regression for capability and syntax gates.
 
 Blueprint item DIV-14 / CAT-22: commands that previously only stored a
 record in .pg_compat_objects while reporting success (CREATE EXTENSION,
@@ -20,7 +20,8 @@ import subprocess
 import tempfile
 import time
 
-DBMS_MAIN = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "dbms_main"))
+DBMS_MAIN = os.path.abspath(os.environ.get(
+    "DBMS_MAIN", os.path.join(os.path.dirname(__file__), "..", "dbms_main")))
 SOCKET_TIMEOUT = float(os.environ.get("DBMS_PROTOCOL_TEST_TIMEOUT", "10"))
 STARTUP_TIMEOUT = float(os.environ.get("DBMS_PROTOCOL_STARTUP_TIMEOUT", "15"))
 
@@ -64,6 +65,19 @@ def expect_0a000(sock, sql, label):
     state, message = err
     assert state == "0A000", "%s: expected SQLSTATE 0A000, got %r (%s)" % (label, state, message)
     assert "feature not supported" in message, "%s: unexpected message %r" % (label, message)
+
+
+def expect_error(sock, sql, expected_state, label, message_fragment=None):
+    messages = simple_query(sock, sql)
+    err = error_of(messages)
+    assert err is not None, "%s: expected ErrorResponse, got %r" % (label, messages)
+    state, message = err
+    assert state == expected_state, \
+        "%s: expected SQLSTATE %s, got %r (%s)" % (
+            label, expected_state, state, message)
+    if message_fragment is not None:
+        assert message_fragment in message, \
+            "%s: expected %r in %r" % (label, message_fragment, message)
 
 
 def expect_command_tag(sock, sql, label):
@@ -208,17 +222,15 @@ def main():
             assert err is not None and err[0] == "42601" and hint in err[1], \
                 "%s must fail with 42601 syntax error mentioning %s: %r" % (sql, hint, err)
 
-        # DIV-10: project admin commands -> 0A000 with tool hints.
+        # DIV-10: project-only admin grammar is a PostgreSQL syntax error;
+        # retain tool hints without misclassifying it as a server capability.
         for sql, tool in [
             ("DUMP DATABASE info TO '/tmp/x.sql'", "pg_dump"),
             ("BACKUP DATABASE info TO '/tmp/x.bak'", "pg_basebackup"),
             ("RESTORE DATABASE info FROM '/tmp/x.bak'", "pg_restore"),
             ("CLEAR PLAN CACHE", "project extension"),
         ]:
-            messages = simple_query(sock, sql)
-            err = error_of(messages)
-            assert err is not None and err[0] == "0A000" and tool in err[1], \
-                "%s must fail with 0A000 mentioning %s: %r" % (sql, tool, err)
+            expect_error(sock, sql, "42601", sql, tool)
 
         # DIV-08: CREATE ASSERTION is unsupported in BOTH modes, exactly
         # like PostgreSQL 18 (which never implemented SQL assertions).
@@ -235,13 +247,13 @@ def main():
             assert err is not None and err[0] == "42704" and guc in err[1], \
                 "SHOW %s must be unrecognized parameter 42704: %r" % (guc, err)
 
-        # DIV-09: plain-SQL slot management and SHOW LOGICAL are project
-        # interfaces; PostgreSQL uses the replication protocol.
+        # DIV-09: plain-SQL slot management and SHOW LOGICAL are not
+        # PostgreSQL SQL grammar; PostgreSQL uses the replication protocol.
         for sql in ["CREATE REPLICATION SLOT s1",
                     "DROP REPLICATION SLOT s1",
                     "SHOW REPLICATION SLOTS",
                     "SHOW LOGICAL CHANGES FOR SLOT s1"]:
-            expect_0a000(sock, sql, sql)
+            expect_error(sock, sql, "42601", sql)
 
         # DIV-02/03/04: MySQL-style syntax is rejected with 42601 in
         # postgresql18 mode.
@@ -253,20 +265,23 @@ def main():
             assert err is not None and err[0] == "42601", \
                 "%s must fail with 42601: %r" % (sql, err)
 
-        # DIV-05: project meta-commands are gated; PostgreSQL
-        # introspection goes through catalog queries.
-        for sql in ["DESC t", "DESCRIBE t", "VIEW TABLE t", "VIEW DATABASE",
-                    "SHOW USERS", "SHOW ROLES", "SHOW POOLS"]:
-            expect_0a000(sock, sql, sql)
+        # DIV-05: project meta-command grammar is 42601.  A one-token SHOW
+        # name is instead parsed as a GUC lookup and returns 42704.
+        for sql in ["DESC t", "DESCRIBE t", "VIEW TABLE t", "VIEW DATABASE"]:
+            expect_error(sock, sql, "42601", sql)
+        for sql, parameter in [("SHOW USERS", "users"),
+                               ("SHOW ROLES", "roles"),
+                               ("SHOW POOLS", "pools")]:
+            expect_error(sock, sql, "42704", sql, parameter)
 
         # DIV-01: USE DATABASE is not PostgreSQL SQL; the connection must
         # stay alive and the session state must be untouched.
         err = error_of(simple_query(sock, "USE DATABASE info"))
-        assert err is not None and err[0] == "0A000", \
-            "USE DATABASE must fail with 0A000 in postgresql18 mode: %r" % (err,)
+        assert err is not None and err[0] == "42601", \
+            "USE DATABASE must fail with 42601 in postgresql18 mode: %r" % (err,)
         err = error_of(simple_query(sock, "use info"))
-        assert err is not None and err[0] == "0A000", \
-            "short 'use' form must fail with 0A000 too: %r" % (err,)
+        assert err is not None and err[0] == "42601", \
+            "short 'use' form must fail with 42601 too: %r" % (err,)
         alive = [m for m in simple_query(sock, "SELECT 1 + 1") if m[0] == b"D"]
         assert alive, "connection must stay usable after gated USE DATABASE"
 

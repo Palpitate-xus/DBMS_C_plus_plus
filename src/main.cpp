@@ -12035,7 +12035,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 // DIV-09: plain-SQL slot management is a project
                 // interface; PostgreSQL uses the replication protocol or
                 // pg_create/drop_*_replication_slot() functions.
-                cout << dbms::featureNotSupportedError(
+                cout << dbms::postgresSyntaxError(
                     string(pre.rfind("create", 0) == 0
                                ? "CREATE REPLICATION SLOT as SQL"
                                : "DROP REPLICATION SLOT as SQL") +
@@ -12247,7 +12247,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             // keeps this project command; postgresql18 mode refuses it
             // before touching any session state.
             if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
-                cout << dbms::featureNotSupportedError(
+                cout << dbms::postgresSyntaxError(
                     "USE DATABASE (reconnect to switch databases)") << endl;
                 return true;
             }
@@ -14437,7 +14437,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
     if (sql.substr(0, 4) == "dump") {
         // DIV-10: project dump command; PostgreSQL uses pg_dump/pg_dumpall.
         if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
-            cout << dbms::featureNotSupportedError(
+            cout << dbms::postgresSyntaxError(
                 "DUMP (use pg_dump)") << endl;
             return true;
         }
@@ -14526,7 +14526,7 @@ if (sql.rfind("backup database", 0) == 0) {
         // DIV-10: project physical backup command; PostgreSQL uses
         // pg_basebackup / the backup API.
         if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
-            cout << dbms::featureNotSupportedError(
+            cout << dbms::postgresSyntaxError(
                 "BACKUP DATABASE (use pg_basebackup)") << endl;
             return true;
         }
@@ -14557,7 +14557,7 @@ if (sql.rfind("backup database", 0) == 0) {
         // DIV-10: project restore command; PostgreSQL restores via
         // pg_restore / recovery.signal with restore_command.
         if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
-            cout << dbms::featureNotSupportedError(
+            cout << dbms::postgresSyntaxError(
                 "RESTORE DATABASE (use pg_restore or recovery with "
                 "restore_command)") << endl;
             return true;
@@ -14678,7 +14678,7 @@ if (sql.rfind("backup database", 0) == 0) {
         // DIV-10: project maintenance command; PostgreSQL does not expose
         // plan cache clearing as SQL.
         if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
-            cout << dbms::featureNotSupportedError(
+            cout << dbms::postgresSyntaxError(
                 "CLEAR PLAN CACHE (project extension)") << endl;
             return true;
         }
@@ -15177,7 +15177,7 @@ if (sql.rfind("backup database", 0) == 0) {
             // interfaces; PostgreSQL consumes slots through the
             // replication protocol.
             if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
-                cout << dbms::featureNotSupportedError(
+                cout << dbms::postgresSyntaxError(
                     "SHOW LOGICAL (use the replication protocol or "
                     "pg_replication_slots)") << endl;
                 return true;
@@ -15254,8 +15254,8 @@ if (sql.rfind("backup database", 0) == 0) {
         if (rest == "pools") {
             // DIV-05: connection pool introspection is a project extension.
             if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
-                cout << dbms::featureNotSupportedError(
-                    "SHOW POOLS (project extension)") << endl;
+                cout << dbms::unrecognizedConfigurationParameterError(
+                    "pools") << endl;
                 return true;
             }
             const auto st = dbms::ConnectionPool::instance().stats();
@@ -15685,8 +15685,8 @@ if (sql.rfind("backup database", 0) == 0) {
             // DIV-05: SHOW USERS is a project meta-command; PostgreSQL
             // introspects roles via pg_roles / pg_user.
             if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
-                cout << dbms::featureNotSupportedError(
-                    "SHOW USERS (query pg_roles instead)") << endl;
+                cout << dbms::unrecognizedConfigurationParameterError(
+                    "users") << endl;
                 return true;
             }
             if (!checkAdmin(s)) return true;
@@ -15704,8 +15704,8 @@ if (sql.rfind("backup database", 0) == 0) {
         }
         if (rest == "roles") {
             if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
-                cout << dbms::featureNotSupportedError(
-                    "SHOW ROLES (query pg_roles instead)") << endl;
+                cout << dbms::unrecognizedConfigurationParameterError(
+                    "roles") << endl;
                 return true;
             }
             if (!checkAdmin(s)) return true;
@@ -21924,7 +21924,7 @@ if (sql.rfind("backup database", 0) == 0) {
         // postgresql18 mode introspection goes through catalog queries
         // (psql \d), not server-side DESC.
         if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
-            cout << dbms::featureNotSupportedError(
+            cout << dbms::postgresSyntaxError(
                 "DESC (query information_schema or pg_catalog instead)") << endl;
             return true;
         }
@@ -21953,7 +21953,7 @@ if (sql.rfind("backup database", 0) == 0) {
     if (sql.substr(0, 4) == "view") {
         // DIV-05: VIEW TABLE / VIEW DATABASE are project meta-commands.
         if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
-            cout << dbms::featureNotSupportedError(
+            cout << dbms::postgresSyntaxError(
                 "VIEW TABLE/VIEW DATABASE "
                 "(query information_schema or pg_catalog instead)") << endl;
             return true;
