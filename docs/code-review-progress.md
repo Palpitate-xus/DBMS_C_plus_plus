@@ -78,6 +78,7 @@
 | 242 | P0-02 / SQL-12 / QRY-01 / PROTO-04 | 普通列 OR 查询按格式化后的投影文本去重，既会把投影值相同的不同物理行误删，也会破坏 SQL NULL、文本 `NULL` 和嵌入换行。为普通表结构化查询返回内部 row id，各 OR 分支按行身份合并并同步保留 cells/NULL bitmap | 协议 E2E 用重叠 OR 覆盖两个相同投影值、文本 NULL、SQL NULL 和嵌入换行，确认 5 条物理记录各返回一次；精确协议测试及实际 PostgreSQL 122 组差分通过。多 OR 的全局 ORDER BY 仍待下一项统一 | `eb57664` |
 | 243 | P0-02 / SQL-12 / QRY-01,10 / PROTO-04 | 普通列多 OR 查询让每个分支分别 ORDER BY 后再串接，后分支的新行可能属于全局结果最前面。取得同一可见整表的有序 row-id 序列，为已按身份合并的结果建立全局排名，并用同一排列同步重排显示行、精确 cells 和 NULL bitmap | 协议 E2E 覆盖重叠 OR 后按未投影 `id DESC` 排序，旧结果 `4,3,2,1,5` 现为 `5,4,3,2,1`，且 NULL、文本 NULL、换行与重复值均保真；实际 PostgreSQL 122 组差分保持 `failed=0` | `94410a9` |
 | 244 | P0-02 / SQL-12 / QRY-01,10 / PROTO-04 | 普通列按输出 alias/ordinal 排序时只重排显示字符串，协议仍发布未排序结构化行；存储排序又以空字符串判断 NULL。建立 SELECT 输出列到存储列的映射并同步排列精确结果，NULL 排序改读真实 NULL 位 | 协议 E2E 覆盖反顺序投影、alias ORDER BY、空串、SQL NULL、文本 NULL、换行和边界空格；旧路径把空串与 NULL 一起放末尾，现按二进制文本序及 PG 默认 NULL 位置返回。122 组差分保持 `failed=0` | `866b947` |
+| 245 | P0-02 / SQL-12 / QRY-01,09,10 / PROTO-04 | 普通列 DISTINCT 与 LIMIT/OFFSET 会关闭结构化通道，随后按显示文本去重、切片并由协议反解析。允许基础普通投影保留精确结果，以 cells+NULL bitmap 为 DISTINCT 键，并同步切片显示行和结构化行 | 协议 E2E 覆盖重复文本、文本 `NULL`、SQL NULL、嵌入换行的 DISTINCT，以及跨 NULL/文本 NULL/换行的 LIMIT 3 OFFSET 2；精确协议与实际 PostgreSQL 122 组差分通过 | `cbcc771` |
 
 本批新增的待修复复现（仍计入总清单）：
 
