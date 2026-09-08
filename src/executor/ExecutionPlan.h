@@ -35,6 +35,18 @@ public:
         return false;
     }
 
+    // Operators that synthesize result cells (aggregates, joins, windows)
+    // can expose the exact row separately from their legacy display string.
+    // This keeps SQL NULL distinct from text "NULL" and preserves embedded
+    // whitespace for protocol consumers.
+    virtual bool supportsStructuredRows() const { return false; }
+    virtual bool lastStructuredRow(std::vector<std::string>& cells,
+                                   std::vector<bool>& nulls) const {
+        (void)cells;
+        (void)nulls;
+        return false;
+    }
+
     // Origin of the most recent next() row: the scan node that produced
     // it (engine + location), for stored-NULL rebinding after buffering
     // operators (sort, limit) re-emit rows later. Null origin when the
@@ -80,6 +92,9 @@ using OpPtr = std::unique_ptr<Operator>;
 
 struct PlanExecutionResult {
     std::vector<std::string> rows;
+    std::vector<std::vector<std::string>> structuredRows;
+    std::vector<std::vector<bool>> structuredNulls;
+    bool structuredRowsAvailable = false;
     bool ok = true;
     std::string error;
 };
@@ -881,6 +896,9 @@ public:
 
     bool open() override;
     bool next(std::string& outRow) override;
+    bool supportsStructuredRows() const override { return true; }
+    bool lastStructuredRow(std::vector<std::string>& cells,
+                           std::vector<bool>& nulls) const override;
     void close() override;
     Operator* child() const { return child_.get(); }
     size_t groupingSetCount() const { return groupingSets_.empty() ? 1 : groupingSets_.size(); }
@@ -893,6 +911,8 @@ private:
     std::vector<StorageEngine::AggItem> items_;
     std::vector<std::string> havingConds_;
     std::vector<std::string> rows_;
+    std::vector<std::vector<std::string>> structuredRows_;
+    std::vector<std::vector<bool>> structuredNulls_;
     size_t pos_ = 0;
 };
 
@@ -914,6 +934,9 @@ public:
                              int workers);
     bool open() override;
     bool next(std::string& outRow) override;
+    bool supportsStructuredRows() const override { return true; }
+    bool lastStructuredRow(std::vector<std::string>& cells,
+                           std::vector<bool>& nulls) const override;
     void close() override;
     Operator* child() const { return child_.get(); }
     int workers() const { return workers_; }
@@ -928,6 +951,8 @@ private:
     int workers_;
     bool usedParallelWorkers_ = false;
     std::vector<std::string> rows_;
+    std::vector<std::vector<std::string>> structuredRows_;
+    std::vector<std::vector<bool>> structuredNulls_;
     size_t pos_ = 0;
 };
 

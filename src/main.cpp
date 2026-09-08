@@ -20165,6 +20165,8 @@ if (sql.rfind("backup database", 0) == 0) {
         bool structuredPlainRows = false;
         dbms::DmlResult structuredScalarResult;
         bool structuredScalarRows = false;
+        dbms::DmlResult structuredAggregateResult;
+        bool structuredAggregateRows = false;
         if (!groupByCols.empty()) {
             if (forUpdate) { cout << "FOR UPDATE not supported with GROUP BY" << endl; return true; }
             vector<string> groupProtocolColumns;
@@ -20264,8 +20266,12 @@ if (sql.rfind("backup database", 0) == 0) {
                 dbms::DmlResult metadata;
                 metadata.available = true;
                 metadata.metadataOnly = true;
-                metadata.columns = std::move(groupProtocolColumns);
-                metadata.columnTypes = std::move(groupProtocolTypes);
+                metadata.columns = groupProtocolColumns;
+                metadata.columnTypes = groupProtocolTypes;
+                structuredAggregateResult.columns =
+                    std::move(groupProtocolColumns);
+                structuredAggregateResult.columnTypes =
+                    std::move(groupProtocolTypes);
                 dbms::publishLastDmlResult(std::move(metadata));
             }
             // GROUP BY over expressions: the select list projects the
@@ -20394,6 +20400,15 @@ if (sql.rfind("backup database", 0) == 0) {
                     return true;
                 }
                 answers = std::move(execution.rows);
+                if (execution.structuredRowsAvailable &&
+                    execution.structuredRows.size() == answers.size() &&
+                    execution.structuredNulls.size() == answers.size()) {
+                    structuredAggregateResult.rows =
+                        std::move(execution.structuredRows);
+                    structuredAggregateResult.nulls =
+                        std::move(execution.structuredNulls);
+                    structuredAggregateRows = true;
+                }
             } else if (isGroupingSets) {
                 if (condTokens.empty()) {
                     answers = g_engine.groupAggregateSets(s.currentDB, tname, {}, pureAgg, groupByCols, groupingSets, havingConds);
@@ -20744,6 +20759,66 @@ if (sql.rfind("backup database", 0) == 0) {
                         keys.push_back({(size_t)idx, &spec});
                     }
                     if (allMapped && !keys.empty()) {
+                        const bool exactRows = structuredAggregateRows &&
+                            structuredAggregateResult.rows.size() ==
+                                answers.size() &&
+                            structuredAggregateResult.nulls.size() ==
+                                answers.size();
+                        if (exactRows) {
+                            vector<size_t> order(answers.size());
+                            std::iota(order.begin(), order.end(), 0);
+                            std::stable_sort(order.begin(), order.end(),
+                                [&](size_t a, size_t b) {
+                                    for (const auto& key : keys) {
+                                        const bool aNull =
+                                            key.first >= structuredAggregateResult.nulls[a].size() ||
+                                            structuredAggregateResult.nulls[a][key.first];
+                                        const bool bNull =
+                                            key.first >= structuredAggregateResult.nulls[b].size() ||
+                                            structuredAggregateResult.nulls[b][key.first];
+                                        if (aNull != bNull)
+                                            return aNull == key.second->nullsFirst;
+                                        if (aNull) continue;
+                                        const string& av =
+                                            structuredAggregateResult.rows[a][key.first];
+                                        const string& bv =
+                                            structuredAggregateResult.rows[b][key.first];
+                                        int comparison = 0;
+                                        dbms::Numeric an(0), bn(0);
+                                        bool numericA = true, numericB = true;
+                                        try { an = dbms::Numeric(av); }
+                                        catch (...) { numericA = false; }
+                                        try { bn = dbms::Numeric(bv); }
+                                        catch (...) { numericB = false; }
+                                        if (numericA && numericB) {
+                                            comparison = an < bn ? -1
+                                                : (bn < an ? 1 : 0);
+                                        } else {
+                                            comparison = ciTextCompare(av, bv);
+                                        }
+                                        if (comparison != 0)
+                                            return key.second->ascending
+                                                ? comparison < 0
+                                                : comparison > 0;
+                                    }
+                                    return false;
+                                });
+                            auto oldAnswers = std::move(answers);
+                            auto oldRows = std::move(
+                                structuredAggregateResult.rows);
+                            auto oldNulls = std::move(
+                                structuredAggregateResult.nulls);
+                            answers.reserve(order.size());
+                            structuredAggregateResult.rows.reserve(order.size());
+                            structuredAggregateResult.nulls.reserve(order.size());
+                            for (size_t index : order) {
+                                answers.push_back(std::move(oldAnswers[index]));
+                                structuredAggregateResult.rows.push_back(
+                                    std::move(oldRows[index]));
+                                structuredAggregateResult.nulls.push_back(
+                                    std::move(oldNulls[index]));
+                            }
+                        } else {
                         auto cellOf = [](const string& row, size_t want) -> string {
                             vector<string> cells;
                             size_t start = 0;
@@ -20780,6 +20855,7 @@ if (sql.rfind("backup database", 0) == 0) {
                                 }
                                 return false;
                             });
+                        }
                     }
                 }
         } else if (hasAgg) {
@@ -20823,8 +20899,12 @@ if (sql.rfind("backup database", 0) == 0) {
                     dbms::DmlResult metadata;
                     metadata.available = true;
                     metadata.metadataOnly = true;
-                    metadata.columns = std::move(protocolColumns);
-                    metadata.columnTypes = std::move(protocolTypes);
+                    metadata.columns = protocolColumns;
+                    metadata.columnTypes = protocolTypes;
+                    structuredAggregateResult.columns =
+                        std::move(protocolColumns);
+                    structuredAggregateResult.columnTypes =
+                        std::move(protocolTypes);
                     dbms::publishLastDmlResult(std::move(metadata));
                 }
             }
@@ -20897,6 +20977,15 @@ if (sql.rfind("backup database", 0) == 0) {
                     return true;
                 }
                 answers = std::move(execution.rows);
+                if (execution.structuredRowsAvailable &&
+                    execution.structuredRows.size() == answers.size() &&
+                    execution.structuredNulls.size() == answers.size()) {
+                    structuredAggregateResult.rows =
+                        std::move(execution.structuredRows);
+                    structuredAggregateResult.nulls =
+                        std::move(execution.structuredNulls);
+                    structuredAggregateRows = true;
+                }
             } else if (condTokens.empty()) {
                 answers = g_engine.aggregate(s.currentDB, tname, {}, pureAgg);
             } else {
@@ -22345,6 +22434,10 @@ if (sql.rfind("backup database", 0) == 0) {
                     structuredScalarRows &&
                     structuredScalarResult.rows.size() == answers.size() &&
                     structuredScalarResult.nulls.size() == answers.size();
+                const bool hasStructuredAggregateOrder =
+                    structuredAggregateRows &&
+                    structuredAggregateResult.rows.size() == answers.size() &&
+                    structuredAggregateResult.nulls.size() == answers.size();
                 vector<size_t> plainOutputToStorage;
                 if (structuredPlainRows && !projectionOrder.empty()) {
                     vector<string> storageColumns;
@@ -22372,7 +22465,58 @@ if (sql.rfind("backup database", 0) == 0) {
                     structuredPlainResult.rows.size() == answers.size() &&
                     structuredPlainResult.nulls.size() == answers.size() &&
                     plainOutputToStorage.size() == selectExprs.size();
-                if (hasStructuredScalarOrder) {
+                if (hasStructuredAggregateOrder) {
+                    vector<size_t> order(answers.size());
+                    iota(order.begin(), order.end(), 0);
+                    stable_sort(order.begin(), order.end(),
+                        [&](size_t a, size_t b) {
+                            for (const auto& key : outKeys) {
+                                const bool aNull =
+                                    key.first >= structuredAggregateResult.nulls[a].size() ||
+                                    structuredAggregateResult.nulls[a][key.first];
+                                const bool bNull =
+                                    key.first >= structuredAggregateResult.nulls[b].size() ||
+                                    structuredAggregateResult.nulls[b][key.first];
+                                if (aNull != bNull)
+                                    return aNull == key.second->nullsFirst;
+                                if (aNull) continue;
+                                const string& left =
+                                    structuredAggregateResult.rows[a][key.first];
+                                const string& right =
+                                    structuredAggregateResult.rows[b][key.first];
+                                int comparison = 0;
+                                dbms::Numeric leftNumber(0), rightNumber(0);
+                                bool leftNumeric = true, rightNumeric = true;
+                                try { leftNumber = dbms::Numeric(left); }
+                                catch (...) { leftNumeric = false; }
+                                try { rightNumber = dbms::Numeric(right); }
+                                catch (...) { rightNumeric = false; }
+                                if (leftNumeric && rightNumeric) {
+                                    comparison = leftNumber < rightNumber
+                                        ? -1 : (rightNumber < leftNumber ? 1 : 0);
+                                } else {
+                                    comparison = ciTextCompare(left, right);
+                                }
+                                if (comparison != 0)
+                                    return key.second->ascending
+                                        ? comparison < 0 : comparison > 0;
+                            }
+                            return false;
+                        });
+                    auto oldAnswers = std::move(answers);
+                    auto oldRows = std::move(structuredAggregateResult.rows);
+                    auto oldNulls = std::move(structuredAggregateResult.nulls);
+                    answers.reserve(order.size());
+                    structuredAggregateResult.rows.reserve(order.size());
+                    structuredAggregateResult.nulls.reserve(order.size());
+                    for (size_t index : order) {
+                        answers.push_back(std::move(oldAnswers[index]));
+                        structuredAggregateResult.rows.push_back(
+                            std::move(oldRows[index]));
+                        structuredAggregateResult.nulls.push_back(
+                            std::move(oldNulls[index]));
+                    }
+                } else if (hasStructuredScalarOrder) {
                     vector<size_t> order;
                     order.reserve(answers.size());
                     for (size_t i = 0; i < answers.size(); ++i)
@@ -22548,7 +22692,30 @@ if (sql.rfind("backup database", 0) == 0) {
                 structuredScalarRows &&
                 structuredScalarResult.rows.size() == answers.size() &&
                 structuredScalarResult.nulls.size() == answers.size();
-            if (canDeduplicateStructuredScalar) {
+            const bool canDeduplicateStructuredAggregate =
+                structuredAggregateRows &&
+                structuredAggregateResult.rows.size() == answers.size() &&
+                structuredAggregateResult.nulls.size() == answers.size();
+            if (canDeduplicateStructuredAggregate) {
+                set<pair<vector<string>, vector<bool>>> seen;
+                vector<string> dedupedAnswers;
+                vector<vector<string>> dedupedRows;
+                vector<vector<bool>> dedupedNulls;
+                for (size_t i = 0; i < answers.size(); ++i) {
+                    const auto key = make_pair(
+                        structuredAggregateResult.rows[i],
+                        structuredAggregateResult.nulls[i]);
+                    if (!seen.insert(key).second) continue;
+                    dedupedAnswers.push_back(std::move(answers[i]));
+                    dedupedRows.push_back(
+                        std::move(structuredAggregateResult.rows[i]));
+                    dedupedNulls.push_back(
+                        std::move(structuredAggregateResult.nulls[i]));
+                }
+                answers = std::move(dedupedAnswers);
+                structuredAggregateResult.rows = std::move(dedupedRows);
+                structuredAggregateResult.nulls = std::move(dedupedNulls);
+            } else if (canDeduplicateStructuredScalar) {
                 set<pair<vector<string>, vector<bool>>> seen;
                 vector<string> dedupedAnswers;
                 vector<vector<string>> dedupedRows;
@@ -22605,27 +22772,39 @@ if (sql.rfind("backup database", 0) == 0) {
             structuredPlainRows &&
             structuredPlainResult.rows.size() == answers.size() &&
             structuredPlainResult.nulls.size() == answers.size();
-        if (canSliceStructuredScalar || canSliceStructuredPlain) {
-            auto& slicedRows = canSliceStructuredScalar
-                ? structuredScalarResult.rows : structuredPlainResult.rows;
-            auto& slicedNulls = canSliceStructuredScalar
-                ? structuredScalarResult.nulls : structuredPlainResult.nulls;
+        const bool canSliceStructuredAggregate =
+            structuredAggregateRows &&
+            structuredAggregateResult.rows.size() == answers.size() &&
+            structuredAggregateResult.nulls.size() == answers.size();
+        vector<vector<string>>* slicedRows = nullptr;
+        vector<vector<bool>>* slicedNulls = nullptr;
+        if (canSliceStructuredScalar) {
+            slicedRows = &structuredScalarResult.rows;
+            slicedNulls = &structuredScalarResult.nulls;
+        } else if (canSliceStructuredPlain) {
+            slicedRows = &structuredPlainResult.rows;
+            slicedNulls = &structuredPlainResult.nulls;
+        } else if (canSliceStructuredAggregate) {
+            slicedRows = &structuredAggregateResult.rows;
+            slicedNulls = &structuredAggregateResult.nulls;
+        }
+        if (slicedRows && slicedNulls) {
             size_t count = 0, offset = 0;
             const bool finiteLimit = parseLimitOffset(count, offset);
             if (offset >= answers.size()) {
                 answers.clear();
-                slicedRows.clear();
-                slicedNulls.clear();
+                slicedRows->clear();
+                slicedNulls->clear();
             } else {
                 answers.erase(answers.begin(), answers.begin() + offset);
-                slicedRows.erase(
-                    slicedRows.begin(), slicedRows.begin() + offset);
-                slicedNulls.erase(
-                    slicedNulls.begin(), slicedNulls.begin() + offset);
+                slicedRows->erase(
+                    slicedRows->begin(), slicedRows->begin() + offset);
+                slicedNulls->erase(
+                    slicedNulls->begin(), slicedNulls->begin() + offset);
                 if (finiteLimit && count < answers.size()) {
                     answers.resize(count);
-                    slicedRows.resize(count);
-                    slicedNulls.resize(count);
+                    slicedRows->resize(count);
+                    slicedNulls->resize(count);
                 }
             }
         } else {
@@ -22730,7 +22909,15 @@ if (sql.rfind("backup database", 0) == 0) {
                 }
             }
         }
-        if (structuredScalarRows) {
+        if (structuredAggregateRows) {
+            structuredAggregateResult.available = true;
+            structuredAggregateResult.metadataOnly = false;
+            structuredAggregateResult.commandTag =
+                "SELECT " +
+                std::to_string(structuredAggregateResult.rows.size());
+            dbms::publishLastDmlResult(
+                std::move(structuredAggregateResult));
+        } else if (structuredScalarRows) {
             structuredScalarResult.available = true;
             structuredScalarResult.metadataOnly = false;
             structuredScalarResult.commandTag =

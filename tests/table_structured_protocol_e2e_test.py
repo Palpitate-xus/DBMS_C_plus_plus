@@ -31,6 +31,10 @@ def main():
             ("INSERT INTO exact_distinct_on VALUES "
              "(1, ''), (2, NULL), (3, ''), (4, NULL), "
              "(5, 'NULL'), (6, 'NULL');"),
+            "CREATE TABLE exact_aggregate_rows (g INT, v TEXT);",
+            ("INSERT INTO exact_aggregate_rows VALUES "
+             "(1, 'hello world'), (1, 'line\nbreak'), "
+             "(2, 'NULL'), (3, NULL), (4, '');"),
         ]
         for sql in setup:
             _, state, message, _ = runner.ours_query(
@@ -55,6 +59,64 @@ def main():
         assert headers == ["id", "v"], headers
         assert type_oids == [23, 25], type_oids
         assert command_tag == "SELECT 7", command_tag
+
+        aggregate_sql = (
+            "SELECT count(*), string_agg(v, '|') AS joined "
+            "FROM exact_aggregate_rows;")
+        aggregate_decoded = runner.decode_wire_result(
+            client.simple_query(server["sock"], aggregate_sql),
+            include_types=True)
+        aggregate_rows, aggregate_state, aggregate_message, \
+            aggregate_headers, aggregate_tag, aggregate_types = \
+            aggregate_decoded
+        assert aggregate_state is None, (
+            aggregate_state, aggregate_message)
+        assert aggregate_rows == [
+            ["5", "hello world|line\nbreak|NULL|"]
+        ], aggregate_rows
+        assert aggregate_headers == ["count", "joined"], aggregate_headers
+        assert aggregate_types == [20, 25], aggregate_types
+        assert aggregate_tag == "SELECT 1", aggregate_tag
+
+        grouped_aggregate_sql = (
+            "SELECT g, string_agg(v, '|') AS joined "
+            "FROM exact_aggregate_rows GROUP BY g ORDER BY g DESC;")
+        grouped_decoded = runner.decode_wire_result(
+            client.simple_query(server["sock"], grouped_aggregate_sql),
+            include_types=True)
+        grouped_rows, grouped_state, grouped_message, grouped_headers, \
+            grouped_tag, grouped_types = grouped_decoded
+        assert grouped_state is None, (grouped_state, grouped_message)
+        assert grouped_rows == [
+            ["4", ""],
+            ["3", None],
+            ["2", "NULL"],
+            ["1", "hello world|line\nbreak"],
+        ], grouped_rows
+        assert grouped_headers == ["g", "joined"], grouped_headers
+        assert grouped_types == [23, 25], grouped_types
+        assert grouped_tag == "SELECT 4", grouped_tag
+
+        distinct_aggregate_sql = (
+            "SELECT DISTINCT g, count(*) FROM exact_aggregate_rows "
+            "GROUP BY GROUPING SETS ((g), (g)) ORDER BY g;")
+        distinct_aggregate_decoded = runner.decode_wire_result(
+            client.simple_query(server["sock"], distinct_aggregate_sql),
+            include_types=True)
+        distinct_aggregate_rows, distinct_aggregate_state, \
+            distinct_aggregate_message, distinct_aggregate_headers, \
+            distinct_aggregate_tag, distinct_aggregate_types = \
+            distinct_aggregate_decoded
+        assert distinct_aggregate_state is None, (
+            distinct_aggregate_state, distinct_aggregate_message)
+        assert distinct_aggregate_rows == [
+            ["1", "2"], ["2", "1"], ["3", "1"], ["4", "1"],
+        ], distinct_aggregate_rows
+        assert distinct_aggregate_headers == ["g", "count"], \
+            distinct_aggregate_headers
+        assert distinct_aggregate_types == [23, 20], \
+            distinct_aggregate_types
+        assert distinct_aggregate_tag == "SELECT 4", distinct_aggregate_tag
 
         reversed_sql = "SELECT v, id FROM exact_table_rows ORDER BY id;"
         reversed_rows, reversed_state, reversed_message, reversed_headers = (

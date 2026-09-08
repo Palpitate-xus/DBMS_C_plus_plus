@@ -2397,7 +2397,7 @@ template <typename InputRow>
 static std::string collectionAggregate(
     const TableSchema& table, const std::vector<InputRow>& input,
     const std::vector<size_t>& rowIds, const StorageEngine::AggItem& item,
-    const std::string& function) {
+    const std::string& function, bool* resultIsNull = nullptr) {
     SQLParser parser;
     auto parsed = parser.parse("SELECT " + function + "(" + item.arg + ")");
     const auto* select = dynamic_cast<const SelectStmt*>(parsed.stmt.get());
@@ -2542,7 +2542,11 @@ static std::string collectionAggregate(
         result += array ? quoteElement(entry.args[0]) : entry.args[0].value;
         first = false;
     }
-    if (first) return "NULL";
+    if (first) {
+        if (resultIsNull) *resultIsNull = true;
+        return "NULL";
+    }
+    if (resultIsNull) *resultIsNull = false;
     return array ? "{" + result + "}" : result;
 }
 
@@ -2590,10 +2594,6 @@ static std::string encodeGroupingKey(const ExprValue& value) {
     return value.isNull ? "N;" : "V" + std::to_string(value.value.size()) + ":" + value.value;
 }
 
-static std::string displayGroupingKey(const ExprValue& value) {
-    return value.isNull ? "NULL" : value.value;
-}
-
 // ========================================================================
 // ParallelGroupAggregateOp
 // ========================================================================
@@ -2608,6 +2608,8 @@ ParallelGroupAggregateOp::ParallelGroupAggregateOp(
 
 bool ParallelGroupAggregateOp::open() try {
     rows_.clear();
+    structuredRows_.clear();
+    structuredNulls_.clear();
     pos_ = 0;
     usedParallelWorkers_ = false;
     if (!child_->open()) return false;
@@ -2722,11 +2724,13 @@ bool ParallelGroupAggregateOp::open() try {
         return out.str();
     };
     auto computeAggregate = [&](const std::vector<size_t>& rowIds,
-                                const StorageEngine::AggItem& item) -> std::string {
+                                const StorageEngine::AggItem& item,
+                                bool* resultIsNull = nullptr) -> std::string {
         std::string func = item.func;
         for (char& c : func) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         if (func == "string_agg" || func == "array_agg")
-            return collectionAggregate(tbl_, input, rowIds, item, func);
+            return collectionAggregate(
+                tbl_, input, rowIds, item, func, resultIsNull);
         const bool distinct = func == "count" && item.arg.size() > 9 &&
             item.arg.substr(0, 9) == "distinct ";
         std::string arg = distinct ? item.arg.substr(9) : item.arg;
@@ -2849,10 +2853,17 @@ bool ParallelGroupAggregateOp::open() try {
                 else boolValue = boolValue && truthy;
             }
         }
-        if (func == "count") return distinct ? std::to_string(distinctValues.size())
-                                             : std::to_string(count);
-        if (func == "sum") return count == 0 ? "NULL" : formatNumber(sum);
+        if (func == "count") {
+            if (resultIsNull) *resultIsNull = false;
+            return distinct ? std::to_string(distinctValues.size())
+                            : std::to_string(count);
+        }
+        if (func == "sum") {
+            if (resultIsNull) *resultIsNull = count == 0;
+            return count == 0 ? "NULL" : formatNumber(sum);
+        }
         if (func == "avg") {
+            if (resultIsNull) *resultIsNull = count == 0;
             if (count == 0) return "NULL";
             // PG avg(numeric) = numeric division of the exact sum by the
             // row count, carrying the select_div_scale digit rules.
@@ -2864,10 +2875,15 @@ bool ParallelGroupAggregateOp::open() try {
             }
             return std::to_string(static_cast<double>(sum / count));
         }
-        if (func == "min" || func == "max") return hasValue ? selected : "NULL";
+        if (func == "min" || func == "max") {
+            if (resultIsNull) *resultIsNull = !hasValue;
+            return hasValue ? selected : "NULL";
+        }
         if (func == "bool_and" || func == "every" || func == "bool_or") {
+            if (resultIsNull) *resultIsNull = !boolSeen;
             return boolSeen ? (boolValue ? "t" : "f") : "NULL";
         }
+        if (resultIsNull) *resultIsNull = true;
         return "NULL";
     };
     for (const auto& item : items_) {
@@ -2885,25 +2901,39 @@ bool ParallelGroupAggregateOp::open() try {
     }
     for (const auto& group : groups) {
         std::vector<std::string> values;
+        std::vector<bool> nulls;
         values.reserve(groupByCols_.size() + items_.size());
+        nulls.reserve(groupByCols_.size() + items_.size());
         for (size_t gi = 0; gi < groupByCols_.size(); ++gi) {
-            values.push_back(group.second.empty()
-                ? std::string("NULL")
-                : displayGroupingKey(groupKeyValue(group.second.front(), gi)));
+            const bool isNull = group.second.empty() ||
+                groupKeyValue(group.second.front(), gi).isNull;
+            values.push_back(isNull ? std::string{} :
+                groupKeyValue(group.second.front(), gi).value);
+            nulls.push_back(isNull);
         }
-        for (const auto& item : items_) values.push_back(computeAggregate(group.second, item));
+        for (const auto& item : items_) {
+            bool isNull = false;
+            std::string value = computeAggregate(
+                group.second, item, &isNull);
+            values.push_back(isNull ? std::string{} : std::move(value));
+            nulls.push_back(isNull);
+        }
         std::string output;
         for (size_t i = 0; i < values.size(); ++i) {
             if (i != 0) output.push_back(' ');
-            output += values[i];
+            output += nulls[i] ? "NULL" : values[i];
         }
         rows_.push_back(std::move(output));
+        structuredRows_.push_back(std::move(values));
+        structuredNulls_.push_back(std::move(nulls));
     }
     return true;
 }
 
 catch (const std::exception& error) {
     rows_.clear();
+    structuredRows_.clear();
+    structuredNulls_.clear();
     child_->close();
     setError(error.what());
     return false;
@@ -2917,8 +2947,21 @@ bool ParallelGroupAggregateOp::next(std::string& outRow) {
     return true;
 }
 
+bool ParallelGroupAggregateOp::lastStructuredRow(
+    std::vector<std::string>& cells, std::vector<bool>& nulls) const {
+    if (pos_ == 0 || pos_ > structuredRows_.size() ||
+        pos_ > structuredNulls_.size()) {
+        return false;
+    }
+    cells = structuredRows_[pos_ - 1];
+    nulls = structuredNulls_[pos_ - 1];
+    return true;
+}
+
 void ParallelGroupAggregateOp::close() {
     rows_.clear();
+    structuredRows_.clear();
+    structuredNulls_.clear();
     pos_ = 0;
 }
 
@@ -3325,6 +3368,8 @@ GroupAggregateOp::GroupAggregateOp(
 
 bool GroupAggregateOp::open() try {
     rows_.clear();
+    structuredRows_.clear();
+    structuredNulls_.clear();
     pos_ = 0;
     if (!child_->open()) return false;
 
@@ -3404,7 +3449,8 @@ bool GroupAggregateOp::open() try {
     };
 
     auto computeAggregate = [&](const std::vector<size_t>& rowIds,
-                                const StorageEngine::AggItem& item) -> std::string {
+                                const StorageEngine::AggItem& item,
+                                bool* resultIsNull = nullptr) -> std::string {
         std::string func = item.func;
         for (char& c : func) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         const bool distinct = func == "count" && item.arg.size() > 9 &&
@@ -3413,7 +3459,8 @@ bool GroupAggregateOp::open() try {
         const size_t argIndex = arg == "*" ? tbl_.len : columnIndex(arg);
         const auto filters = StorageEngine::parseConditions(item.filterConds);
         if (func == "string_agg" || func == "array_agg")
-            return collectionAggregate(tbl_, input, rowIds, item, func);
+            return collectionAggregate(
+                tbl_, input, rowIds, item, func, resultIsNull);
         std::set<std::string> distinctValues;
         int64_t count = 0;
         long double sum = 0;
@@ -3502,10 +3549,15 @@ bool GroupAggregateOp::open() try {
         }
 
         if (func == "count") {
+            if (resultIsNull) *resultIsNull = false;
             return distinct ? std::to_string(distinctValues.size()) : std::to_string(count);
         }
-        if (func == "sum") return count == 0 ? "NULL" : formatNumber(sum);
+        if (func == "sum") {
+            if (resultIsNull) *resultIsNull = count == 0;
+            return count == 0 ? "NULL" : formatNumber(sum);
+        }
         if (func == "avg") {
+            if (resultIsNull) *resultIsNull = count == 0;
             if (count == 0) return "NULL";
             // PG avg(numeric) = numeric division of the exact sum by the
             // row count, carrying the select_div_scale digit rules.
@@ -3517,10 +3569,15 @@ bool GroupAggregateOp::open() try {
             }
             return std::to_string(static_cast<double>(sum / count));
         }
-        if (func == "min" || func == "max") return hasValue ? selected : "NULL";
+        if (func == "min" || func == "max") {
+            if (resultIsNull) *resultIsNull = !hasValue;
+            return hasValue ? selected : "NULL";
+        }
         if (func == "bool_and" || func == "every" || func == "bool_or") {
+            if (resultIsNull) *resultIsNull = !boolSeen;
             return boolSeen ? (boolValue ? "t" : "f") : "NULL";
         }
+        if (resultIsNull) *resultIsNull = true;
         return "NULL";
     };
 
@@ -3587,22 +3644,33 @@ bool GroupAggregateOp::open() try {
         for (const auto& group : groups) {
             if (!havingPasses(group.second)) continue;
             std::vector<std::string> values;
+            std::vector<bool> nulls;
             values.reserve(groupByCols_.size() + items_.size());
+            nulls.reserve(groupByCols_.size() + items_.size());
             for (size_t gi = 0; gi < groupByCols_.size(); ++gi) {
                 auto setIt = std::find(groupingSet.begin(), groupingSet.end(), groupByCols_[gi]);
-                if (setIt == groupingSet.end() || group.second.empty()) {
-                    values.push_back("NULL");
-                } else {
-                    values.push_back(displayGroupingKey(groupKeyValue(group.second.front(), gi)));
-                }
+                const bool isNull = setIt == groupingSet.end() ||
+                    group.second.empty() ||
+                    groupKeyValue(group.second.front(), gi).isNull;
+                values.push_back(isNull ? std::string{} :
+                    groupKeyValue(group.second.front(), gi).value);
+                nulls.push_back(isNull);
             }
-            for (const auto& item : items_) values.push_back(computeAggregate(group.second, item));
+            for (const auto& item : items_) {
+                bool isNull = false;
+                std::string value = computeAggregate(
+                    group.second, item, &isNull);
+                values.push_back(isNull ? std::string{} : std::move(value));
+                nulls.push_back(isNull);
+            }
             std::string output;
-        for (size_t i = 0; i < values.size(); ++i) {
-            if (i != 0) output.push_back(' ');
-            output += values[i];
+            for (size_t i = 0; i < values.size(); ++i) {
+                if (i != 0) output.push_back(' ');
+                output += nulls[i] ? "NULL" : values[i];
             }
             rows_.push_back(std::move(output));
+            structuredRows_.push_back(std::move(values));
+            structuredNulls_.push_back(std::move(nulls));
         }
     }
     return true;
@@ -3610,6 +3678,8 @@ bool GroupAggregateOp::open() try {
 
 catch (const std::exception& error) {
     rows_.clear();
+    structuredRows_.clear();
+    structuredNulls_.clear();
     child_->close();
     setError(error.what());
     return false;
@@ -3623,8 +3693,21 @@ bool GroupAggregateOp::next(std::string& outRow) {
     return true;
 }
 
+bool GroupAggregateOp::lastStructuredRow(
+    std::vector<std::string>& cells, std::vector<bool>& nulls) const {
+    if (pos_ == 0 || pos_ > structuredRows_.size() ||
+        pos_ > structuredNulls_.size()) {
+        return false;
+    }
+    cells = structuredRows_[pos_ - 1];
+    nulls = structuredNulls_[pos_ - 1];
+    return true;
+}
+
 void GroupAggregateOp::close() {
     rows_.clear();
+    structuredRows_.clear();
+    structuredNulls_.clear();
     pos_ = 0;
 }
 
@@ -5109,6 +5192,7 @@ PlanExecutionResult QueryPlanner::executePlanChecked(OpPtr plan) {
         result.error = "executor received a null plan";
         return result;
     }
+    result.structuredRowsAvailable = plan->supportsStructuredRows();
     if (!plan->open()) {
         result.ok = false;
         result.error = plan->errorMessage();
@@ -5119,6 +5203,19 @@ PlanExecutionResult QueryPlanner::executePlanChecked(OpPtr plan) {
     std::string row;
     while (plan->next(row)) {
         result.rows.push_back(row);
+        if (result.structuredRowsAvailable) {
+            std::vector<std::string> cells;
+            std::vector<bool> nulls;
+            if (!plan->lastStructuredRow(cells, nulls) ||
+                cells.size() != nulls.size()) {
+                result.structuredRowsAvailable = false;
+                result.structuredRows.clear();
+                result.structuredNulls.clear();
+            } else {
+                result.structuredRows.push_back(std::move(cells));
+                result.structuredNulls.push_back(std::move(nulls));
+            }
+        }
     }
     if (plan->hasError()) {
         result.ok = false;
