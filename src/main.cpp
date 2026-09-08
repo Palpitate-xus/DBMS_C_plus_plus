@@ -16832,7 +16832,7 @@ if (sql.rfind("backup database", 0) == 0) {
 
         // Check for INTO OUTFILE clause
         string outfile;
-        size_t intoPos = sql.find("into outfile");
+        size_t intoPos = findTopLevelKeyword(sql, "into outfile");
         if (intoPos != string::npos) {
             // DIV-04: MySQL-style SELECT ... INTO OUTFILE.  In postgresql18
             // mode SELECT INTO is table creation and OUTFILE is a syntax

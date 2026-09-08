@@ -45,7 +45,8 @@ def main():
                  "(22, 'for update'), (23, 'for share'), "
                  "(24, 'nowait'), (25, 'skip locked'), "
                  "(26, 'before (select 1) from (select 2) after'), "
-                 "(27, 'lateral (select 1) as x');")):
+                 "(27, 'lateral (select 1) as x'), "
+                 "(28, 'into outfile');")):
             _, state, message, _ = runner.ours_query(
                 client, server["sock"], sql)
             assert state is None, (sql, state, message)
@@ -90,6 +91,7 @@ def main():
             (25, "skip locked"),
             (26, "before (select 1) from (select 2) after"),
             (27, "lateral (select 1) as x"),
+            (28, "into outfile"),
         ]
         for row_id, value in rewrite_literals:
             sql = ("SELECT id FROM rewrite_literal_rows WHERE value = '" +
