@@ -27293,17 +27293,30 @@ std::vector<std::string> StorageEngine::query(
             }
         }
         if (distinctIdxs.size() == distinctOnCols.size()) {
-            std::set<std::string> seen;
+            std::set<std::pair<std::vector<std::string>,
+                               std::vector<bool>>> seen;
             std::vector<std::pair<int64_t, std::string>> deduped;
             for (auto& mr : matchRows) {
                 NullRowBinding nullBinding(
                     this, dbname, tbl.tablename, mr.first, tbl.len);
-                std::string key;
+                std::vector<std::string> keyValues;
+                std::vector<bool> keyNulls;
                 for (size_t idx : distinctIdxs) {
-                    if (!key.empty()) key += "\x01";
-                    key += extractColumnValue(mr.second, tbl, idx, dbname, true);
+                    bool valueIsNull = false;
+                    std::string value = extractColumnValue(
+                        mr.second, tbl, idx, dbname, true, &valueIsNull);
+                    const bool resultIsNull = valueIsNull ||
+                        (tbl.cols[idx].generatedKind != 'v' &&
+                         isColumnNullByRid(
+                             dbname, tbl.tablename, mr.first, idx));
+                    keyValues.push_back(
+                        resultIsNull ? std::string{} : std::move(value));
+                    keyNulls.push_back(resultIsNull);
                 }
-                if (seen.insert(key).second) deduped.push_back(std::move(mr));
+                if (seen.emplace(
+                        std::move(keyValues), std::move(keyNulls)).second) {
+                    deduped.push_back(std::move(mr));
+                }
             }
             matchRows = std::move(deduped);
         }

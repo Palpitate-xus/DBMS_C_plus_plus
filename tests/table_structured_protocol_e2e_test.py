@@ -27,6 +27,10 @@ def main():
             ("INSERT INTO exact_scalar_or_rows VALUES "
              "(1, 'same'), (2, 'same'), (3, 'NULL'), "
              "(4, 'line\nbreak'), (5, NULL);"),
+            "CREATE TABLE exact_distinct_on (id INT, v TEXT);",
+            ("INSERT INTO exact_distinct_on VALUES "
+             "(1, ''), (2, NULL), (3, ''), (4, NULL), "
+             "(5, 'NULL'), (6, 'NULL');"),
         ]
         for sql in setup:
             _, state, message, _ = runner.ours_query(
@@ -126,6 +130,17 @@ def main():
         assert plain_distinct_rows == [
             ["NULL"], ["line\nbreak"], ["same"], [None],
         ], plain_distinct_rows
+
+        distinct_on_sql = (
+            "SELECT DISTINCT ON (v) v, id FROM exact_distinct_on "
+            "ORDER BY v, id;")
+        distinct_on_rows, distinct_on_state, distinct_on_message, _ = (
+            runner.ours_query(client, server["sock"], distinct_on_sql))
+        assert distinct_on_state is None, (
+            distinct_on_state, distinct_on_message)
+        assert distinct_on_rows == [
+            ["", "1"], ["NULL", "5"], [None, "2"],
+        ], distinct_on_rows
 
         plain_slice_sql = (
             "SELECT v FROM exact_table_rows "

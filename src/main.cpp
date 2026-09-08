@@ -21742,7 +21742,6 @@ if (sql.rfind("backup database", 0) == 0) {
                 simpleStructuredPlainPredicate &&
                 semiJoins.empty() && existenceFilters.empty() &&
                 quantifiedSubqueries.empty() && exprOrderBySpecs.empty() &&
-                distinctOnCols.empty() &&
                 !forUpdate && !noWait && !skipLocked && outfile.empty() &&
                 queryDb != "information_schema" && queryDb != "pg_catalog" &&
                 (s.onlyNext ||
