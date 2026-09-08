@@ -17411,11 +17411,36 @@ if (sql.rfind("backup database", 0) == 0) {
                 if (dot != string::npos) rightOnCol = rightOnCol.substr(dot + 1);
             }
 
-            // Extract table name and alias from "table alias" format
-            auto extractTableAndAlias = [](const string& s) -> pair<string, string> {
-                size_t sp = s.find(' ');
-                if (sp == string::npos) return {s, ""};
-                return {trim(s.substr(0, sp)), trim(s.substr(sp + 1))};
+            // Extract both PostgreSQL alias forms: "table alias" and
+            // "table AS alias".  Locate whitespace outside quoted identifiers
+            // so names such as "joined table" remain a single relation token.
+            auto extractTableAndAlias = [](const string& input) -> pair<string, string> {
+                const string text = trim(input);
+                bool quoted = false;
+                size_t split = string::npos;
+                for (size_t i = 0; i < text.size(); ++i) {
+                    if (text[i] == '"') {
+                        if (quoted && i + 1 < text.size() && text[i + 1] == '"') {
+                            ++i;
+                        } else {
+                            quoted = !quoted;
+                        }
+                    } else if (!quoted && isspace(static_cast<unsigned char>(text[i]))) {
+                        split = i;
+                        break;
+                    }
+                }
+                if (split == string::npos) {
+                    return {decodeQuotedIdentifier(text), ""};
+                }
+                string table = decodeQuotedIdentifier(trim(text.substr(0, split)));
+                string alias = trim(text.substr(split));
+                const string lowerAlias = toLower(alias);
+                if (lowerAlias.size() > 2 && lowerAlias.compare(0, 2, "as") == 0 &&
+                    isspace(static_cast<unsigned char>(lowerAlias[2]))) {
+                    alias = trim(alias.substr(2));
+                }
+                return {std::move(table), decodeQuotedIdentifier(alias)};
             };
             auto [leftTableName, leftAlias] = extractTableAndAlias(leftTableOrig);
             auto [rightTableName, rightAlias] = extractTableAndAlias(rightTableOrig);
