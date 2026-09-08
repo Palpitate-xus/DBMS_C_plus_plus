@@ -36242,7 +36242,25 @@ static bool validPhysicalBackupSource(const std::filesystem::path& source) {
     return contents == "DBMS_PHYSICAL_BACKUP_V1\n";
 }
 
-bool StorageEngine::physicalBackup(const std::string& dbname, const std::string& backupPath) {
+bool StorageEngine::physicalBackup(const std::string& dbname,
+                                   const std::string& backupPath) {
+    // A public backup is a database-wide snapshot operation.  Refuse to run
+    // from inside the caller's transaction (which already owns a shared lock
+    // and may contain uncommitted state), then exclude new transactions for
+    // the complete flush-and-copy interval.
+    if (transactionContext().inTransaction) return false;
+    const auto databaseMutex = databaseTxnLockFor(dbname);
+    std::unique_lock<std::shared_mutex> databaseLock(*databaseMutex);
+    if (!databaseExists(dbname)) return false;
+    if (catalogService_ && !catalogService_->persistAll()) return false;
+    if (!flushDatabaseCaches(dbname)) return false;
+    WALManager* wal = getWAL(dbname);
+    if (!wal || !wal->XLogFlush(wal->currentWriteLsn())) return false;
+    return physicalBackupLocked(dbname, backupPath);
+}
+
+bool StorageEngine::physicalBackupLocked(
+    const std::string& dbname, const std::string& backupPath) {
     if (!databaseExists(dbname)) return false;
     auto src = dbPath(dbname);
     auto dst = std::filesystem::path(backupPath);
@@ -38328,7 +38346,7 @@ bool StorageEngine::createTransactionBackup() {
     const auto backup = transactionBackupPath(dbname, context.currentTxnId);
     std::error_code ec;
     std::filesystem::remove_all(backup, ec);
-    if (!physicalBackup(dbname, backup.string())) {
+    if (!physicalBackupLocked(dbname, backup.string())) {
         std::filesystem::remove_all(backup, ec);
         return false;
     }
