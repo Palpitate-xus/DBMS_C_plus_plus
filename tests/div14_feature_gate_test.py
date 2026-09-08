@@ -7,10 +7,9 @@ CREATE OPERATOR, CREATE RULE, CREATE LANGUAGE, CREATE AGGREGATE,
 CREATE TEXT SEARCH ..., CREATE FOREIGN ..., CREATE SERVER, ALTER/DROP
 counterparts, IMPORT FOREIGN SCHEMA, LOAD) must instead return
 feature_not_supported (SQLSTATE 0A000) in the default postgresql18
-compatibility mode.  Nothing may be written to .pg_compat_objects.
-
-The explicit "extended" compatibility mode keeps the legacy record layer
-so existing project tooling can opt in.
+or the explicit extended mode.  Nothing may be written to
+.pg_compat_objects; extended mode only enables project-native syntax that
+has a real implementation.
 """
 
 import os
@@ -306,15 +305,18 @@ def main():
                 raise AssertionError(
                     "compat object store created in %s despite 0A000 gate" % root)
 
-        # Extended mode keeps the legacy record layer (explicit opt-in).
+        # Extended mode does not make unimplemented PostgreSQL objects real.
         expect_command_tag(sock, "SET compatibility_mode = extended",
                            "SET compatibility_mode")
-        messages = simple_query(sock, "CREATE EXTENSION hstore")
-        assert any(kind == b"C" for kind, _ in messages), \
-            "extended mode CREATE EXTENSION must keep legacy success: %r" % (messages,)
-        compat_store = os.path.join(work_dir, "info", ".pg_compat_objects")
-        assert os.path.exists(compat_store), \
-            "extended mode must keep writing the legacy compat store"
+        expect_0a000(sock, "CREATE EXTENSION hstore",
+                     "extended CREATE EXTENSION")
+        expect_0a000(sock,
+                     "IMPORT FOREIGN SCHEMA fs FROM SERVER s1 INTO public",
+                     "extended IMPORT FOREIGN SCHEMA")
+        expect_0a000(sock, "LOAD 'auto_explain'", "extended LOAD")
+        for root, _dirs, files in os.walk(work_dir):
+            assert ".pg_compat_objects" not in files, \
+                "extended mode wrote a fake compat object in %s" % root
 
         # DIV-01 / DIV-11 in extended mode: project commands work again.
         expect_command_tag(sock, "USE DATABASE info", "extended USE DATABASE")

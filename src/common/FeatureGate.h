@@ -5,8 +5,9 @@
 // SQLSTATE 0A000 (feature_not_supported) until a real runtime exists.
 // This module is the single place that decides, per object kind, whether a
 // runtime implementation exists.  The default compatibility mode is
-// "postgresql18"; the explicit "extended" mode keeps the legacy
-// record-keeping behavior for project extensions (DIV-01..DIV-14 framework).
+// "postgresql18".  The explicit "extended" mode enables project-native SQL
+// extensions, but never turns an unimplemented PostgreSQL object into a
+// successful compatibility-record write.
 #pragma once
 
 #include <string>

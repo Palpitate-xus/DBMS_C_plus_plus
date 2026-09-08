@@ -5127,10 +5127,8 @@ static bool handleCreateCompatObject(const string& sql, Session& s) {
     // DIV-14/CAT-22: refuse to fake-succeed.  Without a runtime behind the
     // kind, the command must fail with feature_not_supported instead of
     // storing a compatibility record and reporting success.
-    if ((!dbms::compatKindHasRuntime(kind) ||
-         dbms::compatKindAlwaysUnsupported(kind)) &&
-        (dbms::compatKindAlwaysUnsupported(kind) ||
-         !dbms::isExtendedCompatMode(s.compatibilityMode))) {
+    if (!dbms::compatKindHasRuntime(kind) ||
+        dbms::compatKindAlwaysUnsupported(kind)) {
         cout << dbms::featureNotSupportedError(
             string("CREATE ") + phrase) << endl;
         return true;
@@ -5173,10 +5171,8 @@ static bool handleAlterCompatObject(const string& sql, Session& s) {
     if (!consumeCompatPrefix(rest, compatAlterDropPrefixes(), kind, phrase)) return false;
     // DIV-14/CAT-22: no runtime behind the kind means ALTER must not report
     // success against a compatibility record.
-    if ((!dbms::compatKindHasRuntime(kind) ||
-         dbms::compatKindAlwaysUnsupported(kind)) &&
-        (dbms::compatKindAlwaysUnsupported(kind) ||
-         !dbms::isExtendedCompatMode(s.compatibilityMode))) {
+    if (!dbms::compatKindHasRuntime(kind) ||
+        dbms::compatKindAlwaysUnsupported(kind)) {
         cout << dbms::featureNotSupportedError(
             string("ALTER ") + phrase) << endl;
         return true;
@@ -5233,10 +5229,8 @@ static bool handleDropCompatObject(const string& sql, Session& s) {
     if (!consumeCompatPrefix(rest, compatDropPrefixes(), kind, phrase)) return false;
     // DIV-14/CAT-22: dropping a compatibility record is not dropping a real
     // object; report feature_not_supported unless a runtime exists.
-    if ((!dbms::compatKindHasRuntime(kind) ||
-         dbms::compatKindAlwaysUnsupported(kind)) &&
-        (dbms::compatKindAlwaysUnsupported(kind) ||
-         !dbms::isExtendedCompatMode(s.compatibilityMode))) {
+    if (!dbms::compatKindHasRuntime(kind) ||
+        dbms::compatKindAlwaysUnsupported(kind)) {
         cout << dbms::featureNotSupportedError(
             string("DROP ") + phrase) << endl;
         return true;
@@ -5280,36 +5274,14 @@ static bool handleDropCompatObject(const string& sql, Session& s) {
 }
 
 static bool handleImportForeignSchema(const string& sql, Session& s) {
+    (void)sql;
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
     // DIV-14/FDW: no FDW runtime exists; the previous behavior stored a
     // record and claimed the schema was imported.
-    if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
-        cout << dbms::featureNotSupportedError(
-            "IMPORT FOREIGN SCHEMA") << endl;
-        return true;
-    }
-    string rest = trim(sql.substr(21)); // after "import foreign schema"
-    string remoteSchema = firstCompatNameToken(rest);
-    size_t serverPos = findTopLevelKeyword(rest, "server");
-    string serverName;
-    if (serverPos != string::npos) {
-        serverName = firstCompatNameToken(trim(rest.substr(serverPos + 6)));
-    }
-    if (remoteSchema.empty() || serverName.empty()) {
-        cout << "SQL syntax error: IMPORT FOREIGN SCHEMA schema FROM SERVER server INTO schema" << endl;
-        return true;
-    }
-    string name = remoteSchema + "@" + serverName;
-    auto objects = loadCompatObjects(s.currentDB);
-    objects[compatObjectKey("imported_foreign_schema", name)] =
-        {"imported_foreign_schema", name, s.username, sql, ""};
-    if (!saveCompatObjects(s.currentDB, objects)) {
-        cout << "IMPORT FOREIGN SCHEMA failed" << endl;
-        return true;
-    }
-    cout << "foreign schema " << remoteSchema << " imported from server " << serverName << endl;
-    return false;
+    cout << dbms::featureNotSupportedError(
+        "IMPORT FOREIGN SCHEMA") << endl;
+    return true;
 }
 
 static bool showCompatObjects(Session& s, const string& rest) {
@@ -5374,19 +5346,8 @@ static bool handleLoadSharedLibrary(const string& sql, Session& s) {
     }
     // DIV-14/EXT-02: no dynamic library loading runtime exists; storing a
     // "loaded_library" record is not loading anything.
-    if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
-        cout << dbms::featureNotSupportedError("LOAD") << endl;
-        return true;
-    }
-    auto objects = loadCompatObjects(s.currentDB);
-    objects[compatObjectKey("loaded_library", lib)] =
-        {"loaded_library", lib, s.username, sql, ""};
-    if (!saveCompatObjects(s.currentDB, objects)) {
-        cout << "LOAD failed" << endl;
-        return true;
-    }
-    cout << "Library " << lib << " loaded" << endl;
-    return false;
+    cout << dbms::featureNotSupportedError("LOAD") << endl;
+    return true;
 }
 
 static bool extractQuotedSqlBody(const string& s, string& body) {
