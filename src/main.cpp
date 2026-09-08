@@ -16981,6 +16981,29 @@ if (sql.rfind("backup database", 0) == 0) {
     if (sql.substr(0, 6) == "select" || sql.substr(0, 5) == "with ") {
         if (!checkDB(s)) return true;
 
+        // A nested SELECT may consume CTE/derived tables owned by its parent.
+        // Only discard transient relations created by this invocation; clearing
+        // the whole session set here breaks sibling CTEs that share an earlier
+        // CTE once one nested SELECT has completed.
+        struct TempTableGuard {
+            Session* ps;
+            std::set<std::string> inherited;
+            explicit TempTableGuard(Session* session)
+                : ps(session), inherited(session->transientTempTables) {}
+            ~TempTableGuard() {
+                for (auto it = ps->transientTempTables.begin();
+                     it != ps->transientTempTables.end();) {
+                    if (inherited.count(*it) != 0) {
+                        ++it;
+                        continue;
+                    }
+                    g_engine.dropTable(ps->currentDB,
+                                       tempTablePrefix(*ps, *it));
+                    it = ps->transientTempTables.erase(it);
+                }
+            }
+        } guard(&s);
+
         // Process CTEs: WITH cte AS (SELECT ...)
         bool cteFailed = false;
         sql = processCTEs(sql, s, cteFailed);
@@ -17016,19 +17039,6 @@ if (sql.rfind("backup database", 0) == 0) {
                 sql = trim(sql.substr(0, fsPos));
             }
         }
-
-        // RAII guard to drop query-local CTE and derived tables. User-created
-        // temporary tables belong to the session and must survive the query.
-        struct TempTableGuard {
-            Session* ps;
-            TempTableGuard(Session* s) : ps(s) {}
-            ~TempTableGuard() {
-                for (const auto& t : ps->transientTempTables) {
-                    g_engine.dropTable(ps->currentDB, tempTablePrefix(*ps, t));
-                }
-                ps->transientTempTables.clear();
-            }
-        } guard(&s);
 
         // Check for INTO OUTFILE clause
         string outfile;

@@ -100,6 +100,14 @@ def main():
              [["1", "a b"], ["2", ""], ["3", "NULL"], ["4", None],
               ["5", "  edge  "], ["6", "line1\nline2"]],
              [23, 25]),
+            (("WITH source_rows AS "
+              "(SELECT id, txt FROM typed_text_edges), "
+              "first_reader AS (SELECT id, txt FROM source_rows), "
+              "second_reader AS (SELECT id, txt FROM source_rows) "
+              "SELECT id, txt FROM second_reader ORDER BY id;"),
+             [["1", "a b"], ["2", ""], ["3", "NULL"], ["4", None],
+              ["5", "  edge  "], ["6", "line1\nline2"]],
+             [23, 25]),
         ]
         for sql, expected_rows, expected_types in cases:
             decoded = runner.decode_wire_result(
