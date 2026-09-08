@@ -10,6 +10,7 @@
 #include "catalog/collation.h"
 #include "catalog/CatalogService.h"
 #include "expression/expr_helper.h"
+#include "expression/ExprEvaluator.h"
 #include "permissions.h"
 #include "utils/Session.h"
 #include "process/RuntimeStats.h"
@@ -27384,8 +27385,8 @@ static ParsedProjectionSubquery parseProjectionSubquery(const std::string& sql) 
         !select->locking.empty() || !select->windowDefs.empty()) {
         throw std::runtime_error("unsupported projection subquery shape (SQLSTATE 0A000)");
     }
-    if (!select->orderBy.empty() || select->limit || select->offset || select->withTies) {
-        throw std::runtime_error("projection subquery row selection is not supported (SQLSTATE 0A000)");
+    if (select->withTies) {
+        throw std::runtime_error("projection subquery WITH TIES is not supported (SQLSTATE 0A000)");
     }
     // Slice complete lexer tokens, not substrings. Quoted text is one token
     // and nested FROM (e.g. EXTRACT) is not a query-clause boundary. Keeping
@@ -27742,6 +27743,9 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 "\" does not exist (SQLSTATE 42P01)");
         }
         TableSchema innerSch = engine->getTableSchema(dbname, innerTbl);
+        const bool negate = expr.funcArgs.size() > 1 && expr.funcArgs[1] == "not";
+        if (select->limit && *select->limit == 0) return negate ? "t" : "f";
+        size_t remainingOffset = select->offset.value_or(0);
 
         std::set<std::string> innerColumnNames;
         for (size_t i = 0; i < innerSch.len; ++i)
@@ -27768,13 +27772,19 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         }
 
         bool anyRow = false;
+        // Ordering cannot change whether a non-DISTINCT relation has a row
+        // after OFFSET. EXISTS need not evaluate the SELECT list or sort keys.
+        const auto matchedRow = [&]() {
+            if (remainingOffset != 0) --remainingOffset;
+            else anyRow = true;
+        };
         std::string evaluationError;
         const bool scanned = engine->forEachRow(dbname, innerTbl, [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
             // forEachRow has a void callback and continues the physical
             // scan. Once EXISTS is decided, do not evaluate later rows.
             if (anyRow || !evaluationError.empty()) return;
             if (whereSql.empty()) {
-                anyRow = true;
+                matchedRow();
                 return;
             }
             NullRowBinding nullBinding(
@@ -27824,7 +27834,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                  evaluated.value != "1")) {
                 return;
             }
-            anyRow = true;
+            matchedRow();
         });
         if (!scanned) {
             throw std::runtime_error(
@@ -27832,7 +27842,6 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         }
         if (!evaluationError.empty())
             throw std::runtime_error(evaluationError);
-        bool negate = expr.funcArgs.size() > 1 && expr.funcArgs[1] == "not";
         return (negate ? !anyRow : anyRow) ? "t" : "f";
     }
 
@@ -30413,13 +30422,47 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 }
             }
 
-            std::vector<std::pair<std::string, bool>> scalarRows;
+            const bool sorted = !projection->orderBy.empty();
+            std::vector<const Expr*> orderExpressions;
+            for (const auto& order : projection->orderBy) {
+                const Expr* key = order.expr.get();
+                if (const auto* literal = dynamic_cast<const LiteralExpr*>(key)) {
+                    if (!literal->value.empty() && std::all_of(literal->value.begin(),
+                            literal->value.end(), [](unsigned char ch) { return std::isdigit(ch); })) {
+                        size_t ordinal = 0;
+                        const auto parsedOrdinal = std::from_chars(literal->value.data(),
+                            literal->value.data() + literal->value.size(), ordinal);
+                        if (parsedOrdinal.ec != std::errc{} || ordinal != 1) {
+                            throw std::runtime_error("ORDER BY position is not in select list (SQLSTATE 42P10)");
+                        }
+                        key = target;
+                    }
+                } else if (const auto* column = dynamic_cast<const ColumnRefExpr*>(key)) {
+                    if (column->table.empty() && column->schema.empty() &&
+                        !projection->selectList.front().alias.empty() &&
+                        projectionIdentifier(column->column) ==
+                            projectionIdentifier(projection->selectList.front().alias)) key = target;
+                }
+                orderExpressions.push_back(key);
+            }
+            if (projection->limit && *projection->limit == 0) return "NULL";
+            size_t remainingOffset = projection->offset.value_or(0);
+            const size_t take = std::min<size_t>(2, projection->limit.value_or(2));
+            struct ScalarCandidate {
+                std::map<std::string, std::string> values;
+                std::map<std::string, std::string> types;
+                std::set<std::string> nulls;
+                std::vector<ExprValue> keys;
+            };
+            std::vector<ScalarCandidate> candidates;
+            ExprEvaluator orderEvaluator;
+            orderEvaluator.setCurrentDB(dbname);
             std::string evaluationError;
             const bool scanned = engine->forEachVisibleRow(
                 dbname, subTname, "SELECT",
                 [&](uint32_t pageId, uint16_t slotId, const char* data,
                     size_t len) {
-                    if (!evaluationError.empty() || scalarRows.size() > 1)
+                    if (!evaluationError.empty() || (!sorted && candidates.size() >= take))
                         return;
                     NullRowBinding nullBinding(
                         engine, dbname, subTname,
@@ -30480,26 +30523,34 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                         }
                     }
 
-                    // A wildcard has already been expanded and checked
-                    // against the relation shape, including empty relations.
-                    if (wildcard) {
-                        scalarRows.emplace_back(
-                            rowContext.at(wildcardColumn),
-                            nullColumns.count(wildcardColumn) != 0);
+                    if (!sorted && remainingOffset != 0) {
+                        --remainingOffset;
                         return;
                     }
-                    const auto selected =
-                        dbms::ExprHelper::evalStringWithNulls(
-                            colsStr, rowContext, nullColumns, typeHints,
-                            dbname, expr.sessionUser);
-                    if (!selected.ok) {
-                        evaluationError = selected.error.empty()
-                            ? "failed to evaluate scalar subquery projection"
-                            : selected.error;
+                    ScalarCandidate candidate{std::move(rowContext), std::move(typeHints),
+                                              std::move(nullColumns), {}};
+                    try {
+                        RowContext context;
+                        for (const auto& [name, value] : candidate.values)
+                            context.set(name, ExprValue(candidate.types.at(name), value,
+                                                        candidate.nulls.count(name) != 0));
+                        for (const Expr* key : orderExpressions) {
+                            auto value = wildcard && key == target
+                                ? ExprValue(candidate.types.at(wildcardColumn),
+                                            candidate.values.at(wildcardColumn),
+                                            candidate.nulls.count(wildcardColumn) != 0)
+                                : orderEvaluator.eval(key, context);
+                            if (value.isUnknown())
+                                throw std::runtime_error("unsupported subquery sort expression (SQLSTATE 0A000)");
+                            candidate.keys.push_back(std::move(value));
+                        }
+                    } catch (const std::exception& error) {
+                        // Do not unwind through the page-scanning callback:
+                        // its caller must unpin the page and release its lock.
+                        evaluationError = error.what();
                         return;
                     }
-                    scalarRows.emplace_back(
-                        selected.value, selected.isNull);
+                    candidates.push_back(std::move(candidate));
                 });
             if (!scanned) {
                 throw std::runtime_error(
@@ -30507,6 +30558,56 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             }
             if (!evaluationError.empty())
                 throw std::runtime_error(evaluationError);
+            if (sorted) {
+                BinaryOpExpr less;
+                less.op = "<";
+                auto left = std::make_unique<ColumnRefExpr>();
+                auto right = std::make_unique<ColumnRefExpr>();
+                left->column = "sort_left";
+                right->column = "sort_right";
+                less.left = std::move(left);
+                less.right = std::move(right);
+                std::stable_sort(candidates.begin(), candidates.end(),
+                    [&](const ScalarCandidate& a, const ScalarCandidate& b) {
+                        for (size_t i = 0; i < a.keys.size(); ++i) {
+                            const auto& order = projection->orderBy[i];
+                            const auto& av = a.keys[i];
+                            const auto& bv = b.keys[i];
+                            if (av.isNull || bv.isNull) {
+                                if (av.isNull != bv.isNull) return av.isNull == order.nullsFirst;
+                                continue;
+                            }
+                            RowContext context;
+                            context.set("sort_left", av);
+                            context.set("sort_right", bv);
+                            if (orderEvaluator.eval(&less, context).asBool()) return order.asc;
+                            context.set("sort_left", bv);
+                            context.set("sort_right", av);
+                            if (orderEvaluator.eval(&less, context).asBool()) return !order.asc;
+                        }
+                        return false;
+                    });
+                const size_t skipped = std::min(remainingOffset, candidates.size());
+                candidates.erase(candidates.begin(), candidates.begin() + skipped);
+                if (candidates.size() > take) candidates.resize(take);
+            }
+            std::vector<std::pair<std::string, bool>> scalarRows;
+            for (const auto& candidate : candidates) {
+                // Projection runs after ORDER BY / OFFSET / LIMIT, so discarded
+                // rows cannot raise unrelated SELECT-list expression errors.
+                if (wildcard) {
+                    scalarRows.emplace_back(candidate.values.at(wildcardColumn),
+                                            candidate.nulls.count(wildcardColumn) != 0);
+                    continue;
+                }
+                const auto selected = dbms::ExprHelper::evalStringWithNulls(
+                    colsStr, candidate.values, candidate.nulls, candidate.types,
+                    dbname, expr.sessionUser);
+                if (!selected.ok)
+                    throw std::runtime_error(selected.error.empty()
+                        ? "failed to evaluate scalar subquery projection" : selected.error);
+                scalarRows.emplace_back(selected.value, selected.isNull);
+            }
             if (scalarRows.size() > 1) {
                 throw std::runtime_error(
                     "more than one row returned by a subquery used as an "
@@ -30517,7 +30618,13 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             return scalarRows.front().first;
         }
 
+        if (!projection->orderBy.empty()) {
+            throw std::runtime_error("virtual catalog subquery ordering is not supported (SQLSTATE 0A000)");
+        }
         auto rows = engine->query(dbname, subTname, {}, subSelectCols);
+        const size_t skipped = std::min(projection->offset.value_or(0), rows.size());
+        rows.erase(rows.begin(), rows.begin() + skipped);
+        if (projection->limit && rows.size() > *projection->limit) rows.resize(*projection->limit);
         if (rows.size() > 1) {
             throw std::runtime_error(
                 "more than one row returned by a subquery used as an "

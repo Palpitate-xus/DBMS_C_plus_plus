@@ -2634,12 +2634,12 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
         while (pos < tokens.size()) {
             std::string w = toLower(tokens[pos]);
             if (w == "limit" || w == "offset" || w == "union"
-                || w == "intersect" || w == "except" || w == "for") break;
+                || w == "intersect" || w == "except" || w == "for" || w == "fetch") break;
             auto expr = parseSimpleExpr(tokens, pos);
             bool asc = true;
             if (pos < tokens.size() && toLower(tokens[pos]) == "asc") { asc = true; ++pos; }
             else if (pos < tokens.size() && toLower(tokens[pos]) == "desc") { asc = false; ++pos; }
-            if (expr) stmt->orderBy.push_back({std::move(expr), asc, false, ""});
+            if (expr) stmt->orderBy.push_back({std::move(expr), asc, !asc, ""});
             if (pos < tokens.size() && toLower(tokens[pos]) == "nulls") {
                 ++pos;
                 if (pos < tokens.size() && toLower(tokens[pos]) == "first") {
@@ -2690,6 +2690,8 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
         }
         stmt->offset = offset;
         ++pos;
+        if (pos < tokens.size() &&
+            (toLower(tokens[pos]) == "row" || toLower(tokens[pos]) == "rows")) ++pos;
     }
     // FETCH { FIRST | NEXT } [ count ] { ROW | ROWS } { ONLY | WITH TIES }
     if (pos < tokens.size() && toLower(tokens[pos]) == "fetch") {

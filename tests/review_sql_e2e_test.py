@@ -33,6 +33,23 @@ def main():
                 selects += 1
         assert selects == len(expected)
         print("[REVIEW SQL E2E] GROUPING SETS / ROLLUP / CUBE expressions passed")
+        cases = [
+            ("SELECT (SELECT id FROM diff_gsexpr ORDER BY id DESC LIMIT 1) AS picked "
+             "FROM diff_gsexpr WHERE id = 1;", [["3"]]),
+            ("SELECT (SELECT id FROM diff_gsexpr LIMIT 1 OFFSET 1) AS picked "
+             "FROM diff_gsexpr WHERE id = 1;", [["2"]]),
+            ("SELECT EXISTS (SELECT 1 FROM diff_gsexpr LIMIT 0) AS present "
+             "FROM diff_gsexpr WHERE id = 1;", [["f"]]),
+            ("SELECT NOT EXISTS (SELECT 1 FROM diff_gsexpr LIMIT 1 OFFSET 3) AS absent "
+             "FROM diff_gsexpr WHERE id = 1;", [["t"]]),
+            ("SELECT EXISTS (SELECT ' from missing ' FROM diff_gsexpr WHERE id = 1) "
+             "AS present FROM diff_gsexpr WHERE id = 1;", [["t"]]),
+        ]
+        for statement, expected_rows in cases:
+            rows, state, message, _ = runner.ours_query(client, server["sock"], statement)
+            assert state is None, (statement, state, message)
+            assert rows == expected_rows, (statement, rows, expected_rows)
+        print("[REVIEW SQL E2E] projection subquery clauses passed")
     finally:
         runner.stop_ours(server)
 

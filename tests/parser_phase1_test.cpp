@@ -50,6 +50,22 @@ static const FunctionCallExpr* asFuncCall(const ExprPtr& expr) {
 int main() {
     SQLParser parser;
 
+    // PostgreSQL's default NULL position follows the sort direction, and
+    // OFFSET's optional ROW(S) must not consume the following FETCH clause.
+    {
+        const auto parsed = parser.parse(
+            "SELECT id FROM items ORDER BY id DESC OFFSET 1 ROWS FETCH NEXT 1 ROW ONLY");
+        assert(parsed.success);
+        const auto* select = asSelect(parsed.stmt);
+        assert(select && select->orderBy.size() == 1);
+        assert(!select->orderBy[0].asc && select->orderBy[0].nullsFirst);
+        assert(select->offset == 1 && select->limit == 1 && select->fetchFirst);
+        const auto explicitNulls = parser.parse(
+            "SELECT id FROM items ORDER BY id DESC NULLS LAST FETCH FIRST 1 ROW ONLY");
+        assert(explicitNulls.success);
+        assert(!asSelect(explicitNulls.stmt)->orderBy[0].nullsFirst);
+    }
+
     // 1. classify()
     assert(SQLParser::classify("SET timezone = 'UTC'") == SqlCommand::Set);
     assert(SQLParser::classify("SHOW search_path") == SqlCommand::Show);
