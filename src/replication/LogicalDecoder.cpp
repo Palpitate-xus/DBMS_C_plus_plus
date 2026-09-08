@@ -240,13 +240,16 @@ bool PublicationCatalog::create(const std::string& dbname, const Publication& pu
     const auto path = publicationPath(dbname, pub.name);
     std::error_code ec;
     fs::create_directories(path.parent_path(), ec);
-    std::ofstream out(path, std::ios::trunc);
-    if (!out) {
-        error = "cannot write publication file";
+    if (ec) {
+        error = "cannot create publication directory";
         return false;
     }
-    out << serializePublication(pub);
-    if (!out) {
+    if (!index_file::writeAtomically(path, serializePublication(pub))) {
+        // writeAtomically can report a directory-fsync error after rename.
+        // The statement still failed, so remove any visible target rather
+        // than leave a catalog object that makes a retry look like a duplicate.
+        std::error_code cleanupError;
+        fs::remove(path, cleanupError);
         error = "cannot write publication file";
         return false;
     }

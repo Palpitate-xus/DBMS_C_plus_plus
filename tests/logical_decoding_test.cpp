@@ -17,6 +17,10 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <csignal>
+#include <sys/resource.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
@@ -106,6 +110,32 @@ static void test_publication_catalog() {
     assert(!fs::exists(escapedPath));
     assert(!cat.update(db, unsafe, error));
     assert(!cat.exists(db, unsafe.name));
+
+    // A short write must not expose a partial publication as a real catalog
+    // object.  Limit a child process to a few output bytes to force the
+    // persistence path to fail after opening its output.
+    const fs::path failedCreatePath = fs::path(db) / "atomic_fail.publication";
+    const pid_t child = ::fork();
+    assert(child >= 0);
+    if (child == 0) {
+        std::signal(SIGXFSZ, SIG_IGN);
+        const rlimit fileLimit{8, 8};
+        if (::setrlimit(RLIMIT_FSIZE, &fileLimit) != 0) ::_exit(3);
+        Publication failedCreate;
+        failedCreate.name = "atomic_fail";
+        failedCreate.owner = std::string(4096, 'x');
+        std::string childError;
+        const bool created = cat.create(db, failedCreate, childError);
+        ::_exit(created ? 2 : 0);
+    }
+    int childStatus = 0;
+    assert(::waitpid(child, &childStatus, 0) == child);
+    assert(WIFEXITED(childStatus) && WEXITSTATUS(childStatus) == 0);
+    assert(!fs::exists(failedCreatePath));
+    for (const auto& entry : fs::directory_iterator(db)) {
+        assert(entry.path().filename().string().find(
+                   "atomic_fail.publication.tmp.") != 0);
+    }
 
     // Persistence: list reloads from files.
     auto pubs = cat.list(db);
