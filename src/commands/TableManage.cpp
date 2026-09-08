@@ -27050,10 +27050,14 @@ std::vector<std::string> StorageEngine::query(
                  ++orderIndex) {
                 const size_t sortIdx = sortColumnIndices[orderIndex];
                 if (sortIdx < tbl.len) {
+                    bool valueIsNull = false;
                     std::string val = extractColumnValue(
-                        mr.second, tbl, sortIdx, dbname, true);
+                        mr.second, tbl, sortIdx, dbname, true, &valueIsNull);
                     const Column& scol = tbl.cols[sortIdx];
-                    k.isNulls.push_back(val.empty());
+                    const bool resultIsNull = valueIsNull ||
+                        (scol.generatedKind != 'v' && isColumnNullByRid(
+                            dbname, tbl.tablename, mr.first, sortIdx));
+                    k.isNulls.push_back(resultIsNull);
                     if (scol.dataType == "numeric") {
                         k.vals.emplace_back(
                             "", 0, 0.0, Date{},

@@ -22034,6 +22034,33 @@ if (sql.rfind("backup database", 0) == 0) {
                     structuredScalarRows &&
                     structuredScalarResult.rows.size() == answers.size() &&
                     structuredScalarResult.nulls.size() == answers.size();
+                vector<size_t> plainOutputToStorage;
+                if (structuredPlainRows && !projectionOrder.empty()) {
+                    vector<string> storageColumns;
+                    for (size_t ci = 0; ci < tbl.len; ++ci) {
+                        if (selectCols.count(tbl.cols[ci].dataName))
+                            storageColumns.push_back(tbl.cols[ci].dataName);
+                    }
+                    for (const auto& projected : projectionOrder) {
+                        const size_t separator = projected.find("\x01");
+                        const string source = separator == string::npos
+                            ? projected : projected.substr(separator + 1);
+                        const auto found = find(
+                            storageColumns.begin(), storageColumns.end(),
+                            source);
+                        if (found == storageColumns.end()) {
+                            plainOutputToStorage.clear();
+                            break;
+                        }
+                        plainOutputToStorage.push_back(static_cast<size_t>(
+                            found - storageColumns.begin()));
+                    }
+                }
+                const bool hasStructuredPlainOrder =
+                    structuredPlainRows &&
+                    structuredPlainResult.rows.size() == answers.size() &&
+                    structuredPlainResult.nulls.size() == answers.size() &&
+                    plainOutputToStorage.size() == selectExprs.size();
                 if (hasStructuredScalarOrder) {
                     vector<size_t> order;
                     order.reserve(answers.size());
@@ -22096,6 +22123,72 @@ if (sql.rfind("backup database", 0) == 0) {
                         structuredScalarResult.rows.push_back(
                             std::move(oldRows[index]));
                         structuredScalarResult.nulls.push_back(
+                            std::move(oldNulls[index]));
+                    }
+                } else if (hasStructuredPlainOrder) {
+                    vector<size_t> order(answers.size());
+                    iota(order.begin(), order.end(), 0);
+                    stable_sort(order.begin(), order.end(),
+                        [&](size_t a, size_t b) {
+                            for (const auto& key : outKeys) {
+                                const size_t source =
+                                    plainOutputToStorage[key.first];
+                                const bool aNull =
+                                    source >= structuredPlainResult.nulls[a].size() ||
+                                    structuredPlainResult.nulls[a][source];
+                                const bool bNull =
+                                    source >= structuredPlainResult.nulls[b].size() ||
+                                    structuredPlainResult.nulls[b][source];
+                                if (aNull != bNull)
+                                    return aNull == key.second->nullsFirst;
+                                if (aNull) continue;
+                                const string& va =
+                                    structuredPlainResult.rows[a][source];
+                                const string& vb =
+                                    structuredPlainResult.rows[b][source];
+                                const string resultType = key.first <
+                                        structuredPlainResult.columnTypes.size()
+                                    ? toLower(structuredPlainResult.columnTypes[
+                                          key.first])
+                                    : string();
+                                const bool numericType =
+                                    resultType == "smallint" || resultType == "int2" ||
+                                    resultType == "integer" || resultType == "int4" ||
+                                    resultType == "bigint" || resultType == "int8" ||
+                                    resultType == "numeric" || resultType == "decimal" ||
+                                    resultType == "real" || resultType == "float4" ||
+                                    resultType == "double" ||
+                                    resultType == "double precision" ||
+                                    resultType == "float8";
+                                int comparison = 0;
+                                if (numericType) {
+                                    try {
+                                        dbms::Numeric na(va), nb(vb);
+                                        comparison = na < nb
+                                            ? -1 : (nb < na ? 1 : 0);
+                                    } catch (...) {
+                                        comparison = ciTextCompare(va, vb);
+                                    }
+                                } else {
+                                    comparison = ciTextCompare(va, vb);
+                                }
+                                if (comparison != 0)
+                                    return key.second->ascending
+                                        ? comparison < 0 : comparison > 0;
+                            }
+                            return false;
+                        });
+                    auto oldAnswers = std::move(answers);
+                    auto oldRows = std::move(structuredPlainResult.rows);
+                    auto oldNulls = std::move(structuredPlainResult.nulls);
+                    answers.reserve(order.size());
+                    structuredPlainResult.rows.reserve(order.size());
+                    structuredPlainResult.nulls.reserve(order.size());
+                    for (size_t index : order) {
+                        answers.push_back(std::move(oldAnswers[index]));
+                        structuredPlainResult.rows.push_back(
+                            std::move(oldRows[index]));
+                        structuredPlainResult.nulls.push_back(
                             std::move(oldNulls[index]));
                     }
                 } else {

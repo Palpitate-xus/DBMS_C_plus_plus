@@ -102,6 +102,21 @@ def main():
             [None], ["line\nbreak"], ["NULL"], ["same"], ["same"],
         ], ordered_plain_or_rows
 
+        plain_alias_sql = (
+            "SELECT v AS rendered, id FROM exact_table_rows "
+            "ORDER BY rendered;")
+        plain_alias_rows, plain_alias_state, plain_alias_message, _ = (
+            runner.ours_query(client, server["sock"], plain_alias_sql))
+        assert plain_alias_state is None, (
+            plain_alias_state, plain_alias_message)
+        plain_alias_expected = [
+            [row[1], row[0]] for row in sorted(
+                (row for row in expected if row[1] is not None),
+                key=lambda row: row[1])
+        ] + [[None, "3"]]
+        assert plain_alias_rows == plain_alias_expected, (
+            plain_alias_rows, plain_alias_expected)
+
         scalar_cases = [
             (
                 "SELECT upper(v) AS rendered FROM exact_table_rows "
