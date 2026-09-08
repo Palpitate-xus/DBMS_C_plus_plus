@@ -17517,14 +17517,20 @@ if (sql.rfind("backup database", 0) == 0) {
                 size_t condEnd = (orderPos != string::npos) ? orderPos : sql.size();
                 string whereClause = trim(sql.substr(wherePos + 5, condEnd - wherePos - 5));
                 whereClause = expandSubqueries(whereClause, s);
-                // Strip table aliases from WHERE clause before normalization
+                // Resolve JOIN aliases to physical relation names.  Dropping
+                // the qualifier makes same-named columns bind to the left side.
                 if (!leftAlias.empty() || !rightAlias.empty()) {
-                    for (const auto& alias : {leftAlias, rightAlias}) {
+                    for (const auto& mapping : {
+                             pair<string, string>{leftAlias, leftTable},
+                             pair<string, string>{rightAlias, rightTable}}) {
+                        const auto& alias = mapping.first;
                         if (alias.empty()) continue;
                         string prefix = alias + ".";
+                        string replacement = mapping.second + ".";
                         size_t pos = 0;
                         while ((pos = whereClause.find(prefix, pos)) != string::npos) {
-                            whereClause = whereClause.substr(0, pos) + whereClause.substr(pos + prefix.size());
+                            whereClause.replace(pos, prefix.size(), replacement);
+                            pos += replacement.size();
                         }
                     }
                 }
@@ -17635,14 +17641,17 @@ if (sql.rfind("backup database", 0) == 0) {
                 }
             }
 
-            // Strip table aliases from WHERE condition tokens
+            // Preserve source qualification in parsed JOIN predicates.
             if (!condTokens.empty() && (!leftAlias.empty() || !rightAlias.empty())) {
                 for (auto& tok : condTokens) {
-                    for (const auto& alias : {leftAlias, rightAlias}) {
+                    for (const auto& mapping : {
+                             pair<string, string>{leftAlias, leftTable},
+                             pair<string, string>{rightAlias, rightTable}}) {
+                        const auto& alias = mapping.first;
                         if (alias.empty()) continue;
                         string prefix = alias + ".";
                         if (tok.size() > prefix.size() && tok.substr(0, prefix.size()) == prefix) {
-                            tok = tok.substr(prefix.size());
+                            tok = mapping.second + "." + tok.substr(prefix.size());
                         }
                     }
                 }

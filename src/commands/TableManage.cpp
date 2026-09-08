@@ -33291,6 +33291,8 @@ std::vector<std::string> StorageEngine::join(
         bool valueIsNull = false;
         std::string val = logicalValue(
             row, tbl, tableName, it->second.colIdx, &valueIsNull);
+        if (c.op == "isnull") return valueIsNull;
+        if (c.op == "isnotnull") return !valueIsNull;
         if (valueIsNull) return false;
         const Column& col = tbl.cols[it->second.colIdx];
         if (col.dataType == "char" || col.isVariableLength) {
@@ -33349,6 +33351,8 @@ std::vector<std::string> StorageEngine::join(
         bool valueIsNull = false;
         std::string val = logicalValue(
             row, tbl, tableName, it->second.colIdx, &valueIsNull);
+        if (c.op == "isnull") return valueIsNull;
+        if (c.op == "isnotnull") return !valueIsNull;
         if (valueIsNull) return false;
         const Column& col = tbl.cols[it->second.colIdx];
         if (col.dataType == "char" || col.isVariableLength) {
@@ -33583,17 +33587,20 @@ std::vector<std::string> StorageEngine::leftJoin(
         colMap[rightTable + "." + simple] = {false, i};
     }
 
-    auto evalCond = [&](const Condition& c, const JoinRow& leftRow,
-                        const JoinRow& rightRow) -> bool {
+    auto evalCond = [&](const Condition& c, const JoinRow* leftRow,
+                        const JoinRow* rightRow) -> bool {
         auto it = colMap.find(c.colName);
         if (it == colMap.end()) return false;
         const TableSchema& tbl = it->second.isLeft ? leftTbl : rightTbl;
-        const JoinRow& row = it->second.isLeft ? leftRow : rightRow;
+        const JoinRow* row = it->second.isLeft ? leftRow : rightRow;
+        if (!row) return c.op == "isnull";
         const std::string& tableName =
             it->second.isLeft ? leftTable : rightTable;
         bool valueIsNull = false;
         std::string val = logicalValue(
-            row, tbl, tableName, it->second.colIdx, &valueIsNull);
+            *row, tbl, tableName, it->second.colIdx, &valueIsNull);
+        if (c.op == "isnull") return valueIsNull;
+        if (c.op == "isnotnull") return !valueIsNull;
         if (valueIsNull) return false;
         const Column& col = tbl.cols[it->second.colIdx];
         if (col.dataType == "char" || col.isVariableLength) {
@@ -33687,20 +33694,20 @@ std::vector<std::string> StorageEngine::leftJoin(
     };
 
     for (const auto& lr : leftRows) {
-        bool hasMatch = false;
+        bool hasOnMatch = false;
         for (const auto& rr : rightRows) {
             if (leftColIdx >= leftTbl.len || rightColIdx >= rightTbl.len) continue;
             if (lr.joinKeyNull || rr.joinKeyNull) continue;
             if (lr.joinKey != rr.joinKey) continue;
+            hasOnMatch = true;
             bool whereMatch = true;
             for (const auto& c : conds) {
-                if (!evalCond(c, lr, rr)) {
+                if (!evalCond(c, &lr, &rr)) {
                     whereMatch = false;
                     break;
                 }
             }
             if (!whereMatch) continue;
-            hasMatch = true;
             std::vector<std::string> cells;
             std::vector<bool> nulls;
             std::string rowStr = formatRow(lr, &rr, false, cells, nulls);
@@ -33710,7 +33717,15 @@ std::vector<std::string> StorageEngine::leftJoin(
                 if (structuredNulls) structuredNulls->push_back(std::move(nulls));
             }
         }
-        if (!hasMatch) {
+        if (!hasOnMatch) {
+            bool whereMatch = true;
+            for (const auto& c : conds) {
+                if (!evalCond(c, &lr, nullptr)) {
+                    whereMatch = false;
+                    break;
+                }
+            }
+            if (!whereMatch) continue;
             std::vector<std::string> cells;
             std::vector<bool> nulls;
             std::string rowStr = formatRow(lr, nullptr, true, cells, nulls);
@@ -33812,17 +33827,20 @@ std::vector<std::string> StorageEngine::rightJoin(
         colMap[rightTable + "." + simple] = {false, i};
     }
 
-    auto evalCond = [&](const Condition& c, const JoinRow& leftRow,
-                        const JoinRow& rightRow) -> bool {
+    auto evalCond = [&](const Condition& c, const JoinRow* leftRow,
+                        const JoinRow* rightRow) -> bool {
         auto it = colMap.find(c.colName);
         if (it == colMap.end()) return false;
         const TableSchema& tbl = it->second.isLeft ? leftTbl : rightTbl;
-        const JoinRow& row = it->second.isLeft ? leftRow : rightRow;
+        const JoinRow* row = it->second.isLeft ? leftRow : rightRow;
+        if (!row) return c.op == "isnull";
         const std::string& tableName =
             it->second.isLeft ? leftTable : rightTable;
         bool valueIsNull = false;
         std::string val = logicalValue(
-            row, tbl, tableName, it->second.colIdx, &valueIsNull);
+            *row, tbl, tableName, it->second.colIdx, &valueIsNull);
+        if (c.op == "isnull") return valueIsNull;
+        if (c.op == "isnotnull") return !valueIsNull;
         if (valueIsNull) return false;
         const Column& col = tbl.cols[it->second.colIdx];
         if (col.dataType == "char" || col.isVariableLength) {
@@ -33916,20 +33934,20 @@ std::vector<std::string> StorageEngine::rightJoin(
     };
 
     for (const auto& rr : rightRows) {
-        bool hasMatch = false;
+        bool hasOnMatch = false;
         for (const auto& lr : leftRows) {
             if (leftColIdx >= leftTbl.len || rightColIdx >= rightTbl.len) continue;
             if (lr.joinKeyNull || rr.joinKeyNull) continue;
             if (lr.joinKey != rr.joinKey) continue;
+            hasOnMatch = true;
             bool whereMatch = true;
             for (const auto& c : conds) {
-                if (!evalCond(c, lr, rr)) {
+                if (!evalCond(c, &lr, &rr)) {
                     whereMatch = false;
                     break;
                 }
             }
             if (!whereMatch) continue;
-            hasMatch = true;
             std::vector<std::string> cells;
             std::vector<bool> nulls;
             std::string rowStr = formatRow(&lr, rr, false, cells, nulls);
@@ -33939,7 +33957,15 @@ std::vector<std::string> StorageEngine::rightJoin(
                 if (structuredNulls) structuredNulls->push_back(std::move(nulls));
             }
         }
-        if (!hasMatch) {
+        if (!hasOnMatch) {
+            bool whereMatch = true;
+            for (const auto& c : conds) {
+                if (!evalCond(c, nullptr, &rr)) {
+                    whereMatch = false;
+                    break;
+                }
+            }
+            if (!whereMatch) continue;
             std::vector<std::string> cells;
             std::vector<bool> nulls;
             std::string rowStr = formatRow(nullptr, rr, true, cells, nulls);

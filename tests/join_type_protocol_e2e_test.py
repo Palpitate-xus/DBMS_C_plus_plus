@@ -141,6 +141,55 @@ def main():
         assert type_oids == [23, 25, 25], type_oids
         assert command_tag == "SELECT 5", command_tag
 
+        left_where_sql = (
+            "SELECT l.id, r.txt FROM join_exact_left l "
+            "LEFT JOIN join_exact_right r ON l.id = r.id "
+            "WHERE r.txt = 'r one';")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], left_where_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [["1", "r one"]], rows
+        assert type_oids == [23, 25], type_oids
+        assert command_tag == "SELECT 1", command_tag
+
+        preserved_where_sql = (
+            "SELECT l.id, r.txt FROM join_exact_left l "
+            "LEFT JOIN join_exact_right r ON l.id = r.id "
+            "WHERE l.txt = 'left only';")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], preserved_where_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [["5", None]], rows
+        assert command_tag == "SELECT 1", command_tag
+
+        null_extended_where_sql = (
+            "SELECT l.id, r.txt FROM join_exact_left l "
+            "LEFT JOIN join_exact_right r ON l.id = r.id "
+            "WHERE r.txt IS NULL ORDER BY l.id;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], null_extended_where_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [["3", None], ["5", None]], rows
+        assert command_tag == "SELECT 2", command_tag
+
+        not_null_where_sql = (
+            "SELECT l.id, r.txt FROM join_exact_left l "
+            "LEFT JOIN join_exact_right r ON l.id = r.id "
+            "WHERE r.txt IS NOT NULL ORDER BY l.id;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], not_null_where_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [["1", "r one"], ["2", ""], ["4", "NULL"]], rows
+        assert command_tag == "SELECT 3", command_tag
+
         right_sql = (
             "SELECT l.txt, r.id, r.txt FROM join_exact_left l "
             "RIGHT JOIN join_exact_right r ON l.id = r.id ORDER BY r.id;")
@@ -156,6 +205,18 @@ def main():
         ], rows
         assert type_oids == [25, 23, 25], type_oids
         assert command_tag == "SELECT 5", command_tag
+
+        right_where_sql = (
+            "SELECT l.txt, r.id FROM join_exact_left l "
+            "RIGHT JOIN join_exact_right r ON l.id = r.id "
+            "WHERE l.txt = 'a b';")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], right_where_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [["a b", "4"]], rows
+        assert command_tag == "SELECT 1", command_tag
 
         full_sql = (
             "SELECT l.id, l.txt, r.id, r.txt FROM join_exact_left l "
@@ -173,6 +234,18 @@ def main():
         ], rows
         assert type_oids == [23, 25, 23, 25], type_oids
         assert command_tag == "SELECT 6", command_tag
+
+        full_where_sql = (
+            "SELECT l.id, l.txt, r.id FROM join_exact_left l "
+            "FULL OUTER JOIN join_exact_right r ON l.id = r.id "
+            "WHERE l.id = 5;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], full_where_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [["5", "left only", None]], rows
+        assert command_tag == "SELECT 1", command_tag
 
         collision_sql = (
             "SELECT l.txt, r.txt FROM join_collision_left l "
