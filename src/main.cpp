@@ -17220,6 +17220,59 @@ if (sql.rfind("backup database", 0) == 0) {
                 for (const auto& c : requestedCols) cout << c << ' ';
             }
             cout << '\n';
+            if (shouldPublishQueryMetadata()) {
+                dbms::DmlResult metadata;
+                metadata.available = true;
+                metadata.metadataOnly = true;
+                map<string, string> joinTypeHints;
+                for (size_t i = 0; i < leftTbl.len; ++i) {
+                    const string& name = leftTbl.cols[i].dataName;
+                    const string& type = leftTbl.cols[i].dataType;
+                    joinTypeHints[name] = type;
+                    joinTypeHints[leftTableName + "." + name] = type;
+                    joinTypeHints[leftPrefix + "." + name] = type;
+                }
+                for (size_t i = 0; i < rightTbl.len; ++i) {
+                    const string& name = rightTbl.cols[i].dataName;
+                    const string& type = rightTbl.cols[i].dataType;
+                    if (!joinTypeHints.count(name)) joinTypeHints[name] = type;
+                    joinTypeHints[rightTableName + "." + name] = type;
+                    joinTypeHints[rightPrefix + "." + name] = type;
+                }
+
+                if (pureJoinAgg) {
+                    for (const auto& aggregate : joinAggs) {
+                        metadata.columns.push_back(aggregate.func);
+                        metadata.columnTypes.push_back(
+                            dbms::ExprHelper::inferResultType(
+                                aggregate.func + "(" + aggregate.arg + ")",
+                                joinTypeHints));
+                    }
+                } else if (selectAll) {
+                    for (size_t i = 0; i < leftTbl.len; ++i) {
+                        metadata.columns.push_back(leftTbl.cols[i].dataName);
+                        metadata.columnTypes.push_back(leftTbl.cols[i].dataType);
+                    }
+                    for (size_t i = 0; i < rightTbl.len; ++i) {
+                        metadata.columns.push_back(rightTbl.cols[i].dataName);
+                        metadata.columnTypes.push_back(rightTbl.cols[i].dataType);
+                    }
+                } else {
+                    for (const string& column : requestedCols) {
+                        metadata.columns.push_back(column);
+                        const auto position = enginePos(column);
+                        string type = "text";
+                        if (position.first == 0 && position.second >= 0)
+                            type = leftTbl.cols[position.second].dataType;
+                        else if (position.first == 1 && position.second >= 0)
+                            type = rightTbl.cols[position.second].dataType;
+                        metadata.columnTypes.push_back(std::move(type));
+                    }
+                }
+                if (!metadata.columns.empty() &&
+                    metadata.columns.size() == metadata.columnTypes.size())
+                    dbms::publishLastDmlResult(std::move(metadata));
+            }
 
             // Strip table aliases from WHERE condition tokens
             if (!condTokens.empty() && (!leftAlias.empty() || !rightAlias.empty())) {
