@@ -143,6 +143,8 @@
 
 | 299 | P0-01 / SQL-01 / SQL-02 / SQL-04 / QRY-02 | 派生表物化后用裸字符串循环删除 `alias.`，投影字符串常量中的相同文本也被修改；`'d.id'` 在 AS 与裸别名两种语法下都错误返回 `'id'`。派生表限定符重写现在跳过引号和双写转义，并校验标识符左边界 | `sql_literal_preservation_e2e_test` 覆盖 `(SELECT ...) AS d` 与 `(SELECT ...) d`；真实派生表类型、DIV-14、O2 构建及实际 PostgreSQL `cases=122 failed=0` 通过 | `1cf2eee` |
 
+| 300 | P0-01 / SQL-01 / SQL-02 / SQL-04 / QRY-05 | CTE 物化的三处名称替换只检查 `isalnum`，既会把字符串中的 CTE 名改为内部临时表名，也把下划线当边界而改坏普通关系名；`'before cteword after'` 返回内部名，未使用的 CTE `rows` 还会破坏 `rewrite_literal_rows`。普通、限定及递归引用替换现在跳过单/双引号与双写转义，并把 `_` 视为标识符字符 | `sql_literal_preservation_e2e_test` 覆盖完整/嵌入字符串和下划线标识符；CTE 边界、派生表类型、DIV-14、O2 构建及实际 PostgreSQL `cases=122 failed=0` 通过 | `b4450da` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
