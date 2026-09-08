@@ -8072,6 +8072,19 @@ static size_t findTextOutsideQuotes(const std::string& sql,
     return std::string::npos;
 }
 
+static size_t findLastTextOutsideQuotes(const std::string& sql,
+                                        const std::string& text,
+                                        size_t from = 0) {
+    size_t last = std::string::npos;
+    size_t pos = from;
+    while ((pos = findTextOutsideQuotes(sql, text, pos)) !=
+           std::string::npos) {
+        last = pos;
+        pos += text.size();
+    }
+    return last;
+}
+
 static size_t findKeywordOutsideQuotes(const std::string& sql,
                                        const std::string& keyword,
                                        size_t from) {
@@ -17044,7 +17057,7 @@ if (sql.rfind("backup database", 0) == 0) {
         // modifier, not part of the first target expression.
         for (const auto& rawItem : splitSelectColumns(columns)) {
             const string item = trim(rawItem);
-            const size_t asPos = item.rfind(" as ");
+            const size_t asPos = findLastTextOutsideQuotes(item, " as ");
             if (asPos == string::npos) continue;
             const string expression = trim(item.substr(0, asPos));
             const string alias = trim(item.substr(asPos + 4));
@@ -17677,7 +17690,8 @@ if (sql.rfind("backup database", 0) == 0) {
             auto normalizeJoinColumn = [&](string column) {
                 column = trim(column);
                 const string lowerColumn = toLower(column);
-                const size_t asPos = lowerColumn.rfind(" as ");
+                const size_t asPos = findLastTextOutsideQuotes(
+                    lowerColumn, " as ");
                 if (asPos != string::npos) column = trim(column.substr(0, asPos));
                 const size_t dot = column.find('.');
                 if (dot == string::npos) return column;
@@ -17696,7 +17710,8 @@ if (sql.rfind("backup database", 0) == 0) {
                     string expression = trim(item);
                     string outputName;
                     const string lowerExpression = toLower(expression);
-                    const size_t asPos = lowerExpression.rfind(" as ");
+                    const size_t asPos = findLastTextOutsideQuotes(
+                        lowerExpression, " as ");
                     if (asPos != string::npos) {
                         outputName = decodeQuotedIdentifier(
                             trim(expression.substr(asPos + 4)));
@@ -17725,7 +17740,8 @@ if (sql.rfind("backup database", 0) == 0) {
                     string it = trim(item);
                     string low = toLower(it);
                     string aggregateAlias;
-                    const size_t aggregateAsPos = low.rfind(" as ");
+                    const size_t aggregateAsPos = findLastTextOutsideQuotes(
+                        low, " as ");
                     if (aggregateAsPos != string::npos) {
                         aggregateAlias = decodeQuotedIdentifier(
                             trim(it.substr(aggregateAsPos + 4)));
@@ -19137,7 +19153,7 @@ if (sql.rfind("backup database", 0) == 0) {
                         lower.reserve(it.size());
                         for (char ch : it)
                             lower += static_cast<char>(tolower(static_cast<unsigned char>(ch)));
-                        size_t ap = lower.find(" as ");
+                        size_t ap = findTextOutsideQuotes(lower, " as ");
                         while (ap != string::npos) {
                             string tail = trim(it.substr(ap + 4));
                             if (!tail.empty() &&
@@ -19145,7 +19161,7 @@ if (sql.rfind("backup database", 0) == 0) {
                                 aliasToExpr[tail] = trim(it.substr(0, ap));
                                 break;
                             }
-                            ap = lower.find(" as ", ap + 4);
+                            ap = findTextOutsideQuotes(lower, " as ", ap + 4);
                         }
                     }
                     for (auto& gc : groupByCols) {
@@ -19166,7 +19182,8 @@ if (sql.rfind("backup database", 0) == 0) {
                         string pickLower;
                         for (char ch : pick)
                             pickLower += static_cast<char>(tolower(static_cast<unsigned char>(ch)));
-                        size_t pp = pickLower.rfind(" as ");
+                        size_t pp = findLastTextOutsideQuotes(
+                            pickLower, " as ");
                         if (pp != string::npos) pick = trim(pick.substr(0, pp));
                         // PG 42803: an aggregate function is not a legal
                         // GROUP BY target, whether written directly or via
@@ -19241,7 +19258,7 @@ if (sql.rfind("backup database", 0) == 0) {
                     lower.reserve(it.size());
                     for (char ch : it)
                         lower += static_cast<char>(tolower(static_cast<unsigned char>(ch)));
-                    size_t ap = lower.find(" as ");
+                    size_t ap = findTextOutsideQuotes(lower, " as ");
                     while (ap != string::npos) {
                         string tail = trim(it.substr(ap + 4));
                         if (!tail.empty() &&
@@ -19249,7 +19266,7 @@ if (sql.rfind("backup database", 0) == 0) {
                             aliasToExpr[tail] = trim(it.substr(0, ap));
                             break;
                         }
-                        ap = lower.find(" as ", ap + 4);
+                        ap = findTextOutsideQuotes(lower, " as ", ap + 4);
                     }
                 }
                 if (!aliasToExpr.empty()) {
@@ -19300,7 +19317,7 @@ if (sql.rfind("backup database", 0) == 0) {
             windowDefs.push_back(trim(windowRest.substr(start)));
             for (const auto& wd : windowDefs) {
                 // Format: "name AS (PARTITION BY ... ORDER BY ...)"
-                size_t asPos = toLower(wd).find(" as ");
+                size_t asPos = findTextOutsideQuotes(toLower(wd), " as ");
                 if (asPos == string::npos) continue;
                 string wname = trim(wd.substr(0, asPos));
                 string wbody = trim(wd.substr(asPos + 4));
@@ -19342,12 +19359,12 @@ if (sql.rfind("backup database", 0) == 0) {
                 string itemAlias;
                 {
                     size_t asPos = string::npos;
-                    for (size_t ap = item.find(" as "); ap != string::npos;
-                         ap = item.find(" as ", ap + 4)) {
+                    for (size_t ap = findTextOutsideQuotes(item, " as ");
+                         ap != string::npos;
+                         ap = findTextOutsideQuotes(item, " as ", ap + 4)) {
                         // The pattern's own leading space is the separator;
                         // no extra boundary check needed before it.
                         size_t after = ap + 4;
-                        bool la = true;
                         while (after < item.size() &&
                                isspace(static_cast<unsigned char>(item[after]))) ++after;
                         string tail = item.substr(after);
@@ -19687,7 +19704,8 @@ if (sql.rfind("backup database", 0) == 0) {
                         }
                         // Preprocess cast: "expr as type" → "expr,type"
                         if (func == "cast") {
-                            size_t asPos = arg.find(" as ");
+                            size_t asPos = findLastTextOutsideQuotes(
+                                arg, " as ");
                             if (asPos != string::npos) {
                                 string expr = trim(arg.substr(0, asPos));
                                 string type = trim(arg.substr(asPos + 4));
@@ -20158,7 +20176,8 @@ if (sql.rfind("backup database", 0) == 0) {
                     projectionTargets.push_back({true, {}});
                 } else {
                     if (item.empty() || item == "*" || item.find('(') != string::npos ||
-                        item.find(')') != string::npos || item.find(" as ") != string::npos) {
+                        item.find(')') != string::npos ||
+                        findTextOutsideQuotes(item, " as ") != string::npos) {
                         validTargets = false;
                         break;
                     }
@@ -20766,7 +20785,8 @@ if (sql.rfind("backup database", 0) == 0) {
             rawGroupBodies.reserve(rawGroupItems.size());
             for (const auto& raw : rawGroupItems) {
                 string body = trim(raw);
-                const size_t asPos = toLower(body).rfind(" as ");
+                const size_t asPos = findLastTextOutsideQuotes(
+                    toLower(body), " as ");
                 if (asPos != string::npos) body = trim(body.substr(0, asPos));
                 rawGroupBodies.push_back(std::move(body));
             }
@@ -20880,7 +20900,8 @@ if (sql.rfind("backup database", 0) == 0) {
                 size_t scalarSeen = 0;
                 for (const auto& itemRaw : splitSelectColumns(columns)) {
                     string it3 = trim(itemRaw);
-                    size_t ap3 = toLower(it3).rfind(" as ");
+                    size_t ap3 = findLastTextOutsideQuotes(
+                        toLower(it3), " as ");
                     string body3 = ap3 == string::npos ? it3 : trim(it3.substr(0, ap3));
                     if (body3.find('(') != string::npos ||
                         body3.find_first_of("+-*/%") == string::npos) continue;
@@ -20957,7 +20978,8 @@ if (sql.rfind("backup database", 0) == 0) {
                     // when the item (minus its AS alias) matches a GROUP BY
                     // spec or is itself an arithmetic expression.
                     string body = item;
-                    size_t asAt = toLower(body).rfind(" as ");
+                    size_t asAt = findLastTextOutsideQuotes(
+                        toLower(body), " as ");
                     if (asAt != string::npos) body = trim(body.substr(0, asAt));
                     const bool groupMatch = isGroupColumn(item) || isGroupColumn(body) ||
                         body.find_first_of("+-*/%") != string::npos;
@@ -21867,7 +21889,7 @@ if (sql.rfind("backup database", 0) == 0) {
                 for (const auto& itemRaw : splitSelectColumns(columns)) {
                     string item = trim(itemRaw);
                     string alias;
-                    size_t asPos = item.rfind(" as ");
+                    size_t asPos = findLastTextOutsideQuotes(item, " as ");
                     if (asPos != string::npos) {
                         alias = decodeQuotedIdentifier(trim(item.substr(asPos + 4)));
                         item = trim(item.substr(0, asPos));
@@ -23122,7 +23144,7 @@ if (sql.rfind("backup database", 0) == 0) {
                     const vector<string> rawItems = splitSelectColumns(columns);
                     for (size_t ei = 0; ei < rawItems.size() && ei < selectExprs.size(); ++ei) {
                         string it = trim(rawItems[ei]);
-                        size_t asPos = it.rfind(" as ");
+                        size_t asPos = findLastTextOutsideQuotes(it, " as ");
                         if (asPos != string::npos) it = trim(it.substr(0, asPos));
                         if (it == name) { out = ei; return true; }
                     }

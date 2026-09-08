@@ -120,6 +120,16 @@ def main():
             ("WITH rows AS (SELECT 99 AS id) "
              "SELECT id FROM rewrite_literal_rows WHERE id = 1;",
              [["1"]]),
+            ("SELECT 'x as y' FROM rewrite_literal_rows WHERE id = 1;",
+             [["x as y"]]),
+            ("SELECT 'x as y' AS value "
+             "FROM rewrite_literal_rows WHERE id = 1;",
+             [["x as y"]]),
+            ("SELECT 'a as b as c' FROM rewrite_literal_rows WHERE id = 1;",
+             [["a as b as c"]]),
+            ("SELECT CAST('x as y' AS TEXT) "
+             "FROM rewrite_literal_rows WHERE id = 1;",
+             [["x as y"]]),
         ]
         for sql, expected in qualifier_literals:
             rows, state, message, _ = runner.ours_query(
