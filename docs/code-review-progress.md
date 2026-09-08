@@ -129,6 +129,8 @@
 | 291 | P0-01 / SQL-01 / SQL-02 / SQL-03 | 全局 `IN (...)` 预处理用裸 `find(',')` 拆值，逗号即使位于字符串、转义引号后的字符串或嵌套表达式内也会被当成列表边界；例如 `IN ('a,b')` 被改写成两个残缺比较并错误返回空集。现在复用引号与括号深度感知的顶层逗号切分器，完整保留列表项文本，避免字符串内容被 SQL rewrite 破坏 | `sql_literal_preservation_e2e_test` 覆盖含逗号、双写单引号加逗号以及相应 NOT IN；`join_type_protocol_e2e_test` 覆盖 JOIN WHERE 的含逗号/空串/空格/字面量 `NULL` 和 SQL NULL 三值边界。PostgreSQL 协议、review SQL、结构化协议、DIV-14、O2 构建及实际 PostgreSQL `cases=122 failed=0` 全部通过 | `f3d41de` |
 | 292 | P0-01 / SQL-01 / SQL-02 / SQL-03 | WHERE 普通字符串中的 `(SELECT`、EXISTS、ANY/ALL、IN、LIKE/ILIKE、regexp、contains、overlaps、SIMILAR TO、IS NULL、比较符或 `/ 0` 会被多层全局文本处理器当作可执行语法；五个首批样例均把 PostgreSQL 应返回的一行变成空集，`/ 0` 还可触发伪除零错误。现在 SQL 预处理、子查询展开、条件规范化、IN 压缩、括号匹配和最终谓词编码统一跳过单/双引号及双写转义内容；IN/NOT IN 同时接受关键字后无空格的左括号 | `sql_literal_preservation_e2e_test` 覆盖 14 类关键字/运算符文本、含括号内容及 `IN(`/`NOT IN(`；JOIN、协议、结构化结果、review SQL、DIV-14、合法 ANY/ALL/LIKE/ILIKE/ESCAPE/SIMILAR TO/NULL 专项、O2 构建和实际 PostgreSQL `cases=122 failed=0` 全部通过 | `c0d8c77` |
 
+| 293 | P0-01 / SQL-01 / SQL-02 / SQL-03 | 更早的全 SQL 表达式改写仍扫描引号内部：数组下标、量化数组、SUBSTRING/POSITION、IS DISTINCT FROM 和 CASE 形状的普通文本被改写；前四类错误返回空集，两个 DISTINCT 字符串条件错误放行整张表。现在这些改写复用引号感知扫描，括号匹配同时跳过双引号标识符；真实表达式路径保持原语义 | `sql_literal_preservation_e2e_test` 增加 7 类字符串复现；array、ANY/ALL、IS DISTINCT、SUBSTRING、POSITION、searched/simple CASE 专项及 JOIN、结构化协议、review SQL、DIV-14、O2 构建和实际 PostgreSQL `cases=122 failed=0` 全部通过 | `64751ae` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
