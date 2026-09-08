@@ -89,6 +89,14 @@ std::vector<ReplicationManager::ReplicationSlot> ReplicationManager::listSlots()
     return result;
 }
 
+void ReplicationManager::publishLogicalBatch(const LogicalChangeBatch& batch) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& [name, slot] : slots_) {
+        if (slot.slotType != "logical") continue;
+        LogicalChangeStore::instance().append(name, batch);
+    }
+}
+
 bool ReplicationManager::promote() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (standbyMode_ == StandbyMode::None) return false;

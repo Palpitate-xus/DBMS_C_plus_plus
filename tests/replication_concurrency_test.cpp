@@ -1,7 +1,9 @@
 // ReplicationManager must expose snapshots and synchronize all shared state.
 
 #include "replication/ReplicationManager.h"
+#include "replication/LogicalDecoder.h"
 
+#include <atomic>
 #include <cassert>
 #include <iostream>
 #include <thread>
@@ -41,6 +43,41 @@ int main() {
     assert(manager.findSlot(slot).has_value());
     assert(manager.deactivateReplicationSlot(slot) || !manager.findSlot(slot)->active);
     assert(manager.dropReplicationSlot(slot));
+
+    // Publishing and dropping the same logical slot must be serializable.
+    // Whichever operation acquires the manager lock first, no retained batch
+    // may remain after drop returns and both threads finish.
+    const std::string logicalSlot = "concurrent_logical_slot";
+    LogicalChangeBatch batch;
+    batch.changes.push_back(
+        {LogicalChange::Op::Insert, "t", "", "1", 1, 1});
+    for (uint64_t round = 1; round <= 200; ++round) {
+        batch.xid = round;
+        batch.commitLsn = round;
+        assert(manager.createReplicationSlot(
+            logicalSlot, "logical", "test_decoding"));
+        std::atomic<bool> start{false};
+        std::atomic<bool> dropped{false};
+        std::thread publisher([&] {
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            manager.publishLogicalBatch(batch);
+        });
+        std::thread dropper([&] {
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            dropped.store(manager.dropReplicationSlot(logicalSlot),
+                          std::memory_order_release);
+        });
+        start.store(true, std::memory_order_release);
+        publisher.join();
+        dropper.join();
+        assert(dropped.load(std::memory_order_acquire));
+        assert(!manager.findSlot(logicalSlot));
+        assert(LogicalChangeStore::instance().depth(logicalSlot) == 0);
+    }
     manager.setStandbyMode(ReplicationManager::StandbyMode::None);
     std::cout << "[REPLICATION CONCURRENCY] synchronized snapshot API OK\n";
     return 0;

@@ -34951,10 +34951,7 @@ static void publishLogicalChanges(
         change.commitLsn = commitLsn;
         batch.changes.push_back(std::move(change));
     }
-    for (const auto& slot : ReplicationManager::instance().listSlots()) {
-        if (slot.slotType != "logical") continue;
-        LogicalChangeStore::instance().append(slot.name, batch);
-    }
+    ReplicationManager::instance().publishLogicalBatch(batch);
 }
 
 static const char* preparedLockModeName(LockManager::LockMode mode) {
