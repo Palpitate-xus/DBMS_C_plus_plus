@@ -112,6 +112,11 @@ const bool g_initialConfigLoadOk = [] {
 
 StorageEngine g_engine;
 
+// Recursive SELECT helpers call execute() as well.  Structured statement
+// results must only be published by the outer statement, never by a nested
+// subquery that happens to use the same execution path.
+static thread_local unsigned executeDepth = 0;
+
 // ========================================================================
 // Slow query log enhancements
 // ========================================================================
@@ -5651,6 +5656,12 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
     // Evaluate each item; remember display names for the header.
     vector<string> headers;
     vector<string> values;
+    vector<bool> valueNulls;
+    bool hasLegacyScalarSubquery = false;
+    auto appendValue = [&](string value, bool isNull = false) {
+        values.push_back(std::move(value));
+        valueNulls.push_back(isNull);
+    };
     for (const string& item : items) {
         if (item.empty()) {
             cout << "SQL syntax error: empty projection item" << endl;
@@ -5696,28 +5707,28 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
         // Pseudo functions
         if (lowItem == "current_user") {
             headers.push_back("current_user");
-            values.push_back(s.currentRole.empty() ? s.username : s.currentRole);
+            appendValue(s.currentRole.empty() ? s.username : s.currentRole);
             continue;
         }
         if (lowItem == "session_user") {
             headers.push_back("session_user");
-            values.push_back(s.username);
+            appendValue(s.username);
             continue;
         }
         if (lowItem.rfind("generate_series", 0) == 0) {
             // Placeholder row; the SRF expansion below fills the series.
             headers.push_back("generate_series");
-            values.push_back("");
+            appendValue("");
             continue;
         }
         if (lowItem == "current_database()" || lowItem == "current_database ( )") {
             headers.push_back("current_database");
-            values.push_back(s.currentDB.empty() ? std::string("postgres") : s.currentDB);
+            appendValue(s.currentDB.empty() ? std::string("postgres") : s.currentDB);
             continue;
         }
         if (lowItem == "current_schema()" || lowItem == "current_schema ( )") {
             headers.push_back("current_schema");
-            values.push_back("public");
+            appendValue("public");
             continue;
         }
         if (lowItem.substr(0, 10) == "pg_typeof(" || lowItem.substr(0, 10) == "pg_typeof (") {
@@ -5735,21 +5746,21 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             else if (!arg.empty() && arg.front() == '{') tn = "text[]";
             else tn = "unknown";
             headers.push_back("pg_typeof");
-            values.push_back(tn);
+            appendValue(tn);
             continue;
         }
         if (lowItem == "version()" || lowItem == "version ( )") {
             headers.push_back("version");
             // PG-compatible version banner (matches the reference server
             // shape: PostgreSQL <ver> (<distro>) on <arch>, compiled by ...).
-            values.push_back("PostgreSQL 17.2 (Debian 17.2-1.pgdg120+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 12.2.0-14) 12.2.0, 64-bit");
+            appendValue("PostgreSQL 17.2 (Debian 17.2-1.pgdg120+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 12.2.0-14) 12.2.0, 64-bit");
             continue;
         }
         if (lowItem == "user" || lowItem == "current_user" || lowItem == "session_user") {
             // The bare keyword USER is a PG synonym for CURRENT_USER.
             if (lowItem == "user") {
                 headers.push_back("user");
-                values.push_back(s.username);
+                appendValue(s.username);
                 continue;
             }
         }
@@ -5801,7 +5812,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                         return true;
                     }
                     headers.push_back(disp == item ? fname : disp);
-                    values.push_back(rv);
+                    appendValue(rv);
                     continue;
                 }
             }
@@ -5838,6 +5849,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             string innerLow;
             for (char c : inner) innerLow += static_cast<char>(tolower(static_cast<unsigned char>(c)));
             if (innerLow.compare(0, 7, "select ") == 0) {
+                hasLegacyScalarSubquery = true;
                 auto rows = runSubQuery(inner, s);
                 string cell = "NULL";
                 if (!rows.empty()) {
@@ -5847,7 +5859,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                     if (!first.empty()) cell = first;
                 }
                 headers.push_back(disp == item ? "?column?" : disp);
-                values.push_back(cell);
+                appendValue(cell, cell == "NULL");
                 continue;
             }
         }
@@ -5877,7 +5889,8 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                 exE + 7 < lowE.size() &&
                 isspace(static_cast<unsigned char>(lowE[exE + 7]))) {
                 headers.push_back("exists");
-                values.push_back(r.value.empty() && r.isNull ? "NULL" : r.value);
+                appendValue(r.value.empty() && r.isNull ? "NULL" : r.value,
+                            r.isNull);
                 continue;
             }
             // ARRAY[...] literal projects as header "array" (PG
@@ -5897,7 +5910,8 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                   lowA.find("[", npA) != string::npos)) &&
                 endsBracketA && !hasCatA) {
                 headers.push_back("array");
-                values.push_back(r.value.empty() && r.isNull ? "NULL" : r.value);
+                appendValue(r.value.empty() && r.isNull ? "NULL" : r.value,
+                            r.isNull);
                 continue;
             }
             // CAST target type names the column (PG: cast(1 as text) ->
@@ -6034,7 +6048,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             headers.push_back(disp);
         }
         headerDone:;
-        values.push_back(r.isNull ? "NULL" : r.value);
+        appendValue(r.isNull ? "NULL" : r.value, r.isNull);
     }
 
     size_t multiRowWidth = 0;  // >0 when a set-returning function expanded rows
@@ -6075,22 +6089,32 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
         }
         if (hasSrf && srfIdx < values.size()) {
             vector<string> expanded;
+            vector<bool> expandedNulls;
             if (gsStep > 0) {
                 for (int64_t v2 = gsStart; v2 <= gsStop; v2 += gsStep) {
                     vector<string> row = values;
+                    vector<bool> rowNulls = valueNulls;
                     row[srfIdx] = std::to_string(v2);
+                    rowNulls[srfIdx] = false;
                     for (const auto& cell : row) expanded.push_back(cell);
+                    expandedNulls.insert(expandedNulls.end(),
+                                         rowNulls.begin(), rowNulls.end());
                 }
             } else {
                 for (int64_t v2 = gsStart; v2 >= gsStop; v2 += gsStep) {
                     vector<string> row = values;
+                    vector<bool> rowNulls = valueNulls;
                     row[srfIdx] = std::to_string(v2);
+                    rowNulls[srfIdx] = false;
                     for (const auto& cell : row) expanded.push_back(cell);
+                    expandedNulls.insert(expandedNulls.end(),
+                                         rowNulls.begin(), rowNulls.end());
                 }
             }
             if (!expanded.empty()) {
                 size_t width = values.size();
                 values = std::move(expanded);
+                valueNulls = std::move(expandedNulls);
                 multiRowWidth = width;
             }
         }
@@ -6098,6 +6122,31 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
 
     if (isDistinct) {
         // Single row: distinct is a no-op unless the row duplicates itself.
+    }
+
+    // Keep the CLI rendering below for interactive users, but publish exact
+    // cells for the network layer.  This bypasses whitespace/newline parsing
+    // and carries SQL NULL separately from empty or literal "NULL" text.
+    if (executeDepth == 1 && !hasLegacyScalarSubquery) {
+        dbms::DmlResult queryResult;
+        queryResult.available = true;
+        queryResult.columns = headers;
+        if (!suppressDataRow) {
+            const size_t width = multiRowWidth > 0 ? multiRowWidth : values.size();
+            if (width > 0) {
+                for (size_t offset = 0; offset + width <= values.size();
+                     offset += width) {
+                    queryResult.rows.emplace_back(
+                        values.begin() + offset, values.begin() + offset + width);
+                    queryResult.nulls.emplace_back(
+                        valueNulls.begin() + offset,
+                        valueNulls.begin() + offset + width);
+                }
+            }
+        }
+        queryResult.commandTag = "SELECT " +
+            std::to_string(queryResult.rows.size());
+        dbms::publishLastDmlResult(std::move(queryResult));
     }
 
     for (const auto& h : headers) cout << renderLegacyHeader(h) << ' ';
@@ -21301,8 +21350,6 @@ if (sql.rfind("backup database", 0) == 0) {
 }
 
 namespace {
-
-thread_local unsigned executeDepth = 0;
 
 bool containsSqlKeyword(const std::string& sql, const std::string& keyword) {
     bool singleQuoted = false;
