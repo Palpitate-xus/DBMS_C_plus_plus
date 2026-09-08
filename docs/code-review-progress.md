@@ -73,10 +73,11 @@
 | 237 | P0-02 / SQL-12 / QRY-01 / PROTO-04 | 带 WHERE 的标量表投影无条件退回显示文本，即使谓词只产生一个合取执行组，也再次损坏 NULL、换行和边界空格；单执行组现在直接从 `queryExpr` 收集结构化 cells/NULL bitmap | 协议 E2E 覆盖双条件筛选后的空串、SQL NULL、文本 NULL、换行、引号和边界空格；review SQL 及实际 PostgreSQL 122 组差分通过。多 OR 组仍需按行身份合并后全局排序 | `2daf1cf` |
 | 238 | P0-02 / SQL-12 / QRY-01 / PROTO-04 | 标量 OR 谓词按显示行做集合合并，错误删除投影值相同的不同物理行，并继续损坏文本 `NULL` 与换行。`queryExpr` 结构化重载返回内部 row id，多分支按行身份去重并保留精确 cells/NULL bitmap | 协议 E2E 用重叠 OR 覆盖重复投影值、文本 NULL、SQL NULL和嵌入换行，确认 5 个物理行各返回一次；协议、review SQL、异常解锁及实际 PostgreSQL 122 组差分通过。多 OR 后按未投影表列的全局排序仍待迁移 | `e4ee2dd` |
 | 239 | P0-02 / SQL-12 / QRY-01,10 / PROTO-04 | 多 OR 标量查询按未投影表列排序时，各分支分别排序后串接且退回显示文本，结果既非全局有序又不保真。把物理排序列作为隐藏结构化 cell，行身份合并后按类型、方向和 NULL 位置全局稳定排序，再删除隐藏列 | 协议 E2E 覆盖重叠 OR、`ORDER BY id DESC`、重复值、文本 NULL、SQL NULL 和换行；LIMIT/OFFSET、协议、review SQL 及实际 PostgreSQL 122 组差分通过。物理列与输出表达式混合排序仍待统一 comparator | `2ad43ad` |
+| 240 | P0-02 / SQL-12 / QRY-01,09,10 / PROTO-04 | 标量 DISTINCT 用显示文本去重，混淆 SQL NULL、文本 `NULL` 与换行；LIMIT/OFFSET 只切显示行。改用完整 cells+NULL bitmap 作为 DISTINCT 键，并同步切片结构化 rows/nulls；同时在移除 DISTINCT 后建立 alias map，修复 `ORDER BY alias` | 协议 E2E 覆盖 DISTINCT 重复值、SQL NULL/文本 NULL/换行、alias 排序，以及 LIMIT 3 OFFSET 2 的精确保真；LIMIT/FETCH、协议及实际 PostgreSQL 122 组差分通过。DISTINCT ON 约束、collation 和 spill 仍属于 QRY-09 | `fd303b2` |
 
 本批新增的待修复复现（仍计入总清单）：
 
-- P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–239 项迁移；混合物理列/输出表达式排序、DISTINCT / LIMIT、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
+- P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
 - P0-02 / TYPE：第 217 项已修复无 FROM 基础表达式的已知 OID 回退；表查询、复杂表达式、数组 / composite / domain、typmod 和 binary format 类型元数据仍需完整差分。
 
 ### 本批验证记录（第 197–220 项）
