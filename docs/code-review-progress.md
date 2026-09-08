@@ -113,6 +113,8 @@
 | 277 | P0-05 / P0-10 / WAL-07 / BACKUP-01 | 备份复制文件后只原子写 marker/manifest，payload 和嵌套目录没有 `fsync`，最终 staging rename 也未同步父目录；成功返回的 generation 可能在掉电后消失或只留下部分数据。现在逐文件同步、由叶到根同步目录，再发布；已有目标使用 Linux `renameat2(RENAME_EXCHANGE)` 原子交换，父目录同步失败时交换回并持久化旧 generation，新目标同步失败时移回 staging | `physical_backup_replacement_test` 计算本次目录同步序列并在最终发布 sync 精确注入 EIO，验证调用失败且旧 schema generation 原样保留，随后正常替换和恢复；manifest、一致性、restore、DDL snapshot、PITR、logical decoding、DIV-14 与 122/122 差分通过。尚未覆盖跨文件系统目标、真实 power-cut 和多平台 exchange 实现 | `2ff499c` |
 | 278 | P0-05 / P0-10 / WAL-07 / BACKUP-01 | 主数据库恢复树复制后未 `fsync`，已有数据库通过“旧目录移走→新目录改名”发布，canonical 路径存在消失窗口且父目录从未同步；备份专用 `tablespaces/` 容器还会被误复制进活动数据库。恢复现在逐文件/逐目录同步 staging，已有目标原子 exchange、新目标原子 rename，并在父目录同步失败时恢复旧 generation；marker、manifest、WAL archive 和 tablespace 容器不进入活动根目录 | `physical_restore_validation_test` 在 exchange 后的发布 sync 注入 EIO，验证旧数据库和仅存于 live generation 的表完整保留；成功恢复后旧表消失、manifest/tablespaces 容器不存在。所有 backup/restore、DDL snapshot、PITR、DIV-14 及高负载下放宽本次 socket 等待的 122/122 差分通过。外部 tablespace/WAL archive 的跨根原子性仍待处理 | `d28da5f` |
 
+| 279 | P0-05 / WAL-08 | `createTransactionBackup()` 先生成带精确文件集合的 manifest，再按崩溃语义删除快照中的 UNLOGGED relation forks，却没有更新 manifest；含 UNLOGGED 表的 DDL/tablespace 快照会在回滚时被当成损坏备份拒绝。过滤完成后现在重新生成 manifest，并再次同步完整快照树；失败会删除不可恢复的快照并中止事务备份创建 | `alter_table_only_test` 的自定义 tablespace + logged/UNLOGGED 组合重新通过事务回滚、手工快照恢复和重启读取，验证外部 logged relation 保留且过滤后的 manifest 可验证。完整 backup/restore 与 DDL snapshot 回归随后随相邻项继续执行 | `7cb852b` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
