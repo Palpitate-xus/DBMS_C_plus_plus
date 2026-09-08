@@ -16482,20 +16482,7 @@ if (sql.rfind("backup database", 0) == 0) {
                               columns.substr(cpos + prefix.size());
             }
         }
-        // SELECT-list alias map ("expr as name" -> expr) for ORDER BY
-        // resolution; computed on the raw projection text.
         map<string, string> selectAliasMap;
-        for (const auto& itemRaw : splitSelectColumns(columns)) {
-            string it = trim(itemRaw);
-            size_t ap = it.find(" as ");
-            if (ap == string::npos) continue;
-            string expr = trim(it.substr(0, ap));
-            string alias = trim(it.substr(ap + 4));
-            if (!expr.empty() && !alias.empty() &&
-                alias.find_first_of(" ,()+-*/%") == string::npos) {
-                selectAliasMap[alias] = expr;
-            }
-        }
         bool isDistinct = false;
         vector<string> distinctOnCols;
         if (columns.size() >= 12 && columns.substr(0, 12) == "distinct on(") {
@@ -16527,6 +16514,20 @@ if (sql.rfind("backup database", 0) == 0) {
         } else if (columns.size() >= 9 && columns.substr(0, 9) == "distinct ") {
             isDistinct = true;
             columns = trim(columns.substr(9));
+        }
+        // SELECT-list alias map ("expr as name" -> expr) for ORDER BY.
+        // Build it after removing DISTINCT: that keyword is a SELECT
+        // modifier, not part of the first target expression.
+        for (const auto& rawItem : splitSelectColumns(columns)) {
+            const string item = trim(rawItem);
+            const size_t asPos = item.rfind(" as ");
+            if (asPos == string::npos) continue;
+            const string expression = trim(item.substr(0, asPos));
+            const string alias = trim(item.substr(asPos + 4));
+            if (!expression.empty() && !alias.empty() &&
+                alias.find_first_of(" ,()+-*/%") == string::npos) {
+                selectAliasMap[alias] = expression;
+            }
         }
 
         size_t wherePos = findTopLevelKeyword(sql, "where", fromPos);
@@ -21506,10 +21507,9 @@ if (sql.rfind("backup database", 0) == 0) {
             const bool captureStructuredScalar =
                 shouldPublishQueryMetadata() &&
                 !structuredScalar && !hasSetReturningScalar &&
-                !isDistinct && distinctOnCols.empty() &&
+                distinctOnCols.empty() &&
                 exprOrderBySpecs.empty() &&
-                limitPos == string::npos &&
-                offsetPos == string::npos && outfile.empty() &&
+                outfile.empty() &&
                 queryDb != "information_schema" && queryDb != "pg_catalog" &&
                 structuredScalarResult.columns.size() == selectExprs.size() &&
                 g_engine.getInheritedChildren(queryDb, tname).empty();
@@ -22048,14 +22048,66 @@ if (sql.rfind("backup database", 0) == 0) {
         }
         // Post-query DISTINCT deduplication (skip if DISTINCT ON already handled in query())
         if (isDistinct && distinctOnCols.empty()) {
-            vector<string> deduped;
-            set<string> seen;
-            for (const auto& row : answers) {
-                if (seen.insert(row).second) deduped.push_back(row);
+            const bool canDeduplicateStructuredScalar =
+                structuredScalarRows &&
+                structuredScalarResult.rows.size() == answers.size() &&
+                structuredScalarResult.nulls.size() == answers.size();
+            if (canDeduplicateStructuredScalar) {
+                set<pair<vector<string>, vector<bool>>> seen;
+                vector<string> dedupedAnswers;
+                vector<vector<string>> dedupedRows;
+                vector<vector<bool>> dedupedNulls;
+                for (size_t i = 0; i < answers.size(); ++i) {
+                    const auto key = make_pair(
+                        structuredScalarResult.rows[i],
+                        structuredScalarResult.nulls[i]);
+                    if (!seen.insert(key).second) continue;
+                    dedupedAnswers.push_back(std::move(answers[i]));
+                    dedupedRows.push_back(
+                        std::move(structuredScalarResult.rows[i]));
+                    dedupedNulls.push_back(
+                        std::move(structuredScalarResult.nulls[i]));
+                }
+                answers = std::move(dedupedAnswers);
+                structuredScalarResult.rows = std::move(dedupedRows);
+                structuredScalarResult.nulls = std::move(dedupedNulls);
+            } else {
+                vector<string> deduped;
+                set<string> seen;
+                for (const auto& row : answers) {
+                    if (seen.insert(row).second) deduped.push_back(row);
+                }
+                answers = std::move(deduped);
             }
-            answers = std::move(deduped);
         }
-        applyLimitOffset(answers);
+        const bool canSliceStructuredScalar =
+            structuredScalarRows &&
+            structuredScalarResult.rows.size() == answers.size() &&
+            structuredScalarResult.nulls.size() == answers.size();
+        if (canSliceStructuredScalar) {
+            size_t count = 0, offset = 0;
+            const bool finiteLimit = parseLimitOffset(count, offset);
+            if (offset >= answers.size()) {
+                answers.clear();
+                structuredScalarResult.rows.clear();
+                structuredScalarResult.nulls.clear();
+            } else {
+                answers.erase(answers.begin(), answers.begin() + offset);
+                structuredScalarResult.rows.erase(
+                    structuredScalarResult.rows.begin(),
+                    structuredScalarResult.rows.begin() + offset);
+                structuredScalarResult.nulls.erase(
+                    structuredScalarResult.nulls.begin(),
+                    structuredScalarResult.nulls.begin() + offset);
+                if (finiteLimit && count < answers.size()) {
+                    answers.resize(count);
+                    structuredScalarResult.rows.resize(count);
+                    structuredScalarResult.nulls.resize(count);
+                }
+            }
+        } else {
+            applyLimitOffset(answers);
+        }
         // Re-render TIMESTAMPTZ values in the session's TimeZone (SET TIME
         // ZONE).  Executor paths emit UTC; the legacy engine query() already
         // applied the offset and suffixed "+HH:MM", which the post-processor

@@ -132,6 +132,25 @@ def main():
             [None], ["LINE\nBREAK"], ["NULL"], ["SAME"], ["SAME"],
         ], ordered_or_rows
 
+        distinct_sql = (
+            "SELECT DISTINCT upper(v) AS rendered "
+            "FROM exact_scalar_or_rows ORDER BY rendered;")
+        distinct_rows, distinct_state, distinct_message, _ = (
+            runner.ours_query(client, server["sock"], distinct_sql))
+        assert distinct_state is None, (distinct_state, distinct_message)
+        assert distinct_rows == [
+            ["LINE\nBREAK"], ["NULL"], ["SAME"], [None],
+        ], distinct_rows
+
+        slice_sql = (
+            "SELECT upper(v) AS rendered FROM exact_table_rows "
+            "ORDER BY id LIMIT 3 OFFSET 2;")
+        slice_rows, slice_state, slice_message, _ = runner.ours_query(
+            client, server["sock"], slice_sql)
+        assert slice_state is None, (slice_state, slice_message)
+        assert slice_rows == [[None], ["NULL"], ["LINE1\nLINE2"]], \
+            slice_rows
+
         alias_values = [
             None if row[1] is None else row[1].upper()
             for row in expected
