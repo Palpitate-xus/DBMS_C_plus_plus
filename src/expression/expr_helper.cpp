@@ -77,6 +77,242 @@ std::string canonicalTypeName(const std::string& storageType) {
     return t;
 }
 
+std::string protocolTypeName(std::string type) {
+    type = toLower(type);
+    const size_t modifier = type.find('(');
+    if (modifier != std::string::npos) type.resize(modifier);
+    while (!type.empty() && std::isspace(static_cast<unsigned char>(type.back())))
+        type.pop_back();
+    if (type == "int" || type == "int4" || type == "serial") return "integer";
+    if (type == "int2" || type == "smallserial") return "smallint";
+    if (type == "int8" || type == "bigserial") return "bigint";
+    if (type == "decimal") return "numeric";
+    if (type == "float8" || type == "double" || type == "float")
+        return "double precision";
+    if (type == "float4") return "real";
+    if (type == "bool") return "boolean";
+    if (type == "character varying") return "varchar";
+    if (type == "character") return "bpchar";
+    return type;
+}
+
+bool numericProtocolType(const std::string& type) {
+    const std::string t = protocolTypeName(type);
+    return t == "smallint" || t == "integer" || t == "bigint" ||
+           t == "numeric" || t == "real" || t == "double precision";
+}
+
+int numericTypeRank(const std::string& type) {
+    const std::string t = protocolTypeName(type);
+    if (t == "double precision") return 6;
+    if (t == "real") return 5;
+    if (t == "numeric") return 4;
+    if (t == "bigint") return 3;
+    if (t == "integer") return 2;
+    if (t == "smallint") return 1;
+    return 0;
+}
+
+std::string mergeProtocolTypes(const std::string& leftRaw,
+                               const std::string& rightRaw) {
+    const std::string left = protocolTypeName(leftRaw);
+    const std::string right = protocolTypeName(rightRaw);
+    if (left.empty() || left == "unknown") return right;
+    if (right.empty() || right == "unknown") return left;
+    if (left == right) return left;
+    if (numericProtocolType(left) && numericProtocolType(right)) {
+        const int rank = std::max(numericTypeRank(left), numericTypeRank(right));
+        if (rank >= 6) return "double precision";
+        if (rank == 5) return "real";
+        if (rank == 4) return "numeric";
+        if (rank == 3) return "bigint";
+        if (rank == 2) return "integer";
+        return "smallint";
+    }
+    if ((left == "text" || left == "varchar" || left == "bpchar") &&
+        (right == "text" || right == "varchar" || right == "bpchar")) {
+        if (left == "text" || right == "text") return "text";
+        if (left == "varchar" || right == "varchar") return "varchar";
+        return "bpchar";
+    }
+    return left;
+}
+
+std::string inferAstResultType(
+    const Expr* expression,
+    const std::map<std::string, std::string>& typeHints) {
+    if (!expression) return "text";
+    if (const auto* literal = dynamic_cast<const LiteralExpr*>(expression)) {
+        if (!literal->typeName.empty())
+            return protocolTypeName(literal->typeName);
+        const std::string value = toLower(literal->value);
+        if (value == "null" ||
+            (literal->value.size() >= 2 && literal->value.front() == '\'' &&
+             literal->value.back() == '\'')) return "unknown";
+        if (value == "true" || value == "false") return "boolean";
+        if (looksLikeNumber(literal->value))
+            return literal->value.find_first_of(".eE") == std::string::npos
+                ? "integer" : "numeric";
+        return "unknown";
+    }
+    if (const auto* column = dynamic_cast<const ColumnRefExpr*>(expression)) {
+        for (const std::string& key : {
+                 column->toString(), column->column}) {
+            auto found = typeHints.find(key);
+            if (found != typeHints.end())
+                return protocolTypeName(found->second);
+        }
+        return "text";
+    }
+    if (const auto* cast = dynamic_cast<const CastExpr*>(expression))
+        return protocolTypeName(cast->typeName);
+    if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expression)) {
+        const std::string op = toLower(unary->op);
+        if (op == "not" || op.find("is ") == 0) return "boolean";
+        return inferAstResultType(unary->operand.get(), typeHints);
+    }
+    if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression)) {
+        const std::string op = toLower(binary->op);
+        static const std::set<std::string> booleanOperators = {
+            "and", "or", "=", "<>", "!=", "<", ">", "<=", ">=",
+            "like", "not like", "ilike", "not ilike", "in", "not in",
+            "between", "not between", "is distinct from",
+            "is not distinct from", "similar to", "not similar to"
+        };
+        if (booleanOperators.count(op)) return "boolean";
+        if (op == "||") return "text";
+        const std::string left = inferAstResultType(binary->left.get(), typeHints);
+        const std::string right = inferAstResultType(binary->right.get(), typeHints);
+        if (op == "+" || op == "-") {
+            if (left == "date" && right == "interval") return "timestamp";
+            if ((left == "timestamp" || left == "timestamptz") &&
+                right == "interval") return left;
+            if (op == "-" && left == "date" && right == "date") return "integer";
+            if (op == "-" && left == "timestamp" && right == "timestamp")
+                return "interval";
+            if (left == "date" && numericProtocolType(right)) return "date";
+        }
+        return mergeProtocolTypes(left, right);
+    }
+    if (const auto* array = dynamic_cast<const ArrayExpr*>(expression)) {
+        std::string element = "unknown";
+        for (const auto& value : array->elements)
+            element = mergeProtocolTypes(
+                element, inferAstResultType(value.get(), typeHints));
+        if (element.empty() || element == "unknown") element = "text";
+        return element + "[]";
+    }
+    if (dynamic_cast<const RowExpr*>(expression)) return "record";
+    if (const auto* caseExpression = dynamic_cast<const CaseExpr*>(expression)) {
+        std::string result = "unknown";
+        for (const auto& clause : caseExpression->whenClauses)
+            result = mergeProtocolTypes(
+                result, inferAstResultType(clause.second.get(), typeHints));
+        if (caseExpression->elseExpr)
+            result = mergeProtocolTypes(
+                result, inferAstResultType(caseExpression->elseExpr.get(), typeHints));
+        return result;
+    }
+    if (const auto* call = dynamic_cast<const FunctionCallExpr*>(expression)) {
+        const std::string name = toLower(call->funcName);
+        auto argType = [&](size_t index) {
+            return index < call->args.size()
+                ? inferAstResultType(call->args[index].get(), typeHints)
+                : std::string("unknown");
+        };
+        if (name == "cast" && call->args.size() >= 2) {
+            if (const auto* target =
+                    dynamic_cast<const ColumnRefExpr*>(call->args[1].get())) {
+                return protocolTypeName(target->column);
+            }
+            if (const auto* target =
+                    dynamic_cast<const LiteralExpr*>(call->args[1].get())) {
+                return protocolTypeName(target->value);
+            }
+            return protocolTypeName(call->args[1]->toString());
+        }
+        if (name == "case_when") {
+            std::string result = "unknown";
+            for (size_t i = 1; i < call->args.size(); i += 2)
+                result = mergeProtocolTypes(result, argType(i));
+            if (call->args.size() % 2 == 1)
+                result = mergeProtocolTypes(result, argType(call->args.size() - 1));
+            return result;
+        }
+        if (name == "exists" || name == "is_null" || name == "is_not_null" ||
+            name == "isdistinct" || name == "isnotdistinct") return "boolean";
+        if (name == "count" || name == "row_number" || name == "rank" ||
+            name == "dense_rank") return "bigint";
+        if (name == "ntile" || name == "width_bucket" || name == "length" ||
+            name == "char_length" || name == "character_length" ||
+            name == "bit_length" || name == "octet_length" || name == "strpos" ||
+            name == "position" || name == "ascii" || name == "gcd" ||
+            name == "lcm") return "integer";
+        if (name == "percent_rank" || name == "cume_dist" || name == "date_part")
+            return "double precision";
+        if (name == "extract") return "numeric";
+        if (name == "age") return "interval";
+        if (name == "to_timestamp") return "timestamptz";
+        if (name == "date_trunc") return argType(1);
+        if (name == "current_date") return "date";
+        if (name == "now" || name == "current_timestamp") return "timestamptz";
+        if (name == "string_to_array" || name == "regexp_split_to_array" ||
+            name == "regexp_matches") return "text[]";
+        if (name == "array_append" || name == "array_prepend" ||
+            name == "array_remove" || name == "array_replace")
+            return name == "array_prepend" ? argType(1) : argType(0);
+        if (name == "array_agg") {
+            const std::string element = argType(0);
+            return (element.empty() || element == "unknown" ? "text" : element) + "[]";
+        }
+        if (name == "string_agg") return "text";
+        if (name == "json_agg") return "json";
+        if (name == "jsonb_agg") return "jsonb";
+        if (name == "bool_and" || name == "bool_or" || name == "every")
+            return "boolean";
+        if (name == "sum") {
+            const std::string input = argType(0);
+            if (input == "smallint" || input == "integer") return "bigint";
+            if (input == "bigint" || input == "numeric") return "numeric";
+            if (input == "real" || input == "double precision")
+                return "double precision";
+        }
+        if (name == "avg" || name == "stddev" || name == "stddev_samp" ||
+            name == "stddev_pop" || name == "variance" || name == "var_samp" ||
+            name == "var_pop") {
+            const std::string input = argType(0);
+            return input == "real" || input == "double precision"
+                ? "double precision" : "numeric";
+        }
+        if (name == "sign") {
+            const std::string input = argType(0);
+            return input == "numeric" ? "numeric" : "double precision";
+        }
+        if (name == "min" || name == "max" || name == "lag" ||
+            name == "lead" || name == "first_value" || name == "last_value" ||
+            name == "nth_value" || name == "coalesce" || name == "nullif" ||
+            name == "greatest" || name == "least" || name == "abs" ||
+            name == "round" || name == "trunc" || name == "ceil" ||
+            name == "ceiling" || name == "floor" || name == "mod")
+            return argType(0);
+        if (name == "div") return "numeric";
+        if (name == "power")
+            return argType(0) == "numeric" ? "numeric" : "double precision";
+        if (name == "exp" || name == "ln" || name == "log" || name == "sqrt" ||
+            name == "sin" || name == "cos" || name == "tan")
+            return argType(0) == "numeric" ? "numeric" : "double precision";
+        static const std::set<std::string> textFunctions = {
+            "lower", "upper", "initcap", "concat", "concat_ws", "substring",
+            "substr", "left", "right", "trim", "btrim", "ltrim", "rtrim",
+            "reverse", "replace", "translate", "format", "quote_literal",
+            "quote_nullable", "overlay", "to_char"
+        };
+        if (textFunctions.count(name)) return "text";
+        return "text";
+    }
+    return "text";
+}
+
 bool countParsedColumnReferences(
     const Expr* expression, const std::string& columnName, size_t& count) {
     if (!expression) return true;
@@ -434,6 +670,193 @@ std::vector<size_t> columnReferenceSourceTokens(
 }
 
 } // namespace
+
+std::string ExprHelper::inferResultType(
+    const std::string& exprSql,
+    const std::map<std::string, std::string>& typeHints) {
+    const std::string trimmed = [&] {
+        size_t first = exprSql.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos) return std::string{};
+        size_t last = exprSql.find_last_not_of(" \t\r\n");
+        return exprSql.substr(first, last - first + 1);
+    }();
+    const std::string lower = toLower(trimmed);
+
+    // The expression parser accepts PostgreSQL postfix casts while evaluating,
+    // but older AST paths can leave the cast suffix outside the returned root.
+    // Read a top-level suffix directly so protocol metadata follows the cast,
+    // including typemods such as numeric(12,2).
+    size_t postfixCast = std::string::npos;
+    int castDepth = 0;
+    bool castString = false;
+    bool castIdentifier = false;
+    for (size_t i = 0; i + 1 < trimmed.size(); ++i) {
+        const char ch = trimmed[i];
+        if (castString) {
+            if (ch == '\'' && i + 1 < trimmed.size() && trimmed[i + 1] == '\'') {
+                ++i;
+            } else if (ch == '\'') {
+                castString = false;
+            }
+            continue;
+        }
+        if (castIdentifier) {
+            if (ch == '"' && i + 1 < trimmed.size() && trimmed[i + 1] == '"') {
+                ++i;
+            } else if (ch == '"') {
+                castIdentifier = false;
+            }
+            continue;
+        }
+        if (ch == '\'') { castString = true; continue; }
+        if (ch == '"') { castIdentifier = true; continue; }
+        if (ch == '(' || ch == '[') { ++castDepth; continue; }
+        if (ch == ')' || ch == ']') { if (castDepth > 0) --castDepth; continue; }
+        if (castDepth == 0 && ch == ':' && trimmed[i + 1] == ':') {
+            postfixCast = i;
+            ++i;
+        }
+    }
+    if (postfixCast != std::string::npos) {
+        const std::string target = trimmed.substr(postfixCast + 2);
+        if (!target.empty()) return protocolTypeName(target);
+    }
+
+    // SQL preprocessing lowers CASE into an evaluator-only case_when wrapper.
+    // Conditions in that wrapper are not general SQL, so infer its value slots
+    // directly instead of asking the expression parser to read them.
+    if (lower.rfind("case_when(", 0) == 0 && trimmed.back() == ')') {
+        std::vector<std::string> args;
+        std::string current;
+        int depth = 0;
+        bool quoted = false;
+        for (size_t i = 10; i + 1 < trimmed.size(); ++i) {
+            const char ch = trimmed[i];
+            if (ch == '\'') quoted = !quoted;
+            if (!quoted && (ch == '(' || ch == '[')) ++depth;
+            if (!quoted && (ch == ')' || ch == ']') && depth > 0) --depth;
+            if (!quoted && depth == 0 && ch == ',') {
+                args.push_back(current);
+                current.clear();
+            } else {
+                current += ch;
+            }
+        }
+        args.push_back(current);
+        std::string result = "unknown";
+        for (size_t i = 1; i < args.size(); i += 2)
+            result = mergeProtocolTypes(
+                result, inferResultType(args[i], typeHints));
+        if (args.size() % 2 == 1)
+            result = mergeProtocolTypes(
+                result, inferResultType(args.back(), typeHints));
+        if (!result.empty() && result != "unknown") return result;
+    }
+
+    static const std::vector<std::string> typedLiteralTypes = {
+        "timestamptz", "timestamp", "interval", "date", "time",
+        "numeric", "boolean", "text"
+    };
+    for (const std::string& type : typedLiteralTypes) {
+        const std::string prefix = type + " ";
+        if (lower.rfind(prefix, 0) == 0 &&
+            trimmed.size() > prefix.size() && trimmed[prefix.size()] == '\'' &&
+            trimmed.back() == '\'') return type;
+    }
+    if (lower.rfind("case", 0) != 0 &&
+        (lower.find(" between ") != std::string::npos ||
+         lower.find(" is distinct from ") != std::string::npos ||
+         lower.find(" is not distinct from ") != std::string::npos ||
+         lower.find(" like ") != std::string::npos ||
+         lower.find(" ilike ") != std::string::npos)) {
+        return "boolean";
+    }
+    if (lower.rfind("array[", 0) == 0 || lower.rfind("array [", 0) == 0) {
+        if (trimmed.find('\'') != std::string::npos) return "text[]";
+        if (trimmed.find('.') != std::string::npos) return "numeric[]";
+        return "integer[]";
+    }
+
+    // Simple CASE has a selector between CASE and the first WHEN.  Some legacy
+    // parser paths treat that form as an opaque expression, so merge only its
+    // result arms here.  Nested CASE expressions are kept at their own depth.
+    if (lower.rfind("case", 0) == 0) {
+        struct CaseWord { size_t begin; size_t end; std::string word; };
+        std::vector<CaseWord> words;
+        int parenDepth = 0;
+        int caseDepth = 0;
+        bool string = false;
+        bool identifier = false;
+        for (size_t i = 0; i < trimmed.size();) {
+            const char ch = trimmed[i];
+            if (string) {
+                if (ch == '\'' && i + 1 < trimmed.size() &&
+                    trimmed[i + 1] == '\'') i += 2;
+                else { if (ch == '\'') string = false; ++i; }
+                continue;
+            }
+            if (identifier) {
+                if (ch == '"' && i + 1 < trimmed.size() &&
+                    trimmed[i + 1] == '"') i += 2;
+                else { if (ch == '"') identifier = false; ++i; }
+                continue;
+            }
+            if (ch == '\'') { string = true; ++i; continue; }
+            if (ch == '"') { identifier = true; ++i; continue; }
+            if (ch == '(' || ch == '[') { ++parenDepth; ++i; continue; }
+            if (ch == ')' || ch == ']') {
+                if (parenDepth > 0) --parenDepth;
+                ++i;
+                continue;
+            }
+            if (parenDepth == 0 &&
+                (std::isalpha(static_cast<unsigned char>(ch)) || ch == '_')) {
+                const size_t begin = i++;
+                while (i < trimmed.size() &&
+                       (std::isalnum(static_cast<unsigned char>(trimmed[i])) ||
+                        trimmed[i] == '_' || trimmed[i] == '$')) ++i;
+                const std::string word = lower.substr(begin, i - begin);
+                if (word == "case") {
+                    ++caseDepth;
+                } else if (word == "end") {
+                    if (caseDepth == 1) words.push_back({begin, i, word});
+                    if (caseDepth > 0) --caseDepth;
+                } else if (caseDepth == 1 &&
+                           (word == "then" || word == "when" ||
+                            word == "else")) {
+                    words.push_back({begin, i, word});
+                }
+                continue;
+            }
+            ++i;
+        }
+        std::string result = "unknown";
+        for (size_t i = 0; i < words.size(); ++i) {
+            if (words[i].word != "then" && words[i].word != "else") continue;
+            const size_t valueBegin = words[i].end;
+            const size_t valueEnd = i + 1 < words.size()
+                ? words[i + 1].begin : trimmed.size();
+            result = mergeProtocolTypes(
+                result, inferResultType(
+                            trimmed.substr(valueBegin, valueEnd - valueBegin),
+                            typeHints));
+        }
+        if (!result.empty() && result != "unknown") return result;
+    }
+
+    ParseResult parsed;
+    const Expr* expression = parseStoredExpression(trimmed, parsed);
+    if (!expression) {
+        if (lower.find(" is ") != std::string::npos ||
+            lower.find(" between ") != std::string::npos ||
+            lower.find(" like ") != std::string::npos) return "boolean";
+        return "text";
+    }
+    std::string type = protocolTypeName(
+        inferAstResultType(expression, typeHints));
+    if (type.empty() || type == "unknown") type = "text";
+    return type;
+}
 
 std::optional<bool> ExprHelper::referencesColumn(
     const std::string& exprSql, const std::string& columnName) {

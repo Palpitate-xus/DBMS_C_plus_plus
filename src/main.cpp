@@ -21085,6 +21085,57 @@ if (sql.rfind("backup database", 0) == 0) {
         } else if (hasScalar) {
             if (forUpdate) { cout << "FOR UPDATE not supported with scalar functions" << endl; return true; }
 
+            if (shouldPublishQueryMetadata()) {
+                const vector<string> rawTargets = splitSelectColumns(columns);
+                if (rawTargets.size() == selectExprs.size() &&
+                    none_of(rawTargets.begin(), rawTargets.end(),
+                            [](const string& target) {
+                                return trim(target) == "*";
+                            })) {
+                    map<string, string> typeHints;
+                    for (size_t ci = 0; ci < tbl.len; ++ci) {
+                        const string& name = tbl.cols[ci].dataName;
+                        const string& type = tbl.cols[ci].dataType;
+                        typeHints[name] = type;
+                        if (!tnameOrig.empty()) typeHints[tnameOrig + "." + name] = type;
+                        if (!tableAlias.empty()) typeHints[tableAlias + "." + name] = type;
+                    }
+                    auto withoutAlias = [](const string& target) {
+                        string lower = toLower(target);
+                        int depth = 0;
+                        bool quoted = false;
+                        size_t aliasAt = string::npos;
+                        for (size_t i = 0; i + 4 <= target.size(); ++i) {
+                            const char ch = target[i];
+                            if (quoted) {
+                                if (ch == '\'' && i + 1 < target.size() &&
+                                    target[i + 1] == '\'') { ++i; continue; }
+                                if (ch == '\'') quoted = false;
+                                continue;
+                            }
+                            if (ch == '\'') { quoted = true; continue; }
+                            if (ch == '(' || ch == '[') { ++depth; continue; }
+                            if (ch == ')' || ch == ']') { if (depth > 0) --depth; continue; }
+                            if (depth == 0 && lower.compare(i, 4, " as ") == 0)
+                                aliasAt = i;
+                        }
+                        return trim(aliasAt == string::npos
+                                        ? target : target.substr(0, aliasAt));
+                    };
+
+                    dbms::DmlResult metadata;
+                    metadata.available = true;
+                    metadata.metadataOnly = true;
+                    for (size_t i = 0; i < rawTargets.size(); ++i) {
+                        metadata.columns.push_back(selectExprs[i].displayName);
+                        metadata.columnTypes.push_back(
+                            dbms::ExprHelper::inferResultType(
+                                withoutAlias(rawTargets[i]), typeHints));
+                    }
+                    dbms::publishLastDmlResult(std::move(metadata));
+                }
+            }
+
             bool scalarVolcanoUsed = false;
             if (structuredScalar && !isDistinct && distinctOnCols.empty() &&
                 orderBySpecs.empty() && limitPos == string::npos &&

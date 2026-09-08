@@ -184,6 +184,33 @@ static void test_generated_identity() {
 }
 
 int main() {
+    const std::map<std::string, std::string> resultTypes = {
+        {"i", "integer"}, {"n", "numeric"}, {"d", "date"},
+        {"v", "varchar"}
+    };
+    assert(dbms::ExprHelper::inferResultType("i + 1", resultTypes) == "integer");
+    assert(dbms::ExprHelper::inferResultType("n * 2", resultTypes) == "numeric");
+    assert(dbms::ExprHelper::inferResultType("i BETWEEN 1 AND 2", resultTypes) == "boolean");
+    assert(dbms::ExprHelper::inferResultType("i IS DISTINCT FROM n", resultTypes) == "boolean");
+    assert(dbms::ExprHelper::inferResultType("CAST(n AS integer)", resultTypes) == "integer");
+    assert(dbms::ExprHelper::inferResultType("d + 1", resultTypes) == "date");
+    assert(dbms::ExprHelper::inferResultType("length(v || 'x')", resultTypes) == "integer");
+    assert(dbms::ExprHelper::inferResultType("power(i + 1, 2)", resultTypes) == "double precision");
+    assert(dbms::ExprHelper::inferResultType("round(n)", resultTypes) == "numeric");
+    assert(dbms::ExprHelper::inferResultType("ARRAY[1,2]", resultTypes) == "integer[]");
+    assert(dbms::ExprHelper::inferResultType(
+               "CASE n WHEN 10 THEN 1 WHEN 20 THEN 2 ELSE 0 END", resultTypes) ==
+           "integer");
+    assert(dbms::ExprHelper::inferResultType("i::text", resultTypes) == "text");
+    assert(dbms::ExprHelper::inferResultType(
+               "(i + 1)::numeric(6,2)", resultTypes) == "numeric");
+    assert(dbms::ExprHelper::inferResultType("sign(i)", resultTypes) ==
+           "double precision");
+    assert(dbms::ExprHelper::inferResultType(
+               "case_when(=n 10,1,=n 20,2,0)", resultTypes) == "integer");
+    assert(dbms::ExprHelper::inferResultType("cast(i,text)", resultTypes) ==
+           "text");
+
     dbms::TypeRegistry::instance().bootstrap();
     test_expr_helper_basic();
     test_default_literal();

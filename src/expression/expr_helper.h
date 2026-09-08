@@ -25,6 +25,13 @@ struct ExprEvalResult {
 
 class ExprHelper {
 public:
+    // Infer the PostgreSQL-visible result type of an expression without
+    // evaluating it. Column types are supplied by the caller; unknown string
+    // literals resolve to text only at the outer expression boundary.
+    static std::string inferResultType(
+        const std::string& exprSql,
+        const std::map<std::string, std::string>& typeHints = {});
+
     // Evaluate `exprSql` against the supplied row values.
     //
     // `row`      : column name -> value string (empty string means NULL)
