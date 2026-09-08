@@ -16973,9 +16973,17 @@ if (sql.rfind("backup database", 0) == 0) {
                 if (qual.empty() || qual == ".") continue;
                 string prefix = qual + ".";
                 size_t cpos = 0;
-                while ((cpos = columns.find(prefix, cpos)) != string::npos)
+                while ((cpos = findTextOutsideQuotes(
+                            columns, prefix, cpos)) != string::npos) {
+                    if (cpos > 0 &&
+                        (isalnum(static_cast<unsigned char>(columns[cpos - 1])) ||
+                         columns[cpos - 1] == '_')) {
+                        cpos += prefix.size();
+                        continue;
+                    }
                     columns = columns.substr(0, cpos) +
                               columns.substr(cpos + prefix.size());
+                }
             }
         }
         map<string, string> selectAliasMap;

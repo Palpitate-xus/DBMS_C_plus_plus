@@ -100,6 +100,19 @@ def main():
                 client, server["sock"], sql)
             assert state is None, (sql, state, message)
             assert rows == [[str(row_id)]], (sql, rows, row_id)
+        qualifier_literals = [
+            ("SELECT 'rewrite_literal_rows.id' AS value "
+             "FROM rewrite_literal_rows WHERE id = 1;",
+             [["rewrite_literal_rows.id"]]),
+            ("SELECT 'r.id' AS value FROM rewrite_literal_rows AS r "
+             "WHERE r.id = 1;",
+             [["r.id"]]),
+        ]
+        for sql, expected in qualifier_literals:
+            rows, state, message, _ = runner.ours_query(
+                client, server["sock"], sql)
+            assert state is None, (sql, state, message)
+            assert rows == expected, (sql, rows, expected)
         _, state, message, _ = runner.ours_query(
             client, server["sock"], "BEGIN;")
         assert state is None, (state, message)
