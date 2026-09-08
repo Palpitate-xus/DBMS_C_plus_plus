@@ -149,6 +149,8 @@
 
 | 302 | P0-01 / SQL-01 / SQL-02 / SQL-04 / QRY-01 | SELECT 目标、JOIN、GROUP、WINDOW 与输出排序的多套别名解析器用裸 `find/rfind(" as ")`，把字符串数据中的 ` as ` 当作输出别名；无别名的 `'x as y'` 因而被截成非法列 `'x` 并报 `XX000`。新增“引号外最后匹配”扫描，并统一上述别名及 CAST 解析路径 | `sql_literal_preservation_e2e_test` 覆盖无别名、显式别名、多次 ` as ` 与 `CAST('x as y' AS TEXT)`；JOIN、GROUP、WINDOW、派生表、结构化协议、DIV-14、O2 构建及两次实际 PostgreSQL 差分最终保持 `cases=122 failed=0` | `ea6c878` |
 
+| 303 | P0-02 / SQL-12 / TYPE-02 / QRY-02 / QRY-05 / PROTO-04 | 派生表和非递归 CTE 虽能捕获内部查询的结构化结果，物化时仍只读取空格拼接的显示行并用流提取，导致含空格文本截断，空串、字面量 `NULL` 与 SQL NULL 全部丢失。内部查询现在输出精确 cells/NULL 位图，临时表通过可空 `SqlRow` 逐格插入；无结构化结果时才保留 legacy 回退 | `derived_type_protocol_e2e_test` 同时覆盖派生表与 CTE 的含空格、空串、字面量 `NULL`、SQL NULL、首尾空白、嵌入换行以及 int/text OID；CTE 边界、字面量、结构化协议、review SQL、DIV-14、O2 构建及实际 PostgreSQL `cases=122 failed=0` 通过 | `58509b2` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
