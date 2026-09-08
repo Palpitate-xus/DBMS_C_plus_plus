@@ -7,16 +7,64 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 
 namespace {
 
-size_t rowCount(dbms::StorageEngine& engine, const std::string& database) {
+size_t rowCount(dbms::StorageEngine& engine, const std::string& database,
+                const std::string& table = "t") {
     size_t rows = 0;
     assert(engine.forEachRow(
-        database, "t",
+        database, table,
         [&](uint32_t, uint16_t, const char*, size_t) { ++rows; }));
     return rows;
+}
+
+unsigned directoryCount(const std::filesystem::path& root) {
+    unsigned count = 1;
+    for (const auto& entry :
+         std::filesystem::recursive_directory_iterator(root)) {
+        if (entry.is_directory()) ++count;
+    }
+    return count;
+}
+
+unsigned mainRestoreDirectoryCount(const std::filesystem::path& backup) {
+    unsigned count = 1;
+    for (const auto& entry :
+         std::filesystem::recursive_directory_iterator(backup)) {
+        const auto relative = std::filesystem::relative(entry.path(), backup);
+        const auto first = relative.begin();
+        if (first != relative.end() &&
+            (*first == "wal_archive" || *first == "tablespaces")) {
+            continue;
+        }
+        if (entry.is_directory()) ++count;
+    }
+    return count;
+}
+
+void assertNoRestoreStaging(const std::filesystem::path& root) {
+    if (!std::filesystem::exists(root)) return;
+    for (const auto& entry : std::filesystem::directory_iterator(root)) {
+        const auto name = entry.path().filename().string();
+        assert(name.find(".restore_staging.") == std::string::npos);
+        assert(name.find(".restore_archive.") == std::string::npos);
+        assert(name.find(".restore_tablespace.") == std::string::npos);
+    }
+}
+
+void writeText(const std::filesystem::path& path, const std::string& text) {
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output << text;
+    assert(output.good());
+}
+
+std::string readText(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(input),
+            std::istreambuf_iterator<char>()};
 }
 
 void assertOriginalDatabase(dbms::StorageEngine& engine,
@@ -102,20 +150,8 @@ int main() {
         // The staged database has the same directory layout as the source
         // database. Fail the next sync, which is the parent-directory sync
         // immediately after the atomic exchange, and require rollback.
-        unsigned stagedDirectoryCount = 1;
-        for (const auto& entry :
-             std::filesystem::recursive_directory_iterator(validBackup)) {
-            const auto relative = std::filesystem::relative(
-                entry.path(), std::filesystem::path(validBackup));
-            const auto first = relative.begin();
-            if (first != relative.end() &&
-                (*first == "wal_archive" || *first == "tablespaces")) {
-                continue;
-            }
-            if (entry.is_directory()) ++stagedDirectoryCount;
-        }
         dbms::index_file::failDirectorySyncAfterForTesting(
-            stagedDirectoryCount);
+            mainRestoreDirectoryCount(validBackup));
         assert(!engine.physicalRestore(database, validBackup));
         assertOriginalDatabase(engine, database,
                                "publication-sync rollback");
@@ -133,6 +169,79 @@ int main() {
             std::filesystem::path(database) / ".dbms_backup_manifest"));
         assert(!std::filesystem::exists(
             std::filesystem::path(database) / "tablespaces"));
+    }
+
+    // Main-database publication used to happen before external tablespaces
+    // were copied destructively. A later external I/O failure therefore left
+    // a mixed generation. Fail the tablespace publication sync after the main
+    // exchange and require both roots to roll back together.
+    {
+        const std::string tablespaceDatabase =
+            testDbPath("restore_tablespace_db");
+        const std::string tablespaceBackup =
+            testDbPath("restore_tablespace_backup");
+        const std::string tablespaceLocation =
+            testDbPath("restore_tablespace_location");
+        dbms::StorageEngine engine;
+        assert(engine.createDatabase(tablespaceDatabase, "utf8") ==
+               dbms::DBStatus::OK);
+        assert(engine.createTablespace(
+                   tablespaceDatabase, "fast_space", tablespaceLocation) ==
+               dbms::DBStatus::OK);
+
+        dbms::TableSchema externalTable;
+        externalTable.tablename = "external_t";
+        externalTable.tablespace = "fast_space";
+        externalTable.formatVersion = dbms::DATA_FILE_FORMAT_VERSION;
+        externalTable.append(dbms::makeIntColumn("id", false, 4, true));
+        assert(engine.createTable(tablespaceDatabase, externalTable) ==
+               dbms::DBStatus::OK);
+        assert(engine.insert(
+                   tablespaceDatabase, "external_t", {{"id", "1"}}) ==
+               dbms::DBStatus::OK);
+        const auto archiveRoot =
+            std::filesystem::path(tablespaceDatabase + ".archive");
+        std::filesystem::create_directories(archiveRoot);
+        writeText(archiveRoot / "generation", "backup\n");
+        assert(engine.physicalBackup(tablespaceDatabase, tablespaceBackup));
+
+        assert(engine.insert(
+                   tablespaceDatabase, "external_t", {{"id", "2"}}) ==
+               dbms::DBStatus::OK);
+        writeText(archiveRoot / "generation", "live\n");
+        dbms::TableSchema liveOnly;
+        liveOnly.tablename = "live_only";
+        liveOnly.formatVersion = dbms::DATA_FILE_FORMAT_VERSION;
+        liveOnly.append(dbms::makeIntColumn("id", false, 4, true));
+        assert(engine.createTable(tablespaceDatabase, liveOnly) ==
+               dbms::DBStatus::OK);
+
+        const auto externalBackupRoot =
+            std::filesystem::path(tablespaceBackup) / "tablespaces" /
+            "fast_space";
+        const auto archiveBackupRoot =
+            std::filesystem::path(tablespaceBackup) / "wal_archive";
+        assert(std::filesystem::is_directory(externalBackupRoot));
+        assert(std::filesystem::is_directory(archiveBackupRoot));
+        const unsigned successfulSyncs =
+            mainRestoreDirectoryCount(tablespaceBackup) +
+            directoryCount(archiveBackupRoot) +
+            directoryCount(externalBackupRoot) +
+            2;  // main and WAL archive generation publication
+        dbms::index_file::failDirectorySyncAfterForTesting(successfulSyncs);
+        assert(!engine.physicalRestore(tablespaceDatabase, tablespaceBackup));
+        assert(engine.tableExists(tablespaceDatabase, "live_only"));
+        assert(rowCount(engine, tablespaceDatabase, "external_t") == 2);
+        assert(readText(archiveRoot / "generation") == "live\n");
+        assertNoRestoreStaging(".");
+        assertNoRestoreStaging(tablespaceLocation);
+
+        assert(engine.physicalRestore(tablespaceDatabase, tablespaceBackup));
+        assert(!engine.tableExists(tablespaceDatabase, "live_only"));
+        assert(rowCount(engine, tablespaceDatabase, "external_t") == 1);
+        assert(readText(archiveRoot / "generation") == "backup\n");
+        assertNoRestoreStaging(".");
+        assertNoRestoreStaging(tablespaceLocation);
     }
 
     finalCleanupTestData();

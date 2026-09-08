@@ -36371,6 +36371,140 @@ static bool exchangePhysicalBackupDirectories(
 #endif
 }
 
+struct DurableDirectoryReplacement {
+    std::filesystem::path target;
+    std::filesystem::path staging;
+    bool targetExisted = false;
+    bool published = false;
+};
+
+static std::filesystem::path directoryParent(
+    const std::filesystem::path& path) {
+    return path.parent_path().empty()
+        ? std::filesystem::path(".") : path.parent_path();
+}
+
+static bool rollbackDirectoryReplacement(
+    DurableDirectoryReplacement& replacement) {
+    if (!replacement.published) return true;
+    const auto parent = directoryParent(replacement.target);
+    if (replacement.targetExisted) {
+        if (!exchangePhysicalBackupDirectories(
+                replacement.staging, replacement.target)) {
+            return false;
+        }
+    } else {
+        std::error_code error;
+        std::filesystem::rename(
+            replacement.target, replacement.staging, error);
+        if (error) return false;
+    }
+    replacement.published = false;
+    return index_file::syncDirectory(parent);
+}
+
+static bool publishDirectoryReplacement(
+    DurableDirectoryReplacement& replacement) {
+    std::error_code error;
+    replacement.targetExisted =
+        std::filesystem::exists(replacement.target, error);
+    if (error) return false;
+    if (replacement.targetExisted) {
+        if (!exchangePhysicalBackupDirectories(
+                replacement.staging, replacement.target)) {
+            return false;
+        }
+    } else {
+        std::filesystem::rename(
+            replacement.staging, replacement.target, error);
+        if (error) return false;
+    }
+    replacement.published = true;
+    if (index_file::syncDirectory(
+            directoryParent(replacement.target))) {
+        return true;
+    }
+    (void)rollbackDirectoryReplacement(replacement);
+    return false;
+}
+
+static bool discardDirectoryReplacement(
+    DurableDirectoryReplacement& replacement) {
+    if (replacement.staging.empty()) return true;
+    std::error_code error;
+    const bool exists = std::filesystem::exists(
+        replacement.staging, error);
+    if (error) return false;
+    if (exists) {
+        std::filesystem::remove_all(replacement.staging, error);
+        if (error ||
+            !index_file::syncDirectory(
+                directoryParent(replacement.staging))) {
+            return false;
+        }
+    }
+    replacement.staging.clear();
+    return true;
+}
+
+static bool stageDirectoryReplacement(
+    const std::filesystem::path* source,
+    const std::filesystem::path& target,
+    std::string_view purpose,
+    DurableDirectoryReplacement& replacement) {
+    replacement = {};
+    replacement.target = target;
+    if (source) {
+        std::error_code sourceError;
+        if (!std::filesystem::is_directory(*source, sourceError) ||
+            sourceError) {
+            return false;
+        }
+    }
+
+    static std::atomic<uint64_t> sequence{0};
+    const auto parent = directoryParent(target);
+    std::error_code error;
+    std::filesystem::create_directories(parent, error);
+    if (error) return false;
+    for (size_t attempt = 0; attempt < 1000; ++attempt) {
+        const auto candidate = parent / std::filesystem::path(
+            "." + target.filename().string() + "." +
+            std::string(purpose) + "." + std::to_string(::getpid()) + "." +
+            std::to_string(sequence.fetch_add(1, std::memory_order_relaxed)));
+        error.clear();
+        if (std::filesystem::create_directory(candidate, error)) {
+            replacement.staging = candidate;
+            break;
+        }
+        if (error && !std::filesystem::exists(candidate)) return false;
+    }
+    if (replacement.staging.empty()) return false;
+
+    try {
+        if (source) {
+            for (const auto& entry :
+                 std::filesystem::directory_iterator(*source)) {
+                const auto destination =
+                    replacement.staging / entry.path().filename();
+                if (entry.is_directory()) {
+                    std::filesystem::copy(
+                        entry.path(), destination,
+                        std::filesystem::copy_options::recursive);
+                } else {
+                    std::filesystem::copy_file(
+                        entry.path(), destination,
+                        std::filesystem::copy_options::overwrite_existing);
+                }
+            }
+        }
+        if (syncPhysicalBackupTree(replacement.staging)) return true;
+    } catch (...) {
+    }
+    (void)discardDirectoryReplacement(replacement);
+    return false;
+}
+
 static bool collectPhysicalBackupEntries(
     const std::filesystem::path& root,
     PhysicalBackupDirectories& directories,
@@ -36766,6 +36900,7 @@ bool StorageEngine::physicalRestoreLocked(
     auto src = std::filesystem::path(backupPath);
     auto dst = dbPath(dbname);
     std::filesystem::path stagedDatabase;
+    std::vector<DurableDirectoryReplacement> restoreReplacements;
     try {
         // Validate the complete source and every destructive destination
         // before removing the current database. In particular, aliases and
@@ -36781,6 +36916,18 @@ bool StorageEngine::physicalRestoreLocked(
 
         const auto markerSourceDir = src / "pg_tblspc";
         const auto tablespaceBackup = src / "tablespaces";
+        std::error_code tablespaceBackupError;
+        const bool tablespaceBackupExists = std::filesystem::exists(
+            tablespaceBackup, tablespaceBackupError);
+        if (tablespaceBackupError ||
+            (tablespaceBackupExists &&
+             !std::filesystem::is_directory(
+                 tablespaceBackup, tablespaceBackupError)) ||
+            tablespaceBackupError) {
+            return false;
+        }
+        std::vector<std::pair<std::filesystem::path, std::filesystem::path>>
+            tablespaceSources;
         if (std::filesystem::exists(markerSourceDir)) {
             if (!std::filesystem::is_directory(markerSourceDir)) return false;
             for (const auto& marker :
@@ -36799,7 +36946,19 @@ bool StorageEngine::physicalRestoreLocked(
                 if (!std::filesystem::is_directory(source)) return false;
                 const auto relationRoot =
                     std::filesystem::path(location) / dbname;
-                if (restorePathsOverlap(src, relationRoot)) return false;
+                if (restorePathsOverlap(src, relationRoot) ||
+                    restorePathsOverlap(dst, relationRoot) ||
+                    restorePathsOverlap(walArchiveDir(dbname), relationRoot)) {
+                    return false;
+                }
+                for (const auto& [existingSource, existingTarget] :
+                     tablespaceSources) {
+                    (void)existingSource;
+                    if (restorePathsOverlap(existingTarget, relationRoot)) {
+                        return false;
+                    }
+                }
+                tablespaceSources.emplace_back(source, relationRoot);
             }
         }
 
@@ -36871,101 +37030,119 @@ bool StorageEngine::physicalRestoreLocked(
             return false;
         }
 
-        // Publish the completely durable tree without ever removing the
-        // canonical generation. Keep the displaced tree until publication is
-        // durably acknowledged so a parent-directory sync error can roll back.
-        const bool destinationExists = std::filesystem::exists(dst, fileError);
-        if (fileError) {
-            discardStagedDatabase();
+        restoreReplacements.push_back({dst, stagedDatabase});
+        stagedDatabase.clear();
+
+        const auto discardUnpublished = [&]() {
+            for (auto& replacement : restoreReplacements) {
+                if (!replacement.published) {
+                    (void)discardDirectoryReplacement(replacement);
+                }
+            }
+        };
+        const auto rollbackPublished = [&]() {
+            bool ok = true;
+            for (auto it = restoreReplacements.rbegin();
+                 it != restoreReplacements.rend(); ++it) {
+                if (it->published && !rollbackDirectoryReplacement(*it)) {
+                    ok = false;
+                }
+            }
+            discardUnpublished();
+            return ok;
+        };
+
+        const auto srcArchive = src / "wal_archive";
+        const auto dstArchive = walArchiveDir(dbname);
+        std::error_code archiveError;
+        const bool sourceArchiveExists =
+            std::filesystem::exists(srcArchive, archiveError);
+        if (archiveError ||
+            (sourceArchiveExists &&
+             !std::filesystem::is_directory(srcArchive, archiveError)) ||
+            archiveError) {
+            discardUnpublished();
             return false;
         }
-        if (destinationExists) {
-            if (!exchangePhysicalBackupDirectories(stagedDatabase, dst)) {
-                discardStagedDatabase();
+        const bool targetArchiveExists =
+            std::filesystem::exists(dstArchive, archiveError);
+        if (archiveError) {
+            discardUnpublished();
+            return false;
+        }
+        if (sourceArchiveExists || targetArchiveExists) {
+            DurableDirectoryReplacement archiveReplacement;
+            const std::filesystem::path* archiveSource =
+                sourceArchiveExists ? &srcArchive : nullptr;
+            if (!stageDirectoryReplacement(
+                    archiveSource, dstArchive, "restore_archive",
+                    archiveReplacement)) {
+                discardUnpublished();
                 return false;
             }
-            if (!index_file::syncDirectory(parent)) {
-                if (exchangePhysicalBackupDirectories(stagedDatabase, dst) &&
-                    index_file::syncDirectory(parent)) {
-                    discardStagedDatabase();
-                } else {
-                    std::cerr << "[storage] restore publication sync failed; "
-                              << "retained recoverable generations at " << dst
-                              << " and " << stagedDatabase << std::endl;
-                    stagedDatabase.clear();
-                }
+            restoreReplacements.push_back(std::move(archiveReplacement));
+        }
+
+        for (const auto& [source, target] : tablespaceSources) {
+            DurableDirectoryReplacement tablespaceReplacement;
+            if (!stageDirectoryReplacement(
+                    &source, target, "restore_tablespace",
+                    tablespaceReplacement)) {
+                discardUnpublished();
                 return false;
             }
-            const std::filesystem::path previousDatabase = stagedDatabase;
-            stagedDatabase.clear();
-            fileError.clear();
-            std::filesystem::remove_all(previousDatabase, fileError);
-            if (fileError || !index_file::syncDirectory(parent)) {
-                std::cerr << "[storage] restored database but could not "
-                          << "durably remove the previous generation: "
-                          << previousDatabase << std::endl;
-            }
-        } else {
-            fileError.clear();
-            std::filesystem::rename(stagedDatabase, dst, fileError);
-            if (fileError) {
-                discardStagedDatabase();
-                return false;
-            }
-            if (!index_file::syncDirectory(parent)) {
-                std::error_code rollbackError;
-                std::filesystem::rename(dst, stagedDatabase, rollbackError);
-                if (!rollbackError) {
-                    (void)index_file::syncDirectory(parent);
-                    discardStagedDatabase();
-                } else {
-                    std::cerr << "[storage] restore publication sync failed and "
-                              << "the new database could not be moved back"
+            restoreReplacements.push_back(
+                std::move(tablespaceReplacement));
+        }
+
+        // Detect a backup source changed while its files were staged. The
+        // staged generations are fixed now; no live target has been touched.
+        std::string revalidatedDatabase;
+        if (!validPhysicalBackupSource(src, revalidatedDatabase) ||
+            revalidatedDatabase != dbname) {
+            discardUnpublished();
+            return false;
+        }
+
+        for (auto& replacement : restoreReplacements) {
+            if (!publishDirectoryReplacement(replacement)) {
+                if (!rollbackPublished()) {
+                    std::cerr << "[storage] restore rollback incomplete; "
+                              << "retained recovery generations beside targets"
                               << std::endl;
-                    stagedDatabase.clear();
                 }
                 return false;
             }
-            stagedDatabase.clear();
         }
 
-        // Restore WAL archive
-        auto srcArchive = src / "wal_archive";
-        if (std::filesystem::exists(srcArchive)) {
-            auto dstArchive = walArchiveDir(dbname);
-            if (std::filesystem::exists(dstArchive)) {
-                std::filesystem::remove_all(dstArchive);
-            }
-            std::filesystem::copy(srcArchive, dstArchive,
-                std::filesystem::copy_options::recursive);
-        }
-
-        // Restore external relation files after restoring the database
-        // directory and its tablespace markers. Keep the marker's location so
-        // a physical restore does not silently relocate data.
-        auto markerDir = dst / "pg_tblspc";
-        if (std::filesystem::exists(markerDir) && std::filesystem::exists(tablespaceBackup)) {
-            for (const auto& marker : std::filesystem::directory_iterator(markerDir)) {
-                if (!marker.is_regular_file() || marker.path().extension() != ".path") continue;
-                std::ifstream in(marker.path());
-                std::string location;
-                if (!std::getline(in, location) || location.empty()) return false;
-                auto source = tablespaceBackup / marker.path().stem();
-                if (!std::filesystem::exists(source)) return false;
-                auto relationRoot = std::filesystem::path(location) / dbname;
-                if (std::filesystem::exists(relationRoot)) {
-                    std::filesystem::remove_all(relationRoot);
-                }
-                std::filesystem::create_directories(std::filesystem::path(location));
-                std::filesystem::copy(source, relationRoot,
-                    std::filesystem::copy_options::recursive);
+        for (auto& replacement : restoreReplacements) {
+            if (!discardDirectoryReplacement(replacement)) {
+                std::cerr << "[storage] restore completed but an old generation "
+                          << "could not be durably removed beside "
+                          << replacement.target << std::endl;
             }
         }
         return true;
     } catch (...) {
+        bool rollbackOk = true;
+        for (auto it = restoreReplacements.rbegin();
+             it != restoreReplacements.rend(); ++it) {
+            if (it->published && !rollbackDirectoryReplacement(*it)) {
+                rollbackOk = false;
+            }
+        }
+        for (auto& replacement : restoreReplacements) {
+            if (!replacement.published) {
+                (void)discardDirectoryReplacement(replacement);
+            }
+        }
         if (!stagedDatabase.empty()) {
             std::error_code cleanupError;
             std::filesystem::remove_all(stagedDatabase, cleanupError);
+        }
+        if (!rollbackOk) {
+            std::cerr << "[storage] restore exception left recovery "
+                         "generations beside their targets" << std::endl;
         }
         return false;
     }
