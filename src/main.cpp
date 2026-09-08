@@ -417,6 +417,12 @@ static string preprocessCaseWhen(string s);
 // ========================================================================
 static string foldConstants(const string& s);
 static size_t findTopLevelKeyword(const string& sql, const string& kw, size_t startPos);
+static size_t findTextOutsideQuotes(const string& sql, const string& text,
+                                    size_t from = 0);
+static size_t findKeywordOutsideQuotes(const string& sql,
+                                       const string& keyword,
+                                       size_t from = 0);
+static size_t findMatchingParen(const string& sql, size_t start);
 static string sqlProcessor(string raw) {
     raw = toLowerSql(raw);
     // Whitespace separates SQL tokens; deleting it joins keywords and names.
@@ -612,8 +618,8 @@ static string sqlProcessor(string raw) {
         string out;
         size_t i = 0;
         while (i < raw.size()) {
-            size_t anyPos = raw.find("any(", i);
-            size_t allPos = raw.find("all(", i);
+            size_t anyPos = findTextOutsideQuotes(raw, "any(", i);
+            size_t allPos = findTextOutsideQuotes(raw, "all(", i);
             size_t foundPos = string::npos;
             bool isAny = true;
             if (anyPos != string::npos && (allPos == string::npos || anyPos < allPos)) {
@@ -1294,20 +1300,6 @@ static bool checkTablePermission(Session& s, const string& tname,
 static bool checkSelectColumnPermission(Session& s, const string& tname,
                                          const string& columns);
 static vector<string> splitConds(const string& s);
-static size_t findWordCI(const string& s, const string& w, size_t from) {
-    for (size_t i = from; i + w.size() <= s.size(); ++i) {
-        bool m = true;
-        for (size_t k = 0; k < w.size(); ++k) {
-            if (tolower(static_cast<unsigned char>(s[i + k])) != w[k]) { m = false; break; }
-        }
-        if (!m) continue;
-        bool lb = (i == 0) || !isalnum(static_cast<unsigned char>(s[i - 1]));
-        bool la = (i + w.size() == s.size()) || !isalnum(static_cast<unsigned char>(s[i + w.size()]));
-        if (lb && la) return i;
-    }
-    return string::npos;
-}
-
 static string normalizeConditionStr(string s);
 static string modifyLogic(const string& logic);
 static string compactInLists(const string& s);
@@ -6211,16 +6203,14 @@ static string normalizeConditionStr(string s) {
     // '0'.  Throwing lets the wire turn this into SQLSTATE 22012
     // with PG's exact message; // comment guards skip.
     {
-        string low;
-        for (char c : s) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
         size_t p = 0;
-        while ((p = low.find('/', p)) != string::npos) {
-            if (p > 0 && low[p - 1] == '/') { p += 2; continue; }
+        while ((p = findTextOutsideQuotes(s, "/", p)) != string::npos) {
+            if (p > 0 && s[p - 1] == '/') { p += 2; continue; }
             size_t a = p + 1;
-            while (a < low.size() && isspace(static_cast<unsigned char>(low[a]))) ++a;
-            bool zeroLit = a < low.size() && low[a] == '0' &&
-                           (a + 1 >= low.size() ||
-                            !isalnum(static_cast<unsigned char>(low[a + 1])));
+            while (a < s.size() && isspace(static_cast<unsigned char>(s[a]))) ++a;
+            bool zeroLit = a < s.size() && s[a] == '0' &&
+                           (a + 1 >= s.size() ||
+                            !isalnum(static_cast<unsigned char>(s[a + 1])));
             if (zeroLit) throw std::runtime_error("division by zero");
             ++p;
         }
@@ -6232,32 +6222,23 @@ static string normalizeConditionStr(string s) {
         static const char* tlKw[] = { "timestamp", "timestamptz", "date", "time" };
         for (const char* kw : tlKw) {
             const size_t kl = strlen(kw);
-            string low;
-            for (char c : s)
-                low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
             size_t pos = 0;
             while (true) {
-                size_t hit = string::npos;
-                for (size_t i = pos; i + kl + 1 < s.size(); ++i) {
-                    if (low.compare(i, kl, kw) != 0) continue;
-                    if (i > 0 && (isalnum(static_cast<unsigned char>(s[i - 1])) ||
-                                  s[i - 1] == '_')) continue;
-                    const size_t ae = i + kl;
-                    if (ae < s.size() &&
-                        (isalnum(static_cast<unsigned char>(s[ae])) ||
-                         s[ae] == '_')) continue;
-                    size_t q = ae;
-                    while (q < s.size() && isspace(static_cast<unsigned char>(s[q]))) ++q;
-                    if (q < s.size() && s[q] == 39) { hit = i; break; }
-                }
+                size_t hit = findKeywordOutsideQuotes(s, kw, pos);
                 if (hit == string::npos) break;
+                size_t quoteStart = hit + kl;
+                while (quoteStart < s.size() &&
+                       isspace(static_cast<unsigned char>(s[quoteStart]))) {
+                    ++quoteStart;
+                }
+                if (quoteStart >= s.size() || s[quoteStart] != '\'') {
+                    pos = hit + kl;
+                    continue;
+                }
                 size_t q2 = hit + kl;
                 while (q2 < s.size() && isspace(static_cast<unsigned char>(s[q2]))) ++q2;
                 s = s.substr(0, hit) + s.substr(q2);
                 pos = hit + 1;
-                low.clear();
-                for (char c : s)
-                    low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
             }
         }
     }
@@ -6265,7 +6246,7 @@ static string normalizeConditionStr(string s) {
     for (const char* op : ops) {
         size_t len = strlen(op);
         size_t pos = 0;
-        while ((pos = s.find(op, pos)) != string::npos) {
+        while ((pos = findTextOutsideQuotes(s, op, pos)) != string::npos) {
             size_t before = pos;
             while (before > 0 && isspace(static_cast<unsigned char>(s[before - 1]))) before--;
             size_t after = pos + len;
@@ -6279,7 +6260,8 @@ static string normalizeConditionStr(string s) {
         }
     }
     // LIKE ... ESCAPE clause: rewrite into an encoded pattern.
-    for (size_t ep = 0; (ep = findWordCI(s, "escape", ep)) != string::npos; ) {
+    for (size_t ep = 0;
+         (ep = findKeywordOutsideQuotes(s, "escape", ep)) != string::npos; ) {
         size_t vs = ep;
         while (vs > 0 && isspace(static_cast<unsigned char>(s[vs - 1]))) vs--;
         if (vs == 0 || s[vs - 1] != (char)39) { ep += 6; continue; }
@@ -6302,7 +6284,7 @@ static string normalizeConditionStr(string s) {
         ep = ps + enc.size() + 1;
     }
     size_t ipos = 0;
-    while ((ipos = s.find("ilike", ipos)) != string::npos) {
+    while ((ipos = findTextOutsideQuotes(s, "ilike", ipos)) != string::npos) {
         size_t before = ipos;
         while (before > 0 && isspace(static_cast<unsigned char>(s[before - 1]))) before--;
         size_t after = ipos + 5;
@@ -6316,7 +6298,7 @@ static string normalizeConditionStr(string s) {
     }
     // Normalize LIKE keyword: "name like 'a%'" → "namelike'a%'"
     size_t pos = 0;
-    while ((pos = s.find("like", pos)) != string::npos) {
+    while ((pos = findTextOutsideQuotes(s, "like", pos)) != string::npos) {
         size_t before = pos;
         while (before > 0 && isspace(static_cast<unsigned char>(s[before - 1]))) before--;
         size_t after = pos + 4;
@@ -6330,7 +6312,7 @@ static string normalizeConditionStr(string s) {
     }
     // Normalize REGEXP keyword: "name regexp '^a'" → "nameregexp'^a'"
     pos = 0;
-    while ((pos = s.find("regexp", pos)) != string::npos) {
+    while ((pos = findTextOutsideQuotes(s, "regexp", pos)) != string::npos) {
         size_t before = pos;
         while (before > 0 && isspace(static_cast<unsigned char>(s[before - 1]))) before--;
         size_t after = pos + 6;
@@ -6344,7 +6326,7 @@ static string normalizeConditionStr(string s) {
     }
     // Normalize SIMILAR TO keyword: "name similar to '^a%'" → "nameregexp'^a%'"
     pos = 0;
-    while ((pos = s.find("similar to", pos)) != string::npos) {
+    while ((pos = findTextOutsideQuotes(s, "similar to", pos)) != string::npos) {
         size_t before = pos;
         while (before > 0 && isspace(static_cast<unsigned char>(s[before - 1]))) before--;
         size_t after = pos + 10;
@@ -6355,7 +6337,7 @@ static string normalizeConditionStr(string s) {
 
     // Normalize OVERLAPS keyword: "(d1,d2) overlaps (d3,d4)" → "(d1,d2)overlaps(d3,d4)"
     pos = 0;
-    while ((pos = s.find("overlaps", pos)) != string::npos) {
+    while ((pos = findTextOutsideQuotes(s, "overlaps", pos)) != string::npos) {
         size_t before = pos;
         while (before > 0 && isspace(static_cast<unsigned char>(s[before - 1]))) before--;
         size_t after = pos + 8;
@@ -6371,7 +6353,7 @@ static string normalizeConditionStr(string s) {
     // "(s1,e1)overlaps(s2,e2)" → "overlaps:s1,e1,s2,e2"
     // This avoids tokenize() splitting on '(' / ')' and breaking the condition.
     pos = 0;
-    while ((pos = s.find("overlaps", pos)) != string::npos) {
+    while ((pos = findTextOutsideQuotes(s, "overlaps", pos)) != string::npos) {
         size_t leftStart = pos;
         while (leftStart > 0 && s[leftStart - 1] != '(') leftStart--;
         if (leftStart == 0 || s[leftStart - 1] != '(') { pos += 8; continue; }
@@ -6394,7 +6376,7 @@ static string normalizeConditionStr(string s) {
     }
     // Normalize CONTAINS keyword: "name contains 'word'" → "namecontains'word'"
     pos = 0;
-    while ((pos = s.find("contains", pos)) != string::npos) {
+    while ((pos = findTextOutsideQuotes(s, "contains", pos)) != string::npos) {
         size_t before = pos;
         while (before > 0 && isspace(static_cast<unsigned char>(s[before - 1]))) before--;
         size_t after = pos + 8;
@@ -6415,7 +6397,7 @@ static string normalizeConditionStr(string s) {
         for (int pi = 0; pi < 2; ++pi) {
             size_t plen = strlen(pats[pi]);
             size_t p2 = 0;
-            while ((p2 = s.find(pats[pi], p2)) != string::npos) {
+            while ((p2 = findTextOutsideQuotes(s, pats[pi], p2)) != string::npos) {
                 size_t opEnd = p2;
                 if (opEnd == 0 || s[opEnd - 1] != ')') { p2 += plen; continue; }
                 int depth3 = 0; size_t open = string::npos;
@@ -6434,7 +6416,7 @@ static string normalizeConditionStr(string s) {
     // IS NULL below, a following and/or connective must stay a separate
     // token ("a is not null and ..." must not glue into "aisnotnulland").
     pos = 0;
-    while ((pos = s.find("is not null", pos)) != string::npos) {
+    while ((pos = findTextOutsideQuotes(s, "is not null", pos)) != string::npos) {
         size_t before = pos;
         while (before > 0 && isspace(static_cast<unsigned char>(s[before - 1]))) before--;
         size_t after = pos + 11;
@@ -6462,7 +6444,7 @@ static string normalizeConditionStr(string s) {
     // paren must stay a separate token, otherwise "a is null and b is null"
     // glues into "aisnulland" and downstream grouping breaks.
     pos = 0;
-    while ((pos = s.find("is null", pos)) != string::npos) {
+    while ((pos = findTextOutsideQuotes(s, "is null", pos)) != string::npos) {
         size_t before = pos;
         while (before > 0 && isspace(static_cast<unsigned char>(s[before - 1]))) before--;
         size_t after = pos + 7;
@@ -6596,8 +6578,8 @@ static string compactInLists(const string& s) {
     size_t i = 0;
     while (i < s.size()) {
         // find " in (" or " not in (" at a token boundary
-        size_t rest = s.find(" in (", i);
-        size_t nrest = s.find(" not in (", i);
+        size_t rest = findTextOutsideQuotes(s, " in (", i);
+        size_t nrest = findTextOutsideQuotes(s, " not in (", i);
         bool neg = false;
         size_t at = rest;
         if (nrest != string::npos && (rest == string::npos || nrest < rest)) {
@@ -6620,11 +6602,7 @@ static string compactInLists(const string& s) {
         }
         // find matching close paren
         size_t open = s.find('(', at);
-        size_t depth = 0, close = string::npos;
-        for (size_t p = open; p < s.size(); ++p) {
-            if (s[p] == '(') ++depth;
-            else if (s[p] == ')') { --depth; if (depth == 0) { close = p; break; } }
-        }
+        size_t close = findMatchingParen(s, open);
         if (close == string::npos) {
             out += s.substr(i, at + 5 - i);
             i = at + 5;
@@ -6632,10 +6610,25 @@ static string compactInLists(const string& s) {
         }
         // literals, commas only (strip spaces inside)
         string lits;
+        char quote = '\0';
         for (size_t p = open + 1; p < close; ++p) {
-            char ch = s[p];
-            if (isspace((unsigned char)ch)) continue;
-            lits += ch;
+            const char c = s[p];
+            if (quote != '\0') {
+                lits += c;
+                if (c == quote) {
+                    if (p + 1 < close && s[p + 1] == quote)
+                        lits += s[++p];
+                    else
+                        quote = '\0';
+                }
+                continue;
+            }
+            if (c == '\'' || c == '"') {
+                quote = c;
+                lits += c;
+            } else if (!isspace(static_cast<unsigned char>(c))) {
+                lits += c;
+            }
         }
         out += s.substr(i, colStart - i);
         out += (neg ? "notin" : "in") + col + "(" + lits + ")";
@@ -6773,7 +6766,7 @@ static string modifyLogic(const string& logic) {
     // The generic tail below returns "" for operator-less tokens, which
     // would shred the predicate.
     {
-        size_t lp = logic.find('(');
+        size_t lp = findTextOutsideQuotes(logic, "(");
         if (lp != string::npos && lp > 0 && lp + 1 < logic.size()) {
             string head = logic.substr(0, lp);
             bool ident = isalpha(static_cast<unsigned char>(head[0])) || head[0] == '_';
@@ -6813,7 +6806,7 @@ static string modifyLogic(const string& logic) {
         };
         for (const auto& g : glued) {
             if (logic.size() > g.len + 2 && logic.substr(0, g.len) == g.pfx) {
-                size_t lp = logic.find('(', g.len);
+                size_t lp = findTextOutsideQuotes(logic, "(", g.len);
                 if (lp != string::npos && logic.back() == ')') {
                     string col = logic.substr(g.len, lp - g.len);
                     string args = logic.substr(lp + 1, logic.size() - lp - 2);
@@ -6825,34 +6818,34 @@ static string modifyLogic(const string& logic) {
         }
     }
     // Handle LIKE
-    size_t ilikePos = logic.find("ilike");
+    size_t ilikePos = findTextOutsideQuotes(logic, "ilike");
     if (ilikePos != string::npos) {
         string before = logic.substr(0, ilikePos);
         string after = logic.substr(ilikePos + 5);
         return "ilike" + before + " " + after;
     }
-    size_t likePos = logic.find("like");
+    size_t likePos = findTextOutsideQuotes(logic, "like");
     if (likePos != string::npos) {
         string before = logic.substr(0, likePos);
         string after = logic.substr(likePos + 4);
         return "like" + before + " " + after;
     }
     // Handle REGEXP
-    size_t regexpPos = logic.find("regexp");
+    size_t regexpPos = findTextOutsideQuotes(logic, "regexp");
     if (regexpPos != string::npos) {
         string before = logic.substr(0, regexpPos);
         string after = logic.substr(regexpPos + 6);
         return "regexp" + before + " " + after;
     }
     // Handle CONTAINS
-    size_t containsPos = logic.find("contains");
+    size_t containsPos = findTextOutsideQuotes(logic, "contains");
     if (containsPos != string::npos) {
         string before = logic.substr(0, containsPos);
         string after = logic.substr(containsPos + 8);
         return "contains" + before + " " + after;
     }
     // Handle OVERLAPS
-    size_t overlapsPos = logic.find("overlaps");
+    size_t overlapsPos = findTextOutsideQuotes(logic, "overlaps");
     if (overlapsPos != string::npos) {
         string before = logic.substr(0, overlapsPos);
         string after = logic.substr(overlapsPos + 8);
@@ -6863,7 +6856,7 @@ static string modifyLogic(const string& logic) {
     if (logic.size() > 3 &&
         (logic.substr(0, 2) == "in" || logic.substr(0, 5) == "notin")) {
         bool negC = (logic.substr(0, 5) == "notin");
-        size_t open = logic.find('(');
+        size_t open = findTextOutsideQuotes(logic, "(");
         if (open != string::npos && logic.back() == ')') {
             string col = logic.substr(negC ? 5 : 2, open - (negC ? 5 : 2));
             string lits = logic.substr(open + 1, logic.size() - open - 2);
@@ -6882,18 +6875,19 @@ static string modifyLogic(const string& logic) {
         // " not in " must be tested first: it contains " in " as a
         // substring, and matching that would slice the column to a
         // space-bearing fragment ("id not") which is then rejected.
-        size_t notInAt = logic.find(" not in ");
+        size_t notInAt = findTextOutsideQuotes(logic, " not in ");
         size_t inAt = string::npos;
         bool notIn = false;
         if (notInAt != string::npos) {
             notIn = true;
             inAt = notInAt + 4;   // position of " in " inside " not in "
         } else {
-            inAt = logic.find(" in ");
+            inAt = findTextOutsideQuotes(logic, " in ");
         }
         if (inAt != string::npos) {
-            size_t open = logic.find('(', inAt);
-            size_t close = logic.rfind(')');
+            size_t open = findTextOutsideQuotes(logic, "(", inAt);
+            size_t close = open == string::npos
+                ? string::npos : findMatchingParen(logic, open);
             if (open != string::npos && close != string::npos && close > open) {
                 string col = trim(logic.substr(0, notIn ? inAt - 4 : inAt));
                 string listRaw = logic.substr(open + 1, close - open - 1);
@@ -6940,7 +6934,21 @@ static string modifyLogic(const string& logic) {
     }
     size_t opStart = string::npos;
     size_t opLen = 0;
+    char operatorQuote = '\0';
     for (size_t i = 0; i < logic.size(); ++i) {
+        if (operatorQuote != '\0') {
+            if (logic[i] == operatorQuote) {
+                if (i + 1 < logic.size() && logic[i + 1] == operatorQuote)
+                    ++i;
+                else
+                    operatorQuote = '\0';
+            }
+            continue;
+        }
+        if (logic[i] == '\'' || logic[i] == '"') {
+            operatorQuote = logic[i];
+            continue;
+        }
         if (logic[i] == '>' || logic[i] == '<' || logic[i] == '=' || logic[i] == '!' || logic[i] == '&') {
             opStart = i;
             opLen = 1;
@@ -8035,19 +8043,81 @@ static std::vector<std::string> runSubQuery(const std::string& rawSql, Session& 
 // Helper: find matching closing paren from start position
 static size_t findMatchingParen(const std::string& s, size_t start) {
     int depth = 1;
-    bool inQuote = false;
+    char quote = '\0';
     for (size_t i = start + 1; i < s.size(); ++i) {
-        if (s[i] == '\'') {
-            if (inQuote && i + 1 < s.size() && s[i + 1] == '\'') {
-                ++i;
-                continue;
+        if (quote != '\0') {
+            if (s[i] == quote) {
+                if (i + 1 < s.size() && s[i + 1] == quote) ++i;
+                else quote = '\0';
             }
-            inQuote = !inQuote;
             continue;
         }
-        if (inQuote) continue;
+        if (s[i] == '\'' || s[i] == '"') {
+            quote = s[i];
+            continue;
+        }
         if (s[i] == '(') ++depth;
         else if (s[i] == ')') { --depth; if (depth == 0) return i; }
+    }
+    return std::string::npos;
+}
+
+// Find a normalized SQL keyword without treating literal text or a quoted
+// identifier as executable syntax. The scan starts at zero so quote state is
+// still correct when callers request a later match.
+static size_t findTextOutsideQuotes(const std::string& sql,
+                                    const std::string& text,
+                                    size_t from) {
+    char quote = '\0';
+    for (size_t i = 0; i < sql.size(); ++i) {
+        if (quote != '\0') {
+            if (sql[i] == quote) {
+                if (i + 1 < sql.size() && sql[i + 1] == quote) ++i;
+                else quote = '\0';
+            }
+            continue;
+        }
+        if (sql[i] == '\'' || sql[i] == '"') {
+            quote = sql[i];
+            continue;
+        }
+        if (i >= from && i + text.size() <= sql.size() &&
+            sql.compare(i, text.size(), text) == 0) {
+            return i;
+        }
+    }
+    return std::string::npos;
+}
+
+static size_t findKeywordOutsideQuotes(const std::string& sql,
+                                       const std::string& keyword,
+                                       size_t from) {
+    auto isIdentifierChar = [](unsigned char c) {
+        return isalnum(c) || c == '_' || c == '$';
+    };
+    char quote = '\0';
+    for (size_t i = 0; i < sql.size(); ++i) {
+        if (quote != '\0') {
+            if (sql[i] == quote) {
+                if (i + 1 < sql.size() && sql[i + 1] == quote) ++i;
+                else quote = '\0';
+            }
+            continue;
+        }
+        if (sql[i] == '\'' || sql[i] == '"') {
+            quote = sql[i];
+            continue;
+        }
+        if (i < from || i + keyword.size() > sql.size() ||
+            sql.compare(i, keyword.size(), keyword) != 0) {
+            continue;
+        }
+        const bool leftOk = i == 0 ||
+            !isIdentifierChar(static_cast<unsigned char>(sql[i - 1]));
+        const bool rightOk = i + keyword.size() == sql.size() ||
+            !isIdentifierChar(
+                static_cast<unsigned char>(sql[i + keyword.size()]));
+        if (leftOk && rightOk) return i;
     }
     return std::string::npos;
 }
@@ -9812,16 +9882,30 @@ static std::string expandSubqueries(std::string sql, Session& s) {
     // substitutes bare; anything else substitutes as a quoted string.
     while (true) {
         size_t parenStart = string::npos;
-        for (size_t p = 0; p + 7 < sql.size(); ++p) {
-            if (sql.compare(p, 7, "(select") == 0 ||
-                sql.compare(p, 7, "(SELECT") == 0) {
-                int depth = 0; bool ok = true;
-                for (size_t q = 0; q < p; ++q) {
-                    if (sql[q] == '(') ++depth;
-                    else if (sql[q] == ')') --depth;
-                    if (depth < 0) { ok = false; break; }
+        int depth = 0;
+        char quote = '\0';
+        for (size_t p = 0; p + 7 <= sql.size(); ++p) {
+            if (quote != '\0') {
+                if (sql[p] == quote) {
+                    if (p + 1 < sql.size() && sql[p + 1] == quote) ++p;
+                    else quote = '\0';
                 }
-                if (ok && depth == 0) { parenStart = p; break; }
+                continue;
+            }
+            if (sql[p] == '\'' || sql[p] == '"') {
+                quote = sql[p];
+                continue;
+            }
+            if (sql[p] == '(') {
+                if (depth == 0 &&
+                    (sql.compare(p, 7, "(select") == 0 ||
+                     sql.compare(p, 7, "(SELECT") == 0)) {
+                    parenStart = p;
+                    break;
+                }
+                ++depth;
+            } else if (sql[p] == ')' && depth > 0) {
+                --depth;
             }
         }
         if (parenStart == string::npos) break;
@@ -9853,10 +9937,14 @@ static std::string expandSubqueries(std::string sql, Session& s) {
 
     // ---------- EXISTS ----------
     while (true) {
-        size_t pos = sql.find("exists");
+        size_t pos = findKeywordOutsideQuotes(sql, "exists");
         if (pos == std::string::npos) break;
-        size_t parenStart = sql.find('(', pos);
-        if (parenStart == std::string::npos) break;
+        size_t parenStart = pos + 6;
+        while (parenStart < sql.size() &&
+               isspace(static_cast<unsigned char>(sql[parenStart]))) {
+            ++parenStart;
+        }
+        if (parenStart == sql.size() || sql[parenStart] != '(') break;
         size_t parenEnd = findMatchingParen(sql, parenStart);
         if (parenEnd == std::string::npos) break;
 
@@ -9874,11 +9962,18 @@ static std::string expandSubqueries(std::string sql, Session& s) {
     // ---------- ANY / ALL ----------
     while (true) {
         auto findAnyAll = [&](const std::string& key) -> size_t {
-            size_t p = sql.find(" " + key + " ");
-            if (p != std::string::npos) return p + 1; // point to key itself
-            p = sql.find(" " + key + "(");
-            if (p != std::string::npos) return p + 1;
-            return std::string::npos;
+            size_t from = 0;
+            while (true) {
+                size_t p = findKeywordOutsideQuotes(sql, key, from);
+                if (p == std::string::npos) return p;
+                size_t next = p + key.size();
+                while (next < sql.size() &&
+                       isspace(static_cast<unsigned char>(sql[next]))) {
+                    ++next;
+                }
+                if (next < sql.size() && sql[next] == '(') return p;
+                from = p + key.size();
+            }
         };
         size_t anyPos = findAnyAll("any");
         size_t allPos = findAnyAll("all");
@@ -9909,8 +10004,12 @@ static std::string expandSubqueries(std::string sql, Session& s) {
         while (colNameStart > 0 && !std::isspace(static_cast<unsigned char>(sql[colNameStart - 1]))) --colNameStart;
         std::string colName = trim(sql.substr(colNameStart, colNameEnd - colNameStart));
 
-        size_t parenStart = sql.find('(', pos);
-        if (parenStart == std::string::npos) break;
+        size_t parenStart = pos + 3;
+        while (parenStart < sql.size() &&
+               isspace(static_cast<unsigned char>(sql[parenStart]))) {
+            ++parenStart;
+        }
+        if (parenStart == sql.size() || sql[parenStart] != '(') break;
         size_t parenEnd = findMatchingParen(sql, parenStart);
         if (parenEnd == std::string::npos) break;
 
@@ -9935,61 +10034,46 @@ static std::string expandSubqueries(std::string sql, Session& s) {
 
     // ---------- IN / NOT IN ----------
     while (true) {
-        // " not in " must be found first: " in " matches inside it, and
-        // the old code then read the column name as the word "not",
-        // rewriting "id not in (1,3)" into "not=1 or not=3" — matching
-        // nothing (NOT IN silently returned zero rows).
-        // " not in " already carries surrounding spaces, so it is
-        // inherently word-bounded before; only the right side must allow
-        // the list paren to follow directly ("not in (1,2)").
-        size_t notPos = string::npos;
-        for (size_t p = sql.find(" not in "); p != string::npos; p = sql.find(" not in ", p + 8)) {
-            bool wordAfter = p + 8 >= sql.size() ||
-                             isspace(static_cast<unsigned char>(sql[p + 8])) ||
-                             sql[p + 8] == '(';
-            if (wordAfter) { notPos = p; break; }
-        }
-        size_t pos = sql.find(" in ");
+        auto findListPredicate = [&](const std::string& key) {
+            size_t from = 0;
+            while (true) {
+                size_t p = findKeywordOutsideQuotes(sql, key, from);
+                if (p == string::npos) return p;
+                size_t next = p + key.size();
+                while (next < sql.size() &&
+                       isspace(static_cast<unsigned char>(sql[next]))) {
+                    ++next;
+                }
+                if (next < sql.size() && sql[next] == '(') return p;
+                from = p + key.size();
+            }
+        };
+        size_t notPos = findListPredicate("not in");
+        size_t inPos = findListPredicate("in");
+        size_t pos = inPos;
         bool anti = false;
         if (notPos != string::npos &&
-            (pos == string::npos || notPos + 1 < pos)) {
-            // treat the " in " inside " not in " as the match
-            pos = notPos + 4;
+            (inPos == string::npos || notPos < inPos)) {
+            pos = notPos;
             anti = true;
         }
         if (pos == string::npos) break;
 
-        size_t parenStart = sql.find('(', pos);
-        if (parenStart == string::npos) break;
-
-        bool onlySpace = true;
-        for (size_t i = pos + 4; i < parenStart; ++i) {
-            if (!isspace(static_cast<unsigned char>(sql[i]))) { onlySpace = false; break; }
+        size_t parenStart = pos + (anti ? 6 : 2);
+        while (parenStart < sql.size() &&
+               isspace(static_cast<unsigned char>(sql[parenStart]))) {
+            ++parenStart;
         }
-        if (!onlySpace) {
-            sql.erase(pos, 4);
-            sql.insert(pos, " in ");
-            pos += 4;
-            continue;
-        }
+        if (parenStart == sql.size() || sql[parenStart] != '(') break;
 
         size_t parenEnd = findMatchingParen(sql, parenStart);
         if (parenEnd == string::npos) break;
 
-        size_t colStart = anti ? notPos : pos;
+        size_t colStart = pos;
         while (colStart > 0 && isspace(static_cast<unsigned char>(sql[colStart - 1]))) --colStart;
         size_t colNameStart = colStart;
         while (colNameStart > 0 && !isspace(static_cast<unsigned char>(sql[colNameStart - 1]))) --colNameStart;
         std::string colName = trim(sql.substr(colNameStart, colStart - colNameStart));
-        if (anti && colName == "not") {
-            // column named "not" is not a thing; recover the real column
-            colNameStart = colStart;
-            while (colNameStart > 0 && isspace(static_cast<unsigned char>(sql[colNameStart - 1]))) --colNameStart;
-            size_t c2 = colNameStart;
-            while (c2 > 0 && !isspace(static_cast<unsigned char>(sql[c2 - 1]))) --c2;
-            colName = trim(sql.substr(c2, colNameStart - c2));
-            colNameStart = c2;
-        }
 
         std::string inner = trim(sql.substr(parenStart + 1, parenEnd - parenStart - 1));
         std::vector<std::string> values;
