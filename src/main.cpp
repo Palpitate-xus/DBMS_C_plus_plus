@@ -6649,9 +6649,11 @@ static bool isBareIdentToken(const string& t) {
     if (t.empty()) return false;
     if (t == "(" || t == ")" || t == "and" || t == "or") return false;
     for (char ch : t) {
-        if (!(isalnum(static_cast<unsigned char>(ch)) || ch == '_')) return false;
+        if (!(isalnum(static_cast<unsigned char>(ch)) || ch == '_' || ch == '.')) {
+            return false;
+        }
     }
-    return true;
+    return t.front() != '.' && t.back() != '.';
 }
 
 static vector<string> mergeNegPredTokens(const vector<string>& toks) {

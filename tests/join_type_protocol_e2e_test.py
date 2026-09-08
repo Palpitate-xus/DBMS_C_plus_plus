@@ -81,6 +81,65 @@ def main():
         assert type_oids == [23, 25, 25], type_oids
         assert command_tag == "SELECT 4", command_tag
 
+        predicate_cases = [
+            (("SELECT l.id FROM join_exact_left l "
+              "JOIN join_exact_right r ON l.id = r.id "
+              "WHERE r.txt LIKE 'r%' ORDER BY l.id;"),
+             [["1"]]),
+            (("SELECT l.id FROM join_exact_left l "
+              "JOIN join_exact_right r ON l.id = r.id "
+              "WHERE r.txt ILIKE 'R%' ORDER BY l.id;"),
+             [["1"]]),
+            (("SELECT l.id FROM join_exact_left l "
+              "JOIN join_exact_right r ON l.id = r.id "
+              "WHERE l.id IN (1, 4) ORDER BY l.id;"),
+             [["1"], ["4"]]),
+            (("SELECT l.id FROM join_exact_left l "
+              "JOIN join_exact_right r ON l.id = r.id "
+              "WHERE l.id BETWEEN 2 AND 3 ORDER BY l.id;"),
+             [["2"], ["3"]]),
+            (("SELECT l.id FROM join_exact_left l "
+              "JOIN join_exact_right r ON l.id = r.id "
+              "WHERE l.id < r.id ORDER BY l.id;"),
+             []),
+        ]
+        for predicate_sql, expected_rows in predicate_cases:
+            rows, state, message, headers, command_tag, type_oids = (
+                runner.decode_wire_result(
+                    client.simple_query(server["sock"], predicate_sql),
+                    include_types=True))
+            assert state is None, (predicate_sql, state, message)
+            assert rows == expected_rows, (predicate_sql, rows)
+            assert type_oids == [23], (predicate_sql, type_oids)
+            assert command_tag == "SELECT %d" % len(rows), (
+                predicate_sql, command_tag)
+
+        outer_predicate_sql = (
+            "SELECT l.id, r.txt FROM join_exact_left l "
+            "LEFT JOIN join_exact_right r ON l.id = r.id "
+            "WHERE r.txt NOT LIKE 'r%' ORDER BY l.id;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], outer_predicate_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [["2", ""], ["4", "NULL"]], rows
+        assert command_tag == "SELECT 2", command_tag
+
+        cross_column_predicate_sql = (
+            "SELECT l.id, r.id FROM join_exact_left l "
+            "CROSS JOIN join_exact_right r WHERE l.id = r.id ORDER BY l.id;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], cross_column_predicate_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [
+            ["1", "1"], ["2", "2"], ["3", "3"], ["4", "4"]
+        ], rows
+        assert type_oids == [23, 23], type_oids
+        assert command_tag == "SELECT 4", command_tag
+
         ordered_sql = (
             "SELECT l.id, l.txt FROM join_exact_left l "
             "JOIN join_exact_right r ON l.id = r.id "

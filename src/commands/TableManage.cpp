@@ -33187,6 +33187,95 @@ std::vector<std::string> StorageEngine::sortByExpression(
 // JOIN implementation
 // ========================================================================
 
+static bool isJoinComparisonOperator(const std::string& op) {
+    return op == "=" || op == "!=" || op == "<>" || op == "<" ||
+           op == ">" || op == "<=" || op == ">=";
+}
+
+static bool joinValuePredicateMatches(
+    const StorageEngine::Condition& condition, const Column& column,
+    const std::string& value, bool valueIsNull,
+    const std::string& comparisonValue, bool comparisonIsNull = false) {
+    const std::string& op = condition.op;
+    if (op == "isnull") return valueIsNull;
+    if (op == "isnotnull") return !valueIsNull;
+    if (valueIsNull) return false;
+
+    if (isJoinComparisonOperator(op)) {
+        return StorageEngine::compareValues(
+                   column, value, false, comparisonValue,
+                   comparisonIsNull, op) ==
+               StorageEngine::PredicateTruth::True;
+    }
+    if (op == "like" || op == "notlike" ||
+        op == "ilike" || op == "notilike") {
+        const bool insensitive = op == "ilike" || op == "notilike";
+        const bool matched = likeMatch(value, comparisonValue, insensitive);
+        return (op == "notlike" || op == "notilike") ? !matched : matched;
+    }
+    if (op == "regexp" || op == "notregexp") {
+        const bool matched = regexMatch(value, comparisonValue);
+        return op == "notregexp" ? !matched : matched;
+    }
+    if (op == "contains") {
+        std::string needle = comparisonValue;
+        for (char& ch : needle) {
+            ch = static_cast<char>(
+                std::tolower(static_cast<unsigned char>(ch)));
+        }
+        const auto tokens = tokenizeText(value);
+        return std::find(tokens.begin(), tokens.end(), needle) != tokens.end();
+    }
+    if (op == "between" || op == "notbetween") {
+        const size_t separator = comparisonValue.find(' ');
+        if (separator == std::string::npos) return false;
+        const std::string lower = comparisonValue.substr(0, separator);
+        const std::string upper = comparisonValue.substr(separator + 1);
+        const auto lowerTruth = StorageEngine::compareValues(
+            column, value, false, lower, false, ">=");
+        const auto upperTruth = StorageEngine::compareValues(
+            column, value, false, upper, false, "<=");
+        if (lowerTruth == StorageEngine::PredicateTruth::Unknown ||
+            upperTruth == StorageEngine::PredicateTruth::Unknown) {
+            return false;
+        }
+        const bool atLeastLower =
+            lowerTruth == StorageEngine::PredicateTruth::True;
+        const bool atMostUpper =
+            upperTruth == StorageEngine::PredicateTruth::True;
+        const bool inRange = atLeastLower && atMostUpper;
+        return op == "between" ? inRange : !inRange;
+    }
+    if (op == "in" || op == "notin") {
+        bool matched = false;
+        bool sawNull = false;
+        std::istringstream values(comparisonValue);
+        std::string candidate;
+        while (values >> candidate) {
+            std::string lowerCandidate = candidate;
+            for (char& ch : lowerCandidate) {
+                ch = static_cast<char>(
+                    std::tolower(static_cast<unsigned char>(ch)));
+            }
+            if (lowerCandidate == "null" || lowerCandidate == "nil") {
+                sawNull = true;
+                continue;
+            }
+            if (StorageEngine::compareValues(
+                    column, value, false, candidate, false, "=") ==
+                StorageEngine::PredicateTruth::True) {
+                matched = true;
+                break;
+            }
+        }
+        if (op == "in") return matched;
+        return matched ? false : !sawNull;
+    }
+
+    // A parsed-but-unsupported predicate must never silently admit every row.
+    return false;
+}
+
 std::vector<std::string> StorageEngine::join(
     const std::string& dbname,
     const std::string& leftTable,
@@ -33291,37 +33380,25 @@ std::vector<std::string> StorageEngine::join(
         bool valueIsNull = false;
         std::string val = logicalValue(
             row, tbl, tableName, it->second.colIdx, &valueIsNull);
-        if (c.op == "isnull") return valueIsNull;
-        if (c.op == "isnotnull") return !valueIsNull;
-        if (valueIsNull) return false;
         const Column& col = tbl.cols[it->second.colIdx];
-        if (col.dataType == "char" || col.isVariableLength) {
-            if (c.op == "<"  && !(val <  c.value)) return false;
-            if (c.op == ">"  && !(val >  c.value)) return false;
-            if (c.op == "="  && val != c.value)    return false;
-            if (c.op == "<=" && (val >  c.value))   return false;
-            if (c.op == ">=" && (val <  c.value))   return false;
-            if (c.op == "!=" && val == c.value)    return false;
-        } else if (col.dataType == "date") {
-            Date d = val.empty() ? Date{} : Date(val.c_str());
-            Date v(c.value.c_str());
-            if (c.op == "<"  && v.year && !(d < v))  return false;
-            if (c.op == ">"  && v.year && !(d > v))  return false;
-            if (c.op == "="  && v.year && d != v)    return false;
-            if (c.op == "<=" && v.year && (d > v))   return false;
-            if (c.op == ">=" && v.year && (d < v))   return false;
-            if (c.op == "!=" && v.year && d == v)    return false;
-        } else {
-            int64_t num = val.empty() ? INF : parseInt(val);
-            int64_t cmp = parseInt(c.value);
-            if (c.op == "<"  && cmp != INF && !(num < cmp)) return false;
-            if (c.op == ">"  && cmp != INF && !(num > cmp)) return false;
-            if (c.op == "="  && cmp != INF && num != cmp)   return false;
-            if (c.op == "<=" && cmp != INF && (num > cmp))  return false;
-            if (c.op == ">=" && cmp != INF && (num < cmp))  return false;
-            if (c.op == "!=" && cmp != INF && num == cmp)   return false;
+        std::string comparisonValue = c.value;
+        bool comparisonIsNull = false;
+        if (isJoinComparisonOperator(c.op)) {
+            auto comparison = colMap.find(c.value);
+            if (comparison != colMap.end()) {
+                const TableSchema& comparisonTable =
+                    comparison->second.isLeft ? leftTbl : rightTbl;
+                const JoinRow& comparisonRow =
+                    comparison->second.isLeft ? leftRow : rightRow;
+                const std::string& comparisonTableName =
+                    comparison->second.isLeft ? leftTable : rightTable;
+                comparisonValue = logicalValue(
+                    comparisonRow, comparisonTable, comparisonTableName,
+                    comparison->second.colIdx, &comparisonIsNull);
+            }
         }
-        return true;
+        return joinValuePredicateMatches(
+            c, col, val, valueIsNull, comparisonValue, comparisonIsNull);
     };
 
     auto conds = parseConditions(conditions);
@@ -33351,37 +33428,9 @@ std::vector<std::string> StorageEngine::join(
         bool valueIsNull = false;
         std::string val = logicalValue(
             row, tbl, tableName, it->second.colIdx, &valueIsNull);
-        if (c.op == "isnull") return valueIsNull;
-        if (c.op == "isnotnull") return !valueIsNull;
-        if (valueIsNull) return false;
         const Column& col = tbl.cols[it->second.colIdx];
-        if (col.dataType == "char" || col.isVariableLength) {
-            if (c.op == "<"  && !(val <  c.value)) return false;
-            if (c.op == ">"  && !(val >  c.value)) return false;
-            if (c.op == "="  && val != c.value)    return false;
-            if (c.op == "<=" && (val >  c.value))   return false;
-            if (c.op == ">=" && (val <  c.value))   return false;
-            if (c.op == "!=" && val == c.value)    return false;
-        } else if (col.dataType == "date") {
-            Date d = val.empty() ? Date{} : Date(val.c_str());
-            Date v(c.value.c_str());
-            if (c.op == "<"  && v.year && !(d < v))  return false;
-            if (c.op == ">"  && v.year && !(d > v))  return false;
-            if (c.op == "="  && v.year && d != v)    return false;
-            if (c.op == "<=" && v.year && (d > v))   return false;
-            if (c.op == ">=" && v.year && (d < v))   return false;
-            if (c.op == "!=" && v.year && d == v)    return false;
-        } else {
-            int64_t num = val.empty() ? INF : parseInt(val);
-            int64_t cmp = parseInt(c.value);
-            if (c.op == "<"  && cmp != INF && !(num < cmp)) return false;
-            if (c.op == ">"  && cmp != INF && !(num > cmp)) return false;
-            if (c.op == "="  && cmp != INF && num != cmp)   return false;
-            if (c.op == "<=" && cmp != INF && (num > cmp))  return false;
-            if (c.op == ">=" && cmp != INF && (num < cmp))  return false;
-            if (c.op == "!=" && cmp != INF && num == cmp)   return false;
-        }
-        return true;
+        return joinValuePredicateMatches(
+            c, col, val, valueIsNull, c.value);
     };
 
     if (!leftConds.empty()) {
@@ -33593,43 +33642,37 @@ std::vector<std::string> StorageEngine::leftJoin(
         if (it == colMap.end()) return false;
         const TableSchema& tbl = it->second.isLeft ? leftTbl : rightTbl;
         const JoinRow* row = it->second.isLeft ? leftRow : rightRow;
-        if (!row) return c.op == "isnull";
+        const Column& col = tbl.cols[it->second.colIdx];
+        if (!row) {
+            return joinValuePredicateMatches(c, col, {}, true, c.value);
+        }
         const std::string& tableName =
             it->second.isLeft ? leftTable : rightTable;
         bool valueIsNull = false;
         std::string val = logicalValue(
             *row, tbl, tableName, it->second.colIdx, &valueIsNull);
-        if (c.op == "isnull") return valueIsNull;
-        if (c.op == "isnotnull") return !valueIsNull;
-        if (valueIsNull) return false;
-        const Column& col = tbl.cols[it->second.colIdx];
-        if (col.dataType == "char" || col.isVariableLength) {
-            if (c.op == "<"  && !(val <  c.value)) return false;
-            if (c.op == ">"  && !(val >  c.value)) return false;
-            if (c.op == "="  && val != c.value)    return false;
-            if (c.op == "<=" && (val >  c.value))   return false;
-            if (c.op == ">=" && (val <  c.value))   return false;
-            if (c.op == "!=" && val == c.value)    return false;
-        } else if (col.dataType == "date") {
-            Date d = val.empty() ? Date{} : Date(val.c_str());
-            Date v(c.value.c_str());
-            if (c.op == "<"  && v.year && !(d < v))  return false;
-            if (c.op == ">"  && v.year && !(d > v))  return false;
-            if (c.op == "="  && v.year && d != v)    return false;
-            if (c.op == "<=" && v.year && (d > v))   return false;
-            if (c.op == ">=" && v.year && (d < v))   return false;
-            if (c.op == "!=" && v.year && d == v)    return false;
-        } else {
-            int64_t num = val.empty() ? INF : parseInt(val);
-            int64_t cmp = parseInt(c.value);
-            if (c.op == "<"  && cmp != INF && !(num < cmp)) return false;
-            if (c.op == ">"  && cmp != INF && !(num > cmp)) return false;
-            if (c.op == "="  && cmp != INF && num != cmp)   return false;
-            if (c.op == "<=" && cmp != INF && (num > cmp))  return false;
-            if (c.op == ">=" && cmp != INF && (num < cmp))  return false;
-            if (c.op == "!=" && cmp != INF && num == cmp)   return false;
+        std::string comparisonValue = c.value;
+        bool comparisonIsNull = false;
+        if (isJoinComparisonOperator(c.op)) {
+            auto comparison = colMap.find(c.value);
+            if (comparison != colMap.end()) {
+                const JoinRow* comparisonRow = comparison->second.isLeft
+                    ? leftRow : rightRow;
+                if (!comparisonRow) {
+                    comparisonIsNull = true;
+                } else {
+                    const TableSchema& comparisonTable =
+                        comparison->second.isLeft ? leftTbl : rightTbl;
+                    const std::string& comparisonTableName =
+                        comparison->second.isLeft ? leftTable : rightTable;
+                    comparisonValue = logicalValue(
+                        *comparisonRow, comparisonTable, comparisonTableName,
+                        comparison->second.colIdx, &comparisonIsNull);
+                }
+            }
         }
-        return true;
+        return joinValuePredicateMatches(
+            c, col, val, valueIsNull, comparisonValue, comparisonIsNull);
     };
 
     auto conds = parseConditions(conditions);
@@ -33833,43 +33876,37 @@ std::vector<std::string> StorageEngine::rightJoin(
         if (it == colMap.end()) return false;
         const TableSchema& tbl = it->second.isLeft ? leftTbl : rightTbl;
         const JoinRow* row = it->second.isLeft ? leftRow : rightRow;
-        if (!row) return c.op == "isnull";
+        const Column& col = tbl.cols[it->second.colIdx];
+        if (!row) {
+            return joinValuePredicateMatches(c, col, {}, true, c.value);
+        }
         const std::string& tableName =
             it->second.isLeft ? leftTable : rightTable;
         bool valueIsNull = false;
         std::string val = logicalValue(
             *row, tbl, tableName, it->second.colIdx, &valueIsNull);
-        if (c.op == "isnull") return valueIsNull;
-        if (c.op == "isnotnull") return !valueIsNull;
-        if (valueIsNull) return false;
-        const Column& col = tbl.cols[it->second.colIdx];
-        if (col.dataType == "char" || col.isVariableLength) {
-            if (c.op == "<"  && !(val <  c.value)) return false;
-            if (c.op == ">"  && !(val >  c.value)) return false;
-            if (c.op == "="  && val != c.value)    return false;
-            if (c.op == "<=" && (val >  c.value))   return false;
-            if (c.op == ">=" && (val <  c.value))   return false;
-            if (c.op == "!=" && val == c.value)    return false;
-        } else if (col.dataType == "date") {
-            Date d = val.empty() ? Date{} : Date(val.c_str());
-            Date v(c.value.c_str());
-            if (c.op == "<"  && v.year && !(d < v))  return false;
-            if (c.op == ">"  && v.year && !(d > v))  return false;
-            if (c.op == "="  && v.year && d != v)    return false;
-            if (c.op == "<=" && v.year && (d > v))   return false;
-            if (c.op == ">=" && v.year && (d < v))   return false;
-            if (c.op == "!=" && v.year && d == v)    return false;
-        } else {
-            int64_t num = val.empty() ? INF : parseInt(val);
-            int64_t cmp = parseInt(c.value);
-            if (c.op == "<"  && cmp != INF && !(num < cmp)) return false;
-            if (c.op == ">"  && cmp != INF && !(num > cmp)) return false;
-            if (c.op == "="  && cmp != INF && num != cmp)   return false;
-            if (c.op == "<=" && cmp != INF && (num > cmp))  return false;
-            if (c.op == ">=" && cmp != INF && (num < cmp))  return false;
-            if (c.op == "!=" && cmp != INF && num == cmp)   return false;
+        std::string comparisonValue = c.value;
+        bool comparisonIsNull = false;
+        if (isJoinComparisonOperator(c.op)) {
+            auto comparison = colMap.find(c.value);
+            if (comparison != colMap.end()) {
+                const JoinRow* comparisonRow = comparison->second.isLeft
+                    ? leftRow : rightRow;
+                if (!comparisonRow) {
+                    comparisonIsNull = true;
+                } else {
+                    const TableSchema& comparisonTable =
+                        comparison->second.isLeft ? leftTbl : rightTbl;
+                    const std::string& comparisonTableName =
+                        comparison->second.isLeft ? leftTable : rightTable;
+                    comparisonValue = logicalValue(
+                        *comparisonRow, comparisonTable, comparisonTableName,
+                        comparison->second.colIdx, &comparisonIsNull);
+                }
+            }
         }
-        return true;
+        return joinValuePredicateMatches(
+            c, col, val, valueIsNull, comparisonValue, comparisonIsNull);
     };
 
     auto conds = parseConditions(conditions);
@@ -34128,35 +34165,25 @@ std::vector<std::string> StorageEngine::crossJoin(
         bool valueIsNull = false;
         std::string val = logicalValue(
             row, tbl, tableName, it->second.colIdx, &valueIsNull);
-        if (valueIsNull) return false;
         const Column& col = tbl.cols[it->second.colIdx];
-        if (col.dataType == "char" || col.isVariableLength) {
-            if (c.op == "<"  && !(val <  c.value)) return false;
-            if (c.op == ">"  && !(val >  c.value)) return false;
-            if (c.op == "="  && val != c.value)    return false;
-            if (c.op == "<=" && (val >  c.value))   return false;
-            if (c.op == ">=" && (val <  c.value))   return false;
-            if (c.op == "!=" && val == c.value)    return false;
-        } else if (col.dataType == "date") {
-            Date d = val.empty() ? Date{} : Date(val.c_str());
-            Date v(c.value.c_str());
-            if (c.op == "<"  && v.year && !(d < v))  return false;
-            if (c.op == ">"  && v.year && !(d > v))  return false;
-            if (c.op == "="  && v.year && d != v)    return false;
-            if (c.op == "<=" && v.year && (d > v))   return false;
-            if (c.op == ">=" && v.year && (d < v))   return false;
-            if (c.op == "!=" && v.year && d == v)    return false;
-        } else {
-            int64_t num = val.empty() ? INF : parseInt(val);
-            int64_t cmp = parseInt(c.value);
-            if (c.op == "<"  && cmp != INF && !(num < cmp)) return false;
-            if (c.op == ">"  && cmp != INF && !(num > cmp)) return false;
-            if (c.op == "="  && cmp != INF && num != cmp)   return false;
-            if (c.op == "<=" && cmp != INF && (num > cmp))  return false;
-            if (c.op == ">=" && cmp != INF && (num < cmp))  return false;
-            if (c.op == "!=" && cmp != INF && num == cmp)   return false;
+        std::string comparisonValue = c.value;
+        bool comparisonIsNull = false;
+        if (isJoinComparisonOperator(c.op)) {
+            auto comparison = colMap.find(c.value);
+            if (comparison != colMap.end()) {
+                const TableSchema& comparisonTable =
+                    comparison->second.isLeft ? leftTbl : rightTbl;
+                const JoinRow& comparisonRow =
+                    comparison->second.isLeft ? leftRow : rightRow;
+                const std::string& comparisonTableName =
+                    comparison->second.isLeft ? leftTable : rightTable;
+                comparisonValue = logicalValue(
+                    comparisonRow, comparisonTable, comparisonTableName,
+                    comparison->second.colIdx, &comparisonIsNull);
+            }
         }
-        return true;
+        return joinValuePredicateMatches(
+            c, col, val, valueIsNull, comparisonValue, comparisonIsNull);
     };
 
     for (const auto& lr : leftRows) {
