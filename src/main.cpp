@@ -392,16 +392,34 @@ static string sqlProcessor(string raw) {
     {
         string out;
         size_t i = 0;
+        char quote = 0;
+        const auto identifierChar = [](unsigned char c) {
+            return isalnum(c) || c == '_' || c == '$';
+        };
         while (i < raw.size()) {
+            if (quote != 0) {
+                const char c = raw[i++];
+                out += c;
+                if (c == quote) {
+                    if (i < raw.size() && raw[i] == quote) out += raw[i++];
+                    else quote = 0;
+                }
+                continue;
+            }
+            if (raw[i] == '\'' || raw[i] == '"') {
+                quote = raw[i];
+                out += raw[i++];
+                continue;
+            }
             // Check for "true" as a standalone token
-            if ((i == 0 || !isalnum(static_cast<unsigned char>(raw[i-1]))) &&
+            if ((i == 0 || !identifierChar(static_cast<unsigned char>(raw[i-1]))) &&
                 raw.substr(i, 4) == "true" &&
-                (i + 4 >= raw.size() || !isalnum(static_cast<unsigned char>(raw[i+4])))) {
+                (i + 4 >= raw.size() || !identifierChar(static_cast<unsigned char>(raw[i+4])))) {
                 out += "1";
                 i += 4;
-            } else if ((i == 0 || !isalnum(static_cast<unsigned char>(raw[i-1]))) &&
+            } else if ((i == 0 || !identifierChar(static_cast<unsigned char>(raw[i-1]))) &&
                        raw.substr(i, 5) == "false" &&
-                       (i + 5 >= raw.size() || !isalnum(static_cast<unsigned char>(raw[i+5])))) {
+                       (i + 5 >= raw.size() || !identifierChar(static_cast<unsigned char>(raw[i+5])))) {
                 out += "0";
                 i += 5;
             } else {
