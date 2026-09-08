@@ -52,25 +52,15 @@ def reference_query(sql):
         input=sql.encode(), capture_output=True)
     out = proc.stdout.decode()
     err = proc.stderr.decode()
-    # psql -A -t prints one line per row; a NULL-only row is an empty
-    # line, but a trailing newline terminates the output. A single
-    # trailing newline means zero-or-N rows; treat the LAST empty
-    # segment after the final newline as the terminator, and empty
-    # segments before it as NULL rows.
+    # Only the final line terminator is framing. Earlier empty lines are
+    # empty text rows, while SQL NULL currently uses the separate marker.
     segs = out.split("\n")
     if segs and segs[-1] == "":
         segs = segs[:-1]
-    # psql -A -t prints command tags (CREATE TABLE, INSERT 0 2, ...) on
-    # stdout too; they never contain the field separator and match the
-    # known tag grammar, so filter them out of the row stream.
-    tag_re = re.compile(
-        r"^(CREATE|INSERT|UPDATE|DELETE|SELECT|DROP|ALTER|TRUNCATE|BEGIN|"
-        r"COMMIT|ROLLBACK|SET|RESET|GRANT|REVOKE|COPY|ANALYZE|VACUUM|"
-        r"REINDEX|COMMENT|DO|CALL|LOCK|SHOW)\b.*$")
+    # -q suppresses command tags; any command-looking line here is data.
+    # Filtering by a tag regex discarded values such as "CREATE TABLE".
     rows = []
     for line in segs:
-        if tag_re.match(line) and "\x1f" not in line:
-            continue
         vals = line.split("\x1f")
         rows.append([None if v == "NULLMARK" else v for v in vals])
     state = None

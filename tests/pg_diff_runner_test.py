@@ -22,6 +22,13 @@ class DifferentialValuesTest(unittest.TestCase):
         rows = [[None, "", "NULL", "NULLMARK", "OID 123", "CREATE TABLE", "a\nb", "a\x1fb"]]
         self.assertEqual(RUNNER.normalize_rows(rows), rows)
 
+    def test_reference_preserves_values_that_look_like_command_tags(self):
+        output = subprocess.CompletedProcess(
+            [], 0, b"CREATE TABLE\nINSERT 0 2\nSELECT 1\nBEGIN\nCOMMIT\n", b"")
+        with mock.patch.object(RUNNER.subprocess, "run", return_value=output):
+            rows = RUNNER.reference_query("SELECT value FROM rows;")[0]
+        self.assertEqual(rows, [["CREATE TABLE"], ["INSERT 0 2"], ["SELECT 1"], ["BEGIN"], ["COMMIT"]])
+
     def test_null_empty_mismatch_is_reported(self):
         with mock.patch.object(RUNNER, "reference_multi", return_value=[([[""]], None, None, "")]), \
              mock.patch.object(RUNNER, "ours_query", return_value=([[None]], None, "", [])):
