@@ -16292,16 +16292,33 @@ if (sql.rfind("backup database", 0) == 0) {
 
         auto parseLimitOffset = [&](size_t& limitVal, size_t& offsetVal) {
             limitVal = 0; offsetVal = 0;
+            bool finiteLimit = false;
             if (limitPos != string::npos) {
                 size_t limEnd = (offsetPos != string::npos) ? offsetPos
                               : sql.size();
                 string lstr = trim(sql.substr(limitPos + 5, limEnd - limitPos - 5));
-                try { limitVal = static_cast<size_t>(std::stoull(lstr)); } catch (...) {}
+                try {
+                    limitVal = static_cast<size_t>(std::stoull(lstr));
+                    finiteLimit = true;
+                } catch (...) {}
             }
             if (offsetPos != string::npos) {
                 string ostr = trim(sql.substr(offsetPos + 6));
                 try { offsetVal = static_cast<size_t>(std::stoull(ostr)); } catch (...) {}
             }
+            return finiteLimit;
+        };
+        auto applyLimitOffset = [&](vector<string>& rows) {
+            size_t count = 0, offset = 0;
+            const bool finiteLimit = parseLimitOffset(count, offset);
+            if (offset >= rows.size()) {
+                rows.clear();
+                return;
+            }
+            // Slice in two stages, without an overflowing offset + count.
+            // An explicit zero is distinct from an absent LIMIT or LIMIT ALL.
+            rows.erase(rows.begin(), rows.begin() + offset);
+            if (finiteLimit && count < rows.size()) rows.resize(count);
         };
 
         // Check for JOIN
@@ -16806,8 +16823,8 @@ if (sql.rfind("backup database", 0) == 0) {
             else if (actualJoinPos + 10 <= sql.size() && sql.substr(actualJoinPos, 10) == "inner join") tableNameStart += 10;
             else tableNameStart += 4;
 
-            size_t clauseEnd = (wherePos != string::npos) ? wherePos
-                             : (orderPos != string::npos) ? orderPos : sql.size();
+            size_t clauseEnd = std::min({wherePos, groupPos, havingPos,
+                windowPos, orderPos, limitPos, offsetPos, sql.size()});
             string rightTableOrig;
             string leftOnCol, rightOnCol;
 
@@ -17046,14 +17063,6 @@ if (sql.rfind("backup database", 0) == 0) {
                 }
                 answers = std::move(deduped);
             }
-            size_t jlim = 0, joff = 0;
-            parseLimitOffset(jlim, joff);
-            if (joff < answers.size()) {
-                if (jlim > 0 && joff + jlim < answers.size())
-                    answers.erase(answers.begin() + joff + jlim, answers.end());
-                if (joff > 0)
-                    answers.erase(answers.begin(), answers.begin() + joff);
-            }
             if (pureJoinAgg) {
                 // Aggregate the joined rows.  Cell layout: left columns
                 // then right columns, space-separated display values.
@@ -17114,10 +17123,16 @@ if (sql.rfind("backup database", 0) == 0) {
                     outRow += val + ' ';
                 }
                 while (!outRow.empty() && outRow.back() == ' ') outRow.pop_back();
-                cout << outRow << endl;
-                log(s.username, outRow, getTime());
+                // LIMIT/OFFSET applies to aggregate output, not join inputs.
+                vector<string> aggregateRows{std::move(outRow)};
+                applyLimitOffset(aggregateRows);
+                for (const auto& row : aggregateRows) {
+                    cout << row << endl;
+                    log(s.username, row, getTime());
+                }
                 return false;
             }
+            applyLimitOffset(answers);
             // Permute each row's cells into the requested projection order
             // (engine layout is left columns then right columns).
             if (!selectAll && !requestedCols.empty()) {
@@ -19990,7 +20005,7 @@ if (sql.rfind("backup database", 0) == 0) {
             // Volcano executor.  Unsupported expressions and syntax retain
             // the legacy semantic fallback below.
             size_t windowLimit = 0, windowOffset = 0;
-            parseLimitOffset(windowLimit, windowOffset);
+            const bool finiteWindowLimit = parseLimitOffset(windowLimit, windowOffset);
             bool canUseVolcanoWindow = !hasAgg && !hasScalar &&
                                        distinctOnCols.empty() &&
                                        exprOrderBySpecs.empty() &&
@@ -20080,7 +20095,9 @@ if (sql.rfind("backup database", 0) == 0) {
                     ctx.conds = dbms::StorageEngine::parseConditions(volcanoWindowGroups.front());
                 }
                 auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
-                auto execution = dbms::QueryPlanner::executePlanChecked(std::move(plan));
+                auto execution = finiteWindowLimit && windowLimit == 0
+                    ? dbms::PlanExecutionResult{}
+                    : dbms::QueryPlanner::executePlanChecked(std::move(plan));
                 if (!execution.ok) {
                     cout << "ERROR: " << execution.error << endl;
                     return true;
@@ -20667,14 +20684,7 @@ if (sql.rfind("backup database", 0) == 0) {
             }
 
             // LIMIT / OFFSET
-            size_t wlim = 0, woff = 0;
-            parseLimitOffset(wlim, woff);
-            if (woff < winAnswers.size()) {
-                if (wlim > 0 && woff + wlim < winAnswers.size())
-                    winAnswers.erase(winAnswers.begin() + woff + wlim, winAnswers.end());
-                if (woff > 0)
-                    winAnswers.erase(winAnswers.begin(), winAnswers.begin() + woff);
-            }
+            applyLimitOffset(winAnswers);
 
             // Output
             for (const auto& row : winAnswers) {
@@ -21023,14 +21033,7 @@ if (sql.rfind("backup database", 0) == 0) {
             }
             answers = std::move(deduped);
         }
-        size_t nlim = 0, noff = 0;
-        parseLimitOffset(nlim, noff);
-        if (noff < answers.size()) {
-            if (nlim > 0 && noff + nlim < answers.size())
-                answers.erase(answers.begin() + noff + nlim, answers.end());
-            if (noff > 0)
-                answers.erase(answers.begin(), answers.begin() + noff);
-        }
+        applyLimitOffset(answers);
         // Re-render TIMESTAMPTZ values in the session's TimeZone (SET TIME
         // ZONE).  Executor paths emit UTC; the legacy engine query() already
         // applied the offset and suffixed "+HH:MM", which the post-processor
