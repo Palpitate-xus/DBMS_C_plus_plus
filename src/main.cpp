@@ -9587,7 +9587,7 @@ static std::string processDerivedTables(const std::string& sql, Session& s) {
     int derivedCount = 0;
 
     while (true) {
-        size_t parenStart = result.find("(select");
+        size_t parenStart = findTextOutsideQuotes(result, "(select");
         if (parenStart == std::string::npos) break;
         // A derived table must be preceded by FROM / JOIN / comma / lateral,
         // otherwise the "(select" belongs to a scalar or predicate subquery
@@ -9609,7 +9609,8 @@ static std::string processDerivedTables(const std::string& sql, Session& s) {
             if (!fromCtx) {
                 // Not a FROM item: skip this occurrence to avoid an
                 // infinite loop.
-                parenStart = result.find("(select", parenStart + 1);
+                parenStart = findTextOutsideQuotes(
+                    result, "(select", parenStart + 1);
                 if (parenStart == std::string::npos) break;
                 // Re-check the new occurrence's context once; if still not
                 // FROM, give up this pass (the outer SELECT machinery will
@@ -9634,7 +9635,8 @@ static std::string processDerivedTables(const std::string& sql, Session& s) {
         std::string beforeParen = trim(result.substr(0, parenStart));
         if (beforeParen.size() >= 7 && beforeParen.substr(beforeParen.size() - 7) == "lateral") {
             // Move past this occurrence to avoid infinite loop
-            parenStart = result.find("(select", parenStart + 1);
+            parenStart = findTextOutsideQuotes(
+                result, "(select", parenStart + 1);
             if (parenStart == std::string::npos) break;
             beforeParen = trim(result.substr(0, parenStart));
             if (beforeParen.size() >= 7 && beforeParen.substr(beforeParen.size() - 7) == "lateral") {
@@ -9727,9 +9729,9 @@ static std::string processLateralJoins(const std::string& sql, Session& s) {
     int lateralCount = 0;
 
     while (true) {
-        size_t latPos = result.find("lateral");
+        size_t latPos = findKeywordOutsideQuotes(result, "lateral");
         if (latPos == std::string::npos) break;
-        size_t parenStart = result.find("(select", latPos);
+        size_t parenStart = findTextOutsideQuotes(result, "(select", latPos);
         if (parenStart == std::string::npos) break;
         size_t parenEnd = findMatchingParen(result, parenStart);
         if (parenEnd == std::string::npos) break;
