@@ -15,14 +15,15 @@ namespace fs = std::filesystem;
 // ----------------------------------------------------------------------------
 
 std::vector<std::string> LogicalDecoder::availablePlugins() {
-    return {"dbms_pgoutput_preview", "test_decoding"};
+    return {"dbms_pgoutput_preview", "dbms_test_decoding"};
 }
 
 bool LogicalDecoder::format(const std::string& plugin, const LogicalChangeBatch& batch,
                             std::string& out) {
     std::ostringstream os;
-    if (plugin == "test_decoding") {
-        // PG's test_decoding: one human-readable line per change.
+    if (plugin == "dbms_test_decoding") {
+        // Project-readable output; this does not claim contrib/test_decoding
+        // wire or text compatibility.
         for (const auto& ch : batch.changes) {
             os << "table " << ch.table << ":";
             switch (ch.op) {

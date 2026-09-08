@@ -1,6 +1,6 @@
 // ============================================================================
 // logical_decoding_test — P2-5 logical decoding / publications:
-//   LogicalDecoder formats the DBMS preview stream and test_decoding text
+//   LogicalDecoder formats DBMS preview and readable text streams
 //   PublicationCatalog create/drop/list/publishes with persistence
 //   LogicalChangeStore append/peek/acknowledge including retention bounds
 //   end-to-end: publication + logical slot, DML buffered, commit streams
@@ -52,7 +52,8 @@ static void test_output_plugins() {
     batch.changes = {ins, upd, del, trunc};
 
     std::string text;
-    assert(LogicalDecoder::format("test_decoding", batch, text));
+    assert(!LogicalDecoder::format("test_decoding", batch, text));
+    assert(LogicalDecoder::format("dbms_test_decoding", batch, text));
     assert(text.find("table t1: INSERT: 1|alice") != std::string::npos);
     assert(text.find("table t1: UPDATE: old-key 1|alice new-tuple 1|bob") != std::string::npos);
     assert(text.find("table t1: DELETE: old-key 1|bob") != std::string::npos);
@@ -78,7 +79,9 @@ static void test_output_plugins() {
     assert(std::find(plugins.begin(), plugins.end(), "pgoutput") == plugins.end());
     assert(std::find(plugins.begin(), plugins.end(),
                      "dbms_pgoutput_preview") != plugins.end());
-    assert(std::find(plugins.begin(), plugins.end(), "test_decoding") != plugins.end());
+    assert(std::find(plugins.begin(), plugins.end(), "test_decoding") == plugins.end());
+    assert(std::find(plugins.begin(), plugins.end(),
+                     "dbms_test_decoding") != plugins.end());
     std::cout << "[LOGICAL] output plugins OK" << std::endl;
 }
 
@@ -370,9 +373,9 @@ static void test_end_to_end_streaming() {
     assert(PublicationCatalog::instance().create(db, pub, error));
     auto& repl = ReplicationManager::instance();
     assert(repl.createReplicationSlot(
-        "e2e_slot", "logical", "test_decoding", db));
+        "e2e_slot", "logical", "dbms_test_decoding", db));
     assert(repl.createReplicationSlot(
-        "other_db_slot", "logical", "test_decoding", "other_database"));
+        "other_db_slot", "logical", "dbms_test_decoding", "other_database"));
 
     // Committed transaction streams into the slot.
     assert(g_engine.beginTransaction(db) == DBStatus::OK);
@@ -390,7 +393,8 @@ static void test_end_to_end_streaming() {
     assert(peek.batches[0].changes[0].table == "src_t");
     assert(peek.batches[0].changes[0].op == LogicalChange::Op::Insert);
     std::string text;
-    assert(LogicalDecoder::format("test_decoding", peek.batches[0], text));
+    assert(LogicalDecoder::format(
+        "dbms_test_decoding", peek.batches[0], text));
     assert(text.find("INSERT") != std::string::npos);
 
     // Rollback discards buffered changes.
@@ -467,7 +471,7 @@ static void test_end_to_end_streaming() {
     assert(truncatePeek.batches[0].changes[0].oldRow.empty());
     assert(truncatePeek.batches[0].changes[0].newRow.empty());
     assert(LogicalDecoder::format(
-        "test_decoding", truncatePeek.batches[0], text));
+        "dbms_test_decoding", truncatePeek.batches[0], text));
     assert(text.find("TRUNCATE") != std::string::npos);
     LogicalChangeStore::instance().acknowledge(
         "e2e_slot", truncatePeek.nextLsn);
@@ -483,7 +487,7 @@ static void test_end_to_end_streaming() {
     assert(repl.dropReplicationSlot("e2e_slot"));
     assert(LogicalChangeStore::instance().depth("e2e_slot") == 0);
     assert(repl.createReplicationSlot(
-        "e2e_slot", "logical", "test_decoding", db));
+        "e2e_slot", "logical", "dbms_test_decoding", db));
     assert(LogicalChangeStore::instance().depth("e2e_slot") == 0);
     assert(repl.dropReplicationSlot("e2e_slot"));
     assert(repl.dropReplicationSlot("other_db_slot"));
@@ -514,7 +518,7 @@ static void test_prepared_transaction_streaming() {
 
     auto& replication = ReplicationManager::instance();
     assert(replication.createReplicationSlot(
-        slotName, "logical", "test_decoding", db));
+        slotName, "logical", "dbms_test_decoding", db));
     auto& changes = LogicalChangeStore::instance();
     StorageEngine completingBackend;
 

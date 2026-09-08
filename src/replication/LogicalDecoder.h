@@ -21,7 +21,7 @@ namespace dbms {
 //
 // Output plugins: "dbms_pgoutput_preview" emits a project-specific compact
 // stream (it deliberately does not claim PostgreSQL's reserved pgoutput
-// identity); "test_decoding" emits a readable debugging format.
+// identity); "dbms_test_decoding" emits a readable debugging format.
 // ============================================================================
 
 struct LogicalChange {

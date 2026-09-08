@@ -25,7 +25,7 @@ static void test_replication_slots() {
     // Create slots
     assert(mgr.createReplicationSlot("slot1", "physical"));
     assert(mgr.createReplicationSlot(
-        "slot2", "logical", "test_decoding", "testdb"));
+        "slot2", "logical", "dbms_test_decoding", "testdb"));
     assert(!mgr.createReplicationSlot("slot1", "physical"));  // duplicate
     assert(!mgr.createReplicationSlot("bad/name", "physical"));
     assert(!mgr.createReplicationSlot("bad-slot", "physical"));
@@ -38,6 +38,8 @@ static void test_replication_slots() {
         "logical_bad_plugin", "logical", "missing_plugin", "testdb"));
     assert(!mgr.createReplicationSlot(
         "reserved_pgoutput", "logical", "pgoutput", "testdb"));
+    assert(!mgr.createReplicationSlot(
+        "reserved_test_decoding", "logical", "test_decoding", "testdb"));
 
     // Find
     auto s1 = mgr.findSlot("slot1");
@@ -47,7 +49,7 @@ static void test_replication_slots() {
 
     auto s2 = mgr.findSlot("slot2");
     assert(s2);
-    assert(s2->plugin == "test_decoding");
+    assert(s2->plugin == "dbms_test_decoding");
     assert(s2->database == "testdb");
 
     LogicalChangeBatch batch;

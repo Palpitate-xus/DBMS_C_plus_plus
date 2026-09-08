@@ -55,7 +55,7 @@ int main() {
         batch.xid = round;
         batch.commitLsn = round;
         assert(manager.createReplicationSlot(
-            logicalSlot, "logical", "test_decoding", "concurrency_db"));
+            logicalSlot, "logical", "dbms_test_decoding", "concurrency_db"));
         std::atomic<bool> start{false};
         std::atomic<bool> dropped{false};
         std::thread publisher([&] {
