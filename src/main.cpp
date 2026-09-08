@@ -9115,7 +9115,13 @@ static std::vector<std::string> runDerivedSubQuery(const std::string& rawSql, Se
 static std::vector<std::string> runDerivedSubQueryFull(
     const std::string& rawSql, Session& s,
     std::vector<std::string>& outColNames,
-    std::vector<std::string>* outColTypes = nullptr) {
+    std::vector<std::string>* outColTypes = nullptr,
+    std::vector<std::vector<std::string>>* outStructuredRows = nullptr,
+    std::vector<std::vector<bool>>* outStructuredNulls = nullptr,
+    bool* outStructuredAvailable = nullptr) {
+    if (outStructuredRows) outStructuredRows->clear();
+    if (outStructuredNulls) outStructuredNulls->clear();
+    if (outStructuredAvailable) *outStructuredAvailable = false;
     std::stringstream captured;
     const unsigned previousCaptureDepth = metadataCaptureDepth;
     metadataCaptureDepth = executeDepth + 1;
@@ -9142,10 +9148,13 @@ static std::vector<std::string> runDerivedSubQueryFull(
             if (!t.empty()) lines.push_back(t);
         }
     }
-    if (lines.empty()) return {};
+    if (lines.empty() &&
+        (!nestedResult.available || nestedResult.columns.empty())) return {};
     // First non-empty line is the header (column names, space separated).
     outColNames.clear();
-    {
+    if (nestedResult.available && !nestedResult.columns.empty()) {
+        outColNames = nestedResult.columns;
+    } else {
         std::stringstream hss(lines[0]);
         std::string col;
         while (hss >> col) outColNames.push_back(col);
@@ -9159,7 +9168,26 @@ static std::vector<std::string> runDerivedSubQueryFull(
             *outColTypes = std::move(nestedResult.columnTypes);
         }
     }
-    std::vector<std::string> rows(lines.begin() + 1, lines.end());
+    if (outStructuredRows && outStructuredNulls &&
+        nestedResult.available && !nestedResult.metadataOnly &&
+        nestedResult.rows.size() == nestedResult.nulls.size()) {
+        bool valid = true;
+        for (size_t i = 0; i < nestedResult.rows.size(); ++i) {
+            if (nestedResult.rows[i].size() != outColNames.size() ||
+                nestedResult.nulls[i].size() != outColNames.size()) {
+                valid = false;
+                break;
+            }
+        }
+        if (valid) {
+            *outStructuredRows = nestedResult.rows;
+            *outStructuredNulls = nestedResult.nulls;
+            if (outStructuredAvailable) *outStructuredAvailable = true;
+        }
+    }
+    std::vector<std::string> rows;
+    if (lines.size() > 1)
+        rows.assign(lines.begin() + 1, lines.end());
     return rows;
 }
 
@@ -9196,7 +9224,19 @@ static std::string createTempTableFromRows(Session& s,
                                            const std::vector<std::string>& rows,
                                            const std::vector<std::string>& colNames,
                                            int& counter,
-                                           const std::vector<std::string>& colTypes = {}) {
+                                           const std::vector<std::string>& colTypes = {},
+                                           const std::vector<std::vector<std::string>>* structuredRows = nullptr,
+                                           const std::vector<std::vector<bool>>* structuredNulls = nullptr) {
+    const bool hasStructuredRows = structuredRows && structuredNulls &&
+        structuredRows->size() == structuredNulls->size();
+    if (hasStructuredRows) {
+        for (size_t i = 0; i < structuredRows->size(); ++i) {
+            if ((*structuredRows)[i].size() != colNames.size() ||
+                (*structuredNulls)[i].size() != colNames.size()) {
+                return "";
+            }
+        }
+    }
     std::string tmpName = "__cte_" + std::to_string(counter++);
     std::string actualName = tempTablePrefix(s, tmpName);
     TableSchema tmpTbl;
@@ -9221,6 +9261,26 @@ static std::string createTempTableFromRows(Session& s,
     auto res = g_engine.createTable(s.currentDB, tmpTbl);
     if (res != DBStatus::OK) return "";
     s.transientTempTables.insert(tmpName);
+
+    if (hasStructuredRows) {
+        for (size_t rowIndex = 0; rowIndex < structuredRows->size();
+             ++rowIndex) {
+            dbms::StorageEngine::SqlRow values;
+            for (size_t colIndex = 0; colIndex < colNames.size(); ++colIndex) {
+                values[colNames[colIndex]] = (*structuredNulls)[rowIndex][colIndex]
+                    ? dbms::StorageEngine::SqlCell(std::nullopt)
+                    : dbms::StorageEngine::SqlCell(
+                          (*structuredRows)[rowIndex][colIndex]);
+            }
+            if (g_engine.insertRow(s.currentDB, actualName, values) !=
+                DBStatus::OK) {
+                g_engine.dropTable(s.currentDB, actualName);
+                s.transientTempTables.erase(tmpName);
+                return "";
+            }
+        }
+        return tmpName;
+    }
 
     for (const auto& row : rows) {
         std::map<std::string, std::string> values;
@@ -9538,15 +9598,24 @@ static std::string processCTEs(const std::string& sql, Session& s, bool& failed)
         } else {
             // Non-recursive CTE: execute and store
             std::vector<std::string> colTypes;
+            std::vector<std::vector<std::string>> structuredRows;
+            std::vector<std::vector<bool>> structuredNulls;
+            bool structuredAvailable = false;
             auto rows = runDerivedSubQueryFull(
-                innerSelect, s, colNames, &colTypes);
+                innerSelect, s, colNames, &colTypes,
+                &structuredRows, &structuredNulls, &structuredAvailable);
             if (colNames.empty()) {
                 colNames.clear();
                 rows = runDerivedSubQuery(innerSelect, s, colNames);
+                structuredRows.clear();
+                structuredNulls.clear();
+                structuredAvailable = false;
             }
             if (colNames.empty()) break;
             tmpName = createTempTableFromRows(
-                s, rows, colNames, cteCount, colTypes);
+                s, rows, colNames, cteCount, colTypes,
+                structuredAvailable ? &structuredRows : nullptr,
+                structuredAvailable ? &structuredNulls : nullptr);
             if (tmpName.empty()) break;
         }
         } // end if (!isDmlCte)
@@ -9709,11 +9778,18 @@ static std::string processDerivedTables(const std::string& sql, Session& s) {
         std::string innerSelect = trim(result.substr(parenStart + 1, parenEnd - parenStart - 1));
         std::vector<std::string> colNames;
         std::vector<std::string> colTypes;
+        std::vector<std::vector<std::string>> structuredRows;
+        std::vector<std::vector<bool>> structuredNulls;
+        bool structuredAvailable = false;
         auto rows = runDerivedSubQueryFull(
-            innerSelect, s, colNames, &colTypes);
+            innerSelect, s, colNames, &colTypes,
+            &structuredRows, &structuredNulls, &structuredAvailable);
         if (colNames.empty()) {
             colNames.clear();
             rows = runDerivedSubQuery(innerSelect, s, colNames);
+            structuredRows.clear();
+            structuredNulls.clear();
+            structuredAvailable = false;
         }
         if (colNames.empty()) break;
 
@@ -9721,7 +9797,9 @@ static std::string processDerivedTables(const std::string& sql, Session& s) {
         if (colTypes.empty())
             colTypes = inferIntegerLiteralDerivedTypes(innerSelect, colNames);
         std::string tmpName = createTempTableFromRows(
-            s, rows, colNames, counter, colTypes);
+            s, rows, colNames, counter, colTypes,
+            structuredAvailable ? &structuredRows : nullptr,
+            structuredAvailable ? &structuredNulls : nullptr);
         if (tmpName.empty()) break;
         derivedCount = counter;
 

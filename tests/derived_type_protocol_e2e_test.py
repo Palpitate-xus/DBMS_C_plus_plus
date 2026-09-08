@@ -27,6 +27,10 @@ def main():
             "CREATE TABLE typed_lateral_right (id INT, label TEXT);",
             ("INSERT INTO typed_lateral_right VALUES "
              "(1, 'one'), (2, 'two'), (3, 'unused');"),
+            "CREATE TABLE typed_text_edges (id INT, txt TEXT);",
+            ("INSERT INTO typed_text_edges VALUES "
+             "(1, 'a b'), (2, ''), (3, 'NULL'), (4, NULL), "
+             "(5, '  edge  '), (6, 'line1\nline2');"),
             ("CREATE VIEW typed_view AS SELECT grp, sum(v) AS total "
              "FROM typed_src GROUP BY grp;"),
         ]
@@ -68,6 +72,16 @@ def main():
               "(SELECT label FROM typed_lateral_right WHERE id = l.id) x "
               "ORDER BY l.id;"),
              [["1", "one"], ["2", "two"]], [23, 25]),
+            (("SELECT id, txt FROM "
+              "(SELECT id, txt FROM typed_text_edges) AS d ORDER BY id;"),
+             [["1", "a b"], ["2", ""], ["3", "NULL"], ["4", None],
+              ["5", "  edge  "], ["6", "line1\nline2"]],
+             [23, 25]),
+            (("WITH d AS (SELECT id, txt FROM typed_text_edges) "
+              "SELECT id, txt FROM d ORDER BY id;"),
+             [["1", "a b"], ["2", ""], ["3", "NULL"], ["4", None],
+              ["5", "  edge  "], ["6", "line1\nline2"]],
+             [23, 25]),
         ]
         for sql, expected_rows, expected_types in cases:
             decoded = runner.decode_wire_result(
