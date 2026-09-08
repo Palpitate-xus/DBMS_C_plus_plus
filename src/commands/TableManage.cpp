@@ -26808,7 +26808,24 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
                                                bool skipLocked,
                                                int timezoneOffsetMinutes,
                                                const std::vector<std::string>& distinctOnCols) {
+    return query(dbname, tablename, conditions, selectCols, orderBy,
+                 forUpdate, noWait, skipLocked, timezoneOffsetMinutes,
+                 distinctOnCols, nullptr, nullptr);
+}
+
+std::vector<std::string> StorageEngine::query(
+    const std::string& dbname, const std::string& tablename,
+    const std::vector<std::string>& conditions,
+    const std::set<std::string>& selectCols,
+    const std::vector<OrderBySpec>& orderBy,
+    bool forUpdate, bool noWait, bool skipLocked,
+    int timezoneOffsetMinutes,
+    const std::vector<std::string>& distinctOnCols,
+    std::vector<std::vector<std::string>>* structuredRows,
+    std::vector<std::vector<bool>>* structuredNulls) {
     std::vector<std::string> result;
+    if (structuredRows) structuredRows->clear();
+    if (structuredNulls) structuredNulls->clear();
 
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
         transactionContext().hasRead = true;
@@ -27290,6 +27307,8 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
         NullRowBinding nullBinding(
             this, dbname, tbl.tablename, mr.first, tbl.len);
         std::string rowStr;
+        std::vector<std::string> structuredRow;
+        std::vector<bool> structuredNullRow;
         for (size_t i = 0; i < tbl.len; ++i) {
             const Column& col = tbl.cols[i];
             if (!selectCols.empty() && selectCols.find(col.dataName) == selectCols.end())
@@ -27321,8 +27340,13 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
             else if (val.find(' ') != std::string::npos && selectCols.size() != 1)
                 rowStr += "\"" + val + "\" ";
             else rowStr += val + ' ';
+            structuredRow.push_back(resultIsNull ? std::string{} : val);
+            structuredNullRow.push_back(resultIsNull);
         }
         result.push_back(rowStr);
+        if (structuredRows) structuredRows->push_back(std::move(structuredRow));
+        if (structuredNulls)
+            structuredNulls->push_back(std::move(structuredNullRow));
     }
     lockManager_.unlock(tablename);
     dbms::recordTableScan(dbname, tablename, matchRows.size(), usedIndex, conds.empty());

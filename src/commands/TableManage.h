@@ -555,6 +555,19 @@ public:
                                    bool skipLocked = false,
                                    int timezoneOffsetMinutes = 0,
                                    const std::vector<std::string>& distinctOnCols = {});
+    // Transitional structured result for the plain-table query path.  The
+    // formatted rows remain available to CLI/internal callers, while wire
+    // callers can consume exact cells and a separate SQL NULL bitmap.
+    std::vector<std::string> query(
+        const std::string& dbname, const std::string& tablename,
+        const std::vector<std::string>& conditions,
+        const std::set<std::string>& selectCols,
+        const std::vector<OrderBySpec>& orderBy,
+        bool forUpdate, bool noWait, bool skipLocked,
+        int timezoneOffsetMinutes,
+        const std::vector<std::string>& distinctOnCols,
+        std::vector<std::vector<std::string>>* structuredRows,
+        std::vector<std::vector<bool>>* structuredNulls);
 
     // Scalar function expression for queryExpr
     struct SelectExpr {

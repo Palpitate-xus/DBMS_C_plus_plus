@@ -18059,18 +18059,22 @@ if (sql.rfind("backup database", 0) == 0) {
                 string sortItem = part;
                 bool asc = true;
                 bool nullsFirst = false;
+                bool nullsSpecified = false;
                 // Detect NULLS FIRST / NULLS LAST
                 size_t nullsPos = sortItem.find("nulls");
                 if (nullsPos != string::npos) {
                     string afterNulls = trim(sortItem.substr(nullsPos + 5));
                     if (afterNulls == "first") nullsFirst = true;
-                    // else "last" is default
+                    nullsSpecified = true;
                     sortItem = trim(sortItem.substr(0, nullsPos));
                 }
                 if (sortItem.size() >= 5 && sortItem.substr(sortItem.size() - 4) == "desc") {
                     asc = false;
                     sortItem = trim(sortItem.substr(0, sortItem.size() - 4));
                 }
+                // PostgreSQL defaults NULLS LAST for ASC and NULLS FIRST for
+                // DESC.  An explicit NULLS clause always wins.
+                if (!nullsSpecified) nullsFirst = !asc;
                 // Detect COLLATE
                 string collation;
                 size_t collatePos = sortItem.find("collate");
@@ -19851,6 +19855,8 @@ if (sql.rfind("backup database", 0) == 0) {
         };
 
         vector<string> answers;
+        dbms::DmlResult structuredPlainResult;
+        bool structuredPlainRows = false;
         if (!groupByCols.empty()) {
             if (forUpdate) { cout << "FOR UPDATE not supported with GROUP BY" << endl; return true; }
             vector<string> groupProtocolColumns;
@@ -21536,10 +21542,28 @@ if (sql.rfind("backup database", 0) == 0) {
                 dbms::DmlResult metadata;
                 metadata.available = true;
                 metadata.metadataOnly = true;
-                metadata.columns = std::move(protocolColumns);
-                metadata.columnTypes = std::move(protocolTypes);
+                metadata.columns = protocolColumns;
+                metadata.columnTypes = protocolTypes;
                 dbms::publishLastDmlResult(std::move(metadata));
+                structuredPlainResult.columns = std::move(protocolColumns);
+                structuredPlainResult.columnTypes = std::move(protocolTypes);
             }
+
+            // A display row cannot distinguish SQL NULL from text "NULL" or
+            // frame embedded newlines.  The basic top-level table projection
+            // therefore asks StorageEngine for exact cells and a separate
+            // NULL bitmap.  Complex operator shapes remain on their existing
+            // path until those operators expose structured tuples too.
+            const bool captureStructuredPlain =
+                shouldPublishQueryMetadata() && condTokens.empty() &&
+                semiJoins.empty() && existenceFilters.empty() &&
+                quantifiedSubqueries.empty() && exprOrderBySpecs.empty() &&
+                !isDistinct && distinctOnCols.empty() &&
+                limitPos == string::npos && offsetPos == string::npos &&
+                !forUpdate && !noWait && !skipLocked && outfile.empty() &&
+                queryDb != "information_schema" && queryDb != "pg_catalog" &&
+                (s.onlyNext ||
+                 g_engine.getInheritedChildren(queryDb, tname).empty());
 
             // Determine the first simple ORDER BY spec (if any) that the volcano
             // path can consume (only plain column ORDER BY without NULLS / expr).
@@ -21583,6 +21607,8 @@ if (sql.rfind("backup database", 0) == 0) {
             bool volcanoUsed = corrAggHandled;
             if (corrAggHandled) {
                 // answers already filled by the correlated scalar filter.
+            } else if (captureStructuredPlain) {
+                // Deliberately enter the StorageEngine fallback below.
             } else if (condTokens.empty()) {
                 volcanoUsed = executeVolcanoSelect(tname, selectCols, {},
                                                     firstOrderBy, useDistinct,
@@ -21617,7 +21643,20 @@ if (sql.rfind("backup database", 0) == 0) {
                 // Fallback: use StorageEngine::query directly.
                 answers.clear();
                 if (condTokens.empty()) {
-                    answers = g_engine.query(queryDb, tname, {}, selectCols, orderBySpecs, forUpdate, noWait, skipLocked, s.timezoneOffsetMinutes, distinctOnCols);
+                    if (captureStructuredPlain) {
+                        answers = g_engine.query(
+                            queryDb, tname, {}, selectCols, orderBySpecs,
+                            forUpdate, noWait, skipLocked,
+                            s.timezoneOffsetMinutes, distinctOnCols,
+                            &structuredPlainResult.rows,
+                            &structuredPlainResult.nulls);
+                        structuredPlainRows = true;
+                    } else {
+                        answers = g_engine.query(
+                            queryDb, tname, {}, selectCols, orderBySpecs,
+                            forUpdate, noWait, skipLocked,
+                            s.timezoneOffsetMinutes, distinctOnCols);
+                    }
                 } else {
                     condTokens.insert(condTokens.begin(), "(");
                     condTokens.push_back(")");
@@ -21847,7 +21886,34 @@ if (sql.rfind("backup database", 0) == 0) {
                     while (!out.empty() && out.back() == ' ') out.pop_back();
                     row = out;
                 }
+                if (structuredPlainRows) {
+                    for (auto& row : structuredPlainResult.rows) {
+                        vector<string> reordered;
+                        reordered.reserve(srcIdx.size());
+                        for (size_t index : srcIdx) {
+                            reordered.push_back(
+                                index < row.size() ? row[index] : string{});
+                        }
+                        row = std::move(reordered);
+                    }
+                    for (auto& row : structuredPlainResult.nulls) {
+                        vector<bool> reordered;
+                        reordered.reserve(srcIdx.size());
+                        for (size_t index : srcIdx) {
+                            reordered.push_back(
+                                index < row.size() && row[index]);
+                        }
+                        row = std::move(reordered);
+                    }
+                }
             }
+        }
+        if (structuredPlainRows) {
+            structuredPlainResult.available = true;
+            structuredPlainResult.metadataOnly = false;
+            structuredPlainResult.commandTag =
+                "SELECT " + std::to_string(structuredPlainResult.rows.size());
+            dbms::publishLastDmlResult(std::move(structuredPlainResult));
         }
         if (!outfile.empty()) {
             ofstream ofs(outfile);
