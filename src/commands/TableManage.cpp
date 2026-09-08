@@ -1,4 +1,5 @@
 #include "TableManage.h"
+#include "common/DbError.h"
 #include "utils/plpgsql.h"
 #include "replication/ReplicationManager.h"
 #include "parser/parser.h"
@@ -30,6 +31,7 @@
 #include <charconv>
 #include <cmath>
 #include <cctype>
+#include <exception>
 #include <iomanip>
 #include <limits>
 #include <mutex>
@@ -27377,16 +27379,16 @@ static ParsedProjectionSubquery parseProjectionSubquery(const std::string& sql) 
     result.parsed = parser.parse(join(0, tokens.size()));
     const auto* select = dynamic_cast<const SelectStmt*>(result.parsed.stmt.get());
     if (!result.parsed.success || !select || select->selectList.empty()) {
-        throw std::runtime_error("invalid projection subquery (SQLSTATE 42601)");
+        throw DbError("42601", "invalid projection subquery");
     }
     if (!select->fromClause || select->fromClause->type != FromItem::Type::Table ||
         !select->groupBy.empty() || select->having || select->distinct ||
         select->setOp != SetOp::None || !select->ctes.empty() ||
         !select->locking.empty() || !select->windowDefs.empty()) {
-        throw std::runtime_error("unsupported projection subquery shape (SQLSTATE 0A000)");
+        throw DbError("0A000", "unsupported projection subquery shape");
     }
     if (select->withTies && select->orderBy.empty()) {
-        throw std::runtime_error("WITH TIES cannot be specified without ORDER BY (SQLSTATE 42601)");
+        throw DbError("42601", "WITH TIES cannot be specified without ORDER BY");
     }
     // Slice complete lexer tokens, not substrings. Quoted text is one token
     // and nested FROM (e.g. EXTRACT) is not a query-clause boundary. Keeping
@@ -27733,14 +27735,11 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             ? innerLocks.lockIntentShared(innerTbl)
             : innerLocks.lockShared(innerTbl);
         if (!innerLocked) {
-            throw std::runtime_error(
-                "could not lock EXISTS subquery relation (SQLSTATE 55P03)");
+            throw DbError("55P03", "could not lock EXISTS subquery relation");
         }
         ResourceUnlockGuard innerLockGuard(innerLocks, innerTbl);
         if (!engine->tableExists(dbname, innerTbl)) {
-            throw std::runtime_error(
-                "relation \"" + innerTbl +
-                "\" does not exist (SQLSTATE 42P01)");
+            throw DbError("42P01", "relation \"" + innerTbl + "\" does not exist");
         }
         TableSchema innerSch = engine->getTableSchema(dbname, innerTbl);
         const bool negate = expr.funcArgs.size() > 1 && expr.funcArgs[1] == "not";
@@ -27837,8 +27836,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             matchedRow();
         });
         if (!scanned) {
-            throw std::runtime_error(
-                "failed to scan EXISTS subquery relation (SQLSTATE 58030)");
+            throw DbError("58030", "failed to scan EXISTS subquery relation");
         }
         if (!evaluationError.empty())
             throw std::runtime_error(evaluationError);
@@ -30338,8 +30336,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         const std::string& whereSql = subquery.predicate;
         if (projection->selectList.size() != 1 ||
             !projection->selectList.front().expr) {
-            throw std::runtime_error(
-                "subquery must return only one column (SQLSTATE 42601)");
+            throw DbError("42601", "subquery must return only one column");
         }
         const std::set<std::string> subSelectCols{colsStr};
 
@@ -30357,16 +30354,13 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 ? innerLocks.lockIntentShared(subTname)
                 : innerLocks.lockShared(subTname);
             if (!innerLocked) {
-                throw std::runtime_error(
-                    "could not lock scalar subquery relation (SQLSTATE 55P03)");
+                throw DbError("55P03", "could not lock scalar subquery relation");
             }
             ResourceUnlockGuard innerLockGuard(innerLocks, subTname);
             // Opening an allocator for an unknown relation may initialize a
             // new heap. Reject it before scanning so a SELECT stays read-only.
             if (!engine->tableExists(dbname, subTname)) {
-                throw std::runtime_error(
-                    "relation \"" + subTname +
-                    "\" does not exist (SQLSTATE 42P01)");
+                throw DbError("42P01", "relation \"" + subTname + "\" does not exist");
             }
             const TableSchema innerSchema =
                 engine->getTableSchema(dbname, subTname);
@@ -30383,9 +30377,9 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     if (!starReference->schema.empty() ||
                         (starReference->table != qualifier &&
                          starReference->table != tbl.tablename)) {
-                        throw std::runtime_error(
+                        throw DbError("42P01",
                             "missing FROM-clause entry for table \"" +
-                            starReference->table + "\" (SQLSTATE 42P01)");
+                            starReference->table + "\"");
                     }
                     if (starReference->table != qualifier) {
                         expandedSchema = &tbl;
@@ -30393,8 +30387,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     }
                 }
                 if (expandedSchema->len != 1) {
-                    throw std::runtime_error(
-                        "subquery must return only one column (SQLSTATE 42601)");
+                    throw DbError("42601", "subquery must return only one column");
                 }
                 wildcardColumn = qualifier + "." + expandedSchema->cols[0].dataName;
             }
@@ -30433,7 +30426,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                         const auto parsedOrdinal = std::from_chars(literal->value.data(),
                             literal->value.data() + literal->value.size(), ordinal);
                         if (parsedOrdinal.ec != std::errc{} || ordinal != 1) {
-                            throw std::runtime_error("ORDER BY position is not in select list (SQLSTATE 42P10)");
+                            throw DbError("42P10", "ORDER BY position is not in select list");
                         }
                         key = target;
                     }
@@ -30458,11 +30451,13 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             ExprEvaluator orderEvaluator;
             orderEvaluator.setCurrentDB(dbname);
             std::string evaluationError;
+            std::exception_ptr evaluationException;
             const bool scanned = engine->forEachVisibleRow(
                 dbname, subTname, "SELECT",
                 [&](uint32_t pageId, uint16_t slotId, const char* data,
                     size_t len) {
-                    if (!evaluationError.empty() || (!sorted && candidates.size() >= take))
+                    if (!evaluationError.empty() || evaluationException ||
+                        (!sorted && candidates.size() >= take))
                         return;
                     NullRowBinding nullBinding(
                         engine, dbname, subTname,
@@ -30541,21 +30536,22 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                                             candidate.nulls.count(wildcardColumn) != 0)
                                 : orderEvaluator.eval(key, context);
                             if (value.isUnknown())
-                                throw std::runtime_error("unsupported subquery sort expression (SQLSTATE 0A000)");
+                                throw DbError("0A000", "unsupported subquery sort expression");
                             candidate.keys.push_back(std::move(value));
                         }
-                    } catch (const std::exception& error) {
+                    } catch (...) {
                         // Do not unwind through the page-scanning callback:
                         // its caller must unpin the page and release its lock.
-                        evaluationError = error.what();
+                        // Preserve the exception type and its SQLSTATE.
+                        evaluationException = std::current_exception();
                         return;
                     }
                     candidates.push_back(std::move(candidate));
                 });
             if (!scanned) {
-                throw std::runtime_error(
-                    "failed to scan scalar subquery relation");
+                throw DbError("58030", "failed to scan scalar subquery relation");
             }
+            if (evaluationException) std::rethrow_exception(evaluationException);
             if (!evaluationError.empty())
                 throw std::runtime_error(evaluationError);
             if (sorted) {
@@ -30617,9 +30613,9 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 scalarRows.emplace_back(selected.value, selected.isNull);
             }
             if (scalarRows.size() > 1) {
-                throw std::runtime_error(
+                throw DbError("21000",
                     "more than one row returned by a subquery used as an "
-                    "expression (SQLSTATE 21000)");
+                    "expression");
             }
             if (scalarRows.empty() || scalarRows.front().second)
                 return "NULL";
@@ -30627,16 +30623,16 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         }
 
         if (!projection->orderBy.empty()) {
-            throw std::runtime_error("virtual catalog subquery ordering is not supported (SQLSTATE 0A000)");
+            throw DbError("0A000", "virtual catalog subquery ordering is not supported");
         }
         auto rows = engine->query(dbname, subTname, {}, subSelectCols);
         const size_t skipped = std::min(projection->offset.value_or(0), rows.size());
         rows.erase(rows.begin(), rows.begin() + skipped);
         if (projection->limit && rows.size() > *projection->limit) rows.resize(*projection->limit);
         if (rows.size() > 1) {
-            throw std::runtime_error(
+            throw DbError("21000",
                 "more than one row returned by a subquery used as an "
-                "expression (SQLSTATE 21000)");
+                "expression");
         }
         if (rows.empty()) return "NULL";
         std::string firstRow = rows.front();

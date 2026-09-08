@@ -1,5 +1,6 @@
 #include "NetworkServer.h"
 #include "common/version.h"
+#include "common/DbError.h"
 #include "commands/DmlExecutor.h"
 #include "TableManage.h"
 #include "permissions.h"
@@ -916,6 +917,7 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
     }
 
     bool executionError = false;
+    bool structuredError = false;
     std::string outputText;
     // PG 42883: unknown function in WHERE fails before execution.
     {
@@ -933,6 +935,11 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
         dbms::ScopedOutputCapture capture(output);
         try {
             executionError = execute(sql, session);
+        } catch (const dbms::DbError& e) {
+            executionError = true;
+            structuredError = true;
+            result.sqlState = e.sqlState();
+            result.errorMessage = e.message();
         } catch (const std::exception& e) {
             executionError = true;
             result.errorMessage = e.what();
@@ -986,7 +993,10 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
                 result.errorMessage = msg;
             }
         }
-        if (result.errorMessage.find(
+        if (structuredError) {
+            // The executor's explicit code takes precedence over all legacy
+            // wording heuristics, even if the message happens to match one.
+        } else if (result.errorMessage.find(
                        "aggregate functions are not allowed in GROUP BY") !=
                    std::string::npos) {
             // 42803: grouping column references an aggregate.

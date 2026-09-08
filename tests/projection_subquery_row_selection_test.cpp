@@ -1,4 +1,5 @@
 #include "catalog/type_registry.h"
+#include "common/DbError.h"
 #include "commands/TableManage.h"
 #include "test_utils.h"
 
@@ -81,19 +82,26 @@ int main() {
         cardinality = std::string(error.what()).find("SQLSTATE 21000") != std::string::npos;
     }
     assert(cardinality);
-    const auto expectError = [&](const std::string& sql, const std::string& state) {
+    const auto expectError = [&](const std::string& sql, const std::string& state,
+                                 bool structured = true) {
         bool rejected = false;
         std::string actualError;
         try { (void)project(sql); }
+        catch (const dbms::DbError& error) {
+            actualError = error.what();
+            rejected = error.sqlState() == state &&
+                error.message().find("SQLSTATE") == std::string::npos;
+        }
         catch (const std::runtime_error& error) {
             actualError = error.what();
-            rejected = actualError.find("SQLSTATE " + state) != std::string::npos;
+            rejected = !structured && actualError.find("SQLSTATE " + state) != std::string::npos;
         }
         if (!rejected) std::cerr << sql << " expected " << state << " got " << actualError << '\n';
         assert(rejected);
         assert(g_engine.getLockManager().captureCheckpoint().tableCounts.empty());
     };
-    expectError("select id from inner_rows order by 1 / (id - 1) limit 1", "22012");
+    // ExprEvaluator arithmetic errors have not yet migrated to DbError.
+    expectError("select id from inner_rows order by 1 / (id - 1) limit 1", "22012", false);
     expectError("select id from inner_rows order by 2 limit 0", "42P10");
     expectError("select id, payload from inner_rows limit 0", "42601");
     expectError("select id from missing_rows limit 0", "42P01");
