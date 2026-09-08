@@ -583,6 +583,15 @@ public:
                                         const std::vector<std::string>& conditions,
                                         const std::vector<SelectExpr>& exprs,
                                         const std::vector<OrderBySpec>& orderBy = {});
+    // Structured counterpart for queryExpr.  It preserves exact scalar
+    // cells and carries SQL NULL independently from the display value.
+    std::vector<std::string> queryExpr(
+        const std::string& dbname, const std::string& tablename,
+        const std::vector<std::string>& conditions,
+        const std::vector<SelectExpr>& exprs,
+        const std::vector<OrderBySpec>& orderBy,
+        std::vector<std::vector<std::string>>* structuredRows,
+        std::vector<std::vector<bool>>* structuredNulls);
 
     // information_schema virtual tables
     std::vector<std::string> queryInformationSchema(

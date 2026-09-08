@@ -19857,6 +19857,8 @@ if (sql.rfind("backup database", 0) == 0) {
         vector<string> answers;
         dbms::DmlResult structuredPlainResult;
         bool structuredPlainRows = false;
+        dbms::DmlResult structuredScalarResult;
+        bool structuredScalarRows = false;
         if (!groupByCols.empty()) {
             if (forUpdate) { cout << "FOR UPDATE not supported with GROUP BY" << endl; return true; }
             vector<string> groupProtocolColumns;
@@ -21410,6 +21412,8 @@ if (sql.rfind("backup database", 0) == 0) {
                             dbms::ExprHelper::inferResultType(
                                 withoutAlias(rawTargets[i]), typeHints));
                     }
+                    structuredScalarResult.columns = metadata.columns;
+                    structuredScalarResult.columnTypes = metadata.columnTypes;
                     dbms::publishLastDmlResult(std::move(metadata));
                 }
             }
@@ -21494,8 +21498,40 @@ if (sql.rfind("backup database", 0) == 0) {
                 cout << renderLegacyHeader(expr.displayName) << ' ';
             }
             cout << '\n';
+            const bool hasSetReturningScalar = any_of(
+                selectExprs.begin(), selectExprs.end(),
+                [](const auto& expr) {
+                    return expr.isScalar && expr.funcName == "unnest";
+                });
+            const bool scalarOrderUsesOnlyTableColumns = all_of(
+                orderBySpecs.begin(), orderBySpecs.end(),
+                [&](const auto& spec) {
+                    for (size_t i = 0; i < tbl.len; ++i) {
+                        if (tbl.cols[i].dataName == spec.colName) return true;
+                    }
+                    return false;
+                });
+            const bool captureStructuredScalar =
+                shouldPublishQueryMetadata() && condTokens.empty() &&
+                !structuredScalar && !hasSetReturningScalar &&
+                !isDistinct && distinctOnCols.empty() &&
+                exprOrderBySpecs.empty() && scalarOrderUsesOnlyTableColumns &&
+                limitPos == string::npos &&
+                offsetPos == string::npos && outfile.empty() &&
+                queryDb != "information_schema" && queryDb != "pg_catalog" &&
+                structuredScalarResult.columns.size() == selectExprs.size() &&
+                g_engine.getInheritedChildren(queryDb, tname).empty();
             if (condTokens.empty()) {
-                answers = g_engine.queryExpr(queryDb, tname, {}, selectExprs, orderBySpecs);
+                if (captureStructuredScalar) {
+                    answers = g_engine.queryExpr(
+                        queryDb, tname, {}, selectExprs, orderBySpecs,
+                        &structuredScalarResult.rows,
+                        &structuredScalarResult.nulls);
+                    structuredScalarRows = true;
+                } else {
+                    answers = g_engine.queryExpr(
+                        queryDb, tname, {}, selectExprs, orderBySpecs);
+                }
             } else {
                 condTokens.insert(condTokens.begin(), "(");
                 condTokens.push_back(")");
@@ -21908,7 +21944,13 @@ if (sql.rfind("backup database", 0) == 0) {
                 }
             }
         }
-        if (structuredPlainRows) {
+        if (structuredScalarRows) {
+            structuredScalarResult.available = true;
+            structuredScalarResult.metadataOnly = false;
+            structuredScalarResult.commandTag =
+                "SELECT " + std::to_string(structuredScalarResult.rows.size());
+            dbms::publishLastDmlResult(std::move(structuredScalarResult));
+        } else if (structuredPlainRows) {
             structuredPlainResult.available = true;
             structuredPlainResult.metadataOnly = false;
             structuredPlainResult.commandTag =

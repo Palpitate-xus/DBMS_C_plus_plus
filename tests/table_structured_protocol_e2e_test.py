@@ -62,6 +62,35 @@ def main():
         assert one_column_rows == [[row[1]] for row in expected], \
             one_column_rows
 
+        scalar_cases = [
+            (
+                "SELECT upper(v) AS rendered FROM exact_table_rows "
+                "ORDER BY id;",
+                [[None if row[1] is None else row[1].upper()]
+                 for row in expected],
+            ),
+            (
+                "SELECT coalesce(v, 'fallback') AS rendered "
+                "FROM exact_table_rows ORDER BY id;",
+                [["fallback" if row[1] is None else row[1]]
+                 for row in expected],
+            ),
+            (
+                "SELECT v || '!' AS rendered FROM exact_table_rows "
+                "ORDER BY id;",
+                [[None if row[1] is None else row[1] + "!"]
+                 for row in expected],
+            ),
+        ]
+        for scalar_sql, scalar_expected in scalar_cases:
+            scalar_rows, scalar_state, scalar_message, scalar_headers = (
+                runner.ours_query(client, server["sock"], scalar_sql))
+            assert scalar_state is None, (
+                scalar_sql, scalar_state, scalar_message)
+            assert scalar_rows == scalar_expected, (
+                scalar_sql, scalar_rows, scalar_expected)
+            assert scalar_headers == ["rendered"], scalar_headers
+
         order_cases = [
             ("SELECT id FROM exact_null_order ORDER BY v;",
              [["2"], ["3"], ["1"]]),

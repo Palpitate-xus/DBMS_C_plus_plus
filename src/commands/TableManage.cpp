@@ -28519,9 +28519,10 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 }
             }
             }
-            if (v.empty() || v == "NULL" || v == "null") {
-                // SQL NULL propagates through arithmetic and concat: emit the
-                // NULL token so the render/wire layers treat it as SQL NULL.
+            if (scalarValueIsNull(a, v)) {
+                // SQL NULL propagates through arithmetic and concat.  The
+                // value text itself is not evidence of NULL: empty strings
+                // and the four-character text "NULL" are ordinary operands.
                 return "NULL";
             }
             if (pendingOp == 'C' && accSet) {
@@ -30912,7 +30913,20 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
                                                    const std::vector<std::string>& conditions,
                                                    const std::vector<SelectExpr>& exprs,
                                                    const std::vector<OrderBySpec>& orderBy) {
+    return queryExpr(dbname, tablename, conditions, exprs, orderBy,
+                     nullptr, nullptr);
+}
+
+std::vector<std::string> StorageEngine::queryExpr(
+    const std::string& dbname, const std::string& tablename,
+    const std::vector<std::string>& conditions,
+    const std::vector<SelectExpr>& exprs,
+    const std::vector<OrderBySpec>& orderBy,
+    std::vector<std::vector<std::string>>* structuredRows,
+    std::vector<std::vector<bool>>* structuredNulls) {
     std::vector<std::string> result;
+    if (structuredRows) structuredRows->clear();
+    if (structuredNulls) structuredNulls->clear();
     if (!tableExists(dbname, tablename)) return result;
     if (!lockManager_.lockShared(tablename)) return result;
     ResourceUnlockGuard tableLockGuard(lockManager_, tablename);
@@ -31104,20 +31118,28 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
         if (hasUnnest) {
             // Compute all column values first
             std::vector<std::string> vals;
+            std::vector<bool> valNulls;
             vals.reserve(exprs.size());
+            valNulls.reserve(exprs.size());
             for (const auto& expr : exprs) {
                 if (expr.isScalar) {
-                    vals.push_back(applyScalarFunc(expr, mr.second, tbl, this, dbname));
+                    const std::string value =
+                        applyScalarFunc(expr, mr.second, tbl, this, dbname);
+                    vals.push_back(value);
+                    valNulls.push_back(value == "NULL");
                 } else {
                     std::string v;
+                    bool valueIsNull = false;
                     for (size_t ci = 0; ci < tbl.len; ++ci) {
                         if (tbl.cols[ci].dataName == expr.colName) {
                             v = extractColumnValue(
-                                mr.second, tbl, ci, dbname, true);
+                                mr.second, tbl, ci, dbname, true,
+                                &valueIsNull);
                             break;
                         }
                     }
                     vals.push_back(v);
+                    valNulls.push_back(valueIsNull);
                 }
             }
             // Parse array elements from unnest column
@@ -31144,22 +31166,80 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
             if (elems.empty()) elems.push_back("");
             for (const auto& elem : elems) {
                 std::string rowStr;
+                std::vector<std::string> cells;
+                std::vector<bool> nulls;
                 for (size_t vi = 0; vi < vals.size(); ++vi) {
-                    rowStr += (vi == unnestIdx ? elem : vals[vi]);
+                    const std::string& cell =
+                        vi == unnestIdx ? elem : vals[vi];
+                    rowStr += cell;
                     rowStr += ' ';
+                    cells.push_back(cell);
+                    nulls.push_back(vi == unnestIdx ? false : valNulls[vi]);
                 }
                 result.push_back(rowStr);
+                if (structuredRows) structuredRows->push_back(std::move(cells));
+                if (structuredNulls) structuredNulls->push_back(std::move(nulls));
             }
         } else {
             std::string rowStr;
+            std::vector<std::string> cells;
+            std::vector<bool> nulls;
             for (const auto& expr : exprs) {
                 std::string val;
+                bool valueIsNull = false;
                 if (expr.isScalar) {
                     val = applyScalarFunc(expr, mr.second, tbl, this, dbname);
+                    if (val == "NULL") {
+                        std::map<std::string, std::string> rowContext;
+                        std::map<std::string, std::string> typeHints;
+                        std::set<std::string> nullColumns;
+                        for (size_t i = 0; i < tbl.len; ++i) {
+                            bool columnIsNull = false;
+                            const std::string value = extractColumnValue(
+                                mr.second, tbl, i, dbname, true,
+                                &columnIsNull);
+                            rowContext[tbl.cols[i].dataName] = value;
+                            typeHints[tbl.cols[i].dataName] =
+                                tbl.cols[i].dataType;
+                            if (columnIsNull)
+                                nullColumns.insert(tbl.cols[i].dataName);
+                        }
+                        std::string expression;
+                        if (expr.funcName == "expreval") {
+                            if (!expr.funcArgs.empty())
+                                expression = expr.funcArgs.front();
+                        } else if (expr.funcName == "arith") {
+                            for (size_t i = 0; i < expr.funcArgs.size(); ++i) {
+                                if (i) expression += ' ';
+                                expression += expr.funcArgs[i];
+                            }
+                        } else if (expr.funcName == "cast" &&
+                                   expr.funcArgs.size() >= 2) {
+                            expression = "cast(" + expr.funcArgs[0] +
+                                " as " + expr.funcArgs[1] + ")";
+                        } else if (!expr.funcName.empty()) {
+                            expression = expr.funcName + "(";
+                            for (size_t i = 0; i < expr.funcArgs.size(); ++i) {
+                                if (i) expression += ',';
+                                expression += expr.funcArgs[i];
+                            }
+                            expression += ')';
+                        }
+                        if (!expression.empty()) {
+                            const auto evaluated =
+                                dbms::ExprHelper::evalStringWithNulls(
+                                    expression, rowContext, nullColumns,
+                                    typeHints, dbname, expr.sessionUser);
+                            valueIsNull = evaluated.ok
+                                ? evaluated.isNull
+                                : true;
+                        } else {
+                            valueIsNull = true;
+                        }
+                    }
                 } else {
                     for (size_t i = 0; i < tbl.len; ++i) {
                         if (tbl.cols[i].dataName == expr.colName) {
-                            bool valueIsNull = false;
                             val = extractColumnValue(
                                 mr.second, tbl, i, dbname, true,
                                 &valueIsNull);
@@ -31175,8 +31255,12 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
                     }
                 }
                 rowStr += val + ' ';
+                cells.push_back(valueIsNull ? std::string{} : val);
+                nulls.push_back(valueIsNull);
             }
             result.push_back(rowStr);
+            if (structuredRows) structuredRows->push_back(std::move(cells));
+            if (structuredNulls) structuredNulls->push_back(std::move(nulls));
         }
     }
     return result;
