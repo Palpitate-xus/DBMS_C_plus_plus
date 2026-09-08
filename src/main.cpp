@@ -10958,33 +10958,82 @@ static bool handleCreatePublication(const string& sql, Session& s) {
     pub.name = name;
     pub.owner = s.username;
     string opts = (sp == string::npos) ? "" : trim(rest.substr(sp + 1));
+    string optionText;
+    bool hasOptions = false;
     if (startsWithKeyword(opts, "for all tables")) {
         pub.publishAllTables = true;
+        const string trailing = trim(opts.substr(14));
+        if (!trailing.empty()) {
+            if (!startsWithKeyword(trailing, "with")) {
+                cout << "ERROR: syntax error: unexpected clause after FOR ALL TABLES"
+                     << endl;
+                return true;
+            }
+            optionText = trim(trailing.substr(4));
+            hasOptions = true;
+        }
     } else if (startsWithKeyword(opts, "for table")) {
         string list = trim(opts.substr(9));
         size_t withPos = findTopLevelKeyword(list, "with");
         if (withPos != string::npos) {
+            optionText = trim(list.substr(withPos + 4));
+            hasOptions = true;
             list = trim(list.substr(0, withPos));
         }
-        size_t start = 0;
-        while (start <= list.size()) {
-            size_t comma = list.find(',', start);
-            string t = trim(list.substr(start, comma == string::npos ? string::npos : comma - start));
-            if (!t.empty()) pub.tables.push_back(t);
-            if (comma == string::npos) break;
-            start = comma + 1;
+        for (const auto& item : splitTopLevelComma(list)) {
+            const string table = trim(item);
+            if (table.empty()) {
+                cout << "ERROR: syntax error: FOR TABLE has an empty table name"
+                     << endl;
+                return true;
+            }
+            if (findTopLevelKeyword(table, "where") != string::npos) {
+                cout << dbms::featureNotSupportedError(
+                    "publication row filters") << endl;
+                return true;
+            }
+            bool quoted = false;
+            bool hasColumnList = false;
+            for (size_t i = 0; i < table.size(); ++i) {
+                if (table[i] == '"') {
+                    if (quoted && i + 1 < table.size() && table[i + 1] == '"') {
+                        ++i;
+                    } else {
+                        quoted = !quoted;
+                    }
+                } else if (!quoted && table[i] == '(') {
+                    hasColumnList = true;
+                    break;
+                }
+            }
+            if (hasColumnList) {
+                cout << dbms::featureNotSupportedError(
+                    "publication column lists") << endl;
+                return true;
+            }
+            pub.tables.push_back(table);
         }
         if (pub.tables.empty()) {
             cout << "SQL syntax error: FOR TABLE requires at least one table" << endl;
             return true;
         }
+    } else if (startsWithKeyword(opts, "for tables in schema")) {
+        cout << dbms::featureNotSupportedError(
+            "schema publications") << endl;
+        return true;
+    } else if (startsWithKeyword(opts, "with")) {
+        optionText = trim(opts.substr(4));
+        hasOptions = true;
+    } else if (!opts.empty()) {
+        cout << "ERROR: syntax error: unexpected CREATE PUBLICATION clause"
+             << endl;
+        return true;
     }
     // WITH (publish = 'insert,update,delete')
-    size_t withPos = findTopLevelKeyword(opts, "with");
-    if (withPos != string::npos) {
+    if (hasOptions) {
         string optionError;
         const auto optionResult = parsePublicationOptions(
-            trim(opts.substr(withPos + 4)), pub, optionError);
+            optionText, pub, optionError);
         if (optionResult == PublicationOptionParseResult::Unsupported) {
             cout << dbms::featureNotSupportedError(optionError) << endl;
             return true;

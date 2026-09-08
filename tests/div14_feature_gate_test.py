@@ -214,6 +214,27 @@ def main():
 
         # REPL-08: publication membership changes use the real publication
         # catalog and persist atomically; they never reach .pg_compat_objects.
+        invalid_publication_path = os.path.join(
+            work_dir, "info", "invalid_pub.publication")
+        expect_error(
+            sock, "CREATE PUBLICATION invalid_pub trailing_clause",
+            "42601", "unknown publication clause")
+        assert not os.path.exists(invalid_publication_path)
+        expect_0a000(
+            sock, "CREATE PUBLICATION invalid_pub FOR TABLE t6d (a)",
+            "publication column list")
+        expect_0a000(
+            sock, "CREATE PUBLICATION invalid_pub FOR TABLE t6d WHERE (a > 0)",
+            "publication row filter")
+        expect_0a000(
+            sock, "CREATE PUBLICATION invalid_pub FOR TABLES IN SCHEMA public",
+            "schema publication")
+        expect_0a000(
+            sock,
+            "CREATE PUBLICATION invalid_pub "
+            "WITH (publish_via_partition_root = true)",
+            "publication partition-root option")
+        assert not os.path.exists(invalid_publication_path)
         expect_command_tag(sock, "CREATE TABLE pub_member (a INT)",
                            "publication member table")
         expect_command_tag(sock, "CREATE ROLE pub_owner",
