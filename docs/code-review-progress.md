@@ -135,6 +135,8 @@
 
 | 295 | P0-01 / SQL-01 / SQL-02 / SQL-04 / QRY-02 | 派生表与 LATERAL 预处理器用裸字符串搜索 `(select` 和 `lateral`，普通文本值只要包含相同字样就会被误当作 FROM 子查询结构，两个等值查询均错误返回空集。两个扫描器现在只在单/双引号及双写转义之外识别结构关键字 | `sql_literal_preservation_e2e_test` 覆盖派生表形状与 LATERAL 形状的文本值；真实派生表类型 E2E、JOIN、结构化协议、review SQL、DIV-14、O2 构建及实际 PostgreSQL `cases=122 failed=0` 全部通过 | `8fadeeb` |
 
+| 296 | P0-01 / SQL-04 / QRY-02 / QRY-03 / PROTO-04 | LATERAL 逐左行执行子查询后只汇总右侧结果，再与完整左表做 CROSS JOIN，关联身份丢失并生成笛卡尔积；左表带别名时又把 `cross` 拼进别名而返回空集。简单单左表 `CROSS JOIN LATERAL` 与逗号 LATERAL 现在解析 `table [AS] alias`，按左行物化组合结果，映射双方限定列，并保留输出列名及类型 | `derived_type_protocol_e2e_test` 先复现别名空集和无别名四行笛卡尔积，再覆盖 AS/裸左别名、AS/裸右别名、精确关联行、列名、int/text OID 与 command tag；字面量、完整协议、JOIN、结构化结果、review SQL、DIV-14、O2 构建及实际 PostgreSQL `cases=122 failed=0` 全部通过。多级/outer LATERAL、SRF、空值与所有复杂 FROM 形状仍属 QRY-02/QRY-03 | `9b41e73` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
