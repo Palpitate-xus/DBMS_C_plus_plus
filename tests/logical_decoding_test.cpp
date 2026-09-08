@@ -94,6 +94,19 @@ static void test_publication_catalog() {
     assert(!cat.create(db, pub, error));
     assert(error.find("already exists") != std::string::npos);
 
+    // Publication names become filenames.  Every catalog entry point must
+    // reject path-like names before touching either the catalog directory or
+    // a sibling path.
+    const fs::path escapedPath = "publication_escape.publication";
+    fs::remove(escapedPath);
+    Publication unsafe = pub;
+    unsafe.name = "../publication_escape";
+    assert(!cat.create(db, unsafe, error));
+    assert(error.find("invalid publication name") != std::string::npos);
+    assert(!fs::exists(escapedPath));
+    assert(!cat.update(db, unsafe, error));
+    assert(!cat.exists(db, unsafe.name));
+
     // Persistence: list reloads from files.
     auto pubs = cat.list(db);
     assert(pubs.size() == 1);
@@ -137,6 +150,8 @@ static void test_publication_catalog() {
     // Rename is atomic and refuses to overwrite another publication.
     assert(!cat.rename(db, "mypub", "allpub", error));
     assert(cat.exists(db, "mypub") && cat.exists(db, "allpub"));
+    assert(!cat.rename(db, "mypub", "../publication_escape", error));
+    assert(cat.exists(db, "mypub") && !fs::exists(escapedPath));
     assert(cat.rename(db, "mypub", "renamed_pub", error));
     assert(!cat.exists(db, "mypub") && cat.exists(db, "renamed_pub"));
     pubs = cat.list(db);
@@ -155,6 +170,10 @@ static void test_publication_catalog() {
     assert(cat.create(db, secondDrop, error));
     std::vector<std::string> missing;
     assert(!cat.dropMany(
+        db, {"drop_first", "../publication_escape"}, true,
+        missing, error));
+    assert(cat.exists(db, "drop_first") && !fs::exists(escapedPath));
+    assert(!cat.dropMany(
         db, {"drop_first", "missing", "drop_second"}, false,
         missing, error));
     assert(missing == std::vector<std::string>{"missing"});
@@ -167,6 +186,8 @@ static void test_publication_catalog() {
 
     assert(cat.drop(db, "renamed_pub", error));
     assert(!cat.exists(db, "mypub"));
+    assert(!cat.drop(db, "../publication_escape", error));
+    assert(!fs::exists(escapedPath));
     assert(!cat.drop(db, "renamed_pub", error));
     assert(cat.drop(db, "allpub", error));
     assert(cat.drop(db, "legacy", error));

@@ -216,6 +216,12 @@ def main():
         # catalog and persist atomically; they never reach .pg_compat_objects.
         invalid_publication_path = os.path.join(
             work_dir, "info", "invalid_pub.publication")
+        escaped_publication_path = os.path.join(
+            work_dir, "publication_escape.publication")
+        expect_error(
+            sock, "CREATE PUBLICATION ../publication_escape",
+            "42601", "path-like publication name")
+        assert not os.path.exists(escaped_publication_path)
         expect_error(
             sock, "CREATE PUBLICATION invalid_pub trailing_clause",
             "42601", "unknown publication clause")

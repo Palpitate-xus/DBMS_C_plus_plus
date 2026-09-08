@@ -100,6 +100,25 @@ PublicationCatalog& PublicationCatalog::instance() {
 }
 
 namespace {
+bool validPublicationName(const std::string& name) {
+    if (name.empty() || name == "." || name == "..") return false;
+    for (const unsigned char ch : name) {
+        if (ch == '\0' || ch < 0x20 || ch == 0x7f || ch == '/' ||
+            ch == '\\') {
+            return false;
+        }
+    }
+    const fs::path candidate(name);
+    return !candidate.is_absolute() && !candidate.has_parent_path() &&
+           candidate.filename().string() == name;
+}
+
+bool validatePublicationName(const std::string& name, std::string& error) {
+    if (validPublicationName(name)) return true;
+    error = "invalid publication name syntax (SQLSTATE 42601)";
+    return false;
+}
+
 fs::path publicationPath(const std::string& dbname, const std::string& name) {
     return fs::path(dbname) / (name + ".publication");
 }
@@ -211,10 +230,8 @@ bool rewritePublicationFiles(const std::string& dbname,
 
 bool PublicationCatalog::create(const std::string& dbname, const Publication& pub,
                                 std::string& error) {
-    if (pub.name.empty()) {
-        error = "publication name is required";
-        return false;
-    }
+    error.clear();
+    if (!validatePublicationName(pub.name, error)) return false;
     std::lock_guard<std::mutex> lock(mutex_);
     if (exists(dbname, pub.name)) {
         error = "publication \"" + pub.name + "\" already exists";
@@ -238,6 +255,8 @@ bool PublicationCatalog::create(const std::string& dbname, const Publication& pu
 
 bool PublicationCatalog::drop(const std::string& dbname, const std::string& name,
                               std::string& error) {
+    error.clear();
+    if (!validatePublicationName(name, error)) return false;
     std::lock_guard<std::mutex> lock(mutex_);
     const auto path = publicationPath(dbname, name);
     if (!fs::exists(path)) {
@@ -259,6 +278,9 @@ bool PublicationCatalog::dropMany(const std::string& dbname,
                                   std::string& error) {
     missing.clear();
     error.clear();
+    for (const auto& name : names) {
+        if (!validatePublicationName(name, error)) return false;
+    }
     struct SavedPublication {
         fs::path path;
         std::string bytes;
@@ -318,10 +340,7 @@ bool PublicationCatalog::update(const std::string& dbname,
                                 const Publication& pub,
                                 std::string& error) {
     error.clear();
-    if (pub.name.empty()) {
-        error = "publication name is required";
-        return false;
-    }
+    if (!validatePublicationName(pub.name, error)) return false;
     std::lock_guard<std::mutex> lock(mutex_);
     const auto path = publicationPath(dbname, pub.name);
     if (!fs::exists(path)) {
@@ -340,10 +359,8 @@ bool PublicationCatalog::rename(const std::string& dbname,
                                 const std::string& newName,
                                 std::string& error) {
     error.clear();
-    if (oldName.empty() || newName.empty()) {
-        error = "publication name is required";
-        return false;
-    }
+    if (!validatePublicationName(oldName, error) ||
+        !validatePublicationName(newName, error)) return false;
     std::lock_guard<std::mutex> lock(mutex_);
     const auto oldPath = publicationPath(dbname, oldName);
     const auto newPath = publicationPath(dbname, newName);
@@ -365,6 +382,7 @@ bool PublicationCatalog::rename(const std::string& dbname,
 }
 
 bool PublicationCatalog::exists(const std::string& dbname, const std::string& name) const {
+    if (!validPublicationName(name)) return false;
     return fs::exists(publicationPath(dbname, name));
 }
 
