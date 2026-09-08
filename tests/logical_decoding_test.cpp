@@ -146,6 +146,25 @@ static void test_publication_catalog() {
         });
     assert(renamed != pubs.end() && renamed->owner == "admin");
 
+    Publication firstDrop;
+    firstDrop.name = "drop_first";
+    firstDrop.owner = "admin";
+    Publication secondDrop = firstDrop;
+    secondDrop.name = "drop_second";
+    assert(cat.create(db, firstDrop, error));
+    assert(cat.create(db, secondDrop, error));
+    std::vector<std::string> missing;
+    assert(!cat.dropMany(
+        db, {"drop_first", "missing", "drop_second"}, false,
+        missing, error));
+    assert(missing == std::vector<std::string>{"missing"});
+    assert(cat.exists(db, "drop_first") && cat.exists(db, "drop_second"));
+    assert(cat.dropMany(
+        db, {"drop_first", "missing", "drop_second"}, true,
+        missing, error));
+    assert(missing == std::vector<std::string>{"missing"});
+    assert(!cat.exists(db, "drop_first") && !cat.exists(db, "drop_second"));
+
     assert(cat.drop(db, "renamed_pub", error));
     assert(!cat.exists(db, "mypub"));
     assert(!cat.drop(db, "renamed_pub", error));

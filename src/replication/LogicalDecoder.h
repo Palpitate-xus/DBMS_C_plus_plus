@@ -78,6 +78,9 @@ public:
     bool rename(const std::string& dbname, const std::string& oldName,
                 const std::string& newName, std::string& error);
     bool drop(const std::string& dbname, const std::string& name, std::string& error);
+    bool dropMany(const std::string& dbname,
+                  const std::vector<std::string>& names, bool ifExists,
+                  std::vector<std::string>& missing, std::string& error);
     bool exists(const std::string& dbname, const std::string& name) const;
     std::vector<Publication> list(const std::string& dbname) const;
     // Retarget explicit publication membership when a relation is renamed.

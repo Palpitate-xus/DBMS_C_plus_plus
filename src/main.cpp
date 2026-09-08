@@ -11012,15 +11012,43 @@ static bool handleCreatePublication(const string& sql, Session& s) {
 static bool handleDropPublicationSql(const string& sql, Session& s) {
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
-    string name = trim(sql.substr(16));
-    if (name.empty()) {
-        cout << "SQL syntax error: DROP PUBLICATION requires a name" << endl;
+    string rest = trim(sql.substr(16));
+    bool ifExists = false;
+    if (startsWithKeyword(rest, "if exists")) {
+        ifExists = true;
+        rest = trim(rest.substr(9));
+    }
+    rest = stripTrailingDropBehavior(rest);
+    vector<string> names;
+    for (const auto& item : splitTopLevelComma(rest)) {
+        const string name = stripQuotes(trim(item));
+        if (name.empty()) {
+            cout << "ERROR: syntax error: DROP PUBLICATION has an empty name"
+                 << endl;
+            return true;
+        }
+        if (find(names.begin(), names.end(), name) == names.end()) {
+            names.push_back(name);
+        }
+    }
+    if (names.empty()) {
+        cout << "ERROR: syntax error: DROP PUBLICATION requires a name" << endl;
         return true;
     }
+    vector<string> missing;
     string error;
-    if (!dbms::PublicationCatalog::instance().drop(s.currentDB, name, error)) {
-        cout << "ERROR: " << error << endl;
+    if (!dbms::PublicationCatalog::instance().dropMany(
+            s.currentDB, names, ifExists, missing, error)) {
+        cout << "ERROR: " << error;
+        if (error.find("does not exist") != string::npos) {
+            cout << " (SQLSTATE 42704)";
+        }
+        cout << endl;
         return true;
+    }
+    for (const auto& name : missing) {
+        cout << "NOTICE: publication \"" << name
+             << "\" does not exist, skipping" << endl;
     }
     cout << "DROP PUBLICATION succeeded" << endl;
     return false;

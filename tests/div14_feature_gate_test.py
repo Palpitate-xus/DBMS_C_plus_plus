@@ -308,6 +308,29 @@ def main():
         expect_command_tag(sock, "DROP ROLE pub_owner",
                            "drop publication owner role")
 
+        expect_command_tag(
+            sock, "CREATE PUBLICATION drop_first FOR TABLE t6d",
+            "create first batch-drop publication")
+        expect_command_tag(
+            sock, "CREATE PUBLICATION drop_second FOR TABLE t6d",
+            "create second batch-drop publication")
+        drop_first_path = os.path.join(
+            work_dir, "info", "drop_first.publication")
+        drop_second_path = os.path.join(
+            work_dir, "info", "drop_second.publication")
+        expect_error(
+            sock,
+            "DROP PUBLICATION drop_first, missing_drop, drop_second",
+            "42704", "batch publication drop prevalidation")
+        assert os.path.exists(drop_first_path) and os.path.exists(drop_second_path)
+        expect_command_tag(
+            sock,
+            "DROP PUBLICATION IF EXISTS "
+            "drop_first, missing_drop, drop_second CASCADE",
+            "batch publication drop")
+        assert not os.path.exists(drop_first_path)
+        assert not os.path.exists(drop_second_path)
+
         # DIV-07: MySQL-style fulltext shortcut syntax -> 42601.
         for sql, hint in [
             ("CREATE FULLTEXT INDEX fi ON t6d (a)", "USING gin"),

@@ -252,6 +252,68 @@ bool PublicationCatalog::drop(const std::string& dbname, const std::string& name
     return true;
 }
 
+bool PublicationCatalog::dropMany(const std::string& dbname,
+                                  const std::vector<std::string>& names,
+                                  bool ifExists,
+                                  std::vector<std::string>& missing,
+                                  std::string& error) {
+    missing.clear();
+    error.clear();
+    struct SavedPublication {
+        fs::path path;
+        std::string bytes;
+    };
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<SavedPublication> existing;
+    existing.reserve(names.size());
+    std::vector<std::string> inspected;
+    for (const auto& name : names) {
+        if (std::find(inspected.begin(), inspected.end(), name) !=
+            inspected.end()) {
+            continue;
+        }
+        inspected.push_back(name);
+        const auto path = publicationPath(dbname, name);
+        if (!fs::exists(path)) {
+            missing.push_back(name);
+            continue;
+        }
+        std::ifstream input(path, std::ios::binary);
+        if (!input) {
+            error = "cannot read publication \"" + name + "\"";
+            return false;
+        }
+        std::string bytes((std::istreambuf_iterator<char>(input)),
+                          std::istreambuf_iterator<char>());
+        if (input.bad()) {
+            error = "cannot read publication \"" + name + "\"";
+            return false;
+        }
+        existing.push_back({path, std::move(bytes)});
+    }
+    if (!ifExists && !missing.empty()) {
+        error = "publication \"" + missing.front() + "\" does not exist";
+        return false;
+    }
+    for (size_t index = 0; index < existing.size(); ++index) {
+        std::error_code filesystemError;
+        if (fs::remove(existing[index].path, filesystemError) &&
+            !filesystemError) {
+            continue;
+        }
+        bool restored = true;
+        for (size_t rollback = 0; rollback <= index; ++rollback) {
+            if (fs::exists(existing[rollback].path)) continue;
+            restored = index_file::writeAtomically(
+                existing[rollback].path, existing[rollback].bytes) && restored;
+        }
+        error = restored ? "cannot remove publication file"
+                         : "cannot remove publication file; rollback failed";
+        return false;
+    }
+    return true;
+}
+
 bool PublicationCatalog::update(const std::string& dbname,
                                 const Publication& pub,
                                 std::string& error) {
