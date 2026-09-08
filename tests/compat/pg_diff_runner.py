@@ -16,7 +16,9 @@ this runner does not implement an allowlist or command-tag comparison yet.
 """
 
 import argparse
+import csv
 import importlib.util
+import io
 import os
 import re
 import socket
@@ -88,25 +90,24 @@ def reference_query(sql):
 
 
 def reference_headers(sql):
-    """Run one statement on reference PG and return its header names.
-
-    Unaligned psql prints the header line (field-sep joined), then the
-    data rows, then a "(N rows)" footer. The header is the FIRST line
-    when the statement produced a footer. Tag-only statements (DDL/DML)
-    print no footer, so [] is returned for them.
-    """
+    """Describe one statement without executing volatile or modifying SQL twice."""
     proc = subprocess.run(
         ["docker", "exec", "-i", CONTAINER,
          "psql", "-U", "postgres", "-d", "postgres",
-         "-v", "ON_ERROR_STOP=0", "-X", "-q", "-A",
-         "-F", "\x1f"],
-        input=sql.encode(), capture_output=True)
+         "-v", "ON_ERROR_STOP=0", "-X", "-q", "--csv"],
+        input=(sql.rstrip().rstrip(";") + "\n\\gdesc\n").encode(), capture_output=True)
     out = proc.stdout.decode()
-    lines = [ln for ln in out.split("\n") if ln != ""]
-    has_footer = any(re.match(r"^\((0|[1-9][0-9]*) rows?\)$", ln) for ln in lines)
-    if not has_footer or not lines:
+    err = proc.stderr.decode()
+    if proc.returncode != 0 or re.search(r"^(ERROR|FATAL):", err, re.M):
+        raise RuntimeError("reference describe failed: " + err.strip())
+    if out.strip() == "The command has no result, or the result has no columns.":
         return []
-    return lines[0].split("\x1f")
+    # The descriptor's Column/Type table is CSV, not query-result rows. Names
+    # can themselves contain commas, quotes or newlines without ambiguity.
+    rows = list(csv.reader(io.StringIO(out, newline=""), strict=True))
+    if not rows or rows[0] != ["Column", "Type"] or any(len(row) != 2 for row in rows[1:]):
+        raise RuntimeError("unexpected reference descriptor output: " + repr(out))
+    return [row[0] for row in rows[1:]]
 
 
 def reference_multi(statements):
@@ -220,7 +221,7 @@ def run_case(name, stmts, client, sock):
             diffs.append("%s: rows differ\n  PG:   %r\n  ours: %r" % (sql, rrows, orows))
         if rstate != ostate:
             diffs.append("%s: sqlstate differs: PG=%r ours=%r" % (sql, rstate, ostate))
-        if compare_headers and orows and ohead:
+        if compare_headers and rstate is None and ostate is None and orows and ohead:
             rhead = reference_headers(sql)
             if rhead and rhead != ohead:
                 diffs.append("%s: headers differ\n  PG:   %r\n  ours: %r" % (sql, rhead, ohead))

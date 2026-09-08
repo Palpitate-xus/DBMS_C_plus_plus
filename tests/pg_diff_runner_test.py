@@ -67,5 +67,35 @@ class DifferentialErrorsTest(unittest.TestCase):
         self.assertTrue(any("sqlstate differs" in diff for diff in diffs), diffs)
 
 
+class DifferentialHeadersTest(unittest.TestCase):
+    def test_headers_are_described_without_executing_query_again(self):
+        output = subprocess.CompletedProcess([], 0, b"Column,Type\nlabel,bigint\n", b"")
+        with mock.patch.object(RUNNER.subprocess, "run", return_value=output) as run:
+            headers = RUNNER.reference_headers("SELECT nextval('sequence_probe') AS label;")
+        self.assertEqual(headers, ["label"])
+        self.assertIn("--csv", run.call_args.args[0])
+        self.assertEqual(run.call_args.kwargs["input"],
+                         b"SELECT nextval('sequence_probe') AS label\n\\gdesc\n")
+
+    def test_quoted_multiline_header_names_are_preserved(self):
+        output = subprocess.CompletedProcess(
+            [], 0, b'Column,Type\n"a,b",text\n"two\nlines",text\n"""quoted""",text\n', b"")
+        with mock.patch.object(RUNNER.subprocess, "run", return_value=output):
+            self.assertEqual(RUNNER.reference_headers("SELECT ..."),
+                             ["a,b", "two\nlines", '"quoted"'])
+
+    def test_no_result_command_has_no_headers(self):
+        output = subprocess.CompletedProcess(
+            [], 0, b"The command has no result, or the result has no columns.\n", b"")
+        with mock.patch.object(RUNNER.subprocess, "run", return_value=output):
+            self.assertEqual(RUNNER.reference_headers("BEGIN"), [])
+
+    def test_unexpected_descriptor_output_cannot_silently_skip_comparison(self):
+        output = subprocess.CompletedProcess([], 0, b"unexpected output\n", b"")
+        with mock.patch.object(RUNNER.subprocess, "run", return_value=output):
+            with self.assertRaises(RuntimeError):
+                RUNNER.reference_headers("SELECT 1")
+
+
 if __name__ == "__main__":
     unittest.main()
