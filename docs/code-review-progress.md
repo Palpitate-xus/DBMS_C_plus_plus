@@ -63,6 +63,7 @@
 | 227 | P0-02 / TYPE-02 / QRY-04,07 | 标量子查询只返回显示文本：FROM-less 外层没有 descriptor，分组相关子查询固定为 text，聚合与子查询算术也丢掉两侧类型。新增无副作用的子查询投影类型解析；FROM-less 使用 metadata-only 描述，分组直接保留内表投影类型，组合算术用类型化占位符推断并按数值优先级合并 | `derived_type_protocol_e2e_test` 新增 count 标量、相关 numeric 子查询及聚合算术三组类型/行数/tag 断言；`subquery_sqlstate`、alias、FROM-less、review SQL 相邻 E2E 通过。实际 PostgreSQL 的 `subqueries`、`corr_scalar_group`、`agg_subquery_arith` 三组差分全部通过；全量 122 组差分由 10 组失败降至 7 组 | `bbea2ed` |
 | 228 | P0-02 / TYPE-02 / QRY-03 | 二表 JOIN 仍依赖显示文本生成 RowDescription，右表 numeric 等类型和纯 JOIN 聚合统一退化成 text。按最终投影顺序构建左右表联合类型环境，`SELECT *` 保留两侧 schema，显式列按来源定位，JOIN 聚合复用表达式返回规则发布 metadata-only descriptor | 新 `join_type_protocol_e2e_test` 覆盖 INNER/LEFT/RIGHT、显式左右投影及 CROSS JOIN count 共 5 组；`multijoin_e2e`、通用协议、派生类型相邻 E2E 通过；实际 PostgreSQL `joins` 全组差分通过。全量 122 组差分由 7 组失败降至 6 组 | `9bb01ce` |
 | 229 | P0-02 / TYPE-02,06 / QRY-01 | 日期算术、EXTRACT 和 AGE 的表标量投影在输入为 SQL NULL 时输出真实空字符串，且 `date - DATE literal` 的协议类型错误为 date；在表达式求值阶段基于行 NULL bitmap 保留 NULL，并补齐 typed date literal 的 int4 类型推断 | `constraint_expr_test`、`date_component_projection_test` 和派生类型协议 E2E 通过；实际 PostgreSQL `date_funcs`、`interval_age` 差分通过，全量 122 组差分由 6 组失败降至 4 组 | `bf37679` |
+| 230 | P0-02 / DML-01 / PROTO-02 | 结构化 DML 和 legacy DML 成功后都丢失受影响行数，协议固定返回 `UPDATE 0` / `DELETE 0`；存储层新增无行镜像开销的可选计数输出，事务失败时归零，两个执行入口均发布结构化 command tag，协议只对 DML 采用该标签 | 新协议 E2E 覆盖 UPDATE/DELETE 的 0、1、2 行；DML RETURNING、update/delete atomicity 相邻回归通过；实际 PostgreSQL `ddl_dml_basic` 差分通过，全量 122 组差分由 4 组失败降至 3 组 | `5f28d15` |
 
 本批新增的待修复复现（仍计入总清单）：
 
