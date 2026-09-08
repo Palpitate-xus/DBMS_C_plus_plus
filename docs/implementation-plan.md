@@ -830,19 +830,19 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 
 | 子任务 | 涉及的 gap | 备注 |
 |--------|-----------|------|
-| ✅ 8.1 实现物理流复制（streaming replication） | 12.1 | ReplicationManager: standby + WAL shipping + primaryConnInfo |
-| ✅ 8.2 实现 Standby / hot standby / read-only replica | 12.2 | ReplicationManager::StandbyMode + promote |
-| ✅ 8.3 实现 replication slots | 12.3 | create/drop/find/list + physical/logical |
-| ✅ 8.4 实现 synchronous replication | 12.4 | setSyncReplication API |
-| ✅ 8.5 实现 cascading replication | 12.5 | ReplicationManager cascade slot config |
-| ✅ 8.6 实现 logical decoding | 12.6 | ReplicationManager logical slot + plugin API |
-| ✅ 8.7 实现 publication / subscription | 12.7, 1.2.6 | PublicationStmt + SubscriptionStmt AST |
-| ✅ 8.8 实现 WAL shipping / continuous archive / recovery.signal | 12.8 | archiveWal + WALManager::archivePendingSegments + wal_archive/ dir |
-| ✅ 8.9 实现 PITR（Point-in-Time Recovery） | 10.7, 12.8 | WAL archive + recovery target time parser |
-| ✅ 8.10 实现 `pg_basebackup` | 12.9 | online backup via WAL shipping + data files copy |
-| ✅ 8.11 实现增量备份 / `pg_combinebackup` | 12.10 | WAL-based incremental backup |
-| ✅ 8.12 实现 failover / promote | 12.12 | ReplicationManager::promote + recovery.signal |
-| ✅ 8.13 实现 `pg_dump` / `pg_restore` 格式和对象依赖顺序 | 12.11 | Schema + data export via catalog queries |
+| ⬜ 8.1 实现物理流复制（streaming replication） | 12.1 | 尚无 sender/receiver 或 replication protocol；状态入口已 fail-closed |
+| ⬜ 8.2 实现 Standby / hot standby / read-only replica | 12.2 | 尚无 standby replay/query；非 None 状态被拒绝 |
+| 🟡 8.3 实现 replication slots | 12.3 | 有本地槽 catalog/逻辑队列子集；WAL retention、xmin 和 failover slot 未完成 |
+| ⬜ 8.4 实现 synchronous replication | 12.4 | 尚无 commit wait 或 remote write/flush/apply ack；启用请求被拒绝 |
+| ⬜ 8.5 实现 cascading replication | 12.5 | 尚无上游/下游复制链路或 timeline follow |
+| 🟡 8.6 实现 logical decoding | 12.6 | 仅有 DML 旁路采集和项目私有输出格式，不是 WAL decoding/plugin API |
+| 🟡 8.7 实现 publication / subscription | 12.7, 1.2.6 | publication 为子集；subscription 无运行时并返回 0A000 |
+| 🟡 8.8 实现 WAL shipping / continuous archive / recovery.signal | 12.8 | 有项目归档目录和 PITR 子集，不兼容 PostgreSQL restore/archive 接口 |
+| 🟡 8.9 实现 PITR（Point-in-Time Recovery） | 10.7, 12.8 | 仅支持项目时间目标/单机恢复子集 |
+| 🟡 8.10 实现 `pg_basebackup` | 12.9 | 只有项目 BACKUP DATABASE 子集，不是在线 base-backup protocol |
+| ⬜ 8.11 实现增量备份 / `pg_combinebackup` | 12.10 | 尚无 backup summary、增量块链或 combine 工具 |
+| ⬜ 8.12 实现 failover / promote | 12.12 | 没有真实 standby/timeline 切换，promote 不再伪成功 |
+| 🟡 8.13 实现 `pg_dump` / `pg_restore` 格式和对象依赖顺序 | 12.11 | 只有项目 DUMP/RESTORE 子集，不兼容 PostgreSQL archive 格式 |
 
 ---
 
