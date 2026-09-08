@@ -726,6 +726,20 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
 std::string commandTagFor(const std::string& sql, const std::vector<std::string>& lines,
                           size_t rowCount) {
     std::string keyword = firstSqlKeyword(sql);
+    const auto mutationCount = [](const std::string& line,
+                                  const std::string& prefix)
+        -> std::optional<std::string> {
+        if (line.rfind(prefix, 0) != 0) return std::nullopt;
+        const size_t begin = prefix.size();
+        size_t end = begin;
+        while (end < line.size() &&
+               std::isdigit(static_cast<unsigned char>(line[end]))) {
+            ++end;
+        }
+        if (end == begin || end >= line.size() || line[end] != ' ')
+            return std::nullopt;
+        return line.substr(begin, end - begin);
+    };
     if (keyword == "insert") {
         for (const auto& line : lines) {
             if (line.rfind("INSERT ", 0) == 0) return line;
@@ -751,12 +765,15 @@ std::string commandTagFor(const std::string& sql, const std::vector<std::string>
     if (keyword == "update") {
         for (const auto& line : lines) {
             if (line.rfind("UPDATE ", 0) == 0) return line;
+            if (const auto count = mutationCount(line, "Update done ("))
+                return "UPDATE " + *count;
         }
         return "UPDATE 0";
     }
     if (keyword == "delete") {
         for (const auto& line : lines) {
-            if (line.rfind("Delete done (", 0) == 0) return "DELETE 0";
+            if (const auto count = mutationCount(line, "Delete done ("))
+                return "DELETE " + *count;
         }
         return "DELETE 0";
     }
@@ -1144,7 +1161,13 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
         }
         result.columnDescriptions = describeProtocolColumns(result, sql, session);
     }
-    result.commandTag = commandTagFor(sql, lines, result.rows.size());
+    result.commandTag =
+        structuredDml.available && structuredDml.metadataOnly &&
+                !structuredDml.commandTag.empty() &&
+                (keyword == "insert" || keyword == "update" ||
+                 keyword == "delete" || keyword == "merge")
+            ? structuredDml.commandTag
+            : commandTagFor(sql, lines, result.rows.size());
     dbms::recordQueryExecution(sql, elapsedMs, session.currentDB, true,
                                result.rows.size());
     return result;

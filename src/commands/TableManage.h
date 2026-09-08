@@ -485,28 +485,56 @@ public:
                                  const std::string& tablename,
                                  const TableSchema& tbl,
                                  std::vector<std::map<std::string, std::string>>* insertedRows = nullptr);
-    DBStatus update(const std::string& dbname, const std::string& tablename,
-                    const std::map<std::string, std::string>& updates,
-                    const std::vector<std::string>& conditions,
-                    std::vector<std::map<std::string, std::string>>* updatedRows = nullptr,
-                    const UpdateResolver& updateResolver = {},
-                    const UpdateMatcher& updateMatcher = {});
-    DBStatus updateRows(const std::string& dbname,
-                        const std::string& tablename,
-                        const SqlRow& updates,
-                        const std::vector<std::string>& conditions,
-                        std::vector<SqlRow>* updatedRows = nullptr,
-                        const SqlUpdateResolver& updateResolver = {},
-                        const SqlUpdateMatcher& updateMatcher = {});
-    DBStatus remove(const std::string& dbname, const std::string& tablename,
-                    const std::vector<std::string>& conditions,
-                    std::vector<std::map<std::string, std::string>>* deletedRows = nullptr,
-                    const DeleteMatcher& deleteMatcher = {});
-    DBStatus removeRows(const std::string& dbname,
-                        const std::string& tablename,
-                        const std::vector<std::string>& conditions,
-                        std::vector<SqlRow>* deletedRows = nullptr,
-                        const SqlDeleteMatcher& deleteMatcher = {});
+    DBStatus update(
+        const std::string& dbname, const std::string& tablename,
+        const std::map<std::string, std::string>& updates,
+        const std::vector<std::string>& conditions,
+        std::vector<std::map<std::string, std::string>>* updatedRows = nullptr,
+        const UpdateResolver& updateResolver = {},
+        const UpdateMatcher& updateMatcher = {});
+    DBStatus update(
+        const std::string& dbname, const std::string& tablename,
+        const std::map<std::string, std::string>& updates,
+        const std::vector<std::string>& conditions,
+        std::vector<std::map<std::string, std::string>>* updatedRows,
+        const UpdateResolver& updateResolver,
+        const UpdateMatcher& updateMatcher,
+        size_t* affectedRows);
+    DBStatus updateRows(
+        const std::string& dbname, const std::string& tablename,
+        const SqlRow& updates, const std::vector<std::string>& conditions,
+        std::vector<SqlRow>* updatedRows = nullptr,
+        const SqlUpdateResolver& updateResolver = {},
+        const SqlUpdateMatcher& updateMatcher = {});
+    DBStatus updateRows(
+        const std::string& dbname, const std::string& tablename,
+        const SqlRow& updates, const std::vector<std::string>& conditions,
+        std::vector<SqlRow>* updatedRows,
+        const SqlUpdateResolver& updateResolver,
+        const SqlUpdateMatcher& updateMatcher,
+        size_t* affectedRows);
+    DBStatus remove(
+        const std::string& dbname, const std::string& tablename,
+        const std::vector<std::string>& conditions,
+        std::vector<std::map<std::string, std::string>>* deletedRows = nullptr,
+        const DeleteMatcher& deleteMatcher = {});
+    DBStatus remove(
+        const std::string& dbname, const std::string& tablename,
+        const std::vector<std::string>& conditions,
+        std::vector<std::map<std::string, std::string>>* deletedRows,
+        const DeleteMatcher& deleteMatcher,
+        size_t* affectedRows);
+    DBStatus removeRows(
+        const std::string& dbname, const std::string& tablename,
+        const std::vector<std::string>& conditions,
+        std::vector<SqlRow>* deletedRows = nullptr,
+        const SqlDeleteMatcher& deleteMatcher = {});
+    DBStatus removeRows(
+        const std::string& dbname, const std::string& tablename,
+        const std::vector<std::string>& conditions,
+        std::vector<SqlRow>* deletedRows,
+        const SqlDeleteMatcher& deleteMatcher,
+        size_t* affectedRows);
     struct OrderBySpec {
         std::string colName;
         bool ascending = true;
@@ -1647,7 +1675,8 @@ private:
         std::vector<SqlRow>* deletedRows,
         const SqlDeleteMatcher& deleteMatcher,
         const std::set<int64_t>* exactRids,
-        ReferentialActionContext& referentialContext);
+        ReferentialActionContext& referentialContext,
+        size_t* affectedRows = nullptr);
     DBStatus updateInternal(
         const std::string& dbname, const std::string& tablename,
         const std::map<std::string, std::string>& updates,
@@ -1657,7 +1686,8 @@ private:
         const SqlUpdateResolver& updateResolver,
         const SqlUpdateMatcher& updateMatcher,
         const std::set<int64_t>* exactRids,
-        ReferentialActionContext& referentialContext);
+        ReferentialActionContext& referentialContext,
+        size_t* affectedRows = nullptr);
 
 
 private:

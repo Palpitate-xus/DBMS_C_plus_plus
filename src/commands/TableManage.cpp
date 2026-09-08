@@ -22524,6 +22524,16 @@ DBStatus StorageEngine::remove(
     const std::vector<std::string>& conditions,
     std::vector<std::map<std::string, std::string>>* deletedRows,
     const DeleteMatcher& deleteMatcher) {
+    return remove(
+        dbname, tablename, conditions, deletedRows, deleteMatcher, nullptr);
+}
+
+DBStatus StorageEngine::remove(
+    const std::string& dbname, const std::string& tablename,
+    const std::vector<std::string>& conditions,
+    std::vector<std::map<std::string, std::string>>* deletedRows,
+    const DeleteMatcher& deleteMatcher,
+    size_t* affectedRows) {
     SqlDeleteMatcher typedMatcher;
     if (deleteMatcher) {
         typedMatcher = [deleteMatcher](const SqlRow& row) {
@@ -22533,7 +22543,7 @@ DBStatus StorageEngine::remove(
     std::vector<SqlRow> typedRows;
     const DBStatus status = removeRows(
         dbname, tablename, conditions,
-        deletedRows ? &typedRows : nullptr, typedMatcher);
+        deletedRows ? &typedRows : nullptr, typedMatcher, affectedRows);
     if (deletedRows) {
         for (const auto& row : typedRows) {
             deletedRows->push_back(legacyRowFromSql(row));
@@ -22547,6 +22557,17 @@ DBStatus StorageEngine::removeRows(
     const std::vector<std::string>& conditions,
     std::vector<SqlRow>* deletedRows,
     const SqlDeleteMatcher& deleteMatcher) {
+    return removeRows(
+        dbname, tablename, conditions, deletedRows, deleteMatcher, nullptr);
+}
+
+DBStatus StorageEngine::removeRows(
+    const std::string& dbname, const std::string& tablename,
+    const std::vector<std::string>& conditions,
+    std::vector<SqlRow>* deletedRows,
+    const SqlDeleteMatcher& deleteMatcher,
+    size_t* affectedRows) {
+    if (affectedRows) *affectedRows = 0;
     if (transactionContext().inTransaction &&
         dbname != transactionContext().txnDB) {
         return DBStatus::INVALID_VALUE;
@@ -22581,7 +22602,7 @@ DBStatus StorageEngine::removeRows(
     ReferentialActionContext referentialContext;
     const DBStatus deleteStatus = removeInternal(
         dbname, tablename, conditions, deletedRows, deleteMatcher, nullptr,
-        referentialContext);
+        referentialContext, affectedRows);
     if (deleteStatus != DBStatus::OK) {
         DBStatus rollbackStatus = DBStatus::OK;
         if (ownsTransaction && transactionContext().inTransaction) {
@@ -22596,6 +22617,7 @@ DBStatus StorageEngine::removeRows(
             rollbackStatus = rollbackTransaction();
         }
         if (deletedRows) *deletedRows = originalDeletedRows;
+        if (affectedRows) *affectedRows = 0;
         return rollbackStatus == DBStatus::OK ? deleteStatus : rollbackStatus;
     }
 
@@ -22604,6 +22626,7 @@ DBStatus StorageEngine::removeRows(
         const DBStatus releaseStatus = releaseSavepoint(statementSavepoint);
         if (releaseStatus == DBStatus::OK) return DBStatus::OK;
         if (deletedRows) *deletedRows = originalDeletedRows;
+        if (affectedRows) *affectedRows = 0;
         const DBStatus rollbackStatus = rollbackTransaction();
         return rollbackStatus == DBStatus::OK
             ? releaseStatus : rollbackStatus;
@@ -22613,6 +22636,7 @@ DBStatus StorageEngine::removeRows(
     if (commitStatus != DBStatus::OK && deletedRows) {
         *deletedRows = originalDeletedRows;
     }
+    if (commitStatus != DBStatus::OK && affectedRows) *affectedRows = 0;
     return commitStatus;
 }
 
@@ -22622,7 +22646,8 @@ DBStatus StorageEngine::removeInternal(
     std::vector<SqlRow>* deletedRows,
     const SqlDeleteMatcher& deleteMatcher,
     const std::set<int64_t>* exactRids,
-    ReferentialActionContext& referentialContext) {
+    ReferentialActionContext& referentialContext,
+    size_t* affectedRows) {
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
         transactionContext().hasWrite = true;
     }
@@ -23630,6 +23655,7 @@ DBStatus StorageEngine::removeInternal(
                               toDelete.size());
     maybeAutoAnalyze(dbname, tablename);
 
+    if (affectedRows) *affectedRows = toDelete.size();
     return DBStatus::OK;
 }
 
@@ -23640,6 +23666,19 @@ DBStatus StorageEngine::update(
     std::vector<std::map<std::string, std::string>>* updatedRows,
     const UpdateResolver& updateResolver,
     const UpdateMatcher& updateMatcher) {
+    return update(
+        dbname, tablename, updates, conditions, updatedRows,
+        updateResolver, updateMatcher, nullptr);
+}
+
+DBStatus StorageEngine::update(
+    const std::string& dbname, const std::string& tablename,
+    const std::map<std::string, std::string>& updates,
+    const std::vector<std::string>& conditions,
+    std::vector<std::map<std::string, std::string>>* updatedRows,
+    const UpdateResolver& updateResolver,
+    const UpdateMatcher& updateMatcher,
+    size_t* affectedRows) {
     SqlUpdateResolver typedResolver;
     if (updateResolver) {
         typedResolver = [updateResolver](const SqlRow& oldValues,
@@ -23660,7 +23699,8 @@ DBStatus StorageEngine::update(
     std::vector<SqlRow> typedRows;
     const DBStatus status = updateRows(
         dbname, tablename, sqlRowFromLegacy(updates), conditions,
-        updatedRows ? &typedRows : nullptr, typedResolver, typedMatcher);
+        updatedRows ? &typedRows : nullptr, typedResolver, typedMatcher,
+        affectedRows);
     if (updatedRows) {
         for (const auto& row : typedRows) {
             updatedRows->push_back(legacyRowFromSql(row));
@@ -23676,6 +23716,20 @@ DBStatus StorageEngine::updateRows(
     std::vector<SqlRow>* updatedRows,
     const SqlUpdateResolver& updateResolver,
     const SqlUpdateMatcher& updateMatcher) {
+    return updateRows(
+        dbname, tablename, sqlUpdates, conditions, updatedRows,
+        updateResolver, updateMatcher, nullptr);
+}
+
+DBStatus StorageEngine::updateRows(
+    const std::string& dbname, const std::string& tablename,
+    const SqlRow& sqlUpdates,
+    const std::vector<std::string>& conditions,
+    std::vector<SqlRow>* updatedRows,
+    const SqlUpdateResolver& updateResolver,
+    const SqlUpdateMatcher& updateMatcher,
+    size_t* affectedRows) {
+    if (affectedRows) *affectedRows = 0;
     std::map<std::string, std::string> updates;
     std::set<std::string> updateNullColumns;
     splitSqlRow(sqlUpdates, updates, updateNullColumns);
@@ -23710,7 +23764,7 @@ DBStatus StorageEngine::updateRows(
     const DBStatus updateStatus = updateInternal(
         dbname, tablename, updates, updateNullColumns, conditions,
         updatedRows, updateResolver, updateMatcher, nullptr,
-        referentialContext);
+        referentialContext, affectedRows);
     if (updateStatus != DBStatus::OK) {
         DBStatus rollbackStatus = DBStatus::OK;
         if (ownsTransaction && transactionContext().inTransaction) {
@@ -23728,6 +23782,7 @@ DBStatus StorageEngine::updateRows(
             rollbackStatus = rollbackTransaction();
         }
         if (updatedRows) updatedRows->resize(returnedRowStart);
+        if (affectedRows) *affectedRows = 0;
         return rollbackStatus == DBStatus::OK ? updateStatus : rollbackStatus;
     }
 
@@ -23736,6 +23791,7 @@ DBStatus StorageEngine::updateRows(
         const DBStatus releaseStatus = releaseSavepoint(statementSavepoint);
         if (releaseStatus == DBStatus::OK) return DBStatus::OK;
         if (updatedRows) updatedRows->resize(returnedRowStart);
+        if (affectedRows) *affectedRows = 0;
         const DBStatus rollbackStatus = rollbackTransaction();
         return rollbackStatus == DBStatus::OK
             ? releaseStatus : rollbackStatus;
@@ -23744,6 +23800,7 @@ DBStatus StorageEngine::updateRows(
     const DBStatus commitStatus = commitTransaction();
     if (commitStatus != DBStatus::OK && updatedRows)
         updatedRows->resize(returnedRowStart);
+    if (commitStatus != DBStatus::OK && affectedRows) *affectedRows = 0;
     return commitStatus;
 }
 
@@ -23756,7 +23813,8 @@ DBStatus StorageEngine::updateInternal(
     const SqlUpdateResolver& updateResolver,
     const SqlUpdateMatcher& updateMatcher,
     const std::set<int64_t>* exactRids,
-    ReferentialActionContext& referentialContext) {
+    ReferentialActionContext& referentialContext,
+    size_t* affectedRows) {
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
         transactionContext().hasWrite = true;
     }
@@ -26290,6 +26348,7 @@ DBStatus StorageEngine::updateInternal(
     dbms::recordTableMutation(dbname, tablename, dbms::TableMutation::Update,
                               matchIds.size());
     maybeAutoAnalyze(dbname, tablename);
+    if (affectedRows) *affectedRows = matchIds.size();
     return DBStatus::OK;
 }
 

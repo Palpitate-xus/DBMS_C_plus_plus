@@ -1581,6 +1581,14 @@ bool publishReturning(const std::vector<ReturningProjection>& projections,
     return true;
 }
 
+void publishMutationCount(const std::string& command, size_t affectedRows) {
+    g_lastDmlResult = {};
+    g_lastDmlResult.available = true;
+    g_lastDmlResult.metadataOnly = true;
+    g_lastDmlResult.commandTag =
+        command + " " + std::to_string(affectedRows);
+}
+
 
 bool publishReturning(const std::vector<ReturningProjection>& projections,
                       const TableSchema& table,
@@ -2451,10 +2459,11 @@ bool executeUpdateFromJoin(const UpdateStmt& stmt, Session& s, bool& fallback) {
         const std::map<std::string, std::string>& oldValues) {
         return matchedUpdates.find(rowValueKey(oldValues)) != matchedUpdates.end();
     };
+    size_t affectedRows = 0;
     const DBStatus status = g_engine.update(
         s.currentDB, resolvedTable, staticUpdates, {},
         stmt.returning.empty() ? nullptr : &updatedRows,
-        updateResolver, updateMatcher);
+        updateResolver, updateMatcher, &affectedRows);
     if (status != DBStatus::OK) {
         std::cout << "UPDATE FROM failed" << std::endl;
         return true;
@@ -2464,6 +2473,8 @@ bool executeUpdateFromJoin(const UpdateStmt& stmt, Session& s, bool& fallback) {
         if (!publishReturning(returningProjections, targetSchema, s.currentDB,
                               updatedRows, "UPDATE")) return true;
         printReturningRows(g_lastDmlResult);
+    } else {
+        publishMutationCount("UPDATE", affectedRows);
     }
     g_engine.analyzeTable(s.currentDB, resolvedTable);
     return false;
@@ -2637,10 +2648,11 @@ bool executeUpdateFrom(const UpdateStmt& stmt, Session& s, bool& fallback) {
         const std::map<std::string, std::string>& oldValues) {
         return matchedUpdates.find(rowValueKey(oldValues)) != matchedUpdates.end();
     };
+    size_t affectedRows = 0;
     const DBStatus status = g_engine.update(
         s.currentDB, resolvedTable, staticUpdates, {},
         stmt.returning.empty() ? nullptr : &updatedRows,
-        updateResolver, updateMatcher);
+        updateResolver, updateMatcher, &affectedRows);
     if (status != DBStatus::OK) {
         std::cout << "UPDATE FROM failed" << std::endl;
         return true;
@@ -2650,6 +2662,8 @@ bool executeUpdateFrom(const UpdateStmt& stmt, Session& s, bool& fallback) {
         if (!publishReturning(returningProjections, targetSchema, s.currentDB,
                               updatedRows, "UPDATE")) return true;
         printReturningRows(g_lastDmlResult);
+    } else {
+        publishMutationCount("UPDATE", affectedRows);
     }
     g_engine.analyzeTable(s.currentDB, resolvedTable);
     return false;
@@ -2747,9 +2761,11 @@ bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
             return true;
         };
     }
+    size_t affectedRows = 0;
     const DBStatus status = g_engine.updateRows(
         s.currentDB, resolvedTable, updates, conditions,
-        stmt.returning.empty() ? nullptr : &updatedRows, updateResolver);
+        stmt.returning.empty() ? nullptr : &updatedRows, updateResolver,
+        StorageEngine::SqlUpdateMatcher{}, &affectedRows);
     if (status != DBStatus::OK) {
         std::cout << "Update failed" << std::endl;
         return true;
@@ -2759,6 +2775,8 @@ bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
         if (!publishReturning(returningProjections, table, s.currentDB,
                               updatedRows, "UPDATE")) return true;
         printReturningRows(g_lastDmlResult);
+    } else {
+        publishMutationCount("UPDATE", affectedRows);
     }
     g_engine.analyzeTable(s.currentDB, resolvedTable);
     return false;
@@ -3134,9 +3152,11 @@ bool executeDeleteUsingJoin(const DeleteStmt& stmt, Session& s, bool& fallback) 
         return matchedTargets.find(rowValueKey(logicalValues(oldValues))) !=
             matchedTargets.end();
     };
+    size_t affectedRows = 0;
     const DBStatus status = g_engine.removeRows(
         s.currentDB, resolvedTable, {},
-        stmt.returning.empty() ? nullptr : &deletedRows, deleteMatcher);
+        stmt.returning.empty() ? nullptr : &deletedRows, deleteMatcher,
+        &affectedRows);
     if (status != DBStatus::OK) {
         std::cout << "DELETE USING failed" << std::endl;
         return true;
@@ -3146,6 +3166,8 @@ bool executeDeleteUsingJoin(const DeleteStmt& stmt, Session& s, bool& fallback) 
         if (!publishReturning(returningProjections, targetSchema, s.currentDB,
                               deletedRows, "DELETE")) return true;
         printReturningRows(g_lastDmlResult);
+    } else {
+        publishMutationCount("DELETE", affectedRows);
     }
     g_engine.analyzeTable(s.currentDB, resolvedTable);
     return false;
@@ -3260,9 +3282,11 @@ bool executeDeleteUsing(const DeleteStmt& stmt, Session& s, bool& fallback) {
         return matchedTargets.find(rowValueKey(logicalValues(oldValues))) !=
             matchedTargets.end();
     };
+    size_t affectedRows = 0;
     const DBStatus status = g_engine.removeRows(
         s.currentDB, resolvedTable, {},
-        stmt.returning.empty() ? nullptr : &deletedRows, deleteMatcher);
+        stmt.returning.empty() ? nullptr : &deletedRows, deleteMatcher,
+        &affectedRows);
     if (status != DBStatus::OK) {
         std::cout << "DELETE USING failed" << std::endl;
         return true;
@@ -3272,6 +3296,8 @@ bool executeDeleteUsing(const DeleteStmt& stmt, Session& s, bool& fallback) {
         if (!publishReturning(returningProjections, targetSchema, s.currentDB,
                               deletedRows, "DELETE")) return true;
         printReturningRows(g_lastDmlResult);
+    } else {
+        publishMutationCount("DELETE", affectedRows);
     }
     g_engine.analyzeTable(s.currentDB, resolvedTable);
     return false;
@@ -3308,9 +3334,11 @@ bool executeDelete(const DeleteStmt& stmt, Session& s, bool& fallback) {
         return false;
     }
     std::vector<SqlRow> deletedRows;
+    size_t affectedRows = 0;
     const DBStatus status = g_engine.removeRows(
         s.currentDB, resolvedTable, conditions,
-        stmt.returning.empty() ? nullptr : &deletedRows);
+        stmt.returning.empty() ? nullptr : &deletedRows,
+        StorageEngine::SqlDeleteMatcher{}, &affectedRows);
     if (status != DBStatus::OK) {
         std::cout << "Delete failed" << std::endl;
         return true;
@@ -3320,6 +3348,8 @@ bool executeDelete(const DeleteStmt& stmt, Session& s, bool& fallback) {
         if (!publishReturning(returningProjections, table, s.currentDB,
                               deletedRows, "DELETE")) return true;
         printReturningRows(g_lastDmlResult);
+    } else {
+        publishMutationCount("DELETE", affectedRows);
     }
     g_engine.analyzeTable(s.currentDB, resolvedTable);
     return false;

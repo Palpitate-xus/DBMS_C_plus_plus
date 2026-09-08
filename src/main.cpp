@@ -14045,17 +14045,27 @@ static bool executeInternal(const string& rawSql, Session& s) {
             // No WHERE clause
             // RETURNING: query all rows before delete
             vector<string> returnedRows;
+            size_t deletedCount = 0;
             if (!returningCols.empty() || returningAll) {
                 auto rr = g_engine.query(s.currentDB, resolvedName, {},
                                          returningAll ? set<string>() : returningCols, {});
                 returnedRows = rr;
             }
-            auto res = g_engine.remove(s.currentDB, resolvedName, {});
+            auto res = g_engine.remove(
+                s.currentDB, resolvedName, {}, nullptr, {}, &deletedCount);
             if (res != DBStatus::OK) {
                 cout << "Delete failed: foreign key constraint violation or other error" << endl;
                 return true;
             }
-            cout << "Delete done" << endl;
+            cout << "Delete done (" << deletedCount << " row(s))" << endl;
+            {
+                dbms::DmlResult dml;
+                dml.available = true;
+                dml.metadataOnly = true;
+                dml.commandTag =
+                    "DELETE " + std::to_string(deletedCount);
+                dbms::publishLastDmlResult(std::move(dml));
+            }
             for (auto& row : returnedRows) cout << row << endl;
             log(s.username, "delete done", getTime());
             return false;
@@ -14073,6 +14083,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
         // RETURNING: query rows before delete
         vector<string> returnedRows;
+        size_t deletedCount = 0;
         if (!returningCols.empty() || returningAll) {
             for (const auto& g : groups) {
                 auto rr = g_engine.query(s.currentDB, resolvedName, g,
@@ -14081,13 +14092,25 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
         }
         for (const auto& g : groups) {
-            auto res = g_engine.remove(s.currentDB, resolvedName, g);
+            size_t groupDeletedCount = 0;
+            auto res = g_engine.remove(
+                s.currentDB, resolvedName, g, nullptr, {},
+                &groupDeletedCount);
             if (res != DBStatus::OK) {
                 cout << "Delete failed: foreign key constraint violation or other error" << endl;
                 return true;
             }
+            deletedCount += groupDeletedCount;
         }
-        cout << "Delete done" << endl;
+        cout << "Delete done (" << deletedCount << " row(s))" << endl;
+        {
+            dbms::DmlResult dml;
+            dml.available = true;
+            dml.metadataOnly = true;
+            dml.commandTag =
+                "DELETE " + std::to_string(deletedCount);
+            dbms::publishLastDmlResult(std::move(dml));
+        }
         for (auto& row : returnedRows) cout << row << endl;
         log(s.username, "delete done", getTime());
         g_engine.analyzeTable(s.currentDB, resolvedName);
@@ -14350,6 +14373,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
         vector<string> conds;
         vector<string> returnedRows;
+        size_t updatedCount = 0;
         if (wherePos != std::string::npos) {
             string whereClause = trim(sql.substr(wherePos + 5));
             whereClause = expandSubqueries(whereClause, s);
@@ -14361,11 +14385,15 @@ static bool executeInternal(const string& rawSql, Session& s) {
             auto groups = breakDownConditions(tokens);
 
             for (const auto& g : groups) {
-                auto res = g_engine.update(s.currentDB, resolvedName, updates, g);
+                size_t groupUpdatedCount = 0;
+                auto res = g_engine.update(
+                    s.currentDB, resolvedName, updates, g, nullptr, {}, {},
+                    &groupUpdatedCount);
                 if (res != DBStatus::OK) {
                     cout << "Update failed" << endl;
                     return true;
                 }
+                updatedCount += groupUpdatedCount;
             }
             // RETURNING: query updated rows
             if (!returningCols.empty() || returningAll) {
@@ -14377,7 +14405,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
         } else {
             // No WHERE clause
-            auto res = g_engine.update(s.currentDB, resolvedName, updates, {});
+            auto res = g_engine.update(
+                s.currentDB, resolvedName, updates, {}, nullptr, {}, {},
+                &updatedCount);
             if (res != DBStatus::OK) {
                 cout << "Update failed" << endl;
                 return true;
@@ -14388,7 +14418,15 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 for (auto& r : rr) returnedRows.push_back(r);
             }
         }
-        cout << "Update done" << endl;
+        cout << "Update done (" << updatedCount << " row(s))" << endl;
+        {
+            dbms::DmlResult dml;
+            dml.available = true;
+            dml.metadataOnly = true;
+            dml.commandTag =
+                "UPDATE " + std::to_string(updatedCount);
+            dbms::publishLastDmlResult(std::move(dml));
+        }
         for (auto& row : returnedRows) cout << row << endl;
         log(s.username, "update done", getTime());
         g_engine.analyzeTable(s.currentDB, resolvedName);
