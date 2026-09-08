@@ -1,5 +1,6 @@
 #include "catalog/type_registry.h"
 #include "commands/TableManage.h"
+#include "access/IndexFileUtil.h"
 #include "test_utils.h"
 
 #include <cassert>
@@ -91,6 +92,34 @@ int main() {
         assertOriginalDatabase(engine, database, "copy-failure rejection");
 
         assert(engine.physicalBackup(database, validBackup));
+
+        dbms::TableSchema liveOnly;
+        liveOnly.tablename = "live_only";
+        liveOnly.formatVersion = dbms::DATA_FILE_FORMAT_VERSION;
+        liveOnly.append(dbms::makeIntColumn("id", false, 4, true));
+        assert(engine.createTable(database, liveOnly) == dbms::DBStatus::OK);
+
+        // The staged database has the same directory layout as the source
+        // database. Fail the next sync, which is the parent-directory sync
+        // immediately after the atomic exchange, and require rollback.
+        unsigned stagedDirectoryCount = 1;
+        for (const auto& entry :
+             std::filesystem::recursive_directory_iterator(validBackup)) {
+            const auto relative = std::filesystem::relative(
+                entry.path(), std::filesystem::path(validBackup));
+            const auto first = relative.begin();
+            if (first != relative.end() &&
+                (*first == "wal_archive" || *first == "tablespaces")) {
+                continue;
+            }
+            if (entry.is_directory()) ++stagedDirectoryCount;
+        }
+        dbms::index_file::failDirectorySyncAfterForTesting(
+            stagedDirectoryCount);
+        assert(!engine.physicalRestore(database, validBackup));
+        assertOriginalDatabase(engine, database,
+                               "publication-sync rollback");
+        assert(engine.tableExists(database, "live_only"));
     }
 
     // A backup produced by the engine remains restorable after the stricter
@@ -99,6 +128,11 @@ int main() {
         dbms::StorageEngine restored;
         assert(restored.physicalRestore(database, validBackup));
         assertOriginalDatabase(restored, database, "valid restore");
+        assert(!restored.tableExists(database, "live_only"));
+        assert(!std::filesystem::exists(
+            std::filesystem::path(database) / ".dbms_backup_manifest"));
+        assert(!std::filesystem::exists(
+            std::filesystem::path(database) / "tablespaces"));
     }
 
     finalCleanupTestData();

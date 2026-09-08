@@ -36837,8 +36837,11 @@ bool StorageEngine::physicalRestoreLocked(
                 continue;
             }
             auto destPath = stagedDatabase / entry.path().filename();
-            if (entry.is_directory() && entry.path().filename() == "wal_archive") {
-                // Skip wal_archive in root, restore it separately
+            if (entry.is_directory() &&
+                (entry.path().filename() == "wal_archive" ||
+                 entry.path().filename() == "tablespaces")) {
+                // Backup-only containers are restored to their external
+                // destinations, never copied into the active database root.
                 continue;
             }
             if (entry.is_directory()) {
@@ -36849,56 +36852,67 @@ bool StorageEngine::physicalRestoreLocked(
                     std::filesystem::copy_options::overwrite_existing);
             }
         }
+        if (!syncPhysicalBackupTree(stagedDatabase)) {
+            discardStagedDatabase();
+            return false;
+        }
 
-        // Publish with a reversible pair of sibling renames. Keep the old
-        // directory until the staged tree owns the canonical name so a rename
-        // failure can restore it without reconstructing any files.
-        std::filesystem::path previousDatabase;
+        // Publish the completely durable tree without ever removing the
+        // canonical generation. Keep the displaced tree until publication is
+        // durably acknowledged so a parent-directory sync error can roll back.
         const bool destinationExists = std::filesystem::exists(dst, fileError);
         if (fileError) {
             discardStagedDatabase();
             return false;
         }
         if (destinationExists) {
-            for (size_t attempt = 0; attempt < 1000; ++attempt) {
-                auto candidate = siblingPath("restore_previous");
-                fileError.clear();
-                if (!std::filesystem::exists(candidate, fileError) &&
-                    !fileError) {
-                    previousDatabase = std::move(candidate);
-                    break;
+            if (!exchangePhysicalBackupDirectories(stagedDatabase, dst)) {
+                discardStagedDatabase();
+                return false;
+            }
+            if (!index_file::syncDirectory(parent)) {
+                if (exchangePhysicalBackupDirectories(stagedDatabase, dst) &&
+                    index_file::syncDirectory(parent)) {
+                    discardStagedDatabase();
+                } else {
+                    std::cerr << "[storage] restore publication sync failed; "
+                              << "retained recoverable generations at " << dst
+                              << " and " << stagedDatabase << std::endl;
+                    stagedDatabase.clear();
                 }
-            }
-            if (previousDatabase.empty()) {
-                discardStagedDatabase();
                 return false;
             }
-            std::filesystem::rename(dst, previousDatabase, fileError);
-            if (fileError) {
-                discardStagedDatabase();
-                return false;
-            }
-        }
-        fileError.clear();
-        std::filesystem::rename(stagedDatabase, dst, fileError);
-        if (fileError) {
-            if (destinationExists) {
-                std::error_code restoreError;
-                std::filesystem::rename(
-                    previousDatabase, dst, restoreError);
-            }
-            discardStagedDatabase();
-            return false;
-        }
-        stagedDatabase.clear();
-        if (destinationExists) {
+            const std::filesystem::path previousDatabase = stagedDatabase;
+            stagedDatabase.clear();
             fileError.clear();
             std::filesystem::remove_all(previousDatabase, fileError);
-            if (fileError) {
-                std::cerr << "[storage] restored database but could not remove "
-                          << "the previous directory: " << previousDatabase
-                          << std::endl;
+            if (fileError || !index_file::syncDirectory(parent)) {
+                std::cerr << "[storage] restored database but could not "
+                          << "durably remove the previous generation: "
+                          << previousDatabase << std::endl;
             }
+        } else {
+            fileError.clear();
+            std::filesystem::rename(stagedDatabase, dst, fileError);
+            if (fileError) {
+                discardStagedDatabase();
+                return false;
+            }
+            if (!index_file::syncDirectory(parent)) {
+                std::error_code rollbackError;
+                std::filesystem::rename(dst, stagedDatabase, rollbackError);
+                if (!rollbackError) {
+                    (void)index_file::syncDirectory(parent);
+                    discardStagedDatabase();
+                } else {
+                    std::cerr << "[storage] restore publication sync failed and "
+                              << "the new database could not be moved back"
+                              << std::endl;
+                    stagedDatabase.clear();
+                }
+                return false;
+            }
+            stagedDatabase.clear();
         }
 
         // Restore WAL archive
