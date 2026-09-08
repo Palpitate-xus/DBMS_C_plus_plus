@@ -82,6 +82,7 @@
 | 246 | P0-02 / SQL-12 / QRY-01,09,10 / PROTO-04 | DISTINCT ON 用分隔符拼接显示值作为分组键，把空串与 SQL NULL 合并且可能与值内分隔符碰撞；该语法还被排除在结构化协议通道外。改用值向量+NULL 位图作为键，并发布精确结果 | 协议 E2E 用重复空串、重复 SQL NULL 和重复文本 `NULL` 验证三组独立保留首行及反顺序投影；精确协议测试和实际 PostgreSQL 122 组差分保持 `failed=0` | `c1a6504` |
 | 247 | P0-02 / SQL-12 / QRY-01,10 / PROTO-04 | 表达式 ORDER BY 在投影后按显示行重算，无法访问未投影列，并把合法空串当 NULL。把表达式排序规格合入存储查询，在原始可见行上计算排序键并携带真实 NULL 位，结构化结果沿同一排列返回 | 协议 E2E 覆盖 `ORDER BY lower(v)` 使用未投影列，以及空串、边界空格、文本 NULL、SQL NULL 的完整顺序；精确协议测试和实际 PostgreSQL 122 组差分保持 `failed=0` | `24a0864` |
 | 248 | P0-03 / CAT-22 / DIV-14 | extended 模式仍允许未实现的 PostgreSQL 对象写入 `.pg_compat_objects` 并返回成功，形成不存在运行时能力的虚假 catalog。取消模式例外：无真实 runtime 的 CREATE/ALTER/DROP、IMPORT FOREIGN SCHEMA 与 LOAD 一律返回 `0A000`；extended 仅开放真实项目扩展 | DIV-14 协议 E2E 在默认及 extended 模式检查 `0A000`，并遍历数据目录确认未创建 compatibility store；实际 PostgreSQL 122 组差分保持 `failed=0` | `877932b` |
+| 249 | P0-03 / CAT-22 / DIV-14 | 通用兼容层按对象 kind 而非具体操作判断 runtime，导致真实 CREATE/DROP handler 存在的 publication 在未实现 ALTER 时仍写假记录成功。规定所有 runtime handler 必须在通用层前消费命令；任何落入通用层的对象操作一律不具备 runtime | 默认和 extended 模式的 `ALTER PUBLICATION ... ADD TABLE` 均返回 `0A000` 且不创建 compatibility store；DIV-14 E2E 与实际 PostgreSQL 122 组差分通过 | `db53209` |
 
 本批新增的待修复复现（仍计入总清单）：
 

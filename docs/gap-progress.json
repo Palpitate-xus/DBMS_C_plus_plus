@@ -3,7 +3,7 @@
   "items": [
     {"id":"P0-01","status":"partial","evidence":["docs/code-review-progress.md"]},
     {"id":"P0-02","status":"partial","evidence":["docs/code-review-progress.md","src/common/DbError.h","src/network/NetworkServer.cpp"],"tests":["tests/subquery_sqlstate_e2e_test.py","tests/quoted_alias_protocol_e2e_test.py","tests/fromless_structured_protocol_e2e_test.py","tests/derived_type_protocol_e2e_test.py","tests/window_type_protocol_e2e_test.py","tests/dml_command_tag_e2e_test.py","tests/table_structured_protocol_e2e_test.py","tests/constraint_expr_test.cpp","tests/compat/pg_diff_runner.py","tests/div14_feature_gate_test.py"],"commits":["417047a","3052136","e6b692d","655fdeb","066be80","e85488b","8b6b5e4","2a32d48","2b7845e","1f17d40","f732538","b7181a1","bbea2ed","9bb01ce","bf37679","5f28d15","2bbcbec","250796e","03346a0","8183624","5170f81","2daf1cf","e4ee2dd","2ad43ad","fd303b2","4c3a9ef","eb57664","94410a9","866b947","cbcc771","c1a6504","24a0864"]},
-    {"id":"P0-03","status":"partial","evidence":["docs/code-review-progress.md"],"tests":["tests/div14_feature_gate_test.py","tests/compat/pg_diff_runner.py"],"commits":["877932b"]},
+    {"id":"P0-03","status":"partial","evidence":["docs/code-review-progress.md"],"tests":["tests/div14_feature_gate_test.py","tests/compat/pg_diff_runner.py"],"commits":["877932b","db53209"]},
     {"id":"P0-04","status":"unverified","evidence":[]},
     {"id":"P0-05","status":"unverified","evidence":[]},
     {"id":"P0-06","status":"unverified","evidence":[]},
@@ -52,7 +52,7 @@
     {"id":"CAT-19","status":"unverified","evidence":[]},
     {"id":"CAT-20","status":"unverified","evidence":[]},
     {"id":"CAT-21","status":"unverified","evidence":[]},
-    {"id":"CAT-22","status":"partial","evidence":["docs/code-review-progress.md","src/common/FeatureGate.cpp"],"tests":["tests/div14_feature_gate_test.py","tests/compat/pg_diff_runner.py"],"commits":["877932b"]},
+    {"id":"CAT-22","status":"partial","evidence":["docs/code-review-progress.md","src/common/FeatureGate.cpp"],"tests":["tests/div14_feature_gate_test.py","tests/compat/pg_diff_runner.py"],"commits":["877932b","db53209"]},
     {"id":"TYPE-01","status":"partial","evidence":["docs/code-review-progress.md"],"tests":["tests/fromless_structured_protocol_e2e_test.py"],"commits":["655fdeb"]},
     {"id":"TYPE-02","status":"partial","evidence":["docs/code-review-progress.md"],"tests":["tests/fromless_structured_protocol_e2e_test.py","tests/quoted_alias_protocol_e2e_test.py","tests/window_type_protocol_e2e_test.py","tests/derived_type_protocol_e2e_test.py","tests/constraint_expr_test.cpp","tests/compat/pg_diff_runner.py"],"commits":["655fdeb","e85488b","8b6b5e4","1f17d40","f732538","b7181a1","bbea2ed","9bb01ce","bf37679"]},
     {"id":"TYPE-03","status":"unverified","evidence":[]},
@@ -273,6 +273,6 @@
     {"id":"DIV-11","status":"unverified","evidence":[]},
     {"id":"DIV-12","status":"unverified","evidence":[]},
     {"id":"DIV-13","status":"unverified","evidence":[]},
-    {"id":"DIV-14","status":"partial","evidence":["docs/code-review-progress.md","src/common/FeatureGate.cpp"],"tests":["tests/div14_feature_gate_test.py","tests/compat/pg_diff_runner.py"],"commits":["877932b"]}
+    {"id":"DIV-14","status":"partial","evidence":["docs/code-review-progress.md","src/common/FeatureGate.cpp"],"tests":["tests/div14_feature_gate_test.py","tests/compat/pg_diff_runner.py"],"commits":["877932b","db53209"]}
   ]
 }
