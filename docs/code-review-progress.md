@@ -115,6 +115,8 @@
 
 | 279 | P0-05 / WAL-08 | `createTransactionBackup()` 先生成带精确文件集合的 manifest，再按崩溃语义删除快照中的 UNLOGGED relation forks，却没有更新 manifest；含 UNLOGGED 表的 DDL/tablespace 快照会在回滚时被当成损坏备份拒绝。过滤完成后现在重新生成 manifest，并再次同步完整快照树；失败会删除不可恢复的快照并中止事务备份创建 | `alter_table_only_test` 的自定义 tablespace + logged/UNLOGGED 组合重新通过事务回滚、手工快照恢复和重启读取，验证外部 logged relation 保留且过滤后的 manifest 可验证。完整 backup/restore 与 DDL snapshot 回归随后随相邻项继续执行 | `7cb852b` |
 
+| 280 | P0-10 / BACKUP-01 / BACKUP-02 | 跨名 `physicalRestore(new_db, backup_of_old_db)` 会复制含原数据库物理 index 路径的 WAL，调用当下返回成功，但下一次启动在 index WAL 路径边界校验处中止。当前格式无法安全重写整段 WAL 身份，因此 manifest V2/V3 marker 现在持久化并严格校验源数据库名；跨名请求在创建/替换目标前 fail-closed，同名恢复保持可用 | `physical_backup_manifest_test` 验证错误目标名被拒绝且目录零副作用；一致性、replacement 和 manifest 测试改为同名恢复并先制造备份后的额外状态，验证恢复确实回到备份 generation；tablespace/UNLOGGED、DDL snapshot、PITR、DIV-14 和 122/122 差分通过。未来若支持 clone，必须实现 WAL/catalog/路径 identity 重写，而不能绕过校验 | `129d2ee` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
