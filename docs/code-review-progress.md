@@ -99,6 +99,7 @@
 | 263 | CAT-07 / REPL-03 | 扩展 confirm 路径先从 LogicalChangeStore 删除批次，再调用 advanceSlotLsn，且完全忽略持久化失败；状态文件写失败会导致队列已丢但 restart LSN 未推进。新增 manager 级 confirmLogicalSlotLsn，在同一锁域中先持久化 LSN，失败恢复旧 LSN 并保留队列，成功后才 acknowledge；SQL 入口检查结果并返回错误 | `replication_test` 在待确认批次存在时移除 state 父目录，验证 confirm 失败、LSN 保持 42、depth 保持 1；恢复目录后重试推进到 43 且 depth 归零。持久化启动 E2E、DIV-14 与 122/122 差分通过 | `f1fbcc5` |
 | 264 | SQL-06 / REPL-03 | 槽名校验依赖 locale `isalnum` 并额外允许 `-`，因此大写、连字符甚至部分 locale 字符可进入 manager 和持久化 catalog，偏离 PostgreSQL 的稳定槽名规则。改为逐字节只接受 ASCII `a-z`、`0-9`、`_`，继续执行 1–63 字节长度限制 | `replication_test` 先复现 `bad-slot` 被接受，再验证连字符、大写、路径字符和 64 字节名称均拒绝；合法槽持久化/重载、启动损坏检测、DIV-14 与 122/122 差分通过 | `c307990` |
 | 265 | REPL-03 | SQL 创建逻辑槽会检查 output plugin，但 ReplicationManager API 和 durable loader 只要求 plugin 非空；内部调用或手工状态文件可产生无法解码、重启后仍存在的未知插件槽。将 LogicalDecoder 插件注册表校验下沉到槽定义唯一入口，create 与 startup load 使用相同规则 | `replication_test` 先复现 `missing_plugin` 槽被接受，再验证 manager 拒绝；server persistence E2E 写入结构正确但插件未知的 V1 entry，启动以 invalid entry fail closed；DIV-14 与 122/122 差分通过。动态 output plugin API/lifecycle 仍属 REPL-10 | `21be178` |
+| 266 | REPL-07 | `pgoutput` 保留名实际输出项目自定义的 little-endian B/R/I/U/D/T/C 帧和竖线文本行，不是 PostgreSQL pgoutput protocol，却被 availablePlugins 与槽创建路径宣称可用。撤下 `pgoutput` 名称并让 format/manager 明确拒绝；保留实验实现但改名 `dbms_pgoutput_preview`，避免客户端误判 wire compatibility | `logical_decoding_test` 验证 `format("pgoutput")` 失败、注册表不含保留名且 preview 格式仍可测；`replication_test` 验证 manager 拒绝 pgoutput 槽；持久化加载、DIV-14 与 122/122 差分通过。真正 protocol v1–v4/schema/type/streaming/2PC 消息仍全部属于 REPL-07 | `9cc992c` |
 
 本批新增的待修复复现（仍计入总清单）：
 
