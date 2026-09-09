@@ -14,6 +14,15 @@ struct Session {
     std::string authenticatedUser; // login identity for RESET SESSION AUTHORIZATION
     int authenticatedPermission = 0;
     std::string currentDB = "info";
+    // Startup/runtime parameters are connection-local.  Keep the original
+    // startup values for diagnostics, plus canonical effective values used
+    // by protocol ParameterStatus and SHOW.
+    std::map<std::string, std::string> startupParameters;
+    std::string startupOptions;
+    std::string applicationName;
+    std::string clientEncoding = "UTF8";
+    std::string replicationMode = "false";
+    std::string searchPath = "public";
     std::map<std::string, std::string> preparedStmts;
     // PostgreSQL PREPARE name(types) AS ...: declared parameter types
     std::map<std::string, std::vector<std::string>> preparedStmtTypes;

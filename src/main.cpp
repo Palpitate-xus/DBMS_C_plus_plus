@@ -16710,6 +16710,21 @@ static bool executeInternal(const string& rawSql, Session& s) {
             cout << s.compatibilityMode << endl;
             return false;
         }
+        if (rest == "application_name") {
+            cout << "application_name" << endl;
+            cout << s.applicationName << endl;
+            return false;
+        }
+        if (rest == "client_encoding") {
+            cout << "client_encoding" << endl;
+            cout << s.clientEncoding << endl;
+            return false;
+        }
+        if (rest == "search_path") {
+            cout << "search_path" << endl;
+            cout << s.searchPath << endl;
+            return false;
+        }
         if (rest == "dbms.extensions") {
             // DIV framework audit surface: which project extensions are
             // active in this session's compatibility mode.

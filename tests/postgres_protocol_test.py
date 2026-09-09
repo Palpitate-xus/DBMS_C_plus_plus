@@ -82,13 +82,18 @@ def write_auth_catalog(work_dir, username, password, superuser=True):
                    (username, flags, password_record))
 
 
-def startup(sock, user, database, password="secret", fragmented=False,
-            application_name="dbms-protocol-test", protocol_version=196608,
-            protocol_options=None, validate_dbms_status=True):
+def send_startup_packet(sock, user, database, application_name,
+                        protocol_version, protocol_options,
+                        startup_parameters, fragmented):
     protocol_options = protocol_options or {}
-    params = (b"user\0" + user.encode() + b"\0database\0" + database.encode() +
-              b"\0application_name\0" + application_name.encode() + b"\0")
+    startup_parameters = startup_parameters or {}
+    params = b"user\0" + user.encode() + b"\0"
+    if database is not None:
+        params += b"database\0" + database.encode() + b"\0"
+    params += b"application_name\0" + application_name.encode() + b"\0"
     for name, value in protocol_options.items():
+        params += name.encode() + b"\0" + value.encode() + b"\0"
+    for name, value in startup_parameters.items():
         params += name.encode() + b"\0" + value.encode() + b"\0"
     packet = frame(struct.pack("!I", protocol_version) + params + b"\0")
     if fragmented:
@@ -97,6 +102,9 @@ def startup(sock, user, database, password="secret", fragmented=False,
         sock.sendall(packet[2:])
     else:
         sock.sendall(packet)
+
+
+def complete_startup_authentication(sock, user, password):
     kind, body = read_message(sock)
     assert kind == b"R"
     auth_type = struct.unpack("!I", body[:4])[0]
@@ -131,6 +139,18 @@ def startup(sock, user, database, password="secret", fragmented=False,
     else:
         assert auth_type == 3
         sock.sendall(typed(b"p", password.encode() + b"\0"))
+
+
+def startup(sock, user, database, password="secret", fragmented=False,
+            application_name="dbms-protocol-test", protocol_version=196608,
+            protocol_options=None, validate_dbms_status=True,
+            startup_parameters=None, expected_application_name=None):
+    protocol_options = protocol_options or {}
+    startup_parameters = startup_parameters or {}
+    send_startup_packet(sock, user, database, application_name,
+                        protocol_version, protocol_options,
+                        startup_parameters, fragmented)
+    complete_startup_authentication(sock, user, password)
     messages = read_until_ready(sock)
     assert messages[0] == (b"R", struct.pack("!I", 0))
     assert messages[-1] == (b"Z", b"I")
@@ -156,11 +176,14 @@ def startup(sock, user, database, password="secret", fragmented=False,
         assert trailing == b""
         statuses[name] = value
     if validate_dbms_status:
+        if expected_application_name is None:
+            expected_application_name = startup_parameters.get(
+                "application_name", application_name)
         assert statuses == {
             b"server_version": b"18.0 DBMS-C++ 0.2.0",
             b"server_encoding": b"UTF8",
             b"client_encoding": b"UTF8",
-            b"application_name": application_name.encode(),
+            b"application_name": expected_application_name.encode(),
             b"DateStyle": b"ISO, MDY",
             b"IntervalStyle": b"postgres",
             b"is_superuser": b"on" if user == "alice" else b"off",
@@ -173,6 +196,19 @@ def startup(sock, user, database, password="secret", fragmented=False,
         }, statuses
     backend_key = next(body for kind, body in messages if kind == b"K")
     return struct.unpack("!II", backend_key)
+
+
+def startup_fails(sock, user, database, sqlstate, password="secret",
+                  application_name="dbms-protocol-test",
+                  startup_parameters=None):
+    send_startup_packet(sock, user, database, application_name, 196608, {},
+                        startup_parameters or {}, False)
+    complete_startup_authentication(sock, user, password)
+    kind, body = read_message(sock)
+    assert kind == b"R" and body == struct.pack("!I", 0), (kind, body)
+    kind, body = read_message(sock)
+    assert kind == b"E" and (b"C" + sqlstate.encode() + b"\0") in body, (kind, body)
+    assert wait_for_disconnect(sock)
 
 
 def startup_reference(sock, user, database, password="secret"):
@@ -760,6 +796,61 @@ def main():
                 protocol_options={"_pq_.unsupported_test": "1"})
         assert setting_value(simple_query(sock, "SELECT * FROM pg_settings"),
                              "max_connections") == b"64"
+
+        # Startup run-time parameters must become real connection-local
+        # defaults.  The legacy options string uses PostgreSQL's backslash
+        # escaping and is applied after individually supplied parameters.
+        startup_settings_sock = socket.create_connection(("127.0.0.1", port))
+        startup_settings_sock.settimeout(SOCKET_TIMEOUT)
+        startup(
+            startup_settings_sock, "alice", "info",
+            application_name="direct-client",
+            startup_parameters={
+                "client_encoding": "UTF-8",
+                "replication": "off",
+                "statement_timeout": "222",
+                "options": ("-c statement_timeout=321 -clock_timeout=17 "
+                            "--deadlock_timeout=19 "
+                            "-c application_name=options\\ client "
+                            "--search_path=public"),
+            },
+            expected_application_name="options client")
+        settings = simple_query(startup_settings_sock,
+                                "SELECT * FROM pg_settings")
+        assert setting_value(settings, "statement_timeout") == b"321"
+        assert setting_value(settings, "lock_timeout") == b"17"
+        assert setting_value(settings, "deadlock_timeout") == b"19"
+        assert data_row_values(simple_query(
+            startup_settings_sock, "SHOW client_encoding")) == [[b"UTF8"]]
+        assert data_row_values(simple_query(
+            startup_settings_sock, "SHOW search_path")) == [[b"public"]]
+        startup_settings_sock.sendall(typed(b"X"))
+        startup_settings_sock.close()
+
+        # Unsupported/invalid startup settings must fail closed after
+        # authentication instead of being silently ignored.  Replication
+        # mode remains owned by PROTO-10, and non-UTF8 transcoding by
+        # PROTO-11.
+        for startup_parameters, sqlstate in [
+                ({"client_encoding": "LATIN1"}, "0A000"),
+                ({"replication": "database"}, "0A000"),
+                ({"replication": "maybe"}, "22023"),
+                ({"options": "-c made_up_parameter=1"}, "42704"),
+                ({"options": "-c"}, "42601")]:
+            rejected_sock = socket.create_connection(("127.0.0.1", port))
+            rejected_sock.settimeout(SOCKET_TIMEOUT)
+            startup_fails(rejected_sock, "alice", "info", sqlstate,
+                          startup_parameters=startup_parameters)
+            rejected_sock.close()
+
+        # PostgreSQL defaults an omitted database name to the user name,
+        # not to a product-specific database.  There is no database alice in
+        # this fixture, so the correctly resolved target fails with 3D000.
+        default_database_sock = socket.create_connection(("127.0.0.1", port))
+        default_database_sock.settimeout(SOCKET_TIMEOUT)
+        startup_fails(default_database_sock, "alice", None, "3D000")
+        default_database_sock.close()
+
         malformed_startup_sock = socket.socket()
         malformed_startup_sock.settimeout(SOCKET_TIMEOUT)
         malformed_startup_sock.connect(("127.0.0.1", port))

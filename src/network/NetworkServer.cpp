@@ -285,6 +285,242 @@ struct ProtocolPortal {
     bool completed = false;
 };
 
+std::string lowerAscii(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return value;
+}
+
+bool splitStartupOptions(const std::string& raw,
+                         std::vector<std::string>& arguments,
+                         std::string& error) {
+    std::string current;
+    bool escaped = false;
+    for (unsigned char ch : raw) {
+        if (escaped) {
+            current.push_back(static_cast<char>(ch));
+            escaped = false;
+        } else if (ch == '\\') {
+            escaped = true;
+        } else if (std::isspace(ch)) {
+            if (!current.empty()) {
+                arguments.push_back(std::move(current));
+                current.clear();
+            }
+        } else {
+            current.push_back(static_cast<char>(ch));
+        }
+    }
+    if (escaped) {
+        error = "invalid startup options: trailing backslash";
+        return false;
+    }
+    if (!current.empty()) arguments.push_back(std::move(current));
+    return true;
+}
+
+bool parseStartupOptionAssignments(
+        const std::string& raw,
+        std::vector<std::pair<std::string, std::string>>& assignments,
+        std::string& error) {
+    std::vector<std::string> arguments;
+    if (!splitStartupOptions(raw, arguments, error)) return false;
+    for (size_t i = 0; i < arguments.size(); ++i) {
+        std::string assignment;
+        if (arguments[i] == "-c") {
+            if (++i == arguments.size()) {
+                error = "invalid startup options: -c requires name=value";
+                return false;
+            }
+            assignment = arguments[i];
+        } else if (arguments[i].rfind("-c", 0) == 0 &&
+                   arguments[i].size() > 2) {
+            assignment = arguments[i].substr(2);
+        } else if (arguments[i].rfind("--", 0) == 0 &&
+                   arguments[i].size() > 2) {
+            assignment = arguments[i].substr(2);
+        } else {
+            error = "invalid startup options: unsupported argument " +
+                    arguments[i];
+            return false;
+        }
+        const size_t equals = assignment.find('=');
+        if (equals == std::string::npos || equals == 0) {
+            error = "invalid startup options: expected name=value";
+            return false;
+        }
+        assignments.emplace_back(assignment.substr(0, equals),
+                                 assignment.substr(equals + 1));
+    }
+    return true;
+}
+
+bool applyStartupRuntimeParameter(Session& session,
+                                  const std::string& rawName,
+                                  const std::string& value,
+                                  std::string& sqlState,
+                                  std::string& error) {
+    std::string name = lowerAscii(rawName);
+    std::replace(name.begin(), name.end(), '-', '_');
+    if (name == "application_name") {
+        session.applicationName = value;
+        return true;
+    }
+    if (name == "client_encoding") {
+        std::string encoding = lowerAscii(value);
+        encoding.erase(std::remove_if(encoding.begin(), encoding.end(),
+                                      [](char ch) {
+                                          return ch == '-' || ch == '_';
+                                      }),
+                       encoding.end());
+        if (encoding != "utf8" && encoding != "unicode") {
+            sqlState = "0A000";
+            error = "client encoding \"" + value +
+                    "\" is not supported; only UTF8 is available";
+            return false;
+        }
+        session.clientEncoding = "UTF8";
+        return true;
+    }
+    if (name == "search_path") {
+        std::string compact;
+        for (unsigned char ch : value) {
+            if (!std::isspace(ch)) compact.push_back(static_cast<char>(ch));
+        }
+        if (lowerAscii(compact) != "public") {
+            sqlState = "0A000";
+            error = "startup search_path is not supported except for public";
+            return false;
+        }
+        session.searchPath = "public";
+        return true;
+    }
+    if (name == "timezone") {
+        const std::string timezone = lowerAscii(value);
+        if (timezone != "utc" && timezone != "gmt" && timezone != "z" &&
+            timezone != "+00" && timezone != "+00:00" &&
+            timezone != "-00" && timezone != "-00:00") {
+            sqlState = "0A000";
+            error = "startup TimeZone is not supported except for UTC";
+            return false;
+        }
+        session.timezoneOffsetMinutes = 0;
+        return true;
+    }
+    if (name == "datestyle") {
+        std::string style = lowerAscii(value);
+        style.erase(std::remove_if(style.begin(), style.end(),
+                                   [](unsigned char ch) {
+                                       return std::isspace(ch);
+                                   }),
+                    style.end());
+        if (style != "iso,mdy") {
+            sqlState = "0A000";
+            error = "startup DateStyle is not supported except for ISO, MDY";
+            return false;
+        }
+        return true;
+    }
+    if (name == "intervalstyle") {
+        if (lowerAscii(value) != "postgres") {
+            sqlState = "0A000";
+            error = "startup IntervalStyle is not supported except for postgres";
+            return false;
+        }
+        return true;
+    }
+    if (name == "statement_timeout" || name == "statement_timeout_ms" ||
+        name == "lock_timeout" || name == "lock_timeout_ms" ||
+        name == "deadlock_timeout" || name == "deadlock_timeout_ms") {
+        Config candidate = g_config;
+        if (!candidate.setParameter(name, value)) {
+            sqlState = "22023";
+            error = "invalid value for parameter \"" + rawName + "\"";
+            return false;
+        }
+        if (name == "statement_timeout" || name == "statement_timeout_ms") {
+            session.statementTimeoutMs = candidate.statementTimeoutMs;
+            session.defaultStatementTimeoutMs = candidate.statementTimeoutMs;
+        } else if (name == "lock_timeout" || name == "lock_timeout_ms") {
+            session.lockTimeoutMs = candidate.lockTimeoutMs;
+        } else {
+            session.deadlockTimeoutMs = candidate.deadlockTimeoutMs;
+        }
+        return true;
+    }
+    sqlState = "42704";
+    error = "unrecognized configuration parameter \"" + rawName + "\"";
+    return false;
+}
+
+bool applyStartupParameters(const PgStartupMessage& startup,
+                            Session& session,
+                            std::string& sqlState,
+                            std::string& error) {
+    session.startupParameters = startup.parameters;
+    const auto application = startup.parameters.find("application_name");
+    if (application != startup.parameters.end()) {
+        session.applicationName = application->second;
+    }
+    const auto encoding = startup.parameters.find("client_encoding");
+    if (encoding != startup.parameters.end() &&
+        !applyStartupRuntimeParameter(session, encoding->first,
+                                      encoding->second, sqlState, error)) {
+        return false;
+    }
+
+    const auto replication = startup.parameters.find("replication");
+    if (replication != startup.parameters.end()) {
+        const std::string mode = lowerAscii(replication->second);
+        if (mode == "false" || mode == "off" || mode == "no" || mode == "0") {
+            session.replicationMode = "false";
+        } else if (mode == "true" || mode == "on" || mode == "yes" ||
+                   mode == "1" || mode == "database") {
+            session.replicationMode = mode == "database" ? "database" : "true";
+            sqlState = "0A000";
+            error = "replication protocol connections are not implemented";
+            return false;
+        } else {
+            sqlState = "22023";
+            error = "invalid value for parameter \"replication\": \"" +
+                    replication->second + "\"";
+            return false;
+        }
+    }
+
+    static const std::set<std::string> special = {
+        "user", "database", "options", "replication", "application_name",
+        "client_encoding",
+    };
+    for (const auto& parameter : startup.parameters) {
+        if (special.count(parameter.first)) continue;
+        if (!applyStartupRuntimeParameter(session, parameter.first,
+                                          parameter.second, sqlState, error)) {
+            return false;
+        }
+    }
+
+    const auto options = startup.parameters.find("options");
+    if (options != startup.parameters.end()) {
+        session.startupOptions = options->second;
+        std::vector<std::pair<std::string, std::string>> assignments;
+        if (!parseStartupOptionAssignments(options->second, assignments,
+                                           error)) {
+            sqlState = "42601";
+            return false;
+        }
+        for (const auto& assignment : assignments) {
+            if (!applyStartupRuntimeParameter(session, assignment.first,
+                                              assignment.second, sqlState,
+                                              error)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 bool isIntegerParameterType(uint32_t typeOid) {
     return typeOid == 20 || typeOid == 21 || typeOid == 23 || typeOid == 26;
 }
@@ -1839,7 +2075,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
     if (portSeparator != std::string::npos) clientIp.resize(portSeparator);
     const HbaMethod authMethod = PgHbaFile::match(
         hbaRecords, socket.tlsOK ? "hostssl" : "hostnossl",
-        startup.parameters.count("database") ? startup.parameters.at("database") : "info",
+        startup.parameters.count("database") ? startup.parameters.at("database") : username,
         username, clientIp,
         [](const std::string& member, const std::string& role) {
             return userIsMemberOfRole(member, role);
@@ -1929,12 +2165,19 @@ void handleClient(SecureSocket socket, std::string clientHost) {
     session.authenticatedPermission = session.permission;
     auto dbIt = startup.parameters.find("database");
     session.currentDB = (dbIt == startup.parameters.end() || dbIt->second.empty())
-                            ? "info" : dbIt->second;
+                            ? username : dbIt->second;
     session.originalRole = username;
     session.statementTimeoutMs = g_config.statementTimeoutMs;
     session.defaultStatementTimeoutMs = g_config.statementTimeoutMs;
     session.lockTimeoutMs = g_config.lockTimeoutMs;
     session.deadlockTimeoutMs = g_config.deadlockTimeoutMs;
+    std::string startupSqlState = "22023";
+    std::string startupError;
+    if (!applyStartupParameters(startup, session, startupSqlState,
+                                startupError)) {
+        protocol.sendErrorResponse("FATAL", startupSqlState, startupError);
+        return;
+    }
     g_engine.getLockManager().setResourceNamespace(session.currentDB);
     g_engine.getLockManager().setLockTimeout(session.lockTimeoutMs);
     g_engine.getLockManager().setDeadlockTimeout(session.deadlockTimeoutMs);
@@ -1956,14 +2199,11 @@ void handleClient(SecureSocket socket, std::string clientHost) {
 
     const uint64_t pid = registerProcess(username, clientHost, session.currentDB);
     session.pid = pid;
-    const auto applicationIt = startup.parameters.find("application_name");
-    const std::string applicationName =
-        applicationIt == startup.parameters.end() ? "" : applicationIt->second;
     if (!protocol.sendParameterStatus(
             "server_version", std::string("18.0 DBMS-C++ ") + DBMS_VERSION_STRING) ||
         !protocol.sendParameterStatus("server_encoding", "UTF8") ||
-        !protocol.sendParameterStatus("client_encoding", "UTF8") ||
-        !protocol.sendParameterStatus("application_name", applicationName) ||
+        !protocol.sendParameterStatus("client_encoding", session.clientEncoding) ||
+        !protocol.sendParameterStatus("application_name", session.applicationName) ||
         !protocol.sendParameterStatus("DateStyle", "ISO, MDY") ||
         !protocol.sendParameterStatus("IntervalStyle", "postgres") ||
         !protocol.sendParameterStatus("is_superuser", account->rolsuper ? "on" : "off") ||
