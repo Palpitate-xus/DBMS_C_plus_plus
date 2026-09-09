@@ -310,6 +310,7 @@
 | 382 | DIV-05 | extended `DESC`/`VIEW TABLE` 只向 stdout 打印，wire 客户端得不到结果集；`SHOW USERS/ROLES/POOLS` 又由协议层按空格反解析，默认值中的空格和 SQL NULL 会损坏，表元数据也没有 ACL 边界。六类命令现发布精确 cells、NULL 位图和类型；表描述执行 SELECT 权限检查，库内表清单只列当前角色可访问对象，角色清单公开但不含秘密字段 | DIV wire E2E 检查 DESC/VIEW 的六列表头、text OID、NULL default 和带空格 default，SHOW USERS 的 int4、SHOW POOLS 的 int8，并用独立非管理员 backend 验证获授权表可见、未授权表隐藏/拒绝。main O0/O2、完整协议及 PostgreSQL 差分 `cases=122 failed=0` 通过。DIV-05 complete | `f69978a` |
 
 | 383 | DIV-09 | extended SQL 复制槽 wrapper 缺少事务边界，物理复制未实现却可创建假 physical slot；SHOW slot 状态、解码文本和确认结果仍经 stdout/空格重构。持久化创建/确认/删除现禁止事务块，physical slot fail-closed；logical wrapper 继续只调用唯一 `ReplicationManager`/`LogicalChangeStore`，并发布精确 typed 状态、完整解码 cell、确认 LSN 和稳定 SQLSTATE | DIV wire E2E 覆盖 physical `0A000`、三种 mutation 的 `25001`、logical 创建结果、publication 后提交、八列状态及 bool/int8 OID、含空格/换行解码 cell、确认后消费和删除；`logical_decoding_test` 全套、main O0/O2、完整协议及 PostgreSQL 差分 `cases=122 failed=0` 通过。DIV-09 complete | `0024971` |
+| 384 | P0-01 / SQL-03 / TYPE-07 | 布尔 cast、heap INSERT/UPDATE、谓词和 wire 参数维护不同输入白名单，合法 PG 缩写可能被拒绝，非法值在底层 writer 还可能退化为 NULL；`sqlProcessor` 同时把表查询中的 TRUE/FALSE 改成 1/0，丢失 bool 类型。新增唯一 BooleanCodec，统一 PG 的大小写不敏感唯一前缀规则与固定 `t/f` 输出，所有存储写入口先验证并 canonicalize，移除整数文本改写 | `boolean_update_test` 覆盖 t/tr/y/ye/on/1 与 f/fa/n/of/0、歧义 o 及 canonical heap output；表达式/聚合/boolean literal E2E、main O0/O2、DIV 门、完整协议（含 typed Bind 的 `ye` 与 bool OID 16）及真实 PostgreSQL 差分 `cases=122 failed=0` 通过。TYPE-07 保持 partial：全引擎仍使用 string-backed ExprValue，尚未达到统一 typed Datum/batch 契约 | `1ff8757` |
 
 本批新增的待修复复现（仍计入总清单）：
 
