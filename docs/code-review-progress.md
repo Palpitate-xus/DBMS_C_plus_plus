@@ -229,6 +229,8 @@
 
 | 342 | P0-02 / CONS-01,02,03,04 / TXN-06 / PROTO-08 | 延迟 UNIQUE、FOREIGN KEY、CHECK、EXCLUDE 在 COMMIT 失败时全部折叠为 `INVALID_VALUE`；PREPARE 失败还会先回滚本地事务，再被入口误报成无活动事务/`25P01`，wire 无法得到真实完整性错误。新增四类约束状态并映射为 `23505`、`23503`、`23514`、`23P01`，COMMIT/PREPARE 在回滚后保留原始失败类别；自动提交 INSERT 也不再强制改成立即约束，和 UPDATE/DELETE 一样在语句提交点检查并返回准确类别 | 八组约束/2PC C++ 回归覆盖四类约束、自动提交、显式 COMMIT 和 PREPARE，均验证原子回滚与精确状态；完整协议测试验证 PREPARE FK 返回 `23503`、COMMIT CHECK 返回 `23514`、failed ReadyForQuery 与显式 ROLLBACK 恢复；核心对象及三组重点测试在 O0/O2 均通过 | `35a4ed6` |
 
+| 343 | TXN-12 | LISTEN registry 和待投递队列以 username 为身份，同一角色的多个连接共享一个队列：先检查的连接会吞掉其他连接的消息；断开连接也不移除全局订阅。新增线程安全 NotificationManager，以 backend PID 分别维护订阅、反向索引和队列，并在 CLI/wire session 销毁时同时清理订阅及未取消息；通知记录保留 sender PID 供 wire 消息使用 | `notification_manager_test` 用两个 backend ID 同时监听同一 channel，验证一次发布形成两份独立消息、任一读取不影响另一份，并验证断开后不会产生 orphan 队列；主入口/网络入口 O0、O2 编译及完整 PostgreSQL 协议套件通过。事务提交语义和真正 NotificationResponse 由后续独立项继续完成 | `5dcb08b` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
