@@ -82,10 +82,14 @@ def write_auth_catalog(work_dir, username, password, superuser=True):
 
 
 def startup(sock, user, database, password="secret", fragmented=False,
-            application_name="dbms-protocol-test"):
+            application_name="dbms-protocol-test", protocol_version=196608,
+            protocol_options=None):
+    protocol_options = protocol_options or {}
     params = (b"user\0" + user.encode() + b"\0database\0" + database.encode() +
-              b"\0application_name\0" + application_name.encode() + b"\0\0")
-    packet = frame(struct.pack("!I", 196608) + params)
+              b"\0application_name\0" + application_name.encode() + b"\0")
+    for name, value in protocol_options.items():
+        params += name.encode() + b"\0" + value.encode() + b"\0"
+    packet = frame(struct.pack("!I", protocol_version) + params + b"\0")
     if fragmented:
         sock.sendall(packet[:2])
         time.sleep(0.05)
@@ -130,6 +134,19 @@ def startup(sock, user, database, password="secret", fragmented=False,
     assert messages[0] == (b"R", struct.pack("!I", 0))
     assert messages[-1] == (b"Z", b"I")
     assert any(kind == b"K" for kind, _ in messages)
+    negotiations = [body for kind, body in messages if kind == b"v"]
+    expected_options = sorted(
+        name.encode() for name in protocol_options if name.startswith("_pq_."))
+    if protocol_version != 196608 or expected_options:
+        assert len(negotiations) == 1, messages
+        negotiation = negotiations[0]
+        negotiated_version, option_count = struct.unpack("!II", negotiation[:8])
+        assert negotiated_version == 196608
+        options = negotiation[8:].split(b"\0")[:-1]
+        assert option_count == len(options)
+        assert sorted(options) == expected_options
+    else:
+        assert negotiations == [], messages
     statuses = {}
     for kind, body in messages:
         if kind != b"S":
@@ -639,7 +656,8 @@ def main():
         second_sock = socket.socket()
         second_sock.settimeout(SOCKET_TIMEOUT)
         second_sock.connect(("127.0.0.1", port))
-        startup(second_sock, "alice", "info")
+        startup(second_sock, "alice", "info", protocol_version=196610,
+                protocol_options={"_pq_.unsupported_test": "1"})
         runtime_limited_sock = socket.socket()
         runtime_limited_sock.connect(("127.0.0.1", port))
         assert wait_for_disconnect(runtime_limited_sock), \
@@ -649,6 +667,15 @@ def main():
         second_sock.close()
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "SET GLOBAL max_connections = 64"))
+        malformed_startup_sock = socket.socket()
+        malformed_startup_sock.settimeout(SOCKET_TIMEOUT)
+        malformed_startup_sock.connect(("127.0.0.1", port))
+        malformed_startup_sock.sendall(frame(
+            struct.pack("!I", 196608) + b"user\0alice\0"))
+        kind, body = read_message(malformed_startup_sock)
+        assert kind == b"E" and b"C08P01\0" in body, (kind, body)
+        assert wait_for_disconnect(malformed_startup_sock)
+        malformed_startup_sock.close()
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "SET GLOBAL max_notify_queue_pages = 2"))
         assert setting_value(simple_query(sock, "SELECT * FROM pg_settings"),

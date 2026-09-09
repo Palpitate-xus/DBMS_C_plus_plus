@@ -222,25 +222,37 @@ bool PostgresProtocol::readStartup(PgStartupMessage& startup, std::string& error
         return false;
     }
     startup.protocolVersion = readUInt32(body, 0);
-    if (startup.protocolVersion != kProtocol30) {
+    if ((startup.protocolVersion >> 16) != (kProtocol30 >> 16)) {
         error = "unsupported PostgreSQL protocol version";
         return false;
     }
 
     size_t offset = 4;
+    bool terminated = false;
     while (offset < body.size()) {
         std::string key;
         if (!readCString(body, offset, key)) {
             error = "malformed startup parameter";
             return false;
         }
-        if (key.empty()) break;
+        if (key.empty()) {
+            terminated = true;
+            break;
+        }
         std::string value;
         if (!readCString(body, offset, value)) {
             error = "malformed startup parameter value";
             return false;
         }
-        startup.parameters[std::move(key)] = std::move(value);
+        if (key.rfind("_pq_.", 0) == 0) {
+            startup.unsupportedProtocolOptions.push_back(std::move(key));
+        } else {
+            startup.parameters[std::move(key)] = std::move(value);
+        }
+    }
+    if (!terminated || offset != body.size()) {
+        error = "invalid startup packet layout: expected terminator as last byte";
+        return false;
     }
     return true;
 }
@@ -353,6 +365,19 @@ bool PostgresProtocol::sendAuthenticationSaslFinal(const std::string& data) {
     appendUInt32(body, 12);
     appendCString(body, data);
     return sendMessage('R', body);
+}
+
+bool PostgresProtocol::sendNegotiateProtocolVersion(
+    uint32_t supportedVersion,
+    const std::vector<std::string>& unsupportedOptions) {
+    if (unsupportedOptions.size() > std::numeric_limits<uint32_t>::max()) {
+        return false;
+    }
+    std::vector<uint8_t> body;
+    appendUInt32(body, supportedVersion);
+    appendUInt32(body, static_cast<uint32_t>(unsupportedOptions.size()));
+    for (const auto& option : unsupportedOptions) appendCString(body, option);
+    return sendMessage('v', body);
 }
 
 bool PostgresProtocol::sendParameterStatus(const std::string& name, const std::string& value) {

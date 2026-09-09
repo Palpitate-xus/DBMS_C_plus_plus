@@ -1857,6 +1857,15 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         }
     }
     if (!authenticationCompleted) return;
+    constexpr uint32_t supportedProtocolVersion = 0x00030000;
+    if ((startup.protocolVersion & 0xffffU) != 0 ||
+        !startup.unsupportedProtocolOptions.empty()) {
+        if (!protocol.sendNegotiateProtocolVersion(
+                supportedProtocolVersion,
+                startup.unsupportedProtocolOptions)) {
+            return;
+        }
+    }
 
     Session session;
     session.compatibilityMode = dbms::defaultCompatibilityMode();

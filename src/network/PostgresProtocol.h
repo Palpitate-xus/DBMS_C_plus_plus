@@ -15,6 +15,7 @@ namespace dbms {
 struct PgStartupMessage {
     uint32_t protocolVersion = 0;
     std::map<std::string, std::string> parameters;
+    std::vector<std::string> unsupportedProtocolOptions;
 };
 
 struct PgFrontendMessage {
@@ -48,6 +49,9 @@ public:
     bool sendAuthenticationSasl(const std::vector<std::string>& mechanisms);
     bool sendAuthenticationSaslContinue(const std::string& data);
     bool sendAuthenticationSaslFinal(const std::string& data);
+    bool sendNegotiateProtocolVersion(
+        uint32_t supportedVersion,
+        const std::vector<std::string>& unsupportedOptions);
     bool sendParameterStatus(const std::string& name, const std::string& value);
     bool sendBackendKeyData(uint32_t processId, uint32_t secretKey);
     bool sendReadyForQuery(char transactionStatus = 'I');
