@@ -283,6 +283,8 @@
 
 | 369 | DIV-14 | `SHOW dbms.extensions` 仍输出已被删除的 `compat_object_record_layer enabled`，MANUAL 也声称 extended 模式会恢复旧兼容对象记录；用户会据此误判假对象层仍存在并可用。运行时改为只声明真实的 `project_sql_extensions`，默认模式显示 none；手册明确 extended 不会解锁无运行时对象，旧记录层和 SHOW 入口已删除 | no-fake 静态门同时扫描源码与手册中的旧声明；DIV capability E2E 对两种模式的审计输出做正/负断言，并与全套 capability/file-side-effect 检查一起通过。main O2 生产重链通过；DIV-14 保持 complete | `e98011e` |
 
+| 370 | DIV-11 | MySQL 风格的 `SHOW VARIABLES` 和 `SET @variable` 可从默认 postgresql18 模式进入，extended 的 `SET GLOBAL` 还可在显式事务内改变配置；同时复现 `SET @project_value = 7` 报成功但下一条 `SELECT @project_value` 返回 NULL，因为旧替换只改 normalized SQL，而 fromless SELECT 重新使用未替换的 raw SQL。默认模式现分别返回 42704/42601，事务内 extended `SET GLOBAL` 返回 25001；extended 会话变量改用识别引号、E-string、dollar quote、行/嵌套块注释的 raw SQL 扫描，并把同一 effective SQL 送入各执行分支 | DIV capability E2E 覆盖两个默认模式负向门、跨协议查询变量保留、普通及 dollar-quoted 字面量不替换、事务回滚；main O0/O2 编译与生产重链、完整协议回归和真实 PostgreSQL 差分 122/122 通过。DIV-11 改为 partial：`SET GLOBAL` 仍会立即改全局运行值，尚未达到蓝图要求的持久化/重载/重启语义 | `05e1aa1` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
