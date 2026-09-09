@@ -618,6 +618,34 @@ ROLLBACK PREPARED 'txn_001';
 
 包含跨语句 DDL CREATE undo 的事务暂不支持 `PREPARE TRANSACTION`；请先完成 `COMMIT` 或 `ROLLBACK`。
 
+### 顾问锁
+
+顾问锁按当前数据库和 key 隔离；单个 `bigint` 与两个 `integer` 使用不同
+namespace。session 锁保持到匹配次数的 unlock、`pg_advisory_unlock_all()`、
+`DISCARD ALL`、切库或断连；transaction 锁在提交/回滚时自动释放，并遵循
+保存点回滚。shared holder 可以并存，exclusive holder 与其他 session 冲突；
+`pg_try_*` 立即返回 `boolean`，非 try 形式会等待。
+
+```sql
+SELECT pg_advisory_lock(42);                 -- void
+SELECT pg_try_advisory_lock(42);             -- boolean
+SELECT pg_advisory_unlock(42);               -- boolean
+SELECT pg_advisory_lock_shared(1, 2);
+SELECT pg_try_advisory_lock_shared(1, 2);
+SELECT pg_advisory_unlock_shared(1, 2);
+
+BEGIN;
+SELECT pg_advisory_xact_lock(-42);
+SELECT pg_try_advisory_xact_lock_shared(7, 9);
+COMMIT;
+
+SELECT pg_advisory_unlock_all();             -- void
+```
+
+函数也接受显式 `pg_catalog.` 限定名和输出列别名。`pg_locks` 当前会列出
+顾问锁的 key、mode 与 granted/waiting 状态；完整 PostgreSQL locktag、
+fastpath、waitstart 及 predicate-lock 列仍由 `MON-05` 跟踪。
+
 ---
 
 ## 8. 索引

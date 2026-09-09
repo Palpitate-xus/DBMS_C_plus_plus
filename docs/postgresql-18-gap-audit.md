@@ -289,7 +289,7 @@
 - [ ] **TXN-07** 完整 heavyweight lock modes/conflict matrix、fast-path locks、lock queue fairness、deadlock soft edge/reorder 和 wait events。
 - [ ] **TXN-08** tuple locks、MultiXact、key-share/no-key-update、EPQ 和 FK/unique 冲突的锁规则。
 - [ ] **TXN-09** predicate lock 在 relation/page/tuple/index range 间升级，覆盖所有访问方法和空范围。
-- [ ] **TXN-10** advisory lock 的 session/transaction 两类、two-int key、shared/exclusive、try-lock 和 cleanup。
+- [x] **TXN-10** advisory lock 的 session/transaction 两类、two-int key、shared/exclusive、try-lock 和 cleanup。
 - [ ] **TXN-11** commit/abort/group commit 顺序、synchronous_commit 级别、commit timestamp 和 WAL flush wait。
 - [ ] **TXN-12** LISTEN/NOTIFY 在事务提交后投递、rollback 丢弃、payload/channel 规则、跨 session/backend 队列和协议异步通知。
 - [ ] **VAC-01** VACUUM 的 prune/freeze/index cleanup/truncate、visibility/freeze map、failsafe 和 wraparound 防护。

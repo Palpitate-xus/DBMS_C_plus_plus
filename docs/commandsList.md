@@ -837,6 +837,33 @@ COMMIT;
 
 ---
 
+### Advisory lock functions
+
+**语法**
+```sql
+SELECT pg_advisory_lock(bigint)
+SELECT pg_advisory_lock(integer, integer)
+SELECT pg_advisory_lock_shared(...)
+SELECT pg_try_advisory_lock(...)
+SELECT pg_try_advisory_lock_shared(...)
+SELECT pg_advisory_xact_lock(...)
+SELECT pg_advisory_xact_lock_shared(...)
+SELECT pg_try_advisory_xact_lock(...)
+SELECT pg_try_advisory_xact_lock_shared(...)
+SELECT pg_advisory_unlock(...)
+SELECT pg_advisory_unlock_shared(...)
+SELECT pg_advisory_unlock_all()
+```
+
+**说明** 单 `bigint` 和双 `integer` key namespace 相互独立并按数据库隔离。
+session 形式支持重入，每次调用 unlock 只释放一次；transaction 形式在事务
+结束自动释放，并支持保存点回滚。shared 锁可由多个 backend 同时持有，
+exclusive 锁与其他 backend 冲突；`pg_try_*` 不等待。成功的 lock/xact-lock/
+unlock-all 返回非 NULL 的 `void` 空值，try/unlock 返回 `boolean`，NULL 参数
+遵循 strict 函数语义。
+
+---
+
 ### CHECKPOINT
 
 **语法**
