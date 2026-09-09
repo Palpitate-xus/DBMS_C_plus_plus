@@ -159,6 +159,8 @@
 
 | 307 | P0-01 / SQL-04 / QRY-03 | 两表 JOIN 解析 `ON` 等式后立即丢弃限定符，并固定把等号左操作数传作左表键；`ON right.key = left.key` 及两表列名可唯一解析的反向裸列条件都静默返回空集。解析器现在保留两侧限定符，以表名/别名或唯一 schema 归属识别操作数来源，必要时交换引擎键而不改变 SQL 语义 | `join_type_protocol_e2e_test` 覆盖反向别名限定键、反向裸键和反向 `LEFT JOIN` 的 NULL 扩展行，并核对 rows/header/OID/tag；三条结果与真实 PostgreSQL 一致，递归 CTE、null-key、多表 JOIN、结构化、字面量、DIV-14、O0/O2 及完整差分 `cases=122 failed=0` 通过 | `b16ab01` |
 
+| 308 | P0-02 / SQL-12 / TYPE-02 / DML-01 / DML-05 / QRY-05 / PROTO-04 | data-modifying CTE 手工删除 RETURNING 后执行 DML：INSERT 再按逗号和空格重拆 `VALUES`，UPDATE/DELETE 则在修改前用文本 SELECT 预读；结果是多行 INSERT 不完整、含空格文本截断、UPDATE 返回旧值、NULL 边界丢失且临时列全部退化为 text。CTE 现在只执行原始 DML 一次，并直接物化 DML 执行器发布的 typed cells/NULL 位图；无列 metadata-only 结果不会再从状态文本猜 header | 新增 `dml_cte_protocol_e2e_test` 覆盖多行 INSERT、空格、空串、字面量 `NULL`、SQL NULL、UPDATE 后值、DELETE NULL、CTE 列别名及最终持久化状态；rows/header/OID/tag 与真实 PostgreSQL 逐条一致；DML tag、CTE、派生表、结构化、DIV-14、O0/O2 及完整差分 `cases=122 failed=0` 通过 | `9a928c0` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
