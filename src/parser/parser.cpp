@@ -2254,7 +2254,7 @@ static SelectItem parseSelectItem(const std::vector<std::string>& tokens, size_t
         if (pos < tokens.size()) item.alias = tokens[pos++];
     } else if (pos < tokens.size() && !SQLParser::isKeyword(tokens[pos])
                && tokens[pos] != "," && tokens[pos] != "from"
-               && tokens[pos] != ")") {
+               && tokens[pos] != ")" && tokens[pos] != ";") {
         // Implicit alias (no AS keyword)
         item.alias = tokens[pos++];
     }
