@@ -153,6 +153,8 @@
 
 | 304 | P0-02 / SQL-12 / TYPE-02 / QRY-02 / QRY-03 / PROTO-04 | LATERAL 仍把左右结果拼成显示字符串再按空白物化，左值 NULL 又被替换成空字面量，导致空格文本、空串、字面量 `NULL`、SQL NULL 和多匹配行失真；空左表甚至把未处理的 LATERAL 语法交给普通 FROM 并报缺表。左扫描现在保留 RID/NULL，逐左行子查询保留结构化 cells/NULL，组合后通过 `SqlRow` 物化；空左表以 NULL 关联值探测右侧 descriptor 并返回有类型的空结果 | `derived_type_protocol_e2e_test` 覆盖 CROSS/逗号 LATERAL、左右空格/空串/字面量 `NULL`/SQL NULL、一个左行多个右行、空左表、列名、OID 和 tag；字面量、结构化协议、DIV-14、O2 构建及实际 PostgreSQL `cases=122 failed=0` 通过 | `94d03c7` |
 
+| 305 | P0-02 / QRY-05 | 每次嵌套 SELECT 结束都清空 session 的全部查询临时表；同一 `WITH` 中两个兄弟 CTE 共享较早 CTE 时，第一个兄弟执行完会提前删除共享关系，第二个兄弟因而报缺表。查询级 RAII 清理器现在进入 SELECT 时记录继承集合，只删除当前调用新建的 CTE/派生临时表，父查询所有权保持到父查询结束 | `derived_type_protocol_e2e_test` 覆盖共享前置 CTE、两个兄弟读取者以及空格、空串、字面量 `NULL`、SQL NULL、首尾空白和换行；CTE 边界、字面量、无 FROM、review SQL、DIV-14、O0/O2 构建及实际 PostgreSQL `cases=122 failed=0` 通过 | `62d7269` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
