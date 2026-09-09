@@ -195,6 +195,8 @@
 
 | 325 | P0-07 / TXN-02 | REPEATABLE READ/SERIALIZABLE 在 BEGIN 内立即固定 ReadView；并发事务若在 BEGIN 后、首条数据语句前提交，其行会在整个事务中错误地保持不可见。事务上下文现在区分“预置 ReadView”与“已取得 snapshot”：READ COMMITTED/UNCOMMITTED 仍在每条命令刷新，RR/Serializable 在首次表读、写或 snapshot export 时取得并固定；导入 snapshot 明确标记已取得，显式历史 ReadView 扫描不覆盖当前事务状态 | `snapshot_export_import_test` 修复前稳定在首条 RR 查询失败，现验证 BEGIN 后首语句前提交可见，并保持后续 snapshot 稳定；原有 export/import、跨库/读写后拒绝、command ID、RC/RU 语句 snapshot 全部通过。subxip、prepared transaction、完整 MVCC update、concurrency、隔离协议、DML CTE、O0/O2 及 122 组 PostgreSQL 差分全部通过 | `bbb31f0` |
 
+| 326 | TXN-02 / DML-01 / PROTO-08 | `SET TRANSACTION READ ONLY/WRITE` 虽被分类为事务命令，却落入普通参数设置并报错；BEGIN READ ONLY 的持久表写入又只返回通用参数错误，且存储层连 PostgreSQL 允许的既有 session 临时表写入也一并禁止。执行器现在真正切换事务读模式：READ ONLY 可在读取后收紧，READ WRITE 仅能在只读事务首次查询前放宽；typed DML 在任何触发器、序列或堆副作用前以 `25006` 拒绝持久关系写入，存储层仍作纵深保护但允许 session 临时关系 | 协议回归修复前稳定把合法 `SET TRANSACTION READ ONLY` 报为 `XX000`，修复后覆盖读取后收紧、持久 INSERT 的 `25006` 和 failed-transaction 恢复、首次查询前放宽、读取后放宽的 `25001`，以及只读事务写既有临时表；snapshot、完整 PostgreSQL 协议、相关 O0/O2 编译及 122 组 PostgreSQL 差分全部通过 | `eef8233` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
