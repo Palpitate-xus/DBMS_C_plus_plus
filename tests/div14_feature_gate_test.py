@@ -38,6 +38,7 @@ simple_query = _helpers.simple_query
 read_until_ready = _helpers.read_until_ready
 write_auth_catalog = _helpers.write_auth_catalog
 setting_value = _helpers.setting_value
+data_row_values = _helpers.data_row_values
 
 
 def error_of(messages):
@@ -445,6 +446,8 @@ def main():
                      "MySQL SHOW VARIABLES", "variables")
         expect_error(sock, "SET @project_value = 7", "42601",
                      "MySQL user variable")
+        missing_reload = simple_query(sock, "SELECT pg_reload_conf()")
+        assert data_row_values(missing_reload) == [[b"f"]], missing_reload
         # Plain SET on the same parameter remains valid PostgreSQL syntax.
         expect_command_tag(sock, "SET statement_timeout = 1234", "plain SET")
 
@@ -512,9 +515,7 @@ def main():
         assert "auto_analyze=off\n" in persisted, persisted
         assert error_of(simple_query(sock, "SHOW VARIABLES")) is None
         reload_messages = simple_query(sock, "SELECT pg_reload_conf()")
-        assert error_of(reload_messages) is None, reload_messages
-        assert any(kind == b"C" for kind, _body in reload_messages), \
-            reload_messages
+        assert data_row_values(reload_messages) == [[b"t"]], reload_messages
         assert setting_value(simple_query(sock, "SELECT * FROM pg_settings"),
                              "auto_vacuum") == b"off"
         expect_command_tag(sock, "SET @project_value = 7",

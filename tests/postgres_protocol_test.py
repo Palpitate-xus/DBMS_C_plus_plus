@@ -665,8 +665,12 @@ def main():
         with open(os.path.join(work_dir, "dbms.conf"), encoding="utf-8") as config:
             assert "max_connections=2\n" in config.read()
         reload_messages = simple_query(sock, "SELECT pg_reload_conf()")
-        assert not any(kind == b"E" for kind, _ in reload_messages), \
-            reload_messages
+        assert data_row_values(reload_messages) == [[b"t"]], reload_messages
+        reload_fields = row_description_fields(reload_messages)
+        assert len(reload_fields) == 1, reload_fields
+        assert reload_fields[0][0] == b"pg_reload_conf", reload_fields
+        assert reload_fields[0][3] == 16, reload_fields
+        assert (b"C", b"SELECT 1\0") in reload_messages, reload_messages
         assert setting_value(simple_query(sock, "SELECT * FROM pg_settings"),
                              "max_connections") == b"1"
         assert any(kind == b"C" for kind, _ in simple_query(
@@ -713,8 +717,7 @@ def main():
         assert setting_value(simple_query(sock, "SELECT * FROM pg_settings"),
                              "max_notify_queue_pages") == b"1"
         reload_messages = simple_query(sock, "SELECT pg_reload_conf()")
-        assert not any(kind == b"E" for kind, _ in reload_messages), \
-            reload_messages
+        assert data_row_values(reload_messages) == [[b"t"]], reload_messages
         assert setting_value(simple_query(sock, "SELECT * FROM pg_settings"),
                              "max_notify_queue_pages") == b"1"
 
@@ -2401,8 +2404,7 @@ def main():
         assert any(b"[plan cache hit]" in row[0]
                    for row in data_row_values(third_plan))
         reload_messages = simple_query(observer_sock, "SELECT pg_reload_conf()")
-        assert not any(kind == b"E" for kind, _ in reload_messages), \
-            reload_messages
+        assert data_row_values(reload_messages) == [[b"t"]], reload_messages
         fourth_plan = simple_query(observer_sock, "EXPLAIN SELECT * FROM t")
         assert not any(b"[plan cache hit]" in row[0]
                        for row in data_row_values(fourth_plan))

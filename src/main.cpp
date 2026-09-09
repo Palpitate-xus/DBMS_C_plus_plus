@@ -13111,12 +13111,21 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 if (func == "pg_reload_conf") {
                     if (!checkAdmin(s)) return true;
                     dbms::Config reloaded = g_config;
-                    if (std::filesystem::exists("dbms.conf") &&
-                        reloaded.load("dbms.conf") && installReloadedConfig(reloaded)) {
-                        cout << "t" << endl;
-                    } else {
-                        cout << "f" << endl;
+                    const bool reloadOk =
+                        std::filesystem::exists("dbms.conf") &&
+                        reloaded.load("dbms.conf") &&
+                        installReloadedConfig(reloaded);
+                    if (shouldPublishQueryMetadata()) {
+                        dbms::DmlResult result;
+                        result.available = true;
+                        result.columns = {"pg_reload_conf"};
+                        result.columnTypes = {"bool"};
+                        result.rows = {{reloadOk ? "t" : "f"}};
+                        result.nulls = {{false}};
+                        result.commandTag = "SELECT 1";
+                        dbms::publishLastDmlResult(std::move(result));
                     }
+                    cout << (reloadOk ? "t" : "f") << endl;
                     return false;
                 }
                 if (func == "nextval" || func == "currval") {
