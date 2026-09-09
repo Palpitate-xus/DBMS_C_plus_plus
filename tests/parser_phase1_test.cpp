@@ -151,6 +151,31 @@ int main() {
         assert(c->columns.size() == 1);
         assert(c->columns[0].column == "created_at");
 
+        auto fulltext = parser.parse(
+            "CREATE FULLTEXT INDEX body_ft ON docs (body)");
+        assert(fulltext.success);
+        c = asCreateIndex(fulltext.stmt);
+        assert(c && c->indexName == "body_ft" &&
+               c->accessMethod == "fulltext" &&
+               c->compatibilityShortcut == "fulltext");
+
+        auto hash = parser.parse("CREATE HASH INDEX id_hash ON docs (id)");
+        assert(hash.success);
+        c = asCreateIndex(hash.stmt);
+        assert(c && c->indexName == "id_hash" &&
+               c->accessMethod == "hash" &&
+               c->compatibilityShortcut == "hash");
+
+        auto dropFulltext = parser.parse(
+            "DROP FULLTEXT INDEX body_ft ON docs");
+        assert(dropFulltext.success);
+        auto* dropIndex = dynamic_cast<DropStmt*>(dropFulltext.stmt.get());
+        assert(dropIndex && dropIndex->command == SqlCommand::DropIndex &&
+               dropIndex->compatibilityShortcut == "fulltext" &&
+               dropIndex->objectNames.size() == 1 &&
+               dropIndex->objectNames[0] == "body_ft" &&
+               dropIndex->tableName == "docs");
+
         auto qualifiedIndexName = parser.parse(
             "CREATE INDEX audit.events_created_idx ON audit.events (created_at)");
         assert(!qualifiedIndexName.success);

@@ -25,6 +25,7 @@ int main() {
         {"create table t (a int)", SqlCommand::CreateTable},
         {"create index i on t (a)", SqlCommand::CreateIndex},
         {"create fulltext index fi on t (a)", SqlCommand::CreateFullTextIndex},
+        {"create hash index hi on t (a)", SqlCommand::CreateHashIndex},
         {"create aggregate agg(int) (SFUNC = f, STYPE = int)", SqlCommand::CreateAggregate},
         {"create assertion a check (1 = 1)", SqlCommand::CreateAssertion},
         {"create server s1 foreign data wrapper dummy", SqlCommand::CreateServer},

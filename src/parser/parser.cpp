@@ -838,6 +838,7 @@ SqlCommand SQLParser::classify(const std::string& sql) {
         if (rest.compare(0, 10, "aggregate ") == 0) return SqlCommand::CreateAggregate;
         if (rest.compare(0, 10, "assertion ") == 0) return SqlCommand::CreateAssertion;
         if (rest.compare(0, 15, "fulltext index ") == 0) return SqlCommand::CreateFullTextIndex;
+        if (rest.compare(0, 11, "hash index ") == 0) return SqlCommand::CreateHashIndex;
         if (rest.compare(0, 7, "server ") == 0) return SqlCommand::CreateServer;
         if (rest.substr(0, 10) == "transform ") return SqlCommand::CreateTransform;
         if (rest.substr(0, 9) == "language ") return SqlCommand::CreateLanguage;
@@ -1097,6 +1098,7 @@ ParseResult SQLParser::parse(const std::string& sql) {
             return parseValues(sql);
 
         case SqlCommand::CreateTable: case SqlCommand::CreateIndex:
+        case SqlCommand::CreateFullTextIndex: case SqlCommand::CreateHashIndex:
         case SqlCommand::CreateView: case SqlCommand::CreateDatabase:
         case SqlCommand::CreateSchema: case SqlCommand::CreateSequence:
         case SqlCommand::CreateDomain: case SqlCommand::CreateType:
@@ -1121,6 +1123,7 @@ ParseResult SQLParser::parse(const std::string& sql) {
             return parseCreate(sql);
 
         case SqlCommand::DropTable: case SqlCommand::DropIndex:
+        case SqlCommand::DropFullTextIndex:
         case SqlCommand::DropView: case SqlCommand::DropMaterializedView:
         case SqlCommand::DropDatabase: case SqlCommand::DropSchema:
         case SqlCommand::DropSequence: case SqlCommand::DropDomain:
@@ -3338,6 +3341,18 @@ ParseResult SQLParser::parseCreate(const std::string& sql) {
         } else if (kw == "index") {
             r.stmt = parseCreateIndex(tokens, pos);
             if (r.stmt && isUnique) static_cast<CreateIndexStmt*>(r.stmt.get())->unique = true;
+        } else if (kw == "fulltext" || kw == "hash") {
+            if (!match(tokens, pos, "index")) {
+                r.stmt.reset();
+            } else {
+                ++pos;
+                r.stmt = parseCreateIndex(tokens, pos);
+                if (r.stmt) {
+                    auto* index = static_cast<CreateIndexStmt*>(r.stmt.get());
+                    index->accessMethod = kw;
+                    index->compatibilityShortcut = kw;
+                }
+            }
         } else if (kw == "view") {
             r.stmt = parseCreateView(tokens, pos);
             if (r.stmt) static_cast<CreateViewStmt*>(r.stmt.get())->replace = isReplace;
@@ -3466,6 +3481,18 @@ ParseResult SQLParser::parseDrop(const std::string& sql) {
     } else if (match(tokens, pos, "index")) {
         pos++;
         r.stmt = parseDropIndex(tokens, pos);
+    } else if (match(tokens, pos, "fulltext")) {
+        ++pos;
+        if (!match(tokens, pos, "index")) {
+            r.stmt.reset();
+        } else {
+            ++pos;
+            r.stmt = parseDropIndex(tokens, pos);
+            if (r.stmt) {
+                static_cast<DropStmt*>(r.stmt.get())->compatibilityShortcut =
+                    "fulltext";
+            }
+        }
     } else if (match(tokens, pos, "view")) {
         pos++;
         r.stmt = parseDropView(tokens, pos);

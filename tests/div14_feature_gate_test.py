@@ -388,6 +388,7 @@ def main():
         # DIV-07: MySQL-style fulltext shortcut syntax -> 42601.
         for sql, hint in [
             ("CREATE FULLTEXT INDEX fi ON t6d (a)", "USING gin"),
+            ("CREATE HASH INDEX hi ON t6d (a)", "USING hash"),
             ("DROP FULLTEXT INDEX fi ON t6d", "DROP INDEX"),
         ]:
             messages = simple_query(sock, sql)
@@ -576,6 +577,27 @@ def main():
             "CREATE TABLE t6aliases (a TINYINT, b DATETIME, c NVARCHAR(4), "
             "d LONG, e BLOB, f NCHAR(4), g BINARY(4), h VARBINARY(4))",
             "extended type aliases")
+
+        # DIV-07 extended mode: shortcut syntax must use the same named-index
+        # metadata and physical lifecycle as canonical CREATE/DROP INDEX.
+        expect_command_tag(sock, "CREATE TABLE t7e (id INTEGER, body TEXT)",
+                           "extended shortcut-index table")
+        expect_command_tag(sock, "INSERT INTO t7e VALUES (1, 'hello world')",
+                           "extended shortcut-index row")
+        expect_command_tag(sock, "CREATE HASH INDEX id_hash ON t7e (id)",
+                           "extended HASH shortcut")
+        expect_command_tag(sock, "DROP INDEX id_hash",
+                           "canonical drop of HASH shortcut")
+        expect_command_tag(
+            sock, "CREATE FULLTEXT INDEX body_ft ON t7e (body)",
+            "extended FULLTEXT shortcut")
+        expect_command_tag(sock, "DROP INDEX body_ft",
+                           "canonical drop of FULLTEXT shortcut")
+        expect_command_tag(
+            sock, "CREATE FULLTEXT INDEX body_ft2 ON t7e (body)",
+            "second extended FULLTEXT shortcut")
+        expect_command_tag(sock, "DROP FULLTEXT INDEX body_ft2 ON t7e",
+                           "shortcut drop of FULLTEXT shortcut")
 
         # A malformed publication sidecar must fail the whole catalog scan;
         # SHOW must not silently hide it or expose a partial snapshot.

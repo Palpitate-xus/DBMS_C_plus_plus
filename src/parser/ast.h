@@ -37,6 +37,7 @@ enum class SqlCommand {
     CreateTableAs,
     CreateIndex,
     CreateFullTextIndex,
+    CreateHashIndex,
     CreateView,
     CreateMaterializedView,
     CreateDatabase,
@@ -462,6 +463,7 @@ public:
             case SqlCommand::CreateTable: return "CREATE TABLE";
             case SqlCommand::CreateIndex: return "CREATE INDEX";
             case SqlCommand::CreateFullTextIndex: return "CREATE FULLTEXT INDEX";
+            case SqlCommand::CreateHashIndex: return "CREATE HASH INDEX";
             case SqlCommand::CreateView: return "CREATE VIEW";
             case SqlCommand::CreateMaterializedView: return "CREATE MATERIALIZED VIEW";
             case SqlCommand::CreateDatabase: return "CREATE DATABASE";
@@ -866,6 +868,7 @@ struct CreateIndexStmt : public Stmt {
     std::string tableName;
     std::vector<IndexElem> columns;
     std::string accessMethod;  // btree, hash, gin, gist, brin, spgist
+    std::string compatibilityShortcut; // fulltext/hash when written before INDEX
     bool unique = false;
     bool ifNotExists = false;
     bool concurrently = false;
@@ -907,6 +910,7 @@ struct DropStmt : public Stmt {
     bool ifExists = false;
     bool cascade = false;
     bool concurrently = false; // DROP INDEX CONCURRENTLY
+    std::string compatibilityShortcut; // fulltext for DROP FULLTEXT INDEX
 
     DropStmt(SqlCommand cmd = SqlCommand::DropTable) : Stmt(cmd) {}
     std::string toString() const override { return "DROP"; }

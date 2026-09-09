@@ -9,6 +9,7 @@
 #include "catalog/systables.h"
 #include "access/IndexFileUtil.h"
 #include "common/logs.h"
+#include "common/FeatureGate.h"
 #include "common/scram_sha256.h"
 #include "permissions.h"
 #include <algorithm>
@@ -1248,7 +1249,10 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         case dbms::SqlCommand::DropTable:
         case dbms::SqlCommand::AlterTable:
         case dbms::SqlCommand::CreateIndex:
+        case dbms::SqlCommand::CreateFullTextIndex:
+        case dbms::SqlCommand::CreateHashIndex:
         case dbms::SqlCommand::DropIndex:
+        case dbms::SqlCommand::DropFullTextIndex:
         case dbms::SqlCommand::CreateSequence:
         case dbms::SqlCommand::AlterSequence:
         case dbms::SqlCommand::DropSequence:
@@ -5638,6 +5642,17 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
 
 bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
     if (!stmt) return false;
+    if (!stmt->compatibilityShortcut.empty() &&
+        !isExtendedCompatMode(s.compatibilityMode)) {
+        const std::string canonical = stmt->compatibilityShortcut == "hash"
+            ? "CREATE INDEX ... USING hash"
+            : "CREATE INDEX ... USING gin (to_tsvector(col))";
+        std::cout << "SQL syntax error: CREATE "
+                  << (stmt->compatibilityShortcut == "hash" ? "HASH" : "FULLTEXT")
+                  << " INDEX is not PostgreSQL syntax; use " << canonical
+                  << " (SQLSTATE 42601)" << std::endl;
+        return true;
+    }
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
@@ -5752,6 +5767,15 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
             std::cout << "HASH index only supports single column" << std::endl;
             return true;
         }
+    } else if (am == "fulltext") {
+        if (stmt->unique || stmt->concurrently || colnames.size() != 1 ||
+            colnames.front().empty() || stmt->columns.front().expr) {
+            std::cout << "FULLTEXT index requires one plain non-unique column"
+                      << std::endl;
+            return true;
+        }
+        res = g_engine.createFullTextIndex(s.currentDB, tname,
+                                           colnames.front());
     } else if (am == "bloom") {
         if (colnames.size() == 1) {
             res = g_engine.createBloomIndex(s.currentDB, tname, colnames.front());
@@ -5790,6 +5814,7 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
         else if (physicalMethod == "gist") g_engine.dropGiSTIndex(s.currentDB, tname, physicalKey);
         else if (physicalMethod == "brin") g_engine.dropBrinIndex(s.currentDB, tname, physicalKey);
         else if (physicalMethod == "spgist") g_engine.dropSPGiSTIndex(s.currentDB, tname, physicalKey);
+        else if (physicalMethod == "fulltext") g_engine.dropFullTextIndex(s.currentDB, tname, physicalKey);
         else g_engine.dropIndex(s.currentDB, tname, physicalKey);
     };
     if (!g_engine.registerIndexName(s.currentDB, tname, idxName, physicalMethod, physicalKey)) {
@@ -5878,6 +5903,12 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
 
 bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
     if (!stmt) return true;
+    if (!stmt->compatibilityShortcut.empty() &&
+        !isExtendedCompatMode(s.compatibilityMode)) {
+        std::cout << "SQL syntax error: DROP FULLTEXT INDEX is not PostgreSQL "
+                     "syntax; use DROP INDEX (SQLSTATE 42601)" << std::endl;
+        return true;
+    }
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
     if (stmt->objectNames.empty()) {
