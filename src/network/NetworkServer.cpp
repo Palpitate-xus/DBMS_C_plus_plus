@@ -11,6 +11,7 @@
 #include "utils/pg_hba.h"
 #include "common/scram_sha256.h"
 #include "common/FeatureGate.h"
+#include "common/NotificationManager.h"
 #include "catalog/CatalogService.h"
 #include "catalog/systables.h"
 #include "common/DateType.h"
@@ -1685,6 +1686,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         Session* session;
         ~BackendSessionGuard() {
             if (session) {
+                notificationManager().disconnect(session->pid);
                 for (const auto& name : session->tempTables) {
                     g_engine.dropTable(session->currentDB,
                                        tempTablePrefix(*session, name));

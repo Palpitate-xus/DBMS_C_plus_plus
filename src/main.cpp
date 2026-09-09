@@ -24,6 +24,7 @@
 #include "storage/PageCrypto.h"
 #include "common/version.h"
 #include "common/FeatureGate.h"
+#include "common/NotificationManager.h"
 #include "replication/ReplicationManager.h"
 #include "logs.h"
 #include "permissions.h"
@@ -234,23 +235,14 @@ void logSlowQuery(const std::string& sql, double ms,
                   const std::string& username = "",
                   const std::string& dbname = "");
 
-// ========================================================================
-// NOTIFY / LISTEN async messaging
-// ========================================================================
-static std::mutex g_notifyMutex;
-static std::map<std::string, std::set<std::string>> g_listeners; // channel -> usernames
-static std::map<std::string, std::vector<std::pair<std::string, std::string>>> g_pendingNotifies; // username -> [(channel, payload)]
-
 static void checkNotifications(Session& s) {
-    std::lock_guard<std::mutex> lock(g_notifyMutex);
-    auto it = g_pendingNotifies.find(s.username);
-    if (it != g_pendingNotifies.end()) {
-        for (const auto& np : it->second) {
-            std::cout << "NOTIFY " << np.first;
-            if (!np.second.empty()) std::cout << " " << np.second;
-            std::cout << std::endl;
+    for (const auto& notification :
+         dbms::notificationManager().takePending(s.pid)) {
+        std::cout << "NOTIFY " << notification.channel;
+        if (!notification.payload.empty()) {
+            std::cout << " " << notification.payload;
         }
-        g_pendingNotifies.erase(it);
+        std::cout << std::endl;
     }
 }
 
@@ -13218,10 +13210,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 cout << "SQL syntax error: LISTEN channel" << endl;
                 return true;
             }
-            {
-                std::lock_guard<std::mutex> lock(g_notifyMutex);
-                g_listeners[channel].insert(s.username);
-            }
+            dbms::notificationManager().listen(s.pid, channel);
             s.listenedChannels.insert(channel);
             cout << "LISTEN " << channel << endl;
             return false;
@@ -13242,15 +13231,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 cout << "SQL syntax error: NOTIFY channel [, payload]" << endl;
                 return true;
             }
-            {
-                std::lock_guard<std::mutex> lock(g_notifyMutex);
-                auto it = g_listeners.find(channel);
-                if (it != g_listeners.end()) {
-                    for (const auto& uname : it->second) {
-                        g_pendingNotifies[uname].push_back({channel, payload});
-                    }
-                }
-            }
+            dbms::notificationManager().publish(s.pid, channel, payload);
             cout << "NOTIFY " << channel << endl;
             return false;
         }
@@ -13258,25 +13239,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
         case dbms::SqlCommand::Unlisten: {
             string channel = trim(sql.substr(8));
             if (channel == "*") {
-                std::lock_guard<std::mutex> lock(g_notifyMutex);
-                for (const auto& ch : s.listenedChannels) {
-                    auto it = g_listeners.find(ch);
-                    if (it != g_listeners.end()) {
-                        it->second.erase(s.username);
-                        if (it->second.empty()) g_listeners.erase(it);
-                    }
-                }
+                dbms::notificationManager().unlistenAll(s.pid);
                 s.listenedChannels.clear();
                 cout << "UNLISTEN *" << endl;
             } else if (!channel.empty()) {
-                {
-                    std::lock_guard<std::mutex> lock(g_notifyMutex);
-                    auto it = g_listeners.find(channel);
-                    if (it != g_listeners.end()) {
-                        it->second.erase(s.username);
-                        if (it->second.empty()) g_listeners.erase(it);
-                    }
-                }
+                dbms::notificationManager().unlisten(s.pid, channel);
                 s.listenedChannels.erase(channel);
                 cout << "UNLISTEN " << channel << endl;
             } else {
@@ -24742,6 +24709,7 @@ int main(int argc, char* argv[]) {
             }
         }
         cleanupSessionTempTables(s);
+        dbms::notificationManager().disconnect(s.pid);
         dbms::unregisterProcess(pid);
     } else {
         cout << "wrong username or password" << endl;
