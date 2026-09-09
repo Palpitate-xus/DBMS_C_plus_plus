@@ -263,6 +263,8 @@
 
 | 359 | PROTO-03 | 同名 named prepared statement 和 portal 原被 `map::operator[]` 静默覆盖，客户端可能在认为创建失败或对象稳定时执行替换后的 SQL。Named Parse/Bind 现在分别返回 PostgreSQL 的 `42P05` / `42P03` 并进入 ignore-until-Sync，原对象不变；空名称仍允许替换，新的 unnamed Parse 只失效 unnamed portal，不误删已绑定的 named portal | 完整协议回归先创建 named statement/portal，再分别重复 Parse/Bind，验证精确 SQLSTATE、Sync 恢复，并执行原 portal 确认结果仍为原 SQL 的 21 而非覆盖 SQL 的 22；O0/O2 编译、生产重链和完整协议套件通过 | `c74bff8` |
 
+| 360 | PROTO-01 | startup 的 `server_version` 原为驱动无法按 PostgreSQL 版本规则解析的 `DBMS-C++ protocol/3.0`，且只发送少量 ParameterStatus，使客户端无法判断 server/client encoding、session identity、superuser、只读/standby 和 interval style。启动响应现以可解析的 `18.0 DBMS-C++ 0.2.0` 开头，并发送 PostgreSQL 连接常见的 13 项状态；`application_name` 回显 startup 值，身份/超级用户按认证角色生成 | 完整协议 startup helper 对每次连接逐字段、逐值且无多余项验证 ParameterStatus，覆盖 alice 超级用户、bob 非超级用户、跨库和明文 SSLRequest；O0/O2 编译、生产重链、完整协议与 DIV-14 通过 | `663d8c6` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
