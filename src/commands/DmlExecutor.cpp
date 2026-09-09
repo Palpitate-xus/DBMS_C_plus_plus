@@ -3420,6 +3420,30 @@ bool tryDmlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         return true;
     }
 
+    // Read-only transactions may mutate session-local temporary relations,
+    // but reject durable writes before triggers, sequences, or heap changes.
+    // Keeping this at the typed dispatch edge covers every supported DML
+    // shape and provides PostgreSQL's dedicated SQLSTATE.
+    if (g_engine.isReadOnly()) {
+        std::string target;
+        if (const auto* stmt = dynamic_cast<const InsertStmt*>(parsed.stmt.get())) {
+            target = identifier(stmt->tableName);
+        } else if (const auto* stmt = dynamic_cast<const UpdateStmt*>(parsed.stmt.get())) {
+            target = identifier(stmt->tableName);
+        } else if (const auto* stmt = dynamic_cast<const DeleteStmt*>(parsed.stmt.get())) {
+            target = identifier(stmt->tableName);
+        } else if (const auto* stmt = dynamic_cast<const MergeStmt*>(parsed.stmt.get())) {
+            target = identifier(stmt->targetTable);
+        }
+        if (!target.empty() && !isTempTable(s, target)) {
+            handled = true;
+            std::cout << "ERROR: cannot execute " << parsed.stmt->toString()
+                      << " in a read-only transaction (SQLSTATE 25006)"
+                      << std::endl;
+            return true;
+        }
+    }
+
     bool fallback = false;
     bool error = false;
     if (parsedCmd == SqlCommand::Insert) {

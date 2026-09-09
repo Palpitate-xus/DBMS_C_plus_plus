@@ -2061,6 +2061,30 @@ static bool handleSetCommand(const string& sql, Session& s) {
         return false;
     }
 
+    // SET TRANSACTION READ ONLY/WRITE changes transaction state; it must not
+    // fall through to the generic GUC parser. Tightening to READ ONLY is
+    // allowed after a query, but relaxing an already read-only transaction
+    // is only valid before its first query.
+    if (sql == "set transaction read only" ||
+        sql == "set transaction read only;" ||
+        sql == "set transaction read write" ||
+        sql == "set transaction read write;") {
+        if (!g_engine.inTransaction()) {
+            cout << "WARNING: SET TRANSACTION can only be used in transaction blocks"
+                 << endl;
+            return false;
+        }
+        const bool readOnly = sql.find("read only") != string::npos;
+        if (!g_engine.setReadOnly(readOnly)) {
+            cout << "ERROR: transaction read-write mode must be set before "
+                    "any query (SQLSTATE 25001)" << endl;
+            return true;
+        }
+        cout << "SET TRANSACTION " << (readOnly ? "READ ONLY" : "READ WRITE")
+             << endl;
+        return false;
+    }
+
     // SET TIMEZONE = '+08:00' | SET TIME ZONE '+08:00' | SET TIME ZONE 'UTC'
     if (sql.substr(0, 13) == "set timezone " || sql.substr(0, 14) == "set time zone ") {
         size_t off = (sql.substr(0, 13) == "set timezone ") ? 13 : 14;

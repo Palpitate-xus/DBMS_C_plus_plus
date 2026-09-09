@@ -703,7 +703,19 @@ public:
     // Transaction operations
     bool inTransaction() const { return transactionContext().inTransaction; }
     bool isReadOnly() const { return transactionContext().readOnly; }
-    void setReadOnly(bool ro) { transactionContext().readOnly = ro; }
+    bool setReadOnly(bool readOnly) {
+        auto& context = transactionContext();
+        // READ ONLY may tighten the transaction at any point. PostgreSQL only
+        // permits the opposite transition before the first query or write.
+        if (!readOnly && context.readOnly &&
+            (context.hasRead || context.hasWrite || !context.txnLog.empty() ||
+             !context.ddlUndoActions.empty() ||
+             !context.txnBackupPath.empty())) {
+            return false;
+        }
+        context.readOnly = readOnly;
+        return true;
+    }
     // DDL transactions opt into a physical backup after acquiring the
     // database-level snapshot lock; ordinary row transactions do not create
     // a full-database backup.

@@ -42,6 +42,61 @@ def main():
         _, state, message, _, _, _ = execute("ROLLBACK;")
         assert state is None, (state, message)
 
+        # SET TRANSACTION read modes are transaction characteristics, not
+        # configuration parameters.  Tightening an active transaction to
+        # READ ONLY is allowed even after a read, and every subsequent DML
+        # command must fail with PostgreSQL's read_only_sql_transaction code.
+        _, state, message, _, _, _ = execute("BEGIN;")
+        assert state is None, (state, message)
+        rows, state, message, _, _, _ = execute(
+            "SELECT id FROM isolation_guard;")
+        assert state is None and rows == [["1"]], (state, message, rows)
+        _, state, message, _, _, _ = execute("SET TRANSACTION READ ONLY;")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute(
+            "INSERT INTO isolation_guard VALUES (2);")
+        assert state == "25006", (state, message)
+        assert "read-only transaction" in message, message
+        _, state, message, _, _, _ = execute("ROLLBACK;")
+        assert state is None, (state, message)
+
+        # Relaxing READ ONLY after the transaction has taken a snapshot is
+        # forbidden, while doing so before the first query restores writes.
+        _, state, message, _, _, _ = execute("BEGIN READ ONLY;")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute("SET TRANSACTION READ WRITE;")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute(
+            "INSERT INTO isolation_guard VALUES (2);")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute("ROLLBACK;")
+        assert state is None, (state, message)
+
+        _, state, message, _, _, _ = execute(
+            "CREATE TEMP TABLE isolation_temp (id INT);")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute("BEGIN READ ONLY;")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute(
+            "INSERT INTO isolation_temp VALUES (9);")
+        assert state is None, (state, message)
+        rows, state, message, _, _, _ = execute(
+            "SELECT id FROM isolation_temp;")
+        assert state is None and rows == [["9"]], (state, message, rows)
+        _, state, message, _, _, _ = execute("COMMIT;")
+        assert state is None, (state, message)
+
+        _, state, message, _, _, _ = execute("BEGIN READ ONLY;")
+        assert state is None, (state, message)
+        rows, state, message, _, _, _ = execute(
+            "SELECT id FROM isolation_guard;")
+        assert state is None and rows == [["1"]], (state, message, rows)
+        _, state, message, _, _, _ = execute("SET TRANSACTION READ WRITE;")
+        assert state == "25001", (state, message)
+        assert "before any query" in message, message
+        _, state, message, _, _, _ = execute("ROLLBACK;")
+        assert state is None, (state, message)
+
         _, state, message, _, _, _ = execute("BEGIN;")
         assert state is None, (state, message)
         rows, state, message, _, _, _ = execute(

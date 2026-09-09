@@ -307,6 +307,18 @@ thread_local Session* g_currentSession = nullptr;
 void setCurrentSession(Session* s) { g_currentSession = s; }
 Session* currentSession() { return g_currentSession; }
 
+static bool isSessionTemporaryRelation(const std::string& tablename) {
+    const Session* session = currentSession();
+    if (!session) return false;
+    for (const auto& logicalName : session->tempTables) {
+        if (tempTablePrefix(*session, logicalName) == tablename) return true;
+    }
+    for (const auto& logicalName : session->transientTempTables) {
+        if (tempTablePrefix(*session, logicalName) == tablename) return true;
+    }
+    return false;
+}
+
 // ========================================================================
 // Row-Level Security helpers
 // ========================================================================
@@ -20390,7 +20402,10 @@ DBStatus StorageEngine::insertInternal(
         }
         transactionContext().hasWrite = true;
     }
-    if (transactionContext().readOnly) return DBStatus::INVALID_VALUE;
+    if (transactionContext().readOnly &&
+        !isSessionTemporaryRelation(tablename)) {
+        return DBStatus::INVALID_VALUE;
+    }
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     // Intention lock instead of a full table X lock: concurrent inserts into
     // different pages (and readers) proceed in parallel. Physical page state
@@ -22613,7 +22628,10 @@ DBStatus StorageEngine::insertDefaultValues(const std::string& dbname,
                                              const std::string& tablename,
                                              const TableSchema& tbl,
                                              std::vector<std::map<std::string, std::string>>* insertedRows) {
-    if (transactionContext().readOnly) return DBStatus::INVALID_VALUE;
+    if (transactionContext().readOnly &&
+        !isSessionTemporaryRelation(tablename)) {
+        return DBStatus::INVALID_VALUE;
+    }
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
 
     // Build row with DEFAULT values or NULL for each column.
@@ -22788,7 +22806,10 @@ DBStatus StorageEngine::removeInternal(
         }
         transactionContext().hasWrite = true;
     }
-    if (transactionContext().readOnly) return DBStatus::INVALID_VALUE;
+    if (transactionContext().readOnly &&
+        !isSessionTemporaryRelation(tablename)) {
+        return DBStatus::INVALID_VALUE;
+    }
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockIntentExclusive(tablename)) return DBStatus::LOCK_CONFLICT;
 
@@ -23969,7 +23990,10 @@ DBStatus StorageEngine::updateInternal(
         }
         transactionContext().hasWrite = true;
     }
-    if (transactionContext().readOnly) return DBStatus::INVALID_VALUE;
+    if (transactionContext().readOnly &&
+        !isSessionTemporaryRelation(tablename)) {
+        return DBStatus::INVALID_VALUE;
+    }
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
