@@ -52,8 +52,9 @@ struct Session {
 
     // Compatibility mode (gap DIV-01..DIV-14 framework): "postgresql18" is
     // the default and rejects project-only syntax with SQLSTATE 0A000;
-    // "extended" enables project extensions such as the compatibility-object
-    // record layer.
+    // "extended" enables only project extensions backed by a real runtime.
+    // It never turns unsupported PostgreSQL objects into metadata-only
+    // compatibility records.
     std::string compatibilityMode = "postgresql18";
 };
 
