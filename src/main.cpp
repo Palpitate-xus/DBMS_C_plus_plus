@@ -2222,6 +2222,11 @@ static bool handleSetCommand(const string& sql, Session& s) {
                 return true;
             }
             if (!checkAdmin(s)) return true;
+            if (g_engine.inTransaction()) {
+                cout << "ERROR: SET GLOBAL cannot run inside a transaction "
+                        "block (SQLSTATE 25001)" << endl;
+                return true;
+            }
             cout << "NOTICE: SET GLOBAL is mapped to ALTER SYSTEM semantics in "
                     "extended compatibility mode" << endl;
         }
@@ -2234,6 +2239,10 @@ static bool handleSetCommand(const string& sql, Session& s) {
         string val = trim(rest.substr(eqPos + 1));
         // User-defined variable: SET @var = value
         if (!param.empty() && param[0] == '@') {
+            if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
+                cout << dbms::postgresSyntaxError("SET @variable") << endl;
+                return true;
+            }
             s.userVariables[param.substr(1)] = val;
             cout << "Set variable " << param << " = " << val << endl;
             return false;
@@ -12701,6 +12710,160 @@ static void applySessionTimezoneToAnswers(
     }
 }
 
+static string expandSessionUserVariables(const string& input,
+                                         const Session& session,
+                                         bool& sawVariable) {
+    string output;
+    output.reserve(input.size());
+    sawVariable = false;
+
+    size_t assignmentEnd = 0;
+    string leading = trim(input);
+    string leadingLower = toLowerSql(leading);
+    const bool preserveCallVariables =
+        leadingLower.rfind("call", 0) == 0 &&
+        (leadingLower.size() == 4 ||
+         std::isspace(static_cast<unsigned char>(leadingLower[4])));
+    if (leadingLower.rfind("set @", 0) == 0) {
+        const size_t equal = findTextOutsideQuotes(input, "=");
+        if (equal != string::npos) assignmentEnd = equal + 1;
+    }
+
+    bool singleQuoted = false;
+    bool doubleQuoted = false;
+    bool escapeString = false;
+    bool lineComment = false;
+    unsigned blockCommentDepth = 0;
+    string dollarTag;
+    for (size_t i = 0; i < input.size();) {
+        const char c = input[i];
+        if (lineComment) {
+            output += c;
+            ++i;
+            if (c == '\n' || c == '\r') lineComment = false;
+            continue;
+        }
+        if (blockCommentDepth != 0) {
+            if (c == '/' && i + 1 < input.size() && input[i + 1] == '*') {
+                output += "/*";
+                i += 2;
+                ++blockCommentDepth;
+            } else if (c == '*' && i + 1 < input.size() && input[i + 1] == '/') {
+                output += "*/";
+                i += 2;
+                --blockCommentDepth;
+            } else {
+                output += c;
+                ++i;
+            }
+            continue;
+        }
+        if (!dollarTag.empty()) {
+            if (input.compare(i, dollarTag.size(), dollarTag) == 0) {
+                output += dollarTag;
+                i += dollarTag.size();
+                dollarTag.clear();
+            } else {
+                output += c;
+                ++i;
+            }
+            continue;
+        }
+        if (singleQuoted || doubleQuoted) {
+            output += c;
+            ++i;
+            const char quote = singleQuoted ? '\'' : '"';
+            if (singleQuoted && escapeString && c == '\\' &&
+                i < input.size()) {
+                output += input[i++];
+                continue;
+            }
+            if (c == quote) {
+                if (i < input.size() && input[i] == quote) {
+                    output += input[i++];
+                } else if (singleQuoted) {
+                    singleQuoted = false;
+                    escapeString = false;
+                } else {
+                    doubleQuoted = false;
+                }
+            }
+            continue;
+        }
+        if (c == '-' && i + 1 < input.size() && input[i + 1] == '-') {
+            output += "--";
+            i += 2;
+            lineComment = true;
+            continue;
+        }
+        if (c == '/' && i + 1 < input.size() && input[i + 1] == '*') {
+            output += "/*";
+            i += 2;
+            blockCommentDepth = 1;
+            continue;
+        }
+        if (c == '\'' || c == '"') {
+            escapeString = c == '\'' && i > 0 &&
+                (input[i - 1] == 'e' || input[i - 1] == 'E') &&
+                (i < 2 || !std::isalnum(
+                    static_cast<unsigned char>(input[i - 2])));
+            output += c;
+            ++i;
+            singleQuoted = c == '\'';
+            doubleQuoted = c == '"';
+            continue;
+        }
+        if (c == '$') {
+            const size_t end = input.find('$', i + 1);
+            if (end != string::npos) {
+                bool validTag = true;
+                for (size_t p = i + 1; p < end; ++p) {
+                    if (!std::isalnum(static_cast<unsigned char>(input[p])) &&
+                        input[p] != '_') {
+                        validTag = false;
+                        break;
+                    }
+                }
+                if (validTag) {
+                    dollarTag = input.substr(i, end - i + 1);
+                    output += dollarTag;
+                    i = end + 1;
+                    continue;
+                }
+            }
+        }
+        if (c == '@' && i + 1 < input.size() &&
+            (std::isalnum(static_cast<unsigned char>(input[i + 1])) ||
+             input[i + 1] == '_')) {
+            size_t end = i + 2;
+            while (end < input.size() &&
+                   (std::isalnum(static_cast<unsigned char>(input[end])) ||
+                    input[end] == '_' || input[end] == '$')) {
+                ++end;
+            }
+            sawVariable = true;
+            const string token = input.substr(i, end - i);
+            string name = token.substr(1);
+            std::transform(name.begin(), name.end(), name.begin(),
+                           [](unsigned char ch) {
+                               return static_cast<char>(std::tolower(ch));
+                           });
+            const auto variable = session.userVariables.find(name);
+            if (!preserveCallVariables && i >= assignmentEnd &&
+                variable != session.userVariables.end()) {
+                output += variable->second;
+            } else {
+                output += token;
+            }
+            i = end;
+            continue;
+        }
+        output += c;
+        ++i;
+    }
+    return output;
+}
+
 static bool executeInternal(const string& rawSql, Session& s) {
     // Check for pg_terminate_backend / pg_cancel_backend flags
     if (s.terminateRequested) {
@@ -12714,7 +12877,15 @@ static bool executeInternal(const string& rawSql, Session& s) {
     }
     g_engine.setRLSUser(effectiveSessionRole(s));
     dbms::setCurrentSession(&s);
-    string sql = sqlProcessor(rawSql);
+    bool sawUserVariable = false;
+    const string effectiveRawSql =
+        expandSessionUserVariables(rawSql, s, sawUserVariable);
+    if (sawUserVariable &&
+        !dbms::isExtendedCompatMode(s.compatibilityMode)) {
+        cout << dbms::postgresSyntaxError("@variable") << endl;
+        return true;
+    }
+    string sql = sqlProcessor(effectiveRawSql);
     // FROM generate_series(a, b[, step]) [AS alias[(col)]]: rewrite into a
     // UNION ALL derived table so the normal derived-table path serves it.
     {
@@ -13001,37 +13172,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
         }
     }
-    // Replace user variables @varname with their values
-    // Skip CALL statements so OUT/INOUT parameter references remain intact
-    if (sql.substr(0, 4) != "call") {
-        // For SET @var = value, do not replace the target variable on the left side of '='
-        size_t replaceStart = 0;
-        if (sql.substr(0, 3) == "set") {
-            size_t eqPos = sql.find('=');
-            if (eqPos != string::npos) {
-                string lhs = trim(sql.substr(3, eqPos - 3));
-                if (!lhs.empty() && lhs[0] == '@') {
-                    replaceStart = eqPos + 1;
-                }
-            }
-        }
-        for (const auto& kv : s.userVariables) {
-            string varName = "@" + kv.first;
-            size_t pos = replaceStart;
-            while ((pos = sql.find(varName, pos)) != string::npos) {
-                // Ensure it's a standalone token (not part of an identifier)
-                bool okBefore = (pos == 0) || !isalnum(static_cast<unsigned char>(sql[pos - 1]));
-                bool okAfter = (pos + varName.size() >= sql.size()) ||
-                               !isalnum(static_cast<unsigned char>(sql[pos + varName.size()]));
-                if (okBefore && okAfter) {
-                    sql.replace(pos, varName.size(), kv.second);
-                    pos += kv.second.size();
-                } else {
-                    ++pos;
-                }
-            }
-        }
-    }
     // Audit logging
     {
         int cat = sqlAuditCategory(sql);
@@ -13219,7 +13359,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             return handleAlterSystem(sql, s);
 
         case dbms::SqlCommand::Comment:
-            return handleCommentOn(sql, s, rawSql);
+            return handleCommentOn(sql, s, effectiveRawSql);
 
         case dbms::SqlCommand::Lock:
             return handleLockTable(sql, s);
@@ -13268,7 +13408,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
     // Phase 4 Wave 0.4: DML AST bridge — try AST-driven execution before legacy string dispatch.
     {
         bool handled = false;
-        bool err = dbms::tryDmlBridge(sql, parsedCmd, s, handled, rawSql);
+        bool err = dbms::tryDmlBridge(
+            sql, parsedCmd, s, handled, effectiveRawSql);
         if (handled) {
             return err;
         }
@@ -13279,7 +13420,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
     // execution falls through to the legacy string dispatch below.
     {
         bool handled = false;
-        bool err = dbms::tryDdlBridge(sql, parsedCmd, s, handled, rawSql);
+        bool err = dbms::tryDdlBridge(
+            sql, parsedCmd, s, handled, effectiveRawSql);
         if (handled) {
             return err;
         }
@@ -13977,7 +14119,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             string uname = tokens[1];
             string newPw = tokens[2];
             {
-                string rawRest = rawSql;
+                string rawRest = effectiveRawSql;
                 size_t p = 0;
                 while (p < rawRest.size() && isspace(static_cast<unsigned char>(rawRest[p]))) ++p;
                 rawRest = rawRest.substr(p);
@@ -14236,7 +14378,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             viewCheckOpt = g_engine.getViewCheckOption(s.currentDB, tname);
             if (!viewBaseTable.empty()) {
                 // Rewrite SQL to use base table
-                string rewritten = rawSql;
+                string rewritten = effectiveRawSql;
                 size_t pos = rewritten.find(tname);
                 if (pos != string::npos) {
                     rewritten = rewritten.substr(0, pos) + viewBaseTable + rewritten.substr(pos + tname.size());
@@ -14835,7 +14977,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             g_engine.viewExists(s.currentDB, tname)) {
             string viewBaseTable = g_engine.getViewBaseTable(s.currentDB, tname);
             if (!viewBaseTable.empty()) {
-                string rewritten = rawSql;
+                string rewritten = effectiveRawSql;
                 size_t pos = rewritten.find(tname);
                 if (pos != string::npos) {
                     rewritten = rewritten.substr(0, pos) + viewBaseTable + rewritten.substr(pos + tname.size());
@@ -15152,7 +15294,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     cout << "ERROR: UPDATE on view WITH CHECK OPTION not yet supported" << endl;
                     return true;
                 }
-                string rewritten = rawSql;
+                string rewritten = effectiveRawSql;
                 size_t pos = rewritten.find(tname);
                 if (pos != string::npos) {
                     rewritten = rewritten.substr(0, pos) + viewBaseTable + rewritten.substr(pos + tname.size());
@@ -16103,6 +16245,14 @@ if (sql.rfind("backup database", 0) == 0) {
             return false;
         }
         if (rest == "variables") {
+            // DIV-11: SHOW VARIABLES is MySQL syntax. PostgreSQL SHOW takes
+            // one GUC name (or ALL), so keep this project-wide dump behind
+            // the explicit extended mode.
+            if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
+                cout << dbms::unrecognizedConfigurationParameterError(
+                    "variables") << endl;
+                return true;
+            }
             g_config.printAll();
             return false;
         }
@@ -17152,7 +17302,7 @@ if (sql.rfind("backup database", 0) == 0) {
         // the rewritten main query until we know whether it is FROM-less;
         // otherwise TRUE/FALSE becomes 1/0 and loses its bool value/type.
         const bool hasLeadingCte = startsWithKeyword(sql, "with");
-        if (hasLeadingCte) sql = sqlProcessor(rawSql, false);
+        if (hasLeadingCte) sql = sqlProcessor(effectiveRawSql, false);
         bool cteFailed = false;
         sql = processCTEs(sql, s, cteFailed);
         if (cteFailed) return true;
@@ -17282,7 +17432,8 @@ if (sql.rfind("backup database", 0) == 0) {
                     return true;
                 }
                 string arrVal;
-                const string& fromlessSql = hasLeadingCte ? sql : rawSql;
+                const string& fromlessSql =
+                    hasLeadingCte ? sql : effectiveRawSql;
                 if (!extractUnnestLiteral(fromlessSql, arrVal)) {
                     cout << "SQL syntax error" << endl;
                     return true;
@@ -17298,7 +17449,8 @@ if (sql.rfind("backup database", 0) == 0) {
                 op.close();
                 return false;
             }
-            return handleFromlessSelect(hasLeadingCte ? sql : rawSql, s);
+            return handleFromlessSelect(
+                hasLeadingCte ? sql : effectiveRawSql, s);
         }
         string columns = trim(sql.substr(6, fromPos - 6));
         // Single-table alias detection (early): "from t [as] a ..." -- strip
@@ -18812,7 +18964,7 @@ if (sql.rfind("backup database", 0) == 0) {
             size_t ulp = un.find('(');
             if (ulp != string::npos && trim(un.substr(0, ulp)) == "unnest") {
                 string arrVal;
-                if (extractUnnestLiteral(rawSql, arrVal)) {
+                if (extractUnnestLiteral(effectiveRawSql, arrVal)) {
                     dbms::UnnestOp op(arrVal, "unnest");
                     if (!op.open()) {
                         cout << "unnest failed" << endl;
@@ -18862,7 +19014,7 @@ if (sql.rfind("backup database", 0) == 0) {
                             pp = tvfSql.find(tvfParam);
                         }
                     }
-                    string expanded = rawSql;
+                    string expanded = effectiveRawSql;
                     string pattern = "from " + tnameOrig;
                     size_t fp = expanded.find(pattern);
                     if (fp != string::npos) {
@@ -19244,13 +19396,13 @@ if (sql.rfind("backup database", 0) == 0) {
                     if (btPos != string::npos) expandedSql = expandedSql.substr(0, btPos);
                     // View expansion: replace view reference with derived table
                     // Replace FROM viewname with FROM (view_sql) AS __view_name
-                    string expanded = rawSql;
+                    string expanded = effectiveRawSql;
                     // Case-insensitive FROM match: queries commonly spell
                     // FROM in upper case, which the literal lowercase pattern
                     // silently missed; the view then fell through to the
                     // standalone-execution fallback and lost the outer
                     // projection (columns after the first went missing).
-                    string lowerRaw = toLower(rawSql);
+                    string lowerRaw = toLower(effectiveRawSql);
                     string pattern = "from " + toLower(tnameOrig);
                     // Join views: derived-table expansion cannot yet resolve
                     // qualified projection columns from the inner join

@@ -440,6 +440,10 @@ def main():
         err = error_of(simple_query(sock, "SET GLOBAL auto_vacuum = on"))
         assert err is not None and err[0] == "42601", \
             "SET GLOBAL must fail with 42601 in postgresql18 mode: %r" % (err,)
+        expect_error(sock, "SHOW VARIABLES", "42704",
+                     "MySQL SHOW VARIABLES", "variables")
+        expect_error(sock, "SET @project_value = 7", "42601",
+                     "MySQL user variable")
         # Plain SET on the same parameter remains valid PostgreSQL syntax.
         expect_command_tag(sock, "SET statement_timeout = 1234", "plain SET")
 
@@ -495,6 +499,20 @@ def main():
         expect_command_tag(sock, "USE DATABASE info", "extended USE DATABASE")
         expect_command_tag(sock, "SET GLOBAL auto_vacuum = on",
                            "extended SET GLOBAL")
+        assert error_of(simple_query(sock, "SHOW VARIABLES")) is None
+        expect_command_tag(sock, "SET @project_value = 7",
+                           "extended user variable")
+        variable_messages = simple_query(sock, "SELECT @project_value")
+        assert any(kind == b"D" and b"7" in body
+                   for kind, body in variable_messages), variable_messages
+        for sql in ["SELECT '@project_value'", "SELECT $$@project_value$$"]:
+            literal_messages = simple_query(sock, sql)
+            assert any(kind == b"D" and b"@project_value" in body
+                       for kind, body in literal_messages), literal_messages
+        expect_command_tag(sock, "BEGIN", "extended SET GLOBAL transaction")
+        expect_error(sock, "SET GLOBAL auto_vacuum = off", "25001",
+                     "transactional SET GLOBAL")
+        expect_command_tag(sock, "ROLLBACK", "extended SET GLOBAL rollback")
         # DIV-06 in extended mode: alias mapping keeps working.
         expect_command_tag(sock, "CREATE TABLE t6e (a TINYINT)",
                            "extended TINYINT")
