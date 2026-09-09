@@ -523,13 +523,50 @@ std::string trimText(const std::string& value) {
     return value.substr(first, last - first);
 }
 
+size_t sqlCommandOffset(const std::string& sql) {
+    size_t pos = 0;
+    while (true) {
+        while (pos < sql.size() &&
+               std::isspace(static_cast<unsigned char>(sql[pos]))) ++pos;
+        if (pos + 1 >= sql.size()) return pos;
+        if (sql[pos] == '-' && sql[pos + 1] == '-') {
+            pos += 2;
+            while (pos < sql.size() && sql[pos] != '\n' && sql[pos] != '\r') {
+                ++pos;
+            }
+            continue;
+        }
+        if (sql[pos] == '/' && sql[pos + 1] == '*') {
+            pos += 2;
+            size_t depth = 1;
+            while (pos < sql.size() && depth != 0) {
+                if (pos + 1 < sql.size() && sql[pos] == '/' &&
+                    sql[pos + 1] == '*') {
+                    ++depth;
+                    pos += 2;
+                } else if (pos + 1 < sql.size() && sql[pos] == '*' &&
+                           sql[pos + 1] == '/') {
+                    --depth;
+                    pos += 2;
+                } else {
+                    ++pos;
+                }
+            }
+            if (depth != 0) return std::string::npos;
+            continue;
+        }
+        return pos;
+    }
+}
+
 std::string firstSqlKeyword(const std::string& sql) {
-    std::string trimmed = trimText(sql);
-    size_t end = 0;
-    while (end < trimmed.size() &&
-           (std::isalnum(static_cast<unsigned char>(trimmed[end])) ||
-            trimmed[end] == '_')) ++end;
-    std::string keyword = trimmed.substr(0, end);
+    const size_t start = sqlCommandOffset(sql);
+    if (start == std::string::npos) return {};
+    size_t end = start;
+    while (end < sql.size() &&
+           (std::isalnum(static_cast<unsigned char>(sql[end])) ||
+            sql[end] == '_')) ++end;
+    std::string keyword = sql.substr(start, end - start);
     for (char& c : keyword) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return keyword;
 }
@@ -591,7 +628,9 @@ std::string lowerProtocolText(std::string value) {
 }
 
 bool startsWithSqlPhrase(const std::string& sql, const std::string& phrase) {
-    const std::string lower = lowerProtocolText(trimText(sql));
+    const size_t start = sqlCommandOffset(sql);
+    if (start == std::string::npos) return false;
+    const std::string lower = lowerProtocolText(sql.substr(start));
     if (lower.size() < phrase.size() || lower.compare(0, phrase.size(), phrase) != 0) {
         return false;
     }
@@ -1201,7 +1240,8 @@ bool isTransactionRecoveryCommand(const std::string& sql) {
 std::string rollbackCommandForAbortedTransaction(const std::string& sql) {
     const std::string lower = lowerProtocolText(trimText(sql));
     if (firstSqlKeyword(sql) != "commit" && firstSqlKeyword(sql) != "end") {
-        return sql;
+        const size_t start = sqlCommandOffset(sql);
+        return start == std::string::npos ? sql : sql.substr(start);
     }
     if (lower.find("and chain") != std::string::npos) return "ROLLBACK AND CHAIN";
     if (lower.find("and no chain") != std::string::npos) {

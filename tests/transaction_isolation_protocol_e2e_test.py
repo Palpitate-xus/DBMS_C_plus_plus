@@ -41,6 +41,22 @@ def main():
         assert "before any query" in message, message
         _, state, message, _, _, _ = execute("ROLLBACK;")
         assert state is None, (state, message)
+
+        _, state, message, _, _, _ = execute("BEGIN;")
+        assert state is None, (state, message)
+        rows, state, message, _, _, _ = execute(
+            "SELECT id FROM isolation_guard;")
+        assert state is None and rows == [["1"]], (state, message, rows)
+        _, state, message, _, _, _ = execute(
+            "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;")
+        assert state == "25001", (state, message)
+        _, state, message, _, _, _ = execute(
+            "/* not local recovery */ ROLLBACK PREPARED 'missing';")
+        assert state == "25P02", (state, message)
+        _, state, message, _, _, _ = execute(
+            "-- leading recovery comment\n"
+            "/* outer /* nested */ comment */ ROLLBACK;")
+        assert state is None, (state, message)
         print("[TRANSACTION ISOLATION PROTOCOL E2E] passed")
     finally:
         runner.stop_ours(server)
