@@ -921,7 +921,7 @@ std::string whereUnknownFunctionError(const std::string& sql,
         "unnest", "array_lower", "array_upper", "array_length", "cardinality",
         "row_number", "rank", "dense_rank", "ntile", "lag", "lead",
         "first_value", "last_value", "nth_value",
-        "pg_notify", "pg_notification_queue_usage"
+        "pg_notify", "pg_notification_queue_usage", "pg_listening_channels"
     };
     std::string low;
     for (char c : sql) low += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));

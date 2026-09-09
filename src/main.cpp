@@ -1098,6 +1098,7 @@ static bool isScalarFunc(const string& name) {
                                          "array_position", "array_dims", "cardinality",
                                          "unnest",
                                          "pg_notify", "pg_notification_queue_usage",
+                                         "pg_listening_channels",
                                          "subquery",
                          "exists",
                                          "is_null", "is_not_null",
@@ -5818,6 +5819,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
     vector<string> values;
     vector<bool> valueNulls;
     vector<string> columnTypes;
+    vector<size_t> listeningChannelSrfIndices;
     bool hasLegacyScalarSubquery = false;
     auto appendValue = [&](string value, bool isNull = false,
                            string typeName = "text") {
@@ -5890,6 +5892,21 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             appendValue(s.currentDB.empty() ? std::string("postgres") : s.currentDB,
                         false, "name");
             continue;
+        }
+        {
+            string compact;
+            for (char c : lowItem) {
+                if (!isspace(static_cast<unsigned char>(c))) compact += c;
+            }
+            if (compact == "pg_listening_channels()") {
+                headers.push_back(
+                    disp == item ? "pg_listening_channels" : disp);
+                // Placeholder expanded into one row per committed channel
+                // after the complete projection has been evaluated.
+                listeningChannelSrfIndices.push_back(values.size());
+                appendValue("", false, "text");
+                continue;
+            }
         }
         if (lowItem == "current_schema()" || lowItem == "current_schema ( )") {
             headers.push_back(disp == item ? "current_schema" : disp);
@@ -6289,6 +6306,38 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                 valueNulls = std::move(expandedNulls);
                 multiRowWidth = width;
             }
+        }
+    }
+
+    // pg_listening_channels() is a set-returning function scoped to the
+    // current backend and database.  Staged LISTEN/UNLISTEN actions are not
+    // reflected until their transaction commits.
+    if (!listeningChannelSrfIndices.empty()) {
+        if (multiRowWidth != 0) {
+            cout << "ERROR: multiple different set-returning functions in "
+                    "one projection are not supported (SQLSTATE 0A000)"
+                 << endl;
+            return true;
+        }
+        {
+            const size_t width = values.size();
+            vector<string> expanded;
+            vector<bool> expandedNulls;
+            for (const auto& channel :
+                 dbms::notificationManager().subscriptions(s.pid, s.currentDB)) {
+                vector<string> row = values;
+                vector<bool> rowNulls = valueNulls;
+                for (size_t channelSrfIdx : listeningChannelSrfIndices) {
+                    row[channelSrfIdx] = channel;
+                    rowNulls[channelSrfIdx] = false;
+                }
+                expanded.insert(expanded.end(), row.begin(), row.end());
+                expandedNulls.insert(expandedNulls.end(),
+                                     rowNulls.begin(), rowNulls.end());
+            }
+            values = std::move(expanded);
+            valueNulls = std::move(expandedNulls);
+            multiRowWidth = width;
         }
     }
 

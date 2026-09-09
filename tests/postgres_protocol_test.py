@@ -859,6 +859,47 @@ def main():
                        for kind, body in invalid_function_notify), \
                 invalid_function_notify
 
+        # pg_listening_channels() is a backend-local SRF and exposes only the
+        # committed subscription set, in deterministic channel order.
+        inspect_sock = socket.socket()
+        inspect_sock.settimeout(SOCKET_TIMEOUT)
+        inspect_sock.connect(("127.0.0.1", port))
+        startup(inspect_sock, "alice", "info")
+        empty_channels = simple_query(
+            inspect_sock, "SELECT pg_listening_channels()")
+        assert data_row_values(empty_channels) == []
+        assert row_description_fields(empty_channels)[0][0] == \
+            b"pg_listening_channels"
+        assert row_description_fields(empty_channels)[0][3:5] == (25, -1)
+        assert any(kind == b"C" for kind, _ in simple_query(
+            inspect_sock, "LISTEN inspect_beta"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            inspect_sock, "LISTEN inspect_alpha"))
+        committed_channels = simple_query(
+            inspect_sock,
+            "SELECT pg_listening_channels(), 7 AS marker")
+        assert data_row_values(committed_channels) == [
+            [b"inspect_alpha", b"7"], [b"inspect_beta", b"7"]]
+
+        assert simple_query(inspect_sock, "BEGIN")[-1] == (b"Z", b"T")
+        assert any(kind == b"C" for kind, _ in simple_query(
+            inspect_sock, "UNLISTEN inspect_alpha"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            inspect_sock, "LISTEN inspect_gamma"))
+        assert data_row_values(simple_query(
+            inspect_sock, "SELECT pg_listening_channels()")) == [
+                [b"inspect_alpha"], [b"inspect_beta"]]
+        assert simple_query(inspect_sock, "COMMIT")[-1] == (b"Z", b"I")
+        assert data_row_values(simple_query(
+            inspect_sock, "SELECT pg_listening_channels()")) == [
+                [b"inspect_beta"], [b"inspect_gamma"]]
+        assert any(kind == b"C" for kind, _ in simple_query(
+            inspect_sock, "UNLISTEN *"))
+        assert data_row_values(simple_query(
+            inspect_sock, "SELECT pg_listening_channels()")) == []
+        inspect_sock.sendall(typed(b"X"))
+        inspect_sock.close()
+
         notify_sock.sendall(typed(b"X"))
         notify_sock.close()
 
