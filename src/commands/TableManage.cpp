@@ -15078,12 +15078,21 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
     // Collect logical rows before changing the row layout.  The on-disk heap
     // is page based and variable-length rows may reference TOAST, so a raw
     // fixed-width file rewrite is neither safe nor format compatible.
-    std::vector<std::map<std::string, std::string>> rows;
-    if (!forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
+    std::vector<SqlRow> rows;
+    if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
+                                          const char* data, size_t len) {
         std::string row(data, len);
-        std::map<std::string, std::string> values;
+        SqlRow values;
+        const int64_t rid = encodeRid(pageId, slotId);
         for (size_t i = 0; i < tbl.len; ++i) {
-            values[tbl.cols[i].dataName] = extractColumnValue(row, tbl, i, dbname);
+            if (!tbl.cols[i].generatedExpr.empty()) continue;
+            if (tbl.cols[i].isNull &&
+                isColumnNullByRid(dbname, tablename, rid, i)) {
+                values[tbl.cols[i].dataName] = std::nullopt;
+            } else {
+                values[tbl.cols[i].dataName] =
+                    extractColumnValue(row, tbl, i, dbname);
+            }
         }
         rows.push_back(std::move(values));
     })) {
@@ -15241,7 +15250,7 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
     lockManager_.unlock(tablename);
 
     for (const auto& values : rows) {
-        DBStatus status = insert(dbname, tablename, values);
+        DBStatus status = insertRow(dbname, tablename, values);
         if (status != DBStatus::OK) return status;
     }
 
