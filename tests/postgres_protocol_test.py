@@ -17,6 +17,7 @@ DBMS_MAIN = os.path.abspath(os.environ.get(
     "DBMS_MAIN", os.path.join(os.path.dirname(__file__), "..", "dbms_main")))
 SOCKET_TIMEOUT = float(os.environ.get("DBMS_PROTOCOL_TEST_TIMEOUT", "10"))
 STARTUP_TIMEOUT = float(os.environ.get("DBMS_PROTOCOL_STARTUP_TIMEOUT", "15"))
+SHUTDOWN_TIMEOUT = float(os.environ.get("DBMS_PROTOCOL_SHUTDOWN_TIMEOUT", "30"))
 
 
 def frame(body):
@@ -680,7 +681,11 @@ def main():
         sock.sendall(typed(b"X"))
         sock.close()
         process.terminate()
-        process.wait(timeout=5)
+        # Graceful SIGTERM includes durable catalog/WAL/cache writeback.  A
+        # populated protocol-test cluster can legitimately need more than
+        # five seconds on a busy or slower filesystem; keep the bound finite
+        # and independently configurable instead of racing the flush path.
+        process.wait(timeout=SHUTDOWN_TIMEOUT)
         process = subprocess.Popen(
             [DBMS_MAIN, "--server", str(port), "--insecure"],
             cwd=work_dir,
