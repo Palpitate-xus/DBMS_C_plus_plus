@@ -26,6 +26,10 @@ int main() {
     assert(!config.enableSeqScan);
     assert(config.setParameter("work_mem", "8192"));
     assert(config.workMemKb == 8192);
+    assert(config.setParameter("max_notify_queue_pages", "32"));
+    assert(config.maxNotifyQueuePages == 32);
+    assert(!config.setParameter("max_notify_queue_pages", "0"));
+    assert(config.maxNotifyQueuePages == 32);
 
     const dbms::Config beforeInvalid = config;
     assert(!config.setParameter("max_connections", "0"));
@@ -43,6 +47,7 @@ int main() {
     assert(loaded.maxConnections == 128);
     assert(!loaded.enableSeqScan);
     assert(loaded.workMemKb == 8192);
+    assert(loaded.maxNotifyQueuePages == 32);
 
     {
         std::ofstream out(path, std::ios::trunc);

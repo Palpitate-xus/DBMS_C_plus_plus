@@ -98,6 +98,12 @@ const bool g_initialConfigLoadOk = [] {
         return false;
     }
     dbms::setSqlStatsMaxEntries(g_config.sqlStatsMaxEntries);
+    if (!dbms::notificationManager().configureMaxQueueBytes(
+            g_config.maxNotifyQueuePages * static_cast<size_t>(8192))) {
+        std::cerr << "FATAL: invalid notification queue configuration"
+                  << std::endl;
+        return false;
+    }
     // TDE must be armed before the StorageEngine (declared right below)
     // opens any data file: recovery reads pages through the buffer pool,
     // and a sealed page without the key loaded fails closed.
@@ -161,6 +167,10 @@ static void syncConnectionRuntimeConfig(const dbms::Config& cfg) {
 }
 
 static bool installReloadedConfig(const dbms::Config& next) {
+    // The notification manager is deliberately not reconfigured here:
+    // max_notify_queue_pages is a postmaster/startup setting.  Keep the new
+    // configured value so a later config save does not discard the pending
+    // restart value, while pg_settings reports the manager's active bound.
     if (!next.validate() ||
         !dbms::setSqlStatsMaxEntries(next.sqlStatsMaxEntries)) {
         return false;
@@ -250,11 +260,24 @@ static void beginNotificationTransaction(Session& s) {
     dbms::notificationManager().beginTransaction(s.pid);
 }
 
-static void commitNotificationTransaction(Session& s) {
-    if (dbms::notificationManager().commitTransaction(s.pid)) {
-        s.listenedChannels =
-            dbms::notificationManager().subscriptions(s.pid, s.currentDB);
+static bool prepareNotificationTransactionCommit(Session& s) {
+    auto& manager = dbms::notificationManager();
+    if (!manager.inTransaction(s.pid)) return true;
+    if (manager.prepareCommitTransaction(s.pid)) return true;
+    cout << "ERROR: too many notifications in the NOTIFY queue "
+            "(SQLSTATE 54000)" << endl;
+    return false;
+}
+
+static bool commitNotificationTransaction(Session& s) {
+    auto& manager = dbms::notificationManager();
+    if (!manager.inTransaction(s.pid)) return true;
+    if (!prepareNotificationTransactionCommit(s) ||
+        !manager.commitTransaction(s.pid)) {
+        return false;
     }
+    s.listenedChannels = manager.subscriptions(s.pid, s.currentDB);
+    return true;
 }
 
 static void rollbackNotificationTransaction(Session& s) {
@@ -1074,7 +1097,7 @@ static bool isScalarFunc(const string& name) {
                                          "array_get", "array_length", "array_contains",
                                          "array_position", "array_dims", "cardinality",
                                          "unnest",
-                                         "pg_notify",
+                                         "pg_notify", "pg_notification_queue_usage",
                                          "subquery",
                          "exists",
                                          "is_null", "is_not_null",
@@ -1591,6 +1614,12 @@ static bool handleBeginTransaction(const string& sql, Session& s) {
 static bool commitBeforeLegacyDdl(Session& s) {
     if (!g_engine.inTransaction()) return true;
 
+    if (!prepareNotificationTransactionCommit(s)) {
+        (void)g_engine.rollbackTransaction();
+        rollbackNotificationTransaction(s);
+        return false;
+    }
+
     const DBStatus status = g_engine.commitTransaction();
     if (status != DBStatus::OK) {
         if (!g_engine.inTransaction()) rollbackNotificationTransaction(s);
@@ -1598,13 +1627,18 @@ static bool commitBeforeLegacyDdl(Session& s) {
              << dbms::sqlstateForDBStatus(status) << ")" << endl;
         return false;
     }
-    commitNotificationTransaction(s);
+    if (!commitNotificationTransaction(s)) return false;
     cout << "Note: DDL caused implicit commit of open transaction" << endl;
     return true;
 }
 
 static bool handleCommitTransaction(const string& sql, Session& s) {
     const bool hadTransaction = g_engine.inTransaction();
+    if (hadTransaction && !prepareNotificationTransactionCommit(s)) {
+        (void)g_engine.rollbackTransaction();
+        rollbackNotificationTransaction(s);
+        return true;
+    }
     auto res = g_engine.commitTransaction();
     if (res != DBStatus::OK) {
         if (!g_engine.inTransaction()) rollbackNotificationTransaction(s);
@@ -1612,7 +1646,7 @@ static bool handleCommitTransaction(const string& sql, Session& s) {
              << dbms::sqlstateForDBStatus(res) << ")" << endl;
         return true;
     }
-    if (hadTransaction) commitNotificationTransaction(s);
+    if (hadTransaction && !commitNotificationTransaction(s)) return true;
     // COMMIT AND [NO] CHAIN: if AND CHAIN, immediately start a new transaction.
     const string lowerSql = toLowerSql(trim(sql));
     if (lowerSql.find("and chain") != string::npos) {
@@ -1924,6 +1958,17 @@ static bool applyConfigParam(const string& param, const string& val, bool isGlob
     if (!candidate.setParameter(param, val)) {
         cout << "Invalid value or unknown parameter: " << param << endl;
         return true;
+    }
+
+    if (param == "max_notify_queue_pages") {
+        if (!candidate.save("dbms.conf")) {
+            cout << "Failed to persist configuration" << endl;
+            return true;
+        }
+        g_config = candidate;
+        cout << "Set global " << param << " = " << val
+             << " (requires restart)" << endl;
+        return false;
     }
 
     if (candidate.sqlStatsMaxEntries != previous.sqlStatsMaxEntries &&
@@ -2836,6 +2881,11 @@ static bool handleCopy(const string& sql, Session& s) {
             return true;
         }
 
+        if (startedCopyTransaction &&
+            !prepareNotificationTransactionCommit(s)) {
+            (void)g_engine.rollbackTransaction();
+            return true;
+        }
         const DBStatus finishStatus = startedCopyTransaction
             ? g_engine.commitTransaction()
             : g_engine.releaseSavepoint(copySavepoint);
@@ -19290,6 +19340,9 @@ if (sql.rfind("backup database", 0) == 0) {
                 cout << "max_connections " << g_config.maxConnections << " " << endl;
                 cout << "shared_buffers " << g_config.bufferPoolFrames << " 8kB" << endl;
                 cout << "work_mem " << g_config.workMemKb << " kB" << endl;
+                cout << "max_notify_queue_pages "
+                     << (dbms::notificationManager().queueCapacityBytes() /
+                         static_cast<size_t>(8192)) << " " << endl;
                 cout << "checkpoint_timeout " << g_config.checkpointInterval << " s" << endl;
                 cout << "statement_timeout " << s.statementTimeoutMs << " ms" << endl;
                 cout << "lock_timeout " << s.lockTimeoutMs << " ms" << endl;
@@ -24477,13 +24530,22 @@ bool execute(const std::string& rawSql, Session& s) {
             g_engine.rollbackTransaction();
             rollbackNotificationTransaction(s);
         } else {
+            if (!prepareNotificationTransactionCommit(s)) {
+                error = true;
+                g_engine.rollbackTransaction();
+                rollbackNotificationTransaction(s);
+            }
+        }
+        if (!error) {
             const DBStatus commitStatus = g_engine.commitTransaction();
             if (commitStatus != dbms::DBStatus::OK) {
                 error = true;
                 g_engine.rollbackTransaction();
                 rollbackNotificationTransaction(s);
-            } else {
-                commitNotificationTransaction(s);
+            } else if (!commitNotificationTransaction(s)) {
+                // Capacity was reserved before the durable commit, so this
+                // branch is only a defensive invariant check.
+                error = true;
             }
         }
     } else if (outermost && g_engine.inTransaction()) {
@@ -24496,8 +24558,9 @@ bool execute(const std::string& rawSql, Session& s) {
         dbms::notificationManager().inTransaction(s.pid)) {
         if (error) {
             rollbackNotificationTransaction(s);
-        } else {
-            commitNotificationTransaction(s);
+        } else if (!commitNotificationTransaction(s)) {
+            error = true;
+            rollbackNotificationTransaction(s);
         }
     }
     if (outermost && !g_engine.inTransaction() &&

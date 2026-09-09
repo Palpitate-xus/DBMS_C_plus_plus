@@ -111,6 +111,42 @@ int main() {
     assert(!manager.publish(senderBackend, "db1", "bounds_channel",
                             std::string("embedded\0zero", 13)));
 
+    // The shared logical queue is bounded independently of listener count.
+    // A transaction reserves its queue bytes before commit, queue-full leaves
+    // it rollbackable, and storage is released only after every recipient
+    // has consumed (or disconnected from) that logical entry.
+    dbms::NotificationManager bounded(8192);
+    constexpr uint64_t boundedFirst = 5001;
+    constexpr uint64_t boundedSecond = 5002;
+    constexpr uint64_t boundedSender = 5003;
+    bounded.listen(boundedFirst, "db1", "bounded_channel");
+    bounded.listen(boundedSecond, "db1", "bounded_channel");
+    bounded.beginTransaction(boundedSender);
+    assert(bounded.publish(boundedSender, "db1", "bounded_channel",
+                           std::string(7900, 'q')));
+    assert(bounded.queueUsage() == 0.0);
+    assert(bounded.prepareCommitTransaction(boundedSender));
+    assert(bounded.commitTransaction(boundedSender));
+    const double occupied = bounded.queueUsage();
+    assert(occupied > 0.9 && occupied < 1.0);
+    assert(!bounded.configureMaxQueueBytes(16384));
+
+    constexpr uint64_t blockedSender = 5004;
+    bounded.beginTransaction(blockedSender);
+    assert(bounded.publish(blockedSender, "db1", "bounded_channel",
+                           std::string(7900, 'r')));
+    assert(!bounded.prepareCommitTransaction(blockedSender));
+    assert(!bounded.commitTransaction(blockedSender));
+    bounded.rollbackTransaction(blockedSender);
+    assert(!bounded.publish(blockedSender, "db1", "bounded_channel",
+                            std::string(7900, 's')));
+
+    assert(bounded.takePending(boundedFirst).size() == 1);
+    assert(bounded.queueUsage() == occupied);
+    assert(bounded.takePending(boundedSecond).size() == 1);
+    assert(bounded.queueUsage() == 0.0);
+    assert(bounded.configureMaxQueueBytes(16384));
+
     manager.disconnect(secondBackend);
     manager.disconnect(senderBackend);
     manager.disconnect(listenerBackend);

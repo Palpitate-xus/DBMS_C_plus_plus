@@ -24,6 +24,7 @@ struct Config {
     int lockTimeoutMs = 0;         // 0 = no timeout
     int deadlockTimeoutMs = 1000;  // ms to wait before declaring deadlock (0 = immediate check)
     size_t workMemKb = 4096;       // work memory per query in KB
+    size_t maxNotifyQueuePages = 1048576; // startup-only, 8KB pages
     bool enableSeqScan = true;     // enable sequential scan
     bool enableHashJoin = true;    // enable hash join
     bool enableMergeJoin = true;   // enable merge join

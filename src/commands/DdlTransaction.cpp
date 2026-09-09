@@ -3,6 +3,7 @@
 // ============================================================================
 
 #include "commands/DdlTransaction.h"
+#include "common/NotificationManager.h"
 #include "catalog/CatalogService.h"
 #include "catalog/systables.h"
 #include <algorithm>
@@ -191,6 +192,14 @@ bool DdlTransaction::commit() {
     if (!active_) return committed_;
 
     if (startedByUs_ && engine_.inTransaction()) {
+        auto& notifications = notificationManager();
+        if (notifications.inTransaction(session_.pid) &&
+            !notifications.prepareCommitTransaction(session_.pid)) {
+            std::cerr << "ERROR: too many notifications in the NOTIFY queue "
+                         "(SQLSTATE 54000)" << std::endl;
+            rollback();
+            return false;
+        }
         const DBStatus status = engine_.commitTransaction();
         if (status != DBStatus::OK) {
             std::cerr << "DDL transaction commit failed (SQLSTATE "

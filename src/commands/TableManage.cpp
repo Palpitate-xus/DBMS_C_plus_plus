@@ -31149,6 +31149,17 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         }
         return "";
     }
+    if (expr.funcName == "pg_notification_queue_usage") {
+        if (!expr.funcArgs.empty()) {
+            throw DbError(
+                "42883",
+                "function pg_notification_queue_usage takes no arguments");
+        }
+        std::ostringstream value;
+        value << std::setprecision(17)
+              << notificationManager().queueUsage();
+        return value.str();
+    }
     // User-defined function fallback
     if (engine && !dbname.empty()) {
         auto udf = engine->getUDF(dbname, expr.funcName);

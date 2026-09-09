@@ -920,7 +920,8 @@ std::string whereUnknownFunctionError(const std::string& sql,
         "starts_with", "encode", "decode", "format", "uuid", "gen_random_uuid",
         "unnest", "array_lower", "array_upper", "array_length", "cardinality",
         "row_number", "rank", "dense_rank", "ntile", "lag", "lead",
-        "first_value", "last_value", "nth_value"
+        "first_value", "last_value", "nth_value",
+        "pg_notify", "pg_notification_queue_usage"
     };
     std::string low;
     for (char c : sql) low += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -1080,7 +1081,19 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
             if (lines.empty()) {
                 result.errorMessage = "query failed";
             } else {
-                std::string msg = lines.front();
+                // A command can print its success tag before a pre-commit
+                // hook rejects the transaction (for example a full NOTIFY
+                // queue).  Prefer the explicit error line over earlier
+                // informational output instead of exposing the SQL/tag as
+                // an XX000 error message.
+                const auto errorLine = std::find_if(
+                    lines.begin(), lines.end(), [](const std::string& line) {
+                        return line.rfind("ERROR:", 0) == 0 ||
+                               line.rfind("SQL syntax error:", 0) == 0 ||
+                               line.rfind("SQL error:", 0) == 0;
+                    });
+                std::string msg = errorLine == lines.end()
+                    ? lines.front() : *errorLine;
                 // Strip the CLI's severity prefix so the wire carries the bare
                 // message like PG: "ERROR: x" -> "x", "SQL syntax error: y"
                 // -> "y".  substr(6) used to mangle the latter to "ntax error".
@@ -1200,6 +1213,9 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
         } else if (result.errorMessage.find("(SQLSTATE 23P01)") !=
                    std::string::npos) {
             result.sqlState = "23P01";
+        } else if (result.errorMessage.find("(SQLSTATE 54000)") !=
+                   std::string::npos) {
+            result.sqlState = "54000";
         } else {
             result.sqlState = "XX000";
         }

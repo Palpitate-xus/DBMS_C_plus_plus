@@ -5794,6 +5794,20 @@ void ExprEvaluator::registerBuiltins() {
     };
     volatility_["pg_notify"] = 'v';
 
+    functions_["pg_notification_queue_usage"] = [](
+            const std::vector<ExprValue>& a) {
+        if (!a.empty()) {
+            throw std::runtime_error(
+                "function pg_notification_queue_usage takes no arguments "
+                "(SQLSTATE 42883)");
+        }
+        std::ostringstream value;
+        value << std::setprecision(17)
+              << notificationManager().queueUsage();
+        return ExprValue("double precision", value.str(), false);
+    };
+    volatility_["pg_notification_queue_usage"] = 'v';
+
     // ARRAY[...] constructor (emitted by the parser as a function call so it
     // composes with the expression grammar). Renders the canonical
     // {e1,e2,...} literal text; NULL elements render as NULL.

@@ -568,7 +568,7 @@ def main():
             hba.write("host all alice 127.0.0.1/32 scram-sha-256\n"
                       "host all +analyst 127.0.0.1/32 scram-sha-256\n")
         with open(os.path.join(work_dir, "dbms.conf"), "w", encoding="utf-8") as config:
-            config.write("max_connections=1\n")
+            config.write("max_connections=1\nmax_notify_queue_pages=1\n")
 
         probe = socket.socket()
         probe.bind(("127.0.0.1", 0))
@@ -623,6 +623,10 @@ def main():
         second_sock.close()
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "SET GLOBAL max_connections = 64"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "SET GLOBAL max_notify_queue_pages = 2"))
+        assert setting_value(simple_query(sock, "SELECT * FROM pg_settings"),
+                             "max_notify_queue_pages") == b"1"
 
         # LISTEN/NOTIFY is backend-local, transactional, and transported as
         # protocol NotificationResponse rather than text prepended to a query.
@@ -676,6 +680,45 @@ def main():
         assert notification_values(listener_commit) == [
             (notify_pid, b"wire_channel", b"receiver transaction boundary")]
         assert listener_commit[-1] == (b"Z", b"I")
+
+        empty_queue_usage = simple_query(
+            notify_sock, "SELECT pg_notification_queue_usage()")
+        assert float(data_row_values(empty_queue_usage)[0][0]) == 0.0
+        assert row_description_fields(empty_queue_usage)[0][3:5] == (701, 8)
+
+        # With a one-page startup queue, one near-maximum payload occupies
+        # most of the queue while the listener is in a transaction.  A second
+        # transaction must fail before commit with PostgreSQL's 54000, then
+        # the first logical entry is released after the receiver consumes it.
+        assert any(kind == b"C" for kind, _ in simple_query(
+            notify_sock, "CREATE TABLE notify_queue_atomic (id INT)"))
+        assert simple_query(sock, "BEGIN")[-1] == (b"Z", b"T")
+        queue_payload = "q" * 7900
+        assert any(kind == b"C" for kind, _ in simple_query(
+            notify_sock,
+            "NOTIFY wire_channel, '" + queue_payload + "'"))
+        occupied_queue_usage = float(data_row_values(simple_query(
+            notify_sock,
+            "SELECT pg_notification_queue_usage()"))[0][0])
+        assert 0.9 < occupied_queue_usage < 1.0
+        assert simple_query(notify_sock, "BEGIN")[-1] == (b"Z", b"T")
+        assert any(kind == b"C" for kind, _ in simple_query(
+            notify_sock, "INSERT INTO notify_queue_atomic VALUES (1)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            notify_sock,
+            "NOTIFY wire_channel, '" + ("r" * 7900) + "'"))
+        full_queue = simple_query(notify_sock, "COMMIT")
+        assert any(kind == b"E" and b"C54000\x00" in body
+                   for kind, body in full_queue), full_queue
+        assert simple_query(notify_sock, "ROLLBACK")[-1] == (b"Z", b"I")
+        assert data_row_values(simple_query(
+            notify_sock, "SELECT id FROM notify_queue_atomic")) == []
+        queue_drain = simple_query(sock, "COMMIT")
+        assert notification_values(queue_drain) == [
+            (notify_pid, b"wire_channel", queue_payload.encode())]
+        assert float(data_row_values(simple_query(
+            notify_sock,
+            "SELECT pg_notification_queue_usage()"))[0][0]) == 0.0
 
         # Two concurrent sessions authenticated as the same role must each
         # retain their own queue; consuming one must not consume the other.

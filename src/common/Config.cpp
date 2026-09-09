@@ -88,6 +88,8 @@ bool Config::validate() const {
            autoAnalyzeThreshold > 0 && autoAnalyzeThreshold <= 100000000 &&
            lockTimeoutMs >= 0 && deadlockTimeoutMs >= 0 &&
            workMemKb > 0 && workMemKb <= 100000000 &&
+           maxNotifyQueuePages > 0 &&
+           maxNotifyQueuePages <= std::numeric_limits<size_t>::max() / 8192 &&
            maxParallelWorkersPerGather >= 0 &&
            maxParallelWorkersPerGather <= 128 &&
            poolSize >= 1 && poolSize <= 4096 &&
@@ -124,6 +126,9 @@ bool assignParameter(Config& config, const std::string& key,
     else if (key == "lock_timeout_ms" || key == "lock_timeout") parsed = parseInt(value, config.lockTimeoutMs);
     else if (key == "deadlock_timeout_ms" || key == "deadlock_timeout") parsed = parseInt(value, config.deadlockTimeoutMs);
     else if (key == "work_mem_kb" || key == "work_mem") parsed = parseSize(value, config.workMemKb);
+    else if (key == "max_notify_queue_pages") {
+        parsed = parseSize(value, config.maxNotifyQueuePages);
+    }
     else if (key == "enable_seq_scan") parsed = parseBool(value, config.enableSeqScan);
     else if (key == "enable_hash_join" || key == "enable_hashjoin") parsed = parseBool(value, config.enableHashJoin);
     else if (key == "enable_merge_join") parsed = parseBool(value, config.enableMergeJoin);
@@ -230,6 +235,7 @@ void Config::printAll() const {
               << "lock_timeout_ms " << lockTimeoutMs << "\n"
               << "deadlock_timeout_ms " << deadlockTimeoutMs << "\n"
               << "work_mem_kb " << workMemKb << "\n"
+              << "max_notify_queue_pages " << maxNotifyQueuePages << "\n"
               << "enable_seq_scan " << (enableSeqScan ? "on" : "off") << "\n"
               << "enable_hash_join " << (enableHashJoin ? "on" : "off") << "\n"
               << "enable_merge_join " << (enableMergeJoin ? "on" : "off") << "\n"
@@ -275,6 +281,7 @@ bool Config::save(const std::string& filename) const {
         << "lock_timeout_ms=" << lockTimeoutMs << "\n"
         << "deadlock_timeout_ms=" << deadlockTimeoutMs << "\n"
         << "work_mem_kb=" << workMemKb << "\n"
+        << "max_notify_queue_pages=" << maxNotifyQueuePages << "\n"
         << "enable_seq_scan=" << (enableSeqScan ? "on" : "off") << "\n"
         << "enable_hash_join=" << (enableHashJoin ? "on" : "off") << "\n"
         << "enable_merge_join=" << (enableMergeJoin ? "on" : "off") << "\n"
