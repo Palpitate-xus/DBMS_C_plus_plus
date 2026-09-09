@@ -2,6 +2,7 @@
 #include "commands/TableManage.h"
 #include "Session.h"
 #include "catalog/CatalogService.h"
+#include "common/DbError.h"
 #include "parser/parser.h"
 #include "catalog/type_registry.h"
 #include <algorithm>
@@ -44,6 +45,41 @@ static void test_sequence_basic() {
 
     cleanup(db);
     std::cout << "[SEQUENCE] basic OK" << std::endl;
+}
+
+static void test_read_only_transaction_rejects_sequence_writes() {
+    const std::string db = testDbPath("seq_read_only");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE SEQUENCE guarded START 10", s));
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.setReadOnly(true));
+
+    bool nextvalRejected = false;
+    try {
+        (void)g_engine.nextval(db, "guarded");
+    } catch (const dbms::DbError& error) {
+        nextvalRejected = error.sqlState() == "25006";
+    }
+    assert(nextvalRejected);
+
+    bool setvalRejected = false;
+    try {
+        (void)g_engine.setval(db, "guarded", 99);
+    } catch (const dbms::DbError& error) {
+        setvalRejected = error.sqlState() == "25006";
+    }
+    assert(setvalRejected);
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+
+    // Neither rejected call may have changed the durable allocation state.
+    assert(g_engine.nextval(db, "guarded") == 10);
+    cleanup(db);
+    std::cout << "[SEQUENCE] read-only transaction guard OK" << std::endl;
 }
 
 static void test_sequence_min_max_cycle() {
@@ -1104,6 +1140,7 @@ static void test_sequence_integer_boundaries() {
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_sequence_basic();
+    test_read_only_transaction_rejects_sequence_writes();
     test_sequence_min_max_cycle();
     test_sequence_cache();
     test_sequence_alter();

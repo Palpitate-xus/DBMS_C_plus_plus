@@ -25,6 +25,24 @@ def main():
         rows, state, message, _, _, _ = execute(
             "INSERT INTO isolation_guard VALUES (1);")
         assert state is None and rows == [], (state, message, rows)
+        _, state, message, _, _, _ = execute(
+            "CREATE SEQUENCE isolation_sequence START WITH 10;")
+        assert state is None, (state, message)
+
+        # Sequence allocation is non-transactional, but PostgreSQL still
+        # prohibits nextval/setval in a read-only transaction.  A rejected
+        # call must not consume a durable value.
+        _, state, message, _, _, _ = execute("BEGIN READ ONLY;")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute(
+            "SELECT nextval('isolation_sequence');")
+        assert state == "25006", (state, message)
+        assert "nextval()" in message, message
+        _, state, message, _, _, _ = execute("ROLLBACK;")
+        assert state is None, (state, message)
+        rows, state, message, _, _, _ = execute(
+            "SELECT nextval('isolation_sequence');")
+        assert state is None and rows == [["10"]], (state, message, rows)
 
         _, state, message, _, _, _ = execute("BEGIN;")
         assert state is None, (state, message)

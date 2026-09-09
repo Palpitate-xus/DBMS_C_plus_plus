@@ -18765,6 +18765,11 @@ DBStatus StorageEngine::getSequenceInfo(const std::string& dbname,
 
 int64_t StorageEngine::nextval(const std::string& dbname,
                                 const std::string& seqname) {
+    if (transactionContext().inTransaction &&
+        transactionContext().readOnly) {
+        throw DbError("25006",
+                      "cannot execute nextval() in a read-only transaction");
+    }
     if (dbname.empty() || !validStoredIdentifier(dbname, MAX_TABLE_NAME_LEN) ||
         !validSequenceName(seqname)) return 0;
     auto path = sequencePath(dbname, seqname);
@@ -18865,6 +18870,11 @@ int64_t StorageEngine::lastval() const {
 int64_t StorageEngine::setval(const std::string& dbname,
                                const std::string& seqname,
                                int64_t value, bool isCalled) {
+    if (transactionContext().inTransaction &&
+        transactionContext().readOnly) {
+        throw DbError("25006",
+                      "cannot execute setval() in a read-only transaction");
+    }
     if (dbname.empty() || !validStoredIdentifier(dbname, MAX_TABLE_NAME_LEN) ||
         !validSequenceName(seqname)) return 0;
     auto path = sequencePath(dbname, seqname);
