@@ -287,6 +287,8 @@
 
 | 371 | DIV-11 | `SET GLOBAL`/`ALTER SYSTEM` 仍先修改 live `g_config`、连接限制、planner、当前 session 并清 plan cache，再写 `dbms.conf`；连续的 pending 修改也从 live snapshot 出发，存在覆盖前一项的风险。全局路径现从持久化文件构造 candidate，在进程互斥下原子 read-modify-save，绝不立即改变 live/session；reload 应用可重载项并失效 plan，`max_connections`、buffer 和通知队列容量保持活动值到重启。`ALTER SYSTEM` 与 extended alias 均禁止事务内执行；手册删除默认模式 `SHOW VARIABLES` 和错误的单位示例，写明 reload/restart 边界 | DIV E2E 验证两次 pending 写均保留、reload 前后值变化和 25001；完整协议验证启动连接上限、pending 文件、reload 不改变 postmaster 值、重启应用、通知队列保持、planner 只在 reload 后失效。O0/O2 编译、正式重链、文档门、完整协议和真实 PostgreSQL 差分 122/122 通过。结合第 370 项，DIV-11 已 complete；其余 `SHOW` 项目命令分别归 DIV-05/09/10/12，完整 pg_settings 字段归 OPS-02 | `80ce82d` |
 
+| 372 | P0-02 / PROTO-04 | `SELECT pg_reload_conf()` 只向 legacy stdout 写单个 `t/f`，协议层把它误判为列名并返回 `SELECT 0`，客户端既收不到函数结果，也没有 bool 类型元数据。该专用函数路径现发布一列 `DmlResult`：列名 `pg_reload_conf`、类型 `bool`、一行 `t` 或 `f`、command tag `SELECT 1`；CLI 文本保持不变 | DIV E2E 分别验证不存在配置文件时的结构化 `f` 和有效文件 reload 的 `t`；完整协议精确验证 RowDescription 名称、bool OID 16、DataRow 与 `SELECT 1`。main O0/O2 编译、正式重链、完整协议与真实 PostgreSQL 差分 122/122 通过。P0-02/PROTO-04 仍为 partial，其他 legacy 函数及复杂查询结果尚未全部结构化 | `a4e4da2` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
