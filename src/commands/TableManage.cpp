@@ -41427,6 +41427,15 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
         // live transaction with COMMIT or ROLLBACK.
         return DBStatus::INVALID_VALUE;
     }
+    for (const auto& entry : transactionContext().txnLog) {
+        if (isSessionTempPhysicalName(entry.tableName)) {
+            // Session teardown owns temporary relation lifetime. A prepared
+            // transaction can outlive that session and complete in another
+            // backend, where its row undo would reference a relation that
+            // has already been removed. Keep the transaction local instead.
+            return DBStatus::INVALID_VALUE;
+        }
+    }
 
     // PREPARE is the last point at which backend-local deferred checks are
     // available.  Validate them before publishing any prepared state; a

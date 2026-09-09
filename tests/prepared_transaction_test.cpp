@@ -138,6 +138,39 @@ void test_prepare_rejects_physical_ddl_snapshot() {
     std::cout << "[PREPARED-TXN] physical DDL cannot escape its rollback lock through PREPARE OK\n";
 }
 
+void test_prepare_rejects_temporary_relation_writes() {
+    const std::string db = testDbPath("prepared_temporary_relation");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session session;
+    session.username = "testuser";
+    session.permission = 1;
+    session.currentDB = db;
+    session.pid = 8675309;
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE TEMP TABLE temp_accounts (id INT PRIMARY KEY)", session));
+    const std::string physicalName =
+        tempTablePrefix(session, "temp_accounts");
+    assert(g_engine.tableExists(db, physicalName));
+
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, physicalName, {{"id", "1"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.prepareTransaction("prepared_temporary_relation") ==
+           dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.inTransaction());
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+    assert(g_engine.query(db, physicalName, {}, {"id"}).empty());
+    const auto prepared = g_engine.listPreparedTransactions();
+    assert(std::find(prepared.begin(), prepared.end(),
+                     "prepared_temporary_relation") == prepared.end());
+
+    cleanup(db);
+    std::cout << "[PREPARED-TXN] temporary relation writes stay session-local OK\n";
+}
+
 void test_cross_backend_prepare_completion() {
     const std::string db = testDbPath("prepared_transaction");
     cleanup(db);
@@ -494,6 +527,7 @@ int main(int argc, char** argv) {
     test_prepare_rejects_deferred_constraint_violation();
     test_prepare_resets_originating_transaction_modes();
     test_prepare_rejects_physical_ddl_snapshot();
+    test_prepare_rejects_temporary_relation_writes();
     test_cross_backend_prepare_completion();
     test_prepared_update_allows_mvcc_reader();
     test_quoted_names_round_trip_through_prepared_metadata();
