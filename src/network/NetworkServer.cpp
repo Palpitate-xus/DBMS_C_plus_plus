@@ -1912,9 +1912,20 @@ void handleClient(SecureSocket socket, std::string clientHost) {
 
     const uint64_t pid = registerProcess(username, clientHost, session.currentDB);
     session.pid = pid;
-    if (!protocol.sendParameterStatus("server_version", "DBMS-C++ protocol/3.0") ||
+    const auto applicationIt = startup.parameters.find("application_name");
+    const std::string applicationName =
+        applicationIt == startup.parameters.end() ? "" : applicationIt->second;
+    if (!protocol.sendParameterStatus(
+            "server_version", std::string("18.0 DBMS-C++ ") + DBMS_VERSION_STRING) ||
+        !protocol.sendParameterStatus("server_encoding", "UTF8") ||
         !protocol.sendParameterStatus("client_encoding", "UTF8") ||
+        !protocol.sendParameterStatus("application_name", applicationName) ||
         !protocol.sendParameterStatus("DateStyle", "ISO, MDY") ||
+        !protocol.sendParameterStatus("IntervalStyle", "postgres") ||
+        !protocol.sendParameterStatus("is_superuser", account->rolsuper ? "on" : "off") ||
+        !protocol.sendParameterStatus("session_authorization", username) ||
+        !protocol.sendParameterStatus("default_transaction_read_only", "off") ||
+        !protocol.sendParameterStatus("in_hot_standby", "off") ||
         !protocol.sendParameterStatus("integer_datetimes", "on") ||
         !protocol.sendParameterStatus("standard_conforming_strings", "on") ||
         !protocol.sendParameterStatus("TimeZone", "UTC") ||
