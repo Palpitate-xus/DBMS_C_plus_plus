@@ -51,7 +51,7 @@
 - **子查询**：解析层支持 `IN`, `EXISTS`, `ANY`, `ALL` 及标量子查询；执行层已结构化未关联单列 `IN`/`NOT IN`、未关联单表 `EXISTS`/`NOT EXISTS`、单个未关联标量目标（严格 0/1 行）以及单列 `ANY/ALL` 量化过滤（含 NULL/空集三值逻辑）；关联、复杂标量、row comparison 和复杂组合仍走兼容 fallback
 - **联合**：`UNION`, `UNION ALL`
 - **CTE**：`WITH cte_name AS (SELECT ...)` 公用表表达式
-- **导出**：`SELECT ... INTO OUTFILE 'file.csv'`
+- **导出**：`COPY table TO 'file.csv'`
 - **执行计划**：`EXPLAIN SELECT ...`, `EXPLAIN ANALYZE SELECT ...`, `EXPLAIN FORMAT JSON SELECT ...`
 - **窗口函数**：`ROW_NUMBER()`, `RANK()`, `DENSE_RANK()`, `LAG()`, `LEAD()`, `FIRST_VALUE()`, `LAST_VALUE()`, `NTILE()`, `PERCENT_RANK()`, `CUME_DIST()` 支持 `OVER (PARTITION BY ... ORDER BY ...)`
 - **派生表**：`(SELECT ...) AS alias`
@@ -137,7 +137,7 @@
 
 ### 数据导入导出
 - **CSV 导入**：`LOAD DATA INFILE 'file.csv' INTO TABLE tname`
-- **CSV 导出**：`SELECT ... INTO OUTFILE 'file.csv'`
+- **CSV 导出**：`COPY table TO 'file.csv'`
 - **数据库导出**：`DUMP DATABASE dbname TO 'file.sql'`
 - **数据库恢复**：`RESTORE DATABASE dbname FROM 'file.sql'`
 - **数据库备份**：`BACKUP DATABASE dbname TO 'file.bak'`
@@ -494,7 +494,7 @@ revoke readonly from eve;
 ### CSV 导入导出
 ```sql
 load data infile '/tmp/users.csv' into table users;
-select * from users into outfile '/tmp/export.csv';
+copy users to '/tmp/export.csv';
 ```
 
 ### 预编译语句

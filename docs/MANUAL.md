@@ -951,13 +951,12 @@ DEALLOCATE PREPARE stmt;
 `LOAD DATA INFILE` 仅是 `extended` 模式中的严格 `COPY table FROM file`
 语法糖，复用相同权限、CSV 解码、SQLSTATE 和整语句回滚；它不会猜测表头或
 静默跳过坏行。默认 `postgresql18` 模式返回 `42601`，应直接使用 `COPY`。
+`SELECT ... INTO OUTFILE` 在两种模式中都返回 `42601`；它不会劫持 PostgreSQL
+的 `SELECT ... INTO table` 建表语法。服务端 CSV 导出统一使用 `COPY ... TO`。
 
 ```sql
 -- CSV 导入
 LOAD DATA INFILE 'data.csv' INTO TABLE users;
-
--- CSV 导出
-SELECT * FROM users INTO OUTFILE 'output.csv';
 
 -- COPY
 COPY users FROM 'data.csv';
@@ -1155,7 +1154,8 @@ SHOW 入口已经删除。该模式是会话级设置，进入事务后不可切
 - `USE [DATABASE]`（DIV-01）→ `0A000`，提示重连切换数据库
 - `REPLACE INTO`（DIV-02）→ `42601`，提示 `INSERT ... ON CONFLICT`
 - `LOAD DATA INFILE`（DIV-03）→ `42601`，提示 `COPY ... FROM`
-- `SELECT ... INTO OUTFILE`（DIV-04）→ `42601`，提示 `COPY ... TO`
+- `SELECT ... INTO OUTFILE`（DIV-04）→ 两种模式均返回 `42601`，提示
+  `COPY ... TO`；PostgreSQL 的 `SELECT ... INTO table` 建表语义保持可用
 - `DESC/DESCRIBE`、`VIEW TABLE/DATABASE`、`SHOW USERS/ROLES/POOLS`（DIV-05）→
   `0A000`，提示查询 `information_schema`/`pg_catalog`/`pg_roles`
 - `CREATE/DROP REPLICATION SLOT` SQL 形式与 `SHOW LOGICAL/REPLICATION SLOTS`

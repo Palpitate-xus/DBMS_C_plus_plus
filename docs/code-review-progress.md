@@ -303,6 +303,8 @@
 
 | 379 | DIV-03 | extended `LOAD DATA INFILE` 曾维护第二套 CSV importer：首行列数不符会被猜作表头跳过，后续坏行与插入错误也只累计 skipped，之前各行已经独立提交，最终仍假报成功。LOAD 现在严格解析 `file INTO TABLE name` 后改写到同一 `handleCopy`，共享 ACL、CSV codec、只读检查、事务/savepoint 原子回滚和错误码 | DIV E2E 验证默认 `42601`；extended 合法两行导入成功，另一个首行合法、第二行列数错误的文件返回 `22P04` 且首行完全回滚。main O0/O2、专项、完整协议与 PostgreSQL 差分 `cases=122 failed=0` 通过。DIV-03 complete | `6eed9d3` |
 
+| 380 | DIV-04 | extended 模式仍会劫持 PostgreSQL 的 `SELECT INTO` 语法，并用空白切分已格式化结果写 CSV，含空格、NULL 和类型值会损坏；删除该第二套导出器，两种模式统一拒绝 MySQL `INTO OUTFILE` 并指向共享权限、CSV 编码和错误语义的 `COPY TO`，标准 `SELECT ... INTO table` 保持可用 | DIV E2E 验证标准建表语义、两种模式 `42601`、无禁用文件副作用及 `COPY TO` 的精确 CSV；main O0/O2、专项、完整协议与 PostgreSQL 差分 `cases=122 failed=0` 通过。DIV-04 complete | `124a2b5` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
