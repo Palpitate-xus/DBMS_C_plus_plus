@@ -598,6 +598,122 @@ std::string firstSqlKeyword(const std::string& sql) {
     return keyword;
 }
 
+std::vector<std::string> splitSimpleQueryStatements(const std::string& sql) {
+    std::vector<std::string> statements;
+    size_t statementStart = 0;
+    bool singleQuoted = false;
+    bool escapeSingleQuoted = false;
+    bool doubleQuoted = false;
+    bool lineComment = false;
+    int blockCommentDepth = 0;
+    std::string dollarDelimiter;
+
+    for (size_t i = 0; i < sql.size(); ++i) {
+        const char c = sql[i];
+        if (lineComment) {
+            if (c == '\n' || c == '\r') lineComment = false;
+            continue;
+        }
+        if (blockCommentDepth > 0) {
+            if (c == '/' && i + 1 < sql.size() && sql[i + 1] == '*') {
+                ++blockCommentDepth;
+                ++i;
+            } else if (c == '*' && i + 1 < sql.size() && sql[i + 1] == '/') {
+                --blockCommentDepth;
+                ++i;
+            }
+            continue;
+        }
+        if (!dollarDelimiter.empty()) {
+            if (sql.compare(i, dollarDelimiter.size(), dollarDelimiter) == 0) {
+                i += dollarDelimiter.size() - 1;
+                dollarDelimiter.clear();
+            }
+            continue;
+        }
+        if (singleQuoted) {
+            if (escapeSingleQuoted && c == '\\' && i + 1 < sql.size()) {
+                ++i;
+            } else if (c == '\'' && i + 1 < sql.size() && sql[i + 1] == '\'') {
+                ++i;
+            } else if (c == '\'') {
+                singleQuoted = false;
+                escapeSingleQuoted = false;
+            }
+            continue;
+        }
+        if (doubleQuoted) {
+            if (c == '"' && i + 1 < sql.size() && sql[i + 1] == '"') {
+                ++i;
+            } else if (c == '"') {
+                doubleQuoted = false;
+            }
+            continue;
+        }
+        if (c == '-' && i + 1 < sql.size() && sql[i + 1] == '-') {
+            lineComment = true;
+            ++i;
+            continue;
+        }
+        if (c == '/' && i + 1 < sql.size() && sql[i + 1] == '*') {
+            blockCommentDepth = 1;
+            ++i;
+            continue;
+        }
+        if (c == '\'') {
+            singleQuoted = true;
+            escapeSingleQuoted = i > 0 &&
+                (sql[i - 1] == 'e' || sql[i - 1] == 'E') &&
+                (i < 2 || (!std::isalnum(static_cast<unsigned char>(sql[i - 2])) &&
+                           sql[i - 2] != '_' && sql[i - 2] != '$'));
+            continue;
+        }
+        if (c == '"') {
+            doubleQuoted = true;
+            continue;
+        }
+        if (c == '$') {
+            size_t end = i + 1;
+            if (end < sql.size() &&
+                (std::isalpha(static_cast<unsigned char>(sql[end])) ||
+                 sql[end] == '_')) {
+                while (end < sql.size() &&
+                       (std::isalnum(static_cast<unsigned char>(sql[end])) ||
+                        sql[end] == '_')) {
+                    ++end;
+                }
+            }
+            if (end < sql.size() && sql[end] == '$') {
+                dollarDelimiter = sql.substr(i, end - i + 1);
+                i = end;
+                continue;
+            }
+        }
+        if (c != ';') continue;
+        const std::string statement = trimText(
+            sql.substr(statementStart, i - statementStart));
+        if (!firstSqlKeyword(statement).empty()) statements.push_back(statement);
+        statementStart = i + 1;
+    }
+    const std::string statement = trimText(sql.substr(statementStart));
+    if (!firstSqlKeyword(statement).empty()) statements.push_back(statement);
+    return statements;
+}
+
+bool isTransactionControlStatement(const std::string& sql) {
+    const std::string keyword = firstSqlKeyword(sql);
+    if (keyword == "prepare") {
+        size_t position = 0;
+        std::string first;
+        std::string second;
+        return readSqlKeyword(sql, position, first) &&
+               readSqlKeyword(sql, position, second) && second == "transaction";
+    }
+    return keyword == "begin" || keyword == "start" || keyword == "commit" ||
+           keyword == "end" || keyword == "rollback" || keyword == "abort" ||
+           keyword == "savepoint" || keyword == "release";
+}
+
 std::vector<std::string> splitProtocolFields(const std::string& line) {
     std::vector<std::string> fields;
     // Double-quoted segments are single fields (multi-word column headers
@@ -1617,19 +1733,19 @@ bool establishClientTransport(int clientFd, TLSServerContext& tlsContext,
 }
 
 void sendQueryResult(PostgresProtocol& protocol, const QueryResult& result,
-                     char transactionStatus) {
+                     char transactionStatus, bool sendReady = true) {
     for (const auto& notice : result.notices) {
         protocol.sendNoticeResponse(notice.message, notice.severity,
                                     notice.sqlState);
     }
     if (result.error) {
         protocol.sendErrorResponse("ERROR", result.sqlState, trimText(result.errorMessage));
-        protocol.sendReadyForQuery(transactionStatus);
+        if (sendReady) protocol.sendReadyForQuery(transactionStatus);
         return;
     }
     if (result.commandTag.empty() && !result.resultSet) {
         protocol.sendEmptyQueryResponse();
-        protocol.sendReadyForQuery(transactionStatus);
+        if (sendReady) protocol.sendReadyForQuery(transactionStatus);
         return;
     }
     if (result.resultSet) {
@@ -1650,7 +1766,7 @@ void sendQueryResult(PostgresProtocol& protocol, const QueryResult& result,
         }
     }
     protocol.sendCommandComplete(result.commandTag);
-    protocol.sendReadyForQuery(transactionStatus);
+    if (sendReady) protocol.sendReadyForQuery(transactionStatus);
 }
 
 bool sendPendingNotifications(PostgresProtocol& protocol,
@@ -1922,11 +2038,60 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 continue;
             }
             updateProcessInfo(pid, "Query", "executing", trimText(sql));
-            QueryResult result = executeForProtocol(sql);
+            const std::vector<std::string> statements =
+                splitSimpleQueryStatements(sql);
+            if (statements.empty()) {
+                updateProcessInfo(pid, "Idle", "", "");
+                QueryResult empty;
+                sendQueryResult(protocol, empty, readyStatus());
+                continue;
+            }
+
+            const bool implicitBatchTransaction =
+                statements.size() > 1 && !g_engine.inTransaction() &&
+                std::none_of(statements.begin(), statements.end(),
+                             isTransactionControlStatement);
+            std::vector<QueryResult> results;
+            results.reserve(statements.size());
+            bool batchError = false;
+            if (implicitBatchTransaction) {
+                QueryResult beginResult = executeForProtocol("BEGIN");
+                if (beginResult.error) {
+                    results.push_back(std::move(beginResult));
+                    batchError = true;
+                }
+            }
+            if (!batchError) {
+                for (const auto& statement : statements) {
+                    updateProcessInfo(pid, "Query", "executing", trimText(statement));
+                    results.push_back(executeForProtocol(statement));
+                    if (results.back().error) {
+                        batchError = true;
+                        break;
+                    }
+                }
+            }
+            if (implicitBatchTransaction) {
+                if (batchError) {
+                    (void)executeForProtocol("ROLLBACK");
+                } else {
+                    QueryResult commitResult = executeForProtocol("COMMIT");
+                    if (commitResult.error) {
+                        results.push_back(std::move(commitResult));
+                        batchError = true;
+                        if (transactionFailed || g_engine.inTransaction()) {
+                            (void)executeForProtocol("ROLLBACK");
+                        }
+                    }
+                }
+            }
             updateProcessDb(pid, session.currentDB);
             updateProcessInfo(pid, "Idle", "", "");
             if (!sendPendingNotifications(protocol, session.pid)) break;
-            sendQueryResult(protocol, result, readyStatus());
+            for (const auto& result : results) {
+                sendQueryResult(protocol, result, readyStatus(), false);
+            }
+            protocol.sendReadyForQuery(readyStatus());
             continue;
         }
         if (message.type == 'P') {

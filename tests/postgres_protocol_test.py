@@ -658,6 +658,44 @@ def main():
         assert not any(kind in (b"T", b"D") for kind, _ in notice_messages), \
             notice_messages
 
+        # A Simple Query message may carry multiple statements.  Split only
+        # on top-level semicolons, return one result per statement and one
+        # ReadyForQuery for the whole message.
+        multi_messages = simple_query(
+            sock, "SELECT ';' AS semicolon /* ; nested /* ; */ */; "
+                  "SELECT 2 AS second_value -- ; in comment\n; "
+                  "SELECT 3 AS third_value")
+        assert data_row_values(multi_messages) == [
+            [b";"], [b"2"], [b"3"]
+        ], multi_messages
+        assert sum(kind == b"T" for kind, _ in multi_messages) == 3, multi_messages
+        assert sum(kind == b"C" for kind, _ in multi_messages) == 3, multi_messages
+        assert sum(kind == b"Z" for kind, _ in multi_messages) == 1, multi_messages
+
+        # In the absence of explicit transaction control, the statements in
+        # one Q message are one implicit transaction.  Stop at the first
+        # error and roll back earlier writes; never execute later statements.
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE protocol_batch_atomic (id INT PRIMARY KEY)"))
+        batch_error = simple_query(
+            sock, "INSERT INTO protocol_batch_atomic VALUES (80); "
+                  "INSERT INTO protocol_missing_table VALUES (1); "
+                  "INSERT INTO protocol_batch_atomic VALUES (81)")
+        assert sum(kind == b"C" for kind, _ in batch_error) == 1, batch_error
+        assert sum(kind == b"E" for kind, _ in batch_error) == 1, batch_error
+        assert batch_error[-1] == (b"Z", b"I"), batch_error
+        assert data_row_values(simple_query(
+            sock, "SELECT id FROM protocol_batch_atomic")) == []
+
+        explicit_batch = simple_query(
+            sock, "BEGIN; INSERT INTO protocol_batch_atomic VALUES (82); "
+                  "SELECT id FROM protocol_batch_atomic WHERE id = 82")
+        assert explicit_batch[-1] == (b"Z", b"T"), explicit_batch
+        assert data_row_values(explicit_batch) == [[b"82"]], explicit_batch
+        assert simple_query(sock, "ROLLBACK")[-1] == (b"Z", b"I")
+        assert data_row_values(simple_query(
+            sock, "SELECT id FROM protocol_batch_atomic WHERE id = 82")) == []
+
         # LISTEN/NOTIFY is backend-local, transactional, and transported as
         # protocol NotificationResponse rather than text prepended to a query.
         notify_sock = socket.socket()
