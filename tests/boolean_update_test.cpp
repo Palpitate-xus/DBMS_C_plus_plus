@@ -27,6 +27,30 @@ int main() {
     assert(engine.insert(dbname, "flags", {{"id", "1"}, {"enabled", "false"}})
            == DBStatus::OK);
 
+    // PostgreSQL accepts unambiguous, case-insensitive prefixes of its six
+    // boolean words and stores one canonical boolean value.
+    const std::vector<std::pair<std::string, std::string>> spellings = {
+        {"t", "t"}, {"TR", "t"}, {"y", "t"}, {"ye", "t"},
+        {"on", "t"}, {"1", "t"}, {"f", "f"}, {"FA", "f"},
+        {"n", "f"}, {"of", "f"}, {"0", "f"},
+    };
+    for (const auto& [input, expected] : spellings) {
+        assert(engine.update(dbname, "flags", {{"enabled", input}}, {"=id 1"})
+               == DBStatus::OK);
+        std::vector<std::string> stored;
+        const TableSchema storedSchema =
+            engine.getTableSchema(dbname, "flags");
+        assert(engine.forEachRow(
+            dbname, "flags",
+            [&](uint32_t, uint16_t, const char* data, size_t length) {
+                stored.push_back(engine.extractColumnValue(
+                    std::string(data, length), storedSchema, 1, dbname));
+            }));
+        assert(stored == std::vector<std::string>{expected});
+    }
+    assert(engine.update(dbname, "flags", {{"enabled", "o"}}, {"=id 1"})
+           == DBStatus::INVALID_VALUE);
+
     assert(engine.update(dbname, "flags", {{"enabled", "true"}}, {"=id 1"})
            == DBStatus::OK);
     assert(engine.query(dbname, "flags", {"=enabled true"}, {"id"}).size() == 1);

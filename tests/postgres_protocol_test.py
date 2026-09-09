@@ -327,6 +327,36 @@ def extended_query_int_parameter(sock, sql, value):
     assert any(kind == b"C" for kind, _ in messages)
 
 
+def extended_query_boolean_text_parameter(sock):
+    statement = b"bool_text"
+    portal = b"bool_text_portal"
+    sql = b"SELECT $1::boolean"
+    parse = (statement + b"\0" + sql + b"\0" + struct.pack("!H", 1) +
+             struct.pack("!I", 16))
+    sock.sendall(typed(b"P", parse))
+    kind, body = read_message(sock)
+    assert kind == b"1" and body == b"", (kind, body)
+
+    # "ye" is an unambiguous PostgreSQL boolean-input abbreviation.
+    raw = b"ye"
+    bind = (portal + b"\0" + statement + b"\0" + struct.pack("!H", 0) +
+            struct.pack("!H", 1) + struct.pack("!i", len(raw)) + raw +
+            struct.pack("!H", 0))
+    sock.sendall(typed(b"B", bind))
+    kind, body = read_message(sock)
+    assert kind == b"2" and body == b"", (kind, body)
+    sock.sendall(typed(b"E", portal + b"\0" + struct.pack("!I", 0)) +
+                 typed(b"S"))
+    messages = read_until_ready(sock)
+    fields = row_description_fields(messages)
+    assert len(fields) == 1 and fields[0][3] == 16, fields
+    assert data_row_values(messages) == [[b"t"]], messages
+
+    sock.sendall(typed(b"C", b"P" + portal + b"\0") +
+                 typed(b"C", b"S" + statement + b"\0") + typed(b"S"))
+    messages = read_until_ready(sock)
+    assert sum(kind == b"3" for kind, _ in messages) == 2, messages
+
 def extended_query_binary_int_parameter(sock, sql, value):
     parse = b"\0" + sql.encode() + b"\0" + struct.pack("!H", 1) + struct.pack("!I", 23)
     sock.sendall(typed(b"P", parse))
@@ -2241,6 +2271,7 @@ def main():
         assert any(kind == b"C" for kind, _ in messages)
         extended_query(sock, "SELECT id FROM t")
         extended_query_int_parameter(sock, "SELECT id FROM t WHERE id = $1", 1)
+        extended_query_boolean_text_parameter(sock)
         extended_query_binary_int_parameter(sock, "SELECT id FROM t WHERE id = $1", 1)
         extended_query_temporal_binary_parameters(sock)
         extended_query_numeric_binary_parameter(sock)

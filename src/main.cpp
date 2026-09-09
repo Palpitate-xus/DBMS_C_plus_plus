@@ -474,7 +474,7 @@ static size_t findKeywordOutsideQuotes(const string& sql,
                                        const string& keyword,
                                        size_t from = 0);
 static size_t findMatchingParen(const string& sql, size_t start);
-static string sqlProcessor(string raw, bool normalizeBooleanLiterals = true) {
+static string sqlProcessor(string raw, bool /*normalizeBooleanLiterals*/ = false) {
     raw = toLowerSql(raw);
     // Whitespace separates SQL tokens; deleting it joins keywords and names.
     // Normalize runs only outside quotes. Whitespace inside a literal or a
@@ -509,49 +509,6 @@ static string sqlProcessor(string raw, bool normalizeBooleanLiterals = true) {
     else raw = raw.substr(start, raw.find_last_not_of(' ') - start + 1);
     if (!raw.empty() && raw.back() == ';') raw.pop_back();
     raw = preprocessCaseWhen(raw);
-    // Normalize boolean literals for the legacy table-expression paths.
-    // FROM-less projections need to retain TRUE/FALSE so the expression
-    // evaluator and protocol metadata preserve PostgreSQL's bool value/type.
-    if (normalizeBooleanLiterals) {
-        string out;
-        size_t i = 0;
-        char quote = 0;
-        const auto identifierChar = [](unsigned char c) {
-            return isalnum(c) || c == '_' || c == '$';
-        };
-        while (i < raw.size()) {
-            if (quote != 0) {
-                const char c = raw[i++];
-                out += c;
-                if (c == quote) {
-                    if (i < raw.size() && raw[i] == quote) out += raw[i++];
-                    else quote = 0;
-                }
-                continue;
-            }
-            if (raw[i] == '\'' || raw[i] == '"') {
-                quote = raw[i];
-                out += raw[i++];
-                continue;
-            }
-            // Check for "true" as a standalone token
-            if ((i == 0 || !identifierChar(static_cast<unsigned char>(raw[i-1]))) &&
-                raw.substr(i, 4) == "true" &&
-                (i + 4 >= raw.size() || !identifierChar(static_cast<unsigned char>(raw[i+4])))) {
-                out += "1";
-                i += 4;
-            } else if ((i == 0 || !identifierChar(static_cast<unsigned char>(raw[i-1]))) &&
-                       raw.substr(i, 5) == "false" &&
-                       (i + 5 >= raw.size() || !identifierChar(static_cast<unsigned char>(raw[i+5])))) {
-                out += "0";
-                i += 5;
-            } else {
-                out += raw[i];
-                ++i;
-            }
-        }
-        raw = out;
-    }
     // Convert array subscript syntax: col[n] -> array_get(col, n)
     {
         string out;

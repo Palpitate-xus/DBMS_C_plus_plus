@@ -15,6 +15,7 @@
 #include "catalog/CatalogService.h"
 #include "catalog/systables.h"
 #include "common/DateType.h"
+#include "common/BooleanCodec.h"
 #include "PostgresNumeric.h"
 #include "process/SqlStats.h"
 #include "process/RuntimeStats.h"
@@ -435,10 +436,8 @@ std::string protocolParameterLiteral(uint32_t typeOid,
         return {};
     }
     if (typeOid == 16) {
-        std::string lower = value;
-        for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        if (lower == "t" || lower == "true" || lower == "1") return "TRUE";
-        if (lower == "f" || lower == "false" || lower == "0") return "FALSE";
+        const auto parsed = parsePostgresBoolean(value);
+        if (parsed) return *parsed ? "TRUE" : "FALSE";
         error = "invalid input syntax for type boolean";
         return {};
     }

@@ -1,6 +1,7 @@
 #include "ExprEvaluator.h"
 #include "commands/TableManage.h"
 #include "common/DateType.h"
+#include "common/BooleanCodec.h"
 #include "common/NotificationManager.h"
 #include "types/numeric.h"
 #include "utils/Session.h"
@@ -222,11 +223,8 @@ static std::string formatScaledDecimalMagnitude(std::string digits,
 
 bool ExprValue::asBool() const {
     if (isNull) return false;
-    std::string v = toLower(value);
-    if (v == "t" || v == "true" || v == "1" || v == "yes" || v == "on") return true;
-    if (v == "f" || v == "false" || v == "0" || v == "no" || v == "off") return false;
-    // Non-empty non-zero string/value is truthy
-    return !value.empty() && value != "0" && value != "0.0";
+    const auto parsed = parsePostgresBoolean(value);
+    return parsed.value_or(false);
 }
 
 int64_t ExprValue::asInt() const {
@@ -3108,25 +3106,7 @@ static ExprValue castToNumeric(const ExprValue& value,
 }
 
 static std::optional<bool> parseBooleanCastText(const std::string& input) {
-    const std::string text = toLower(trimStr(input));
-    if (text == "1") return true;
-    if (text == "0") return false;
-    if (text.empty()) return std::nullopt;
-
-    const std::pair<const char*, bool> names[] = {
-        {"true", true}, {"false", false}, {"yes", true},
-        {"no", false}, {"on", true}, {"off", false}};
-    std::optional<bool> result;
-    size_t matches = 0;
-    for (const auto& name : names) {
-        const std::string candidate = name.first;
-        if (text.size() <= candidate.size() &&
-            candidate.compare(0, text.size(), text) == 0) {
-            result = name.second;
-            ++matches;
-        }
-    }
-    return matches == 1 ? result : std::nullopt;
+    return parsePostgresBoolean(input);
 }
 
 static ExprValue castToBoolean(const ExprValue& value) {

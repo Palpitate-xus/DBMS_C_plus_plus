@@ -1,5 +1,6 @@
 #include "TableManage.h"
 #include "common/DbError.h"
+#include "common/BooleanCodec.h"
 #include "common/NotificationManager.h"
 #include "common/sha256.h"
 #include "utils/plpgsql.h"
@@ -8836,7 +8837,7 @@ std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer
         int8_t val = 0;
         std::memcpy(&val, rowBuffer.data() + offset, sizeof(int8_t));
         if (val == INT8_MIN) return "";
-        return val ? "true" : "false";
+        return postgresBooleanOutput(val != 0);
     } else {
         int64_t val = 0;
         size_t n = std::min(col.dsize, sizeof(val));
@@ -15629,11 +15630,7 @@ static bool valueConvertibleToType(const std::string& raw, const std::string& ta
         return idx == v.size();
     }
     if (targetType == "boolean") {
-        std::string lv;
-        for (char c : v) lv += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        return lv == "true" || lv == "false" || lv == "t" || lv == "f" ||
-               lv == "1" || lv == "0" || lv == "yes" || lv == "no" ||
-               lv == "y" || lv == "n";
+        return parsePostgresBoolean(v).has_value();
     }
     // Other targets (char/varchar/text/date/timestamp/...) accept any text;
     // insert() re-encodes per the new type on a best-effort basis.
@@ -19229,15 +19226,10 @@ StorageEngine::PredicateTruth StorageEngine::compareValues(
         return fromCompare(compareFloatingValues(l, r));
     }
     if (col.dataType == "boolean") {
-        auto normalizeBool = [](const std::string& value) {
-            if (value == "1" || value == "true" || value == "yes" || value == "on") return 1;
-            if (value == "0" || value == "false" || value == "no" || value == "off") return 0;
-            return -1;
-        };
-        const int l = normalizeBool(left);
-        const int r = normalizeBool(right);
-        if (l < 0 || r < 0) return PredicateTruth::Unknown;
-        return fromCompare(l < r ? -1 : (r < l ? 1 : 0));
+        const auto l = parsePostgresBoolean(left);
+        const auto r = parsePostgresBoolean(right);
+        if (!l || !r) return PredicateTruth::Unknown;
+        return fromCompare(*l < *r ? -1 : (*r < *l ? 1 : 0));
     }
 
     // Integral types are stored in the same canonical textual form.  Unlike
@@ -19661,15 +19653,11 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         if (!floatingPredicateMatches(
                 cond.op, compareFloatingValues(num, cmp))) return false;
     } else if (col.dataType == "boolean") {
-        auto normalizeBool = [](const std::string& s) -> std::string {
-            if (s == "1" || s == "true" || s == "yes" || s == "on") return "true";
-            if (s == "0" || s == "false" || s == "no" || s == "off") return "false";
-            return s;
-        };
-        std::string nv = normalizeBool(val);
-        std::string nc = normalizeBool(cond.value);
-        if (cond.op == "="  && nv != nc) return false;
-        if (cond.op == "!=" && nv == nc) return false;
+        const auto nv = parsePostgresBoolean(val);
+        const auto nc = parsePostgresBoolean(cond.value);
+        if (!nv || !nc) return false;
+        if (cond.op == "="  && *nv != *nc) return false;
+        if (cond.op == "!=" && *nv == *nc) return false;
     } else if (col.dataType == "point") {
         double px = 0.0, py = 0.0;
         std::string canonicalPoint;
@@ -19917,9 +19905,9 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                 if (!val.empty()) normalizeMacAddr(val, n, bytes);
                 std::memcpy(&rowBuffer[offset], bytes, n);
             } else if (col.dataType == "boolean") {
+                const auto parsed = parsePostgresBoolean(val);
                 int8_t bval = val.empty() ? INT8_MIN :
-                    (val == "1" || val == "true" || val == "TRUE") ? 1 :
-                    (val == "0" || val == "false" || val == "FALSE") ? 0 : INT8_MIN;
+                    parsed ? static_cast<int8_t>(*parsed) : INT8_MIN;
                 std::memcpy(&rowBuffer[offset], &bval, sizeof(int8_t));
             } else {
                 int64_t num = val.empty() ? INF : StorageEngine::parseInt(val);
@@ -19985,9 +19973,9 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                     std::memcpy(&fixedData[fixedOff + sizeof(double)], &y,
                                 sizeof(double));
                 } else if (col.dataType == "boolean") {
+                    const auto parsed = parsePostgresBoolean(val);
                     int8_t bval = val.empty() ? INT8_MIN :
-                        (val == "1" || val == "true" || val == "TRUE") ? 1 :
-                        (val == "0" || val == "false" || val == "FALSE") ? 0 : INT8_MIN;
+                        parsed ? static_cast<int8_t>(*parsed) : INT8_MIN;
                     std::memcpy(&fixedData[fixedOff], &bval, sizeof(int8_t));
                 } else if (col.dataType == "inet" || col.dataType == "cidr") {
                     uint8_t family = 0, prefix = 32;
@@ -20882,10 +20870,12 @@ DBStatus StorageEngine::insertInternal(
             actualValues[col.dataName] = formatFloatingValue(parsed);
         }
         if (!col.isVariableLength && col.dataType == "boolean" && !val.empty()) {
-            if (val != "1" && val != "0" && val != "true" && val != "false" && val != "TRUE" && val != "FALSE") {
+            const auto parsed = parsePostgresBoolean(val);
+            if (!parsed) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }
+            actualValues[col.dataName] = postgresBooleanOutput(*parsed);
         }
         if (!col.isVariableLength && (col.dataType == "macaddr" || col.dataType == "macaddr8") && !val.empty()) {
             int n = (col.dataType == "macaddr8") ? 8 : 6;
@@ -24190,11 +24180,11 @@ DBStatus StorageEngine::updateInternal(
                             storeVal = canon;
                         }
                     } else if (col.dataType == "boolean") {
-                        if (!kv.second.empty() && kv.second != "1" &&
-                            kv.second != "0" && kv.second != "true" &&
-                            kv.second != "false" && kv.second != "TRUE" &&
-                            kv.second != "FALSE") {
-                            return DBStatus::INVALID_VALUE;
+                        if (!kv.second.empty()) {
+                            const auto parsed =
+                                parsePostgresBoolean(kv.second);
+                            if (!parsed) return DBStatus::INVALID_VALUE;
+                            storeVal = postgresBooleanOutput(*parsed);
                         }
                     } else if (isIntegerStorageType(col.dataType)) {
                         if (!kv.second.empty()) {
