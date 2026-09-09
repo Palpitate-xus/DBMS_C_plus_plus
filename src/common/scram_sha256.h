@@ -14,6 +14,7 @@ namespace dbms {
 namespace scram {
 
 using Bytes = std::vector<uint8_t>;
+inline constexpr uint32_t kDefaultIterations = 4096;
 
 inline Bytes toBytes(const std::string& value) {
     return Bytes(value.begin(), value.end());
@@ -139,8 +140,9 @@ inline bool parseVerifier(const std::string& encoded, Verifier& verifier) {
            verifier.storedKey.size() == 32 && verifier.serverKey.size() == 32;
 }
 
-inline std::string makeVerifier(const std::string& password, const Bytes& salt,
-                                uint32_t iterations = 4096) {
+inline std::string makeVerifier(
+        const std::string& password, const Bytes& salt,
+        uint32_t iterations = kDefaultIterations) {
     const Bytes saltedPassword = pbkdf2Sha256(password, salt, iterations);
     const Bytes clientKey = hmacSha256(saltedPassword, toBytes("Client Key"));
     const Bytes storedKey = sha256Bytes(clientKey);
@@ -150,8 +152,9 @@ inline std::string makeVerifier(const std::string& password, const Bytes& salt,
            base64Encode(serverKey);
 }
 
-inline std::string makeRandomVerifier(const std::string& password,
-                                      uint32_t iterations = 4096) {
+inline std::string makeRandomVerifier(
+        const std::string& password,
+        uint32_t iterations = kDefaultIterations) {
     std::array<uint8_t, 16> salt{};
     std::random_device random;
     for (auto& byte : salt) byte = static_cast<uint8_t>(random());

@@ -192,6 +192,8 @@ def startup(sock, user, database, password="secret", fragmented=False,
             b"in_hot_standby": b"off",
             b"integer_datetimes": b"on",
             b"standard_conforming_strings": b"on",
+            b"scram_iterations": b"4096",
+            b"search_path": b"public",
             b"TimeZone": b"UTC",
         }, statuses
     backend_key = next(body for kind, body in messages if kind == b"K")

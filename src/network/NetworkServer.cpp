@@ -2212,6 +2212,9 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         !protocol.sendParameterStatus("in_hot_standby", "off") ||
         !protocol.sendParameterStatus("integer_datetimes", "on") ||
         !protocol.sendParameterStatus("standard_conforming_strings", "on") ||
+        !protocol.sendParameterStatus("scram_iterations", std::to_string(
+            dbms::scram::kDefaultIterations)) ||
+        !protocol.sendParameterStatus("search_path", session.searchPath) ||
         !protocol.sendParameterStatus("TimeZone", "UTC") ||
         !protocol.sendBackendKeyData(static_cast<uint32_t>(pid), static_cast<uint32_t>(pid ^ 0x9e3779b9U)) ||
         !protocol.sendReadyForQuery()) {
