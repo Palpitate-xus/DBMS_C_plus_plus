@@ -15874,7 +15874,7 @@ if (sql.rfind("backup database", 0) == 0) {
             // active in this session's compatibility mode.
             cout << "extension mode" << endl;
             if (dbms::isExtendedCompatMode(s.compatibilityMode)) {
-                cout << "compat_object_record_layer enabled" << endl;
+                cout << "project_sql_extensions enabled" << endl;
             } else {
                 cout << "none (postgresql18 mode)" << endl;
             }

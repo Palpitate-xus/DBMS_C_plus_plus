@@ -129,6 +129,10 @@ def main():
         assert any(kind == b"D" and b"postgresql18" in body
                    for kind, body in messages), \
             "SHOW compatibility_mode must report postgresql18: %r" % (messages,)
+        messages = simple_query(sock, "SHOW dbms.extensions")
+        assert any(kind == b"D" and b"none" in body for kind, body in messages)
+        assert all(b"compat_object_record_layer" not in body
+                   for _kind, body in messages)
 
         # Every capability-gated command fails with 0A000 and a clear message.
         gated_create = [
@@ -459,6 +463,11 @@ def main():
         # Extended mode does not make unimplemented PostgreSQL objects real.
         expect_command_tag(sock, "SET compatibility_mode = extended",
                            "SET compatibility_mode")
+        messages = simple_query(sock, "SHOW dbms.extensions")
+        assert any(kind == b"D" and b"project_sql_extensions" in body
+                   for kind, body in messages), messages
+        assert all(b"compat_object_record_layer" not in body
+                   for _kind, body in messages)
         expect_0a000(sock, "SHOW COMPAT OBJECTS",
                      "removed extended-mode compat catalog")
         expect_0a000(sock, "CREATE EXTENSION hstore",

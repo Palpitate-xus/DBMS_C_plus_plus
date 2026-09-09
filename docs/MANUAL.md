@@ -1132,9 +1132,9 @@ SHOW dbms.extensions;                        -- 审计当前会话启用的偏�
 - `LOAD 'library'`（无动态加载运行时）
 
 其中 `ASSERTION` 在两种模式下都返回 `0A000`（PostgreSQL 18 本身也未实现
-SQL assertion）。显式 `SET compatibility_mode = 'extended'` 后，其余门控命令
-恢复旧的兼容对象记录行为，便于项目工具链过渡；该模式是会话级设置，
-进入事务后不可切换。
+SQL assertion）。显式 `SET compatibility_mode = 'extended'` 只启用已有真实运行时的
+项目 SQL 扩展；上述没有运行时的对象命令仍返回 `0A000`。旧的兼容对象记录层及其
+SHOW 入口已经删除。该模式是会话级设置，进入事务后不可切换。
 
 同一批门控的项目语法（`postgresql18` 模式下的行为）：
 

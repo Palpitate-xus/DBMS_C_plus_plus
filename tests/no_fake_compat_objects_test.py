@@ -10,6 +10,7 @@ REPO = Path(__file__).resolve().parents[1]
 def main():
     source = (REPO / "src/main.cpp").read_text(encoding="utf-8")
     header = (REPO / "src/common/FeatureGate.h").read_text(encoding="utf-8")
+    manual = (REPO / "docs/MANUAL.md").read_text(encoding="utf-8")
 
     forbidden = (
         ".pg_compat_objects",
@@ -23,6 +24,9 @@ def main():
     for marker in forbidden:
         assert marker not in source, "fake compatibility path returned: %s" % marker
     assert "compatKindHasRuntime" not in header
+    assert "compat_object_record_layer" not in source
+    assert "恢复旧的兼容对象记录行为" not in manual
+    assert "旧的兼容对象记录层及其" in manual
     assert "A runtime-backed CREATE must be consumed" in source
     assert 'featureNotSupportedError(string("CREATE ") + phrase)' in source
     assert 'featureNotSupportedError(string("ALTER ") + phrase)' in source
