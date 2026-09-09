@@ -203,6 +203,8 @@
 
 | 329 | P0-04 / TXN-05 | `ALTER TABLE` 与 `TRUNCATE` 错误地在执行前提交外层事务，使此前 DML 无法回滚；移除隐式提交后又暴露物理 DDL 快照恢复仍重放全部行日志，并把已被快照移除的 INSERT 当作撤销失败。两类 DDL 现在加入外层事务；快照记录行日志边界，完整回滚仅撤销快照中已有的行变更，快照后的行日志不再按旧 schema 重放；INSERT 撤销允许目标行已不存在，但仍拒绝无效页和 RID 指向不同 tuple | 修复前协议稳定复现 `INSERT; ALTER; ROLLBACK` 留下已提交行和新增列，初次移除隐式提交则返回 `XX000 Rollback failed`；修复后直接及协议回归覆盖 DML→ALTER、ALTER→DML 和 DML→TRUNCATE 三种顺序，结构与数据均恢复。`ddl_transaction_skeleton_test`、`truncate_test`、隔离协议、完整 PostgreSQL 协议、TableManage/DdlExecutor O0/O2 及 122 组差分全部通过 | `c1a3409` |
 
+| 330 | P0-04 / PROTO-08 | `CREATE DATABASE`/`DROP DATABASE` 在显式事务中会擅自执行 COMMIT；除偏离 PostgreSQL 的事务块禁令外，还会提前验证延期约束并改变用户事务结果。数据库级 DDL 现在在事务块内于任何 catalog、目录或 session currentDB 副作用前拒绝执行，返回 `25001`，并把事务终止权保留给用户 | `deferrable_test` 验证带失败延期 CHECK 的外层事务不会被数据库 DDL 提交、目标库不存在且显式回滚清理行；协议回归覆盖 CREATE 与 DROP 的 `25001`、CREATE 后的 `25P02`、ROLLBACK 恢复以及事务外命令仍成功；完整 `ddl_ast_bridge_test` 和 DdlExecutor O0/O2 编译通过 | `2a232aa` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
