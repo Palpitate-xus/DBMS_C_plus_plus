@@ -36279,7 +36279,7 @@ std::string StorageEngine::exportSnapshot() const {
     snap.database = context.txnDB;
     snap.xmin = context.readView.upLimitId;
     snap.xmax = context.readView.lowLimitId;
-    snap.curCid = 0; // command id not tracked yet
+    snap.curCid = context.currentCommandId;
     snap.activeXids.assign(context.readView.activeTxnIds.begin(), context.readView.activeTxnIds.end());
     snap.subxip.assign(context.readView.subTxnIds.begin(), context.readView.subTxnIds.end());
     return snap.exportToBytes();

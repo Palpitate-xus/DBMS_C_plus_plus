@@ -143,8 +143,16 @@ int main() {
         auto rows = engine1.query(dbname, "t", {}, {"id", "name"});
         assert(rowContains(rows, "alice"));
 
+        // Exercise a non-zero exporter command ID so the serialized field
+        // cannot silently remain a placeholder.
+        assert(engine1.beginSqlCommand());
+        assert(engine1.finishSqlCommand());
+        assert(engine1.currentCommandId() == 1);
         std::string snapBytes = engine1.exportSnapshot();
         assert(!snapBytes.empty());
+        auto exported = Snapshot::importFromBytes(snapBytes);
+        assert(exported.has_value());
+        assert(exported->curCid == engine1.currentCommandId());
 
         // Engine2 imports the snapshot and should not see engine1's uncommitted row
         r = engine2.beginTransaction(dbname);
