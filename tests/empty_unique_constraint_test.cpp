@@ -127,7 +127,7 @@ void testDeferredUniqueChecksEmptyAtCommit() {
     assert(g_engine.insert(database, "deferred_unique",
                            {{"id", "2"}, {"code", ""}}) ==
            dbms::DBStatus::OK);
-    assert(g_engine.commitTransaction() == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.commitTransaction() == dbms::DBStatus::UNIQUE_VIOLATION);
     cleanup(database);
 }
 

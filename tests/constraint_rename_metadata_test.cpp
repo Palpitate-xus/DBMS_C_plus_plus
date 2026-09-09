@@ -68,7 +68,7 @@ void testRenameMovesDeferrabilityMetadata() {
     assert(g_engine.insert(database, "deferred_values",
                            {{"id", "2"}, {"tag", "duplicate"}}) ==
            dbms::DBStatus::OK);
-    assert(g_engine.commitTransaction() == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.commitTransaction() == dbms::DBStatus::UNIQUE_VIOLATION);
     cleanup(database);
 }
 

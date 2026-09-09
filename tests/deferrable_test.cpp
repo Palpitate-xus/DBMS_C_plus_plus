@@ -62,11 +62,11 @@ static void test_initially_deferred_check_blocks_commit() {
     // With no transaction boundary available, an initially-deferred CHECK
     // must still be enforced by the autocommit statement itself.
     assert(g_engine.insert(db, "t", {{"id", "2"}, {"price", "0"}}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::CHECK_VIOLATION);
     assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "t", {{"id", "1"}, {"price", "0"}}) == dbms::DBStatus::OK);
     // Commit should fail because deferred CHECK catches the violation
-    assert(g_engine.commitTransaction() == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.commitTransaction() == dbms::DBStatus::CHECK_VIOLATION);
 
     auto rows = g_engine.query(db, "t", {"=id 1"}, {"price"});
     assert(rows.empty());
@@ -92,7 +92,7 @@ static void test_initially_deferred_check_allows_valid_commit() {
     assert(g_engine.insert(db, "t", {{"id", "2"}, {"price", "10"}}) ==
            dbms::DBStatus::OK);
     assert(g_engine.update(db, "t", {{"price", "0"}}, {"=id 2"}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::CHECK_VIOLATION);
     assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "t", {{"id", "1"}, {"price", "10"}}) == dbms::DBStatus::OK);
     assert(g_engine.commitTransaction() == dbms::DBStatus::OK);
@@ -169,7 +169,7 @@ static void test_deferred_check_on_update() {
     assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "t", {{"id", "1"}, {"price", "10"}}) == dbms::DBStatus::OK);
     assert(g_engine.update(db, "t", {{"price", "0"}}, {"=id 1"}) == dbms::DBStatus::OK);
-    assert(g_engine.commitTransaction() == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.commitTransaction() == dbms::DBStatus::CHECK_VIOLATION);
 
     auto rows = g_engine.query(db, "t", {"=id 1"}, {"price"});
     assert(rows.empty());

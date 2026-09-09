@@ -1595,7 +1595,8 @@ static bool commitBeforeLegacyDdl() {
 static bool handleCommitTransaction(const string& sql, Session& s) {
     auto res = g_engine.commitTransaction();
     if (res != DBStatus::OK) {
-        cout << "Commit failed" << endl;
+        cout << "ERROR: commit failed (SQLSTATE "
+             << dbms::sqlstateForDBStatus(res) << ")" << endl;
         return true;
     }
     // COMMIT AND [NO] CHAIN: if AND CHAIN, immediately start a new transaction.
@@ -2896,6 +2897,12 @@ static bool handlePrepare(const string& sql, Session& s) {
             }
         } else if (res == DBStatus::DUPLICATE_KEY) {
             cout << "Transaction ID already exists" << endl;
+        } else if (res == DBStatus::UNIQUE_VIOLATION ||
+                   res == DBStatus::CHECK_VIOLATION ||
+                   res == DBStatus::FOREIGN_KEY_VIOLATION ||
+                   res == DBStatus::EXCLUSION_VIOLATION) {
+            cout << "ERROR: deferred constraint violation (SQLSTATE "
+                 << dbms::sqlstateForDBStatus(res) << ")" << endl;
         } else {
             cout << "PREPARE TRANSACTION failed" << endl;
         }

@@ -88,7 +88,7 @@ static void test_exclude_deferred_violation() {
     assert(g_engine.insert(db, "excl", {{"id", "1"}, {"rng", "100"}}) == DBStatus::OK);
     assert(g_engine.insert(db, "excl", {{"id", "2"}, {"rng", "100"}}) == DBStatus::OK);
     // Conflict never resolved -> COMMIT must fail.
-    assert(g_engine.commitTransaction() == DBStatus::INVALID_VALUE);
+    assert(g_engine.commitTransaction() == DBStatus::EXCLUSION_VIOLATION);
     std::cout << "[DEFER] EXCLUDE deferred conflicting commit rejected OK" << std::endl;
 }
 
@@ -103,10 +103,10 @@ static void test_exclude_deferred_resolution() {
 }
 
 static void test_exclude_immediate_rejects() {
-    // Without a transaction there is no commit point: deferrable EXCLUDE
-    // still checks immediately on autocommit inserts.
+    // The autocommit statement supplies the commit point for the deferred
+    // exclusion check and reports the constraint class precisely.
     assert(g_engine.insert(db, "excl", {{"id", "5"}, {"rng", "300"}})
-               == DBStatus::INVALID_VALUE);
+               == DBStatus::EXCLUSION_VIOLATION);
     std::cout << "[DEFER] EXCLUDE autocommit conflict rejected OK" << std::endl;
 }
 
@@ -124,13 +124,13 @@ static void test_fk_deferred_violation() {
     assert(g_engine.beginTransaction(db) == DBStatus::OK);
     assert(g_engine.insert(db, "child", {{"id", "2"}, {"pid", "200"}}) == DBStatus::OK);
     // Parent never appears -> COMMIT must fail.
-    assert(g_engine.commitTransaction() == DBStatus::INVALID_VALUE);
+    assert(g_engine.commitTransaction() == DBStatus::FOREIGN_KEY_VIOLATION);
     std::cout << "[DEFER] FK deferred missing-parent commit rejected OK" << std::endl;
 }
 
 static void test_fk_autocommit_rejects_missing_parent() {
     assert(g_engine.insert(db, "child", {{"id", "3"}, {"pid", "300"}})
-               == DBStatus::INVALID_VALUE);
+               == DBStatus::FOREIGN_KEY_VIOLATION);
     std::cout << "[DEFER] FK autocommit missing parent rejected OK" << std::endl;
 }
 
@@ -144,7 +144,7 @@ static void test_fk_deferred_update() {
     assert(g_engine.beginTransaction(db) == DBStatus::OK);
     assert(g_engine.update(db, "child", {{"pid", "401"}}, {"=id 1"}) ==
            DBStatus::OK);
-    assert(g_engine.commitTransaction() == DBStatus::INVALID_VALUE);
+    assert(g_engine.commitTransaction() == DBStatus::FOREIGN_KEY_VIOLATION);
 
     assert(g_engine.beginTransaction(db) == DBStatus::OK);
     assert(g_engine.update(db, "child", {{"pid", "999"}}, {"=id 1"}) ==
@@ -184,7 +184,7 @@ static void test_composite_fk_deferred() {
     assert(g_engine.update(
                db, "composite_child", {{"b", "40"}}, {"=id 1"}) ==
            DBStatus::OK);
-    assert(g_engine.commitTransaction() == DBStatus::INVALID_VALUE);
+    assert(g_engine.commitTransaction() == DBStatus::FOREIGN_KEY_VIOLATION);
 
     assert(g_engine.beginTransaction(db) == DBStatus::OK);
     assert(g_engine.update(
@@ -209,7 +209,7 @@ static void test_unique_autocommit_rejects_duplicate() {
     assert(g_engine.insert(db, "uniq", {{"id", "21"}, {"tag", "autocommit"}})
                == DBStatus::OK);
     assert(g_engine.insert(db, "uniq", {{"id", "22"}, {"tag", "autocommit"}})
-               == DBStatus::DUPLICATE_KEY);
+               == DBStatus::UNIQUE_VIOLATION);
     std::cout << "[DEFER] UNIQUE autocommit duplicate rejected OK" << std::endl;
 }
 
@@ -229,7 +229,7 @@ static void test_unique_deferred_update_violation() {
     assert(g_engine.beginTransaction(db) == DBStatus::OK);
     assert(g_engine.update(db, "uniq", {{"tag", "c"}}, {"=id 1"})
                == DBStatus::OK);
-    assert(g_engine.commitTransaction() == DBStatus::INVALID_VALUE);
+    assert(g_engine.commitTransaction() == DBStatus::UNIQUE_VIOLATION);
 
     assert(g_engine.beginTransaction(db) == DBStatus::OK);
     assert(g_engine.update(db, "uniq", {{"tag", "c"}}, {"=id 1"}) ==
@@ -252,7 +252,7 @@ static void test_unique_deferred_violation() {
     assert(g_engine.insert(db, "uniq", {{"id", "10"}, {"tag", "dup"}}) == DBStatus::OK);
     assert(g_engine.insert(db, "uniq", {{"id", "11"}, {"tag", "dup"}}) == DBStatus::OK);
     // Duplicate never resolved -> COMMIT must fail.
-    assert(g_engine.commitTransaction() == DBStatus::INVALID_VALUE);
+    assert(g_engine.commitTransaction() == DBStatus::UNIQUE_VIOLATION);
     std::cout << "[DEFER] UNIQUE deferred duplicate commit rejected OK" << std::endl;
 }
 

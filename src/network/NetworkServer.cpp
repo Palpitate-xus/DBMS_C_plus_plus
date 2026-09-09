@@ -1184,6 +1184,18 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
         } else if (result.errorMessage.find("(SQLSTATE 22P04)") !=
                    std::string::npos) {
             result.sqlState = "22P04";
+        } else if (result.errorMessage.find("(SQLSTATE 23505)") !=
+                   std::string::npos) {
+            result.sqlState = "23505";
+        } else if (result.errorMessage.find("(SQLSTATE 23514)") !=
+                   std::string::npos) {
+            result.sqlState = "23514";
+        } else if (result.errorMessage.find("(SQLSTATE 23503)") !=
+                   std::string::npos) {
+            result.sqlState = "23503";
+        } else if (result.errorMessage.find("(SQLSTATE 23P01)") !=
+                   std::string::npos) {
+            result.sqlState = "23P01";
         } else {
             result.sqlState = "XX000";
         }

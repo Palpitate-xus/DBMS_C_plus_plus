@@ -708,7 +708,7 @@ static void test_collation_aware_unique_constraints() {
     assert(g_engine.insert(
                db, "deferred_unique", {{"id", "2"}, {"v", "DEFERRED"}}) ==
            DBStatus::OK);
-    assert(g_engine.commitTransaction() == DBStatus::INVALID_VALUE);
+    assert(g_engine.commitTransaction() == DBStatus::UNIQUE_VIOLATION);
     assert(g_engine.query(
                db, "deferred_unique", {}, {"id"}).size() == 1);
 

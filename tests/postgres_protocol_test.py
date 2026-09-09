@@ -479,6 +479,39 @@ def prepared_transaction_error_boundaries(sock):
     restored_fields = row_description_fields(simple_query(sock, "SELECT * FROM t"))
     assert [field[0] for field in restored_fields] == [b"id"], restored_fields
 
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "CREATE TABLE deferred_parent (id INT PRIMARY KEY)"))
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "CREATE TABLE deferred_child (id INT PRIMARY KEY, pid INT, "
+              "CONSTRAINT deferred_child_fk FOREIGN KEY (pid) "
+              "REFERENCES deferred_parent(id) DEFERRABLE INITIALLY DEFERRED)"))
+    assert simple_query(sock, "BEGIN")[-1] == (b"Z", b"T")
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "INSERT INTO deferred_child VALUES (1, 999)"))
+    fk_prepare = simple_query(
+        sock, "PREPARE TRANSACTION 'deferred_fk_protocol'")
+    fk_error = next(body for kind, body in fk_prepare if kind == b"E")
+    assert b"C23503\0" in fk_error, fk_prepare
+    assert fk_prepare[-1] == (b"Z", b"E"), fk_prepare
+    assert simple_query(sock, "ROLLBACK")[-1] == (b"Z", b"I")
+    assert data_row_values(simple_query(
+        sock, "SELECT id FROM deferred_child")) == []
+
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "CREATE TABLE deferred_check (id INT PRIMARY KEY, value INT, "
+              "CONSTRAINT deferred_positive CHECK (value > 0) "
+              "DEFERRABLE INITIALLY DEFERRED)"))
+    assert simple_query(sock, "BEGIN")[-1] == (b"Z", b"T")
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "INSERT INTO deferred_check VALUES (1, 0)"))
+    check_commit = simple_query(sock, "COMMIT")
+    check_error = next(body for kind, body in check_commit if kind == b"E")
+    assert b"C23514\0" in check_error, check_commit
+    assert check_commit[-1] == (b"Z", b"E"), check_commit
+    assert simple_query(sock, "ROLLBACK")[-1] == (b"Z", b"I")
+    assert data_row_values(simple_query(
+        sock, "SELECT id FROM deferred_check")) == []
+
     # Two-phase completion commands are not substitutes for local transaction
     # recovery. They must remain rejected while the backend is in 25P02.
     assert simple_query(sock, "BEGIN")[-1] == (b"Z", b"T")

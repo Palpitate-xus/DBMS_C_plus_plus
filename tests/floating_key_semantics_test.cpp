@@ -256,7 +256,7 @@ void test_deferred_unique_key(const std::string& database) {
     assert(g_engine.insert(database, "deferred_values",
                            {{"id", "2"}, {"value", "0"}}) ==
            dbms::DBStatus::OK);
-    assert(g_engine.commitTransaction() == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.commitTransaction() == dbms::DBStatus::UNIQUE_VIOLATION);
     assert(g_engine.query(database, "deferred_values", {}, {"id"}).empty());
 }
 

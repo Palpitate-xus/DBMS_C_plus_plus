@@ -111,26 +111,26 @@ int main() {
         session));
     assert(g_engine.insert(database, "checked_values",
                            {{"id", "16"}, {"value", "500"}}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::CHECK_VIOLATION);
     assert(g_engine.update(database, "checked_values", {{"value", "500"}},
-                           {"=id 1"}) == dbms::DBStatus::INVALID_VALUE);
+                           {"=id 1"}) == dbms::DBStatus::CHECK_VIOLATION);
     assert(g_engine.beginTransaction(database) == dbms::DBStatus::OK);
     assert(g_engine.insert(database, "checked_values",
                            {{"id", "13"}, {"value", "500"}}) ==
            dbms::DBStatus::OK);
-    assert(g_engine.commitTransaction() == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.commitTransaction() == dbms::DBStatus::CHECK_VIOLATION);
 
     assert(g_engine.beginTransaction(database) == dbms::DBStatus::OK);
     assert(g_engine.update(database, "checked_values", {{"value", "500"}},
                            {"=id 1"}) == dbms::DBStatus::OK);
-    assert(g_engine.commitTransaction() == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.commitTransaction() == dbms::DBStatus::CHECK_VIOLATION);
 
     assert(g_engine.beginTransaction(database) == dbms::DBStatus::OK);
     assert(g_engine.insert(database, "checked_values",
                            {{"id", "15"}, {"value", "500"}}) ==
            dbms::DBStatus::OK);
     assert(g_engine.prepareTransaction("multiple_check_invalid_prepare") ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::CHECK_VIOLATION);
     assert(!g_engine.inTransaction());
 
     assert(!ddl.executeSql(
@@ -148,12 +148,12 @@ int main() {
         session));
     assert(g_engine.insert(database, "checked_values",
                            {{"id", "17"}, {"value", "600"}}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::CHECK_VIOLATION);
     assert(g_engine.beginTransaction(database) == dbms::DBStatus::OK);
     assert(g_engine.insert(database, "checked_values",
                            {{"id", "18"}, {"value", "600"}}) ==
            dbms::DBStatus::OK);
-    assert(g_engine.commitTransaction() == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.commitTransaction() == dbms::DBStatus::CHECK_VIOLATION);
 
     cleanupTestDb(testName);
     finalCleanupTestData();

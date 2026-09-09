@@ -46,7 +46,7 @@ void test_prepare_rejects_deferred_constraint_violation() {
     assert(g_engine.insert(db, "child", {{"id", "1"}, {"pid", "999"}}) ==
            dbms::DBStatus::OK);
     assert(g_engine.prepareTransaction("prepared_deferred_violation") ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::FOREIGN_KEY_VIOLATION);
     assert(!g_engine.inTransaction());
     const auto prepared = g_engine.listPreparedTransactions();
     assert(std::find(prepared.begin(), prepared.end(),

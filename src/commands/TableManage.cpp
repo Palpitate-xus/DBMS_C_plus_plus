@@ -55,6 +55,10 @@ std::string dbms::sqlstateForDBStatus(DBStatus res) {
         case DBStatus::NULL_NOT_ALLOWED: return "23502";
         case DBStatus::SYNTAX_ERROR: return "42601";
         case DBStatus::DUPLICATE_KEY: return "23505";
+        case DBStatus::UNIQUE_VIOLATION: return "23505";
+        case DBStatus::CHECK_VIOLATION: return "23514";
+        case DBStatus::FOREIGN_KEY_VIOLATION: return "23503";
+        case DBStatus::EXCLUSION_VIOLATION: return "23P01";
         case DBStatus::LOCK_CONFLICT: return "55P03";
         case DBStatus::SERIALIZATION_FAILURE: return "40001";
         case DBStatus::IO_ERROR: return "58030";
@@ -20349,10 +20353,6 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
 
         const DBStatus beginStatus = beginTransaction(dbname);
         if (beginStatus != DBStatus::OK) return beginStatus;
-        // This transaction is the boundary of one autocommit statement.
-        // INITIALLY DEFERRED constraints therefore have no later statement
-        // to wait for; preserve the legacy API's immediate status codes.
-        transactionContext().constraintMode["all"] = false;
         const DBStatus insertStatus = insertInternal(
             dbname, tablename, values, nullColumns, insertedRows);
         if (insertStatus != DBStatus::OK) {
@@ -39614,8 +39614,16 @@ DBStatus StorageEngine::commitTransaction() {
         if (it != transactionContext().deferredChecks.end()) {
             for (const auto& dc : it->second) {
                 if (!runDeferredCheck(dc)) {
+                    const DBStatus violation =
+                        dc.kind == DeferredCheck::Kind::Unique
+                            ? DBStatus::UNIQUE_VIOLATION
+                        : dc.kind == DeferredCheck::Kind::ForeignKey
+                            ? DBStatus::FOREIGN_KEY_VIOLATION
+                        : dc.kind == DeferredCheck::Kind::Exclude
+                            ? DBStatus::EXCLUSION_VIOLATION
+                            : DBStatus::CHECK_VIOLATION;
                     rollbackTransaction();
-                    return DBStatus::INVALID_VALUE;
+                    return violation;
                 }
             }
             transactionContext().deferredChecks.erase(it);
@@ -41447,8 +41455,16 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
         if (it != transactionContext().deferredChecks.end()) {
             for (const auto& dc : it->second) {
                 if (!runDeferredCheck(dc)) {
+                    const DBStatus violation =
+                        dc.kind == DeferredCheck::Kind::Unique
+                            ? DBStatus::UNIQUE_VIOLATION
+                        : dc.kind == DeferredCheck::Kind::ForeignKey
+                            ? DBStatus::FOREIGN_KEY_VIOLATION
+                        : dc.kind == DeferredCheck::Kind::Exclude
+                            ? DBStatus::EXCLUSION_VIOLATION
+                            : DBStatus::CHECK_VIOLATION;
                     rollbackTransaction();
-                    return DBStatus::INVALID_VALUE;
+                    return violation;
                 }
             }
             transactionContext().deferredChecks.erase(it);
