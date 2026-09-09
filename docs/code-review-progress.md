@@ -167,6 +167,8 @@
 
 | 311 | P0-02 / SQL-01 / DML-01 / DML-05 / PROTO-04 | 通用 `parseSelectItem` 的隐式别名判定未排除语句终止分号；直接 INSERT/UPDATE/DELETE `RETURNING id, value;` 因而把最后一列的 alias 设为 `;`，值和 OID 正确但 RowDescription 列名错误，客户端按名取列失效。隐式别名现在将 `;` 作为明确边界，由三种 DML 共享修复 | `dml_command_tag_e2e_test` 新增带终止分号的多行 INSERT、UPDATE、DELETE RETURNING，逐项校验 rows/header/OID/tag 并与真实 PostgreSQL 一致；`parser_phase1_test` 和完整 `dml_returning_test` 通过，DML CTE、DIV-14、O0/O2 parser 构建及完整差分 `cases=122 failed=0` 通过 | `f88bdad` |
 
+| 312 | P0-07 / QRY-05 / TXN-01 / TXN-03 | data-modifying CTE 的 DML 与外层 SELECT 共用当前事务 read view，却没有 command ID；INSERT 新行、UPDATE 新版本和 DELETE 结果会被同一 SQL 的外层查询立即看到，违反 PostgreSQL 的单命令 snapshot。现在 heap tuple 写入 `cmin/cmax`，同事务插入后更新使用 combo CID，read view 按当前 command counter 判断自有版本；最外层 SQL 命令统一推进 counter，执行器内部临时关系显式豁免且不留下指向已删除临时文件的事务 undo | `dml_cte_protocol_e2e_test` 覆盖自动提交 INSERT/UPDATE/DELETE CTE 的同命令不可见、下一命令可见，以及显式事务内先前命令可见、CTE 更新同命令仍见旧值、后续命令见新值和 ROLLBACK；逐条 rows/header/OID/tag 与实际 PostgreSQL 一致。`subxip_visibility_test` 覆盖 cmin/cmax/combo CID 边界；CTE/derived/DML tag、15 组事务/触发器相邻回归、完整协议、DIV-14、O0/O2 构建及完整差分 `cases=122 failed=0` 通过。`mvcc_update_test` 另复现既有 2PC 无超时等待，列为下一项 | `9f1475f` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
