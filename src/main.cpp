@@ -2734,7 +2734,36 @@ static bool handleCopy(const string& sql, Session& s) {
             cout << "Cannot open file: " << filename << endl;
             return true;
         }
+
+        // COPY FROM is one atomic SQL statement. Embedded INSERT calls have
+        // their own failure savepoints, but successful earlier rows still
+        // need a boundary that can be rolled back when a later row fails.
+        bool startedCopyTransaction = false;
+        string copySavepoint;
+        if (g_engine.inTransaction()) {
+            static atomic<uint64_t> copySavepointSequence{0};
+            copySavepoint = "__dbms_copy_statement_" +
+                to_string(g_engine.currentTxnId()) + "_" +
+                to_string(copySavepointSequence.fetch_add(1));
+            if (g_engine.savepoint(copySavepoint) != DBStatus::OK) {
+                cout << "ERROR: COPY FROM cannot establish an atomic "
+                        "statement boundary (SQLSTATE 0A000)" << endl;
+                return true;
+            }
+        } else {
+            const DBStatus beginStatus =
+                g_engine.beginTransaction(s.currentDB);
+            if (beginStatus != DBStatus::OK) {
+                cout << "ERROR: COPY FROM transaction begin failed "
+                        "(SQLSTATE " << sqlstateForDBStatus(beginStatus)
+                     << ")" << endl;
+                return true;
+            }
+            startedCopyTransaction = true;
+        }
+
         size_t imported = 0, skipped = 0;
+        DBStatus importStatus = DBStatus::OK;
         string line;
         bool firstLine = true;
         while (getline(csvIn, line)) {
@@ -2752,7 +2781,40 @@ static bool handleCopy(const string& sql, Session& s) {
             }
             auto res = g_engine.insert(s.currentDB, tname, values);
             if (res == DBStatus::OK) imported++;
-            else skipped++;
+            else {
+                importStatus = res;
+                break;
+            }
+        }
+        if (importStatus != DBStatus::OK) {
+            DBStatus rollbackStatus = DBStatus::OK;
+            if (startedCopyTransaction) {
+                rollbackStatus = g_engine.rollbackTransaction();
+            } else {
+                rollbackStatus =
+                    g_engine.rollbackToSavepoint(copySavepoint);
+                if (rollbackStatus == DBStatus::OK) {
+                    rollbackStatus =
+                        g_engine.releaseSavepoint(copySavepoint);
+                }
+            }
+            if (rollbackStatus != DBStatus::OK) {
+                cout << "ERROR: COPY FROM rollback failed (SQLSTATE XX000)"
+                     << endl;
+            } else {
+                cout << "ERROR: COPY FROM failed (SQLSTATE "
+                     << sqlstateForDBStatus(importStatus) << ")" << endl;
+            }
+            return true;
+        }
+
+        const DBStatus finishStatus = startedCopyTransaction
+            ? g_engine.commitTransaction()
+            : g_engine.releaseSavepoint(copySavepoint);
+        if (finishStatus != DBStatus::OK) {
+            cout << "ERROR: COPY FROM transaction finish failed (SQLSTATE "
+                 << sqlstateForDBStatus(finishStatus) << ")" << endl;
+            return true;
         }
         cout << "COPY " << imported << " rows imported, " << skipped << " skipped" << endl;
         return false;

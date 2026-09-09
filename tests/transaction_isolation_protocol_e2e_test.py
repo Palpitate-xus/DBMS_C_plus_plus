@@ -203,6 +203,40 @@ def main():
             "SELECT id FROM readonly_copy_temp;")
         assert state is None and rows == [], (state, message, rows)
 
+        # COPY FROM is one statement, not a series of independently committed
+        # INSERTs. A conversion failure must roll back earlier input rows and
+        # report the error instead of silently counting it as skipped.
+        copy_path.write_text("10\nnot_an_integer\n11\n", encoding="utf-8")
+        _, state, message, _, _, _ = execute(
+            "CREATE TABLE atomic_copy_target (id INT);")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute(
+            f"COPY atomic_copy_target FROM '{copy_path}';")
+        assert state is not None, (state, message)
+        assert "COPY FROM failed" in message, message
+        rows, state, message, _, _, _ = execute(
+            "SELECT id FROM atomic_copy_target ORDER BY id;")
+        assert state is None and rows == [], (state, message, rows)
+
+        _, state, message, _, _, _ = execute("BEGIN;")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute(
+            "INSERT INTO atomic_copy_target VALUES (5);")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute("SAVEPOINT before_copy;")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute(
+            f"COPY atomic_copy_target FROM '{copy_path}';")
+        assert state is not None, (state, message)
+        _, state, message, _, _, _ = execute(
+            "ROLLBACK TO SAVEPOINT before_copy;")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute("COMMIT;")
+        assert state is None, (state, message)
+        rows, state, message, _, _, _ = execute(
+            "SELECT id FROM atomic_copy_target ORDER BY id;")
+        assert state is None and rows == [["5"]], (state, message, rows)
+
         # SET TRANSACTION read modes are transaction characteristics, not
         # configuration parameters.  Tightening an active transaction to
         # READ ONLY is allowed even after a read, and every subsequent DML
