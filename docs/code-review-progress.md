@@ -223,6 +223,8 @@
 
 | 339 | P0-04 / TXN-06 / WAL-08 | ALTER/TRUNCATE 等物理 DDL 会留下整库事务快照，但 `PREPARE TRANSACTION` 只拒绝内存 DDL undo callback；含脏快照的事务可被准备，随后释放数据库级互斥锁，而 `ROLLBACK PREPARED` 不恢复快照并删除它。直接补恢复会在 PREPARE 后擦除其他 backend 的提交，因此准备入口现在对两种未能安全跨 backend 持久化的 DDL 状态统一 fail-closed，且不擅自结束仍可 COMMIT/ROLLBACK 的本地事务 | `prepared_transaction_test` 覆盖显式事务 ALTER 后存在脏快照、PREPARE 返回拒绝、事务仍活动、ROLLBACK 恢复原 schema、不遗留 prepared 元数据；完整 `ddl_transaction_skeleton_test` 和 PostgreSQL 协议回归通过 | `986f186` |
 
+| 340 | TXN-06 / WAL-08 | 临时表 DML 的 undo 记录可以进入全局 prepared state；原会话退出会按所有权删除临时关系，另一个 backend 的 `ROLLBACK PREPARED` 随后只能对不存在的关系重放行撤销并留下不可清理状态。PREPARE 现在检查事务日志中的受保护 `__tmp_<backend>_` 物理命名空间，在任何 prepared 文件/WAL/锁转移前拒绝含临时关系写入的事务，并保留本地事务供显式决定 | `prepared_transaction_test` 创建会话临时表并写入，验证 PREPARE 被拒、事务保持活动、ROLLBACK 删除行且无 prepared 元数据；完整准备事务回归和 `temp_table_ddl_test` 通过 | `7530a48` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
