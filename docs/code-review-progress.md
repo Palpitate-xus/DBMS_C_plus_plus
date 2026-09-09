@@ -187,6 +187,8 @@
 
 | 321 | P0-16 | 多个独立 E2E runner 把仓库根目录 `dbms_main` 写死，忽略复查、CI 或开发者通过 `DBMS_MAIN` 指定的刚编译二进制；测试会悄悄验证陈旧程序并给出虚假结果。7 个遗漏脚本现与差分/DIV runner 一致，优先使用绝对化的环境变量，未设置时才回退根目录默认值 | 新增 `e2e_binary_routing_test` 逐个导入 7 个 runner 并注入哨兵路径；修复前首个脚本稳定失败，修复后全部命中所选路径，8 个 Python 文件语法检查和构建脚本语法通过。完整协议测试因此首次在当前 review 二进制复现既有复杂集合查询空结果，列为下一项产品修复，未误报套件通过 | `d3d1bb4` |
 
+| 322 | P0-02 / QRY-06 / PROTO-04 | 集合运算的 legacy 回退会递归执行两个 SELECT 操作数并组合捕获的显示行，但未隔离操作数发布的结构化协议结果；右侧聚合的单行 `DmlResult` 因而覆盖外层 UNION 已正确生成的四行结果，客户端收到零列或错误行数。每个嵌套操作数现在在执行前清空旧结果、执行后消费自身结果，只让外层集合结果进入协议转换 | PostgreSQL 协议回归增强为保留完整消息诊断；`SELECT id ... UNION SELECT count(*) ...` 修复前返回零 DataRow/`SELECT 1`，修复后返回 1–4 四行并让完整协议套件继续运行到后续独立失败点；`set_operation_volcano_test`、Python 语法检查及 `main.cpp`/NetworkServer O0/O2 编译通过。集合列 common type/collation 与全结构化输出仍计入 QRY-06 | `064cc45` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
