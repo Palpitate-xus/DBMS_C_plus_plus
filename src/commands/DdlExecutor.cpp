@@ -1455,7 +1455,6 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
         [](const auto& sub) { return sub.action == AlterTableStmt::Action::Owner; });
     if (!ownerOnly && !checkAdmin(s)) return true;
 
-    if (!checkAndImplicitCommit(s)) return true;
     const bool tableIsTemporary =
         s.tempTables.count(stmt->tableName) != 0;
     const std::string tableName = resolveTableName(s, stmt->tableName);
@@ -2899,7 +2898,6 @@ bool DdlExecutor::executeTruncate(const TruncateStmt* stmt, Session& s) {
         }
     }
 
-    if (!checkAndImplicitCommit(s)) return true;
     DdlTransaction txn(s);
     txn.enableSnapshotRollback();
     if (!txn.begin()) {

@@ -39241,6 +39241,7 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
     transactionContext().ddlUndoActions.clear();
     transactionContext().transactionBackupDirty = false;
     transactionContext().restoreBackupBeforeRowUndo = false;
+    transactionContext().txnLogSizeAtBackup = 0;
     transactionContext().ddlUndoSizeAtBackup = 0;
     transactionContext().inTransaction = true;
     transactionContext().preserveBackupOnRollback = false;
@@ -39304,6 +39305,7 @@ bool StorageEngine::createTransactionBackup() {
     }
     context.txnBackupPath = backup.string();
     context.transactionBackupDirty = false;
+    context.txnLogSizeAtBackup = context.txnLog.size();
     context.ddlUndoSizeAtBackup = context.ddlUndoActions.size();
     return true;
 }
@@ -39791,6 +39793,7 @@ DBStatus StorageEngine::commitTransaction() {
     transactionContext().ddlUndoActions.clear();
     transactionContext().transactionBackupDirty = false;
     transactionContext().restoreBackupBeforeRowUndo = false;
+    transactionContext().txnLogSizeAtBackup = 0;
     transactionContext().ddlUndoSizeAtBackup = 0;
     discardTransactionBackup(transactionContext().txnDB);
     transactionContext().savepoints.clear();
@@ -40199,8 +40202,15 @@ DBStatus StorageEngine::rollbackTransaction() {
     const size_t ddlUndoReplaySize = hasBackup
         ? transactionContext().ddlUndoSizeAtBackup
         : transactionContext().ddlUndoActions.size();
+    const bool rowUndoBoundaryValid =
+        !hasBackup ||
+        transactionContext().txnLogSizeAtBackup <=
+            transactionContext().txnLog.size();
+    const size_t rowUndoReplaySize = hasBackup && rowUndoBoundaryValid
+        ? transactionContext().txnLogSizeAtBackup
+        : transactionContext().txnLog.size();
     bool snapshotRestoreOk = true;
-    bool rowUndoOk = true;
+    bool rowUndoOk = rowUndoBoundaryValid;
     std::set<BloomIndex*> bloomUndoIndexes;
 
     // A DDL snapshot may have been taken in the middle of an explicit outer
@@ -40228,7 +40238,10 @@ DBStatus StorageEngine::rollbackTransaction() {
     bool noActiveTransactions = false;
 
     // Replay txnLog in reverse order to undo changes
-    for (auto it = transactionContext().txnLog.rbegin(); it != transactionContext().txnLog.rend(); ++it) {
+    const auto rowUndoBegin = transactionContext().txnLog.begin() +
+        static_cast<std::ptrdiff_t>(rowUndoReplaySize);
+    for (auto it = std::make_reverse_iterator(rowUndoBegin);
+         it != transactionContext().txnLog.rend(); ++it) {
         PageAllocator* pa = getPageAllocator(transactionContext().txnDB, it->tableName);
         TableSchema tbl = getTableSchema(transactionContext().txnDB, it->tableName);
 
@@ -40239,18 +40252,12 @@ DBStatus StorageEngine::rollbackTransaction() {
             // Read row data before removing so index entries can be cleaned up.
             // INSERT records carry the physical row payload so index cleanup
             // does not depend on successfully re-reading a damaged heap page.
-            std::string insertedRow = it->rowData;
+            const std::string& insertedRow = it->rowData;
             std::string pkVal;
             std::vector<EvaluatedIndexEntry> secondaryIdxVals;
             std::vector<EvaluatedIndexEntry> compositeIdxVals;
             std::map<std::string, std::string> hashIdxVals;
             std::map<std::string, std::string> bloomIdxVals;
-            std::string heapRow;
-            if (readRowByRid(pa, it->rowIdx, heapRow, tbl)) {
-                insertedRow = std::move(heapRow);
-            } else {
-                rowUndoOk = false;
-            }
             if (insertedRow.empty()) {
                 rowUndoOk = false;
             } else {
@@ -40324,6 +40331,10 @@ DBStatus StorageEngine::rollbackTransaction() {
             }
             if (!pa) {
                 rowUndoOk = false;
+            } else if (pageId >= pa->numPages()) {
+                // A database snapshot taken before this physical extent was
+                // published has already removed the inserted tuple. Index
+                // cleanup above is intentionally idempotent as well.
             } else {
                 char* pageBuf = pa->fetchPage(pageId);
                 if (!pageBuf) {
@@ -40333,8 +40344,19 @@ DBStatus StorageEngine::rollbackTransaction() {
                         pageBuf, pa->pageSize(), tbl.formatVersion);
                     const char* currentData = nullptr;
                     size_t currentLength = 0;
-                    if (!page.isValid() ||
-                        !page.read(slotId, currentData, currentLength)) {
+                    if (!page.isValid()) {
+                        rowUndoOk = false;
+                    } else if (!page.read(
+                                   slotId, currentData, currentLength)) {
+                        // Already absent is a successful INSERT undo. This
+                        // occurs when the restored DDL snapshot predates the
+                        // row, and also makes retry after a partial rollback
+                        // safe.
+                    } else if (stripRowHeader(
+                                   currentData, currentLength,
+                                   tbl.formatVersion, tbl.len) != insertedRow) {
+                        // Never delete a different tuple if a damaged or
+                        // reused RID points at an occupied slot.
                         rowUndoOk = false;
                     } else {
                         const Lsn beforeLsn = walPageImage(
@@ -40859,6 +40881,7 @@ DBStatus StorageEngine::rollbackTransaction() {
     transactionContext().readOnly = false;
     transactionContext().transactionBackupDirty = false;
     transactionContext().restoreBackupBeforeRowUndo = false;
+    transactionContext().txnLogSizeAtBackup = 0;
     transactionContext().ddlUndoSizeAtBackup = 0;
     transactionContext().preserveBackupOnRollback = false;
     transactionContext().txnDB.clear();
@@ -40912,6 +40935,7 @@ bool StorageEngine::restoreTransactionBackup(const std::string& dbname) {
         context.txnBackupPath.clear();
         context.transactionBackupDirty = false;
         context.restoreBackupBeforeRowUndo = false;
+        context.txnLogSizeAtBackup = 0;
         context.ddlUndoSizeAtBackup = 0;
     }
     return restored;
@@ -40927,6 +40951,7 @@ void StorageEngine::discardTransactionBackup(const std::string& dbname) {
     }
     context.transactionBackupDirty = false;
     context.restoreBackupBeforeRowUndo = false;
+    context.txnLogSizeAtBackup = 0;
     context.ddlUndoSizeAtBackup = 0;
 }
 
@@ -41442,6 +41467,7 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
     transactionContext().txnBackupPath.clear();
     transactionContext().transactionBackupDirty = false;
     transactionContext().restoreBackupBeforeRowUndo = false;
+    transactionContext().txnLogSizeAtBackup = 0;
     transactionContext().ddlUndoSizeAtBackup = 0;
     transactionContext().preserveBackupOnRollback = false;
     transactionContext().txnDB.clear();

@@ -450,6 +450,58 @@ static void test_alter_statement_rollback() {
     std::cout << "[DDL-TXN] ALTER statement rollback OK" << std::endl;
 }
 
+static void test_alter_and_truncate_join_outer_transaction() {
+    const std::string db = testDbPath("ddl_txn_outer_rewrite");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE rewrite_target (id INT)", s));
+    assert(g_engine.insert(db, "rewrite_target", {{"id", "1"}}) ==
+           dbms::DBStatus::OK);
+
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "rewrite_target", {{"id", "2"}}) ==
+           dbms::DBStatus::OK);
+    assert(!ddl.executeSql(
+        "ALTER TABLE rewrite_target ADD COLUMN rolled_back INT", s));
+    assert(g_engine.inTransaction());
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+    auto schema = g_engine.getTableSchema(db, "rewrite_target");
+    assert(schema.len == 1 && schema.cols[0].dataName == "id");
+    assert(g_engine.query(db, "rewrite_target", {}, {"id"}) ==
+           std::vector<std::string>{"1 "});
+
+    // Row changes made after the DDL snapshot are already removed by the
+    // physical restore. They must not be replayed against the older schema.
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(!ddl.executeSql(
+        "ALTER TABLE rewrite_target ADD COLUMN later_value INT", s));
+    assert(g_engine.insert(
+               db, "rewrite_target", {{"id", "4"}, {"later_value", "9"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+    schema = g_engine.getTableSchema(db, "rewrite_target");
+    assert(schema.len == 1 && schema.cols[0].dataName == "id");
+    assert(g_engine.query(db, "rewrite_target", {}, {"id"}) ==
+           std::vector<std::string>{"1 "});
+
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "rewrite_target", {{"id", "3"}}) ==
+           dbms::DBStatus::OK);
+    assert(!ddl.executeSql("TRUNCATE rewrite_target", s));
+    assert(g_engine.inTransaction());
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+    assert(g_engine.query(db, "rewrite_target", {}, {"id"}) ==
+           std::vector<std::string>{"1 "});
+
+    cleanup(db);
+    std::cout << "[DDL-TXN] ALTER/TRUNCATE join outer transaction OK"
+              << std::endl;
+}
+
 static void test_catalog_drop_plan_is_deferred() {
     std::string db = testDbPath("ddl_txn_t_drop_plan");
     cleanup(db);
@@ -644,6 +696,7 @@ int main() {
     test_explicit_transaction_ddl_rollback_and_savepoint();
     test_drop_and_replace_restore_before_outer_row_undo();
     test_alter_statement_rollback();
+    test_alter_and_truncate_join_outer_transaction();
     test_catalog_drop_plan_is_deferred();
     test_schema_drop_plan_is_deferred();
     test_auxiliary_object_rollback();

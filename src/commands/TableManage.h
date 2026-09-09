@@ -1941,6 +1941,7 @@ private:
         std::string txnBackupPath;
         bool transactionBackupDirty = false;
         bool restoreBackupBeforeRowUndo = false;
+        size_t txnLogSizeAtBackup = 0;
         size_t ddlUndoSizeAtBackup = 0;
         uint64_t currentTxnId = 0;
         uint32_t currentCommandId = 0;
