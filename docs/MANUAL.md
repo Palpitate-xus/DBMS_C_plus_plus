@@ -1167,8 +1167,10 @@ SHOW 入口已经删除。该模式是会话级设置，进入事务后不可切
   catalog 视图返回 typed rows 和 SQL NULL，`DESC`/`VIEW` 按表 ACL 过滤，
   `SHOW USERS/ROLES` 不暴露口令字段
 - `CREATE/DROP REPLICATION SLOT` SQL 形式与 `SHOW LOGICAL/REPLICATION SLOTS`
-  （DIV-09）→ `0A000`，提示使用 replication protocol 或
-  `pg_*_replication_slot()` 函数
+  （DIV-09）→ 默认模式返回 `42601`，提示使用 replication protocol 或
+  `pg_*_replication_slot()` 函数；extended 模式仅把真实 logical slot API 暴露为
+  typed wrapper，创建、确认、删除不能在事务块内执行。没有物理复制运行时，
+  `CREATE REPLICATION SLOT ... PHYSICAL` 在 extended 模式仍返回 `0A000`
 - `SET GLOBAL`（DIV-11）→ `42601`，提示 `ALTER SYSTEM`
 - MySQL/SQL Server 类型别名 `TINYINT`、`LONG`、`DATETIME`、`BLOB`、
   `BINARY/VARBINARY`、`NCHAR/NVARCHAR`（DIV-06）→ `42704` 类型错误，

@@ -309,6 +309,8 @@
 
 | 382 | DIV-05 | extended `DESC`/`VIEW TABLE` 只向 stdout 打印，wire 客户端得不到结果集；`SHOW USERS/ROLES/POOLS` 又由协议层按空格反解析，默认值中的空格和 SQL NULL 会损坏，表元数据也没有 ACL 边界。六类命令现发布精确 cells、NULL 位图和类型；表描述执行 SELECT 权限检查，库内表清单只列当前角色可访问对象，角色清单公开但不含秘密字段 | DIV wire E2E 检查 DESC/VIEW 的六列表头、text OID、NULL default 和带空格 default，SHOW USERS 的 int4、SHOW POOLS 的 int8，并用独立非管理员 backend 验证获授权表可见、未授权表隐藏/拒绝。main O0/O2、完整协议及 PostgreSQL 差分 `cases=122 failed=0` 通过。DIV-05 complete | `f69978a` |
 
+| 383 | DIV-09 | extended SQL 复制槽 wrapper 缺少事务边界，物理复制未实现却可创建假 physical slot；SHOW slot 状态、解码文本和确认结果仍经 stdout/空格重构。持久化创建/确认/删除现禁止事务块，physical slot fail-closed；logical wrapper 继续只调用唯一 `ReplicationManager`/`LogicalChangeStore`，并发布精确 typed 状态、完整解码 cell、确认 LSN 和稳定 SQLSTATE | DIV wire E2E 覆盖 physical `0A000`、三种 mutation 的 `25001`、logical 创建结果、publication 后提交、八列状态及 bool/int8 OID、含空格/换行解码 cell、确认后消费和删除；`logical_decoding_test` 全套、main O0/O2、完整协议及 PostgreSQL 差分 `cases=122 failed=0` 通过。DIV-09 complete | `0024971` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
