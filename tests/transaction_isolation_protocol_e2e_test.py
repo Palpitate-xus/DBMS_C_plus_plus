@@ -237,6 +237,19 @@ def main():
             "SELECT id FROM atomic_copy_target ORDER BY id;")
         assert state is None and rows == [["5"]], (state, message, rows)
 
+        # Without HEADER or ON_ERROR, a malformed field count is a COPY file
+        # format error. The first bad line is not an implicit header.
+        copy_path.write_text("1\n2,ok\n", encoding="utf-8")
+        _, state, message, _, _, _ = execute(
+            "CREATE TABLE shaped_copy_target (id INT, label TEXT);")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute(
+            f"COPY shaped_copy_target FROM '{copy_path}';")
+        assert state == "22P04", (state, message)
+        rows, state, message, _, _, _ = execute(
+            "SELECT id FROM shaped_copy_target;")
+        assert state is None and rows == [], (state, message, rows)
+
         # SET TRANSACTION read modes are transaction characteristics, not
         # configuration parameters.  Tightening an active transaction to
         # READ ONLY is allowed even after a read, and every subsequent DML

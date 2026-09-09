@@ -2764,17 +2764,16 @@ static bool handleCopy(const string& sql, Session& s) {
 
         size_t imported = 0, skipped = 0;
         DBStatus importStatus = DBStatus::OK;
+        string importSqlState;
         string line;
-        bool firstLine = true;
         while (getline(csvIn, line)) {
             if (trim(line).empty()) continue;
             auto fields = parseCSVLine(line);
             if (fields.size() != tbl.len) {
-                if (firstLine) { firstLine = false; continue; }
-                skipped++;
-                continue;
+                importStatus = DBStatus::INVALID_VALUE;
+                importSqlState = "22P04";
+                break;
             }
-            firstLine = false;
             map<string, string> values;
             for (size_t i = 0; i < tbl.len; ++i) {
                 values[tbl.cols[i].dataName] = trim(fields[i]);
@@ -2802,8 +2801,11 @@ static bool handleCopy(const string& sql, Session& s) {
                 cout << "ERROR: COPY FROM rollback failed (SQLSTATE XX000)"
                      << endl;
             } else {
-                cout << "ERROR: COPY FROM failed (SQLSTATE "
-                     << sqlstateForDBStatus(importStatus) << ")" << endl;
+                const string state = importSqlState.empty()
+                    ? sqlstateForDBStatus(importStatus)
+                    : importSqlState;
+                cout << "ERROR: COPY FROM failed (SQLSTATE " << state
+                     << ")" << endl;
             }
             return true;
         }
