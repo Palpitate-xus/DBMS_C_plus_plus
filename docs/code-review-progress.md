@@ -259,6 +259,8 @@
 
 | 357 | PROTO-03 | 扩展查询的 Parse 处理错误地先发送 `ParameterDescription` 再发送 `ParseComplete`，而标准协议规定 Parse 响应只有 `ParseComplete`；该额外帧会使按规范等待 `1` 的 libpq/JDBC 等客户端流失步。移除 Parse 阶段的 `t` 帧，参数描述仍只在 Describe Statement 响应中发送 | 完整协议回归的无参数、整数文本/二进制、date/time/timestamp/timestamptz/UUID/numeric 二进制及 portal 分页辅助器全部改为严格断言 Parse 的首个且唯一响应为无 body 的 `1`；O0/O2 编译、生产重链和完整协议套件通过。Describe 的结果列推断等其余扩展协议仍为 partial | `b405971` |
 
+| 358 | PROTO-02,03 | Query 原先只检查“空字符串时 body 是否为一字节”，所以 `SELECT 1\0隐藏内容` 被接受；Sync/Flush/Terminate 完全不检查规范规定的空 body，畸形 Sync 还能清除扩展查询错误状态。现要求 Query body 恰好一个完整 C string，固定 body 消息严格为空；违规统一返回 `08P01`，Malformed Query 不伪造 failed-transaction 状态，Flush 进入 ignore-until-Sync，Terminate 关闭连接 | 完整协议回归验证 NUL 后 SQL 不执行、Query/Flush/Sync 均返回 `08P01`、idle ReadyForQuery 为 `I`，合法 Sync 恢复扩展状态且随后 SELECT 正常；O0/O2 编译、生产重链和完整协议套件通过 | `c0b8689` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
