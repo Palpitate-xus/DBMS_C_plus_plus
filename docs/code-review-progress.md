@@ -213,6 +213,8 @@
 
 | 334 | DML-06 / PROTO-08 | COPY CSV 行的字段数与表列数不同时，入口会把第一条坏行无条件猜成 header，并把后续坏行静默计为 skipped；这在没有 HEADER/ON_ERROR 选项时会继续提交合法行。默认 COPY 现在对首个 shape mismatch fail-fast，复用整句事务边界撤销全部输入行，并向协议返回 `22P04 bad_copy_file_format` | `1 / 2,ok` 导入两列表的协议复现修复前跳过首行、提交第二行并返回成功；修复后精确返回 `22P04` 且目标表为空。完整隔离协议、Python 语法及 `main.cpp`/NetworkServer O0/O2 编译通过 | `55fac94` |
 
+| 335 | DML-06 | COPY 在 CSV parser 已完成引号与转义处理后又对每个字段调用 `trim()`，会静默删除 TEXT 的首尾空格，包括双引号内明确属于数据的空格。构造 INSERT 输入时现在原样传递 parser 字段，不再在 COPY 层改写值 | 协议回归修复前稳定把 `"  quoted edge  "` 与 `unquoted edge  ` 返回为去空格值；修复后 wire 结果逐字节保留两类边界空格，且前述只读、原子性与 shape-error COPY 场景一并通过；Python 语法和 `main.cpp` O0/O2 编译通过 | `47eb2a9` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
