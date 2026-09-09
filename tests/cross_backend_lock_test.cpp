@@ -148,6 +148,28 @@ int main() {
     assert(::waitpid(child, &childStatus, 0) == child);
     assert(WIFEXITED(childStatus) && WEXITSTATUS(childStatus) == 0);
 
+    // Row-exclusive table intent is a shared physical token: MVCC readers
+    // may coexist, while DDL/exclusive ownership still conflicts across a
+    // process boundary.
+    first.getLockManager().setResourceNamespace(dbA);
+    assert(first.getLockManager().lockIntentExclusive("items"));
+    child = ::fork();
+    assert(child >= 0);
+    if (child == 0) {
+        dbms::LockManager childManager;
+        childManager.setResourceNamespace(dbA);
+        childManager.setLockTimeout(75);
+        const bool readAcquired = childManager.lockShared("items");
+        if (readAcquired) childManager.unlock("items");
+        const bool ddlBlocked = !childManager.lockExclusive("items");
+        if (!ddlBlocked) childManager.unlock("items");
+        ::_exit(readAcquired && ddlBlocked ? 0 : 1);
+    }
+    childStatus = 0;
+    assert(::waitpid(child, &childStatus, 0) == child);
+    assert(WIFEXITED(childStatus) && WEXITSTATUS(childStatus) == 0);
+    first.getLockManager().unlock("items");
+
     // Row and page locks use the same cross-process coordination layer.
     assert(first.getLockManager().rowLockExclusive("items", 7));
     child = ::fork();

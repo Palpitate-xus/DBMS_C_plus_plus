@@ -138,6 +138,43 @@ void test_cross_backend_prepare_completion() {
     std::cout << "[PREPARED-TXN] cross-backend commit/rollback and lock ownership OK\n";
 }
 
+void test_prepared_update_allows_mvcc_reader() {
+    const std::string db = testDbPath("prepared_mvcc_reader");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    dbms::TableSchema table;
+    table.tablename = "accounts";
+    table.append(dbms::makeIntColumn("id", false, 2, true));
+    table.append(dbms::makeVarCharColumn("value", false, 32));
+    assert(g_engine.createTable(db, table) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "accounts", {{"id", "1"}, {"value", "old"}}) ==
+           dbms::DBStatus::OK);
+
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.update(db, "accounts", {{"value", "new"}}, {"=id 1"}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.prepareTransaction("prepared_mvcc_reader") ==
+           dbms::DBStatus::OK);
+
+    dbms::StorageEngine reader;
+    reader.getLockManager().setResourceNamespace(db);
+    reader.getLockManager().setLockTimeout(100);
+    const auto oldRows = reader.query(
+        db, "accounts", {"=id 1"}, {"id", "value"});
+    assert(oldRows.size() == 1 && oldRows.front().find("old") != std::string::npos);
+    assert(reader.update(db, "accounts", {{"value", "blocked"}}, {"=id 1"}) ==
+           dbms::DBStatus::LOCK_CONFLICT);
+
+    assert(reader.rollbackPrepared("prepared_mvcc_reader") == dbms::DBStatus::OK);
+    const auto restored = reader.query(
+        db, "accounts", {"=id 1"}, {"id", "value"});
+    assert(restored.size() == 1 && restored.front().find("old") != std::string::npos);
+
+    cleanup(db);
+    std::cout << "[PREPARED-TXN] prepared UPDATE allows MVCC readers OK\n";
+}
+
 void test_quoted_names_round_trip_through_prepared_metadata() {
     const std::string db = testDbPath("prepared quoted database");
     const std::string tableName = "order items";
@@ -414,6 +451,7 @@ int main(int argc, char** argv) {
     test_prepare_rejects_deferred_constraint_violation();
     test_prepare_resets_originating_transaction_modes();
     test_cross_backend_prepare_completion();
+    test_prepared_update_allows_mvcc_reader();
     test_quoted_names_round_trip_through_prepared_metadata();
     test_commit_refreshes_warm_completion_backend();
     test_commit_clog_failure_is_irrevocable();

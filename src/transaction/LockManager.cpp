@@ -9,6 +9,15 @@
 
 namespace dbms {
 
+static bool lockModeUsesSharedPhysicalToken(LockManager::LockMode mode) {
+    return mode == LockManager::LockMode::Shared ||
+           mode == LockManager::LockMode::IntentShared ||
+           mode == LockManager::LockMode::IntentExclusive;
+}
+
+static bool isCompatible(LockManager::LockMode requested,
+                         LockManager::LockMode held, bool sameThread);
+
 LockManager& LockManager::global() {
     static LockManager manager;
     return manager;
@@ -62,7 +71,7 @@ bool LockManager::suspendCurrentLocksForPrepared(uint64_t txnId) {
             case LockMode::Shared: state.mtx.unlock_shared(); --state.sharedCount; break;
             case LockMode::Exclusive: state.mtx.unlock(); state.exclusive = false; break;
             case LockMode::IntentShared: state.mtx.unlock_shared(); --state.intentSharedCount; break;
-            case LockMode::IntentExclusive: state.mtx.unlock(); --state.intentExclusiveCount; break;
+            case LockMode::IntentExclusive: state.mtx.unlock_shared(); --state.intentExclusiveCount; break;
             case LockMode::Metadata: state.mtx.unlock(); state.metadata = false; break;
         }
         state.holders.erase(std::remove(state.holders.begin(), state.holders.end(), self),
@@ -176,9 +185,6 @@ bool LockManager::restorePreparedLocks(
     const std::vector<PreparedLockInfo>& locks) {
     if (txnId == 0 || dbname.empty()) return false;
 
-    auto modeIsShared = [](LockMode mode) {
-        return mode == LockMode::Shared || mode == LockMode::IntentShared;
-    };
     auto canAddPrepared = [&](const LockState& state, LockMode mode) {
         if (!state.holders.empty()) return false;
         for (const auto& [existingXid, existingMode] : state.suspendedTransactions) {
@@ -186,7 +192,7 @@ bool LockManager::restorePreparedLocks(
                 if (existingMode != mode) return false;
                 continue;
             }
-            if (!modeIsShared(existingMode) || !modeIsShared(mode)) return false;
+            if (!isCompatible(mode, existingMode, false)) return false;
         }
         return true;
     };
@@ -303,28 +309,30 @@ LockManager::ProcessLockResult LockManager::tryAcquireProcessLock(
     LockState& state, const std::string& resourceNamespace,
     const std::string& kind, const std::string& resource, LockMode mode,
     bool restoringPrepared) {
-    const bool exclusive = mode != LockMode::Shared && mode != LockMode::IntentShared;
+    const bool exclusive = !lockModeUsesSharedPhysicalToken(mode);
     if (!state.suspendedTransactions.empty() && !restoringPrepared) {
-        // Prepared shared locks may coexist. Any prepared exclusive-like lock
-        // blocks every new local/process owner until its second phase ends.
+        // Prepared row-exclusive table ownership (IX) must keep blocking DDL
+        // and conflicting row writers, but it does not block MVCC readers.
         for (const auto& [preparedXid, preparedMode] : state.suspendedTransactions) {
             (void)preparedXid;
-            const bool preparedExclusive = preparedMode != LockMode::Shared &&
-                                           preparedMode != LockMode::IntentShared;
-            if (preparedExclusive || exclusive) return ProcessLockResult::Busy;
+            if (!isCompatible(mode, preparedMode, false)) {
+                return ProcessLockResult::Busy;
+            }
         }
         if (state.processLockFd < 0) return ProcessLockResult::Error;
         return ProcessLockResult::Acquired;
     }
     if (state.processLockFd >= 0) {
-        if (state.processLockMode == LockMode::Shared && exclusive) {
+        const bool processExclusive =
+            !lockModeUsesSharedPhysicalToken(state.processLockMode);
+        if (!processExclusive && exclusive) {
             if (!state.holders.empty()) return ProcessLockResult::Busy;
             if (::flock(state.processLockFd, LOCK_EX | LOCK_NB) != 0) {
                 if (errno == EWOULDBLOCK || errno == EAGAIN) return ProcessLockResult::Busy;
                 return ProcessLockResult::Error;
             }
             state.processLockMode = LockMode::Exclusive;
-        } else if (state.processLockMode == LockMode::Exclusive && !exclusive) {
+        } else if (processExclusive && !exclusive) {
             if (::flock(state.processLockFd, LOCK_SH | LOCK_NB) != 0) {
                 if (errno == EWOULDBLOCK || errno == EAGAIN) return ProcessLockResult::Busy;
                 return ProcessLockResult::Error;
@@ -529,17 +537,13 @@ static bool isCompatible(LockManager::LockMode requested, LockManager::LockMode 
     if (sameThread) return true; // Same thread can upgrade or re-acquire
     switch (requested) {
         case LockManager::LockMode::Shared:
-            return held == LockManager::LockMode::Shared || held == LockManager::LockMode::IntentShared;
+            return lockModeUsesSharedPhysicalToken(held);
         case LockManager::LockMode::Exclusive:
             return false;
         case LockManager::LockMode::IntentShared:
-            return held == LockManager::LockMode::Shared ||
-                   held == LockManager::LockMode::IntentShared;
+            return lockModeUsesSharedPhysicalToken(held);
         case LockManager::LockMode::IntentExclusive:
-            // IntentExclusive uses the underlying exclusive mutex in this
-            // manager, so claiming compatibility with IS/IX would allow the
-            // wait graph to say "compatible" while shared_mutex blocks.
-            return false;
+            return lockModeUsesSharedPhysicalToken(held);
         case LockManager::LockMode::Metadata:
             return false;
     }
@@ -590,7 +594,7 @@ bool LockManager::acquireLock(const std::string& table, LockMode mode) {
                 --state.intentSharedCount;
                 break;
             case LockMode::IntentExclusive:
-                state.mtx.unlock();
+                state.mtx.unlock_shared();
                 --state.intentExclusiveCount;
                 break;
             case LockMode::Metadata:
@@ -619,7 +623,7 @@ bool LockManager::acquireLock(const std::string& table, LockMode mode) {
                 ++state.intentSharedCount;
                 break;
             case LockMode::IntentExclusive:
-                state.mtx.lock();
+                state.mtx.lock_shared();
                 ++state.intentExclusiveCount;
                 break;
             case LockMode::Metadata:
@@ -760,21 +764,15 @@ bool LockManager::lockIntentExclusiveForPrepared(
                 if (preparedTxnId != txnId) return false;
             }
 
-            // A prepared shared token can be upgraded only when this is the
-            // sole prepared owner. Keep the advisory descriptor open so a
-            // failed completion remains locked and retryable.
-            if (state.processLockFd >= 0 &&
-                state.processLockMode != LockMode::Exclusive) {
-                if (::flock(state.processLockFd, LOCK_EX | LOCK_NB) != 0) {
-                    return false;
-                }
-                state.processLockMode = LockMode::Exclusive;
-            } else if (state.processLockFd < 0 &&
-                       !threadSettings().resourceNamespace.empty()) {
+            // IX is represented by a shared physical token: it remains
+            // compatible with MVCC readers and other row writers, while an
+            // exclusive/metadata operation still has to wait for it.
+            if (state.processLockFd < 0 &&
+                !threadSettings().resourceNamespace.empty()) {
                 return false;
             }
 
-            state.mtx.lock();
+            state.mtx.lock_shared();
             ++state.intentExclusiveCount;
             state.holders.push_back(self);
             state.holderModes[self] = LockMode::IntentExclusive;
@@ -826,7 +824,7 @@ void LockManager::unlock(const std::string& table) {
             state.intentSharedCount--;
             break;
         case LockMode::IntentExclusive:
-            state.mtx.unlock();
+            state.mtx.unlock_shared();
             state.intentExclusiveCount--;
             break;
         case LockMode::Metadata:
@@ -864,7 +862,7 @@ void LockManager::unlockAll() {
                         state.intentSharedCount--;
                         break;
                     case LockMode::IntentExclusive:
-                        state.mtx.unlock();
+                        state.mtx.unlock_shared();
                         state.intentExclusiveCount--;
                         break;
                     case LockMode::Metadata:
@@ -1509,7 +1507,7 @@ void LockManager::rollbackToCheckpoint(const LockCheckpoint& checkpoint) {
                         --state.intentSharedCount;
                         break;
                     case LockMode::IntentExclusive:
-                        state.mtx.unlock();
+                        state.mtx.unlock_shared();
                         --state.intentExclusiveCount;
                         break;
                     case LockMode::Metadata:
@@ -1535,14 +1533,14 @@ void LockManager::rollbackToCheckpoint(const LockCheckpoint& checkpoint) {
                         case LockMode::Shared: state.mtx.unlock_shared(); --state.sharedCount; break;
                         case LockMode::Exclusive: state.mtx.unlock(); state.exclusive = false; break;
                         case LockMode::IntentShared: state.mtx.unlock_shared(); --state.intentSharedCount; break;
-                        case LockMode::IntentExclusive: state.mtx.unlock(); --state.intentExclusiveCount; break;
+                        case LockMode::IntentExclusive: state.mtx.unlock_shared(); --state.intentExclusiveCount; break;
                         case LockMode::Metadata: state.mtx.unlock(); state.metadata = false; break;
                     }
                     switch (targetMode) {
                         case LockMode::Shared: state.mtx.lock_shared(); ++state.sharedCount; break;
                         case LockMode::Exclusive: state.mtx.lock(); state.exclusive = true; break;
                         case LockMode::IntentShared: state.mtx.lock_shared(); ++state.intentSharedCount; break;
-                        case LockMode::IntentExclusive: state.mtx.lock(); ++state.intentExclusiveCount; break;
+                        case LockMode::IntentExclusive: state.mtx.lock_shared(); ++state.intentExclusiveCount; break;
                         case LockMode::Metadata: state.mtx.lock(); state.metadata = true; break;
                     }
                     modeIt->second = targetMode;
