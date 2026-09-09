@@ -706,6 +706,38 @@ def main():
             body for kind, body in malformed_sync if kind == b"E")
         assert data_row_values(simple_query(sock, "SELECT 13")) == [[b"13"]]
 
+        # Named statements and portals cannot be silently replaced.  A
+        # duplicate Parse/Bind enters extended-query recovery, keeps the
+        # original object intact, and reports PostgreSQL's dedicated codes.
+        named_parse = (b"duplicate_stmt\0SELECT 21\0" +
+                       struct.pack("!H", 0))
+        sock.sendall(typed(b"P", named_parse))
+        assert read_message(sock) == (b"1", b"")
+        duplicate_parse = (b"duplicate_stmt\0SELECT 22\0" +
+                           struct.pack("!H", 0))
+        sock.sendall(typed(b"P", duplicate_parse))
+        kind, body = read_message(sock)
+        assert kind == b"E" and b"C42P05\0" in body, (kind, body)
+        sock.sendall(typed(b"S"))
+        assert read_until_ready(sock)[-1] == (b"Z", b"I")
+
+        named_bind = (b"duplicate_portal\0duplicate_stmt\0" +
+                      struct.pack("!H", 0) + struct.pack("!H", 0) +
+                      struct.pack("!H", 0))
+        sock.sendall(typed(b"B", named_bind))
+        assert read_message(sock) == (b"2", b"")
+        sock.sendall(typed(b"B", named_bind))
+        kind, body = read_message(sock)
+        assert kind == b"E" and b"C42P03\0" in body, (kind, body)
+        sock.sendall(typed(b"S"))
+        assert read_until_ready(sock)[-1] == (b"Z", b"I")
+        sock.sendall(typed(
+            b"E", b"duplicate_portal\0" + struct.pack("!I", 0)) +
+            typed(b"S"))
+        duplicate_object_result = read_until_ready(sock)
+        assert data_row_values(duplicate_object_result) == [[b"21"]], \
+            duplicate_object_result
+
         # LISTEN/NOTIFY is backend-local, transactional, and transported as
         # protocol NotificationResponse rather than text prepended to a query.
         notify_sock = socket.socket()

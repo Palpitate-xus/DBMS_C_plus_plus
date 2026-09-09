@@ -2129,6 +2129,20 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     PostgresProtocol::readUInt32(message.payload, offset));
                 offset += 4;
             }
+            if (!statement.empty() && preparedStatements.count(statement) != 0) {
+                protocol.sendErrorResponse(
+                    "ERROR", "42P05",
+                    "prepared statement \"" + statement + "\" already exists");
+                extendedQueryError = true;
+                continue;
+            }
+            if (statement.empty()) {
+                // A new unnamed statement replaces the old unnamed statement
+                // and invalidates the unnamed portal. Named portals retain
+                // their already-bound query text.
+                preparedStatements.erase(statement);
+                portals.erase("");
+            }
             preparedStatements[statement] = std::move(prepared);
             protocol.sendParseComplete();
             continue;
@@ -2264,6 +2278,13 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             std::string substitutionError;
             if (!substituteProtocolParameters(prepared.sql, literals, expandedSql, substitutionError)) {
                 protocol.sendErrorResponse("ERROR", "42P02", substitutionError);
+                extendedQueryError = true;
+                continue;
+            }
+            if (!portal.empty() && portals.count(portal) != 0) {
+                protocol.sendErrorResponse(
+                    "ERROR", "42P03",
+                    "portal \"" + portal + "\" already exists");
                 extendedQueryError = true;
                 continue;
             }
