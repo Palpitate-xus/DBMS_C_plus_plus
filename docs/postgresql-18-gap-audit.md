@@ -427,7 +427,7 @@
 这些能力可以作为项目扩展保留，但必须放入显式 compatibility mode，不能混入 PostgreSQL 模式：
 
 - [ ] **DIV-01** `USE DATABASE`：PostgreSQL 连接建立后不能用 SQL 切换 database。
-- [ ] **DIV-02** `REPLACE INTO`：MySQL 语法；PostgreSQL 使用 `INSERT ... ON CONFLICT`。
+- [x] **DIV-02** `REPLACE INTO`：MySQL 语法；PostgreSQL 使用 `INSERT ... ON CONFLICT`。
 - [ ] **DIV-03** `LOAD DATA INFILE`：MySQL 风格；PostgreSQL 使用 `COPY`/psql `\copy`。
 - [ ] **DIV-04** `SELECT ... INTO OUTFILE`：MySQL 风格；PostgreSQL `SELECT INTO` 是建表。
 - [ ] **DIV-05** `DESC`/`DESCRIBE`、`VIEW TABLE`、`VIEW DATABASE`、`SHOW USERS/ROLES/POOLS` 等是项目命令或客户端元命令风格。

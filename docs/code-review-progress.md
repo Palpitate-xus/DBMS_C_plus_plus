@@ -299,6 +299,8 @@
 
 | 377 | OPS-03 | 完整协议测试在 populated 临时 cluster 收到 SIGTERM 后固定只等 5 秒，而服务端优雅关闭必须先完成 catalog/WAL/cache 持久化，实测约 13.3 秒；测试因此在功能断言前误报超时并由 finally 强杀。测试新增独立 `DBMS_PROTOCOL_SHUTDOWN_TIMEOUT`，默认 30 秒，仍保持有限等待且不绕过耐久关闭 | 原阈值连续复现 `TimeoutExpired`；未改源码内存运行以 30 秒阈值完成；提交后原始完整协议脚本通过。OPS-03 改为 partial：smart/fast/immediate 模式、PID/startup lock、crash restart 与 child supervision 仍未完成 | `576740c` |
 
+| 378 | DIV-02 | 默认 PostgreSQL 模式的 REPLACE 门控正确，但 extended 的冲突删除把 TableSchema 内部编码后的主键值当成第一主键列值：typed 单列主键也因尾部分隔符匹配不到，复合主键更无法表示；删除失败还被忽略。替换路径现在从 schema 收集主键、列/表级 UNIQUE、独立单列/复合唯一索引，对每个完整候选键生成真实多列谓词，删除任一失败即终止；外层 DML statement transaction 保证所有冲突删除和重插原子 | DIV E2E 用复合 PK + 单列 UNIQUE 构造一次替换同时删除两个冲突行，并验证后续多行 REPLACE 的非法 integer 使前一替换完全回滚；默认门控、O0/O2 main、完整协议与真实 PostgreSQL 差分 `cases=122 failed=0` 通过。DIV-02 complete | `c4eee82` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。

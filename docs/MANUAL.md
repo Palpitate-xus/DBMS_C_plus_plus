@@ -413,6 +413,11 @@ MERGE INTO target USING source ON target.ID = source.ID
 
 ### REPLACE INTO (MySQL 兼容)
 
+仅在显式 `extended` 兼容模式下可用；默认 `postgresql18` 模式返回
+`42601` 并提示使用 `INSERT ... ON CONFLICT`。冲突替换按主键、列/表级
+UNIQUE 及独立唯一索引查找所有冲突行，删除和插入属于同一语句事务，任一
+行失败会整体回滚。
+
 ```sql
 REPLACE INTO users (ID, NAME) VALUES (1, 'New Alice');
 -- 等价于: DELETE + INSERT (冲突时)
