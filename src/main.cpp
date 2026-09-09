@@ -4185,6 +4185,10 @@ static bool buildStructuredSetOperand(const string& rawSql, Session& s,
 }
 
 static bool captureSetOperand(const string& sql, Session& s, vector<string>& lines) {
+    // A set-operation fallback executes each operand recursively and consumes
+    // its rendered output below.  Do not let an operand's protocol result leak
+    // out as if it described the combined query.
+    dbms::clearLastDmlResult();
     stringstream captured;
     bool failed = false;
     {
@@ -4199,6 +4203,7 @@ static bool captureSetOperand(const string& sql, Session& s, vector<string>& lin
             captured << "ERROR: unhandled set-operation operand failure\n";
         }
     }
+    dbms::takeLastDmlResult();
     string line;
     while (getline(captured, line)) lines.push_back(line);
     if (failed || (!lines.empty() && lines.front().rfind("ERROR:", 0) == 0)) {

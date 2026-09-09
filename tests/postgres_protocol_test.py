@@ -951,9 +951,11 @@ def main():
                 [b"1"], [b"3"]]
         # A complex operand may still use the legacy SELECT producer, but the
         # set semantics must be executed by the same structured SetOperationOp.
-        complex_set_rows = data_row_values(simple_query(
-            sock, "SELECT id FROM set_left UNION SELECT count(*) FROM set_right"))
-        assert complex_set_rows == [[b"1"], [b"2"], [b"3"], [b"4"]], complex_set_rows
+        complex_set_messages = simple_query(
+            sock, "SELECT id FROM set_left UNION SELECT count(*) FROM set_right")
+        complex_set_rows = data_row_values(complex_set_messages)
+        assert complex_set_rows == [[b"1"], [b"2"], [b"3"], [b"4"]], (
+            complex_set_rows, complex_set_messages)
 
         # OR branches with separate equality indexes use one BitmapOr heap
         # fetch path and must preserve all matching rows.
