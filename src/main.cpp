@@ -4601,20 +4601,6 @@ static vector<string> parseCSVLine(const string& line) {
     return fields;
 }
 
-static string escapeCSVField(const string& val) {
-    bool needsQuote = val.find(',') != string::npos ||
-                      val.find('"') != string::npos ||
-                      val.find('\n') != string::npos;
-    if (!needsQuote) return val;
-    string result = "\"";
-    for (char c : val) {
-        if (c == '"') result += "\"\"";
-        else result += c;
-    }
-    result += '"';
-    return result;
-}
-
 // Quote-aware comma split for INSERT VALUES
 static vector<string> splitValues(const string& s) {
     vector<string> parts;
@@ -17363,25 +17349,14 @@ if (sql.rfind("backup database", 0) == 0) {
         }
 
         // Check for INTO OUTFILE clause
-        string outfile;
         size_t intoPos = findTopLevelKeyword(sql, "into outfile");
         if (intoPos != string::npos) {
-            // DIV-04: MySQL-style SELECT ... INTO OUTFILE.  In postgresql18
-            // mode SELECT INTO is table creation and OUTFILE is a syntax
-            // error; exports go through COPY TO / client \copy.
-            if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
-                cout << "SQL syntax error: INTO OUTFILE is not PostgreSQL syntax; "
-                        "use COPY ... TO (SQLSTATE 42601)" << endl;
-                return true;
-            }
-            size_t q1 = sql.find('\'', intoPos);
-            if (q1 != string::npos) {
-                size_t q2 = sql.find('\'', q1 + 1);
-                if (q2 != string::npos) {
-                    outfile = sql.substr(q1 + 1, q2 - q1 - 1);
-                    sql = trim(sql.substr(0, intoPos));
-                }
-            }
+            // Do not let extended mode hijack PostgreSQL's SELECT INTO
+            // grammar or maintain a second, lossy file encoder.  Server-side
+            // exports use COPY TO in every compatibility mode.
+            cout << "SQL syntax error: INTO OUTFILE is not PostgreSQL syntax; "
+                    "use COPY ... TO (SQLSTATE 42601)" << endl;
+            return true;
         }
 
         // PostgreSQL comma cross join: "from a, b" == "from a cross join b".
@@ -23172,7 +23147,6 @@ if (sql.rfind("backup database", 0) == 0) {
                 !structuredScalar && !hasSetReturningScalar &&
                 distinctOnCols.empty() &&
                 exprOrderBySpecs.empty() &&
-                outfile.empty() &&
                 queryDb != "information_schema" && queryDb != "pg_catalog" &&
                 structuredScalarResult.columns.size() == selectExprs.size() &&
                 g_engine.getInheritedChildren(queryDb, tname).empty();
@@ -23404,7 +23378,7 @@ if (sql.rfind("backup database", 0) == 0) {
                 simpleStructuredPlainPredicate &&
                 semiJoins.empty() && existenceFilters.empty() &&
                 quantifiedSubqueries.empty() &&
-                !forUpdate && !noWait && !skipLocked && outfile.empty() &&
+                !forUpdate && !noWait && !skipLocked &&
                 queryDb != "information_schema" && queryDb != "pg_catalog" &&
                 (s.onlyNext ||
                  g_engine.getInheritedChildren(queryDb, tname).empty());
@@ -24199,72 +24173,9 @@ if (sql.rfind("backup database", 0) == 0) {
                 "SELECT " + std::to_string(structuredPlainResult.rows.size());
             dbms::publishLastDmlResult(std::move(structuredPlainResult));
         }
-        if (!outfile.empty()) {
-            ofstream ofs(outfile);
-            if (!ofs) {
-                cout << "Cannot open file for writing: " << outfile << endl;
-                return true;
-            }
-            // Write header based on column selection
-            if (!groupByCols.empty()) {
-                bool first = true;
-                for (const auto& gc : groupByCols) {
-                    if (!first) ofs << ",";
-                    first = false;
-                    ofs << escapeCSVField(gc);
-                }
-                for (const auto& it : aggItems) {
-                    if (!it.func.empty()) {
-                        ofs << "," << escapeCSVField(it.func + "(" + it.arg + ")");
-                    }
-                }
-                ofs << "\n";
-            } else if (hasAgg) {
-                bool first = true;
-                for (const auto& it : aggItems) {
-                    if (!first) ofs << ",";
-                    first = false;
-                    if (it.func.empty()) ofs << escapeCSVField(it.arg);
-                    else ofs << escapeCSVField(it.func + "(" + it.arg + ")");
-                }
-                ofs << "\n";
-            } else if (hasScalar) {
-                bool first = true;
-                for (const auto& expr : selectExprs) {
-                    if (!first) ofs << ",";
-                    first = false;
-                    ofs << escapeCSVField(expr.displayName);
-                }
-                ofs << "\n";
-            } else {
-                bool first = true;
-                for (size_t i = 0; i < tbl.len; ++i) {
-                    if (!selectAll && selectCols.find(tbl.cols[i].dataName) == selectCols.end()) continue;
-                    if (!first) ofs << ",";
-                    first = false;
-                    ofs << escapeCSVField(tbl.cols[i].dataName);
-                }
-                ofs << "\n";
-            }
-            for (const auto& row : answers) {
-                // Row values are space-separated; split and re-join as CSV
-                stringstream rss(row);
-                string val;
-                bool first = true;
-                while (rss >> val) {
-                    if (!first) ofs << ",";
-                    first = false;
-                    ofs << escapeCSVField(val);
-                }
-                ofs << "\n";
-            }
-            ofs.close();
-            cout << "Query result saved to " << outfile << " (" << answers.size() << " rows)" << endl;
-        } else {
-            for (const auto& row : answers) {
-                cout << row << endl;
-                log(s.username, row, getTime());
-            }
+        for (const auto& row : answers) {
+            cout << row << endl;
+            log(s.username, row, getTime());
         }
         return false;
     }

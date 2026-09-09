@@ -232,6 +232,10 @@ def main():
                          "failed DIV-06 DDL left no relation")
         # A canonical type still works in postgresql18 mode.
         expect_command_tag(sock, "CREATE TABLE t6d (a SMALLINT)", "pg type create")
+        expect_command_tag(sock, "SELECT a INTO select_into_copy FROM t6d",
+                           "PostgreSQL SELECT INTO table")
+        expect_command_tag(sock, "DROP TABLE select_into_copy",
+                           "drop PostgreSQL SELECT INTO table")
         expect_error(
             sock, "ALTER TABLE t6d ADD COLUMN ext_auto INTEGER AUTO_INCREMENT",
             "42601", "ALTER TABLE AUTO_INCREMENT gate", "GENERATED AS IDENTITY")
@@ -598,6 +602,16 @@ def main():
             "second extended FULLTEXT shortcut")
         expect_command_tag(sock, "DROP FULLTEXT INDEX body_ft2 ON t7e",
                            "shortcut drop of FULLTEXT shortcut")
+        expect_error(
+            sock,
+            "SELECT id, body FROM t7e INTO OUTFILE 'forbidden_outfile.csv'",
+            "42601", "extended INTO OUTFILE gate", "COPY")
+        assert not os.path.exists(os.path.join(work_dir, "forbidden_outfile.csv"))
+        expect_command_tag(sock, "COPY t7e TO 'canonical_export.csv'",
+                           "canonical COPY TO export")
+        with open(os.path.join(work_dir, "canonical_export.csv"),
+                  encoding="utf-8") as exported:
+            assert exported.read() == "id,body\n1,hello world\n"
 
         # DIV-02 extended mode: delete every row conflicting with any key,
         # including composite primary keys, and roll the whole multi-row
