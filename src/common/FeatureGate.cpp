@@ -4,7 +4,6 @@
 
 #include <cstdlib>
 #include <string>
-#include <unordered_set>
 
 namespace dbms {
 
@@ -33,12 +32,10 @@ bool compatKindHasRuntime(const std::string& kind) {
 }
 
 bool compatKindAlwaysUnsupported(const std::string& kind) {
-    static const std::unordered_set<std::string> kNeverKinds = {
-        // DIV-08: PostgreSQL 18 itself has no SQL ASSERTION implementation;
-        // neither compatibility mode may fake one.
-        "assertion",
-    };
-    return kNeverKinds.count(kind) > 0;
+    // DIV-08: PostgreSQL 18 itself has no SQL ASSERTION implementation;
+    // neither compatibility mode may fake one.  Keep this as a named
+    // contract even if other generic compatibility objects gain runtimes.
+    return kind == kCompatKindAssertion;
 }
 
 std::string featureNotSupportedError(const std::string& command) {

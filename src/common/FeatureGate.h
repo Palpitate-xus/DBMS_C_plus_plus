@@ -17,6 +17,7 @@ namespace dbms {
 // Canonical compatibility modes.
 inline constexpr const char* kCompatModePostgresql18 = "postgresql18";
 inline constexpr const char* kCompatModeExtended = "extended";
+inline constexpr const char* kCompatKindAssertion = "assertion";
 
 // Returns true when mode names the extended compatibility mode.
 bool isExtendedCompatMode(const std::string& mode);

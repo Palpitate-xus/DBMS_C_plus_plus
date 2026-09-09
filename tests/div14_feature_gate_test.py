@@ -461,6 +461,15 @@ def main():
                      "IMPORT FOREIGN SCHEMA fs FROM SERVER s1 INTO public",
                      "extended IMPORT FOREIGN SCHEMA")
         expect_0a000(sock, "LOAD 'auto_explain'", "extended LOAD")
+        # DIV-08 remains permanently unsupported in extended mode too.  Test
+        # create/alter/drop independently so a future generic compat runtime
+        # cannot accidentally revive a fake assertion catalog entry.
+        for sql in [
+                "CREATE ASSERTION extended_a CHECK (1 = 1)",
+                "ALTER ASSERTION extended_a RENAME TO extended_b",
+                "DROP ASSERTION IF EXISTS extended_a",
+        ]:
+            expect_0a000(sock, sql, "extended DIV-08 assertion")
         for root, _dirs, files in os.walk(work_dir):
             assert ".pg_compat_objects" not in files, \
                 "extended mode wrote a fake compat object in %s" % root
