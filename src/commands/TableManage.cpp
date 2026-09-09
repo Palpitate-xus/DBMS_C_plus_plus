@@ -26975,10 +26975,13 @@ std::vector<std::string> StorageEngine::query(
         if (!lockManager_.lockShared(tablename)) return result;
     }
 
-    // READ COMMITTED: refresh snapshot before each query
+    // A SQL command refreshes READ COMMITTED once in beginSqlCommand().
+    // Direct storage API callers do not establish that boundary, so retain
+    // one refresh per standalone query for them.
     if (transactionContext().inTransaction &&
         transactionContext().txnDB == dbname &&
-        transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED) {
+        transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED &&
+        !transactionContext().readView.commandIdVisibility) {
         refreshReadView();
     }
 
@@ -31079,7 +31082,10 @@ std::vector<std::string> StorageEngine::queryExpr(
     if (!lockManager_.lockShared(tablename)) return result;
     ResourceUnlockGuard tableLockGuard(lockManager_, tablename);
 
-    if (transactionContext().inTransaction && transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED) {
+    if (transactionContext().inTransaction &&
+        transactionContext().txnDB == dbname &&
+        transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED &&
+        !transactionContext().readView.commandIdVisibility) {
         refreshReadView();
     }
 
@@ -39006,6 +39012,13 @@ bool StorageEngine::beginSqlCommand() {
     auto& context = transactionContext();
     if (!context.inTransaction) return false;
     context.commandInternalRelations.clear();
+    // PostgreSQL READ COMMITTED takes one snapshot per command.  Complex SQL
+    // can call query/queryExpr repeatedly; refreshing in those helpers would
+    // let later scans observe commits that happened midway through the same
+    // statement.
+    if (context.txnIsolationLevel == IsolationLevel::READ_COMMITTED) {
+        refreshReadView();
+    }
     context.readView.currentCommandId = context.currentCommandId;
     context.readView.commandIdVisibility = true;
     return true;

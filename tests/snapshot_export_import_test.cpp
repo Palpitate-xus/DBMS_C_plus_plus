@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <thread>
 
 dbms::Config g_config;
 using namespace dbms;
@@ -199,6 +200,49 @@ int main() {
         engine3.commitTransaction();
 
         std::cout << "[SNAPSHOT EI] engine export/import visibility OK\n";
+    }
+
+    // Test 5: READ COMMITTED refreshes once per SQL command, not once per
+    // physical relation scan.  Otherwise a JOIN/CTE/subquery can observe a
+    // transaction that commits between two scans in the same statement.
+    {
+        const std::string rcDb = "snapshot_rc_db";
+        std::filesystem::remove_all(rcDb);
+        StorageEngine engine;
+        assert(engine.createDatabase(rcDb) == DBStatus::OK);
+
+        TableSchema tbl;
+        tbl.tablename = "t";
+        tbl.append(makeIntColumn("id", false, 0, true));
+        tbl.append(makeVarCharColumn("name", false, 20, false));
+        assert(engine.createTable(rcDb, tbl) == DBStatus::OK);
+
+        engine.setIsolationLevel(IsolationLevel::READ_COMMITTED);
+        assert(engine.beginTransaction(rcDb) == DBStatus::OK);
+        assert(engine.beginSqlCommand());
+        auto rows = engine.query(rcDb, "t", {}, {"id", "name"});
+        assert(!rowContains(rows, "concurrent"));
+
+        std::thread writer([&] {
+            assert(engine.beginTransaction(rcDb) == DBStatus::OK);
+            std::map<std::string, std::string> vals{
+                {"id", "1"}, {"name", "concurrent"}};
+            assert(engine.insert(rcDb, "t", vals) == DBStatus::OK);
+            assert(engine.commitTransaction() == DBStatus::OK);
+        });
+        writer.join();
+
+        rows = engine.query(rcDb, "t", {}, {"id", "name"});
+        assert(!rowContains(rows, "concurrent"));
+        assert(engine.finishSqlCommand());
+
+        assert(engine.beginSqlCommand());
+        rows = engine.query(rcDb, "t", {}, {"id", "name"});
+        assert(rowContains(rows, "concurrent"));
+        assert(engine.finishSqlCommand());
+        assert(engine.commitTransaction() == DBStatus::OK);
+        std::filesystem::remove_all(rcDb);
+        std::cout << "[SNAPSHOT EI] READ COMMITTED statement snapshot OK\n";
     }
 
     std::filesystem::remove_all(dbname);
