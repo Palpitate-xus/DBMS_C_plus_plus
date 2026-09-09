@@ -1154,9 +1154,11 @@ SHOW 入口已经删除。该模式是会话级设置，进入事务后不可切
   `pg_*_replication_slot()` 函数
 - `SET GLOBAL`（DIV-11）→ `42601`，提示 `ALTER SYSTEM`
 - MySQL/SQL Server 类型别名 `TINYINT`、`LONG`、`DATETIME`、`BLOB`、
-  `BINARY/VARBINARY`、`NCHAR/NVARCHAR`（DIV-06）→ `42704`/`42601` 类型错误，
+  `BINARY/VARBINARY`、`NCHAR/NVARCHAR`（DIV-06）→ `42704` 类型错误，
   错误信息给出等价的 PostgreSQL 类型（`smallint`/`bigint`/`timestamp`/
-  `bytea`/`char`/`varchar`）
+  `bytea`/`char`/`varchar`）；列属性 `AUTO_INCREMENT`、`UNSIGNED` →
+  `42601`，分别提示使用 identity 和 `CHECK`。只有显式 `extended` 模式
+  保留这些别名与属性，CREATE/ALTER TABLE 使用相同规则
 - `CREATE/DROP FULLTEXT INDEX`（DIV-07）→ `42601`，提示
   `CREATE INDEX ... USING gin (to_tsvector(col))` 与 `DROP INDEX`
 - `DUMP`（DIV-10）→ `0A000`，提示 `pg_dump`；`BACKUP DATABASE` →

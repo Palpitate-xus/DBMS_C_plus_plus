@@ -293,6 +293,8 @@
 
 | 374 | DIV-13 | MANUAL 仍声称 startup `server_version` 为已不存在的 `DBMS-C++ protocol/3.0`，而生产网络入口实际上报 `18.0 DBMS-C++ 0.2.0`；这会让用户和测试对产品身份及客户端 major-version 解析得到相反结论。手册改为精确值，并说明 18.0 前缀只供客户端解析、DBMS 后缀才是产品身份、该字段不是 PG18 兼容认证；兼容契约回归把源码表达式、产品 SemVer 和手册值绑定 | compatibility-contract、documentation-status、version-consistency 三项回归及 diff check 通过；上一项完整协议已精确验证相同 ParameterStatus。DIV-13 改为 partial：显式 data directory、CWD 状态迁移和 cluster magic/system-id 仍未实现 | `0289004` |
 
+| 375 | DIV-06 | CREATE TABLE 解析器会静默丢弃 `AUTO_INCREMENT`、`UNSIGNED`，导致默认 PostgreSQL 模式把非 PG 声明悄悄创建成普通 integer；ALTER TABLE 则在两种模式都无法保留属性，typed DDL 的 `LONG` 映射也遗漏。AST 现在显式保存两种属性，CREATE/ALTER 共用 DDL 门：默认模式以 `42601` 给出 identity/CHECK 替代，只有 extended 模式恢复自增和 unsigned 存储约束；补齐全部列出的类型别名及 `LONG`→`int8` | parser_phase1 覆盖 CREATE/ALTER 属性保真；DIV E2E 验证默认模式无表/列副作用、所有别名拒绝及 extended 自增、负数拒绝、ALTER unsigned、全部别名；生产对象 O2 全量重建、完整协议和 PostgreSQL 差分 `cases=122 failed=0` 通过。DIV-06 complete | `22eefa6` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
