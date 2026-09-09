@@ -247,6 +247,8 @@
 
 | 351 | P0-01 / SQL-01 / TXN-12 / PROTO-08 | SQL utility 形式的 LISTEN/NOTIFY channel 是 identifier，PostgreSQL scanner 会按 `NAMEDATALEN-1` 截为 63 bytes；本项目此前保留任意长度，导致同名兼容和 function 形式边界不一致。通知 identifier 解析现对 quoted/unquoted 名称统一做 UTF-8 安全的 63-byte 截断，避免落在 continuation byte 中间；`pg_notify(text,text)` 仍按 PostgreSQL 行为对 64-byte channel 返回 `22023` | parser 回归覆盖 64 ASCII bytes 截为 63 以及 62 ASCII + 三字节字符在完整字符边界截断；完整协议以两个 backend 分别 LISTEN/NOTIFY 64-byte 名称，收到的 `A` 帧 channel 精确为 63 bytes。O0/O2 parser 和完整协议套件通过 | `7fe269d` |
 
+| 352 | TXN-12 / PROTO-08 | 接收端处于显式事务时，网络线程的 100ms 空闲轮询仍会取走并立即发送已经提交的通知，违反 PostgreSQL 只在事务之间交付异步通知的边界，也使长事务无法保留待处理队列。`takePending` 现在在 backend 有活动通知事务时保留队列；COMMIT 或 ROLLBACK 结束接收端事务后才允许消费，发送端已提交的通知不会随接收端回滚丢失 | `notification_manager_test` 验证接收端事务内取队列为空、ROLLBACK 后收到原消息；完整 wire 回归让 listener 保持事务，验证空闲轮询和事务内 `SELECT` 都不产生 `A`，随后 COMMIT 响应中精确收到 sender/channel/payload。公共头依赖全量刷新、主入口/网络入口 O0、生产 O2 重链及完整协议套件两轮通过 | `471ab75` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
