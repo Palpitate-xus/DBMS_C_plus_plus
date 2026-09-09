@@ -2,6 +2,7 @@
 """SET TRANSACTION rejects isolation changes after snapshot use."""
 
 import importlib.util
+import tempfile
 from pathlib import Path
 
 
@@ -13,6 +14,12 @@ def main():
     runner = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(runner)
     client = runner.load_protocol_client()
+    copy_file = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", delete=False,
+        prefix="dbms_readonly_copy_", suffix=".csv")
+    copy_file.write("2\n")
+    copy_file.close()
+    copy_path = Path(copy_file.name)
     server = runner.start_ours(client)
     try:
         def execute(sql):
@@ -160,6 +167,42 @@ def main():
             "DROP DATABASE forbidden_transaction_database;")
         assert state is None, (state, message)
 
+        # COPY FROM is a table write. A read-only transaction must reject the
+        # command instead of converting the storage error into skipped rows.
+        _, state, message, _, _, _ = execute(
+            "CREATE TABLE readonly_copy_target (id INT);")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute("BEGIN READ ONLY;")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute(
+            f"COPY readonly_copy_target FROM '{copy_path}';")
+        assert state == "25006", (state, message)
+        assert "COPY FROM" in message, message
+        _, state, message, _, _, _ = execute("ROLLBACK;")
+        assert state is None, (state, message)
+        rows, state, message, _, _, _ = execute(
+            "SELECT id FROM readonly_copy_target;")
+        assert state is None and rows == [], (state, message, rows)
+
+        # PostgreSQL's read-only exception for an existing temporary table
+        # applies to COPY FROM just as it does to INSERT/UPDATE/DELETE.
+        _, state, message, _, _, _ = execute(
+            "CREATE TEMP TABLE readonly_copy_temp (id INT);")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute("BEGIN READ ONLY;")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute(
+            f"COPY readonly_copy_temp FROM '{copy_path}';")
+        assert state is None, (state, message)
+        rows, state, message, _, _, _ = execute(
+            "SELECT id FROM readonly_copy_temp;")
+        assert state is None and rows == [["2"]], (state, message, rows)
+        _, state, message, _, _, _ = execute("ROLLBACK;")
+        assert state is None, (state, message)
+        rows, state, message, _, _, _ = execute(
+            "SELECT id FROM readonly_copy_temp;")
+        assert state is None and rows == [], (state, message, rows)
+
         # SET TRANSACTION read modes are transaction characteristics, not
         # configuration parameters.  Tightening an active transaction to
         # READ ONLY is allowed even after a read, and every subsequent DML
@@ -266,6 +309,7 @@ def main():
         print("[TRANSACTION ISOLATION PROTOCOL E2E] passed")
     finally:
         runner.stop_ours(server)
+        copy_path.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

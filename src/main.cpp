@@ -2708,6 +2708,7 @@ static bool handleCopy(const string& sql, Session& s) {
     size_t toPos = rest.find(" to ");
     if (fromPos != string::npos) {
         string tname = trim(rest.substr(0, fromPos));
+        const bool temporaryTarget = s.tempTables.count(tname) != 0;
         tname = resolveTableName(s, tname);
         string fileRest = trim(rest.substr(fromPos + 6));
         size_t q1 = fileRest.find('\'');
@@ -2719,6 +2720,12 @@ static bool handleCopy(const string& sql, Session& s) {
         string filename = fileRest.substr(q1 + 1, q2 - q1 - 1);
         if (!g_engine.tableExists(s.currentDB, tname)) {
             cout << "Table " << tname << " not exist" << endl;
+            return true;
+        }
+        if (g_engine.inTransaction() && g_engine.isReadOnly() &&
+            !temporaryTarget) {
+            cout << "ERROR: cannot execute COPY FROM in a read-only "
+                    "transaction (SQLSTATE 25006)" << endl;
             return true;
         }
         TableSchema tbl = g_engine.getTableSchema(s.currentDB, tname);
