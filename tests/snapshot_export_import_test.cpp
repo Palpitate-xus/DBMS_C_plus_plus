@@ -216,6 +216,7 @@ int main() {
     {
         const std::string rcDb = "snapshot_rc_db";
         std::filesystem::remove_all(rcDb);
+        {
         StorageEngine engine;
         assert(engine.createDatabase(rcDb) == DBStatus::OK);
 
@@ -249,8 +250,56 @@ int main() {
         assert(rowContains(rows, "concurrent"));
         assert(engine.finishSqlCommand());
         assert(engine.commitTransaction() == DBStatus::OK);
-        std::filesystem::remove_all(rcDb);
         std::cout << "[SNAPSHOT EI] READ COMMITTED statement snapshot OK\n";
+        }
+        std::filesystem::remove_all(rcDb);
+    }
+
+    // Test 6: PostgreSQL accepts READ UNCOMMITTED but gives it READ
+    // COMMITTED visibility and statement-snapshot behavior.
+    {
+        const std::string ruDb = "snapshot_ru_db";
+        std::filesystem::remove_all(ruDb);
+        {
+        StorageEngine engine;
+        assert(engine.createDatabase(ruDb) == DBStatus::OK);
+
+        TableSchema tbl;
+        tbl.tablename = "t";
+        tbl.append(makeIntColumn("id", false, 0, true));
+        tbl.append(makeVarCharColumn("name", false, 20, false));
+        assert(engine.createTable(ruDb, tbl) == DBStatus::OK);
+
+        assert(engine.beginTransaction(ruDb) == DBStatus::OK);
+        assert(engine.insert(ruDb, "t", {{"id", "1"}, {"name", "before"}})
+               == DBStatus::OK);
+        assert(engine.commitTransaction() == DBStatus::OK);
+
+        engine.setIsolationLevel(IsolationLevel::READ_UNCOMMITTED);
+        assert(engine.beginTransaction(ruDb) == DBStatus::OK);
+        assert(engine.beginSqlCommand());
+        auto rows = engine.query(ruDb, "t", {}, {"id", "name"});
+        assert(rowContains(rows, "before"));
+
+        std::thread writer([&] {
+            assert(engine.beginTransaction(ruDb) == DBStatus::OK);
+            assert(engine.insert(ruDb, "t", {{"id", "2"}, {"name", "during"}})
+                   == DBStatus::OK);
+            assert(engine.commitTransaction() == DBStatus::OK);
+        });
+        writer.join();
+
+        rows = engine.query(ruDb, "t", {}, {"id", "name"});
+        assert(!rowContains(rows, "during"));
+        assert(engine.finishSqlCommand());
+        assert(engine.beginSqlCommand());
+        rows = engine.query(ruDb, "t", {}, {"id", "name"});
+        assert(rowContains(rows, "during"));
+        assert(engine.finishSqlCommand());
+        assert(engine.commitTransaction() == DBStatus::OK);
+        std::cout << "[SNAPSHOT EI] READ UNCOMMITTED maps to READ COMMITTED OK\n";
+        }
+        std::filesystem::remove_all(ruDb);
     }
 
     std::filesystem::remove_all(dbname);

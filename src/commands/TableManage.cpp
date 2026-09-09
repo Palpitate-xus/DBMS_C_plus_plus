@@ -26980,7 +26980,8 @@ std::vector<std::string> StorageEngine::query(
     // one refresh per standalone query for them.
     if (transactionContext().inTransaction &&
         transactionContext().txnDB == dbname &&
-        transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED &&
+        (transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
+         transactionContext().txnIsolationLevel == IsolationLevel::READ_UNCOMMITTED) &&
         !transactionContext().readView.commandIdVisibility) {
         refreshReadView();
     }
@@ -31084,7 +31085,8 @@ std::vector<std::string> StorageEngine::queryExpr(
 
     if (transactionContext().inTransaction &&
         transactionContext().txnDB == dbname &&
-        transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED &&
+        (transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
+         transactionContext().txnIsolationLevel == IsolationLevel::READ_UNCOMMITTED) &&
         !transactionContext().readView.commandIdVisibility) {
         refreshReadView();
     }
@@ -36251,10 +36253,12 @@ bool StorageEngine::recoverAllDatabases() {
 }
 
 // ========================================================================
-// ReadView refresh (for READ COMMITTED)
+// ReadView refresh (READ COMMITTED and its READ UNCOMMITTED alias)
 // ========================================================================
 void StorageEngine::refreshReadView() {
-    if (!transactionContext().inTransaction || transactionContext().txnIsolationLevel != IsolationLevel::READ_COMMITTED) return;
+    if (!transactionContext().inTransaction ||
+        (transactionContext().txnIsolationLevel != IsolationLevel::READ_COMMITTED &&
+         transactionContext().txnIsolationLevel != IsolationLevel::READ_UNCOMMITTED)) return;
     std::lock_guard<std::mutex> lock(globalTxnMutex_);
     transactionContext().readView.creatorTxnId = transactionContext().currentTxnId;
     transactionContext().readView.upLimitId = activeTransactions_.empty() ? transactionContext().currentTxnId : *activeTransactions_.begin();
@@ -39016,7 +39020,8 @@ bool StorageEngine::beginSqlCommand() {
     // can call query/queryExpr repeatedly; refreshing in those helpers would
     // let later scans observe commits that happened midway through the same
     // statement.
-    if (context.txnIsolationLevel == IsolationLevel::READ_COMMITTED) {
+    if (context.txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
+        context.txnIsolationLevel == IsolationLevel::READ_UNCOMMITTED) {
         refreshReadView();
     }
     context.readView.currentCommandId = context.currentCommandId;
@@ -39123,7 +39128,10 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
     transactionContext().txnHeapWritebackPages.clear();
     transactionContext().txnReadIndexPredicates.clear();
     transactionContext().txnWrittenIndexKeys.clear();
-    if (transactionContext().txnIsolationLevel != IsolationLevel::READ_UNCOMMITTED) {
+    // PostgreSQL maps READ UNCOMMITTED to READ COMMITTED.  Every isolation
+    // level therefore starts with a valid snapshot; the two read-committed
+    // modes refresh it at subsequent SQL command boundaries.
+    {
         std::lock_guard<std::mutex> lock(globalTxnMutex_);
         transactionContext().readView.creatorTxnId = transactionContext().currentTxnId;
         transactionContext().readView.upLimitId = activeTransactions_.empty() ? transactionContext().currentTxnId : *activeTransactions_.begin();
