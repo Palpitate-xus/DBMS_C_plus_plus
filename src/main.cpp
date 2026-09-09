@@ -2027,26 +2027,37 @@ static bool handleSetCommand(const string& sql, Session& s) {
             rawRest = sql.substr(25);
         }
         string rest = trim(rawRest);
+        dbms::IsolationLevel requested;
+        int requestedCode = 0;
+        string requestedName;
         if (rest.find("read uncommitted") != string::npos) {
-            g_engine.setIsolationLevel(dbms::IsolationLevel::READ_UNCOMMITTED);
-            s.isolationLevel = 0;
-            cout << "Isolation level set to READ UNCOMMITTED" << endl;
+            requested = dbms::IsolationLevel::READ_UNCOMMITTED;
+            requestedCode = 0;
+            requestedName = "READ UNCOMMITTED";
         } else if (rest.find("read committed") != string::npos) {
-            g_engine.setIsolationLevel(dbms::IsolationLevel::READ_COMMITTED);
-            s.isolationLevel = 1;
-            cout << "Isolation level set to READ COMMITTED" << endl;
+            requested = dbms::IsolationLevel::READ_COMMITTED;
+            requestedCode = 1;
+            requestedName = "READ COMMITTED";
         } else if (rest.find("repeatable read") != string::npos) {
-            g_engine.setIsolationLevel(dbms::IsolationLevel::REPEATABLE_READ);
-            s.isolationLevel = 2;
-            cout << "Isolation level set to REPEATABLE READ" << endl;
+            requested = dbms::IsolationLevel::REPEATABLE_READ;
+            requestedCode = 2;
+            requestedName = "REPEATABLE READ";
         } else if (rest.find("serializable") != string::npos) {
-            g_engine.setIsolationLevel(dbms::IsolationLevel::SERIALIZABLE);
-            s.isolationLevel = 3;
-            cout << "Isolation level set to SERIALIZABLE" << endl;
+            requested = dbms::IsolationLevel::SERIALIZABLE;
+            requestedCode = 3;
+            requestedName = "SERIALIZABLE";
         } else {
             cout << "Unknown isolation level" << endl;
             return true;
         }
+        if (!g_engine.setIsolationLevel(requested)) {
+            cout << "ERROR: SET TRANSACTION ISOLATION LEVEL must be called "
+                    "before any query or data manipulation statement "
+                    "(SQLSTATE 25001)" << endl;
+            return true;
+        }
+        s.isolationLevel = requestedCode;
+        cout << "Isolation level set to " << requestedName << endl;
         return false;
     }
 
@@ -13209,6 +13220,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             return handleRollbackToSavepoint(sql, s);
 
         case dbms::SqlCommand::Set:
+        case dbms::SqlCommand::SetTransaction:
             return handleSetCommand(sql, s);
 
         case dbms::SqlCommand::Reset:

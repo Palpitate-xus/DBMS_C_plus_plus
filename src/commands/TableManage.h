@@ -1284,7 +1284,17 @@ public:
     bool importSnapshot(const std::string& bytes);
 
     // Transaction isolation levels (unified with dbms::IsolationLevel in dbms_defs.h)
-    void setIsolationLevel(IsolationLevel level) { transactionContext().txnIsolationLevel = level; }
+    bool setIsolationLevel(IsolationLevel level) {
+        auto& context = transactionContext();
+        if (context.inTransaction &&
+            (context.hasRead || context.hasWrite || !context.txnLog.empty() ||
+             !context.ddlUndoActions.empty() ||
+             !context.txnBackupPath.empty())) {
+            return false;
+        }
+        context.txnIsolationLevel = level;
+        return true;
+    }
     IsolationLevel getIsolationLevel() const { return transactionContext().txnIsolationLevel; }
     void refreshReadView();  // For READ COMMITTED: re-snapshot before each query
 

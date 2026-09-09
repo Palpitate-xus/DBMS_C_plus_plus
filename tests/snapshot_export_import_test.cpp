@@ -280,6 +280,8 @@ int main() {
         assert(engine.beginSqlCommand());
         auto rows = engine.query(ruDb, "t", {}, {"id", "name"});
         assert(rowContains(rows, "before"));
+        assert(!engine.setIsolationLevel(IsolationLevel::SERIALIZABLE));
+        assert(engine.getIsolationLevel() == IsolationLevel::READ_UNCOMMITTED);
 
         std::thread writer([&] {
             assert(engine.beginTransaction(ruDb) == DBStatus::OK);

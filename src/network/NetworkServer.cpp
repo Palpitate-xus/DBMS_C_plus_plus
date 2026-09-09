@@ -1081,6 +1081,9 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
                         std::string::npos)) {
             // Undefined function (PG 42883).
             result.sqlState = "42883";
+        } else if (result.errorMessage.find("(SQLSTATE 25001)") !=
+                   std::string::npos) {
+            result.sqlState = "25001";
         } else {
             result.sqlState = "XX000";
         }
