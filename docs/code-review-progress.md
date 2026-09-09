@@ -173,6 +173,8 @@
 
 | 314 | P0-16 | 测试构建脚本把所有 `*_test.cpp` 纳入生产对象缓存签名，并且只在测试成功后写缓存戳；任意测试源码变化或一次测试失败都会让下一次运行重新编译全部生产源码，显著拖慢复查和失败重试。构建驱动现在只用生产源码、头文件和构建配置签名判断共享对象是否失效，并在共享层成功后立即发布缓存戳；测试源码仍每次单独编译，测试失败不再污染生产对象缓存 | `build_cache_routing_test` 检查两个构建入口均使用生产缓存 API、缓存戳位于测试编译之前且旧测试签名逻辑已删除，并执行三份脚本的 `bash -n`；`subxip_visibility_test` 首次完成旧缓存重建后通过，第二次仅编译/链接该测试、没有生产源码重编译，7 项断言全部通过 | `7eacb89` |
 
+| 315 | P0-07 / TXN-01 | READ COMMITTED 在每次底层 `query()` / `queryExpr()` 调用前刷新 read view，而不是在每条 SQL 开始时刷新；JOIN、CTE、子查询等一次语句内的后续扫描会看到中途并发提交，破坏 PostgreSQL 的 statement-level snapshot。最外层 SQL 命令现在只在 `beginSqlCommand()` 刷新一次；命令内所有扫描复用该 read view，未建立 SQL 命令边界的直接存储 API 调用仍按调用刷新 | `snapshot_export_import_test` 的并发回归在修复前稳定失败，现验证同一命令第二次扫描看不到中途提交、下一命令能够看到；`subxip_visibility_test`、`prepared_transaction_test`、完整 `mvcc_update_test`、`concurrency_test`、DML CTE / JOIN / derived type / PostgreSQL 协议回归、O0 编译及完整差分 `cases=122 failed=0` 通过 | `ef96376` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
