@@ -414,9 +414,22 @@ static void test_drop_and_replace_restore_before_outer_row_undo() {
     assert(g_engine.insert(db, "drop_restore", {{"id", "2"}}) == dbms::DBStatus::OK);
     assert(!ddl.executeSql("DROP TABLE drop_restore CASCADE", s));
     assert(!g_engine.tableExists(db, "drop_restore"));
-    assert(g_engine.savepoint("after_drop") == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.savepoint("after_drop") == dbms::DBStatus::OK);
     // A later full-snapshot statement owns an auxiliary image; it may join
     // the transaction without consuming the image reserved for full rollback.
+    assert(!ddl.executeSql(
+        "CREATE OR REPLACE VIEW replace_restore AS SELECT id FROM replace_source", s));
+    assert(!g_engine.getViewSQL(db, "replace_restore").empty());
+    assert(g_engine.rollbackToSavepoint("after_drop") == dbms::DBStatus::OK);
+    assert(!g_engine.tableExists(db, "drop_restore"));
+    assert(g_engine.getViewSQL(db, "replace_restore").empty());
+
+    // ROLLBACK TO retains its target. Repeating the same DDL and rollback
+    // verifies that the consumed physical image is recreated for the target.
+    assert(!ddl.executeSql(
+        "CREATE OR REPLACE VIEW replace_restore AS SELECT id FROM replace_source", s));
+    assert(g_engine.rollbackToSavepoint("after_drop") == dbms::DBStatus::OK);
+    assert(g_engine.getViewSQL(db, "replace_restore").empty());
     assert(!ddl.executeSql(
         "CREATE OR REPLACE VIEW replace_restore AS SELECT id FROM replace_source", s));
 
@@ -490,6 +503,48 @@ static void test_alter_and_truncate_join_outer_transaction() {
     assert(g_engine.query(db, "rewrite_target", {}, {"id"}) ==
            std::vector<std::string>{"1 "});
 
+    // A savepoint declared before the first physical DDL uses the outer
+    // transaction image plus row undo to recover its earlier boundary.
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.savepoint("before_rewrite") == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "rewrite_target", {{"id", "2"}}) ==
+           dbms::DBStatus::OK);
+    assert(!ddl.executeSql(
+        "ALTER TABLE rewrite_target ADD COLUMN savepoint_value INT", s));
+    assert(g_engine.rollbackToSavepoint("before_rewrite") ==
+           dbms::DBStatus::OK);
+    schema = g_engine.getTableSchema(db, "rewrite_target");
+    assert(schema.len == 1 && schema.cols[0].dataName == "id");
+    assert(g_engine.query(db, "rewrite_target", {}, {"id"}) ==
+           std::vector<std::string>{"1 "});
+    assert(g_engine.commitTransaction() == dbms::DBStatus::OK);
+
+    // A savepoint created after DDL captures that DDL state. Later rewrites
+    // can be rolled back repeatedly without losing the earlier ALTER.
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(!ddl.executeSql(
+        "ALTER TABLE rewrite_target ADD COLUMN kept_by_savepoint INT", s));
+    assert(g_engine.savepoint("after_rewrite") == dbms::DBStatus::OK);
+    assert(!ddl.executeSql(
+        "ALTER TABLE rewrite_target ADD COLUMN removed_once INT", s));
+    assert(g_engine.rollbackToSavepoint("after_rewrite") ==
+           dbms::DBStatus::OK);
+    schema = g_engine.getTableSchema(db, "rewrite_target");
+    assert(schema.len == 2);
+    assert(schema.cols[1].dataName == "kept_by_savepoint");
+    assert(!ddl.executeSql(
+        "ALTER TABLE rewrite_target ADD COLUMN removed_twice INT", s));
+    assert(g_engine.rollbackToSavepoint("after_rewrite") ==
+           dbms::DBStatus::OK);
+    schema = g_engine.getTableSchema(db, "rewrite_target");
+    assert(schema.len == 2);
+    assert(schema.cols[1].dataName == "kept_by_savepoint");
+    assert(g_engine.releaseSavepoint("after_rewrite") == dbms::DBStatus::OK);
+    assert(!pathExistsWithPrefix(db + ".ddl_statement_backup."));
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+    schema = g_engine.getTableSchema(db, "rewrite_target");
+    assert(schema.len == 1 && schema.cols[0].dataName == "id");
+
     // Row changes made after the DDL snapshot are already removed by the
     // physical restore. They must not be replayed against the older schema.
     assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
@@ -522,6 +577,7 @@ static void test_alter_and_truncate_join_outer_transaction() {
     assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
     assert(!ddl.executeSql(
         "ALTER TABLE rewrite_target ADD COLUMN committed_first INT", s));
+    assert(g_engine.savepoint("commit_image") == dbms::DBStatus::OK);
     assert(!ddl.executeSql(
         "ALTER TABLE rewrite_target ADD COLUMN committed_second INT", s));
     assert(g_engine.commitTransaction() == dbms::DBStatus::OK);

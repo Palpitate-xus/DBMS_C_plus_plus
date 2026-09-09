@@ -39415,6 +39415,7 @@ bool StorageEngine::restoreDdlStatementBackup(
 
     std::error_code error;
     std::filesystem::remove_all(backup, error);
+    context.readView.commitLog = getCommitLog(context.txnDB);
     clearCatalogSnapshot();
     captureCatalogSnapshot();
     if (error) {
@@ -39926,6 +39927,9 @@ DBStatus StorageEngine::commitTransaction() {
     transactionContext().txnLogSizeAtBackup = 0;
     transactionContext().ddlUndoSizeAtBackup = 0;
     discardTransactionBackup(transactionContext().txnDB);
+    for (const auto& savepoint : transactionContext().savepoints) {
+        discardDdlStatementBackup(savepoint.ddlBackupPath);
+    }
     transactionContext().savepoints.clear();
     transactionContext().txnSubTxnIds.clear();
     clearCatalogSnapshot();
@@ -40954,6 +40958,9 @@ DBStatus StorageEngine::rollbackTransaction() {
     transactionContext().snapshotAcquired = false;
     transactionContext().hasRead = false;
     transactionContext().hasWrite = false;
+    for (const auto& savepoint : transactionContext().savepoints) {
+        discardDdlStatementBackup(savepoint.ddlBackupPath);
+    }
     transactionContext().savepoints.clear();
     transactionContext().txnSubTxnIds.clear();
     clearCatalogSnapshot();
@@ -41067,6 +41074,9 @@ bool StorageEngine::restoreTransactionBackup(const std::string& dbname) {
         context.restoreBackupBeforeRowUndo = false;
         context.txnLogSizeAtBackup = 0;
         context.ddlUndoSizeAtBackup = 0;
+        if (context.inTransaction) {
+            context.readView.commitLog = getCommitLog(dbname);
+        }
     }
     return restored;
 }
@@ -41888,13 +41898,12 @@ std::vector<std::string> StorageEngine::listPreparedTransactions() const {
 
 DBStatus StorageEngine::savepoint(const std::string& name) {
     if (!transactionContext().inTransaction) return DBStatus::INVALID_VALUE;
-    if (transactionContext().transactionBackupDirty) {
-        // A full DDL snapshot cannot safely describe a savepoint created
-        // after the physical mutation. Fail closed until object-level DDL
-        // savepoint images are available.
-        return DBStatus::INVALID_VALUE;
-    }
     auto& context = transactionContext();
+    std::string ddlBackupPath;
+    if (context.transactionBackupDirty &&
+        !createDdlStatementBackup(ddlBackupPath)) {
+        return DBStatus::IO_ERROR;
+    }
     const auto deferred = context.deferredChecks.find(context.currentTxnId);
     const size_t deferredCheckSize = deferred == context.deferredChecks.end()
         ? 0 : deferred->second.size();
@@ -41904,6 +41913,7 @@ DBStatus StorageEngine::savepoint(const std::string& name) {
         context.ddlUndoActions.size(),
         deferredCheckSize,
         context.txnLogicalChanges.size(),
+        std::move(ddlBackupPath),
         lockManager_.captureCheckpoint()
     });
     return DBStatus::OK;
@@ -41912,7 +41922,6 @@ DBStatus StorageEngine::savepoint(const std::string& name) {
 DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
     auto& context = transactionContext();
     if (!context.inTransaction) return DBStatus::INVALID_VALUE;
-    if (context.transactionBackupDirty) return DBStatus::INVALID_VALUE;
     const auto reverseIt = std::find_if(
         context.savepoints.rbegin(), context.savepoints.rend(),
         [&](const TransactionContext::SavepointState& savepoint) {
@@ -41938,6 +41947,37 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
         deferredCheckSpIdx > currentDeferredCheckSize ||
         logicalChangeSpIdx > context.txnLogicalChanges.size()) {
         return DBStatus::INVALID_VALUE;
+    }
+
+    // A savepoint created after physical DDL owns an exact database image.
+    // A savepoint that predates the first physical DDL instead reuses the
+    // transaction image, then row/catalog undo below moves from that image's
+    // log boundary back to the requested savepoint. Changes after either
+    // image are already absent physically and must not be replayed again.
+    bool restoredSavepointImage = false;
+    if (!target.ddlBackupPath.empty()) {
+        if (!restoreDdlStatementBackup(target.ddlBackupPath)) {
+            (void)rollbackTransaction();
+            return DBStatus::IO_ERROR;
+        }
+        context.txnLog.resize(txnLogSpIdx);
+        context.ddlUndoActions.resize(ddlSpIdx);
+        restoredSavepointImage = true;
+    } else if (context.transactionBackupDirty) {
+        const size_t snapshotTxnLogSize = context.txnLogSizeAtBackup;
+        const size_t snapshotDdlUndoSize = context.ddlUndoSizeAtBackup;
+        if (txnLogSpIdx > snapshotTxnLogSize ||
+            snapshotTxnLogSize > context.txnLog.size() ||
+            ddlSpIdx > snapshotDdlUndoSize ||
+            snapshotDdlUndoSize > context.ddlUndoActions.size() ||
+            !restoreTransactionBackup(context.txnDB)) {
+            (void)rollbackTransaction();
+            return DBStatus::IO_ERROR;
+        }
+        clearCatalogSnapshot();
+        captureCatalogSnapshot();
+        context.txnLog.resize(snapshotTxnLogSize);
+        context.ddlUndoActions.resize(snapshotDdlUndoSize);
     }
 
     bool rowUndoOk = true;
@@ -42439,6 +42479,23 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
     transactionContext().ddlUndoActions.resize(ddlSpIdx);
     lockManager_.rollbackToCheckpoint(target.lockCheckpoint);
 
+    std::string replacementTargetBackup;
+    if (restoredSavepointImage &&
+        !createDdlStatementBackup(replacementTargetBackup)) {
+        (void)rollbackTransaction();
+        return DBStatus::IO_ERROR;
+    }
+
+    for (size_t i = savepointIndex + 1;
+         i < context.savepoints.size(); ++i) {
+        discardDdlStatementBackup(
+            context.savepoints[i].ddlBackupPath);
+    }
+    if (restoredSavepointImage) {
+        context.savepoints[savepointIndex].ddlBackupPath =
+            std::move(replacementTargetBackup);
+    }
+
     // ROLLBACK TO retains the target but destroys every savepoint created
     // after it, even when no row or DDL changes separated their declarations.
     context.savepoints.erase(
@@ -42461,6 +42518,10 @@ DBStatus StorageEngine::releaseSavepoint(const std::string& name) {
     }
     const size_t savepointIndex = static_cast<size_t>(std::distance(
         context.savepoints.begin(), reverseIt.base()) - 1);
+    for (size_t i = savepointIndex; i < context.savepoints.size(); ++i) {
+        discardDdlStatementBackup(
+            context.savepoints[i].ddlBackupPath);
+    }
     // RELEASE destroys the named savepoint and every savepoint nested after
     // it. With duplicate names, reverse lookup releases only the newest one.
     context.savepoints.erase(

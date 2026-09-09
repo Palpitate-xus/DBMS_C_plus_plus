@@ -131,6 +131,53 @@ def main():
         assert state is None and rows == [["1"]], (state, message, rows)
         assert headers == ["id"], headers
 
+        # A savepoint before the first physical DDL combines the transaction
+        # image with row undo, so both intervening DML and schema changes go.
+        _, state, message, _, _, _ = execute("BEGIN;")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute("SAVEPOINT before_rewrite;")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute(
+            "INSERT INTO transactional_ddl VALUES (2);")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute(
+            "ALTER TABLE transactional_ddl ADD COLUMN discarded_value INT;")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute(
+            "ROLLBACK TO SAVEPOINT before_rewrite;")
+        assert state is None, (state, message)
+        rows, state, message, headers, _, _ = execute(
+            "SELECT * FROM transactional_ddl ORDER BY id;")
+        assert state is None and rows == [["1"]], (state, message, rows)
+        assert headers == ["id"], headers
+        _, state, message, _, _, _ = execute("COMMIT;")
+        assert state is None, (state, message)
+
+        # A savepoint after physical DDL retains earlier schema changes while
+        # rolling back later rewrites. RELEASE drops its auxiliary image.
+        _, state, message, _, _, _ = execute("BEGIN;")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute(
+            "ALTER TABLE transactional_ddl ADD COLUMN retained_value INT;")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute("SAVEPOINT after_rewrite;")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute(
+            "ALTER TABLE transactional_ddl ADD COLUMN discarded_later INT;")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute(
+            "ROLLBACK TO SAVEPOINT after_rewrite;")
+        assert state is None, (state, message)
+        rows, state, message, headers, _, _ = execute(
+            "SELECT * FROM transactional_ddl ORDER BY id;")
+        assert state is None and rows == [["1", None]], (
+            state, message, rows)
+        assert headers == ["id", "retained_value"], headers
+        _, state, message, _, _, _ = execute("RELEASE SAVEPOINT after_rewrite;")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute("ROLLBACK;")
+        assert state is None, (state, message)
+
         # A row written after the DDL snapshot is removed by snapshot restore,
         # not replayed against the restored older schema.
         _, state, message, _, _, _ = execute("BEGIN;")

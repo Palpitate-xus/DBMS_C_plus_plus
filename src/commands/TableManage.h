@@ -760,9 +760,6 @@ public:
     bool restoreTransactionBackup(const std::string& dbname);
     void discardTransactionBackup(const std::string& dbname);
     // Mark the current DDL snapshot as covering a physical/catalog mutation.
-    // A transaction with a dirty DDL snapshot cannot create or roll back a
-    // savepoint because a single full-database image cannot represent a
-    // post-snapshot savepoint boundary safely.
     void markTransactionBackupDirty();
     // DDL transactions restore their pre-change image inside
     // rollbackTransaction(), before row undo. Ordinary snapshot callers keep
@@ -1969,6 +1966,7 @@ private:
             size_t ddlUndoSize = 0;
             size_t deferredCheckSize = 0;
             size_t logicalChangeSize = 0;
+            std::string ddlBackupPath;
             LockManager::LockCheckpoint lockCheckpoint;
         };
         std::vector<SavepointState> savepoints;
