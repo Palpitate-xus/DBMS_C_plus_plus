@@ -221,6 +221,8 @@
 
 | 338 | P0-04 / CAT-07 / TXN-05 | 文件重写 DDL 一旦弄脏事务快照，`SAVEPOINT` 与 `ROLLBACK TO` 就被硬拒绝。保存点现在区分两种物理边界：首个 DDL 前的目标恢复事务镜像后按记录边界继续撤销行/catalog，DDL 后的目标持有独立镜像并在每次 `ROLLBACK TO` 后重建，以保留 PostgreSQL 的可重复回滚语义；RELEASE、COMMIT、ROLLBACK 清理对应镜像。物理恢复同时重新绑定 ReadView 的 CLOG 缓存，避免恢复后首次查询解引用已关闭对象 | C++ 回归覆盖 DDL 前保存点的 DML+ALTER 回退、DDL 后保存点的连续两次回退、DROP/REPLACE、目标保留、RELEASE/COMMIT/ROLLBACK 清理和恢复后查询；协议回归覆盖两类保存点与 schema/NULL 结果；普通 `savepoint_stack_test`、完整协议、O2 全量构建及 122 组 PostgreSQL 差分 `failed=0` | `983858c` |
 
+| 339 | P0-04 / TXN-06 / WAL-08 | ALTER/TRUNCATE 等物理 DDL 会留下整库事务快照，但 `PREPARE TRANSACTION` 只拒绝内存 DDL undo callback；含脏快照的事务可被准备，随后释放数据库级互斥锁，而 `ROLLBACK PREPARED` 不恢复快照并删除它。直接补恢复会在 PREPARE 后擦除其他 backend 的提交，因此准备入口现在对两种未能安全跨 backend 持久化的 DDL 状态统一 fail-closed，且不擅自结束仍可 COMMIT/ROLLBACK 的本地事务 | `prepared_transaction_test` 覆盖显式事务 ALTER 后存在脏快照、PREPARE 返回拒绝、事务仍活动、ROLLBACK 恢复原 schema、不遗留 prepared 元数据；完整 `ddl_transaction_skeleton_test` 和 PostgreSQL 协议回归通过 | `986f186` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
