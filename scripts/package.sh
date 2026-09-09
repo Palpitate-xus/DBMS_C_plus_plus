@@ -23,6 +23,10 @@ CMAKE_VERSION="$(grep -m1 '^project(DBMS' "$SRC_DIR/CMakeLists.txt" \
     | sed -E 's/.*VERSION[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+).*/\1/')"
 HEADER_VERSION="$(grep -m1 '#define DBMS_VERSION_STRING' "$SRC_DIR/src/common/version.h" \
     | sed -E 's/.*"([^"]+)".*/\1/')"
+HEADER_MAJOR="$(awk '$2 == "DBMS_VERSION_MAJOR" {print $3}' "$SRC_DIR/src/common/version.h")"
+HEADER_MINOR="$(awk '$2 == "DBMS_VERSION_MINOR" {print $3}' "$SRC_DIR/src/common/version.h")"
+HEADER_PATCH="$(awk '$2 == "DBMS_VERSION_PATCH" {print $3}' "$SRC_DIR/src/common/version.h")"
+HEADER_COMPONENT_VERSION="${HEADER_MAJOR}.${HEADER_MINOR}.${HEADER_PATCH}"
 
 if [ -z "$CMAKE_VERSION" ] || [ -z "$HEADER_VERSION" ]; then
     echo "[package] FATAL: could not read version from CMakeLists/version.h" >&2
@@ -31,6 +35,10 @@ fi
 if [ "$CMAKE_VERSION" != "$HEADER_VERSION" ]; then
     echo "[package] FATAL: version mismatch: CMakeLists=$CMAKE_VERSION version.h=$HEADER_VERSION" >&2
     echo "[package]        fix src/common/version.h and CMakeLists.txt to the same VERSION" >&2
+    exit 1
+fi
+if [ "$HEADER_COMPONENT_VERSION" != "$HEADER_VERSION" ]; then
+    echo "[package] FATAL: version component mismatch: macros=$HEADER_COMPONENT_VERSION string=$HEADER_VERSION" >&2
     exit 1
 fi
 
