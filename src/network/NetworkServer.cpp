@@ -526,7 +526,9 @@ std::string trimText(const std::string& value) {
 std::string firstSqlKeyword(const std::string& sql) {
     std::string trimmed = trimText(sql);
     size_t end = 0;
-    while (end < trimmed.size() && !std::isspace(static_cast<unsigned char>(trimmed[end]))) ++end;
+    while (end < trimmed.size() &&
+           (std::isalnum(static_cast<unsigned char>(trimmed[end])) ||
+            trimmed[end] == '_')) ++end;
     std::string keyword = trimmed.substr(0, end);
     for (char& c : keyword) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return keyword;

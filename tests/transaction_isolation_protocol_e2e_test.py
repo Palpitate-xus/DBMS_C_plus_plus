@@ -39,7 +39,7 @@ def main():
             "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;")
         assert state == "25001", (state, message)
         assert "before any query" in message, message
-        _, state, message, _, _, _ = execute("ROLLBACK")
+        _, state, message, _, _, _ = execute("ROLLBACK;")
         assert state is None, (state, message)
         print("[TRANSACTION ISOLATION PROTOCOL E2E] passed")
     finally:
