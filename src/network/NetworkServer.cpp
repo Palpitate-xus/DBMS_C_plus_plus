@@ -240,6 +240,12 @@ std::vector<ProcessInfo> getProcessList() {
 
 namespace {
 
+struct QueryNotice {
+    std::string severity;
+    std::string sqlState;
+    std::string message;
+};
+
 struct QueryResult {
     bool error = false;
     std::string errorMessage;
@@ -250,6 +256,7 @@ struct QueryResult {
     std::vector<PgColumnDescription> columnDescriptions;
     std::vector<std::vector<std::string>> rows;
     std::vector<std::vector<bool>> nulls;
+    std::vector<QueryNotice> notices;
     std::string commandTag;
 };
 
@@ -1075,6 +1082,25 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
     dbms::recordSqlStat(sql, elapsedMs, session.currentDB);
 
     auto lines = outputLines(outputText);
+    // The legacy executor reports successful diagnostics through stdout.
+    // They are asynchronous protocol messages, not row data or command-tag
+    // text.  Remove them before interpreting the remaining command output.
+    lines.erase(std::remove_if(lines.begin(), lines.end(), [&](const std::string& line) {
+        static const std::pair<const char*, const char*> prefixes[] = {
+            {"NOTICE:", "NOTICE"}, {"WARNING:", "WARNING"}
+        };
+        for (const auto& entry : prefixes) {
+            const size_t prefixLength = std::strlen(entry.first);
+            if (line.compare(0, prefixLength, entry.first) != 0) continue;
+            result.notices.push_back(QueryNotice{
+                entry.second,
+                std::string(entry.second) == "WARNING" ? "01000" : "00000",
+                trimText(line.substr(prefixLength))
+            });
+            return true;
+        }
+        return false;
+    }), lines.end());
     if (executionError || (!lines.empty() && lines.front().rfind("ERROR:", 0) == 0)) {
         result.error = true;
         if (result.errorMessage.empty()) {
@@ -1592,6 +1618,10 @@ bool establishClientTransport(int clientFd, TLSServerContext& tlsContext,
 
 void sendQueryResult(PostgresProtocol& protocol, const QueryResult& result,
                      char transactionStatus) {
+    for (const auto& notice : result.notices) {
+        protocol.sendNoticeResponse(notice.message, notice.severity,
+                                    notice.sqlState);
+    }
     if (result.error) {
         protocol.sendErrorResponse("ERROR", result.sqlState, trimText(result.errorMessage));
         protocol.sendReadyForQuery(transactionStatus);
@@ -2104,6 +2134,11 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             }
             if (!sendPendingNotifications(protocol, session.pid)) break;
             QueryResult& result = portalState.result;
+            for (const auto& notice : result.notices) {
+                protocol.sendNoticeResponse(notice.message, notice.severity,
+                                            notice.sqlState);
+            }
+            result.notices.clear();
             if (result.error) {
                 protocol.sendErrorResponse("ERROR", result.sqlState, result.errorMessage);
                 extendedQueryError = true;

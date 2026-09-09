@@ -390,11 +390,18 @@ bool PostgresProtocol::sendErrorResponse(const std::string& severity,
     return sendMessage('E', body);
 }
 
-bool PostgresProtocol::sendNoticeResponse(const std::string& message) {
+bool PostgresProtocol::sendNoticeResponse(const std::string& message,
+                                           const std::string& severity,
+                                           const std::string& sqlState,
+                                           const std::string& detail) {
     std::vector<uint8_t> body;
-    body.push_back('S'); appendCString(body, "NOTICE");
-    body.push_back('V'); appendCString(body, "NOTICE");
+    body.push_back('S'); appendCString(body, severity);
+    body.push_back('V'); appendCString(body, severity);
+    body.push_back('C'); appendCString(body, sqlState.empty() ? "00000" : sqlState);
     body.push_back('M'); appendCString(body, message);
+    if (!detail.empty()) {
+        body.push_back('D'); appendCString(body, detail);
+    }
     body.push_back(0);
     return sendMessage('N', body);
 }

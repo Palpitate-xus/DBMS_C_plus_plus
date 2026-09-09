@@ -56,7 +56,10 @@ public:
                            const std::string& sqlState,
                            const std::string& message,
                            const std::string& detail = {});
-    bool sendNoticeResponse(const std::string& message);
+    bool sendNoticeResponse(const std::string& message,
+                            const std::string& severity = "NOTICE",
+                            const std::string& sqlState = "00000",
+                            const std::string& detail = {});
     bool sendNotificationResponse(uint32_t senderPid,
                                   const std::string& channel,
                                   const std::string& payload);

@@ -170,6 +170,18 @@ def notification_values(messages):
     return values
 
 
+def diagnostic_fields(body):
+    fields = {}
+    offset = 0
+    while body[offset] != 0:
+        field = body[offset:offset + 1]
+        offset += 1
+        end = body.index(b"\0", offset)
+        fields[field] = body[offset:end]
+        offset = end + 1
+    return fields
+
+
 def wait_for_disconnect(sock, timeout=2.0):
     deadline = time.time() + timeout
     sock.settimeout(0.1)
@@ -627,6 +639,24 @@ def main():
             sock, "SET GLOBAL max_notify_queue_pages = 2"))
         assert setting_value(simple_query(sock, "SELECT * FROM pg_settings"),
                              "max_notify_queue_pages") == b"1"
+
+        # Executor NOTICE/WARNING lines are asynchronous NoticeResponse
+        # frames with the standard diagnostic fields.  They must not become
+        # result rows or replace the command tag.
+        notice_messages = simple_query(
+            sock, "DROP TABLE IF EXISTS protocol_notice_missing")
+        notice_index = next(i for i, message in enumerate(notice_messages)
+                            if message[0] == b"N")
+        command_index = next(i for i, message in enumerate(notice_messages)
+                             if message[0] == b"C")
+        fields = diagnostic_fields(notice_messages[notice_index][1])
+        assert fields == {
+            b"S": b"NOTICE", b"V": b"NOTICE", b"C": b"00000",
+            b"M": b'table "protocol_notice_missing" does not exist, skipping'
+        }, fields
+        assert notice_index < command_index, notice_messages
+        assert not any(kind in (b"T", b"D") for kind, _ in notice_messages), \
+            notice_messages
 
         # LISTEN/NOTIFY is backend-local, transactional, and transported as
         # protocol NotificationResponse rather than text prepended to a query.
