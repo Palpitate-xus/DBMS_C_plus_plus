@@ -1462,10 +1462,11 @@ ANALYZE TABLE users COLUMNS (age, status);
 
 **语法**
 ```sql
-DUMP DATABASE database_name TO 'file_path'
+DUMP DATABASE database_name TO 'file_path' [RATE kib_per_second]
 ```
 
-**说明** 将数据库导出为 SQL 脚本文件。
+**说明** extended 模式下提交逻辑 SQL 导出后台作业，立即返回 typed
+`job_id/status`。文件仅在完整写入并同步后原子发布；SQL NULL 与空字符串保持区分。
 
 **示例**
 ```sql
@@ -1474,30 +1475,14 @@ DUMP DATABASE shopdb TO '/tmp/shopdb_backup.sql';
 
 ---
 
-### RESTORE DATABASE
-
-**语法**
-```sql
-RESTORE DATABASE database_name FROM 'file_path'
-```
-
-**说明** 从 SQL 脚本文件恢复数据库。
-
-**示例**
-```sql
-RESTORE DATABASE shopdb FROM '/tmp/shopdb_backup.sql';
-```
-
----
-
 ### BACKUP DATABASE
 
 **语法**
 ```sql
-BACKUP DATABASE database_name TO 'file_path'
+BACKUP DATABASE database_name TO 'file_path' [RATE kib_per_second]
 ```
 
-**说明** 将数据库目录做物理快照复制到指定路径（配合 PITR 使用的基础备份）。
+**说明** extended 模式下提交物理快照后台作业（配合 PITR 使用的基础备份）。
 
 **示例**
 ```sql
@@ -1512,9 +1497,13 @@ BACKUP DATABASE shopdb TO '/backup/shopdb.bak';
 ```sql
 RESTORE DATABASE database_name FROM 'backup_path'
     [PITR 'YYYY-MM-DD HH:MM:SS' ARCHIVE 'archive_dir']
+    [RATE kib_per_second]
 ```
 
-**说明** 不带 PITR 子句时直接用备份覆盖恢复数据库；带 PITR 时把归档目录中该库时间线的段回填 pg_wal,并持久化恢复目标,下一次进程启动时恢复重放 WAL,目标时刻之后提交的事务被回滚（before-image 恢复）。目标含该时刻;恢复目标单次消费。
+**说明** extended 模式下提交物理恢复后台作业；不读取 DUMP 产生的 SQL 文件。
+不带 PITR 子句时用物理备份恢复数据库；带 PITR 时把归档目录中该库时间线的段
+回填 pg_wal，并持久化恢复目标，下一次进程启动时恢复重放 WAL。目标含该时刻；
+恢复目标单次消费。
 
 **示例**
 ```sql
@@ -1544,12 +1533,24 @@ CHECKPOINT;
 
 ### CLEAR PLAN CACHE
 
-**说明** 清空查询计划缓存。
+**说明** extended 模式下提交清空查询计划缓存的后台作业。
 
 **示例**
 ```sql
 CLEAR PLAN CACHE;
 ```
+
+### SHOW / CANCEL MAINTENANCE JOB
+
+```sql
+SHOW MAINTENANCE JOBS;
+SHOW MAINTENANCE JOB job_id;
+CANCEL MAINTENANCE JOB job_id;
+```
+
+**说明** 查询持久化作业的 kind/database/path/status/requested_by/rate/time/error/
+cancel_requested typed 字段，或协作取消 queued/running 作业。所有维护 mutation
+需要管理员权限且不能在事务块内执行；默认 postgresql18 模式拒绝全部项目语法。
 
 ---
 

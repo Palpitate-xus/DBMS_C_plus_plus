@@ -138,9 +138,10 @@
 ### 数据导入导出
 - **CSV 导入**：`LOAD DATA INFILE 'file.csv' INTO TABLE tname`
 - **CSV 导出**：`COPY table TO 'file.csv'`
-- **数据库导出**：`DUMP DATABASE dbname TO 'file.sql'`
-- **数据库恢复**：`RESTORE DATABASE dbname FROM 'file.sql'`
-- **数据库备份**：`BACKUP DATABASE dbname TO 'file.bak'`
+- **后台逻辑导出**：extended 模式 `DUMP DATABASE dbname TO 'file.sql' [RATE kib_per_second]`
+- **后台物理恢复**：extended 模式 `RESTORE DATABASE dbname FROM 'backup_dir' [RATE kib_per_second]`
+- **后台物理备份**：extended 模式 `BACKUP DATABASE dbname TO 'backup_dir' [RATE kib_per_second]`
+- **维护作业**：`SHOW MAINTENANCE JOBS`、`SHOW/CANCEL MAINTENANCE JOB id`
 
 ### 预编译语句
 - `PREPARE stmt_name FROM 'SQL template'`

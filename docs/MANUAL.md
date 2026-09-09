@@ -964,13 +964,21 @@ LOAD DATA INFILE 'data.csv' INTO TABLE users;
 COPY users FROM 'data.csv';
 COPY users TO 'output.csv';
 
--- DUMP/RESTORE (数据库级)
-DUMP DATABASE mydb TO 'mydb.sql';
-RESTORE DATABASE mydb FROM 'mydb.sql';
-
--- BACKUP (物理备份: 整库目录快照)
-BACKUP DATABASE mydb TO 'mydb.bak';
+-- 以下维护命令仅在 extended 模式可用，立即返回 job_id/status
+DUMP DATABASE mydb TO 'mydb.sql' RATE 10240;
+BACKUP DATABASE mydb TO 'mydb.bak' RATE 10240;
+RESTORE DATABASE mydb FROM 'mydb.bak' RATE 10240;
+SHOW MAINTENANCE JOBS;
+SHOW MAINTENANCE JOB 1;
+CANCEL MAINTENANCE JOB 1;
 ```
+
+`DUMP` 产生逻辑 SQL 文件；`RESTORE DATABASE` 只接受 `BACKUP DATABASE`
+产生的物理备份，不能读取 DUMP 文件。后台作业状态持久化为
+`queued/running/succeeded/failed/cancelled`，进程异常退出时遗留的 running
+作业会在下次启动重新排队。维护 mutation 需要管理员权限且不能在事务块内执行；
+可选 `RATE` 的单位为 KiB/s。逻辑 dump 和物理备份只在完整成功后原子发布目标，
+取消不会发布半成品。
 
 ---
 
@@ -1004,6 +1012,7 @@ CHECKPOINT;      -- 关闭的段此刻被归档
 ```sql
 -- 1. 基础备份
 BACKUP DATABASE mydb TO '/backup/mydb_base';
+SHOW MAINTENANCE JOB 1; -- 等待 succeeded
 
 -- 2. (持续运行中) 事务不断写入并被归档
 
@@ -1011,7 +1020,7 @@ BACKUP DATABASE mydb TO '/backup/mydb_base';
 RESTORE DATABASE mydb FROM '/backup/mydb_base'
     PITR '2026-08-23 12:34:56' ARCHIVE '/var/dbms/archive';
 
--- 4. 重启进程: 恢复重放归档 WAL, 目标时刻之后的事务被回滚
+-- 4. 等待 restore job succeeded，然后重启进程：恢复重放归档 WAL
 ```
 
 语义:
@@ -1183,10 +1192,11 @@ SHOW 入口已经删除。该模式是会话级设置，进入事务后不可切
   `CREATE INDEX ... USING hash` 与 `DROP INDEX`。显式 `extended` 模式下，
   快捷语法走统一的 typed index、目录命名和物理生命周期；创建后也可由
   标准 `DROP INDEX name` 删除
-- `DUMP`（DIV-10）→ `0A000`，提示 `pg_dump`；`BACKUP DATABASE` →
-  `0A000`，提示 `pg_basebackup`；`RESTORE DATABASE` → `0A000`，提示
-  `pg_restore` 或 recovery.signal + restore_command；
-  `CLEAR PLAN CACHE` → `0A000`（项目扩展）
+- `DUMP`、`BACKUP/RESTORE DATABASE`、`CLEAR PLAN CACHE` 以及
+  `SHOW/CANCEL MAINTENANCE JOB`（DIV-10）→ 默认模式返回 `42601` 并提示
+  PostgreSQL 的 `pg_dump`、base backup/restore 工具或 project extension；
+  extended 模式只提交持久化后台作业并返回 typed job id/status，支持管理员权限、
+  非事务边界、`RATE` 限速、取消、状态查询和 crash resume
 - PgBouncer 风格连接池与 TDE（DIV-12）：`SHOW POOLS`、`SHOW TDE STATUS`
   → `0A000`；`pool_mode`/`pool_size`/`max_client_conn` 不再出现在
   `SHOW ALL`，单独 `SHOW` 返回 `42704` 未识别参数；扩展能力只能通过
