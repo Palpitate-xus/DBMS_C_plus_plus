@@ -1166,6 +1166,9 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
         } else if (result.errorMessage.find("(SQLSTATE 25006)") !=
                    std::string::npos) {
             result.sqlState = "25006";
+        } else if (result.errorMessage.find("(SQLSTATE 22023)") !=
+                   std::string::npos) {
+            result.sqlState = "22023";
         } else {
             result.sqlState = "XX000";
         }

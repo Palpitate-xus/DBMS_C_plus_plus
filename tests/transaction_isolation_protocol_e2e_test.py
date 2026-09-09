@@ -212,7 +212,7 @@ def main():
         assert state is None, (state, message)
         _, state, message, _, _, _ = execute(
             f"COPY atomic_copy_target FROM '{copy_path}';")
-        assert state is not None, (state, message)
+        assert state == "22023", (state, message)
         assert "COPY FROM failed" in message, message
         rows, state, message, _, _, _ = execute(
             "SELECT id FROM atomic_copy_target ORDER BY id;")
@@ -227,7 +227,7 @@ def main():
         assert state is None, (state, message)
         _, state, message, _, _, _ = execute(
             f"COPY atomic_copy_target FROM '{copy_path}';")
-        assert state is not None, (state, message)
+        assert state == "22023", (state, message)
         _, state, message, _, _, _ = execute(
             "ROLLBACK TO SAVEPOINT before_copy;")
         assert state is None, (state, message)
