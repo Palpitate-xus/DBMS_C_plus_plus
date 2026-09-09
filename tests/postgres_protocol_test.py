@@ -810,6 +810,13 @@ def main():
         assert sum(kind == b"C" for kind, _ in multi_messages) == 3, multi_messages
         assert sum(kind == b"Z" for kind, _ in multi_messages) == 1, multi_messages
 
+        # Whitespace, comments and redundant separators contain no SQL
+        # statement. PostgreSQL answers with one EmptyQueryResponse and one
+        # ReadyForQuery, without a command tag or row metadata.
+        empty_messages = simple_query(
+            sock, " ; -- empty statement\n /* nested /* empty */ comment */ ; ")
+        assert empty_messages == [(b"I", b""), (b"Z", b"I")], empty_messages
+
         # In the absence of explicit transaction control, the statements in
         # one Q message are one implicit transaction.  Stop at the first
         # error and roll back earlier writes; never execute later statements.
