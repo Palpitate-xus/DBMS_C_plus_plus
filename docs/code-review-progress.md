@@ -175,6 +175,8 @@
 
 | 315 | P0-07 / TXN-01 | READ COMMITTED 在每次底层 `query()` / `queryExpr()` 调用前刷新 read view，而不是在每条 SQL 开始时刷新；JOIN、CTE、子查询等一次语句内的后续扫描会看到中途并发提交，破坏 PostgreSQL 的 statement-level snapshot。最外层 SQL 命令现在只在 `beginSqlCommand()` 刷新一次；命令内所有扫描复用该 read view，未建立 SQL 命令边界的直接存储 API 调用仍按调用刷新 | `snapshot_export_import_test` 的并发回归在修复前稳定失败，现验证同一命令第二次扫描看不到中途提交、下一命令能够看到；`subxip_visibility_test`、`prepared_transaction_test`、完整 `mvcc_update_test`、`concurrency_test`、DML CTE / JOIN / derived type / PostgreSQL 协议回归、O0 编译及完整差分 `cases=122 failed=0` 通过 | `ef96376` |
 
+| 316 | TXN-02 | Snapshot v2 的稳定序列化格式包含导出事务的 `curCid`，但 `exportSnapshot()` 仍保留命令 ID 尚未跟踪时期的硬编码 0；事务执行过命令后导出的字段与真实状态不一致，跨后端快照记录也无法准确描述导出点。导出现在写入事务当前 command ID；导入事务继续使用自己的本地 command counter，不把导出方编号误用于自身 tuple 可见性 | `snapshot_export_import_test` 将导出事务推进到非零 command ID，反序列化导出 payload 并核对字段；修复前稳定失败、修复后连同格式 round-trip、畸形 payload、跨事务可见性和 READ COMMITTED statement snapshot 全部通过 | `ff14d43` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
@@ -186,7 +188,7 @@
 - Python 单元测试 31 项通过：总账校验 6 项、差分工具 25 项。
 - 当前 `build/dbms_review_main` 的 11 组 SQL / 协议 E2E 通过：review_sql、CTE、FETCH、子查询 SQLSTATE、转义文本、布尔边界、LIMIT/OFFSET、多行 SQL、窗口、EXPLAIN ANALYZE、PostgreSQL 协议。
 - 实际参考 PostgreSQL 的错误码、CSV 列描述、带注释的终止符及命令样文本读取验证通过；未对参考库做持久化数据修改。
-- 总账完整覆盖 273 项；目前 complete = 0、partial = 70、unverified = 188、用户延期 = 15。`--require-complete` 正确返回非零。122 组差分归零不代表 273 项功能族完成。
+- 总账完整覆盖 273 项；目前 complete = 0、partial = 71、unverified = 187、用户延期 = 15。`--require-complete` 正确返回非零。122 组差分归零不代表 273 项功能族完成。
 - 仓库只有 `ci.yml.disabled`，没有启用的 workflow；修复均为本地 commit，未 push。
 
 ## 上批局部收尾验收（2026-09-08）
