@@ -177,7 +177,9 @@
 
 | 316 | TXN-02 | Snapshot v2 的稳定序列化格式包含导出事务的 `curCid`，但 `exportSnapshot()` 仍保留命令 ID 尚未跟踪时期的硬编码 0；事务执行过命令后导出的字段与真实状态不一致，跨后端快照记录也无法准确描述导出点。导出现在写入事务当前 command ID；导入事务继续使用自己的本地 command counter，不把导出方编号误用于自身 tuple 可见性 | `snapshot_export_import_test` 将导出事务推进到非零 command ID，反序列化导出 payload 并核对字段；修复前稳定失败、修复后连同格式 round-trip、畸形 payload、跨事务可见性和 READ COMMITTED statement snapshot 全部通过 | `ff14d43` |
 
-| 317 | P0-07 / TXN-01 | READ UNCOMMITTED 被排除在 read view 初始化和逐语句刷新之外，事务中的 `lowLimitId` 保持 0，导致事务写入的正常已提交 tuple 也全部不可见；这既不是 dirty read，也不符合 PostgreSQL 将 READ UNCOMMITTED 映射为 READ COMMITTED 的行为。所有隔离级别现在都初始化有效 read view，READ UNCOMMITTED 与 READ COMMITTED 共用命令边界和直接 API 刷新规则，同时保留会话报告的隔离级别 | `snapshot_export_import_test` 新增 READ UNCOMMITTED 回归：事务开始前提交的行可见、同一命令看不到中途并发提交、下一命令可见；修复前在第一项可见性断言稳定失败，修复后专项全部通过，O0 编译通过；测试数据库在引擎后台线程析构后清理，不再产生虚假 writeback 警告 | `aaededf` |
+| 317 | P0-07 / TXN-01 | READ UNCOMMITTED 被排除在 read view 初始化和逐语句刷新之外，事务中的 `lowLimitId` 保持 0，导致事务写入的正常已提交 tuple 也全部不可见；这既不是 dirty read，也不符合 PostgreSQL 将 READ UNCOMMITTED 映射为 READ COMMITTED 的行为。所有隔离级别现在都初始化有效 read view，READ UNCOMMITTED 与 READ COMMITTED 共用命令边界和直接 API 刷新规则，同时保留会话报告的隔离级别 | `snapshot_export_import_test` 新增 READ UNCOMMITTED 回归：事务开始前提交的行可见、同一命令看不到中途并发提交、下一命令可见；修复前在第一项可见性断言稳定失败，修复后专项全部通过，O0 编译通过 | `aaededf` |
+
+| 318 | TXN-02 / PROTO-04 | 解析器把 `SET TRANSACTION` 分类为独立命令，但主执行 switch 只路由普通 `SET`，合法隔离级别命令直接报语法错误；即使从其他入口调用，事务完成读写后仍可静默切换隔离级别并改变后续 snapshot/SSI 规则。执行器现在路由 `SetTransaction`，存储 API 在 snapshot 已使用或写入后拒绝变更且不修改原级别，协议返回 active SQL transaction 错误 `25001` | `transaction_isolation_protocol_e2e_test` 在旧主程序上首先复现合法命令 `42601`，修复后验证首次读取前可设置 READ UNCOMMITTED、读取结果正确、读取后切换 SERIALIZABLE 返回 `25001`、无分号 ROLLBACK 可恢复；`snapshot_export_import_test` 验证直接 API 拒绝且保持原级别；Python 语法检查和 O0 `TableManage.cpp` / `main.cpp` 编译通过。带分号 ROLLBACK 的协议恢复另复现首关键字边界问题，列为下一项 | `643f67b` |
 
 本批新增的待修复复现（仍计入总清单）：
 
