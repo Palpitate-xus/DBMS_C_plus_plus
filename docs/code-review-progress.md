@@ -269,6 +269,8 @@
 
 | 362 | ENG-02 | `DBMS_VERSION_MINOR` 仍为 1，而 `DBMS_VERSION_STRING`、CMake project 和 CHANGELOG 已是 0.2.0，依赖数字宏的条件编译/包元数据会识别成另一版本。修正为 0/2/0；打包门新增 component macros 与字符串的强制一致性检查，完整测试入口新增独立版本一致性回归，同时核对 CMake、header、CHANGELOG 和打包门 | `version_consistency_test.py` 返回 0.2.0；package/build shell 语法检查、包含三个 `static_assert` 的 O0 编译与执行、diff check 通过。该项描述的版本漂移已完全消除，状态改为 complete；其余历史发布文档漂移仍单独计入 ENG-01 | `1a600aa` |
 
+| 363 | ENG-01 | README、RELEASE-NOTES、CHANGELOG、feature-gaps 和 production-status 同时把不同日期的 139/163/165/167 PASS 数写成“当前”基线，0.1/0.2 发布身份和已启用 GitHub Actions 也互相冲突；README 还保留已修复的字符串小写化、fromless scalar 限制。现明确唯一实时来源为 273 项 audit + JSON ledger + 校验命令，其他批次数字统一标为历史证据；v0.1/v0.2 tag 的测试源数量按 Git tree 核对为 156+7，Changelog 比较基线改为 v0.2.0，workflow 状态改为 disabled，移除两条已失效限制 | 新增 `documentation_status_test.py` 并接入完整测试入口，强制五份文档指向同一总账、发行版本一致、历史标签存在、Changelog 链接正确且仓库无启用 workflow；版本回归、总账校验和 shell 语法检查通过。该项列举的事实漂移已关闭，功能本身是否完成仍只由各自 audit 项决定 | `2a81198` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。

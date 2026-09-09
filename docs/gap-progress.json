@@ -245,7 +245,7 @@
     {"id":"FDW-02","status":"unverified","evidence":[]},
     {"id":"EXT-10","status":"unverified","evidence":[]},
     {"id":"EXT-11","status":"unverified","evidence":[]},
-    {"id":"ENG-01","status":"unverified","evidence":[]},
+    {"id":"ENG-01","status":"complete","evidence":["README.md","RELEASE-NOTES.md","CHANGELOG.md","docs/feature-gaps.md","docs/production-status.md","docs/code-review-progress.md","scripts/build_common.sh"],"tests":["tests/documentation_status_test.py","tests/version_consistency_test.py","tests/gap_progress_test.py"],"commits":["2a81198"]},
     {"id":"ENG-02","status":"complete","evidence":["docs/code-review-progress.md","src/common/version.h","CMakeLists.txt","scripts/package.sh","scripts/build_common.sh"],"tests":["tests/version_consistency_test.py"],"commits":["1a600aa"]},
     {"id":"ENG-03","status":"unverified","evidence":[]},
     {"id":"ENG-04","status":"unverified","evidence":[]},
