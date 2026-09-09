@@ -57,6 +57,9 @@ public:
                            const std::string& message,
                            const std::string& detail = {});
     bool sendNoticeResponse(const std::string& message);
+    bool sendNotificationResponse(uint32_t senderPid,
+                                  const std::string& channel,
+                                  const std::string& payload);
     bool sendEmptyQueryResponse();
     bool sendParameterDescription(const std::vector<uint32_t>& parameterTypes);
     bool sendParseComplete();

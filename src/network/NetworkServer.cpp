@@ -1604,6 +1604,19 @@ void sendQueryResult(PostgresProtocol& protocol, const QueryResult& result,
     protocol.sendReadyForQuery(transactionStatus);
 }
 
+bool sendPendingNotifications(PostgresProtocol& protocol,
+                              uint64_t backendId) {
+    for (const auto& notification :
+         notificationManager().takePending(backendId)) {
+        if (!protocol.sendNotificationResponse(
+                notification.senderPid, notification.channel,
+                notification.payload)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void handleClient(SecureSocket socket, std::string clientHost) {
     g_stats.totalConnections++;
     PostgresProtocol protocol(socket);
@@ -1831,6 +1844,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
     while (true) {
         PgFrontendMessage message;
         if (!protocol.readMessage(message, protocolError)) break;
+        if (!sendPendingNotifications(protocol, session.pid)) break;
         if (message.type == 'X') break;
         if (extendedQueryError && message.type != 'S') continue;
         if (message.type == 'Q') {
@@ -1844,6 +1858,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             QueryResult result = executeForProtocol(sql);
             updateProcessDb(pid, session.currentDB);
             updateProcessInfo(pid, "Idle", "", "");
+            if (!sendPendingNotifications(protocol, session.pid)) break;
             sendQueryResult(protocol, result, readyStatus());
             continue;
         }
@@ -2050,6 +2065,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 portalState.result = executeForProtocol(portalState.sql);
                 portalState.executed = true;
             }
+            if (!sendPendingNotifications(protocol, session.pid)) break;
             QueryResult& result = portalState.result;
             if (result.error) {
                 protocol.sendErrorResponse("ERROR", result.sqlState, result.errorMessage);
@@ -2202,6 +2218,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             continue;
         }
         if (message.type == 'S') {
+            if (!sendPendingNotifications(protocol, session.pid)) break;
             protocol.sendReadyForQuery(readyStatus());
             extendedQueryError = false;
             continue;

@@ -128,6 +128,8 @@ def startup(sock, user, database, password="secret", fragmented=False):
     assert messages[0] == (b"R", struct.pack("!I", 0))
     assert messages[-1] == (b"Z", b"I")
     assert any(kind == b"K" for kind, _ in messages)
+    backend_key = next(body for kind, body in messages if kind == b"K")
+    return struct.unpack("!II", backend_key)
 
 
 def simple_query(sock, sql):
@@ -152,6 +154,19 @@ def data_row_values(messages):
                 row.append(body[offset:offset + length])
                 offset += length
         values.append(row)
+    return values
+
+
+def notification_values(messages):
+    values = []
+    for kind, body in messages:
+        if kind != b"A":
+            continue
+        sender_pid = struct.unpack("!I", body[:4])[0]
+        channel_end = body.index(b"\0", 4)
+        payload_end = body.index(b"\0", channel_end + 1)
+        values.append((sender_pid, body[4:channel_end],
+                       body[channel_end + 1:payload_end]))
     return values
 
 
@@ -608,6 +623,67 @@ def main():
         second_sock.close()
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "SET GLOBAL max_connections = 64"))
+
+        # LISTEN/NOTIFY is backend-local, transactional, and transported as
+        # protocol NotificationResponse rather than text prepended to a query.
+        notify_sock = socket.socket()
+        notify_sock.settimeout(SOCKET_TIMEOUT)
+        notify_sock.connect(("127.0.0.1", port))
+        notify_pid, _ = startup(notify_sock, "alice", "info")
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "LISTEN wire_channel"))
+
+        assert simple_query(notify_sock, "BEGIN")[-1] == (b"Z", b"T")
+        assert any(kind == b"C" for kind, _ in simple_query(
+            notify_sock, "NOTIFY wire_channel, 'rolled back'"))
+        assert simple_query(notify_sock, "ROLLBACK")[-1] == (b"Z", b"I")
+        assert notification_values(simple_query(sock, "SELECT 1")) == []
+
+        assert simple_query(notify_sock, "BEGIN")[-1] == (b"Z", b"T")
+        assert any(kind == b"C" for kind, _ in simple_query(
+            notify_sock, "NOTIFY wire_channel, 'before savepoint'"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            notify_sock, "SAVEPOINT notify_sp"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            notify_sock, "NOTIFY wire_channel, 'after savepoint'"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            notify_sock, "ROLLBACK TO SAVEPOINT notify_sp"))
+        assert simple_query(notify_sock, "COMMIT")[-1] == (b"Z", b"I")
+        assert notification_values(simple_query(sock, "SELECT 1")) == [
+            (notify_pid, b"wire_channel", b"before savepoint")]
+
+        assert simple_query(sock, "BEGIN")[-1] == (b"Z", b"T")
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "UNLISTEN wire_channel"))
+        assert simple_query(sock, "ROLLBACK")[-1] == (b"Z", b"I")
+        committed_notify = simple_query(
+            notify_sock, "NOTIFY wire_channel, 'unlisten rolled back'")
+        assert any(kind == b"C" for kind, _ in committed_notify)
+        assert notification_values(simple_query(sock, "SELECT 1")) == [
+            (notify_pid, b"wire_channel", b"unlisten rolled back")]
+
+        # Two concurrent sessions authenticated as the same role must each
+        # retain their own queue; consuming one must not consume the other.
+        assert any(kind == b"C" for kind, _ in simple_query(
+            notify_sock, "LISTEN shared_role_channel"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "LISTEN shared_role_channel"))
+        self_notify = simple_query(
+            notify_sock, "NOTIFY shared_role_channel, 'both backends'")
+        assert notification_values(self_notify) == [
+            (notify_pid, b"shared_role_channel", b"both backends")]
+        assert notification_values(simple_query(sock, "SELECT 1")) == [
+            (notify_pid, b"shared_role_channel", b"both backends")]
+
+        assert simple_query(sock, "BEGIN")[-1] == (b"Z", b"T")
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "UNLISTEN wire_channel"))
+        assert simple_query(sock, "COMMIT")[-1] == (b"Z", b"I")
+        assert any(kind == b"C" for kind, _ in simple_query(
+            notify_sock, "NOTIFY wire_channel, 'after unlisten commit'"))
+        assert notification_values(simple_query(sock, "SELECT 1")) == []
+        notify_sock.sendall(typed(b"X"))
+        notify_sock.close()
 
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "CREATE ROLE analyst"))

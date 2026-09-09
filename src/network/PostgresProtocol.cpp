@@ -399,6 +399,16 @@ bool PostgresProtocol::sendNoticeResponse(const std::string& message) {
     return sendMessage('N', body);
 }
 
+bool PostgresProtocol::sendNotificationResponse(
+    uint32_t senderPid, const std::string& channel,
+    const std::string& payload) {
+    std::vector<uint8_t> body;
+    appendUInt32(body, senderPid);
+    appendCString(body, channel);
+    appendCString(body, payload);
+    return sendMessage('A', body);
+}
+
 bool PostgresProtocol::sendEmptyQueryResponse() {
     return sendMessage('I', {});
 }

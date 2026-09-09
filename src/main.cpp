@@ -13194,9 +13194,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
             auditLog(g_config.auditLevel, s.username, s.currentDB, rawSql, "EXEC");
         }
     }
-    // Check pending notifications at the start of each command
-    checkNotifications(s);
-
     // Phase 1: Parser integration — classify SQL command via AST parser
     dbms::SqlCommand parsedCmd = dbms::SQLParser::classify(sql);
 
@@ -24717,6 +24714,7 @@ int main(int argc, char* argv[]) {
             string sql;
             if (!getline(cin, sql)) break;
             if (trim(sql) == "exit") break;
+            checkNotifications(s);
             dbms::updateProcessInfo(pid, "Query", "executing", sql);
             auto start = std::chrono::steady_clock::now();
             bool ok = false;
