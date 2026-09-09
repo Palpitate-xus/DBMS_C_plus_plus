@@ -430,7 +430,7 @@
 - [x] **DIV-02** `REPLACE INTO`：MySQL 语法；PostgreSQL 使用 `INSERT ... ON CONFLICT`。
 - [x] **DIV-03** `LOAD DATA INFILE`：MySQL 风格；PostgreSQL 使用 `COPY`/psql `\copy`。
 - [x] **DIV-04** `SELECT ... INTO OUTFILE`：MySQL 风格；PostgreSQL `SELECT INTO` 是建表。
-- [ ] **DIV-05** `DESC`/`DESCRIBE`、`VIEW TABLE`、`VIEW DATABASE`、`SHOW USERS/ROLES/POOLS` 等是项目命令或客户端元命令风格。
+- [x] **DIV-05** `DESC`/`DESCRIBE`、`VIEW TABLE`、`VIEW DATABASE`、`SHOW USERS/ROLES/POOLS` 等是项目命令或客户端元命令风格。
 - [x] **DIV-06** `AUTO_INCREMENT`、unsigned integers、`TINYINT`、`DATETIME`、`BLOB`、`NCHAR/NVARCHAR`、`BINARY/VARBINARY` 是兼容别名或非 PG 类型。
 - [x] **DIV-07** `CREATE FULLTEXT INDEX`、`CREATE HASH INDEX` 等快捷语法不是 PostgreSQL 的标准写法；PG 使用 `CREATE INDEX ... USING ...` 和 operator class。
 - [x] **DIV-08** `CREATE ASSERTION` 被当作 compatibility object 接受，但 PostgreSQL 18 自身也没有实现 SQL assertion；项目当前更没有约束运行时。

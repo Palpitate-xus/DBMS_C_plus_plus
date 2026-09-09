@@ -1162,7 +1162,10 @@ SHOW 入口已经删除。该模式是会话级设置，进入事务后不可切
 - `SELECT ... INTO OUTFILE`（DIV-04）→ 两种模式均返回 `42601`，提示
   `COPY ... TO`；PostgreSQL 的 `SELECT ... INTO table` 建表语义保持可用
 - `DESC/DESCRIBE`、`VIEW TABLE/DATABASE`、`SHOW USERS/ROLES/POOLS`（DIV-05）→
-  `0A000`，提示查询 `information_schema`/`pg_catalog`/`pg_roles`
+  默认模式分别返回 `42601`/`42704`，提示查询
+  `information_schema`/`pg_catalog`/`pg_roles`；extended 模式将它们作为只读
+  catalog 视图返回 typed rows 和 SQL NULL，`DESC`/`VIEW` 按表 ACL 过滤，
+  `SHOW USERS/ROLES` 不暴露口令字段
 - `CREATE/DROP REPLICATION SLOT` SQL 形式与 `SHOW LOGICAL/REPLICATION SLOTS`
   （DIV-09）→ `0A000`，提示使用 replication protocol 或
   `pg_*_replication_slot()` 函数
