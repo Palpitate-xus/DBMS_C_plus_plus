@@ -249,6 +249,8 @@
 
 | 352 | TXN-12 / PROTO-08 | 接收端处于显式事务时，网络线程的 100ms 空闲轮询仍会取走并立即发送已经提交的通知，违反 PostgreSQL 只在事务之间交付异步通知的边界，也使长事务无法保留待处理队列。`takePending` 现在在 backend 有活动通知事务时保留队列；COMMIT 或 ROLLBACK 结束接收端事务后才允许消费，发送端已提交的通知不会随接收端回滚丢失 | `notification_manager_test` 验证接收端事务内取队列为空、ROLLBACK 后收到原消息；完整 wire 回归让 listener 保持事务，验证空闲轮询和事务内 `SELECT` 都不产生 `A`，随后 COMMIT 响应中精确收到 sender/channel/payload。公共头依赖全量刷新、主入口/网络入口 O0、生产 O2 重链及完整协议套件两轮通过 | `471ab75` |
 
+| 353 | FUNC-01 / TXN-11,12 / PROTO-08 / OPS-02,05 | 待投递通知原按监听 backend 复制完整 payload 且没有总容量上限，慢监听者可让进程内存持续增长；存储事务还会先提交数据再发布通知，无法按 PostgreSQL 的 pre-commit 队列失败语义回滚。现以共享逻辑队列项和最后接收者引用计数限制资源，按启动参数 `max_notify_queue_pages`（默认 1048576 个 8KB 页）设置容量；发送事务在任何 durable commit 前原子预留，满队列返回 `54000` 并回滚数据。新增 volatile `pg_notification_queue_usage()`，返回活动队列占比和 `float8` 元数据；运行期配置只持久化为待重启值 | 管理器回归覆盖双监听者共享容量、逐接收释放、预留竞争、满队列保持可回滚及清空后重配；配置回归覆盖解析/验证/保存。完整 wire 套件用一页队列验证活动值不被运行期设置改变、占用率、满队列 `54000`、同事务 INSERT 回滚、首条大 payload 完整交付及释放后归零。表达式、DDL 事务、DIV-14、O0/O2 入口和 122 组差分全部通过 | `96e8a83` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
