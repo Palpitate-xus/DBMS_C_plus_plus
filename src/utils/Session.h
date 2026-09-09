@@ -41,6 +41,7 @@ struct Session {
     // replace the database session context can fail closed.
     uint64_t openProtocolPortals = 0;
     uint64_t pid = 0; // process id for pg_cancel_backend / pg_terminate_backend
+    uint64_t advisoryOwnerId = 0; // stable owner for session/xact advisory locks
 
     // Cursors: named result sets for DECLARE CURSOR / FETCH / CLOSE
     struct Cursor {

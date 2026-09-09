@@ -43,6 +43,7 @@
 #include "process/SqlStats.h"
 #include "process/RuntimeStats.h"
 #include "process/OutputCapture.h"
+#include "process/AdvisoryLockManager.h"
 #include "process/MaintenanceJobManager.h"
 #include "access/IndexFileUtil.h"
 #include <atomic>
@@ -1665,6 +1666,249 @@ static bool publishMaintenanceJobs(
     return false;
 }
 
+static uint64_t advisoryOwner(Session& session) {
+    if (session.advisoryOwnerId != 0) return session.advisoryOwnerId;
+    if (session.pid != 0) session.advisoryOwnerId = session.pid;
+    else {
+        static std::atomic<uint64_t> nextOwner{UINT64_C(1) << 63};
+        session.advisoryOwnerId = nextOwner.fetch_add(1);
+    }
+    return session.advisoryOwnerId;
+}
+
+struct ParsedAdvisoryCall {
+    std::string name;
+    std::string outputName;
+    std::vector<std::string> arguments;
+};
+
+static bool parseAdvisoryCall(
+    const std::string& sql, ParsedAdvisoryCall& call,
+    bool& recognized, std::string& error, std::string& sqlstate) {
+    recognized = false;
+    if (sql.compare(0, 6, "select") != 0 ||
+        (sql.size() > 6 &&
+         !std::isspace(static_cast<unsigned char>(sql[6])))) {
+        return false;
+    }
+    const std::string expression = trim(sql.substr(6));
+    const size_t left = expression.find('(');
+    if (left == std::string::npos) return false;
+    call.name = trim(expression.substr(0, left));
+    if (call.name.rfind("pg_catalog.", 0) == 0)
+        call.name = call.name.substr(11);
+    static const std::set<std::string> functions = {
+        "pg_advisory_lock", "pg_advisory_lock_shared",
+        "pg_try_advisory_lock", "pg_try_advisory_lock_shared",
+        "pg_advisory_xact_lock", "pg_advisory_xact_lock_shared",
+        "pg_try_advisory_xact_lock", "pg_try_advisory_xact_lock_shared",
+        "pg_advisory_unlock", "pg_advisory_unlock_shared",
+        "pg_advisory_unlock_all",
+    };
+    if (functions.count(call.name) == 0) return false;
+    recognized = true;
+
+    size_t right = left + 1;
+    int depth = 1;
+    for (; right < expression.size() && depth != 0; ++right) {
+        if (expression[right] == '(') ++depth;
+        else if (expression[right] == ')') --depth;
+    }
+    if (depth != 0) {
+        error = "unterminated advisory lock function call";
+        sqlstate = "42601";
+        return false;
+    }
+    std::string trailing = trim(expression.substr(right));
+    call.outputName = call.name;
+    if (!trailing.empty()) {
+        if (trailing.rfind("as ", 0) == 0)
+            trailing = trim(trailing.substr(3));
+        bool validAlias = !trailing.empty();
+        if (validAlias && trailing.front() == '"') {
+            validAlias = trailing.size() >= 2 && trailing.back() == '"';
+            if (validAlias) {
+                call.outputName = trailing.substr(1, trailing.size() - 2);
+            }
+        } else {
+            if (validAlias &&
+                !std::isalpha(static_cast<unsigned char>(trailing.front())) &&
+                trailing.front() != '_') {
+                validAlias = false;
+            }
+            for (const char c : trailing) {
+                if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') {
+                    validAlias = false;
+                    break;
+                }
+            }
+            if (validAlias) call.outputName = trailing;
+        }
+        if (!validAlias) {
+            error = "unexpected input after advisory lock function call";
+            sqlstate = "42601";
+            return false;
+        }
+    }
+
+    const std::string inside =
+        expression.substr(left + 1, right - left - 2);
+    call.arguments.clear();
+    if (!trim(inside).empty()) {
+        size_t start = 0;
+        while (start <= inside.size()) {
+            const size_t comma = inside.find(',', start);
+            const std::string argument = trim(
+                inside.substr(start, comma - start));
+            if (argument.empty()) {
+                error = "empty advisory lock argument";
+                sqlstate = "42601";
+                return false;
+            }
+            call.arguments.push_back(argument);
+            if (comma == std::string::npos) break;
+            start = comma + 1;
+        }
+    }
+    const size_t expectedMinimum =
+        call.name == "pg_advisory_unlock_all" ? 0 : 1;
+    const size_t expectedMaximum =
+        call.name == "pg_advisory_unlock_all" ? 0 : 2;
+    if (call.arguments.size() < expectedMinimum ||
+        call.arguments.size() > expectedMaximum) {
+        error = "advisory lock function has no matching overload";
+        sqlstate = "42883";
+        return false;
+    }
+    return true;
+}
+
+static bool parseAdvisoryInteger(
+    std::string input, bool int32Only, int64_t& value,
+    std::string& error, std::string& sqlstate) {
+    input = trim(input);
+    const size_t cast = input.find("::");
+    if (cast != std::string::npos) {
+        const std::string type = trim(input.substr(cast + 2));
+        if (type != "bigint" && type != "int8" && type != "integer" &&
+            type != "int4") {
+            error = "invalid advisory lock argument type";
+            sqlstate = "42883";
+            return false;
+        }
+        input = trim(input.substr(0, cast));
+    }
+    try {
+        size_t consumed = 0;
+        value = std::stoll(input, &consumed);
+        if (consumed != input.size()) throw std::invalid_argument("integer");
+    } catch (const std::out_of_range&) {
+        error = "advisory lock key is out of range";
+        sqlstate = "22003";
+        return false;
+    } catch (...) {
+        error = "invalid input syntax for advisory lock key";
+        sqlstate = "22P02";
+        return false;
+    }
+    if (int32Only &&
+        (value < std::numeric_limits<int32_t>::min() ||
+         value > std::numeric_limits<int32_t>::max())) {
+        error = "advisory lock key is out of range for integer";
+        sqlstate = "22003";
+        return false;
+    }
+    return true;
+}
+
+static bool handleAdvisoryFunction(
+    const std::string& sql, Session& session, bool& handled) {
+    ParsedAdvisoryCall call;
+    std::string error;
+    std::string sqlstate;
+    if (!parseAdvisoryCall(sql, call, handled, error, sqlstate)) {
+        if (handled) {
+            cout << "ERROR: " << error << " (SQLSTATE " << sqlstate << ')'
+                 << endl;
+            return true;
+        }
+        return false;
+    }
+    if (!checkDB(session)) return true;
+    const uint64_t owner = advisoryOwner(session);
+    auto& manager = dbms::advisoryLockManager();
+
+    const bool unlockAll = call.name == "pg_advisory_unlock_all";
+    const bool unlock = call.name == "pg_advisory_unlock" ||
+        call.name == "pg_advisory_unlock_shared";
+    const bool transaction = call.name.find("_xact_lock") !=
+        std::string::npos;
+    const bool tryLock = call.name.rfind("pg_try_", 0) == 0;
+    const bool shared = call.name.find("_shared") != std::string::npos;
+    const auto mode = shared ? dbms::AdvisoryLockMode::Shared
+                             : dbms::AdvisoryLockMode::Exclusive;
+
+    bool result = true;
+    bool resultIsNull = false;
+    std::string resultType = "void";
+    if (unlockAll) {
+        manager.releaseSession(owner);
+    } else {
+        bool hasNull = false;
+        int64_t first = 0;
+        int64_t second = 0;
+        for (const auto& argument : call.arguments) {
+            const std::string normalized = trim(argument);
+            const size_t cast = normalized.find("::");
+            if (trim(normalized.substr(0, cast)) == "null") hasNull = true;
+        }
+        if (hasNull) {
+            resultType = (unlock || tryLock) ? "boolean" : "void";
+            resultIsNull = true;
+        } else {
+            const bool pair = call.arguments.size() == 2;
+            if (!parseAdvisoryInteger(
+                    call.arguments[0], pair, first, error, sqlstate) ||
+                (pair && !parseAdvisoryInteger(
+                    call.arguments[1], true, second, error, sqlstate))) {
+                cout << "ERROR: " << error << " (SQLSTATE " << sqlstate
+                     << ')' << endl;
+                return true;
+            }
+            const dbms::AdvisoryLockKey key{
+                session.currentDB,
+                pair ? dbms::AdvisoryKeySpace::IntPair
+                     : dbms::AdvisoryKeySpace::BigInt,
+                first, second};
+            if (unlock) {
+                result = manager.unlockSession(key, owner, mode);
+                resultType = "boolean";
+            } else {
+                const bool implicitTransaction =
+                    transaction && !g_engine.inTransaction();
+                if (implicitTransaction) manager.beginTransaction(owner);
+                result = manager.acquire(
+                    key, owner,
+                    transaction ? dbms::AdvisoryLockScope::Transaction
+                                : dbms::AdvisoryLockScope::Session,
+                    mode, !tryLock);
+                if (implicitTransaction) manager.releaseTransaction(owner);
+                if (tryLock) resultType = "boolean";
+            }
+        }
+    }
+    const bool booleanResult = resultType == "boolean";
+    publishStructuredUtilityResult(
+        {call.outputName}, {resultType},
+        {{booleanResult ? (result ? "t" : "f") : std::string{}}},
+        {{resultIsNull}}, "SELECT 1");
+    cout << call.outputName << endl;
+    if (booleanResult) cout << (resultIsNull ? "NULL" : (result ? "t" : "f"));
+    else if (resultIsNull) cout << "NULL";
+    cout << endl;
+    return false;
+}
+
 // ========================================================================
 // Cursor command handlers (extracted for Parser switch/case dispatch)
 // ========================================================================
@@ -1928,6 +2172,7 @@ static bool handleBeginTransaction(const string& sql, Session& s) {
         cout << "Begin transaction failed" << endl;
         return true;
     }
+    dbms::advisoryLockManager().beginTransaction(advisoryOwner(s));
     beginNotificationTransaction(s);
     g_engine.setReadOnly(txn->readOnly);
     if (txn->readOnly) {
@@ -1949,16 +2194,20 @@ static bool commitBeforeLegacyDdl(Session& s) {
     if (!prepareNotificationTransactionCommit(s)) {
         (void)g_engine.rollbackTransaction();
         rollbackNotificationTransaction(s);
+        dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
         return false;
     }
 
     const DBStatus status = g_engine.commitTransaction();
     if (status != DBStatus::OK) {
+        if (!g_engine.inTransaction())
+            dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
         if (!g_engine.inTransaction()) rollbackNotificationTransaction(s);
         cout << "ERROR: implicit DDL commit failed (SQLSTATE "
              << dbms::sqlstateForDBStatus(status) << ")" << endl;
         return false;
     }
+    dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
     if (!commitNotificationTransaction(s)) return false;
     cout << "Note: DDL caused implicit commit of open transaction" << endl;
     return true;
@@ -1969,20 +2218,30 @@ static bool handleCommitTransaction(const string& sql, Session& s) {
     if (hadTransaction && !prepareNotificationTransactionCommit(s)) {
         (void)g_engine.rollbackTransaction();
         rollbackNotificationTransaction(s);
+        dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
         return true;
     }
     auto res = g_engine.commitTransaction();
     if (res != DBStatus::OK) {
-        if (!g_engine.inTransaction()) rollbackNotificationTransaction(s);
+        if (!g_engine.inTransaction()) {
+            rollbackNotificationTransaction(s);
+            dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
+        }
         cout << "ERROR: commit failed (SQLSTATE "
              << dbms::sqlstateForDBStatus(res) << ")" << endl;
         return true;
     }
+    if (hadTransaction)
+        dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
     if (hadTransaction && !commitNotificationTransaction(s)) return true;
     // COMMIT AND [NO] CHAIN: if AND CHAIN, immediately start a new transaction.
     const string lowerSql = toLowerSql(trim(sql));
     if (lowerSql.find("and chain") != string::npos) {
-        g_engine.beginTransaction(s.currentDB);
+        if (g_engine.beginTransaction(s.currentDB) != DBStatus::OK) {
+            cout << "ERROR: could not start chained transaction" << endl;
+            return true;
+        }
+        dbms::advisoryLockManager().beginTransaction(advisoryOwner(s));
         beginNotificationTransaction(s);
         cout << "Transaction committed (and chain)" << endl;
         log(s.username, "commit and chain", getTime());
@@ -2004,6 +2263,7 @@ static bool handleCommitPrepared(const string& sql, Session& s) {
     }
     auto res = g_engine.commitPrepared(xid);
     if (res == DBStatus::OK) {
+        dbms::advisoryLockManager().finishPrepared(xid);
         cout << "COMMIT PREPARED " << xid << endl;
         log(s.username, "commit prepared " + xid, getTime());
     } else if (res == DBStatus::TABLE_NOT_FOUND) {
@@ -2023,7 +2283,10 @@ static bool handleRollbackTransaction(const string& sql, Session& s) {
         cout << "Rollback failed" << endl;
         return true;
     }
-    if (hadTransaction) rollbackNotificationTransaction(s);
+    if (hadTransaction) {
+        rollbackNotificationTransaction(s);
+        dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
+    }
     // ROLLBACK AND [NO] CHAIN
     const string lowerSql = toLowerSql(trim(sql));
     if (lowerSql.find("and no chain") != string::npos) {
@@ -2034,6 +2297,7 @@ static bool handleRollbackTransaction(const string& sql, Session& s) {
             cout << "Rollback chain failed" << endl;
             return true;
         }
+        dbms::advisoryLockManager().beginTransaction(advisoryOwner(s));
         beginNotificationTransaction(s);
         cout << "Transaction rolled back (and chain)" << endl;
         log(s.username, "rollback and chain", getTime());
@@ -2052,6 +2316,7 @@ static bool handleRollbackPrepared(const string& sql, Session& s) {
     }
     auto res = g_engine.rollbackPrepared(xid);
     if (res == DBStatus::OK) {
+        dbms::advisoryLockManager().finishPrepared(xid);
         cout << "ROLLBACK PREPARED " << xid << endl;
         log(s.username, "rollback prepared " + xid, getTime());
     } else if (res == DBStatus::TABLE_NOT_FOUND) {
@@ -2087,6 +2352,7 @@ static bool handleSavepoint(const string& sql, Session& s) {
         beginNotificationTransaction(s);
         (void)dbms::notificationManager().savepoint(s.pid, name);
     }
+    dbms::advisoryLockManager().savepoint(advisoryOwner(s), name);
     cout << "Savepoint " << name << " created" << endl;
     log(s.username, "savepoint " + name, getTime());
     return false;
@@ -2112,6 +2378,7 @@ static bool handleReleaseSavepoint(const string& sql, Session& s) {
         return true;
     }
     (void)dbms::notificationManager().releaseSavepoint(s.pid, name);
+    dbms::advisoryLockManager().releaseSavepoint(advisoryOwner(s), name);
     cout << "Savepoint " << name << " released" << endl;
     log(s.username, "release savepoint " + name, getTime());
     return false;
@@ -2138,6 +2405,7 @@ static bool handleRollbackToSavepoint(const string& sql, Session& s) {
         return true;
     }
     (void)dbms::notificationManager().rollbackToSavepoint(s.pid, name);
+    dbms::advisoryLockManager().rollbackToSavepoint(advisoryOwner(s), name);
     cout << "Rolled back to savepoint " << name << endl;
     log(s.username, "rollback to savepoint " + name, getTime());
     return false;
@@ -3131,6 +3399,8 @@ static bool handleCopy(const string& sql, Session& s) {
                         "statement boundary (SQLSTATE 0A000)" << endl;
                 return true;
             }
+            dbms::advisoryLockManager().savepoint(
+                advisoryOwner(s), copySavepoint);
         } else {
             const DBStatus beginStatus =
                 g_engine.beginTransaction(s.currentDB);
@@ -3141,6 +3411,7 @@ static bool handleCopy(const string& sql, Session& s) {
                 return true;
             }
             startedCopyTransaction = true;
+            dbms::advisoryLockManager().beginTransaction(advisoryOwner(s));
         }
 
         size_t imported = 0, skipped = 0;
@@ -3170,12 +3441,20 @@ static bool handleCopy(const string& sql, Session& s) {
             DBStatus rollbackStatus = DBStatus::OK;
             if (startedCopyTransaction) {
                 rollbackStatus = g_engine.rollbackTransaction();
+                dbms::advisoryLockManager().releaseTransaction(
+                    advisoryOwner(s));
             } else {
                 rollbackStatus =
                     g_engine.rollbackToSavepoint(copySavepoint);
                 if (rollbackStatus == DBStatus::OK) {
+                    dbms::advisoryLockManager().rollbackToSavepoint(
+                        advisoryOwner(s), copySavepoint);
                     rollbackStatus =
                         g_engine.releaseSavepoint(copySavepoint);
+                    if (rollbackStatus == DBStatus::OK) {
+                        dbms::advisoryLockManager().releaseSavepoint(
+                            advisoryOwner(s), copySavepoint);
+                    }
                 }
             }
             if (rollbackStatus != DBStatus::OK) {
@@ -3194,15 +3473,27 @@ static bool handleCopy(const string& sql, Session& s) {
         if (startedCopyTransaction &&
             !prepareNotificationTransactionCommit(s)) {
             (void)g_engine.rollbackTransaction();
+            dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
             return true;
         }
         const DBStatus finishStatus = startedCopyTransaction
             ? g_engine.commitTransaction()
             : g_engine.releaseSavepoint(copySavepoint);
         if (finishStatus != DBStatus::OK) {
+            if (startedCopyTransaction) {
+                (void)g_engine.rollbackTransaction();
+                dbms::advisoryLockManager().releaseTransaction(
+                    advisoryOwner(s));
+            }
             cout << "ERROR: COPY FROM transaction finish failed (SQLSTATE "
                  << sqlstateForDBStatus(finishStatus) << ")" << endl;
             return true;
+        }
+        if (startedCopyTransaction) {
+            dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
+        } else {
+            dbms::advisoryLockManager().releaseSavepoint(
+                advisoryOwner(s), copySavepoint);
         }
         cout << "COPY " << imported << " rows imported, " << skipped << " skipped" << endl;
         return false;
@@ -3276,6 +3567,17 @@ static bool handlePrepare(const string& sql, Session& s) {
         }
         auto res = g_engine.prepareTransaction(xid);
         if (res == DBStatus::OK) {
+            if (!dbms::advisoryLockManager().prepareTransaction(
+                    advisoryOwner(s), xid)) {
+                (void)g_engine.rollbackPrepared(xid);
+                dbms::advisoryLockManager().releaseTransaction(
+                    advisoryOwner(s));
+                rollbackNotificationTransaction(s);
+                cout << "ERROR: advisory lock ownership could not be "
+                        "transferred to prepared transaction (SQLSTATE "
+                        "XX000)" << endl;
+                return true;
+            }
             rollbackNotificationTransaction(s);
             cout << "PREPARE TRANSACTION " << xid << endl;
             log(s.username, "prepare transaction " + xid, getTime());
@@ -3297,7 +3599,13 @@ static bool handlePrepare(const string& sql, Session& s) {
         } else {
             cout << "PREPARE TRANSACTION failed" << endl;
         }
-        if (!g_engine.inTransaction()) rollbackNotificationTransaction(s);
+        if (!g_engine.inTransaction()) {
+            rollbackNotificationTransaction(s);
+            if (res != DBStatus::OK) {
+                dbms::advisoryLockManager().releaseTransaction(
+                    advisoryOwner(s));
+            }
+        }
         return res != DBStatus::OK;
     }
     // PostgreSQL syntax: PREPARE name [(type, ...)] AS <statement with $n>
@@ -13577,6 +13885,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             // The authenticated identity, compatibility mode and ordinary
             // session GUCs intentionally survive this project extension.
             dbms::notificationManager().disconnect(s.pid);
+            dbms::advisoryLockManager().releaseSession(advisoryOwner(s));
             s.preparedStmts.clear();
             s.preparedStmtTypes.clear();
             s.sequenceLastValues.clear();
@@ -17568,6 +17877,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
     if (sql == "discard all") {
         // Drop all session-owned temporary tables.
         cleanupSessionTempTables(s);
+        dbms::advisoryLockManager().releaseSession(advisoryOwner(s));
         // Clear prepared statements
         s.preparedStmts.clear();
         // Reset session variables
@@ -17636,48 +17946,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
         return handleLoadSharedLibrary(sql, s);
     }
 
-    // pg_advisory_lock / pg_advisory_unlock (intercept before SELECT)
-    if (sql.find("pg_advisory") != string::npos) {
-        if (!checkDB(s)) return true;
-        size_t lockPos = sql.find("pg_advisory_lock(");
-        size_t unlockPos = sql.find("pg_advisory_unlock(");
-        size_t lockSharedPos = sql.find("pg_advisory_lock_shared(");
-        size_t unlockSharedPos = sql.find("pg_advisory_unlock_shared(");
-        auto extractKey = [](const string& sql, size_t pos) -> int64_t {
-            size_t lp = sql.find('(', pos);
-            size_t rp = sql.find(')', lp);
-            if (lp == string::npos || rp == string::npos) return -1;
-            try { return stoll(trim(sql.substr(lp + 1, rp - lp - 1))); } catch (...) { return -1; }
-        };
-        if (lockPos != string::npos) {
-            int64_t key = extractKey(sql, lockPos);
-            if (key < 0) { cout << "SQL syntax error" << endl; return true; }
-            bool ok = g_engine.advisoryLock(key);
-            cout << (ok ? "Lock acquired" : "Lock not available") << endl;
-            return false;
-        }
-        if (unlockPos != string::npos) {
-            int64_t key = extractKey(sql, unlockPos);
-            if (key < 0) { cout << "SQL syntax error" << endl; return true; }
-            bool ok = g_engine.advisoryUnlock(key);
-            cout << (ok ? "Lock released" : "Lock not held") << endl;
-            return false;
-        }
-        if (lockSharedPos != string::npos) {
-            int64_t key = extractKey(sql, lockSharedPos);
-            if (key < 0) { cout << "SQL syntax error" << endl; return true; }
-            bool ok = g_engine.advisoryLockShared(key);
-            cout << (ok ? "Shared lock acquired" : "Lock not available") << endl;
-            return false;
-        }
-        if (unlockSharedPos != string::npos) {
-            int64_t key = extractKey(sql, unlockSharedPos);
-            if (key < 0) { cout << "SQL syntax error" << endl; return true; }
-            bool ok = g_engine.advisoryUnlockShared(key);
-            cout << (ok ? "Shared lock released" : "Lock not held") << endl;
-            return false;
-        }
-    }
+    // Advisory lock functions own a process-wide, per-session lock table and
+    // publish their native void/bool result types on the wire.
+    bool advisoryHandled = false;
+    const bool advisoryError =
+        handleAdvisoryFunction(sql, s, advisoryHandled);
+    if (advisoryHandled) return advisoryError;
 
     if (startsWithKeyword(sql, "select")) {
         bool handledSelectInto = false;
@@ -24897,7 +25171,10 @@ bool execute(const std::string& rawSql, Session& s) {
         std::cout << "ERROR: could not start statement transaction" << std::endl;
         return true;
     }
-    if (statementTransaction) beginNotificationTransaction(s);
+    if (statementTransaction) {
+        dbms::advisoryLockManager().beginTransaction(advisoryOwner(s));
+        beginNotificationTransaction(s);
+    }
     if (notificationStatementTransaction) beginNotificationTransaction(s);
     const bool commandVisibilityActive = outermost &&
         g_engine.inTransaction() && g_engine.beginSqlCommand();
@@ -24909,6 +25186,7 @@ bool execute(const std::string& rawSql, Session& s) {
         if (statementTransaction) {
             g_engine.rollbackTransaction();
             rollbackNotificationTransaction(s);
+            dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
         } else if (notificationStatementTransaction &&
                    dbms::notificationManager().inTransaction(s.pid)) {
             rollbackNotificationTransaction(s);
@@ -24926,11 +25204,13 @@ bool execute(const std::string& rawSql, Session& s) {
         if (error) {
             g_engine.rollbackTransaction();
             rollbackNotificationTransaction(s);
+            dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
         } else {
             if (!prepareNotificationTransactionCommit(s)) {
                 error = true;
                 g_engine.rollbackTransaction();
                 rollbackNotificationTransaction(s);
+                dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
             }
         }
         if (!error) {
@@ -24939,11 +25219,14 @@ bool execute(const std::string& rawSql, Session& s) {
                 error = true;
                 g_engine.rollbackTransaction();
                 rollbackNotificationTransaction(s);
+                dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
             } else if (!commitNotificationTransaction(s)) {
                 // Capacity was reserved before the durable commit, so this
                 // branch is only a defensive invariant check.
                 error = true;
             }
+            if (commitStatus == dbms::DBStatus::OK)
+                dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
         }
     } else if (outermost && g_engine.inTransaction()) {
         // BEGIN creates the transaction inside executeInternal(), whereas an
@@ -25308,6 +25591,7 @@ int main(int argc, char* argv[]) {
             }
         }
         cleanupSessionTempTables(s);
+        dbms::advisoryLockManager().releaseAll(advisoryOwner(s));
         dbms::notificationManager().disconnect(s.pid);
         dbms::unregisterProcess(pid);
     } else {

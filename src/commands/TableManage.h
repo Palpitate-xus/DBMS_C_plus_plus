@@ -297,13 +297,6 @@ public:
     std::vector<std::string> getInheritedChildren(const std::string& dbname,
                                                    const std::string& parentName) const;
 
-    // Advisory locks (session-level)
-    bool advisoryLock(int64_t key);
-    bool advisoryUnlock(int64_t key);
-    bool advisoryLockShared(int64_t key);
-    bool advisoryUnlockShared(int64_t key);
-    bool advisoryLockExists(int64_t key) const;
-
     // User-defined functions (simple expression-based)
     struct UDFInfo {
         std::string name;
@@ -1789,10 +1782,6 @@ private:
     // backends coordinate exactly like protocol workers. The resource
     // namespace is set from the database operation before table/row/gap locks.
     LockManager& lockManager_;
-
-    // Advisory locks (session-level, non-persistent)
-    mutable std::mutex advisoryMutex_;
-    std::map<int64_t, int> advisoryLocks_; // key -> exclusive count (positive) or shared count (negative)
 
     // Auto-VACUUM: per-table dead tuple tracking
     mutable std::mutex deadTupleMutex_;

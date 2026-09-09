@@ -20,6 +20,7 @@
 #include "process/SqlStats.h"
 #include "process/RuntimeStats.h"
 #include "process/OutputCapture.h"
+#include "process/AdvisoryLockManager.h"
 #include "Config.h"
 #include <netinet/tcp.h>
 
@@ -1904,6 +1905,9 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         Session* session;
         ~BackendSessionGuard() {
             if (session) {
+                if (session->advisoryOwnerId != 0)
+                    advisoryLockManager().releaseAll(
+                        session->advisoryOwnerId);
                 notificationManager().disconnect(session->pid);
                 for (const auto& name : session->tempTables) {
                     g_engine.dropTable(session->currentDB,
