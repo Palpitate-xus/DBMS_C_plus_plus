@@ -184,6 +184,20 @@ int main() {
         assert(table && table->onCommit == "drop" && !table->asSelect.empty());
         std::cout << "[PARSER P1] CREATE TEMP flags OK\n";
     }
+
+    // Project-only MySQL column attributes must survive parsing so the
+    // executor can gate them by compatibility mode instead of silently
+    // discarding the tokens.
+    {
+        auto extensions = parser.parse(
+            "CREATE TABLE mysql_attrs (id INTEGER UNSIGNED AUTO_INCREMENT)");
+        assert(extensions.success);
+        auto* table = asCreateTable(extensions.stmt);
+        assert(table && table->columns.size() == 1);
+        assert(table->columns[0].isUnsignedExtension);
+        assert(table->columns[0].isAutoIncrementExtension);
+        std::cout << "[PARSER P1] MySQL column attributes preserved OK\n";
+    }
     }
 
     // 7. CREATE VIEW
@@ -282,6 +296,16 @@ int main() {
                column.checkExprs[0]->toString() == "score > 0");
         assert(column.checkNames.size() == 1 &&
                column.checkNames[0] == "score_positive");
+
+        auto extensions = parser.parse(
+            "ALTER TABLE t ADD COLUMN mysql_id INT UNSIGNED AUTO_INCREMENT");
+        assert(extensions.success);
+        auto* extensionAlter = asAlterTable(extensions.stmt);
+        assert(extensionAlter && extensionAlter->subCommands.size() == 1);
+        const auto& extensionColumn =
+            extensionAlter->subCommands[0].colDef;
+        assert(extensionColumn.isUnsignedExtension);
+        assert(extensionColumn.isAutoIncrementExtension);
 
         auto generated = parser.parse(
             "ALTER TABLE t ADD COLUMN doubled INT "

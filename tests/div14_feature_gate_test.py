@@ -210,13 +210,34 @@ def main():
         # canonical type in the message (SQLSTATE 42704).
         for sql, canon in [("CREATE TABLE t6a (a TINYINT)", "smallint"),
                            ("CREATE TABLE t6b (a DATETIME)", "timestamp"),
-                           ("CREATE TABLE t6c (a NVARCHAR(10))", "varchar")]:
+                           ("CREATE TABLE t6c (a NVARCHAR(10))", "varchar"),
+                           ("CREATE TABLE t6long (a LONG)", "bigint"),
+                           ("CREATE TABLE t6blob (a BLOB)", "bytea"),
+                           ("CREATE TABLE t6nchar (a NCHAR(4))", "char"),
+                           ("CREATE TABLE t6bin (a BINARY(4))", "bytea"),
+                           ("CREATE TABLE t6vbin (a VARBINARY(4))", "bytea")]:
             messages = simple_query(sock, sql)
             err = error_of(messages)
             assert err is not None and "does not exist" in err[1] and canon in err[1], \
                 "%s must fail with type error mentioning %s: %r" % (sql, canon, err)
+        for sql, fragment in [
+                ("CREATE TABLE t6auto (a INTEGER AUTO_INCREMENT)",
+                 "GENERATED AS IDENTITY"),
+                ("CREATE TABLE t6unsigned (a INTEGER UNSIGNED)",
+                 "CHECK constraint"),
+        ]:
+            expect_error(sock, sql, "42601", sql, fragment)
+        for relation in ("t6auto", "t6unsigned"):
+            expect_error(sock, "SELECT * FROM %s" % relation, "42P01",
+                         "failed DIV-06 DDL left no relation")
         # A canonical type still works in postgresql18 mode.
         expect_command_tag(sock, "CREATE TABLE t6d (a SMALLINT)", "pg type create")
+        expect_error(
+            sock, "ALTER TABLE t6d ADD COLUMN ext_auto INTEGER AUTO_INCREMENT",
+            "42601", "ALTER TABLE AUTO_INCREMENT gate", "GENERATED AS IDENTITY")
+        expect_error(
+            sock, "ALTER TABLE t6d ADD COLUMN ext_unsigned INTEGER UNSIGNED",
+            "42601", "ALTER TABLE UNSIGNED gate", "CHECK constraint")
 
         # REPL-08: publication membership changes use the real publication
         # catalog and persist atomically; they never reach .pg_compat_objects.
@@ -536,8 +557,25 @@ def main():
                      "transactional ALTER SYSTEM")
         expect_command_tag(sock, "ROLLBACK", "ALTER SYSTEM rollback")
         # DIV-06 in extended mode: alias mapping keeps working.
-        expect_command_tag(sock, "CREATE TABLE t6e (a TINYINT)",
-                           "extended TINYINT")
+        expect_command_tag(
+            sock,
+            "CREATE TABLE t6e (id INTEGER AUTO_INCREMENT PRIMARY KEY, "
+            "u INTEGER UNSIGNED)",
+            "extended AUTO_INCREMENT/UNSIGNED")
+        expect_command_tag(sock, "INSERT INTO t6e (u) VALUES (1)",
+                           "extended auto-increment insert")
+        assert data_row_values(simple_query(sock, "SELECT id, u FROM t6e")) \
+            == [[b"1", b"1"]]
+        assert error_of(simple_query(sock, "INSERT INTO t6e (u) VALUES (-1)")) \
+            is not None, "extended UNSIGNED must reject negative input"
+        expect_command_tag(
+            sock, "ALTER TABLE t6e ADD COLUMN later INTEGER UNSIGNED",
+            "extended ALTER TABLE UNSIGNED")
+        expect_command_tag(
+            sock,
+            "CREATE TABLE t6aliases (a TINYINT, b DATETIME, c NVARCHAR(4), "
+            "d LONG, e BLOB, f NCHAR(4), g BINARY(4), h VARBINARY(4))",
+            "extended type aliases")
 
         # A malformed publication sidecar must fail the whole catalog scan;
         # SHOW must not silently hide it or expose a partial snapshot.

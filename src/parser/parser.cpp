@@ -5278,6 +5278,14 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                     } else if (ckw == "unique") {
                         ++pos;
                         col.isUnique = true;
+                    } else if (ckw == "auto_increment") {
+                        ++pos;
+                        col.isAutoIncrementExtension = true;
+                        col.constraints.push_back("AUTO_INCREMENT");
+                    } else if (ckw == "unsigned") {
+                        ++pos;
+                        col.isUnsignedExtension = true;
+                        col.constraints.push_back("UNSIGNED");
                     } else if (ckw == "default") {
                         ++pos;
                         std::string defVal;
@@ -7891,6 +7899,14 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                     pos += 2;
                 } else if (modifier == "unique") {
                     sub.colDef.isUnique = true;
+                    ++pos;
+                } else if (modifier == "auto_increment") {
+                    sub.colDef.isAutoIncrementExtension = true;
+                    sub.colDef.constraints.push_back("AUTO_INCREMENT");
+                    ++pos;
+                } else if (modifier == "unsigned") {
+                    sub.colDef.isUnsignedExtension = true;
+                    sub.colDef.constraints.push_back("UNSIGNED");
                     ++pos;
                 } else if (modifier == "default") {
                     ++pos;

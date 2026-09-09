@@ -3294,6 +3294,28 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
     col.generatedKind = cd.generatedKind;
 
     std::string baseType = toLower(cd.typeName);
+    const bool extended = compatibilityMode == "extended";
+    if ((cd.isAutoIncrementExtension || cd.isUnsignedExtension) &&
+        !extended) {
+        error = cd.isAutoIncrementExtension
+            ? "AUTO_INCREMENT is not PostgreSQL syntax; use GENERATED AS "
+              "IDENTITY (SQLSTATE 42601)"
+            : "UNSIGNED is not PostgreSQL syntax; use a CHECK constraint "
+              "(SQLSTATE 42601)";
+        return false;
+    }
+    const bool extensionIntegerType =
+        baseType == "tinyint" || baseType == "smallint" ||
+        baseType == "int2" || baseType == "int4" ||
+        baseType == "int8" ||
+        baseType == "int" || baseType == "integer" ||
+        baseType == "bigint" || baseType == "long";
+    if ((cd.isAutoIncrementExtension || cd.isUnsignedExtension) &&
+        !extensionIntegerType) {
+        error = "AUTO_INCREMENT and UNSIGNED require an integer column "
+                "(SQLSTATE 42804)";
+        return false;
+    }
     std::string domainName;
     std::string domainCheck;
     std::vector<std::string> domainTypeMods;
@@ -3355,6 +3377,7 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
     }
     if (baseType == "int" || baseType == "integer") baseType = "int4";
     else if (baseType == "bigint") baseType = "int8";
+    else if (baseType == "long") baseType = "int8";
     else if (baseType == "smallint") baseType = "int2";
     else if (baseType == "tinyint") baseType = "smallint";
     else if (baseType == "real") baseType = "float4";
@@ -3398,11 +3421,14 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
         col = makeIntColumn(cd.name, cd.isNull, 3, cd.isPrimaryKey);
         col.isAutoIncrement = true;
     } else if (baseType == "int2" || baseType == "smallint") {
-        col = makeIntColumn(cd.name, cd.isNull, 0, cd.isPrimaryKey);
+        col = makeIntColumn(cd.name, cd.isNull, 0, cd.isPrimaryKey,
+                            cd.isUnsignedExtension);
     } else if (baseType == "int4" || baseType == "integer" || baseType == "int") {
-        col = makeIntColumn(cd.name, cd.isNull, 2, cd.isPrimaryKey);
+        col = makeIntColumn(cd.name, cd.isNull, 2, cd.isPrimaryKey,
+                            cd.isUnsignedExtension);
     } else if (baseType == "int8" || baseType == "bigint") {
-        col = makeIntColumn(cd.name, cd.isNull, 3, cd.isPrimaryKey);
+        col = makeIntColumn(cd.name, cd.isNull, 3, cd.isPrimaryKey,
+                            cd.isUnsignedExtension);
     } else if (baseType == "varchar" || baseType == "character varying") {
         size_t len = typeMod1 > 0 ? static_cast<size_t>(typeMod1) : 255;
         col = makeVarCharColumn(cd.name, cd.isNull, len, cd.isPrimaryKey);
@@ -3515,7 +3541,8 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
     col.defaultValue = cd.defaultValue ? cd.defaultValue->toString() : "";
     col.generatedExpr = cd.generatedExpr;
     col.generatedKind = cd.generatedKind;
-    col.isAutoIncrement = col.isAutoIncrement || cd.isGeneratedIdentity;
+    col.isAutoIncrement = col.isAutoIncrement || cd.isGeneratedIdentity ||
+                          cd.isAutoIncrementExtension;
     col.isUnique = cd.isUnique;
     col.isArray = cd.isArray;
     col.enumValues = enumValues;

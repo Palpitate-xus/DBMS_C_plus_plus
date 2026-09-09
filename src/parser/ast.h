@@ -779,6 +779,8 @@ struct ColumnDef {
     std::string generatedExpr;                 // GENERATED ALWAYS AS (expr) 的表达式体
     char generatedKind = 0;                    // 0=none, 's'=STORED, 'v'=VIRTUAL
     bool isGeneratedIdentity = false;          // GENERATED ... AS IDENTITY
+    bool isAutoIncrementExtension = false;     // MySQL AUTO_INCREMENT
+    bool isUnsignedExtension = false;          // MySQL integer UNSIGNED
     std::vector<std::string> constraints;      // GENERATED, IDENTITY 等
     bool isArray = false;
 };
