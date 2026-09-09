@@ -357,6 +357,26 @@ def extended_query_boolean_text_parameter(sock):
     messages = read_until_ready(sock)
     assert sum(kind == b"3" for kind, _ in messages) == 2, messages
 
+    # "o" is ambiguous between ON and OFF. PostgreSQL classifies bad text
+    # input as 22P02 during Bind, not as an unsupported feature.
+    statement = b"bool_ambiguous"
+    parse = (statement + b"\0" + sql + b"\0" + struct.pack("!H", 1) +
+             struct.pack("!I", 16))
+    sock.sendall(typed(b"P", parse))
+    kind, body = read_message(sock)
+    assert kind == b"1" and body == b"", (kind, body)
+    raw = b"o"
+    bind = (b"\0" + statement + b"\0" + struct.pack("!H", 0) +
+            struct.pack("!H", 1) + struct.pack("!i", len(raw)) + raw +
+            struct.pack("!H", 0))
+    sock.sendall(typed(b"B", bind))
+    kind, body = read_message(sock)
+    assert kind == b"E", (kind, body)
+    assert diagnostic_fields(body).get(b"C") == b"22P02", body
+    sock.sendall(typed(b"S"))
+    messages = read_until_ready(sock)
+    assert messages[-1][0] == b"Z", messages
+
 def extended_query_binary_int_parameter(sock, sql, value):
     parse = b"\0" + sql.encode() + b"\0" + struct.pack("!H", 1) + struct.pack("!I", 23)
     sock.sendall(typed(b"P", parse))

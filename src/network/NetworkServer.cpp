@@ -458,6 +458,19 @@ std::string protocolParameterLiteral(uint32_t typeOid,
     return quoteProtocolText(value, error);
 }
 
+static const char* protocolParameterErrorSqlstate(
+    const std::string& message) {
+    if (message.rfind("invalid binary input", 0) == 0 ||
+        message == "invalid binary input length for parameter type") {
+        return "22P03";  // invalid_binary_representation
+    }
+    if (message.rfind("invalid input syntax", 0) == 0 ||
+        message.find("contains a NUL byte") != std::string::npos) {
+        return "22P02";  // invalid_text_representation
+    }
+    return "0A000";      // unsupported type/format capability
+}
+
 bool substituteProtocolParameters(const std::string& sql,
                                   const std::vector<std::string>& literals,
                                   std::string& expanded,
@@ -2246,10 +2259,12 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             literals.reserve(valueCount);
             bool bindError = false;
             std::string bindErrorMessage;
+            std::string bindErrorSqlstate = "0A000";
             for (uint16_t i = 0; i < valueCount; ++i) {
                 if (offset + 4 > message.payload.size()) {
                     bindError = true;
                     bindErrorMessage = "malformed Bind parameter value";
+                    bindErrorSqlstate = "08P01";
                     break;
                 }
                 const int32_t valueLength = PostgresProtocol::readInt32(message.payload, offset);
@@ -2259,6 +2274,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                      static_cast<size_t>(valueLength) > message.payload.size() - offset)) {
                     bindError = true;
                     bindErrorMessage = "malformed Bind parameter value length";
+                    bindErrorSqlstate = "08P01";
                     break;
                 }
                 uint16_t format = 0;
@@ -2280,13 +2296,16 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                         prepared.parameterTypes[i], raw, format == 1, bindErrorMessage);
                     if (!bindErrorMessage.empty()) {
                         bindError = true;
+                        bindErrorSqlstate =
+                            protocolParameterErrorSqlstate(bindErrorMessage);
                         break;
                     }
                     literals.push_back(std::move(literal));
                 }
             }
             if (bindError) {
-                protocol.sendErrorResponse("ERROR", "0A000", bindErrorMessage);
+                protocol.sendErrorResponse(
+                    "ERROR", bindErrorSqlstate, bindErrorMessage);
                 extendedQueryError = true;
                 continue;
             }
