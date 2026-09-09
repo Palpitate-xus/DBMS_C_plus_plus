@@ -289,6 +289,8 @@
 
 | 372 | P0-02 / PROTO-04 | `SELECT pg_reload_conf()` 只向 legacy stdout 写单个 `t/f`，协议层把它误判为列名并返回 `SELECT 0`，客户端既收不到函数结果，也没有 bool 类型元数据。该专用函数路径现发布一列 `DmlResult`：列名 `pg_reload_conf`、类型 `bool`、一行 `t` 或 `f`、command tag `SELECT 1`；CLI 文本保持不变 | DIV E2E 分别验证不存在配置文件时的结构化 `f` 和有效文件 reload 的 `t`；完整协议精确验证 RowDescription 名称、bool OID 16、DataRow 与 `SELECT 1`。main O0/O2 编译、正式重链、完整协议与真实 PostgreSQL 差分 122/122 通过。P0-02/PROTO-04 仍为 partial，其他 legacy 函数及复杂查询结果尚未全部结构化 | `a4e4da2` |
 
+| 373 | DIV-14 | 运行时与手册已删除 compatibility-object record layer，但 `Session.h` 仍注释 extended 会启用该记录层，容易让维护者据此恢复已禁止的 metadata-only 假对象路径。注释改为只允许有真实 runtime 的项目扩展，并明确 unsupported PostgreSQL object 绝不能变成兼容记录；静态防回归门现同时扫描 Session contract | no-fake-sidecar、完整 fallback registry 和 compatibility contract 三个静态回归通过，diff check 通过。DIV-14 保持 complete | `0c40fdb` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
