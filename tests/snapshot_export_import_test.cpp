@@ -210,7 +210,43 @@ int main() {
         std::cout << "[SNAPSHOT EI] engine export/import visibility OK\n";
     }
 
-    // Test 5: READ COMMITTED refreshes once per SQL command, not once per
+    // Test 5: REPEATABLE READ takes its snapshot at the first statement, not
+    // at BEGIN. A transaction committed after BEGIN but before the first
+    // statement must therefore be visible.
+    {
+        const std::string rrDb = "snapshot_rr_lazy_db";
+        std::filesystem::remove_all(rrDb);
+        {
+        StorageEngine writer;
+        StorageEngine reader;
+        assert(writer.createDatabase(rrDb) == DBStatus::OK);
+
+        TableSchema tbl;
+        tbl.tablename = "t";
+        tbl.append(makeIntColumn("id", false, 0, true));
+        tbl.append(makeVarCharColumn("name", false, 20, false));
+        assert(writer.createTable(rrDb, tbl) == DBStatus::OK);
+
+        assert(writer.beginTransaction(rrDb) == DBStatus::OK);
+        assert(writer.insert(rrDb, "t", {{"id", "1"}, {"name", "before_first"}})
+               == DBStatus::OK);
+
+        assert(reader.setIsolationLevel(IsolationLevel::REPEATABLE_READ));
+        assert(reader.beginTransaction(rrDb) == DBStatus::OK);
+        assert(writer.commitTransaction() == DBStatus::OK);
+        assert(writer.getPageAllocator(rrDb, "t")->flush());
+
+        assert(reader.beginSqlCommand());
+        auto rows = reader.query(rrDb, "t", {}, {"id", "name"});
+        assert(rowContains(rows, "before_first"));
+        assert(reader.finishSqlCommand());
+        assert(reader.commitTransaction() == DBStatus::OK);
+        std::cout << "[SNAPSHOT EI] REPEATABLE READ lazy snapshot OK\n";
+        }
+        std::filesystem::remove_all(rrDb);
+    }
+
+    // Test 6: READ COMMITTED refreshes once per SQL command, not once per
     // physical relation scan.  Otherwise a JOIN/CTE/subquery can observe a
     // transaction that commits between two scans in the same statement.
     {
@@ -255,7 +291,7 @@ int main() {
         std::filesystem::remove_all(rcDb);
     }
 
-    // Test 6: PostgreSQL accepts READ UNCOMMITTED but gives it READ
+    // Test 7: PostgreSQL accepts READ UNCOMMITTED but gives it READ
     // COMMITTED visibility and statement-snapshot behavior.
     {
         const std::string ruDb = "snapshot_ru_db";

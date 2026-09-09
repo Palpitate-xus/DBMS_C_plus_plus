@@ -6027,6 +6027,15 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                                 bool indexMaintenanceView) const {
     if (!indexMaintenanceView && transactionContext().inTransaction &&
         dbname == transactionContext().txnDB) {
+        if (!readView) {
+            if ((transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
+                 transactionContext().txnIsolationLevel == IsolationLevel::READ_UNCOMMITTED) &&
+                !transactionContext().readView.commandIdVisibility) {
+                refreshReadView();
+            } else {
+                ensureTransactionSnapshot();
+            }
+        }
         transactionContext().hasRead = true;
     }
     const ReadView* rv = readView;
@@ -6305,6 +6314,15 @@ bool StorageEngine::forEachRowPageRange(
     const std::function<void(uint32_t, uint16_t, const char*, size_t)>& callback,
     const ReadView* readView) const {
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
+        if (!readView) {
+            if ((transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
+                 transactionContext().txnIsolationLevel == IsolationLevel::READ_UNCOMMITTED) &&
+                !transactionContext().readView.commandIdVisibility) {
+                refreshReadView();
+            } else {
+                ensureTransactionSnapshot();
+            }
+        }
         transactionContext().hasRead = true;
     }
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -14938,6 +14956,13 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
 DBStatus StorageEngine::truncateTable(const std::string& dbname,
                                        const std::string& tablename) {
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
+        if ((transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
+             transactionContext().txnIsolationLevel == IsolationLevel::READ_UNCOMMITTED) &&
+            !transactionContext().readView.commandIdVisibility) {
+            refreshReadView();
+        } else {
+            ensureTransactionSnapshot();
+        }
         transactionContext().hasWrite = true;
     }
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
@@ -20356,6 +20381,13 @@ DBStatus StorageEngine::insertInternal(
                                 const std::set<std::string>& nullColumns,
                                 std::vector<SqlRow>* insertedRows) {
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
+        if ((transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
+             transactionContext().txnIsolationLevel == IsolationLevel::READ_UNCOMMITTED) &&
+            !transactionContext().readView.commandIdVisibility) {
+            refreshReadView();
+        } else {
+            ensureTransactionSnapshot();
+        }
         transactionContext().hasWrite = true;
     }
     if (transactionContext().readOnly) return DBStatus::INVALID_VALUE;
@@ -22747,6 +22779,13 @@ DBStatus StorageEngine::removeInternal(
     ReferentialActionContext& referentialContext,
     size_t* affectedRows) {
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
+        if ((transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
+             transactionContext().txnIsolationLevel == IsolationLevel::READ_UNCOMMITTED) &&
+            !transactionContext().readView.commandIdVisibility) {
+            refreshReadView();
+        } else {
+            ensureTransactionSnapshot();
+        }
         transactionContext().hasWrite = true;
     }
     if (transactionContext().readOnly) return DBStatus::INVALID_VALUE;
@@ -23921,6 +23960,13 @@ DBStatus StorageEngine::updateInternal(
     ReferentialActionContext& referentialContext,
     size_t* affectedRows) {
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
+        if ((transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
+             transactionContext().txnIsolationLevel == IsolationLevel::READ_UNCOMMITTED) &&
+            !transactionContext().readView.commandIdVisibility) {
+            refreshReadView();
+        } else {
+            ensureTransactionSnapshot();
+        }
         transactionContext().hasWrite = true;
     }
     if (transactionContext().readOnly) return DBStatus::INVALID_VALUE;
@@ -26943,6 +26989,13 @@ std::vector<std::string> StorageEngine::query(
     if (structuredRowIds) structuredRowIds->clear();
 
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
+        if ((transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
+             transactionContext().txnIsolationLevel == IsolationLevel::READ_UNCOMMITTED) &&
+            !transactionContext().readView.commandIdVisibility) {
+            refreshReadView();
+        } else {
+            ensureTransactionSnapshot();
+        }
         transactionContext().hasRead = true;
     }
 
@@ -26973,17 +27026,6 @@ std::vector<std::string> StorageEngine::query(
         }
     } else {
         if (!lockManager_.lockShared(tablename)) return result;
-    }
-
-    // A SQL command refreshes READ COMMITTED once in beginSqlCommand().
-    // Direct storage API callers do not establish that boundary, so retain
-    // one refresh per standalone query for them.
-    if (transactionContext().inTransaction &&
-        transactionContext().txnDB == dbname &&
-        (transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
-         transactionContext().txnIsolationLevel == IsolationLevel::READ_UNCOMMITTED) &&
-        !transactionContext().readView.commandIdVisibility) {
-        refreshReadView();
     }
 
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -31079,17 +31121,19 @@ std::vector<std::string> StorageEngine::queryExpr(
     if (structuredRows) structuredRows->clear();
     if (structuredNulls) structuredNulls->clear();
     if (structuredRowIds) structuredRowIds->clear();
+    if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
+        if ((transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
+             transactionContext().txnIsolationLevel == IsolationLevel::READ_UNCOMMITTED) &&
+            !transactionContext().readView.commandIdVisibility) {
+            refreshReadView();
+        } else {
+            ensureTransactionSnapshot();
+        }
+        transactionContext().hasRead = true;
+    }
     if (!tableExists(dbname, tablename)) return result;
     if (!lockManager_.lockShared(tablename)) return result;
     ResourceUnlockGuard tableLockGuard(lockManager_, tablename);
-
-    if (transactionContext().inTransaction &&
-        transactionContext().txnDB == dbname &&
-        (transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
-         transactionContext().txnIsolationLevel == IsolationLevel::READ_UNCOMMITTED) &&
-        !transactionContext().readView.commandIdVisibility) {
-        refreshReadView();
-    }
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     PageAllocator* pa = getPageAllocator(dbname, tablename);
@@ -36255,10 +36299,8 @@ bool StorageEngine::recoverAllDatabases() {
 // ========================================================================
 // ReadView refresh (READ COMMITTED and its READ UNCOMMITTED alias)
 // ========================================================================
-void StorageEngine::refreshReadView() {
-    if (!transactionContext().inTransaction ||
-        (transactionContext().txnIsolationLevel != IsolationLevel::READ_COMMITTED &&
-         transactionContext().txnIsolationLevel != IsolationLevel::READ_UNCOMMITTED)) return;
+void StorageEngine::refreshReadView() const {
+    if (!transactionContext().inTransaction) return;
     std::lock_guard<std::mutex> lock(globalTxnMutex_);
     transactionContext().readView.creatorTxnId = transactionContext().currentTxnId;
     transactionContext().readView.upLimitId = activeTransactions_.empty() ? transactionContext().currentTxnId : *activeTransactions_.begin();
@@ -36268,16 +36310,25 @@ void StorageEngine::refreshReadView() {
     transactionContext().readView.subTxnIds.clear();
     transactionContext().readView.subTxnIds.insert(transactionContext().txnSubTxnIds.begin(), transactionContext().txnSubTxnIds.end());
     transactionContext().readView.commitLog = getCommitLog(transactionContext().txnDB);
+    transactionContext().snapshotAcquired = true;
+}
+
+void StorageEngine::ensureTransactionSnapshot() const {
+    if (transactionContext().inTransaction &&
+        !transactionContext().snapshotAcquired) {
+        refreshReadView();
+    }
 }
 
 // ========================================================================
 // Snapshot export/import
 // ========================================================================
 std::string StorageEngine::exportSnapshot() const {
-    const auto& context = transactionContext();
+    auto& context = transactionContext();
     if (!context.inTransaction || context.txnDB.empty() ||
         (context.txnIsolationLevel != IsolationLevel::REPEATABLE_READ &&
          context.txnIsolationLevel != IsolationLevel::SERIALIZABLE)) return "";
+    ensureTransactionSnapshot();
     Snapshot snap;
     snap.version = 2;
     snap.database = context.txnDB;
@@ -36309,6 +36360,7 @@ bool StorageEngine::importSnapshot(const std::string& bytes) {
     context.readView.subTxnIds.insert(snap.subxip.begin(), snap.subxip.end());
     context.readView.commitLog = getCommitLog(context.txnDB);
     context.snapshotImported = true;
+    context.snapshotAcquired = true;
     return true;
 }
 
@@ -39149,6 +39201,7 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
     transactionContext().txnLog.clear();
     transactionContext().specializedIndexTables.clear();
     transactionContext().snapshotImported = false;
+    transactionContext().snapshotAcquired = false;
     transactionContext().hasRead = false;
     transactionContext().hasWrite = false;
     transactionContext().ddlUndoActions.clear();
@@ -40712,6 +40765,7 @@ DBStatus StorageEngine::rollbackTransaction() {
     // never see uncommitted work.
     transactionContext().txnLogicalChanges.clear();
     transactionContext().snapshotImported = false;
+    transactionContext().snapshotAcquired = false;
     transactionContext().hasRead = false;
     transactionContext().hasWrite = false;
     transactionContext().savepoints.clear();
@@ -41307,6 +41361,7 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
     transactionContext().txnLogicalChanges.clear();
     transactionContext().specializedIndexTables.clear();
     transactionContext().snapshotImported = false;
+    transactionContext().snapshotAcquired = false;
     transactionContext().hasRead = false;
     transactionContext().hasWrite = false;
     transactionContext().savepoints.clear();

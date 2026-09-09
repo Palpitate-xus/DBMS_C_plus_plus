@@ -1293,10 +1293,11 @@ public:
             return false;
         }
         context.txnIsolationLevel = level;
+        context.snapshotAcquired = false;
         return true;
     }
     IsolationLevel getIsolationLevel() const { return transactionContext().txnIsolationLevel; }
-    void refreshReadView();  // For READ COMMITTED: re-snapshot before each query
+    void refreshReadView() const;
 
 public:
     std::filesystem::path dbPath(const std::string& dbname) const;
@@ -1922,6 +1923,7 @@ private:
         bool preserveBackupOnRollback = false;
         std::string txnDB;
         bool snapshotImported = false;
+        bool snapshotAcquired = false;
         bool hasRead = false;
         bool hasWrite = false;
         std::string txnBackupPath;
@@ -1997,6 +1999,7 @@ private:
     mutable std::mutex transactionContextsMutex_;
     mutable std::map<std::thread::id, std::unique_ptr<TransactionContext>> transactionContexts_;
     TransactionContext& transactionContext() const;
+    void ensureTransactionSnapshot() const;
     bool markTupleDeletedByCurrentCommand(
         char* rowBuffer, size_t len, uint32_t formatVersion);
     mutable std::mutex catalogSnapshotMutex_;
