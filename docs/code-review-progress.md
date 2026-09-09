@@ -233,6 +233,8 @@
 
 | 344 | TXN-05,06,12 / PROTO-08 | LISTEN/UNLISTEN 原先在命令执行时立即改全局订阅，NOTIFY 也立即入接收队列，所以 ROLLBACK 仍改变监听状态并投递消息，保存点无法撤销；含这些 session-local 动作的事务还能进入 2PC。NotificationManager 现为每个 backend 维护事务订阅快照、去重后的 outgoing 队列和嵌套保存点；仅 COMMIT 原子应用订阅并投递，ROLLBACK/失败自动事务丢弃，ROLLBACK TO/RELEASE 与存储保存点同步，PREPARE 对仍有动作的事务在任何状态转移前返回 `0A000` | 管理器专项回归验证回滚零投递、提交前不可见、提交投递、同事务同 channel/payload 去重、LISTEN 提交生效、UNLISTEN 回滚失效及保存点删除后置通知；完整协议回归新增 `BEGIN; NOTIFY; PREPARE` 的 `0A000` 与事务保持可回滚断言。O0/O2 当前生产构建及完整协议套件通过 | `5e62ed3` |
 
+| 345 | P0-02 / TXN-12 / PROTO-08 | wire session 在下一条命令开头调用 CLI `checkNotifications`，把 `NOTIFY channel payload` 文本混入捕获的查询输出；协议类又没有 `NotificationResponse`，标准客户端永远收不到消息。协议层现发送类型 `A` 的标准消息体（sender PID、channel、payload），在前端消息边界及执行后排空本 backend 队列；CLI 文本轮询移到交互循环，不能再污染协议结果 | 完整 `postgres_protocol_test.py` 以两个同用户名连接验证 `A` 消息字段、回滚零消息、ROLLBACK TO 仅投递保存点前消息、UNLISTEN 回滚/提交差异、同角色双 backend 各自取一份且互不吞队列；O0/O2 生产构建与完整协议套件均通过。空闲 socket 无前端流量时的主动唤醒仍计入 TXN-12/PROTO-08 | `a77e553` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
