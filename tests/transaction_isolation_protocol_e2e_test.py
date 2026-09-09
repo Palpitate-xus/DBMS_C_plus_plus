@@ -54,8 +54,41 @@ def main():
             "/* not local recovery */ ROLLBACK PREPARED 'missing';")
         assert state == "25P02", (state, message)
         _, state, message, _, _, _ = execute(
+            "ROLLBACK /* comment separates keywords */ PREPARED 'missing';")
+        assert state == "25P02", (state, message)
+        _, state, message, _, _, _ = execute(
             "-- leading recovery comment\n"
             "/* outer /* nested */ comment */ ROLLBACK;")
+        assert state is None, (state, message)
+
+        # Comment contents are trivia, not transaction-chain options.  A
+        # failed transaction ended by this COMMIT must return to idle.
+        _, state, message, _, _, _ = execute("BEGIN;")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute("SELECT 1 / 0;")
+        assert state == "22012", (state, message)
+        commit_messages = client.simple_query(
+            server["sock"], "COMMIT /* and chain */;")
+        _, state, message, _, _, _ = runner.decode_wire_result(
+            commit_messages, include_types=True)
+        assert state is None, (state, message)
+        ready = [payload for kind, payload in commit_messages if kind == b"Z"]
+        assert ready == [b"I"], ready
+
+        # Conversely, comments may separate real option tokens.  CHAIN must
+        # start a replacement transaction after rolling the failed one back.
+        _, state, message, _, _, _ = execute("BEGIN;")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute("SELECT 1 / 0;")
+        assert state == "22012", (state, message)
+        chain_messages = client.simple_query(
+            server["sock"], "COMMIT AND /* separator */ CHAIN;")
+        _, state, message, _, _, _ = runner.decode_wire_result(
+            chain_messages, include_types=True)
+        assert state is None, (state, message)
+        ready = [payload for kind, payload in chain_messages if kind == b"Z"]
+        assert ready == [b"T"], ready
+        _, state, message, _, _, _ = execute("ROLLBACK;")
         assert state is None, (state, message)
         print("[TRANSACTION ISOLATION PROTOCOL E2E] passed")
     finally:

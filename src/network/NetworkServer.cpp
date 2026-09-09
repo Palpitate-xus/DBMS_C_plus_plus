@@ -523,8 +523,7 @@ std::string trimText(const std::string& value) {
     return value.substr(first, last - first);
 }
 
-size_t sqlCommandOffset(const std::string& sql) {
-    size_t pos = 0;
+size_t skipSqlTrivia(const std::string& sql, size_t pos) {
     while (true) {
         while (pos < sql.size() &&
                std::isspace(static_cast<unsigned char>(sql[pos]))) ++pos;
@@ -559,15 +558,35 @@ size_t sqlCommandOffset(const std::string& sql) {
     }
 }
 
-std::string firstSqlKeyword(const std::string& sql) {
-    const size_t start = sqlCommandOffset(sql);
-    if (start == std::string::npos) return {};
+size_t sqlCommandOffset(const std::string& sql) {
+    return skipSqlTrivia(sql, 0);
+}
+
+bool readSqlKeyword(const std::string& sql, size_t& position,
+                    std::string& keyword) {
+    const size_t start = skipSqlTrivia(sql, position);
+    if (start == std::string::npos || start >= sql.size() ||
+        (!std::isalnum(static_cast<unsigned char>(sql[start])) &&
+         sql[start] != '_')) {
+        return false;
+    }
     size_t end = start;
     while (end < sql.size() &&
            (std::isalnum(static_cast<unsigned char>(sql[end])) ||
             sql[end] == '_')) ++end;
-    std::string keyword = sql.substr(start, end - start);
-    for (char& c : keyword) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    keyword = sql.substr(start, end - start);
+    for (char& c : keyword) {
+        c = static_cast<char>(
+            std::tolower(static_cast<unsigned char>(c)));
+    }
+    position = end;
+    return true;
+}
+
+std::string firstSqlKeyword(const std::string& sql) {
+    size_t position = 0;
+    std::string keyword;
+    if (!readSqlKeyword(sql, position, keyword)) return {};
     return keyword;
 }
 
@@ -628,15 +647,34 @@ std::string lowerProtocolText(std::string value) {
 }
 
 bool startsWithSqlPhrase(const std::string& sql, const std::string& phrase) {
-    const size_t start = sqlCommandOffset(sql);
-    if (start == std::string::npos) return false;
-    const std::string lower = lowerProtocolText(sql.substr(start));
-    if (lower.size() < phrase.size() || lower.compare(0, phrase.size(), phrase) != 0) {
-        return false;
+    size_t position = 0;
+    std::istringstream expected(phrase);
+    std::string expectedKeyword;
+    while (expected >> expectedKeyword) {
+        std::string actualKeyword;
+        if (!readSqlKeyword(sql, position, actualKeyword) ||
+            actualKeyword != lowerProtocolText(expectedKeyword)) {
+            return false;
+        }
     }
-    return lower.size() == phrase.size() ||
-           std::isspace(static_cast<unsigned char>(lower[phrase.size()])) ||
-           lower[phrase.size()] == ';';
+    if (position >= sql.size()) return true;
+    return std::isspace(static_cast<unsigned char>(sql[position])) ||
+           sql[position] == ';' ||
+           (position + 1 < sql.size() &&
+            ((sql[position] == '-' && sql[position + 1] == '-') ||
+             (sql[position] == '/' && sql[position + 1] == '*')));
+}
+
+std::vector<std::string> leadingSqlKeywords(const std::string& sql,
+                                            size_t maximum) {
+    std::vector<std::string> keywords;
+    size_t position = 0;
+    while (keywords.size() < maximum) {
+        std::string keyword;
+        if (!readSqlKeyword(sql, position, keyword)) break;
+        keywords.push_back(std::move(keyword));
+    }
+    return keywords;
 }
 
 std::string protocolRelationFromQuery(const std::string& sql) {
@@ -1238,14 +1276,27 @@ bool isTransactionRecoveryCommand(const std::string& sql) {
 // session-local objects, undo records, WAL and locks are all cleaned up by one
 // transaction boundary.
 std::string rollbackCommandForAbortedTransaction(const std::string& sql) {
-    const std::string lower = lowerProtocolText(trimText(sql));
-    if (firstSqlKeyword(sql) != "commit" && firstSqlKeyword(sql) != "end") {
+    const std::vector<std::string> keywords = leadingSqlKeywords(sql, 5);
+    if (keywords.empty() ||
+        (keywords.front() != "commit" && keywords.front() != "end")) {
         const size_t start = sqlCommandOffset(sql);
         return start == std::string::npos ? sql : sql.substr(start);
     }
-    if (lower.find("and chain") != std::string::npos) return "ROLLBACK AND CHAIN";
-    if (lower.find("and no chain") != std::string::npos) {
-        return "ROLLBACK AND NO CHAIN";
+    size_t option = 1;
+    if (option < keywords.size() &&
+        (keywords[option] == "work" || keywords[option] == "transaction")) {
+        ++option;
+    }
+    if (option < keywords.size() && keywords[option] == "and") {
+        ++option;
+        bool noChain = false;
+        if (option < keywords.size() && keywords[option] == "no") {
+            noChain = true;
+            ++option;
+        }
+        if (option < keywords.size() && keywords[option] == "chain") {
+            return noChain ? "ROLLBACK AND NO CHAIN" : "ROLLBACK AND CHAIN";
+        }
     }
     return "ROLLBACK";
 }
