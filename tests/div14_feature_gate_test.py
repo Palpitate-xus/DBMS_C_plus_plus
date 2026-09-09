@@ -646,6 +646,64 @@ def main():
         viewer.sendall(typed(b"X"))
         viewer.close()
 
+        # DIV-09: extended SQL is only a typed wrapper over the logical slot
+        # runtime. Physical slots remain gated until physical replication is
+        # real, and durable slot mutations cannot escape transaction rollback.
+        expect_0a000(sock, "CREATE REPLICATION SLOT div9_physical PHYSICAL",
+                     "fake physical replication slot")
+        expect_command_tag(sock, "BEGIN", "transactional slot create")
+        expect_error(
+            sock,
+            "CREATE REPLICATION SLOT div9_tx LOGICAL dbms_test_decoding",
+            "25001", "transactional slot create")
+        expect_command_tag(sock, "ROLLBACK", "transactional slot rollback")
+        create_slot = simple_query(
+            sock,
+            "CREATE REPLICATION SLOT div9_slot LOGICAL dbms_test_decoding")
+        assert [field[3] for field in row_description_fields(create_slot)] \
+            == [25, 20]
+        assert data_row_values(create_slot) == [[b"div9_slot", b"0"]]
+        expect_command_tag(sock, "CREATE TABLE div9_data (id INTEGER)",
+                           "logical slot source table")
+        expect_command_tag(
+            sock, "CREATE PUBLICATION div9_pub FOR TABLE div9_data",
+            "logical slot source publication")
+        expect_command_tag(sock, "INSERT INTO div9_data VALUES (9)",
+                           "logical slot source change")
+        slot_messages = simple_query(sock, "SHOW REPLICATION SLOTS")
+        assert [field[3] for field in row_description_fields(slot_messages)] \
+            == [25, 25, 25, 25, 20, 16, 16, 20]
+        slot_rows = data_row_values(slot_messages)
+        div9_row = next(row for row in slot_rows if row[0] == b"div9_slot")
+        assert div9_row[1:4] == [b"logical", b"dbms_test_decoding", b"info"]
+        assert div9_row[7] == b"1", div9_row
+        change_messages = simple_query(
+            sock, "SHOW LOGICAL CHANGES FOR SLOT div9_slot")
+        assert row_description_fields(change_messages)[0][3] == 25
+        change_rows = data_row_values(change_messages)
+        assert len(change_rows) == 1 and \
+            b"table div9_data: INSERT:" in change_rows[0][0], change_rows
+        expect_command_tag(sock, "BEGIN", "transactional slot confirm")
+        expect_error(sock, "SHOW LOGICAL CONFIRM FOR SLOT div9_slot", "25001",
+                     "transactional slot confirm")
+        expect_command_tag(sock, "ROLLBACK", "slot confirm rollback")
+        confirm_messages = simple_query(
+            sock, "SHOW LOGICAL CONFIRM FOR SLOT div9_slot")
+        assert row_description_fields(confirm_messages)[0][3] == 20
+        assert len(data_row_values(confirm_messages)) == 1
+        assert data_row_values(simple_query(
+            sock, "SHOW LOGICAL CHANGES FOR SLOT div9_slot")) == []
+        expect_command_tag(sock, "BEGIN", "transactional slot drop")
+        expect_error(sock, "DROP REPLICATION SLOT div9_slot", "25001",
+                     "transactional slot drop")
+        expect_command_tag(sock, "ROLLBACK", "slot drop rollback")
+        expect_command_tag(sock, "DROP REPLICATION SLOT div9_slot",
+                           "drop logical slot")
+        expect_command_tag(sock, "DROP PUBLICATION div9_pub",
+                           "drop logical slot publication")
+        assert all(row[0] != b"div9_slot" for row in data_row_values(
+            simple_query(sock, "SHOW REPLICATION SLOTS")))
+
         # DIV-11 in extended mode: project commands work again.
         assert setting_value(simple_query(sock, "SELECT * FROM pg_settings"),
                              "auto_vacuum") == b"on"

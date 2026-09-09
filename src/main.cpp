@@ -11786,6 +11786,11 @@ static bool handleAlterPublication(const string& sql, Session& s) {
 static bool handleCreateReplicationSlotSql(const string& sql, Session& s) {
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
+    if (g_engine.inTransaction()) {
+        cout << "ERROR: CREATE REPLICATION SLOT cannot run inside a "
+                "transaction block (SQLSTATE 25001)" << endl;
+        return true;
+    }
     string rest = trim(sql.substr(23));
     size_t sp = rest.find(' ');
     string name = (sp == string::npos) ? rest : rest.substr(0, sp);
@@ -11805,39 +11810,65 @@ static bool handleCreateReplicationSlotSql(const string& sql, Session& s) {
             if (p == plugin) known = true;
         }
         if (!known) {
-            cout << "ERROR: output plugin " << plugin << " is not available" << endl;
+            cout << "ERROR: output plugin " << plugin
+                 << " is not available (SQLSTATE 42704)" << endl;
+            return true;
+        }
+        if (dbms::ReplicationManager::instance().findSlot(name)) {
+            cout << "ERROR: replication slot \"" << name
+                 << "\" already exists (SQLSTATE 42710)" << endl;
             return true;
         }
         if (!dbms::ReplicationManager::instance().createReplicationSlot(
                 name, "logical", plugin, s.currentDB)) {
-            cout << "ERROR: cannot create replication slot " << name << endl;
+            cout << "ERROR: cannot create replication slot " << name
+                 << " (SQLSTATE 58030)" << endl;
             return true;
         }
+        publishStructuredUtilityResult(
+            {"slot_name", "restart_lsn"}, {"text", "int8"},
+            {{name, "0"}}, {{false, false}}, "SELECT 1");
         cout << "CREATE REPLICATION SLOT succeeded" << endl;
         return false;
     }
     if (kind == "physical" || kind.empty()) {
-        if (!dbms::ReplicationManager::instance().createReplicationSlot(name, "physical")) {
-            cout << "ERROR: cannot create replication slot " << name << endl;
-            return true;
-        }
-        cout << "CREATE REPLICATION SLOT succeeded" << endl;
-        return false;
+        cout << dbms::featureNotSupportedError(
+            "physical replication slots require a WAL sender/receiver runtime")
+             << endl;
+        return true;
     }
-    cout << "SQL syntax error: slot type must be LOGICAL or PHYSICAL" << endl;
+    cout << "SQL syntax error: slot type must be LOGICAL or PHYSICAL "
+            "(SQLSTATE 42601)" << endl;
     return true;
 }
 
 static bool handleDropReplicationSlotSql(const string& sql, Session& s) {
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
+    if (g_engine.inTransaction()) {
+        cout << "ERROR: DROP REPLICATION SLOT cannot run inside a transaction "
+                "block (SQLSTATE 25001)" << endl;
+        return true;
+    }
     string name = trim(sql.substr(22));
     if (name.empty()) {
         cout << "SQL syntax error: DROP REPLICATION SLOT requires a name" << endl;
         return true;
     }
+    const auto slot = dbms::ReplicationManager::instance().findSlot(name);
+    if (!slot) {
+        cout << "ERROR: replication slot \"" << name
+             << "\" does not exist (SQLSTATE 42704)" << endl;
+        return true;
+    }
+    if (slot->active) {
+        cout << "ERROR: replication slot \"" << name
+             << "\" is active (SQLSTATE 55006)" << endl;
+        return true;
+    }
     if (!dbms::ReplicationManager::instance().dropReplicationSlot(name)) {
-        cout << "ERROR: replication slot " << name << " does not exist" << endl;
+        cout << "ERROR: could not persist removal of replication slot \""
+             << name << "\" (SQLSTATE 58030)" << endl;
         return true;
     }
     cout << "DROP REPLICATION SLOT succeeded" << endl;
@@ -16216,7 +16247,29 @@ if (sql.rfind("backup database", 0) == 0) {
             }
         }
         if (rest == "replication slots") {
+            if (!checkAdmin(s)) return true;
             const auto slots = dbms::ReplicationManager::instance().listSlots();
+            vector<vector<string>> rows;
+            vector<vector<bool>> nulls;
+            for (const auto& slot : slots) {
+                rows.push_back({slot.name, slot.slotType, slot.plugin,
+                                slot.database,
+                                std::to_string(slot.restartLsn),
+                                slot.active ? "t" : "f",
+                                slot.invalidated ? "t" : "f",
+                                std::to_string(
+                                    dbms::LogicalChangeStore::instance().depth(
+                                        slot.name))});
+                nulls.push_back({false, false, slot.plugin.empty(),
+                                 slot.database.empty(), false, false, false,
+                                 false});
+            }
+            publishStructuredUtilityResult(
+                {"name", "type", "plugin", "database", "restart_lsn",
+                 "active", "invalidated", "changes"},
+                {"text", "text", "text", "text", "int8", "bool",
+                 "bool", "int8"},
+                rows, nulls, "SHOW");
             cout << "name type plugin active invalidated changes" << endl;
             for (const auto& slot : slots) {
                 cout << slot.name << " " << slot.slotType << " " << slot.plugin << " "
@@ -16227,49 +16280,66 @@ if (sql.rfind("backup database", 0) == 0) {
             return false;
         }
         if (rest.rfind("logical changes for slot ", 0) == 0) {
+            if (!checkAdmin(s)) return true;
             string slotName = trim(rest.substr(25));
             auto slot = dbms::ReplicationManager::instance().findSlot(slotName);
             if (!slot || slot->slotType != "logical" ||
                 slot->database != s.currentDB) {
-                cout << "ERROR: logical replication slot " << slotName
-                     << " does not exist" << endl;
+                cout << "ERROR: logical replication slot \"" << slotName
+                     << "\" does not exist (SQLSTATE 42704)" << endl;
                 return true;
             }
             if (slot->invalidated) {
-                cout << "ERROR: logical replication slot " << slotName
-                     << " is invalidated" << endl;
+                cout << "ERROR: logical replication slot \"" << slotName
+                     << "\" is invalidated (SQLSTATE 55000)" << endl;
                 return true;
             }
             const auto peek = dbms::LogicalChangeStore::instance().peek(
                 slotName, slot->restartLsn, 100);
+            vector<vector<string>> rows;
+            vector<vector<bool>> nulls;
             for (const auto& batch : peek.batches) {
                 string out;
                 if (!dbms::LogicalDecoder::format(slot->plugin, batch, out)) {
-                    cout << "ERROR: output plugin failed" << endl;
+                    cout << "ERROR: output plugin failed (SQLSTATE 58030)"
+                         << endl;
                     return true;
                 }
+                rows.push_back({out});
+                nulls.push_back({false});
                 cout << out;
             }
+            publishStructuredUtilityResult(
+                {"data"}, {"text"}, rows, nulls,
+                "SELECT " + std::to_string(rows.size()));
             if (peek.batches.empty()) cout << "(no pending changes)" << endl;
             return false;
         }
         if (rest.rfind("logical confirm for slot ", 0) == 0) {
-            string slotName = trim(rest.substr(24));
+            if (!checkAdmin(s)) return true;
+            if (g_engine.inTransaction()) {
+                cout << "ERROR: SHOW LOGICAL CONFIRM cannot run inside a "
+                        "transaction block (SQLSTATE 25001)" << endl;
+                return true;
+            }
+            string slotName = trim(rest.substr(25));
             auto slot = dbms::ReplicationManager::instance().findSlot(slotName);
             if (!slot || slot->slotType != "logical" ||
                 slot->database != s.currentDB) {
-                cout << "ERROR: logical replication slot " << slotName
-                     << " does not exist" << endl;
+                cout << "ERROR: logical replication slot \"" << slotName
+                     << "\" does not exist (SQLSTATE 42704)" << endl;
                 return true;
             }
             if (slot->invalidated) {
-                cout << "ERROR: logical replication slot " << slotName
-                     << " is invalidated" << endl;
+                cout << "ERROR: logical replication slot \"" << slotName
+                     << "\" is invalidated (SQLSTATE 55000)" << endl;
                 return true;
             }
             const auto peek = dbms::LogicalChangeStore::instance().peek(
                 slotName, slot->restartLsn, 4096);
             if (peek.batches.empty()) {
+                publishStructuredUtilityResult(
+                    {"confirmed_lsn"}, {"int8"}, {}, {}, "SELECT 0");
                 cout << "(nothing to confirm)" << endl;
                 return false;
             }
@@ -16277,9 +16347,12 @@ if (sql.rfind("backup database", 0) == 0) {
             if (!dbms::ReplicationManager::instance().confirmLogicalSlotLsn(
                     slotName, static_cast<int64_t>(confirmed))) {
                 cout << "ERROR: cannot confirm logical replication slot "
-                     << slotName << endl;
+                     << slotName << " (SQLSTATE 58030)" << endl;
                 return true;
             }
+            publishStructuredUtilityResult(
+                {"confirmed_lsn"}, {"int8"},
+                {{std::to_string(confirmed)}}, {{false}}, "SELECT 1");
             cout << "confirmed up to lsn " << confirmed << endl;
             return false;
         }
