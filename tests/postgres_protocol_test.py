@@ -686,6 +686,26 @@ def main():
         assert data_row_values(simple_query(
             sock, "SELECT id FROM protocol_batch_atomic WHERE id = 82")) == []
 
+        # Control messages have fixed bodies.  A NUL-terminated Query cannot
+        # hide trailing SQL, and malformed Flush/Sync frames must produce a
+        # protocol-violation error without desynchronizing the connection.
+        sock.sendall(typed(b"Q", b"SELECT 11\0SELECT 12\0"))
+        malformed_query = read_until_ready(sock)
+        assert not any(kind == b"D" for kind, _ in malformed_query), malformed_query
+        assert b"C08P01\0" in next(
+            body for kind, body in malformed_query if kind == b"E")
+        assert malformed_query[-1] == (b"Z", b"I"), malformed_query
+
+        sock.sendall(typed(b"H", b"garbage") + typed(b"S"))
+        malformed_flush = read_until_ready(sock)
+        assert b"C08P01\0" in next(
+            body for kind, body in malformed_flush if kind == b"E")
+        sock.sendall(typed(b"S", b"garbage"))
+        malformed_sync = read_until_ready(sock)
+        assert b"C08P01\0" in next(
+            body for kind, body in malformed_sync if kind == b"E")
+        assert data_row_values(simple_query(sock, "SELECT 13")) == [[b"13"]]
+
         # LISTEN/NOTIFY is backend-local, transactional, and transported as
         # protocol NotificationResponse rather than text prepended to a query.
         notify_sock = socket.socket()

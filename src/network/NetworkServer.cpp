@@ -2028,13 +2028,21 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         PgFrontendMessage message;
         if (!protocol.readMessage(message, protocolError)) break;
         if (!sendPendingNotifications(protocol, session.pid)) break;
-        if (message.type == 'X') break;
+        if (message.type == 'X') {
+            if (!message.payload.empty()) {
+                protocol.sendErrorResponse("FATAL", "08P01",
+                                           "malformed Terminate message");
+            }
+            break;
+        }
         if (extendedQueryError && message.type != 'S') continue;
         if (message.type == 'Q') {
-            std::string sql = messageCString(message);
-            if (sql.empty() && message.payload.size() != 1) {
+            size_t queryOffset = 0;
+            std::string sql;
+            if (!PostgresProtocol::readCString(message.payload, queryOffset, sql) ||
+                queryOffset != message.payload.size()) {
                 protocol.sendErrorResponse("ERROR", "08P01", "malformed Query message");
-                protocol.sendReadyForQuery('E');
+                protocol.sendReadyForQuery(readyStatus());
                 continue;
             }
             updateProcessInfo(pid, "Query", "executing", trimText(sql));
@@ -2451,12 +2459,26 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             continue;
         }
         if (message.type == 'S') {
+            if (!message.payload.empty()) {
+                protocol.sendErrorResponse("ERROR", "08P01",
+                                           "malformed Sync message");
+                protocol.sendReadyForQuery(readyStatus());
+                extendedQueryError = false;
+                continue;
+            }
             if (!sendPendingNotifications(protocol, session.pid)) break;
             protocol.sendReadyForQuery(readyStatus());
             extendedQueryError = false;
             continue;
         }
-        if (message.type == 'H') continue;
+        if (message.type == 'H') {
+            if (!message.payload.empty()) {
+                protocol.sendErrorResponse("ERROR", "08P01",
+                                           "malformed Flush message");
+                extendedQueryError = true;
+            }
+            continue;
+        }
         protocol.sendErrorResponse("ERROR", "08P01", "unsupported frontend message");
         extendedQueryError = true;
     }
