@@ -444,6 +444,8 @@ def main():
         expect_command_tag(sock, "BEGIN", "BEGIN")
         expect_0a000(sock, "CREATE EXTENSION hstore", "in-txn gated create")
         expect_command_tag(sock, "COMMIT", "COMMIT")
+        expect_error(sock, "SHOW COMPAT OBJECTS", "42601",
+                     "postgresql18 fake-object introspection")
 
         # No compatibility records were written: the store must not exist in
         # any database directory of the work dir.
@@ -451,16 +453,22 @@ def main():
             if ".pg_compat_objects" in files:
                 raise AssertionError(
                     "compat object store created in %s despite 0A000 gate" % root)
+        expect_error(sock, "SHOW COMPAT OBJECTS", "42601",
+                     "removed PostgreSQL-mode compat catalog")
 
         # Extended mode does not make unimplemented PostgreSQL objects real.
         expect_command_tag(sock, "SET compatibility_mode = extended",
                            "SET compatibility_mode")
+        expect_0a000(sock, "SHOW COMPAT OBJECTS",
+                     "removed extended-mode compat catalog")
         expect_0a000(sock, "CREATE EXTENSION hstore",
                      "extended CREATE EXTENSION")
         expect_0a000(sock,
                      "IMPORT FOREIGN SCHEMA fs FROM SERVER s1 INTO public",
                      "extended IMPORT FOREIGN SCHEMA")
         expect_0a000(sock, "LOAD 'auto_explain'", "extended LOAD")
+        expect_0a000(sock, "SHOW COMPAT OBJECTS",
+                     "extended fake-object introspection")
         # DIV-08 remains permanently unsupported in extended mode too.  Test
         # create/alter/drop independently so a future generic compat runtime
         # cannot accidentally revive a fake assertion catalog entry.

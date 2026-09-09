@@ -29,12 +29,6 @@ bool isExtendedCompatMode(const std::string& mode);
 // rely on extended-mode commands.
 std::string defaultCompatibilityMode();
 
-// Object kinds understood by the compatibility-object layer in main.cpp.
-// Keep in sync with compatCreatePrefixes()/compatAlterDropPrefixes().
-// Generic compatibility dispatch has no runtime-backed object kind.  Real
-// handlers must consume their supported verb before this layer is reached.
-bool compatKindHasRuntime(const std::string& kind);
-
 // Kinds that must stay feature_not_supported in every compatibility mode
 // because PostgreSQL 18 itself does not implement them (DIV-08: SQL
 // assertions) or because no honest runtime can exist yet.

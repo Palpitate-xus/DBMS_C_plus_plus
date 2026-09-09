@@ -5041,60 +5041,9 @@ static bool saveConversions(const string& dbname, const map<string, ConversionIn
     return true;
 }
 
-struct CatalogObjectInfo {
-    string kind;
-    string name;
-    string owner;
-    string definition;
-    string options;
-};
-
 bool checkAdmin(const Session& s);
 bool checkDB(const Session& s);
 bool execute(const std::string& rawSql, Session& s);
-
-static std::filesystem::path compatObjectCatalogPath(const string& dbname) {
-    return g_engine.dbPath(dbname) / ".pg_compat_objects";
-}
-
-static string compatObjectKey(const string& kind, const string& name) {
-    return kind + "|" + name;
-}
-
-static map<string, CatalogObjectInfo> loadCompatObjects(const string& dbname) {
-    map<string, CatalogObjectInfo> result;
-    ifstream in(compatObjectCatalogPath(dbname));
-    string line;
-    while (getline(in, line)) {
-        if (trim(line).empty()) continue;
-        auto parts = splitByDelimiter(line, '|');
-        if (parts.size() < 5) continue;
-        CatalogObjectInfo obj;
-        obj.kind = catalogUnescape(parts[0]);
-        obj.name = catalogUnescape(parts[1]);
-        obj.owner = catalogUnescape(parts[2]);
-        obj.definition = catalogUnescape(parts[3]);
-        obj.options = catalogUnescape(parts[4]);
-        if (!obj.kind.empty() && !obj.name.empty()) {
-            result[compatObjectKey(obj.kind, obj.name)] = obj;
-        }
-    }
-    return result;
-}
-
-static bool saveCompatObjects(const string& dbname, const map<string, CatalogObjectInfo>& objects) {
-    ofstream out(compatObjectCatalogPath(dbname), ios::trunc);
-    if (!out) return false;
-    for (const auto& kv : objects) {
-        const auto& obj = kv.second;
-        out << catalogEscape(obj.kind) << "|"
-            << catalogEscape(obj.name) << "|"
-            << catalogEscape(obj.owner) << "|"
-            << catalogEscape(obj.definition) << "|"
-            << catalogEscape(obj.options) << "\n";
-    }
-    return true;
-}
 
 struct CompatObjectPrefix {
     string phrase;
@@ -5232,53 +5181,6 @@ static string firstCompatNameToken(const string& rest) {
     return stripQuotes(trim(s.substr(0, end)));
 }
 
-static string parseUserMappingName(const string& rest) {
-    string s = trim(rest);
-    if (startsWithKeyword(s, "if not exists")) s = trim(s.substr(13));
-    if (startsWithKeyword(s, "if exists")) s = trim(s.substr(9));
-    if (!startsWithKeyword(s, "for")) return "";
-    s = trim(s.substr(3));
-    size_t serverPos = findTopLevelKeyword(s, "server");
-    if (serverPos == string::npos) return "";
-    string userName = trim(s.substr(0, serverPos));
-    string afterServer = trim(s.substr(serverPos + 6));
-    string serverName = firstCompatNameToken(afterServer);
-    if (userName.empty() || serverName.empty()) return "";
-    return userName + "@" + serverName;
-}
-
-static string parseTransformName(const string& rest) {
-    string s = trim(rest);
-    if (!startsWithKeyword(s, "for")) return "";
-    s = trim(s.substr(3));
-    size_t langPos = findTopLevelKeyword(s, "language");
-    if (langPos == string::npos) return "";
-    string typeName = trim(s.substr(0, langPos));
-    string langName = firstCompatNameToken(trim(s.substr(langPos + 8)));
-    if (typeName.empty() || langName.empty()) return "";
-    return typeName + "/" + langName;
-}
-
-static string parseCompatObjectName(const string& kind, const string& rest) {
-    if (kind == "user_mapping") return parseUserMappingName(rest);
-    if (kind == "transform") return parseTransformName(rest);
-    if (kind == "operator" || kind == "aggregate") {
-        string s = stripTrailingDropBehavior(rest);
-        if (startsWithKeyword(s, "if exists")) s = trim(s.substr(9));
-        size_t lp = s.find('(');
-        if (lp != string::npos) return stripQuotes(trim(s.substr(0, lp)));
-        return firstCompatNameToken(s);
-    }
-    if (kind == "rule") {
-        string name = firstCompatNameToken(rest);
-        return name;
-    }
-    string s = stripTrailingDropBehavior(rest);
-    if (startsWithKeyword(s, "if not exists")) s = trim(s.substr(13));
-    if (startsWithKeyword(s, "if exists")) s = trim(s.substr(9));
-    return firstCompatNameToken(s);
-}
-
 static bool isCompatObjectCreate(const string& sql) {
     if (!startsWithKeyword(sql, "create")) return false;
     string rest = trim(sql.substr(6));
@@ -5293,171 +5195,41 @@ static bool isCompatObjectCreate(const string& sql) {
 }
 
 static bool handleCreateCompatObject(const string& sql, Session& s) {
-    if (!checkAdmin(s)) return true;
-    if (!checkDB(s)) return true;
+    (void)s;
     string rest = trim(sql.substr(6));
-    bool orReplace = false;
-    string leadingOptions;
     if (startsWithKeyword(rest, "or replace")) {
-        orReplace = true;
         rest = trim(rest.substr(10));
     }
     while (startsWithKeyword(rest, "trusted") || startsWithKeyword(rest, "procedural")) {
         size_t sp = rest.find(' ');
-        string opt = (sp == string::npos) ? rest : rest.substr(0, sp);
-        leadingOptions += (leadingOptions.empty() ? "" : " ") + opt;
         if (sp == string::npos) return false;
         rest = trim(rest.substr(sp + 1));
     }
     string kind, phrase;
     if (!consumeCompatPrefix(rest, compatCreatePrefixes(), kind, phrase)) return false;
-    // DIV-14/CAT-22: refuse to fake-succeed.  Without a runtime behind the
-    // kind, the command must fail with feature_not_supported instead of
-    // storing a compatibility record and reporting success.
-    if (!dbms::compatKindHasRuntime(kind) ||
-        dbms::compatKindAlwaysUnsupported(kind)) {
-        cout << dbms::featureNotSupportedError(
-            string("CREATE ") + phrase) << endl;
-        return true;
-    }
-    bool ifNotExists = false;
-    if (startsWithKeyword(rest, "if not exists")) {
-        ifNotExists = true;
-        rest = trim(rest.substr(13));
-    }
-    string name = parseCompatObjectName(kind, rest);
-    if (name.empty()) {
-        cout << "SQL syntax error: CREATE " << phrase << " requires an object name" << endl;
-        return true;
-    }
-    auto objects = loadCompatObjects(s.currentDB);
-    string key = compatObjectKey(kind, name);
-    if (objects.count(key) && !orReplace) {
-        if (ifNotExists) {
-            cout << phrase << " " << name << " already exists, skipping" << endl;
-            return false;
-        }
-        cout << phrase << " " << name << " already exists" << endl;
-        return true;
-    }
-    bool existed = objects.count(key) > 0;
-    objects[key] = {kind, name, s.username, sql, leadingOptions};
-    if (!saveCompatObjects(s.currentDB, objects)) {
-        cout << "Create " << phrase << " failed" << endl;
-        return true;
-    }
-    cout << phrase << " " << name << (orReplace && existed ? " replaced" : " created") << endl;
-    return false;
+    // A runtime-backed CREATE must be consumed by its typed handler before
+    // reaching this compatibility fallback.  The fallback has no catalog,
+    // no write path and no successful command tag.
+    cout << dbms::featureNotSupportedError(string("CREATE ") + phrase) << endl;
+    return true;
 }
 
 static bool handleAlterCompatObject(const string& sql, Session& s) {
-    if (!checkAdmin(s)) return true;
-    if (!checkDB(s)) return true;
+    (void)s;
     string rest = trim(sql.substr(5));
     string kind, phrase;
     if (!consumeCompatPrefix(rest, compatAlterDropPrefixes(), kind, phrase)) return false;
-    // DIV-14/CAT-22: no runtime behind the kind means ALTER must not report
-    // success against a compatibility record.
-    if (!dbms::compatKindHasRuntime(kind) ||
-        dbms::compatKindAlwaysUnsupported(kind)) {
-        cout << dbms::featureNotSupportedError(
-            string("ALTER ") + phrase) << endl;
-        return true;
-    }
-    string name = parseCompatObjectName(kind, rest);
-    if (name.empty()) {
-        cout << "SQL syntax error: ALTER " << phrase << " requires an object name" << endl;
-        return true;
-    }
-    auto objects = loadCompatObjects(s.currentDB);
-    string key = compatObjectKey(kind, name);
-    auto it = objects.find(key);
-    if (it == objects.end()) {
-        objects[key] = {kind, name, s.username, "", ""};
-        it = objects.find(key);
-    }
-    size_t ownerPos = findTopLevelKeyword(rest, "owner to");
-    if (ownerPos != string::npos) {
-        string owner = firstCompatNameToken(trim(rest.substr(ownerPos + 8)));
-        if (!owner.empty()) it->second.owner = owner;
-    }
-    size_t renamePos = findTopLevelKeyword(rest, "rename to");
-    if (renamePos != string::npos) {
-        string newName = firstCompatNameToken(trim(rest.substr(renamePos + 9)));
-        if (newName.empty()) {
-            cout << "SQL syntax error: ALTER " << phrase << " RENAME TO requires a new name" << endl;
-            return true;
-        }
-        string newKey = compatObjectKey(kind, newName);
-        if (objects.count(newKey)) {
-            cout << phrase << " " << newName << " already exists" << endl;
-            return true;
-        }
-        auto info = it->second;
-        objects.erase(it);
-        info.name = newName;
-        info.definition = sql;
-        objects[newKey] = info;
-        saveCompatObjects(s.currentDB, objects);
-        cout << phrase << " " << name << " renamed to " << newName << endl;
-        return false;
-    }
-    it->second.definition = sql;
-    saveCompatObjects(s.currentDB, objects);
-    cout << phrase << " " << name << " altered" << endl;
-    return false;
+    cout << dbms::featureNotSupportedError(string("ALTER ") + phrase) << endl;
+    return true;
 }
 
 static bool handleDropCompatObject(const string& sql, Session& s) {
-    if (!checkAdmin(s)) return true;
-    if (!checkDB(s)) return true;
+    (void)s;
     string rest = trim(sql.substr(4));
     string kind, phrase;
     if (!consumeCompatPrefix(rest, compatDropPrefixes(), kind, phrase)) return false;
-    // DIV-14/CAT-22: dropping a compatibility record is not dropping a real
-    // object; report feature_not_supported unless a runtime exists.
-    if (!dbms::compatKindHasRuntime(kind) ||
-        dbms::compatKindAlwaysUnsupported(kind)) {
-        cout << dbms::featureNotSupportedError(
-            string("DROP ") + phrase) << endl;
-        return true;
-    }
-    bool ifExists = false;
-    if (startsWithKeyword(rest, "if exists")) {
-        ifExists = true;
-        rest = trim(rest.substr(9));
-    }
-    auto objects = loadCompatObjects(s.currentDB);
-    bool allOk = true;
-    vector<string> names;
-    if (kind == "user_mapping" || kind == "transform" || kind == "operator" || kind == "aggregate") {
-        names.push_back(parseCompatObjectName(kind, rest));
-    } else {
-        for (auto item : splitTopLevelComma(stripTrailingDropBehavior(rest))) {
-            item = stripTrailingDropBehavior(item);
-            string name = parseCompatObjectName(kind, item);
-            if (!name.empty()) names.push_back(name);
-        }
-    }
-    if (names.empty()) {
-        cout << "SQL syntax error: DROP " << phrase << " requires an object name" << endl;
-        return true;
-    }
-    for (const auto& name : names) {
-        string key = compatObjectKey(kind, name);
-        auto it = objects.find(key);
-        if (it == objects.end()) {
-            if (!ifExists) {
-                cout << phrase << " " << name << " not exist" << endl;
-                allOk = false;
-            }
-            continue;
-        }
-        objects.erase(it);
-        cout << phrase << " " << name << " dropped" << endl;
-    }
-    saveCompatObjects(s.currentDB, objects);
-    return !allOk;
+    cout << dbms::featureNotSupportedError(string("DROP ") + phrase) << endl;
+    return true;
 }
 
 static bool handleImportForeignSchema(const string& sql, Session& s) {
@@ -5468,29 +5240,6 @@ static bool handleImportForeignSchema(const string& sql, Session& s) {
     // record and claimed the schema was imported.
     cout << dbms::featureNotSupportedError(
         "IMPORT FOREIGN SCHEMA") << endl;
-    return true;
-}
-
-static bool showCompatObjects(Session& s, const string& rest) {
-    if (!checkDB(s)) return true;
-    string filter = trim(rest);
-    if (startsWithKeyword(filter, "compat objects")) filter = trim(filter.substr(14));
-    else if (startsWithKeyword(filter, "compatibility objects")) filter = trim(filter.substr(21));
-    else if (startsWithKeyword(filter, "pg compat objects")) filter = trim(filter.substr(17));
-    else return false;
-    auto objects = loadCompatObjects(s.currentDB);
-    if (objects.empty()) {
-        cout << "No compatibility objects found" << endl;
-        return true;
-    }
-    cout << "kind name owner definition" << endl;
-    for (const auto& kv : objects) {
-        const auto& obj = kv.second;
-        if (!filter.empty() && obj.kind != filter) continue;
-        string def = obj.definition;
-        if (def.size() > 80) def = def.substr(0, 77) + "...";
-        cout << obj.kind << " " << obj.name << " " << obj.owner << " " << def << endl;
-    }
     return true;
 }
 
@@ -16360,8 +16109,12 @@ if (sql.rfind("backup database", 0) == 0) {
         if (startsWithKeyword(rest, "compat objects") ||
             startsWithKeyword(rest, "compatibility objects") ||
             startsWithKeyword(rest, "pg compat objects")) {
-            showCompatObjects(s, rest);
-            return false;
+            if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
+                cout << dbms::postgresSyntaxError("SHOW COMPAT OBJECTS") << endl;
+            } else {
+                cout << dbms::featureNotSupportedError("SHOW COMPAT OBJECTS") << endl;
+            }
+            return true;
         }
         if (rest == "domains") {
             if (!checkDB(s)) return true;

@@ -22,15 +22,6 @@ std::string defaultCompatibilityMode() {
     return cached;
 }
 
-bool compatKindHasRuntime(const std::string& kind) {
-    (void)kind;
-    // A real handler must consume the command before generic compatibility
-    // dispatch.  Falling through here proves that this specific operation
-    // has no runtime, even if another verb for the same kind does (for
-    // example CREATE/DROP PUBLICATION versus ALTER PUBLICATION).
-    return false;
-}
-
 bool compatKindAlwaysUnsupported(const std::string& kind) {
     // DIV-08: PostgreSQL 18 itself has no SQL ASSERTION implementation;
     // neither compatibility mode may fake one.  Keep this as a named
