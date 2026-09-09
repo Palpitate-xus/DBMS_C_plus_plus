@@ -291,6 +291,8 @@
 
 | 373 | DIV-14 | 运行时与手册已删除 compatibility-object record layer，但 `Session.h` 仍注释 extended 会启用该记录层，容易让维护者据此恢复已禁止的 metadata-only 假对象路径。注释改为只允许有真实 runtime 的项目扩展，并明确 unsupported PostgreSQL object 绝不能变成兼容记录；静态防回归门现同时扫描 Session contract | no-fake-sidecar、完整 fallback registry 和 compatibility contract 三个静态回归通过，diff check 通过。DIV-14 保持 complete | `0c40fdb` |
 
+| 374 | DIV-13 | MANUAL 仍声称 startup `server_version` 为已不存在的 `DBMS-C++ protocol/3.0`，而生产网络入口实际上报 `18.0 DBMS-C++ 0.2.0`；这会让用户和测试对产品身份及客户端 major-version 解析得到相反结论。手册改为精确值，并说明 18.0 前缀只供客户端解析、DBMS 后缀才是产品身份、该字段不是 PG18 兼容认证；兼容契约回归把源码表达式、产品 SemVer 和手册值绑定 | compatibility-contract、documentation-status、version-consistency 三项回归及 diff check 通过；上一项完整协议已精确验证相同 ParameterStatus。DIV-13 改为 partial：显式 data directory、CWD 状态迁移和 cluster magic/system-id 仍未实现 | `0289004` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
