@@ -189,6 +189,8 @@
 
 | 322 | P0-02 / QRY-06 / PROTO-04 | 集合运算的 legacy 回退会递归执行两个 SELECT 操作数并组合捕获的显示行，但未隔离操作数发布的结构化协议结果；右侧聚合的单行 `DmlResult` 因而覆盖外层 UNION 已正确生成的四行结果，客户端收到零列或错误行数。每个嵌套操作数现在在执行前清空旧结果、执行后消费自身结果，只让外层集合结果进入协议转换 | PostgreSQL 协议回归增强为保留完整消息诊断；`SELECT id ... UNION SELECT count(*) ...` 修复前返回零 DataRow/`SELECT 1`，修复后返回 1–4 四行并让完整协议套件继续运行到后续独立失败点；`set_operation_volcano_test`、Python 语法检查及 `main.cpp`/NetworkServer O0/O2 编译通过。集合列 common type/collation 与全结构化输出仍计入 QRY-06 | `064cc45` |
 
+| 323 | CAT-18 / QRY-13 | statement-level DELETE trigger 已收集 OLD TABLE 行并物化为 session 临时表，但该路径没有像 CTE/derived table 一样登记“命令内部关系”；command-ID 可见性因而把本命令插入的 transition rows 隐藏起来，trigger action 的 `INSERT ... SELECT` 读取空集。物化后立即登记物理临时关系，使 transition producer/consumer 在同一 SQL command 内可见，同时不放宽普通用户表的同命令 snapshot | 完整 PostgreSQL 协议测试修复前在 `tt_archive` 断言得到空行，修复后 OLD TABLE 的两行被归档、剩余源行和 alias 清理均正确，套件全部通过；`trigger_test` 全部通过，`main.cpp` O0/O2 编译通过，实际 PostgreSQL 122 组差分 `failed=0` | `f76d8db` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
