@@ -13,7 +13,8 @@ import tempfile
 import time
 
 
-DBMS_MAIN = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "dbms_main"))
+DBMS_MAIN = os.path.abspath(os.environ.get(
+    "DBMS_MAIN", os.path.join(os.path.dirname(__file__), "..", "dbms_main")))
 SOCKET_TIMEOUT = float(os.environ.get("DBMS_PROTOCOL_TEST_TIMEOUT", "10"))
 STARTUP_TIMEOUT = float(os.environ.get("DBMS_PROTOCOL_STARTUP_TIMEOUT", "15"))
 

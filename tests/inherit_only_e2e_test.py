@@ -18,7 +18,8 @@ import shutil
 import sys
 import tempfile
 
-DBMS_MAIN = os.path.join(os.path.dirname(__file__), "..", "dbms_main")
+DBMS_MAIN = os.path.abspath(os.environ.get(
+    "DBMS_MAIN", os.path.join(os.path.dirname(__file__), "..", "dbms_main")))
 COMMAND_TIMEOUT = float(os.environ.get("DBMS_INHERIT_TEST_TIMEOUT", "60"))
 
 
