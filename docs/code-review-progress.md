@@ -251,6 +251,8 @@
 
 | 353 | FUNC-01 / TXN-11,12 / PROTO-08 / OPS-02,05 | 待投递通知原按监听 backend 复制完整 payload 且没有总容量上限，慢监听者可让进程内存持续增长；存储事务还会先提交数据再发布通知，无法按 PostgreSQL 的 pre-commit 队列失败语义回滚。现以共享逻辑队列项和最后接收者引用计数限制资源，按启动参数 `max_notify_queue_pages`（默认 1048576 个 8KB 页）设置容量；发送事务在任何 durable commit 前原子预留，满队列返回 `54000` 并回滚数据。新增 volatile `pg_notification_queue_usage()`，返回活动队列占比和 `float8` 元数据；运行期配置只持久化为待重启值 | 管理器回归覆盖双监听者共享容量、逐接收释放、预留竞争、满队列保持可回滚及清空后重配；配置回归覆盖解析/验证/保存。完整 wire 套件用一页队列验证活动值不被运行期设置改变、占用率、满队列 `54000`、同事务 INSERT 回滚、首条大 payload 完整交付及释放后归零。表达式、DDL 事务、DIV-14、O0/O2 入口和 122 组差分全部通过 | `96e8a83` |
 
+| 354 | FUNC-01 / TXN-12 / PROTO-04 | 缺少 PostgreSQL 的 `pg_listening_channels()`，客户端无法查询当前 backend 在当前 database 已生效的监听集合。新增 fromless set-returning 路径：按 channel 排序输出零到多行，可与普通投影列组合并保留 text/OID 25 元数据；查询只读取已提交订阅，所以事务内暂存的 LISTEN/UNLISTEN 在 COMMIT 前不可见，ROLLBACK 也不会污染结果 | 完整协议回归使用独立 backend 验证空集合仍有 RowDescription、两个 channel 的稳定顺序与重复投影、事务内显示旧集合、COMMIT 后切换为新集合及 UNLISTEN * 后零行；主入口/网络入口 O0、生产 O2 重链和完整协议套件通过 | `90592c9` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
