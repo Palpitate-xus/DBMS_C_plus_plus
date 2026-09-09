@@ -199,6 +199,8 @@
 
 | 327 | TXN-02 / P0-04 / PROTO-08 | typed DDL 完全忽略事务的 READ ONLY 标志；`BEGIN READ ONLY; CREATE TABLE ...` 会返回成功并创建物理及 catalog 对象，部分 ALTER/TRUNCATE 路径还可能先隐式结束只读事务。DDL 执行器现在在任何隐式提交、文件创建或 catalog 注册前统一拒绝只读事务中的对象写入，并返回 `25006`；与临时表 DML 不同，PostgreSQL 对临时关系的 DDL 同样禁止 | 协议回归在修复前稳定观察到 CREATE TABLE 成功，修复后验证 `25006`、事务保持 failed 直到 ROLLBACK，且目标关系不存在；完整 `ddl_transaction_skeleton_test` 的外层回滚/保存点/原子失败/重启恢复通过，隔离协议、完整 PostgreSQL 协议、DIV-14 门禁和 DdlExecutor O0/O2 编译通过 | `5c271a7` |
 
+| 328 | TXN-02 / CAT-15 / PROTO-08 | 序列分配函数绕过事务 READ ONLY：`SELECT nextval(...)` 在只读事务中成功并不可逆地消耗持久值，`setval` 的存储 API 也没有保护。`nextval`/`setval` 现在在读写序列文件及修改 session last-value 状态前检查事务模式，并抛出带 `25006` 的结构化错误；保护位于存储 API，覆盖快速 SELECT、表达式、默认值和嵌套调用入口 | 协议回归修复前稳定观察到只读 `nextval` 成功，修复后验证 `25006`、ROLLBACK 恢复及下一次合法调用仍返回未消耗的起始值 10；`sequence_full_test` 直接覆盖 nextval/setval 两条拒绝路径和持久值不变，其完整 cache/cycle/bounds/restart/owned-by/schema 回归通过；TableManage O0/O2 及隔离协议通过 | `f11a5e2` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
