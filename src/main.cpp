@@ -2888,7 +2888,12 @@ static bool handlePrepare(const string& sql, Session& s) {
             cout << "PREPARE TRANSACTION " << xid << endl;
             log(s.username, "prepare transaction " + xid, getTime());
         } else if (res == DBStatus::INVALID_VALUE) {
-            cout << "No active transaction" << endl;
+            if (g_engine.inTransaction()) {
+                cout << "ERROR: transaction contains state that cannot be prepared "
+                        "(SQLSTATE 0A000)" << endl;
+            } else {
+                cout << "ERROR: no active transaction (SQLSTATE 25P01)" << endl;
+            }
         } else if (res == DBStatus::DUPLICATE_KEY) {
             cout << "Transaction ID already exists" << endl;
         } else {
@@ -13360,6 +13365,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             return handleCopy(sql, s);
 
         case dbms::SqlCommand::Prepare:
+        case dbms::SqlCommand::PrepareTransaction:
             return handlePrepare(sql, s);
 
         case dbms::SqlCommand::Execute:

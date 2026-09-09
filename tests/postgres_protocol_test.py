@@ -447,6 +447,38 @@ def transaction_error_state_recovery(sock):
 
 
 def prepared_transaction_error_boundaries(sock):
+    # Distinguish a genuinely missing local transaction from an active
+    # transaction whose backend-local state cannot safely enter 2PC.
+    missing_local = simple_query(sock, "PREPARE TRANSACTION 'no_local_txn'")
+    missing_error = next(body for kind, body in missing_local if kind == b"E")
+    assert b"C25P01\0" in missing_error, missing_local
+    assert missing_local[-1] == (b"Z", b"I"), missing_local
+
+    assert simple_query(sock, "BEGIN")[-1] == (b"Z", b"T")
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "INSERT INTO t VALUES (440)"))
+    prepared_ok = simple_query(sock, "PREPARE TRANSACTION 'protocol_2pc_ok'")
+    assert any(kind == b"C" and body == b"PREPARE TRANSACTION\0"
+               for kind, body in prepared_ok), prepared_ok
+    assert prepared_ok[-1] == (b"Z", b"I"), prepared_ok
+    rollback_prepared = simple_query(
+        sock, "ROLLBACK PREPARED 'protocol_2pc_ok'")
+    assert any(kind == b"C" and body == b"ROLLBACK PREPARED\0"
+               for kind, body in rollback_prepared), rollback_prepared
+    assert data_row_values(simple_query(
+        sock, "SELECT id FROM t WHERE id = 440")) == []
+
+    assert simple_query(sock, "BEGIN")[-1] == (b"Z", b"T")
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "ALTER TABLE t ADD COLUMN prepared_note TEXT"))
+    ddl_prepared = simple_query(sock, "PREPARE TRANSACTION 'ddl_protocol_xid'")
+    ddl_error = next(body for kind, body in ddl_prepared if kind == b"E")
+    assert b"C0A000\0" in ddl_error, ddl_prepared
+    assert ddl_prepared[-1] == (b"Z", b"E"), ddl_prepared
+    assert simple_query(sock, "ROLLBACK")[-1] == (b"Z", b"I")
+    restored_fields = row_description_fields(simple_query(sock, "SELECT * FROM t"))
+    assert [field[0] for field in restored_fields] == [b"id"], restored_fields
+
     # Two-phase completion commands are not substitutes for local transaction
     # recovery. They must remain rejected while the backend is in 25P02.
     assert simple_query(sock, "BEGIN")[-1] == (b"Z", b"T")

@@ -805,6 +805,15 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
 std::string commandTagFor(const std::string& sql, const std::vector<std::string>& lines,
                           size_t rowCount) {
     std::string keyword = firstSqlKeyword(sql);
+    if (startsWithSqlPhrase(sql, "prepare transaction")) {
+        return "PREPARE TRANSACTION";
+    }
+    if (startsWithSqlPhrase(sql, "commit prepared")) {
+        return "COMMIT PREPARED";
+    }
+    if (startsWithSqlPhrase(sql, "rollback prepared")) {
+        return "ROLLBACK PREPARED";
+    }
     const auto mutationCount = [](const std::string& line,
                                   const std::string& prefix)
         -> std::optional<std::string> {
@@ -1166,6 +1175,9 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
         } else if (result.errorMessage.find("(SQLSTATE 25006)") !=
                    std::string::npos) {
             result.sqlState = "25006";
+        } else if (result.errorMessage.find("(SQLSTATE 25P01)") !=
+                   std::string::npos) {
+            result.sqlState = "25P01";
         } else if (result.errorMessage.find("(SQLSTATE 22023)") !=
                    std::string::npos) {
             result.sqlState = "22023";
