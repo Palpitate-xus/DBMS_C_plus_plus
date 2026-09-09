@@ -279,6 +279,8 @@
 
 | 367 | DIV-14 | generic compatibility handler 虽已因 `compatKindHasRuntime=false` 在运行时拒绝，但仍保留 `.pg_compat_objects` 的读写函数、CREATE/ALTER/DROP 假成功文本和 SHOW 浏览入口；未来一次 gate 改动即可重新暴露伪对象。彻底删除 sidecar schema、load/save、名称解析及成功分支；generic fallback 现在只能 `0A000`，真实 runtime 必须在到达 fallback 前由 typed handler 消费。旧 SHOW 在 PG 模式为 `42601`，extended 模式为 `0A000` | 新增源码静态门并接入完整测试入口，禁止 sidecar、load/save、runtime boolean 和假 SHOW 文本回归；capability E2E 覆盖全部原 create/alter/drop/import/load 命令、两种模式、事务和文件系统零副作用。main O0/O2 编译、生产重链、完整协议、DIV E2E 和 PostgreSQL 差分 122/122 通过。该项所指的假成功/兼容记录机制已不存在 | `0e22ff9` |
 
+| 368 | CAT-22 | 删除 sidecar 后仍需防止 catalog fallback registry 漂移：三份 prefix 表有 21/36/24 个 kind，新增条目若没有显式审阅，可能绕开当前样例覆盖。新增 registry 完整性门，冻结每个 CREATE/ALTER/DROP fallback phrase、kind 唯一性和最长前缀顺序，并检查三个 handler 只构造对应 verb 的 `featureNotSupportedError`，不做权限/catalog/成功处理 | `compat_fallback_registry_test.py` 与 no-fake-sidecar、compatibility-contract 回归通过并接入完整 E2E 清单；现有 capability E2E、完整协议和 122 组差分已在同一生产 binary 通过。CAT-22 所述假 catalog 语义及未 gate 入口均已关闭 | `3808402` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。

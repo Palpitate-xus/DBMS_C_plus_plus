@@ -172,7 +172,7 @@
 - [ ] **CAT-19** event trigger 和 rule 当前只是骨架，需要真实 DDL/rewrite 事件执行。
 - [ ] **CAT-20** tablespace 补 cluster 级 catalog、OID/symlink 布局、owner/ACL、并发、跨设备持久化和备份恢复。
 - [ ] **CAT-21** `COMMENT`/`SECURITY LABEL` 覆盖 PostgreSQL 对象全集，并使用 catalog dependency。
-- [ ] **CAT-22** 删除 `.pg_compat_objects` 的“成功但无运行时效果”语义；未实现命令应返回 `0A000 feature_not_supported`。
+- [x] **CAT-22** 删除 `.pg_compat_objects` 的“成功但无运行时效果”语义；未实现命令应返回 `0A000 feature_not_supported`。
 
 ## 8. 数据类型、I/O、函数和操作符
 
