@@ -987,6 +987,14 @@ SHOW DEADLOCKS;
 
 服务进程收到 `SIGINT` 或 `SIGTERM` 后会停止接收新连接，关闭活动连接并等待客户端 worker 退出；监听端口失败会以非零退出码结束。`--insecure` 仅用于本地开发。
 
+Simple Query 的一个 `Q` 消息可以包含多条顶层分号分隔语句；分句器识别
+普通/escape 字符串、quoted identifier、dollar quote、行注释和嵌套块注释。
+没有显式事务控制的多语句消息属于同一个 implicit transaction，遇到首个错误
+即停止后续语句并回滚；显式事务则保留 `T/E` ReadyForQuery 状态。每条已执行
+语句各自产生准确的 RowDescription/DataRow/CommandComplete，整个消息只发送
+一次 ReadyForQuery。空串、纯注释或只有分号的消息返回一次
+EmptyQueryResponse，不伪造 command tag。
+
 ---
 
 ## 19. 预编译语句
