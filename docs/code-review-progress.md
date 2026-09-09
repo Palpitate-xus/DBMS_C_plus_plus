@@ -185,6 +185,8 @@
 
 | 320 | PROTO-02 / PROTO-08 | 首关键字和事务恢复短语只跳过空白，不跳过 SQL 注释；失败事务中的注释前缀 ROLLBACK 被拒为 `25P02`，而只修首词又会把带注释的 `ROLLBACK PREPARED` 错当本地恢复。协议词法入口现在跳过行注释和可嵌套块注释，恢复重写剥离前导注释，prepared completion 排除使用相同命令起点 | 回归在修复前稳定返回 `25P02`；`transaction_isolation_protocol_e2e_test` 现覆盖行注释、嵌套块注释后的 `ROLLBACK;` 成功，以及带块注释的 `ROLLBACK PREPARED` 在失败事务中仍返回 `25P02`；NetworkServer O0/O2、Python 语法检查和新协议主程序通过 | `b49a0fa` |
 
+| 321 | P0-16 | 多个独立 E2E runner 把仓库根目录 `dbms_main` 写死，忽略复查、CI 或开发者通过 `DBMS_MAIN` 指定的刚编译二进制；测试会悄悄验证陈旧程序并给出虚假结果。7 个遗漏脚本现与差分/DIV runner 一致，优先使用绝对化的环境变量，未设置时才回退根目录默认值 | 新增 `e2e_binary_routing_test` 逐个导入 7 个 runner 并注入哨兵路径；修复前首个脚本稳定失败，修复后全部命中所选路径，8 个 Python 文件语法检查和构建脚本语法通过。完整协议测试因此首次在当前 review 二进制复现既有复杂集合查询空结果，列为下一项产品修复，未误报套件通过 | `d3d1bb4` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
