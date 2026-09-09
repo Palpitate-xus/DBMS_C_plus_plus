@@ -86,6 +86,22 @@ int main() {
     assert(afterSavepoint.size() == 1);
     assert(afterSavepoint.front().payload == "before savepoint");
 
+    // A receiving backend must not consume queued notifications while its
+    // transaction is open.  They become visible after either transaction
+    // boundary; the sender's already-committed notification is not rolled
+    // back with the receiver.
+    constexpr uint64_t longTransactionListener = 4001;
+    manager.listen(longTransactionListener, "db1", "deferred_delivery");
+    manager.beginTransaction(longTransactionListener);
+    assert(manager.publish(senderBackend, "db1", "deferred_delivery",
+                           "after boundary"));
+    assert(manager.takePending(longTransactionListener).empty());
+    manager.rollbackTransaction(longTransactionListener);
+    const auto afterReceiverRollback =
+        manager.takePending(longTransactionListener);
+    assert(afterReceiverRollback.size() == 1);
+    assert(afterReceiverRollback.front().payload == "after boundary");
+
     // PostgreSQL accepts payloads strictly shorter than 8000 bytes. Reject
     // invalid values before they can enter a transaction or delivery queue.
     assert(manager.publish(senderBackend, "db1", "bounds_channel",
@@ -99,6 +115,7 @@ int main() {
     manager.disconnect(senderBackend);
     manager.disconnect(listenerBackend);
     manager.disconnect(transactionalSender);
+    manager.disconnect(longTransactionListener);
     std::cout << "[NOTIFICATION MANAGER] backend identity and cleanup OK"
               << std::endl;
     return 0;

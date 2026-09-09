@@ -663,6 +663,20 @@ def main():
         assert notification_values(simple_query(sock, "SELECT 1")) == [
             (notify_pid, b"wire_channel", b"unlisten rolled back")]
 
+        # A listener inside a transaction retains notifications until it
+        # reaches a transaction boundary.  In particular, the server's idle
+        # socket poll and statements inside that transaction must not emit A.
+        assert simple_query(sock, "BEGIN")[-1] == (b"Z", b"T")
+        assert any(kind == b"C" for kind, _ in simple_query(
+            notify_sock,
+            "NOTIFY wire_channel, 'receiver transaction boundary'"))
+        in_listener_transaction = simple_query(sock, "SELECT 1")
+        assert notification_values(in_listener_transaction) == []
+        listener_commit = simple_query(sock, "COMMIT")
+        assert notification_values(listener_commit) == [
+            (notify_pid, b"wire_channel", b"receiver transaction boundary")]
+        assert listener_commit[-1] == (b"Z", b"I")
+
         # Two concurrent sessions authenticated as the same role must each
         # retain their own queue; consuming one must not consume the other.
         assert any(kind == b"C" for kind, _ in simple_query(

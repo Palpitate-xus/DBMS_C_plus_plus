@@ -200,6 +200,11 @@ public:
 
     std::vector<AsyncNotification> takePending(uint64_t backendId) {
         std::lock_guard<std::mutex> lock(mutex_);
+        // PostgreSQL only delivers asynchronous notifications between
+        // transactions.  Keeping the entry queued while the receiving
+        // backend has an open transaction also prevents an idle network
+        // poll from exposing a notification too early.
+        if (transactions_.find(backendId) != transactions_.end()) return {};
         auto pending = pending_.find(backendId);
         if (pending == pending_.end()) return {};
         std::vector<AsyncNotification> result = std::move(pending->second);
