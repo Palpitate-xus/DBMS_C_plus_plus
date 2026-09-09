@@ -14702,36 +14702,85 @@ static bool executeInternal(const string& rawSql, Session& s) {
             auto res = g_engine.insert(s.currentDB, resolvedName, values);
             if (res == DBStatus::DUPLICATE_KEY) {
                 if (isReplace) {
-                    // REPLACE INTO: delete conflicting row(s), then re-insert
+                    // REPLACE INTO deletes every row that conflicts with any
+                    // primary/unique key, then inserts the replacement.  Do
+                    // not feed TableSchema's encoded composite PK value back
+                    // as a predicate for the first PK column: that never
+                    // matched typed schemas (and could not represent a
+                    // composite key).  Build predicates from the real key
+                    // columns instead.  execute() wraps REPLACE in a statement
+                    // transaction, so any failed delete/re-insert restores all
+                    // rows removed here.
                     TableSchema tbl = g_engine.getTableSchema(s.currentDB, resolvedName);
-                    if (tbl.hasPrimaryKey()) {
-                        string pkVal = tbl.buildPKValue(values);
-                        if (!pkVal.empty()) {
-                            vector<string> whereConds;
-                            string pkColName;
-                            if (!tbl.pkColIndices.empty()) {
-                                for (size_t idx : tbl.pkColIndices) {
-                                    if (idx < tbl.len) { pkColName = tbl.cols[idx].dataName; break; }
-                                }
-                            } else {
-                                for (size_t i = 0; i < tbl.len; ++i) {
-                                    if (tbl.cols[i].isPrimaryKey) { pkColName = tbl.cols[i].dataName; break; }
-                                }
-                            }
-                            if (!pkColName.empty()) {
-                                whereConds.push_back("=" + pkColName + " " + pkVal);
-                                g_engine.remove(s.currentDB, resolvedName, whereConds);
+                    set<vector<size_t>> uniqueKeys;
+                    vector<size_t> primaryKey = tbl.pkColIndices;
+                    if (primaryKey.empty()) {
+                        for (size_t ci = 0; ci < tbl.len; ++ci) {
+                            if (tbl.cols[ci].isPrimaryKey) primaryKey.push_back(ci);
+                        }
+                    }
+                    if (!primaryKey.empty()) uniqueKeys.insert(primaryKey);
+                    for (size_t ci = 0; ci < tbl.len; ++ci) {
+                        if (tbl.cols[ci].isUnique) uniqueKeys.insert({ci});
+                    }
+                    for (const auto& key : tbl.uniqueConstraints) {
+                        if (!key.empty()) uniqueKeys.insert(key);
+                    }
+                    for (const auto& index :
+                         g_engine.getIndexMetadata(s.currentDB, resolvedName)) {
+                        if (!index.isUnique || index.isExpression ||
+                            !index.whereCondition.empty()) continue;
+                        for (size_t ci = 0; ci < tbl.len; ++ci) {
+                            if (tbl.cols[ci].dataName == index.name) {
+                                uniqueKeys.insert({ci});
+                                break;
                             }
                         }
                     }
-                    // Also check unique constraints
-                    for (size_t ci = 0; ci < tbl.len; ++ci) {
-                        if (!tbl.cols[ci].isUnique) continue;
-                        auto it = values.find(tbl.cols[ci].dataName);
-                        if (it == values.end() || it->second.empty()) continue;
+                    for (const auto& index :
+                         g_engine.getCompositeIndexes(s.currentDB, resolvedName)) {
+                        if (!index.isUnique || !index.whereCondition.empty()) continue;
+                        vector<size_t> columns;
+                        for (const auto& columnName : index.columns) {
+                            auto found = tbl.len;
+                            for (size_t ci = 0; ci < tbl.len; ++ci) {
+                                if (tbl.cols[ci].dataName == columnName) {
+                                    found = ci;
+                                    break;
+                                }
+                            }
+                            if (found == tbl.len) {
+                                columns.clear();
+                                break;
+                            }
+                            columns.push_back(found);
+                        }
+                        if (!columns.empty()) uniqueKeys.insert(std::move(columns));
+                    }
+
+                    for (const auto& key : uniqueKeys) {
                         vector<string> whereConds;
-                        whereConds.push_back("=" + tbl.cols[ci].dataName + " " + it->second);
-                        g_engine.remove(s.currentDB, resolvedName, whereConds);
+                        bool completeKey = true;
+                        for (const size_t ci : key) {
+                            if (ci >= tbl.len) {
+                                completeKey = false;
+                                break;
+                            }
+                            const auto value = values.find(tbl.cols[ci].dataName);
+                            if (value == values.end()) {
+                                completeKey = false;
+                                break;
+                            }
+                            whereConds.push_back("=" + tbl.cols[ci].dataName +
+                                                 " " + value->second);
+                        }
+                        if (!completeKey || whereConds.empty()) continue;
+                        const auto deleteStatus = g_engine.remove(
+                            s.currentDB, resolvedName, whereConds);
+                        if (deleteStatus != DBStatus::OK) {
+                            cout << "REPLACE conflict delete failed" << endl;
+                            return true;
+                        }
                     }
                     // Re-insert after deletion
                     res = g_engine.insert(s.currentDB, resolvedName, values);

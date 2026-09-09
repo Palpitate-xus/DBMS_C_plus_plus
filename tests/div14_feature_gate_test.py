@@ -599,6 +599,38 @@ def main():
         expect_command_tag(sock, "DROP FULLTEXT INDEX body_ft2 ON t7e",
                            "shortcut drop of FULLTEXT shortcut")
 
+        # DIV-02 extended mode: delete every row conflicting with any key,
+        # including composite primary keys, and roll the whole multi-row
+        # statement back if a later replacement is invalid.
+        expect_command_tag(
+            sock,
+            "CREATE TABLE replace_t (a INTEGER, b INTEGER, email TEXT UNIQUE, "
+            "payload TEXT, PRIMARY KEY (a, b))",
+            "extended REPLACE table")
+        expect_command_tag(
+            sock,
+            "INSERT INTO replace_t VALUES "
+            "(1, 2, 'first@example', 'old'), "
+            "(3, 4, 'second@example', 'keep')",
+            "extended REPLACE seed")
+        expect_command_tag(
+            sock,
+            "REPLACE INTO replace_t VALUES "
+            "(1, 2, 'second@example', 'replacement')",
+            "extended composite/multiple-conflict REPLACE")
+        assert data_row_values(simple_query(
+            sock, "SELECT a, b, email, payload FROM replace_t")) == [
+                [b"1", b"2", b"second@example", b"replacement"]]
+        expect_error(
+            sock,
+            "REPLACE INTO replace_t VALUES "
+            "(1, 2, 'second@example', 'must_rollback'), "
+            "('not_an_integer', 9, 'bad@example', 'bad')",
+            "XX000", "extended REPLACE statement rollback")
+        assert data_row_values(simple_query(
+            sock, "SELECT a, b, email, payload FROM replace_t")) == [
+                [b"1", b"2", b"second@example", b"replacement"]]
+
         # A malformed publication sidecar must fail the whole catalog scan;
         # SHOW must not silently hide it or expose a partial snapshot.
         corrupt_publication = Path(work_dir, "info", "corrupt.publication")
