@@ -243,6 +243,8 @@
 
 | 349 | P0-16 | `build_one_test.sh` 用 `build/obj/*.o` 组装链接，构建配置切换后缓存会同时遗留 `TLSWrapper.o` 与 `TLSWrapper_stub.o`，即使当前源码全部成功编译，单测仍因互斥实现的重复定义而链接失败。单测驱动现仅按当前 `DBMS_PROJECT_SOURCES` 构造生产对象列表，再明确加入 test stubs，不再吸收旧配置或无关对象 | 在缓存中故意同时保留真实 TLS 与 stub 对象后运行 `build_one_test.sh notification_manager_test`，链接和隔离执行均通过；`build_cache_routing_test.py` 固化配置源列表和禁止对象目录 glob 的断言，三个 build shell 脚本 `bash -n` 通过 | `56904da` |
 
+| 350 | TYPE-22 / FUNC-01 / TXN-12 / PROTO-04,08 | PostgreSQL 提供的表达式入口 `pg_notify(text,text)` 完全不存在，动态 channel/payload 会报 `42883`；若直接在 evaluator 增加副作用，普通 SELECT 又没有通知事务，后续表达式失败仍可能泄漏消息。现把 `pg_notify` 注册为 volatile builtin，并接通无 FROM 与表扫描两条表达式路径；NULL payload 变为空串、空/过长 channel 与超长 payload 返回 `22023`，结果保留 `void` pseudo-type 和 OID 2278。所有非事务控制的顶层语句在没有显式事务时使用轻量通知事务，成功后提交、任意错误后回滚，递归/UDF/触发器执行共享同一边界 | 完整 `postgres_protocol_test.py` 覆盖拼接表达式参数、NULL payload、表列逐行 payload、返回空值及两条路径的 `void` OID/typlen、错误后零投递、显式回滚零投递、空/NULL/64-byte channel 与错误参数数量；O0/O2 全部受影响对象编译，协议全套两轮、`expression_evaluator_test`、`type_registry_test`、DIV-14 和完整差分 `cases=122 failed=0` 通过 | `06dd3cb` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
