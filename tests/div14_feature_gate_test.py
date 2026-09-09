@@ -41,6 +41,7 @@ typed = _helpers.typed
 write_auth_catalog = _helpers.write_auth_catalog
 setting_value = _helpers.setting_value
 data_row_values = _helpers.data_row_values
+row_description_fields = _helpers.row_description_fields
 
 
 def error_of(messages):
@@ -103,7 +104,7 @@ def main():
         open(os.path.join(work_dir, "other_db", "tlist.lst"), "wb").close()
         write_auth_catalog(work_dir, "alice", "secret")
         with open(os.path.join(work_dir, "pg_hba.conf"), "w", encoding="utf-8") as hba:
-            hba.write("host all alice 127.0.0.1/32 scram-sha-256\n")
+            hba.write("host all all 127.0.0.1/32 scram-sha-256\n")
 
         probe = socket.socket()
         probe.bind(("127.0.0.1", 0))
@@ -583,6 +584,67 @@ def main():
         expect_command_tag(sock, "DROP SEQUENCE use_seq", "drop target USE sequence")
         expect_command_tag(sock, "USE DATABASE info", "extended USE return")
         expect_command_tag(sock, "DROP SEQUENCE use_seq", "drop source USE sequence")
+
+        # DIV-05: project meta commands return typed catalog-style rows. In
+        # particular, defaults containing spaces and SQL NULL stay intact.
+        expect_command_tag(
+            sock,
+            "CREATE TABLE div5_meta (id INTEGER PRIMARY KEY, "
+            "note TEXT DEFAULT 'hello world')",
+            "DIV-05 metadata table")
+        expect_command_tag(sock, "CREATE ROLE div5_role", "DIV-05 role")
+        expect_command_tag(
+            sock, "CREATE USER div5_user WITH PASSWORD 'Div5Pass9!'",
+            "DIV-05 non-admin user")
+        expect_command_tag(sock, "CREATE TABLE div5_visible (id INTEGER)",
+                           "DIV-05 visible table")
+        expect_command_tag(sock, "GRANT SELECT ON div5_visible TO div5_user",
+                           "DIV-05 visible table grant")
+        desc_messages = simple_query(sock, "DESC div5_meta")
+        desc_fields = row_description_fields(desc_messages)
+        assert [field[0] for field in desc_fields] == [
+            b"field", b"type", b"null", b"key", b"default", b"extra"]
+        assert [field[3] for field in desc_fields] == [25] * 6, desc_fields
+        desc_rows = data_row_values(desc_messages)
+        assert len(desc_rows) == 2 and desc_rows[0][0] == b"id", desc_rows
+        assert desc_rows[0][4] is None, desc_rows
+        assert desc_rows[1][0] == b"note" and \
+            desc_rows[1][4] == b"'hello world'", desc_rows
+        view_table_messages = simple_query(sock, "VIEW TABLE div5_meta")
+        assert data_row_values(view_table_messages) == desc_rows
+        view_database_messages = simple_query(sock, "VIEW DATABASE")
+        assert [field[0] for field in row_description_fields(
+            view_database_messages)] == [b"table_name"]
+        assert [b"div5_meta"] in data_row_values(view_database_messages)
+        users_messages = simple_query(sock, "SHOW USERS")
+        assert [field[3] for field in row_description_fields(users_messages)] \
+            == [25, 23]
+        assert [b"alice", b"1"] in data_row_values(users_messages)
+        roles_messages = simple_query(sock, "SHOW ROLES")
+        assert row_description_fields(roles_messages)[0][3] == 25
+        assert [b"div5_role"] in data_row_values(roles_messages)
+        pools_messages = simple_query(sock, "SHOW POOLS")
+        assert [field[3] for field in row_description_fields(pools_messages)] \
+            == [25] + [20] * 8
+        assert len(data_row_values(pools_messages)) == 1
+
+        viewer = socket.socket()
+        viewer.settimeout(SOCKET_TIMEOUT)
+        viewer.connect(("127.0.0.1", port))
+        startup(viewer, "div5_user", "info", password="Div5Pass9!")
+        expect_command_tag(viewer, "SET compatibility_mode = extended",
+                           "non-admin extended mode")
+        viewer_tables = data_row_values(simple_query(viewer, "VIEW DATABASE"))
+        assert [b"div5_visible"] in viewer_tables, viewer_tables
+        assert [b"div5_meta"] not in viewer_tables, viewer_tables
+        assert error_of(simple_query(viewer, "DESC div5_meta")) is not None
+        assert data_row_values(simple_query(viewer, "DESC div5_visible"))[0][0] \
+            == b"id"
+        # Role metadata is public, like pg_roles, but no secret fields exist.
+        assert [b"div5_user", b"0"] in data_row_values(
+            simple_query(viewer, "SHOW USERS"))
+        viewer.sendall(typed(b"X"))
+        viewer.close()
 
         # DIV-11 in extended mode: project commands work again.
         assert setting_value(simple_query(sock, "SELECT * FROM pg_settings"),

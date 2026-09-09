@@ -135,6 +135,23 @@ static bool shouldPublishQueryMetadata() {
            (metadataCaptureDepth != 0 && executeDepth == metadataCaptureDepth);
 }
 
+static void publishStructuredUtilityResult(
+    std::vector<std::string> columns,
+    std::vector<std::string> columnTypes,
+    std::vector<std::vector<std::string>> rows,
+    std::vector<std::vector<bool>> nulls,
+    const std::string& commandTag) {
+    if (!shouldPublishQueryMetadata()) return;
+    dbms::DmlResult result;
+    result.available = true;
+    result.columns = std::move(columns);
+    result.columnTypes = std::move(columnTypes);
+    result.rows = std::move(rows);
+    result.nulls = std::move(nulls);
+    result.commandTag = commandTag;
+    dbms::publishLastDmlResult(std::move(result));
+}
+
 // ========================================================================
 // Slow query log enhancements
 // ========================================================================
@@ -16290,6 +16307,22 @@ if (sql.rfind("backup database", 0) == 0) {
                 return true;
             }
             const auto st = dbms::ConnectionPool::instance().stats();
+            publishStructuredUtilityResult(
+                {"mode", "pool_size", "backends", "idle", "rented",
+                 "waiting", "clients", "total_rents", "total_waits"},
+                {"text", "int8", "int8", "int8", "int8", "int8",
+                 "int8", "int8", "int8"},
+                {{st.mode, std::to_string(st.poolSize),
+                  std::to_string(st.totalContexts),
+                  std::to_string(st.idleContexts),
+                  std::to_string(st.rentedContexts),
+                  std::to_string(st.waitingRenters),
+                  std::to_string(st.clientConnections),
+                  std::to_string(st.totalRents),
+                  std::to_string(st.totalWaits)}},
+                {{false, false, false, false, false, false, false, false,
+                  false}},
+                "SHOW");
             cout << "mode pool_size backends idle rented waiting clients total_rents total_waits" << endl;
             cout << st.mode << " " << st.poolSize << " " << st.totalContexts << " "
                  << st.idleContexts << " " << st.rentedContexts << " " << st.waitingRenters
@@ -16732,16 +16765,25 @@ if (sql.rfind("backup database", 0) == 0) {
                     "users") << endl;
                 return true;
             }
-            if (!checkAdmin(s)) return true;
             const auto accounts = authCatalog().listAuthIds();
-            if (accounts.empty()) {
+            vector<vector<string>> rows;
+            vector<vector<bool>> nulls;
+            for (const auto& account : accounts) {
+                if (!account.rolcanlogin) continue;
+                rows.push_back({account.rolname,
+                                account.rolsuper ? "1" : "0"});
+                nulls.push_back({false, false});
+            }
+            publishStructuredUtilityResult(
+                {"username", "permission"}, {"text", "int4"},
+                rows, nulls, "SHOW");
+            if (rows.empty()) {
                 cout << "No users found" << endl;
                 return false;
             }
             cout << "username permission" << endl;
-            for (const auto& account : accounts) {
-                if (!account.rolcanlogin) continue;
-                cout << account.rolname << " " << (account.rolsuper ? "1" : "0") << endl;
+            for (const auto& row : rows) {
+                cout << row[0] << " " << row[1] << endl;
             }
             return false;
         }
@@ -16751,16 +16793,22 @@ if (sql.rfind("backup database", 0) == 0) {
                     "roles") << endl;
                 return true;
             }
-            if (!checkAdmin(s)) return true;
             const auto accounts = authCatalog().listAuthIds();
-            if (accounts.empty()) {
+            vector<vector<string>> rows;
+            vector<vector<bool>> nulls;
+            for (const auto& account : accounts) {
+                if (account.rolcanlogin) continue;
+                rows.push_back({account.rolname});
+                nulls.push_back({false});
+            }
+            publishStructuredUtilityResult(
+                {"role_name"}, {"text"}, rows, nulls, "SHOW");
+            if (rows.empty()) {
                 cout << "No roles found" << endl;
                 return false;
             }
             cout << "role_name" << endl;
-            for (const auto& account : accounts) {
-                if (!account.rolcanlogin) cout << account.rolname << endl;
-            }
+            for (const auto& row : rows) cout << row[0] << endl;
             return false;
         }
         // Planner cost GUCs: SHOW from the live cost model (session-scoped
@@ -24226,23 +24274,42 @@ if (sql.rfind("backup database", 0) == 0) {
             return true;
         }
         if (!checkDB(s)) return true;
-        string tname = (sql.substr(0, 5) == "desc ") ? trim(sql.substr(5)) : trim(sql.substr(9));
-        tname = resolveTableName(s, tname);
+        const string requestedName =
+            (sql.substr(0, 5) == "desc ") ? trim(sql.substr(5))
+                                           : trim(sql.substr(9));
+        string tname = resolveTableName(s, requestedName);
         TableSchema tbl = g_engine.getTableSchema(s.currentDB, tname);
         if (tbl.len == 0) {
-            cout << "Table not exist" << endl;
+            cout << "ERROR: relation \"" << requestedName
+                 << "\" does not exist (SQLSTATE 42P01)" << endl;
             return true;
         }
-        cout << "field type null key default extra" << endl;
+        if (!isTempTable(s, requestedName) &&
+            !checkTablePermission(
+                s, requestedName,
+                dbms::StorageEngine::TablePrivilege::Select)) {
+            return true;
+        }
+        vector<vector<string>> rows;
+        vector<vector<bool>> nulls;
         for (size_t i = 0; i < tbl.len; ++i) {
             const auto& c = tbl.cols[i];
-            cout << c.dataName << ' '
-                 << c.dataType << ' '
-                 << (c.isNull ? "yes" : "no") << ' '
-                 << (c.isPrimaryKey ? "pri" : "") << ' '
-                 << c.defaultValue << ' '
-                 << (c.isAutoIncrement ? "auto_increment" : "")
-                 << endl;
+            rows.push_back({c.dataName, c.dataType,
+                            c.isNull ? "yes" : "no",
+                            c.isPrimaryKey ? "pri" : "",
+                            c.defaultValue,
+                            c.isAutoIncrement ? "auto_increment" : ""});
+            nulls.push_back({false, false, false, false,
+                             c.defaultValue.empty(), false});
+        }
+        publishStructuredUtilityResult(
+            {"field", "type", "null", "key", "default", "extra"},
+            {"text", "text", "text", "text", "text", "text"},
+            rows, nulls, "SELECT " + std::to_string(rows.size()));
+        cout << "field type null key default extra" << endl;
+        for (const auto& row : rows) {
+            for (const auto& cell : row) cout << cell << ' ';
+            cout << endl;
         }
         return false;
     }
@@ -24263,26 +24330,77 @@ if (sql.rfind("backup database", 0) == 0) {
         }
         string op = tokens[0];
         if (op == "table") {
-            if (tokens.size() < 2) {
-                cout << "SQL syntax error" << endl;
+            if (tokens.size() != 2) {
+                cout << "SQL syntax error: VIEW TABLE requires one relation "
+                        "name (SQLSTATE 42601)" << endl;
                 return true;
             }
-            string tname = resolveTableName(s, tokens[1]);
+            const string requestedName = tokens[1];
+            string tname = resolveTableName(s, requestedName);
             TableSchema tbl = g_engine.getTableSchema(s.currentDB, tname);
             if (tbl.len == 0) {
-                cout << "Table " << tokens[1] << " not exist" << endl;
+                cout << "ERROR: relation \"" << requestedName
+                     << "\" does not exist (SQLSTATE 42P01)" << endl;
                 return true;
             }
-            tbl.print();
+            if (!isTempTable(s, requestedName) &&
+                !checkTablePermission(
+                    s, requestedName,
+                    dbms::StorageEngine::TablePrivilege::Select)) {
+                return true;
+            }
+            vector<vector<string>> rows;
+            vector<vector<bool>> nulls;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                const auto& c = tbl.cols[i];
+                rows.push_back({c.dataName, c.dataType,
+                                c.isNull ? "yes" : "no",
+                                c.isPrimaryKey ? "pri" : "",
+                                c.defaultValue,
+                                c.isAutoIncrement ? "auto_increment" : ""});
+                nulls.push_back({false, false, false, false,
+                                 c.defaultValue.empty(), false});
+            }
+            publishStructuredUtilityResult(
+                {"field", "type", "null", "key", "default", "extra"},
+                {"text", "text", "text", "text", "text", "text"},
+                rows, nulls, "SELECT " + std::to_string(rows.size()));
+            cout << "field type null key default extra" << endl;
+            for (const auto& row : rows) {
+                for (const auto& cell : row) cout << cell << ' ';
+                cout << endl;
+            }
             return false;
         }
         if (op == "database") {
+            if (tokens.size() != 1) {
+                cout << "SQL syntax error: VIEW DATABASE takes no arguments "
+                        "(SQLSTATE 42601)" << endl;
+                return true;
+            }
             auto names = g_engine.getTableNames(s.currentDB);
-            for (const auto& n : names) cout << n << endl;
+            vector<vector<string>> rows;
+            vector<vector<bool>> nulls;
+            for (const auto& name : names) {
+                bool visible = sessionIsAdmin(s) ||
+                    g_engine.hasPermission(
+                        s.currentDB, name, effectiveSessionRole(s),
+                        dbms::StorageEngine::TablePrivilege::Select) ||
+                    !g_engine.getUserPermissions(
+                        s.currentDB, name, effectiveSessionRole(s)).empty();
+                if (!visible) continue;
+                rows.push_back({name});
+                nulls.push_back({false});
+                cout << name << endl;
+            }
+            publishStructuredUtilityResult(
+                {"table_name"}, {"text"}, rows, nulls,
+                "SELECT " + std::to_string(rows.size()));
             log(s.username, "view database", getTime());
             return false;
         }
-        cout << "SQL syntax error" << endl;
+        cout << "SQL syntax error: VIEW TABLE name or VIEW DATABASE "
+                "(SQLSTATE 42601)" << endl;
         return true;
     }
 
