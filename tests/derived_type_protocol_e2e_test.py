@@ -34,6 +34,9 @@ def main():
             ("INSERT INTO typed_text_edges VALUES "
              "(1, 'a b'), (2, ''), (3, 'NULL'), (4, NULL), "
              "(5, '  edge  '), (6, 'line1\nline2');"),
+            "CREATE TABLE typed_recursive_edges (parent INT, child INT);",
+            ("INSERT INTO typed_recursive_edges VALUES "
+             "(1, 2), (1, 3), (2, 4), (3, 4);"),
             ("CREATE VIEW typed_view AS SELECT grp, sum(v) AS total "
              "FROM typed_src GROUP BY grp;"),
         ]
@@ -108,6 +111,40 @@ def main():
              [["1", "a b"], ["2", ""], ["3", "NULL"], ["4", None],
               ["5", "  edge  "], ["6", "line1\nline2"]],
              [23, 25]),
+            (("WITH renamed(row_id, body) AS "
+              "(SELECT id, txt FROM typed_text_edges) "
+              "SELECT row_id, body FROM renamed ORDER BY row_id;"),
+             [["1", "a b"], ["2", ""], ["3", "NULL"], ["4", None],
+              ["5", "  edge  "], ["6", "line1\nline2"]],
+             [23, 25]),
+            (("WITH RECURSIVE edges("
+              "n, spaced, empty_text, literal_null, sql_null) AS ("
+              "SELECT 1, 'a b'::text, ''::text, 'NULL'::text, NULL::text "
+              "UNION ALL "
+              "SELECT n + 1, spaced, empty_text, literal_null, sql_null "
+              "FROM edges WHERE n < 3) "
+              "SELECT n, spaced, empty_text, literal_null, sql_null "
+              "FROM edges ORDER BY n;"),
+             [["1", "a b", "", "NULL", None],
+              ["2", "a b", "", "NULL", None],
+              ["3", "a b", "", "NULL", None]],
+             [23, 25, 25, 25, 25]),
+            (("WITH RECURSIVE walk(n) AS ("
+              "SELECT 1 UNION ALL "
+              "SELECT e.child FROM walk w "
+              "JOIN typed_recursive_edges e ON w.n = e.parent) "
+              "SELECT n FROM walk ORDER BY n;"),
+             [["1"], ["2"], ["3"], ["4"], ["4"]], [23]),
+            (("WITH RECURSIVE walk(n) AS ("
+              "SELECT 1 UNION "
+              "SELECT e.child FROM walk w "
+              "JOIN typed_recursive_edges e ON w.n = e.parent) "
+              "SELECT n FROM walk ORDER BY n;"),
+             [["1"], ["2"], ["3"], ["4"]], [23]),
+            (("WITH RECURSIVE constants(n) AS ("
+              "SELECT 1 UNION ALL SELECT 2) "
+              "SELECT n FROM constants ORDER BY n;"),
+             [["1"], ["2"]], [23]),
         ]
         for sql, expected_rows, expected_types in cases:
             decoded = runner.decode_wire_result(

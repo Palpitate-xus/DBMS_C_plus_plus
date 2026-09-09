@@ -9118,10 +9118,12 @@ static std::vector<std::string> runDerivedSubQueryFull(
     std::vector<std::string>* outColTypes = nullptr,
     std::vector<std::vector<std::string>>* outStructuredRows = nullptr,
     std::vector<std::vector<bool>>* outStructuredNulls = nullptr,
-    bool* outStructuredAvailable = nullptr) {
+    bool* outStructuredAvailable = nullptr,
+    bool* outExecutionFailed = nullptr) {
     if (outStructuredRows) outStructuredRows->clear();
     if (outStructuredNulls) outStructuredNulls->clear();
     if (outStructuredAvailable) *outStructuredAvailable = false;
+    if (outExecutionFailed) *outExecutionFailed = false;
     std::stringstream captured;
     const unsigned previousCaptureDepth = metadataCaptureDepth;
     metadataCaptureDepth = executeDepth + 1;
@@ -9138,7 +9140,10 @@ static std::vector<std::string> runDerivedSubQueryFull(
     }
     dbms::DmlResult nestedResult = dbms::takeLastDmlResult();
     metadataCaptureDepth = previousCaptureDepth;
-    if (failed) return {};
+    if (failed) {
+        if (outExecutionFailed) *outExecutionFailed = true;
+        return {};
+    }
     std::vector<std::string> lines;
     {
         std::string ln;
@@ -9195,7 +9200,7 @@ static std::vector<std::string> inferIntegerLiteralDerivedTypes(
     const std::string& sql, const std::vector<std::string>& colNames) {
     if (colNames.size() != 1) return {};
     const std::regex operand(
-        R"(^\s*select\s+([+-]?[0-9]+)\s+as\s+[a-zA-Z_][a-zA-Z0-9_]*\s*$)",
+        R"(^\s*select\s+([+-]?[0-9]+)(?:\s+as\s+[a-zA-Z_][a-zA-Z0-9_]*)?\s*$)",
         std::regex::icase);
     bool bigint = false;
     size_t start = 0;
@@ -9295,6 +9300,288 @@ static std::string createTempTableFromRows(Session& s,
     return tmpName;
 }
 
+static bool appendTempTableRows(
+    Session& s, const std::string& tmpName,
+    const std::vector<std::string>& colNames,
+    const std::vector<std::string>& rows,
+    const std::vector<std::vector<std::string>>* structuredRows = nullptr,
+    const std::vector<std::vector<bool>>* structuredNulls = nullptr) {
+    const std::string actualName = tempTablePrefix(s, tmpName);
+    if (structuredRows && structuredNulls) {
+        if (structuredRows->size() != structuredNulls->size()) return false;
+        for (size_t rowIndex = 0; rowIndex < structuredRows->size();
+             ++rowIndex) {
+            if ((*structuredRows)[rowIndex].size() != colNames.size() ||
+                (*structuredNulls)[rowIndex].size() != colNames.size()) {
+                return false;
+            }
+            dbms::StorageEngine::SqlRow values;
+            for (size_t colIndex = 0; colIndex < colNames.size(); ++colIndex) {
+                values[colNames[colIndex]] =
+                    (*structuredNulls)[rowIndex][colIndex]
+                    ? dbms::StorageEngine::SqlCell(std::nullopt)
+                    : dbms::StorageEngine::SqlCell(
+                          (*structuredRows)[rowIndex][colIndex]);
+            }
+            if (g_engine.insertRow(s.currentDB, actualName, values) !=
+                DBStatus::OK) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    for (const auto& row : rows) {
+        std::map<std::string, std::string> values;
+        std::stringstream rss(row);
+        std::string value;
+        size_t colIndex = 0;
+        while (colIndex < colNames.size() && rss >> value) {
+            values[colNames[colIndex++]] = value;
+        }
+        if (colIndex != colNames.size() ||
+            g_engine.insert(s.currentDB, actualName, values) != DBStatus::OK) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void dropTransientQueryTable(Session& s, const std::string& tmpName) {
+    if (tmpName.empty()) return;
+    g_engine.dropTable(s.currentDB, tempTablePrefix(s, tmpName));
+    s.transientTempTables.erase(tmpName);
+}
+
+static std::string recursiveRowKey(const std::vector<std::string>& row,
+                                   const std::vector<bool>& nulls) {
+    std::string key;
+    for (size_t index = 0; index < row.size(); ++index) {
+        if (index < nulls.size() && nulls[index]) {
+            key += "N;";
+        } else {
+            key += "V" + std::to_string(row[index].size()) + ":" + row[index];
+        }
+    }
+    return key;
+}
+
+static bool containsSqlIdentifier(const std::string& sql,
+                                  const std::string& identifier) {
+    size_t position = 0;
+    while ((position = findTextOutsideQuotes(
+                sql, identifier, position)) != std::string::npos) {
+        const bool leftOk = position == 0 ||
+            !(isalnum(static_cast<unsigned char>(sql[position - 1])) ||
+              sql[position - 1] == '_');
+        const size_t after = position + identifier.size();
+        const bool rightOk = after == sql.size() ||
+            !(isalnum(static_cast<unsigned char>(sql[after])) ||
+              sql[after] == '_');
+        if (leftOk && rightOk) return true;
+        position += identifier.size();
+    }
+    return false;
+}
+
+static std::string materializeRecursiveCte(
+    Session& s, const std::string& innerSelect,
+    const std::string& cteName,
+    const std::vector<std::string>& columnAliases,
+    size_t unionPos, bool unionAll, int& counter, bool& failed) {
+    const size_t unionLength = unionAll ? 9 : 5;
+    const std::string anchorSql = trim(innerSelect.substr(0, unionPos));
+    const std::string recursiveSql =
+        trim(innerSelect.substr(unionPos + unionLength));
+
+    std::vector<std::string> colNames;
+    std::vector<std::string> colTypes;
+    std::vector<std::vector<std::string>> anchorCells;
+    std::vector<std::vector<bool>> anchorNulls;
+    bool anchorStructured = false;
+    bool anchorFailed = false;
+    std::vector<std::string> anchorRows = runDerivedSubQueryFull(
+        anchorSql, s, colNames, &colTypes, &anchorCells, &anchorNulls,
+        &anchorStructured, &anchorFailed);
+    if (anchorFailed) {
+        failed = true;
+        return {};
+    }
+    if (colNames.empty()) {
+        anchorRows = runDerivedSubQuery(anchorSql, s, colNames);
+        anchorCells.clear();
+        anchorNulls.clear();
+        anchorStructured = false;
+    }
+    if (!columnAliases.empty()) {
+        if (columnAliases.size() != colNames.size()) {
+            cout << "recursive CTE column alias count does not match "
+                    "the anchor query (SQLSTATE 42601)" << endl;
+            failed = true;
+            return {};
+        }
+        colNames = columnAliases;
+    }
+    if (colNames.empty()) {
+        failed = true;
+        return {};
+    }
+
+    std::set<std::string> seenRows;
+    if (!unionAll) {
+        if (anchorStructured) {
+            std::vector<std::vector<std::string>> uniqueCells;
+            std::vector<std::vector<bool>> uniqueNulls;
+            for (size_t index = 0; index < anchorCells.size(); ++index) {
+                if (seenRows.insert(recursiveRowKey(
+                        anchorCells[index], anchorNulls[index])).second) {
+                    uniqueCells.push_back(anchorCells[index]);
+                    uniqueNulls.push_back(anchorNulls[index]);
+                }
+            }
+            anchorCells = std::move(uniqueCells);
+            anchorNulls = std::move(uniqueNulls);
+        } else {
+            std::vector<std::string> uniqueRows;
+            for (const auto& row : anchorRows) {
+                if (seenRows.insert(row).second) uniqueRows.push_back(row);
+            }
+            anchorRows = std::move(uniqueRows);
+        }
+    }
+
+    const auto anchorCellsPtr = anchorStructured ? &anchorCells : nullptr;
+    const auto anchorNullsPtr = anchorStructured ? &anchorNulls : nullptr;
+    std::string resultName = createTempTableFromRows(
+        s, anchorRows, colNames, counter, colTypes,
+        anchorCellsPtr, anchorNullsPtr);
+    if (resultName.empty()) {
+        failed = true;
+        return {};
+    }
+    std::string workName = createTempTableFromRows(
+        s, anchorRows, colNames, counter, colTypes,
+        anchorCellsPtr, anchorNullsPtr);
+    if (workName.empty()) {
+        failed = true;
+        return {};
+    }
+
+    bool exhausted = anchorStructured ? anchorCells.empty() : anchorRows.empty();
+    const int maxIterations = 1000;
+    for (int iteration = 0;
+         !exhausted && iteration < maxIterations; ++iteration) {
+        std::string iterationSql = recursiveSql;
+        const std::string workActual = tempTablePrefix(s, workName);
+        size_t replaceAt = 0;
+        while ((replaceAt = findTextOutsideQuotes(
+                    iterationSql, cteName, replaceAt)) != std::string::npos) {
+            const bool leftOk = replaceAt == 0 ||
+                !(isalnum(static_cast<unsigned char>(
+                      iterationSql[replaceAt - 1])) ||
+                  iterationSql[replaceAt - 1] == '_');
+            const size_t after = replaceAt + cteName.size();
+            const bool rightOk = after == iterationSql.size() ||
+                !(isalnum(static_cast<unsigned char>(iterationSql[after])) ||
+                  iterationSql[after] == '_');
+            if (leftOk && rightOk) {
+                iterationSql.replace(replaceAt, cteName.size(), workActual);
+                replaceAt += workActual.size();
+            } else {
+                replaceAt += cteName.size();
+            }
+        }
+
+        std::vector<std::string> recursiveNames;
+        std::vector<std::string> recursiveTypes;
+        std::vector<std::vector<std::string>> recursiveCells;
+        std::vector<std::vector<bool>> recursiveNulls;
+        bool recursiveStructured = false;
+        bool recursiveFailed = false;
+        std::vector<std::string> recursiveRows = runDerivedSubQueryFull(
+            iterationSql, s, recursiveNames, &recursiveTypes,
+            &recursiveCells, &recursiveNulls,
+            &recursiveStructured, &recursiveFailed);
+        if (recursiveFailed) {
+            dropTransientQueryTable(s, workName);
+            failed = true;
+            return {};
+        }
+        if (recursiveNames.empty()) {
+            recursiveRows = runDerivedSubQuery(
+                iterationSql, s, recursiveNames);
+            recursiveCells.clear();
+            recursiveNulls.clear();
+            recursiveStructured = false;
+        }
+        if (!recursiveNames.empty() &&
+            recursiveNames.size() != colNames.size()) {
+            dropTransientQueryTable(s, workName);
+            cout << "recursive query column count does not match anchor "
+                    "(SQLSTATE 42601)" << endl;
+            failed = true;
+            return {};
+        }
+
+        if (!unionAll) {
+            if (recursiveStructured) {
+                std::vector<std::vector<std::string>> uniqueCells;
+                std::vector<std::vector<bool>> uniqueNulls;
+                for (size_t index = 0; index < recursiveCells.size(); ++index) {
+                    if (seenRows.insert(recursiveRowKey(
+                            recursiveCells[index],
+                            recursiveNulls[index])).second) {
+                        uniqueCells.push_back(recursiveCells[index]);
+                        uniqueNulls.push_back(recursiveNulls[index]);
+                    }
+                }
+                recursiveCells = std::move(uniqueCells);
+                recursiveNulls = std::move(uniqueNulls);
+            } else {
+                std::vector<std::string> uniqueRows;
+                for (const auto& row : recursiveRows) {
+                    if (seenRows.insert(row).second) uniqueRows.push_back(row);
+                }
+                recursiveRows = std::move(uniqueRows);
+            }
+        }
+
+        exhausted = recursiveStructured
+            ? recursiveCells.empty() : recursiveRows.empty();
+        if (exhausted) break;
+        const auto recursiveCellsPtr =
+            recursiveStructured ? &recursiveCells : nullptr;
+        const auto recursiveNullsPtr =
+            recursiveStructured ? &recursiveNulls : nullptr;
+        if (!appendTempTableRows(s, resultName, colNames, recursiveRows,
+                                 recursiveCellsPtr, recursiveNullsPtr)) {
+            dropTransientQueryTable(s, workName);
+            failed = true;
+            return {};
+        }
+        const std::vector<std::string>& workTypes =
+            colTypes.empty() ? recursiveTypes : colTypes;
+        std::string nextWork = createTempTableFromRows(
+            s, recursiveRows, colNames, counter, workTypes,
+            recursiveCellsPtr, recursiveNullsPtr);
+        if (nextWork.empty()) {
+            dropTransientQueryTable(s, workName);
+            failed = true;
+            return {};
+        }
+        dropTransientQueryTable(s, workName);
+        workName = std::move(nextWork);
+    }
+    dropTransientQueryTable(s, workName);
+    if (!exhausted) {
+        cout << "recursive query exceeded 1000 iterations "
+                "(SQLSTATE 54001)" << endl;
+        failed = true;
+        return {};
+    }
+    return resultName;
+}
+
 // Forward declaration for CTE DML support
 bool execute(const std::string& rawSql, Session& s);
 
@@ -9331,7 +9618,19 @@ static std::string processCTEs(const std::string& sql, Session& s, bool& failed)
         // Find " as (" to split name and subquery
         size_t asPos = result.find(" as ", pos);
         if (asPos == std::string::npos) break;
-        std::string cteName = trim(result.substr(pos, asPos - pos));
+        const std::string cteBinding = trim(result.substr(pos, asPos - pos));
+        std::string cteName = cteBinding;
+        std::vector<std::string> cteColumnAliases;
+        const size_t nameParen = cteBinding.find('(');
+        if (nameParen != std::string::npos && cteBinding.back() == ')') {
+            cteName = trim(cteBinding.substr(0, nameParen));
+            const std::string aliases = cteBinding.substr(
+                nameParen + 1, cteBinding.size() - nameParen - 2);
+            for (const auto& rawAlias : splitSelectColumns(aliases)) {
+                const std::string alias = stripQuotes(trim(rawAlias));
+                if (!alias.empty()) cteColumnAliases.push_back(alias);
+            }
+        }
         if (cteName.empty()) break;
 
         // Find opening paren of subquery
@@ -9508,6 +9807,15 @@ static std::string processCTEs(const std::string& sql, Session& s, bool& failed)
                 }
             }
 
+            if (!cteColumnAliases.empty()) {
+                if (cteColumnAliases.size() != colNames.size()) {
+                    cout << "CTE column alias count does not match result "
+                            "(SQLSTATE 42601)" << endl;
+                    failed = true;
+                    return {};
+                }
+                colNames = cteColumnAliases;
+            }
             if (!colNames.empty()) {
                 tmpName = createTempTableFromRows(s, returnRows, colNames, cteCount);
             } else {
@@ -9519,83 +9827,29 @@ static std::string processCTEs(const std::string& sql, Session& s, bool& failed)
         }
 
         if (!isDmlCte) {
-            // Detect UNION ALL split for recursive CTE
-        size_t unionAllPos = std::string::npos;
-        if (recursiveMode) {
-            // Look for top-level UNION ALL
-            int depth = 0;
-            for (size_t k = 0; k + 9 <= innerSelect.size(); ++k) {
-                if (innerSelect[k] == '(') depth++;
-                else if (innerSelect[k] == ')') depth--;
-                if (depth == 0 && innerSelect.compare(k, 9, "union all") == 0) {
-                    unionAllPos = k;
-                    break;
+            size_t unionPos = std::string::npos;
+            bool unionAll = false;
+            if (recursiveMode) {
+                unionPos = findTopLevelKeyword(innerSelect, "union all");
+                unionAll = unionPos != std::string::npos;
+                if (unionPos == std::string::npos) {
+                    unionPos = findTopLevelKeyword(innerSelect, "union");
                 }
             }
-        }
 
-        if (recursiveMode && unionAllPos != std::string::npos) {
-            // Recursive CTE: anchor UNION ALL recursive_part
-            std::string anchorSql = trim(innerSelect.substr(0, unionAllPos));
-            std::string recursiveSql = trim(innerSelect.substr(unionAllPos + 9));
-
-            // Execute anchor to get initial rows
-            std::vector<std::string> anchorRows = runDerivedSubQuery(anchorSql, s, colNames);
-            if (colNames.empty()) break;
-
-            // Create temp table from anchor rows
-            tmpName = createTempTableFromRows(s, anchorRows, colNames, cteCount);
-            if (tmpName.empty()) break;
-            std::string tmpActualName = tempTablePrefix(s, tmpName);
-
-            // Iteratively execute recursive part
-            std::vector<std::string> allRows = anchorRows;
-            std::set<std::string> seenRows(anchorRows.begin(), anchorRows.end());
-            const int MAX_ITERATIONS = 1000;
-            for (int iter = 0; iter < MAX_ITERATIONS; ++iter) {
-                // Replace CTE name references in recursiveSql with the temp table name
-                std::string recSql = recursiveSql;
-                size_t rp = 0;
-                while ((rp = findTextOutsideQuotes(recSql, cteName, rp)) !=
-                       std::string::npos) {
-                    // Word boundary check
-                    bool leftOk = (rp == 0) ||
-                                  !(isalnum(static_cast<unsigned char>(recSql[rp - 1])) ||
-                                    recSql[rp - 1] == '_');
-                    bool rightOk = (rp + cteName.size() == recSql.size()) ||
-                                   !(isalnum(static_cast<unsigned char>(
-                                         recSql[rp + cteName.size()])) ||
-                                     recSql[rp + cteName.size()] == '_');
-                    if (leftOk && rightOk) {
-                        recSql = recSql.substr(0, rp) + tmpActualName + recSql.substr(rp + cteName.size());
-                        rp += tmpActualName.size();
-                    } else {
-                        rp += cteName.size();
-                    }
-                }
-                std::vector<std::string> recCols;
-                std::vector<std::string> newRows = runDerivedSubQuery(recSql, s, recCols);
-                bool added = false;
-                for (const auto& row : newRows) {
-                    if (seenRows.insert(row).second) {
-                        // Insert into temp table
-                        std::map<std::string, std::string> values;
-                        std::stringstream rss(row);
-                        std::string val;
-                        size_t colIdx = 0;
-                        while (colIdx < colNames.size() && rss >> val) {
-                            values[colNames[colIdx++]] = val;
-                        }
-                        if (!values.empty()) {
-                            g_engine.insert(s.currentDB, tmpActualName, values);
-                            allRows.push_back(row);
-                            added = true;
-                        }
-                    }
-                }
-                if (!added) break;
-            }
-        } else {
+            const size_t recursiveStart = unionPos == std::string::npos
+                ? std::string::npos : unionPos + (unionAll ? 9 : 5);
+            const bool selfRecursive = recursiveStart != std::string::npos &&
+                containsSqlIdentifier(
+                    innerSelect.substr(recursiveStart), cteName);
+            if (recursiveMode && unionPos != std::string::npos &&
+                selfRecursive) {
+                tmpName = materializeRecursiveCte(
+                    s, innerSelect, cteName, cteColumnAliases,
+                    unionPos, unionAll, cteCount, failed);
+                if (failed) return {};
+                if (tmpName.empty()) break;
+            } else {
             // Non-recursive CTE: execute and store
             std::vector<std::string> colTypes;
             std::vector<std::vector<std::string>> structuredRows;
@@ -9612,6 +9866,19 @@ static std::string processCTEs(const std::string& sql, Session& s, bool& failed)
                 structuredAvailable = false;
             }
             if (colNames.empty()) break;
+            if (!cteColumnAliases.empty()) {
+                if (cteColumnAliases.size() != colNames.size()) {
+                    cout << "CTE column alias count does not match result "
+                            "(SQLSTATE 42601)" << endl;
+                    failed = true;
+                    return {};
+                }
+                colNames = cteColumnAliases;
+            }
+            if (colTypes.empty()) {
+                colTypes = inferIntegerLiteralDerivedTypes(
+                    innerSelect, colNames);
+            }
             tmpName = createTempTableFromRows(
                 s, rows, colNames, cteCount, colTypes,
                 structuredAvailable ? &structuredRows : nullptr,
