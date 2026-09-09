@@ -487,6 +487,18 @@ bool StorageEngine::ReadView::isVisible(const char* rowBuffer, size_t len, uint3
 
     uint64_t xmin = htup->t_fields.t_xmin;
     uint64_t xmax = htup->t_fields.t_xmax;
+    uint32_t cmin = htup->t_fields.t_cid;
+    uint32_t cmax = htup->t_fields.t_cid;
+    bool comboResolved = true;
+    if ((htup->t_infomask & HEAP_COMBOCID) != 0) {
+        const auto combo = comboCommandIds.find(htup->t_fields.t_cid);
+        if (combo == comboCommandIds.end()) {
+            comboResolved = false;
+        } else {
+            cmin = combo->second.first;
+            cmax = combo->second.second;
+        }
+    }
 
     // Use hint bits when available
     bool xminComm = xminCommitted(htup);
@@ -501,7 +513,15 @@ bool StorageEngine::ReadView::isVisible(const char* rowBuffer, size_t len, uint3
     } else if (xminInv) {
         xminVisible = false;
     } else if (xmin == creatorTxnId) {
-        xminVisible = true;
+        if (commandIdVisibility) {
+            // A command reads the transaction snapshot from its start.  Its
+            // own inserts (cmin >= curcid) are not visible to sibling CTEs or
+            // the outer query until the command counter advances.
+            if (!comboResolved) return false;
+            xminVisible = cmin < currentCommandId;
+        } else {
+            xminVisible = true;
+        }
     } else if (activeTxnIds.count(xmin)) {
         xminVisible = false; // transaction is still in progress
     } else if (subTxnIds.count(xmin)) {
@@ -530,7 +550,14 @@ bool StorageEngine::ReadView::isVisible(const char* rowBuffer, size_t len, uint3
 
     bool xmaxVisible = false; // true means row is still visible (delete not committed)
     if (xmax == creatorTxnId) {
-        xmaxVisible = false; // current tx deleted it
+        if (commandIdVisibility) {
+            if (!comboResolved) return false;
+            // A delete/update performed by this command is outside the
+            // command snapshot, so the OLD version remains visible.
+            xmaxVisible = cmax >= currentCommandId;
+        } else {
+            xmaxVisible = false; // current tx deleted it
+        }
     } else if (activeTxnIds.count(xmax) || subTxnIds.count(xmax)) {
         xmaxVisible = true; // prepared/in-progress delete is not committed
     } else if (xmax >= lowLimitId) {
@@ -3585,6 +3612,48 @@ static void setRowXmax(char* rowBuffer, size_t len, uint32_t formatVersion, uint
     htup->t_fields.t_xmax = static_cast<uint32_t>(xmax);
 }
 
+static void setRowCid(char* rowBuffer, size_t len, uint32_t formatVersion,
+                      uint32_t commandId) {
+    if (len == 0) return;
+    if (!usesHeapTupleHeader(formatVersion) ||
+        len < sizeof(HeapTupleHeaderData)) return;
+    auto* htup = castHeapHeader(rowBuffer);
+    htup->t_fields.t_cid = commandId;
+    htup->t_infomask &= ~HEAP_COMBOCID;
+}
+
+bool StorageEngine::markTupleDeletedByCurrentCommand(
+    char* rowBuffer, size_t len, uint32_t formatVersion) {
+    auto& context = transactionContext();
+    if (!context.inTransaction || context.currentTxnId == 0 ||
+        !usesHeapTupleHeader(formatVersion) ||
+        len < sizeof(HeapTupleHeaderData)) return false;
+
+    auto* htup = castHeapHeader(rowBuffer);
+    uint32_t insertCommandId = htup->t_fields.t_cid;
+    if (htup->t_fields.t_xmin == context.currentTxnId) {
+        if ((htup->t_infomask & HEAP_COMBOCID) != 0) {
+            const auto existing = context.readView.comboCommandIds.find(
+                htup->t_fields.t_cid);
+            if (existing == context.readView.comboCommandIds.end()) {
+                return false;
+            }
+            insertCommandId = existing->second.first;
+        }
+        if (context.nextComboCommandId == 0) return false;
+        const uint32_t comboId = context.nextComboCommandId++;
+        context.readView.comboCommandIds[comboId] = {
+            insertCommandId, context.currentCommandId};
+        htup->t_fields.t_cid = comboId;
+        htup->t_infomask |= HEAP_COMBOCID;
+    } else {
+        htup->t_fields.t_cid = context.currentCommandId;
+        htup->t_infomask &= ~HEAP_COMBOCID;
+    }
+    htup->t_fields.t_xmax = static_cast<uint32_t>(context.currentTxnId);
+    return true;
+}
+
 // Set ctid on a mutable row buffer
 static void setRowCtid(char* rowBuffer, size_t len, uint32_t formatVersion, const ItemPointer& ctid) {
     if (len == 0) return;
@@ -5962,6 +6031,7 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
     }
     const ReadView* rv = readView;
     ReadView autocommitView;
+    ReadView commandInternalView;
     if (indexMaintenanceView) {
         rv = nullptr;
     } else if (!rv && transactionContext().inTransaction &&
@@ -5981,6 +6051,14 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
         autocommitView.subTxnIds.clear();
         autocommitView.commitLog = getCommitLog(dbname);
         rv = &autocommitView;
+    }
+    if (rv && rv->commandIdVisibility &&
+        transactionContext().inTransaction &&
+        transactionContext().txnDB == dbname &&
+        transactionContext().commandInternalRelations.count(tablename) != 0) {
+        commandInternalView = *rv;
+        commandInternalView.commandIdVisibility = false;
+        rv = &commandInternalView;
     }
 
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -21299,6 +21377,10 @@ DBStatus StorageEngine::insertInternal(
     }
     std::string rowBuffer = buildRowBuffer(
         tbl, storedValues, creatorTxnId, &physicalNullColumns);
+    if (creatorTxnId != 0) {
+        setRowCid(rowBuffer.data(), rowBuffer.size(), tbl.formatVersion,
+                  transactionContext().currentCommandId);
+    }
     std::string strippedRow = stripRowHeader(
         rowBuffer, tbl.formatVersion, tbl.len);
     const auto insertedColumnIsNull = [&](size_t columnIndex) {
@@ -23333,8 +23415,14 @@ DBStatus StorageEngine::removeInternal(
         bool pageChanged = false;
         if (transactionalDelete) {
             std::string mutableRow(currentData, currentLen);
-            setRowXmax(mutableRow.data(), mutableRow.size(), tbl.formatVersion,
-                       transactionContext().currentTxnId);
+            if (!markTupleDeletedByCurrentCommand(
+                    mutableRow.data(), mutableRow.size(),
+                    tbl.formatVersion)) {
+                pa->unpinPage(pageId);
+                lockManager_.pageUnlock(dbname, tablename, pageId);
+                lockManager_.unlock(tablename);
+                return DBStatus::CORRUPTED_DATA;
+            }
             pageChanged = page.update(
                 slotId, mutableRow.data(), mutableRow.size());
         } else {
@@ -25607,6 +25695,10 @@ DBStatus StorageEngine::updateInternal(
         }
         newRow = buildRowBuffer(
             tbl, storedRowValues, updateTxnId, &physicalNullColumns);
+        if (updateTxnId != 0) {
+            setRowCid(newRow.data(), newRow.size(), tbl.formatVersion,
+                      transactionContext().currentCommandId);
+        }
         strippedNewRow = stripRowHeader(newRow, tbl.formatVersion, tbl.len);
 
         int64_t actualRid = rid;
@@ -25793,10 +25885,11 @@ DBStatus StorageEngine::updateInternal(
                                 stagedOldBuffer.data(), pa->pageSize(),
                                 tbl.formatVersion);
                             std::string mutableOld(oldData, oldLength);
-                            setRowXmax(
-                                mutableOld.data(), mutableOld.size(),
-                                tbl.formatVersion,
-                                transactionContext().currentTxnId);
+                            if (!markTupleDeletedByCurrentCommand(
+                                    mutableOld.data(), mutableOld.size(),
+                                    tbl.formatVersion)) {
+                                retireStatus = DBStatus::CORRUPTED_DATA;
+                            }
                             setRowCtid(
                                 mutableOld.data(), mutableOld.size(),
                                 tbl.formatVersion,
@@ -25809,26 +25902,28 @@ DBStatus StorageEngine::updateInternal(
                                 HEAP_XMAX_COMMITTED | HEAP_XMAX_INVALID |
                                 HEAP_XMAX_EXCL_LOCK | HEAP_XMAX_KEYSHR_LOCK |
                                 HEAP_XMAX_LOCK_ONLY | HEAP_XMAX_IS_MULTI);
-                            if (!stagedOldPage.update(
-                                    slotId, mutableOld.data(),
-                                    mutableOld.size())) {
-                                retireStatus = DBStatus::IO_ERROR;
-                            } else {
-                                const Lsn lsn = walPageImage(
-                                    dbname, tablename, pageId,
-                                    stagedOldBuffer.data(), pa->pageSize(),
-                                    false);
-                                if (lsn == INVALID_LSN) {
+                            if (retireStatus == DBStatus::OK) {
+                                if (!stagedOldPage.update(
+                                        slotId, mutableOld.data(),
+                                        mutableOld.size())) {
                                     retireStatus = DBStatus::IO_ERROR;
                                 } else {
-                                    std::memcpy(
-                                        oldPageBuffer,
-                                        stagedOldBuffer.data(),
-                                        pa->pageSize());
-                                    setPageLsnAndChecksum(oldPageBuffer, lsn);
-                                    pa->markDirty(pageId);
-                                    getVM(dbname, tablename)->setAllVisible(
-                                        pageId, false);
+                                    const Lsn lsn = walPageImage(
+                                        dbname, tablename, pageId,
+                                        stagedOldBuffer.data(), pa->pageSize(),
+                                        false);
+                                    if (lsn == INVALID_LSN) {
+                                        retireStatus = DBStatus::IO_ERROR;
+                                    } else {
+                                        std::memcpy(
+                                            oldPageBuffer,
+                                            stagedOldBuffer.data(),
+                                            pa->pageSize());
+                                        setPageLsnAndChecksum(oldPageBuffer, lsn);
+                                        pa->markDirty(pageId);
+                                        getVM(dbname, tablename)->setAllVisible(
+                                            pageId, false);
+                                    }
                                 }
                             }
                         }
@@ -38489,6 +38584,12 @@ void StorageEngine::recordSsiIndexKeys(const std::string& dbname,
 
 void StorageEngine::logTxnInsert(const std::string& tableName, int64_t rowIdx,
                                  const std::string& rowData) {
+    // Executor-owned CTE/derived relations are dropped before the outer SQL
+    // command returns.  They must not leave undo entries that point at files
+    // which no longer exist when an explicit transaction later rolls back.
+    if (transactionContext().commandInternalRelations.count(tableName) != 0) {
+        return;
+    }
     TxnLogEntry entry;
     entry.op = TxnLogEntry::Op::Insert;
     entry.tableName = tableName;
@@ -38520,6 +38621,9 @@ void StorageEngine::logTxnInsert(const std::string& tableName, int64_t rowIdx,
 
 void StorageEngine::logTxnUpdate(const std::string& tableName, int64_t rowIdx,
                                   const std::string& oldRowData) {
+    if (transactionContext().commandInternalRelations.count(tableName) != 0) {
+        return;
+    }
     TxnLogEntry entry;
     entry.op = TxnLogEntry::Op::Update;
     entry.tableName = tableName;
@@ -38550,6 +38654,9 @@ void StorageEngine::logTxnUpdate(const std::string& tableName, int64_t rowIdx,
 
 void StorageEngine::logTxnDelete(const std::string& tableName, int64_t rowIdx,
                                   const std::string& oldRowData) {
+    if (transactionContext().commandInternalRelations.count(tableName) != 0) {
+        return;
+    }
     TxnLogEntry entry;
     entry.op = TxnLogEntry::Op::Delete;
     entry.tableName = tableName;
@@ -38895,6 +39002,35 @@ bool StorageEngine::transactionBackupDirty() const {
     return transactionContext().transactionBackupDirty;
 }
 
+bool StorageEngine::beginSqlCommand() {
+    auto& context = transactionContext();
+    if (!context.inTransaction) return false;
+    context.commandInternalRelations.clear();
+    context.readView.currentCommandId = context.currentCommandId;
+    context.readView.commandIdVisibility = true;
+    return true;
+}
+
+bool StorageEngine::finishSqlCommand() {
+    auto& context = transactionContext();
+    if (!context.inTransaction) return false;
+    context.readView.commandIdVisibility = false;
+    context.commandInternalRelations.clear();
+    if (context.currentCommandId ==
+        std::numeric_limits<uint32_t>::max()) return false;
+    ++context.currentCommandId;
+    context.readView.currentCommandId = context.currentCommandId;
+    return true;
+}
+
+void StorageEngine::registerSqlCommandInternalRelation(
+    const std::string& tablename) {
+    auto& context = transactionContext();
+    if (context.inTransaction && !tablename.empty()) {
+        context.commandInternalRelations.insert(tablename);
+    }
+}
+
 DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnapshot) {
     auto& context = transactionContext();
     if (context.inTransaction) {
@@ -38942,6 +39078,12 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
         context.databaseTxnMutex.reset();
         return DBStatus::IO_ERROR;
     }
+    transactionContext().currentCommandId = 0;
+    transactionContext().nextComboCommandId = 1;
+    transactionContext().commandInternalRelations.clear();
+    transactionContext().readView.currentCommandId = 0;
+    transactionContext().readView.commandIdVisibility = false;
+    transactionContext().readView.comboCommandIds.clear();
     {
         std::lock_guard<std::mutex> lock(globalTxnMutex_);
         activeTransactions_.insert(transactionContext().currentTxnId);

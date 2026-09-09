@@ -180,6 +180,50 @@ int main() {
         std::cout << "[SUBXIP] tuple outcome and snapshot timing OK\n";
     }
 
+    // Test 6: current-transaction tuples obey command-ID visibility.
+    {
+        alignas(8) char buf[128] = {};
+        StorageEngine::ReadView rv;
+        rv.creatorTxnId = 42;
+        rv.upLimitId = 10;
+        rv.lowLimitId = 100;
+        rv.currentCommandId = 3;
+        rv.commandIdVisibility = true;
+
+        auto resetTuple = [&](uint32_t xmin, uint32_t xmax,
+                              uint32_t cid) {
+            std::memset(buf, 0, sizeof(buf));
+            auto* header = castHeapHeader(buf);
+            initHeapTupleHeader(header, xmin, 2, false, false);
+            header->t_fields.t_xmax = xmax;
+            header->t_fields.t_cid = cid;
+            return header;
+        };
+
+        // This command's insert is hidden; a prior command's insert is seen.
+        resetTuple(42, 0, 3);
+        assert(!rv.isVisible(buf, sizeof(buf), 2));
+        resetTuple(42, 0, 2);
+        assert(rv.isVisible(buf, sizeof(buf), 2));
+
+        // This command's delete is hidden; a prior command's delete is seen.
+        resetTuple(5, 42, 3);
+        assert(rv.isVisible(buf, sizeof(buf), 2));
+        resetTuple(5, 42, 2);
+        assert(!rv.isVisible(buf, sizeof(buf), 2));
+
+        // A tuple inserted by an earlier command and updated by this command
+        // needs both cmin and cmax; the on-page combo ID resolves that pair.
+        auto* header = resetTuple(42, 42, 1);
+        header->t_infomask |= HEAP_COMBOCID;
+        rv.comboCommandIds[1] = {1, 3};
+        assert(rv.isVisible(buf, sizeof(buf), 2));
+        rv.currentCommandId = 4;
+        assert(!rv.isVisible(buf, sizeof(buf), 2));
+
+        std::cout << "[SUBXIP] command-ID visibility OK\n";
+    }
+
     std::cout << "[SUBXIP] all passed\n";
     return 0;
 }

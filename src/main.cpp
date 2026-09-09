@@ -9269,6 +9269,7 @@ static std::string createTempTableFromRows(Session& s,
     auto res = g_engine.createTable(s.currentDB, tmpTbl);
     if (res != DBStatus::OK) return "";
     s.transientTempTables.insert(tmpName);
+    g_engine.registerSqlCommandInternalRelation(actualName);
 
     if (hasStructuredRows) {
         for (size_t rowIndex = 0; rowIndex < structuredRows->size();
@@ -24268,23 +24269,37 @@ bool execute(const std::string& rawSql, Session& s) {
         std::cout << "ERROR: could not start statement transaction" << std::endl;
         return true;
     }
+    const bool commandVisibilityActive = outermost &&
+        g_engine.inTransaction() && g_engine.beginSqlCommand();
 
     bool error = false;
     try {
         error = executeInternal(rawSql, s);
     } catch (...) {
-        if (statementTransaction) g_engine.rollbackTransaction();
+        if (statementTransaction) {
+            g_engine.rollbackTransaction();
+        } else if (commandVisibilityActive && g_engine.inTransaction()) {
+            g_engine.finishSqlCommand();
+        }
         --executeDepth;
         throw;
     }
 
     if (statementTransaction) {
+        if (commandVisibilityActive && !g_engine.finishSqlCommand()) {
+            error = true;
+        }
         if (error) {
             g_engine.rollbackTransaction();
         } else if (g_engine.commitTransaction() != dbms::DBStatus::OK) {
             error = true;
             g_engine.rollbackTransaction();
         }
+    } else if (outermost && g_engine.inTransaction()) {
+        // BEGIN creates the transaction inside executeInternal(), whereas an
+        // ordinary statement entered with command visibility already active.
+        // Both consume one command ID before the next SQL statement.
+        if (!g_engine.finishSqlCommand()) error = true;
     }
     --executeDepth;
     return error;

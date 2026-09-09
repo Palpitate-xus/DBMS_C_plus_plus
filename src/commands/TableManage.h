@@ -717,6 +717,12 @@ public:
     DBStatus beginTransaction(const std::string& dbname, bool ddlSnapshot);
     DBStatus commitTransaction();
     DBStatus rollbackTransaction();
+    // SQL statements inside one transaction share a command ID.  Tuple
+    // versions written by the current command stay outside that command's
+    // MVCC snapshot, then become visible after the command counter advances.
+    bool beginSqlCommand();
+    bool finishSqlCommand();
+    void registerSqlCommandInternalRelation(const std::string& tablename);
 
     // Register an undo action for DDL performed inside an already-open
     // transaction. The action is replayed in reverse order by ROLLBACK and
@@ -1029,10 +1035,15 @@ public:
     // MVCC ReadView
     struct ReadView {
         ReadView()
-            : creatorTxnId(0), upLimitId(0), lowLimitId(0), commitLog(nullptr) {}
+            : creatorTxnId(0), upLimitId(0), lowLimitId(0),
+              currentCommandId(0), commandIdVisibility(false),
+              commitLog(nullptr) {}
         uint64_t creatorTxnId;
         uint64_t upLimitId;
         uint64_t lowLimitId;
+        uint32_t currentCommandId;
+        bool commandIdVisibility;
+        std::map<uint32_t, std::pair<uint32_t, uint32_t>> comboCommandIds;
         std::set<uint64_t> activeTxnIds;
         std::set<uint64_t> subTxnIds;        // subtransaction IDs in progress
         const CommitLog* commitLog; // for CLOG lookups
@@ -1260,6 +1271,9 @@ public:
 
     // Current transaction ID (0 = not in a transaction)
     uint64_t currentTxnId() const { return transactionContext().currentTxnId; }
+    uint32_t currentCommandId() const {
+        return transactionContext().currentCommandId;
+    }
     const ReadView* getCurrentReadView() const {
         const auto& tx = transactionContext();
         return tx.inTransaction ? &tx.readView : nullptr;
@@ -1905,6 +1919,9 @@ private:
         bool restoreBackupBeforeRowUndo = false;
         size_t ddlUndoSizeAtBackup = 0;
         uint64_t currentTxnId = 0;
+        uint32_t currentCommandId = 0;
+        uint32_t nextComboCommandId = 1;
+        std::set<std::string> commandInternalRelations;
         ReadView readView;
         IsolationLevel txnIsolationLevel = IsolationLevel::REPEATABLE_READ;
         std::vector<TxnLogEntry> txnLog;
@@ -1970,6 +1987,8 @@ private:
     mutable std::mutex transactionContextsMutex_;
     mutable std::map<std::thread::id, std::unique_ptr<TransactionContext>> transactionContexts_;
     TransactionContext& transactionContext() const;
+    bool markTupleDeletedByCurrentCommand(
+        char* rowBuffer, size_t len, uint32_t formatVersion);
     mutable std::mutex catalogSnapshotMutex_;
 };
 
