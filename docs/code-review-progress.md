@@ -191,6 +191,8 @@
 
 | 323 | CAT-18 / QRY-13 | statement-level DELETE trigger 已收集 OLD TABLE 行并物化为 session 临时表，但该路径没有像 CTE/derived table 一样登记“命令内部关系”；command-ID 可见性因而把本命令插入的 transition rows 隐藏起来，trigger action 的 `INSERT ... SELECT` 读取空集。物化后立即登记物理临时关系，使 transition producer/consumer 在同一 SQL command 内可见，同时不放宽普通用户表的同命令 snapshot | 完整 PostgreSQL 协议测试修复前在 `tt_archive` 断言得到空行，修复后 OLD TABLE 的两行被归档、剩余源行和 alias 清理均正确，套件全部通过；`trigger_test` 全部通过，`main.cpp` O0/O2 编译通过，实际 PostgreSQL 122 组差分 `failed=0` | `f76d8db` |
 
+| 324 | PROTO-02 / PROTO-08 | failed-transaction 恢复判定仅把连续文本 `ROLLBACK PREPARED` 排除；SQL 注释分隔两个关键字时被误认成普通 ROLLBACK，二阶段命令会成功逃离 `25P02`。COMMIT 转 ROLLBACK 又在原始文本中搜索 `and chain`，注释内容可伪造 CHAIN，真实 token 间插注释则无法识别。新增可复用 SQL trivia/keyword reader，prepared 与 chain 识别均按实际 token 序列执行 | 协议 E2E 修复前稳定复现 `ROLLBACK /*...*/ PREPARED` 返回成功，现保持 `25P02`；同时验证注释中的 `and chain` 回到 idle、真实 `AND /*...*/ CHAIN` 回到 transaction，并最终正常 ROLLBACK。专项与完整 PostgreSQL 协议套件、NetworkServer O0/O2 编译通过 | `e6f6544` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
