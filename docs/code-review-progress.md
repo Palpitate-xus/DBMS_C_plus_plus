@@ -285,6 +285,8 @@
 
 | 370 | DIV-11 | MySQL 风格的 `SHOW VARIABLES` 和 `SET @variable` 可从默认 postgresql18 模式进入，extended 的 `SET GLOBAL` 还可在显式事务内改变配置；同时复现 `SET @project_value = 7` 报成功但下一条 `SELECT @project_value` 返回 NULL，因为旧替换只改 normalized SQL，而 fromless SELECT 重新使用未替换的 raw SQL。默认模式现分别返回 42704/42601，事务内 extended `SET GLOBAL` 返回 25001；extended 会话变量改用识别引号、E-string、dollar quote、行/嵌套块注释的 raw SQL 扫描，并把同一 effective SQL 送入各执行分支 | DIV capability E2E 覆盖两个默认模式负向门、跨协议查询变量保留、普通及 dollar-quoted 字面量不替换、事务回滚；main O0/O2 编译与生产重链、完整协议回归和真实 PostgreSQL 差分 122/122 通过。DIV-11 改为 partial：`SET GLOBAL` 仍会立即改全局运行值，尚未达到蓝图要求的持久化/重载/重启语义 | `05e1aa1` |
 
+| 371 | DIV-11 | `SET GLOBAL`/`ALTER SYSTEM` 仍先修改 live `g_config`、连接限制、planner、当前 session 并清 plan cache，再写 `dbms.conf`；连续的 pending 修改也从 live snapshot 出发，存在覆盖前一项的风险。全局路径现从持久化文件构造 candidate，在进程互斥下原子 read-modify-save，绝不立即改变 live/session；reload 应用可重载项并失效 plan，`max_connections`、buffer 和通知队列容量保持活动值到重启。`ALTER SYSTEM` 与 extended alias 均禁止事务内执行；手册删除默认模式 `SHOW VARIABLES` 和错误的单位示例，写明 reload/restart 边界 | DIV E2E 验证两次 pending 写均保留、reload 前后值变化和 25001；完整协议验证启动连接上限、pending 文件、reload 不改变 postmaster 值、重启应用、通知队列保持、planner 只在 reload 后失效。O0/O2 编译、正式重链、文档门、完整协议和真实 PostgreSQL 差分 122/122 通过。结合第 370 项，DIV-11 已 complete；其余 `SHOW` 项目命令分别归 DIV-05/09/10/12，完整 pg_settings 字段归 OPS-02 | `80ce82d` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
