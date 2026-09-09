@@ -1171,8 +1171,9 @@ SHOW 入口已经删除。该模式是会话级设置，进入事务后不可切
   同样未实现 SQL assertion）
 - 启动标识（DIV-13）：服务端 banner 标明自身版本与兼容模式，并明确
   提示“这不是 PostgreSQL server cluster”；`server_version` 参数上报
-  `DBMS-C++ protocol/3.0`，不冒充 PostgreSQL 版本号；无默认端口，
-  必须显式 `--server PORT`
+  `18.0 DBMS-C++ 0.2.0`：前导主版本供 PostgreSQL 客户端解析，后缀标识
+  实际产品版本；该字段不是 PostgreSQL 18 兼容认证。服务端无默认端口，必须
+  显式 `--server PORT`
 
 会话默认模式可由环境变量 `DBMS_COMPATIBILITY_MODE=extended|postgresql18`
 设定（默认 `postgresql18`），CLI 与网络会话一致生效。

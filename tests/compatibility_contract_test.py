@@ -17,6 +17,8 @@ def main():
     feature_gate = read("src/common/FeatureGate.h")
     protocol = read("src/network/PostgresProtocol.cpp")
     version = read("src/common/version.h")
+    network = read("src/network/NetworkServer.cpp")
+    manual = read("docs/MANUAL.md")
     readme = read("README.md")
     production = read("docs/production-status.md")
 
@@ -29,6 +31,11 @@ def main():
     assert product_version == "0.2.0"
     assert modes == {"Postgresql18": "postgresql18", "Extended": "extended"}
     assert "constexpr uint32_t kProtocol30 = 0x00030000" in protocol
+    assert ('"server_version", std::string("18.0 DBMS-C++ ") + '
+            'DBMS_VERSION_STRING') in network
+    assert "`18.0 DBMS-C++ %s`" % product_version in manual
+    assert "该字段不是 PostgreSQL 18 兼容认证" in manual
+    assert "`DBMS-C++ protocol/3.0`" not in manual
     assert "产品版本 | `0.2.0`" in contract
     assert "差分基线 `18.6`" in contract
     assert "wire protocol 上限 | `3.0` (`196608`)" in contract
