@@ -250,6 +250,22 @@ def main():
             "SELECT id FROM shaped_copy_target;")
         assert state is None and rows == [], (state, message, rows)
 
+        # CSV field contents are data. COPY must not trim spaces from quoted
+        # or unquoted text values while constructing INSERT input.
+        copy_path.write_text(
+            '1,"  quoted edge  "\n2,unquoted edge  \n', encoding="utf-8")
+        _, state, message, _, _, _ = execute(
+            "CREATE TABLE text_copy_target (id INT, value TEXT);")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute(
+            f"COPY text_copy_target FROM '{copy_path}';")
+        assert state is None, (state, message)
+        rows, state, message, _, _, _ = execute(
+            "SELECT value FROM text_copy_target ORDER BY id;")
+        assert state is None and rows == [
+            ["  quoted edge  "], ["unquoted edge  "]
+        ], (state, message, rows)
+
         # SET TRANSACTION read modes are transaction characteristics, not
         # configuration parameters.  Tightening an active transaction to
         # READ ONLY is allowed even after a read, and every subsequent DML

@@ -2776,7 +2776,7 @@ static bool handleCopy(const string& sql, Session& s) {
             }
             map<string, string> values;
             for (size_t i = 0; i < tbl.len; ++i) {
-                values[tbl.cols[i].dataName] = trim(fields[i]);
+                values[tbl.cols[i].dataName] = fields[i];
             }
             auto res = g_engine.insert(s.currentDB, tname, values);
             if (res == DBStatus::OK) imported++;
