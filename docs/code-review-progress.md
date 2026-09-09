@@ -239,6 +239,8 @@
 
 | 347 | TXN-12 | notification registry 只以 channel 作为全局键，连接到不同 database 的会话会互相收到同名 channel，违反 NOTIFY 仅面向当前 database 的隔离边界。订阅键现为 `(database, channel)`，事务订阅快照、保存点、去重、断开清理和即时/提交时发布均携带 database；wire 帧仍只暴露 PostgreSQL 规定的 channel/payload | 管理器专项回归验证 db2 的同名发布不会进入 db1 backend、db1 发布仍正常；完整协议回归创建第二 database 并连接同一用户，跨库 NOTIFY 后让 info listener 执行查询，断言没有任何 `A` 消息。O0/O2 生产构建与完整协议套件通过 | `0aaabf0` |
 
+| 348 | P0-01 / SQL-01 / TXN-12 / PROTO-08 | LISTEN/NOTIFY/UNLISTEN 曾绕过 parser，直接按空格和首个逗号切原 SQL：quoted channel 连同引号注册，payload 中 doubled quote 不解码，尾随垃圾被静默接受且没有 8000-byte 上限；事务内还提前污染 Session 的监听镜像。三种命令现使用类型化 AST，按 PostgreSQL 规则折叠 unquoted identifier、保留并解码 quoted identifier、要求 payload 为单个字符串字面量，并在任何排队前拒绝 NUL 或长度不小于 8000 bytes；语法与边界错误在线协议分别返回 `42601`/`22023` | `parser_phase1_test` 覆盖 quoted/doubled identifier、payload 转义、大小写折叠和尾随垃圾拒绝；`notification_manager_test` 覆盖 7999/8000 bytes 与 NUL；完整 `postgres_protocol_test.py` 验证 quoted channel/payload 的 `A` 帧、三类非法输入 SQLSTATE、超长 payload 不投递。主入口/网络入口 O0、O2 编译以及完整协议套件通过 | `cc17e0e` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
