@@ -1368,17 +1368,13 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
 // Transaction helpers
 // ----------------------------------------------------------------------------
 
-bool DdlExecutor::checkAndImplicitCommit(Session& s) {
+bool DdlExecutor::checkDatabaseCommandOutsideTransaction(Session& s) {
     (void)s;
     if (!g_engine.inTransaction()) return true;
-    const DBStatus status = g_engine.commitTransaction();
-    if (status != DBStatus::OK) {
-        std::cout << "ERROR: implicit DDL commit failed (SQLSTATE "
-                  << sqlstateForDBStatus(status) << ")" << std::endl;
-        return false;
-    }
-    std::cout << "Note: DDL caused implicit commit of open transaction" << std::endl;
-    return true;
+    std::cout << "ERROR: CREATE/DROP DATABASE cannot run inside a "
+                 "transaction block (SQLSTATE 25001)"
+              << std::endl;
+    return false;
 }
 
 // ALTER TABLE is deliberately executed from the typed AST.  Keep the
@@ -2510,7 +2506,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
 bool DdlExecutor::executeCreateDatabase(const CreateObjectStmt* stmt, Session& s) {
     if (!stmt) return false;
     if (!checkAdmin(s)) return true;
-    if (!checkAndImplicitCommit(s)) return true;
+    if (!checkDatabaseCommandOutsideTransaction(s)) return true;
     std::string dbname = stmt->objectName;
     if (dbname.empty()) {
         std::cout << "SQL syntax error: CREATE DATABASE name" << std::endl;
@@ -2536,7 +2532,7 @@ bool DdlExecutor::executeCreateDatabase(const CreateObjectStmt* stmt, Session& s
 bool DdlExecutor::executeDropDatabase(const DropStmt* stmt, Session& s) {
     if (!stmt) return false;
     if (!checkAdmin(s)) return true;
-    if (!checkAndImplicitCommit(s)) return true;
+    if (!checkDatabaseCommandOutsideTransaction(s)) return true;
     if (stmt->objectNames.empty()) {
         std::cout << "SQL syntax error: DROP DATABASE name" << std::endl;
         return true;

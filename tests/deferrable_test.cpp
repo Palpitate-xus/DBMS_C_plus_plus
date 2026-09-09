@@ -216,7 +216,7 @@ static void test_deferred_check_uses_final_row() {
               << std::endl;
 }
 
-static void test_ddl_implicit_commit_failure_is_propagated() {
+static void test_database_ddl_does_not_commit_outer_transaction() {
     std::string db = testDbPath("deferrable_t7");
     std::string targetDb = testDbPath("implicit_commit_target");
     cleanup(db);
@@ -234,16 +234,18 @@ static void test_ddl_implicit_commit_failure_is_propagated() {
     assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "t", {{"id", "1"}, {"price", "0"}}) == dbms::DBStatus::OK);
 
-    // CREATE DATABASE has an implicit-commit boundary.  The deferred CHECK
-    // must fail that boundary and prevent the database creation from running.
+    // PostgreSQL rejects CREATE/DROP DATABASE inside a transaction block.
+    // It must not try to commit unrelated work as an implementation shortcut.
     assert(ddl.executeSql("CREATE DATABASE " + targetDb, s));
-    assert(!g_engine.inTransaction());
+    assert(g_engine.inTransaction());
     assert(!g_engine.databaseExists(targetDb));
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
     assert(g_engine.query(db, "t", {"=id 1"}, {"price"}).empty());
 
     cleanup(db);
     cleanup(targetDb);
-    std::cout << "[DEFERRABLE] implicit DDL commit failure propagates OK" << std::endl;
+    std::cout << "[DEFERRABLE] database DDL preserves outer transaction OK"
+              << std::endl;
 }
 
 int main() {
@@ -255,7 +257,7 @@ int main() {
     test_set_constraints_all_deferred_via_engine();
     test_deferred_check_on_update();
     test_deferred_check_uses_final_row();
-    test_ddl_implicit_commit_failure_is_propagated();
+    test_database_ddl_does_not_commit_outer_transaction();
     std::cout << "[DEFERRABLE] all passed" << std::endl;
     return 0;
 }

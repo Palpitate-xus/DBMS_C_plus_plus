@@ -84,7 +84,7 @@ private:
 
     // 事务隐式提交（PG 语义；后续 Wave 5 移除）。返回 false 表示
     // WAL/CLOG/fsync、延迟约束或 SSI 等提交失败，调用方必须停止 DDL。
-    static bool checkAndImplicitCommit(Session& s);
+    static bool checkDatabaseCommandOutsideTransaction(Session& s);
 };
 
 // DDL AST bridge 入口。由 main.cpp::execute() 在字符串分发前调用。

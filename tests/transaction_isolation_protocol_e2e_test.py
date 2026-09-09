@@ -132,6 +132,34 @@ def main():
         assert state is None and rows == [["1"]], (state, message, rows)
         assert headers == ["id"], headers
 
+        # PostgreSQL does not implement CREATE/DROP DATABASE by committing an
+        # open transaction. Both commands are prohibited in a transaction
+        # block and leave the protocol transaction failed until ROLLBACK.
+        _, state, message, _, _, _ = execute("BEGIN;")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute(
+            "CREATE DATABASE forbidden_transaction_database;")
+        assert state == "25001", (state, message)
+        assert "cannot run inside a transaction block" in message, message
+        _, state, message, _, _, _ = execute("SELECT 1;")
+        assert state == "25P02", (state, message)
+        _, state, message, _, _, _ = execute("ROLLBACK;")
+        assert state is None, (state, message)
+
+        _, state, message, _, _, _ = execute(
+            "CREATE DATABASE forbidden_transaction_database;")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute("BEGIN;")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute(
+            "DROP DATABASE forbidden_transaction_database;")
+        assert state == "25001", (state, message)
+        _, state, message, _, _, _ = execute("ROLLBACK;")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute(
+            "DROP DATABASE forbidden_transaction_database;")
+        assert state is None, (state, message)
+
         # SET TRANSACTION read modes are transaction characteristics, not
         # configuration parameters.  Tightening an active transaction to
         # READ ONLY is allowed even after a read, and every subsequent DML
