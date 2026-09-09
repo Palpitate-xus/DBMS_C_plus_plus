@@ -2122,10 +2122,6 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 offset += 4;
             }
             preparedStatements[statement] = std::move(prepared);
-            if (!protocol.sendParameterDescription(preparedStatements[statement].parameterTypes)) {
-                extendedQueryError = true;
-                continue;
-            }
             protocol.sendParseComplete();
             continue;
         }

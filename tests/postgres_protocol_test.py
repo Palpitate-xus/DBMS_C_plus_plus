@@ -231,9 +231,7 @@ def extended_query(sock, sql):
     parse = b"\0" + sql.encode() + b"\0" + struct.pack("!H", 0)
     sock.sendall(typed(b"P", parse))
     kind, body = read_message(sock)
-    assert kind == b"t" and body == struct.pack("!H", 0), (kind, body)
-    kind, _ = read_message(sock)
-    assert kind == b"1"
+    assert kind == b"1" and body == b"", (kind, body)
 
     sock.sendall(typed(b"D", b"S\0"))
     kind, body = read_message(sock)
@@ -266,9 +264,7 @@ def extended_query_int_parameter(sock, sql, value):
     parse = b"\0" + sql.encode() + b"\0" + struct.pack("!H", 1) + struct.pack("!I", 23)
     sock.sendall(typed(b"P", parse))
     kind, body = read_message(sock)
-    assert kind == b"t" and body == struct.pack("!H", 1) + struct.pack("!I", 23)
-    kind, _ = read_message(sock)
-    assert kind == b"1"
+    assert kind == b"1" and body == b"", (kind, body)
 
     encoded = str(value).encode()
     bind = (b"\0\0" + struct.pack("!H", 0) + struct.pack("!H", 1) +
@@ -286,9 +282,7 @@ def extended_query_binary_int_parameter(sock, sql, value):
     parse = b"\0" + sql.encode() + b"\0" + struct.pack("!H", 1) + struct.pack("!I", 23)
     sock.sendall(typed(b"P", parse))
     kind, body = read_message(sock)
-    assert kind == b"t" and body == struct.pack("!H", 1) + struct.pack("!I", 23)
-    kind, _ = read_message(sock)
-    assert kind == b"1"
+    assert kind == b"1" and body == b"", (kind, body)
 
     bind = (b"\0\0" + struct.pack("!H", 1) + struct.pack("!H", 1) +
             struct.pack("!H", 1) + struct.pack("!i", 4) + struct.pack("!i", value) +
@@ -311,9 +305,7 @@ def extended_query_binary_parameter(sock, suffix, sql, type_oid, raw, expected):
              struct.pack("!H", 1) + struct.pack("!I", type_oid))
     sock.sendall(typed(b"P", parse))
     kind, body = read_message(sock)
-    assert kind == b"t" and body == struct.pack("!H", 1) + struct.pack("!I", type_oid)
-    kind, _ = read_message(sock)
-    assert kind == b"1"
+    assert kind == b"1" and body == b"", (kind, body)
 
     bind = (portal_name + b"\0" + statement_name + b"\0" +
             struct.pack("!H", 1) + struct.pack("!H", 1) +
@@ -395,9 +387,7 @@ def extended_query_portal_pagination(sock):
     parse = b"paged_stmt\0SELECT id FROM portal_t\0" + struct.pack("!H", 0)
     sock.sendall(typed(b"P", parse))
     kind, body = read_message(sock)
-    assert kind == b"t" and body == struct.pack("!H", 0)
-    kind, _ = read_message(sock)
-    assert kind == b"1"
+    assert kind == b"1" and body == b"", (kind, body)
 
     bind = b"paged\0paged_stmt\0" + struct.pack("!H", 0) + struct.pack("!H", 0) + struct.pack("!H", 0)
     sock.sendall(typed(b"B", bind))
