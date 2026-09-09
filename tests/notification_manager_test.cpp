@@ -13,9 +13,9 @@ int main() {
     manager.disconnect(secondBackend);
     manager.disconnect(senderBackend);
 
-    manager.listen(firstBackend, "same_role_channel");
-    manager.listen(secondBackend, "same_role_channel");
-    manager.publish(senderBackend, "same_role_channel", "payload");
+    manager.listen(firstBackend, "db1", "same_role_channel");
+    manager.listen(secondBackend, "db1", "same_role_channel");
+    manager.publish(senderBackend, "db1", "same_role_channel", "payload");
 
     const auto first = manager.takePending(firstBackend);
     const auto second = manager.takePending(secondBackend);
@@ -28,25 +28,31 @@ int main() {
     assert(second.front().channel == "same_role_channel");
     assert(second.front().payload == "payload");
 
-    manager.listen(firstBackend, "disconnect_channel");
+    manager.listen(secondBackend, "db1", "database_channel");
+    manager.publish(senderBackend, "db2", "database_channel", "wrong database");
+    assert(manager.takePending(secondBackend).empty());
+    manager.publish(senderBackend, "db1", "database_channel", "same database");
+    assert(manager.takePending(secondBackend).size() == 1);
+
+    manager.listen(firstBackend, "db1", "disconnect_channel");
     manager.disconnect(firstBackend);
-    manager.publish(senderBackend, "disconnect_channel", "orphan");
+    manager.publish(senderBackend, "db1", "disconnect_channel", "orphan");
     assert(manager.takePending(firstBackend).empty());
 
     constexpr uint64_t listenerBackend = 3001;
     constexpr uint64_t transactionalSender = 3002;
-    manager.listen(listenerBackend, "transaction_channel");
+    manager.listen(listenerBackend, "db1", "transaction_channel");
 
     manager.beginTransaction(transactionalSender);
-    manager.publish(transactionalSender, "transaction_channel", "rolled back");
+    manager.publish(transactionalSender, "db1", "transaction_channel", "rolled back");
     assert(manager.hasTransactionalActions(transactionalSender));
     assert(manager.takePending(listenerBackend).empty());
     manager.rollbackTransaction(transactionalSender);
     assert(manager.takePending(listenerBackend).empty());
 
     manager.beginTransaction(transactionalSender);
-    manager.publish(transactionalSender, "transaction_channel", "committed");
-    manager.publish(transactionalSender, "transaction_channel", "committed");
+    manager.publish(transactionalSender, "db1", "transaction_channel", "committed");
+    manager.publish(transactionalSender, "db1", "transaction_channel", "committed");
     assert(manager.takePending(listenerBackend).empty());
     assert(manager.commitTransaction(transactionalSender));
     const auto committed = manager.takePending(listenerBackend);
@@ -54,26 +60,26 @@ int main() {
     assert(committed.front().payload == "committed");
 
     manager.beginTransaction(secondBackend);
-    manager.listen(secondBackend, "transaction_channel");
-    manager.publish(transactionalSender, "transaction_channel", "before listen commit");
+    manager.listen(secondBackend, "db1", "transaction_channel");
+    manager.publish(transactionalSender, "db1", "transaction_channel", "before listen commit");
     assert(manager.takePending(secondBackend).empty());
     assert(manager.takePending(listenerBackend).size() == 1);
     assert(manager.commitTransaction(secondBackend));
-    manager.publish(transactionalSender, "transaction_channel", "after listen commit");
+    manager.publish(transactionalSender, "db1", "transaction_channel", "after listen commit");
     assert(manager.takePending(secondBackend).size() == 1);
     assert(manager.takePending(listenerBackend).size() == 1);
 
     manager.beginTransaction(secondBackend);
-    manager.unlisten(secondBackend, "transaction_channel");
+    manager.unlisten(secondBackend, "db1", "transaction_channel");
     manager.rollbackTransaction(secondBackend);
-    manager.publish(transactionalSender, "transaction_channel", "unlisten rolled back");
+    manager.publish(transactionalSender, "db1", "transaction_channel", "unlisten rolled back");
     assert(manager.takePending(secondBackend).size() == 1);
     assert(manager.takePending(listenerBackend).size() == 1);
 
     manager.beginTransaction(transactionalSender);
-    manager.publish(transactionalSender, "transaction_channel", "before savepoint");
+    manager.publish(transactionalSender, "db1", "transaction_channel", "before savepoint");
     assert(manager.savepoint(transactionalSender, "notification_sp"));
-    manager.publish(transactionalSender, "transaction_channel", "after savepoint");
+    manager.publish(transactionalSender, "db1", "transaction_channel", "after savepoint");
     assert(manager.rollbackToSavepoint(transactionalSender, "notification_sp"));
     assert(manager.commitTransaction(transactionalSender));
     const auto afterSavepoint = manager.takePending(listenerBackend);

@@ -683,6 +683,19 @@ def main():
         assert any(kind == b"C" for kind, _ in simple_query(
             notify_sock, "NOTIFY wire_channel, 'after unlisten commit'"))
         assert notification_values(simple_query(sock, "SELECT 1")) == []
+
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE DATABASE notify_other"))
+        other_db_sock = socket.socket()
+        other_db_sock.settimeout(SOCKET_TIMEOUT)
+        other_db_sock.connect(("127.0.0.1", port))
+        startup(other_db_sock, "alice", "notify_other")
+        assert any(kind == b"C" for kind, _ in simple_query(
+            other_db_sock,
+            "NOTIFY shared_role_channel, 'other database'"))
+        assert notification_values(simple_query(sock, "SELECT 1")) == []
+        other_db_sock.sendall(typed(b"X"))
+        other_db_sock.close()
         notify_sock.sendall(typed(b"X"))
         notify_sock.close()
 

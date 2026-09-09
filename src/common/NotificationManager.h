@@ -43,7 +43,7 @@ public:
             subscriptions_[backendId].insert(channel);
         }
         for (const auto& notification : transaction->second.outgoing) {
-            publishLocked(notification);
+            publishLocked(notification.key, notification.notification);
         }
         transactions_.erase(transaction);
         return true;
@@ -118,34 +118,38 @@ public:
         return true;
     }
 
-    void listen(uint64_t backendId, const std::string& channel) {
+    void listen(uint64_t backendId, const std::string& database,
+                const std::string& channel) {
         std::lock_guard<std::mutex> lock(mutex_);
+        const ChannelKey key{database, channel};
         auto transaction = transactions_.find(backendId);
         if (transaction != transactions_.end()) {
             transaction->second.actionExecuted = true;
-            transaction->second.subscriptions.insert(channel);
+            transaction->second.subscriptions.insert(key);
             return;
         }
-        listeners_[channel].insert(backendId);
-        subscriptions_[backendId].insert(channel);
+        listeners_[key].insert(backendId);
+        subscriptions_[backendId].insert(key);
     }
 
-    void unlisten(uint64_t backendId, const std::string& channel) {
+    void unlisten(uint64_t backendId, const std::string& database,
+                  const std::string& channel) {
         std::lock_guard<std::mutex> lock(mutex_);
+        const ChannelKey key{database, channel};
         auto transaction = transactions_.find(backendId);
         if (transaction != transactions_.end()) {
             transaction->second.actionExecuted = true;
-            transaction->second.subscriptions.erase(channel);
+            transaction->second.subscriptions.erase(key);
             return;
         }
-        auto listener = listeners_.find(channel);
+        auto listener = listeners_.find(key);
         if (listener != listeners_.end()) {
             listener->second.erase(backendId);
             if (listener->second.empty()) listeners_.erase(listener);
         }
         auto subscription = subscriptions_.find(backendId);
         if (subscription != subscriptions_.end()) {
-            subscription->second.erase(channel);
+            subscription->second.erase(key);
             if (subscription->second.empty()) subscriptions_.erase(subscription);
         }
     }
@@ -161,27 +165,29 @@ public:
         removeSubscriptionsLocked(backendId);
     }
 
-    void publish(uint64_t senderId, const std::string& channel,
-                 const std::string& payload) {
+    void publish(uint64_t senderId, const std::string& database,
+                 const std::string& channel, const std::string& payload) {
         std::lock_guard<std::mutex> lock(mutex_);
         const AsyncNotification notification{
             static_cast<uint32_t>(senderId), channel, payload};
+        const ChannelKey key{database, channel};
         auto transaction = transactions_.find(senderId);
         if (transaction != transactions_.end()) {
             transaction->second.actionExecuted = true;
             const auto duplicate = std::find_if(
                 transaction->second.outgoing.begin(),
                 transaction->second.outgoing.end(),
-                [&](const AsyncNotification& queued) {
-                    return queued.channel == channel &&
-                           queued.payload == payload;
+                [&](const PendingNotification& queued) {
+                    return queued.key == key &&
+                           queued.notification.payload == payload;
                 });
             if (duplicate == transaction->second.outgoing.end()) {
-                transaction->second.outgoing.push_back(notification);
+                transaction->second.outgoing.push_back(
+                    PendingNotification{key, notification});
             }
             return;
         }
-        publishLocked(notification);
+        publishLocked(key, notification);
     }
 
     std::vector<AsyncNotification> takePending(uint64_t backendId) {
@@ -200,30 +206,43 @@ public:
         transactions_.erase(backendId);
     }
 
-    std::set<std::string> subscriptions(uint64_t backendId) const {
+    std::set<std::string> subscriptions(uint64_t backendId,
+                                        const std::string& database) const {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto subscription = subscriptions_.find(backendId);
-        return subscription == subscriptions_.end()
-            ? std::set<std::string>{} : subscription->second;
+        std::set<std::string> result;
+        if (subscription == subscriptions_.end()) return result;
+        for (const auto& key : subscription->second) {
+            if (key.first == database) result.insert(key.second);
+        }
+        return result;
     }
 
 private:
+    using ChannelKey = std::pair<std::string, std::string>;
+
+    struct PendingNotification {
+        ChannelKey key;
+        AsyncNotification notification;
+    };
+
     struct SavepointState {
         std::string name;
-        std::set<std::string> subscriptions;
+        std::set<ChannelKey> subscriptions;
         size_t outgoingSize = 0;
         bool actionExecuted = false;
     };
 
     struct TransactionState {
-        std::set<std::string> subscriptions;
-        std::vector<AsyncNotification> outgoing;
+        std::set<ChannelKey> subscriptions;
+        std::vector<PendingNotification> outgoing;
         bool actionExecuted = false;
         std::vector<SavepointState> savepoints;
     };
 
-    void publishLocked(const AsyncNotification& notification) {
-        const auto listener = listeners_.find(notification.channel);
+    void publishLocked(const ChannelKey& key,
+                       const AsyncNotification& notification) {
+        const auto listener = listeners_.find(key);
         if (listener == listeners_.end()) return;
         for (uint64_t backendId : listener->second) {
             pending_[backendId].push_back(notification);
@@ -233,8 +252,8 @@ private:
     void removeSubscriptionsLocked(uint64_t backendId) {
         auto subscription = subscriptions_.find(backendId);
         if (subscription == subscriptions_.end()) return;
-        for (const auto& channel : subscription->second) {
-            auto listener = listeners_.find(channel);
+        for (const auto& key : subscription->second) {
+            auto listener = listeners_.find(key);
             if (listener == listeners_.end()) continue;
             listener->second.erase(backendId);
             if (listener->second.empty()) listeners_.erase(listener);
@@ -243,8 +262,8 @@ private:
     }
 
     mutable std::mutex mutex_;
-    std::map<std::string, std::set<uint64_t>> listeners_;
-    std::map<uint64_t, std::set<std::string>> subscriptions_;
+    std::map<ChannelKey, std::set<uint64_t>> listeners_;
+    std::map<uint64_t, std::set<ChannelKey>> subscriptions_;
     std::map<uint64_t, std::vector<AsyncNotification>> pending_;
     std::map<uint64_t, TransactionState> transactions_;
 };

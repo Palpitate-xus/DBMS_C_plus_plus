@@ -253,7 +253,7 @@ static void beginNotificationTransaction(Session& s) {
 static void commitNotificationTransaction(Session& s) {
     if (dbms::notificationManager().commitTransaction(s.pid)) {
         s.listenedChannels =
-            dbms::notificationManager().subscriptions(s.pid);
+            dbms::notificationManager().subscriptions(s.pid, s.currentDB);
     }
 }
 
@@ -13246,7 +13246,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 cout << "SQL syntax error: LISTEN channel" << endl;
                 return true;
             }
-            dbms::notificationManager().listen(s.pid, channel);
+            dbms::notificationManager().listen(
+                s.pid, s.currentDB, channel);
             s.listenedChannels.insert(channel);
             cout << "LISTEN " << channel << endl;
             return false;
@@ -13267,7 +13268,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 cout << "SQL syntax error: NOTIFY channel [, payload]" << endl;
                 return true;
             }
-            dbms::notificationManager().publish(s.pid, channel, payload);
+            dbms::notificationManager().publish(
+                s.pid, s.currentDB, channel, payload);
             cout << "NOTIFY " << channel << endl;
             return false;
         }
@@ -13279,7 +13281,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 s.listenedChannels.clear();
                 cout << "UNLISTEN *" << endl;
             } else if (!channel.empty()) {
-                dbms::notificationManager().unlisten(s.pid, channel);
+                dbms::notificationManager().unlisten(
+                    s.pid, s.currentDB, channel);
                 s.listenedChannels.erase(channel);
                 cout << "UNLISTEN " << channel << endl;
             } else {
