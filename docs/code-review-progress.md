@@ -217,6 +217,8 @@
 
 | 336 | CAT-10 | `ALTER TABLE ADD COLUMN` 用无 NULL 表示能力的 `map<string,string>` 暂存旧行；任一已有可空整数列为 SQL NULL 时都会变成空字符串，重写插入报类型错误，且生成列值也被当作普通输入复制。旧行暂存改用 `SqlRow`，按 tuple NULL bitmap 保留 NULL，并让生成列由新模式重新计算 | 新增 `alter_add_column_null_test`：带 NULL 整数列的已有行新增第二列，修复前返回 `INVALID_VALUE`，修复后重写成功且两个新增/原有可空列的 bitmap 均为 NULL；`alter_column_type_test` 及连续 ALTER 事务回归通过 | `ad543b9` |
 
+| 337 | P0-04 / CAT-07 / TXN-05 | 外层事务的首个文件重写 DDL 已占用事务初始快照后，第二个 ALTER/TRUNCATE/DROP/REPLACE 会被直接拒绝；若复用初始快照，当前语句失败又会错误撤销前一条成功 DDL。后续重写语句现在创建独立辅助物理快照：成功即删除，失败只恢复语句前状态，外层初始快照继续负责整事务回滚；启动恢复在处理事务快照后校验并清理崩溃遗留的完整辅助快照 | `ddl_transaction_skeleton_test` 覆盖连续 ALTER 的整事务回滚与 COMMIT、第二条多 action ALTER 失败只撤销自身、DROP 后 REPLACE、快照文件清理和重启恢复；协议回归覆盖连续 ALTER、NULL 与外层 ROLLBACK。相关 ALTER/TRUNCATE 回归、完整协议、O0/O2 编译及实际 PostgreSQL 122 组差分 `failed=0` | `d1d07e9` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
