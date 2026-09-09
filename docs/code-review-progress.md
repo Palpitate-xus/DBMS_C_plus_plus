@@ -261,6 +261,8 @@
 
 | 358 | PROTO-02,03 | Query 原先只检查“空字符串时 body 是否为一字节”，所以 `SELECT 1\0隐藏内容` 被接受；Sync/Flush/Terminate 完全不检查规范规定的空 body，畸形 Sync 还能清除扩展查询错误状态。现要求 Query body 恰好一个完整 C string，固定 body 消息严格为空；违规统一返回 `08P01`，Malformed Query 不伪造 failed-transaction 状态，Flush 进入 ignore-until-Sync，Terminate 关闭连接 | 完整协议回归验证 NUL 后 SQL 不执行、Query/Flush/Sync 均返回 `08P01`、idle ReadyForQuery 为 `I`，合法 Sync 恢复扩展状态且随后 SELECT 正常；O0/O2 编译、生产重链和完整协议套件通过 | `c0b8689` |
 
+| 359 | PROTO-03 | 同名 named prepared statement 和 portal 原被 `map::operator[]` 静默覆盖，客户端可能在认为创建失败或对象稳定时执行替换后的 SQL。Named Parse/Bind 现在分别返回 PostgreSQL 的 `42P05` / `42P03` 并进入 ignore-until-Sync，原对象不变；空名称仍允许替换，新的 unnamed Parse 只失效 unnamed portal，不误删已绑定的 named portal | 完整协议回归先创建 named statement/portal，再分别重复 Parse/Bind，验证精确 SQLSTATE、Sync 恢复，并执行原 portal 确认结果仍为原 SQL 的 21 而非覆盖 SQL 的 22；O0/O2 编译、生产重链和完整协议套件通过 | `c74bff8` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
