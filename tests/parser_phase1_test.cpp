@@ -608,6 +608,20 @@ int main() {
         assert(notifyStmt && notifyStmt->channel == "folded_channel" &&
                notifyStmt->payload.empty());
 
+        auto longIdentifier = parser.parse(
+            "LISTEN " + std::string(64, 'a'));
+        assert(longIdentifier.success);
+        listenStmt = dynamic_cast<const ListenStmt*>(
+            longIdentifier.stmt.get());
+        assert(listenStmt && listenStmt->channel == std::string(63, 'a'));
+
+        auto multibyteBoundary = parser.parse(
+            "LISTEN \"" + std::string(62, 'b') + "界\"");
+        assert(multibyteBoundary.success);
+        listenStmt = dynamic_cast<const ListenStmt*>(
+            multibyteBoundary.stmt.get());
+        assert(listenStmt && listenStmt->channel == std::string(62, 'b'));
+
         auto unlistenAll = parser.parse("UNLISTEN *;");
         assert(unlistenAll.success);
         auto* unlistenStmt = dynamic_cast<const UnlistenStmt*>(

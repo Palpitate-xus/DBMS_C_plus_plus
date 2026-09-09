@@ -708,6 +708,16 @@ def main():
         assert notification_values([read_message(sock)]) == [
             (notify_pid, b"MiXed,Channel", b"It's Mixed")]
 
+        long_statement_channel = "n" * 64
+        truncated_statement_channel = b"n" * 63
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "LISTEN " + long_statement_channel))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            notify_sock,
+            "NOTIFY " + long_statement_channel + ", 'identifier clipped'"))
+        assert notification_values([read_message(sock)]) == [
+            (notify_pid, truncated_statement_channel, b"identifier clipped")]
+
         for invalid_notification_sql in (
                 "LISTEN two words",
                 "NOTIFY wire_channel, payload",

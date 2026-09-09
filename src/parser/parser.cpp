@@ -4555,6 +4555,15 @@ ParseResult SQLParser::parseLock(const std::string&) {
 
 static bool parseNotificationIdentifier(const std::string& token,
                                         std::string& identifier) {
+    const auto truncateIdentifier = [](std::string& value) {
+        if (value.size() <= 63) return;
+        size_t boundary = 63;
+        while (boundary > 0 &&
+               (static_cast<unsigned char>(value[boundary]) & 0xc0) == 0x80) {
+            --boundary;
+        }
+        value.resize(boundary);
+    };
     if (token.size() >= 2 && token.front() == '"' && token.back() == '"') {
         identifier.clear();
         for (size_t i = 1; i + 1 < token.size(); ++i) {
@@ -4566,6 +4575,7 @@ static bool parseNotificationIdentifier(const std::string& token,
             }
             identifier.push_back(token[i]);
         }
+        truncateIdentifier(identifier);
         return !identifier.empty() && identifier.find('\0') == std::string::npos;
     }
 
@@ -4586,6 +4596,7 @@ static bool parseNotificationIdentifier(const std::string& token,
             ? static_cast<char>(std::tolower(value))
             : static_cast<char>(value));
     }
+    truncateIdentifier(identifier);
     return true;
 }
 
