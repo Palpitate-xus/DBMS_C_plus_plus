@@ -20,7 +20,7 @@ dbms_main_sources
 cd "${SRC_DIR}"
 mkdir -p "${BUILD_DIR}"
 CACHE_INVALID=0
-if dbms_test_cache_needs_rebuild "${BUILD_DIR}"; then
+if dbms_cache_needs_rebuild "${BUILD_DIR}"; then
     CACHE_INVALID=1
     echo "[test-build] Build configuration changed; invalidating cached objects"
 fi
@@ -69,6 +69,12 @@ if [ "$CACHE_INVALID" -eq 1 ] || [ ! -f "$TEST_STUB_OBJECT" ] || [ tests/test_st
         echo "[test-build] COMPILE FAILED: tests/test_stubs.cpp" >&2
         FAILED=1
     fi
+fi
+
+if [ "$FAILED" -eq 0 ]; then
+    # Test source changes and test failures do not invalidate the reusable
+    # production object layer.
+    dbms_write_cache_signature "${BUILD_DIR}"
 fi
 
 for test_file in tests/*_test.cpp; do
@@ -132,5 +138,4 @@ if [ "$FAILED" -ne 0 ]; then
     exit 1
 fi
 
-dbms_write_test_cache_signature "${BUILD_DIR}"
 echo "[test-build] All tests passed"

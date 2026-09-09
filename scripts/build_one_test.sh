@@ -19,7 +19,7 @@ dbms_print_tls_status inc
 
 mkdir -p build/obj
 CACHE_INVALID=0
-if dbms_test_cache_needs_rebuild build/obj; then
+if dbms_cache_needs_rebuild build/obj; then
     CACHE_INVALID=1
     echo "[inc] build configuration changed; invalidating cached objects"
 fi
@@ -50,6 +50,10 @@ if [ "$CACHE_INVALID" -eq 1 ] || [ ! -f build/obj/test_stubs.o ] || [ tests/test
     g++ "${DBMS_CXXFLAGS[@]}" "${DBMS_TEST_INCLUDES[@]}" -c tests/test_stubs.cpp -o build/obj/test_stubs.o
 fi
 
+# The stamp describes reusable production objects, not the outcome or source
+# of one test. Publish it as soon as that reusable layer is complete.
+dbms_write_cache_signature build/obj
+
 # 编译测试本身
 echo "[inc] compiling tests/$test_name.cpp"
 g++ "${DBMS_CXXFLAGS[@]}" "${DBMS_TEST_INCLUDES[@]}" -c "tests/$test_name.cpp" -o "build/obj/$test_name.o"
@@ -75,4 +79,3 @@ g++ "${DBMS_CXXFLAGS[@]}" "${link[@]}" "build/obj/$test_name.o" "${DBMS_LDFLAGS[
 
 echo "[inc] running build/$test_name"
 dbms_run_isolated_test "$test_name" "${SRC_DIR}/build/$test_name"
-dbms_write_test_cache_signature build/obj

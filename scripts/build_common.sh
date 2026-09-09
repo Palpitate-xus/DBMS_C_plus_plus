@@ -51,6 +51,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/dml_cte_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/table_structured_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/gap_progress_test.py tests/pg_diff_runner_test.py)
+    DBMS_E2E_TESTS+=(tests/build_cache_routing_test.py)
     DBMS_CXXFLAGS=(-std=c++17 -O2 -pthread -Wall -Wextra)
     DBMS_LDFLAGS=(-pthread)
 
@@ -204,38 +205,14 @@ dbms_cache_signature() {
     } | sha256sum | awk '{print $1}'
 }
 
-dbms_test_cache_signature() {
-    {
-        printf 'production\n%s\n' "$(dbms_cache_signature)"
-        local test_file
-        while IFS= read -r test_file; do
-            printf 'test %s\n' "${test_file#"${DBMS_SOURCE_DIR}/"}"
-            sha256sum -- "$test_file"
-        done < <(find "${DBMS_SOURCE_DIR}/tests" -maxdepth 1 -type f \
-            \( -name '*_test.cpp' -o -name 'test_stubs.cpp' \) -print | sort)
-    } | sha256sum | awk '{print $1}'
-}
-
 dbms_cache_needs_rebuild() {
     local cache_dir="${1:?cache directory is required}"
     local marker="${cache_dir}/.build-config.sha256"
     [[ ! -f "$marker" || "$(<"$marker")" != "$(dbms_cache_signature)" ]]
 }
 
-dbms_test_cache_needs_rebuild() {
-    local cache_dir="${1:?cache directory is required}"
-    local marker="${cache_dir}/.test-build-config.sha256"
-    [[ ! -f "$marker" || "$(<"$marker")" != "$(dbms_test_cache_signature)" ]]
-}
-
 dbms_write_cache_signature() {
     local cache_dir="${1:?cache directory is required}"
     mkdir -p "$cache_dir"
     printf '%s\n' "$(dbms_cache_signature)" > "${cache_dir}/.build-config.sha256"
-}
-
-dbms_write_test_cache_signature() {
-    local cache_dir="${1:?cache directory is required}"
-    mkdir -p "$cache_dir"
-    printf '%s\n' "$(dbms_test_cache_signature)" > "${cache_dir}/.test-build-config.sha256"
 }
