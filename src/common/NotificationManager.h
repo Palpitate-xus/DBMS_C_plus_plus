@@ -165,9 +165,16 @@ public:
         removeSubscriptionsLocked(backendId);
     }
 
-    void publish(uint64_t senderId, const std::string& database,
+    bool publish(uint64_t senderId, const std::string& database,
                  const std::string& channel, const std::string& payload) {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (database.empty() || channel.empty() ||
+            database.find('\0') != std::string::npos ||
+            channel.find('\0') != std::string::npos ||
+            payload.find('\0') != std::string::npos ||
+            payload.size() >= 8000) {
+            return false;
+        }
         const AsyncNotification notification{
             static_cast<uint32_t>(senderId), channel, payload};
         const ChannelKey key{database, channel};
@@ -185,9 +192,10 @@ public:
                 transaction->second.outgoing.push_back(
                     PendingNotification{key, notification});
             }
-            return;
+            return true;
         }
         publishLocked(key, notification);
+        return true;
     }
 
     std::vector<AsyncNotification> takePending(uint64_t backendId) {

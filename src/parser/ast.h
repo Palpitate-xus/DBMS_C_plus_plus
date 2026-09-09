@@ -1065,6 +1065,29 @@ struct TransactionStmt : public Stmt {
     std::string toString() const override;
 };
 
+struct ListenStmt : public Stmt {
+    std::string channel;
+
+    ListenStmt() : Stmt(SqlCommand::Listen) {}
+    std::string toString() const override { return "LISTEN"; }
+};
+
+struct NotifyStmt : public Stmt {
+    std::string channel;
+    std::string payload;
+
+    NotifyStmt() : Stmt(SqlCommand::Notify) {}
+    std::string toString() const override { return "NOTIFY"; }
+};
+
+struct UnlistenStmt : public Stmt {
+    std::string channel;
+    bool all = false;
+
+    UnlistenStmt() : Stmt(SqlCommand::Unlisten) {}
+    std::string toString() const override { return "UNLISTEN"; }
+};
+
 // ============================================================================
 // EXPLAIN 语句
 // ============================================================================

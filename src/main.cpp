@@ -13241,53 +13241,75 @@ static bool executeInternal(const string& rawSql, Session& s) {
         }
 
         case dbms::SqlCommand::Listen: {
-            string channel = trim(sql.substr(6));
-            if (channel.empty()) {
-                cout << "SQL syntax error: LISTEN channel" << endl;
+            dbms::SQLParser parser;
+            auto parsed = parser.parse(sql);
+            const auto* listen = dynamic_cast<const dbms::ListenStmt*>(
+                parsed.stmt.get());
+            if (!parsed.success || !listen) {
+                cout << "SQL syntax error: "
+                     << (parsed.error.empty()
+                             ? "invalid LISTEN statement" : parsed.error)
+                     << " (SQLSTATE 42601)"
+                     << endl;
                 return true;
             }
             dbms::notificationManager().listen(
-                s.pid, s.currentDB, channel);
-            s.listenedChannels.insert(channel);
-            cout << "LISTEN " << channel << endl;
+                s.pid, s.currentDB, listen->channel);
+            if (!g_engine.inTransaction()) {
+                s.listenedChannels.insert(listen->channel);
+            }
+            cout << "LISTEN " << listen->channel << endl;
             return false;
         }
 
         case dbms::SqlCommand::Notify: {
-            string rest = trim(sql.substr(6));
-            size_t commaPos = rest.find(',');
-            string channel = trim(rest.substr(0, commaPos));
-            string payload;
-            if (commaPos != string::npos) {
-                payload = trim(rest.substr(commaPos + 1));
-                if (payload.size() >= 2 && payload.front() == '\'' && payload.back() == '\'') {
-                    payload = payload.substr(1, payload.size() - 2);
-                }
-            }
-            if (channel.empty()) {
-                cout << "SQL syntax error: NOTIFY channel [, payload]" << endl;
+            dbms::SQLParser parser;
+            auto parsed = parser.parse(sql);
+            const auto* notify = dynamic_cast<const dbms::NotifyStmt*>(
+                parsed.stmt.get());
+            if (!parsed.success || !notify) {
+                cout << "SQL syntax error: "
+                     << (parsed.error.empty()
+                             ? "invalid NOTIFY statement" : parsed.error)
+                     << " (SQLSTATE 42601)"
+                     << endl;
                 return true;
             }
-            dbms::notificationManager().publish(
-                s.pid, s.currentDB, channel, payload);
-            cout << "NOTIFY " << channel << endl;
+            if (!dbms::notificationManager().publish(
+                    s.pid, s.currentDB, notify->channel,
+                    notify->payload)) {
+                cout << "ERROR: NOTIFY payload must be shorter than 8000 bytes "
+                        "and contain no zero byte (SQLSTATE 22023)" << endl;
+                return true;
+            }
+            cout << "NOTIFY " << notify->channel << endl;
             return false;
         }
 
         case dbms::SqlCommand::Unlisten: {
-            string channel = trim(sql.substr(8));
-            if (channel == "*") {
-                dbms::notificationManager().unlistenAll(s.pid);
-                s.listenedChannels.clear();
-                cout << "UNLISTEN *" << endl;
-            } else if (!channel.empty()) {
-                dbms::notificationManager().unlisten(
-                    s.pid, s.currentDB, channel);
-                s.listenedChannels.erase(channel);
-                cout << "UNLISTEN " << channel << endl;
-            } else {
-                cout << "SQL syntax error: UNLISTEN channel | UNLISTEN *" << endl;
+            dbms::SQLParser parser;
+            auto parsed = parser.parse(sql);
+            const auto* unlisten = dynamic_cast<const dbms::UnlistenStmt*>(
+                parsed.stmt.get());
+            if (!parsed.success || !unlisten) {
+                cout << "SQL syntax error: "
+                     << (parsed.error.empty()
+                             ? "invalid UNLISTEN statement" : parsed.error)
+                     << " (SQLSTATE 42601)"
+                     << endl;
                 return true;
+            }
+            if (unlisten->all) {
+                dbms::notificationManager().unlistenAll(s.pid);
+                if (!g_engine.inTransaction()) s.listenedChannels.clear();
+                cout << "UNLISTEN *" << endl;
+            } else {
+                dbms::notificationManager().unlisten(
+                    s.pid, s.currentDB, unlisten->channel);
+                if (!g_engine.inTransaction()) {
+                    s.listenedChannels.erase(unlisten->channel);
+                }
+                cout << "UNLISTEN " << unlisten->channel << endl;
             }
             return false;
         }

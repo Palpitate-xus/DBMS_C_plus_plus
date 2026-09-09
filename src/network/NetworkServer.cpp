@@ -1133,7 +1133,9 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
             // 22P02: strict type-coercion failures (checked before the generic
             // "syntax" branch below, which would otherwise also match).
             result.sqlState = "22P02";
-        } else if (result.errorMessage.find("syntax") != std::string::npos) {
+        } else if (result.errorMessage.find("syntax") != std::string::npos ||
+                   result.errorMessage.find("(SQLSTATE 42601)") !=
+                       std::string::npos) {
             result.sqlState = "42601";
         } else if (result.errorMessage.find(
                        "more than one row returned by a subquery used as an expression")

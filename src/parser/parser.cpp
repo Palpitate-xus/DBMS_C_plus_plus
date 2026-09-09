@@ -502,6 +502,10 @@ std::vector<std::string> SQLParser::tokenize(const std::string& sql) {
         if (inIdentifier) {
             cur += c;
             if (c == '"') {
+                if (i + 1 < sql.size() && sql[i + 1] == '"') {
+                    cur += sql[++i];
+                    continue;
+                }
                 inIdentifier = false;
                 tokens.push_back(cur);
                 cur.clear();
@@ -4549,24 +4553,106 @@ ParseResult SQLParser::parseLock(const std::string&) {
 // Listen / Notify / Unlisten
 // ------------------------------------------------------------------------
 
-ParseResult SQLParser::parseListen(const std::string&) {
+static bool parseNotificationIdentifier(const std::string& token,
+                                        std::string& identifier) {
+    if (token.size() >= 2 && token.front() == '"' && token.back() == '"') {
+        identifier.clear();
+        for (size_t i = 1; i + 1 < token.size(); ++i) {
+            if (token[i] == '"') {
+                if (i + 2 >= token.size() || token[i + 1] != '"') {
+                    return false;
+                }
+                ++i;
+            }
+            identifier.push_back(token[i]);
+        }
+        return !identifier.empty() && identifier.find('\0') == std::string::npos;
+    }
+
+    if (token.empty()) return false;
+    const auto isHighByte = [](unsigned char value) { return value >= 0x80; };
+    const unsigned char first = static_cast<unsigned char>(token.front());
+    if (!std::isalpha(first) && token.front() != '_' && !isHighByte(first)) {
+        return false;
+    }
+    identifier.clear();
+    identifier.reserve(token.size());
+    for (unsigned char value : token) {
+        if (!std::isalnum(value) && value != '_' && value != '$' &&
+            !isHighByte(value)) {
+            return false;
+        }
+        identifier.push_back(value < 0x80
+            ? static_cast<char>(std::tolower(value))
+            : static_cast<char>(value));
+    }
+    return true;
+}
+
+static void discardTrailingSemicolons(std::vector<std::string>& tokens) {
+    while (!tokens.empty() && tokens.back() == ";") tokens.pop_back();
+}
+
+ParseResult SQLParser::parseListen(const std::string& sql) {
     ParseResult r;
+    auto tokens = tokenize(sql);
+    discardTrailingSemicolons(tokens);
+    if (tokens.size() != 2) {
+        r.error = "LISTEN requires exactly one channel identifier";
+        return r;
+    }
+    auto stmt = std::make_unique<ListenStmt>();
+    if (!parseNotificationIdentifier(tokens[1], stmt->channel)) {
+        r.error = "invalid LISTEN channel identifier";
+        return r;
+    }
     r.success = true;
-    r.stmt = std::make_unique<Stmt>(SqlCommand::Listen);
+    r.stmt = std::move(stmt);
     return r;
 }
 
-ParseResult SQLParser::parseNotify(const std::string&) {
+ParseResult SQLParser::parseNotify(const std::string& sql) {
     ParseResult r;
+    auto tokens = tokenize(sql);
+    discardTrailingSemicolons(tokens);
+    if (tokens.size() != 2 && tokens.size() != 4) {
+        r.error = "NOTIFY requires a channel and optional string payload";
+        return r;
+    }
+    auto stmt = std::make_unique<NotifyStmt>();
+    if (!parseNotificationIdentifier(tokens[1], stmt->channel)) {
+        r.error = "invalid NOTIFY channel identifier";
+        return r;
+    }
+    if (tokens.size() == 4) {
+        if (tokens[2] != "," || !isStringLiteralToken(tokens[3])) {
+            r.error = "NOTIFY payload must be a string literal";
+            return r;
+        }
+        stmt->payload = stripQuotes(tokens[3]);
+    }
     r.success = true;
-    r.stmt = std::make_unique<Stmt>(SqlCommand::Notify);
+    r.stmt = std::move(stmt);
     return r;
 }
 
-ParseResult SQLParser::parseUnlisten(const std::string&) {
+ParseResult SQLParser::parseUnlisten(const std::string& sql) {
     ParseResult r;
+    auto tokens = tokenize(sql);
+    discardTrailingSemicolons(tokens);
+    if (tokens.size() != 2) {
+        r.error = "UNLISTEN requires exactly one channel identifier or *";
+        return r;
+    }
+    auto stmt = std::make_unique<UnlistenStmt>();
+    if (tokens[1] == "*") {
+        stmt->all = true;
+    } else if (!parseNotificationIdentifier(tokens[1], stmt->channel)) {
+        r.error = "invalid UNLISTEN channel identifier";
+        return r;
+    }
     r.success = true;
-    r.stmt = std::make_unique<Stmt>(SqlCommand::Unlisten);
+    r.stmt = std::move(stmt);
     return r;
 }
 

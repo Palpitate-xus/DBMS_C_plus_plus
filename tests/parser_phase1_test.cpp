@@ -581,6 +581,47 @@ int main() {
         std::cout << "[PARSER P1] transaction options/savepoints OK\n";
     }
 
+    // 17. LISTEN/NOTIFY/UNLISTEN preserve PostgreSQL identifier and literal
+    // semantics instead of passing raw SQL fragments to the executor.
+    {
+        auto listen = parser.parse("LISTEN \"MiXed,Channel\";");
+        assert(listen.success);
+        auto* listenStmt = dynamic_cast<const ListenStmt*>(listen.stmt.get());
+        assert(listenStmt && listenStmt->channel == "MiXed,Channel");
+
+        auto doubledIdentifier = parser.parse("LISTEN \"odd\"\"channel\"");
+        assert(doubledIdentifier.success);
+        listenStmt = dynamic_cast<const ListenStmt*>(
+            doubledIdentifier.stmt.get());
+        assert(listenStmt && listenStmt->channel == "odd\"channel");
+
+        auto notify = parser.parse(
+            "NOTIFY \"MiXed,Channel\", 'It''s Mixed';");
+        assert(notify.success);
+        auto* notifyStmt = dynamic_cast<const NotifyStmt*>(notify.stmt.get());
+        assert(notifyStmt && notifyStmt->channel == "MiXed,Channel" &&
+               notifyStmt->payload == "It's Mixed");
+
+        auto folded = parser.parse("NOTIFY FoLdEd_Channel");
+        assert(folded.success);
+        notifyStmt = dynamic_cast<const NotifyStmt*>(folded.stmt.get());
+        assert(notifyStmt && notifyStmt->channel == "folded_channel" &&
+               notifyStmt->payload.empty());
+
+        auto unlistenAll = parser.parse("UNLISTEN *;");
+        assert(unlistenAll.success);
+        auto* unlistenStmt = dynamic_cast<const UnlistenStmt*>(
+            unlistenAll.stmt.get());
+        assert(unlistenStmt && unlistenStmt->all);
+
+        assert(!parser.parse("LISTEN two words").success);
+        assert(!parser.parse("LISTEN \"\"").success);
+        assert(!parser.parse("NOTIFY channel, payload").success);
+        assert(!parser.parse("NOTIFY channel, 'payload' trailing").success);
+        assert(!parser.parse("UNLISTEN channel trailing").success);
+        std::cout << "[PARSER P1] LISTEN/NOTIFY/UNLISTEN syntax OK\n";
+    }
+
     std::cout << "[PARSER P1] all passed\n";
     return 0;
 }

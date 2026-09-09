@@ -86,6 +86,15 @@ int main() {
     assert(afterSavepoint.size() == 1);
     assert(afterSavepoint.front().payload == "before savepoint");
 
+    // PostgreSQL accepts payloads strictly shorter than 8000 bytes. Reject
+    // invalid values before they can enter a transaction or delivery queue.
+    assert(manager.publish(senderBackend, "db1", "bounds_channel",
+                           std::string(7999, 'x')));
+    assert(!manager.publish(senderBackend, "db1", "bounds_channel",
+                            std::string(8000, 'x')));
+    assert(!manager.publish(senderBackend, "db1", "bounds_channel",
+                            std::string("embedded\0zero", 13)));
+
     manager.disconnect(secondBackend);
     manager.disconnect(senderBackend);
     manager.disconnect(listenerBackend);

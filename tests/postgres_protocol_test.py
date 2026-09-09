@@ -696,6 +696,35 @@ def main():
         assert notification_values(simple_query(sock, "SELECT 1")) == []
         other_db_sock.sendall(typed(b"X"))
         other_db_sock.close()
+
+        # Channel identifiers are parsed (including quoted case, punctuation,
+        # and doubled quotes) and payload string literals are decoded. Invalid
+        # trailing tokens and the 8000-byte payload boundary fail closed.
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, 'LISTEN "MiXed,Channel"'))
+        quoted_notify = simple_query(
+            notify_sock, 'NOTIFY "MiXed,Channel", \'It\'\'s Mixed\'')
+        assert any(kind == b"C" for kind, _ in quoted_notify)
+        assert notification_values([read_message(sock)]) == [
+            (notify_pid, b"MiXed,Channel", b"It's Mixed")]
+
+        for invalid_notification_sql in (
+                "LISTEN two words",
+                "NOTIFY wire_channel, payload",
+                "NOTIFY wire_channel, 'payload' trailing"):
+            invalid_notification = simple_query(
+                notify_sock, invalid_notification_sql)
+            assert any(kind == b"E" and b"C42601\x00" in body
+                       for kind, body in invalid_notification), \
+                invalid_notification
+
+        oversized_notify = simple_query(
+            notify_sock,
+            "NOTIFY wire_channel, '" + ("x" * 8000) + "'")
+        assert any(kind == b"E" and b"C22023\x00" in body
+                   for kind, body in oversized_notify), oversized_notify
+        assert notification_values(simple_query(sock, "SELECT 1")) == []
+
         notify_sock.sendall(typed(b"X"))
         notify_sock.close()
 
