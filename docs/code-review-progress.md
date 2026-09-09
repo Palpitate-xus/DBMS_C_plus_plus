@@ -197,6 +197,8 @@
 
 | 326 | TXN-02 / DML-01 / PROTO-08 | `SET TRANSACTION READ ONLY/WRITE` 虽被分类为事务命令，却落入普通参数设置并报错；BEGIN READ ONLY 的持久表写入又只返回通用参数错误，且存储层连 PostgreSQL 允许的既有 session 临时表写入也一并禁止。执行器现在真正切换事务读模式：READ ONLY 可在读取后收紧，READ WRITE 仅能在只读事务首次查询前放宽；typed DML 在任何触发器、序列或堆副作用前以 `25006` 拒绝持久关系写入，存储层仍作纵深保护但允许 session 临时关系 | 协议回归修复前稳定把合法 `SET TRANSACTION READ ONLY` 报为 `XX000`，修复后覆盖读取后收紧、持久 INSERT 的 `25006` 和 failed-transaction 恢复、首次查询前放宽、读取后放宽的 `25001`，以及只读事务写既有临时表；snapshot、完整 PostgreSQL 协议、相关 O0/O2 编译及 122 组 PostgreSQL 差分全部通过 | `eef8233` |
 
+| 327 | TXN-02 / P0-04 / PROTO-08 | typed DDL 完全忽略事务的 READ ONLY 标志；`BEGIN READ ONLY; CREATE TABLE ...` 会返回成功并创建物理及 catalog 对象，部分 ALTER/TRUNCATE 路径还可能先隐式结束只读事务。DDL 执行器现在在任何隐式提交、文件创建或 catalog 注册前统一拒绝只读事务中的对象写入，并返回 `25006`；与临时表 DML 不同，PostgreSQL 对临时关系的 DDL 同样禁止 | 协议回归在修复前稳定观察到 CREATE TABLE 成功，修复后验证 `25006`、事务保持 failed 直到 ROLLBACK，且目标关系不存在；完整 `ddl_transaction_skeleton_test` 的外层回滚/保存点/原子失败/重启恢复通过，隔离协议、完整 PostgreSQL 协议、DIV-14 门禁和 DdlExecutor O0/O2 编译通过 | `5c271a7` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
