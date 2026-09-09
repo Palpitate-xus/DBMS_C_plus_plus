@@ -196,7 +196,7 @@
     {"id":"PROTO-05","status":"partial","evidence":["docs/code-review-progress.md"],"tests":["tests/interval_arith_test.cpp","tests/compat/pg_diff_runner.py"],"commits":["e8a158c"]},
     {"id":"PROTO-06","status":"unverified","evidence":[]},
     {"id":"PROTO-07","status":"unverified","evidence":[]},
-    {"id":"PROTO-08","status":"partial","evidence":["docs/code-review-progress.md","src/network/NetworkServer.cpp","src/commands/DdlExecutor.cpp","src/main.cpp"],"tests":["tests/constraint_expr_test.cpp","tests/div14_feature_gate_test.py","tests/transaction_isolation_protocol_e2e_test.py","tests/compat/pg_diff_runner.py","tests/postgres_protocol_test.py","tests/deferrable_test.cpp"],"commits":["2bbcbec","250796e","42ae6fa","b49a0fa","e6f6544","2a232aa","81d0791"]},
+    {"id":"PROTO-08","status":"partial","evidence":["docs/code-review-progress.md","src/network/NetworkServer.cpp","src/commands/DdlExecutor.cpp","src/main.cpp"],"tests":["tests/constraint_expr_test.cpp","tests/div14_feature_gate_test.py","tests/transaction_isolation_protocol_e2e_test.py","tests/compat/pg_diff_runner.py","tests/postgres_protocol_test.py","tests/deferrable_test.cpp"],"commits":["2bbcbec","250796e","42ae6fa","b49a0fa","e6f6544","2a232aa","81d0791","c0c04f2"]},
     {"id":"PROTO-09","status":"unverified","evidence":[]},
     {"id":"PROTO-10","status":"unverified","evidence":[]},
     {"id":"PROTO-11","status":"unverified","evidence":[]},
