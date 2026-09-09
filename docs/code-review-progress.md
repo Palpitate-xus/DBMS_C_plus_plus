@@ -169,6 +169,8 @@
 
 | 312 | P0-07 / QRY-05 / TXN-01 / TXN-03 | data-modifying CTE 的 DML 与外层 SELECT 共用当前事务 read view，却没有 command ID；INSERT 新行、UPDATE 新版本和 DELETE 结果会被同一 SQL 的外层查询立即看到，违反 PostgreSQL 的单命令 snapshot。现在 heap tuple 写入 `cmin/cmax`，同事务插入后更新使用 combo CID，read view 按当前 command counter 判断自有版本；最外层 SQL 命令统一推进 counter，执行器内部临时关系显式豁免且不留下指向已删除临时文件的事务 undo | `dml_cte_protocol_e2e_test` 覆盖自动提交 INSERT/UPDATE/DELETE CTE 的同命令不可见、下一命令可见，以及显式事务内先前命令可见、CTE 更新同命令仍见旧值、后续命令见新值和 ROLLBACK；逐条 rows/header/OID/tag 与实际 PostgreSQL 一致。`subxip_visibility_test` 覆盖 cmin/cmax/combo CID 边界；CTE/derived/DML tag、15 组事务/触发器相邻回归、完整协议、DIV-14、O0/O2 构建及完整差分 `cases=122 failed=0` 通过。`mvcc_update_test` 另复现既有 2PC 无超时等待，列为下一项 | `9f1475f` |
 
+| 313 | P0-07 / TXN-06 / TXN-07 | 表级 `IntentExclusive` 使用独占 `shared_mutex` 和 `flock`，因此 PREPARE 后持久化的行写意向会把普通 MVCC SELECT 当作冲突操作；默认 lock timeout 为零时查询永久等待，无法读取 prepared UPDATE 之前的可见版本。现在 Shared/IS/IX 共享物理 token 并使用一致兼容矩阵，X/metadata 仍为独占；prepared IX 可与读取和其他行写意向共存，行锁继续阻止同一 tuple 的冲突写，DDL 仍等待二阶段结束 | `prepared_transaction_test` 验证 prepared UPDATE 期间读到旧值、冲突 UPDATE 返回 lock conflict、ROLLBACK PREPARED 后恢复；`cross_backend_lock_test` 验证跨进程 IX 与 S 兼容而 X 被阻止；`lock_manager_concurrency_test`、`lock_failure_propagation_test`、完整 `mvcc_update_test`（含 savepoint、五类索引、TOAST、2PC 和 crash recovery）、`concurrency_test`、DIV-14、O0/O2 编译及完整差分 `cases=122 failed=0` 通过 | `f630ef5` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
