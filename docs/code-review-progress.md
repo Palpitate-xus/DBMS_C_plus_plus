@@ -201,6 +201,8 @@
 
 | 328 | TXN-02 / CAT-15 / PROTO-08 | 序列分配函数绕过事务 READ ONLY：`SELECT nextval(...)` 在只读事务中成功并不可逆地消耗持久值，`setval` 的存储 API 也没有保护。`nextval`/`setval` 现在在读写序列文件及修改 session last-value 状态前检查事务模式，并抛出带 `25006` 的结构化错误；保护位于存储 API，覆盖快速 SELECT、表达式、默认值和嵌套调用入口 | 协议回归修复前稳定观察到只读 `nextval` 成功，修复后验证 `25006`、ROLLBACK 恢复及下一次合法调用仍返回未消耗的起始值 10；`sequence_full_test` 直接覆盖 nextval/setval 两条拒绝路径和持久值不变，其完整 cache/cycle/bounds/restart/owned-by/schema 回归通过；TableManage O0/O2 及隔离协议通过 | `f11a5e2` |
 
+| 329 | P0-04 / TXN-05 | `ALTER TABLE` 与 `TRUNCATE` 错误地在执行前提交外层事务，使此前 DML 无法回滚；移除隐式提交后又暴露物理 DDL 快照恢复仍重放全部行日志，并把已被快照移除的 INSERT 当作撤销失败。两类 DDL 现在加入外层事务；快照记录行日志边界，完整回滚仅撤销快照中已有的行变更，快照后的行日志不再按旧 schema 重放；INSERT 撤销允许目标行已不存在，但仍拒绝无效页和 RID 指向不同 tuple | 修复前协议稳定复现 `INSERT; ALTER; ROLLBACK` 留下已提交行和新增列，初次移除隐式提交则返回 `XX000 Rollback failed`；修复后直接及协议回归覆盖 DML→ALTER、ALTER→DML 和 DML→TRUNCATE 三种顺序，结构与数据均恢复。`ddl_transaction_skeleton_test`、`truncate_test`、隔离协议、完整 PostgreSQL 协议、TableManage/DdlExecutor O0/O2 及 122 组差分全部通过 | `c1a3409` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
@@ -212,7 +214,7 @@
 - Python 单元测试 31 项通过：总账校验 6 项、差分工具 25 项。
 - 当前 `build/dbms_review_main` 的 11 组 SQL / 协议 E2E 通过：review_sql、CTE、FETCH、子查询 SQLSTATE、转义文本、布尔边界、LIMIT/OFFSET、多行 SQL、窗口、EXPLAIN ANALYZE、PostgreSQL 协议。
 - 实际参考 PostgreSQL 的错误码、CSV 列描述、带注释的终止符及命令样文本读取验证通过；未对参考库做持久化数据修改。
-- 总账完整覆盖 273 项；目前 complete = 0、partial = 74、unverified = 184、用户延期 = 15。`--require-complete` 正确返回非零。122 组差分归零不代表 273 项功能族完成。
+- 总账完整覆盖 273 项；目前 complete = 0、partial = 76、unverified = 182、用户延期 = 15。`--require-complete` 正确返回非零。122 组差分归零不代表 273 项功能族完成。
 - 仓库只有 `ci.yml.disabled`，没有启用的 workflow；修复均为本地 commit，未 push。
 
 ## 上批局部收尾验收（2026-09-08）
