@@ -181,6 +181,8 @@
 
 | 318 | TXN-02 / PROTO-04 | 解析器把 `SET TRANSACTION` 分类为独立命令，但主执行 switch 只路由普通 `SET`，合法隔离级别命令直接报语法错误；即使从其他入口调用，事务完成读写后仍可静默切换隔离级别并改变后续 snapshot/SSI 规则。执行器现在路由 `SetTransaction`，存储 API 在 snapshot 已使用或写入后拒绝变更且不修改原级别，协议返回 active SQL transaction 错误 `25001` | `transaction_isolation_protocol_e2e_test` 在旧主程序上首先复现合法命令 `42601`，修复后验证首次读取前可设置 READ UNCOMMITTED、读取结果正确、读取后切换 SERIALIZABLE 返回 `25001`、无分号 ROLLBACK 可恢复；`snapshot_export_import_test` 验证直接 API 拒绝且保持原级别；Python 语法检查和 O0 `TableManage.cpp` / `main.cpp` 编译通过。带分号 ROLLBACK 的协议恢复另复现首关键字边界问题，列为下一项 | `643f67b` |
 
+| 319 | PROTO-02 / PROTO-08 | 协议层 `firstSqlKeyword()` 一直读到空白，语句终止分号被并入单词；失败事务中的常见 `ROLLBACK;` 被识别成 `rollback;` 而非恢复命令，因此返回 `25P02`，客户端无法结束失败事务。首关键字现在只消费标识符字符，终止符不再影响 COMMIT/ROLLBACK/ABORT/END 的失败状态恢复判定 | `transaction_isolation_protocol_e2e_test` 将恢复语句改为 `ROLLBACK;`：修复前在已确认的 `25001` 后稳定返回 `25P02`，修复后成功结束事务并回到 idle；新协议主程序回归、Python 语法检查、NetworkServer O0/O2 编译通过 | `42ae6fa` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
