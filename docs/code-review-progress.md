@@ -205,6 +205,8 @@
 
 | 330 | P0-04 / PROTO-08 | `CREATE DATABASE`/`DROP DATABASE` 在显式事务中会擅自执行 COMMIT；除偏离 PostgreSQL 的事务块禁令外，还会提前验证延期约束并改变用户事务结果。数据库级 DDL 现在在事务块内于任何 catalog、目录或 session currentDB 副作用前拒绝执行，返回 `25001`，并把事务终止权保留给用户 | `deferrable_test` 验证带失败延期 CHECK 的外层事务不会被数据库 DDL 提交、目标库不存在且显式回滚清理行；协议回归覆盖 CREATE 与 DROP 的 `25001`、CREATE 后的 `25P02`、ROLLBACK 恢复以及事务外命令仍成功；完整 `ddl_ast_bridge_test` 和 DdlExecutor O0/O2 编译通过 | `2a232aa` |
 
+| 331 | DML-06 / TXN-02 / PROTO-08 | legacy `COPY FROM` 在只读事务中逐行调用已受保护的存储 INSERT，却把每次 `INVALID_VALUE` 统计为 skipped row 并向客户端返回成功，导致写入禁令和失败事务状态均不可见。COPY 入口现在在验证文件语法及目标表后、打开输入文件前拒绝只读事务中的持久表导入并返回 `25006`；保留 PostgreSQL 对既有 session 临时表的写入例外 | 协议回归修复前稳定得到成功的 `COPY 0 rows imported, 1 skipped`；修复后验证持久表返回 `25006`、ROLLBACK 后为空，并验证临时表 COPY 成功、事务内行可见且 ROLLBACK 清除该行；隔离协议完整用例、Python 语法和 `main.cpp` O0/O2 编译通过 | `81d0791` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
@@ -216,7 +218,7 @@
 - Python 单元测试 31 项通过：总账校验 6 项、差分工具 25 项。
 - 当前 `build/dbms_review_main` 的 11 组 SQL / 协议 E2E 通过：review_sql、CTE、FETCH、子查询 SQLSTATE、转义文本、布尔边界、LIMIT/OFFSET、多行 SQL、窗口、EXPLAIN ANALYZE、PostgreSQL 协议。
 - 实际参考 PostgreSQL 的错误码、CSV 列描述、带注释的终止符及命令样文本读取验证通过；未对参考库做持久化数据修改。
-- 总账完整覆盖 273 项；目前 complete = 0、partial = 76、unverified = 182、用户延期 = 15。`--require-complete` 正确返回非零。122 组差分归零不代表 273 项功能族完成。
+- 总账完整覆盖 273 项；目前 complete = 0、partial = 77、unverified = 181、用户延期 = 15。`--require-complete` 正确返回非零。122 组差分归零不代表 273 项功能族完成。
 - 仓库只有 `ci.yml.disabled`，没有启用的 workflow；修复均为本地 commit，未 push。
 
 ## 上批局部收尾验收（2026-09-08）
