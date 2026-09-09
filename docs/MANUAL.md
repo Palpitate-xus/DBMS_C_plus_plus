@@ -74,6 +74,7 @@ ctest --test-dir build --output-on-failure
 
 ```sql
 CREATE DATABASE mydb;
+SET compatibility_mode = extended;
 USE DATABASE mydb;
 --- 现在可以开始建表和操作数据
 ```
@@ -143,6 +144,7 @@ USE DATABASE mydb;
 CREATE DATABASE dbname;
 
 -- 使用数据库
+SET compatibility_mode = extended;
 USE DATABASE dbname;
 
 -- 删除数据库
@@ -1151,7 +1153,10 @@ SHOW 入口已经删除。该模式是会话级设置，进入事务后不可切
 
 同一批门控的项目语法（`postgresql18` 模式下的行为）：
 
-- `USE [DATABASE]`（DIV-01）→ `0A000`，提示重连切换数据库
+- `USE [DATABASE]`（DIV-01）→ 默认模式返回 `42601` 并提示重连；extended
+  模式仅在无事务、临时表、LISTEN、cursor/portal 时允许切换。目标不存在返回
+  `3D000` 且保持原数据库；成功后清理 prepared statement、`currval` 和项目会话变量，
+  并为新数据库重建锁命名空间
 - `REPLACE INTO`（DIV-02）→ `42601`，提示 `INSERT ... ON CONFLICT`
 - `LOAD DATA INFILE`（DIV-03）→ `42601`，提示 `COPY ... FROM`
 - `SELECT ... INTO OUTFILE`（DIV-04）→ 两种模式均返回 `42601`，提示

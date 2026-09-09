@@ -305,6 +305,8 @@
 
 | 380 | DIV-04 | extended 模式仍会劫持 PostgreSQL 的 `SELECT INTO` 语法，并用空白切分已格式化结果写 CSV，含空格、NULL 和类型值会损坏；删除该第二套导出器，两种模式统一拒绝 MySQL `INTO OUTFILE` 并指向共享权限、CSV 编码和错误语义的 `COPY TO`，标准 `SELECT ... INTO table` 保持可用 | DIV E2E 验证标准建表语义、两种模式 `42601`、无禁用文件副作用及 `COPY TO` 的精确 CSV；main O0/O2、专项、完整协议与 PostgreSQL 差分 `cases=122 failed=0` 通过。DIV-04 complete | `124a2b5` |
 
+| 381 | DIV-01 | extended `USE DATABASE` 会在目标不存在时清空 `currentDB`，也允许事务、临时表、LISTEN、cursor/portal 持有旧库状态时切换；成功后还保留 prepared/currval/变量并继续使用旧锁命名空间。目标现由 parser 严格解析；所有有状态场景 fail-closed，失败不改库，成功时清理 catalog 相关会话状态、通知队列并重设锁命名空间 | parser 单测覆盖目标及尾随 token；DIV wire E2E 覆盖默认门、`3D000`、事务 `25001`、临时表/LISTEN/真实协议 portal `55006`、跨库 prepared 与同名 sequence `currval` 隔离。main/NetworkServer O0/O2、完整协议及 PostgreSQL 差分 `cases=122 failed=0` 通过。DIV-01 complete | `a1bacef` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
