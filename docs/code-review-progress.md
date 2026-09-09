@@ -295,6 +295,10 @@
 
 | 375 | DIV-06 | CREATE TABLE 解析器会静默丢弃 `AUTO_INCREMENT`、`UNSIGNED`，导致默认 PostgreSQL 模式把非 PG 声明悄悄创建成普通 integer；ALTER TABLE 则在两种模式都无法保留属性，typed DDL 的 `LONG` 映射也遗漏。AST 现在显式保存两种属性，CREATE/ALTER 共用 DDL 门：默认模式以 `42601` 给出 identity/CHECK 替代，只有 extended 模式恢复自增和 unsigned 存储约束；补齐全部列出的类型别名及 `LONG`→`int8` | parser_phase1 覆盖 CREATE/ALTER 属性保真；DIV E2E 验证默认模式无表/列副作用、所有别名拒绝及 extended 自增、负数拒绝、ALTER unsigned、全部别名；生产对象 O2 全量重建、完整协议和 PostgreSQL 差分 `cases=122 failed=0` 通过。DIV-06 complete | `22eefa6` |
 
+| 376 | DIV-07 | 默认模式只门控 FULLTEXT 快捷语法，`CREATE HASH INDEX` 被误分类为空 CREATE TABLE；extended 的 FULLTEXT 创建又忽略 SQL 索引名，导致紧接着按该名称 DROP 必然失败。两种快捷 CREATE 及 FULLTEXT 快捷 DROP 现在解析为统一 typed index AST；默认模式均以 `42601` 给 canonical 提示，extended 则复用访问方法、命名映射、pg_catalog、事务快照和物理删除路径 | sql_classify 与 parser_phase1 覆盖三种快捷 AST；DIV E2E 验证默认门控，extended HASH/FULLTEXT 创建后可由标准 DROP INDEX 删除，FULLTEXT 快捷 DROP 也命中同一命名对象；main O2 重编、完整协议及真实 PostgreSQL 差分 `cases=122 failed=0` 通过。DIV-07 complete | `e0017c2` |
+
+| 377 | OPS-03 | 完整协议测试在 populated 临时 cluster 收到 SIGTERM 后固定只等 5 秒，而服务端优雅关闭必须先完成 catalog/WAL/cache 持久化，实测约 13.3 秒；测试因此在功能断言前误报超时并由 finally 强杀。测试新增独立 `DBMS_PROTOCOL_SHUTDOWN_TIMEOUT`，默认 30 秒，仍保持有限等待且不绕过耐久关闭 | 原阈值连续复现 `TimeoutExpired`；未改源码内存运行以 30 秒阈值完成；提交后原始完整协议脚本通过。OPS-03 改为 partial：smart/fast/immediate 模式、PID/startup lock、crash restart 与 child supervision 仍未完成 | `576740c` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。

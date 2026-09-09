@@ -1159,8 +1159,11 @@ SHOW 入口已经删除。该模式是会话级设置，进入事务后不可切
   `bytea`/`char`/`varchar`）；列属性 `AUTO_INCREMENT`、`UNSIGNED` →
   `42601`，分别提示使用 identity 和 `CHECK`。只有显式 `extended` 模式
   保留这些别名与属性，CREATE/ALTER TABLE 使用相同规则
-- `CREATE/DROP FULLTEXT INDEX`（DIV-07）→ `42601`，提示
-  `CREATE INDEX ... USING gin (to_tsvector(col))` 与 `DROP INDEX`
+- `CREATE/DROP FULLTEXT INDEX`、`CREATE HASH INDEX`（DIV-07）→ `42601`，
+  提示 `CREATE INDEX ... USING gin (to_tsvector(col))`、
+  `CREATE INDEX ... USING hash` 与 `DROP INDEX`。显式 `extended` 模式下，
+  快捷语法走统一的 typed index、目录命名和物理生命周期；创建后也可由
+  标准 `DROP INDEX name` 删除
 - `DUMP`（DIV-10）→ `0A000`，提示 `pg_dump`；`BACKUP DATABASE` →
   `0A000`，提示 `pg_basebackup`；`RESTORE DATABASE` → `0A000`，提示
   `pg_restore` 或 recovery.signal + restore_command；
