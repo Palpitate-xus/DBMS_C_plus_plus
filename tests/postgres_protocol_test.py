@@ -512,6 +512,16 @@ def prepared_transaction_error_boundaries(sock):
     assert data_row_values(simple_query(
         sock, "SELECT id FROM deferred_check")) == []
 
+    assert simple_query(sock, "BEGIN")[-1] == (b"Z", b"T")
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "NOTIFY prepared_notify, 'must_not_escape'"))
+    notify_prepare = simple_query(
+        sock, "PREPARE TRANSACTION 'prepared_notify_protocol'")
+    notify_error = next(body for kind, body in notify_prepare if kind == b"E")
+    assert b"C0A000\0" in notify_error, notify_prepare
+    assert notify_prepare[-1] == (b"Z", b"E"), notify_prepare
+    assert simple_query(sock, "ROLLBACK")[-1] == (b"Z", b"I")
+
     # Two-phase completion commands are not substitutes for local transaction
     # recovery. They must remain rejected while the backend is in 25P02.
     assert simple_query(sock, "BEGIN")[-1] == (b"Z", b"T")

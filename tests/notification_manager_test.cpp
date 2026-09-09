@@ -33,8 +33,57 @@ int main() {
     manager.publish(senderBackend, "disconnect_channel", "orphan");
     assert(manager.takePending(firstBackend).empty());
 
+    constexpr uint64_t listenerBackend = 3001;
+    constexpr uint64_t transactionalSender = 3002;
+    manager.listen(listenerBackend, "transaction_channel");
+
+    manager.beginTransaction(transactionalSender);
+    manager.publish(transactionalSender, "transaction_channel", "rolled back");
+    assert(manager.hasTransactionalActions(transactionalSender));
+    assert(manager.takePending(listenerBackend).empty());
+    manager.rollbackTransaction(transactionalSender);
+    assert(manager.takePending(listenerBackend).empty());
+
+    manager.beginTransaction(transactionalSender);
+    manager.publish(transactionalSender, "transaction_channel", "committed");
+    manager.publish(transactionalSender, "transaction_channel", "committed");
+    assert(manager.takePending(listenerBackend).empty());
+    assert(manager.commitTransaction(transactionalSender));
+    const auto committed = manager.takePending(listenerBackend);
+    assert(committed.size() == 1);
+    assert(committed.front().payload == "committed");
+
+    manager.beginTransaction(secondBackend);
+    manager.listen(secondBackend, "transaction_channel");
+    manager.publish(transactionalSender, "transaction_channel", "before listen commit");
+    assert(manager.takePending(secondBackend).empty());
+    assert(manager.takePending(listenerBackend).size() == 1);
+    assert(manager.commitTransaction(secondBackend));
+    manager.publish(transactionalSender, "transaction_channel", "after listen commit");
+    assert(manager.takePending(secondBackend).size() == 1);
+    assert(manager.takePending(listenerBackend).size() == 1);
+
+    manager.beginTransaction(secondBackend);
+    manager.unlisten(secondBackend, "transaction_channel");
+    manager.rollbackTransaction(secondBackend);
+    manager.publish(transactionalSender, "transaction_channel", "unlisten rolled back");
+    assert(manager.takePending(secondBackend).size() == 1);
+    assert(manager.takePending(listenerBackend).size() == 1);
+
+    manager.beginTransaction(transactionalSender);
+    manager.publish(transactionalSender, "transaction_channel", "before savepoint");
+    assert(manager.savepoint(transactionalSender, "notification_sp"));
+    manager.publish(transactionalSender, "transaction_channel", "after savepoint");
+    assert(manager.rollbackToSavepoint(transactionalSender, "notification_sp"));
+    assert(manager.commitTransaction(transactionalSender));
+    const auto afterSavepoint = manager.takePending(listenerBackend);
+    assert(afterSavepoint.size() == 1);
+    assert(afterSavepoint.front().payload == "before savepoint");
+
     manager.disconnect(secondBackend);
     manager.disconnect(senderBackend);
+    manager.disconnect(listenerBackend);
+    manager.disconnect(transactionalSender);
     std::cout << "[NOTIFICATION MANAGER] backend identity and cleanup OK"
               << std::endl;
     return 0;

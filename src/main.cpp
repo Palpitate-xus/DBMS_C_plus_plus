@@ -246,6 +246,21 @@ static void checkNotifications(Session& s) {
     }
 }
 
+static void beginNotificationTransaction(Session& s) {
+    dbms::notificationManager().beginTransaction(s.pid);
+}
+
+static void commitNotificationTransaction(Session& s) {
+    if (dbms::notificationManager().commitTransaction(s.pid)) {
+        s.listenedChannels =
+            dbms::notificationManager().subscriptions(s.pid);
+    }
+}
+
+static void rollbackNotificationTransaction(Session& s) {
+    dbms::notificationManager().rollbackTransaction(s.pid);
+}
+
 // Forward declaration for SHOW VARIABLES
 extern dbms::Config g_config;
 
@@ -1557,6 +1572,7 @@ static bool handleBeginTransaction(const string& sql, Session& s) {
         cout << "Begin transaction failed" << endl;
         return true;
     }
+    beginNotificationTransaction(s);
     g_engine.setReadOnly(txn->readOnly);
     if (txn->readOnly) {
         cout << "Read-only transaction started" << endl;
@@ -1571,30 +1587,36 @@ static bool handleBeginTransaction(const string& sql, Session& s) {
 // Legacy DDL dispatch still handles a small set of compatibility statements
 // that are not routed through DdlExecutor. Keep its implicit-commit contract
 // identical to the typed DDL path: a failed commit must abort the statement.
-static bool commitBeforeLegacyDdl() {
+static bool commitBeforeLegacyDdl(Session& s) {
     if (!g_engine.inTransaction()) return true;
 
     const DBStatus status = g_engine.commitTransaction();
     if (status != DBStatus::OK) {
+        if (!g_engine.inTransaction()) rollbackNotificationTransaction(s);
         cout << "ERROR: implicit DDL commit failed (SQLSTATE "
              << dbms::sqlstateForDBStatus(status) << ")" << endl;
         return false;
     }
+    commitNotificationTransaction(s);
     cout << "Note: DDL caused implicit commit of open transaction" << endl;
     return true;
 }
 
 static bool handleCommitTransaction(const string& sql, Session& s) {
+    const bool hadTransaction = g_engine.inTransaction();
     auto res = g_engine.commitTransaction();
     if (res != DBStatus::OK) {
+        if (!g_engine.inTransaction()) rollbackNotificationTransaction(s);
         cout << "ERROR: commit failed (SQLSTATE "
              << dbms::sqlstateForDBStatus(res) << ")" << endl;
         return true;
     }
+    if (hadTransaction) commitNotificationTransaction(s);
     // COMMIT AND [NO] CHAIN: if AND CHAIN, immediately start a new transaction.
     const string lowerSql = toLowerSql(trim(sql));
     if (lowerSql.find("and chain") != string::npos) {
         g_engine.beginTransaction(s.currentDB);
+        beginNotificationTransaction(s);
         cout << "Transaction committed (and chain)" << endl;
         log(s.username, "commit and chain", getTime());
     } else if (lowerSql.find("and no chain") != string::npos) {
@@ -1628,11 +1650,13 @@ static bool handleCommitPrepared(const string& sql, Session& s) {
 }
 
 static bool handleRollbackTransaction(const string& sql, Session& s) {
+    const bool hadTransaction = g_engine.inTransaction();
     auto res = g_engine.rollbackTransaction();
     if (res != DBStatus::OK) {
         cout << "Rollback failed" << endl;
         return true;
     }
+    if (hadTransaction) rollbackNotificationTransaction(s);
     // ROLLBACK AND [NO] CHAIN
     const string lowerSql = toLowerSql(trim(sql));
     if (lowerSql.find("and no chain") != string::npos) {
@@ -1643,6 +1667,7 @@ static bool handleRollbackTransaction(const string& sql, Session& s) {
             cout << "Rollback chain failed" << endl;
             return true;
         }
+        beginNotificationTransaction(s);
         cout << "Transaction rolled back (and chain)" << endl;
         log(s.username, "rollback and chain", getTime());
     } else {
@@ -1691,6 +1716,10 @@ static bool handleSavepoint(const string& sql, Session& s) {
         cout << "Savepoint failed" << endl;
         return true;
     }
+    if (!dbms::notificationManager().savepoint(s.pid, name)) {
+        beginNotificationTransaction(s);
+        (void)dbms::notificationManager().savepoint(s.pid, name);
+    }
     cout << "Savepoint " << name << " created" << endl;
     log(s.username, "savepoint " + name, getTime());
     return false;
@@ -1715,6 +1744,7 @@ static bool handleReleaseSavepoint(const string& sql, Session& s) {
         cout << "Savepoint not found" << endl;
         return true;
     }
+    (void)dbms::notificationManager().releaseSavepoint(s.pid, name);
     cout << "Savepoint " << name << " released" << endl;
     log(s.username, "release savepoint " + name, getTime());
     return false;
@@ -1736,9 +1766,11 @@ static bool handleRollbackToSavepoint(const string& sql, Session& s) {
     string name = stripQuotes(txn->savepointName);
     auto res = g_engine.rollbackToSavepoint(name);
     if (res != DBStatus::OK) {
+        if (!g_engine.inTransaction()) rollbackNotificationTransaction(s);
         cout << "Savepoint not found" << endl;
         return true;
     }
+    (void)dbms::notificationManager().rollbackToSavepoint(s.pid, name);
     cout << "Rolled back to savepoint " << name << endl;
     log(s.username, "rollback to savepoint " + name, getTime());
     return false;
@@ -2876,8 +2908,14 @@ static bool handlePrepare(const string& sql, Session& s) {
             cout << "SQL syntax error: PREPARE TRANSACTION requires a transaction ID" << endl;
             return true;
         }
+        if (dbms::notificationManager().hasTransactionalActions(s.pid)) {
+            cout << "ERROR: transaction has executed LISTEN, UNLISTEN, or "
+                    "NOTIFY (SQLSTATE 0A000)" << endl;
+            return true;
+        }
         auto res = g_engine.prepareTransaction(xid);
         if (res == DBStatus::OK) {
+            rollbackNotificationTransaction(s);
             cout << "PREPARE TRANSACTION " << xid << endl;
             log(s.username, "prepare transaction " + xid, getTime());
         } else if (res == DBStatus::INVALID_VALUE) {
@@ -2898,6 +2936,7 @@ static bool handlePrepare(const string& sql, Session& s) {
         } else {
             cout << "PREPARE TRANSACTION failed" << endl;
         }
+        if (!g_engine.inTransaction()) rollbackNotificationTransaction(s);
         return res != DBStatus::OK;
     }
     // PostgreSQL syntax: PREPARE name [(type, ...)] AS <statement with $n>
@@ -13407,7 +13446,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             if (!checkAdmin(s)) return true;
             if (!checkDB(s)) return true;
             // DDL implicitly commits any open transaction (PostgreSQL behavior)
-            if (!commitBeforeLegacyDdl()) return true;
+            if (!commitBeforeLegacyDdl(s)) return true;
             size_t restOff = tableKeywordPos + 6;
             string rest = trim(sql.substr(restOff));
             // Determine table name end: stop at first '(', " as ", or space
@@ -15673,7 +15712,7 @@ if (sql.rfind("backup database", 0) == 0) {
     if (sql.substr(0, 4) == "drop") {
         if (!checkAdmin(s)) return true;
         if (!checkDB(s)) return true;
-        if (!commitBeforeLegacyDdl()) return true;
+        if (!commitBeforeLegacyDdl(s)) return true;
         vector<string> tokens = tokenize(sql.substr(4));
         if (tokens.size() < 2) {
             cout << "SQL syntax error" << endl;
@@ -24361,6 +24400,7 @@ bool execute(const std::string& rawSql, Session& s) {
         std::cout << "ERROR: could not start statement transaction" << std::endl;
         return true;
     }
+    if (statementTransaction) beginNotificationTransaction(s);
     const bool commandVisibilityActive = outermost &&
         g_engine.inTransaction() && g_engine.beginSqlCommand();
 
@@ -24370,6 +24410,7 @@ bool execute(const std::string& rawSql, Session& s) {
     } catch (...) {
         if (statementTransaction) {
             g_engine.rollbackTransaction();
+            rollbackNotificationTransaction(s);
         } else if (commandVisibilityActive && g_engine.inTransaction()) {
             g_engine.finishSqlCommand();
         }
@@ -24383,15 +24424,26 @@ bool execute(const std::string& rawSql, Session& s) {
         }
         if (error) {
             g_engine.rollbackTransaction();
-        } else if (g_engine.commitTransaction() != dbms::DBStatus::OK) {
-            error = true;
-            g_engine.rollbackTransaction();
+            rollbackNotificationTransaction(s);
+        } else {
+            const DBStatus commitStatus = g_engine.commitTransaction();
+            if (commitStatus != dbms::DBStatus::OK) {
+                error = true;
+                g_engine.rollbackTransaction();
+                rollbackNotificationTransaction(s);
+            } else {
+                commitNotificationTransaction(s);
+            }
         }
     } else if (outermost && g_engine.inTransaction()) {
         // BEGIN creates the transaction inside executeInternal(), whereas an
         // ordinary statement entered with command visibility already active.
         // Both consume one command ID before the next SQL statement.
         if (!g_engine.finishSqlCommand()) error = true;
+    }
+    if (outermost && !g_engine.inTransaction() &&
+        dbms::notificationManager().inTransaction(s.pid)) {
+        rollbackNotificationTransaction(s);
     }
     --executeDepth;
     return error;
