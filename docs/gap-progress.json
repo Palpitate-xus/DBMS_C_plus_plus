@@ -273,6 +273,6 @@
     {"id":"DIV-11","status":"unverified","evidence":[]},
     {"id":"DIV-12","status":"unverified","evidence":[]},
     {"id":"DIV-13","status":"unverified","evidence":[]},
-    {"id":"DIV-14","status":"partial","evidence":["docs/code-review-progress.md","src/common/FeatureGate.cpp"],"tests":["tests/div14_feature_gate_test.py","tests/compat/pg_diff_runner.py"],"commits":["877932b","db53209"]}
+    {"id":"DIV-14","status":"complete","evidence":["docs/code-review-progress.md","src/main.cpp","src/common/FeatureGate.h","src/common/FeatureGate.cpp","scripts/build_common.sh"],"tests":["tests/no_fake_compat_objects_test.py","tests/div14_feature_gate_test.py","tests/postgres_protocol_test.py","tests/compat/pg_diff_runner.py"],"commits":["877932b","db53209","0e22ff9"]}
   ]
 }
