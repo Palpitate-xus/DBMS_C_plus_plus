@@ -420,7 +420,7 @@
 - [ ] **ENG-12** 发布二进制、包管理、容器、SBOM、依赖/CVE、签名、reproducible build 和支持平台矩阵。
 - [ ] **ENG-13** 安全评审：密码学、协议、SQL 权限、文件路径、extension/load、backup/restore、DoS 和敏感日志。
 - [ ] **ENG-14** 明确 SLA、支持范围、已知限制、数据恢复手册、备份恢复演练和 incident response。
-- [ ] **ENG-15** 建立兼容版本策略：是“接受 psql 的自有 DBMS”，还是“PostgreSQL 18 行为兼容”；两种目标的验收标准完全不同。
+- [x] **ENG-15** 建立兼容版本策略：是“接受 psql 的自有 DBMS”，还是“PostgreSQL 18 行为兼容”；两种目标的验收标准完全不同。
 
 ## 21. 非 PostgreSQL 语法和行为偏移
 

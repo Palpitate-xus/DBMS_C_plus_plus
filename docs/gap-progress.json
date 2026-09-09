@@ -259,7 +259,7 @@
     {"id":"ENG-12","status":"unverified","evidence":[]},
     {"id":"ENG-13","status":"unverified","evidence":[]},
     {"id":"ENG-14","status":"unverified","evidence":[]},
-    {"id":"ENG-15","status":"unverified","evidence":[]},
+    {"id":"ENG-15","status":"complete","evidence":["docs/compatibility-contract.md","README.md","docs/production-status.md","src/common/FeatureGate.h","src/network/PostgresProtocol.cpp","scripts/build_common.sh","docs/code-review-progress.md"],"tests":["tests/compatibility_contract_test.py","tests/documentation_status_test.py","tests/version_consistency_test.py","tests/gap_progress_test.py"],"commits":["60d8f2f"]},
     {"id":"DIV-01","status":"partial","evidence":["docs/code-review-progress.md"],"tests":["tests/div14_feature_gate_test.py","tests/compat/pg_diff_runner.py"],"commits":["250796e"]},
     {"id":"DIV-02","status":"unverified","evidence":[]},
     {"id":"DIV-03","status":"unverified","evidence":[]},

@@ -271,6 +271,8 @@
 
 | 363 | ENG-01 | README、RELEASE-NOTES、CHANGELOG、feature-gaps 和 production-status 同时把不同日期的 139/163/165/167 PASS 数写成“当前”基线，0.1/0.2 发布身份和已启用 GitHub Actions 也互相冲突；README 还保留已修复的字符串小写化、fromless scalar 限制。现明确唯一实时来源为 273 项 audit + JSON ledger + 校验命令，其他批次数字统一标为历史证据；v0.1/v0.2 tag 的测试源数量按 Git tree 核对为 156+7，Changelog 比较基线改为 v0.2.0，workflow 状态改为 disabled，移除两条已失效限制 | 新增 `documentation_status_test.py` 并接入完整测试入口，强制五份文档指向同一总账、发行版本一致、历史标签存在、Changelog 链接正确且仓库无启用 workflow；版本回归、总账校验和 shell 语法检查通过。该项列举的事实漂移已关闭，功能本身是否完成仍只由各自 audit 项决定 | `2a81198` |
 
+| 364 | ENG-15 | 过去没有区分产品 SemVer、PostgreSQL 行为目标、wire protocol 上限和项目扩展模式，`server_version` 或一次 psql 连接可能被误当成 PG18 兼容声明。新增兼容版本契约：产品为 0.2.0、自有 DBMS 定位、PG18/18.6 差分目标、wire 3.0 上限和显式 extended 契约各自独立；定义“客户端可连接”A 门与“PG18 行为兼容”B 门，以及允许/禁止的发布措辞。B 门明确要求 273 项（包括当前用户延期项）全部 complete | `compatibility_contract_test.py` 绑定代码中的两个模式、wire 常量、产品版本、契约状态及 README/production-status 链接，并加入完整测试清单；文档状态、版本、总账回归、shell 语法和 diff 检查通过。该项要求的策略和两套验收标准已完整建立，不声称 A/B 门当前已经通过 | `60d8f2f` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
