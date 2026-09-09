@@ -177,6 +177,8 @@
 
 | 316 | TXN-02 | Snapshot v2 的稳定序列化格式包含导出事务的 `curCid`，但 `exportSnapshot()` 仍保留命令 ID 尚未跟踪时期的硬编码 0；事务执行过命令后导出的字段与真实状态不一致，跨后端快照记录也无法准确描述导出点。导出现在写入事务当前 command ID；导入事务继续使用自己的本地 command counter，不把导出方编号误用于自身 tuple 可见性 | `snapshot_export_import_test` 将导出事务推进到非零 command ID，反序列化导出 payload 并核对字段；修复前稳定失败、修复后连同格式 round-trip、畸形 payload、跨事务可见性和 READ COMMITTED statement snapshot 全部通过 | `ff14d43` |
 
+| 317 | P0-07 / TXN-01 | READ UNCOMMITTED 被排除在 read view 初始化和逐语句刷新之外，事务中的 `lowLimitId` 保持 0，导致事务写入的正常已提交 tuple 也全部不可见；这既不是 dirty read，也不符合 PostgreSQL 将 READ UNCOMMITTED 映射为 READ COMMITTED 的行为。所有隔离级别现在都初始化有效 read view，READ UNCOMMITTED 与 READ COMMITTED 共用命令边界和直接 API 刷新规则，同时保留会话报告的隔离级别 | `snapshot_export_import_test` 新增 READ UNCOMMITTED 回归：事务开始前提交的行可见、同一命令看不到中途并发提交、下一命令可见；修复前在第一项可见性断言稳定失败，修复后专项全部通过，O0 编译通过；测试数据库在引擎后台线程析构后清理，不再产生虚假 writeback 警告 | `aaededf` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
