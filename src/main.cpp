@@ -17159,60 +17159,45 @@ if (sql.rfind("backup database", 0) == 0) {
                     "use COPY ... FROM (SQLSTATE 42601)" << endl;
             return true;
         }
-        if (!checkAdmin(s)) return true;
-        if (!checkDB(s)) return true;
         string rest = trim(sql.substr(17));
-        // Parse: 'file.csv' into table tname
-        size_t q1 = rest.find('\'');
-        if (q1 == string::npos) {
+        // Extended LOAD is syntax sugar only.  Parse its deliberately small
+        // grammar strictly, then route through COPY FROM so permissions, CSV
+        // decoding, transaction/savepoint rollback and SQLSTATE behavior
+        // cannot drift into a second importer.
+        if (rest.empty() || rest.front() != '\'') {
             cout << "SQL syntax error: missing filename" << endl;
             return true;
         }
-        size_t q2 = rest.find('\'', q1 + 1);
-        if (q2 == string::npos) {
+        size_t q2 = 1;
+        while (q2 < rest.size()) {
+            if (rest[q2] != '\'') {
+                ++q2;
+                continue;
+            }
+            if (q2 + 1 < rest.size() && rest[q2 + 1] == '\'') {
+                cout << "SQL syntax error: quoted filename is not supported"
+                     << endl;
+                return true;
+            }
+            break;
+        }
+        if (q2 >= rest.size()) {
             cout << "SQL syntax error: unclosed filename" << endl;
             return true;
         }
-        string filename = rest.substr(q1 + 1, q2 - q1 - 1);
+        const string filenameLiteral = rest.substr(0, q2 + 1);
         string afterFile = trim(rest.substr(q2 + 1));
         if (afterFile.substr(0, 11) != "into table ") {
             cout << "SQL syntax error: expected INTO TABLE" << endl;
             return true;
         }
         string tname = trim(afterFile.substr(11));
-        if (!g_engine.tableExists(s.currentDB, tname)) {
-            cout << "Table " << tname << " not exist" << endl;
+        if (tname.empty() || tname.find_first_of(" \t\r\n,;()") !=
+                                 string::npos) {
+            cout << "SQL syntax error: expected one table name" << endl;
             return true;
         }
-        TableSchema tbl = g_engine.getTableSchema(s.currentDB, tname);
-        ifstream csvIn(filename);
-        if (!csvIn) {
-            cout << "Cannot open file: " << filename << endl;
-            return true;
-        }
-        size_t imported = 0, skipped = 0;
-        string line;
-        bool firstLine = true;
-        while (getline(csvIn, line)) {
-            if (trim(line).empty()) continue;
-            auto fields = parseCSVLine(line);
-            if (fields.size() != tbl.len) {
-                // Try treating first line as header
-                if (firstLine) { firstLine = false; continue; }
-                skipped++;
-                continue;
-            }
-            firstLine = false;
-            map<string, string> values;
-            for (size_t i = 0; i < tbl.len; ++i) {
-                values[tbl.cols[i].dataName] = trim(fields[i]);
-            }
-            auto res = g_engine.insert(s.currentDB, tname, values);
-            if (res == DBStatus::OK) imported++;
-            else skipped++;
-        }
-        cout << "Imported " << imported << " rows, skipped " << skipped << endl;
-        return false;
+        return handleCopy("copy " + tname + " from " + filenameLiteral, s);
     }
 
     if (startsWithKeyword(sql, "load")) {

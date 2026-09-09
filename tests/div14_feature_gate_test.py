@@ -631,6 +631,28 @@ def main():
             sock, "SELECT a, b, email, payload FROM replace_t")) == [
                 [b"1", b"2", b"second@example", b"replacement"]]
 
+        # DIV-03 extended mode is strictly COPY FROM syntax sugar. A malformed
+        # later CSV row rolls back earlier rows instead of being skipped.
+        load_ok = Path(work_dir, "load_ok.csv")
+        load_ok.write_text("1,alpha\n2,beta\n", encoding="utf-8")
+        load_bad = Path(work_dir, "load_bad.csv")
+        load_bad.write_text("3,gamma\nmalformed_only_one_field\n",
+                            encoding="utf-8")
+        expect_command_tag(sock, "CREATE TABLE load_t (id INTEGER, v TEXT)",
+                           "extended LOAD table")
+        expect_command_tag(
+            sock, "LOAD DATA INFILE 'load_ok.csv' INTO TABLE load_t",
+            "extended LOAD through COPY")
+        assert data_row_values(simple_query(
+            sock, "SELECT id, v FROM load_t ORDER BY id")) == [
+                [b"1", b"alpha"], [b"2", b"beta"]]
+        expect_error(
+            sock, "LOAD DATA INFILE 'load_bad.csv' INTO TABLE load_t",
+            "22P04", "extended LOAD atomic bad CSV")
+        assert data_row_values(simple_query(
+            sock, "SELECT id, v FROM load_t ORDER BY id")) == [
+                [b"1", b"alpha"], [b"2", b"beta"]]
+
         # A malformed publication sidecar must fail the whole catalog scan;
         # SHOW must not silently hide it or expose a partial snapshot.
         corrupt_publication = Path(work_dir, "info", "corrupt.publication")
