@@ -163,6 +163,8 @@
 
 | 309 | P0-01 / P0-02 / SQL-01 / TYPE-02 / QRY-01 / QRY-05 / PROTO-04 | CTE 物化后已将主查询改写为 SELECT，但无 FROM 分支仍把原始 `WITH ...` 文本交给常量投影和 unnest 求值器，未引用 CTE 的常量主查询因而误解析或返回错值；直接使用普通预处理文本又会将 TRUE/FALSE 降成整数。CTE 路径现在保留字面量完成物化和主查询改写，无 FROM 直接执行该改写结果，仅对后续有 FROM 的 legacy 路径重新应用布尔归一化 | `cte_clause_boundary_e2e_test` 覆盖未引用 SELECT CTE 后的整数、含空格文本、unnest 及 bool 值/header/OID/tag；`dml_cte_protocol_e2e_test` 覆盖未引用、无 RETURNING DML CTE 的仅一次副作用和常量主查询。新结果与真实 PostgreSQL 一致；无 FROM/派生类型/DML tag/review、DIV-14、O0/O2 及完整差分 `cases=122 failed=0` 通过 | `077a8af` |
 
+| 310 | P0-16 | 总账的伪完成回归硬编码第 1 项必须无 evidence/tests/commits；P0-01 进入有证据的 partial 后，该回归不再触发“complete 必须有证据”校验并误报失败。测试现在按状态选择一个真正无证据的 unverified 项，不再依赖总账排序或某项永久空白 | `gap_progress_test` 6 项全部通过；同时验证 checkbox 不一致和缺 evidence/tests/commits 两种伪完成均被拒绝，当前 273 项总账覆盖校验一致 | `cb51ccf` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
