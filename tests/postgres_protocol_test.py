@@ -83,7 +83,7 @@ def write_auth_catalog(work_dir, username, password, superuser=True):
 
 def startup(sock, user, database, password="secret", fragmented=False,
             application_name="dbms-protocol-test", protocol_version=196608,
-            protocol_options=None):
+            protocol_options=None, validate_dbms_status=True):
     protocol_options = protocol_options or {}
     params = (b"user\0" + user.encode() + b"\0database\0" + database.encode() +
               b"\0application_name\0" + application_name.encode() + b"\0")
@@ -154,23 +154,30 @@ def startup(sock, user, database, password="secret", fragmented=False,
         name, value, trailing = body.split(b"\0")
         assert trailing == b""
         statuses[name] = value
-    assert statuses == {
-        b"server_version": b"18.0 DBMS-C++ 0.2.0",
-        b"server_encoding": b"UTF8",
-        b"client_encoding": b"UTF8",
-        b"application_name": application_name.encode(),
-        b"DateStyle": b"ISO, MDY",
-        b"IntervalStyle": b"postgres",
-        b"is_superuser": b"on" if user == "alice" else b"off",
-        b"session_authorization": user.encode(),
-        b"default_transaction_read_only": b"off",
-        b"in_hot_standby": b"off",
-        b"integer_datetimes": b"on",
-        b"standard_conforming_strings": b"on",
-        b"TimeZone": b"UTC",
-    }, statuses
+    if validate_dbms_status:
+        assert statuses == {
+            b"server_version": b"18.0 DBMS-C++ 0.2.0",
+            b"server_encoding": b"UTF8",
+            b"client_encoding": b"UTF8",
+            b"application_name": application_name.encode(),
+            b"DateStyle": b"ISO, MDY",
+            b"IntervalStyle": b"postgres",
+            b"is_superuser": b"on" if user == "alice" else b"off",
+            b"session_authorization": user.encode(),
+            b"default_transaction_read_only": b"off",
+            b"in_hot_standby": b"off",
+            b"integer_datetimes": b"on",
+            b"standard_conforming_strings": b"on",
+            b"TimeZone": b"UTC",
+        }, statuses
     backend_key = next(body for kind, body in messages if kind == b"K")
     return struct.unpack("!II", backend_key)
+
+
+def startup_reference(sock, user, database, password="secret"):
+    """Use the wire reader against PostgreSQL without DBMS-only status claims."""
+    return startup(sock, user, database, password=password,
+                   validate_dbms_status=False)
 
 
 def simple_query(sock, sql):

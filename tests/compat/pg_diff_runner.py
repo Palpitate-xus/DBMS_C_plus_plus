@@ -375,7 +375,11 @@ def reference_multi(statements, client=None):
     host, port, user, database, password = _reference_connection_settings()
     sock = socket.create_connection((host, port), timeout=15)
     try:
-        client.startup(sock, user, database, password=password)
+        # The shared DBMS protocol helper validates our exact ParameterStatus
+        # contract.  A real PostgreSQL reference legitimately has a different
+        # server_version, TimeZone and version-dependent extra fields.
+        startup_reference = getattr(client, "startup_reference", client.startup)
+        startup_reference(sock, user, database, password=password)
         results = []
         for sql in statements:
             statement = describe_statement(sql)

@@ -205,6 +205,32 @@ class DifferentialSessionTest(unittest.TestCase):
         self.assertEqual([result[5] for result in results], [[], []])
         sock.close.assert_called_once()
 
+    def test_wire_reference_uses_reference_startup_policy(self):
+        class FakeClient:
+            def __init__(self):
+                self.dbms_startups = 0
+                self.reference_startups = 0
+
+            def startup(self, *_args, **_kwargs):
+                self.dbms_startups += 1
+
+            def startup_reference(self, *_args, **_kwargs):
+                self.reference_startups += 1
+
+            def simple_query(self, _sock, _sql):
+                return [(b"C", b"SELECT 1\0")]
+
+        client = FakeClient()
+        sock = mock.Mock()
+        with mock.patch.object(
+                RUNNER, "_reference_connection_settings",
+                return_value=("127.0.0.1", 55432, "postgres", "postgres", "secret")), \
+             mock.patch.object(RUNNER.socket, "create_connection",
+                               return_value=sock):
+            RUNNER.reference_multi(["SELECT 1"], client)
+        self.assertEqual(client.reference_startups, 1)
+        self.assertEqual(client.dbms_startups, 0)
+
     def test_command_tag_mismatch_is_reported(self):
         reference = [([['1']], None, "SELECT 1", "", ["?column?"])]
         ours = ([['1']], None, "", ["?column?"], "SELECT 0")
