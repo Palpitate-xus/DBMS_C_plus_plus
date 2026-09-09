@@ -43,7 +43,7 @@ cleanup() {
         kill -9 "$SERVER_PID" 2>/dev/null
         # Belt and braces: any dbms_main still holding this workdir must
         # die, or its wal.lock stalls later verification runs.
-        pkill -9 -f "dbms_main --server $PORT" 2>/dev/null
+        pkill -9 -f "dbms_main .*--server $PORT" 2>/dev/null
     fi
     if [ "${SOAK_KEEP_DIR:-0}" != "1" ]; then rm -rf "$WORK"; fi
 }

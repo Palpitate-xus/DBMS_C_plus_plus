@@ -19,7 +19,7 @@ services:
     container_name: dbms_server
     # Run in TCP server mode (remove for interactive use)
     # Port configurable via DBMS_PORT env var (default 9999)
-    command: ["./dbms_main", "--server", "${DBMS_PORT:-9999}"]
+    command: ["./dbms_main", "-D", "/data", "--server", "${DBMS_PORT:-9999}"]
     environment:
       DBMS_TLS_CERT: /etc/dbms/tls/server.crt
       DBMS_TLS_KEY: /etc/dbms/tls/server.key

@@ -52,6 +52,6 @@ VOLUME ["/data"]
 # Default TCP port for server mode
 EXPOSE 9999
 
-# Default: run in interactive mode
-# Override with: docker run ... ./dbms_main --server 9999
-CMD ["./dbms_main"]
+# Default: run interactively against the declared persistent volume.
+# Override with: docker run ... ./dbms_main -D /data --server 9999
+CMD ["./dbms_main", "-D", "/data"]
