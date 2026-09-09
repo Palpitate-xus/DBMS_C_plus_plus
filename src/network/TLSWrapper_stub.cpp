@@ -28,6 +28,7 @@ ssize_t SecureSocket::recv(void* buf, size_t len) {
     if (fd < 0) return -1;
     return ::recv(fd, buf, len, 0);
 }
+bool SecureSocket::hasBufferedInput() const { return false; }
 void SecureSocket::close() {
     if (fd >= 0) { ::close(fd); fd = -1; }
 }
@@ -54,4 +55,5 @@ extern "C" {
     int SSL_write(SSL*, const void*, int) { return -1; }
     int SSL_shutdown(SSL*) { return -1; }
     int SSL_get_error(const SSL*, int) { return 0; }
+    int SSL_pending(const SSL*) { return 0; }
 }

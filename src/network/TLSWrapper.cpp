@@ -82,6 +82,10 @@ ssize_t SecureSocket::recv(void* buf, size_t len) {
     return -1;
 }
 
+bool SecureSocket::hasBufferedInput() const {
+    return useTLS && ssl && tlsOK && SSL_pending(ssl) > 0;
+}
+
 void SecureSocket::close() {
     if (ssl) {
         SSL_shutdown(ssl);

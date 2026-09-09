@@ -25,6 +25,7 @@ extern "C" {
     int SSL_write(SSL* ssl, const void* buf, int num);
     int SSL_shutdown(SSL* ssl);
     int SSL_get_error(const SSL* ssl, int ret);
+    int SSL_pending(const SSL* ssl);
 }
 
 constexpr int SSL_FILETYPE_PEM = 1;
@@ -55,6 +56,7 @@ struct SecureSocket {
     bool handshake();
     ssize_t send(const void* buf, size_t len);
     ssize_t recv(void* buf, size_t len);
+    bool hasBufferedInput() const;
     void close();
 };
 

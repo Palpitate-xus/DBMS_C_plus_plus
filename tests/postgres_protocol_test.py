@@ -649,7 +649,8 @@ def main():
         assert any(kind == b"C" for kind, _ in simple_query(
             notify_sock, "ROLLBACK TO SAVEPOINT notify_sp"))
         assert simple_query(notify_sock, "COMMIT")[-1] == (b"Z", b"I")
-        assert notification_values(simple_query(sock, "SELECT 1")) == [
+        idle_notification = read_message(sock)
+        assert notification_values([idle_notification]) == [
             (notify_pid, b"wire_channel", b"before savepoint")]
 
         assert simple_query(sock, "BEGIN")[-1] == (b"Z", b"T")

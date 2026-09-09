@@ -1842,6 +1842,24 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         return result;
     };
     while (true) {
+        if (!socket.hasBufferedInput()) {
+            pollfd descriptor{};
+            descriptor.fd = socket.fd;
+            descriptor.events = POLLIN;
+            int ready = 0;
+            do {
+                ready = ::poll(&descriptor, 1, 100);
+            } while (ready < 0 && errno == EINTR);
+            if (ready < 0) break;
+            if (ready == 0) {
+                if (!sendPendingNotifications(protocol, session.pid)) break;
+                continue;
+            }
+            if ((descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0 &&
+                (descriptor.revents & POLLIN) == 0) {
+                break;
+            }
+        }
         PgFrontendMessage message;
         if (!protocol.readMessage(message, protocolError)) break;
         if (!sendPendingNotifications(protocol, session.pid)) break;
