@@ -151,7 +151,7 @@
     {"id":"TXN-09","status":"unverified","evidence":[]},
     {"id":"TXN-10","status":"unverified","evidence":[]},
     {"id":"TXN-11","status":"unverified","evidence":[]},
-    {"id":"TXN-12","status":"partial","evidence":["docs/code-review-progress.md","src/common/NotificationManager.h","src/main.cpp","src/network/NetworkServer.cpp","src/network/PostgresProtocol.h","src/network/PostgresProtocol.cpp","src/network/TLSWrapper.h","src/network/TLSWrapper.cpp","src/network/TLSWrapper_stub.cpp"],"tests":["tests/notification_manager_test.cpp","tests/postgres_protocol_test.py"],"commits":["5dcb08b","5e62ed3","a77e553","7f9eeb7"]},
+    {"id":"TXN-12","status":"partial","evidence":["docs/code-review-progress.md","src/common/NotificationManager.h","src/main.cpp","src/network/NetworkServer.cpp","src/network/PostgresProtocol.h","src/network/PostgresProtocol.cpp","src/network/TLSWrapper.h","src/network/TLSWrapper.cpp","src/network/TLSWrapper_stub.cpp"],"tests":["tests/notification_manager_test.cpp","tests/postgres_protocol_test.py"],"commits":["5dcb08b","5e62ed3","a77e553","7f9eeb7","0aaabf0"]},
     {"id":"VAC-01","status":"unverified","evidence":[]},
     {"id":"VAC-02","status":"unverified","evidence":[]},
     {"id":"VAC-03","status":"unverified","evidence":[]},

@@ -237,6 +237,8 @@
 
 | 346 | TXN-12 / PROTO-08 | 即使已有标准 `NotificationResponse`，backend 线程仍永久阻塞在读取下一条前端消息，完全空闲的 LISTEN 客户端收不到通知。消息循环现在以 100ms 上限等待 socket，可读时照常解析、超时时排空本 backend 通知队列；TLS wrapper 同时检查 OpenSSL 已解密缓冲，避免 poll 看不到同一 TLS record 中的后续前端消息。明文 stub 与真实 TLS 实现均提供一致接口 | 协议回归在 notifier COMMIT 后不向 listener 发送任何前端消息，直接阻塞读取并收到准确 sender PID/channel/payload 的 `A` 帧；完整协议套件在 O0/O2 通过，TLS 与无 OpenSSL stub 两种 wrapper 均编译。长查询执行期间的并行投递仍计入 TXN-12/PROTO-08 | `7f9eeb7` |
 
+| 347 | TXN-12 | notification registry 只以 channel 作为全局键，连接到不同 database 的会话会互相收到同名 channel，违反 NOTIFY 仅面向当前 database 的隔离边界。订阅键现为 `(database, channel)`，事务订阅快照、保存点、去重、断开清理和即时/提交时发布均携带 database；wire 帧仍只暴露 PostgreSQL 规定的 channel/payload | 管理器专项回归验证 db2 的同名发布不会进入 db1 backend、db1 发布仍正常；完整协议回归创建第二 database 并连接同一用户，跨库 NOTIFY 后让 info listener 执行查询，断言没有任何 `A` 消息。O0/O2 生产构建与完整协议套件通过 | `0aaabf0` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
