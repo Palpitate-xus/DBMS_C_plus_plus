@@ -183,6 +183,8 @@
 
 | 319 | PROTO-02 / PROTO-08 | 协议层 `firstSqlKeyword()` 一直读到空白，语句终止分号被并入单词；失败事务中的常见 `ROLLBACK;` 被识别成 `rollback;` 而非恢复命令，因此返回 `25P02`，客户端无法结束失败事务。首关键字现在只消费标识符字符，终止符不再影响 COMMIT/ROLLBACK/ABORT/END 的失败状态恢复判定 | `transaction_isolation_protocol_e2e_test` 将恢复语句改为 `ROLLBACK;`：修复前在已确认的 `25001` 后稳定返回 `25P02`，修复后成功结束事务并回到 idle；新协议主程序回归、Python 语法检查、NetworkServer O0/O2 编译通过 | `42ae6fa` |
 
+| 320 | PROTO-02 / PROTO-08 | 首关键字和事务恢复短语只跳过空白，不跳过 SQL 注释；失败事务中的注释前缀 ROLLBACK 被拒为 `25P02`，而只修首词又会把带注释的 `ROLLBACK PREPARED` 错当本地恢复。协议词法入口现在跳过行注释和可嵌套块注释，恢复重写剥离前导注释，prepared completion 排除使用相同命令起点 | 回归在修复前稳定返回 `25P02`；`transaction_isolation_protocol_e2e_test` 现覆盖行注释、嵌套块注释后的 `ROLLBACK;` 成功，以及带块注释的 `ROLLBACK PREPARED` 在失败事务中仍返回 `25P02`；NetworkServer O0/O2、Python 语法检查和新协议主程序通过 | `b49a0fa` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
