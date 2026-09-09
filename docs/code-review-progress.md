@@ -165,6 +165,8 @@
 
 | 310 | P0-16 | 总账的伪完成回归硬编码第 1 项必须无 evidence/tests/commits；P0-01 进入有证据的 partial 后，该回归不再触发“complete 必须有证据”校验并误报失败。测试现在按状态选择一个真正无证据的 unverified 项，不再依赖总账排序或某项永久空白 | `gap_progress_test` 6 项全部通过；同时验证 checkbox 不一致和缺 evidence/tests/commits 两种伪完成均被拒绝，当前 273 项总账覆盖校验一致 | `cb51ccf` |
 
+| 311 | P0-02 / SQL-01 / DML-01 / DML-05 / PROTO-04 | 通用 `parseSelectItem` 的隐式别名判定未排除语句终止分号；直接 INSERT/UPDATE/DELETE `RETURNING id, value;` 因而把最后一列的 alias 设为 `;`，值和 OID 正确但 RowDescription 列名错误，客户端按名取列失效。隐式别名现在将 `;` 作为明确边界，由三种 DML 共享修复 | `dml_command_tag_e2e_test` 新增带终止分号的多行 INSERT、UPDATE、DELETE RETURNING，逐项校验 rows/header/OID/tag 并与真实 PostgreSQL 一致；`parser_phase1_test` 和完整 `dml_returning_test` 通过，DML CTE、DIV-14、O0/O2 parser 构建及完整差分 `cases=122 failed=0` 通过 | `f88bdad` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
