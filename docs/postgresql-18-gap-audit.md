@@ -291,7 +291,7 @@
 - [ ] **TXN-09** predicate lock 在 relation/page/tuple/index range 间升级，覆盖所有访问方法和空范围。
 - [x] **TXN-10** advisory lock 的 session/transaction 两类、two-int key、shared/exclusive、try-lock 和 cleanup。
 - [ ] **TXN-11** commit/abort/group commit 顺序、synchronous_commit 级别、commit timestamp 和 WAL flush wait。
-- [ ] **TXN-12** LISTEN/NOTIFY 在事务提交后投递、rollback 丢弃、payload/channel 规则、跨 session/backend 队列和协议异步通知。
+- [x] **TXN-12** LISTEN/NOTIFY 在事务提交后投递、rollback 丢弃、payload/channel 规则、跨 session/backend 队列和协议异步通知。
 - [ ] **VAC-01** VACUUM 的 prune/freeze/index cleanup/truncate、visibility/freeze map、failsafe 和 wraparound 防护。
 - [ ] **VAC-02** autovacuum launcher/worker、per-table thresholds/cost delay、worker slots、anti-wraparound 优先级和冲突取消。
 - [ ] **VAC-03** VACUUM FULL 使用 transactional table rewrite/swap；ANALYZE/VACUUM option 与 progress view 对齐。

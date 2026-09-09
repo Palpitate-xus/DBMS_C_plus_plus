@@ -864,6 +864,26 @@ unlock-all 返回非 NULL 的 `void` 空值，try/unlock 返回 `boolean`，NULL
 
 ---
 
+### LISTEN / NOTIFY / UNLISTEN
+
+**语法**
+```sql
+LISTEN channel
+NOTIFY channel [, 'payload']
+UNLISTEN channel
+UNLISTEN *
+SELECT pg_notify(channel_text, payload_text)
+SELECT pg_listening_channels()
+SELECT pg_notification_queue_usage()
+```
+
+**说明** LISTEN/UNLISTEN 和 NOTIFY 在 COMMIT 后生效，ROLLBACK 丢弃；
+接收连接只在事务之间收到异步 `NotificationResponse`。channel identifier
+最长 63 bytes，payload 必须短于 8000 bytes。队列按数据库和 backend
+隔离并受 `max_notify_queue_pages` 限制，提交前容量不足返回 `54000`。
+
+---
+
 ### CHECKPOINT
 
 **语法**

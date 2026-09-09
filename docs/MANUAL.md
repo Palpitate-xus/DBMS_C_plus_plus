@@ -646,6 +646,29 @@ SELECT pg_advisory_unlock_all();             -- void
 顾问锁的 key、mode 与 granted/waiting 状态；完整 PostgreSQL locktag、
 fastpath、waitstart 及 predicate-lock 列仍由 `MON-05` 跟踪。
 
+### LISTEN / NOTIFY
+
+```sql
+LISTEN job_finished;
+NOTIFY job_finished, 'job 42';
+SELECT pg_notify('job_finished', 'job 43');
+SELECT pg_listening_channels();
+SELECT pg_notification_queue_usage();
+UNLISTEN job_finished;
+UNLISTEN *;
+```
+
+订阅变更和通知都服从事务边界：COMMIT 后生效，ROLLBACK（包括回滚到
+SAVEPOINT）丢弃对应变更；接收端处于事务中时，已经提交的通知保留到该事务
+结束后发送。相同事务内 channel/payload 完全相同的通知会合并。channel 是
+identifier，按 UTF-8 安全边界限制为 63 bytes；payload 必须短于 8000 bytes，
+不能包含零字节。通知按数据库和 backend 隔离，以 PostgreSQL
+`NotificationResponse` 帧异步发送，同一角色的不同连接拥有各自队列。
+
+队列容量由启动参数 `max_notify_queue_pages` 控制；提交前会预留容量，队列满
+返回 `54000` 并保持事务可回滚。含 LISTEN/UNLISTEN/NOTIFY 动作的事务不能
+`PREPARE TRANSACTION`，返回 `0A000`。
+
 ---
 
 ## 8. 索引
