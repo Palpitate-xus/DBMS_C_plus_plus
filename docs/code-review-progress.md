@@ -253,6 +253,8 @@
 
 | 354 | FUNC-01 / TXN-12 / PROTO-04 | 缺少 PostgreSQL 的 `pg_listening_channels()`，客户端无法查询当前 backend 在当前 database 已生效的监听集合。新增 fromless set-returning 路径：按 channel 排序输出零到多行，可与普通投影列组合并保留 text/OID 25 元数据；查询只读取已提交订阅，所以事务内暂存的 LISTEN/UNLISTEN 在 COMMIT 前不可见，ROLLBACK 也不会污染结果 | 完整协议回归使用独立 backend 验证空集合仍有 RowDescription、两个 channel 的稳定顺序与重复投影、事务内显示旧集合、COMMIT 后切换为新集合及 UNLISTEN * 后零行；主入口/网络入口 O0、生产 O2 重链和完整协议套件通过 | `90592c9` |
 
+| 355 | P0-02 / PROTO-08 | 执行器通过 stdout 产生的 `NOTICE:` / `WARNING:` 行会被 wire 结果解析器当成列、行或命令文本，标准客户端收不到诊断消息；已有 `NoticeResponse` 也缺少必需的 SQLSTATE 字段。协议结果现先提取诊断行并从普通结果中删除，以 `N` 帧发送 `S/V/C/M` 字段，NOTICE 使用 `00000`、WARNING 使用 `01000`；扩展协议 portal 只发送一次诊断 | 完整协议回归以 `DROP TABLE IF EXISTS` 验证精确字段、NoticeResponse 位于 CommandComplete 前且没有伪造 RowDescription/DataRow；受影响对象 O0/O2 编译、生产重链和完整协议套件通过 | `94a3bfb` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
