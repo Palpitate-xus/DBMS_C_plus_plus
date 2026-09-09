@@ -24426,6 +24426,9 @@ int main(int argc, char* argv[]) {
                 continue;
             triggerSession.tempTables.insert(alias);
             createdAliases.push_back(alias);
+            // Transition rows are produced inside the triggering SQL command
+            // and must be visible to the trigger action in that same command.
+            g_engine.registerSqlCommandInternalRelation(actual);
             for (const auto& r : rows) {
                 g_engine.insert(triggerSession.currentDB, actual, r);
             }
