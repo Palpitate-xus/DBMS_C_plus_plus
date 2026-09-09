@@ -1,7 +1,9 @@
 #include "ExprEvaluator.h"
 #include "commands/TableManage.h"
 #include "common/DateType.h"
+#include "common/NotificationManager.h"
 #include "types/numeric.h"
+#include "utils/Session.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -5757,6 +5759,41 @@ void ExprEvaluator::registerBuiltins() {
         formatUtcClock(stableClock, "%Y-%m-%d %H:%M:%S");
     const std::string stableTime =
         formatUtcClock(stableClock, "%H:%M:%S");
+
+    // pg_notify(text, text) is the expression form of NOTIFY. It is volatile
+    // and returns PostgreSQL's void pseudo-type; delivery is staged by the
+    // same per-session notification transaction as the utility command.
+    functions_["pg_notify"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() != 2) {
+            throw std::runtime_error(
+                "function pg_notify requires exactly two arguments "
+                "(SQLSTATE 42883)");
+        }
+        Session* session = currentSession();
+        if (!session) {
+            throw std::runtime_error(
+                "pg_notify has no active session (SQLSTATE XX000)");
+        }
+        const std::string channel = a[0].isNull ? "" : a[0].value;
+        const std::string payload = a[1].isNull ? "" : a[1].value;
+        if (channel.empty()) {
+            throw std::runtime_error(
+                "channel name cannot be empty (SQLSTATE 22023)");
+        }
+        if (channel.size() >= 64) {
+            throw std::runtime_error(
+                "channel name too long (SQLSTATE 22023)");
+        }
+        if (!notificationManager().publish(
+                session->pid, session->currentDB, channel, payload)) {
+            throw std::runtime_error(
+                "notification payload is too long or contains a zero byte "
+                "(SQLSTATE 22023)");
+        }
+        return ExprValue("void", "", false);
+    };
+    volatility_["pg_notify"] = 'v';
+
     // ARRAY[...] constructor (emitted by the parser as a function call so it
     // composes with the expression grammar). Renders the canonical
     // {e1,e2,...} literal text; NULL elements render as NULL.

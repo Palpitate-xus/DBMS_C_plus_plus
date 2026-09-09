@@ -1072,8 +1072,9 @@ static bool isScalarFunc(const string& name) {
                                          "split_part",
                                          "uuid_generate",
                                          "array_get", "array_length", "array_contains",
-                                          "array_position", "array_dims", "cardinality",
+                                         "array_position", "array_dims", "cardinality",
                                          "unnest",
+                                         "pg_notify",
                                          "subquery",
                          "exists",
                                          "is_null", "is_not_null",
@@ -24402,6 +24403,26 @@ bool isTopLevelDml(const std::string& rawSql) {
     return false;
 }
 
+bool managesNotificationTransaction(const std::string& sql) {
+    switch (dbms::SQLParser::classify(sql)) {
+        case dbms::SqlCommand::Begin:
+        case dbms::SqlCommand::StartTransaction:
+        case dbms::SqlCommand::Commit:
+        case dbms::SqlCommand::Rollback:
+        case dbms::SqlCommand::Abort:
+        case dbms::SqlCommand::End:
+        case dbms::SqlCommand::Savepoint:
+        case dbms::SqlCommand::ReleaseSavepoint:
+        case dbms::SqlCommand::RollbackToSavepoint:
+        case dbms::SqlCommand::PrepareTransaction:
+        case dbms::SqlCommand::CommitPrepared:
+        case dbms::SqlCommand::RollbackPrepared:
+            return true;
+        default:
+            return false;
+    }
+}
+
 } // namespace
 
 // PostgreSQL statements are atomic even outside an explicit BEGIN block.  The
@@ -24414,6 +24435,10 @@ bool execute(const std::string& rawSql, Session& s) {
         !g_engine.inTransaction() &&
         g_engine.databaseExists(s.currentDB) &&
         isTopLevelDml(rawSql);
+    const bool notificationStatementTransaction = outermost &&
+        !statementTransaction && !g_engine.inTransaction() &&
+        !dbms::notificationManager().inTransaction(s.pid) &&
+        !managesNotificationTransaction(rawSql);
 
     ++executeDepth;
     if (statementTransaction &&
@@ -24423,6 +24448,7 @@ bool execute(const std::string& rawSql, Session& s) {
         return true;
     }
     if (statementTransaction) beginNotificationTransaction(s);
+    if (notificationStatementTransaction) beginNotificationTransaction(s);
     const bool commandVisibilityActive = outermost &&
         g_engine.inTransaction() && g_engine.beginSqlCommand();
 
@@ -24432,6 +24458,9 @@ bool execute(const std::string& rawSql, Session& s) {
     } catch (...) {
         if (statementTransaction) {
             g_engine.rollbackTransaction();
+            rollbackNotificationTransaction(s);
+        } else if (notificationStatementTransaction &&
+                   dbms::notificationManager().inTransaction(s.pid)) {
             rollbackNotificationTransaction(s);
         } else if (commandVisibilityActive && g_engine.inTransaction()) {
             g_engine.finishSqlCommand();
@@ -24462,6 +24491,14 @@ bool execute(const std::string& rawSql, Session& s) {
         // ordinary statement entered with command visibility already active.
         // Both consume one command ID before the next SQL statement.
         if (!g_engine.finishSqlCommand()) error = true;
+    }
+    if (notificationStatementTransaction && !g_engine.inTransaction() &&
+        dbms::notificationManager().inTransaction(s.pid)) {
+        if (error) {
+            rollbackNotificationTransaction(s);
+        } else {
+            commitNotificationTransaction(s);
+        }
     }
     if (outermost && !g_engine.inTransaction() &&
         dbms::notificationManager().inTransaction(s.pid)) {

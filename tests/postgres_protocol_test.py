@@ -725,6 +725,73 @@ def main():
                    for kind, body in oversized_notify), oversized_notify
         assert notification_values(simple_query(sock, "SELECT 1")) == []
 
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "LISTEN function_channel"))
+        function_notify = simple_query(
+            notify_sock,
+            "SELECT pg_notify('function_' || 'channel', "
+            "'pay' || 'load')")
+        assert data_row_values(function_notify) == [[b""]]
+        function_fields = row_description_fields(function_notify)
+        assert function_fields[0][0] == b"pg_notify"
+        assert function_fields[0][3:5] == (2278, 4)
+        assert notification_values([read_message(sock)]) == [
+            (notify_pid, b"function_channel", b"payload")]
+
+        null_payload_notify = simple_query(
+            notify_sock, "SELECT pg_notify('function_channel', NULL)")
+        assert data_row_values(null_payload_notify) == [[b""]]
+        assert notification_values([read_message(sock)]) == [
+            (notify_pid, b"function_channel", b"")]
+
+        assert any(kind == b"C" for kind, _ in simple_query(
+            notify_sock,
+            "CREATE TABLE notify_payloads (payload TEXT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            notify_sock,
+            "INSERT INTO notify_payloads VALUES ('row one'), ('row two')"))
+        row_function_notify = simple_query(
+            notify_sock,
+            "SELECT pg_notify('function_channel', payload) "
+            "FROM notify_payloads ORDER BY payload")
+        assert data_row_values(row_function_notify) == [[b""], [b""]]
+        assert row_description_fields(row_function_notify)[0][3:5] == (2278, 4)
+        assert [notification_values([read_message(sock)]),
+                notification_values([read_message(sock)])] == [
+            [(notify_pid, b"function_channel", b"row one")],
+            [(notify_pid, b"function_channel", b"row two")]]
+
+        # A top-level SELECT is still a transaction for notification side
+        # effects: a later expression error and an explicit rollback must
+        # discard a pg_notify call already evaluated in that statement/txn.
+        failed_function_notify = simple_query(
+            notify_sock,
+            "SELECT pg_notify('function_channel', 'must not escape'), 1/0")
+        assert any(kind == b"E" and b"C22012\x00" in body
+                   for kind, body in failed_function_notify), \
+            failed_function_notify
+        assert notification_values(simple_query(sock, "SELECT 1")) == []
+
+        assert simple_query(notify_sock, "BEGIN")[-1] == (b"Z", b"T")
+        assert data_row_values(simple_query(
+            notify_sock,
+            "SELECT pg_notify('function_channel', 'rolled back function')")) \
+            == [[b""]]
+        assert simple_query(notify_sock, "ROLLBACK")[-1] == (b"Z", b"I")
+        assert notification_values(simple_query(sock, "SELECT 1")) == []
+
+        for invalid_function_notify_sql, expected_state in (
+                ("SELECT pg_notify(NULL, 'payload')", b"C22023\x00"),
+                ("SELECT pg_notify('', 'payload')", b"C22023\x00"),
+                ("SELECT pg_notify('" + ("c" * 64) + "', 'payload')",
+                 b"C22023\x00"),
+                ("SELECT pg_notify('function_channel')", b"C42883\x00")):
+            invalid_function_notify = simple_query(
+                notify_sock, invalid_function_notify_sql)
+            assert any(kind == b"E" and expected_state in body
+                       for kind, body in invalid_function_notify), \
+                invalid_function_notify
+
         notify_sock.sendall(typed(b"X"))
         notify_sock.close()
 

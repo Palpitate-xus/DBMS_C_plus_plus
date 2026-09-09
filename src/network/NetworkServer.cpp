@@ -725,6 +725,7 @@ int16_t protocolTypeSize(uint32_t typeOid, const Column& column) {
         case 1083: return 8; // time
         case 1114: case 1184: return 8; // timestamp/timestamptz
         case 1700: return -1; // numeric
+        case 2278: return 4;  // void
         case 2950: return 16; // uuid
         default: return column.isVariableLength ? -1 : static_cast<int16_t>(column.dsize);
     }

@@ -1,5 +1,6 @@
 #include "TableManage.h"
 #include "common/DbError.h"
+#include "common/NotificationManager.h"
 #include "common/sha256.h"
 #include "utils/plpgsql.h"
 #include "replication/ReplicationManager.h"
@@ -31097,6 +31098,56 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     if (expr.funcName == "unnest" && !expr.funcArgs.empty()) {
         // Return raw array value; expansion happens in queryExpr
         return getVal(expr.funcArgs[0]);
+    }
+    if (expr.funcName == "pg_notify") {
+        if (expr.funcArgs.size() != 2) {
+            throw DbError("42883",
+                          "function pg_notify requires exactly two arguments");
+        }
+        std::map<std::string, std::string> rowContext;
+        std::map<std::string, std::string> typeHints;
+        std::set<std::string> nullColumns;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            bool valueIsNull = false;
+            const std::string value = engine && !dbname.empty()
+                ? engine->extractColumnValue(
+                      rowBuffer, tbl, i, dbname, true, &valueIsNull)
+                : StorageEngine::extractColumnValueStatic(rowBuffer, tbl, i);
+            rowContext[tbl.cols[i].dataName] = value;
+            typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+            if (valueIsNull) nullColumns.insert(tbl.cols[i].dataName);
+        }
+        std::vector<ExprEvalResult> arguments;
+        for (const auto& argument : expr.funcArgs) {
+            auto evaluated = ExprHelper::evalStringWithNulls(
+                argument, rowContext, nullColumns, typeHints, dbname,
+                expr.sessionUser);
+            if (!evaluated.ok) {
+                throw std::runtime_error(evaluated.error);
+            }
+            arguments.push_back(std::move(evaluated));
+        }
+        const std::string channel = arguments[0].isNull
+            ? "" : arguments[0].value;
+        const std::string payload = arguments[1].isNull
+            ? "" : arguments[1].value;
+        if (channel.empty()) {
+            throw DbError("22023", "channel name cannot be empty");
+        }
+        if (channel.size() >= 64) {
+            throw DbError("22023", "channel name too long");
+        }
+        Session* session = currentSession();
+        if (!session) {
+            throw DbError("XX000", "pg_notify has no active session");
+        }
+        if (!notificationManager().publish(
+                session->pid, session->currentDB, channel, payload)) {
+            throw DbError(
+                "22023",
+                "notification payload is too long or contains a zero byte");
+        }
+        return "";
     }
     // User-defined function fallback
     if (engine && !dbname.empty()) {
