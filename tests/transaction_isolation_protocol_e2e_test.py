@@ -108,6 +108,29 @@ def main():
         assert state is None and rows == [["1"]], (state, message, rows)
         assert headers == ["id"], headers
 
+        # Every later file-rewriting statement needs its own atomicity image.
+        # The first added nullable column also verifies that a subsequent
+        # rewrite preserves SQL NULL instead of coercing it to an empty value.
+        _, state, message, _, _, _ = execute("BEGIN;")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute(
+            "ALTER TABLE transactional_ddl ADD COLUMN first_change INT;")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute(
+            "ALTER TABLE transactional_ddl ADD COLUMN second_change INT;")
+        assert state is None, (state, message)
+        rows, state, message, headers, _, _ = execute(
+            "SELECT * FROM transactional_ddl ORDER BY id;")
+        assert state is None and rows == [["1", None, None]], (
+            state, message, rows)
+        assert headers == ["id", "first_change", "second_change"], headers
+        _, state, message, _, _, _ = execute("ROLLBACK;")
+        assert state is None, (state, message)
+        rows, state, message, headers, _, _ = execute(
+            "SELECT * FROM transactional_ddl ORDER BY id;")
+        assert state is None and rows == [["1"]], (state, message, rows)
+        assert headers == ["id"], headers
+
         # A row written after the DDL snapshot is removed by snapshot restore,
         # not replayed against the restored older schema.
         _, state, message, _, _, _ = execute("BEGIN;")

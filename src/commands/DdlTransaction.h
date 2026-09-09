@@ -88,6 +88,7 @@ private:
     bool snapshotRollbackEnabled_ = false;
     bool snapshotDirty_ = false;
     bool snapshotCreatedByThis_ = false;
+    std::string statementBackupPath_;
     std::vector<RecordedOp> ops_;
 
     std::string kindString(DdlObjectKind kind) const;

@@ -35331,6 +35331,9 @@ static bool parsePreparedLockMode(const std::string& value,
     return true;
 }
 
+static bool validPhysicalBackupSource(
+    const std::filesystem::path& source, std::string& sourceDatabase);
+
 bool StorageEngine::recoverAllDatabases() {
     if (!std::filesystem::exists(".") || !std::filesystem::is_directory(".")) {
         return true;
@@ -35802,6 +35805,43 @@ bool StorageEngine::recoverAllDatabases() {
         if (physicalRestore(dbname, backup.string())) {
             std::error_code ec;
             std::filesystem::remove_all(backup, ec);
+        }
+    }
+
+    // A statement image is only a nested atomicity aid. After a process
+    // crash the transaction image above is authoritative, so a completely
+    // published auxiliary generation is now stale and may be removed.
+    for (const auto& entry : std::filesystem::directory_iterator(
+             ".", std::filesystem::directory_options::skip_permission_denied)) {
+        try {
+            if (!entry.is_directory()) continue;
+            const std::string name = entry.path().filename().string();
+            constexpr const char* marker = ".ddl_statement_backup.";
+            const size_t markerPos = name.rfind(marker);
+            if (markerPos == std::string::npos || markerPos == 0) continue;
+            const std::string dbname = name.substr(0, markerPos);
+            const std::string suffix =
+                name.substr(markerPos + std::strlen(marker));
+            const size_t separator = suffix.find('.');
+            if (separator == std::string::npos || separator == 0 ||
+                separator + 1 >= suffix.size() ||
+                suffix.find('.', separator + 1) != std::string::npos ||
+                !std::all_of(suffix.begin(), suffix.begin() + separator,
+                    [](unsigned char c) { return std::isdigit(c) != 0; }) ||
+                !std::all_of(suffix.begin() + separator + 1, suffix.end(),
+                    [](unsigned char c) { return std::isdigit(c) != 0; })) {
+                continue;
+            }
+            std::string sourceDatabase;
+            if (!validPhysicalBackupSource(
+                    entry.path(), sourceDatabase) ||
+                sourceDatabase != dbname) {
+                continue;
+            }
+            std::error_code cleanupError;
+            std::filesystem::remove_all(entry.path(), cleanupError);
+        } catch (...) {
+            continue;
         }
     }
 
@@ -39057,6 +39097,14 @@ std::filesystem::path transactionBackupPath(const std::string& dbname, uint64_t 
     return std::filesystem::path(dbname + ".txn_backup." + std::to_string(xid));
 }
 
+std::filesystem::path ddlStatementBackupPath(const std::string& dbname,
+                                             uint64_t xid) {
+    static std::atomic<uint64_t> sequence{0};
+    return std::filesystem::path(
+        dbname + ".ddl_statement_backup." + std::to_string(xid) + "." +
+        std::to_string(sequence.fetch_add(1, std::memory_order_relaxed)));
+}
+
 } // anonymous namespace
 
 DBStatus StorageEngine::beginTransaction(const std::string& dbname) {
@@ -39317,6 +39365,79 @@ bool StorageEngine::createTransactionBackup() {
     context.txnLogSizeAtBackup = context.txnLog.size();
     context.ddlUndoSizeAtBackup = context.ddlUndoActions.size();
     return true;
+}
+
+bool StorageEngine::createDdlStatementBackup(std::string& backupPath) {
+    backupPath.clear();
+    auto& context = transactionContext();
+    if (!context.inTransaction || context.txnDB.empty() ||
+        context.currentTxnId == 0 || !context.databaseExclusiveLock ||
+        !context.databaseExclusiveLock->owns_lock()) {
+        return false;
+    }
+    if (catalogService_ && !catalogService_->persistAll()) return false;
+    if (!flushDatabaseCaches(context.txnDB)) return false;
+
+    const auto backup = ddlStatementBackupPath(
+        context.txnDB, context.currentTxnId);
+    if (!physicalBackupLocked(context.txnDB, backup.string())) {
+        std::error_code error;
+        std::filesystem::remove_all(backup, error);
+        return false;
+    }
+    backupPath = backup.string();
+    return true;
+}
+
+bool StorageEngine::restoreDdlStatementBackup(
+    const std::string& backupPath) {
+    auto& context = transactionContext();
+    if (!context.inTransaction || context.txnDB.empty() ||
+        context.currentTxnId == 0 || backupPath.empty() ||
+        !context.databaseExclusiveLock ||
+        !context.databaseExclusiveLock->owns_lock()) {
+        return false;
+    }
+    const std::string prefix = context.txnDB + ".ddl_statement_backup." +
+        std::to_string(context.currentTxnId) + ".";
+    const auto backup = std::filesystem::path(backupPath);
+    if (backup.parent_path() != std::filesystem::path{} ||
+        backup.filename().string().rfind(prefix, 0) != 0) {
+        return false;
+    }
+
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    if (catalogService_) catalogService_->evict(context.txnDB);
+    closeDatabaseCaches(context.txnDB);
+    const bool restored =
+        physicalRestoreLocked(context.txnDB, backupPath);
+    if (!restored) return false;
+
+    std::error_code error;
+    std::filesystem::remove_all(backup, error);
+    clearCatalogSnapshot();
+    captureCatalogSnapshot();
+    if (error) {
+        std::cerr << "[ddl] restored statement snapshot but could not remove "
+                  << backup << ": " << error.message() << std::endl;
+    }
+    return true;
+}
+
+void StorageEngine::discardDdlStatementBackup(
+    const std::string& backupPath) {
+    if (backupPath.empty()) return;
+    const auto& context = transactionContext();
+    if (context.txnDB.empty() || context.currentTxnId == 0) return;
+    const std::string prefix = context.txnDB + ".ddl_statement_backup." +
+        std::to_string(context.currentTxnId) + ".";
+    const auto backup = std::filesystem::path(backupPath);
+    if (backup.parent_path() != std::filesystem::path{} ||
+        backup.filename().string().rfind(prefix, 0) != 0) {
+        return;
+    }
+    std::error_code error;
+    std::filesystem::remove_all(backup, error);
 }
 
 DBStatus StorageEngine::commitTransaction() {

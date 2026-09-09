@@ -746,6 +746,14 @@ public:
     // acquired its database lock. Ordinary row transactions do not need one.
     bool createTransactionBackup();
 
+    // A later file-rewriting DDL statement in the same outer transaction
+    // needs its own statement image. The transaction image remains reserved
+    // for full ROLLBACK; this auxiliary image is discarded on statement
+    // success or restored on statement failure.
+    bool createDdlStatementBackup(std::string& backupPath);
+    bool restoreDdlStatementBackup(const std::string& backupPath);
+    void discardDdlStatementBackup(const std::string& backupPath);
+
     // Restore/remove the current transaction's pre-change database snapshot.
     // DDL uses this because schema/file rewrites are not represented by the
     // row-level transaction undo log.

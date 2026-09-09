@@ -122,11 +122,16 @@ void DdlTransaction::markSnapshotDirty() {
 bool DdlTransaction::begin() {
     if (engine_.inTransaction()) {
         if (snapshotRollbackEnabled_ && engine_.transactionBackupDirty()) {
-            // A full snapshot already contains an earlier physical DDL
-            // mutation. A second snapshot-scoped statement would need a
-            // nested image to preserve statement atomicity; reject it until
-            // object-level/nested DDL savepoints are implemented.
-            return false;
+            // Keep the transaction's original image reserved for full
+            // ROLLBACK. A later file-rewriting statement gets an auxiliary
+            // image so its failure does not erase earlier successful DDL.
+            active_ = true;
+            startedByUs_ = false;
+            if (!engine_.createDdlStatementBackup(statementBackupPath_)) {
+                active_ = false;
+                return false;
+            }
+            return true;
         }
         active_ = true;
         startedByUs_ = false;
@@ -215,6 +220,10 @@ bool DdlTransaction::commit() {
             });
         }
     }
+    if (!statementBackupPath_.empty()) {
+        engine_.discardDdlStatementBackup(statementBackupPath_);
+        statementBackupPath_.clear();
+    }
     ops_.clear();
     committed_ = true;
     active_ = false;
@@ -245,6 +254,19 @@ void DdlTransaction::rollback() {
         // makes the next process startup mistake an already-rolled-back
         // statement for an in-progress DDL and restore stale files.
         engine_.discardTransactionBackup(session_.currentDB);
+    } else if (!startedByUs_ && engine_.inTransaction() &&
+               !statementBackupPath_.empty()) {
+        if (snapshotDirty_) {
+            if (!engine_.restoreDdlStatementBackup(
+                    statementBackupPath_)) {
+                std::cerr << "DDL rollback warning: failed to restore "
+                             "statement snapshot for "
+                          << session_.currentDB << std::endl;
+            }
+        } else {
+            engine_.discardDdlStatementBackup(statementBackupPath_);
+        }
+        statementBackupPath_.clear();
     } else if (!startedByUs_ && engine_.inTransaction() &&
                snapshotRollbackEnabled_ && snapshotDirty_ &&
                !session_.currentDB.empty()) {

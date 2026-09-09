@@ -27,6 +27,15 @@ namespace fs = std::filesystem;
 
 static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
+static bool pathExistsWithPrefix(const std::string& prefix) {
+    for (const auto& entry : fs::directory_iterator(".")) {
+        if (entry.path().filename().string().rfind(prefix, 0) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
     s.permission = 1;
@@ -228,8 +237,11 @@ static void test_snapshot_ddl_serializes_database_backends() {
 static void test_unfinished_snapshot_recovers_on_restart() {
     const std::string db = testDbPath("ddl_txn_t_snapshot_recovery");
     const std::string backup = db + ".txn_backup.900001";
+    const std::string statementBackup =
+        db + ".ddl_statement_backup.900001.0";
     cleanup(db);
     cleanup(backup);
+    cleanup(statementBackup);
 
     {
         dbms::StorageEngine source;
@@ -239,6 +251,7 @@ static void test_unfinished_snapshot_recovers_on_restart() {
         tbl.append(dbms::makeIntColumn("id", false, 2, true));
         assert(source.createTable(db, tbl) == dbms::DBStatus::OK);
         assert(source.physicalBackup(db, backup));
+        assert(source.physicalBackup(db, statementBackup));
         assert(source.alterTableAddColumn(
                    db, "recovery_tbl", dbms::makeIntColumn("after_crash", true, 0, false)) ==
                dbms::DBStatus::OK);
@@ -251,9 +264,11 @@ static void test_unfinished_snapshot_recovers_on_restart() {
         dbms::StorageEngine restarted;
         assert(restarted.getTableSchema(db, "recovery_tbl").len == 1);
         assert(!std::filesystem::exists(backup));
+        assert(!std::filesystem::exists(statementBackup));
     }
 
     cleanup(db);
+    cleanup(statementBackup);
     std::cout << "[DDL-TXN] unfinished snapshot restart recovery OK" << std::endl;
 }
 
@@ -390,6 +405,7 @@ static void test_drop_and_replace_restore_before_outer_row_undo() {
     setupSession(s, db);
     dbms::DdlExecutor ddl;
     assert(!ddl.executeSql("CREATE TABLE drop_restore (id INT PRIMARY KEY)", s));
+    assert(!ddl.executeSql("CREATE TABLE replace_source (id INT PRIMARY KEY)", s));
     assert(g_engine.insert(db, "drop_restore", {{"id", "1"}}) == dbms::DBStatus::OK);
     assert(!ddl.executeSql("CREATE VIEW replace_restore AS SELECT id FROM drop_restore", s));
     const std::string oldViewSql = g_engine.getViewSQL(db, "replace_restore");
@@ -399,10 +415,10 @@ static void test_drop_and_replace_restore_before_outer_row_undo() {
     assert(!ddl.executeSql("DROP TABLE drop_restore CASCADE", s));
     assert(!g_engine.tableExists(db, "drop_restore"));
     assert(g_engine.savepoint("after_drop") == dbms::DBStatus::INVALID_VALUE);
-    // A second full-snapshot DDL statement is rejected rather than silently
-    // reusing the first statement's image and breaking atomicity.
-    assert(ddl.executeSql(
-        "CREATE OR REPLACE VIEW replace_restore AS SELECT id FROM replace_restore", s));
+    // A later full-snapshot statement owns an auxiliary image; it may join
+    // the transaction without consuming the image reserved for full rollback.
+    assert(!ddl.executeSql(
+        "CREATE OR REPLACE VIEW replace_restore AS SELECT id FROM replace_source", s));
 
     // The snapshot is restored first, then the row undo removes id=2 from
     // the restored table and the pre-transaction view definition survives.
@@ -416,7 +432,7 @@ static void test_drop_and_replace_restore_before_outer_row_undo() {
 
     assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
     assert(!ddl.executeSql(
-        "CREATE OR REPLACE VIEW replace_restore AS SELECT id FROM replace_restore", s));
+        "CREATE OR REPLACE VIEW replace_restore AS SELECT id FROM replace_source", s));
     assert(g_engine.getViewSQL(db, "replace_restore") != oldViewSql);
     assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
     assert(g_engine.getViewSQL(db, "replace_restore") == oldViewSql);
@@ -487,6 +503,51 @@ static void test_alter_and_truncate_join_outer_transaction() {
     assert(schema.len == 1 && schema.cols[0].dataName == "id");
     assert(g_engine.query(db, "rewrite_target", {}, {"id"}) ==
            std::vector<std::string>{"1 "});
+
+    // Multiple file-rewriting DDL statements may share one outer transaction.
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(!ddl.executeSql(
+        "ALTER TABLE rewrite_target ADD COLUMN first_change INT", s));
+    assert(!ddl.executeSql(
+        "ALTER TABLE rewrite_target ADD COLUMN second_change INT", s));
+    schema = g_engine.getTableSchema(db, "rewrite_target");
+    assert(schema.len == 3);
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+    schema = g_engine.getTableSchema(db, "rewrite_target");
+    assert(schema.len == 1 && schema.cols[0].dataName == "id");
+    assert(!pathExistsWithPrefix(db + ".ddl_statement_backup."));
+
+    // COMMIT keeps both schema changes and removes both the outer and
+    // statement-level images; neither may be replayed at the next startup.
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(!ddl.executeSql(
+        "ALTER TABLE rewrite_target ADD COLUMN committed_first INT", s));
+    assert(!ddl.executeSql(
+        "ALTER TABLE rewrite_target ADD COLUMN committed_second INT", s));
+    assert(g_engine.commitTransaction() == dbms::DBStatus::OK);
+    schema = g_engine.getTableSchema(db, "rewrite_target");
+    assert(schema.len == 3);
+    assert(schema.cols[1].dataName == "committed_first");
+    assert(schema.cols[2].dataName == "committed_second");
+    assert(!pathExistsWithPrefix(db + ".txn_backup."));
+    assert(!pathExistsWithPrefix(db + ".ddl_statement_backup."));
+
+    // Failure in a later statement restores only that statement. The first
+    // successful DDL remains visible until the outer transaction rolls back.
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(!ddl.executeSql(
+        "ALTER TABLE rewrite_target ADD COLUMN retained_change INT", s));
+    assert(ddl.executeSql(
+        "ALTER TABLE rewrite_target ADD COLUMN leaked_change INT, "
+        "DROP COLUMN missing_change", s));
+    schema = g_engine.getTableSchema(db, "rewrite_target");
+    assert(schema.len == 4);
+    assert(schema.cols[3].dataName == "retained_change");
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+    schema = g_engine.getTableSchema(db, "rewrite_target");
+    assert(schema.len == 3);
+    assert(schema.cols[1].dataName == "committed_first");
+    assert(schema.cols[2].dataName == "committed_second");
 
     assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "rewrite_target", {{"id", "3"}}) ==
