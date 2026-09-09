@@ -1,8 +1,8 @@
 # 生产化状态
 
-最后更新：2026-08-22（v0.2 并发硬化批次）
+状态口径更新：2026-09-09；下方工程批次记录截至其各自标注日期。
 
-当前版本处于生产化重构阶段，不能宣称已经达到 PostgreSQL 的生产级完整度。当前可验证基线为：主程序构建成功，**165 个 C++ 回归测试 + 7 个 E2E**（协议、窗口函数、EXPLAIN ANALYZE、多表 JOIN、timestamptz、inherit-only、unnest）共 `PASS=165 FAIL=0`；ASAN/TSAN sanitizer 核心集 12/12 CLEAN；崩溃恢复矩阵 12/12（见下）；发布工程管线（CI、sanitizer、soak、打包）就绪。
+当前发行标识为 v0.2.0，但仍处于生产化重构阶段，不能宣称已达到 PostgreSQL 的生产级完整度。实时范围和完成状态只取自 [`postgresql-18-gap-audit.md`](postgresql-18-gap-audit.md) 与 [`gap-progress.json`](gap-progress.json)，由 `python3 scripts/check_gap_progress.py` 校验。本文其余 PASS、sanitizer、崩溃矩阵、soak 和性能数字都是带日期的历史证据，不代表当前 HEAD 已运行同一全量矩阵。GitHub Actions 当前全部禁用（仅保留 `.github/workflows/ci.yml.disabled`）；本地构建、测试、sanitizer 和打包脚本仍可手动运行。
 
 ## v0.2 并发硬化批次（2026-08-22）
 
@@ -64,7 +64,7 @@ world-stop 残余核查与根因终局，三项提交：
 发布工程（本批次核心产出）：
 
 - **版本单一事实源**：CMake project version ↔ `src/common/version.h` ↔ CHANGELOG.md；`dbms_main --version/-V`；git tag v0.1.0。
-- **CI**：`scripts/ci.sh`（build → 165 回归 + 7 E2E → 版本一致性 → sanitizer 核心）+ `.github/workflows/ci.yml`（push/PR/tag 触发）。
+- **CI（历史发布配置）**：`scripts/ci.sh` 曾编排 build、回归、E2E、版本一致性和 sanitizer；GitHub Actions workflow 现已改名为 `.github/workflows/ci.yml.disabled`，不会由 push/PR/tag 触发。
 - **Sanitizer 例程**：`scripts/sanitizer.sh`（out-of-tree ASAN+UBSAN / TSAN 构建，核心 12 测试；`setarch -R` 规避内核 6.8 高熵 ASLR 与 TSAN 的不兼容；LSAN suppressions 记录有意泄漏的单例）。
 - **崩溃恢复矩阵**：`tests/crash_matrix_test.sh` —— {wal-insert, tde-insert, ddl-mixed, connection-pool} × {mid-transaction, post-commit, post-checkpoint} = 12 组合，SIGKILL 后继进程验证已提交行存活/未提交行消失。post-commit 用输出确认屏障消除 kill 与 flush 的竞态 flake。
 - **Soak 负载**：`scripts/soak.sh` + `scripts/soak_client.py` —— 单 `--server` 进程（thread-per-connection，真实并发架构）+ N 个 PG wire protocol 客户端（SCRAM 认证 + 混合 DML 循环），验证 server 存活、行数一致性、CHECKPOINT 后干净重开。**架构发现：process-per-connection 共享数据目录不是安全并发形态**（每进程 XID 计数器在共享 WAL 中冲突 → 恢复时 contradictory COMMIT）；多用户必须走单 --server 进程。文档化于脚本注释。soak 的直接产出：两个真修复（时间格式化线程安全、WAL LSN 原子化伴随项）与三项 v0.2 已知发现（PgPage 竞态、锁序反转、world-stop）。

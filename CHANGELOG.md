@@ -6,10 +6,13 @@
 
 ## [Unreleased]
 
+- PostgreSQL 18 兼容审计仍在逐项执行；完成状态只以 `docs/postgresql-18-gap-audit.md` 与 `docs/gap-progress.json` 为准。
+- GitHub Actions workflow 按维护要求保持 `.disabled`；`scripts/build_tests.sh` 是本地完整验证入口。
+
 ## [0.2.0] - 2026-08-22
 
 并发硬化与写放大根除（"concurrency hardening"）。
-基线：163 个 C++ 回归 + 7 个 E2E 全绿；崩溃恢复矩阵 12/12；ASAN/TSAN 核心集 CLEAN。
+Tag 内容：156 个 `*_test.cpp` 测试源 + 7 个 Python E2E；发布时记录崩溃恢复矩阵 12/12、ASAN/TSAN 核心集 CLEAN。
 
 ### 并发正确性
 - TypeRegistry 单例 bootstrap 竞态：`static bool` 旗标不受 Meyers 单例保护，两线程并发 bootstrap 重写注册表——TSAN 1288 条报告的单一根因，`call_once` 修复后 0 报告
@@ -31,7 +34,7 @@
 ## [0.1.0] - 2026-08-21
 
 首个公开发布版本（v0.1.0 "first public cut"）。
-基线：165 个 C++ 回归测试 + 5 个 E2E（Python 协议/窗口函数/EXPLAIN ANALYZE/多表 JOIN/timestamptz）全绿。
+Tag 内容：156 个 `*_test.cpp` 测试源 + 7 个 Python E2E；发布时记录全绿。
 
 ### 核心引擎
 - 堆表存储：8 KiB PostgreSQL 风格页布局（页头 + line pointer + tuple 从页尾生长），Fletcher-16 页校验，Free Space Map
@@ -81,5 +84,6 @@
 ## [0.1.0 之前]
 开发期 874+ commits 不在此列，演进细节见 docs/production-status.md 与 docs/all-gaps-todo.md。
 
-[Unreleased]: https://github.com/Palpitate-xus/DBMS_C_plus_plus/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Palpitate-xus/DBMS_C_plus_plus/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Palpitate-xus/DBMS_C_plus_plus/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Palpitate-xus/DBMS_C_plus_plus/releases/tag/v0.1.0

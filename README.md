@@ -5,7 +5,7 @@
 > **完整使用手册**: [docs/MANUAL.md](docs/MANUAL.md)
 > **生产化状态与边界**: [docs/production-status.md](docs/production-status.md)
 > **PostgreSQL 18 差距审计与实施蓝图**: [差距清单](docs/postgresql-18-gap-audit.md) · [逐项实施方案](docs/postgresql-18-implementation-blueprint.md)
-> **当前状态（2026-08-14）**: 生产化重构进行中；统一回归基线 PASS=139 FAIL=0（137 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E），主构建 `-Wall -Wextra` 无警告。当前发行格式为单一的 v2/8 KiB 存储格式，不提供旧数据迁移；数据库初始化、checkpoint 和物理备份标记采用原子持久化，生命周期清理失败会显式返回错误；PREPARE TRANSACTION 已在准备阶段刷出 heap/index 缓存、原子发布 prepared 元数据并记录 PREPARE WAL，跨 backend/进程完成时保留并恢复表/row/page/gap 锁；含内存 undo 的事务仍拒绝 PREPARE，完整 2PC 全局目录/in-doubt 决策语义仍未完成；这不代表已达到 PostgreSQL 生产级等价。
+> **当前状态（2026-09-09）**：发行标识为 v0.2.0；PostgreSQL 18 兼容和生产化复查仍在进行，不能宣称生产就绪或 PostgreSQL 等价。唯一的实时范围与完成状态来自 [`docs/postgresql-18-gap-audit.md`](docs/postgresql-18-gap-audit.md) 和机器可读 [`docs/gap-progress.json`](docs/gap-progress.json)，可运行 `python3 scripts/check_gap_progress.py` 校验。其他文档中的 PASS 数、批次和性能数字都是带日期的历史记录，不是当前全量绿色声明。GitHub Actions 当前全部禁用；本地验证入口仍为 `scripts/build_tests.sh`。
 >
 > **2026-08-14 性能与并发硬化轮次**（13 个提交，每步全量回归保持绿色）：WAL 追加改为增量状态 + 常开 segment fd + 按库互斥；同事务重复页 before-image 去重；`.secidx`/`.hashidx`/排除约束/表 schema/序列计数器内存缓存（DDL 全路径失效）；缓冲池默认 256/128 帧可环境变量覆盖，页校验只在磁盘加载时执行；B+ 树节点下降改二分查找并加 64 项节点缓存；BufferPool 磁盘 I/O 移出池锁（两阶段加载 + 单加载者规则 + 孤儿帧失效语义）；FSM/VM/PageAllocator/BPTree/HashIndex/CLOG 映射内部锁；`invalidatePage` 并发读者下的孤儿帧修复经 TSAN/ASAN 多线程压测验证 0 竞态 0 损坏。典型负载提升：事务内带 PK 插入 11.7 → ~2000+ 行/秒，commit 267ms → ~13ms，500 行插入+聚合 106s → ~0.3s。
 
@@ -645,11 +645,9 @@ Var Offset Array 每项 (4 bytes):
 
 ## 已知限制
 
-- **数据存储为小写**：所有字符串值在存储时会被转换为小写（通过 `toLower()` 预处理），`SELECT 'Hello' → 'hello'`
-- **标量函数不支持独立 SELECT**：`SELECT upper('hello')` 会报语法错误，需用于表列：`SELECT upper(name) FROM users`
+- **兼容范围仍未闭合**：以 PostgreSQL 18 差距审计和进度总账为准；README 的功能列举只表示已有入口，不表示完整 PostgreSQL 语义。
+- **非 PostgreSQL 扩展需显式模式**：`USE DATABASE`、`REPLACE INTO`、`SET GLOBAL`、`SHOW USERS/ROLES` 等只应在 extended compatibility mode 使用。
 - **`SAVEPOINT` 需要在事务内**：`SAVEPOINT` 命令必须在 `BEGIN` 之后执行，否则返回 "Not in transaction"
-- **`CREATE HASH INDEX`** ✅ 已实现：`CREATE HASH INDEX name ON table(col)` 创建哈希索引，支持 O(1) 等值查询
-- **`SHOW USERS` / `SHOW ROLES`** ✅ 已实现：从 `pg_authid` 展示用户与角色属性（需 admin 权限）
 
 ## 参考项目
 
@@ -664,7 +662,7 @@ Var Offset Array 每项 (4 bytes):
 | [implementation-plan.md](docs/implementation-plan.md) | 实施计划与历史 Wave 记录（当前状态以 Gap 表为准） |
 | [all-gaps-todo.md](docs/all-gaps-todo.md) | 历史 Gap 追踪与进度备注（已由新审计取代） |
 | [postgresql-comparison.md](docs/postgresql-comparison.md) | PostgreSQL 18 功能对比与差距分析 |
-| [test-report.md](docs/test-report.md) | 自动测试报告（当前回归基线 PASS=139 FAIL=0） |
+| [test-report.md](docs/test-report.md) | 带日期的历史自动测试报告（不是当前全量状态） |
 | [commandsList.md](docs/commandsList.md) | SQL 命令参考手册 |
 | [archive/](docs/archive/) | 历史过程文档 (Phase 4 专项计划、PG 差距分析) |
 

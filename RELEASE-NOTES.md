@@ -1,5 +1,7 @@
 # RELEASE NOTES — DBMS v0.1.0
 
+> 这是 `v0.1.0` tag 的历史发布快照，不是当前工作树的能力或测试状态。当前发行标识为 v0.2.0；实时兼容状态以 `docs/postgresql-18-gap-audit.md` 和 `docs/gap-progress.json` 为准。仓库中的 GitHub Actions 当前已禁用，下面的 CI/PASS 描述只记录该历史发布批次。
+
 发布日期：2026-08-21
 代号：first public cut
 
@@ -9,7 +11,7 @@
 
 v0.1.0 是首个公开发布版本。核心定位：**C++17 实现的 PostgreSQL 兼容单机数据库**，覆盖 SQL 兼容面（DDL/DML/查询/PL/pgSQL）、事务（MVCC + WAL 崩溃恢复）、PostgreSQL wire protocol v3（SCRAM-SHA-256 认证）、以及本批次补齐的运维面（连接池、逻辑解码、透明数据加密）。
 
-**质量基线**：165 个 C++ 回归测试 + 7 个 Python E2E 全绿；ASAN/UBSAN 与 TSAN 核心集 12/12 CLEAN；崩溃恢复矩阵 12/12；soak 负载（单 server 多客户端混合 DML）通过。
+**历史质量记录**：`v0.1.0` tag 包含 156 个 `*_test.cpp` 测试源和构建入口列出的 7 个 Python E2E；该发布当时记录 sanitizer 核心集、崩溃恢复矩阵和 soak 通过。这些结果没有被当作当前 HEAD 的验证结论。
 
 ## 本版本亮点
 
@@ -17,7 +19,7 @@ v0.1.0 是首个公开发布版本。核心定位：**C++17 实现的 PostgreSQL
 - **逻辑解码**（P2-5）：`pgoutput`/`test_decoding` 双输出插件、Publication 目录、按槽变更流（peek/confirm/LSN 推进）。
 - **PgBouncer 式连接池**（P2-4）：session/transaction/statement 三模式。
 - **Bloom 索引**（P2-2）与**自定义代价函数钩子**（P1-9）。
-- **发布工程**：CI 管线、sanitizer 例程、崩溃恢复矩阵、soak 负载、打包脚本——本批次产出一个真修复（WAL LSN 数据竞争）。
+- **发布工程（历史）**：当时的 CI 管线、sanitizer 例程、崩溃恢复矩阵、soak 负载和打包脚本；当前自动 workflow 状态见本文开头说明。
 
 ## 已知限制（务必阅读）
 

@@ -55,6 +55,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/build_cache_routing_test.py)
     DBMS_E2E_TESTS+=(tests/e2e_binary_routing_test.py)
     DBMS_E2E_TESTS+=(tests/version_consistency_test.py)
+    DBMS_E2E_TESTS+=(tests/documentation_status_test.py)
     DBMS_CXXFLAGS=(-std=c++17 -O2 -pthread -Wall -Wextra)
     DBMS_LDFLAGS=(-pthread)
 
