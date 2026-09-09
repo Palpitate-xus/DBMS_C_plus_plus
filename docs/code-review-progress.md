@@ -245,6 +245,8 @@
 
 | 350 | TYPE-22 / FUNC-01 / TXN-12 / PROTO-04,08 | PostgreSQL 提供的表达式入口 `pg_notify(text,text)` 完全不存在，动态 channel/payload 会报 `42883`；若直接在 evaluator 增加副作用，普通 SELECT 又没有通知事务，后续表达式失败仍可能泄漏消息。现把 `pg_notify` 注册为 volatile builtin，并接通无 FROM 与表扫描两条表达式路径；NULL payload 变为空串、空/过长 channel 与超长 payload 返回 `22023`，结果保留 `void` pseudo-type 和 OID 2278。所有非事务控制的顶层语句在没有显式事务时使用轻量通知事务，成功后提交、任意错误后回滚，递归/UDF/触发器执行共享同一边界 | 完整 `postgres_protocol_test.py` 覆盖拼接表达式参数、NULL payload、表列逐行 payload、返回空值及两条路径的 `void` OID/typlen、错误后零投递、显式回滚零投递、空/NULL/64-byte channel 与错误参数数量；O0/O2 全部受影响对象编译，协议全套两轮、`expression_evaluator_test`、`type_registry_test`、DIV-14 和完整差分 `cases=122 failed=0` 通过 | `06dd3cb` |
 
+| 351 | P0-01 / SQL-01 / TXN-12 / PROTO-08 | SQL utility 形式的 LISTEN/NOTIFY channel 是 identifier，PostgreSQL scanner 会按 `NAMEDATALEN-1` 截为 63 bytes；本项目此前保留任意长度，导致同名兼容和 function 形式边界不一致。通知 identifier 解析现对 quoted/unquoted 名称统一做 UTF-8 安全的 63-byte 截断，避免落在 continuation byte 中间；`pg_notify(text,text)` 仍按 PostgreSQL 行为对 64-byte channel 返回 `22023` | parser 回归覆盖 64 ASCII bytes 截为 63 以及 62 ASCII + 三字节字符在完整字符边界截断；完整协议以两个 backend 分别 LISTEN/NOTIFY 64-byte 名称，收到的 `A` 帧 channel 精确为 63 bytes。O0/O2 parser 和完整协议套件通过 | `7fe269d` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
