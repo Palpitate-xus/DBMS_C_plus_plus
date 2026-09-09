@@ -207,6 +207,8 @@
 
 | 331 | DML-06 / TXN-02 / PROTO-08 | legacy `COPY FROM` 在只读事务中逐行调用已受保护的存储 INSERT，却把每次 `INVALID_VALUE` 统计为 skipped row 并向客户端返回成功，导致写入禁令和失败事务状态均不可见。COPY 入口现在在验证文件语法及目标表后、打开输入文件前拒绝只读事务中的持久表导入并返回 `25006`；保留 PostgreSQL 对既有 session 临时表的写入例外 | 协议回归修复前稳定得到成功的 `COPY 0 rows imported, 1 skipped`；修复后验证持久表返回 `25006`、ROLLBACK 后为空，并验证临时表 COPY 成功、事务内行可见且 ROLLBACK 清除该行；隔离协议完整用例、Python 语法和 `main.cpp` O0/O2 编译通过 | `81d0791` |
 
+| 332 | DML-06 / TXN-05 | server-side `COPY FROM` 把每行作为独立 INSERT：自动提交模式下合法行立即提交，后续类型/约束错误仅增加 skipped 计数并返回成功；显式事务中也没有整条 COPY 的撤销边界。导入现在自建事务，或在外层事务中建立内部保存点；首个存储错误立即停止并撤销本条 COPY 的全部成功行，提交/释放边界失败也不再报告成功 | 协议复现中 `10 / not_an_integer / 11` 修复前导入两行并成功，修复后返回错误且自动提交目标表为空；显式事务回归验证 COPY 前 INSERT 经用户保存点保留，失败 COPY 的行被内部保存点移除，`ROLLBACK TO` 后可正常 COMMIT。隔离协议完整用例及 `main.cpp` O0/O2 编译通过；消息携带的 `22023` 尚被协议映射为 `XX000`，作为下一独立项处理 | `27c98b7` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
