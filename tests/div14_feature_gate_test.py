@@ -36,6 +36,8 @@ _spec.loader.exec_module(_helpers)
 startup = _helpers.startup
 simple_query = _helpers.simple_query
 read_until_ready = _helpers.read_until_ready
+read_message = _helpers.read_message
+typed = _helpers.typed
 write_auth_catalog = _helpers.write_auth_catalog
 setting_value = _helpers.setting_value
 data_row_values = _helpers.data_row_values
@@ -97,6 +99,8 @@ def main():
     try:
         os.mkdir(os.path.join(work_dir, "info"))
         open(os.path.join(work_dir, "info", "tlist.lst"), "wb").close()
+        os.mkdir(os.path.join(work_dir, "other_db"))
+        open(os.path.join(work_dir, "other_db", "tlist.lst"), "wb").close()
         write_auth_catalog(work_dir, "alice", "secret")
         with open(os.path.join(work_dir, "pg_hba.conf"), "w", encoding="utf-8") as hba:
             hba.write("host all alice 127.0.0.1/32 scram-sha-256\n")
@@ -525,8 +529,62 @@ def main():
             assert ".pg_compat_objects" not in files, \
                 "extended mode wrote a fake compat object in %s" % root
 
-        # DIV-01 / DIV-11 in extended mode: project commands work again.
-        expect_command_tag(sock, "USE DATABASE info", "extended USE DATABASE")
+        # DIV-01: the project database switch is allowed only from a clean
+        # session context. Every rejected attempt keeps the current database.
+        expect_error(sock, "USE DATABASE", "42601", "missing USE target")
+        expect_error(sock, "USE DATABASE info trailing", "42601",
+                     "trailing USE input")
+        expect_error(sock, "USE DATABASE missing_db", "3D000",
+                     "missing USE database")
+        assert data_row_values(simple_query(sock, "SELECT current_database()")) \
+            == [[b"info"]]
+
+        expect_command_tag(sock, "BEGIN", "USE transaction")
+        expect_error(sock, "USE DATABASE other_db", "25001",
+                     "transactional USE")
+        expect_command_tag(sock, "ROLLBACK", "USE transaction rollback")
+
+        expect_command_tag(sock, "CREATE TEMP TABLE use_temp (id INTEGER)",
+                           "USE temporary table blocker")
+        expect_error(sock, "USE DATABASE other_db", "55006",
+                     "temporary table USE")
+        expect_command_tag(sock, "DROP TABLE use_temp", "drop USE temp table")
+
+        expect_command_tag(sock, "LISTEN use_channel", "USE LISTEN blocker")
+        expect_error(sock, "USE DATABASE other_db", "55006", "LISTEN USE")
+        expect_command_tag(sock, "UNLISTEN use_channel", "clear USE LISTEN")
+
+        portal_parse = b"use_stmt\0SELECT 1\0" + struct.pack("!H", 0)
+        sock.sendall(typed(b"P", portal_parse))
+        assert read_message(sock) == (b"1", b"")
+        portal_bind = (b"use_portal\0use_stmt\0" + struct.pack("!H", 0) +
+                       struct.pack("!H", 0) + struct.pack("!H", 0))
+        sock.sendall(typed(b"B", portal_bind))
+        assert read_message(sock) == (b"2", b"")
+        expect_error(sock, "USE DATABASE other_db", "55006", "portal USE")
+        sock.sendall(typed(b"C", b"Puse_portal\0") +
+                     typed(b"C", b"Suse_stmt\0") + typed(b"S"))
+        closed = read_until_ready(sock)
+        assert sum(kind == b"3" for kind, _ in closed) == 2, closed
+
+        # Catalog-dependent state must not cross a successful switch. A
+        # currval/prepared name established in info is unavailable in other_db.
+        expect_command_tag(sock, "CREATE SEQUENCE use_seq", "source USE sequence")
+        assert data_row_values(simple_query(sock, "SELECT nextval('use_seq')")) \
+            == [[b"1"]]
+        expect_command_tag(sock, "PREPARE use_prepared FROM 'SELECT 1'",
+                           "source USE prepared statement")
+        expect_command_tag(sock, "USE DATABASE other_db", "extended USE switch")
+        assert data_row_values(simple_query(sock, "SELECT current_database()")) \
+            == [[b"other_db"]]
+        expect_command_tag(sock, "CREATE SEQUENCE use_seq", "target USE sequence")
+        assert error_of(simple_query(sock, "SELECT currval('use_seq')")) is not None
+        assert error_of(simple_query(sock, "EXECUTE use_prepared")) is not None
+        expect_command_tag(sock, "DROP SEQUENCE use_seq", "drop target USE sequence")
+        expect_command_tag(sock, "USE DATABASE info", "extended USE return")
+        expect_command_tag(sock, "DROP SEQUENCE use_seq", "drop source USE sequence")
+
+        # DIV-11 in extended mode: project commands work again.
         assert setting_value(simple_query(sock, "SELECT * FROM pg_settings"),
                              "auto_vacuum") == b"on"
         expect_command_tag(sock, "SET GLOBAL auto_vacuum = off",

@@ -81,6 +81,23 @@ int main() {
     assert(!parser.parse("DELETE FROM users WHERE age > 100 LIMIT 10").success);
     std::cout << "[PARSER P1] non-PG DML LIMIT rejected\n";
 
+    // The project-only database switch still uses the common parser in
+    // extended mode. Preserve one target token and reject missing/trailing
+    // input so the executor never derives a name with substr().
+    {
+        auto parsed = parser.parse("USE DATABASE target_db;");
+        assert(parsed.success);
+        const auto* use = asSet(parsed.stmt);
+        assert(use && use->command == SqlCommand::UseDatabase);
+        assert(use->values.size() == 1 && use->values[0] == "target_db");
+        parsed = parser.parse("USE short_db");
+        assert(parsed.success && asSet(parsed.stmt)->values[0] == "short_db");
+        assert(!parser.parse("USE").success);
+        assert(!parser.parse("USE DATABASE").success);
+        assert(!parser.parse("USE DATABASE a trailing").success);
+    }
+    std::cout << "[PARSER P1] USE target validation OK\n";
+
     // 2. SET
     {
         auto r = parser.parse("SET timezone = 'UTC'");

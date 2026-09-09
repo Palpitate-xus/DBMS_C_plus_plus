@@ -4276,14 +4276,17 @@ ParseResult SQLParser::parseUse(const std::string& sql) {
     auto tokens = tokenize(sql);
     auto stmt = std::make_unique<SetStmt>();
     stmt->command = SqlCommand::UseDatabase;
-    // USE DATABASE name -> mapped to SET search_path = name, public
-    // Retain backward-compatible bare Stmt behavior for callers that expect it.
     size_t pos = 1;
     if (pos < tokens.size() && toLower(tokens[pos]) == "database") ++pos;
-    if (pos < tokens.size()) {
-        stmt->name = "search_path";
-        stmt->values.push_back(tokens[pos]);
-        stmt->values.push_back("public");
+    if (pos >= tokens.size() || tokens[pos] == ";") {
+        r.error = "USE requires a database name";
+        return r;
+    }
+    stmt->values.push_back(tokens[pos++]);
+    if (pos < tokens.size() && tokens[pos] == ";") ++pos;
+    if (pos != tokens.size()) {
+        r.error = "unexpected token after database name";
+        return r;
     }
     r.success = true;
     r.stmt = std::move(stmt);

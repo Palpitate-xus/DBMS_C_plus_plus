@@ -36,6 +36,10 @@ struct Session {
     std::map<std::string, int64_t> sequenceLastValues; // session-local currval state
     bool constraintsDeferred = false; // SET CONSTRAINTS ALL/constraint_list DEFERRED
     std::set<std::string> listenedChannels; // channels this session is LISTENing to
+    // Connection-local protocol portals are owned by NetworkServer. Mirror
+    // their count here while executing a statement so project commands that
+    // replace the database session context can fail closed.
+    uint64_t openProtocolPortals = 0;
     uint64_t pid = 0; // process id for pg_cancel_backend / pg_terminate_backend
 
     // Cursors: named result sets for DECLARE CURSOR / FETCH / CLOSE

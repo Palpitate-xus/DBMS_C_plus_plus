@@ -13171,27 +13171,63 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     "USE DATABASE (reconnect to switch databases)") << endl;
                 return true;
             }
-            // Accept both "use database <name>" (13-char prefix) and the
-            // short "use <name>" form.  The parser classifies any leading
-            // "use" here, so the short form used to hit substr(13) on a
-            // shorter string and abort the backend with out_of_range.
-            string dbname;
-            if (sql.size() >= 13 && sql.substr(0, 13) == "use database ") {
-                dbname = trim(sql.substr(13));
-            } else {
-                dbname = trim(sql.substr(3));
+            dbms::SQLParser parser;
+            auto parsed = parser.parse(sql);
+            const auto* use = dynamic_cast<const dbms::SetStmt*>(
+                parsed.stmt.get());
+            if (!parsed.success || !use || use->values.size() != 1) {
+                cout << "SQL syntax error: "
+                     << (parsed.error.empty() ? "use [database] name"
+                                              : parsed.error)
+                     << " (SQLSTATE 42601)" << endl;
+                return true;
             }
-            if (dbname.empty()) {
-                cout << "SQL syntax error: use [database] name" << endl;
+            const string dbname = decodeQuotedIdentifier(use->values.front());
+            // Replacing the database context is not an atomic SQL operation.
+            // Refuse every state that may own objects or callbacks in the old
+            // database instead of silently carrying them across the boundary.
+            if (g_engine.inTransaction()) {
+                cout << "ERROR: USE DATABASE cannot run inside a transaction "
+                        "block (SQLSTATE 25001)" << endl;
+                return true;
+            }
+            if (s.openProtocolPortals != 0 || !s.cursors.empty()) {
+                cout << "ERROR: cannot switch database while a portal or "
+                        "cursor is open (SQLSTATE 55006)" << endl;
+                return true;
+            }
+            if (!s.tempTables.empty() || !s.transientTempTables.empty() ||
+                !s.tempTableOnCommit.empty() ||
+                !s.tempTablesCreatedInTransaction.empty()) {
+                cout << "ERROR: cannot switch database while temporary "
+                        "relations exist (SQLSTATE 55006)" << endl;
+                return true;
+            }
+            if (!s.listenedChannels.empty()) {
+                cout << "ERROR: cannot switch database while LISTEN channels "
+                        "are active (SQLSTATE 55006)" << endl;
                 return true;
             }
             if (dbname != "information_schema" && !g_engine.databaseExists(dbname)) {
-                cout << "Database not found" << endl;
-                s.currentDB = "";
+                cout << "ERROR: database \"" << dbname
+                     << "\" does not exist (SQLSTATE 3D000)" << endl;
                 log(s.username, "use database error", getTime());
                 return true;
             }
+
+            // Clear all state whose meaning can depend on the old catalog.
+            // The authenticated identity, compatibility mode and ordinary
+            // session GUCs intentionally survive this project extension.
+            dbms::notificationManager().disconnect(s.pid);
+            s.preparedStmts.clear();
+            s.preparedStmtTypes.clear();
+            s.sequenceLastValues.clear();
+            s.userVariables.clear();
+            s.constraintsDeferred = false;
             s.currentDB = dbname;
+            g_engine.getLockManager().setResourceNamespace(dbname);
+            g_engine.getLockManager().setLockTimeout(s.lockTimeoutMs);
+            g_engine.getLockManager().setDeadlockTimeout(s.deadlockTimeoutMs);
             cout << "set Database to " << dbname << endl;
             log(s.username, "use database success", getTime());
             return false;

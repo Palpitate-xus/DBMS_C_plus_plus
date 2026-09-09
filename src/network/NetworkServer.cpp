@@ -1264,9 +1264,28 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
                 result.errorMessage = msg;
             }
         }
+        std::string embeddedSqlState;
+        const size_t stateMarker = result.errorMessage.find("(SQLSTATE ");
+        if (stateMarker != std::string::npos &&
+            stateMarker + 15 < result.errorMessage.size()) {
+            const std::string candidate =
+                result.errorMessage.substr(stateMarker + 10, 5);
+            const bool valid = std::all_of(
+                candidate.begin(), candidate.end(), [](unsigned char c) {
+                    return std::isdigit(c) || (c >= 'A' && c <= 'Z');
+                });
+            if (valid && result.errorMessage[stateMarker + 15] == ')') {
+                embeddedSqlState = candidate;
+            }
+        }
         if (structuredError) {
             // The executor's explicit code takes precedence over all legacy
             // wording heuristics, even if the message happens to match one.
+        } else if (!embeddedSqlState.empty()) {
+            // Legacy handlers that have not yet migrated to DbError still
+            // declare an exact SQLSTATE in their diagnostic. Honor any valid
+            // five-character code instead of maintaining an incomplete list.
+            result.sqlState = embeddedSqlState;
         } else if (result.errorMessage.find(
                        "aggregate functions are not allowed in GROUP BY") !=
                    std::string::npos) {
@@ -1990,6 +2009,10 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         return g_engine.inTransaction() ? 'T' : 'I';
     };
     const auto executeForProtocol = [&](const std::string& sql) -> QueryResult {
+        // Portal objects live in this connection loop rather than Session.
+        // Mirror their count while a command executes so a database-context
+        // replacement cannot leave a portal bound to the previous database.
+        session.openProtocolPortals = portals.size();
         if (transactionFailed && !isTransactionRecoveryCommand(sql)) {
             return transactionAbortedResult();
         }
