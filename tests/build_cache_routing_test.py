@@ -28,6 +28,13 @@ def main():
     assert all_tests.index("dbms_write_cache_signature") < all_tests.index(
         "for test_file in tests/*_test.cpp")
 
+    # Incremental single-test links must follow the selected source list. A
+    # directory glob can pick up both TLSWrapper.o and TLSWrapper_stub.o after
+    # a build configuration switch and fail with duplicate definitions.
+    assert 'for src in "${DBMS_PROJECT_SOURCES[@]}"' in one
+    assert 'link+=("build/obj/$base.o")' in one
+    assert "for o in build/obj/*.o" not in one
+
     for script in ("build_common.sh", "build_one_test.sh", "build_tests.sh"):
         subprocess.run(
             ["bash", "-n", str(REPO / "scripts" / script)], check=True)

@@ -58,15 +58,15 @@ dbms_write_cache_signature build/obj
 echo "[inc] compiling tests/$test_name.cpp"
 g++ "${DBMS_CXXFLAGS[@]}" "${DBMS_TEST_INCLUDES[@]}" -c "tests/$test_name.cpp" -o "build/obj/$test_name.o"
 
-# 链接：所有非 *_test.o 的对象 + 本测试对象（排除 main.o，测试自带 main 与桩）
+# Link only objects selected by the current build configuration. A previous
+# configuration can leave the mutually exclusive TLS implementation (or other
+# unrelated objects) in build/obj; globbing the directory would link both.
 link=()
-for o in build/obj/*.o; do
-    case "$o" in
-        *_test.o) ;;
-        */main.o) ;;
-        *) link+=("$o");;
-    esac
+for src in "${DBMS_PROJECT_SOURCES[@]}"; do
+    base=$(basename "$src" .cpp)
+    link+=("build/obj/$base.o")
 done
+link+=("build/obj/test_stubs.o")
 if grep -Eq '(^|[[:space:]])(bool checkAdmin|bool checkDB|std::string resolveTableName|bool execute\(|void logSlowQuery|void recordSqlStat)' "tests/$test_name.cpp"; then
     filtered_link=()
     for o in "${link[@]}"; do
