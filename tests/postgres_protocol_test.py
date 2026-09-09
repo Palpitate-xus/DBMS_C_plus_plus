@@ -651,8 +651,8 @@ def main():
 
         startup(sock, "alice", "info")
 
-        # max_connections must control the live accept path at startup and
-        # after SET GLOBAL, not just the value exposed through pg_settings.
+        # max_connections controls the live accept path at startup.  ALTER
+        # SYSTEM/extended SET GLOBAL only persist a pending restart value.
         limited_sock = socket.socket()
         limited_sock.connect(("127.0.0.1", port))
         assert wait_for_disconnect(limited_sock), "startup max_connections was ignored"
@@ -660,20 +660,45 @@ def main():
 
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "SET GLOBAL max_connections = 2"))
-        second_sock = socket.socket()
-        second_sock.settimeout(SOCKET_TIMEOUT)
-        second_sock.connect(("127.0.0.1", port))
-        startup(second_sock, "alice", "info", protocol_version=196610,
-                protocol_options={"_pq_.unsupported_test": "1"})
-        runtime_limited_sock = socket.socket()
-        runtime_limited_sock.connect(("127.0.0.1", port))
-        assert wait_for_disconnect(runtime_limited_sock), \
-            "runtime max_connections was ignored"
-        runtime_limited_sock.close()
-        second_sock.sendall(typed(b"X"))
-        second_sock.close()
+        assert setting_value(simple_query(sock, "SELECT * FROM pg_settings"),
+                             "max_connections") == b"1"
+        with open(os.path.join(work_dir, "dbms.conf"), encoding="utf-8") as config:
+            assert "max_connections=2\n" in config.read()
+        reload_messages = simple_query(sock, "SELECT pg_reload_conf()")
+        assert not any(kind == b"E" for kind, _ in reload_messages), \
+            reload_messages
+        assert setting_value(simple_query(sock, "SELECT * FROM pg_settings"),
+                             "max_connections") == b"1"
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "SET GLOBAL max_connections = 64"))
+
+        # A restart installs the persisted value.
+        sock.sendall(typed(b"X"))
+        sock.close()
+        process.terminate()
+        process.wait(timeout=5)
+        process = subprocess.Popen(
+            [DBMS_MAIN, "--server", str(port), "--insecure"],
+            cwd=work_dir,
+            env=dict(os.environ, DBMS_COMPATIBILITY_MODE="extended"),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        sock = socket.socket()
+        sock.settimeout(SOCKET_TIMEOUT)
+        deadline = time.time() + STARTUP_TIMEOUT
+        while True:
+            try:
+                sock.connect(("127.0.0.1", port))
+                break
+            except OSError:
+                if time.time() >= deadline:
+                    raise
+                time.sleep(0.05)
+        startup(sock, "alice", "info", protocol_version=196610,
+                protocol_options={"_pq_.unsupported_test": "1"})
+        assert setting_value(simple_query(sock, "SELECT * FROM pg_settings"),
+                             "max_connections") == b"64"
         malformed_startup_sock = socket.socket()
         malformed_startup_sock.settimeout(SOCKET_TIMEOUT)
         malformed_startup_sock.connect(("127.0.0.1", port))
@@ -685,6 +710,11 @@ def main():
         malformed_startup_sock.close()
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "SET GLOBAL max_notify_queue_pages = 2"))
+        assert setting_value(simple_query(sock, "SELECT * FROM pg_settings"),
+                             "max_notify_queue_pages") == b"1"
+        reload_messages = simple_query(sock, "SELECT pg_reload_conf()")
+        assert not any(kind == b"E" for kind, _ in reload_messages), \
+            reload_messages
         assert setting_value(simple_query(sock, "SELECT * FROM pg_settings"),
                              "max_notify_queue_pages") == b"1"
 
@@ -2357,7 +2387,8 @@ def main():
         assert any(kind == b"E" for kind, _ in simple_query(
             role_sock, "SET enable_seq_scan = off"))
 
-        # Planner-affecting global changes invalidate the old EXPLAIN entry.
+        # Persisting a planner change does not affect a cached plan until a
+        # reload installs the value and invalidates runtime plans.
         first_plan = simple_query(observer_sock, "EXPLAIN SELECT * FROM t")
         assert not any(b"[plan cache hit]" in row[0]
                        for row in data_row_values(first_plan))
@@ -2367,8 +2398,14 @@ def main():
         assert any(kind == b"C" for kind, _ in simple_query(
             observer_sock, "SET GLOBAL enable_seq_scan = off"))
         third_plan = simple_query(observer_sock, "EXPLAIN SELECT * FROM t")
+        assert any(b"[plan cache hit]" in row[0]
+                   for row in data_row_values(third_plan))
+        reload_messages = simple_query(observer_sock, "SELECT pg_reload_conf()")
+        assert not any(kind == b"E" for kind, _ in reload_messages), \
+            reload_messages
+        fourth_plan = simple_query(observer_sock, "EXPLAIN SELECT * FROM t")
         assert not any(b"[plan cache hit]" in row[0]
-                       for row in data_row_values(third_plan))
+                       for row in data_row_values(fourth_plan))
 
         observer_sock.sendall(typed(b"X"))
         observer_sock.close()

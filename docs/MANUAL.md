@@ -1093,8 +1093,8 @@ SET deadlock_timeout = 1000;
 RESET search_path;
 RESET ALL;
 
--- 查看运行时参数
-SHOW VARIABLES;
+-- PostgreSQL 模式查看当前值
+SELECT * FROM pg_settings;
 
 -- 配置文件位于工作目录 dbms.conf；修改后由管理员请求重新加载
 SELECT pg_reload_conf();
@@ -1104,13 +1104,18 @@ SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
 SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;
 SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 
--- ALTER SYSTEM (持久化)
-ALTER SYSTEM SET work_mem = '64MB';
+-- ALTER SYSTEM 只持久化，不立即改当前进程或会话
+ALTER SYSTEM SET work_mem = 65536;
+SELECT pg_reload_conf();                 -- 应用可 reload 参数
+ALTER SYSTEM SET max_connections = 128; -- 启动参数，重启后生效
 -- 当前版本只支持 ALTER SYSTEM SET；如需恢复默认值请删除/修改 dbms.conf
 
--- AUTO_VACUUM
+-- extended 模式中的 SET GLOBAL 是 ALTER SYSTEM SET 的持久化别名；
+-- 同样需要 reload 或重启，且不能在事务中执行
+SET compatibility_mode = 'extended';
 SET GLOBAL AUTO_VACUUM = ON;
 SET GLOBAL AUTO_VACUUM_THRESHOLD = 1000;
+SHOW VARIABLES;                          -- 仅 extended 模式提供
 
 -- 兼容模式（DIV 框架；会话开始处受限，事务中不可更改）
 SHOW compatibility_mode;                     -- 默认 postgresql18

@@ -37,6 +37,7 @@ startup = _helpers.startup
 simple_query = _helpers.simple_query
 read_until_ready = _helpers.read_until_ready
 write_auth_catalog = _helpers.write_auth_catalog
+setting_value = _helpers.setting_value
 
 
 def error_of(messages):
@@ -497,9 +498,25 @@ def main():
 
         # DIV-01 / DIV-11 in extended mode: project commands work again.
         expect_command_tag(sock, "USE DATABASE info", "extended USE DATABASE")
-        expect_command_tag(sock, "SET GLOBAL auto_vacuum = on",
+        assert setting_value(simple_query(sock, "SELECT * FROM pg_settings"),
+                             "auto_vacuum") == b"on"
+        expect_command_tag(sock, "SET GLOBAL auto_vacuum = off",
                            "extended SET GLOBAL")
+        expect_command_tag(sock, "SET GLOBAL auto_analyze = off",
+                           "second extended SET GLOBAL")
+        # ALTER SYSTEM semantics persist without changing the live value.
+        assert setting_value(simple_query(sock, "SELECT * FROM pg_settings"),
+                             "auto_vacuum") == b"on"
+        persisted = Path(work_dir, "dbms.conf").read_text(encoding="utf-8")
+        assert "auto_vacuum=off\n" in persisted, persisted
+        assert "auto_analyze=off\n" in persisted, persisted
         assert error_of(simple_query(sock, "SHOW VARIABLES")) is None
+        reload_messages = simple_query(sock, "SELECT pg_reload_conf()")
+        assert error_of(reload_messages) is None, reload_messages
+        assert any(kind == b"C" for kind, _body in reload_messages), \
+            reload_messages
+        assert setting_value(simple_query(sock, "SELECT * FROM pg_settings"),
+                             "auto_vacuum") == b"off"
         expect_command_tag(sock, "SET @project_value = 7",
                            "extended user variable")
         variable_messages = simple_query(sock, "SELECT @project_value")
@@ -510,9 +527,13 @@ def main():
             assert any(kind == b"D" and b"@project_value" in body
                        for kind, body in literal_messages), literal_messages
         expect_command_tag(sock, "BEGIN", "extended SET GLOBAL transaction")
-        expect_error(sock, "SET GLOBAL auto_vacuum = off", "25001",
+        expect_error(sock, "SET GLOBAL auto_vacuum = on", "25001",
                      "transactional SET GLOBAL")
         expect_command_tag(sock, "ROLLBACK", "extended SET GLOBAL rollback")
+        expect_command_tag(sock, "BEGIN", "ALTER SYSTEM transaction")
+        expect_error(sock, "ALTER SYSTEM SET auto_vacuum = on", "25001",
+                     "transactional ALTER SYSTEM")
+        expect_command_tag(sock, "ROLLBACK", "ALTER SYSTEM rollback")
         # DIV-06 in extended mode: alias mapping keeps working.
         expect_command_tag(sock, "CREATE TABLE t6e (a TINYINT)",
                            "extended TINYINT")

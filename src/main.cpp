@@ -167,20 +167,24 @@ static void syncConnectionRuntimeConfig(const dbms::Config& cfg) {
 }
 
 static bool installReloadedConfig(const dbms::Config& next) {
-    // The notification manager is deliberately not reconfigured here:
-    // max_notify_queue_pages is a postmaster/startup setting.  Keep the new
-    // configured value so a later config save does not discard the pending
-    // restart value, while pg_settings reports the manager's active bound.
+    // These settings size process-lifetime resources.  A reload must retain
+    // their active values; the values already persisted in dbms.conf become
+    // effective only when the server starts again.
+    dbms::Config applied = next;
+    applied.maxConnections = g_config.maxConnections;
+    applied.bufferPoolFrames = g_config.bufferPoolFrames;
+    applied.maxNotifyQueuePages = g_config.maxNotifyQueuePages;
     if (!next.validate() ||
         !dbms::setSqlStatsMaxEntries(next.sqlStatsMaxEntries)) {
         return false;
     }
-    g_config = next;
-    g_slowQueryThresholdMs = next.slowQueryThresholdMs;
-    g_checkpointInterval = next.checkpointInterval;
-    dbms::QueryPlanner::setParallelWorkers(next.maxParallelWorkersPerGather);
-    syncPlannerCostModel(next);
-    syncConnectionRuntimeConfig(next);
+    g_config = applied;
+    g_slowQueryThresholdMs = applied.slowQueryThresholdMs;
+    g_checkpointInterval = applied.checkpointInterval;
+    dbms::QueryPlanner::setParallelWorkers(
+        applied.maxParallelWorkersPerGather);
+    syncPlannerCostModel(applied);
+    syncConnectionRuntimeConfig(applied);
     invalidatePlanCacheForConfigChange();
     return true;
 }
@@ -1950,69 +1954,33 @@ static bool applyConfigParam(const string& param, const string& val, bool isGlob
         return false;
     }
 
-    const dbms::Config previous = g_config;
-    const int previousSessionStatementTimeoutMs = s.statementTimeoutMs;
-    const int previousSessionDefaultStatementTimeoutMs = s.defaultStatementTimeoutMs;
-    const int previousSessionLockTimeoutMs = s.lockTimeoutMs;
-    const int previousSessionDeadlockTimeoutMs = s.deadlockTimeoutMs;
-    dbms::Config candidate = previous;
+    // ALTER SYSTEM semantics: build from the persisted file so consecutive
+    // changes made before a reload do not overwrite one another.  Never
+    // change live process or session state on this path.
+    static std::mutex persistedConfigMutex;
+    const std::lock_guard<std::mutex> persistedConfigLock(
+        persistedConfigMutex);
+    dbms::Config candidate = g_config;
+    if (std::filesystem::exists("dbms.conf") &&
+        !candidate.load("dbms.conf")) {
+        cout << "Failed to read persisted configuration" << endl;
+        return true;
+    }
     if (!candidate.setParameter(param, val)) {
         cout << "Invalid value or unknown parameter: " << param << endl;
         return true;
     }
-
-    if (param == "max_notify_queue_pages") {
-        if (!candidate.save("dbms.conf")) {
-            cout << "Failed to persist configuration" << endl;
-            return true;
-        }
-        g_config = candidate;
-        cout << "Set global " << param << " = " << val
-             << " (requires restart)" << endl;
-        return false;
-    }
-
-    if (candidate.sqlStatsMaxEntries != previous.sqlStatsMaxEntries &&
-        !dbms::setSqlStatsMaxEntries(candidate.sqlStatsMaxEntries)) {
-        cout << "Invalid value for parameter " << param << endl;
-        return true;
-    }
-    g_config = candidate;
-    if (param == "statement_timeout_ms" || param == "statement_timeout") {
-        s.statementTimeoutMs = g_config.statementTimeoutMs;
-        s.defaultStatementTimeoutMs = g_config.statementTimeoutMs;
-    } else if (param == "lock_timeout_ms" || param == "lock_timeout") {
-        s.lockTimeoutMs = g_config.lockTimeoutMs;
-        g_engine.getLockManager().setLockTimeout(s.lockTimeoutMs);
-    } else if (param == "deadlock_timeout_ms" || param == "deadlock_timeout") {
-        s.deadlockTimeoutMs = g_config.deadlockTimeoutMs;
-        g_engine.getLockManager().setDeadlockTimeout(s.deadlockTimeoutMs);
-    }
-    g_slowQueryThresholdMs = g_config.slowQueryThresholdMs;
-    g_checkpointInterval = g_config.checkpointInterval;
-    dbms::QueryPlanner::setParallelWorkers(g_config.maxParallelWorkersPerGather);
-    syncPlannerCostModel(g_config);
-    syncConnectionRuntimeConfig(g_config);
-    invalidatePlanCacheForConfigChange();
-    if (!g_config.save("dbms.conf")) {
-        g_config = previous;
-        dbms::setSqlStatsMaxEntries(previous.sqlStatsMaxEntries);
-        g_slowQueryThresholdMs = previous.slowQueryThresholdMs;
-        g_checkpointInterval = previous.checkpointInterval;
-        dbms::QueryPlanner::setParallelWorkers(previous.maxParallelWorkersPerGather);
-        syncPlannerCostModel(previous);
-        syncConnectionRuntimeConfig(previous);
-        s.statementTimeoutMs = previousSessionStatementTimeoutMs;
-        s.defaultStatementTimeoutMs = previousSessionDefaultStatementTimeoutMs;
-        s.lockTimeoutMs = previousSessionLockTimeoutMs;
-        s.deadlockTimeoutMs = previousSessionDeadlockTimeoutMs;
-        g_engine.getLockManager().setLockTimeout(s.lockTimeoutMs);
-        g_engine.getLockManager().setDeadlockTimeout(s.deadlockTimeoutMs);
-        invalidatePlanCacheForConfigChange();
+    if (!candidate.save("dbms.conf")) {
         cout << "Failed to persist configuration" << endl;
         return true;
     }
-    cout << "Set global " << param << " = " << val << endl;
+    static const std::set<std::string> kRestartParams = {
+        "max_connections", "buffer_pool_frames", "max_notify_queue_pages",
+    };
+    cout << "Set global " << param << " = " << val
+         << (kRestartParams.count(param) ? " (requires restart)"
+                                         : " (pending reload)")
+         << endl;
     return false;
 }
 
@@ -2256,6 +2224,11 @@ static bool handleSetCommand(const string& sql, Session& s) {
 
 static bool handleAlterSystem(const string& sql, Session& s) {
     if (!checkAdmin(s)) return true;
+    if (g_engine.inTransaction()) {
+        cout << "ERROR: ALTER SYSTEM cannot run inside a transaction block "
+                "(SQLSTATE 25001)" << endl;
+        return true;
+    }
     string rest = trim(sql.substr(12));
     if (rest.size() >= 3 && rest.substr(0, 3) == "set") {
         rest = trim(rest.substr(3));
