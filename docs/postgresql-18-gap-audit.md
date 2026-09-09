@@ -407,7 +407,7 @@
 ## 20. 工程质量、发布和生产化
 
 - [ ] **ENG-01** 修正文档事实漂移：README、RELEASE-NOTES、CHANGELOG、feature-gaps 和 production-status 中存在互相冲突的 PASS 数、版本和“已完成”描述。
-- [ ] **ENG-02** 修正版本单一事实源：`version.h` 的 `MAJOR/MINOR/PATCH` 当前仍是 0/1/0，而字符串与 CMake 是 0.2.0。
+- [x] **ENG-02** 修正版本单一事实源：`version.h` 的 `MAJOR/MINOR/PATCH` 当前仍是 0/1/0，而字符串与 CMake 是 0.2.0。
 - [ ] **ENG-03** 每个 release 必须在 clean worktree、固定 compiler/dependency、真实 TLS 构建上完成全量测试并保存机器可读报告。
 - [ ] **ENG-04** 单元测试之外增加 SQLLogicTest、PostgreSQL regression/isolation test 移植、ORM suites 和随机 differential SQL。
 - [ ] **ENG-05** parser/expression/protocol/WAL/page/catalog/backup 输入 fuzzing，以及 corpus/minimization。

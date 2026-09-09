@@ -267,6 +267,8 @@
 
 | 361 | PROTO-01 | 服务端只接受版本号精确等于 3.0，PostgreSQL 18 客户端显式请求 3.2 时直接断开；未知 `_pq_.` protocol option 也被当作普通参数静默忽略。现接受 major=3 的较新 minor，以标准 `NegotiateProtocolVersion` (`v`) 返回本实现最高 3.0 及全部未知协议 option 后继续认证；major 不匹配仍拒绝。startup 参数区必须以唯一末尾零字节结束，不能缺终止符或在终止符后藏数据 | 按 PostgreSQL 18 protocol-flow/message-formats 和后端 `SendNegotiateProtocolVersion` 源码核对格式；完整 wire 回归用 3.2 + `_pq_.unsupported_test` 验证 `v` 的版本、计数、名称和后续正常连接，并验证缺末尾 terminator 返回 `08P01` 后断开。O0/O2、完整协议及 DIV-14 通过 | `334052f` |
 
+| 362 | ENG-02 | `DBMS_VERSION_MINOR` 仍为 1，而 `DBMS_VERSION_STRING`、CMake project 和 CHANGELOG 已是 0.2.0，依赖数字宏的条件编译/包元数据会识别成另一版本。修正为 0/2/0；打包门新增 component macros 与字符串的强制一致性检查，完整测试入口新增独立版本一致性回归，同时核对 CMake、header、CHANGELOG 和打包门 | `version_consistency_test.py` 返回 0.2.0；package/build shell 语法检查、包含三个 `static_assert` 的 O0 编译与执行、diff check 通过。该项描述的版本漂移已完全消除，状态改为 complete；其余历史发布文档漂移仍单独计入 ENG-01 | `1a600aa` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
