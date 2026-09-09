@@ -58,6 +58,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/documentation_status_test.py)
     DBMS_E2E_TESTS+=(tests/compatibility_contract_test.py)
     DBMS_E2E_TESTS+=(tests/no_fake_compat_objects_test.py)
+    DBMS_E2E_TESTS+=(tests/compat_fallback_registry_test.py)
     DBMS_CXXFLAGS=(-std=c++17 -O2 -pthread -Wall -Wextra)
     DBMS_LDFLAGS=(-pthread)
 
