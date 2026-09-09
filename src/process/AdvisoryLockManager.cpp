@@ -1,7 +1,9 @@
 #include "AdvisoryLockManager.h"
 
 #include <algorithm>
+#include <chrono>
 #include <iterator>
+#include <set>
 #include <tuple>
 
 namespace dbms {
@@ -32,8 +34,19 @@ bool AdvisoryLockManager::acquire(
     if (owner == 0 || scope == AdvisoryLockScope::Prepared) return false;
     std::unique_lock<std::mutex> lock(mutex_);
     if (!wait && !compatibleLocked(key, owner, mode)) return false;
-    if (wait) {
+    if (wait && !compatibleLocked(key, owner, mode)) {
+        const uint64_t waiterId = nextWaiterId_++;
+        const auto now = std::chrono::system_clock::now();
+        const uint64_t waitStartMillis = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                now.time_since_epoch()).count());
+        waiters_.push_back(
+            Waiter{waiterId, key, owner, scope, mode, waitStartMillis});
         changed_.wait(lock, [&] { return compatibleLocked(key, owner, mode); });
+        waiters_.erase(std::remove_if(
+            waiters_.begin(), waiters_.end(), [&](const Waiter& waiter) {
+                return waiter.id == waiterId;
+            }), waiters_.end());
     }
     uint64_t sequence = 0;
     if (scope == AdvisoryLockScope::Transaction) {
@@ -211,6 +224,29 @@ void AdvisoryLockManager::finishPrepared(const std::string& gid) {
     preparedOwners_.erase(owner);
     pruneEmptyLocked();
     if (removed != 0) changed_.notify_all();
+}
+
+std::vector<AdvisoryLockSnapshot> AdvisoryLockManager::snapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<AdvisoryLockSnapshot> result;
+    std::set<std::tuple<std::string, AdvisoryKeySpace, int64_t, int64_t,
+                        uint64_t, AdvisoryLockScope, AdvisoryLockMode>> seen;
+    for (const auto& [key, holders] : holders_) {
+        for (const auto& holder : holders) {
+            const auto identity = std::make_tuple(
+                key.database, key.keySpace, key.first, key.second,
+                holder.owner, holder.scope, holder.mode);
+            if (!seen.insert(identity).second) continue;
+            result.push_back(AdvisoryLockSnapshot{
+                key, holder.owner, holder.scope, holder.mode, true, 0});
+        }
+    }
+    for (const auto& waiter : waiters_) {
+        result.push_back(AdvisoryLockSnapshot{
+            waiter.key, waiter.owner, waiter.scope, waiter.mode, false,
+            waiter.waitStartMillis});
+    }
+    return result;
 }
 
 AdvisoryLockManager& advisoryLockManager() {

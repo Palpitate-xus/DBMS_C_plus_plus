@@ -89,6 +89,18 @@ def main():
             waiter = pool.submit(query, third, "SELECT pg_advisory_lock(60);")
             time.sleep(0.1)
             assert not waiter.done(), "blocking advisory lock returned early"
+            lock_rows, state, message, headers, _, _ = query(
+                second, "SELECT * FROM pg_locks;")
+            assert state is None, (state, message)
+            assert headers == [
+                "locktype", "database", "relation", "mode", "granted",
+            ], headers
+            advisory_rows = [
+                row for row in lock_rows
+                if row[0] == "advisory" and row[2] == "bigint:60"
+            ]
+            assert sorted(row[4] for row in advisory_rows) == ["f", "t"], (
+                advisory_rows, lock_rows)
             expect(first, "SELECT pg_advisory_unlock(60);", [["t"]], [16])
             rows, state, message, _, _, types = waiter.result(timeout=5)
             assert state is None and rows == [[""]] and types == [2278], (

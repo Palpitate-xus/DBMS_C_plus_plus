@@ -71,6 +71,22 @@ int main() {
     while (!entered.load(std::memory_order_acquire)) std::this_thread::yield();
     assert(waiter.wait_for(std::chrono::milliseconds(30)) ==
            std::future_status::timeout);
+    {
+        const auto locks = manager.snapshot();
+        size_t grantedShared = 0;
+        size_t waitingExclusive = 0;
+        for (const auto& lock : locks) {
+            if (lock.key.first != 50) continue;
+            if (lock.granted && lock.mode == AdvisoryLockMode::Shared)
+                ++grantedShared;
+            if (!lock.granted && lock.mode == AdvisoryLockMode::Exclusive &&
+                lock.waitStartMillis != 0) {
+                ++waitingExclusive;
+            }
+        }
+        assert(grantedShared == 2);
+        assert(waitingExclusive == 1);
+    }
     assert(manager.unlockSession(shared, first, AdvisoryLockMode::Shared));
     assert(waiter.wait_for(std::chrono::milliseconds(30)) ==
            std::future_status::timeout);

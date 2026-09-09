@@ -22,6 +22,15 @@ struct AdvisoryLockKey {
     bool operator<(const AdvisoryLockKey& other) const;
 };
 
+struct AdvisoryLockSnapshot {
+    AdvisoryLockKey key;
+    uint64_t owner = 0;
+    AdvisoryLockScope scope = AdvisoryLockScope::Session;
+    AdvisoryLockMode mode = AdvisoryLockMode::Exclusive;
+    bool granted = true;
+    uint64_t waitStartMillis = 0;
+};
+
 class AdvisoryLockManager {
 public:
     bool acquire(const AdvisoryLockKey& key, uint64_t owner,
@@ -40,6 +49,7 @@ public:
 
     bool prepareTransaction(uint64_t owner, const std::string& gid);
     void finishPrepared(const std::string& gid);
+    std::vector<AdvisoryLockSnapshot> snapshot() const;
 
 private:
     struct Holder {
@@ -57,17 +67,27 @@ private:
         uint64_t nextSequence = 1;
         std::vector<Savepoint> savepoints;
     };
+    struct Waiter {
+        uint64_t id = 0;
+        AdvisoryLockKey key;
+        uint64_t owner = 0;
+        AdvisoryLockScope scope = AdvisoryLockScope::Session;
+        AdvisoryLockMode mode = AdvisoryLockMode::Exclusive;
+        uint64_t waitStartMillis = 0;
+    };
 
     bool compatibleLocked(const AdvisoryLockKey& key, uint64_t owner,
                           AdvisoryLockMode mode) const;
     size_t removeLocked(uint64_t owner, bool session, bool transaction);
     void pruneEmptyLocked();
 
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     std::condition_variable changed_;
     std::map<AdvisoryLockKey, std::vector<Holder>> holders_;
     std::map<uint64_t, TransactionState> transactions_;
     std::map<std::string, uint64_t> preparedOwners_;
+    std::vector<Waiter> waiters_;
+    uint64_t nextWaiterId_ = 1;
     uint64_t nextPreparedOwner_ = UINT64_MAX;
 };
 

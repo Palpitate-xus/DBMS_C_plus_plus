@@ -19930,6 +19930,20 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 for (const auto& w : waits) {
                     cout << "relation " << s.currentDB << " " << w.resource << " " << "wait" << " f" << endl;
                 }
+                for (const auto& lock :
+                     dbms::advisoryLockManager().snapshot()) {
+                    cout << "advisory " << lock.key.database << " ";
+                    if (lock.key.keySpace == dbms::AdvisoryKeySpace::BigInt) {
+                        cout << "bigint:" << lock.key.first;
+                    } else {
+                        cout << "int4:" << lock.key.first << ','
+                             << lock.key.second;
+                    }
+                    cout << " "
+                         << (lock.mode == dbms::AdvisoryLockMode::Shared
+                                 ? "ShareLock" : "ExclusiveLock")
+                         << " " << (lock.granted ? "t" : "f") << endl;
+                }
             } else if (tname == "pg_stat_wait_events") {
                 cout << "event_type event count " << endl;
                 // Static snapshot of common PostgreSQL wait event categories
