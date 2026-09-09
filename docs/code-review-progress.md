@@ -227,6 +227,8 @@
 
 | 341 | P0-01 / P0-12 / TXN-06 / PROTO-02 / PROTO-08 | parser 已把 `PREPARE TRANSACTION` 分类为独立枚举，但主执行 switch 只路由 SQL 计划的普通 `PREPARE`，真实 CLI/wire 入口因此始终落到语法错误，存储层 2PC 从协议不可达；同时安全拒绝谎称没有活动事务并降级为 `XX000`，三种二阶段命令 tag 也只剩首词。主入口现路由两种 PREPARE，分别报告 idle `25P01` 与不支持的 backend-local state `0A000`，wire tag 精确为 `PREPARE TRANSACTION`/`COMMIT PREPARED`/`ROLLBACK PREPARED` | 完整 `postgres_protocol_test.py` 覆盖 idle 拒绝、DML PREPARE 成功后跨命令 ROLLBACK PREPARED、行撤销、DDL PREPARE 的 `0A000`/failed 状态/ROLLBACK/schema 恢复以及精确 command tag；O0、O2 当前生产二进制均通过完整协议套件 | `fc3b9a7` |
 
+| 342 | P0-02 / CONS-01,02,03,04 / TXN-06 / PROTO-08 | 延迟 UNIQUE、FOREIGN KEY、CHECK、EXCLUDE 在 COMMIT 失败时全部折叠为 `INVALID_VALUE`；PREPARE 失败还会先回滚本地事务，再被入口误报成无活动事务/`25P01`，wire 无法得到真实完整性错误。新增四类约束状态并映射为 `23505`、`23503`、`23514`、`23P01`，COMMIT/PREPARE 在回滚后保留原始失败类别；自动提交 INSERT 也不再强制改成立即约束，和 UPDATE/DELETE 一样在语句提交点检查并返回准确类别 | 八组约束/2PC C++ 回归覆盖四类约束、自动提交、显式 COMMIT 和 PREPARE，均验证原子回滚与精确状态；完整协议测试验证 PREPARE FK 返回 `23503`、COMMIT CHECK 返回 `23514`、failed ReadyForQuery 与显式 ROLLBACK 恢复；核心对象及三组重点测试在 O0/O2 均通过 | `35a4ed6` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
