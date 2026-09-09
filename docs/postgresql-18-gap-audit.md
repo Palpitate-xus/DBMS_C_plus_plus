@@ -433,7 +433,7 @@
 - [ ] **DIV-05** `DESC`/`DESCRIBE`、`VIEW TABLE`、`VIEW DATABASE`、`SHOW USERS/ROLES/POOLS` 等是项目命令或客户端元命令风格。
 - [ ] **DIV-06** `AUTO_INCREMENT`、unsigned integers、`TINYINT`、`DATETIME`、`BLOB`、`NCHAR/NVARCHAR`、`BINARY/VARBINARY` 是兼容别名或非 PG 类型。
 - [ ] **DIV-07** `CREATE FULLTEXT INDEX`、`CREATE HASH INDEX` 等快捷语法不是 PostgreSQL 的标准写法；PG 使用 `CREATE INDEX ... USING ...` 和 operator class。
-- [ ] **DIV-08** `CREATE ASSERTION` 被当作 compatibility object 接受，但 PostgreSQL 18 自身也没有实现 SQL assertion；项目当前更没有约束运行时。
+- [x] **DIV-08** `CREATE ASSERTION` 被当作 compatibility object 接受，但 PostgreSQL 18 自身也没有实现 SQL assertion；项目当前更没有约束运行时。
 - [ ] **DIV-09** 普通 SQL 形式的 `CREATE/DROP REPLICATION SLOT` 和 `SHOW LOGICAL ...` 是项目接口；PostgreSQL 通过 replication protocol 或系统函数管理/消费槽。
 - [ ] **DIV-10** `DUMP`、`BACKUP DATABASE`、`RESTORE DATABASE`、`RESTORE ... PITR`、`CLEAR PLAN CACHE` 是项目命令，不是 PostgreSQL SQL reference 命令。
 - [ ] **DIV-11** `SET GLOBAL` 和部分 `SHOW` 命令是 MySQL 风格，不是 PostgreSQL GUC 语法。

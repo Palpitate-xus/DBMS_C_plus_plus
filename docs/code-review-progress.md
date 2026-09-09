@@ -273,6 +273,8 @@
 
 | 364 | ENG-15 | 过去没有区分产品 SemVer、PostgreSQL 行为目标、wire protocol 上限和项目扩展模式，`server_version` 或一次 psql 连接可能被误当成 PG18 兼容声明。新增兼容版本契约：产品为 0.2.0、自有 DBMS 定位、PG18/18.6 差分目标、wire 3.0 上限和显式 extended 契约各自独立；定义“客户端可连接”A 门与“PG18 行为兼容”B 门，以及允许/禁止的发布措辞。B 门明确要求 273 项（包括当前用户延期项）全部 complete | `compatibility_contract_test.py` 绑定代码中的两个模式、wire 常量、产品版本、契约状态及 README/production-status 链接，并加入完整测试清单；文档状态、版本、总账回归、shell 语法和 diff 检查通过。该项要求的策略和两套验收标准已完整建立，不声称 A/B 门当前已经通过 | `60d8f2f` |
 
+| 365 | DIV-08 | SQL ASSERTION 没有 PostgreSQL 18 或本项目的全局约束运行时，却曾落入通用 compatibility-object 假成功路径。将 `assertion` 提升为命名的永久禁用 kind；即使未来其他 compatibility kind 获得运行时，也不能顺带启用 ASSERTION。postgresql18 与 extended 两种模式都对 CREATE/ALTER/DROP 返回 `0A000`，不写 sidecar | 新增 FeatureGate 单元回归，验证永久禁用标识和稳定错误；DIV-14 E2E 新增 extended 模式三种 verb，并连同默认模式断言及全目录 `.pg_compat_objects` 不存在检查通过。FeatureGate O0/O2 编译、生产主程序重链及完整 DIV capability E2E 通过 | `567ba0c` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
