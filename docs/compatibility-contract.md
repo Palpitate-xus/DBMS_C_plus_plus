@@ -38,6 +38,11 @@ wire protocol 不能自动提升行为兼容声明；增加 extended 命令也�
 运行时的 PostgreSQL 对象变成成功操作。切换模式不改变产品版本、wire protocol
 版本、数据格式或当前 database。
 
+进程启动必须通过 `-D/--data-dir` 或 `DBMS_DATA_DIR` 显式选择本项目数据根。
+`DBMS_CONTROL` 的项目 magic 和 system identifier 只声明 DBMS-C++ 自有 cluster
+身份，不代表磁盘格式与 PostgreSQL 兼容；含 `PG_VERSION` 的 PostgreSQL cluster
+会被拒绝，运行状态不会写入调用者的启动 CWD。
+
 ## 两级验收标准
 
 ### A. “PostgreSQL 客户端可连接”

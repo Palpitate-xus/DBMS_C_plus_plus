@@ -126,10 +126,10 @@
 - 支持 `ON COMMIT PRESERVE ROWS`、`DELETE ROWS`、`DROP`；真正的 `pg_temp` catalog/search_path 语义尚未实现
 
 ### 网络服务
-- **PostgreSQL TCP 服务器**：`./dbms_main --server PORT` 启动 PostgreSQL protocol 3.0 服务端
+- **PostgreSQL TCP 服务器**：`./dbms_main -D DATA_DIR --server PORT` 启动 PostgreSQL protocol 3.0 服务端
 - **扩展查询协议**：支持 Parse/Bind/Execute/Describe/Close/Sync、SCRAM、常用标量及 date/time/timestamp/timestamptz/uuid binary 参数与结果，以及基础 portal `maxRows` 分页；完整 libpq/cursor 语义仍在建设中
 - **TLS 加密**：默认必须提供证书和私钥；证书缺失或 TLS 初始化失败时拒绝启动
-- **开发明文模式**：仅可通过显式 `./dbms_main --server PORT --insecure` 开启，不得用于生产环境
+- **开发明文模式**：仅可通过显式 `./dbms_main -D DATA_DIR --server PORT --insecure` 开启，不得用于生产环境
 - **多客户端**：每个连接独立线程，支持并发访问；legacy 文本执行器的结果捕获采用线程局部输出路由，不再用全局锁串行化协议会话
 - **会话隔离**：每个客户端连接拥有独立的 Session（用户名、权限、当前数据库、预编译语句、临时表），多客户端互不干扰
 - **连接管理**：最大连接数限制（默认 64）
@@ -233,7 +233,7 @@ cmake --build build --target check
 
 ### 交互式运行
 ```bash
-./dbms_main
+./dbms_main -D /srv/dbms/main
 ```
 启动后输入用户名和密码登录（角色必须先存在于 `pg_authid`，密码使用 SCRAM-SHA-256）。
 
@@ -242,10 +242,10 @@ cmake --build build --target check
 # 服务端
 export DBMS_TLS_CERT=/etc/dbms/tls/server.crt
 export DBMS_TLS_KEY=/etc/dbms/tls/server.key
-./dbms_main --server 9999
+./dbms_main -D /srv/dbms/main --server 9999
 
 # 仅限本地开发：显式允许明文
-./dbms_main --server 9999 --insecure
+./dbms_main -D /srv/dbms/main --server 9999 --insecure
 
 # 客户端（libpq/psql；当前支持 SCRAM-SHA-256 与基础协议流程）
 psql "host=localhost port=9999 dbname=info user=admin sslmode=require"
@@ -266,7 +266,7 @@ docker run -it --rm -v dbms_data:/data dbms-c-plus-plus:latest
 
 # 服务器模式
 docker run -d --name dbms_server -p 9999:9999 -v dbms_data:/data \
-    dbms-c-plus-plus:latest ./dbms_main --server 9999
+    dbms-c-plus-plus:latest ./dbms_main -D /data --server 9999
 
 # Docker Compose 一键启动
 docker compose up -d
@@ -552,9 +552,11 @@ show deadlocks;
 ├── logs.h                   # 操作日志记录
 ├── permissions.h            # 用户认证与权限查询
 ├── sha256.h                 # SHA-256 哈希实现
-├── info/pg_catalog/pg_authid.cat # 角色与 SCRAM 凭据 catalog
-├── dbms.log                 # 运行日志
-├── slow_query.log           # 慢查询日志
+├── data/                    # 由 -D/--data-dir 显式选择的数据根
+│   ├── DBMS_CONTROL         # DBMS magic、format version、system identifier
+│   ├── info/pg_catalog/pg_authid.cat # 角色与 SCRAM 凭据 catalog
+│   ├── dbms.log             # 运行日志
+│   └── slow_query.log       # 慢查询日志
 ├── Dockerfile               # Docker 多阶段构建定义
 ├── docker-compose.yml       # Docker Compose 一键部署配置
 ├── .dockerignore            # Docker 构建排除规则

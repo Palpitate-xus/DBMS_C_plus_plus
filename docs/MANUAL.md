@@ -62,10 +62,10 @@ ctest --test-dir build --output-on-failure
 
 ```bash
 # 交互模式
-./dbms_main
+./dbms_main -D /srv/dbms/main
 
 # 网络服务模式
-./dbms_main --server 9999
+./dbms_main -D /srv/dbms/main --server 9999
 ```
 
 ### 首次登录
@@ -916,10 +916,10 @@ export DBMS_INDEX_BUFFER_FRAMES=256
 # 生产服务端：证书和私钥必须预先准备好
 export DBMS_TLS_CERT=/etc/dbms/tls/server.crt
 export DBMS_TLS_KEY=/etc/dbms/tls/server.key
-./dbms_main --server 9999
+./dbms_main -D /srv/dbms/main --server 9999
 
 # 仅限本地开发的明文模式（生产环境禁止）
-./dbms_main --server 9999 --insecure
+./dbms_main -D /srv/dbms/main --server 9999 --insecure
 
 # 客户端连接（libpq/psql；当前支持 SCRAM-SHA-256 与基础协议流程）
 psql "host=localhost port=9999 dbname=info user=admin sslmode=require"
@@ -1115,7 +1115,7 @@ RESET ALL;
 -- PostgreSQL 模式查看当前值
 SELECT * FROM pg_settings;
 
--- 配置文件位于工作目录 dbms.conf；修改后由管理员请求重新加载
+-- 配置文件位于显式 data directory 的 dbms.conf；修改后由管理员请求重新加载
 SELECT pg_reload_conf();
 
 -- 事务隔离级别
@@ -1206,8 +1206,11 @@ SHOW 入口已经删除。该模式是会话级设置，进入事务后不可切
 - 启动标识（DIV-13）：服务端 banner 标明自身版本与兼容模式，并明确
   提示“这不是 PostgreSQL server cluster”；`server_version` 参数上报
   `18.0 DBMS-C++ 0.2.0`：前导主版本供 PostgreSQL 客户端解析，后缀标识
-  实际产品版本；该字段不是 PostgreSQL 18 兼容认证。服务端无默认端口，必须
-  显式 `--server PORT`
+  实际产品版本；该字段不是 PostgreSQL 18 兼容认证。所有正常启动必须用
+  `-D/--data-dir` 或 `DBMS_DATA_DIR` 显式选取数据根；首次启动写入带 DBMS magic、
+  format version 和随机 system identifier 的 `DBMS_CONTROL`，损坏 control 或
+  含 `PG_VERSION` 的 PostgreSQL cluster 会在全局存储对象构造前被拒绝。服务端
+  无默认端口，必须显式 `--server PORT`
 
 会话默认模式可由环境变量 `DBMS_COMPATIBILITY_MODE=extended|postgresql18`
 设定（默认 `postgresql18`），CLI 与网络会话一致生效。
@@ -1296,4 +1299,6 @@ date 输出 ISO 零填充格式（`2020-01-02`）；聚合/函数投影列头按
 
 `build_tests.sh` 是唯一负责生产二进制、生产对象编译、测试链接、桩对象选择和 E2E 调度的测试实现；即使项目根目录没有 `dbms_main`，它也会先通过共享构建逻辑生成当前二进制。`run_all_tests_fast.sh` 只是它的安静输出外壳，成功时输出计数，失败时保留完整诊断。上述 shell 入口共享 `scripts/build_common.sh` 的编译配置；`scripts/build_one_test.sh <test_name>` 可用于单测试增量编译，编译配置变化会自动使对象缓存失效。
 
-每个 C++ 测试都在独立的临时工作目录中执行，测试结束后自动删除；因此 `.txnid`、WAL、catalog、日志和 `__t_*` 数据库不会跨测试共享。窗口函数 E2E 测试使用临时工作目录和临时管理员账号，结束后自动删除，不依赖或污染项目根目录。
+每个 C++ 测试都在独立的临时目录中执行，E2E 服务端还显式传入独立
+`--data-dir`；测试结束后自动删除，因此 `.txnid`、WAL、catalog、日志和
+`__t_*` 数据库不会跨测试共享或落入启动 CWD。

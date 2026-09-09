@@ -438,7 +438,7 @@
 - [x] **DIV-10** `DUMP`、`BACKUP DATABASE`、`RESTORE DATABASE`、`RESTORE ... PITR`、`CLEAR PLAN CACHE` 是项目命令，不是 PostgreSQL SQL reference 命令。
 - [x] **DIV-11** `SET GLOBAL` 和部分 `SHOW` 命令是 MySQL 风格，不是 PostgreSQL GUC 语法。
 - [ ] **DIV-12** 内置 PgBouncer 风格连接池、TDE、`BACKUP/RESTORE DATABASE` 是项目扩展，不等于 PostgreSQL 核心同名能力。
-- [ ] **DIV-13** 默认端口、数据目录和启动 CWD 状态布局与 PostgreSQL 不同，应避免给工具造成“这是 PostgreSQL cluster”的假象。
+- [x] **DIV-13** 默认端口、数据目录和启动 CWD 状态布局与 PostgreSQL 不同，应避免给工具造成“这是 PostgreSQL cluster”的假象。
 - [x] **DIV-14** 对仅保存兼容记录的命令返回“created/loaded/altered”会误导用户；应改为 feature-not-supported，直到运行时真正存在。
 
 ## 22. 建议实施顺序和验收门
