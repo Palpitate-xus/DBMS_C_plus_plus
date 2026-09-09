@@ -35,7 +35,13 @@ class GapProgressTest(unittest.TestCase):
         self.check_errors("duplicate progress")
 
     def test_false_completion(self):
-        self.ledger["items"][0]["status"] = "complete"
+        # Use an entry that intentionally has no evidence yet.  The first
+        # ledger item is no longer such an entry now that review findings
+        # have accumulated, so indexing item zero stopped exercising the
+        # completion-evidence guard.
+        item = next(row for row in self.ledger["items"]
+                    if row["status"] == "unverified")
+        item["status"] = "complete"
         self.check_errors("checkbox")
         self.check_errors("requires evidence")
 
