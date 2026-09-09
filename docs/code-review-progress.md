@@ -157,6 +157,8 @@
 
 | 306 | P0-02 / SQL-12 / TYPE-02 / QRY-05 / PROTO-04 | 递归 CTE 把 `name(columns)` 整体当关系名，锚点和递归项只走单表文本查询，再把空格行拆回临时表；标准无 FROM 锚点直接报缺表，文本/NULL/类型失真，`UNION ALL` 又错误全局去重并让递归项读取累计结果而非当前工作集。CTE 绑定现分离名称与列别名；锚点/递归项走结构化完整分派器，结果表与逐轮工作表分离，`UNION ALL` 保留多重集、`UNION` 用含 NULL/长度边界的键去重，非自引用 `WITH RECURSIVE` 仍按普通 CTE 执行 | `derived_type_protocol_e2e_test` 覆盖普通/递归列别名、整数数列、空格、空串、字面量 `NULL`、SQL NULL、图分支重复路径、`UNION ALL`/`UNION` 和非自引用集合；新增结果逐条与真实 PostgreSQL 行、header、OID/tag 核对一致，CTE/字面量/无 FROM/JOIN/结构化/review、DIV-14、O0/O2 及完整差分 `cases=122 failed=0` 通过 | `a689c12` |
 
+| 307 | P0-01 / SQL-04 / QRY-03 | 两表 JOIN 解析 `ON` 等式后立即丢弃限定符，并固定把等号左操作数传作左表键；`ON right.key = left.key` 及两表列名可唯一解析的反向裸列条件都静默返回空集。解析器现在保留两侧限定符，以表名/别名或唯一 schema 归属识别操作数来源，必要时交换引擎键而不改变 SQL 语义 | `join_type_protocol_e2e_test` 覆盖反向别名限定键、反向裸键和反向 `LEFT JOIN` 的 NULL 扩展行，并核对 rows/header/OID/tag；三条结果与真实 PostgreSQL 一致，递归 CTE、null-key、多表 JOIN、结构化、字面量、DIV-14、O0/O2 及完整差分 `cases=122 failed=0` 通过 | `b16ab01` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
