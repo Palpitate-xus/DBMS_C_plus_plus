@@ -241,6 +241,8 @@
 
 | 348 | P0-01 / SQL-01 / TXN-12 / PROTO-08 | LISTEN/NOTIFY/UNLISTEN 曾绕过 parser，直接按空格和首个逗号切原 SQL：quoted channel 连同引号注册，payload 中 doubled quote 不解码，尾随垃圾被静默接受且没有 8000-byte 上限；事务内还提前污染 Session 的监听镜像。三种命令现使用类型化 AST，按 PostgreSQL 规则折叠 unquoted identifier、保留并解码 quoted identifier、要求 payload 为单个字符串字面量，并在任何排队前拒绝 NUL 或长度不小于 8000 bytes；语法与边界错误在线协议分别返回 `42601`/`22023` | `parser_phase1_test` 覆盖 quoted/doubled identifier、payload 转义、大小写折叠和尾随垃圾拒绝；`notification_manager_test` 覆盖 7999/8000 bytes 与 NUL；完整 `postgres_protocol_test.py` 验证 quoted channel/payload 的 `A` 帧、三类非法输入 SQLSTATE、超长 payload 不投递。主入口/网络入口 O0、O2 编译以及完整协议套件通过 | `cc17e0e` |
 
+| 349 | P0-16 | `build_one_test.sh` 用 `build/obj/*.o` 组装链接，构建配置切换后缓存会同时遗留 `TLSWrapper.o` 与 `TLSWrapper_stub.o`，即使当前源码全部成功编译，单测仍因互斥实现的重复定义而链接失败。单测驱动现仅按当前 `DBMS_PROJECT_SOURCES` 构造生产对象列表，再明确加入 test stubs，不再吸收旧配置或无关对象 | 在缓存中故意同时保留真实 TLS 与 stub 对象后运行 `build_one_test.sh notification_manager_test`，链接和隔离执行均通过；`build_cache_routing_test.py` 固化配置源列表和禁止对象目录 glob 的断言，三个 build shell 脚本 `bash -n` 通过 | `56904da` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
