@@ -215,6 +215,8 @@
 
 | 335 | DML-06 | COPY 在 CSV parser 已完成引号与转义处理后又对每个字段调用 `trim()`，会静默删除 TEXT 的首尾空格，包括双引号内明确属于数据的空格。构造 INSERT 输入时现在原样传递 parser 字段，不再在 COPY 层改写值 | 协议回归修复前稳定把 `"  quoted edge  "` 与 `unquoted edge  ` 返回为去空格值；修复后 wire 结果逐字节保留两类边界空格，且前述只读、原子性与 shape-error COPY 场景一并通过；Python 语法和 `main.cpp` O0/O2 编译通过 | `47eb2a9` |
 
+| 336 | CAT-10 | `ALTER TABLE ADD COLUMN` 用无 NULL 表示能力的 `map<string,string>` 暂存旧行；任一已有可空整数列为 SQL NULL 时都会变成空字符串，重写插入报类型错误，且生成列值也被当作普通输入复制。旧行暂存改用 `SqlRow`，按 tuple NULL bitmap 保留 NULL，并让生成列由新模式重新计算 | 新增 `alter_add_column_null_test`：带 NULL 整数列的已有行新增第二列，修复前返回 `INVALID_VALUE`，修复后重写成功且两个新增/原有可空列的 bitmap 均为 NULL；`alter_column_type_test` 及连续 ALTER 事务回归通过 | `ad543b9` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。

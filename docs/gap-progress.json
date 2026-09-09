@@ -40,7 +40,7 @@
     {"id":"CAT-07","status":"partial","evidence":["docs/code-review-progress.md","src/commands/DdlExecutor.cpp","src/commands/DdlTransaction.cpp","src/replication/LogicalDecoder.cpp","src/replication/ReplicationManager.cpp","src/access/IndexFileUtil.h"],"tests":["tests/truncate_test.cpp","tests/logical_decoding_test.cpp","tests/replication_test.cpp","tests/replication_slot_persistence_e2e_test.py","tests/div14_feature_gate_test.py"],"commits":["06fd56c","a2822af","a1fbfae","827d9aa","e826376","f1fbcc5","ef06339","da08f25"]},
     {"id":"CAT-08","status":"unverified","evidence":[]},
     {"id":"CAT-09","status":"unverified","evidence":[]},
-    {"id":"CAT-10","status":"unverified","evidence":[]},
+    {"id":"CAT-10","status":"partial","evidence":["docs/code-review-progress.md","src/commands/TableManage.cpp"],"tests":["tests/alter_add_column_null_test.cpp","tests/alter_column_type_test.cpp"],"commits":["ad543b9"]},
     {"id":"CAT-11","status":"unverified","evidence":[]},
     {"id":"CAT-12","status":"unverified","evidence":[]},
     {"id":"CAT-13","status":"unverified","evidence":[]},
