@@ -37109,8 +37109,32 @@ static bool validPhysicalBackupSource(const std::filesystem::path& source,
            expectedFiles == actualFiles;
 }
 
+static uint64_t maintenancePathBytes(const std::filesystem::path& path) {
+    std::error_code error;
+    if (std::filesystem::is_regular_file(path, error)) {
+        const auto bytes = std::filesystem::file_size(path, error);
+        return error ? 0 : bytes;
+    }
+    if (error || !std::filesystem::is_directory(path, error) || error)
+        return 0;
+    uint64_t total = 0;
+    std::filesystem::recursive_directory_iterator iterator(
+        path, std::filesystem::directory_options::skip_permission_denied,
+        error);
+    const std::filesystem::recursive_directory_iterator end;
+    while (!error && iterator != end) {
+        if (iterator->is_regular_file(error) && !error) {
+            const auto bytes = iterator->file_size(error);
+            if (!error && UINT64_MAX - total >= bytes) total += bytes;
+        }
+        iterator.increment(error);
+    }
+    return total;
+}
+
 bool StorageEngine::physicalBackup(const std::string& dbname,
-                                   const std::string& backupPath) {
+                                   const std::string& backupPath,
+                                   const MaintenanceProgress& progress) {
     // A public backup is a database-wide snapshot operation.  Refuse to run
     // from inside the caller's transaction (which already owns a shared lock
     // and may contain uncommitted state), then exclude new transactions for
@@ -37123,11 +37147,12 @@ bool StorageEngine::physicalBackup(const std::string& dbname,
     if (!flushDatabaseCaches(dbname)) return false;
     WALManager* wal = getWAL(dbname);
     if (!wal || !wal->XLogFlush(wal->currentWriteLsn())) return false;
-    return physicalBackupLocked(dbname, backupPath);
+    return physicalBackupLocked(dbname, backupPath, progress);
 }
 
 bool StorageEngine::physicalBackupLocked(
-    const std::string& dbname, const std::string& backupPath) {
+    const std::string& dbname, const std::string& backupPath,
+    const MaintenanceProgress& progress) {
     if (!databaseExists(dbname)) return false;
     auto src = dbPath(dbname);
     auto dst = std::filesystem::path(backupPath);
@@ -37174,6 +37199,10 @@ bool StorageEngine::physicalBackupLocked(
             }
         }
         if (stagedBackup.empty()) return false;
+        if (progress && !progress(0)) {
+            discardStagedBackup();
+            return false;
+        }
 
         for (const auto& entry : std::filesystem::directory_iterator(src)) {
             // Advisory lock and interrupted temporary files are runtime
@@ -37197,6 +37226,10 @@ bool StorageEngine::physicalBackupLocked(
                 std::filesystem::copy_file(entry.path(), destPath,
                     std::filesystem::copy_options::overwrite_existing);
             }
+            if (progress && !progress(maintenancePathBytes(entry.path()))) {
+                discardStagedBackup();
+                return false;
+            }
         }
         // Also backup WAL archive if exists
         if (std::filesystem::exists(archiveDir)) {
@@ -37204,6 +37237,10 @@ bool StorageEngine::physicalBackupLocked(
             std::filesystem::copy(archiveDir, destArchive,
                 std::filesystem::copy_options::overwrite_existing |
                 std::filesystem::copy_options::recursive);
+            if (progress && !progress(maintenancePathBytes(archiveDir))) {
+                discardStagedBackup();
+                return false;
+            }
         }
 
         // A database directory only contains tablespace markers for external
@@ -37241,6 +37278,12 @@ bool StorageEngine::physicalBackupLocked(
                             std::filesystem::copy_file(relationEntry.path(), relationDestination,
                                 std::filesystem::copy_options::overwrite_existing);
                         }
+                        if (progress &&
+                            !progress(maintenancePathBytes(
+                                relationEntry.path()))) {
+                            discardStagedBackup();
+                            return false;
+                        }
                     }
                 } else {
                     // A newly-created tablespace may not have a database
@@ -37259,6 +37302,10 @@ bool StorageEngine::physicalBackupLocked(
             return false;
         }
         if (!syncPhysicalBackupTree(stagedBackup)) {
+            discardStagedBackup();
+            return false;
+        }
+        if (progress && !progress(0)) {
             discardStagedBackup();
             return false;
         }
@@ -37334,7 +37381,8 @@ bool StorageEngine::physicalBackupLocked(
 }
 
 bool StorageEngine::physicalRestore(const std::string& dbname,
-                                    const std::string& backupPath) {
+                                    const std::string& backupPath,
+                                    const MaintenanceProgress& progress) {
     // Replacing a live database directory must not race a transaction or
     // leave open allocators/indexes/WAL managers attached to the displaced
     // files. A caller already inside any transaction cannot safely acquire
@@ -37345,11 +37393,12 @@ bool StorageEngine::physicalRestore(const std::string& dbname,
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (catalogService_) catalogService_->evict(dbname);
     closeDatabaseCaches(dbname);
-    return physicalRestoreLocked(dbname, backupPath);
+    return physicalRestoreLocked(dbname, backupPath, progress);
 }
 
 bool StorageEngine::physicalRestoreLocked(
-    const std::string& dbname, const std::string& backupPath) {
+    const std::string& dbname, const std::string& backupPath,
+    const MaintenanceProgress& progress) {
     auto src = std::filesystem::path(backupPath);
     auto dst = dbPath(dbname);
     std::filesystem::path stagedDatabase;
@@ -37452,6 +37501,10 @@ bool StorageEngine::physicalRestoreLocked(
             std::filesystem::remove_all(stagedDatabase, cleanupError);
             stagedDatabase.clear();
         };
+        if (progress && !progress(0)) {
+            discardStagedDatabase();
+            return false;
+        }
 
         for (const auto& entry : std::filesystem::directory_iterator(src)) {
             const auto filename = entry.path().filename().string();
@@ -37476,6 +37529,10 @@ bool StorageEngine::physicalRestoreLocked(
             } else {
                 std::filesystem::copy_file(entry.path(), destPath,
                     std::filesystem::copy_options::overwrite_existing);
+            }
+            if (progress && !progress(maintenancePathBytes(entry.path()))) {
+                discardStagedDatabase();
+                return false;
             }
         }
         if (!syncPhysicalBackupTree(stagedDatabase)) {
@@ -37556,6 +37613,10 @@ bool StorageEngine::physicalRestoreLocked(
             discardUnpublished();
             return false;
         }
+        if (progress && !progress(0)) {
+            discardUnpublished();
+            return false;
+        }
 
         for (auto& replacement : restoreReplacements) {
             if (!publishDirectoryReplacement(replacement)) {
@@ -37614,12 +37675,13 @@ Lsn StorageEngine::switchWal(const std::string& dbname) {
 bool StorageEngine::pitrRestore(const std::string& dbname,
                                 const std::string& backupPath,
                                 const std::string& archiveDir,
-                                uint64_t targetEpoch) {
+                                uint64_t targetEpoch,
+                                const MaintenanceProgress& progress) {
     if (targetEpoch == 0) {
         std::cerr << "[pitr] recovery target epoch is required" << std::endl;
         return false;
     }
-    if (!physicalRestore(dbname, backupPath)) return false;
+    if (!physicalRestore(dbname, backupPath, progress)) return false;
 
     // Roll-forward material: archived segments of this database's timeline
     // that are newer than the backup. The backup carries its own pg_wal up
@@ -37681,6 +37743,8 @@ bool StorageEngine::pitrRestore(const std::string& dbname,
                           << ": " << copyEc.message() << std::endl;
                 return false;
             }
+            if (progress && !progress(maintenancePathBytes(entry.path())))
+                return false;
             ++copied;
         }
     }

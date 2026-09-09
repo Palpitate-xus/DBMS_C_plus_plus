@@ -792,8 +792,13 @@ public:
     bool archiveWal(const std::string& dbname);
 
     // Physical backup / restore
-    bool physicalBackup(const std::string& dbname, const std::string& backupPath);
-    bool physicalRestore(const std::string& dbname, const std::string& backupPath);
+    using MaintenanceProgress = std::function<bool(uint64_t)>;
+    bool physicalBackup(const std::string& dbname,
+                        const std::string& backupPath,
+                        const MaintenanceProgress& progress = {});
+    bool physicalRestore(const std::string& dbname,
+                         const std::string& backupPath,
+                         const MaintenanceProgress& progress = {});
     // pg_switch_wal: close the current WAL segment of the database so the
     // archiver can ship it. Returns the next insertion LSN (0 on error).
     Lsn switchWal(const std::string& dbname);
@@ -803,7 +808,8 @@ public:
     // first; recovery then replays with commits after the target treated as
     // uncommitted (their before-images undo them).
     bool pitrRestore(const std::string& dbname, const std::string& backupPath,
-                     const std::string& archiveDir, uint64_t targetEpoch);
+                     const std::string& archiveDir, uint64_t targetEpoch,
+                     const MaintenanceProgress& progress = {});
     // Recovery target used by recoverAllDatabases: commits whose WAL
     // timestamp is newer than this are rolled back (0 = no limit).
     void setRecoveryTargetEpoch(uint64_t epoch) { recoveryTargetEpoch_ = epoch; }
@@ -1729,11 +1735,13 @@ private:
     // Copy a physical generation after the caller has acquired the database
     // transaction lock and flushed all durable state.
     bool physicalBackupLocked(const std::string& dbname,
-                              const std::string& backupPath);
+                              const std::string& backupPath,
+                              const MaintenanceProgress& progress = {});
     // Restore a physical generation after the caller has acquired the
     // database transaction lock and discarded database-owned caches.
     bool physicalRestoreLocked(const std::string& dbname,
-                               const std::string& backupPath);
+                               const std::string& backupPath,
+                               const MaintenanceProgress& progress = {});
 
     // Evaluate a single row against conditions, returning matching row indices
     std::set<int64_t> filterRows(const std::string& dbname, const std::string& tablename,

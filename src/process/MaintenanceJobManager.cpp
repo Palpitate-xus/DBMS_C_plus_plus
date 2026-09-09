@@ -246,7 +246,8 @@ bool MaintenanceJobManager::accountBytes(
     if (rate == 0 || bytes == 0) return true;
 
     const auto minimum = std::chrono::duration<double>(
-        static_cast<double>(bytes) / static_cast<double>(rate * 1024));
+        static_cast<double>(bytes) /
+        (static_cast<double>(rate) * 1024.0));
     while (std::chrono::steady_clock::now() - started < minimum) {
         if (isCancellationRequested(id)) return false;
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -280,12 +281,18 @@ void MaintenanceJobManager::workerLoop() {
         if (id == 0) continue;
 
         const auto started = std::chrono::steady_clock::now();
+        uint64_t accountedBytes = 0;
         MaintenanceJobControl control;
         control.cancelled_ = [this, id] {
             return isCancellationRequested(id);
         };
-        control.accountBytes_ = [this, id, started](uint64_t bytes) {
-            return accountBytes(id, bytes, started);
+        control.accountBytes_ =
+            [this, id, started, &accountedBytes](uint64_t bytes) {
+            if (UINT64_MAX - accountedBytes < bytes)
+                accountedBytes = UINT64_MAX;
+            else
+                accountedBytes += bytes;
+            return accountBytes(id, accountedBytes, started);
         };
         bool succeeded = false;
         std::string error;

@@ -91,6 +91,40 @@ def expect_command_tag(sock, sql, label):
         "%s: expected CommandComplete, got %r" % (label, messages)
 
 
+def submit_maintenance(sock, sql, label):
+    messages = simple_query(sock, sql)
+    assert error_of(messages) is None, \
+        "%s: maintenance submission failed: %r" % (label, messages)
+    fields = row_description_fields(messages)
+    assert [field[0] for field in fields] == [b"job_id", b"status"], fields
+    assert [field[3] for field in fields] == [20, 25], fields
+    rows = data_row_values(messages)
+    assert len(rows) == 1 and rows[0][1] == b"queued", rows
+    return int(rows[0][0])
+
+
+def wait_for_maintenance(sock, job_id, terminal=None, timeout=20):
+    if terminal is None:
+        terminal = {b"succeeded", b"failed", b"cancelled"}
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        messages = simple_query(sock, "SHOW MAINTENANCE JOB %d" % job_id)
+        assert error_of(messages) is None, messages
+        fields = row_description_fields(messages)
+        assert [field[3] for field in fields] == [
+            20, 25, 25, 25, 25, 25, 20, 20, 20, 20, 25, 16], fields
+        rows = data_row_values(messages)
+        assert len(rows) == 1 and rows[0][0] == str(job_id).encode(), rows
+        last = rows[0]
+        if last[4] in terminal:
+            return last
+        time.sleep(0.02)
+    raise AssertionError(
+        "maintenance job %d did not reach %r; last=%r" %
+        (job_id, terminal, last))
+
+
 def main():
     if not os.path.exists(DBMS_MAIN):
         raise SystemExit("run scripts/build.sh first")
@@ -414,6 +448,9 @@ def main():
             ("CLEAR PLAN CACHE", "project extension"),
         ]:
             expect_error(sock, sql, "42601", sql, tool)
+        for sql in ["SHOW MAINTENANCE JOBS", "SHOW MAINTENANCE JOB 1",
+                    "CANCEL MAINTENANCE JOB 1"]:
+            expect_error(sock, sql, "42601", sql)
 
         # DIV-08: CREATE ASSERTION is unsupported in BOTH modes, exactly
         # like PostgreSQL 18 (which never implemented SQL assertions).
@@ -643,8 +680,112 @@ def main():
         # Role metadata is public, like pg_roles, but no secret fields exist.
         assert [b"div5_user", b"0"] in data_row_values(
             simple_query(viewer, "SHOW USERS"))
+        assert error_of(simple_query(
+            viewer, "DUMP DATABASE info TO 'forbidden.sql'")) is not None
+        assert error_of(simple_query(
+            viewer, "SHOW MAINTENANCE JOBS")) is not None
         viewer.sendall(typed(b"X"))
         viewer.close()
+
+        # DIV-10: extended maintenance SQL is a typed, durable job wrapper.
+        # The client is never blocked while backup/dump work runs, and every
+        # state transition is observable through SHOW MAINTENANCE JOB.
+        expect_command_tag(
+            sock,
+            "CREATE TABLE maintenance_dump (id INTEGER PRIMARY KEY, v TEXT)",
+            "maintenance dump table")
+        expect_command_tag(
+            sock,
+            "INSERT INTO maintenance_dump VALUES "
+            "(1, 'space value'), (2, ''), (3, NULL), (4, 'quote''value')",
+            "maintenance dump values")
+        dump_path = Path(work_dir, "maintenance.sql")
+        dump_id = submit_maintenance(
+            sock,
+            "DUMP DATABASE info TO '%s'" % dump_path,
+            "maintenance dump")
+        dump_row = wait_for_maintenance(sock, dump_id)
+        assert dump_row[1] == b"dump" and dump_row[2] == b"info", dump_row
+        assert dump_row[4] == b"succeeded" and dump_row[8] is not None, dump_row
+        assert dump_row[9] is not None and dump_row[10] is None, dump_row
+        dump_text = dump_path.read_text(encoding="utf-8")
+        assert "'space value'" in dump_text, dump_text
+        assert "VALUES ('2', '')" in dump_text, dump_text
+        assert "VALUES ('3', NULL)" in dump_text, dump_text
+        assert "'quote''value'" in dump_text, dump_text
+
+        backup_path = Path(work_dir, "maintenance.backup")
+        backup_id = submit_maintenance(
+            sock,
+            "BACKUP DATABASE info TO '%s'" % backup_path,
+            "maintenance backup")
+        backup_row = wait_for_maintenance(sock, backup_id, timeout=30)
+        assert backup_row[1] == b"backup" and backup_row[4] == b"succeeded", \
+            backup_row
+        assert (backup_path / ".dbms_backup_manifest").is_file()
+        expect_command_tag(
+            sock, "INSERT INTO maintenance_dump VALUES (99, 'after backup')",
+            "post-backup mutation")
+        restore_id = submit_maintenance(
+            sock,
+            "RESTORE DATABASE info FROM '%s'" % backup_path,
+            "maintenance restore")
+        restore_row = wait_for_maintenance(sock, restore_id, timeout=30)
+        assert restore_row[1] == b"restore" and \
+            restore_row[4] == b"succeeded", restore_row
+        assert data_row_values(simple_query(
+            sock, "SELECT id FROM maintenance_dump WHERE id = 99")) == []
+
+        clear_id = submit_maintenance(
+            sock, "CLEAR PLAN CACHE", "maintenance clear plan cache")
+        clear_row = wait_for_maintenance(sock, clear_id)
+        assert clear_row[1] == b"clear_plan_cache" and \
+            clear_row[4] == b"succeeded", clear_row
+        listed = data_row_values(simple_query(sock, "SHOW MAINTENANCE JOBS"))
+        assert {int(row[0]) for row in listed}.issuperset(
+            {dump_id, backup_id, restore_id, clear_id}), listed
+
+        # Rate limiting happens in the worker and cancellation is cooperative.
+        # A cancelled dump never publishes either its final file or staging file.
+        expect_command_tag(
+            sock, "CREATE TABLE maintenance_cancel (payload TEXT)",
+            "maintenance cancellation table")
+        large_value = "x" * 8192
+        expect_command_tag(
+            sock, "INSERT INTO maintenance_cancel VALUES ('%s')" % large_value,
+            "maintenance cancellation payload")
+        cancelled_path = Path(work_dir, "maintenance-cancelled.sql")
+        cancel_id = submit_maintenance(
+            sock,
+            "DUMP DATABASE info TO '%s' RATE 1" % cancelled_path,
+            "rate-limited maintenance dump")
+        running_row = wait_for_maintenance(
+            sock, cancel_id, terminal={b"running"}, timeout=5)
+        assert running_row[4] == b"running", running_row
+        cancel_messages = simple_query(
+            sock, "CANCEL MAINTENANCE JOB %d" % cancel_id)
+        assert [field[3] for field in row_description_fields(cancel_messages)] \
+            == [20, 16]
+        assert data_row_values(cancel_messages) == [
+            [str(cancel_id).encode(), b"t"]]
+        cancelled_row = wait_for_maintenance(sock, cancel_id, timeout=5)
+        assert cancelled_row[4] == b"cancelled" and \
+            cancelled_row[11] == b"t", cancelled_row
+        assert not cancelled_path.exists()
+        assert not list(Path(work_dir).glob(
+            "maintenance-cancelled.sql.job_staging.*"))
+
+        # Mutating maintenance controls are deliberately non-transactional.
+        for sql in [
+                "DUMP DATABASE info TO 'transaction.sql'",
+                "BACKUP DATABASE info TO 'transaction.backup'",
+                "RESTORE DATABASE info FROM '%s'" % backup_path,
+                "CLEAR PLAN CACHE",
+                "CANCEL MAINTENANCE JOB %d" % dump_id,
+        ]:
+            expect_command_tag(sock, "BEGIN", "maintenance transaction")
+            expect_error(sock, sql, "25001", "transactional " + sql)
+            expect_command_tag(sock, "ROLLBACK", "maintenance rollback")
 
         # DIV-09: extended SQL is only a typed wrapper over the logical slot
         # runtime. Physical slots remain gated until physical replication is

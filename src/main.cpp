@@ -32,6 +32,7 @@
 #include "Session.h"
 #include "expression/expr_helper.h"
 #include "common/DateType.h"
+#include <fcntl.h>
 #include <unistd.h>
 #include "Config.h"
 #include "parser/parser.h"
@@ -41,6 +42,11 @@
 #include "process/SqlStats.h"
 #include "process/RuntimeStats.h"
 #include "process/OutputCapture.h"
+#include "process/MaintenanceJobManager.h"
+#include "access/IndexFileUtil.h"
+#include <atomic>
+#include <optional>
+#include <stdexcept>
 
 using namespace std;
 using dbms::Column;
@@ -1311,6 +1317,331 @@ static vector<string> parseCSVLine(const string& line);
 static bool parseSimpleQuantifiedSubquery(
     const std::string& rawClause, Session& s, const std::string& dbname,
     const std::string& outerTable, dbms::QuantifiedSubquerySpec& outSpec);
+
+static std::string quoteDumpIdentifier(const std::string& identifier) {
+    std::string result = "\"";
+    for (char c : identifier) {
+        if (c == '"') result.push_back('"');
+        result.push_back(c);
+    }
+    result.push_back('"');
+    return result;
+}
+
+static std::string quoteDumpLiteral(const std::string& value) {
+    std::string result = "'";
+    for (char c : value) {
+        if (c == '\'') result.push_back('\'');
+        result.push_back(c);
+    }
+    result.push_back('\'');
+    return result;
+}
+
+static bool publishDumpFile(
+    const dbms::MaintenanceJobSpec& spec,
+    const dbms::MaintenanceJobControl& control, std::string& error) {
+    if (!g_engine.databaseExists(spec.database)) {
+        error = "database does not exist";
+        return false;
+    }
+    const std::filesystem::path target(spec.path);
+    const auto parent = target.parent_path().empty()
+        ? std::filesystem::path(".") : target.parent_path();
+    std::error_code filesystemError;
+    std::filesystem::create_directories(parent, filesystemError);
+    if (filesystemError) {
+        error = "could not create dump directory: " +
+            filesystemError.message();
+        return false;
+    }
+    static std::atomic<uint64_t> dumpSequence{0};
+    const std::filesystem::path staging =
+        target.string() + ".job_staging." + std::to_string(::getpid()) +
+        "." + std::to_string(dumpSequence.fetch_add(1));
+    const auto discard = [&] {
+        std::error_code ignored;
+        std::filesystem::remove(staging, ignored);
+    };
+    std::ofstream output(staging, std::ios::binary | std::ios::trunc);
+    if (!output) {
+        error = "could not open dump staging file";
+        return false;
+    }
+
+    uint64_t accounted = 0;
+    const auto accountOutput = [&]() {
+        const auto position = output.tellp();
+        if (position < 0) return false;
+        const auto current = static_cast<uint64_t>(position);
+        const uint64_t delta = current >= accounted ? current - accounted : 0;
+        accounted = current;
+        return control.accountBytes(delta);
+    };
+    const auto tables = g_engine.getTableNames(spec.database);
+    for (const auto& tableName : tables) {
+        if (control.cancelled()) {
+            output.close();
+            discard();
+            return false;
+        }
+        const TableSchema table =
+            g_engine.getTableSchema(spec.database, tableName);
+        output << "CREATE TABLE " << quoteDumpIdentifier(tableName) << " (";
+        for (size_t columnIndex = 0; columnIndex < table.len; ++columnIndex) {
+            if (columnIndex != 0) output << ", ";
+            const auto& column = table.cols[columnIndex];
+            output << quoteDumpIdentifier(column.dataName) << ' '
+                   << column.dataType;
+            if (column.dsize > 0 &&
+                (column.dataType == "char" ||
+                 column.dataType == "varchar")) {
+                output << '(' << column.dsize << ')';
+            }
+            if (column.isPrimaryKey) output << " PRIMARY KEY";
+            if (!column.isNull) output << " NOT NULL";
+            if (column.isUnique) output << " UNIQUE";
+        }
+        output << ");\n";
+        bool writeOk = true;
+        bool scanOk = g_engine.forEachRow(
+            spec.database, tableName,
+            [&](uint32_t pageId, uint16_t slotId,
+                const char* data, size_t length) {
+                if (!writeOk || !output || control.cancelled()) {
+                    writeOk = false;
+                    return;
+                }
+                const std::string row(data, length);
+                const int64_t rid =
+                    StorageEngine::encodeRid(pageId, slotId);
+                output << "INSERT INTO " << quoteDumpIdentifier(tableName)
+                       << " (";
+                for (size_t columnIndex = 0;
+                     columnIndex < table.len; ++columnIndex) {
+                    if (columnIndex != 0) output << ", ";
+                    output << quoteDumpIdentifier(
+                        table.cols[columnIndex].dataName);
+                }
+                output << ") VALUES (";
+                for (size_t columnIndex = 0;
+                     columnIndex < table.len; ++columnIndex) {
+                    if (columnIndex != 0) output << ", ";
+                    const bool isNull = g_engine.isColumnNullByRid(
+                        spec.database, tableName, rid, columnIndex);
+                    if (isNull) {
+                        output << "NULL";
+                    } else {
+                        output << quoteDumpLiteral(
+                            g_engine.extractColumnValue(
+                                row, table, columnIndex, spec.database));
+                    }
+                }
+                output << ");\n";
+                if (!output || !accountOutput()) writeOk = false;
+            });
+        if (!scanOk || !writeOk || !output) {
+            output.close();
+            discard();
+            error = control.cancelled() ? "" : "could not write dump";
+            return false;
+        }
+    }
+    output.flush();
+    if (!output) {
+        output.close();
+        discard();
+        error = "could not flush dump";
+        return false;
+    }
+    output.close();
+    const int fd = ::open(staging.c_str(), O_RDONLY);
+    const bool fileDurable = fd >= 0 && ::fsync(fd) == 0;
+    const bool closeOk = fd < 0 || ::close(fd) == 0;
+    if (!fileDurable || !closeOk || control.cancelled()) {
+        discard();
+        error = control.cancelled() ? "" : "could not sync dump";
+        return false;
+    }
+    filesystemError.clear();
+    std::filesystem::rename(staging, target, filesystemError);
+    if (filesystemError || !dbms::index_file::syncDirectory(parent)) {
+        discard();
+        error = "could not publish dump atomically";
+        return false;
+    }
+    return true;
+}
+
+static bool runMaintenanceJob(
+    const dbms::MaintenanceJobSpec& spec,
+    const dbms::MaintenanceJobControl& control, std::string& error) {
+    const auto progress = [&](uint64_t bytes) {
+        return control.accountBytes(bytes);
+    };
+    switch (spec.kind) {
+        case dbms::MaintenanceJobKind::Dump:
+            return publishDumpFile(spec, control, error);
+        case dbms::MaintenanceJobKind::Backup:
+            if (!g_engine.physicalBackup(
+                    spec.database, spec.path, progress)) {
+                if (!control.cancelled()) error = "physical backup failed";
+                return false;
+            }
+            return true;
+        case dbms::MaintenanceJobKind::Restore:
+            if (!g_engine.physicalRestore(
+                    spec.database, spec.path, progress)) {
+                if (!control.cancelled()) error = "physical restore failed";
+                return false;
+            }
+            return true;
+        case dbms::MaintenanceJobKind::PitrRestore:
+            if (!g_engine.pitrRestore(
+                    spec.database, spec.path, spec.archivePath,
+                    spec.targetEpoch, progress)) {
+                if (!control.cancelled()) error = "PITR restore failed";
+                return false;
+            }
+            return true;
+        case dbms::MaintenanceJobKind::ClearPlanCache:
+            if (control.cancelled()) return false;
+            clearPlanCache();
+            return true;
+    }
+    error = "unknown maintenance operation";
+    return false;
+}
+
+static dbms::MaintenanceJobManager& maintenanceJobManager() {
+    static dbms::MaintenanceJobManager manager(
+        ".dbms_maintenance_jobs", runMaintenanceJob);
+    return manager;
+}
+
+static bool parseMaintenanceString(
+    const std::string& input, size_t& position, std::string& value) {
+    while (position < input.size() &&
+           std::isspace(static_cast<unsigned char>(input[position]))) {
+        ++position;
+    }
+    if (position >= input.size() || input[position] != '\'') return false;
+    ++position;
+    value.clear();
+    while (position < input.size()) {
+        const char c = input[position++];
+        if (c != '\'') {
+            value.push_back(c);
+            continue;
+        }
+        if (position < input.size() && input[position] == '\'') {
+            value.push_back('\'');
+            ++position;
+            continue;
+        }
+        return true;
+    }
+    return false;
+}
+
+static bool parseMaintenanceDatabasePath(
+    std::string rest, const std::string& direction,
+    std::string& database, std::string& path, std::string& options) {
+    rest = trim(rest);
+    if (rest.rfind("database ", 0) == 0) rest = trim(rest.substr(9));
+    const size_t directionAt =
+        findKeywordOutsideQuotes(rest, direction);
+    if (directionAt == std::string::npos) return false;
+    database = decodeQuotedIdentifier(trim(rest.substr(0, directionAt)));
+    if (database.empty()) return false;
+    size_t position = directionAt + direction.size();
+    if (!parseMaintenanceString(rest, position, path) || path.empty())
+        return false;
+    options = trim(rest.substr(position));
+    return true;
+}
+
+static bool parseMaintenanceRate(
+    const std::string& options, uint64_t& rateLimitKiB) {
+    rateLimitKiB = 0;
+    if (options.empty()) return true;
+    if (options.rfind("rate ", 0) != 0) return false;
+    const std::string value = trim(options.substr(5));
+    try {
+        size_t consumed = 0;
+        const auto parsed = std::stoull(value, &consumed);
+        if (parsed == 0 || consumed != value.size()) return false;
+        rateLimitKiB = parsed;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+static bool submitMaintenanceJob(
+    dbms::MaintenanceJobSpec spec, const Session& session,
+    const std::string& commandTag) {
+    spec.requestedBy = session.username;
+    std::string error;
+    const uint64_t id = maintenanceJobManager().submit(spec, error);
+    if (id == 0) {
+        cout << "ERROR: " << error << " (SQLSTATE 58030)" << endl;
+        return true;
+    }
+    publishStructuredUtilityResult(
+        {"job_id", "status"}, {"int8", "text"},
+        {{std::to_string(id), "queued"}}, {{false, false}}, commandTag);
+    cout << "Maintenance job " << id << " queued" << endl;
+    return false;
+}
+
+static bool publishMaintenanceJobs(
+    const std::optional<uint64_t>& requestedId) {
+    std::vector<dbms::MaintenanceJobSnapshot> jobs;
+    if (requestedId) {
+        const auto job = maintenanceJobManager().find(*requestedId);
+        if (!job) {
+            cout << "ERROR: maintenance job does not exist (SQLSTATE 42704)"
+                 << endl;
+            return true;
+        }
+        jobs.push_back(*job);
+    } else {
+        jobs = maintenanceJobManager().list();
+    }
+    std::vector<std::vector<std::string>> rows;
+    std::vector<std::vector<bool>> nulls;
+    for (const auto& job : jobs) {
+        rows.push_back({
+            std::to_string(job.id),
+            dbms::MaintenanceJobManager::kindName(job.spec.kind),
+            job.spec.database,
+            job.spec.path,
+            dbms::MaintenanceJobManager::statusName(job.status),
+            job.spec.requestedBy,
+            std::to_string(job.spec.rateLimitKiB),
+            std::to_string(job.submittedAt),
+            std::to_string(job.startedAt),
+            std::to_string(job.finishedAt),
+            job.error,
+            job.cancelRequested ? "t" : "f",
+        });
+        nulls.push_back({
+            false, false, job.spec.database.empty(), job.spec.path.empty(),
+            false, false, false, false, job.startedAt == 0,
+            job.finishedAt == 0, job.error.empty(), false,
+        });
+    }
+    publishStructuredUtilityResult(
+        {"job_id", "kind", "database", "path", "status",
+         "requested_by", "rate_limit_kib", "submitted_at", "started_at",
+         "finished_at", "error", "cancel_requested"},
+        {"int8", "text", "text", "text", "text", "text", "int8",
+         "int8", "int8", "int8", "text", "boolean"},
+        std::move(rows), std::move(nulls),
+        "SHOW " + std::to_string(jobs.size()));
+    return false;
+}
 
 // ========================================================================
 // Cursor command handlers (extracted for Parser switch/case dispatch)
@@ -15447,83 +15778,97 @@ static bool executeInternal(const string& rawSql, Session& s) {
         return false;
     }
 
-    // DUMP DATABASE dbname TO 'file.sql'
-    if (sql.substr(0, 4) == "dump") {
-        // DIV-10: project dump command; PostgreSQL uses pg_dump/pg_dumpall.
+    if (sql == "show maintenance jobs" ||
+        sql.rfind("show maintenance job ", 0) == 0) {
+        if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
+            cout << dbms::postgresSyntaxError("SHOW MAINTENANCE JOB") << endl;
+            return true;
+        }
+        if (!checkAdmin(s)) return true;
+        std::optional<uint64_t> id;
+        if (sql != "show maintenance jobs") {
+            const std::string value = trim(sql.substr(21));
+            try {
+                size_t consumed = 0;
+                id = std::stoull(value, &consumed);
+                if (*id == 0 || consumed != value.size()) throw std::invalid_argument("id");
+            } catch (...) {
+                cout << "ERROR: invalid maintenance job id (SQLSTATE 22P02)"
+                     << endl;
+                return true;
+            }
+        }
+        return publishMaintenanceJobs(id);
+    }
+
+    if (sql.rfind("cancel maintenance job ", 0) == 0) {
+        if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
+            cout << dbms::postgresSyntaxError("CANCEL MAINTENANCE JOB") << endl;
+            return true;
+        }
+        if (!checkAdmin(s)) return true;
+        if (g_engine.inTransaction()) {
+            cout << "ERROR: CANCEL MAINTENANCE JOB cannot run inside a "
+                    "transaction block (SQLSTATE 25001)" << endl;
+            return true;
+        }
+        uint64_t id = 0;
+        try {
+            const std::string value = trim(sql.substr(23));
+            size_t consumed = 0;
+            id = std::stoull(value, &consumed);
+            if (id == 0 || consumed != value.size()) throw std::invalid_argument("id");
+        } catch (...) {
+            cout << "ERROR: invalid maintenance job id (SQLSTATE 22P02)"
+                 << endl;
+            return true;
+        }
+        std::string error;
+        if (!maintenanceJobManager().cancel(id, error)) {
+            const char* state = error == "maintenance job does not exist"
+                ? "42704" : "55000";
+            cout << "ERROR: " << error << " (SQLSTATE " << state << ')'
+                 << endl;
+            return true;
+        }
+        publishStructuredUtilityResult(
+            {"job_id", "cancel_requested"}, {"int8", "boolean"},
+            {{std::to_string(id), "t"}}, {{false, false}}, "CANCEL 1");
+        return false;
+    }
+
+    // DUMP DATABASE is an extended-mode wrapper. The connection only submits
+    // a durable background job; it never walks the database in the SQL thread.
+    if (sql.rfind("dump ", 0) == 0) {
         if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
             cout << dbms::postgresSyntaxError(
                 "DUMP (use pg_dump)") << endl;
             return true;
         }
         if (!checkAdmin(s)) return true;
-        string rest = trim(sql.substr(4));
-        size_t toPos = rest.find("to ");
-        if (toPos == string::npos) {
-            cout << "SQL syntax error: DUMP database_name TO 'file.sql'" << endl;
+        if (g_engine.inTransaction()) {
+            cout << "ERROR: DUMP cannot run inside a transaction block "
+                    "(SQLSTATE 25001)" << endl;
             return true;
         }
-        string dbname = trim(rest.substr(0, toPos));
-        string filePath = stripQuotes(trim(rest.substr(toPos + 3)));
-        if (filePath.empty()) {
-            cout << "SQL syntax error: missing file path" << endl;
+        dbms::MaintenanceJobSpec spec;
+        spec.kind = dbms::MaintenanceJobKind::Dump;
+        std::string options;
+        if (!parseMaintenanceDatabasePath(
+                sql.substr(4), "to", spec.database, spec.path, options) ||
+            !parseMaintenanceRate(options, spec.rateLimitKiB)) {
+            cout << "ERROR: syntax is DUMP DATABASE name TO 'file' "
+                    "[RATE kib_per_second] (SQLSTATE 42601)" << endl;
             return true;
         }
-        ofstream out(filePath);
-        if (!out) {
-            cout << "Cannot open file: " << filePath << endl;
+        if (!g_engine.databaseExists(spec.database)) {
+            cout << "ERROR: database does not exist (SQLSTATE 3D000)" << endl;
             return true;
         }
-        auto tables = g_engine.getTableNames(dbname);
-        for (const string& tname : tables) {
-            TableSchema tbl = g_engine.getTableSchema(dbname, tname);
-            out << "CREATE TABLE " << tname << " (";
-            for (size_t i = 0; i < tbl.len; ++i) {
-                if (i > 0) out << ", ";
-                out << tbl.cols[i].dataName << " " << tbl.cols[i].dataType;
-                if (tbl.cols[i].dsize > 0 && tbl.cols[i].dataType == "char") {
-                    out << "(" << tbl.cols[i].dsize << ")";
-                } else if (tbl.cols[i].dsize > 0 && tbl.cols[i].dataType == "varchar") {
-                    out << "(" << tbl.cols[i].dsize << ")";
-                }
-                if (tbl.cols[i].isPrimaryKey) out << " PRIMARY KEY";
-                if (!tbl.cols[i].isNull) out << " NOT NULL";
-                if (tbl.cols[i].isUnique) out << " UNIQUE";
-                if (tbl.cols[i].isAutoIncrement) out << " AUTO_INCREMENT";
-            }
-            out << ");\n";
-            vector<string> colNames;
-            for (size_t i = 0; i < tbl.len; ++i) colNames.push_back(tbl.cols[i].dataName);
-            g_engine.forEachRow(dbname, tname, [&](uint32_t, uint16_t, const char* data, size_t len) {
-                std::string row(data, len);
-                out << "INSERT INTO " << tname << " (";
-                for (size_t i = 0; i < colNames.size(); ++i) {
-                    if (i > 0) out << ", ";
-                    out << colNames[i];
-                }
-                out << ") VALUES (";
-                for (size_t i = 0; i < tbl.len; ++i) {
-                    if (i > 0) out << ", ";
-                    string val = dbms::StorageEngine::extractColumnValueStatic(row, tbl, i);
-                    if (val.empty()) {
-                        out << "NULL";
-                    } else {
-                        string escaped;
-                        for (char c : val) {
-                            if (c == '\'') escaped += "''";
-                            else escaped += c;
-                        }
-                        out << "'" << escaped << "'";
-                    }
-                }
-                out << ");\n";
-            });
-        }
-        cout << "Dumped " << tables.size() << " tables to " << filePath << endl;
-        return false;
+        return submitMaintenanceJob(std::move(spec), s, "DUMP 1");
     }
 
-    // RESTORE DATABASE dbname FROM 'file.sql'
-        if (sql.rfind("pg_switch_wal", 0) == 0 || sql.rfind("switch wal", 0) == 0) {
+    if (sql.rfind("pg_switch_wal", 0) == 0 || sql.rfind("switch wal", 0) == 0) {
         if (!checkAdmin(s)) return true;
         if (!checkDB(s)) return true;
         const dbms::Lsn next = g_engine.switchWal(s.currentDB);
@@ -15536,40 +15881,36 @@ static bool executeInternal(const string& rawSql, Session& s) {
         return false;
     }
 
-if (sql.rfind("backup database", 0) == 0) {
-        // DIV-10: project physical backup command; PostgreSQL uses
-        // pg_basebackup / the backup API.
+    if (sql.rfind("backup database ", 0) == 0) {
         if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
             cout << dbms::postgresSyntaxError(
                 "BACKUP DATABASE (use pg_basebackup)") << endl;
             return true;
         }
         if (!checkAdmin(s)) return true;
-        string rest = trim(sql.substr(16));  // skip "backup database"
-        size_t toPos = rest.find("to ");
-        if (toPos == string::npos) {
-            cout << "SQL syntax error: BACKUP DATABASE dbname TO 'path'" << endl;
+        if (g_engine.inTransaction()) {
+            cout << "ERROR: BACKUP DATABASE cannot run inside a transaction "
+                    "block (SQLSTATE 25001)" << endl;
             return true;
         }
-        string dbname = trim(rest.substr(0, toPos));
-        string backupPath = stripQuotes(trim(rest.substr(toPos + 3)));
-        if (backupPath.empty()) {
-            cout << "SQL syntax error: missing backup path" << endl;
+        dbms::MaintenanceJobSpec spec;
+        spec.kind = dbms::MaintenanceJobKind::Backup;
+        std::string options;
+        if (!parseMaintenanceDatabasePath(
+                sql.substr(16), "to", spec.database, spec.path, options) ||
+            !parseMaintenanceRate(options, spec.rateLimitKiB)) {
+            cout << "ERROR: syntax is BACKUP DATABASE name TO 'path' "
+                    "[RATE kib_per_second] (SQLSTATE 42601)" << endl;
             return true;
         }
-        if (g_engine.physicalBackup(dbname, backupPath)) {
-            cout << "Backup completed: " << dbname << " -> " << backupPath << endl;
-            log(s.username, "backup " + dbname + " to " + backupPath, getTime());
-        } else {
-            cout << "Backup failed" << endl;
+        if (!g_engine.databaseExists(spec.database)) {
+            cout << "ERROR: database does not exist (SQLSTATE 3D000)" << endl;
             return true;
         }
-        return false;
+        return submitMaintenanceJob(std::move(spec), s, "BACKUP 1");
     }
 
     if (sql.rfind("restore database", 0) == 0) {
-        // DIV-10: project restore command; PostgreSQL restores via
-        // pg_restore / recovery.signal with restore_command.
         if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
             cout << dbms::postgresSyntaxError(
                 "RESTORE DATABASE (use pg_restore or recovery with "
@@ -15577,135 +15918,104 @@ if (sql.rfind("backup database", 0) == 0) {
             return true;
         }
         if (!checkAdmin(s)) return true;
-        string rest = trim(sql.substr(17));  // skip "restore database"
-        size_t fromPos = rest.find("from ");
-        if (fromPos == string::npos) {
-            cout << "SQL syntax error: RESTORE DATABASE dbname FROM 'path' "
-                 << "[PITR 'YYYY-MM-DD HH:MM:SS' ARCHIVE 'dir']" << endl;
+        if (g_engine.inTransaction()) {
+            cout << "ERROR: RESTORE DATABASE cannot run inside a transaction "
+                    "block (SQLSTATE 25001)" << endl;
             return true;
         }
-        string dbname = trim(rest.substr(0, fromPos));
-        string tail = rest.substr(fromPos + 5);
-        // Optional: PITR 'timestamp' ARCHIVE 'dir' (both required together).
-        string backupAndOpts = tail;
-        string pitrTs, archiveDir;
-        size_t pitrPos = tail.find(" pitr ");
-        if (pitrPos != string::npos) {
-            backupAndOpts = tail.substr(0, pitrPos);
-            string opts = trim(tail.substr(pitrPos + 6));
-            size_t archPos = opts.find(" archive ");
-            if (archPos == string::npos) {
-                cout << "SQL syntax error: PITR requires ARCHIVE 'dir'" << endl;
-                return true;
-            }
-            pitrTs = stripQuotes(trim(opts.substr(0, archPos)));
-            archiveDir = stripQuotes(trim(opts.substr(archPos + 9)));
-            if (pitrTs.empty() || archiveDir.empty()) {
-                cout << "SQL syntax error: PITR requires a timestamp and archive dir" << endl;
-                return true;
-            }
-        }
-        string backupPath = stripQuotes(trim(backupAndOpts));
-        if (backupPath.empty()) {
-            cout << "SQL syntax error: missing backup path" << endl;
+        dbms::MaintenanceJobSpec spec;
+        spec.kind = dbms::MaintenanceJobKind::Restore;
+        std::string options;
+        if (!parseMaintenanceDatabasePath(
+                sql.substr(17), "from", spec.database, spec.path, options)) {
+            cout << "ERROR: syntax is RESTORE DATABASE name FROM 'path' "
+                    "[PITR 'YYYY-MM-DD HH:MM:SS' ARCHIVE 'dir'] "
+                    "[RATE kib_per_second] (SQLSTATE 42601)" << endl;
             return true;
         }
-        if (!pitrTs.empty()) {
-            // Parse 'YYYY-MM-DD HH:MM:SS' in local time to an epoch.
+        if (options.rfind("pitr", 0) == 0 &&
+            (options.size() == 4 ||
+             std::isspace(static_cast<unsigned char>(options[4])))) {
+            size_t position = 4;
+            std::string timestamp;
+            if (!parseMaintenanceString(options, position, timestamp)) {
+                cout << "ERROR: PITR requires a timestamp (SQLSTATE 42601)"
+                     << endl;
+                return true;
+            }
+            while (position < options.size() &&
+                   std::isspace(static_cast<unsigned char>(options[position])))
+                ++position;
+            if (options.compare(position, 7, "archive") != 0 ||
+                (position + 7 < options.size() &&
+                 !std::isspace(static_cast<unsigned char>(
+                     options[position + 7])))) {
+                cout << "ERROR: PITR requires ARCHIVE 'dir' "
+                        "(SQLSTATE 42601)" << endl;
+                return true;
+            }
+            position += 7;
+            if (!parseMaintenanceString(
+                    options, position, spec.archivePath) ||
+                spec.archivePath.empty() ||
+                !parseMaintenanceRate(
+                    trim(options.substr(position)), spec.rateLimitKiB)) {
+                cout << "ERROR: invalid PITR ARCHIVE/RATE options "
+                        "(SQLSTATE 42601)" << endl;
+                return true;
+            }
             std::tm tmBuf{};
-            const char* parsed = ::strptime(pitrTs.c_str(), "%Y-%m-%d %H:%M:%S", &tmBuf);
+            tmBuf.tm_isdst = -1;
+            const char* parsed = ::strptime(
+                timestamp.c_str(), "%Y-%m-%d %H:%M:%S", &tmBuf);
             if (parsed == nullptr || *parsed != '\0') {
-                cout << "SQL syntax error: bad PITR timestamp (want 'YYYY-MM-DD HH:MM:SS')" << endl;
+                cout << "ERROR: bad PITR timestamp (SQLSTATE 22007)" << endl;
                 return true;
             }
             const time_t epoch = ::mktime(&tmBuf);
             if (epoch == static_cast<time_t>(-1)) {
-                cout << "SQL syntax error: unrepresentable PITR timestamp" << endl;
+                cout << "ERROR: unrepresentable PITR timestamp "
+                        "(SQLSTATE 22008)" << endl;
                 return true;
             }
-            if (g_engine.pitrRestore(dbname, backupPath, archiveDir,
-                                     static_cast<uint64_t>(epoch))) {
-                cout << "PITR restore staged: " << backupPath << " -> " << dbname
-                     << " at " << pitrTs << "; restart to roll forward" << endl;
-                log(s.username, "pitr restore " + dbname + " from " + backupPath +
-                    " to " + pitrTs, getTime());
-            } else {
-                cout << "Restore failed" << endl;
-                return true;
-            }
-            return false;
-        }
-        if (g_engine.physicalRestore(dbname, backupPath)) {
-            cout << "Restore completed: " << backupPath << " -> " << dbname << endl;
-            log(s.username, "restore " + dbname + " from " + backupPath, getTime());
+            spec.targetEpoch = static_cast<uint64_t>(epoch);
+            spec.kind = dbms::MaintenanceJobKind::PitrRestore;
         } else {
-            cout << "Restore failed" << endl;
-            return true;
+            if (!parseMaintenanceRate(options, spec.rateLimitKiB)) {
+                cout << "ERROR: invalid RESTORE RATE option (SQLSTATE 42601)"
+                     << endl;
+                return true;
+            }
         }
-        return false;
+        return submitMaintenanceJob(std::move(spec), s, "RESTORE 1");
     }
 
     if (sql.substr(0, 7) == "restore") {
-        if (!checkAdmin(s)) return true;
-        string rest = trim(sql.substr(7));
-        size_t fromPos = rest.find("from ");
-        if (fromPos == string::npos) {
-            cout << "SQL syntax error: RESTORE database_name FROM 'file.sql'" << endl;
-            return true;
-        }
-        string dbname = trim(rest.substr(0, fromPos));
-        string filePath = stripQuotes(trim(rest.substr(fromPos + 5)));
-        if (filePath.empty()) {
-            cout << "SQL syntax error: missing file path" << endl;
-            return true;
-        }
-        ifstream in(filePath);
-        if (!in) {
-            cout << "Cannot open file: " << filePath << endl;
-            return true;
-        }
-        if (!g_engine.databaseExists(dbname)) {
-            g_engine.createDatabase(dbname);
-        }
-        string line, stmt;
-        int count = 0;
-        while (getline(in, line)) {
-            stmt += line;
-            size_t semi = stmt.find(';');
-            if (semi != string::npos) {
-                string cmd = trim(stmt.substr(0, semi));
-                stmt = stmt.substr(semi + 1);
-                if (!cmd.empty()) {
-                    Session tmpS = s;
-                    tmpS.currentDB = dbname;
-                    execute(cmd, tmpS);
-                    ++count;
-                }
-            }
-            stmt += " ";
-        }
-        cout << "Restored " << count << " statements to " << dbname << endl;
-        return false;
+        cout << "ERROR: legacy SQL-file RESTORE is disabled; use a physical "
+                "RESTORE DATABASE job (SQLSTATE 0A000)" << endl;
+        return true;
     }
 
     if (sql.substr(0, 16) == "clear plan cache") {
-        // DIV-10: project maintenance command; PostgreSQL does not expose
-        // plan cache clearing as SQL.
         if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
             cout << dbms::postgresSyntaxError(
                 "CLEAR PLAN CACHE (project extension)") << endl;
             return true;
         }
-        size_t cleared = 0;
-        {
-            std::lock_guard<std::mutex> lock(g_planCacheMutex);
-            cleared = g_queryPlanCache.size();
-            g_queryPlanCache.clear();
-            g_planCacheHits = 0;
-            g_planCacheMisses = 0;
+        if (!checkAdmin(s)) return true;
+        if (sql != "clear plan cache") {
+            cout << "ERROR: syntax is CLEAR PLAN CACHE (SQLSTATE 42601)"
+                 << endl;
+            return true;
         }
-        cout << "Cleared " << cleared << " plan cache entries" << endl;
-        return false;
+        if (g_engine.inTransaction()) {
+            cout << "ERROR: CLEAR PLAN CACHE cannot run inside a transaction "
+                    "block (SQLSTATE 25001)" << endl;
+            return true;
+        }
+        dbms::MaintenanceJobSpec spec;
+        spec.kind = dbms::MaintenanceJobKind::ClearPlanCache;
+        return submitMaintenanceJob(std::move(spec), s, "CLEAR 1");
     }
 
     // DROP OWNED BY owner
@@ -24777,6 +25087,10 @@ int main(int argc, char* argv[]) {
     if (!dbms::ReplicationManager::instance().configureSlotStorage(
             ".replication_slots", replicationStateError)) {
         std::cerr << "FATAL: " << replicationStateError << std::endl;
+        return 1;
+    }
+    if (!maintenanceJobManager().persistenceHealthy()) {
+        std::cerr << "FATAL: maintenance job state is unreadable" << std::endl;
         return 1;
     }
     // TDE: load the keyring before any data file opens.
