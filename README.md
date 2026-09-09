@@ -4,6 +4,7 @@
 
 > **完整使用手册**: [docs/MANUAL.md](docs/MANUAL.md)
 > **生产化状态与边界**: [docs/production-status.md](docs/production-status.md)
+> **兼容版本契约**: [docs/compatibility-contract.md](docs/compatibility-contract.md)
 > **PostgreSQL 18 差距审计与实施蓝图**: [差距清单](docs/postgresql-18-gap-audit.md) · [逐项实施方案](docs/postgresql-18-implementation-blueprint.md)
 > **当前状态（2026-09-09）**：发行标识为 v0.2.0；PostgreSQL 18 兼容和生产化复查仍在进行，不能宣称生产就绪或 PostgreSQL 等价。唯一的实时范围与完成状态来自 [`docs/postgresql-18-gap-audit.md`](docs/postgresql-18-gap-audit.md) 和机器可读 [`docs/gap-progress.json`](docs/gap-progress.json)，可运行 `python3 scripts/check_gap_progress.py` 校验。其他文档中的 PASS 数、批次和性能数字都是带日期的历史记录，不是当前全量绿色声明。GitHub Actions 当前全部禁用；本地验证入口仍为 `scripts/build_tests.sh`。
 >
@@ -646,6 +647,7 @@ Var Offset Array 每项 (4 bytes):
 ## 已知限制
 
 - **兼容范围仍未闭合**：以 PostgreSQL 18 差距审计和进度总账为准；README 的功能列举只表示已有入口，不表示完整 PostgreSQL 语义。
+- **兼容声明分级**：当前定位是提供 PostgreSQL wire protocol 3.0 子集的自有 DBMS；“客户端可连接”和“PostgreSQL 18 行为兼容”的独立验收门见[兼容版本契约](docs/compatibility-contract.md)，两者均未宣告通过。
 - **非 PostgreSQL 扩展需显式模式**：`USE DATABASE`、`REPLACE INTO`、`SET GLOBAL`、`SHOW USERS/ROLES` 等只应在 extended compatibility mode 使用。
 - **`SAVEPOINT` 需要在事务内**：`SAVEPOINT` 命令必须在 `BEGIN` 之后执行，否则返回 "Not in transaction"
 
@@ -657,6 +659,7 @@ Var Offset Array 每项 (4 bytes):
 |------|------|
 | [README.md](README.md) | 项目总览与功能特性 |
 | [docs/MANUAL.md](docs/MANUAL.md) | 唯一完整使用手册（25 章，覆盖当前 SQL 语法与明确能力边界） |
+| [compatibility-contract.md](docs/compatibility-contract.md) | 产品、PG 行为、wire protocol 和 extended 模式的独立版本与验收门 |
 | [postgresql-18-gap-audit.md](docs/postgresql-18-gap-audit.md) | PostgreSQL 18.6 完整差距审计（当前权威清单） |
 | [postgresql-18-implementation-blueprint.md](docs/postgresql-18-implementation-blueprint.md) | 273 个差距逐项完整实施方案（代码落点、I/O 保真、性能与验收） |
 | [implementation-plan.md](docs/implementation-plan.md) | 实施计划与历史 Wave 记录（当前状态以 Gap 表为准） |

@@ -2,7 +2,7 @@
 
 状态口径更新：2026-09-09；下方工程批次记录截至其各自标注日期。
 
-当前发行标识为 v0.2.0，但仍处于生产化重构阶段，不能宣称已达到 PostgreSQL 的生产级完整度。实时范围和完成状态只取自 [`postgresql-18-gap-audit.md`](postgresql-18-gap-audit.md) 与 [`gap-progress.json`](gap-progress.json)，由 `python3 scripts/check_gap_progress.py` 校验。本文其余 PASS、sanitizer、崩溃矩阵、soak 和性能数字都是带日期的历史证据，不代表当前 HEAD 已运行同一全量矩阵。GitHub Actions 当前全部禁用（仅保留 `.github/workflows/ci.yml.disabled`）；本地构建、测试、sanitizer 和打包脚本仍可手动运行。
+当前发行标识为 v0.2.0，但仍处于生产化重构阶段，不能宣称已达到 PostgreSQL 的生产级完整度。实时范围和完成状态只取自 [`postgresql-18-gap-audit.md`](postgresql-18-gap-audit.md) 与 [`gap-progress.json`](gap-progress.json)，由 `python3 scripts/check_gap_progress.py` 校验。[`compatibility-contract.md`](compatibility-contract.md) 独立定义产品版本、PostgreSQL 18.6 行为目标、wire protocol 3.0 上限和 extended 模式；当前“客户端可连接”和“PG18 行为兼容”两级验收均未宣告通过。本文其余 PASS、sanitizer、崩溃矩阵、soak 和性能数字都是带日期的历史证据，不代表当前 HEAD 已运行同一全量矩阵。GitHub Actions 当前全部禁用（仅保留 `.github/workflows/ci.yml.disabled`）；本地构建、测试、sanitizer 和打包脚本仍可手动运行。
 
 ## v0.2 并发硬化批次（2026-08-22）
 
