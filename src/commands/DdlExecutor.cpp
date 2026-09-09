@@ -1137,6 +1137,18 @@ bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
         Session* previous;
         ~SessionGuard() { setCurrentSession(previous); }
     } sessionGuard{previousSession};
+
+    // PostgreSQL rejects catalog and relation utility writes in a read-only
+    // transaction, including operations on temporary relations.  Enforce the
+    // boundary before an executor can implicitly commit, create a file, or
+    // register a catalog row.
+    if (g_engine.inTransaction() && g_engine.isReadOnly()) {
+        std::cout << "ERROR: cannot execute " << stmt->toString()
+                  << " in a read-only transaction (SQLSTATE 25006)"
+                  << std::endl;
+        return true;
+    }
+
     switch (stmt->command) {
         case SqlCommand::CreateTable:
             return executeCreateTable(dynamic_cast<const CreateTableStmt*>(stmt.get()), s);

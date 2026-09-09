@@ -42,6 +42,23 @@ def main():
         _, state, message, _, _, _ = execute("ROLLBACK;")
         assert state is None, (state, message)
 
+        # Utility writes are subject to the same read-only transaction gate.
+        # Reject them before DDL can create files or implicitly end the
+        # transaction, and keep the backend failed until explicit recovery.
+        _, state, message, _, _, _ = execute("BEGIN READ ONLY;")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute(
+            "CREATE TABLE readonly_ddl_leak (id INT);")
+        assert state == "25006", (state, message)
+        assert "read-only transaction" in message, message
+        _, state, message, _, _, _ = execute("SELECT 1;")
+        assert state == "25P02", (state, message)
+        _, state, message, _, _, _ = execute("ROLLBACK;")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = execute(
+            "SELECT id FROM readonly_ddl_leak;")
+        assert state == "42P01", (state, message)
+
         # SET TRANSACTION read modes are transaction characteristics, not
         # configuration parameters.  Tightening an active transaction to
         # READ ONLY is allowed even after a read, and every subsequent DML
