@@ -257,6 +257,8 @@
 
 | 356 | PROTO-02 | 一个 Simple Query `Q` 消息中的分号分隔语句此前作为整串只执行一次，后续语句会丢失或变成语法错误；先成功的写入还可能在后续语句失败时部分提交。新增识别普通/转义字符串、quoted identifier、dollar quote、行注释和嵌套块注释的顶层分句；逐语句产生 RowDescription/DataRow/CommandComplete，但整条消息只产生一次 ReadyForQuery。无显式事务控制的多语句批次使用一个隐式事务，首错停止并回滚；显式 BEGIN 批次保留 `T/E` 状态 | 完整协议回归覆盖字符串及两类注释内分号、三组 SELECT 的消息顺序/数量、第二条缺表后的停止和首条 INSERT 回滚，以及显式 BEGIN 批次可见性和 ROLLBACK；受影响对象 O0/O2 编译、完整协议、122 组差分及 DIV-14 通过 | `5befce5` |
 
+| 357 | PROTO-03 | 扩展查询的 Parse 处理错误地先发送 `ParameterDescription` 再发送 `ParseComplete`，而标准协议规定 Parse 响应只有 `ParseComplete`；该额外帧会使按规范等待 `1` 的 libpq/JDBC 等客户端流失步。移除 Parse 阶段的 `t` 帧，参数描述仍只在 Describe Statement 响应中发送 | 完整协议回归的无参数、整数文本/二进制、date/time/timestamp/timestamptz/UUID/numeric 二进制及 portal 分页辅助器全部改为严格断言 Parse 的首个且唯一响应为无 body 的 `1`；O0/O2 编译、生产重链和完整协议套件通过。Describe 的结果列推断等其余扩展协议仍为 partial | `b405971` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
