@@ -18060,6 +18060,7 @@ if (sql.rfind("backup database", 0) == 0) {
                 windowPos, orderPos, limitPos, offsetPos, sql.size()});
             string rightTableOrig;
             string leftOnCol, rightOnCol;
+            string leftOnQualifier, rightOnQualifier;
 
             if (isCrossJoin) {
                 rightTableOrig = trim(sql.substr(tableNameStart, clauseEnd - tableNameStart));
@@ -18078,9 +18079,15 @@ if (sql.rfind("backup database", 0) == 0) {
                 leftOnCol = trim(onClause.substr(0, eqPos));
                 rightOnCol = trim(onClause.substr(eqPos + 1));
                 size_t dot = leftOnCol.find('.');
-                if (dot != string::npos) leftOnCol = leftOnCol.substr(dot + 1);
+                if (dot != string::npos) {
+                    leftOnQualifier = leftOnCol.substr(0, dot);
+                    leftOnCol = leftOnCol.substr(dot + 1);
+                }
                 dot = rightOnCol.find('.');
-                if (dot != string::npos) rightOnCol = rightOnCol.substr(dot + 1);
+                if (dot != string::npos) {
+                    rightOnQualifier = rightOnCol.substr(0, dot);
+                    rightOnCol = rightOnCol.substr(dot + 1);
+                }
             }
 
             // Extract both PostgreSQL alias forms: "table alias" and
@@ -18252,6 +18259,32 @@ if (sql.rfind("backup database", 0) == 0) {
             TableSchema rightTbl = g_engine.getTableSchema(s.currentDB, rightTable);
             string leftPrefix = leftAlias.empty() ? leftTableName : leftAlias;
             string rightPrefix = rightAlias.empty() ? rightTableName : rightAlias;
+            auto joinOperandSide = [&](const string& qualifier,
+                                       const string& column) {
+                if (!qualifier.empty()) {
+                    if (qualifier == leftAlias || qualifier == leftTableName ||
+                        qualifier == leftTable) return 0;
+                    if (qualifier == rightAlias || qualifier == rightTableName ||
+                        qualifier == rightTable) return 1;
+                    return -1;
+                }
+                bool inLeft = false;
+                bool inRight = false;
+                for (size_t index = 0; index < leftTbl.len; ++index) {
+                    inLeft = inLeft || leftTbl.cols[index].dataName == column;
+                }
+                for (size_t index = 0; index < rightTbl.len; ++index) {
+                    inRight = inRight || rightTbl.cols[index].dataName == column;
+                }
+                if (inLeft != inRight) return inLeft ? 0 : 1;
+                return -1;
+            };
+            if (!isCrossJoin &&
+                joinOperandSide(leftOnQualifier, leftOnCol) == 1 &&
+                joinOperandSide(rightOnQualifier, rightOnCol) == 0) {
+                std::swap(leftOnCol, rightOnCol);
+                std::swap(leftOnQualifier, rightOnQualifier);
+            }
             // The engine emits join rows as left-table columns followed by
             // right-table columns.  The projected header must list columns
             // in the *requested* order and every data row must be permuted

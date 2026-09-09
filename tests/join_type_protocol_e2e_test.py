@@ -38,6 +38,12 @@ def main():
              "(1, 'a,b'), (2, 'x'), (3, NULL), "
              "(4, 'l.id'), (5, 'r.id');"),
             "INSERT INTO join_pred_right VALUES (1), (2), (3), (4), (5);",
+            "CREATE TABLE join_orientation_left (lkey INT, ltxt TEXT);",
+            "CREATE TABLE join_orientation_right (rkey INT, rtxt TEXT);",
+            ("INSERT INTO join_orientation_left VALUES "
+             "(1, 'left one'), (2, 'left two');"),
+            ("INSERT INTO join_orientation_right VALUES "
+             "(1, 'right one'), (3, 'right three');"),
         ]
         for sql in setup:
             _, state, message, _ = runner.ours_query(
@@ -69,6 +75,31 @@ def main():
             assert len(headers) == len(expected_types), (sql, headers)
             assert type_oids == expected_types, (sql, type_oids, expected_types)
             assert command_tag == "SELECT %d" % len(rows), (sql, command_tag)
+
+        orientation_cases = [
+            (("SELECT l.lkey, r.rtxt FROM join_orientation_left l "
+              "JOIN join_orientation_right r ON r.rkey = l.lkey "
+              "ORDER BY l.lkey;"),
+             [["1", "right one"]]),
+            (("SELECT lkey, rtxt FROM join_orientation_left "
+              "JOIN join_orientation_right ON rkey = lkey "
+              "ORDER BY lkey;"),
+             [["1", "right one"]]),
+            (("SELECT l.lkey, r.rtxt FROM join_orientation_left l "
+              "LEFT JOIN join_orientation_right r ON r.rkey = l.lkey "
+              "ORDER BY l.lkey;"),
+             [["1", "right one"], ["2", None]]),
+        ]
+        for sql, expected_rows in orientation_cases:
+            decoded = runner.decode_wire_result(
+                client.simple_query(server["sock"], sql), include_types=True)
+            rows, state, message, headers, command_tag, type_oids = decoded
+            assert state is None, (sql, state, message)
+            assert rows == expected_rows, (sql, rows, expected_rows)
+            assert headers == ["lkey", "rtxt"], (sql, headers)
+            assert type_oids == [23, 25], (sql, type_oids)
+            assert command_tag == "SELECT %d" % len(expected_rows), (
+                sql, command_tag)
 
         exact_sql = (
             "SELECT l.id, l.txt, r.txt FROM join_exact_left l "
