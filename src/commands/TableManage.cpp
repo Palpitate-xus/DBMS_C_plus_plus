@@ -41416,10 +41416,15 @@ static PreparedTerminalState preparedTerminalState(
 DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
     if (!transactionContext().inTransaction) return DBStatus::INVALID_VALUE;
     if (!validPreparedXid(xid)) return DBStatus::INVALID_VALUE;
-    if (!transactionContext().ddlUndoActions.empty()) {
-        // DDL undo callbacks are backend-local closures. Do not prepare a
-        // transaction whose rollback semantics cannot survive this backend's
-        // in-memory context; callers must commit/rollback it directly.
+    if (!transactionContext().ddlUndoActions.empty() ||
+        transactionContext().transactionBackupDirty) {
+        // DDL undo callbacks are backend-local closures, while a dirty
+        // transaction snapshot can only be restored safely while this
+        // backend still owns the database-wide transaction lock. PREPARE
+        // releases that lock, so a later whole-database restore could erase
+        // commits made by other backends. Reject both forms of DDL state
+        // before publishing prepared metadata; callers can still finish the
+        // live transaction with COMMIT or ROLLBACK.
         return DBStatus::INVALID_VALUE;
     }
 

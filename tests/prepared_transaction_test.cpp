@@ -95,6 +95,49 @@ void test_prepare_resets_originating_transaction_modes() {
     std::cout << "[PREPARED-TXN] preparing session transaction modes reset OK\n";
 }
 
+void test_prepare_rejects_physical_ddl_snapshot() {
+    const std::string db = testDbPath("prepared_physical_ddl");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    dbms::TableSchema table;
+    table.tablename = "accounts";
+    table.append(dbms::makeIntColumn("id", false, 2, true));
+    assert(g_engine.createTable(db, table) == dbms::DBStatus::OK);
+
+    Session session;
+    session.username = "testuser";
+    session.permission = 1;
+    session.currentDB = db;
+    dbms::DdlExecutor ddl;
+
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(!ddl.executeSql(
+        "ALTER TABLE accounts ADD COLUMN note TEXT", session));
+    assert(g_engine.hasTransactionBackup());
+    assert(g_engine.transactionBackupDirty());
+
+    // A prepared backend no longer owns the database-wide lock needed by a
+    // whole-directory DDL restore. Fail closed without aborting the live
+    // transaction, which remains available for an explicit decision.
+    assert(g_engine.prepareTransaction("prepared_physical_ddl") ==
+           dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.inTransaction());
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+    assert(!g_engine.hasTransactionBackup());
+
+    const dbms::TableSchema restored =
+        g_engine.getTableSchema(db, "accounts");
+    assert(restored.len == 1);
+    assert(restored.cols[0].dataName == "id");
+    const auto prepared = g_engine.listPreparedTransactions();
+    assert(std::find(prepared.begin(), prepared.end(),
+                     "prepared_physical_ddl") == prepared.end());
+
+    cleanup(db);
+    std::cout << "[PREPARED-TXN] physical DDL cannot escape its rollback lock through PREPARE OK\n";
+}
+
 void test_cross_backend_prepare_completion() {
     const std::string db = testDbPath("prepared_transaction");
     cleanup(db);
@@ -450,6 +493,7 @@ int main(int argc, char** argv) {
     cleanupAllTestData();
     test_prepare_rejects_deferred_constraint_violation();
     test_prepare_resets_originating_transaction_modes();
+    test_prepare_rejects_physical_ddl_snapshot();
     test_cross_backend_prepare_completion();
     test_prepared_update_allows_mvcc_reader();
     test_quoted_names_round_trip_through_prepared_metadata();
