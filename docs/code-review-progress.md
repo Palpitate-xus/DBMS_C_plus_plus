@@ -171,6 +171,8 @@
 
 | 313 | P0-07 / TXN-06 / TXN-07 | 表级 `IntentExclusive` 使用独占 `shared_mutex` 和 `flock`，因此 PREPARE 后持久化的行写意向会把普通 MVCC SELECT 当作冲突操作；默认 lock timeout 为零时查询永久等待，无法读取 prepared UPDATE 之前的可见版本。现在 Shared/IS/IX 共享物理 token 并使用一致兼容矩阵，X/metadata 仍为独占；prepared IX 可与读取和其他行写意向共存，行锁继续阻止同一 tuple 的冲突写，DDL 仍等待二阶段结束 | `prepared_transaction_test` 验证 prepared UPDATE 期间读到旧值、冲突 UPDATE 返回 lock conflict、ROLLBACK PREPARED 后恢复；`cross_backend_lock_test` 验证跨进程 IX 与 S 兼容而 X 被阻止；`lock_manager_concurrency_test`、`lock_failure_propagation_test`、完整 `mvcc_update_test`（含 savepoint、五类索引、TOAST、2PC 和 crash recovery）、`concurrency_test`、DIV-14、O0/O2 编译及完整差分 `cases=122 failed=0` 通过 | `f630ef5` |
 
+| 314 | P0-16 | 测试构建脚本把所有 `*_test.cpp` 纳入生产对象缓存签名，并且只在测试成功后写缓存戳；任意测试源码变化或一次测试失败都会让下一次运行重新编译全部生产源码，显著拖慢复查和失败重试。构建驱动现在只用生产源码、头文件和构建配置签名判断共享对象是否失效，并在共享层成功后立即发布缓存戳；测试源码仍每次单独编译，测试失败不再污染生产对象缓存 | `build_cache_routing_test` 检查两个构建入口均使用生产缓存 API、缓存戳位于测试编译之前且旧测试签名逻辑已删除，并执行三份脚本的 `bash -n`；`subxip_visibility_test` 首次完成旧缓存重建后通过，第二次仅编译/链接该测试、没有生产源码重编译，7 项断言全部通过 | `7eacb89` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
@@ -182,7 +184,7 @@
 - Python 单元测试 31 项通过：总账校验 6 项、差分工具 25 项。
 - 当前 `build/dbms_review_main` 的 11 组 SQL / 协议 E2E 通过：review_sql、CTE、FETCH、子查询 SQLSTATE、转义文本、布尔边界、LIMIT/OFFSET、多行 SQL、窗口、EXPLAIN ANALYZE、PostgreSQL 协议。
 - 实际参考 PostgreSQL 的错误码、CSV 列描述、带注释的终止符及命令样文本读取验证通过；未对参考库做持久化数据修改。
-- 总账完整覆盖 273 项；目前 complete = 0、partial = 35、unverified = 223、用户延期 = 15。`--require-complete` 正确返回非零。122 组差分归零不代表 273 项功能族完成。
+- 总账完整覆盖 273 项；目前 complete = 0、partial = 70、unverified = 188、用户延期 = 15。`--require-complete` 正确返回非零。122 组差分归零不代表 273 项功能族完成。
 - 仓库只有 `ci.yml.disabled`，没有启用的 workflow；修复均为本地 commit，未 push。
 
 ## 上批局部收尾验收（2026-09-08）
