@@ -423,7 +423,7 @@ static size_t findKeywordOutsideQuotes(const string& sql,
                                        const string& keyword,
                                        size_t from = 0);
 static size_t findMatchingParen(const string& sql, size_t start);
-static string sqlProcessor(string raw) {
+static string sqlProcessor(string raw, bool normalizeBooleanLiterals = true) {
     raw = toLowerSql(raw);
     // Whitespace separates SQL tokens; deleting it joins keywords and names.
     // Normalize runs only outside quotes. Whitespace inside a literal or a
@@ -458,8 +458,10 @@ static string sqlProcessor(string raw) {
     else raw = raw.substr(start, raw.find_last_not_of(' ') - start + 1);
     if (!raw.empty() && raw.back() == ';') raw.pop_back();
     raw = preprocessCaseWhen(raw);
-    // Normalize boolean literals: true/false → 1/0
-    {
+    // Normalize boolean literals for the legacy table-expression paths.
+    // FROM-less projections need to retain TRUE/FALSE so the expression
+    // evaluator and protocol metadata preserve PostgreSQL's bool value/type.
+    if (normalizeBooleanLiterals) {
         string out;
         size_t i = 0;
         char quote = 0;
@@ -17139,10 +17141,22 @@ if (sql.rfind("backup database", 0) == 0) {
             }
         } guard(&s);
 
-        // Process CTEs: WITH cte AS (SELECT ...)
+        // Process CTEs: WITH cte AS (SELECT ...).  Keep boolean literals in
+        // the rewritten main query until we know whether it is FROM-less;
+        // otherwise TRUE/FALSE becomes 1/0 and loses its bool value/type.
+        const bool hasLeadingCte = startsWithKeyword(sql, "with");
+        if (hasLeadingCte) sql = sqlProcessor(rawSql, false);
         bool cteFailed = false;
         sql = processCTEs(sql, s, cteFailed);
         if (cteFailed) return true;
+
+        // Table-backed legacy evaluation historically consumes normalized
+        // booleans.  Reapply the standard preprocessing only on that path;
+        // a top-level FROM inside a scalar subquery does not count here.
+        if (hasLeadingCte &&
+            findTopLevelKeyword(sql, "from") != string::npos) {
+            sql = sqlProcessor(sql);
+        }
 
         // Process derived tables: (SELECT ...) AS alias
         sql = processDerivedTables(sql, s);
@@ -17261,7 +17275,8 @@ if (sql.rfind("backup database", 0) == 0) {
                     return true;
                 }
                 string arrVal;
-                if (!extractUnnestLiteral(rawSql, arrVal)) {
+                const string& fromlessSql = hasLeadingCte ? sql : rawSql;
+                if (!extractUnnestLiteral(fromlessSql, arrVal)) {
                     cout << "SQL syntax error" << endl;
                     return true;
                 }
@@ -17276,7 +17291,7 @@ if (sql.rfind("backup database", 0) == 0) {
                 op.close();
                 return false;
             }
-            return handleFromlessSelect(rawSql, s);
+            return handleFromlessSelect(hasLeadingCte ? sql : rawSql, s);
         }
         string columns = trim(sql.substr(6, fromPos - 6));
         // Single-table alias detection (early): "from t [as] a ..." -- strip

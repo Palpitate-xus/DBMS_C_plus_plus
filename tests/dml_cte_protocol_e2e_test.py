@@ -41,6 +41,10 @@ def main():
               "DELETE FROM dml_cte_rows WHERE id = 4 RETURNING id, txt) "
               "SELECT id, txt FROM deleted;"),
              [["4", None]], ["id", "txt"], [23, 25]),
+            (("WITH changed AS ("
+              "UPDATE dml_cte_rows SET txt = 'changed' WHERE id = 3) "
+              "SELECT 1 AS answer;"),
+             [["1"]], ["answer"], [23]),
         ]
         for sql, expected_rows, expected_headers, expected_types in cases:
             decoded = decode(runner, client, server, sql)
@@ -57,7 +61,7 @@ def main():
             "SELECT id, txt FROM dml_cte_rows ORDER BY id;")
         rows, state, message, headers, command_tag, type_oids = decoded
         assert state is None, (state, message)
-        assert rows == [["1", "c d"], ["2", ""], ["3", "NULL"]], rows
+        assert rows == [["1", "c d"], ["2", ""], ["3", "changed"]], rows
         assert headers == ["id", "txt"], headers
         assert type_oids == [23, 25], type_oids
         assert command_tag == "SELECT 3", command_tag

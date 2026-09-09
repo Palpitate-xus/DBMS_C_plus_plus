@@ -23,10 +23,29 @@ def main():
             ("SELECT (SELECT 'with data' FROM cte_boundary_rows) AS value "
              "FROM cte_boundary_rows;", [["with data"]]),
             ("WITH selected AS (SELECT id FROM cte_boundary_rows) SELECT id FROM selected;", [["1"]]),
+            (("WITH unused AS (SELECT id FROM cte_boundary_rows) "
+              "SELECT 1 AS answer;"), [["1"]]),
+            (("WITH unused AS (SELECT id FROM cte_boundary_rows) "
+              "SELECT 'a b'::text AS answer;"), [["a b"]]),
+            (("WITH unused AS (SELECT id FROM cte_boundary_rows) "
+              "SELECT unnest(ARRAY[1, 2]);"), [["1"], ["2"]]),
         ]:
             rows, state, message, _ = runner.ours_query(client, server["sock"], statement)
             assert state is None, (statement, state, message)
             assert rows == expected, (statement, rows, expected)
+
+        decoded = runner.decode_wire_result(
+            client.simple_query(
+                server["sock"],
+                "WITH unused AS (SELECT id FROM cte_boundary_rows) "
+                "SELECT true AS flag;"),
+            include_types=True)
+        rows, state, message, headers, command_tag, type_oids = decoded
+        assert state is None, (state, message)
+        assert rows == [["t"]], rows
+        assert headers == ["flag"], headers
+        assert command_tag == "SELECT 1", command_tag
+        assert type_oids == [16], type_oids
         print("[CTE CLAUSE BOUNDARY E2E] passed")
     finally:
         runner.stop_ours(server)
