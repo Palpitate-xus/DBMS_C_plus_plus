@@ -95,7 +95,7 @@ printf 'checkpoint_interval=1000000\n' > "$WORK/dbms.conf"
 # NOTE: run via exec so $! is the SERVER's pid, not a subshell's — a
 # mismatched pid leaves the real server alive holding wal.lock, which
 # stalls every later process opening the database directory.
-(cd "$WORK" && exec "$DBMS_MAIN" --server "$PORT" --insecure > "$WORK/server.log" 2>&1) &
+(cd "$WORK" && exec "$DBMS_MAIN" --data-dir "$WORK" --server "$PORT" --insecure > "$WORK/server.log" 2>&1) &
 SERVER_PID=$!
 
 # Wait for the accept loop to come up.

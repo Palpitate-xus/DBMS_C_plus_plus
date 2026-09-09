@@ -23,6 +23,7 @@
 #include "replication/LogicalDecoder.h"
 #include "storage/PageCrypto.h"
 #include "common/version.h"
+#include "common/DataDirectory.h"
 #include "common/FeatureGate.h"
 #include "common/NotificationManager.h"
 #include "replication/ReplicationManager.h"
@@ -45,6 +46,8 @@
 #include "process/MaintenanceJobManager.h"
 #include "access/IndexFileUtil.h"
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <optional>
 #include <stdexcept>
 
@@ -92,6 +95,25 @@ using dbms::makeIntervalColumn;
 using dbms::DBStatus;
 using dbms::StorageEngine;
 using dbms::TableSchema;
+
+namespace {
+[[maybe_unused]] const bool g_dataDirectoryBootstrapOk = [] {
+    // This check must happen before g_config and g_engine are constructed:
+    // both historically open relative paths during static initialization.
+    if (dbms::processArgumentsRequestVersion()) {
+        std::fprintf(stdout, "dbms %s\n", DBMS_VERSION_STRING);
+        std::fflush(stdout);
+        std::_Exit(0);
+    }
+    std::string error;
+    if (!dbms::bootstrapDataDirectory(error)) {
+        std::fprintf(stderr, "FATAL: %s\n", error.c_str());
+        std::fflush(stderr);
+        std::_Exit(1);
+    }
+    return true;
+}();
+}
 
 dbms::Config g_config;
 
@@ -24953,17 +24975,52 @@ int main(int argc, char* argv[]) {
     // Set locale for Unicode support
     std::setlocale(LC_CTYPE, "");
 
-    // --version / -V: print the release identity and exit before any
-    // engine/config side effects.
-    for (int i = 1; i < argc; ++i) {
-        const std::string arg = argv[i];
-        if (arg == "--version" || arg == "-V") {
-            std::cout << "dbms " << DBMS_VERSION_STRING << std::endl;
-            return 0;
-        }
-    }
-
     if (!g_initialConfigLoadOk) return 1;
+
+    bool serverMode = false;
+    bool allowPlaintext = false;
+    int serverPort = 0;
+    for (int i = 1; i < argc; ++i) {
+        const std::string argument = argv[i];
+        if (argument == "-D" || argument == "--data-dir") {
+            if (++i >= argc) {
+                std::cerr << argument << " requires a directory" << std::endl;
+                return 2;
+            }
+            continue;  // consumed during pre-global bootstrap
+        }
+        if (argument.rfind("--data-dir=", 0) == 0) continue;
+        if (argument == "--server") {
+            if (serverMode || ++i >= argc) {
+                std::cerr << "--server requires one port" << std::endl;
+                return 2;
+            }
+            try {
+                size_t consumed = 0;
+                const std::string value = argv[i];
+                const long parsed = std::stol(value, &consumed);
+                if (consumed != value.size() || parsed < 0 || parsed > 65535)
+                    throw std::out_of_range("port");
+                serverPort = static_cast<int>(parsed);
+            } catch (...) {
+                std::cerr << "invalid server port" << std::endl;
+                return 2;
+            }
+            serverMode = true;
+            continue;
+        }
+        if (argument == "--insecure") {
+            allowPlaintext = true;
+            continue;
+        }
+        if (argument == "--version" || argument == "-V") continue;
+        std::cerr << "Unknown option: " << argument << std::endl;
+        return 2;
+    }
+    if (allowPlaintext && !serverMode) {
+        std::cerr << "--insecure requires --server" << std::endl;
+        return 2;
+    }
 
     // Trigger actions run in the session that is currently executing SQL.
     // Install this before entering server mode; the old registration lived
@@ -25103,21 +25160,9 @@ int main(int argc, char* argv[]) {
         std::cout << "TDE enabled (keyring " << g_config.tdeKeyring << ")" << std::endl;
     }
 
-    // Server mode: ./dbms_main --server PORT [--insecure]
-    if (argc >= 3 && std::string(argv[1]) == "--server") {
-        int port = std::stoi(argv[2]);
-        bool allowPlaintext = false;
-        for (int i = 3; i < argc; ++i) {
-            if (std::string(argv[i]) == "--insecure") {
-                allowPlaintext = true;
-            } else {
-                std::cerr << "Unknown server option: " << argv[i]
-                          << " (supported: --insecure)" << std::endl;
-                return 2;
-            }
-        }
-        return dbms::startServer(port, allowPlaintext) ? 0 : 1;
-    }
+    // Server mode: ./dbms_main -D DATA_DIR --server PORT [--insecure]
+    if (serverMode)
+        return dbms::startServer(serverPort, allowPlaintext) ? 0 : 1;
 
     Session s;
     s.compatibilityMode = dbms::defaultCompatibilityMode();

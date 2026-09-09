@@ -676,7 +676,8 @@ def main():
         port = probe.getsockname()[1]
         probe.close()
         process = subprocess.Popen(
-            [DBMS_MAIN, "--server", str(port), "--insecure"],
+            [DBMS_MAIN, "--data-dir", work_dir,
+             "--server", str(port), "--insecure"],
             cwd=work_dir,
             # Parts of this regression exercise extended-mode project
             # commands (SET GLOBAL plan invalidation, DIV-11).
@@ -737,7 +738,8 @@ def main():
         # and independently configurable instead of racing the flush path.
         process.wait(timeout=SHUTDOWN_TIMEOUT)
         process = subprocess.Popen(
-            [DBMS_MAIN, "--server", str(port), "--insecure"],
+            [DBMS_MAIN, "--data-dir", work_dir,
+             "--server", str(port), "--insecure"],
             cwd=work_dir,
             env=dict(os.environ, DBMS_COMPATIBILITY_MODE="extended"),
             stdout=subprocess.DEVNULL,

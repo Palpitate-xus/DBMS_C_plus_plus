@@ -19,7 +19,8 @@ def main():
         Path(work_dir, ".replication_slots").write_text(
             "BROKEN_SLOT_STATE\n", encoding="utf-8")
         result = subprocess.run(
-            [DBMS_MAIN, "--server", "0", "--insecure"],
+            [DBMS_MAIN, "--data-dir", work_dir,
+             "--server", "0", "--insecure"],
             cwd=work_dir,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -36,7 +37,8 @@ def main():
             '"bad_plugin" "logical" "missing_plugin" "db" 0\n',
             encoding="utf-8")
         result = subprocess.run(
-            [DBMS_MAIN, "--server", "0", "--insecure"],
+            [DBMS_MAIN, "--data-dir", work_dir,
+             "--server", "0", "--insecure"],
             cwd=work_dir,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -53,7 +55,8 @@ def main():
             '"physical_invalidated" "physical" "" "" 0 1\n',
             encoding="utf-8")
         result = subprocess.run(
-            [DBMS_MAIN, "--server", "0", "--insecure"],
+            [DBMS_MAIN, "--data-dir", work_dir,
+             "--server", "0", "--insecure"],
             cwd=work_dir,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -70,7 +73,8 @@ def main():
             '"bad_flag" "logical" "dbms_test_decoding" "db" 0 2\n',
             encoding="utf-8")
         result = subprocess.run(
-            [DBMS_MAIN, "--server", "0", "--insecure"],
+            [DBMS_MAIN, "--data-dir", work_dir,
+             "--server", "0", "--insecure"],
             cwd=work_dir,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

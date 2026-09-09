@@ -503,7 +503,8 @@ def start_ours(client):
     port = probe.getsockname()[1]
     probe.close()
     process = subprocess.Popen(
-        [DBMS_MAIN, "--server", str(port), "--insecure"],
+        [DBMS_MAIN, "--data-dir", work_dir,
+         "--server", str(port), "--insecure"],
         cwd=work_dir,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL)
