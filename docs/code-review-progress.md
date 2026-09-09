@@ -301,6 +301,8 @@
 
 | 378 | DIV-02 | 默认 PostgreSQL 模式的 REPLACE 门控正确，但 extended 的冲突删除把 TableSchema 内部编码后的主键值当成第一主键列值：typed 单列主键也因尾部分隔符匹配不到，复合主键更无法表示；删除失败还被忽略。替换路径现在从 schema 收集主键、列/表级 UNIQUE、独立单列/复合唯一索引，对每个完整候选键生成真实多列谓词，删除任一失败即终止；外层 DML statement transaction 保证所有冲突删除和重插原子 | DIV E2E 用复合 PK + 单列 UNIQUE 构造一次替换同时删除两个冲突行，并验证后续多行 REPLACE 的非法 integer 使前一替换完全回滚；默认门控、O0/O2 main、完整协议与真实 PostgreSQL 差分 `cases=122 failed=0` 通过。DIV-02 complete | `c4eee82` |
 
+| 379 | DIV-03 | extended `LOAD DATA INFILE` 曾维护第二套 CSV importer：首行列数不符会被猜作表头跳过，后续坏行与插入错误也只累计 skipped，之前各行已经独立提交，最终仍假报成功。LOAD 现在严格解析 `file INTO TABLE name` 后改写到同一 `handleCopy`，共享 ACL、CSV codec、只读检查、事务/savepoint 原子回滚和错误码 | DIV E2E 验证默认 `42601`；extended 合法两行导入成功，另一个首行合法、第二行列数错误的文件返回 `22P04` 且首行完全回滚。main O0/O2、专项、完整协议与 PostgreSQL 差分 `cases=122 failed=0` 通过。DIV-03 complete | `6eed9d3` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。

@@ -948,6 +948,10 @@ DEALLOCATE PREPARE stmt;
 
 ## 20. 导入导出
 
+`LOAD DATA INFILE` 仅是 `extended` 模式中的严格 `COPY table FROM file`
+语法糖，复用相同权限、CSV 解码、SQLSTATE 和整语句回滚；它不会猜测表头或
+静默跳过坏行。默认 `postgresql18` 模式返回 `42601`，应直接使用 `COPY`。
+
 ```sql
 -- CSV 导入
 LOAD DATA INFILE 'data.csv' INTO TABLE users;
