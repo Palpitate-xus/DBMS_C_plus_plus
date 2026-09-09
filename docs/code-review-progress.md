@@ -211,6 +211,8 @@
 
 | 333 | P0-02 / PROTO-08 | 文本结果适配器没有识别执行器明确输出的 `22023 invalid_parameter_value` 标记，COPY 已正确撤销并报告该状态时，wire 层仍将其降级为 `XX000`。协议错误映射现在保留显式 `(SQLSTATE 22023)`，与已有 `25001`、`25006` 等精确分支一致 | 同一 COPY 自动提交和显式事务回归在修复前均稳定收到 `XX000`，修复后两处精确收到 `22023`，且数据/保存点原子性断言保持通过；完整 PostgreSQL 协议套件、隔离协议、Python 语法和 NetworkServer O0/O2 编译通过 | `c0c04f2` |
 
+| 334 | DML-06 / PROTO-08 | COPY CSV 行的字段数与表列数不同时，入口会把第一条坏行无条件猜成 header，并把后续坏行静默计为 skipped；这在没有 HEADER/ON_ERROR 选项时会继续提交合法行。默认 COPY 现在对首个 shape mismatch fail-fast，复用整句事务边界撤销全部输入行，并向协议返回 `22P04 bad_copy_file_format` | `1 / 2,ok` 导入两列表的协议复现修复前跳过首行、提交第二行并返回成功；修复后精确返回 `22P04` 且目标表为空。完整隔离协议、Python 语法及 `main.cpp`/NetworkServer O0/O2 编译通过 | `55fac94` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF / UDF 及二进制值仍存在显示文本边界，继续计入总清单。
