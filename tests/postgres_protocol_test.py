@@ -1860,11 +1860,15 @@ def main():
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "CREATE TABLE sub_inner (id INT, enabled INT)"))
         assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE sub_text (id INT, value TEXT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
             sock, "INSERT INTO sub_outer VALUES (1), (2), (3), (4)"))
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "INSERT INTO sub_inner VALUES (2, 1), (3, 1)"))
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "INSERT INTO sub_inner (enabled) VALUES (1)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO sub_text VALUES (2, ''), (3, 'NULL'), (4, NULL)"))
         semi_rows = data_row_values(simple_query(
             sock, "SELECT id FROM sub_outer "
             "WHERE id IN (SELECT id FROM sub_inner WHERE enabled = 1)"))
@@ -1937,6 +1941,26 @@ def main():
             "FROM sub_outer"))
         assert scalar_null_rows == [[b"1", None], [b"2", None],
                                     [b"3", None], [b"4", None]], scalar_null_rows
+        scalar_empty_text_rows = data_row_values(simple_query(
+            sock, "SELECT id, (SELECT value FROM sub_text WHERE id = 2) "
+            "FROM sub_outer"))
+        assert scalar_empty_text_rows == [[b"1", b""], [b"2", b""],
+                                          [b"3", b""], [b"4", b""]], scalar_empty_text_rows
+        scalar_null_text_rows = data_row_values(simple_query(
+            sock, "SELECT id, (SELECT value FROM sub_text WHERE id = 3) "
+            "FROM sub_outer"))
+        assert scalar_null_text_rows == [[b"1", b"NULL"], [b"2", b"NULL"],
+                                         [b"3", b"NULL"], [b"4", b"NULL"]], scalar_null_text_rows
+        scalar_sql_null_rows = data_row_values(simple_query(
+            sock, "SELECT id, (SELECT value FROM sub_text WHERE id = 4) "
+            "FROM sub_outer"))
+        assert scalar_sql_null_rows == [[b"1", None], [b"2", None],
+                                        [b"3", None], [b"4", None]], scalar_sql_null_rows
+        scalar_first_rows = data_row_values(simple_query(
+            sock, "SELECT (SELECT value FROM sub_text WHERE id = 3), id "
+            "FROM sub_outer"))
+        assert scalar_first_rows == [[b"NULL", b"1"], [b"NULL", b"2"],
+                                     [b"NULL", b"3"], [b"NULL", b"4"]], scalar_first_rows
         scalar_multi_messages = simple_query(
             sock, "SELECT id, (SELECT id FROM sub_inner WHERE enabled = 1) "
             "FROM sub_outer")

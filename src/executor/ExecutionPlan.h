@@ -558,6 +558,9 @@ public:
 
     bool open() override;
     bool next(std::string& outRow) override;
+    bool supportsStructuredRows() const override { return true; }
+    bool lastStructuredRow(std::vector<std::string>& cells,
+                           std::vector<bool>& nulls) const override;
     void close() override;
     Operator* outerChild() const { return outer_.get(); }
     Operator* innerChild() const { return inner_.get(); }
@@ -572,6 +575,8 @@ private:
     std::string innerColumn_;
     std::string scalarValue_;
     bool scalarIsNull_ = true;
+    std::vector<std::string> lastCells_;
+    std::vector<bool> lastNulls_;
 };
 
 // ========================================================================

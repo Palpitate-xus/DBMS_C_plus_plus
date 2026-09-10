@@ -630,6 +630,7 @@ static void test_semi_and_anti_join() {
     dbms::DdlExecutor ddl;
     assert(!ddl.executeSql("CREATE TABLE outer_t (id INT, payload INT)", s));
     assert(!ddl.executeSql("CREATE TABLE inner_t (id INT, enabled INT)", s));
+    assert(!ddl.executeSql("CREATE TABLE inner_text (id INT, value TEXT)", s));
     assert(!ddl.executeSql("CREATE TABLE clean_inner_t (id INT NOT NULL)", s));
 
     insertRow(db, "outer_t", {{"id", "1"}, {"payload", "10"}});
@@ -640,6 +641,15 @@ static void test_semi_and_anti_join() {
     insertRow(db, "inner_t", {{"id", "3"}, {"enabled", "1"}});
     // Omitting a nullable column creates a SQL NULL key.
     insertRow(db, "inner_t", {{"enabled", "1"}});
+    assert(g_engine.insertRow(
+        db, "inner_text", {{"id", "1"}, {"value", ""}}) ==
+        dbms::DBStatus::OK);
+    assert(g_engine.insertRow(
+        db, "inner_text", {{"id", "2"}, {"value", "NULL"}}) ==
+        dbms::DBStatus::OK);
+    assert(g_engine.insertRow(
+        db, "inner_text", {{"id", "3"}, {"value", std::nullopt}}) ==
+        dbms::DBStatus::OK);
     insertRow(db, "clean_inner_t", {{"id", "2"}});
     insertRow(db, "clean_inner_t", {{"id", "3"}});
 
@@ -763,17 +773,67 @@ static void test_semi_and_anti_join() {
     auto scalarPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, scalarCtx);
     auto* scalar = dynamic_cast<dbms::ScalarSubqueryProjectOp*>(scalarPlan.get());
     assert(scalar);
-    auto scalarRows = executePlanRows(std::move(scalarPlan));
-    assert((scalarRows == std::vector<std::string>{
+    auto scalarResult = dbms::QueryPlanner::executePlanChecked(
+        std::move(scalarPlan));
+    assert(scalarResult.ok && scalarResult.structuredRowsAvailable);
+    assert((scalarResult.rows == std::vector<std::string>{
         "1 2 ", "2 2 ", "3 2 ", "4 2 "}));
+    assert((scalarResult.structuredRows ==
+            std::vector<std::vector<std::string>>{
+                {"1", "2"}, {"2", "2"}, {"3", "2"}, {"4", "2"}}));
+    assert((scalarResult.structuredNulls ==
+            std::vector<std::vector<bool>>{
+                {false, false}, {false, false},
+                {false, false}, {false, false}}));
 
     scalarCtx.scalarSubquery.innerConds =
         dbms::StorageEngine::parseConditions({"=id 9"});
-    auto nullScalarRows = executePlanRows(
+    auto nullScalarResult = dbms::QueryPlanner::executePlanChecked(
         dbms::QueryPlanner::buildSelectPlan(&g_engine, scalarCtx));
-    assert((nullScalarRows == std::vector<std::string>{
+    assert(nullScalarResult.ok && nullScalarResult.structuredRowsAvailable);
+    assert((nullScalarResult.rows == std::vector<std::string>{
         "1 NULL ", "2 NULL ", "3 NULL ", "4 NULL "}));
+    assert((nullScalarResult.structuredRows ==
+            std::vector<std::vector<std::string>>{
+                {"1", ""}, {"2", ""}, {"3", ""}, {"4", ""}}));
+    assert((nullScalarResult.structuredNulls ==
+            std::vector<std::vector<bool>>{
+                {false, true}, {false, true},
+                {false, true}, {false, true}}));
 
+    scalarCtx.scalarSubquery.tablename = "inner_text";
+    scalarCtx.scalarSubquery.column = "value";
+    scalarCtx.scalarSubquery.innerConds =
+        dbms::StorageEngine::parseConditions({"=id 1"});
+    auto emptyTextResult = dbms::QueryPlanner::executePlanChecked(
+        dbms::QueryPlanner::buildSelectPlan(&g_engine, scalarCtx));
+    assert(emptyTextResult.ok && emptyTextResult.structuredRowsAvailable);
+    assert((emptyTextResult.structuredRows ==
+            std::vector<std::vector<std::string>>{
+                {"1", ""}, {"2", ""}, {"3", ""}, {"4", ""}}));
+    assert((emptyTextResult.structuredNulls ==
+            std::vector<std::vector<bool>>{
+                {false, false}, {false, false},
+                {false, false}, {false, false}}));
+
+    scalarCtx.scalarSubquery.innerConds =
+        dbms::StorageEngine::parseConditions({"=id 2"});
+    auto nullTextResult = dbms::QueryPlanner::executePlanChecked(
+        dbms::QueryPlanner::buildSelectPlan(&g_engine, scalarCtx));
+    assert(nullTextResult.ok && nullTextResult.structuredRowsAvailable);
+    assert(nullTextResult.structuredRows.front()[1] == "NULL");
+    assert(!nullTextResult.structuredNulls.front()[1]);
+
+    scalarCtx.scalarSubquery.innerConds =
+        dbms::StorageEngine::parseConditions({"=id 3"});
+    auto sqlNullResult = dbms::QueryPlanner::executePlanChecked(
+        dbms::QueryPlanner::buildSelectPlan(&g_engine, scalarCtx));
+    assert(sqlNullResult.ok && sqlNullResult.structuredRowsAvailable);
+    assert(sqlNullResult.structuredRows.front()[1].empty());
+    assert(sqlNullResult.structuredNulls.front()[1]);
+
+    scalarCtx.scalarSubquery.tablename = "inner_t";
+    scalarCtx.scalarSubquery.column = "id";
     scalarCtx.scalarSubquery.innerConds =
         dbms::StorageEngine::parseConditions({"=enabled 1"});
     auto multiScalarPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, scalarCtx);

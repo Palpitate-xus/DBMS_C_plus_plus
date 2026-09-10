@@ -21818,6 +21818,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
         // support (inheritance, FOR UPDATE, DISTINCT ON, NOWAIT/SKIP LOCKED, etc.),
         // in which case the caller falls back to g_engine.query().
         bool volcanoExecutionError = false;
+        vector<vector<string>> volcanoStructuredRows;
+        vector<vector<bool>> volcanoStructuredNulls;
+        bool volcanoStructuredAvailable = false;
         auto executeVolcanoSelect = [&](const std::string& tblName,
                                          const std::set<std::string>& projCols,
                                          const std::vector<std::vector<std::string>>& condGroups,
@@ -21827,6 +21830,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                          const std::vector<dbms::ExistenceSpec>& existenceSubqueries,
                                          const std::vector<dbms::QuantifiedSubquerySpec>& quantifiedSubqueries,
                                          std::vector<std::string>& outAnswers) -> bool {
+            volcanoStructuredRows.clear();
+            volcanoStructuredNulls.clear();
+            volcanoStructuredAvailable = false;
             // Fall back when the volcano path cannot yet handle the query.
             if (forUpdate || noWait || skipLocked) return false;
             if (!distinctOnCols.empty()) return false;
@@ -21915,32 +21921,18 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 if (!branches.empty()) ctx.conds = std::move(branches.front());
                 plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
             }
-            if (auto* scalarPlan = dynamic_cast<dbms::ScalarSubqueryProjectOp*>(plan.get())) {
-                if (!scalarPlan->open()) {
-                    if (!scalarPlan->errorMessage().empty()) {
-                        volcanoExecutionError = true;
-                        cout << "ERROR: " << scalarPlan->errorMessage() << endl;
-                        return true;
-                    }
-                    return false;
-                }
-                string row;
-                while (scalarPlan->next(row)) outAnswers.push_back(row);
-                if (scalarPlan->hasError()) {
-                    volcanoExecutionError = true;
-                    cout << "ERROR: " << scalarPlan->errorMessage() << endl;
-                    scalarPlan->close();
-                    return true;
-                }
-                scalarPlan->close();
-            } else {
-                auto execution = dbms::QueryPlanner::executePlanChecked(std::move(plan));
-                if (!execution.ok) {
-                    volcanoExecutionError = true;
-                    cout << "ERROR: " << execution.error << endl;
-                    return true;
-                }
-                outAnswers = std::move(execution.rows);
+            auto execution = dbms::QueryPlanner::executePlanChecked(
+                std::move(plan));
+            if (!execution.ok) {
+                volcanoExecutionError = true;
+                cout << "ERROR: " << execution.error << endl;
+                return true;
+            }
+            outAnswers = std::move(execution.rows);
+            if (execution.structuredRowsAvailable) {
+                volcanoStructuredRows = std::move(execution.structuredRows);
+                volcanoStructuredNulls = std::move(execution.structuredNulls);
+                volcanoStructuredAvailable = true;
             }
             return true;
         };
@@ -24023,9 +24015,37 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
             }
             if (scalarVolcanoUsed) {
+                if (volcanoExecutionError) return true;
+                if (shouldPublishQueryMetadata()) {
+                    const size_t width = projectionTargets.size();
+                    bool exact = volcanoStructuredAvailable &&
+                        volcanoStructuredRows.size() == answers.size() &&
+                        volcanoStructuredNulls.size() == answers.size() &&
+                        structuredScalarResult.columns.size() == width &&
+                        structuredScalarResult.columnTypes.size() == width;
+                    for (size_t i = 0; exact && i < answers.size(); ++i) {
+                        exact = volcanoStructuredRows[i].size() == width &&
+                                volcanoStructuredNulls[i].size() == width;
+                    }
+                    if (!exact) {
+                        cout << "ERROR: scalar subquery lost structured result metadata"
+                             << endl;
+                        return true;
+                    }
+                    structuredScalarResult.available = true;
+                    structuredScalarResult.metadataOnly = false;
+                    structuredScalarResult.rows =
+                        std::move(volcanoStructuredRows);
+                    structuredScalarResult.nulls =
+                        std::move(volcanoStructuredNulls);
+                    structuredScalarResult.commandTag =
+                        "SELECT " + std::to_string(answers.size());
+                    dbms::publishLastDmlResult(
+                        std::move(structuredScalarResult));
+                }
                 // PG projection order for plain columns (see the final
                 // print path): permute cells out of table order.
-                if (!projectionOrder.empty() && !projectionOrder.empty()) {
+                if (!projectionOrder.empty()) {
                     vector<string> want;
                     for (const auto& po : projectionOrder) {
                         string wantName = po;

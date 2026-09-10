@@ -6,6 +6,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 extern dbms::StorageEngine g_engine;
@@ -42,6 +43,21 @@ int main() {
         expression.funcArgs = {"select " + target + " from inner_rows"};
         return g_engine.queryExpr(database, outer.tablename, {}, {expression});
     };
+    auto projectStructured = [&](const std::string& target) {
+        dbms::StorageEngine::SelectExpr expression;
+        expression.displayName = "value";
+        expression.isScalar = true;
+        expression.funcName = "subquery";
+        expression.funcArgs = {"select " + target + " from inner_rows"};
+        std::vector<std::vector<std::string>> rows;
+        std::vector<std::vector<bool>> nulls;
+        (void)g_engine.queryExpr(database, outer.tablename, {}, {expression},
+                                 {}, &rows, &nulls);
+        assert(rows.size() == 1 && rows.front().size() == 1);
+        assert(nulls.size() == 1 && nulls.front().size() == 1);
+        return std::make_pair(rows.front().front(),
+                              static_cast<bool>(nulls.front().front()));
+    };
     assert((project("1") == std::vector<std::string>{"1 "}));
     assert((project("id + 2") == std::vector<std::string>{"11 "}));
     assert((project("inner_rows.id") == std::vector<std::string>{"9 "}));
@@ -52,6 +68,12 @@ int main() {
     assert((project("null_text IS NULL") == std::vector<std::string>{"f "}));
     assert((project("null_value IS NULL") == std::vector<std::string>{"t "}));
     assert((project("null_value") == std::vector<std::string>{"NULL "}));
+    assert(projectStructured("null_text") ==
+           std::make_pair(std::string("NULL"), false));
+    assert(projectStructured("null_value") ==
+           std::make_pair(std::string(), true));
+    assert(projectStructured("empty_value") ==
+           std::make_pair(std::string(), false));
 
     assert(g_engine.beginTransaction(database, false) == dbms::DBStatus::OK);
     assert(g_engine.update(database, inner.tablename, {{"id", "10"}}, {"=id 9"}) ==

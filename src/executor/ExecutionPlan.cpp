@@ -1301,6 +1301,8 @@ bool ScalarSubqueryProjectOp::open() {
     clearError();
     scalarValue_.clear();
     scalarIsNull_ = true;
+    lastCells_.clear();
+    lastNulls_.clear();
 
     size_t innerIdx = innerTbl_.len;
     for (size_t i = 0; i < innerTbl_.len; ++i) {
@@ -1317,8 +1319,7 @@ bool ScalarSubqueryProjectOp::open() {
 
     std::string row;
     if (inner_->next(row)) {
-        scalarIsNull_ = inner_->lastColumnIsNull(innerIdx) ||
-                        rawColumnIsNull(row, innerTbl_, innerIdx);
+        scalarIsNull_ = inner_->lastColumnIsNull(innerIdx);
         if (!scalarIsNull_) {
             scalarValue_ = StorageEngine::extractColumnValueStatic(
                 row, innerTbl_, innerIdx);
@@ -1347,10 +1348,16 @@ bool ScalarSubqueryProjectOp::next(std::string& outRow) {
     }
 
     outRow.clear();
+    lastCells_.clear();
+    lastNulls_.clear();
+    lastCells_.reserve(targets_.size());
+    lastNulls_.reserve(targets_.size());
     for (const auto& target : targets_) {
         std::string value;
+        bool isNull = false;
         if (target.isScalar) {
-            value = scalarIsNull_ ? "NULL" : scalarValue_;
+            isNull = scalarIsNull_;
+            value = isNull ? "NULL" : scalarValue_;
         } else {
             size_t outerIdx = outerTbl_.len;
             for (size_t i = 0; i < outerTbl_.len; ++i) {
@@ -1363,10 +1370,12 @@ bool ScalarSubqueryProjectOp::next(std::string& outRow) {
                 setError("scalar projection column does not exist");
                 return false;
             }
-            const bool isNull = rawColumnIsNull(row, outerTbl_, outerIdx);
+            isNull = outer_->lastColumnIsNull(outerIdx);
             value = isNull ? "NULL" :
                 StorageEngine::extractColumnValueStatic(row, outerTbl_, outerIdx);
         }
+        lastCells_.push_back(isNull ? std::string{} : value);
+        lastNulls_.push_back(isNull);
         outRow += value;
         outRow += ' ';
     }
@@ -1374,8 +1383,21 @@ bool ScalarSubqueryProjectOp::next(std::string& outRow) {
     return true;
 }
 
+bool ScalarSubqueryProjectOp::lastStructuredRow(
+    std::vector<std::string>& cells, std::vector<bool>& nulls) const {
+    if (lastCells_.size() != targets_.size() ||
+        lastNulls_.size() != targets_.size()) {
+        return false;
+    }
+    cells = lastCells_;
+    nulls = lastNulls_;
+    return true;
+}
+
 void ScalarSubqueryProjectOp::close() {
     outer_->close();
+    lastCells_.clear();
+    lastNulls_.clear();
 }
 
 // ========================================================================

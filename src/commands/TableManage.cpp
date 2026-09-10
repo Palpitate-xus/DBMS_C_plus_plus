@@ -19395,7 +19395,8 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                                     const std::string& rowBuffer,
                                     const TableSchema& tbl,
                                     StorageEngine* engine,
-                                    const std::string& dbname);
+                                    const std::string& dbname,
+                                    std::optional<bool>* knownNull = nullptr);
 bool StorageEngine::evalConditionOnRow(const Condition& cond,
                                         const std::string& rowBuffer, const TableSchema& tbl) {
     if (cond.colName == "__true__") return true;
@@ -27999,8 +28000,10 @@ static bool scalarArgColumnIsNull(const std::string& arg,
 static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                                     const std::string& rowBuffer,
                                     const TableSchema& tbl,
-                                    StorageEngine* engine = nullptr,
-                                    const std::string& dbname = "") {
+                                    StorageEngine* engine,
+                                    const std::string& dbname,
+                                    std::optional<bool>* knownNull) {
+    if (knownNull) knownNull->reset();
     auto scaleOf = [](const std::string& v) -> int {
         size_t dot = v.find('.');
         if (dot == std::string::npos) return -1;
@@ -31072,7 +31075,10 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 }
                 orderExpressions.push_back(key);
             }
-            if (projection->limit && *projection->limit == 0) return "NULL";
+            if (projection->limit && *projection->limit == 0) {
+                if (knownNull) *knownNull = true;
+                return "NULL";
+            }
             size_t remainingOffset = projection->offset.value_or(0);
             const size_t take = std::min<size_t>(2, projection->limit.value_or(2));
             struct ScalarCandidate {
@@ -31251,8 +31257,11 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     "more than one row returned by a subquery used as an "
                     "expression");
             }
-            if (scalarRows.empty() || scalarRows.front().second)
+            if (scalarRows.empty() || scalarRows.front().second) {
+                if (knownNull) *knownNull = true;
                 return "NULL";
+            }
+            if (knownNull) *knownNull = false;
             return scalarRows.front().first;
         }
 
@@ -31268,7 +31277,10 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 "more than one row returned by a subquery used as an "
                 "expression");
         }
-        if (rows.empty()) return "NULL";
+        if (rows.empty()) {
+            if (knownNull) *knownNull = true;
+            return "NULL";
+        }
         std::string firstRow = rows.front();
         // query() appends exactly one output-field delimiter. This scalar
         // path selects one column, so removing the first space would truncate
@@ -31736,10 +31748,12 @@ std::vector<std::string> StorageEngine::queryExpr(
             valNulls.reserve(exprs.size());
             for (const auto& expr : exprs) {
                 if (expr.isScalar) {
+                    std::optional<bool> knownNull;
                     const std::string value =
-                        applyScalarFunc(expr, mr.second, tbl, this, dbname);
+                        applyScalarFunc(expr, mr.second, tbl, this, dbname,
+                                        &knownNull);
                     vals.push_back(value);
-                    valNulls.push_back(value == "NULL");
+                    valNulls.push_back(knownNull.value_or(value == "NULL"));
                 } else {
                     std::string v;
                     bool valueIsNull = false;
@@ -31802,8 +31816,11 @@ std::vector<std::string> StorageEngine::queryExpr(
                 std::string val;
                 bool valueIsNull = false;
                 if (expr.isScalar) {
-                    val = applyScalarFunc(expr, mr.second, tbl, this, dbname);
-                    if (val == "NULL") {
+                    std::optional<bool> knownNull;
+                    val = applyScalarFunc(expr, mr.second, tbl, this, dbname,
+                                          &knownNull);
+                    if (knownNull.has_value()) valueIsNull = *knownNull;
+                    if (!knownNull.has_value() && val == "NULL") {
                         std::map<std::string, std::string> rowContext;
                         std::map<std::string, std::string> typeHints;
                         std::set<std::string> nullColumns;
