@@ -124,9 +124,8 @@ static void test_named_enum_alter_updates_dependent_schemas() {
     assert(g_engine.insert(db, "tasks", {{"id", "3"}, {"p", "medium"}}) ==
            dbms::DBStatus::OK);
 
-    // Renaming an unused label is safe and immediately updates every
-    // dependent table.  Removing an in-use label fails before either the
-    // enum catalog or any table schema is published.
+    // Renaming updates every dependent table and rewrites rows that carry the
+    // old text-backed value as one engine transaction.
     priority.labels.back() = "urgent";
     assert(g_engine.updateEnumType(db, priority) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "tasks", {{"id", "4"}, {"p", "urgent"}}) ==
@@ -157,14 +156,16 @@ static void test_named_enum_alter_updates_dependent_schemas() {
     volcanoSort.close();
     assert((volcanoOrder == std::vector<std::string>{"1", "3", "2", "4"}));
 
-    const auto beforeRejectedRename = priority;
     priority.labels.front() = "minor";
-    assert(g_engine.updateEnumType(db, priority) ==
+    assert(g_engine.updateEnumType(db, priority) == dbms::DBStatus::OK);
+    assert(g_engine.getEnumType(db, "priority").labels == priority.labels);
+    const auto renamedSchema = g_engine.getTableSchema(db, "tasks");
+    assert(renamedSchema.cols[1].enumValues == priority.labels);
+    assert(g_engine.insert(db, "tasks", {{"id", "5"}, {"p", "low"}}) ==
            dbms::DBStatus::INVALID_VALUE);
-    assert(g_engine.getEnumType(db, "priority").labels ==
-           beforeRejectedRename.labels);
-    const auto unchangedSchema = g_engine.getTableSchema(db, "tasks");
-    assert(unchangedSchema.cols[1].enumValues == beforeRejectedRename.labels);
+    const auto renamedRows = g_engine.query(
+        db, "tasks", {"=id 1"}, {"p"});
+    assert((renamedRows == std::vector<std::string>{"minor "}));
 
     cleanup(db);
     std::cout << "[ENUM] dependent schema updates OK" << std::endl;

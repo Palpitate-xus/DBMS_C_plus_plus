@@ -43825,6 +43825,7 @@ DBStatus StorageEngine::updateEnumType(const std::string& dbname, const EnumType
     if (!exists) return DBStatus::TABLE_NOT_FOUND;
     std::vector<EnumType> types;
     if (!loadEnumTypes(path, types)) return DBStatus::IO_ERROR;
+    const std::vector<EnumType> originalTypes = types;
     EnumType previous;
     size_t identicalPreviousDefinitions = 0;
     for (auto& type : types) {
@@ -43834,6 +43835,19 @@ DBStatus StorageEngine::updateEnumType(const std::string& dbname, const EnumType
         }
     }
     if (previous.name.empty()) return DBStatus::TABLE_NOT_FOUND;
+    std::optional<std::pair<std::string, std::string>> renamedLabel;
+    if (previous.labels.size() == et.labels.size()) {
+        for (size_t labelIndex = 0; labelIndex < et.labels.size();
+             ++labelIndex) {
+            if (previous.labels[labelIndex] == et.labels[labelIndex]) continue;
+            if (renamedLabel) {
+                renamedLabel.reset();
+                break;
+            }
+            renamedLabel = std::make_pair(previous.labels[labelIndex],
+                                          et.labels[labelIndex]);
+        }
+    }
     for (const auto& type : types) {
         if (type.name != et.name && type.labels == previous.labels) {
             ++identicalPreviousDefinitions;
@@ -43845,6 +43859,7 @@ DBStatus StorageEngine::updateEnumType(const std::string& dbname, const EnumType
         TableSchema original;
         TableSchema updated;
         std::vector<size_t> columns;
+        std::map<int64_t, std::map<std::string, std::string>> renamedRows;
         std::string originalBytes;
         std::string updatedBytes;
     };
@@ -43890,15 +43905,24 @@ DBStatus StorageEngine::updateEnumType(const std::string& dbname, const EnumType
         rewrites.push_back(std::move(rewrite));
     }
 
-    // Lock every dependent relation in deterministic order.  Removing or
-    // renaming an in-use label cannot merely rewrite schema metadata: rows
-    // would then contain values that the column rejects.  Until enum values
-    // have stable physical IDs, fail closed before publishing any file.
+    // A label rename must update the current text-backed heap representation
+    // in the same engine transaction. Begin before taking table locks so the
+    // database/table lock order matches normal DML. ADD VALUE and pure order
+    // changes do not rewrite heap rows.
+    const bool ownsRenameTransaction = renamedLabel && !rewrites.empty();
+    if (ownsRenameTransaction) {
+        if (transactionContext().inTransaction) return DBStatus::INVALID_VALUE;
+        const DBStatus beginStatus = beginTransaction(dbname);
+        if (beginStatus != DBStatus::OK) return beginStatus;
+    }
+
+    // Lock every dependent relation in deterministic table-list order.
     std::vector<std::string> lockedTables;
     for (const auto& rewrite : rewrites) {
         if (!lockManager_.lockExclusive(rewrite.tableName)) {
             for (auto it = lockedTables.rbegin(); it != lockedTables.rend(); ++it)
                 lockManager_.unlock(*it);
+            if (ownsRenameTransaction) (void)rollbackTransaction();
             return DBStatus::LOCK_CONFLICT;
         }
         lockedTables.push_back(rewrite.tableName);
@@ -43910,7 +43934,7 @@ DBStatus StorageEngine::updateEnumType(const std::string& dbname, const EnumType
     };
     const std::unordered_set<std::string> newLabels(et.labels.begin(),
                                                     et.labels.end());
-    for (const auto& rewrite : rewrites) {
+    for (auto& rewrite : rewrites) {
         bool invalidStoredValue = false;
         if (!forEachRow(
                 dbname, rewrite.tableName,
@@ -43928,19 +43952,36 @@ DBStatus StorageEngine::updateEnumType(const std::string& dbname, const EnumType
                         const std::string value = extractColumnValue(
                             row, rewrite.original, columnIndex, dbname, true);
                         if (newLabels.count(value) == 0) {
-                            invalidStoredValue = true;
-                            return;
+                            if (renamedLabel &&
+                                value == renamedLabel->first) {
+                                rewrite.renamedRows[rid][
+                                    rewrite.original.cols[columnIndex].dataName] =
+                                    renamedLabel->second;
+                            } else {
+                                invalidStoredValue = true;
+                                return;
+                            }
                         }
                     }
                 })) {
+            if (ownsRenameTransaction) (void)rollbackTransaction();
             unlockTables();
             return DBStatus::IO_ERROR;
         }
         if (invalidStoredValue) {
+            if (ownsRenameTransaction) (void)rollbackTransaction();
             unlockTables();
             return DBStatus::INVALID_VALUE;
         }
     }
+
+    auto restoreSchemas = [&]() {
+        for (const auto& rewrite : rewrites) {
+            index_file::writeAtomically(schemaPath(dbname, rewrite.tableName),
+                                        rewrite.originalBytes);
+            invalidateCatalogSchema(dbname, rewrite.tableName);
+        }
+    };
 
     size_t publishedSchemas = 0;
     for (; publishedSchemas < rewrites.size(); ++publishedSchemas) {
@@ -43957,18 +43998,52 @@ DBStatus StorageEngine::updateEnumType(const std::string& dbname, const EnumType
                                         prior.originalBytes);
             invalidateCatalogSchema(dbname, prior.tableName);
         }
+        if (ownsRenameTransaction) (void)rollbackTransaction();
         unlockTables();
         return DBStatus::IO_ERROR;
     }
 
-    if (!index_file::writeAtomically(path, serializeEnumTypes(types))) {
-        for (const auto& rewrite : rewrites) {
-            index_file::writeAtomically(schemaPath(dbname, rewrite.tableName),
-                                        rewrite.originalBytes);
-            invalidateCatalogSchema(dbname, rewrite.tableName);
+    // The new schema admits the replacement label. Rewrite each affected
+    // physical row once, combining multiple enum columns in that row so a
+    // versioned UPDATE never tries to revisit an already superseded RID.
+    for (const auto& rewrite : rewrites) {
+        ReferentialActionContext referentialContext;
+        for (const auto& [rid, updates] : rewrite.renamedRows) {
+            const std::set<int64_t> exactRid{rid};
+            size_t affectedRows = 0;
+            const DBStatus status = updateInternal(
+                dbname, rewrite.tableName, updates, {}, {}, nullptr, {}, {},
+                &exactRid, referentialContext, &affectedRows);
+            if (status != DBStatus::OK || affectedRows != 1) {
+                if (ownsRenameTransaction) (void)rollbackTransaction();
+                restoreSchemas();
+                unlockTables();
+                return status == DBStatus::OK ? DBStatus::CORRUPTED_DATA
+                                              : status;
+            }
         }
+    }
+
+    if (!index_file::writeAtomically(path, serializeEnumTypes(types))) {
+        // writeAtomically may report a directory-fsync failure after rename;
+        // restore the target as well as the heap transaction and schemas.
+        index_file::writeAtomically(path, serializeEnumTypes(originalTypes));
+        if (ownsRenameTransaction) (void)rollbackTransaction();
+        restoreSchemas();
         unlockTables();
         return DBStatus::IO_ERROR;
+    }
+    if (ownsRenameTransaction) {
+        const DBStatus commitStatus = commitTransaction();
+        if (commitStatus != DBStatus::OK) {
+            if (transactionContext().inTransaction)
+                (void)rollbackTransaction();
+            index_file::writeAtomically(path,
+                                        serializeEnumTypes(originalTypes));
+            restoreSchemas();
+            unlockTables();
+            return commitStatus;
+        }
     }
     unlockTables();
     return DBStatus::OK;
