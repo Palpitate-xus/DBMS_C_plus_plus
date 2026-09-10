@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cctype>
 #include <filesystem>
+#include <functional>
 #include <future>
 #include <iomanip>
 #include <iostream>
@@ -42,6 +43,7 @@
 #include "commands/DdlExecutor.h"
 #include "commands/DmlExecutor.h"
 #include "catalog/CatalogService.h"
+#include "catalog/type_registry.h"
 #include "process/SqlStats.h"
 #include "process/RuntimeStats.h"
 #include "process/OutputCapture.h"
@@ -1202,6 +1204,42 @@ static vector<string> splitFuncArgs(const string& s) {
 
 static vector<string> splitTopLevelComma(const string& s);
 
+static bool isStandaloneValuesTypedLiteral(const string& expression) {
+    const string value = trim(expression);
+    size_t keywordEnd = 0;
+    while (keywordEnd < value.size() &&
+           isalpha(static_cast<unsigned char>(value[keywordEnd]))) {
+        ++keywordEnd;
+    }
+    string keyword = value.substr(0, keywordEnd);
+    for (char& c : keyword) {
+        c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    }
+    static const set<string> typedLiteralKeywords = {
+        "boolean", "date", "interval", "numeric", "time",
+        "timestamp", "timestamptz"
+    };
+    if (!typedLiteralKeywords.count(keyword) || keywordEnd == value.size() ||
+        !isspace(static_cast<unsigned char>(value[keywordEnd]))) {
+        return false;
+    }
+    size_t quote = keywordEnd;
+    while (quote < value.size() &&
+           isspace(static_cast<unsigned char>(value[quote]))) {
+        ++quote;
+    }
+    if (quote >= value.size() || value[quote] != '\'') return false;
+    for (size_t i = quote + 1; i < value.size(); ++i) {
+        if (value[i] != '\'') continue;
+        if (i + 1 < value.size() && value[i + 1] == '\'') {
+            ++i;
+            continue;
+        }
+        return i + 1 == value.size();
+    }
+    return false;
+}
+
 static bool parseValuesRows(const string& valuesPart,
                             vector<vector<string>>& rows,
                             string& error) {
@@ -1232,10 +1270,14 @@ static bool parseValuesRows(const string& valuesPart,
                 continue;
             }
             if (!inQuote) {
-                if (c == '(') {
+                if (c == '(' || c == '[') {
                     ++parenDepth;
-                } else if (c == ')') {
+                } else if (c == ')' || c == ']') {
                     if (parenDepth == 0) {
+                        if (c != ')') {
+                            error = "SQL syntax error: unmatched bracket in VALUES row";
+                            return false;
+                        }
                         closed = true;
                         ++i;
                         break;
@@ -1251,7 +1293,10 @@ static bool parseValuesRows(const string& valuesPart,
         }
 
         vector<string> cells = splitTopLevelComma(inner);
-        if (cells.empty()) {
+        if (cells.empty() ||
+            any_of(cells.begin(), cells.end(), [](const string& cell) {
+                return trim(cell).empty();
+            })) {
             error = "SQL syntax error: VALUES row cannot be empty";
             return false;
         }
@@ -1270,6 +1315,14 @@ static bool parseValuesRows(const string& valuesPart,
             return false;
         }
         ++i;
+        while (i < valuesPart.size() &&
+               isspace(static_cast<unsigned char>(valuesPart[i]))) {
+            ++i;
+        }
+        if (i >= valuesPart.size()) {
+            error = "SQL syntax error: trailing comma after VALUES row";
+            return false;
+        }
     }
     if (rows.empty()) {
         error = "SQL syntax error: VALUES requires at least one row";
@@ -1278,39 +1331,483 @@ static bool parseValuesRows(const string& valuesPart,
     return true;
 }
 
-static string formatValuesCell(string cell) {
-    cell = trim(cell);
-    if (cell == "null") return "NULL";
-    if (cell.size() >= 2 && cell.front() == '\'' && cell.back() == '\'') {
-        string out = cell.substr(1, cell.size() - 2);
-        size_t pos = 0;
-        while ((pos = out.find("''", pos)) != string::npos) {
-            out.replace(pos, 2, "'");
-            ++pos;
-        }
-        return out;
+static bool validateValuesExpression(const string& expression,
+                                     string& error,
+                                     string& sqlState) {
+    string lowered = trim(expression);
+    for (char& c : lowered) {
+        c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
     }
-    return cell;
+    if (lowered == "default") {
+        error = "DEFAULT is not allowed in a standalone VALUES list";
+        sqlState = "42601";
+        return false;
+    }
+    if (lowered.rfind("array[", 0) == 0 ||
+        lowered.rfind("row(", 0) == 0) {
+        error = "VALUES expression is not supported";
+        sqlState = "0A000";
+        return false;
+    }
+    if (isStandaloneValuesTypedLiteral(expression)) return true;
+
+    dbms::SQLParser parser;
+    auto parsed = parser.parse("SELECT " + expression);
+    const auto* select = parsed.success
+        ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
+    if (!select || select->selectList.size() != 1 ||
+        !select->selectList.front().expr ||
+        !select->selectList.front().alias.empty() || select->fromClause ||
+        select->whereClause || !select->groupBy.empty() || select->having ||
+        !select->orderBy.empty() || select->limit || select->offset) {
+        error = parsed.error.empty()
+            ? "invalid expression in VALUES row" : parsed.error;
+        sqlState = "42601";
+        return false;
+    }
+
+    string unboundColumn;
+    bool unsupported = false;
+    std::function<void(const dbms::Expr*)> inspect =
+        [&](const dbms::Expr* node) {
+            if (!node || !unboundColumn.empty() || unsupported) return;
+            switch (node->type) {
+                case dbms::ExprType::Literal:
+                    return;
+                case dbms::ExprType::ColumnRef: {
+                    const auto* column =
+                        static_cast<const dbms::ColumnRefExpr*>(node);
+                    string name = column->column;
+                    for (char& c : name) {
+                        c = static_cast<char>(
+                            tolower(static_cast<unsigned char>(c)));
+                    }
+                    static const set<string> available = {
+                        "current_user", "session_user", "user",
+                        "current_date", "current_timestamp", "localtimestamp"
+                    };
+                    static const set<string> knownButUnsupported = {
+                        "current_catalog", "current_role", "current_schema",
+                        "current_time", "localtime"
+                    };
+                    if (column->schema.empty() && column->table.empty() &&
+                        available.count(name)) {
+                        return;
+                    }
+                    if (column->schema.empty() && column->table.empty() &&
+                        knownButUnsupported.count(name)) {
+                        unsupported = true;
+                        return;
+                    }
+                    unboundColumn = column->toString();
+                    return;
+                }
+                case dbms::ExprType::UnaryOp:
+                    inspect(static_cast<const dbms::UnaryOpExpr*>(node)
+                                ->operand.get());
+                    return;
+                case dbms::ExprType::BinaryOp: {
+                    const auto* binary =
+                        static_cast<const dbms::BinaryOpExpr*>(node);
+                    inspect(binary->left.get());
+                    inspect(binary->right.get());
+                    return;
+                }
+                case dbms::ExprType::FunctionCall: {
+                    const auto* call =
+                        static_cast<const dbms::FunctionCallExpr*>(node);
+                    string name = call->funcName;
+                    for (char& c : name) {
+                        c = static_cast<char>(
+                            tolower(static_cast<unsigned char>(c)));
+                    }
+                    static const set<string> aggregateOrSetReturning = {
+                        "array_agg", "avg", "bit_and", "bit_or",
+                        "bool_and", "bool_or", "count", "every",
+                        "generate_series", "json_agg", "jsonb_agg",
+                        "max", "min", "string_agg", "sum", "unnest",
+                        "xmlagg"
+                    };
+                    if (aggregateOrSetReturning.count(name) ||
+                        call->distinct || !call->orderBy.empty() ||
+                        call->filter || call->hasOver) {
+                        unsupported = true;
+                        return;
+                    }
+                    for (const auto& arg : call->args) inspect(arg.get());
+                    for (const auto& arg : call->namedArgs) {
+                        inspect(arg.value.get());
+                    }
+                    return;
+                }
+                case dbms::ExprType::CastExpr:
+                    inspect(static_cast<const dbms::CastExpr*>(node)
+                                ->operand.get());
+                    return;
+                case dbms::ExprType::CaseExpr: {
+                    const auto* caseExpr =
+                        static_cast<const dbms::CaseExpr*>(node);
+                    inspect(caseExpr->switchExpr.get());
+                    for (const auto& clause : caseExpr->whenClauses) {
+                        inspect(clause.first.get());
+                        inspect(clause.second.get());
+                    }
+                    inspect(caseExpr->elseExpr.get());
+                    return;
+                }
+                case dbms::ExprType::ArrayExpr:
+                    for (const auto& element :
+                         static_cast<const dbms::ArrayExpr*>(node)->elements) {
+                        inspect(element.get());
+                    }
+                    return;
+                case dbms::ExprType::RowExpr:
+                    for (const auto& element :
+                         static_cast<const dbms::RowExpr*>(node)->elements) {
+                        inspect(element.get());
+                    }
+                    return;
+                case dbms::ExprType::Subquery:
+                case dbms::ExprType::Parameter:
+                case dbms::ExprType::A_Star:
+                    unsupported = true;
+                    return;
+            }
+        };
+    inspect(select->selectList.front().expr.get());
+    if (!unboundColumn.empty()) {
+        string lower = unboundColumn;
+        for (char& c : lower) {
+            c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        }
+        if (lower == "default") {
+            error = "DEFAULT is not allowed in a standalone VALUES list";
+            sqlState = "42601";
+        } else {
+            error = "column \"" + unboundColumn + "\" does not exist";
+            sqlState = "42703";
+        }
+        return false;
+    }
+    if (unsupported) {
+        error = "VALUES expression is not supported";
+        sqlState = "0A000";
+        return false;
+    }
+    return true;
 }
 
-static bool executeValuesStatement(const string& sql) {
-    string rest = trim(sql.substr(6));
+static bool isUnknownValuesExpression(const string& expression) {
+    const string value = trim(expression);
+    string lower;
+    lower.reserve(value.size());
+    for (char c : value) {
+        lower += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    }
+    if (lower == "null") return true;
+    size_t index = 0;
+    bool escapeString = false;
+    if (value.size() >= 2 && (value[0] == 'e' || value[0] == 'E') &&
+        value[1] == '\'') {
+        escapeString = true;
+        index = 1;
+    }
+    if (index >= value.size() || value[index] != '\'') return false;
+    ++index;
+    while (index < value.size()) {
+        if (escapeString && value[index] == '\\') {
+            index += std::min<size_t>(2, value.size() - index);
+            continue;
+        }
+        if (value[index] != '\'') {
+            ++index;
+            continue;
+        }
+        if (index + 1 < value.size() && value[index + 1] == '\'') {
+            index += 2;
+            continue;
+        }
+        return index + 1 == value.size();
+    }
+    return false;
+}
+
+static string valuesIntegerLiteralType(const string& expression) {
+    const string value = trim(expression);
+    size_t index = 0;
+    bool negative = false;
+    if (index < value.size() && (value[index] == '+' || value[index] == '-')) {
+        negative = value[index] == '-';
+        ++index;
+    }
+    const size_t digitStart = index;
+    while (index < value.size() &&
+           isdigit(static_cast<unsigned char>(value[index]))) {
+        ++index;
+    }
+    if (digitStart == index || index != value.size()) return {};
+    size_t significantStart = digitStart;
+    while (significantStart < value.size() &&
+           value[significantStart] == '0') {
+        ++significantStart;
+    }
+    const string magnitude = significantStart == value.size()
+        ? "0" : value.substr(significantStart);
+    const auto within = [&](const char* bound) {
+        const size_t boundSize = std::strlen(bound);
+        return magnitude.size() < boundSize ||
+               (magnitude.size() == boundSize && magnitude <= bound);
+    };
+    if (within(negative ? "2147483648" : "2147483647")) return "integer";
+    if (within(negative ? "9223372036854775808" : "9223372036854775807")) {
+        return "bigint";
+    }
+    return "numeric";
+}
+
+static string canonicalValuesType(string type);
+
+static string inferValuesExpressionType(const string& expression) {
+    if (isUnknownValuesExpression(expression)) return "unknown";
+    string lower = trim(expression);
+    for (char& c : lower) {
+        c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    }
+    if (lower == "current_user" || lower == "session_user" ||
+        lower == "user") {
+        return "name";
+    }
+    if (lower == "current_date") return "date";
+    if (lower == "current_timestamp") return "timestamptz";
+    if (lower == "localtimestamp") return "timestamp";
+    const string integerType = valuesIntegerLiteralType(expression);
+    if (!integerType.empty()) return integerType;
+    return canonicalValuesType(
+        dbms::ExprHelper::inferResultType(expression));
+}
+
+static string canonicalValuesType(string type) {
+    type = trim(type);
+    const size_t modifier = type.find('(');
+    if (modifier != string::npos) type = trim(type.substr(0, modifier));
+    string canonical =
+        dbms::TypeRegistry::instance().normalizeTypeName(type);
+    if (!canonical.empty()) return canonical;
+    for (char& c : type) {
+        c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    }
+    return type;
+}
+
+static int valuesNumericRank(const string& type) {
+    if (type == "smallint") return 0;
+    if (type == "integer") return 1;
+    if (type == "bigint") return 2;
+    if (type == "numeric") return 3;
+    if (type == "real") return 4;
+    if (type == "double precision") return 5;
+    return -1;
+}
+
+static bool isSupportedValuesTarget(const string& type) {
+    static const set<string> supported = {
+        "boolean", "smallint", "integer", "bigint", "numeric", "real",
+        "double precision", "character", "character varying", "text",
+        "date", "timestamp", "timestamptz", "uuid", "bytea",
+        "int4range", "int8range", "numrange", "daterange", "tsrange",
+        "tstzrange", "name"
+    };
+    return supported.count(type) != 0;
+}
+
+static bool resolveValuesColumnType(const vector<string>& inputTypes,
+                                    string& resultType,
+                                    string& error) {
+    vector<string> known;
+    for (const auto& input : inputTypes) {
+        if (!input.empty() && input != "unknown") {
+            known.push_back(canonicalValuesType(input));
+        }
+    }
+    if (known.empty()) {
+        resultType = "text";
+        return true;
+    }
+    resultType = known.front();
+    for (size_t i = 1; i < known.size(); ++i) {
+        const string& next = known[i];
+        if (next == resultType) continue;
+
+        const auto* currentEntry =
+            dbms::TypeRegistry::instance().findType(resultType);
+        const auto* nextEntry =
+            dbms::TypeRegistry::instance().findType(next);
+        if (!currentEntry || !nextEntry ||
+            currentEntry->category != nextEntry->category) {
+            error = "VALUES types " + resultType + " and " + next +
+                    " cannot be matched";
+            return false;
+        }
+        if (currentEntry->category == dbms::TypeCategory::Numeric) {
+            const int currentRank = valuesNumericRank(resultType);
+            const int nextRank = valuesNumericRank(next);
+            if (currentRank < 0 || nextRank < 0) {
+                error = "VALUES types " + resultType + " and " + next +
+                        " cannot be matched";
+                return false;
+            }
+            if (nextRank > currentRank) resultType = next;
+            continue;
+        }
+        if (currentEntry->category == dbms::TypeCategory::String) {
+            continue;
+        }
+        if (currentEntry->category == dbms::TypeCategory::DateTime) {
+            const bool currentTimestamp =
+                resultType == "date" || resultType == "timestamp" ||
+                resultType == "timestamptz";
+            const bool nextTimestamp =
+                next == "date" || next == "timestamp" ||
+                next == "timestamptz";
+            if (currentTimestamp && nextTimestamp) {
+                if (resultType == "timestamptz" || next == "timestamptz") {
+                    resultType = "timestamptz";
+                } else if (resultType == "timestamp" || next == "timestamp") {
+                    resultType = "timestamp";
+                }
+                continue;
+            }
+            const bool currentTime =
+                resultType == "time" || resultType == "timetz";
+            const bool nextTime = next == "time" || next == "timetz";
+            if (currentTime && nextTime) {
+                if (next == "timetz") resultType = "timetz";
+                continue;
+            }
+        }
+        error = "VALUES types " + resultType + " and " + next +
+                " cannot be matched";
+        return false;
+    }
+    return true;
+}
+
+static bool executeValuesStatement(const string& sql, const Session& session) {
+    const string statement = trim(sql);
+    string rest = trim(statement.substr(6));
+    if (!rest.empty() && rest.back() == ';') {
+        rest = trim(rest.substr(0, rest.size() - 1));
+    }
     vector<vector<string>> rows;
     string error;
     if (!parseValuesRows(rest, rows, error)) {
-        cout << error << endl;
+        cout << "ERROR: " << error << " (SQLSTATE 42601)" << endl;
         return true;
     }
 
-    for (size_t col = 0; col < rows.front().size(); ++col) {
+    const size_t width = rows.front().size();
+    vector<vector<string>> inferredTypes(
+        rows.size(), vector<string>(width));
+    for (size_t row = 0; row < rows.size(); ++row) {
+        for (size_t col = 0; col < width; ++col) {
+            string sqlState;
+            if (!validateValuesExpression(
+                    rows[row][col], error, sqlState)) {
+                cout << "ERROR: " << error << " (SQLSTATE "
+                     << sqlState << ")" << endl;
+                return true;
+            }
+            inferredTypes[row][col] =
+                inferValuesExpressionType(rows[row][col]);
+        }
+    }
+
+    vector<string> columnTypes(width);
+    for (size_t col = 0; col < width; ++col) {
+        vector<string> inputs;
+        inputs.reserve(rows.size());
+        for (size_t row = 0; row < rows.size(); ++row) {
+            inputs.push_back(inferredTypes[row][col]);
+        }
+        if (!resolveValuesColumnType(inputs, columnTypes[col], error)) {
+            cout << "ERROR: " << error << " (SQLSTATE 42804)" << endl;
+            return true;
+        }
+        if (!isSupportedValuesTarget(columnTypes[col])) {
+            cout << "ERROR: VALUES type " << columnTypes[col]
+                 << " is not supported (SQLSTATE 0A000)" << endl;
+            return true;
+        }
+    }
+
+    vector<vector<string>> values;
+    vector<vector<bool>> nulls;
+    values.reserve(rows.size());
+    nulls.reserve(rows.size());
+    for (size_t row = 0; row < rows.size(); ++row) {
+        vector<string> valueRow;
+        vector<bool> nullRow;
+        valueRow.reserve(width);
+        nullRow.reserve(width);
+        for (size_t col = 0; col < width; ++col) {
+            string expression = trim(rows[row][col]);
+            string lower = expression;
+            for (char& c : lower) {
+                c = static_cast<char>(
+                    tolower(static_cast<unsigned char>(c)));
+            }
+            if (lower == "user") expression = "current_user";
+            if (columnTypes[col] == "name" &&
+                inferredTypes[row][col] != "name") {
+                cout << "ERROR: VALUES coercion to name is not supported "
+                     << "(SQLSTATE 0A000)" << endl;
+                return true;
+            }
+            const string evaluatedExpression =
+                "CAST((" + expression + ") AS " + columnTypes[col] + ")";
+            const auto evaluated = dbms::ExprHelper::evalString(
+                evaluatedExpression, {}, {}, session.currentDB,
+                session.username);
+            if (!evaluated.ok) {
+                cout << "ERROR: "
+                     << (evaluated.error.empty()
+                             ? "cannot evaluate VALUES expression"
+                             : evaluated.error)
+                     << endl;
+                return true;
+            }
+            const string actualType =
+                canonicalValuesType(evaluated.typeName);
+            if (actualType != columnTypes[col]) {
+                cout << "ERROR: VALUES coercion to " << columnTypes[col]
+                     << " is not supported (SQLSTATE 0A000)" << endl;
+                return true;
+            }
+            valueRow.push_back(evaluated.isNull ? string{} : evaluated.value);
+            nullRow.push_back(evaluated.isNull);
+        }
+        values.push_back(std::move(valueRow));
+        nulls.push_back(std::move(nullRow));
+    }
+
+    vector<string> columns;
+    columns.reserve(width);
+    for (size_t col = 0; col < width; ++col) {
+        columns.push_back("column" + std::to_string(col + 1));
+    }
+    publishStructuredUtilityResult(
+        columns, columnTypes, values, nulls,
+        "SELECT " + std::to_string(values.size()));
+
+    for (size_t col = 0; col < columns.size(); ++col) {
         if (col > 0) cout << ' ';
-        cout << "column" << (col + 1);
+        cout << columns[col];
     }
     cout << endl;
-    for (const auto& row : rows) {
-        for (size_t col = 0; col < row.size(); ++col) {
+    for (size_t row = 0; row < values.size(); ++row) {
+        for (size_t col = 0; col < width; ++col) {
             if (col > 0) cout << ' ';
-            cout << formatValuesCell(row[col]);
+            cout << (nulls[row][col] ? "NULL" : values[row][col]);
         }
         cout << endl;
     }
@@ -13990,7 +14487,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
     // fall through to the legacy string-based dispatch below.
     switch (parsedCmd) {
         case dbms::SqlCommand::Values:
-            return executeValuesStatement(sql);
+            // VALUES owns its expression parsing. Preserve the original
+            // spelling here: the legacy normalizer rewrites ARRAY[...] as
+            // array_get(array, ...), which changes both syntax and meaning.
+            return executeValuesStatement(effectiveRawSql, s);
 
         case dbms::SqlCommand::UseDatabase: {
             // DIV-01: PostgreSQL cannot switch databases via SQL after
