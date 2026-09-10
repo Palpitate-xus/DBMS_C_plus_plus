@@ -1318,7 +1318,11 @@ public:
                                                               const std::string& tablename) const;
 
     // Deferred constraint support (SET CONSTRAINTS / DEFERRABLE)
-    void setConstraintMode(const std::vector<std::string>& names, bool deferred);
+    // Change transaction-local constraint modes. Switching to IMMEDIATE
+    // retroactively validates matching queued events and returns the precise
+    // violation without changing either the queue or mode on failure.
+    DBStatus setConstraintMode(const std::vector<std::string>& names,
+                               bool deferred);
     bool isConstraintDeferred(const std::string& name, bool defaultDeferred = false) const;
 
     // Current transaction ID (0 = not in a transaction)
@@ -2004,8 +2008,13 @@ private:
             std::string name;
             size_t txnLogSize = 0;
             size_t ddlUndoSize = 0;
-            size_t deferredCheckSize = 0;
             size_t logicalChangeSize = 0;
+            // SET CONSTRAINTS IMMEDIATE can drain events that predate this
+            // savepoint. Keep the common path O(1), but lazily snapshot the
+            // prefix if a later mode switch is about to remove those events.
+            size_t deferredCheckSize = 0;
+            std::optional<std::vector<DeferredCheck>> deferredCheckSnapshot;
+            std::map<std::string, bool> constraintMode;
             std::string ddlBackupPath;
             LockManager::LockCheckpoint lockCheckpoint;
         };

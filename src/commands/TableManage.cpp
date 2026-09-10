@@ -9966,10 +9966,73 @@ bool StorageEngine::checkExclusionConflict(const std::string& dbname, const std:
 // ========================================================================
 // Deferred constraint support (SET CONSTRAINTS / DEFERRABLE)
 // ========================================================================
-void StorageEngine::setConstraintMode(const std::vector<std::string>& names, bool deferred) {
-    for (const auto& name : names) {
-        transactionContext().constraintMode[name] = deferred;
+DBStatus StorageEngine::setConstraintMode(
+    const std::vector<std::string>& names, bool deferred) {
+    auto& context = transactionContext();
+
+    // PostgreSQL emits a warning and otherwise has no effect outside an
+    // explicit transaction. Most importantly, such a command must not leak
+    // its mode into the next transaction on this backend.
+    if (!context.inTransaction) return DBStatus::OK;
+
+    const bool all = std::find(names.begin(), names.end(), "all") != names.end();
+    const auto matches = [&](const DeferredCheck& check) {
+        return all || std::find(names.begin(), names.end(),
+                                check.constraintName) != names.end();
+    };
+
+    auto queued = context.deferredChecks.find(context.currentTxnId);
+    if (!deferred && queued != context.deferredChecks.end()) {
+        // DEFERRED -> IMMEDIATE is retroactive. Validate first without
+        // mutating any state: if one event fails, SET CONSTRAINTS itself
+        // fails and every selected constraint remains in its previous mode.
+        for (const auto& check : queued->second) {
+            if (!matches(check) || runDeferredCheck(check)) continue;
+            if (check.kind == DeferredCheck::Kind::Unique)
+                return DBStatus::UNIQUE_VIOLATION;
+            if (check.kind == DeferredCheck::Kind::ForeignKey)
+                return DBStatus::FOREIGN_KEY_VIOLATION;
+            if (check.kind == DeferredCheck::Kind::Exclude)
+                return DBStatus::EXCLUSION_VIOLATION;
+            return DBStatus::CHECK_VIOLATION;
+        }
+
+        auto& events = queued->second;
+        if (std::any_of(events.begin(), events.end(), matches)) {
+            // Savepoints normally keep only an O(1) queue watermark. A drain
+            // is the exceptional operation that can delete an older prefix,
+            // so materialize that prefix lazily before changing the queue.
+            for (const auto& savepoint : context.savepoints) {
+                if (!savepoint.deferredCheckSnapshot.has_value() &&
+                    savepoint.deferredCheckSize > events.size()) {
+                    return DBStatus::CORRUPTED_DATA;
+                }
+            }
+            for (auto& savepoint : context.savepoints) {
+                if (savepoint.deferredCheckSnapshot.has_value() ||
+                    savepoint.deferredCheckSize == 0) {
+                    continue;
+                }
+                savepoint.deferredCheckSnapshot.emplace(
+                    events.begin(),
+                    events.begin() + static_cast<std::ptrdiff_t>(
+                        savepoint.deferredCheckSize));
+            }
+        }
+        events.erase(
+            std::remove_if(events.begin(), events.end(), matches),
+            events.end());
+        if (events.empty()) context.deferredChecks.erase(queued);
     }
+
+    if (all) {
+        // A later ALL command supersedes earlier per-constraint overrides.
+        context.constraintMode.clear();
+        context.constraintMode["all"] = deferred;
+    } else {
+        for (const auto& name : names) context.constraintMode[name] = deferred;
+    }
+    return DBStatus::OK;
 }
 
 bool StorageEngine::isConstraintDeferred(const std::string& name, bool defaultDeferred) const {
@@ -40424,6 +40487,11 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
 
     transactionContext().txnLog.clear();
     transactionContext().specializedIndexTables.clear();
+    // Constraint modes are transaction-local. Clearing at BEGIN is also a
+    // fail-safe against state left by a transaction-free SET CONSTRAINTS or
+    // an interrupted backend lifecycle.
+    transactionContext().constraintMode.clear();
+    transactionContext().deferredChecks.clear();
     transactionContext().snapshotImported = false;
     transactionContext().snapshotAcquired = false;
     transactionContext().hasRead = false;
@@ -43078,8 +43146,10 @@ DBStatus StorageEngine::savepoint(const std::string& name) {
         name,
         context.txnLog.size(),
         context.ddlUndoActions.size(),
-        deferredCheckSize,
         context.txnLogicalChanges.size(),
+        deferredCheckSize,
+        std::nullopt,
+        context.constraintMode,
         std::move(ddlBackupPath),
         lockManager_.captureCheckpoint()
     });
@@ -43102,7 +43172,6 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
     const TransactionContext::SavepointState target = *reverseIt;
     const size_t txnLogSpIdx = target.txnLogSize;
     const size_t ddlSpIdx = target.ddlUndoSize;
-    const size_t deferredCheckSpIdx = target.deferredCheckSize;
     const size_t logicalChangeSpIdx = target.logicalChangeSize;
     const auto deferredChecks = context.deferredChecks.find(
         context.currentTxnId);
@@ -43111,7 +43180,8 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
             ? 0 : deferredChecks->second.size();
     if (txnLogSpIdx > context.txnLog.size() ||
         ddlSpIdx > context.ddlUndoActions.size() ||
-        deferredCheckSpIdx > currentDeferredCheckSize ||
+        (!target.deferredCheckSnapshot.has_value() &&
+         target.deferredCheckSize > currentDeferredCheckSize) ||
         logicalChangeSpIdx > context.txnLogicalChanges.size()) {
         return DBStatus::INVALID_VALUE;
     }
@@ -43640,9 +43710,25 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
 
     transactionContext().txnLog.resize(txnLogSpIdx);
     transactionContext().txnLogicalChanges.resize(logicalChangeSpIdx);
-    if (deferredChecks != transactionContext().deferredChecks.end()) {
-        deferredChecks->second.resize(deferredCheckSpIdx);
+    if (target.deferredCheckSnapshot.has_value()) {
+        if (target.deferredCheckSnapshot->empty()) {
+            transactionContext().deferredChecks.erase(
+                transactionContext().currentTxnId);
+        } else {
+            transactionContext().deferredChecks[
+                transactionContext().currentTxnId] =
+                    *target.deferredCheckSnapshot;
+        }
+    } else if (deferredChecks != transactionContext().deferredChecks.end()) {
+        deferredChecks->second.resize(target.deferredCheckSize);
+        if (deferredChecks->second.empty()) {
+            transactionContext().deferredChecks.erase(deferredChecks);
+        }
+    } else {
+        transactionContext().deferredChecks.erase(
+            transactionContext().currentTxnId);
     }
+    transactionContext().constraintMode = target.constraintMode;
     transactionContext().ddlUndoActions.resize(ddlSpIdx);
     lockManager_.rollbackToCheckpoint(target.lockCheckpoint);
 

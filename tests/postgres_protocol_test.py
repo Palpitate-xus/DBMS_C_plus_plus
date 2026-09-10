@@ -705,6 +705,26 @@ def prepared_transaction_error_boundaries(sock):
     assert data_row_values(simple_query(
         sock, "SELECT id FROM deferred_child")) == []
 
+    # SET CONSTRAINTS ... IMMEDIATE is retroactive. The violation belongs to
+    # this statement, and ROLLBACK TO must discard the queued event created
+    # after the savepoint so the transaction can resume.
+    assert simple_query(sock, "BEGIN")[-1] == (b"Z", b"T")
+    assert simple_query(sock, "SAVEPOINT deferred_boundary")[-1] == \
+        (b"Z", b"T")
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "INSERT INTO deferred_child VALUES (2, 998)"))
+    forced_check = simple_query(sock, "SET CONSTRAINTS ALL IMMEDIATE")
+    forced_error = next(body for kind, body in forced_check if kind == b"E")
+    assert b"C23503\0" in forced_error, forced_check
+    assert forced_check[-1] == (b"Z", b"E"), forced_check
+    assert simple_query(sock, "ROLLBACK TO SAVEPOINT deferred_boundary")[-1] == \
+        (b"Z", b"T")
+    assert not any(kind == b"E" for kind, _ in simple_query(
+        sock, "SET CONSTRAINTS ALL IMMEDIATE"))
+    assert simple_query(sock, "COMMIT")[-1] == (b"Z", b"I")
+    assert data_row_values(simple_query(
+        sock, "SELECT id FROM deferred_child WHERE id = 2")) == []
+
     assert any(kind == b"C" for kind, _ in simple_query(
         sock, "CREATE TABLE deferred_check (id INT PRIMARY KEY, value INT, "
               "CONSTRAINT deferred_positive CHECK (value > 0) "

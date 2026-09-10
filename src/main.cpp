@@ -3188,8 +3188,13 @@ static bool handleSetCommand(const string& sql, Session& s) {
             cout << "SQL syntax error: SET CONSTRAINTS name [, ...] IMMEDIATE|DEFERRED" << endl;
             return true;
         }
+        const DBStatus status = g_engine.setConstraintMode(names, deferred);
+        if (status != DBStatus::OK) {
+            cout << "ERROR: deferred constraint violation (SQLSTATE "
+                 << dbms::sqlstateForDBStatus(status) << ")" << endl;
+            return true;
+        }
         s.constraintsDeferred = deferred;
-        g_engine.setConstraintMode(names, deferred);
         cout << "SET CONSTRAINTS" << endl;
         return false;
     }

@@ -286,12 +286,72 @@ static void test_immediate_unique_updates() {
 
 static void test_set_constraints_immediate() {
     assert(g_engine.beginTransaction(db) == DBStatus::OK);
-    g_engine.setConstraintMode({"all"}, false); // SET CONSTRAINTS ALL IMMEDIATE
+    assert(g_engine.setConstraintMode({"all"}, false) == DBStatus::OK);
     // FK check is immediate again: missing parent must fail the insert.
     assert(g_engine.insert(db, "child", {{"id", "50"}, {"pid", "500"}})
                == DBStatus::INVALID_VALUE);
     assert(g_engine.rollbackTransaction() == DBStatus::OK);
     std::cout << "[DEFER] SET CONSTRAINTS ALL IMMEDIATE restores checks OK" << std::endl;
+}
+
+static void test_set_constraints_immediate_retroactive() {
+    assert(g_engine.beginTransaction(db) == DBStatus::OK);
+    assert(g_engine.insert(db, "child", {{"id", "51"}, {"pid", "510"}})
+               == DBStatus::OK);
+
+    // Switching to IMMEDIATE checks already queued work. A failed switch is
+    // atomic: the mode remains deferred and the event remains pending, so an
+    // internal caller can repair the transaction before retrying.
+    assert(g_engine.setConstraintMode({"child_pid_fkey"}, false) ==
+           DBStatus::FOREIGN_KEY_VIOLATION);
+    assert(g_engine.isConstraintCurrentlyDeferred(
+        db, "child", "child_pid_fkey"));
+    assert(g_engine.insert(db, "parent", {{"id", "510"}}) == DBStatus::OK);
+    assert(g_engine.setConstraintMode({"child_pid_fkey"}, false) ==
+           DBStatus::OK);
+    assert(!g_engine.isConstraintCurrentlyDeferred(
+        db, "child", "child_pid_fkey"));
+    assert(g_engine.commitTransaction() == DBStatus::OK);
+    std::cout << "[DEFER] SET CONSTRAINTS IMMEDIATE retroactively drains queued events OK"
+              << std::endl;
+}
+
+static void test_savepoint_restores_drained_events_and_mode() {
+    assert(g_engine.insert(db, "parent", {{"id", "520"}}) == DBStatus::OK);
+    assert(g_engine.beginTransaction(db) == DBStatus::OK);
+    assert(g_engine.insert(db, "child", {{"id", "52"}, {"pid", "520"}})
+               == DBStatus::OK);
+    assert(g_engine.savepoint("before_immediate") == DBStatus::OK);
+    assert(g_engine.setConstraintMode({"all"}, false) == DBStatus::OK);
+
+    // A queue-size watermark cannot roll back after the successful drain
+    // above. ROLLBACK TO must restore both the event snapshot and the mode
+    // that existed when the savepoint was created.
+    assert(g_engine.rollbackToSavepoint("before_immediate") == DBStatus::OK);
+    assert(g_engine.isConstraintCurrentlyDeferred(
+        db, "child", "child_pid_fkey"));
+    assert(g_engine.releaseSavepoint("before_immediate") == DBStatus::OK);
+    assert(g_engine.commitTransaction() == DBStatus::OK);
+    std::cout << "[DEFER] savepoint restores drained queue and constraint modes OK"
+              << std::endl;
+}
+
+static void test_transaction_free_set_does_not_leak() {
+    assert(!g_engine.inTransaction());
+    assert(g_engine.setConstraintMode({"all"}, false) == DBStatus::OK);
+    assert(g_engine.beginTransaction(db) == DBStatus::OK);
+    assert(g_engine.isConstraintCurrentlyDeferred(
+        db, "child", "child_pid_fkey"));
+    assert(g_engine.setConstraintMode({"child_pid_fkey"}, false) ==
+           DBStatus::OK);
+    assert(!g_engine.isConstraintCurrentlyDeferred(
+        db, "child", "child_pid_fkey"));
+    assert(g_engine.setConstraintMode({"all"}, true) == DBStatus::OK);
+    assert(g_engine.isConstraintCurrentlyDeferred(
+        db, "child", "child_pid_fkey"));
+    assert(g_engine.rollbackTransaction() == DBStatus::OK);
+    std::cout << "[DEFER] transaction-free and later ALL modes do not leak stale overrides OK"
+              << std::endl;
 }
 
 int main() {
@@ -311,6 +371,9 @@ int main() {
     test_unique_deferred_update_violation();
     test_unique_deferred_violation();
     test_set_constraints_immediate();
+    test_set_constraints_immediate_retroactive();
+    test_savepoint_restores_drained_events_and_mode();
+    test_transaction_free_set_does_not_leak();
     std::cout << "[DEFER] all tests passed" << std::endl;
     return 0;
 }
