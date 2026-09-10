@@ -43808,16 +43808,153 @@ DBStatus StorageEngine::updateEnumType(const std::string& dbname, const EnumType
     if (!exists) return DBStatus::TABLE_NOT_FOUND;
     std::vector<EnumType> types;
     if (!loadEnumTypes(path, types)) return DBStatus::IO_ERROR;
-    bool found = false;
+    EnumType previous;
+    size_t identicalPreviousDefinitions = 0;
     for (auto& type : types) {
         if (type.name == et.name) {
-            found = true;
+            previous = type;
             type = et;
         }
     }
-    if (!found) return DBStatus::TABLE_NOT_FOUND;
-    return index_file::writeAtomically(path, serializeEnumTypes(types))
-        ? DBStatus::OK : DBStatus::IO_ERROR;
+    if (previous.name.empty()) return DBStatus::TABLE_NOT_FOUND;
+    for (const auto& type : types) {
+        if (type.name != et.name && type.labels == previous.labels) {
+            ++identicalPreviousDefinitions;
+        }
+    }
+
+    struct EnumSchemaRewrite {
+        std::string tableName;
+        TableSchema original;
+        TableSchema updated;
+        std::vector<size_t> columns;
+        std::string originalBytes;
+        std::string updatedBytes;
+    };
+    std::vector<EnumSchemaRewrite> rewrites;
+    auto serializeSchema = [&](const TableSchema& schema,
+                               std::string& bytes) {
+        std::ostringstream output(std::ios::out | std::ios::binary);
+        writeSchema(output, schema);
+        if (!output) return false;
+        bytes = output.str();
+        return true;
+    };
+
+    // Enum labels were historically copied into table schemas while the
+    // declared type was replaced by varchar.  Migrate that old representation
+    // only when the label list identifies exactly one enum; otherwise there is
+    // no safe way to guess which same-shaped enum the column meant.
+    for (const auto& tableName : getTableNames(dbname)) {
+        const TableSchema schema = getTableSchema(dbname, tableName);
+        if (schema.len == 0) return DBStatus::CORRUPTED_DATA;
+        EnumSchemaRewrite rewrite;
+        rewrite.tableName = tableName;
+        rewrite.original = schema;
+        rewrite.updated = schema;
+        for (size_t columnIndex = 0; columnIndex < schema.len; ++columnIndex) {
+            const Column& column = schema.cols[columnIndex];
+            const bool namedDependency =
+                column.dataType == et.name && !column.enumValues.empty();
+            const bool unambiguousLegacyDependency =
+                column.dataType == "varchar" &&
+                identicalPreviousDefinitions == 0 &&
+                column.enumValues == previous.labels;
+            if (!namedDependency && !unambiguousLegacyDependency) continue;
+            rewrite.columns.push_back(columnIndex);
+            rewrite.updated.cols[columnIndex].dataType = et.name;
+            rewrite.updated.cols[columnIndex].enumValues = et.labels;
+        }
+        if (rewrite.columns.empty()) continue;
+        if (!serializeSchema(rewrite.original, rewrite.originalBytes) ||
+            !serializeSchema(rewrite.updated, rewrite.updatedBytes)) {
+            return DBStatus::IO_ERROR;
+        }
+        rewrites.push_back(std::move(rewrite));
+    }
+
+    // Lock every dependent relation in deterministic order.  Removing or
+    // renaming an in-use label cannot merely rewrite schema metadata: rows
+    // would then contain values that the column rejects.  Until enum values
+    // have stable physical IDs, fail closed before publishing any file.
+    std::vector<std::string> lockedTables;
+    for (const auto& rewrite : rewrites) {
+        if (!lockManager_.lockExclusive(rewrite.tableName)) {
+            for (auto it = lockedTables.rbegin(); it != lockedTables.rend(); ++it)
+                lockManager_.unlock(*it);
+            return DBStatus::LOCK_CONFLICT;
+        }
+        lockedTables.push_back(rewrite.tableName);
+    }
+    auto unlockTables = [&]() {
+        for (auto it = lockedTables.rbegin(); it != lockedTables.rend(); ++it)
+            lockManager_.unlock(*it);
+        lockedTables.clear();
+    };
+    const std::unordered_set<std::string> newLabels(et.labels.begin(),
+                                                    et.labels.end());
+    for (const auto& rewrite : rewrites) {
+        bool invalidStoredValue = false;
+        if (!forEachRow(
+                dbname, rewrite.tableName,
+                [&](uint32_t pageId, uint16_t slotId, const char* data,
+                    size_t length) {
+                    if (invalidStoredValue) return;
+                    const std::string row(data, length);
+                    const int64_t rid = encodeRid(pageId, slotId);
+                    for (const size_t columnIndex : rewrite.columns) {
+                        if (rewrite.original.cols[columnIndex].isNull &&
+                            isColumnNullByRid(dbname, rewrite.tableName, rid,
+                                              columnIndex)) {
+                            continue;
+                        }
+                        const std::string value = extractColumnValue(
+                            row, rewrite.original, columnIndex, dbname, true);
+                        if (newLabels.count(value) == 0) {
+                            invalidStoredValue = true;
+                            return;
+                        }
+                    }
+                })) {
+            unlockTables();
+            return DBStatus::IO_ERROR;
+        }
+        if (invalidStoredValue) {
+            unlockTables();
+            return DBStatus::INVALID_VALUE;
+        }
+    }
+
+    size_t publishedSchemas = 0;
+    for (; publishedSchemas < rewrites.size(); ++publishedSchemas) {
+        const auto& rewrite = rewrites[publishedSchemas];
+        if (index_file::writeAtomically(
+                schemaPath(dbname, rewrite.tableName),
+                rewrite.updatedBytes)) {
+            invalidateCatalogSchema(dbname, rewrite.tableName);
+            continue;
+        }
+        for (size_t rollback = 0; rollback <= publishedSchemas; ++rollback) {
+            const auto& prior = rewrites[rollback];
+            index_file::writeAtomically(schemaPath(dbname, prior.tableName),
+                                        prior.originalBytes);
+            invalidateCatalogSchema(dbname, prior.tableName);
+        }
+        unlockTables();
+        return DBStatus::IO_ERROR;
+    }
+
+    if (!index_file::writeAtomically(path, serializeEnumTypes(types))) {
+        for (const auto& rewrite : rewrites) {
+            index_file::writeAtomically(schemaPath(dbname, rewrite.tableName),
+                                        rewrite.originalBytes);
+            invalidateCatalogSchema(dbname, rewrite.tableName);
+        }
+        unlockTables();
+        return DBStatus::IO_ERROR;
+    }
+    unlockTables();
+    return DBStatus::OK;
 }
 
 StorageEngine::EnumType StorageEngine::getEnumType(const std::string& dbname,

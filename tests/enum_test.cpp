@@ -94,6 +94,56 @@ static void test_enum_update() {
     std::cout << "[ENUM] update OK" << std::endl;
 }
 
+static void test_named_enum_alter_updates_dependent_schemas() {
+    std::string db = testDbPath("enum_dependent_schema");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE TYPE priority AS ENUM ('low', 'high')", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE tasks (id INT PRIMARY KEY, p priority)", s));
+    assert(g_engine.insert(db, "tasks", {{"id", "1"}, {"p", "low"}}) ==
+           dbms::DBStatus::OK);
+
+    auto priority = g_engine.getEnumType(db, "priority");
+    priority.labels.insert(priority.labels.begin() + 1, "medium");
+    assert(g_engine.updateEnumType(db, priority) == dbms::DBStatus::OK);
+    {
+        dbms::StorageEngine reopened;
+        const auto schema = reopened.getTableSchema(db, "tasks");
+        assert(schema.cols[1].dataType == "priority");
+        assert(schema.cols[1].enumValues == priority.labels);
+    }
+    assert(g_engine.insert(db, "tasks", {{"id", "2"}, {"p", "medium"}}) ==
+           dbms::DBStatus::OK);
+
+    // Renaming an unused label is safe and immediately updates every
+    // dependent table.  Removing an in-use label fails before either the
+    // enum catalog or any table schema is published.
+    priority.labels.back() = "urgent";
+    assert(g_engine.updateEnumType(db, priority) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "tasks", {{"id", "3"}, {"p", "urgent"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "tasks", {{"id", "4"}, {"p", "high"}}) ==
+           dbms::DBStatus::INVALID_VALUE);
+
+    const auto beforeRejectedRename = priority;
+    priority.labels.front() = "minor";
+    assert(g_engine.updateEnumType(db, priority) ==
+           dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.getEnumType(db, "priority").labels ==
+           beforeRejectedRename.labels);
+    const auto unchangedSchema = g_engine.getTableSchema(db, "tasks");
+    assert(unchangedSchema.cols[1].enumValues == beforeRejectedRename.labels);
+
+    cleanup(db);
+    std::cout << "[ENUM] dependent schema updates OK" << std::endl;
+}
+
 static void test_enum_labels_round_trip_losslessly() {
     std::string db = testDbPath("enum_lossless_labels");
     cleanup(db);
@@ -193,6 +243,7 @@ int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_enum_basic();
     test_enum_update();
+    test_named_enum_alter_updates_dependent_schemas();
     test_enum_labels_round_trip_losslessly();
     test_enum_legacy_migration_and_atomic_rewrites();
     std::cout << "[ENUM] all passed" << std::endl;
