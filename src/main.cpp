@@ -2446,6 +2446,10 @@ static bool handleResetCommand(const string& sql, Session& s) {
         s.originalRole = authUser;
         s.currentRole.clear();
         s.timezoneOffsetMinutes = 0;
+        s.applicationName = s.defaultApplicationName;
+        s.clientEncoding = s.defaultClientEncoding;
+        s.searchPath = s.defaultSearchPath;
+        s.timeZone = s.defaultTimeZone;
         s.statementTimeoutMs = s.defaultStatementTimeoutMs;
         s.lockTimeoutMs = g_config.lockTimeoutMs;
         s.deadlockTimeoutMs = g_config.deadlockTimeoutMs;
@@ -2458,6 +2462,22 @@ static bool handleResetCommand(const string& sql, Session& s) {
     }
     if (rest == "timezone" || rest == "time zone") {
         s.timezoneOffsetMinutes = 0;
+        s.timeZone = s.defaultTimeZone;
+        cout << "RESET " << rest << endl;
+        return false;
+    }
+    if (rest == "application_name") {
+        s.applicationName = s.defaultApplicationName;
+        cout << "RESET " << rest << endl;
+        return false;
+    }
+    if (rest == "client_encoding") {
+        s.clientEncoding = s.defaultClientEncoding;
+        cout << "RESET " << rest << endl;
+        return false;
+    }
+    if (rest == "search_path") {
+        s.searchPath = s.defaultSearchPath;
         cout << "RESET " << rest << endl;
         return false;
     }
@@ -2732,6 +2752,9 @@ static bool handleSetCommand(const string& sql, Session& s) {
         std::string sign = (s.timezoneOffsetMinutes >= 0) ? "+" : "-";
         char buf[32];
         snprintf(buf, sizeof(buf), "%s%02d:%02d", sign.c_str(), tzh, tzm);
+        s.timeZone = (s.timezoneOffsetMinutes == 0)
+                         ? "UTC"
+                         : std::string("UTC") + buf;
         cout << "Timezone set to UTC" << buf << " (" << tzVal << ")" << endl;
         return false;
     }
@@ -2808,6 +2831,42 @@ static bool handleSetCommand(const string& sql, Session& s) {
             }
             s.userVariables[param.substr(1)] = val;
             cout << "Set variable " << param << " = " << val << endl;
+            return false;
+        }
+        if (!isGlobal && param == "application_name") {
+            s.applicationName = stripQuotes(val);
+            cout << "SET" << endl;
+            return false;
+        }
+        if (!isGlobal && param == "client_encoding") {
+            string encoding = stripQuotes(val);
+            encoding.erase(std::remove_if(
+                encoding.begin(), encoding.end(), [](char ch) {
+                    return ch == '-' || ch == '_';
+                }), encoding.end());
+            encoding = toLowerSql(encoding);
+            if (encoding != "utf8" && encoding != "unicode") {
+                cout << "ERROR: client encoding is not supported; only UTF8 "
+                        "is available (SQLSTATE 0A000)" << endl;
+                return true;
+            }
+            s.clientEncoding = "UTF8";
+            cout << "SET" << endl;
+            return false;
+        }
+        if (!isGlobal && param == "search_path") {
+            string path = toLowerSql(stripQuotes(val));
+            path.erase(std::remove_if(
+                path.begin(), path.end(), [](unsigned char ch) {
+                    return std::isspace(ch);
+                }), path.end());
+            if (path != "public") {
+                cout << "ERROR: search_path is not supported except for public "
+                        "(SQLSTATE 0A000)" << endl;
+                return true;
+            }
+            s.searchPath = "public";
+            cout << "SET" << endl;
             return false;
         }
         return applyConfigParam(param, val, isGlobal, s);
@@ -16723,6 +16782,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
         if (rest == "search_path") {
             cout << "search_path" << endl;
             cout << s.searchPath << endl;
+            return false;
+        }
+        if (rest == "timezone") {
+            cout << "TimeZone" << endl;
+            cout << s.timeZone << endl;
             return false;
         }
         if (rest == "dbms.extensions") {

@@ -219,6 +219,17 @@ def startup_reference(sock, user, database, password="secret"):
                    validate_dbms_status=False)
 
 
+def parameter_status_values(messages):
+    values = []
+    for kind, body in messages:
+        if kind != b"S":
+            continue
+        name, value, trailing = body.split(b"\0")
+        assert trailing == b""
+        values.append((name, value))
+    return values
+
+
 def simple_query(sock, sql):
     sock.sendall(typed(b"Q", sql.encode() + b"\0"))
     return read_until_ready(sock)
@@ -826,6 +837,56 @@ def main():
             startup_settings_sock, "SHOW client_encoding")) == [[b"UTF8"]]
         assert data_row_values(simple_query(
             startup_settings_sock, "SHOW search_path")) == [[b"public"]]
+
+        changed_name = simple_query(
+            startup_settings_sock,
+            "SET application_name = 'simple-client'")
+        assert parameter_status_values(changed_name) == [
+            (b"application_name", b"simple-client")]
+        command_index = next(i for i, message in enumerate(changed_name)
+                             if message[0] == b"C")
+        status_index = next(i for i, message in enumerate(changed_name)
+                            if message[0] == b"S")
+        assert command_index < status_index < len(changed_name) - 1, changed_name
+        unchanged_name = simple_query(
+            startup_settings_sock,
+            "SET application_name = 'simple-client'")
+        assert parameter_status_values(unchanged_name) == [], unchanged_name
+        final_name = simple_query(
+            startup_settings_sock,
+            "SET application_name = 'intermediate'; "
+            "SET application_name = 'final-client'")
+        assert parameter_status_values(final_name) == [
+            (b"application_name", b"final-client")], final_name
+
+        timezone_change = simple_query(
+            startup_settings_sock, "SET TIME ZONE '+08:00'")
+        assert parameter_status_values(timezone_change) == [
+            (b"TimeZone", b"UTC+08:00")], timezone_change
+        timezone_reset = simple_query(startup_settings_sock,
+                                      "RESET TIME ZONE")
+        assert parameter_status_values(timezone_reset) == [
+            (b"TimeZone", b"UTC")], timezone_reset
+
+        # Extended Query reports changed GUCs once at Sync, after the command
+        # result and before ReadyForQuery.
+        parse = (b"\0SET application_name = 'extended-client'\0" +
+                 struct.pack("!H", 0))
+        bind = (b"\0\0" + struct.pack("!H", 0) +
+                struct.pack("!H", 0) + struct.pack("!H", 0))
+        execute = b"\0" + struct.pack("!I", 0)
+        startup_settings_sock.sendall(
+            typed(b"P", parse) + typed(b"B", bind) +
+            typed(b"E", execute) + typed(b"S"))
+        extended_status = read_until_ready(startup_settings_sock)
+        assert parameter_status_values(extended_status) == [
+            (b"application_name", b"extended-client")], extended_status
+        assert extended_status[-1] == (b"Z", b"I"), extended_status
+
+        reset_name = simple_query(startup_settings_sock,
+                                  "RESET application_name")
+        assert parameter_status_values(reset_name) == [
+            (b"application_name", b"options client")], reset_name
         startup_settings_sock.sendall(typed(b"X"))
         startup_settings_sock.close()
 

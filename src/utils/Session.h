@@ -23,6 +23,11 @@ struct Session {
     std::string clientEncoding = "UTF8";
     std::string replicationMode = "false";
     std::string searchPath = "public";
+    std::string timeZone = "UTC";
+    std::string defaultApplicationName;
+    std::string defaultClientEncoding = "UTF8";
+    std::string defaultSearchPath = "public";
+    std::string defaultTimeZone = "UTC";
     std::map<std::string, std::string> preparedStmts;
     // PostgreSQL PREPARE name(types) AS ...: declared parameter types
     std::map<std::string, std::vector<std::string>> preparedStmtTypes;

@@ -518,7 +518,27 @@ bool applyStartupParameters(const PgStartupMessage& startup,
             }
         }
     }
+    session.defaultApplicationName = session.applicationName;
+    session.defaultClientEncoding = session.clientEncoding;
+    session.defaultSearchPath = session.searchPath;
+    session.defaultTimeZone = session.timeZone;
     return true;
+}
+
+std::map<std::string, std::string> mutableProtocolParameterStatuses(
+        const Session& session) {
+    const std::string effectiveRole = session.currentRole.empty()
+                                          ? session.username
+                                          : session.currentRole;
+    const auto account = authCatalog().getAuthIdByName(effectiveRole);
+    return {
+        {"application_name", session.applicationName},
+        {"client_encoding", session.clientEncoding},
+        {"is_superuser", account && account->rolsuper ? "on" : "off"},
+        {"search_path", session.searchPath},
+        {"session_authorization", session.username},
+        {"TimeZone", session.timeZone},
+    };
 }
 
 bool isIntegerParameterType(uint32_t typeOid) {
@@ -2221,6 +2241,25 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         unregisterProcess(pid);
         return;
     }
+    auto reportedParameterStatuses =
+        mutableProtocolParameterStatuses(session);
+    const auto sendChangedParameterStatuses = [&]() -> bool {
+        const auto current = mutableProtocolParameterStatuses(session);
+        for (const auto& parameter : current) {
+            const auto previous = reportedParameterStatuses.find(
+                parameter.first);
+            if (previous != reportedParameterStatuses.end() &&
+                previous->second == parameter.second) {
+                continue;
+            }
+            if (!protocol.sendParameterStatus(parameter.first,
+                                              parameter.second)) {
+                return false;
+            }
+        }
+        reportedParameterStatuses = current;
+        return true;
+    };
 
     // ---- Pooled backend contexts (PgBouncer-style) ------------------
     // Session mode: one backend rented for the client's whole lifetime,
@@ -2401,6 +2440,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             for (const auto& result : results) {
                 sendQueryResult(protocol, result, readyStatus(), false);
             }
+            if (!sendChangedParameterStatuses()) break;
             protocol.sendReadyForQuery(readyStatus());
             continue;
         }
@@ -2796,6 +2836,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 continue;
             }
             if (!sendPendingNotifications(protocol, session.pid)) break;
+            if (!sendChangedParameterStatuses()) break;
             protocol.sendReadyForQuery(readyStatus());
             extendedQueryError = false;
             continue;
