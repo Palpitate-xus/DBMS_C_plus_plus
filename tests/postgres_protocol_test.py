@@ -553,6 +553,20 @@ def extended_query_money_binary_parameter(sock):
             790, money_raw, money_raw)
 
 
+def extended_query_bytea_binary_parameter(sock):
+    # bytea's binary wire representation is the byte sequence itself.  Cover
+    # bytes that cannot be embedded directly in a SQL text literal so the Bind
+    # decoder must convert them to bytea's canonical hex input form.
+    raw = b"\x00'\\\x80\xff"
+    extended_query_binary_parameter(
+        sock, "bytea", "SELECT payload FROM protocol_bytea WHERE payload = $1",
+        17, raw, raw)
+    extended_query_binary_parameter(
+        sock, "bytea_empty",
+        "SELECT payload FROM protocol_bytea WHERE payload = $1",
+        17, b"", b"")
+
+
 def extended_query_portal_pagination(sock):
     parse = b"paged_stmt\0SELECT id FROM portal_t\0" + struct.pack("!H", 0)
     sock.sendall(typed(b"P", parse))
@@ -2102,6 +2116,14 @@ def main():
         assert data_row_values(simple_query(sock, "SHOW lc_monetary")) == [[b"C"]]
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "INSERT INTO protocol_money VALUES ('-12.34')"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE protocol_bytea (payload BYTEA)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO protocol_bytea VALUES "
+                  "('\\x00275c80ff'), ('\\x')"))
+        bytea_description = row_description_fields(simple_query(
+            sock, "SELECT payload FROM protocol_bytea"))
+        assert bytea_description[0][3:5] == (17, -1), bytea_description
 
         # Set operations use one shared execution path.  Exercise duplicate
         # elimination, multiset ALL semantics, and INTERSECT precedence.
@@ -2853,6 +2875,7 @@ def main():
         extended_query_temporal_binary_parameters(sock)
         extended_query_numeric_binary_parameter(sock)
         extended_query_money_binary_parameter(sock)
+        extended_query_bytea_binary_parameter(sock)
         extended_query_portal_pagination(sock)
         extended_query_error_recovery(sock)
         transaction_error_state_recovery(sock)

@@ -17,6 +17,7 @@
 #include "common/DateType.h"
 #include "common/BooleanCodec.h"
 #include "PostgresNumeric.h"
+#include "types/bytea.h"
 #include "types/money.h"
 #include "process/SqlStats.h"
 #include "process/RuntimeStats.h"
@@ -659,6 +660,11 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
                                            std::string& error) {
     uint64_t bits = 0;
     switch (typeOid) {
+        case 17:
+            return quoteProtocolText(
+                ByteaValue::fromBytes(std::string(raw.begin(), raw.end()))
+                    .toString(),
+                error);
         case 16:
             if (raw.size() != 1 || (raw[0] != 0 && raw[0] != 1)) {
                 error = "invalid binary input syntax for type boolean";
@@ -1239,8 +1245,11 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
             Column expressionColumn;
             expressionColumn.dataType = result.columnTypes[columnIndex];
             expressionColumn.isVariableLength = true;
-            description.typeOid = mapBuiltinTypeNameToOid(
-                lowerProtocolText(expressionColumn.dataType));
+            const std::string typeName =
+                lowerProtocolText(expressionColumn.dataType);
+            description.typeOid = isByteaTypeName(typeName)
+                                      ? 17
+                                      : mapBuiltinTypeNameToOid(typeName);
             if (description.typeOid == INVALID_OID) description.typeOid = 25;
             description.typeSize = protocolTypeSize(description.typeOid, expressionColumn);
         }
@@ -1248,7 +1257,10 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
             const Column& column = table.cols[i];
             if (lowerProtocolText(column.dataName) != lowerProtocolText(name)) continue;
             if (!hasStructuredType) {
-                description.typeOid = mapBuiltinTypeNameToOid(lowerProtocolText(column.dataType));
+                const std::string typeName = lowerProtocolText(column.dataType);
+                description.typeOid = isByteaTypeName(typeName)
+                                          ? 17
+                                          : mapBuiltinTypeNameToOid(typeName);
                 if (description.typeOid == INVALID_OID) description.typeOid = 25;
                 description.typeSize = protocolTypeSize(description.typeOid, column);
                 description.typeModifier = column.isVariableLength && column.dsize > 0

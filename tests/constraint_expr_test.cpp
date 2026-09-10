@@ -193,7 +193,7 @@ static void test_generated_identity() {
 int main() {
     const std::map<std::string, std::string> resultTypes = {
         {"i", "integer"}, {"n", "numeric"}, {"d", "date"},
-        {"v", "varchar"}
+        {"v", "varchar"}, {"b", "blob"}
     };
     assert(dbms::ExprHelper::inferResultType("i + 1", resultTypes) == "integer");
     assert(dbms::ExprHelper::inferResultType("n * 2", resultTypes) == "numeric");
@@ -204,6 +204,10 @@ int main() {
     assert(dbms::ExprHelper::inferResultType(
                "d - DATE '2024-01-01'", resultTypes) == "integer");
     assert(dbms::ExprHelper::inferResultType("length(v || 'x')", resultTypes) == "integer");
+    assert(dbms::ExprHelper::inferResultType("b || b", resultTypes) == "bytea");
+    assert(dbms::ExprHelper::inferResultType("reverse(b)", resultTypes) == "bytea");
+    assert(dbms::ExprHelper::inferResultType(
+               "decode('00', 'hex')", resultTypes) == "bytea");
     assert(dbms::ExprHelper::inferResultType("power(i + 1, 2)", resultTypes) == "double precision");
     assert(dbms::ExprHelper::inferResultType("round(n)", resultTypes) == "numeric");
     assert(dbms::ExprHelper::inferResultType("ARRAY[1,2]", resultTypes) == "integer[]");

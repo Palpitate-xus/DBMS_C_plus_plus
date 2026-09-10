@@ -1,6 +1,7 @@
 #include "PostgresProtocol.h"
 #include "common/DateType.h"
 #include "PostgresNumeric.h"
+#include "types/bytea.h"
 #include "types/money.h"
 
 #include <algorithm>
@@ -103,6 +104,13 @@ bool encodeBinaryValue(const std::string& value, const PgColumnDescription& colu
                        std::vector<uint8_t>& encoded) {
     try {
         switch (column.typeOid) {
+            case 17: {
+                ByteaValue bytea;
+                if (!ByteaValue::parse(value, bytea)) return false;
+                const auto& bytes = bytea.bytes();
+                encoded.insert(encoded.end(), bytes.begin(), bytes.end());
+                return true;
+            }
             case 16: {
                 if (value == "true" || value == "t" || value == "1") encoded.push_back(1);
                 else if (value == "false" || value == "f" || value == "0") encoded.push_back(0);

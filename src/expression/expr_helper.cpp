@@ -74,6 +74,7 @@ std::string canonicalTypeName(const std::string& storageType) {
     if (t == "timetz" || t == "time with time zone") return "timetz";
     if (t == "interval") return "interval";
     if (t == "uuid") return "uuid";
+    if (t == "blob") return "bytea";
     return t;
 }
 
@@ -97,6 +98,7 @@ std::string protocolTypeName(std::string type) {
     if (type == "timestamp without time zone") return "timestamp";
     if (type == "time with time zone") return "timetz";
     if (type == "time without time zone") return "time";
+    if (type == "blob") return "bytea";
     return type;
 }
 
