@@ -999,8 +999,13 @@ StartupMessage 支持 wire 3.0，并对 3.x 的更高 minor（含 PostgreSQL 18
 最后发送 idle ReadyForQuery。应用名、编码、搜索路径、时区、session authorization
 或有效角色的 superuser 状态变化时，会在一个 Simple Query 或 Extended Sync
 周期结束前至多发送一次最终 ParameterStatus；事务状态由 ReadyForQuery 的
-`I/T/E` 精确表示。BackendKeyData 的 CancelRequest 消费和长算子取消时效仍由
-PROTO-07 覆盖。
+`I/T/E` 精确表示。BackendKeyData 的 secret 每次连接随机生成；标准 16-byte
+CancelRequest 只有在 PID/secret 同时匹配且目标正在执行查询时才设置共享中断
+令牌，辅助连接无论匹配与否都不返回消息。当前中断点覆盖表/行/页锁等待、heap
+逐页/逐行扫描、`generate_series` 展开以及 parallel scan/group/hash-join/
+GatherMerge worker 的安全汇合，取消返回 `57014` 并保持原连接可复用。不可中断
+的单次内核文件 I/O、标准库排序调用内部以及尚未接入统一执行计划的遗留长循环
+仍由 PROTO-07 覆盖，因此不能把当前能力宣称为完整 PostgreSQL cancel 语义。
 
 Simple Query 的一个 `Q` 消息可以包含多条顶层分号分隔语句；分句器识别
 普通/escape 字符串、quoted identifier、dollar quote、行注释和嵌套块注释。
