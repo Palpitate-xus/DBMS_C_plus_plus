@@ -17,6 +17,7 @@ constexpr Oid PgClassOid_Attribute = 1249;   // pg_attribute
 constexpr Oid PgClassOid_Type      = 1247;   // pg_type
 constexpr Oid PgClassOid_Proc      = 1255;   // pg_proc
 constexpr Oid PgClassOid_Depend    = 2608;   // pg_depend
+constexpr Oid PgClassOid_Enum      = 3501;   // pg_enum
 
 // ============================================================================
 // 系统表行格式定义（PostgreSQL 18 兼容子集）
@@ -139,6 +140,19 @@ struct PgTypeRow {
     int32_t  typtypmod = -1;
     int32_t  typndims = 0;
     Oid      typcollation = INVALID_OID;
+
+    std::string toString() const;
+};
+
+// ---------------------------------------------------------------------------
+// pg_enum — enum labels. Label OIDs are stable object identities; sort order
+// may be renumbered when a value is inserted between existing labels.
+// ---------------------------------------------------------------------------
+struct PgEnumRow {
+    Oid oid = INVALID_OID;
+    Oid enumtypid = INVALID_OID;
+    float enumsortorder = 0.0f;
+    std::string enumlabel;
 
     std::string toString() const;
 };

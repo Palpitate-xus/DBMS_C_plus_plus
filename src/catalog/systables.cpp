@@ -90,6 +90,13 @@ std::string PgTypeRow::toString() const {
     return oss.str();
 }
 
+std::string PgEnumRow::toString() const {
+    std::ostringstream oss;
+    oss << "PgEnum(oid=" << oid << ", type=" << enumtypid
+        << ", order=" << enumsortorder << ", label=" << enumlabel << ")";
+    return oss.str();
+}
+
 std::string PgProcRow::toString() const {
     std::ostringstream oss;
     oss << "PgProc(oid=" << oid << ", name=" << proname

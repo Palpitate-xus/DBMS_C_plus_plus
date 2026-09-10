@@ -620,17 +620,54 @@ static DBStatus anyTypeExists(const std::string& dbname,
 static Oid ensureTypeInCatalog(CatalogManager& cat, Oid nspOid, const Column& col) {
     Oid typid = mapBuiltinTypeNameToOid(col.dataType);
     if (typid != INVALID_OID) return typid;
-    if (const auto* existing = cat.findTypeByName(col.dataType, nspOid)) {
-        return existing->oid;
+
+    CatalogManager::QualifiedName typeName;
+    if (!CatalogManager::parseQualifiedName(col.dataType, typeName))
+        throw std::runtime_error("invalid column type name");
+    Oid typeNamespace = nspOid;
+    if (!typeName.schema.empty()) {
+        const PgNamespaceRow* namedNamespace =
+            cat.findNamespaceByName(typeName.schema);
+        if (!namedNamespace)
+            throw std::runtime_error("column type schema has no catalog entry");
+        typeNamespace = namedNamespace->oid;
+    }
+    if (const auto* existing =
+            cat.findTypeByName(typeName.name, typeNamespace)) {
+        const Oid existingOid = existing->oid;
+        if (!col.enumValues.empty()) {
+            if (existing->typtype != 'e') {
+                PgTypeRow corrected = *existing;
+                corrected.typlen = 4;
+                corrected.typbyval = true;
+                corrected.typtype = 'e';
+                corrected.typcategory = 'E';
+                if (!cat.updateType(existingOid, corrected))
+                    throw std::runtime_error("cannot repair enum catalog type");
+            }
+            if (!cat.replaceEnumLabels(existingOid, col.enumValues))
+                throw std::runtime_error("cannot synchronize enum labels");
+        }
+        return existingOid;
     }
 
     PgTypeRow typ;
-    typ.typname = col.dataType;
-    typ.typnamespace = nspOid;
-    typ.typlen = col.isVariableLength ? static_cast<int16_t>(-1) : static_cast<int16_t>(col.dsize);
-    typ.typtype = 'b';
-    typ.typcategory = 'U';
-    return cat.createType(typ);
+    typ.typname = typeName.name;
+    typ.typnamespace = typeNamespace;
+    typ.typlen = !col.enumValues.empty()
+        ? static_cast<int16_t>(4)
+        : (col.isVariableLength ? static_cast<int16_t>(-1)
+                                : static_cast<int16_t>(col.dsize));
+    typ.typbyval = !col.enumValues.empty();
+    typ.typtype = col.enumValues.empty() ? 'b' : 'e';
+    typ.typcategory = col.enumValues.empty() ? 'U' : 'E';
+    const Oid createdOid = cat.createType(typ);
+    if (!col.enumValues.empty() &&
+        !cat.replaceEnumLabels(createdOid, col.enumValues)) {
+        (void)cat.dropType(createdOid);
+        throw std::runtime_error("cannot register enum labels");
+    }
+    return createdOid;
 }
 
 static PgAttributeRow catalogAttributeForColumn(
@@ -7224,6 +7261,38 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
         DBStatus res = g_engine.createEnumType(s.currentDB, et);
         if (res != DBStatus::OK) {
             std::cout << "CREATE TYPE AS ENUM failed" << std::endl;
+            return true;
+        }
+        try {
+            CatalogManager& catalog =
+                g_engine.catalogService().get(s.currentDB);
+            const PgNamespaceRow* typeNamespace =
+                catalog.findNamespaceByName(typeSchema);
+            if (!typeNamespace ||
+                catalog.findTypeByName(stmt->objectName,
+                                       typeNamespace->oid)) {
+                throw std::runtime_error(
+                    "enum namespace/type catalog conflict");
+            }
+            PgTypeRow catalogType;
+            catalogType.typname = stmt->objectName;
+            catalogType.typnamespace = typeNamespace->oid;
+            catalogType.typlen = 4;
+            catalogType.typbyval = true;
+            catalogType.typtype = 'e';
+            catalogType.typcategory = 'E';
+            if (const auto owner = authCatalog().getAuthIdByName(
+                    effectiveSessionRole(s))) {
+                catalogType.typowner = owner->oid;
+            }
+            const Oid typeOid = catalog.createType(catalogType);
+            if (!catalog.replaceEnumLabels(typeOid, et.labels) ||
+                !catalog.persistAll()) {
+                throw std::runtime_error("cannot persist enum catalog rows");
+            }
+        } catch (const std::exception& error) {
+            std::cout << "CREATE TYPE AS ENUM catalog registration failed: "
+                      << error.what() << std::endl;
             return true;
         }
         txn.recordCreate(DdlObjectKind::Type, et.name);

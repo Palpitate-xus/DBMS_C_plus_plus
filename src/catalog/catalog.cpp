@@ -4,6 +4,7 @@
 #include <sstream>
 #include <iostream>
 #include <algorithm>
+#include <cmath>
 #include <iomanip>
 #include <limits>
 #include <set>
@@ -28,6 +29,36 @@ static void writeString(std::ostream& out, const std::string& s) {
         out << c;
     }
     out << '"';
+}
+
+static std::string hexEncode(const std::string& value) {
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string encoded;
+    encoded.reserve(value.size() * 2);
+    for (const unsigned char byte : value) {
+        encoded.push_back(digits[byte >> 4]);
+        encoded.push_back(digits[byte & 0x0f]);
+    }
+    return encoded;
+}
+
+static bool hexDecode(const std::string& encoded, std::string& value) {
+    if ((encoded.size() & 1U) != 0) return false;
+    const auto nibble = [](char digit) -> int {
+        if (digit >= '0' && digit <= '9') return digit - '0';
+        if (digit >= 'a' && digit <= 'f') return digit - 'a' + 10;
+        if (digit >= 'A' && digit <= 'F') return digit - 'A' + 10;
+        return -1;
+    };
+    value.clear();
+    value.reserve(encoded.size() / 2);
+    for (size_t offset = 0; offset < encoded.size(); offset += 2) {
+        const int high = nibble(encoded[offset]);
+        const int low = nibble(encoded[offset + 1]);
+        if (high < 0 || low < 0) return false;
+        value.push_back(static_cast<char>((high << 4) | low));
+    }
+    return true;
 }
 
 static std::string readString(std::istringstream& in) {
@@ -674,6 +705,17 @@ const PgTypeRow* CatalogManager::findTypeByName(const std::string& name, Oid nsp
     return findTypeByNameUnlocked(name, nspOid);
 }
 
+bool CatalogManager::updateType(Oid oid, const PgTypeRow& row) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto found = typeByOid_.find(oid);
+    if (found == typeByOid_.end() || found->second >= types_.size())
+        return false;
+    PgTypeRow replacement = row;
+    replacement.oid = oid;
+    types_[found->second] = std::move(replacement);
+    return true;
+}
+
 bool CatalogManager::dropTypeUnlocked(Oid oid) {
     auto it = typeByOid_.find(oid);
     if (it == typeByOid_.end() || it->second >= types_.size()) return false;
@@ -685,6 +727,12 @@ bool CatalogManager::dropTypeUnlocked(Oid oid) {
     }
     types_.pop_back();
     typeByOid_.erase(oid);
+    enums_.erase(
+        std::remove_if(enums_.begin(), enums_.end(),
+                       [oid](const PgEnumRow& label) {
+                           return label.enumtypid == oid;
+                       }),
+        enums_.end());
     return true;
 }
 
@@ -696,6 +744,99 @@ bool CatalogManager::dropType(Oid oid) {
 std::vector<PgTypeRow> CatalogManager::listTypes() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return types_;
+}
+
+// ============================================================================
+// pg_enum
+// ============================================================================
+
+bool CatalogManager::replaceEnumLabels(
+    Oid typeOid, const std::vector<std::string>& labels) {
+    if (typeOid == INVALID_OID || labels.empty()) return false;
+    std::set<std::string> distinct;
+    for (const auto& label : labels) {
+        if (label.find('\0') != std::string::npos ||
+            !distinct.insert(label).second) {
+            return false;
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    const PgTypeRow* type = findTypeUnlocked(typeOid);
+    if (!type || type->typtype != 'e') return false;
+
+    std::vector<PgEnumRow> existing;
+    for (const auto& label : enums_) {
+        if (label.enumtypid == typeOid) existing.push_back(label);
+    }
+    std::sort(existing.begin(), existing.end(),
+              [](const PgEnumRow& left, const PgEnumRow& right) {
+                  if (left.enumsortorder != right.enumsortorder)
+                      return left.enumsortorder < right.enumsortorder;
+                  return left.oid < right.oid;
+              });
+
+    std::optional<size_t> renamedPosition;
+    if (existing.size() == labels.size()) {
+        for (size_t position = 0; position < labels.size(); ++position) {
+            if (existing[position].enumlabel == labels[position]) continue;
+            if (renamedPosition) {
+                renamedPosition.reset();
+                break;
+            }
+            renamedPosition = position;
+        }
+    }
+    std::unordered_map<std::string, Oid> oidByLabel;
+    for (const auto& label : existing)
+        oidByLabel.emplace(label.enumlabel, label.oid);
+
+    std::vector<PgEnumRow> replacement;
+    replacement.reserve(labels.size());
+    for (size_t position = 0; position < labels.size(); ++position) {
+        PgEnumRow label;
+        label.enumtypid = typeOid;
+        label.enumsortorder = static_cast<float>(position + 1);
+        label.enumlabel = labels[position];
+        const auto unchanged = oidByLabel.find(label.enumlabel);
+        if (unchanged != oidByLabel.end()) {
+            label.oid = unchanged->second;
+        } else if (renamedPosition && *renamedPosition == position) {
+            label.oid = existing[position].oid;
+        } else {
+            label.oid = oidGen_->allocate();
+        }
+        replacement.push_back(std::move(label));
+    }
+
+    enums_.erase(
+        std::remove_if(enums_.begin(), enums_.end(),
+                       [typeOid](const PgEnumRow& label) {
+                           return label.enumtypid == typeOid;
+                       }),
+        enums_.end());
+    enums_.insert(enums_.end(), replacement.begin(), replacement.end());
+    return true;
+}
+
+std::vector<PgEnumRow> CatalogManager::findEnumLabels(Oid typeOid) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<PgEnumRow> result;
+    for (const auto& label : enums_) {
+        if (label.enumtypid == typeOid) result.push_back(label);
+    }
+    std::sort(result.begin(), result.end(),
+              [](const PgEnumRow& left, const PgEnumRow& right) {
+                  if (left.enumsortorder != right.enumsortorder)
+                      return left.enumsortorder < right.enumsortorder;
+                  return left.oid < right.oid;
+              });
+    return result;
+}
+
+std::vector<PgEnumRow> CatalogManager::listEnumLabels() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return enums_;
 }
 
 // ============================================================================
@@ -1408,6 +1549,19 @@ bool CatalogManager::persistAll() {
         }
     });
 
+    // pg_enum. Labels are hex encoded because PostgreSQL enum labels may
+    // contain commas, quotes, backslashes, and newlines while this bootstrap
+    // catalog is still line-oriented.
+    persist("enum", [&](std::ostream& out) {
+        for (const auto& r : enums_) {
+            writeOid(out, r.oid); out << ',';
+            writeOid(out, r.enumtypid); out << ',';
+            out << std::setprecision(
+                std::numeric_limits<float>::max_digits10)
+                << r.enumsortorder << ',' << hexEncode(r.enumlabel) << '\n';
+        }
+    });
+
     // pg_proc
     persist("proc", [&](std::ostream& out) {
         for (const auto& r : procs_) {
@@ -1651,6 +1805,31 @@ void CatalogManager::loadAll() {
             iss >> r.typelem; iss.ignore(1);
             iss >> r.typarray;
             types_.push_back(r);
+        }
+    }
+
+    // pg_enum
+    {
+        std::ifstream in(catalogFilePath("enum"));
+        std::string line;
+        while (std::getline(in, line)) {
+            if (line.empty()) continue;
+            std::istringstream iss(line);
+            PgEnumRow r;
+            std::string encodedLabel;
+            const bool prefixValid =
+                readCatalogCsvField(iss, r.oid) &&
+                readCatalogCsvField(iss, r.enumtypid) &&
+                readCatalogCsvField(iss, r.enumsortorder);
+            const bool labelRead = prefixValid &&
+                static_cast<bool>(std::getline(iss, encodedLabel));
+            if (!prefixValid || (!labelRead && !iss.eof()) ||
+                r.oid == INVALID_OID || r.enumtypid == INVALID_OID ||
+                !std::isfinite(r.enumsortorder) ||
+                !hexDecode(encodedLabel, r.enumlabel)) {
+                continue;
+            }
+            enums_.push_back(std::move(r));
         }
     }
 

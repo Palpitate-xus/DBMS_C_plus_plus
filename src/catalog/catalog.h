@@ -118,8 +118,19 @@ public:
     Oid createType(const PgTypeRow& row);
     const PgTypeRow* findType(Oid oid) const;
     const PgTypeRow* findTypeByName(const std::string& name, Oid nspOid) const;
+    bool updateType(Oid oid, const PgTypeRow& row);
     bool dropType(Oid oid);
     std::vector<PgTypeRow> listTypes() const;
+
+    // =====================================================================
+    // pg_enum
+    // =====================================================================
+    // Synchronize ordered labels while retaining OIDs for unchanged labels
+    // and for a one-position RENAME VALUE operation.
+    bool replaceEnumLabels(Oid typeOid,
+                           const std::vector<std::string>& labels);
+    std::vector<PgEnumRow> findEnumLabels(Oid typeOid) const;
+    std::vector<PgEnumRow> listEnumLabels() const;
 
     // =====================================================================
     // pg_proc
@@ -222,6 +233,7 @@ private:
     std::vector<PgClassRow>     classes_;
     std::vector<PgAttributeRow>  attributes_;
     std::vector<PgTypeRow>       types_;
+    std::vector<PgEnumRow>       enums_;
     std::vector<PgProcRow>       procs_;
     std::vector<PgDependRow>     depends_;
     std::vector<PgAuthIdRow>     authIds_;

@@ -3,6 +3,7 @@
 #include "executor/ExecutionPlan.h"
 #include "Session.h"
 #include "catalog/type_registry.h"
+#include "catalog/CatalogService.h"
 #include <cassert>
 #include <filesystem>
 #include <fstream>
@@ -38,8 +39,37 @@ static void test_enum_basic() {
     bool err = ddl.executeSql("CREATE TYPE mood AS ENUM ('happy', 'sad', 'neutral')", s);
     assert(!err);
 
+    dbms::Oid moodTypeOid = dbms::INVALID_OID;
+    {
+        auto& catalog = g_engine.catalogService().get(db);
+        const auto* publicNamespace = catalog.findNamespaceByName("public");
+        assert(publicNamespace);
+        const auto* moodType =
+            catalog.findTypeByName("mood", publicNamespace->oid);
+        assert(moodType);
+        moodTypeOid = moodType->oid;
+        assert(moodType->typtype == 'e');
+        assert(moodType->typcategory == 'E');
+        const auto labels = catalog.findEnumLabels(moodType->oid);
+        assert(labels.size() == 3);
+        assert(labels[0].enumlabel == "happy");
+        assert(labels[1].enumlabel == "sad");
+        assert(labels[2].enumlabel == "neutral");
+    }
+
     err = ddl.executeSql("CREATE TABLE t (id INT PRIMARY KEY, m mood)", s);
     assert(!err);
+
+    {
+        auto& catalog = g_engine.catalogService().get(db);
+        const auto* publicNamespace = catalog.findNamespaceByName("public");
+        assert(publicNamespace);
+        const auto* table = catalog.findClassByName("t", publicNamespace->oid);
+        assert(table);
+        const auto* enumAttribute = catalog.findAttribute(table->oid, "m");
+        assert(enumAttribute);
+        assert(enumAttribute->atttypid == moodTypeOid);
+    }
 
     // The named enum identity must survive schema serialization.  It is not
     // interchangeable with another enum merely because the labels match.
@@ -190,6 +220,22 @@ static void test_enum_labels_round_trip_losslessly() {
     assert(stored.name == "punctuation");
     assert(stored.labels == expected);
 
+    auto& catalog = g_engine.catalogService().get(db);
+    const auto* publicNamespace = catalog.findNamespaceByName("public");
+    assert(publicNamespace);
+    const auto* punctuationType =
+        catalog.findTypeByName("punctuation", publicNamespace->oid);
+    assert(punctuationType && punctuationType->typtype == 'e');
+    const dbms::Oid punctuationTypeOid = punctuationType->oid;
+    assert(catalog.persistAll());
+    dbms::CatalogManager reopenedCatalog(
+        (std::filesystem::path(db) / "pg_catalog").string());
+    const auto persistedLabels =
+        reopenedCatalog.findEnumLabels(punctuationTypeOid);
+    assert(persistedLabels.size() == expected.size());
+    for (size_t index = 0; index < expected.size(); ++index)
+        assert(persistedLabels[index].enumlabel == expected[index]);
+
     const std::string raw = readBytes(std::filesystem::path(db) / ".enums");
     assert(raw.rfind("DBMS_ENUM_V2:", 0) == 0);
     assert(raw.find("pipe|label") == std::string::npos);
@@ -197,6 +243,59 @@ static void test_enum_labels_round_trip_losslessly() {
 
     cleanup(db);
     std::cout << "[ENUM] lossless labels OK" << std::endl;
+}
+
+static void test_enum_catalog_label_oid_stability() {
+    std::string db = testDbPath("enum_catalog_oids");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE TYPE priority AS ENUM ('low', 'high', 'obsolete')", s));
+
+    auto& catalog = g_engine.catalogService().get(db);
+    const auto* publicNamespace = catalog.findNamespaceByName("public");
+    assert(publicNamespace);
+    const auto* type =
+        catalog.findTypeByName("priority", publicNamespace->oid);
+    assert(type && type->typtype == 'e');
+    const dbms::Oid typeOid = type->oid;
+    const auto original = catalog.findEnumLabels(typeOid);
+    assert(original.size() == 3);
+
+    assert(catalog.replaceEnumLabels(
+        typeOid, {"low", "medium", "high", "obsolete"}));
+    const auto added = catalog.findEnumLabels(typeOid);
+    assert(added.size() == 4);
+    assert(added[0].oid == original[0].oid);
+    assert(added[2].oid == original[1].oid);
+    assert(added[3].oid == original[2].oid);
+    assert(added[1].oid != dbms::INVALID_OID);
+
+    assert(catalog.replaceEnumLabels(
+        typeOid, {"low", "medium", "high", "urgent"}));
+    const auto renamed = catalog.findEnumLabels(typeOid);
+    assert(renamed.size() == 4);
+    assert(renamed[3].enumlabel == "urgent");
+    assert(renamed[3].oid == added[3].oid);
+    assert(catalog.persistAll());
+
+    dbms::CatalogManager reopened(
+        (std::filesystem::path(db) / "pg_catalog").string());
+    const auto persisted = reopened.findEnumLabels(typeOid);
+    assert(persisted.size() == renamed.size());
+    for (size_t index = 0; index < renamed.size(); ++index) {
+        assert(persisted[index].oid == renamed[index].oid);
+        assert(persisted[index].enumlabel == renamed[index].enumlabel);
+        assert(persisted[index].enumsortorder ==
+               renamed[index].enumsortorder);
+    }
+
+    cleanup(db);
+    std::cout << "[ENUM] catalog label OIDs OK" << std::endl;
 }
 
 static void test_enum_legacy_migration_and_atomic_rewrites() {
@@ -272,6 +371,7 @@ int main() {
     test_enum_update();
     test_named_enum_alter_updates_dependent_schemas();
     test_enum_labels_round_trip_losslessly();
+    test_enum_catalog_label_oid_stability();
     test_enum_legacy_migration_and_atomic_rewrites();
     std::cout << "[ENUM] all passed" << std::endl;
     return 0;
