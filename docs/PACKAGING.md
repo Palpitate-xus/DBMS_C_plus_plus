@@ -20,14 +20,17 @@ cd dbms-<version>
 ## 目录约定（显式 data directory）
 
 每次正常启动都必须用 `-D/--data-dir` 或 `DBMS_DATA_DIR` 显式选择数据根；
-启动 CWD 不再决定状态位置。首次打开空目录或可识别的旧 DBMS 目录时会原子写入
-`DBMS_CONTROL`（项目 magic、format version、随机 system identifier）。损坏的
-control、无 DBMS 标识的任意非空目录以及含 `PG_VERSION` 的 PostgreSQL cluster
+启动 CWD 不再决定状态位置。首次打开空目录时会原子写入 V2
+`DBMS_CONTROL`（项目 magic、control/catalog/heap format version、8 KiB block size、
+native byte order、随机 system identifier）。正常启动只接受完整兼容的 V2；
+`--check-data-directory` 执行只读检查，`--upgrade-data-directory` 当前仅执行
+V1→V2 control 升级，不会转换 catalog/关系/索引数据。损坏或未知 control、
+无 DBMS 标识的任意非空目录以及含 `PG_VERSION` 的 PostgreSQL cluster
 都会在引擎全局对象构造前被拒绝。
 
 | 路径 | 内容 |
 |---|---|
-| `DBMS_CONTROL` | DBMS-C++ cluster identity；不得复制到另一套独立 cluster 或手工编辑 |
+| `DBMS_CONTROL` | DBMS-C++ cluster identity 与持久化格式边界；不得复制到另一套独立 cluster 或手工编辑 |
 | `info/` | 集群级元数据根 |
 | `info/pg_catalog/pg_authid.cat` | 角色目录。CSV 行：`oid,"name",super,createdb,createrole,inherit,login,replication,bypassrls,-1,"SCRAM-SHA-256$iter:salt$stored:server",""`（注意 stored/server 之间是 `:`） |
 | `info/tlist.lst` | 数据库清单（每行一个数据库名） |
