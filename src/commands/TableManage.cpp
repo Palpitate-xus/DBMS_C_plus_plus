@@ -15,6 +15,7 @@
 #include "types/money.h"
 #include "types/uuid.h"
 #include "types/bytea.h"
+#include "types/xml.h"
 #include "catalog/collation.h"
 #include "catalog/CatalogService.h"
 #include "expression/expr_helper.h"
@@ -846,7 +847,8 @@ static bool columnAcceptsEmptyValue(const Column& column) {
     const TypeEntry* type =
         TypeRegistry::instance().findType(column.dataType);
     return type && (type->category == TypeCategory::String ||
-                    type->category == TypeCategory::Binary);
+                    type->category == TypeCategory::Binary ||
+                    type->category == TypeCategory::XML);
 }
 
 static std::string valueFromRowMap(
@@ -8315,94 +8317,6 @@ static bool normalizeArray(const std::string& in, const std::string& elemType, s
     if (p.i != in.size()) return false;  // trailing garbage
     out = result;
     return true;
-}
-
-// ========================================================================
-// XML well-formedness check (CONTENT form: fragments / text allowed).
-// Validates balanced, properly-nested element tags with quoted attribute
-// values, and properly-closed comments, CDATA, processing instructions and
-// declarations. Not a full XML 1.0 validator (no DTD/entity validation), but
-// rejects mismatched/unclosed tags, unquoted attributes and stray '<'.
-// ========================================================================
-static bool isWellFormedXml(const std::string& s) {
-    std::vector<std::string> stack;
-    size_t i = 0, n = s.size();
-    auto isNameStart = [](char c) { return std::isalpha(static_cast<unsigned char>(c)) || c == '_' || c == ':'; };
-    auto isNameChar = [](char c) {
-        return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == ':' || c == '-' || c == '.';
-    };
-    while (i < n) {
-        if (s[i] != '<') { ++i; continue; }  // text content
-        if (i + 1 >= n) return false;          // lone '<'
-        char c1 = s[i + 1];
-        if (c1 == '!') {
-            if (s.compare(i, 4, "<!--") == 0) {
-                size_t e = s.find("-->", i + 4);
-                if (e == std::string::npos) return false;
-                i = e + 3;
-            } else if (s.compare(i, 9, "<![CDATA[") == 0) {
-                size_t e = s.find("]]>", i + 9);
-                if (e == std::string::npos) return false;
-                i = e + 3;
-            } else {
-                // <!DOCTYPE ...> etc.; find the matching '>', honoring [ ] subset.
-                size_t j = i + 2; int br = 0; bool closed = false;
-                while (j < n) {
-                    if (s[j] == '[') br++;
-                    else if (s[j] == ']') br--;
-                    else if (s[j] == '>' && br <= 0) { closed = true; ++j; break; }
-                    ++j;
-                }
-                if (!closed) return false;
-                i = j;
-            }
-            continue;
-        }
-        if (c1 == '?') {
-            size_t e = s.find("?>", i + 2);
-            if (e == std::string::npos) return false;
-            i = e + 2;
-            continue;
-        }
-        if (c1 == '/') {  // closing tag
-            size_t j = i + 2;
-            std::string name;
-            if (j < n && isNameStart(s[j])) { name += s[j]; ++j; while (j < n && isNameChar(s[j])) { name += s[j]; ++j; } }
-            else return false;
-            while (j < n && std::isspace(static_cast<unsigned char>(s[j]))) ++j;
-            if (j >= n || s[j] != '>') return false;
-            ++j;
-            if (stack.empty() || stack.back() != name) return false;
-            stack.pop_back();
-            i = j;
-            continue;
-        }
-        // opening (or self-closing) tag
-        size_t j = i + 1;
-        std::string name;
-        if (j < n && isNameStart(s[j])) { name += s[j]; ++j; while (j < n && isNameChar(s[j])) { name += s[j]; ++j; } }
-        else return false;
-        bool done = false;
-        while (!done) {
-            while (j < n && std::isspace(static_cast<unsigned char>(s[j]))) ++j;
-            if (j >= n) return false;
-            if (s[j] == '>') { ++j; stack.push_back(name); done = true; break; }
-            if (s[j] == '/') { ++j; if (j >= n || s[j] != '>') return false; ++j; done = true; break; }  // self-closing
-            if (!isNameStart(s[j])) return false;                       // attribute name
-            ++j; while (j < n && isNameChar(s[j])) ++j;
-            while (j < n && std::isspace(static_cast<unsigned char>(s[j]))) ++j;
-            if (j >= n || s[j] != '=') return false;
-            ++j;
-            while (j < n && std::isspace(static_cast<unsigned char>(s[j]))) ++j;
-            if (j >= n || (s[j] != '"' && s[j] != '\'')) return false;  // value must be quoted
-            char q = s[j]; ++j;
-            while (j < n && s[j] != q) ++j;
-            if (j >= n) return false;
-            ++j;
-        }
-        i = j;
-    }
-    return stack.empty();
 }
 
 // ========================================================================
@@ -21758,8 +21672,8 @@ DBStatus StorageEngine::insertInternal(
             actualValues[col.dataName] = canon;
         }
         // Validate XML well-formedness (stored verbatim, no canonicalization).
-        if (col.dataType == "xml" && !col.isArray && !val.empty()) {
-            if (!isWellFormedXml(val)) {
+        if (col.dataType == "xml" && !col.isArray) {
+            if (!validateXml(val, XmlParseMode::Content).ok) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }
@@ -24966,7 +24880,7 @@ DBStatus StorageEngine::updateInternal(
                             storeVal = canon;
                         }
                     } else if (col.dataType == "xml") {
-                        if (!kv.second.empty() && !isWellFormedXml(kv.second))
+                        if (!validateXml(kv.second, XmlParseMode::Content).ok)
                             return DBStatus::INVALID_VALUE;
                     } else if (col.dataType == "tsvector") {
                         if (!kv.second.empty()) {

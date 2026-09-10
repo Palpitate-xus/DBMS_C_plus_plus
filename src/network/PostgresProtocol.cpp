@@ -4,6 +4,7 @@
 #include "types/bytea.h"
 #include "common/NetworkValue.h"
 #include "types/money.h"
+#include "types/xml.h"
 
 #include <algorithm>
 #include <cctype>
@@ -105,6 +106,11 @@ bool encodeBinaryValue(const std::string& value, const PgColumnDescription& colu
                        std::vector<uint8_t>& encoded) {
     try {
         switch (column.typeOid) {
+            case 142: {
+                if (!validateXml(value, XmlParseMode::Content).ok) return false;
+                encoded.assign(value.begin(), value.end());
+                return true;
+            }
             case 17: {
                 ByteaValue bytea;
                 if (!ByteaValue::parse(value, bytea)) return false;

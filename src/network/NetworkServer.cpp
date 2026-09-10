@@ -20,6 +20,7 @@
 #include "PostgresNumeric.h"
 #include "types/bytea.h"
 #include "types/money.h"
+#include "types/xml.h"
 #include "process/SqlStats.h"
 #include "process/RuntimeStats.h"
 #include "process/OutputCapture.h"
@@ -801,6 +802,14 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
             }
             return quoteProtocolText(uuid, error);
         }
+        case 142: {
+            const std::string value(raw.begin(), raw.end());
+            if (!validateXml(value, XmlParseMode::Content).ok) {
+                error = "invalid binary input syntax for type xml";
+                return {};
+            }
+            return quoteProtocolText(value, error);
+        }
         case 25: case 1042: case 1043:
             return quoteProtocolText(std::string(raw.begin(), raw.end()), error);
         default:
@@ -873,6 +882,12 @@ std::string protocolParameterLiteral(uint32_t typeOid,
         }
         return quoteProtocolText(formatMacAddress(address.data(), length),
                                  error);
+    }
+    if (typeOid == 142) {
+        if (!validateXml(value, XmlParseMode::Content).ok) {
+            error = "invalid input syntax for type xml";
+            return {};
+        }
     }
     return quoteProtocolText(value, error);
 }
@@ -1501,7 +1516,10 @@ std::string whereUnknownFunctionError(const std::string& sql,
         "unnest", "array_lower", "array_upper", "array_length", "cardinality",
         "row_number", "rank", "dense_rank", "ntile", "lag", "lead",
         "first_value", "last_value", "nth_value",
-        "pg_notify", "pg_notification_queue_usage", "pg_listening_channels"
+        "pg_notify", "pg_notification_queue_usage", "pg_listening_channels",
+        "xml_is_well_formed", "xml_is_well_formed_content",
+        "xml_is_well_formed_document", "xml_is_document", "xmlconcat",
+        "xmlcomment"
     };
     std::string low;
     for (char c : sql) low += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));

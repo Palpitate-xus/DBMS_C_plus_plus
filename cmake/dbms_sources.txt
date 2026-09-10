@@ -49,4 +49,5 @@ src/process/AdvisoryLockManager.cpp
 src/process/MaintenanceJobManager.cpp
 src/storage/LargeObject.cpp
 src/types/numeric.cpp
+src/types/xml.cpp
 src/utils/plpgsql.cpp

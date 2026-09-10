@@ -286,7 +286,12 @@ std::string inferAstResultType(
             return result;
         }
         if (name == "exists" || name == "is_null" || name == "is_not_null" ||
-            name == "isdistinct" || name == "isnotdistinct") return "boolean";
+            name == "isdistinct" || name == "isnotdistinct" ||
+            name == "xml_is_well_formed" ||
+            name == "xml_is_well_formed_content" ||
+            name == "xml_is_well_formed_document" ||
+            name == "xml_is_document") return "boolean";
+        if (name == "xmlconcat" || name == "xmlcomment") return "xml";
         if (name == "pg_notify") return "void";
         if (name == "gen_random_uuid" || name == "uuidv4" ||
             name == "uuidv7") return "uuid";
@@ -898,7 +903,7 @@ std::string ExprHelper::inferResultType(
             "smallint", "integer", "bigint", "numeric", "real",
             "double precision", "boolean", "text", "varchar", "bpchar",
             "date", "time", "timetz", "timestamp", "timestamptz",
-            "interval", "json", "jsonb", "uuid", "name", "regtype",
+            "interval", "json", "jsonb", "xml", "uuid", "name", "regtype",
             "smallint[]", "integer[]", "bigint[]", "numeric[]", "real[]",
             "double precision[]", "boolean[]", "text[]", "varchar[]",
             "date[]", "time[]", "timestamp[]", "timestamptz[]", "uuid[]"
@@ -939,7 +944,7 @@ std::string ExprHelper::inferResultType(
 
     static const std::vector<std::string> typedLiteralTypes = {
         "timestamptz", "timestamp", "interval", "date", "time",
-        "numeric", "boolean", "text"
+        "numeric", "boolean", "text", "xml"
     };
     for (const std::string& type : typedLiteralTypes) {
         const std::string prefix = type + " ";

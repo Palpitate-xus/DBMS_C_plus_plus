@@ -12,6 +12,7 @@
 #include "types/uuid.h"
 #include "types/bytea.h"
 #include "types/encoding_conversion.h"
+#include "types/xml.h"
 #include "utils/Session.h"
 
 #include <algorithm>
@@ -1489,6 +1490,15 @@ ExprValue ExprEvaluator::evalLiteral(const LiteralExpr* e) const {
     }
 
     if (!e->typeName.empty()) {
+        if (toLower(e->typeName) == "xml") {
+            const std::string value = unquote(raw);
+            const auto validation = validateXml(value, XmlParseMode::Content);
+            if (!validation.ok) {
+                throw DbError("2200N", "invalid XML content: " +
+                                         validation.message);
+            }
+            return ExprValue("xml", value, false);
+        }
         return ExprValue(e->typeName, unquote(raw), false);
     }
 
@@ -4235,6 +4245,14 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
         }
         return ExprValue(target, formatMacAddress(address.data(), length), false);
     }
+    if (target == "xml") {
+        const auto validation = validateXml(v.value, XmlParseMode::Content);
+        if (!validation.ok) {
+            throw DbError("2200N", "invalid XML content: " +
+                                     validation.message);
+        }
+        return ExprValue("xml", v.value, false);
+    }
     const BitCastSpec bitSpec = parseBitCastSpec(target);
     if (bitSpec.matches) return castToBitString(v, bitSpec);
     const CharacterCastSpec characterSpec = parseCharacterCastSpec(target);
@@ -6526,6 +6544,82 @@ void ExprEvaluator::registerBuiltins() {
         formatUtcClock(stableClock, "%Y-%m-%d %H:%M:%S");
     const std::string stableTime =
         formatUtcClock(stableClock, "%H:%M:%S");
+
+    auto requireXmlArity = [](const std::vector<ExprValue>& arguments,
+                              size_t expected,
+                              const char* signature) {
+        if (arguments.size() != expected) {
+            throw DbError("42883", std::string("function ") + signature +
+                                      " does not exist");
+        }
+    };
+    auto xmlWellFormed = [requireXmlArity](XmlParseMode mode,
+                                           const char* signature,
+                                           const std::vector<ExprValue>& a) {
+        requireXmlArity(a, 1, signature);
+        if (a[0].isNull) return ExprValue("boolean", "", true);
+        return ExprValue("boolean",
+                         validateXml(a[0].value, mode).ok ? "t" : "f",
+                         false);
+    };
+    functions_["xml_is_well_formed_content"] =
+        [xmlWellFormed](const std::vector<ExprValue>& a) {
+            return xmlWellFormed(XmlParseMode::Content,
+                                 "xml_is_well_formed_content(text)", a);
+        };
+    functions_["xml_is_well_formed_document"] =
+        [xmlWellFormed](const std::vector<ExprValue>& a) {
+            return xmlWellFormed(XmlParseMode::Document,
+                                 "xml_is_well_formed_document(text)", a);
+        };
+    // xmloption defaults to CONTENT in PostgreSQL and this engine does not
+    // expose a mutable xmloption setting yet.
+    functions_["xml_is_well_formed"] =
+        [xmlWellFormed](const std::vector<ExprValue>& a) {
+            return xmlWellFormed(XmlParseMode::Content,
+                                 "xml_is_well_formed(text)", a);
+        };
+    functions_["xml_is_document"] =
+        [xmlWellFormed](const std::vector<ExprValue>& a) {
+            return xmlWellFormed(XmlParseMode::Document,
+                                 "xml_is_document(xml)", a);
+        };
+    functions_["xmlconcat"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty()) {
+            throw DbError("42601", "XMLCONCAT requires at least one argument");
+        }
+        std::string result;
+        bool sawValue = false;
+        for (const ExprValue& argument : a) {
+            if (argument.isNull) continue;
+            const auto validation =
+                validateXml(argument.value, XmlParseMode::Content);
+            if (!validation.ok) {
+                throw DbError("2200N", "invalid XML content: " +
+                                         validation.message);
+            }
+            result += stripXmlDeclaration(argument.value);
+            sawValue = true;
+        }
+        return sawValue ? ExprValue("xml", std::move(result), false)
+                        : ExprValue("xml", "", true);
+    };
+    functions_["xmlcomment"] = [requireXmlArity](
+        const std::vector<ExprValue>& a) {
+        requireXmlArity(a, 1, "xmlcomment(text)");
+        if (a[0].isNull) return ExprValue("xml", "", true);
+        if (a[0].value.find("--") != std::string::npos ||
+            (!a[0].value.empty() && a[0].value.back() == '-')) {
+            throw DbError("2200S", "invalid XML comment");
+        }
+        const std::string value = "<!--" + a[0].value + "-->";
+        const auto validation = validateXml(value, XmlParseMode::Content);
+        if (!validation.ok) {
+            throw DbError("2200S", "invalid XML comment: " +
+                                     validation.message);
+        }
+        return ExprValue("xml", value, false);
+    };
 
     // pg_notify(text, text) is the expression form of NOTIFY. It is volatile
     // and returns PostgreSQL's void pseudo-type; delivery is staged by the
@@ -10637,6 +10731,12 @@ void ExprEvaluator::registerBuiltins() {
     volatility_["lastval"] = 'v';
     volatility_["setval"] = 'v';
     volatility_["random"] = 'v';
+    volatility_["xml_is_well_formed"] = 's';
+    volatility_["xml_is_well_formed_content"] = 'i';
+    volatility_["xml_is_well_formed_document"] = 'i';
+    volatility_["xml_is_document"] = 'i';
+    volatility_["xmlconcat"] = 'i';
+    volatility_["xmlcomment"] = 'i';
 }
 
 } // namespace dbms
