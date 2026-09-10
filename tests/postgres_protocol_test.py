@@ -1500,6 +1500,78 @@ def main():
         assert any(kind == b"C" for kind, _ in simple_query(sock, "CREATE TABLE t (id INT)"))
         assert any(kind == b"C" for kind, _ in simple_query(sock, "INSERT INTO t VALUES (1)"))
 
+        # Relation lookup follows search_path, with pg_temp ahead of explicit
+        # schemas, and unqualified CREATE TABLE targets the first existing
+        # non-system schema in the path.
+        for schema in ("path_a", "path_b", "alice"):
+            assert any(kind == b"C" for kind, _ in simple_query(
+                sock, "CREATE SCHEMA " + schema))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE public.path_pick (v INT)"))
+        insert_public_path = simple_query(
+            sock, "INSERT INTO public.path_pick VALUES (10)")
+        assert any(kind == b"C" for kind, _ in insert_public_path), \
+            insert_public_path
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE path_a.path_pick (v INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO path_a.path_pick VALUES (20)"))
+
+        set_path = simple_query(sock, "SET search_path TO path_a, public")
+        assert not any(kind == b"E" for kind, _ in set_path), set_path
+        assert data_row_values(simple_query(sock, "SHOW search_path")) == \
+            [[b"path_a, public"]]
+        assert data_row_values(simple_query(
+            sock, "SELECT v FROM path_pick")) == [[b"20"]]
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE path_created (v INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO path_created VALUES (30)"))
+        assert data_row_values(simple_query(
+            sock, "SELECT v FROM path_a.path_created")) == [[b"30"]]
+
+        assert not any(kind == b"E" for kind, _ in simple_query(
+            sock, "SET search_path TO missing_schema, public"))
+        assert data_row_values(simple_query(
+            sock, "SELECT v FROM path_pick")) == [[b"10"]]
+
+        assert not any(kind == b"E" for kind, _ in simple_query(
+            sock, 'SET search_path TO "$user", public'))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE user_path_table (v INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO user_path_table VALUES (40)"))
+        assert data_row_values(simple_query(
+            sock, "SELECT v FROM alice.user_path_table")) == [[b"40"]]
+
+        assert not any(kind == b"E" for kind, _ in simple_query(
+            sock, "SET search_path TO path_a, public"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TEMP TABLE path_pick (v INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO path_pick VALUES (50)"))
+        assert data_row_values(simple_query(
+            sock, "SELECT v FROM path_pick")) == [[b"50"]]
+        assert data_row_values(simple_query(
+            sock, "SELECT v FROM pg_temp.path_pick")) == [[b"50"]]
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "DROP TABLE path_pick"))
+        assert data_row_values(simple_query(
+            sock, "SELECT v FROM path_pick")) == [[b"20"]]
+
+        malformed_path = simple_query(
+            sock, "SET search_path TO path_a,,public")
+        assert any(kind == b"E" and b"C22023\x00" in body
+                   for kind, body in malformed_path), malformed_path
+        assert data_row_values(simple_query(
+            sock, "SELECT v FROM path_pick")) == [[b"20"]]
+        assert not any(kind == b"E" for kind, _ in simple_query(
+            sock, "RESET search_path"))
+        assert data_row_values(simple_query(sock, "SHOW search_path")) == \
+            [[b"public"]]
+        assert data_row_values(simple_query(
+            sock, "SELECT v FROM path_pick")) == [[b"10"]]
+
         # Named enums have a real pg_type OID and ordered, stable pg_enum
         # label OIDs. Qualified pg_catalog access must inspect the connected
         # database rather than a database literally named "pg_catalog".

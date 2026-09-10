@@ -516,6 +516,28 @@ int main() {
         assert(!parser.parse("UPDATE t SET a = 1, WHERE a = 1").success);
         assert(!parser.parse("UPDATE t SET WHERE a = 1").success);
         assert(!parser.parse("DELETE FROM t WHERE a = 1 trailing").success);
+        auto qualifiedInsert = parser.parse(
+            "INSERT INTO app.t (a) VALUES (1)");
+        auto qualifiedUpdate = parser.parse(
+            "UPDATE app.t SET a = 2 WHERE a = 1");
+        auto qualifiedDelete = parser.parse(
+            "DELETE FROM app.t WHERE a = 2");
+        auto qualifiedMerge = parser.parse(
+            "MERGE INTO app.t USING public.s ON t.a = s.a "
+            "WHEN MATCHED THEN DELETE");
+        assert(qualifiedInsert.success);
+        assert(dynamic_cast<InsertStmt*>(qualifiedInsert.stmt.get())
+                   ->tableName == "app.t");
+        assert(qualifiedUpdate.success);
+        assert(dynamic_cast<UpdateStmt*>(qualifiedUpdate.stmt.get())
+                   ->tableName == "app.t");
+        assert(qualifiedDelete.success);
+        assert(dynamic_cast<DeleteStmt*>(qualifiedDelete.stmt.get())
+                   ->tableName == "app.t");
+        assert(qualifiedMerge.success);
+        assert(dynamic_cast<MergeStmt*>(qualifiedMerge.stmt.get())
+                   ->targetTable == "app.t");
+        assert(!parser.parse("INSERT INTO app. VALUES (1)").success);
         std::cout << "[PARSER P1] INSERT AST DEFAULT handling OK\n";
     }
 

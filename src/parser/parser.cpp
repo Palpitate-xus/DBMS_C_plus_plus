@@ -162,6 +162,35 @@ static bool parsePositiveDouble(const std::string& token, double& value) {
 
 static std::vector<std::string> collectParenthesized(const std::vector<std::string>& tokens, size_t& pos);
 static ExprPtr parseSimpleExpr(const std::vector<std::string>& tokens, size_t& pos);
+
+static bool parseQualifiedObjectName(
+    const std::vector<std::string>& tokens, size_t& pos,
+    std::string& name) {
+    const auto invalidName = [](const std::string& token,
+                                bool rejectClauseKeyword) {
+        static const std::set<std::string> clauseKeywords = {
+            "values", "default", "select", "set", "using", "on",
+            "where", "returning"
+        };
+        return token.empty() || token == "." || token == "," ||
+               token == ";" ||
+               (rejectClauseKeyword && token.front() != '"' &&
+                clauseKeywords.count(SQLParser::toLower(token)) != 0);
+    };
+    if (pos >= tokens.size() || invalidName(tokens[pos], false)) {
+        return false;
+    }
+    name = tokens[pos++];
+    if (pos < tokens.size() && tokens[pos] == ".") {
+        if (pos + 1 >= tokens.size() ||
+            invalidName(tokens[pos + 1], true)) {
+            return false;
+        }
+        name += "." + tokens[pos + 1];
+        pos += 2;
+    }
+    return true;
+}
 static ExprPtr parseExpr(const std::vector<std::string>& tokens, size_t& pos);
 static SelectItem parseSelectItem(const std::vector<std::string>& tokens, size_t& pos);
 static std::unique_ptr<FromItem> parseFromItem(const std::vector<std::string>& tokens, size_t& pos);
@@ -2803,8 +2832,9 @@ ParseResult SQLParser::parseInsert(const std::string& sql) {
     if (pos < tokens.size() && toLower(tokens[pos]) == "into") ++pos;
 
     // Table name
-    if (pos < tokens.size()) {
-        stmt->tableName = tokens[pos++];
+    if (!parseQualifiedObjectName(tokens, pos, stmt->tableName)) {
+        r.error = "INSERT requires a valid target table";
+        return r;
     }
 
     // Optional column list: (col1, col2, ...)
@@ -2967,8 +2997,9 @@ ParseResult SQLParser::parseUpdate(const std::string& sql) {
     }
 
     // Table name, optional [AS] alias (PG: UPDATE t [AS] x SET ...)
-    if (pos < tokens.size()) {
-        stmt->tableName = tokens[pos++];
+    if (!parseQualifiedObjectName(tokens, pos, stmt->tableName)) {
+        r.error = "UPDATE requires a valid target table";
+        return r;
     }
     std::string updateAlias;
     if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "as") {
@@ -3073,8 +3104,9 @@ ParseResult SQLParser::parseDelete(const std::string& sql) {
     }
 
     // Table name
-    if (pos < tokens.size()) {
-        stmt->tableName = tokens[pos++];
+    if (!parseQualifiedObjectName(tokens, pos, stmt->tableName)) {
+        r.error = "DELETE requires a valid target table";
+        return r;
     }
 
     // USING
@@ -3123,8 +3155,9 @@ ParseResult SQLParser::parseMerge(const std::string& sql) {
     if (pos < tokens.size() && toLower(tokens[pos]) == "into") ++pos;
 
     // Target table
-    if (pos < tokens.size()) {
-        stmt->targetTable = tokens[pos++];
+    if (!parseQualifiedObjectName(tokens, pos, stmt->targetTable)) {
+        r.error = "MERGE requires a valid target table";
+        return r;
     }
 
     // USING

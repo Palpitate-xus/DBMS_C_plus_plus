@@ -2817,13 +2817,18 @@ static bool handleSetCommand(const string& sql, Session& s) {
             cout << "NOTICE: SET GLOBAL is mapped to ALTER SYSTEM semantics in "
                     "extended compatibility mode" << endl;
         }
-        size_t eqPos = rest.find('=');
-        if (eqPos == string::npos) {
-            cout << "SQL syntax error: SET [GLOBAL] parameter = value" << endl;
+        size_t separatorPos = rest.find('=');
+        size_t separatorLength = 1;
+        if (separatorPos == string::npos) {
+            separatorPos = toLowerSql(rest).find(" to ");
+            separatorLength = 4;
+        }
+        if (separatorPos == string::npos) {
+            cout << "SQL syntax error: SET [GLOBAL] parameter TO value" << endl;
             return true;
         }
-        string param = trim(rest.substr(0, eqPos));
-        string val = trim(rest.substr(eqPos + 1));
+        string param = trim(rest.substr(0, separatorPos));
+        string val = trim(rest.substr(separatorPos + separatorLength));
         // User-defined variable: SET @var = value
         if (!param.empty() && param[0] == '@') {
             if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
@@ -2856,17 +2861,25 @@ static bool handleSetCommand(const string& sql, Session& s) {
             return false;
         }
         if (!isGlobal && param == "search_path") {
-            string path = toLowerSql(stripQuotes(val));
-            path.erase(std::remove_if(
-                path.begin(), path.end(), [](unsigned char ch) {
-                    return std::isspace(ch);
-                }), path.end());
-            if (path != "public") {
-                cout << "ERROR: search_path is not supported except for public "
-                        "(SQLSTATE 0A000)" << endl;
+            if (!val.empty() && val.back() == ';') {
+                val.pop_back();
+                val = trim(val);
+            }
+            if (toLowerSql(val) == "default") {
+                s.searchPath = s.defaultSearchPath;
+                cout << "SET" << endl;
+                return false;
+            }
+            const string setting = stripQuotes(val);
+            std::vector<std::string> entries;
+            std::string canonical;
+            if (!dbms::parseSessionSearchPath(
+                    setting, entries, canonical)) {
+                cout << "ERROR: invalid value for parameter \"search_path\" "
+                        "(SQLSTATE 22023)" << endl;
                 return true;
             }
-            s.searchPath = "public";
+            s.searchPath = std::move(canonical);
             cout << "SET" << endl;
             return false;
         }
@@ -4540,22 +4553,79 @@ void cleanupSessionTempTables(Session& s) {
 }
 
 string resolveTableName(Session& s, const string& name) {
-    if (s.tempTables.count(name)) return tempTablePrefix(s, name);
-    if (s.transientTempTables.count(name)) return tempTablePrefix(s, name);
-    // Materialized views redirect to backing table
-    if (g_engine.isMaterializedView(s.currentDB, name)) {
-        return dbms::StorageEngine::materializedViewPrefix(name);
-    }
-    // Schema-qualified table: schema.table -> schema__table
-    size_t dotPos = name.find('.');
+    const size_t dotPos = name.find('.');
     if (dotPos != string::npos && dotPos > 0 && dotPos + 1 < name.size()) {
         string schema = name.substr(0, dotPos);
         string table = name.substr(dotPos + 1);
+        if ((schema == "pg_temp" ||
+             schema.rfind("pg_temp_", 0) == 0) &&
+            (s.tempTables.count(table) ||
+             s.transientTempTables.count(table))) {
+            return tempTablePrefix(s, table);
+        }
         if (g_engine.schemaExists(s.currentDB, schema)) {
-            return schema + "__" + table;
+            string physical = schema == "public"
+                ? table : schema + "__" + table;
+            const string legacyPublic = "public__" + table;
+            if (schema == "public" &&
+                !g_engine.tableExists(s.currentDB, physical) &&
+                !g_engine.viewExists(s.currentDB, physical) &&
+                !g_engine.isMaterializedView(s.currentDB, physical) &&
+                (g_engine.tableExists(s.currentDB, legacyPublic) ||
+                 g_engine.viewExists(s.currentDB, legacyPublic) ||
+                 g_engine.isMaterializedView(s.currentDB, legacyPublic))) {
+                physical = legacyPublic;
+            }
+            if (g_engine.isMaterializedView(s.currentDB, physical)) {
+                return dbms::StorageEngine::materializedViewPrefix(physical);
+            }
+            return physical;
+        }
+        return name;
+    }
+
+    // PostgreSQL implicitly searches the session temporary namespace before
+    // the explicit path unless pg_temp is listed later for function/operator
+    // lookup. This resolver is relation-only, so temp relations always win.
+    if (s.tempTables.count(name)) return tempTablePrefix(s, name);
+    if (s.transientTempTables.count(name)) return tempTablePrefix(s, name);
+
+    std::vector<std::string> entries;
+    std::string canonical;
+    if (!dbms::parseSessionSearchPath(s.searchPath, entries, canonical)) {
+        entries = {"public"};
+    }
+    std::string firstCandidate;
+    for (const auto& rawEntry : entries) {
+        const string schema = dbms::expandSessionSearchPathEntry(
+            rawEntry, s.username);
+        if (schema == "pg_catalog" || schema == "pg_temp" ||
+            schema.rfind("pg_temp_", 0) == 0 ||
+            !g_engine.schemaExists(s.currentDB, schema)) {
+            continue;
+        }
+        string physical = schema == "public"
+            ? name : schema + "__" + name;
+        const string legacyPublic = "public__" + name;
+        if (schema == "public" &&
+            !g_engine.tableExists(s.currentDB, physical) &&
+            !g_engine.viewExists(s.currentDB, physical) &&
+            !g_engine.isMaterializedView(s.currentDB, physical) &&
+            (g_engine.tableExists(s.currentDB, legacyPublic) ||
+             g_engine.viewExists(s.currentDB, legacyPublic) ||
+             g_engine.isMaterializedView(s.currentDB, legacyPublic))) {
+            physical = legacyPublic;
+        }
+        if (firstCandidate.empty()) firstCandidate = physical;
+        if (g_engine.isMaterializedView(s.currentDB, physical)) {
+            return dbms::StorageEngine::materializedViewPrefix(physical);
+        }
+        if (g_engine.tableExists(s.currentDB, physical) ||
+            g_engine.viewExists(s.currentDB, physical)) {
+            return physical;
         }
     }
-    return name;
+    return firstCandidate.empty() ? name : firstCandidate;
 }
 
 static bool isTempTable(Session& s, const string& name) {

@@ -436,16 +436,14 @@ bool applyStartupRuntimeParameter(Session& session,
         return true;
     }
     if (name == "search_path") {
-        std::string compact;
-        for (unsigned char ch : value) {
-            if (!std::isspace(ch)) compact.push_back(static_cast<char>(ch));
-        }
-        if (lowerAscii(compact) != "public") {
-            sqlState = "0A000";
-            error = "startup search_path is not supported except for public";
+        std::vector<std::string> entries;
+        std::string canonical;
+        if (!dbms::parseSessionSearchPath(value, entries, canonical)) {
+            sqlState = "22023";
+            error = "invalid value for parameter \"search_path\"";
             return false;
         }
-        session.searchPath = "public";
+        session.searchPath = std::move(canonical);
         return true;
     }
     if (name == "timezone") {

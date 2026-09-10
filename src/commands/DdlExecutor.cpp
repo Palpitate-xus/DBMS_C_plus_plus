@@ -3966,8 +3966,33 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                   << "\"" << std::endl;
         return true;
     }
-    const std::string targetSchema = targetName.schema.empty()
-        ? "public" : targetName.schema;
+    std::string targetSchema = targetName.schema;
+    if (targetSchema.empty()) {
+        std::vector<std::string> searchPath;
+        std::string canonicalSearchPath;
+        if (!dbms::parseSessionSearchPath(
+                s.searchPath, searchPath, canonicalSearchPath)) {
+            std::cout << "ERROR: invalid search_path" << std::endl;
+            return true;
+        }
+        for (const auto& rawSchema : searchPath) {
+            const std::string candidate =
+                dbms::expandSessionSearchPathEntry(rawSchema, s.username);
+            if (candidate == "pg_catalog" || candidate == "pg_temp" ||
+                candidate.rfind("pg_temp_", 0) == 0) {
+                continue;
+            }
+            if (g_engine.schemaExists(s.currentDB, candidate)) {
+                targetSchema = candidate;
+                break;
+            }
+        }
+        if (targetSchema.empty() && !temporary) {
+            std::cout << "ERROR: no schema has been selected to create in"
+                      << std::endl;
+            return true;
+        }
+    }
     if (!temporary && !g_engine.schemaExists(s.currentDB, targetSchema)) {
         std::cout << "ERROR: schema \"" << targetSchema
                   << "\" does not exist" << std::endl;
@@ -4001,9 +4026,13 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             return true;
         }
     }
+    const std::string unqualifiedStorageName = targetSchema == "public"
+        ? targetName.name : targetSchema + "__" + targetName.name;
     const std::string tname = temporary
-                                  ? tempTablePrefix(s, stmt->tableName)
-                                  : resolveTableName(s, stmt->tableName);
+        ? tempTablePrefix(s, targetName.name)
+        : (targetName.schema.empty()
+               ? unqualifiedStorageName
+               : resolveTableName(s, stmt->tableName));
     if (g_engine.tableExists(s.currentDB, tname) || g_engine.viewExists(s.currentDB, tname)) {
         if (stmt->ifNotExists) {
             std::cout << "NOTICE: table \"" << tname << "\" already exists, skipping" << std::endl;

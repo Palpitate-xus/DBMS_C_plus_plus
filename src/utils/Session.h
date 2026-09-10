@@ -1,12 +1,116 @@
 #pragma once
 
 #include <atomic>
+#include <cctype>
 #include <cstdint>
 #include <map>
 #include <memory>
 #include <set>
 #include <string>
 #include <vector>
+
+namespace dbms {
+
+// Parse the list-valued search_path GUC without flattening quoted identifiers
+// or accepting empty/malformed elements.  Entries are stored without quotes;
+// unquoted identifiers follow PostgreSQL's lower-case folding rule.  "$user",
+// pg_temp and pg_catalog are resolved by relation lookup rather than here.
+inline bool parseSessionSearchPath(const std::string& value,
+                                   std::vector<std::string>& entries,
+                                   std::string& canonical) {
+    entries.clear();
+    canonical.clear();
+    if (value.empty()) return true;
+    std::string current;
+    bool quoted = false;
+    bool currentWasQuoted = false;
+    const auto finish = [&]() -> bool {
+        size_t first = 0;
+        size_t last = current.size();
+        if (!currentWasQuoted) {
+            while (first < last && std::isspace(
+                       static_cast<unsigned char>(current[first]))) ++first;
+            while (last > first && std::isspace(
+                       static_cast<unsigned char>(current[last - 1]))) --last;
+        }
+        std::string entry = current.substr(first, last - first);
+        if (entry.empty() || entry.find('\0') != std::string::npos)
+            return false;
+        if (!currentWasQuoted) {
+            for (char& ch : entry) {
+                ch = static_cast<char>(std::tolower(
+                    static_cast<unsigned char>(ch)));
+            }
+        }
+        entries.push_back(std::move(entry));
+        current.clear();
+        currentWasQuoted = false;
+        return true;
+    };
+
+    for (size_t offset = 0; offset < value.size(); ++offset) {
+        const char ch = value[offset];
+        if (quoted) {
+            if (ch == '"') {
+                if (offset + 1 < value.size() && value[offset + 1] == '"') {
+                    current.push_back('"');
+                    ++offset;
+                } else {
+                    quoted = false;
+                }
+            } else {
+                current.push_back(ch);
+            }
+            continue;
+        }
+        if (ch == '"') {
+            if (current.find_first_not_of(" \t\r\n") != std::string::npos)
+                return false;
+            current.clear();
+            quoted = true;
+            currentWasQuoted = true;
+        } else if (ch == ',') {
+            if (!finish()) return false;
+        } else {
+            if (currentWasQuoted) {
+                if (std::isspace(static_cast<unsigned char>(ch))) continue;
+                return false;
+            }
+            current.push_back(ch);
+        }
+    }
+    if (quoted || !finish()) return false;
+
+    for (size_t index = 0; index < entries.size(); ++index) {
+        if (index != 0) canonical += ", ";
+        const std::string& entry = entries[index];
+        bool needsQuotes = entry == "$user";
+        for (const unsigned char ch : entry) {
+            if (!(std::islower(ch) || std::isdigit(ch) || ch == '_')) {
+                needsQuotes = true;
+                break;
+            }
+        }
+        if (!needsQuotes) {
+            canonical += entry;
+            continue;
+        }
+        canonical.push_back('"');
+        for (const char ch : entry) {
+            if (ch == '"') canonical.push_back('"');
+            canonical.push_back(ch);
+        }
+        canonical.push_back('"');
+    }
+    return true;
+}
+
+inline std::string expandSessionSearchPathEntry(
+    const std::string& entry, const std::string& username) {
+    return entry == "$user" ? username : entry;
+}
+
+}  // namespace dbms
 
 // Shared between the protocol worker and the short-lived CancelRequest
 // connection. Keeping this state outside Session itself makes copied pooled
