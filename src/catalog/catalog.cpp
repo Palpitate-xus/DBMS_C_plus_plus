@@ -836,7 +836,16 @@ std::vector<PgEnumRow> CatalogManager::findEnumLabels(Oid typeOid) const {
 
 std::vector<PgEnumRow> CatalogManager::listEnumLabels() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return enums_;
+    std::vector<PgEnumRow> result = enums_;
+    std::sort(result.begin(), result.end(),
+              [](const PgEnumRow& left, const PgEnumRow& right) {
+                  if (left.enumtypid != right.enumtypid)
+                      return left.enumtypid < right.enumtypid;
+                  if (left.enumsortorder != right.enumsortorder)
+                      return left.enumsortorder < right.enumsortorder;
+                  return left.oid < right.oid;
+              });
+    return result;
 }
 
 // ============================================================================

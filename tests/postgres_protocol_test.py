@@ -1499,6 +1499,48 @@ def main():
             sock, "CREATE USER carol WITH PASSWORD 'cArolPass9!'"))
         assert any(kind == b"C" for kind, _ in simple_query(sock, "CREATE TABLE t (id INT)"))
         assert any(kind == b"C" for kind, _ in simple_query(sock, "INSERT INTO t VALUES (1)"))
+
+        # Named enums have a real pg_type OID and ordered, stable pg_enum
+        # label OIDs. Qualified pg_catalog access must inspect the connected
+        # database rather than a database literally named "pg_catalog".
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TYPE protocol_priority AS ENUM ('low', 'high')"))
+        type_rows = data_row_values(simple_query(
+            sock, "SELECT * FROM pg_catalog.pg_type"))
+        enum_type = next(row for row in type_rows
+                         if row[1] == b"protocol_priority")
+        assert enum_type[3] == b"e", enum_type
+        enum_type_oid = enum_type[0]
+        original_enum_rows = [
+            row for row in data_row_values(simple_query(
+                sock, "SELECT * FROM pg_catalog.pg_enum"))
+            if row[1] == enum_type_oid]
+        assert [row[3] for row in original_enum_rows] == [b"low", b"high"], \
+            original_enum_rows
+        original_enum_oids = {row[3]: row[0] for row in original_enum_rows}
+
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "ALTER TYPE protocol_priority ADD VALUE 'medium' BEFORE 'high'"))
+        added_enum_rows = [
+            row for row in data_row_values(simple_query(
+                sock, "SELECT * FROM pg_catalog.pg_enum"))
+            if row[1] == enum_type_oid]
+        assert [row[3] for row in added_enum_rows] == \
+            [b"low", b"medium", b"high"], added_enum_rows
+        assert added_enum_rows[0][0] == original_enum_oids[b"low"]
+        assert added_enum_rows[2][0] == original_enum_oids[b"high"]
+        medium_oid = added_enum_rows[1][0]
+
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "ALTER TYPE protocol_priority RENAME VALUE 'medium' TO 'normal'"))
+        renamed_enum_rows = [
+            row for row in data_row_values(simple_query(
+                sock, "SELECT * FROM pg_catalog.pg_enum"))
+            if row[1] == enum_type_oid]
+        assert [row[3] for row in renamed_enum_rows] == \
+            [b"low", b"normal", b"high"], renamed_enum_rows
+        assert renamed_enum_rows[1][0] == medium_oid
+
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
             "GRANT SELECT ON TABLES TO analyst"))

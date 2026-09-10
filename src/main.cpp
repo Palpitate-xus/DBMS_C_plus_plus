@@ -19940,8 +19940,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
         }
 
         // pg_stat_* virtual tables
-        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || tname == "pg_stat_activity" || tname == "pg_database" || tname == "pg_tables" || tname == "pg_views" || tname == "pg_indexes" || tname == "pg_settings" || tname == "pg_roles" || tname == "pg_namespace" || tname == "pg_class" || tname == "pg_type" || tname == "pg_stats" || tname == "pg_statistic") {
+        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || tname == "pg_stat_activity" || tname == "pg_database" || tname == "pg_tables" || tname == "pg_views" || tname == "pg_indexes" || tname == "pg_settings" || tname == "pg_roles" || tname == "pg_namespace" || tname == "pg_class" || tname == "pg_type" || tname == "pg_enum" || tname == "pg_stats" || tname == "pg_statistic") {
             auto bpStats = g_engine.getBufferPoolStats();
+            const std::string catalogDb = queryDb == "pg_catalog"
+                ? s.currentDB : queryDb;
             if (tname == "pg_stat_database") {
                 cout << "datname numbackends blks_read blks_hit tup_returned xact_commit xact_rollback " << endl;
                 auto runtimeStats = dbms::getRuntimeDatabaseStats();
@@ -20154,9 +20156,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
             } else if (tname == "pg_namespace") {
                 cout << "oid nspname nspowner " << endl;
-                if (!queryDb.empty()) {
+                if (!catalogDb.empty()) {
                     try {
-                        for (const auto& ns : g_engine.catalogService().get(queryDb).listNamespaces()) {
+                        for (const auto& ns : g_engine.catalogService().get(catalogDb).listNamespaces()) {
                             cout << ns.oid << " " << ns.nspname << " " << ns.nspowner << " " << endl;
                         }
                     } catch (const std::exception& e) {
@@ -20165,9 +20167,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
             } else if (tname == "pg_class") {
                 cout << "oid relname relnamespace relkind relnatts relpersistence relowner " << endl;
-                if (!queryDb.empty()) {
+                if (!catalogDb.empty()) {
                     try {
-                        for (const auto& cls : g_engine.catalogService().get(queryDb).listClasses()) {
+                        for (const auto& cls : g_engine.catalogService().get(catalogDb).listClasses()) {
                             cout << cls.oid << " " << cls.relname << " "
                                  << cls.relnamespace << " " << cls.relkind << " "
                                  << cls.relnatts << " " << cls.relpersistence << " "
@@ -20179,15 +20181,32 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
             } else if (tname == "pg_type") {
                 cout << "oid typname typnamespace typtype typlen " << endl;
-                if (!queryDb.empty()) {
+                if (!catalogDb.empty()) {
                     try {
-                        for (const auto& typ : g_engine.catalogService().get(queryDb).listTypes()) {
+                        for (const auto& typ : g_engine.catalogService().get(catalogDb).listTypes()) {
                             cout << typ.oid << " " << typ.typname << " "
                                  << typ.typnamespace << " " << typ.typtype << " "
                                  << typ.typlen << " " << endl;
                         }
                     } catch (const std::exception& e) {
                         std::cerr << "WARNING: pg_type lookup failed: " << e.what() << std::endl;
+                    }
+                }
+            } else if (tname == "pg_enum") {
+                cout << "oid enumtypid enumsortorder enumlabel " << endl;
+                if (!catalogDb.empty()) {
+                    try {
+                        for (const auto& label :
+                             g_engine.catalogService().get(catalogDb)
+                                 .listEnumLabels()) {
+                            cout << label.oid << " " << label.enumtypid
+                                 << " " << label.enumsortorder << " "
+                                 << std::quoted(label.enumlabel) << " "
+                                 << endl;
+                        }
+                    } catch (const std::exception& e) {
+                        std::cerr << "WARNING: pg_enum lookup failed: "
+                                  << e.what() << std::endl;
                     }
                 }
             } else if (tname == "pg_stats" || tname == "pg_statistic") {
