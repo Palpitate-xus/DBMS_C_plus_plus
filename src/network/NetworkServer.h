@@ -3,9 +3,12 @@
 #include <atomic>
 #include <chrono>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
+
+struct SessionInterruptState;
 
 namespace dbms {
 
@@ -59,7 +62,13 @@ void releaseConnectionSlot();
 ServerStats& getServerStats();
 
 // Process list management (thread-safe)
-uint64_t registerProcess(const std::string& user, const std::string& host, const std::string& db);
+struct BackendRegistration {
+    uint64_t pid = 0;
+    uint32_t secretKey = 0;
+};
+BackendRegistration registerProcess(
+    const std::string& user, const std::string& host, const std::string& db,
+    const std::shared_ptr<SessionInterruptState>& interruptState = nullptr);
 void updateProcessInfo(uint64_t pid, const std::string& command,
                        const std::string& state, const std::string& info);
 void updateProcessDb(uint64_t pid, const std::string& db);
@@ -69,5 +78,6 @@ std::vector<ProcessInfo> getProcessList();
 // Cancel / terminate a backend by pid (for pg_cancel_backend / pg_terminate_backend)
 bool cancelBackend(uint64_t pid);
 bool terminateBackend(uint64_t pid);
+bool cancelBackend(uint32_t pid, uint32_t secretKey);
 
 } // namespace dbms

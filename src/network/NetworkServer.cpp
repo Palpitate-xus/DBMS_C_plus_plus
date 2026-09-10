@@ -47,6 +47,7 @@
 #include <unordered_map>
 #include <vector>
 #include <sys/socket.h>
+#include <sys/random.h>
 #include <unistd.h>
 
 // External globals from main.cpp
@@ -67,6 +68,11 @@ static ServerStats g_stats;
 // Process list: active connections
 static std::mutex g_processMutex;
 static std::map<uint64_t, ProcessInfo> g_processList;
+struct BackendKeyEntry {
+    uint32_t secretKey = 0;
+    std::weak_ptr<SessionInterruptState> interruptState;
+};
+static std::map<uint64_t, BackendKeyEntry> g_backendKeys;
 static uint64_t g_nextProcessId = 1;
 static std::mutex g_roleConnectionMutex;
 static std::unordered_map<std::string, int> g_roleConnections;
@@ -126,7 +132,21 @@ ServerStats& getServerStats() {
     return g_stats;
 }
 
-uint64_t registerProcess(const std::string& user, const std::string& host, const std::string& db) {
+uint32_t randomBackendSecret() {
+    uint32_t secret = 0;
+    while (secret == 0) {
+        const ssize_t received = ::getrandom(&secret, sizeof(secret), 0);
+        if (received == static_cast<ssize_t>(sizeof(secret))) continue;
+        std::random_device device;
+        secret = (static_cast<uint32_t>(device()) << 16) ^
+                 static_cast<uint32_t>(device());
+    }
+    return secret;
+}
+
+BackendRegistration registerProcess(
+    const std::string& user, const std::string& host, const std::string& db,
+    const std::shared_ptr<SessionInterruptState>& interruptState) {
     std::lock_guard<std::mutex> lock(g_processMutex);
     uint64_t pid = g_nextProcessId++;
     ProcessInfo info;
@@ -140,7 +160,9 @@ uint64_t registerProcess(const std::string& user, const std::string& host, const
     info.info = "";
     info.connectTime = std::chrono::steady_clock::now();
     g_processList[pid] = std::move(info);
-    return pid;
+    const uint32_t secretKey = randomBackendSecret();
+    g_backendKeys[pid] = BackendKeyEntry{secretKey, interruptState};
+    return BackendRegistration{pid, secretKey};
 }
 
 bool isServerTransportAllowed(bool tlsEnabled, bool allowPlaintext) {
@@ -209,6 +231,7 @@ void updateProcessDb(uint64_t pid, const std::string& db) {
 void unregisterProcess(uint64_t pid) {
     std::lock_guard<std::mutex> lock(g_processMutex);
     g_processList.erase(pid);
+    g_backendKeys.erase(pid);
 }
 
 bool cancelBackend(uint64_t pid) {
@@ -216,6 +239,13 @@ bool cancelBackend(uint64_t pid) {
     auto it = g_processList.find(pid);
     if (it == g_processList.end()) return false;
     it->second.cancelRequested = true;
+    const auto key = g_backendKeys.find(pid);
+    if (key != g_backendKeys.end()) {
+        if (const auto state = key->second.interruptState.lock();
+            state && state->queryActive.load(std::memory_order_acquire)) {
+            state->cancelRequested.store(true, std::memory_order_release);
+        }
+    }
     return true;
 }
 
@@ -224,6 +254,28 @@ bool terminateBackend(uint64_t pid) {
     auto it = g_processList.find(pid);
     if (it == g_processList.end()) return false;
     it->second.terminateRequested = true;
+    const auto key = g_backendKeys.find(pid);
+    if (key != g_backendKeys.end()) {
+        if (const auto state = key->second.interruptState.lock()) {
+            state->terminateRequested.store(true, std::memory_order_release);
+        }
+    }
+    return true;
+}
+
+bool cancelBackend(uint32_t pid, uint32_t secretKey) {
+    std::lock_guard<std::mutex> lock(g_processMutex);
+    const auto key = g_backendKeys.find(pid);
+    if (key == g_backendKeys.end() || key->second.secretKey != secretKey) {
+        return false;
+    }
+    const auto state = key->second.interruptState.lock();
+    if (!state || !state->queryActive.load(std::memory_order_acquire)) {
+        return false;
+    }
+    state->cancelRequested.store(true, std::memory_order_release);
+    const auto process = g_processList.find(pid);
+    if (process != g_processList.end()) process->second.cancelRequested = true;
     return true;
 }
 
@@ -1439,6 +1491,19 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
         }
     }
     auto start = std::chrono::steady_clock::now();
+    struct QueryInterruptGuard {
+        std::shared_ptr<SessionInterruptState> state;
+        explicit QueryInterruptGuard(
+            std::shared_ptr<SessionInterruptState> interruptState)
+            : state(std::move(interruptState)) {
+            state->cancelRequested.store(false, std::memory_order_release);
+            state->queryActive.store(true, std::memory_order_release);
+        }
+        ~QueryInterruptGuard() {
+            state->queryActive.store(false, std::memory_order_release);
+            state->cancelRequested.store(false, std::memory_order_release);
+        }
+    } interruptGuard(session.interruptState);
     {
         std::ostringstream output;
         dbms::ScopedOutputCapture capture(output);
@@ -1983,7 +2048,9 @@ uint32_t rawUInt32(const uint8_t* bytes) {
 // PostgreSQL clients send SSLRequest before the StartupMessage. The server
 // must answer on the raw socket before wrapping that same descriptor in TLS.
 bool establishClientTransport(int clientFd, TLSServerContext& tlsContext,
-                              bool allowPlaintext, SecureSocket& socket) {
+                              bool allowPlaintext, SecureSocket& socket,
+                              bool& cancelRequest) {
+    cancelRequest = false;
     uint8_t header[8]{};
     // MSG_PEEK may return a short prefix when TCP segmentation delivers the
     // startup packet in multiple reads. Keep peeking from offset zero until
@@ -2013,7 +2080,13 @@ bool establishClientTransport(int clientFd, TLSServerContext& tlsContext,
         socket = SecureSocket(clientFd, tlsContext.ctx());
         return socket.handshake();
     }
-    if (length == 16 && code == cancelRequestCode) return false;
+    if (length == 16 && code == cancelRequestCode) {
+        uint8_t request[16]{};
+        if (!readRawExact(clientFd, request, sizeof(request))) return false;
+        cancelRequest = true;
+        (void)cancelBackend(rawUInt32(request + 8), rawUInt32(request + 12));
+        return false;
+    }
     if (tlsContext.enabled()) return false;
     if (!allowPlaintext) return false;
     socket = SecureSocket(clientFd);
@@ -2217,7 +2290,9 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         ~RoleConnectionGuard() { releaseRoleConnection(roleName); }
     } roleConnectionGuard{username};
 
-    const uint64_t pid = registerProcess(username, clientHost, session.currentDB);
+    const BackendRegistration registration = registerProcess(
+        username, clientHost, session.currentDB, session.interruptState);
+    const uint64_t pid = registration.pid;
     session.pid = pid;
     if (!protocol.sendParameterStatus(
             "server_version", std::string("18.0 DBMS-C++ ") + DBMS_VERSION_STRING) ||
@@ -2236,7 +2311,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             dbms::scram::kDefaultIterations)) ||
         !protocol.sendParameterStatus("search_path", session.searchPath) ||
         !protocol.sendParameterStatus("TimeZone", "UTC") ||
-        !protocol.sendBackendKeyData(static_cast<uint32_t>(pid), static_cast<uint32_t>(pid ^ 0x9e3779b9U)) ||
+        !protocol.sendBackendKeyData(static_cast<uint32_t>(pid), registration.secretKey) ||
         !protocol.sendReadyForQuery()) {
         unregisterProcess(pid);
         return;
@@ -3081,9 +3156,13 @@ bool startServer(int port, bool allowPlaintext) {
                     }
                 } slotGuard;
                 SecureSocket socket;
-                if (!establishClientTransport(clientFd, tlsCtx, allowPlaintext, socket)) {
+                bool cancelRequest = false;
+                if (!establishClientTransport(clientFd, tlsCtx, allowPlaintext,
+                                              socket, cancelRequest)) {
                     if (socket.fd < 0) ::close(clientFd);
-                    std::cerr << "client transport negotiation failed" << std::endl;
+                    if (!cancelRequest) {
+                        std::cerr << "client transport negotiation failed" << std::endl;
+                    }
                 } else {
                     handleClient(std::move(socket), clientHost);
                 }

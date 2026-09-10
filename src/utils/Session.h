@@ -1,10 +1,22 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
+
+// Shared between the protocol worker and the short-lived CancelRequest
+// connection. Keeping this state outside Session itself makes copied pooled
+// Session contexts observe the same interrupt without making Session
+// non-copyable.
+struct SessionInterruptState {
+    std::atomic<bool> queryActive{false};
+    std::atomic<bool> cancelRequested{false};
+    std::atomic<bool> terminateRequested{false};
+};
 
 // Per-connection session context.
 // Replaces the previous global session variables (g_nowUser, g_nowPermission, etc.)
@@ -68,6 +80,8 @@ struct Session {
     // Cancellation flags for pg_cancel_backend / pg_terminate_backend
     bool cancelRequested = false;   // set true to cancel current query
     bool terminateRequested = false; // set true to terminate session
+    std::shared_ptr<SessionInterruptState> interruptState =
+        std::make_shared<SessionInterruptState>();
 
     // Compatibility mode (gap DIV-01..DIV-14 framework): "postgresql18" is
     // the default and rejects project-only syntax with SQLSTATE 0A000;

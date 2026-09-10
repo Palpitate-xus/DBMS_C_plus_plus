@@ -235,6 +235,18 @@ def simple_query(sock, sql):
     return read_until_ready(sock)
 
 
+def send_cancel_request(port, backend_pid, secret_key):
+    cancel_sock = socket.create_connection(("127.0.0.1", port))
+    cancel_sock.settimeout(SOCKET_TIMEOUT)
+    cancel_sock.sendall(frame(struct.pack(
+        "!III", 80877102, backend_pid, secret_key)))
+    # PostgreSQL CancelRequest is deliberately fire-and-forget: the server
+    # closes the auxiliary connection without any response, regardless of
+    # whether the key matched a live query.
+    assert wait_for_disconnect(cancel_sock)
+    cancel_sock.close()
+
+
 def data_row_values(messages):
     values = []
     for kind, body in messages:
@@ -812,10 +824,30 @@ def main():
                 if time.time() >= deadline:
                     raise
                 time.sleep(0.05)
-        startup(sock, "alice", "info", protocol_version=196610,
-                protocol_options={"_pq_.unsupported_test": "1"})
+        backend_pid, backend_secret = startup(
+            sock, "alice", "info", protocol_version=196610,
+            protocol_options={"_pq_.unsupported_test": "1"})
         assert setting_value(simple_query(sock, "SELECT * FROM pg_settings"),
                              "max_connections") == b"64"
+
+        # CancelRequest must validate the unpredictable BackendKeyData secret
+        # and interrupt the query that is active at receipt time. A forged key
+        # cannot stop the query; a correct request returns no packet on its
+        # auxiliary socket and produces 57014 on the original connection.
+        sock.sendall(typed(
+            b"Q",
+            b"SELECT 1 FROM generate_series(1, 9223372036854775807) g\0"))
+        time.sleep(0.05)
+        send_cancel_request(port, backend_pid, backend_secret ^ 0xFFFFFFFF)
+        time.sleep(0.05)
+        send_cancel_request(port, backend_pid, backend_secret)
+        cancelled = read_until_ready(sock)
+        assert any(kind == b"E" and b"C57014\0" in body
+                   for kind, body in cancelled), cancelled
+        assert cancelled[-1] == (b"Z", b"I"), cancelled
+        # A valid key received while idle must not poison the next statement.
+        send_cancel_request(port, backend_pid, backend_secret)
+        assert data_row_values(simple_query(sock, "SELECT 1")) == [[b"1"]]
 
         # Startup run-time parameters must become real connection-local
         # defaults.  The legacy options string uses PostgreSQL's backslash

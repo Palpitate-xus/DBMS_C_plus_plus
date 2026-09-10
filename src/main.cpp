@@ -24,6 +24,7 @@
 #include "storage/PageCrypto.h"
 #include "common/version.h"
 #include "common/DataDirectory.h"
+#include "common/DbError.h"
 #include "common/FeatureGate.h"
 #include "common/NotificationManager.h"
 #include "replication/ReplicationManager.h"
@@ -13559,6 +13560,20 @@ static bool executeInternal(const string& rawSql, Session& s) {
         cout << "ERROR: query cancelled" << endl;
         return true;
     }
+    const auto checkInterrupt = [&s]() {
+        if (s.interruptState->terminateRequested.load(
+                std::memory_order_acquire)) {
+            throw dbms::DbError(
+                "57P01",
+                "terminating connection due to administrator command");
+        }
+        if (s.interruptState->cancelRequested.load(
+                std::memory_order_acquire)) {
+            throw dbms::DbError("57014",
+                                "canceling statement due to user request");
+        }
+    };
+    checkInterrupt();
     g_engine.setRLSUser(effectiveSessionRole(s));
     dbms::setCurrentSession(&s);
     bool sawUserVariable = false;
@@ -13666,12 +13681,18 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         bool firstU = true;
                         if (gs3 > 0) {
                             for (long long v = gs1; v <= gs2; v += gs3) {
+                                if ((static_cast<uint64_t>(v - gs1) & 1023U) == 0) {
+                                    checkInterrupt();
+                                }
                                 if (!firstU) unionBody += " union all ";
                                 unionBody += "select " + std::to_string(v) + " as " + colName;
                                 firstU = false;
                             }
                         } else {
                             for (long long v = gs1; v >= gs2; v += gs3) {
+                                if ((static_cast<uint64_t>(gs1 - v) & 1023U) == 0) {
+                                    checkInterrupt();
+                                }
                                 if (!firstU) unionBody += " union all ";
                                 unionBody += "select " + std::to_string(v) + " as " + colName;
                                 firstU = false;
@@ -25635,7 +25656,9 @@ int main(int argc, char* argv[]) {
         s.authenticatedPermission = s.permission;
         cin.ignore(numeric_limits<streamsize>::max(), '\n');
         // Register interactive session in process list
-        uint64_t pid = dbms::registerProcess(s.username, "localhost", s.currentDB);
+        const dbms::BackendRegistration registration = dbms::registerProcess(
+            s.username, "localhost", s.currentDB, s.interruptState);
+        const uint64_t pid = registration.pid;
         s.pid = pid;
         int sqlCount = 0;
         while (true) {
