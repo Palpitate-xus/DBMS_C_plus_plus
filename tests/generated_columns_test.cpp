@@ -1,10 +1,14 @@
 #include "commands/DdlExecutor.h"
+#include "commands/DmlExecutor.h"
 #include "commands/TableManage.h"
 #include "Session.h"
 #include "catalog/type_registry.h"
+#include "parser/parser.h"
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include <optional>
+#include <sstream>
 #include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
@@ -24,6 +28,27 @@ static std::string trimRight(const std::string& s) {
     return (end == std::string::npos) ? "" : s.substr(0, end + 1);
 }
 
+static bool runDml(const std::string& sql, Session& session,
+                   std::string* output = nullptr) {
+    std::ostringstream captured;
+    std::streambuf* previous = std::cout.rdbuf(captured.rdbuf());
+    bool handled = false;
+    const bool error = dbms::tryDmlBridge(
+        sql, dbms::SQLParser::classify(sql), session, handled);
+    std::cout.rdbuf(previous);
+    assert(handled);
+    if (output) *output = captured.str();
+    return error;
+}
+
+static size_t rowCount(const std::string& db, const std::string& table) {
+    size_t count = 0;
+    assert(g_engine.forEachRow(
+        db, table,
+        [&](uint32_t, uint16_t, const char*, size_t) { ++count; }));
+    return count;
+}
+
 static void test_stored_generated() {
     std::string db = testDbPath("gen_col_stored");
     cleanup(db);
@@ -39,8 +64,29 @@ static void test_stored_generated() {
     // User-supplied value for generated column is rejected.
     assert(g_engine.insert(db, "t", {{"id", "1"}, {"a", "3"}, {"b", "4"}, {"c", "99"}}) ==
            dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insert(db, "t", {{"id", "1"}, {"a", "3"}, {"b", "4"}, {"c", ""}}) ==
+           dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insertRow(
+               db, "t", {{"id", std::string("1")}, {"a", std::string("3")},
+                          {"b", std::string("4")}, {"c", std::nullopt}}) ==
+           dbms::DBStatus::INVALID_VALUE);
+    assert(rowCount(db, "t") == 0);
 
-    assert(g_engine.insert(db, "t", {{"id", "1"}, {"a", "3"}, {"b", "4"}}) == dbms::DBStatus::OK);
+    std::string output;
+    assert(runDml(
+        "INSERT INTO t (id, a, b, c) VALUES (1, 3, 4, NULL)", s,
+        &output));
+    assert(output.find("SQLSTATE 428C9") != std::string::npos);
+    assert(runDml(
+        "INSERT INTO t (id, a, b, c) VALUES (1, 3, 4, '')", s,
+        &output));
+    assert(output.find("SQLSTATE 428C9") != std::string::npos);
+    assert(rowCount(db, "t") == 0);
+
+    // DEFAULT and omission are the only accepted generated-column inputs.
+    assert(!runDml(
+        "INSERT INTO t (id, a, b, c) VALUES (1, 3, 4, DEFAULT)", s));
+    assert(!runDml("INSERT INTO t (id, a, b) VALUES (2, 5, 6)", s));
 
     auto rows = g_engine.query(db, "t", {"=id 1"}, {"c"});
     assert(rows.size() == 1);
@@ -74,8 +120,30 @@ static void test_virtual_generated() {
     // User-supplied value for virtual generated column is rejected.
     assert(g_engine.insert(db, "t", {{"id", "1"}, {"a", "6"}, {"b", "7"}, {"c", "99"}}) ==
            dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insert(db, "t", {{"id", "1"}, {"a", "6"}, {"b", "7"}, {"c", ""}}) ==
+           dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insertRow(
+               db, "t", {{"id", std::string("1")}, {"a", std::string("6")},
+                          {"b", std::string("7")}, {"c", std::nullopt}}) ==
+           dbms::DBStatus::INVALID_VALUE);
+    assert(rowCount(db, "t") == 0);
 
-    assert(g_engine.insert(db, "t", {{"id", "1"}, {"a", "6"}, {"b", "7"}}) == dbms::DBStatus::OK);
+    std::string output;
+    assert(runDml(
+        "INSERT INTO t (id, a, b, c) VALUES (1, 6, 7, NULL)", s,
+        &output));
+    assert(output.find("SQLSTATE 428C9") != std::string::npos);
+    assert(runDml(
+        "INSERT INTO t (id, a, b, c) VALUES (1, 6, 7, '')", s,
+        &output));
+    assert(output.find("SQLSTATE 428C9") != std::string::npos);
+    assert(rowCount(db, "t") == 0);
+
+    assert(!runDml(
+        "INSERT INTO t (id, a, b, c) VALUES (1, 6, 7, DEFAULT)", s));
+    assert(!runDml("INSERT INTO t (id, a, b) VALUES (2, 2, 3)", s));
+    assert(rowCount(db, "t") == 2);
+    assert(g_engine.remove(db, "t", {"=id 2"}) == dbms::DBStatus::OK);
 
     // Query-time computation of VIRTUAL column.
     auto rows = g_engine.query(db, "t", {"=id 1"}, {"c"});

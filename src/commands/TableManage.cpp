@@ -20673,13 +20673,15 @@ DBStatus StorageEngine::insertInternal(
     std::set<std::string> actualNullColumns = nullColumns;
     auto typeHints = buildTypeHints(tbl);
 
-    // Reject user-supplied values for GENERATED ALWAYS columns.
-    for (const auto& kv : values) {
-        for (size_t i = 0; i < tbl.len; ++i) {
-            if (tbl.cols[i].dataName == kv.first && !tbl.cols[i].generatedExpr.empty() && !kv.second.empty()) {
-                lockManager_.unlock(tablename);
-                return DBStatus::INVALID_VALUE;
-            }
+    // Reject user-supplied values for GENERATED ALWAYS columns.  Presence is
+    // what matters here: SQL NULL and an empty string are still explicit
+    // values, while DEFAULT has already been represented by an omitted key.
+    for (size_t i = 0; i < tbl.len; ++i) {
+        const Column& col = tbl.cols[i];
+        if (!col.generatedExpr.empty() &&
+            values.find(col.dataName) != values.end()) {
+            lockManager_.unlock(tablename);
+            return DBStatus::INVALID_VALUE;
         }
     }
 

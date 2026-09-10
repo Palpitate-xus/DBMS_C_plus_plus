@@ -1997,6 +1997,25 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
 
     if (!checkInsertColumns(s, requestedTable, columns)) return true;
 
+    std::vector<bool> generatedTargets;
+    generatedTargets.reserve(columns.size());
+    for (const auto& column : columns) {
+        bool generated = false;
+        for (size_t i = 0; i < table.len; ++i) {
+            if (table.cols[i].dataName == column) {
+                generated = !table.cols[i].generatedExpr.empty();
+                break;
+            }
+        }
+        generatedTargets.push_back(generated);
+    }
+    const auto rejectGeneratedValue = [&](size_t columnIndex) {
+        std::cout << "ERROR: cannot insert a non-DEFAULT value into column \""
+                  << columns[columnIndex]
+                  << "\" (SQLSTATE 428C9)" << std::endl;
+        return true;
+    };
+
     std::vector<ReturningProjection> returningProjections;
     if (!stmt.returning.empty() &&
         !buildReturningProjections(stmt.returning, table, returningProjections)) {
@@ -2063,6 +2082,9 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
     }
 
     if (stmt.selectSource) {
+        for (size_t i = 0; i < generatedTargets.size(); ++i) {
+            if (generatedTargets[i]) return rejectGeneratedValue(i);
+        }
         const auto* select = dynamic_cast<const SelectStmt*>(stmt.selectSource.get());
         if (!select) {
             fallback = true;
@@ -2178,6 +2200,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
         SqlRow values;
         for (size_t i = 0; i < row.size(); ++i) {
             if (isDefaultValue(row[i])) continue;
+            if (generatedTargets[i]) return rejectGeneratedValue(i);
             SqlCell value;
             if (!evaluateValue(row[i], s.currentDB, value)) {
                 // Returning false lets the legacy path retain ownership of
