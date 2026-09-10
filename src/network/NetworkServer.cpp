@@ -2766,7 +2766,11 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 }
             } else {
                 portalState.completed = true;
-                protocol.sendCommandComplete(result.commandTag);
+                if (result.commandTag.empty()) {
+                    protocol.sendEmptyQueryResponse();
+                } else {
+                    protocol.sendCommandComplete(result.commandTag);
+                }
             }
             continue;
         }

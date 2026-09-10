@@ -1031,6 +1031,18 @@ def main():
             (b"3", b""), (b"3", b""), (b"Z", b"I")
         ], missing_close
 
+        empty_parse = b"empty_stmt\0\0" + struct.pack("!H", 0)
+        empty_bind = (b"empty_portal\0empty_stmt\0" +
+                      struct.pack("!H", 0) + struct.pack("!H", 0) +
+                      struct.pack("!H", 0))
+        empty_execute = b"empty_portal\0" + struct.pack("!I", 0)
+        sock.sendall(typed(b"P", empty_parse) + typed(b"B", empty_bind) +
+                     typed(b"E", empty_execute) + typed(b"S"))
+        empty_extended = read_until_ready(sock)
+        assert empty_extended == [
+            (b"1", b""), (b"2", b""), (b"I", b""), (b"Z", b"I")
+        ], empty_extended
+
         # Extended Parse accepts exactly one SQL statement.  Grammar-aware
         # splitting must reject two commands before creating the named
         # statement, then discard pipelined messages through Sync.
