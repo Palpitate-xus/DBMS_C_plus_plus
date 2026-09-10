@@ -1015,6 +1015,15 @@ def main():
             body for kind, body in malformed_sync if kind == b"E")
         assert data_row_values(simple_query(sock, "SELECT 13")) == [[b"13"]]
 
+        # PostgreSQL Close is idempotent: missing named or unnamed objects
+        # still produce CloseComplete and must not enter skip-until-Sync.
+        sock.sendall(typed(b"C", b"Sdoes_not_exist\0") +
+                     typed(b"C", b"Pdoes_not_exist\0") + typed(b"S"))
+        missing_close = read_until_ready(sock)
+        assert missing_close == [
+            (b"3", b""), (b"3", b""), (b"Z", b"I")
+        ], missing_close
+
         # Named statements and portals cannot be silently replaced.  A
         # duplicate Parse/Bind enters extended-query recovery, keeps the
         # original object intact, and reports PostgreSQL's dedicated codes.

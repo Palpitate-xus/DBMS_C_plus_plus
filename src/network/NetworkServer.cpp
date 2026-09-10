@@ -2804,21 +2804,18 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 continue;
             }
             if (target == 'S') {
-                if (preparedStatements.erase(name) == 0) {
-                    protocol.sendErrorResponse("ERROR", "26000", "prepared statement does not exist");
-                    extendedQueryError = true;
-                    continue;
-                }
-                for (auto portalIt = portals.begin(); portalIt != portals.end();) {
-                    if (portalIt->second.statement == name) portalIt = portals.erase(portalIt);
-                    else ++portalIt;
+                if (preparedStatements.erase(name) != 0) {
+                    for (auto portalIt = portals.begin();
+                         portalIt != portals.end();) {
+                        if (portalIt->second.statement == name) {
+                            portalIt = portals.erase(portalIt);
+                        } else {
+                            ++portalIt;
+                        }
+                    }
                 }
             } else if (target == 'P') {
-                if (portals.erase(name) == 0) {
-                    protocol.sendErrorResponse("ERROR", "34000", "portal does not exist");
-                    extendedQueryError = true;
-                    continue;
-                }
+                portals.erase(name);
             } else {
                 protocol.sendErrorResponse("ERROR", "08P01", "invalid Close target");
                 extendedQueryError = true;
