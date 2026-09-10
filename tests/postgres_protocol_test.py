@@ -849,6 +849,33 @@ def main():
         send_cancel_request(port, backend_pid, backend_secret)
         assert data_row_values(simple_query(sock, "SELECT 1")) == [[b"1"]]
 
+        # Row/page lock waits must use cooperative polling as well; an
+        # unbounded shared_mutex wait used to make CancelRequest ineffective
+        # until the blocker committed.
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE cancel_wait (id INT PRIMARY KEY, v INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO cancel_wait VALUES (1, 0)"))
+        lock_sock = socket.create_connection(("127.0.0.1", port))
+        lock_sock.settimeout(SOCKET_TIMEOUT)
+        startup(lock_sock, "alice", "info")
+        assert simple_query(lock_sock, "BEGIN")[-1] == (b"Z", b"T")
+        assert any(kind == b"C" for kind, _ in simple_query(
+            lock_sock, "UPDATE cancel_wait SET v = 1 WHERE id = 1"))
+        sock.sendall(typed(
+            b"Q", b"UPDATE cancel_wait SET v = 2 WHERE id = 1\0"))
+        time.sleep(0.05)
+        send_cancel_request(port, backend_pid, backend_secret)
+        lock_cancelled = read_until_ready(sock)
+        assert any(kind == b"E" and b"C57014\0" in body
+                   for kind, body in lock_cancelled), lock_cancelled
+        assert lock_cancelled[-1] == (b"Z", b"I"), lock_cancelled
+        assert simple_query(lock_sock, "ROLLBACK")[-1] == (b"Z", b"I")
+        lock_sock.sendall(typed(b"X"))
+        lock_sock.close()
+        assert data_row_values(simple_query(
+            sock, "SELECT v FROM cancel_wait WHERE id = 1")) == [[b"0"]]
+
         # Startup run-time parameters must become real connection-local
         # defaults.  The legacy options string uses PostgreSQL's backslash
         # escaping and is applied after individually supplied parameters.

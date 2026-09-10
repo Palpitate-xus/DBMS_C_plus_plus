@@ -461,6 +461,14 @@ void LockManager::setDeadlockTimeout(int ms) {
     threadSettings().deadlockTimeoutMs = ms > 0 ? ms : 0;
 }
 
+void LockManager::setInterruptHandler(std::function<void()> handler) {
+    threadSettings().interruptHandler = std::move(handler);
+}
+
+void LockManager::clearInterruptHandler() {
+    threadSettings().interruptHandler = {};
+}
+
 static std::string tidToString(std::thread::id tid) {
     std::ostringstream oss;
     oss << tid;
@@ -563,6 +571,15 @@ static const char* modeToStr(LockManager::LockMode mode) {
 
 bool LockManager::acquireLock(const std::string& table, LockMode mode) {
     const std::thread::id self = std::this_thread::get_id();
+    const auto checkInterrupt = [&]() {
+        if (!threadSettings().interruptHandler) return;
+        try {
+            threadSettings().interruptHandler();
+        } catch (...) {
+            removeWaitEdges(self);
+            throw;
+        }
+    };
 
     auto isSharedMode = [](LockMode value) {
         return value == LockMode::Shared || value == LockMode::IntentShared;
@@ -660,6 +677,7 @@ bool LockManager::acquireLock(const std::string& table, LockMode mode) {
     const auto deadlockCheckAt = waitStart +
         std::chrono::milliseconds(std::max(0, threadSettings().deadlockTimeoutMs));
     while (true) {
+        checkInterrupt();
         bool cycle = false;
         {
             std::lock_guard<std::mutex> guard(globalMutex_);
@@ -961,9 +979,19 @@ std::vector<std::string> LockManager::lockedTables() const {
 
 bool LockManager::rowLockShared(const std::string& table, int64_t rid) {
     std::thread::id self = std::this_thread::get_id();
+    const auto checkInterrupt = [&]() {
+        if (!threadSettings().interruptHandler) return;
+        try {
+            threadSettings().interruptHandler();
+        } catch (...) {
+            removeWaitEdges(self);
+            throw;
+        }
+    };
     std::string key = rowResourceKey(table, rid);
     const auto started = std::chrono::steady_clock::now();
     while (true) {
+        checkInterrupt();
         LockState* state = nullptr;
         {
             std::lock_guard<std::mutex> guard(rowMutex_);
@@ -994,7 +1022,14 @@ bool LockManager::rowLockShared(const std::string& table, int64_t rid) {
             ++current.waiters;
             state = &current;
         }
-        state->mtx.lock_shared();
+        if (!state->mtx.try_lock_shared()) {
+            {
+                std::lock_guard<std::mutex> guard(rowMutex_);
+                --state->waiters;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
         {
             std::lock_guard<std::mutex> guard(rowMutex_);
             --state->waiters;
@@ -1021,9 +1056,19 @@ bool LockManager::rowLockShared(const std::string& table, int64_t rid) {
 
 bool LockManager::rowLockExclusive(const std::string& table, int64_t rid) {
     std::thread::id self = std::this_thread::get_id();
+    const auto checkInterrupt = [&]() {
+        if (!threadSettings().interruptHandler) return;
+        try {
+            threadSettings().interruptHandler();
+        } catch (...) {
+            removeWaitEdges(self);
+            throw;
+        }
+    };
     std::string key = rowResourceKey(table, rid);
     const auto started = std::chrono::steady_clock::now();
     while (true) {
+        checkInterrupt();
         LockState* state = nullptr;
         {
             std::lock_guard<std::mutex> guard(rowMutex_);
@@ -1062,7 +1107,14 @@ bool LockManager::rowLockExclusive(const std::string& table, int64_t rid) {
             ++current.waiters;
             state = &current;
         }
-        state->mtx.lock();
+        if (!state->mtx.try_lock()) {
+            {
+                std::lock_guard<std::mutex> guard(rowMutex_);
+                --state->waiters;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
         {
             std::lock_guard<std::mutex> guard(rowMutex_);
             --state->waiters;
@@ -1686,9 +1738,20 @@ static std::string makePageKey(const std::string& dbname, const std::string& tab
 
 bool LockManager::pageLockShared(const std::string& dbname, const std::string& table, uint32_t pageId) const {
     std::thread::id self = std::this_thread::get_id();
+    const auto checkInterrupt = [&]() {
+        auto& manager = *const_cast<LockManager*>(this);
+        if (!manager.threadSettings().interruptHandler) return;
+        try {
+            manager.threadSettings().interruptHandler();
+        } catch (...) {
+            manager.removeWaitEdges(self);
+            throw;
+        }
+    };
     std::string key = makePageKey(dbname, table, pageId);
     const auto started = std::chrono::steady_clock::now();
     while (true) {
+        checkInterrupt();
         LockState* state = nullptr;
         {
             std::lock_guard<std::mutex> guard(pageMutex_);
@@ -1716,7 +1779,14 @@ bool LockManager::pageLockShared(const std::string& dbname, const std::string& t
             ++current.waiters;
             state = &current;
         }
-        state->mtx.lock_shared();
+        if (!state->mtx.try_lock_shared()) {
+            {
+                std::lock_guard<std::mutex> guard(pageMutex_);
+                --state->waiters;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
         {
             std::lock_guard<std::mutex> guard(pageMutex_);
             --state->waiters;
@@ -1742,9 +1812,20 @@ bool LockManager::pageLockShared(const std::string& dbname, const std::string& t
 
 bool LockManager::pageLockExclusive(const std::string& dbname, const std::string& table, uint32_t pageId) const {
     std::thread::id self = std::this_thread::get_id();
+    const auto checkInterrupt = [&]() {
+        auto& manager = *const_cast<LockManager*>(this);
+        if (!manager.threadSettings().interruptHandler) return;
+        try {
+            manager.threadSettings().interruptHandler();
+        } catch (...) {
+            manager.removeWaitEdges(self);
+            throw;
+        }
+    };
     std::string key = makePageKey(dbname, table, pageId);
     const auto started = std::chrono::steady_clock::now();
     while (true) {
+        checkInterrupt();
         LockState* state = nullptr;
         {
             std::lock_guard<std::mutex> guard(pageMutex_);
@@ -1779,7 +1860,14 @@ bool LockManager::pageLockExclusive(const std::string& dbname, const std::string
             ++current.waiters;
             state = &current;
         }
-        state->mtx.lock();
+        if (!state->mtx.try_lock()) {
+            {
+                std::lock_guard<std::mutex> guard(pageMutex_);
+                --state->waiters;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
         {
             std::lock_guard<std::mutex> guard(pageMutex_);
             --state->waiters;

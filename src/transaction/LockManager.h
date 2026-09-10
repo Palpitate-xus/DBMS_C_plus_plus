@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <set>
@@ -57,6 +58,11 @@ public:
     void setLockTimeout(int ms);
     // Set deadlock detection timeout (0 = immediate check)
     void setDeadlockTimeout(int ms);
+    // Called from cooperative wait loops. The handler may throw a typed
+    // query-cancellation exception; it is backend/thread-local like timeout
+    // and namespace settings.
+    void setInterruptHandler(std::function<void()> handler);
+    void clearInterruptHandler();
 
     // Get list of currently locked tables
     std::vector<std::string> lockedTables() const;
@@ -173,6 +179,7 @@ private:
         std::string resourceNamespace;
         int lockTimeoutMs = 0;
         int deadlockTimeoutMs = 0;
+        std::function<void()> interruptHandler;
     };
 
     struct LockState {

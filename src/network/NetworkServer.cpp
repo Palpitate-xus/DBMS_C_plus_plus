@@ -1493,17 +1493,33 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
     auto start = std::chrono::steady_clock::now();
     struct QueryInterruptGuard {
         std::shared_ptr<SessionInterruptState> state;
+        dbms::LockManager& lockManager;
         explicit QueryInterruptGuard(
-            std::shared_ptr<SessionInterruptState> interruptState)
-            : state(std::move(interruptState)) {
+            std::shared_ptr<SessionInterruptState> interruptState,
+            dbms::LockManager& manager)
+            : state(std::move(interruptState)), lockManager(manager) {
             state->cancelRequested.store(false, std::memory_order_release);
             state->queryActive.store(true, std::memory_order_release);
+            lockManager.setInterruptHandler([interruptState = state]() {
+                if (interruptState->terminateRequested.load(
+                        std::memory_order_acquire)) {
+                    throw dbms::DbError(
+                        "57P01",
+                        "terminating connection due to administrator command");
+                }
+                if (interruptState->cancelRequested.load(
+                        std::memory_order_acquire)) {
+                    throw dbms::DbError(
+                        "57014", "canceling statement due to user request");
+                }
+            });
         }
         ~QueryInterruptGuard() {
+            lockManager.clearInterruptHandler();
             state->queryActive.store(false, std::memory_order_release);
             state->cancelRequested.store(false, std::memory_order_release);
         }
-    } interruptGuard(session.interruptState);
+    } interruptGuard(session.interruptState, g_engine.getLockManager());
     {
         std::ostringstream output;
         dbms::ScopedOutputCapture capture(output);
