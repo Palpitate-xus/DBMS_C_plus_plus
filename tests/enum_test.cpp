@@ -4,6 +4,7 @@
 #include "Session.h"
 #include "catalog/type_registry.h"
 #include "catalog/CatalogService.h"
+#include "access/HashIndex.h"
 #include <cassert>
 #include <filesystem>
 #include <fstream>
@@ -141,6 +142,10 @@ static void test_named_enum_alter_updates_dependent_schemas() {
            dbms::DBStatus::OK);
     assert(g_engine.insert(db, "tasks", {{"id", "2"}, {"p", "high"}}) ==
            dbms::DBStatus::OK);
+    assert(g_engine.createHashIndex(db, "tasks", "p") ==
+           dbms::DBStatus::OK);
+    assert(g_engine.getHashIndex(db, "tasks", "p")
+               ->search("low").size() == 1);
 
     auto priority = g_engine.getEnumType(db, "priority");
     priority.labels.insert(priority.labels.begin() + 1, "medium");
@@ -207,6 +212,14 @@ static void test_named_enum_alter_updates_dependent_schemas() {
     const auto renamedRows = g_engine.query(
         db, "tasks", {"=id 1"}, {"p"});
     assert((renamedRows == std::vector<std::string>{"minor "}));
+    assert(g_engine.getHashIndex(db, "tasks", "p")
+               ->search("low").empty());
+    assert(g_engine.getHashIndex(db, "tasks", "p")
+               ->search("minor").size() == 1);
+    assert(g_engine.getHashIndex(db, "tasks", "p")
+               ->search("high").size() == 1);
+    assert(g_engine.getHashIndex(db, "tasks", "p")
+               ->search("urgent").size() == 1);
     {
         auto& catalog = g_engine.catalogService().get(db);
         const auto* publicNamespace = catalog.findNamespaceByName("public");
@@ -219,6 +232,31 @@ static void test_named_enum_alter_updates_dependent_schemas() {
         for (size_t index = 0; index < priority.labels.size(); ++index)
             assert(catalogLabels[index].enumlabel == priority.labels[index]);
     }
+
+    const std::string backup = db + "_backup";
+    cleanup(backup);
+    assert(g_engine.physicalBackup(db, backup));
+    priority.labels.push_back("later");
+    assert(g_engine.updateEnumType(db, priority) == dbms::DBStatus::OK);
+    assert(g_engine.getEnumType(db, "priority").labels.back() == "later");
+    assert(g_engine.physicalRestore(db, backup));
+    assert(g_engine.getEnumType(db, "priority").labels ==
+           std::vector<std::string>({"minor", "medium", "high", "urgent"}));
+    const auto restoredSchema = g_engine.getTableSchema(db, "tasks");
+    assert(restoredSchema.cols[1].enumValues ==
+           g_engine.getEnumType(db, "priority").labels);
+    auto& restoredCatalog = g_engine.catalogService().get(db);
+    const auto* restoredNamespace =
+        restoredCatalog.findNamespaceByName("public");
+    assert(restoredNamespace);
+    const auto* restoredType =
+        restoredCatalog.findTypeByName("priority", restoredNamespace->oid);
+    assert(restoredType);
+    const auto restoredLabels =
+        restoredCatalog.findEnumLabels(restoredType->oid);
+    assert(restoredLabels.size() == 4);
+    assert(restoredLabels.back().enumlabel == "urgent");
+    cleanup(backup);
 
     cleanup(db);
     std::cout << "[ENUM] dependent schema updates OK" << std::endl;
