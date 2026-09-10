@@ -2471,6 +2471,13 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     PostgresProtocol::readUInt32(message.payload, offset));
                 offset += 4;
             }
+            if (splitSimpleQueryStatements(prepared.sql).size() > 1) {
+                protocol.sendErrorResponse(
+                    "ERROR", "42601",
+                    "cannot insert multiple commands into a prepared statement");
+                extendedQueryError = true;
+                continue;
+            }
             if (!statement.empty() && preparedStatements.count(statement) != 0) {
                 protocol.sendErrorResponse(
                     "ERROR", "42P05",

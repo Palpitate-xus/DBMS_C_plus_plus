@@ -1024,6 +1024,25 @@ def main():
             (b"3", b""), (b"3", b""), (b"Z", b"I")
         ], missing_close
 
+        # Extended Parse accepts exactly one SQL statement.  Grammar-aware
+        # splitting must reject two commands before creating the named
+        # statement, then discard pipelined messages through Sync.
+        multi_parse = (b"multi_stmt\0SELECT ';' AS literal; SELECT 2\0" +
+                       struct.pack("!H", 0))
+        sock.sendall(typed(b"P", multi_parse))
+        kind, body = read_message(sock)
+        assert kind == b"E" and b"C42601\0" in body, (kind, body)
+        skipped_bind = (b"multi_portal\0multi_stmt\0" +
+                        struct.pack("!H", 0) + struct.pack("!H", 0) +
+                        struct.pack("!H", 0))
+        sock.sendall(typed(b"B", skipped_bind) + typed(b"S"))
+        assert read_until_ready(sock) == [(b"Z", b"I")]
+        sock.sendall(typed(b"B", skipped_bind))
+        kind, body = read_message(sock)
+        assert kind == b"E" and b"C26000\0" in body, (kind, body)
+        sock.sendall(typed(b"S"))
+        assert read_until_ready(sock) == [(b"Z", b"I")]
+
         # Named statements and portals cannot be silently replaced.  A
         # duplicate Parse/Bind enters extended-query recovery, keeps the
         # original object intact, and reports PostgreSQL's dedicated codes.
