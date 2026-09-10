@@ -184,9 +184,10 @@ std::string inferAstResultType(
             "is not distinct from", "similar to", "not similar to"
         };
         if (booleanOperators.count(op)) return "boolean";
-        if (op == "||") return "text";
         const std::string left = inferAstResultType(binary->left.get(), typeHints);
         const std::string right = inferAstResultType(binary->right.get(), typeHints);
+        if (op == "||")
+            return left == "bytea" && right == "bytea" ? "bytea" : "text";
         if (op == "+" || op == "-") {
             if (left == "money" && right == "money") return "money";
             if (left == "date" && right == "interval") return "timestamp";
@@ -260,14 +261,25 @@ std::string inferAstResultType(
             name == "uuidv7") return "uuid";
         if (name == "uuid_extract_version") return "smallint";
         if (name == "uuid_extract_timestamp") return "timestamptz";
+        if (name == "decode" || name == "reverse" || name == "set_byte" ||
+            name == "set_bit" || name == "substring" || name == "substr" ||
+            name == "overlay" || name == "btrim" || name == "ltrim" ||
+            name == "rtrim") {
+            if (name == "decode") return "bytea";
+            const std::string input = argType(0);
+            if (input == "bytea") return "bytea";
+        }
         if (name == "pg_notification_queue_usage") return "double precision";
         if (name == "count" || name == "row_number" || name == "rank" ||
             name == "dense_rank") return "bigint";
         if (name == "ntile" || name == "width_bucket" || name == "length" ||
             name == "char_length" || name == "character_length" ||
             name == "bit_length" || name == "octet_length" || name == "strpos" ||
-            name == "position" || name == "ascii" || name == "gcd" ||
+            name == "position" || name == "get_byte" || name == "get_bit" ||
+            name == "ascii" || name == "gcd" ||
             name == "lcm") return "integer";
+        if (name == "bit_count" || name == "crc32" || name == "crc32c")
+            return "bigint";
         if (name == "percent_rank" || name == "cume_dist" || name == "date_part")
             return "double precision";
         if (name == "extract") return "numeric";

@@ -6,6 +6,7 @@
 #include "types/numeric.h"
 #include "types/money.h"
 #include "types/uuid.h"
+#include "types/bytea.h"
 #include "utils/Session.h"
 
 #include <algorithm>
@@ -88,6 +89,20 @@ static std::optional<UuidValue> tryParseUuid(const std::string& value) {
     UuidValue uuid;
     if (!UuidValue::parse(value, uuid)) return std::nullopt;
     return uuid;
+}
+
+static bool isCanonicalByteaType(const std::string& typeName) {
+    const std::string type = toLower(typeName);
+    return type == "bytea" || type == "blob";
+}
+
+static ByteaValue parseByteaOrThrow(const ExprValue& value) {
+    ByteaValue bytes;
+    if (!ByteaValue::parse(value.value, bytes)) {
+        throw std::runtime_error(
+            "invalid input syntax for type bytea (SQLSTATE 22P02)");
+    }
+    return bytes;
 }
 
 static std::string normalizeDecimalMagnitude(std::string value) {
@@ -1635,6 +1650,13 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
         return *left < *right ? -1 : 1;
     }
 
+    if (isCanonicalByteaType(ta) || isCanonicalByteaType(tb)) {
+        const ByteaValue left = parseByteaOrThrow(a);
+        const ByteaValue right = parseByteaOrThrow(b);
+        if (left == right) return 0;
+        return left < right ? -1 : 1;
+    }
+
     const bool blankPaddedA = isBlankPaddedCharacterType(ta);
     const bool blankPaddedB = isBlankPaddedCharacterType(tb);
     auto isVaryingCharacter = [](const std::string& type) {
@@ -2579,7 +2601,17 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
 
     // String concatenation; SQL arrays concatenate as arrays (PG ||).
     if (op == "||") {
-        if (l.isNull || r.isNull) return ExprValue("text", "", true);
+        const bool byteaResult = isCanonicalByteaType(l.typeName) &&
+                                 isCanonicalByteaType(r.typeName);
+        if (l.isNull || r.isNull)
+            return ExprValue(byteaResult ? "bytea" : "text", "", true);
+        if (byteaResult) {
+            std::string joined = parseByteaOrThrow(l).bytes();
+            joined += parseByteaOrThrow(r).bytes();
+            return ExprValue(
+                "bytea", ByteaValue::fromBytes(std::move(joined)).toString(),
+                false);
+        }
         auto isArrayTxt = [](const std::string& v) {
             std::string s = trimStr(v);
             return s.size() >= 2 && s.front() == 0x7B && s.back() == 0x7D;
@@ -3026,6 +3058,38 @@ static ExprValue castToInteger(const ExprValue& value,
                                IntegerCastTarget target) {
     const std::string sourceType = toLower(value.typeName);
 
+    if (isCanonicalByteaType(sourceType)) {
+        const ByteaValue parsedBytes = parseByteaOrThrow(value);
+        const std::string& bytes = parsedBytes.bytes();
+        const size_t width = target == IntegerCastTarget::SmallInt ? 2U :
+                             target == IntegerCastTarget::Integer ? 4U : 8U;
+        if (bytes.size() > width) {
+            throw std::runtime_error(
+                "invalid byte sequence for encoding integer "
+                "(SQLSTATE 22003)");
+        }
+        uint64_t bits = 0;
+        for (const unsigned char byte : bytes)
+            bits = (bits << 8) | byte;
+        int64_t converted = 0;
+        if (bytes.size() == width &&
+            (bits & (uint64_t{1} << (width * 8 - 1))) != 0) {
+            if (width == 8) {
+                converted = bits == (uint64_t{1} << 63)
+                    ? std::numeric_limits<int64_t>::min()
+                    : -static_cast<int64_t>((~bits) + 1U);
+            } else {
+                const uint64_t mask =
+                    ~((uint64_t{1} << (width * 8)) - 1);
+                converted = static_cast<int64_t>(bits | mask);
+            }
+        } else {
+            converted = static_cast<int64_t>(bits);
+        }
+        return ExprValue(integerCastTypeName(target),
+                         std::to_string(converted), false);
+    }
+
     if (sourceType == "boolean" || sourceType == "bool") {
         if (target != IntegerCastTarget::Integer) {
             throw std::runtime_error(
@@ -3092,6 +3156,44 @@ static ExprValue castToInteger(const ExprValue& value,
 
     return ExprValue(integerCastTypeName(target), std::to_string(converted),
                      false);
+}
+
+static ExprValue castToBytea(const ExprValue& value) {
+    const std::string sourceType = toLower(value.typeName);
+    size_t width = 0;
+    if (sourceType == "smallint" || sourceType == "int2") width = 2;
+    else if (sourceType == "integer" || sourceType == "int" ||
+             sourceType == "int4") width = 4;
+    else if (sourceType == "bigint" || sourceType == "int8") width = 8;
+
+    if (width != 0) {
+        int64_t signedValue = 0;
+        const SignedIntegerParseResult parsed =
+            parseSignedInteger(value.value, signedValue);
+        if (parsed != SignedIntegerParseResult::Ok) {
+            throwIntegerCastSyntaxError(
+                width == 2 ? IntegerCastTarget::SmallInt :
+                width == 4 ? IntegerCastTarget::Integer :
+                             IntegerCastTarget::BigInt,
+                trimStr(value.value));
+        }
+        uint64_t bits = static_cast<uint64_t>(signedValue);
+        std::string bytes(width, '\0');
+        for (size_t index = width; index > 0; --index) {
+            bytes[index - 1] = static_cast<char>(bits & 0xffU);
+            bits >>= 8;
+        }
+        return ExprValue(
+            "bytea", ByteaValue::fromBytes(std::move(bytes)).toString(),
+            false);
+    }
+
+    ByteaValue bytes;
+    if (!ByteaValue::parse(value.value, bytes)) {
+        throw std::runtime_error(
+            "invalid input syntax for type bytea (SQLSTATE 22P02)");
+    }
+    return ExprValue("bytea", bytes.toString(), false);
 }
 
 [[noreturn]] static void throwFloatingCastSyntaxError(
@@ -3798,6 +3900,7 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
     if (numericSpec.matches) return castToNumeric(v, numericSpec);
     if (target == "money") return castToMoney(v);
     if (target == "uuid") return castToUuid(v);
+    if (target == "bytea" || target == "blob") return castToBytea(v);
     const CharacterCastSpec characterSpec = parseCharacterCastSpec(target);
     if (characterSpec.kind != CharacterCastKind::None)
         return castToCharacter(v, characterSpec);
@@ -4237,6 +4340,16 @@ static bool hexDecode(const std::string& in, std::string& out) {
     return true;
 }
 
+static uint32_t byteaCrc(const std::string& bytes, uint32_t polynomial) {
+    uint32_t crc = 0xffffffffU;
+    for (const unsigned char byte : bytes) {
+        crc ^= byte;
+        for (unsigned bit = 0; bit < 8; ++bit)
+            crc = (crc >> 1) ^ ((crc & 1U) ? polynomial : 0U);
+    }
+    return crc ^ 0xffffffffU;
+}
+
 // UTF-8 aware helpers: total characters and char-index -> byte offset.
 static size_t utf8CharCount(const std::string& s) {
     size_t n = 0;
@@ -4384,12 +4497,22 @@ static std::string trimUtf8Characters(const std::string& text,
 }
 
 static ExprValue evaluateTextSubstring(const std::vector<ExprValue>& args) {
-    if (args.empty() || args[0].isNull)
-        return ExprValue("text", "", true);
+    if (args.empty()) return ExprValue("text", "", true);
+    const bool byteaInput = isCanonicalByteaType(args[0].typeName);
+    if (args[0].isNull)
+        return ExprValue(byteaInput ? "bytea" : "text", "", true);
+    const std::string byteInput = byteaInput
+        ? parseByteaOrThrow(args[0]).bytes() : std::string();
     const std::string input = textArgumentValue(args[0]);
-    if (args.size() < 2) return ExprValue("text", input, false);
+    if (args.size() < 2) {
+        if (byteaInput) {
+            return ExprValue(
+                "bytea", ByteaValue::fromBytes(byteInput).toString(), false);
+        }
+        return ExprValue("text", input, false);
+    }
     if (args[1].isNull || (args.size() >= 3 && args[2].isNull))
-        return ExprValue("text", "", true);
+        return ExprValue(byteaInput ? "bytea" : "text", "", true);
 
     long long from = 0;
     if (!parseInt64Exact(args[1].value, from))
@@ -4405,13 +4528,14 @@ static ExprValue evaluateTextSubstring(const std::vector<ExprValue>& args) {
         }
     }
 
-    const size_t total = utf8CharCount(input);
+    const size_t total = byteaInput ? byteInput.size() : utf8CharCount(input);
     const __int128 requestedEnd = hasLength
         ? static_cast<__int128>(from) + length
         : static_cast<__int128>(total) + 1;
     const __int128 requestedStart = std::max<__int128>(from, 1);
     if (requestedStart > static_cast<__int128>(total))
-        return ExprValue("text", "", false);
+        return ExprValue(byteaInput ? "bytea" : "text",
+                         byteaInput ? "\\x" : "", false);
 
     const size_t beginCharacter =
         static_cast<size_t>(requestedStart - 1);
@@ -4421,10 +4545,51 @@ static ExprValue evaluateTextSubstring(const std::vector<ExprValue>& args) {
     if (endCharacterWide > static_cast<__int128>(total))
         endCharacterWide = total;
     const size_t endCharacter = static_cast<size_t>(endCharacterWide);
-    const size_t beginByte = utf8ByteAt(input, beginCharacter);
-    const size_t endByte = utf8ByteAt(input, endCharacter);
+    const size_t beginByte = byteaInput
+        ? beginCharacter : utf8ByteAt(input, beginCharacter);
+    const size_t endByte = byteaInput
+        ? endCharacter : utf8ByteAt(input, endCharacter);
+    if (byteaInput) {
+        return ExprValue(
+            "bytea",
+            ByteaValue::fromBytes(
+                byteInput.substr(beginByte, endByte - beginByte)).toString(),
+            false);
+    }
     return ExprValue(
         "text", input.substr(beginByte, endByte - beginByte), false);
+}
+
+static ExprValue evaluateByteaTrim(const std::vector<ExprValue>& args,
+                                   bool trimLeading,
+                                   bool trimTrailing) {
+    if (args.size() < 2) {
+        throw std::runtime_error(
+            "function does not exist for bytea without a byte set "
+            "(SQLSTATE 42883)");
+    }
+    if (args[0].isNull || args[1].isNull)
+        return ExprValue("bytea", "", true);
+    std::string bytes = parseByteaOrThrow(args[0]).bytes();
+    const std::string trimBytes = parseByteaOrThrow(args[1]).bytes();
+    const auto shouldTrim = [&](unsigned char byte) {
+        return std::find_if(
+                   trimBytes.begin(), trimBytes.end(),
+                   [&](unsigned char candidate) { return candidate == byte; }) !=
+               trimBytes.end();
+    };
+    size_t begin = 0;
+    size_t end = bytes.size();
+    if (trimLeading)
+        while (begin < end && shouldTrim(
+               static_cast<unsigned char>(bytes[begin]))) ++begin;
+    if (trimTrailing)
+        while (end > begin && shouldTrim(
+               static_cast<unsigned char>(bytes[end - 1]))) --end;
+    return ExprValue(
+        "bytea",
+        ByteaValue::fromBytes(bytes.substr(begin, end - begin)).toString(),
+        false);
 }
 
 static ExprValue evaluateTextPad(const std::vector<ExprValue>& args,
@@ -6376,10 +6541,12 @@ void ExprEvaluator::registerBuiltins() {
     functions_["length"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
         const std::string type = toLower(a[0].typeName);
-        const bool byteLength = type == "bytea" || type == "binary" ||
+        const bool canonicalBytea = isCanonicalByteaType(type);
+        const bool byteLength = canonicalBytea || type == "binary" ||
                                 type == "varbinary";
-        const size_t length = byteLength
-            ? a[0].value.size()
+        const size_t length = canonicalBytea
+            ? parseByteaOrThrow(a[0]).bytes().size()
+            : byteLength ? a[0].value.size()
             : utf8CharCount(a[0].value.substr(
                   0, logicalCharacterByteLength(a[0])));
         return ExprValue("integer", std::to_string(length), false);
@@ -7371,6 +7538,8 @@ void ExprEvaluator::registerBuiltins() {
             "text", trimUtf8Characters(s, chars, true, true), false);
     };
     functions_["ltrim"] = [](const std::vector<ExprValue>& a) {
+        if (!a.empty() && isCanonicalByteaType(a[0].typeName))
+            return evaluateByteaTrim(a, true, false);
         if (a.empty() || a[0].isNull ||
             (a.size() >= 2 && a[1].isNull)) {
             return ExprValue("text", "", true);
@@ -7382,6 +7551,8 @@ void ExprEvaluator::registerBuiltins() {
             "text", trimUtf8Characters(s, chars, true, false), false);
     };
     functions_["rtrim"] = [](const std::vector<ExprValue>& a) {
+        if (!a.empty() && isCanonicalByteaType(a[0].typeName))
+            return evaluateByteaTrim(a, false, true);
         if (a.empty() || a[0].isNull ||
             (a.size() >= 2 && a[1].isNull)) {
             return ExprValue("text", "", true);
@@ -7409,6 +7580,17 @@ void ExprEvaluator::registerBuiltins() {
     functions_["position"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull)
             return ExprValue("integer", "", true);
+        if (isCanonicalByteaType(a[0].typeName) ||
+            isCanonicalByteaType(a[1].typeName)) {
+            const std::string needle = parseByteaOrThrow(a[0]).bytes();
+            const std::string haystack = parseByteaOrThrow(a[1]).bytes();
+            const size_t position = haystack.find(needle);
+            return ExprValue(
+                "integer",
+                position == std::string::npos ? "0" :
+                    std::to_string(position + 1),
+                false);
+        }
         const std::string needle = textArgumentValue(a[0]);
         const std::string haystack = textArgumentValue(a[1]);
         size_t pos = haystack.find(needle);
@@ -7459,7 +7641,17 @@ void ExprEvaluator::registerBuiltins() {
         return ExprValue("text", s, false);
     };
     functions_["reverse"] = [](const std::vector<ExprValue>& a) {
-        if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
+        const bool byteaInput = !a.empty() &&
+                                isCanonicalByteaType(a[0].typeName);
+        if (a.empty() || a[0].isNull)
+            return ExprValue(byteaInput ? "bytea" : "text", "", true);
+        if (byteaInput) {
+            std::string bytes = parseByteaOrThrow(a[0]).bytes();
+            std::reverse(bytes.begin(), bytes.end());
+            return ExprValue(
+                "bytea", ByteaValue::fromBytes(std::move(bytes)).toString(),
+                false);
+        }
         const std::string input = textArgumentValue(a[0]);
         std::string result;
         result.reserve(input.size());
@@ -7522,10 +7714,18 @@ void ExprEvaluator::registerBuiltins() {
     };
     functions_["octet_length"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
-        return ExprValue("integer", std::to_string(a[0].value.size()), false);
+        const size_t length = isCanonicalByteaType(a[0].typeName)
+            ? parseByteaOrThrow(a[0]).bytes().size() : a[0].value.size();
+        return ExprValue("integer", std::to_string(length), false);
     };
     functions_["bit_length"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
+        if (isCanonicalByteaType(a[0].typeName)) {
+            return ExprValue(
+                "integer",
+                std::to_string(parseByteaOrThrow(a[0]).bytes().size() * 8),
+                false);
+        }
         return ExprValue(
             "integer", std::to_string(logicalCharacterByteLength(a[0]) * 8),
             false);
@@ -7539,6 +7739,8 @@ void ExprEvaluator::registerBuiltins() {
     };
     // btrim(str[, chars]) — trim matching characters (default whitespace) from both ends
     functions_["btrim"] = [](const std::vector<ExprValue>& a) {
+        if (!a.empty() && isCanonicalByteaType(a[0].typeName))
+            return evaluateByteaTrim(a, true, true);
         if (a.empty() || a[0].isNull ||
             (a.size() >= 2 && a[1].isNull)) {
             return ExprValue("text", "", true);
@@ -7747,24 +7949,33 @@ void ExprEvaluator::registerBuiltins() {
 
     // overlay(string, newsub, start[, count]) — replace count chars at 1-based start
     functions_["overlay"] = [](const std::vector<ExprValue>& a) {
+        const bool byteaInput = !a.empty() &&
+                                isCanonicalByteaType(a[0].typeName);
         if (a.size() < 3 || a[0].isNull || a[1].isNull || a[2].isNull ||
             (a.size() >= 4 && a[3].isNull)) {
-            return ExprValue("text", "", true);
+            return ExprValue(byteaInput ? "bytea" : "text", "", true);
         }
-        const std::string s = textArgumentValue(a[0]);
-        const std::string repl = textArgumentValue(a[1]);
+        const std::string s = byteaInput
+            ? parseByteaOrThrow(a[0]).bytes() : textArgumentValue(a[0]);
+        const std::string repl = byteaInput
+            ? parseByteaOrThrow(a[1]).bytes() : textArgumentValue(a[1]);
         const long long start = parseInt32Argument(a[2]);
         long long count = 0;
         if (a.size() >= 4) {
             count = parseInt32Argument(a[3]);
         } else {
-            count = static_cast<long long>(utf8CharCount(repl));
+            count = static_cast<long long>(
+                byteaInput ? repl.size() : utf8CharCount(repl));
+        }
+        if (count < 0) {
+            throw std::runtime_error(
+                "negative substring length not allowed (SQLSTATE 22011)");
         }
         if (start < 1) {
             throw std::runtime_error(
                 "negative substring length not allowed (SQLSTATE 22011)");
         }
-        const size_t characters = utf8CharCount(s);
+        const size_t characters = byteaInput ? s.size() : utf8CharCount(s);
         const uint64_t requestedBegin = static_cast<uint64_t>(start - 1);
         const size_t prefixCharacters = requestedBegin >= characters
             ? characters : static_cast<size_t>(requestedBegin);
@@ -7776,9 +7987,16 @@ void ExprEvaluator::registerBuiltins() {
             suffixCharacter = zeroBased >= static_cast<__int128>(characters)
                 ? characters : static_cast<size_t>(zeroBased);
         }
-        const size_t prefixByte = utf8ByteAt(s, prefixCharacters);
-        const size_t suffixByte = utf8ByteAt(s, suffixCharacter);
+        const size_t prefixByte = byteaInput
+            ? prefixCharacters : utf8ByteAt(s, prefixCharacters);
+        const size_t suffixByte = byteaInput
+            ? suffixCharacter : utf8ByteAt(s, suffixCharacter);
         std::string out = s.substr(0, prefixByte) + repl + s.substr(suffixByte);
+        if (byteaInput) {
+            return ExprValue(
+                "bytea", ByteaValue::fromBytes(std::move(out)).toString(),
+                false);
+        }
         return ExprValue("text", out, false);
     };
     // quote_literal — single-quote a value, doubling embedded quotes
@@ -8050,16 +8268,19 @@ void ExprEvaluator::registerBuiltins() {
         if (a.size() < 2) return ExprValue("unknown", "", true);
         return a[0].isNull ? a[1] : a[0];
     };
-    // md5(text) — 32-char lowercase hex digest
+    // md5(text/bytea) — 32-char lowercase hex digest
     functions_["md5"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
-        return ExprValue("text", md5Hex(textArgumentValue(a[0])), false);
+        const std::string input = isCanonicalByteaType(a[0].typeName)
+            ? parseByteaOrThrow(a[0]).bytes() : textArgumentValue(a[0]);
+        return ExprValue("text", md5Hex(input), false);
     };
     // encode(data, format) — format is 'hex', 'base64', or 'escape'
     functions_["encode"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
         std::string fmt = toLower(textArgumentValue(a[1]));
-        const std::string& data = a[0].value;
+        const std::string data = isCanonicalByteaType(a[0].typeName)
+            ? parseByteaOrThrow(a[0]).bytes() : a[0].value;
         if (fmt == "hex") return ExprValue("text", hexEncode(data), false);
         if (fmt == "base64") return ExprValue("text", base64Encode(data), false);
         if (fmt == "escape") {
@@ -8078,7 +8299,7 @@ void ExprEvaluator::registerBuiltins() {
             "unrecognized encoding: \"" + a[1].value +
             "\" (SQLSTATE 22023)");
     };
-    // decode(text, format) — inverse of encode, returns the raw bytes as text
+    // decode(text, format) — inverse of encode, returns canonical bytea.
     functions_["decode"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("bytea", "", true);
         std::string fmt = toLower(textArgumentValue(a[1]));
@@ -8088,13 +8309,17 @@ void ExprEvaluator::registerBuiltins() {
             if (!hexDecode(text, out))
                 throw std::runtime_error(
                     "invalid hexadecimal data (SQLSTATE 22023)");
-            return ExprValue("bytea", out, false);
+            return ExprValue(
+                "bytea", ByteaValue::fromBytes(std::move(out)).toString(),
+                false);
         }
         if (fmt == "base64") {
             if (!base64Decode(text, out))
                 throw std::runtime_error(
                     "invalid base64 data (SQLSTATE 22023)");
-            return ExprValue("bytea", out, false);
+            return ExprValue(
+                "bytea", ByteaValue::fromBytes(std::move(out)).toString(),
+                false);
         }
         if (fmt == "escape") {
             for (size_t i = 0; i < text.size(); ++i) {
@@ -8121,11 +8346,117 @@ void ExprEvaluator::registerBuiltins() {
                 out.push_back(static_cast<char>(value));
                 i += 3;
             }
-            return ExprValue("bytea", out, false);
+            return ExprValue(
+                "bytea", ByteaValue::fromBytes(std::move(out)).toString(),
+                false);
         }
         throw std::runtime_error(
             "unrecognized encoding: \"" + a[1].value +
             "\" (SQLSTATE 22023)");
+    };
+    functions_["get_byte"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull)
+            return ExprValue("integer", "", true);
+        const std::string bytes = parseByteaOrThrow(a[0]).bytes();
+        const int64_t offset = parseInt32Argument(a[1]);
+        if (offset < 0 || static_cast<uint64_t>(offset) >= bytes.size()) {
+            throw std::runtime_error(
+                "index out of valid range (SQLSTATE 2202E)");
+        }
+        return ExprValue(
+            "integer",
+            std::to_string(static_cast<unsigned char>(
+                bytes[static_cast<size_t>(offset)])),
+            false);
+    };
+    functions_["set_byte"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 3 || a[0].isNull || a[1].isNull || a[2].isNull)
+            return ExprValue("bytea", "", true);
+        std::string bytes = parseByteaOrThrow(a[0]).bytes();
+        const int64_t offset = parseInt32Argument(a[1]);
+        const int64_t replacement = parseInt32Argument(a[2]);
+        if (offset < 0 || static_cast<uint64_t>(offset) >= bytes.size()) {
+            throw std::runtime_error(
+                "index out of valid range (SQLSTATE 2202E)");
+        }
+        if (replacement < 0 || replacement > 255) {
+            throw std::runtime_error(
+                "new byte must be between 0 and 255 "
+                "(SQLSTATE 22023)");
+        }
+        bytes[static_cast<size_t>(offset)] =
+            static_cast<char>(replacement);
+        return ExprValue(
+            "bytea", ByteaValue::fromBytes(std::move(bytes)).toString(),
+            false);
+    };
+    functions_["get_bit"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull)
+            return ExprValue("integer", "", true);
+        const std::string bytes = parseByteaOrThrow(a[0]).bytes();
+        const int64_t offset = parseInt32Argument(a[1]);
+        if (offset < 0 || static_cast<uint64_t>(offset) >= bytes.size() * 8U) {
+            throw std::runtime_error(
+                "index out of valid range (SQLSTATE 2202E)");
+        }
+        const unsigned char byte = static_cast<unsigned char>(
+            bytes[static_cast<size_t>(offset) / 8U]);
+        const unsigned bit = static_cast<unsigned>(offset) & 7U;
+        return ExprValue(
+            "integer", ((byte >> bit) & 1U) != 0 ? "1" : "0", false);
+    };
+    functions_["set_bit"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 3 || a[0].isNull || a[1].isNull || a[2].isNull)
+            return ExprValue("bytea", "", true);
+        std::string bytes = parseByteaOrThrow(a[0]).bytes();
+        const int64_t offset = parseInt32Argument(a[1]);
+        const int64_t replacement = parseInt32Argument(a[2]);
+        if (offset < 0 || static_cast<uint64_t>(offset) >= bytes.size() * 8U) {
+            throw std::runtime_error(
+                "index out of valid range (SQLSTATE 2202E)");
+        }
+        if (replacement != 0 && replacement != 1) {
+            throw std::runtime_error(
+                "new bit must be 0 or 1 (SQLSTATE 22023)");
+        }
+        unsigned char byte = static_cast<unsigned char>(
+            bytes[static_cast<size_t>(offset) / 8U]);
+        const unsigned char mask = static_cast<unsigned char>(
+            1U << (static_cast<unsigned>(offset) & 7U));
+        byte = replacement == 0 ? static_cast<unsigned char>(byte & ~mask)
+                                : static_cast<unsigned char>(byte | mask);
+        bytes[static_cast<size_t>(offset) / 8U] = static_cast<char>(byte);
+        return ExprValue(
+            "bytea", ByteaValue::fromBytes(std::move(bytes)).toString(),
+            false);
+    };
+    functions_["bit_count"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("bigint", "", true);
+        const std::string bytes = parseByteaOrThrow(a[0]).bytes();
+        uint64_t count = 0;
+        for (unsigned char byte : bytes) {
+            while (byte != 0) {
+                byte &= static_cast<unsigned char>(byte - 1);
+                ++count;
+            }
+        }
+        return ExprValue("bigint", std::to_string(count), false);
+    };
+    functions_["crc32"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("bigint", "", true);
+        return ExprValue(
+            "bigint",
+            std::to_string(byteaCrc(
+                parseByteaOrThrow(a[0]).bytes(), 0xedb88320U)),
+            false);
+    };
+    functions_["crc32c"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("bigint", "", true);
+        return ExprValue(
+            "bigint",
+            std::to_string(byteaCrc(
+                parseByteaOrThrow(a[0]).bytes(), 0x82f63b78U)),
+            false);
     };
 
     // ------------------------------------------------------------------------

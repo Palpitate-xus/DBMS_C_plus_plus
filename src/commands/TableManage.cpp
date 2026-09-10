@@ -13,6 +13,7 @@
 #include "types/numeric.h"
 #include "types/money.h"
 #include "types/uuid.h"
+#include "types/bytea.h"
 #include "catalog/collation.h"
 #include "catalog/CatalogService.h"
 #include "expression/expr_helper.h"
@@ -7544,42 +7545,9 @@ static bool writeUuidStorage(const std::string& input, char* destination,
 // canonical lowercase hex form "\xhh...". Whitespace inside hex is ignored.
 // ========================================================================
 static bool normalizeBytea(const std::string& in, std::string& out) {
-    auto hexVal = [](char c) -> int {
-        if (c >= '0' && c <= '9') return c - '0';
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        return c - 'a' + 10;
-    };
-    std::vector<unsigned char> bytes;
-    if (in.size() >= 2 && in[0] == '\\' && (in[1] == 'x' || in[1] == 'X')) {
-        std::string clean;
-        for (size_t i = 2; i < in.size(); ++i) {
-            char c = in[i];
-            if (std::isspace(static_cast<unsigned char>(c))) continue;
-            if (!std::isxdigit(static_cast<unsigned char>(c))) return false;
-            clean += c;
-        }
-        if (clean.size() % 2 != 0) return false;
-        for (size_t i = 0; i < clean.size(); i += 2)
-            bytes.push_back(static_cast<unsigned char>((hexVal(clean[i]) << 4) | hexVal(clean[i + 1])));
-    } else {
-        for (size_t i = 0; i < in.size();) {
-            if (in[i] == '\\') {
-                if (i + 1 < in.size() && in[i + 1] == '\\') { bytes.push_back('\\'); i += 2; }
-                else if (i + 3 < in.size() && in[i+1] >= '0' && in[i+1] <= '3' &&
-                         in[i+2] >= '0' && in[i+2] <= '7' && in[i+3] >= '0' && in[i+3] <= '7') {
-                    int v = (in[i+1] - '0') * 64 + (in[i+2] - '0') * 8 + (in[i+3] - '0');
-                    bytes.push_back(static_cast<unsigned char>(v)); i += 4;
-                } else return false;  // invalid escape sequence
-            } else {
-                bytes.push_back(static_cast<unsigned char>(in[i])); ++i;
-            }
-        }
-    }
-    std::ostringstream oss;
-    oss << "\\x";
-    for (unsigned char b : bytes)
-        oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(b);
-    out = oss.str();
+    ByteaValue value;
+    if (!ByteaValue::parse(in, value)) return false;
+    out = value.toString();
     return true;
 }
 
