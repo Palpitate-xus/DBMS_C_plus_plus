@@ -1423,6 +1423,8 @@ void CatalogManager::bootstrapSystemTypes() {
     ensureType(30,    "oidvector",  -1,   'b', 'A');
     ensureType(700,   "float4",      4,   'b', 'N');
     ensureType(701,   "float8",      8,   'b', 'N');
+    ensureType(790,   "money",       8,   'b', 'N');
+    ensureType(791,   "_money",     -1,   'b', 'A');
     ensureType(1042,  "bpchar",     -1,   'b', 'S');
     ensureType(1043,  "varchar",    -1,   'b', 'S');
     ensureType(1082,  "date",        4,   'b', 'D');

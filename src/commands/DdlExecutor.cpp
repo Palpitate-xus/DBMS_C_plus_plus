@@ -3489,6 +3489,8 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
     } else if (baseType == "numeric" || baseType == "decimal") {
         col = makeDecimalColumn(cd.name, cd.isNull, typeMod1 > 0 ? typeMod1 : 18,
                                 typeMod2 > 0 ? typeMod2 : 2, cd.isPrimaryKey);
+    } else if (baseType == "money") {
+        col = makeMoneyColumn(cd.name, cd.isNull, cd.isPrimaryKey);
     } else if (baseType == "date") {
         col = makeDateColumn(cd.name, cd.isNull, cd.isPrimaryKey);
     } else if (baseType == "timestamp" || baseType == "datetime") {

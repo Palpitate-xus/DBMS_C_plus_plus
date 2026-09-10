@@ -188,6 +188,7 @@ std::string inferAstResultType(
         const std::string left = inferAstResultType(binary->left.get(), typeHints);
         const std::string right = inferAstResultType(binary->right.get(), typeHints);
         if (op == "+" || op == "-") {
+            if (left == "money" && right == "money") return "money";
             if (left == "date" && right == "interval") return "timestamp";
             if ((left == "timestamp" || left == "timestamptz") &&
                 right == "interval") return left;
@@ -196,6 +197,15 @@ std::string inferAstResultType(
                 return "interval";
             if (left == "date" && numericProtocolType(right)) return "date";
         }
+        if (op == "/" && left == "money" && right == "money")
+            return "double precision";
+        if (op == "*" &&
+            ((left == "money" && numericProtocolType(right)) ||
+             (right == "money" && numericProtocolType(left)))) {
+            return "money";
+        }
+        if (op == "/" && left == "money" && numericProtocolType(right))
+            return "money";
         return mergeProtocolTypes(left, right);
     }
     if (const auto* array = dynamic_cast<const ArrayExpr*>(expression)) {

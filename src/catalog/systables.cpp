@@ -45,6 +45,8 @@ static const std::unordered_map<std::string, Oid> kBuiltinTypeMap = {
     {"interval", 1186},
     {"interval[]", 1187},
     {"timetz", 1266}, {"time with time zone", 1266},
+    {"money", 790},
+    {"money[]", 791},
     {"numeric", 1700}, {"decimal", 1700},
     {"numeric[]", 1231}, {"decimal[]", 1231},
     {"regtype", 2206},

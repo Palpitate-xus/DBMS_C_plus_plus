@@ -1,6 +1,7 @@
 #include "PostgresProtocol.h"
 #include "common/DateType.h"
 #include "PostgresNumeric.h"
+#include "types/money.h"
 
 #include <algorithm>
 #include <cctype>
@@ -143,6 +144,13 @@ bool encodeBinaryValue(const std::string& value, const PgColumnDescription& colu
                 uint64_t bits = 0;
                 std::memcpy(&bits, &number, sizeof(bits));
                 appendRawUInt64(encoded, bits);
+                return true;
+            }
+            case 790: {
+                Money money;
+                if (!Money::parse(value, money, column.moneyLocale)) return false;
+                appendRawUInt64(encoded,
+                    static_cast<uint64_t>(money.minorUnits()));
                 return true;
             }
             case 1082: {

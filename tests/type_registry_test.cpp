@@ -27,6 +27,7 @@ static void test_bootstrap_has_core_types() {
     assert(reg.findType("inet") != nullptr);
     assert(reg.findType("tsvector") != nullptr);
     assert(reg.findType("int4range") != nullptr);
+    assert(reg.findType("money") != nullptr);
     std::cout << "test_bootstrap_has_core_types passed\n";
 }
 
@@ -41,6 +42,7 @@ static void test_normalize_aliases() {
     assert(reg.normalizeTypeName("float") == "real");
     assert(reg.normalizeTypeName("double") == "double precision");
     assert(reg.normalizeTypeName("decimal") == "numeric");
+    assert(reg.normalizeTypeName("money") == "money");
     assert(reg.normalizeTypeName("no_such_type").empty());
     std::cout << "test_normalize_aliases passed\n";
 }
@@ -152,6 +154,7 @@ static void test_type_categories() {
     TypeRegistry& reg = TypeRegistry::instance();
     assert(reg.findType("boolean")->category == TypeCategory::Boolean);
     assert(reg.findType("integer")->category == TypeCategory::Numeric);
+    assert(reg.findType("money")->category == TypeCategory::Numeric);
     assert(reg.findType("text")->category == TypeCategory::String);
     assert(reg.findType("bytea")->category == TypeCategory::Binary);
     assert(reg.findType("timestamp")->category == TypeCategory::DateTime);

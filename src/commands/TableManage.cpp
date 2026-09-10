@@ -11,6 +11,7 @@
 #include "HeapTupleHeader.h"
 #include "type_registry.h"
 #include "types/numeric.h"
+#include "types/money.h"
 #include "catalog/collation.h"
 #include "catalog/CatalogService.h"
 #include "expression/expr_helper.h"
@@ -662,6 +663,28 @@ static bool parseFiniteDouble(const std::string& input, double& value) {
     return parseDoubleLiteral(input, value) && std::isfinite(value);
 }
 
+static bool parseMoneyLiteral(const std::string& input, int64_t& minorUnits,
+                              std::string* canonical = nullptr) {
+    Money money;
+    const std::string locale = StorageEngine::getMoneyLocale();
+    if (!Money::parse(input, money, locale)) return false;
+    minorUnits = money.minorUnits();
+    if (canonical) *canonical = money.format(locale);
+    return true;
+}
+
+static std::string moneyIndexKey(int64_t minorUnits) {
+    // Bias the sign bit and emit fixed-width hexadecimal.  Lexicographic
+    // B-tree order then exactly matches signed money order.
+    const uint64_t ordered = static_cast<uint64_t>(minorUnits) ^
+                             (uint64_t{1} << 63);
+    char key[17] = {};
+    const auto result = std::to_chars(key, key + 16, ordered, 16);
+    if (result.ec != std::errc()) return {};
+    const size_t digits = static_cast<size_t>(result.ptr - key);
+    return std::string(16 - digits, '0') + std::string(key, result.ptr);
+}
+
 template <typename Floating>
 static std::string formatFloatingValue(Floating value) {
     if (std::isnan(value)) return "NaN";
@@ -699,6 +722,11 @@ static std::string canonicalColumnKeyValue(const Column& column,
         double parsed = 0.0;
         if (!parseDoubleLiteral(value, parsed)) return value;
         return parsed == 0.0 ? "0" : formatFloatingValue(parsed);
+    }
+    if (column.dataType == "money") {
+        int64_t minorUnits = 0;
+        if (!parseMoneyLiteral(value, minorUnits)) return value;
+        return moneyIndexKey(minorUnits);
     }
     return value;
 }
@@ -1680,6 +1708,16 @@ Column makeDecimalColumn(const std::string& name, bool isNull, int precision, in
     c.isVariableLength = true;
     c.dataType = "numeric";
     c.dsize = Numeric::kMaxTextLength;
+    return c;
+}
+
+Column makeMoneyColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.dataType = "money";
+    c.dsize = sizeof(int64_t);
     return c;
 }
 
@@ -8063,6 +8101,10 @@ static bool validateArrayScalar(const std::string& tok, const std::string& elemT
     if (arrayElemIsFloat(elemType)) {
         try { size_t p = 0; std::stod(tok, &p); return p == tok.size(); } catch (...) { return false; }
     }
+    if (elemType == "money") {
+        int64_t minorUnits = 0;
+        return parseMoneyLiteral(tok, minorUnits);
+    }
     return true;  // text-like element types accept any contents
 }
 
@@ -8835,6 +8877,11 @@ std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer
         float val = 0.0f;
         std::memcpy(&val, rowBuffer.data() + offset, sizeof(float));
         return formatFloatingValue(val);
+    } else if (col.dataType == "money") {
+        int64_t minorUnits = 0;
+        std::memcpy(&minorUnits, rowBuffer.data() + offset,
+                    sizeof(minorUnits));
+        return Money(minorUnits).format(StorageEngine::getMoneyLocale());
     } else if (col.dataType == "double" || col.dataType == "decimal" || col.dataType == "numeric") {
         double val = 0.0;
         std::memcpy(&val, rowBuffer.data() + offset, sizeof(double));
@@ -15683,8 +15730,12 @@ static bool valueConvertibleToType(const std::string& raw, const std::string& ta
         try { (void)std::stoll(v, &idx); } catch (...) { return false; }
         return idx == v.size();
     }
+    if (targetType == "money") {
+        int64_t minorUnits = 0;
+        return parseMoneyLiteral(v, minorUnits);
+    }
     if (targetType == "float" || targetType == "double" || targetType == "decimal" ||
-        targetType == "numeric" || targetType == "money") {
+        targetType == "numeric") {
         size_t idx = 0;
         try { (void)std::stod(v, &idx); } catch (...) { return false; }
         return idx == v.size();
@@ -19275,6 +19326,13 @@ StorageEngine::PredicateTruth StorageEngine::compareValues(
             return PredicateTruth::Unknown;
         }
     }
+    if (col.dataType == "money") {
+        int64_t l = 0;
+        int64_t r = 0;
+        if (!parseMoneyLiteral(left, l) || !parseMoneyLiteral(right, r))
+            return PredicateTruth::Unknown;
+        return fromCompare(l < r ? -1 : (r < l ? 1 : 0));
+    }
     if (col.dataType == "float" || col.dataType == "double" ||
         col.dataType == "decimal") {
         double l = 0.0;
@@ -19688,6 +19746,29 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         } catch (...) {
             return false;
         }
+    } else if (col.dataType == "money") {
+        int64_t num = 0;
+        if (cond.op == "between" || cond.op == "notbetween") {
+            const size_t separator = cond.value.find(' ');
+            if (separator == std::string::npos) return false;
+            int64_t lower = 0;
+            int64_t upper = 0;
+            if (!parseMoneyLiteral(val, num) ||
+                !parseMoneyLiteral(cond.value.substr(0, separator), lower) ||
+                !parseMoneyLiteral(cond.value.substr(separator + 1), upper))
+                return false;
+            const bool inRange = num >= lower && num <= upper;
+            return cond.op == "between" ? inRange : !inRange;
+        }
+        int64_t cmp = 0;
+        if (!parseMoneyLiteral(val, num) ||
+            !parseMoneyLiteral(cond.value, cmp)) return false;
+        if (cond.op == "<" && !(num < cmp)) return false;
+        if (cond.op == ">" && !(num > cmp)) return false;
+        if (cond.op == "=" && num != cmp) return false;
+        if (cond.op == "<=" && !(num <= cmp)) return false;
+        if (cond.op == ">=" && !(num >= cmp)) return false;
+        if ((cond.op == "!=" || cond.op == "<>") && num == cmp) return false;
     } else if (col.dataType == "double" || col.dataType == "decimal") {
         double num = 0.0, cmp = 0.0;
         if (cond.op == "between" || cond.op == "notbetween") {
@@ -19935,6 +20016,11 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                 float num = 0.0f;
                 if (!val.empty()) parseFloatLiteral(val, num);
                 std::memcpy(&rowBuffer[offset], &num, sizeof(float));
+            } else if (col.dataType == "money") {
+                int64_t minorUnits = 0;
+                if (!val.empty()) (void)parseMoneyLiteral(val, minorUnits);
+                std::memcpy(&rowBuffer[offset], &minorUnits,
+                            sizeof(minorUnits));
             } else if (col.dataType == "double" || col.dataType == "decimal") {
                 double num = 0.0;
                 if (!val.empty()) parseDoubleLiteral(val, num);
@@ -20019,6 +20105,11 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                     float num = 0.0f;
                     if (!val.empty()) parseFloatLiteral(val, num);
                     std::memcpy(&fixedData[fixedOff], &num, sizeof(float));
+                } else if (col.dataType == "money") {
+                    int64_t minorUnits = 0;
+                    if (!val.empty()) (void)parseMoneyLiteral(val, minorUnits);
+                    std::memcpy(&fixedData[fixedOff], &minorUnits,
+                                sizeof(minorUnits));
                 } else if (col.dataType == "double" || col.dataType == "decimal" || col.dataType == "numeric") {
                     double num = 0.0;
                     if (!val.empty()) parseDoubleLiteral(val, num);
@@ -20916,7 +21007,15 @@ DBStatus StorageEngine::insertInternal(
             }
             actualValues[col.dataName] = formatFloatingValue(parsed);
         }
-        if (col.dataType == "numeric" && !val.empty()) {
+        if (col.dataType == "money" && !val.empty()) {
+            int64_t minorUnits = 0;
+            std::string canonical;
+            if (!parseMoneyLiteral(val, minorUnits, &canonical)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
+            }
+            actualValues[col.dataName] = canonical;
+        } else if (col.dataType == "numeric" && !val.empty()) {
             try { Numeric numeric(val); (void)numeric; } catch (...) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
@@ -21081,7 +21180,7 @@ DBStatus StorageEngine::insertInternal(
                 return DBStatus::INVALID_VALUE;
             }
         }
-        if (!col.isVariableLength && col.dataType != "char" && col.dataType != "binary" && col.dataType != "date" && col.dataType != "timestamp" && col.dataType != "timestamptz" && col.dataType != "datetime" && col.dataType != "time" && col.dataType != "float" && col.dataType != "double" && col.dataType != "decimal" && col.dataType != "numeric" && col.dataType != "boolean" && col.dataType != "uuid" && col.dataType != "point" && col.dataType != "inet" && col.dataType != "cidr" && col.dataType != "macaddr" && col.dataType != "macaddr8" && !val.empty()) {
+        if (!col.isVariableLength && col.dataType != "char" && col.dataType != "binary" && col.dataType != "date" && col.dataType != "timestamp" && col.dataType != "timestamptz" && col.dataType != "datetime" && col.dataType != "time" && col.dataType != "float" && col.dataType != "double" && col.dataType != "decimal" && col.dataType != "numeric" && col.dataType != "money" && col.dataType != "boolean" && col.dataType != "uuid" && col.dataType != "point" && col.dataType != "inet" && col.dataType != "cidr" && col.dataType != "macaddr" && col.dataType != "macaddr8" && !val.empty()) {
             int64_t num = parseInt(val);
             if (num == INF || !integerValueFitsColumn(col, num)) {
                 lockManager_.unlock(tablename);
@@ -24132,6 +24231,14 @@ DBStatus StorageEngine::updateInternal(
                                 return DBStatus::INVALID_VALUE;
                             }
                             storeVal = formatFloatingValue(parsed);
+                        }
+                    } else if (col.dataType == "money") {
+                        if (!kv.second.empty()) {
+                            int64_t minorUnits = 0;
+                            if (!parseMoneyLiteral(kv.second, minorUnits,
+                                                   &storeVal)) {
+                                return DBStatus::INVALID_VALUE;
+                            }
                         }
                     } else if (col.dataType == "double" ||
                                col.dataType == "decimal") {
@@ -27333,6 +27440,12 @@ std::vector<std::string> StorageEngine::query(
                         k.vals.emplace_back(
                             "", val.empty() ? 0 : parseTimeToSeconds(val),
                             0.0, Date{}, Numeric{});
+                    } else if (scol.dataType == "money") {
+                        int64_t minorUnits = 0;
+                        if (!val.empty())
+                            (void)parseMoneyLiteral(val, minorUnits);
+                        k.vals.emplace_back(
+                            "", minorUnits, 0.0, Date{}, Numeric{});
                     } else if (scol.dataType == "float") {
                         float parsed = 0.0f;
                         if (!val.empty()) (void)parseFloatLiteral(val, parsed);
@@ -28717,6 +28830,58 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         }
     }
     if (expr.funcName == "arith") {
+        bool moneyExpression = false;
+        for (const auto& argument : expr.funcArgs) {
+            const std::string operand = trim(argument.substr(
+                0, argument.find("::")));
+            for (size_t columnIndex = 0; columnIndex < tbl.len;
+                 ++columnIndex) {
+                if (tbl.cols[columnIndex].dataName == operand &&
+                    tbl.cols[columnIndex].dataType == "money") {
+                    moneyExpression = true;
+                    break;
+                }
+            }
+            std::string lowered = argument;
+            for (char& character : lowered) {
+                character = static_cast<char>(std::tolower(
+                    static_cast<unsigned char>(character)));
+            }
+            if (lowered.find("::money") != std::string::npos)
+                moneyExpression = true;
+        }
+        if (moneyExpression) {
+            std::map<std::string, std::string> rowContext;
+            std::map<std::string, std::string> typeHints;
+            std::set<std::string> nullColumns;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                bool valueIsNull = false;
+                const std::string value = engine && !dbname.empty()
+                    ? engine->extractColumnValue(
+                          rowBuffer, tbl, i, dbname, true, &valueIsNull)
+                    : StorageEngine::extractColumnValueStatic(
+                          rowBuffer, tbl, i);
+                rowContext[tbl.cols[i].dataName] = value;
+                typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+                if (valueIsNull || (!engine && value.empty()))
+                    nullColumns.insert(tbl.cols[i].dataName);
+            }
+            std::string expressionSql;
+            for (const auto& argument : expr.funcArgs) {
+                if (!expressionSql.empty()) expressionSql.push_back(' ');
+                expressionSql += argument;
+            }
+            const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
+                expressionSql, rowContext, nullColumns, typeHints, dbname,
+                expr.sessionUser);
+            if (!evaluated.ok) {
+                throw std::runtime_error(
+                    evaluated.error.empty()
+                        ? "failed to evaluate money expression"
+                        : evaluated.error);
+            }
+            return evaluated.isNull ? "NULL" : evaluated.value;
+        }
         double acc = 0.0;
         bool accSet = false;
         char pendingOp = 0;
@@ -31357,6 +31522,12 @@ std::vector<std::string> StorageEngine::queryExpr(
                         k.vals.emplace_back(
                             "", val.empty() ? 0 : parseTimeToSeconds(val),
                             0.0, Date{}, Numeric{});
+                    } else if (scol.dataType == "money") {
+                        int64_t minorUnits = 0;
+                        if (!val.empty())
+                            (void)parseMoneyLiteral(val, minorUnits);
+                        k.vals.emplace_back(
+                            "", minorUnits, 0.0, Date{}, Numeric{});
                     } else if (scol.dataType == "float") {
                         float parsed = 0.0f;
                         if (!val.empty()) (void)parseFloatLiteral(val, parsed);

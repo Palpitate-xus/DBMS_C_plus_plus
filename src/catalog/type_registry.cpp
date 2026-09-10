@@ -301,6 +301,8 @@ void TypeRegistry::registerNumericTypes() {
     registerType({"numeric", -1, 'd', 'p', TypeCategory::Numeric, true, -1,
                   Numeric::kMaxTextLength, false},
                  {"decimal"});
+    registerType({"money", 8, 'd', 'p', TypeCategory::Numeric, false, -1, 0,
+                  false});
 
     // SERIAL 是宏，不是真正类型；注册为别名以便解析时识别
     registerType({"smallserial", 2, 's', 'p', TypeCategory::Numeric, false, -1, 0, false},

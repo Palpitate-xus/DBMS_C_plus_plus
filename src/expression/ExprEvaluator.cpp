@@ -4,6 +4,7 @@
 #include "common/BooleanCodec.h"
 #include "common/NotificationManager.h"
 #include "types/numeric.h"
+#include "types/money.h"
 #include "utils/Session.h"
 
 #include <algorithm>
@@ -68,6 +69,17 @@ static std::optional<Numeric> tryParseNumeric(const std::string& s) {
     } catch (...) {
         return std::nullopt;
     }
+}
+
+static std::optional<Money> tryParseMoney(const std::string& value,
+                                          bool decimalInput = false) {
+    Money money;
+    const std::string locale = StorageEngine::getMoneyLocale();
+    const bool parsed = decimalInput
+        ? Money::parseDecimal(value, money, locale)
+        : Money::parse(value, money, locale);
+    if (!parsed) return std::nullopt;
+    return money;
 }
 
 static std::string normalizeDecimalMagnitude(std::string value) {
@@ -1316,6 +1328,17 @@ ExprValue ExprEvaluator::evalUnaryOp(const UnaryOpExpr* e, const RowContext& ctx
     if (op == "-") {
         if (v.isNull) return v;
         if (v.value.empty()) return ExprValue(v.typeName, "0", false);
+        if (toLower(v.typeName) == "money") {
+            const auto money = tryParseMoney(v.value);
+            if (!money || money->minorUnits() ==
+                              std::numeric_limits<int64_t>::min()) {
+                throw std::runtime_error(
+                    "money out of range (SQLSTATE 22003)");
+            }
+            return ExprValue(
+                "money", Money(-money->minorUnits()).format(
+                             StorageEngine::getMoneyLocale()), false);
+        }
         if (isIntegerTypeName(v.typeName)) {
             long long integer = 0;
             if (!parseInt64Exact(v.value, integer) ||
@@ -1529,6 +1552,15 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
     // GREATEST/LEAST (for example, text '10' must precede text '2').
     if (textualA && textualB) {
         return a.value < b.value ? -1 : (a.value > b.value ? 1 : 0);
+    }
+
+    if (ta == "money" || tb == "money") {
+        const auto left = tryParseMoney(a.value, ta != "money");
+        const auto right = tryParseMoney(b.value, tb != "money");
+        if (left && right) {
+            return (left->minorUnits() > right->minorUnits()) -
+                   (left->minorUnits() < right->minorUnits());
+        }
     }
 
     // Exact numeric comparison for explicit numeric/decimal types.
@@ -1929,6 +1961,79 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
     const bool floatingPower =
         op == "^" &&
         (isFloatingTyped(l.typeName) || isFloatingTyped(r.typeName));
+    const bool leftMoney = toLower(l.typeName) == "money";
+    const bool rightMoney = toLower(r.typeName) == "money";
+    if (leftMoney || rightMoney) {
+        const auto leftCash = leftMoney ? tryParseMoney(l.value)
+                                        : std::optional<Money>{};
+        const auto rightCash = rightMoney ? tryParseMoney(r.value)
+                                          : std::optional<Money>{};
+        if ((leftMoney && !leftCash) || (rightMoney && !rightCash)) {
+            throw std::runtime_error(
+                "invalid input syntax for type money (SQLSTATE 22P02)");
+        }
+        const std::string locale = StorageEngine::getMoneyLocale();
+        if ((op == "+" || op == "-") && leftMoney && rightMoney) {
+            const __int128 result = op == "+"
+                ? static_cast<__int128>(leftCash->minorUnits()) +
+                      rightCash->minorUnits()
+                : static_cast<__int128>(leftCash->minorUnits()) -
+                      rightCash->minorUnits();
+            if (result < std::numeric_limits<int64_t>::min() ||
+                result > std::numeric_limits<int64_t>::max()) {
+                throw std::runtime_error(
+                    "money out of range (SQLSTATE 22003)");
+            }
+            return ExprValue(
+                "money", Money(static_cast<int64_t>(result)).format(locale),
+                false);
+        }
+        if (op == "/" && leftMoney && rightMoney) {
+            if (rightCash->minorUnits() == 0) {
+                throw std::runtime_error(
+                    "division by zero (SQLSTATE 22012)");
+            }
+            const double quotient =
+                static_cast<double>(leftCash->minorUnits()) /
+                static_cast<double>(rightCash->minorUnits());
+            char text[64];
+            const auto converted = std::to_chars(
+                text, text + sizeof(text), quotient,
+                std::chars_format::general);
+            if (converted.ec != std::errc()) {
+                throw std::runtime_error(
+                    "money division failed (SQLSTATE XX000)");
+            }
+            return ExprValue(
+                "double precision", std::string(text, converted.ptr), false);
+        }
+        if ((op == "*" || op == "/") && leftMoney != rightMoney &&
+            (leftMoney || op == "*")) {
+            const ExprValue& numericOperand = leftMoney ? r : l;
+            auto numeric = tryParseNumeric(numericOperand.value);
+            if (!numeric) {
+                throw std::runtime_error(
+                    "invalid input syntax for type numeric (SQLSTATE 22P02)");
+            }
+            if (op == "/" && numeric->isFinite() && numeric->sign() == 0) {
+                throw std::runtime_error(
+                    "division by zero (SQLSTATE 22012)");
+            }
+            Numeric cashValue(
+                (leftMoney ? *leftCash : *rightCash).decimalString(locale));
+            Numeric result = op == "*" ? cashValue * *numeric
+                                        : cashValue / *numeric;
+            Money rounded;
+            if (!result.isFinite() ||
+                !Money::parseDecimal(result.toString(), rounded, locale)) {
+                throw std::runtime_error(
+                    "money out of range (SQLSTATE 22003)");
+            }
+            return ExprValue("money", rounded.format(locale), false);
+        }
+        throw std::runtime_error(
+            "operator does not exist for money operands (SQLSTATE 42883)");
+    }
     if ((isDecimalTyped(l.typeName) || isDecimalTyped(r.typeName)) &&
         !floatingPower) {
         auto nl = tryParseNumeric(l.value);
@@ -3072,8 +3177,14 @@ static ExprValue castToNumeric(const ExprValue& value,
             "cannot cast type boolean to numeric (SQLSTATE 42846)");
     }
     std::optional<Numeric> numeric;
+    if (sourceType == "money") {
+        const auto money = tryParseMoney(value.value);
+        if (!money) throwNumericCastSyntaxError(trimStr(value.value));
+        numeric.emplace(money->decimalString(
+            StorageEngine::getMoneyLocale()));
+    }
     try {
-        numeric.emplace(value.value);
+        if (!numeric) numeric.emplace(value.value);
     } catch (const std::invalid_argument& error) {
         const std::string message = error.what();
         if (message.find("exceeds maximum") != std::string::npos ||
@@ -3103,6 +3214,49 @@ static ExprValue castToNumeric(const ExprValue& value,
     }
     return ExprValue("numeric",
                      formatNumericCastValue(rounded, spec.scale), false);
+}
+
+static bool isTextCastSourceType(const std::string& sourceType);
+
+static ExprValue castToMoney(const ExprValue& value) {
+    const std::string sourceType = toLower(value.typeName);
+    if (sourceType == "boolean" || sourceType == "bool") {
+        throw std::runtime_error(
+            "cannot cast type boolean to money (SQLSTATE 42846)");
+    }
+    const bool textual = isTextCastSourceType(sourceType);
+    const bool numeric = isNumericTypeName(sourceType) ||
+        sourceType == "real" || sourceType == "float" ||
+        sourceType == "float4" || sourceType == "float8" ||
+        sourceType == "double" || sourceType == "double precision";
+    if (sourceType != "money" && !textual && !numeric) {
+        throw std::runtime_error(
+            "cannot cast type " + sourceType +
+            " to money (SQLSTATE 42846)");
+    }
+    std::string input = value.value;
+    if (numeric) {
+        try {
+            const Numeric normalized(input);
+            if (!normalized.isFinite()) throw std::invalid_argument("non-finite");
+            input = normalized.toString();
+        } catch (const std::invalid_argument&) {
+            throw std::runtime_error(
+                "invalid input syntax for type money: '" +
+                trimStr(value.value) + "' (SQLSTATE 22P02)");
+        }
+    }
+    Money money;
+    const std::string locale = StorageEngine::getMoneyLocale();
+    const bool parsed = sourceType == "money" || textual
+        ? Money::parse(input, money, locale)
+        : Money::parseDecimal(input, money, locale);
+    if (!parsed) {
+        throw std::runtime_error(
+            "invalid input syntax for type money: '" +
+            trimStr(value.value) + "' (SQLSTATE 22P02)");
+    }
+    return ExprValue("money", money.format(locale), false);
 }
 
 static std::optional<bool> parseBooleanCastText(const std::string& input) {
@@ -3516,6 +3670,7 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
     }
     const NumericCastSpec numericSpec = parseNumericCastSpec(target);
     if (numericSpec.matches) return castToNumeric(v, numericSpec);
+    if (target == "money") return castToMoney(v);
     const CharacterCastSpec characterSpec = parseCharacterCastSpec(target);
     if (characterSpec.kind != CharacterCastKind::None)
         return castToCharacter(v, characterSpec);

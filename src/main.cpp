@@ -1,5 +1,6 @@
 #include <algorithm>
 #include "types/numeric.h"
+#include "types/money.h"
 #include <chrono>
 #include <cctype>
 #include <filesystem>
@@ -2451,6 +2452,7 @@ static bool handleResetCommand(const string& sql, Session& s) {
         s.clientEncoding = s.defaultClientEncoding;
         s.searchPath = s.defaultSearchPath;
         s.timeZone = s.defaultTimeZone;
+        s.lcMonetary = s.defaultLcMonetary;
         s.statementTimeoutMs = s.defaultStatementTimeoutMs;
         s.lockTimeoutMs = g_config.lockTimeoutMs;
         s.deadlockTimeoutMs = g_config.deadlockTimeoutMs;
@@ -2479,6 +2481,11 @@ static bool handleResetCommand(const string& sql, Session& s) {
     }
     if (rest == "search_path") {
         s.searchPath = s.defaultSearchPath;
+        cout << "RESET " << rest << endl;
+        return false;
+    }
+    if (rest == "lc_monetary") {
+        s.lcMonetary = s.defaultLcMonetary;
         cout << "RESET " << rest << endl;
         return false;
     }
@@ -2880,6 +2887,20 @@ static bool handleSetCommand(const string& sql, Session& s) {
                 return true;
             }
             s.searchPath = std::move(canonical);
+            cout << "SET" << endl;
+            return false;
+        }
+        if (!isGlobal && param == "lc_monetary") {
+            std::string locale = stripQuotes(val);
+            if (toLowerSql(locale) == "default") {
+                locale = s.defaultLcMonetary;
+            }
+            if (!dbms::Money::localeAvailable(locale)) {
+                cout << "ERROR: invalid value for parameter \"lc_monetary\": \""
+                     << locale << "\" (SQLSTATE 22023)" << endl;
+                return true;
+            }
+            s.lcMonetary = std::move(locale);
             cout << "SET" << endl;
             return false;
         }
@@ -8510,8 +8531,11 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd, const st
             } else if (ctype.substr(0, 5) == "float") {
                 col = makeFloatColumn(cname, isNull, isPK);
                 colCreated = true;
-            } else if (ctype.substr(0, 6) == "double" || ctype.substr(0, 5) == "money") {
+            } else if (ctype.substr(0, 6) == "double") {
                 col = makeDoubleColumn(cname, isNull, isPK);
+                colCreated = true;
+            } else if (ctype == "money") {
+                col = dbms::makeMoneyColumn(cname, isNull, isPK);
                 colCreated = true;
             } else if (ctype.substr(0, 5) == "point") {
                 col = makePointColumn(cname, isNull, isPK);
@@ -13632,6 +13656,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
     }
     dbms::checkForQueryInterrupt();
     g_engine.setRLSUser(effectiveSessionRole(s));
+    g_engine.setMoneyLocale(s.lcMonetary);
     dbms::setCurrentSession(&s);
     bool sawUserVariable = false;
     const string effectiveRawSql =
@@ -16863,6 +16888,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
         if (rest == "search_path") {
             cout << "search_path" << endl;
             cout << s.searchPath << endl;
+            return false;
+        }
+        if (rest == "lc_monetary") {
+            cout << "lc_monetary" << endl;
+            cout << s.lcMonetary << endl;
             return false;
         }
         if (rest == "timezone") {
@@ -20188,6 +20218,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 cout << "statement_timeout " << s.statementTimeoutMs << " ms" << endl;
                 cout << "lock_timeout " << s.lockTimeoutMs << " ms" << endl;
                 cout << "deadlock_timeout " << s.deadlockTimeoutMs << " ms" << endl;
+                cout << "lc_monetary " << s.lcMonetary << " " << endl;
                 cout << "slow_query_threshold_ms " << g_config.slowQueryThresholdMs << " ms" << endl;
                 cout << "enable_seq_scan " << (g_config.enableSeqScan ? "on" : "off") << " " << endl;
                 cout << "enable_hash_join " << (g_config.enableHashJoin ? "on" : "off") << " " << endl;

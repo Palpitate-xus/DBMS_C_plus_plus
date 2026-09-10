@@ -17,6 +17,7 @@
 #include "common/DateType.h"
 #include "common/BooleanCodec.h"
 #include "PostgresNumeric.h"
+#include "types/money.h"
 #include "process/SqlStats.h"
 #include "process/RuntimeStats.h"
 #include "process/OutputCapture.h"
@@ -446,6 +447,16 @@ bool applyStartupRuntimeParameter(Session& session,
         session.searchPath = std::move(canonical);
         return true;
     }
+    if (name == "lc_monetary") {
+        if (!Money::localeAvailable(value)) {
+            sqlState = "22023";
+            error = "invalid value for parameter \"lc_monetary\": \"" +
+                    value + "\"";
+            return false;
+        }
+        session.lcMonetary = value;
+        return true;
+    }
     if (name == "timezone") {
         const std::string timezone = lowerAscii(value);
         if (timezone != "utc" && timezone != "gmt" && timezone != "z" &&
@@ -572,6 +583,7 @@ bool applyStartupParameters(const PgStartupMessage& startup,
     session.defaultClientEncoding = session.clientEncoding;
     session.defaultSearchPath = session.searchPath;
     session.defaultTimeZone = session.timeZone;
+    session.defaultLcMonetary = session.lcMonetary;
     return true;
 }
 
@@ -586,6 +598,7 @@ std::map<std::string, std::string> mutableProtocolParameterStatuses(
         {"client_encoding", session.clientEncoding},
         {"is_superuser", account && account->rolsuper ? "on" : "off"},
         {"search_path", session.searchPath},
+        {"lc_monetary", session.lcMonetary},
         {"session_authorization", session.username},
         {"TimeZone", session.timeZone},
     };
@@ -642,6 +655,7 @@ bool decodeBinaryUnsigned(const std::vector<uint8_t>& raw, size_t width, uint64_
 
 std::string binaryProtocolParameterLiteral(uint32_t typeOid,
                                            const std::vector<uint8_t>& raw,
+                                           const std::string& moneyLocale,
                                            std::string& error) {
     uint64_t bits = 0;
     switch (typeOid) {
@@ -675,6 +689,16 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
             double number = 0;
             std::memcpy(&number, &bits, sizeof(number));
             return std::to_string(number);
+        }
+        case 790: {
+            if (!decodeBinaryUnsigned(raw, 8, bits)) break;
+            const int64_t minorUnits =
+                bits <= static_cast<uint64_t>(
+                            std::numeric_limits<int64_t>::max())
+                    ? static_cast<int64_t>(bits)
+                    : -1 - static_cast<int64_t>(~bits);
+            return quoteProtocolText(
+                Money(minorUnits).format(moneyLocale), error);
         }
         case 1082: {
             if (!decodeBinaryUnsigned(raw, 4, bits)) break;
@@ -735,8 +759,12 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
 std::string protocolParameterLiteral(uint32_t typeOid,
                                      const std::vector<uint8_t>& raw,
                                      bool binary,
+                                     const std::string& moneyLocale,
                                      std::string& error) {
-    if (binary) return binaryProtocolParameterLiteral(typeOid, raw, error);
+    if (binary) {
+        return binaryProtocolParameterLiteral(
+            typeOid, raw, moneyLocale, error);
+    }
     std::string value(raw.begin(), raw.end());
     if (value.find('\0') != std::string::npos) {
         error = "parameter contains a NUL byte";
@@ -1163,6 +1191,7 @@ int16_t protocolTypeSize(uint32_t typeOid, const Column& column) {
         case 23: return 4;   // int4
         case 700: return 4;  // float4
         case 701: return 8;  // float8
+        case 790: return 8;  // money
         case 1082: return 4; // date
         case 1083: return 8; // time
         case 1114: case 1184: return 8; // timestamp/timestamptz
@@ -1201,6 +1230,7 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
     for (const auto& name : result.columns) {
         PgColumnDescription description;
         description.name = name;
+        description.moneyLocale = session.lcMonetary;
         const size_t columnIndex = descriptions.size();
         const bool hasStructuredType =
             columnIndex < result.columnTypes.size() &&
@@ -2682,7 +2712,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                         message.payload.begin() + static_cast<std::ptrdiff_t>(offset + valueLength));
                     offset += static_cast<size_t>(valueLength);
                     std::string literal = protocolParameterLiteral(
-                        prepared.parameterTypes[i], raw, format == 1, bindErrorMessage);
+                        prepared.parameterTypes[i], raw, format == 1,
+                        session.lcMonetary, bindErrorMessage);
                     if (!bindErrorMessage.empty()) {
                         bindError = true;
                         bindErrorSqlstate =

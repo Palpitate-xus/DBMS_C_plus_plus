@@ -31,6 +31,7 @@ struct PgColumnDescription {
     int16_t typeSize = -1;       // varlena/text
     int32_t typeModifier = -1;
     int16_t formatCode = 0;      // text format
+    std::string moneyLocale = "C"; // session lc_monetary for binary cash I/O
 };
 
 class PostgresProtocol {

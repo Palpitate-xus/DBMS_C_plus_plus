@@ -1196,6 +1196,10 @@ public:
     // RLS current user (thread-local, for transparent policy application inside engine)
     static void setRLSUser(const std::string& user) { rlsCurrentUser_ = user; }
     static std::string getRLSUser() { return rlsCurrentUser_; }
+    static void setMoneyLocale(const std::string& locale) {
+        moneyLocale_ = locale.empty() ? "C" : locale;
+    }
+    static std::string getMoneyLocale() { return moneyLocale_; }
     // Whether the current session must apply row policies for this relation.
     // Query planning uses this to prevent an access method from bypassing the
     // relation-aware SELECT policy boundary.
@@ -1915,6 +1919,7 @@ private:
 
     // Row-Level Security: per-thread current user (for transparent RLS application)
     inline static thread_local std::string rlsCurrentUser_;
+    inline static thread_local std::string moneyLocale_ = "C";
 
 private:
     void startBackgroundWorker();
@@ -2045,6 +2050,7 @@ Column makeJsonbColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeXmlColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeFloatColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeDoubleColumn(const std::string& name, bool isNull, bool isPK = false);
+Column makeMoneyColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makePointColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeINetColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeCidrColumn(const std::string& name, bool isNull, bool isPK = false);

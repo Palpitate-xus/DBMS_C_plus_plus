@@ -193,6 +193,10 @@ struct Session {
     // It never turns unsupported PostgreSQL objects into metadata-only
     // compatibility records.
     std::string compatibilityMode = "postgresql18";
+    // Appended to preserve the offsets of the long-lived session ABI used by
+    // independently linked executor tests.
+    std::string lcMonetary = "C";
+    std::string defaultLcMonetary = "C";
 };
 
 inline std::string tempTablePrefix(const Session& session, const std::string& name) {

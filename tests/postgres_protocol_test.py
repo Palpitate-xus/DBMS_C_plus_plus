@@ -543,6 +543,16 @@ def extended_query_numeric_binary_parameter(sock):
         numeric_raw, numeric_raw)
 
 
+def extended_query_money_binary_parameter(sock):
+    for statement_name, minor_units in (
+            ("money_positive", 123456), ("money_negative", -1234)):
+        money_raw = struct.pack("!q", minor_units)
+        extended_query_binary_parameter(
+            sock, statement_name,
+            "SELECT amount FROM protocol_money WHERE amount = $1",
+            790, money_raw, money_raw)
+
+
 def extended_query_portal_pagination(sock):
     parse = b"paged_stmt\0SELECT id FROM portal_t\0" + struct.pack("!H", 0)
     sock.sendall(typed(b"P", parse))
@@ -887,6 +897,7 @@ def main():
             startup_parameters={
                 "client_encoding": "UTF-8",
                 "replication": "off",
+                "lc_monetary": "en_US.utf8",
                 "statement_timeout": "222",
                 "options": ("-c statement_timeout=321 -clock_timeout=17 "
                             "--deadlock_timeout=19 "
@@ -903,6 +914,9 @@ def main():
             startup_settings_sock, "SHOW client_encoding")) == [[b"UTF8"]]
         assert data_row_values(simple_query(
             startup_settings_sock, "SHOW search_path")) == [[b"public"]]
+        assert data_row_values(simple_query(
+            startup_settings_sock, "SHOW lc_monetary")) == [[b"en_US.utf8"]]
+        assert setting_value(settings, "lc_monetary") == b"en_US.utf8"
 
         changed_name = simple_query(
             startup_settings_sock,
@@ -964,6 +978,7 @@ def main():
                 ({"client_encoding": "LATIN1"}, "0A000"),
                 ({"replication": "database"}, "0A000"),
                 ({"replication": "maybe"}, "22023"),
+                ({"lc_monetary": "dbms_missing_locale"}, "22023"),
                 ({"options": "-c made_up_parameter=1"}, "42704"),
                 ({"options": "-c"}, "42601")]:
             rejected_sock = socket.create_connection(("127.0.0.1", port))
@@ -1988,6 +2003,65 @@ def main():
             sock, "SELECT n FROM protocol_numeric WHERE n = 12345.67"))
         assert numeric_rows == [[b"12345.67"]], numeric_rows
 
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE protocol_money (amount MONEY UNIQUE)"))
+        money_description = row_description_fields(
+            simple_query(sock, "SELECT amount FROM protocol_money"))
+        assert money_description[0][3] == 790, money_description
+        assert money_description[0][4] == 8, money_description
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO protocol_money VALUES ('1234.56')"))
+        money_messages = simple_query(sock, "SELECT amount FROM protocol_money")
+        assert data_row_values(money_messages) == [[b"$1,234.56"]], money_messages
+        money_sum_messages = simple_query(
+            sock, "SELECT amount + amount FROM protocol_money")
+        money_sum = data_row_values(money_sum_messages)
+        assert money_sum == [[b"$2,469.12"]], money_sum
+        assert row_description_fields(money_sum_messages)[0][3] == 790
+        money_product_messages = simple_query(
+            sock, "SELECT amount * 2 FROM protocol_money")
+        money_product = data_row_values(money_product_messages)
+        assert money_product == [[b"$2,469.12"]], money_product
+        assert row_description_fields(money_product_messages)[0][3] == 790
+        money_quotient_messages = simple_query(
+            sock, "SELECT amount / 2 FROM protocol_money")
+        money_quotient = data_row_values(money_quotient_messages)
+        assert money_quotient == [[b"$617.28"]], money_quotient
+        assert row_description_fields(money_quotient_messages)[0][3] == 790
+        money_ratio_messages = simple_query(
+            sock, "SELECT amount / amount FROM protocol_money")
+        assert data_row_values(money_ratio_messages) == [[b"1"]]
+        assert row_description_fields(money_ratio_messages)[0][3] == 701
+        money_numeric_messages = simple_query(
+            sock, "SELECT amount::numeric FROM protocol_money")
+        money_numeric = data_row_values(money_numeric_messages)
+        assert money_numeric == [[b"1234.56"]], money_numeric
+        assert row_description_fields(money_numeric_messages)[0][3] == 1700
+        money_cast_messages = simple_query(sock, "SELECT '12.345'::money")
+        money_cast = data_row_values(money_cast_messages)
+        assert money_cast == [[b"$12.35"]], money_cast
+        assert row_description_fields(money_cast_messages)[0][3] == 790
+        duplicate_money = simple_query(
+            sock, "INSERT INTO protocol_money VALUES ('$1,234.560')")
+        assert any(kind == b"E" for kind, _ in duplicate_money), duplicate_money
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "SET lc_monetary TO 'en_US.utf8'"))
+        assert data_row_values(simple_query(sock, "SHOW lc_monetary")) == [
+            [b"en_US.utf8"]]
+        assert data_row_values(simple_query(
+            sock, "SELECT amount FROM protocol_money")) == [[b"$1,234.56"]]
+        invalid_money_locale = simple_query(
+            sock, "SET lc_monetary TO 'dbms_missing_locale'")
+        assert any(kind == b"E" for kind, _ in invalid_money_locale), (
+            invalid_money_locale)
+        assert data_row_values(simple_query(sock, "SHOW lc_monetary")) == [
+            [b"en_US.utf8"]]
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "RESET lc_monetary"))
+        assert data_row_values(simple_query(sock, "SHOW lc_monetary")) == [[b"C"]]
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO protocol_money VALUES ('-12.34')"))
+
         # Set operations use one shared execution path.  Exercise duplicate
         # elimination, multiset ALL semantics, and INTERSECT precedence.
         assert any(kind == b"C" for kind, _ in simple_query(
@@ -2737,6 +2811,7 @@ def main():
         extended_query_binary_int_parameter(sock, "SELECT id FROM t WHERE id = $1", 1)
         extended_query_temporal_binary_parameters(sock)
         extended_query_numeric_binary_parameter(sock)
+        extended_query_money_binary_parameter(sock)
         extended_query_portal_pagination(sock)
         extended_query_error_recovery(sock)
         transaction_error_state_recovery(sock)
