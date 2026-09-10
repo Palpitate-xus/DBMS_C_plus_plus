@@ -309,9 +309,40 @@ std::map<uint64_t, std::set<uint64_t>> StorageEngine::ssiInEdges_;
 
 // Thread-local session pointer for sequence builtins to update currval state.
 thread_local Session* g_currentSession = nullptr;
+thread_local std::shared_ptr<SessionInterruptState> g_currentInterruptState;
 
 void setCurrentSession(Session* s) { g_currentSession = s; }
 Session* currentSession() { return g_currentSession; }
+
+void setCurrentQueryInterruptState(
+    std::shared_ptr<SessionInterruptState> state) {
+    g_currentInterruptState = std::move(state);
+}
+
+std::shared_ptr<SessionInterruptState> currentQueryInterruptState() {
+    return g_currentInterruptState;
+}
+
+bool queryInterruptPending() {
+    return g_currentInterruptState &&
+        (g_currentInterruptState->cancelRequested.load(
+             std::memory_order_acquire) ||
+         g_currentInterruptState->terminateRequested.load(
+             std::memory_order_acquire));
+}
+
+void checkForQueryInterrupt() {
+    if (!g_currentInterruptState) return;
+    if (g_currentInterruptState->terminateRequested.load(
+            std::memory_order_acquire)) {
+        throw DbError("57P01",
+                      "terminating connection due to administrator command");
+    }
+    if (g_currentInterruptState->cancelRequested.load(
+            std::memory_order_acquire)) {
+        throw DbError("57014", "canceling statement due to user request");
+    }
+}
 
 static bool isSessionTemporaryRelation(const std::string& tablename) {
     const Session* session = currentSession();
@@ -6167,6 +6198,7 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
         indexMaintenanceView, &belongsInPhysicalIndex,
         fmtVer = tbl.formatVersion, natts = tbl.len
     ](uint32_t pid, uint16_t sid, const char* data, size_t len) {
+        checkForQueryInterrupt();
         if (len == 0) return;
         size_t hdrLen = rowHeaderSize(fmtVer, natts);
         if (len <= hdrLen) return;
@@ -6226,6 +6258,7 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
             if (!ppa->open()) return false;
             const uint32_t pageCount = ppa->numPages();
             for (uint32_t pageId = 1; pageId < pageCount; ++pageId) {
+                checkForQueryInterrupt();
                 if (!lockManager_.pageLockShared(
                         dbname, tablename, pageId)) return false;
                 char* buffer = ppa->fetchPage(pageId);
@@ -6252,6 +6285,7 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
     if (!pa) return false;
     uint32_t np = pa->numPages();
     for (uint32_t pid = 1; pid < np; ++pid) {
+        checkForQueryInterrupt();
         if (!lockManager_.pageLockShared(dbname, tablename, pid)) return false;
         char* buf = pa->fetchPage(pid);
         if (!buf) {
@@ -6378,6 +6412,7 @@ bool StorageEngine::forEachRowPageRange(
 
     auto emitRow = [&callback, rv, fmtVer, natts](uint32_t pid, uint16_t sid,
                                                    const char* data, size_t len) {
+        checkForQueryInterrupt();
         if (len == 0) return;
         const size_t hdrLen = rowHeaderSize(fmtVer, natts);
         if (len <= hdrLen) return;
@@ -6389,6 +6424,7 @@ bool StorageEngine::forEachRowPageRange(
     };
 
     for (uint32_t pid = std::max<uint32_t>(1, firstPage); pid < lastPage; ++pid) {
+        checkForQueryInterrupt();
         if (!lockManager_.pageLockShared(dbname, tablename, pid)) return false;
         char* buf = allocator->fetchPage(pid);
         if (!buf) {

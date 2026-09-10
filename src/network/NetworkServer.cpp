@@ -1500,6 +1500,7 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
             : state(std::move(interruptState)), lockManager(manager) {
             state->cancelRequested.store(false, std::memory_order_release);
             state->queryActive.store(true, std::memory_order_release);
+            dbms::setCurrentQueryInterruptState(state);
             lockManager.setInterruptHandler([interruptState = state]() {
                 if (interruptState->terminateRequested.load(
                         std::memory_order_acquire)) {
@@ -1516,6 +1517,7 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
         }
         ~QueryInterruptGuard() {
             lockManager.clearInterruptHandler();
+            dbms::setCurrentQueryInterruptState(nullptr);
             state->queryActive.store(false, std::memory_order_release);
             state->cancelRequested.store(false, std::memory_order_release);
         }

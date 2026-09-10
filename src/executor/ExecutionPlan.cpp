@@ -1,4 +1,5 @@
 #include "ExecutionPlan.h"
+#include "common/DbError.h"
 #include "access/BPTree.h"
 #include "access/HashIndex.h"
 #include "access/BloomIndex.h"
@@ -316,6 +317,7 @@ bool ParallelTableScanOp::open() {
     using Row = std::pair<int64_t, std::string>;
     std::vector<std::vector<Row>> local(static_cast<size_t>(activeWorkers));
     std::atomic<bool> scanFailed{false};
+    const auto interruptState = currentQueryInterruptState();
     std::vector<std::thread> threads;
     threads.reserve(static_cast<size_t>(activeWorkers));
     for (int worker = 0; worker < activeWorkers; ++worker) {
@@ -323,21 +325,30 @@ bool ParallelTableScanOp::open() {
                                    static_cast<uint32_t>(activeWorkers);
         const uint32_t end = 1 + static_cast<uint32_t>(worker + 1) * (pageCount - 1) /
                                  static_cast<uint32_t>(activeWorkers);
-        threads.emplace_back([this, &local, &scanFailed, worker, begin, end]() {
+        threads.emplace_back([this, &local, &scanFailed, interruptState,
+                              worker, begin, end]() {
+            setCurrentQueryInterruptState(interruptState);
             auto& output = local[static_cast<size_t>(worker)];
-            if (!engine_->forEachRowPageRange(
-                dbname_, tablename_, begin, end,
-                [this, &output](uint32_t pageId, uint16_t slotId,
-                                const char* data, size_t len) {
-                    std::string row(data, len);
-                    output.emplace_back(StorageEngine::encodeRid(pageId, slotId),
-                                        std::move(row));
-                })) {
+            try {
+                if (!engine_->forEachRowPageRange(
+                    dbname_, tablename_, begin, end,
+                    [this, &output](uint32_t pageId, uint16_t slotId,
+                                    const char* data, size_t len) {
+                        std::string row(data, len);
+                        output.emplace_back(
+                            StorageEngine::encodeRid(pageId, slotId),
+                            std::move(row));
+                    })) {
+                    scanFailed.store(true, std::memory_order_relaxed);
+                }
+            } catch (...) {
                 scanFailed.store(true, std::memory_order_relaxed);
             }
+            setCurrentQueryInterruptState(nullptr);
         });
     }
     for (auto& thread : threads) thread.join();
+    checkForQueryInterrupt();
     if (scanFailed.load(std::memory_order_relaxed)) {
         rows_.clear();
         usedParallelWorkers_ = false;
@@ -2800,15 +2811,18 @@ bool ParallelGroupAggregateOp::open() try {
     std::vector<Buckets> localB(static_cast<size_t>(activeWorkers));
     if (activeWorkers > 1) {
         usedParallelWorkers_ = true;
+        const auto interruptState = currentQueryInterruptState();
         std::vector<std::thread> threads;
         threads.reserve(static_cast<size_t>(activeWorkers));
         const size_t chunk = (n + activeWorkers - 1) / activeWorkers;
         for (int w = 0; w < activeWorkers; ++w) {
             const size_t begin = static_cast<size_t>(w) * chunk;
             const size_t end = std::min(n, begin + chunk);
-            threads.emplace_back([&, w, begin, end]() {
+            threads.emplace_back([&, interruptState, w, begin, end]() {
+                setCurrentQueryInterruptState(interruptState);
                 auto& buckets = localB[static_cast<size_t>(w)];
                 for (size_t rowId = begin; rowId < end; ++rowId) {
+                    if (queryInterruptPending()) break;
                     std::string key;
                     for (size_t ki = 0; ki < groupByCols_.size(); ++ki) {
                         const auto& value = groupKeyValue(rowId, ki);
@@ -2816,9 +2830,11 @@ bool ParallelGroupAggregateOp::open() try {
                     }
                     buckets[key].push_back(rowId);
                 }
+                setCurrentQueryInterruptState(nullptr);
             });
         }
         for (auto& t : threads) t.join();
+        checkForQueryInterrupt();
     } else {
         for (size_t rowId = 0; rowId < n; ++rowId) {
             std::string key;
@@ -3076,6 +3092,13 @@ bool ParallelGroupAggregateOp::open() try {
     return true;
 }
 
+catch (const DbError&) {
+    rows_.clear();
+    structuredRows_.clear();
+    structuredNulls_.clear();
+    child_->close();
+    throw;
+}
 catch (const std::exception& error) {
     rows_.clear();
     structuredRows_.clear();
@@ -3146,6 +3169,7 @@ bool ParallelHashJoinOp::open() {
         using Shard = std::map<std::string, std::vector<std::pair<int64_t, std::string>>>;
         std::vector<Shard> shards(static_cast<size_t>(activeWorkers));
         std::atomic<bool> failed{false};
+        const auto interruptState = currentQueryInterruptState();
         std::vector<std::thread> threads;
         threads.reserve(static_cast<size_t>(activeWorkers));
         for (int w = 0; w < activeWorkers; ++w) {
@@ -3153,9 +3177,12 @@ bool ParallelHashJoinOp::open() {
                                        static_cast<uint32_t>(activeWorkers);
             const uint32_t end = 1 + static_cast<uint32_t>(w + 1) * (pageCount - 1) /
                                        static_cast<uint32_t>(activeWorkers);
-            threads.emplace_back([this, &shards, &failed, w, begin, end]() {
+            threads.emplace_back([this, &shards, &failed, interruptState,
+                                  w, begin, end]() {
+                setCurrentQueryInterruptState(interruptState);
                 auto& shard = shards[static_cast<size_t>(w)];
-                if (!engine_->forEachRowPageRange(dbname_, rightTable_, begin, end,
+                try {
+                    if (!engine_->forEachRowPageRange(dbname_, rightTable_, begin, end,
                         [this, &shard, &failed](uint32_t pageId, uint16_t slotId,
                                                const char* data, size_t len) {
                             std::string row(data, len);
@@ -3175,11 +3202,16 @@ bool ParallelHashJoinOp::open() {
                             std::string key = extractJoinKey(row, rightTbl_, rightCol_);
                             shard[key].emplace_back(rid, std::move(row));
                         })) {
+                        failed.store(true, std::memory_order_relaxed);
+                    }
+                } catch (...) {
                     failed.store(true, std::memory_order_relaxed);
                 }
+                setCurrentQueryInterruptState(nullptr);
             });
         }
         for (auto& t : threads) t.join();
+        checkForQueryInterrupt();
         if (failed.load(std::memory_order_relaxed)) {
             setError("parallel hash join build failed");
             return false;
@@ -3823,6 +3855,13 @@ bool GroupAggregateOp::open() try {
     return true;
 }
 
+catch (const DbError&) {
+    rows_.clear();
+    structuredRows_.clear();
+    structuredNulls_.clear();
+    child_->close();
+    throw;
+}
 catch (const std::exception& error) {
     rows_.clear();
     structuredRows_.clear();
@@ -4154,6 +4193,7 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
                 using Part = std::vector<std::pair<int64_t, std::string>>;
                 std::vector<Part> parts(static_cast<size_t>(activeWorkers));
                 std::atomic<bool> failed{false};
+                const auto interruptState = currentQueryInterruptState();
                 std::vector<std::thread> sorters;
                 sorters.reserve(static_cast<size_t>(activeWorkers));
                 for (int w = 0; w < activeWorkers; ++w) {
@@ -4163,31 +4203,41 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
                     const uint32_t end =
                         1 + static_cast<uint32_t>(w + 1) * (pageCount - 1) /
                                 static_cast<uint32_t>(activeWorkers);
-                    sorters.emplace_back([engine, &ctx, &tbl, &parts, &failed, w,
+                    sorters.emplace_back([engine, &ctx, &tbl, &parts, &failed,
+                                          interruptState, w,
                                           begin, end]() {
+                        setCurrentQueryInterruptState(interruptState);
                         auto& part = parts[static_cast<size_t>(w)];
-                        if (!engine->forEachRowPageRange(
+                        try {
+                            if (!engine->forEachRowPageRange(
                                 ctx.dbname, ctx.tablename, begin, end,
                                 [&part](uint32_t pageId, uint16_t slotId,
                                         const char* data, size_t len) {
                                     part.emplace_back(0, std::string(data, len));
                                 })) {
+                                failed.store(true, std::memory_order_relaxed);
+                                setCurrentQueryInterruptState(nullptr);
+                                return;
+                            }
+                            checkForQueryInterrupt();
+                            std::sort(part.begin(), part.end(),
+                                      [&tbl, &ctx](const std::pair<int64_t, std::string>& a,
+                                                   const std::pair<int64_t, std::string>& b) {
+                                          const std::string va =
+                                              StorageEngine::extractColumnValueStatic(a.second, tbl, sortColIndex(tbl, ctx.orderByCol));
+                                          const std::string vb =
+                                              StorageEngine::extractColumnValueStatic(b.second, tbl, sortColIndex(tbl, ctx.orderByCol));
+                                          return ctx.orderByAsc ? compareWindowValue(va, vb) < 0
+                                                                : compareWindowValue(va, vb) > 0;
+                                      });
+                        } catch (...) {
                             failed.store(true, std::memory_order_relaxed);
-                            return;
                         }
-                        std::sort(part.begin(), part.end(),
-                                  [&tbl, &ctx](const std::pair<int64_t, std::string>& a,
-                                               const std::pair<int64_t, std::string>& b) {
-                                      const std::string va =
-                                          StorageEngine::extractColumnValueStatic(a.second, tbl, sortColIndex(tbl, ctx.orderByCol));
-                                      const std::string vb =
-                                          StorageEngine::extractColumnValueStatic(b.second, tbl, sortColIndex(tbl, ctx.orderByCol));
-                                      return ctx.orderByAsc ? compareWindowValue(va, vb) < 0
-                                                            : compareWindowValue(va, vb) > 0;
-                                  });
+                        setCurrentQueryInterruptState(nullptr);
                     });
                 }
                 for (auto& t : sorters) t.join();
+                checkForQueryInterrupt();
                 if (failed.load(std::memory_order_relaxed)) {
                     root = std::make_unique<SortOp>(std::move(root), tbl,
                                                     ctx.orderByCol, ctx.orderByAsc);
@@ -5339,30 +5389,37 @@ PlanExecutionResult QueryPlanner::executePlanChecked(OpPtr plan) {
         result.error = "executor received a null plan";
         return result;
     }
+    checkForQueryInterrupt();
     result.structuredRowsAvailable = plan->supportsStructuredRows();
-    if (!plan->open()) {
-        result.ok = false;
-        result.error = plan->errorMessage();
-        if (result.error.empty()) result.error = "executor failed to open plan";
-        plan->close();
-        return result;
-    }
-    std::string row;
-    while (plan->next(row)) {
-        result.rows.push_back(row);
-        if (result.structuredRowsAvailable) {
-            std::vector<std::string> cells;
-            std::vector<bool> nulls;
-            if (!plan->lastStructuredRow(cells, nulls) ||
-                cells.size() != nulls.size()) {
-                result.structuredRowsAvailable = false;
-                result.structuredRows.clear();
-                result.structuredNulls.clear();
-            } else {
-                result.structuredRows.push_back(std::move(cells));
-                result.structuredNulls.push_back(std::move(nulls));
+    try {
+        if (!plan->open()) {
+            result.ok = false;
+            result.error = plan->errorMessage();
+            if (result.error.empty()) result.error = "executor failed to open plan";
+            plan->close();
+            return result;
+        }
+        std::string row;
+        while (plan->next(row)) {
+            checkForQueryInterrupt();
+            result.rows.push_back(row);
+            if (result.structuredRowsAvailable) {
+                std::vector<std::string> cells;
+                std::vector<bool> nulls;
+                if (!plan->lastStructuredRow(cells, nulls) ||
+                    cells.size() != nulls.size()) {
+                    result.structuredRowsAvailable = false;
+                    result.structuredRows.clear();
+                    result.structuredNulls.clear();
+                } else {
+                    result.structuredRows.push_back(std::move(cells));
+                    result.structuredNulls.push_back(std::move(nulls));
+                }
             }
         }
+    } catch (...) {
+        plan->close();
+        throw;
     }
     if (plan->hasError()) {
         result.ok = false;

@@ -13560,20 +13560,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
         cout << "ERROR: query cancelled" << endl;
         return true;
     }
-    const auto checkInterrupt = [&s]() {
-        if (s.interruptState->terminateRequested.load(
-                std::memory_order_acquire)) {
-            throw dbms::DbError(
-                "57P01",
-                "terminating connection due to administrator command");
-        }
-        if (s.interruptState->cancelRequested.load(
-                std::memory_order_acquire)) {
-            throw dbms::DbError("57014",
-                                "canceling statement due to user request");
-        }
-    };
-    checkInterrupt();
+    dbms::checkForQueryInterrupt();
     g_engine.setRLSUser(effectiveSessionRole(s));
     dbms::setCurrentSession(&s);
     bool sawUserVariable = false;
@@ -13682,7 +13669,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         if (gs3 > 0) {
                             for (long long v = gs1; v <= gs2; v += gs3) {
                                 if ((static_cast<uint64_t>(v - gs1) & 1023U) == 0) {
-                                    checkInterrupt();
+                                    dbms::checkForQueryInterrupt();
                                 }
                                 if (!firstU) unionBody += " union all ";
                                 unionBody += "select " + std::to_string(v) + " as " + colName;
@@ -13691,7 +13678,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         } else {
                             for (long long v = gs1; v >= gs2; v += gs3) {
                                 if ((static_cast<uint64_t>(gs1 - v) & 1023U) == 0) {
-                                    checkInterrupt();
+                                    dbms::checkForQueryInterrupt();
                                 }
                                 if (!firstU) unionBody += " union all ";
                                 unionBody += "select " + std::to_string(v) + " as " + colName;

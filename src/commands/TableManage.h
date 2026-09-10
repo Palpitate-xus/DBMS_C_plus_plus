@@ -27,6 +27,7 @@
 
 // Forward declaration for session-local sequence-state threading.
 struct Session;
+struct SessionInterruptState;
 
 namespace dbms {
 
@@ -71,6 +72,11 @@ std::string sqlstateForDBStatus(DBStatus res);
 // session-local currval state during DEFAULT expression evaluation.
 void setCurrentSession(Session* s);
 Session* currentSession();
+void setCurrentQueryInterruptState(
+    std::shared_ptr<SessionInterruptState> state);
+std::shared_ptr<SessionInterruptState> currentQueryInterruptState();
+bool queryInterruptPending();
+void checkForQueryInterrupt();
 
 class StorageEngine {
 public:
