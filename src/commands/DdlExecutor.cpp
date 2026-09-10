@@ -694,7 +694,7 @@ static PgAttributeRow catalogAttributeForColumn(
     attribute.attnotnull = !column.isNull;
     attribute.atthasdef = !column.defaultValue.empty();
     attribute.attstorage = column.isVariableLength ? 'x' : 'p';
-    attribute.attidentity = column.isAutoIncrement ? 'd' : '\0';
+    attribute.attidentity = column.identityKind;
     attribute.attgenerated = column.generatedExpr.empty()
         ? '\0' : (column.generatedKind == 'v' ? 'v' : 's');
     attribute.attislocal = true;
@@ -1799,7 +1799,17 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     std::cout << "SQL syntax error: ALTER COLUMN requires a name" << std::endl;
                     return true;
                 }
-                if (sub.defaultValue) {
+                if (!sub.identityAction.empty()) {
+                    if (sub.colDef.hasIdentityOptions) {
+                        std::cout << "ERROR: identity sequence options are not "
+                                     "supported (SQLSTATE 0A000)" << std::endl;
+                        return true;
+                    }
+                    status = g_engine.alterTableIdentity(
+                        s.currentDB, tableName, sub.name,
+                        sub.identityAction, sub.identityKind,
+                        sub.identityIfExists);
+                } else if (sub.defaultValue) {
                     status = g_engine.alterTableSetDefault(s.currentDB, tableName,
                                                             sub.name, sub.defaultValue->toString());
                 } else if (sub.dropDefault) {
@@ -3418,10 +3428,19 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
     col.defaultValue = cd.defaultValue ? cd.defaultValue->toString() : "";
 
     col.isAutoIncrement = cd.isGeneratedIdentity;
+    col.identityKind = cd.identityKind;
     col.generatedExpr = cd.generatedExpr;
     col.generatedKind = cd.generatedKind;
 
     std::string baseType = toLower(cd.typeName);
+    if (cd.hasIdentityOptions) {
+        error = "identity sequence options are not supported (SQLSTATE 0A000)";
+        return false;
+    }
+    if (cd.isGeneratedIdentity && cd.defaultValue) {
+        error = "identity column cannot also have a DEFAULT (SQLSTATE 42601)";
+        return false;
+    }
     const bool extended = compatibilityMode == "extended";
     if ((cd.isAutoIncrementExtension || cd.isUnsignedExtension) &&
         !extended) {
@@ -3692,6 +3711,18 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
     col.generatedKind = cd.generatedKind;
     col.isAutoIncrement = col.isAutoIncrement || cd.isGeneratedIdentity ||
                           cd.isAutoIncrementExtension;
+    col.identityKind = cd.identityKind;
+    if (cd.isGeneratedIdentity) {
+        const bool integerIdentity = baseType == "int2" ||
+                                     baseType == "int4" ||
+                                     baseType == "int8";
+        if (!integerIdentity || cd.isArray || !domainName.empty()) {
+            error = "identity column type must be smallint, integer, or bigint "
+                    "(SQLSTATE 22023)";
+            return false;
+        }
+        col.isNull = false;
+    }
     col.isUnique = cd.isUnique;
     col.isArray = cd.isArray;
     col.enumValues = enumValues;
@@ -4337,7 +4368,10 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                 c.generatedExpr.clear();
                 c.generatedKind = 0;
             }
-            if (!lc.includingIdentity) c.isAutoIncrement = false;
+            if (!lc.includingIdentity && c.identityKind != 0) {
+                c.isAutoIncrement = false;
+                c.identityKind = 0;
+            }
             if (!lc.includingIndexes) {
                 c.isPrimaryKey = false;
                 c.isUnique = false;
@@ -4534,6 +4568,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                 target.isPrimaryKey = incoming.isPrimaryKey;
                 target.isUnique = incoming.isUnique;
                 target.isAutoIncrement = incoming.isAutoIncrement;
+                target.identityKind = incoming.identityKind;
             }
             return true;
         };
@@ -4553,6 +4588,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                 inherited.isPrimaryKey = false;
                 inherited.isUnique = false;
                 inherited.isAutoIncrement = false;
+                inherited.identityKind = 0;
                 const auto existing = mergedColumns.find(inherited.dataName);
                 inheritedColumnNames.insert(inherited.dataName);
                 if (existing != mergedColumns.end()) {

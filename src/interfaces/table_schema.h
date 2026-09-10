@@ -27,6 +27,7 @@ struct Column {
     bool isVariableLength = false;  // true for VARCHAR, false for fixed-length types
     bool isUnique = false;          // UNIQUE constraint
     bool isAutoIncrement = false;   // AUTO_INCREMENT / SERIAL
+    char identityKind = 0;          // 0=serial/extension, 'a'=ALWAYS, 'd'=BY DEFAULT
     bool isUnsigned = false;        // UNSIGNED for numeric types
     bool isArray = false;           // true for array types (INT[], VARCHAR[])
     std::string dataType;

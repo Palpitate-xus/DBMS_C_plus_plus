@@ -541,9 +541,11 @@ bool supportsInsert(const InsertStmt& stmt) {
     // sources, column-projection RETURNING, and narrow conflict actions.
     // Every feature outside this contract remains on the established
     // implementation until its AST semantics are migrated.
+    const std::string identityOverride = lower(stmt.override_);
     return !stmt.tableName.empty() &&
            supportsConflict(stmt) &&
-           stmt.override_.empty() &&
+           (identityOverride.empty() || identityOverride == "system" ||
+            identityOverride == "user") &&
            (stmt.defaultValues || !stmt.values.empty() || stmt.selectSource != nullptr);
 }
 
@@ -2240,6 +2242,14 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
         return true;
     }
 
+    StorageEngine::IdentityOverride identityOverride =
+        StorageEngine::IdentityOverride::None;
+    if (lower(stmt.override_) == "system") {
+        identityOverride = StorageEngine::IdentityOverride::System;
+    } else if (lower(stmt.override_) == "user") {
+        identityOverride = StorageEngine::IdentityOverride::User;
+    }
+
     std::vector<std::string> columns;
     if (stmt.columns.empty()) {
         columns.reserve(table.len);
@@ -2274,21 +2284,34 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
     if (!checkInsertColumns(s, requestedTable, columns)) return true;
 
     std::vector<bool> generatedTargets;
+    std::vector<char> identityTargets;
     generatedTargets.reserve(columns.size());
+    identityTargets.reserve(columns.size());
     for (const auto& column : columns) {
         bool generated = false;
+        char identityKind = 0;
         for (size_t i = 0; i < table.len; ++i) {
             if (table.cols[i].dataName == column) {
                 generated = !table.cols[i].generatedExpr.empty();
+                identityKind = table.cols[i].identityKind;
                 break;
             }
         }
         generatedTargets.push_back(generated);
+        identityTargets.push_back(identityKind);
     }
     const auto rejectGeneratedValue = [&](size_t columnIndex) {
         std::cout << "ERROR: cannot insert a non-DEFAULT value into column \""
                   << columns[columnIndex]
                   << "\" (SQLSTATE 428C9)" << std::endl;
+        return true;
+    };
+    const auto rejectAlwaysIdentityValue = [&](size_t columnIndex) {
+        std::cout << "ERROR: cannot insert a non-DEFAULT value into identity "
+                     "column \"" << columns[columnIndex]
+                  << "\" (SQLSTATE 428C9)\n"
+                     "HINT: Use OVERRIDING SYSTEM VALUE to override."
+                  << std::endl;
         return true;
     };
 
@@ -2360,6 +2383,11 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
     if (stmt.selectSource) {
         for (size_t i = 0; i < generatedTargets.size(); ++i) {
             if (generatedTargets[i]) return rejectGeneratedValue(i);
+            if (identityTargets[i] == 'a' &&
+                identityOverride != StorageEngine::IdentityOverride::System &&
+                identityOverride != StorageEngine::IdentityOverride::User) {
+                return rejectAlwaysIdentityValue(i);
+            }
         }
         const auto* select = dynamic_cast<const SelectStmt*>(stmt.selectSource.get());
         if (!select) {
@@ -2374,6 +2402,13 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
             return false;
         }
         if (buildResult == InsertSelectBuildResult::Error) return true;
+        if (identityOverride == StorageEngine::IdentityOverride::User) {
+            for (auto& values : pendingRows) {
+                for (size_t i = 0; i < identityTargets.size(); ++i) {
+                    if (identityTargets[i] != 0) values.erase(columns[i]);
+                }
+            }
+        }
 
         InsertStatementScope statementScope(g_engine, s.currentDB);
         if (!statementScope.ready()) {
@@ -2385,7 +2420,8 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
         for (const auto& values : pendingRows) {
             const DBStatus status = g_engine.insert(
                 s.currentDB, resolvedTable, values,
-                stmt.returning.empty() ? nullptr : &insertedRows);
+                stmt.returning.empty() ? nullptr : &insertedRows,
+                identityOverride);
             if (status == DBStatus::DUPLICATE_KEY) {
                 if (ignoreDuplicate) continue;
                 std::cout << "Duplicate key" << std::endl;
@@ -2477,6 +2513,14 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
         for (size_t i = 0; i < row.size(); ++i) {
             if (isDefaultValue(row[i])) continue;
             if (generatedTargets[i]) return rejectGeneratedValue(i);
+            if (identityTargets[i] != 0 &&
+                identityOverride == StorageEngine::IdentityOverride::User) {
+                continue;
+            }
+            if (identityTargets[i] == 'a' &&
+                identityOverride != StorageEngine::IdentityOverride::System) {
+                return rejectAlwaysIdentityValue(i);
+            }
             SqlCell value;
             if (!evaluateValue(row[i], s.currentDB, value)) {
                 // Returning false lets the legacy path retain ownership of
@@ -2535,7 +2579,8 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
     for (const auto& values : pendingRows) {
         const DBStatus status = g_engine.insertRow(
             s.currentDB, resolvedTable, values,
-            stmt.returning.empty() ? nullptr : &sqlInsertedRows);
+            stmt.returning.empty() ? nullptr : &sqlInsertedRows,
+            identityOverride);
         if (status == DBStatus::DUPLICATE_KEY) {
             if (ignoreDuplicate) {
                 if (conflictTarget.empty()) continue;
@@ -3822,6 +3867,15 @@ bool tryDmlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         error = executeMerge(*stmt, s, fallback);
     }
     if (fallback) {
+        if (parsedCmd == SqlCommand::Insert) {
+            const auto* insert = dynamic_cast<const InsertStmt*>(parsed.stmt.get());
+            if (insert && !insert->override_.empty()) {
+                handled = true;
+                std::cout << "ERROR: this INSERT shape is not supported with "
+                             "OVERRIDING (SQLSTATE 0A000)" << std::endl;
+                return true;
+            }
+        }
         handled = false;
         return false;
     }

@@ -119,7 +119,13 @@ public:
     DBStatus alterTableSetDefault(const std::string& dbname, const std::string& tablename,
                                    const std::string& colName, const std::string& defaultValue);
     DBStatus alterTableDropDefault(const std::string& dbname, const std::string& tablename,
-                                    const std::string& colName);
+                                   const std::string& colName);
+    DBStatus alterTableIdentity(const std::string& dbname,
+                                const std::string& tablename,
+                                const std::string& colName,
+                                const std::string& action,
+                                char identityKind,
+                                bool ifExists = false);
     DBStatus alterTableSetNotNull(const std::string& dbname, const std::string& tablename,
                                    const std::string& colName);
     DBStatus alterTableDropNotNull(const std::string& dbname, const std::string& tablename,
@@ -460,6 +466,11 @@ public:
     // still means DEFAULT (INSERT) or leave unchanged (UPDATE).
     using SqlCell = std::optional<std::string>;
     using SqlRow = std::map<std::string, SqlCell>;
+    enum class IdentityOverride {
+        None,
+        System,
+        User,
+    };
     using SqlUpdateResolver = std::function<bool(
         const SqlRow&, SqlRow&)>;
     using SqlUpdateMatcher = std::function<bool(const SqlRow&)>;
@@ -476,11 +487,13 @@ public:
     // input: physical SQL NULL is "NULL"; a stored empty string stays empty.
     DBStatus insert(const std::string& dbname, const std::string& tablename,
                     const std::map<std::string, std::string>& values,
-                    std::vector<std::map<std::string, std::string>>* insertedRows = nullptr);
+                    std::vector<std::map<std::string, std::string>>* insertedRows = nullptr,
+                    IdentityOverride identityOverride = IdentityOverride::None);
     DBStatus insertRow(const std::string& dbname,
                        const std::string& tablename,
                        const SqlRow& values,
-                       std::vector<SqlRow>* insertedRows = nullptr);
+                       std::vector<SqlRow>* insertedRows = nullptr,
+                       IdentityOverride identityOverride = IdentityOverride::None);
     // INSERT INTO t DEFAULT VALUES — uses column defaults or NULL.
     DBStatus insertDefaultValues(const std::string& dbname,
                                  const std::string& tablename,
@@ -1765,7 +1778,8 @@ private:
         const std::string& dbname, const std::string& tablename,
         const std::map<std::string, std::string>& values,
         const std::set<std::string>& nullColumns,
-        std::vector<SqlRow>* insertedRows);
+        std::vector<SqlRow>* insertedRows,
+        IdentityOverride identityOverride);
     DBStatus removeInternal(
         const std::string& dbname, const std::string& tablename,
         const std::vector<std::string>& conditions,

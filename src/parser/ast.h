@@ -782,6 +782,8 @@ struct ColumnDef {
     std::string generatedExpr;                 // GENERATED ALWAYS AS (expr) 的表达式体
     char generatedKind = 0;                    // 0=none, 's'=STORED, 'v'=VIRTUAL
     bool isGeneratedIdentity = false;          // GENERATED ... AS IDENTITY
+    char identityKind = 0;                     // 0=none, 'a'=ALWAYS, 'd'=BY DEFAULT
+    bool hasIdentityOptions = false;           // sequence options are not implemented yet
     bool isAutoIncrementExtension = false;     // MySQL AUTO_INCREMENT
     bool isUnsignedExtension = false;          // MySQL integer UNSIGNED
     std::vector<std::string> constraints;      // GENERATED, IDENTITY 等
@@ -1030,6 +1032,9 @@ struct AlterTableStmt : public Stmt {
         bool initiallyDeferred = false;
         int statisticsTarget = -1;
         std::string parentTable;  // for INHERIT / NO INHERIT
+        std::string identityAction; // add, set, or drop
+        char identityKind = 0;       // 'a'=ALWAYS, 'd'=BY DEFAULT
+        bool identityIfExists = false;
     };
     std::vector<SubCmd> subCommands;
 
