@@ -110,6 +110,19 @@ namespace {
         std::fflush(stdout);
         std::_Exit(0);
     }
+    const auto utility = dbms::requestedDataDirectoryUtility();
+    if (utility != dbms::DataDirectoryUtility::None) {
+        std::string output;
+        std::string error;
+        if (!dbms::runDataDirectoryUtility(utility, output, error)) {
+            std::fprintf(stderr, "FATAL: %s\n", error.c_str());
+            std::fflush(stderr);
+            std::_Exit(1);
+        }
+        std::fprintf(stdout, "%s\n", output.c_str());
+        std::fflush(stdout);
+        std::_Exit(0);
+    }
     std::string error;
     if (!dbms::bootstrapDataDirectory(error)) {
         std::fprintf(stderr, "FATAL: %s\n", error.c_str());

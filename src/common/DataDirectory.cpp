@@ -1,6 +1,8 @@
 #include "DataDirectory.h"
 
 #include "access/IndexFileUtil.h"
+#include "storage/DataFileHeader.h"
+#include "interfaces/dbms_defs.h"
 
 #include <array>
 #include <cerrno>
@@ -21,6 +23,32 @@ struct BootstrapState {
     std::string systemIdentifier;
     bool ready = false;
 };
+
+constexpr const char* kCurrentControlMagic =
+    "DBMS_CPP_CLUSTER_CONTROL_V2";
+constexpr const char* kLegacyControlMagic =
+    "DBMS_CPP_CLUSTER_CONTROL_V1";
+constexpr uint32_t kControlFormatVersion = 2;
+constexpr uint32_t kCatalogFormatVersion = 1;
+
+const char* nativeByteOrder() {
+    const uint16_t marker = 1;
+    return *reinterpret_cast<const unsigned char*>(&marker) == 1
+        ? "little" : "big";
+}
+
+std::string currentControlContents(const std::string& systemIdentifier) {
+    return std::string(kCurrentControlMagic) + "\n" +
+        "control_format_version=" +
+        std::to_string(kControlFormatVersion) + "\n" +
+        "catalog_format_version=" +
+        std::to_string(kCatalogFormatVersion) + "\n" +
+        "heap_format_version=" +
+        std::to_string(DATA_FILE_FORMAT_VERSION) + "\n" +
+        "block_size=" + std::to_string(BLCKSZ) + "\n" +
+        "byte_order=" + nativeByteOrder() + "\n" +
+        "system_identifier=" + systemIdentifier + "\n";
+}
 
 BootstrapState& state() {
     static BootstrapState value;
@@ -142,27 +170,68 @@ std::string newSystemIdentifier() {
     return output.str();
 }
 
+enum class ControlFileVersion {
+    Current,
+    LegacyV1
+};
+
 bool loadControlFile(const std::filesystem::path& path,
-                     std::string& systemIdentifier, std::string& error) {
+                     std::string& systemIdentifier,
+                     ControlFileVersion& version,
+                     std::string& error) {
     std::ifstream input(path);
     if (!input) {
         error = "could not open DBMS_CONTROL";
         return false;
     }
     std::string header;
-    std::string format;
-    std::string identifier;
-    std::string trailing;
-    if (!std::getline(input, header) ||
-        !std::getline(input, format) ||
-        !std::getline(input, identifier) ||
-        std::getline(input, trailing) ||
-        header != "DBMS_CPP_CLUSTER_CONTROL_V1" ||
-        format != "format_version=1" ||
-        identifier.rfind("system_identifier=", 0) != 0) {
+    if (!std::getline(input, header)) {
         error = "invalid DBMS_CONTROL format or magic";
         return false;
     }
+
+    std::string identifier;
+    std::string trailing;
+    if (header == kLegacyControlMagic) {
+        std::string format;
+        if (!std::getline(input, format) ||
+            !std::getline(input, identifier) ||
+            std::getline(input, trailing) ||
+            format != "format_version=1" ||
+            identifier.rfind("system_identifier=", 0) != 0) {
+            error = "invalid DBMS_CONTROL version 1 format";
+            return false;
+        }
+        version = ControlFileVersion::LegacyV1;
+    } else if (header == kCurrentControlMagic) {
+        std::array<std::string, 6> fields;
+        for (auto& field : fields) {
+            if (!std::getline(input, field)) {
+                error = "invalid DBMS_CONTROL version 2 format";
+                return false;
+            }
+        }
+        if (std::getline(input, trailing) ||
+            fields[0] != "control_format_version=2" ||
+            fields[1] != "catalog_format_version=1" ||
+            fields[2] != "heap_format_version=2" ||
+            fields[3] != "block_size=8192" ||
+            fields[4] != std::string("byte_order=") + nativeByteOrder() ||
+            fields[5].rfind("system_identifier=", 0) != 0) {
+            error = "incompatible or invalid DBMS_CONTROL version 2 fields";
+            return false;
+        }
+        identifier = fields[5];
+        version = ControlFileVersion::Current;
+    } else {
+        if (header.rfind("DBMS_CPP_CLUSTER_CONTROL_V", 0) == 0) {
+            error = "unsupported DBMS_CONTROL version";
+        } else {
+            error = "invalid DBMS_CONTROL format or magic";
+        }
+        return false;
+    }
+
     systemIdentifier = identifier.substr(18);
     if (!validSystemIdentifier(systemIdentifier)) {
         error = "invalid DBMS_CONTROL system identifier";
@@ -183,7 +252,16 @@ bool initializeControlFile(const std::filesystem::path& root,
             error = "DBMS_CONTROL is not a regular file";
             return false;
         }
-        return loadControlFile(control, systemIdentifier, error);
+        ControlFileVersion version = ControlFileVersion::Current;
+        if (!loadControlFile(control, systemIdentifier, version, error)) {
+            return false;
+        }
+        if (version != ControlFileVersion::Current) {
+            error = "DBMS_CONTROL version 1 requires offline upgrade; run "
+                    "dbms_main -D <data-directory> --upgrade-data-directory";
+            return false;
+        }
+        return true;
     }
     if (filesystemError) {
         error = "could not inspect DBMS_CONTROL: " + filesystemError.message();
@@ -211,9 +289,7 @@ bool initializeControlFile(const std::filesystem::path& root,
     }
 
     systemIdentifier = newSystemIdentifier();
-    const std::string contents =
-        "DBMS_CPP_CLUSTER_CONTROL_V1\nformat_version=1\n"
-        "system_identifier=" + systemIdentifier + "\n";
+    const std::string contents = currentControlContents(systemIdentifier);
     if (!index_file::writeAtomically(control, contents)) {
         error = "could not create durable DBMS_CONTROL";
         return false;
@@ -229,6 +305,78 @@ bool processArgumentsRequestVersion() {
         if (arguments[i] == "--version" || arguments[i] == "-V") return true;
     }
     return false;
+}
+
+DataDirectoryUtility requestedDataDirectoryUtility() {
+    const auto arguments = processArguments();
+    DataDirectoryUtility requested = DataDirectoryUtility::None;
+    for (size_t i = 1; i < arguments.size(); ++i) {
+        DataDirectoryUtility candidate = DataDirectoryUtility::None;
+        if (arguments[i] == "--check-data-directory") {
+            candidate = DataDirectoryUtility::Check;
+        } else if (arguments[i] == "--upgrade-data-directory") {
+            candidate = DataDirectoryUtility::Upgrade;
+        }
+        if (candidate == DataDirectoryUtility::None) continue;
+        if (requested != DataDirectoryUtility::None && requested != candidate) {
+            return DataDirectoryUtility::None;
+        }
+        requested = candidate;
+    }
+    return requested;
+}
+
+bool runDataDirectoryUtility(DataDirectoryUtility utility,
+                             std::string& output,
+                             std::string& error) {
+    if (utility == DataDirectoryUtility::None) {
+        error = "no data-directory utility selected";
+        return false;
+    }
+    std::filesystem::path selected;
+    if (!parseSelectedDirectory(selected, error)) return false;
+
+    std::error_code filesystemError;
+    if (!std::filesystem::is_directory(selected, filesystemError) ||
+        filesystemError) {
+        error = "data directory does not exist or is not a directory";
+        return false;
+    }
+    const auto control = selected / "DBMS_CONTROL";
+    if (!std::filesystem::is_regular_file(control, filesystemError) ||
+        filesystemError) {
+        error = "DBMS_CONTROL is missing or is not a regular file";
+        return false;
+    }
+
+    std::string identifier;
+    ControlFileVersion version = ControlFileVersion::Current;
+    if (!loadControlFile(control, identifier, version, error)) return false;
+
+    if (utility == DataDirectoryUtility::Check) {
+        if (version != ControlFileVersion::Current) {
+            error = "data directory uses control version 1; offline upgrade is required";
+            return false;
+        }
+        output = "data directory is compatible\n" +
+            std::string("control_format_version=2\n") +
+            "catalog_format_version=1\nheap_format_version=2\n" +
+            "block_size=8192\nbyte_order=" + nativeByteOrder() + "\n" +
+            "system_identifier=" + identifier;
+        return true;
+    }
+
+    if (version == ControlFileVersion::Current) {
+        output = "data directory is already at control format version 2";
+        return true;
+    }
+    if (!index_file::writeAtomically(control, currentControlContents(identifier))) {
+        error = "could not durably upgrade DBMS_CONTROL";
+        return false;
+    }
+    output = "upgraded DBMS_CONTROL from version 1 to version 2; "
+             "system identifier preserved";
+    return true;
 }
 
 bool bootstrapDataDirectory(std::string& error) {

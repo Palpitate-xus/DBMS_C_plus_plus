@@ -56,7 +56,10 @@ def main():
         missing = root / "implicit"
         pg_cluster = root / "postgres"
         corrupt = root / "corrupt"
-        for directory in (launch, cluster, missing, pg_cluster, corrupt):
+        legacy = root / "legacy"
+        future = root / "future"
+        for directory in (launch, cluster, missing, pg_cluster, corrupt,
+                          legacy, future):
             directory.mkdir()
 
         # Version discovery must not require or initialize a data directory.
@@ -113,10 +116,51 @@ def main():
 
         control = (cluster / "DBMS_CONTROL").read_text(encoding="utf-8")
         assert control.startswith(
-            "DBMS_CPP_CLUSTER_CONTROL_V1\nformat_version=1\n"), control
+            "DBMS_CPP_CLUSTER_CONTROL_V2\n"
+            "control_format_version=2\n"
+            "catalog_format_version=1\n"
+            "heap_format_version=2\n"
+            "block_size=8192\n"
+            "byte_order="), control
         match = re.search(r"^system_identifier=([0-9a-f]{16})$", control, re.M)
         assert match and int(match.group(1), 16) != 0, control
         assert list(launch.iterdir()) == [], list(launch.iterdir())
+
+        checked = subprocess.run(
+            [DBMS_MAIN, "-D", str(cluster), "--check-data-directory"],
+            cwd=launch, capture_output=True, text=True, timeout=5, check=False)
+        assert checked.returncode == 0, checked
+        assert "data directory is compatible" in checked.stdout, checked
+        assert f"system_identifier={match.group(1)}" in checked.stdout, checked
+
+        legacy_identifier = "0123456789abcdef"
+        (legacy / "DBMS_CONTROL").write_text(
+            "DBMS_CPP_CLUSTER_CONTROL_V1\nformat_version=1\n"
+            f"system_identifier={legacy_identifier}\n", encoding="utf-8")
+        legacy_start = subprocess.run(
+            [DBMS_MAIN, "-D", str(legacy), "--server", "0", "--insecure"],
+            cwd=launch, capture_output=True, text=True, timeout=5, check=False)
+        assert legacy_start.returncode == 1, legacy_start
+        assert "requires offline upgrade" in legacy_start.stderr, legacy_start
+        assert "CONTROL_V1" in (legacy / "DBMS_CONTROL").read_text(), legacy_start
+
+        upgraded = subprocess.run(
+            [DBMS_MAIN, "-D", str(legacy), "--upgrade-data-directory"],
+            cwd=launch, capture_output=True, text=True, timeout=5, check=False)
+        assert upgraded.returncode == 0, upgraded
+        upgraded_control = (legacy / "DBMS_CONTROL").read_text(encoding="utf-8")
+        assert upgraded_control.startswith("DBMS_CPP_CLUSTER_CONTROL_V2\n"), upgraded_control
+        assert f"system_identifier={legacy_identifier}" in upgraded_control, upgraded_control
+
+        (future / "DBMS_CONTROL").write_text(
+            "DBMS_CPP_CLUSTER_CONTROL_V99\n", encoding="utf-8")
+        future_before = (future / "DBMS_CONTROL").read_bytes()
+        rejected_future = subprocess.run(
+            [DBMS_MAIN, "-D", str(future), "--upgrade-data-directory"],
+            cwd=launch, capture_output=True, text=True, timeout=5, check=False)
+        assert rejected_future.returncode == 1, rejected_future
+        assert "unsupported DBMS_CONTROL" in rejected_future.stderr, rejected_future
+        assert (future / "DBMS_CONTROL").read_bytes() == future_before
 
         # The environment form selects the same cluster from another CWD and
         # preserves its system identifier rather than silently initializing.
