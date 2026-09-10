@@ -85,7 +85,7 @@
     {"id":"CONS-02","status":"partial","evidence":["docs/code-review-progress.md","src/interfaces/dbms_defs.h","src/commands/TableManage.cpp"],"tests":["tests/deferrable_constraints_test.cpp","tests/prepared_transaction_test.cpp","tests/postgres_protocol_test.py"],"commits":["35a4ed6"]},
     {"id":"CONS-03","status":"partial","evidence":["docs/code-review-progress.md","src/interfaces/dbms_defs.h","src/commands/TableManage.cpp"],"tests":["tests/deferrable_test.cpp","tests/multiple_check_constraints_test.cpp","tests/postgres_protocol_test.py"],"commits":["35a4ed6"]},
     {"id":"CONS-04","status":"partial","evidence":["docs/code-review-progress.md","src/interfaces/dbms_defs.h","src/commands/TableManage.cpp"],"tests":["tests/deferrable_constraints_test.cpp","tests/postgres_protocol_test.py"],"commits":["35a4ed6"]},
-    {"id":"CONS-05","status":"unverified","evidence":[]},
+    {"id":"CONS-05","status":"partial","evidence":["docs/code-review-progress.md","src/commands/TableManage.cpp","src/commands/DmlExecutor.cpp"],"tests":["tests/generated_columns_test.cpp"],"commits":["8ef3d19"]},
     {"id":"CONS-06","status":"unverified","evidence":[]},
     {"id":"CONS-07","status":"unverified","evidence":[]},
     {"id":"CONS-08","status":"unverified","evidence":[]},
