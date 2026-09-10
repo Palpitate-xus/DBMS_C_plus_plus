@@ -34,6 +34,22 @@ struct DmlResult {
     std::string commandTag;
 };
 
+enum class StructuredSetOperation { Union, Intersect, Except };
+
+struct StructuredSetError {
+    std::string sqlState;
+    std::string message;
+};
+
+// Combine two already-evaluated SELECT results without converting their
+// cells to display text.  SQL NULL is part of row identity for set semantics,
+// but remains distinct from both an empty string and the text value "NULL".
+bool combineStructuredSetResults(
+    const DmlResult& left, const DmlResult& right,
+    StructuredSetOperation operation, bool all,
+    const std::string& database, const std::string& username,
+    DmlResult& output, StructuredSetError& error);
+
 DmlResult takeLastDmlResult();
 void clearLastDmlResult();
 // Publish a structured DML result (used by paths outside this executor,

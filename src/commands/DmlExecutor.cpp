@@ -6,8 +6,10 @@
 
 #include "access/BPTree.h"
 #include "access/HashIndex.h"
+#include "catalog/type_registry.h"
 #include "commands/TableManage.h"
 #include "expression/ExprEvaluator.h"
+#include "expression/expr_helper.h"
 #include "parser/parser.h"
 #include "permissions.h"
 
@@ -42,6 +44,280 @@ DmlResult takeLastDmlResult() {
 
 void clearLastDmlResult() {
     g_lastDmlResult = {};
+}
+
+namespace {
+
+std::string canonicalSetType(std::string type) {
+    const size_t modifier = type.find('(');
+    if (modifier != std::string::npos) type.resize(modifier);
+    while (!type.empty() && std::isspace(static_cast<unsigned char>(type.back())))
+        type.pop_back();
+    size_t start = 0;
+    while (start < type.size() &&
+           std::isspace(static_cast<unsigned char>(type[start]))) ++start;
+    if (start != 0) type.erase(0, start);
+    const std::string normalized =
+        TypeRegistry::instance().normalizeTypeName(type);
+    if (!normalized.empty()) return normalized;
+    std::transform(type.begin(), type.end(), type.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return type;
+}
+
+int setNumericRank(const std::string& type) {
+    if (type == "smallint") return 0;
+    if (type == "integer") return 1;
+    if (type == "bigint") return 2;
+    if (type == "numeric") return 3;
+    if (type == "real") return 4;
+    if (type == "double precision") return 5;
+    return -1;
+}
+
+bool resolveSetType(const std::string& leftType,
+                    const std::string& rightType,
+                    std::string& result) {
+    const std::string left = canonicalSetType(leftType);
+    const std::string right = canonicalSetType(rightType);
+    if (left.empty() || right.empty()) return false;
+    if (left == "unknown") {
+        result = right == "unknown" ? "text" : right;
+        return true;
+    }
+    if (right == "unknown" || left == right) {
+        result = left;
+        return true;
+    }
+
+    if (left == "name" || right == "name") {
+        const std::string& other = left == "name" ? right : left;
+        const auto* otherEntry = TypeRegistry::instance().findType(other);
+        if (other == "name" ||
+            (otherEntry && otherEntry->category == TypeCategory::String)) {
+            result = "text";
+            return true;
+        }
+        return false;
+    }
+
+    const auto* leftEntry = TypeRegistry::instance().findType(left);
+    const auto* rightEntry = TypeRegistry::instance().findType(right);
+    if (!leftEntry || !rightEntry ||
+        leftEntry->category != rightEntry->category) return false;
+
+    if (leftEntry->category == TypeCategory::Numeric) {
+        const int leftRank = setNumericRank(left);
+        const int rightRank = setNumericRank(right);
+        if (leftRank < 0 || rightRank < 0) return false;
+        result = leftRank >= rightRank ? left : right;
+        return true;
+    }
+    if (leftEntry->category == TypeCategory::String) {
+        if (left == "text" || right == "text" || left == "name" || right == "name")
+            result = "text";
+        else if (left == "character varying" || right == "character varying")
+            result = "character varying";
+        else
+            result = left;
+        return true;
+    }
+    if (leftEntry->category == TypeCategory::DateTime) {
+        const bool leftTimestamp = left == "date" || left == "timestamp" ||
+                                   left == "timestamptz";
+        const bool rightTimestamp = right == "date" || right == "timestamp" ||
+                                    right == "timestamptz";
+        if (leftTimestamp && rightTimestamp) {
+            if (left == "timestamptz" || right == "timestamptz")
+                result = "timestamptz";
+            else if (left == "timestamp" || right == "timestamp")
+                result = "timestamp";
+            else
+                result = "date";
+            return true;
+        }
+        const bool leftTime = left == "time" || left == "timetz";
+        const bool rightTime = right == "time" || right == "timetz";
+        if (leftTime && rightTime) {
+            result = left == "timetz" || right == "timetz" ? "timetz" : "time";
+            return true;
+        }
+    }
+    return false;
+}
+
+bool validateStructuredSetInput(const DmlResult& input,
+                                StructuredSetError& error) {
+    const size_t width = input.columns.size();
+    if (!input.available || input.metadataOnly || width == 0 ||
+        input.columnTypes.size() != width ||
+        input.rows.size() != input.nulls.size()) {
+        error = {"0A000", "set operation operand did not publish a complete structured result"};
+        return false;
+    }
+    for (size_t row = 0; row < input.rows.size(); ++row) {
+        if (input.rows[row].size() != width || input.nulls[row].size() != width) {
+            error = {"0A000", "set operation operand has inconsistent row metadata"};
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string quoteSetLiteral(const std::string& value) {
+    std::string quoted = "'";
+    quoted.reserve(value.size() + 2);
+    for (char c : value) {
+        if (c == '\'') quoted += "''";
+        else quoted += c;
+    }
+    quoted += '\'';
+    return quoted;
+}
+
+bool coerceSetRows(const DmlResult& input,
+                   const std::vector<std::string>& resultTypes,
+                   const std::string& database, const std::string& username,
+                   std::vector<std::vector<std::string>>& rows,
+                   std::vector<std::vector<bool>>& nulls,
+                   StructuredSetError& error) {
+    rows = input.rows;
+    nulls = input.nulls;
+    for (size_t row = 0; row < rows.size(); ++row) {
+        for (size_t column = 0; column < resultTypes.size(); ++column) {
+            if (nulls[row][column]) {
+                rows[row][column].clear();
+                continue;
+            }
+            const std::string sourceType = canonicalSetType(input.columnTypes[column]);
+            const std::string& targetType = resultTypes[column];
+            if (sourceType == targetType ||
+                (TypeRegistry::instance().findType(sourceType) &&
+                 TypeRegistry::instance().findType(targetType) &&
+                 TypeRegistry::instance().findType(sourceType)->category == TypeCategory::String &&
+                 TypeRegistry::instance().findType(targetType)->category == TypeCategory::String)) {
+                continue;
+            }
+            const ExprEvalResult evaluated = ExprHelper::evalString(
+                "CAST(" + quoteSetLiteral(rows[row][column]) + " AS " +
+                    targetType + ")",
+                {}, {}, database, username);
+            if (!evaluated.ok || evaluated.isNull ||
+                canonicalSetType(evaluated.typeName) != targetType) {
+                error = {"0A000", "set operation type coercion is not supported"};
+                return false;
+            }
+            rows[row][column] = evaluated.value;
+        }
+    }
+    return true;
+}
+
+std::string structuredSetRowKey(const std::vector<std::string>& row,
+                                const std::vector<bool>& nulls) {
+    std::string key;
+    for (size_t column = 0; column < row.size(); ++column) {
+        if (nulls[column]) {
+            key += "N;";
+        } else {
+            key += "V" + std::to_string(row[column].size()) + ":" +
+                   row[column] + ";";
+        }
+    }
+    return key;
+}
+
+} // namespace
+
+bool combineStructuredSetResults(
+    const DmlResult& left, const DmlResult& right,
+    StructuredSetOperation operation, bool all,
+    const std::string& database, const std::string& username,
+    DmlResult& output, StructuredSetError& error) {
+    output = {};
+    error = {};
+    if (!validateStructuredSetInput(left, error) ||
+        !validateStructuredSetInput(right, error)) return false;
+    if (left.columns.size() != right.columns.size()) {
+        error = {"42601", "each set operation query must have the same number of columns"};
+        return false;
+    }
+
+    std::vector<std::string> resultTypes(left.columns.size());
+    for (size_t column = 0; column < resultTypes.size(); ++column) {
+        if (!resolveSetType(left.columnTypes[column], right.columnTypes[column],
+                            resultTypes[column])) {
+            error = {"42804", "set operation types " +
+                       canonicalSetType(left.columnTypes[column]) + " and " +
+                       canonicalSetType(right.columnTypes[column]) +
+                       " cannot be matched"};
+            return false;
+        }
+    }
+
+    std::vector<std::vector<std::string>> leftRows;
+    std::vector<std::vector<bool>> leftNulls;
+    std::vector<std::vector<std::string>> rightRows;
+    std::vector<std::vector<bool>> rightNulls;
+    if (!coerceSetRows(left, resultTypes, database, username,
+                       leftRows, leftNulls, error) ||
+        !coerceSetRows(right, resultTypes, database, username,
+                       rightRows, rightNulls, error)) return false;
+
+    output.available = true;
+    output.columns = left.columns;
+    output.columnTypes = std::move(resultTypes);
+    auto append = [&](std::vector<std::string> row,
+                      std::vector<bool> rowNulls) {
+        output.rows.push_back(std::move(row));
+        output.nulls.push_back(std::move(rowNulls));
+    };
+
+    if (operation == StructuredSetOperation::Union) {
+        if (all) {
+            for (size_t i = 0; i < leftRows.size(); ++i)
+                append(std::move(leftRows[i]), std::move(leftNulls[i]));
+            for (size_t i = 0; i < rightRows.size(); ++i)
+                append(std::move(rightRows[i]), std::move(rightNulls[i]));
+        } else {
+            std::set<std::string> seen;
+            auto appendDistinct = [&](std::vector<std::vector<std::string>>& rows,
+                                      std::vector<std::vector<bool>>& nulls) {
+                for (size_t i = 0; i < rows.size(); ++i) {
+                    if (seen.insert(structuredSetRowKey(rows[i], nulls[i])).second)
+                        append(std::move(rows[i]), std::move(nulls[i]));
+                }
+            };
+            appendDistinct(leftRows, leftNulls);
+            appendDistinct(rightRows, rightNulls);
+        }
+    } else {
+        std::map<std::string, size_t> rightCounts;
+        for (size_t i = 0; i < rightRows.size(); ++i)
+            ++rightCounts[structuredSetRowKey(rightRows[i], rightNulls[i])];
+        std::set<std::string> emitted;
+        for (size_t i = 0; i < leftRows.size(); ++i) {
+            const std::string key = structuredSetRowKey(leftRows[i], leftNulls[i]);
+            auto found = rightCounts.find(key);
+            const size_t available = found == rightCounts.end() ? 0 : found->second;
+            if (operation == StructuredSetOperation::Intersect) {
+                if (available == 0) continue;
+                if (all) {
+                    append(std::move(leftRows[i]), std::move(leftNulls[i]));
+                    --found->second;
+                } else if (emitted.insert(key).second) {
+                    append(std::move(leftRows[i]), std::move(leftNulls[i]));
+                }
+            } else if (available > 0) {
+                if (all) --found->second;
+            } else if (all || emitted.insert(key).second) {
+                append(std::move(leftRows[i]), std::move(leftNulls[i]));
+            }
+        }
+    }
+    output.commandTag = "SELECT " + std::to_string(output.rows.size());
+    return true;
 }
 
 namespace {

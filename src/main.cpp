@@ -5468,9 +5468,9 @@ struct StructuredSetOperand {
 // Complex operands intentionally return false and use the established
 // executor path below; this keeps the migration incremental without silently
 // changing semantics for joins, aggregates, expressions, or CTEs.
-static bool buildStructuredSetOperand(const string& rawSql, Session& s,
-                                      StructuredSetOperand& out,
-                                      bool& executionError) {
+[[maybe_unused]] static bool buildStructuredSetOperand(
+    const string& rawSql, Session& s, StructuredSetOperand& out,
+    bool& executionError) {
     executionError = false;
     string query = trim(rawSql);
     if (query.size() < 6 || query.substr(0, 6) != "select") return false;
@@ -5642,10 +5642,13 @@ static bool buildStructuredSetOperand(const string& rawSql, Session& s,
     return true;
 }
 
-static bool captureSetOperand(const string& sql, Session& s, vector<string>& lines) {
-    // A set-operation fallback executes each operand recursively and consumes
-    // its rendered output below.  Do not let an operand's protocol result leak
-    // out as if it described the combined query.
+static bool captureSetOperand(const string& sql, Session& s,
+                              dbms::DmlResult& result) {
+    // Execute recursively with the same structured-result capture boundary
+    // used by derived tables. Rendered stdout is retained only for an error
+    // diagnostic; successful operands are never reconstructed from it.
+    const unsigned previousCaptureDepth = metadataCaptureDepth;
+    metadataCaptureDepth = executeDepth + 1;
     dbms::clearLastDmlResult();
     stringstream captured;
     bool failed = false;
@@ -5653,6 +5656,10 @@ static bool captureSetOperand(const string& sql, Session& s, vector<string>& lin
         dbms::ScopedOutputCapture capture(captured);
         try {
             failed = execute(sql, s);
+        } catch (const dbms::DbError& e) {
+            failed = true;
+            captured << "ERROR: " << e.message() << " (SQLSTATE "
+                     << e.sqlState() << ")\n";
         } catch (const exception& e) {
             failed = true;
             captured << "ERROR: " << e.what() << '\n';
@@ -5661,48 +5668,91 @@ static bool captureSetOperand(const string& sql, Session& s, vector<string>& lin
             captured << "ERROR: unhandled set-operation operand failure\n";
         }
     }
-    dbms::takeLastDmlResult();
-    string line;
-    while (getline(captured, line)) lines.push_back(line);
-    if (failed || (!lines.empty() && lines.front().rfind("ERROR:", 0) == 0)) {
-        for (const auto& output : lines) cout << output << endl;
+    result = dbms::takeLastDmlResult();
+    metadataCaptureDepth = previousCaptureDepth;
+    if (failed) {
+        const string diagnostic = captured.str();
+        if (!diagnostic.empty()) cout << diagnostic;
+        else cout << "ERROR: set-operation operand failed (SQLSTATE XX000)" << endl;
         return false;
     }
     return true;
 }
 
-static void applySetOperationTail(vector<string>& rows, bool hasOrder,
-                                 bool asc, size_t limitN, bool hasLimit) {
+static bool applySetOperationTail(
+    dbms::DmlResult& result, bool hasOrder, const string& orderColumn,
+    bool asc, bool explicitNullsFirst, bool hasExplicitNullOrder,
+    size_t limitN, bool hasLimit, string& error, string& sqlState) {
     if (hasOrder) {
-        auto cellOf = [](const string& row) -> string {
-            vector<string> cells;
-            size_t start = 0;
-            while (start <= row.size()) {
-                size_t sp = row.find(' ', start);
-                if (sp == string::npos) { cells.push_back(row.substr(start)); break; }
-                cells.push_back(row.substr(start, sp - start));
-                start = sp + 1;
+        size_t orderIndex = result.columns.size();
+        try {
+            size_t parsed = 0;
+            const unsigned long long ordinal = stoull(orderColumn, &parsed);
+            if (parsed == orderColumn.size() && ordinal > 0 &&
+                ordinal <= result.columns.size()) {
+                orderIndex = static_cast<size_t>(ordinal - 1);
             }
-            return cells.empty() ? string() : cells.front();
-        };
-        auto nullish = [](const string& v) {
-            return v == "NULL";
-        };
-        std::stable_sort(rows.begin(), rows.end(),
-            [&](const string& a, const string& b) {
-                const string va = cellOf(a), vb = cellOf(b);
-                const bool na = nullish(va), nb = nullish(vb);
-                if (na != nb) return asc ? !na : na;
-                if (na) return false;
-                dbms::Numeric xa(0), xb(0);
-                bool okA = true, okB = true;
-                try { xa = dbms::Numeric(va); } catch (...) { okA = false; }
-                try { xb = dbms::Numeric(vb); } catch (...) { okB = false; }
-                if (okA && okB) return asc ? xa < xb : xb < xa;
-                return asc ? va < vb : vb < va;
-            });
+        } catch (...) {}
+        if (orderIndex == result.columns.size()) {
+            string name = orderColumn;
+            if (name.size() >= 2 && name.front() == '"' && name.back() == '"')
+                name = name.substr(1, name.size() - 2);
+            for (size_t i = 0; i < result.columns.size(); ++i) {
+                if (result.columns[i] == name) {
+                    orderIndex = i;
+                    break;
+                }
+            }
+        }
+        if (orderIndex == result.columns.size()) {
+            error = "ORDER BY position or column is not in select list";
+            sqlState = "42P10";
+            return false;
+        }
+
+        vector<size_t> order(result.rows.size());
+        iota(order.begin(), order.end(), 0);
+        const bool nullsFirst = hasExplicitNullOrder
+            ? explicitNullsFirst : !asc;
+        const string type = orderIndex < result.columnTypes.size()
+            ? canonicalValuesType(result.columnTypes[orderIndex]) : "text";
+        const auto* typeEntry =
+            dbms::TypeRegistry::instance().findType(type);
+        stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+            const bool nullA = result.nulls[a][orderIndex];
+            const bool nullB = result.nulls[b][orderIndex];
+            if (nullA != nullB) return nullA == nullsFirst;
+            if (nullA) return false;
+            const string& valueA = result.rows[a][orderIndex];
+            const string& valueB = result.rows[b][orderIndex];
+            if (valueA == valueB) return false;
+            if (typeEntry &&
+                typeEntry->category == dbms::TypeCategory::Numeric) {
+                try {
+                    const dbms::Numeric numericA(valueA);
+                    const dbms::Numeric numericB(valueB);
+                    return asc ? numericA < numericB : numericB < numericA;
+                } catch (...) {}
+            }
+            return asc ? valueA < valueB : valueB < valueA;
+        });
+        vector<vector<string>> sortedRows;
+        vector<vector<bool>> sortedNulls;
+        sortedRows.reserve(order.size());
+        sortedNulls.reserve(order.size());
+        for (size_t index : order) {
+            sortedRows.push_back(std::move(result.rows[index]));
+            sortedNulls.push_back(std::move(result.nulls[index]));
+        }
+        result.rows = std::move(sortedRows);
+        result.nulls = std::move(sortedNulls);
     }
-    if (hasLimit && rows.size() > limitN) rows.resize(limitN);
+    if (hasLimit && result.rows.size() > limitN) {
+        result.rows.resize(limitN);
+        result.nulls.resize(limitN);
+    }
+    result.commandTag = "SELECT " + to_string(result.rows.size());
+    return true;
 }
 
 static bool executeSetOperation(const string& sql, Session& s, bool& handled) {
@@ -5724,12 +5774,14 @@ static bool executeSetOperation(const string& sql, Session& s, bool& handled) {
     string tailOrderCol;
     bool tailOrderAsc = true;
     bool tailHasOrder = false;
+    bool tailNullsFirst = false;
+    bool tailHasNullOrder = false;
     size_t tailLimit = 0;
     bool tailHasLimit = false;
     {
-        auto stripLimit = [&](string& text) {
+        auto stripLimit = [&](string& text) -> bool {
             size_t lp = findTopLevelKeyword(text, "limit");
-            if (lp == string::npos) return;
+            if (lp == string::npos) return true;
             string num = trim(text.substr(lp + 5));
             try {
                 size_t parsed = 0;
@@ -5738,96 +5790,102 @@ static bool executeSetOperation(const string& sql, Session& s, bool& handled) {
                     tailLimit = v;
                     tailHasLimit = true;
                     text = trim(text.substr(0, lp));
+                    return true;
                 }
             } catch (...) {}
+            return false;
         };
-        stripLimit(rightSql);
+        if (!stripLimit(rightSql)) {
+            cout << "ERROR: invalid LIMIT in set operation (SQLSTATE 42601)"
+                 << endl;
+            return true;
+        }
         size_t op = findTopLevelKeyword(rightSql, "order by");
         if (op != string::npos) {
             string spec = trim(rightSql.substr(op + 8));
             rightSql = trim(rightSql.substr(0, op));
             vector<string> toks = tokenize(spec);
-            if (!toks.empty()) {
-                tailOrderCol = toks[0];
-                tailHasOrder = true;
-                if (toks.size() >= 2) {
-                    if (toks[1] == "desc") tailOrderAsc = false;
+            if (toks.empty() || toks.size() > 4) {
+                cout << "ERROR: unsupported ORDER BY in set operation "
+                        "(SQLSTATE 0A000)" << endl;
+                return true;
+            }
+            tailOrderCol = toks[0];
+            tailHasOrder = true;
+            size_t index = 1;
+            if (index < toks.size() &&
+                (toks[index] == "asc" || toks[index] == "desc")) {
+                tailOrderAsc = toks[index] != "desc";
+                ++index;
+            }
+            if (index < toks.size()) {
+                if (index + 1 >= toks.size() || toks[index] != "nulls" ||
+                    (toks[index + 1] != "first" &&
+                     toks[index + 1] != "last")) {
+                    cout << "ERROR: invalid ORDER BY in set operation "
+                            "(SQLSTATE 42601)" << endl;
+                    return true;
                 }
+                tailNullsFirst = toks[index + 1] == "first";
+                tailHasNullOrder = true;
+                index += 2;
+            }
+            if (index != toks.size()) {
+                cout << "ERROR: invalid ORDER BY in set operation "
+                        "(SQLSTATE 42601)" << endl;
+                return true;
             }
         }
     }
 
-    StructuredSetOperand leftPlan;
-    StructuredSetOperand rightPlan;
-    bool structuredError = false;
-    const bool leftStructured = buildStructuredSetOperand(leftSql, s, leftPlan, structuredError);
-    if (structuredError) return true;
-    const bool rightStructured = buildStructuredSetOperand(rightSql, s, rightPlan, structuredError);
-    if (structuredError) return true;
-    if (leftStructured && rightStructured) {
-        if (leftPlan.columnCount != rightPlan.columnCount) {
-            cout << "ERROR: each set operation query must have the same number of columns" << endl;
-            return true;
+    dbms::DmlResult leftResult;
+    dbms::DmlResult rightResult;
+    if (!captureSetOperand(leftSql, s, leftResult) ||
+        !captureSetOperand(rightSql, s, rightResult)) return true;
+
+    dbms::StructuredSetOperation operation =
+        dbms::StructuredSetOperation::Union;
+    if (split.kind == SetOperationKind::Intersect)
+        operation = dbms::StructuredSetOperation::Intersect;
+    else if (split.kind == SetOperationKind::Except)
+        operation = dbms::StructuredSetOperation::Except;
+    dbms::DmlResult result;
+    dbms::StructuredSetError setError;
+    if (!dbms::combineStructuredSetResults(
+            leftResult, rightResult, operation, split.all,
+            s.currentDB, s.username, result, setError)) {
+        cout << "ERROR: " << setError.message << " (SQLSTATE "
+             << setError.sqlState << ")" << endl;
+        return true;
+    }
+    string tailError;
+    string tailSqlState;
+    if (!applySetOperationTail(
+            result, tailHasOrder, tailOrderCol, tailOrderAsc,
+            tailNullsFirst, tailHasNullOrder, tailLimit, tailHasLimit,
+            tailError, tailSqlState)) {
+        cout << "ERROR: " << tailError << " (SQLSTATE "
+             << tailSqlState << ")" << endl;
+        return true;
+    }
+
+    const dbms::DmlResult rendered = result;
+    publishStructuredUtilityResult(
+        result.columns, result.columnTypes, result.rows, result.nulls,
+        result.commandTag);
+    for (size_t column = 0; column < rendered.columns.size(); ++column) {
+        if (column != 0) cout << ' ';
+        cout << renderLegacyHeader(rendered.columns[column]);
+    }
+    cout << endl;
+    for (size_t row = 0; row < rendered.rows.size(); ++row) {
+        for (size_t column = 0; column < rendered.columns.size(); ++column) {
+            if (column != 0) cout << ' ';
+            cout << (rendered.nulls[row][column]
+                         ? "NULL" : rendered.rows[row][column]);
         }
-        dbms::SetOperationType type = dbms::SetOperationType::Union;
-        if (split.kind == SetOperationKind::Intersect) type = dbms::SetOperationType::Intersect;
-        else if (split.kind == SetOperationKind::Except) type = dbms::SetOperationType::Except;
-        auto plan = dbms::QueryPlanner::buildSetOperationPlan(
-            std::move(leftPlan.plan), std::move(rightPlan.plan), type, split.all);
-        auto execution = dbms::QueryPlanner::executePlanChecked(std::move(plan));
-        if (!execution.ok) {
-            cout << "ERROR: " << execution.error << endl;
-            return true;
-        }
-        auto rows = std::move(execution.rows);
-        applySetOperationTail(rows, tailHasOrder, tailOrderAsc,
-                              tailLimit, tailHasLimit);
-        cout << leftPlan.header << endl;
-        for (const auto& row : rows) cout << row << endl;
-        return false;
+        cout << endl;
     }
-
-    vector<string> leftLines;
-    vector<string> rightLines;
-    if (!captureSetOperand(leftSql, s, leftLines) ||
-        !captureSetOperand(rightSql, s, rightLines)) return true;
-
-    if (leftLines.empty() || rightLines.empty()) {
-        cout << "ERROR: set operation operand returned no columns" << endl;
-        return true;
-    }
-    const string header = leftLines.front();
-    vector<string> leftRows(leftLines.begin() + 1, leftLines.end());
-    vector<string> rightRows(rightLines.begin() + 1, rightLines.end());
-    auto countHeaderColumns = [](const string& line) {
-        stringstream ss(line);
-        size_t count = 0;
-        string column;
-        while (ss >> column) ++count;
-        return count;
-    };
-    if (countHeaderColumns(leftLines.front()) != countHeaderColumns(rightLines.front())) {
-        cout << "ERROR: each set operation query must have the same number of columns" << endl;
-        return true;
-    }
-
-    dbms::SetOperationType type = dbms::SetOperationType::Union;
-    if (split.kind == SetOperationKind::Intersect) type = dbms::SetOperationType::Intersect;
-    else if (split.kind == SetOperationKind::Except) type = dbms::SetOperationType::Except;
-    auto plan = dbms::QueryPlanner::buildSetOperationPlan(
-        std::make_unique<dbms::MaterializedRowsOp>(std::move(leftRows)),
-        std::make_unique<dbms::MaterializedRowsOp>(std::move(rightRows)),
-        type, split.all);
-    auto execution = dbms::QueryPlanner::executePlanChecked(std::move(plan));
-    if (!execution.ok) {
-        cout << "ERROR: " << execution.error << endl;
-        return true;
-    }
-    auto rows = std::move(execution.rows);
-    applySetOperationTail(rows, tailHasOrder, tailOrderAsc,
-                          tailLimit, tailHasLimit);
-    cout << header << endl;
-    for (const auto& row : rows) cout << row << endl;
     return false;
 }
 
