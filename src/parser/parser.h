@@ -67,6 +67,7 @@ private:
     ParseResult parseVacuum(const std::string& sql);
     ParseResult parseCheckpoint(const std::string& sql);
     ParseResult parseReindex(const std::string& sql);
+    ParseResult parseRefreshMaterializedView(const std::string& sql);
     ParseResult parseCluster(const std::string& sql);
 
     ParseResult parseCopy(const std::string& sql);

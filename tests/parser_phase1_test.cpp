@@ -35,6 +35,11 @@ static const CreateViewStmt* asCreateView(const StmtPtr& stmt) {
     return dynamic_cast<const CreateViewStmt*>(stmt.get());
 }
 
+static const RefreshMaterializedViewStmt* asRefreshMaterializedView(
+    const StmtPtr& stmt) {
+    return dynamic_cast<const RefreshMaterializedViewStmt*>(stmt.get());
+}
+
 static const CreateTableStmt* asCreateTable(const StmtPtr& stmt) {
     return dynamic_cast<const CreateTableStmt*>(stmt.get());
 }
@@ -73,7 +78,26 @@ int main() {
     assert(SQLParser::classify("EXPLAIN SELECT 1") == SqlCommand::Explain);
     assert(SQLParser::classify("SELECT 1") == SqlCommand::Select);
     assert(SQLParser::classify("CREATE INDEX idx ON t (a)") == SqlCommand::CreateIndex);
+    assert(SQLParser::classify("REFRESH MATERIALIZED VIEW mv") ==
+           SqlCommand::RefreshMaterializedView);
+    assert(SQLParser::classify("REFRESH\nMATERIALIZED\tVIEW mv") ==
+           SqlCommand::RefreshMaterializedView);
     std::cout << "[PARSER P1] classify OK\n";
+
+    {
+        auto parsed = parser.parse(
+            "REFRESH MATERIALIZED VIEW CONCURRENTLY reporting.mv WITH NO DATA;");
+        assert(parsed.success);
+        const auto* refresh = asRefreshMaterializedView(parsed.stmt);
+        assert(refresh != nullptr);
+        assert(refresh->viewName == "reporting.mv");
+        assert(refresh->concurrently);
+        assert(!refresh->withData);
+        assert(!parser.parse("REFRESH MATERIALIZED VIEW").success);
+        assert(!parser.parse(
+            "REFRESH MATERIALIZED VIEW mv WITH NO DATA trailing").success);
+    }
+    std::cout << "[PARSER P1] REFRESH MATERIALIZED VIEW OK\n";
 
     // MySQL-only DML LIMIT syntax is intentionally rejected.  It used to have
     // a dead legacy implementation behind the typed DML fail-closed boundary.

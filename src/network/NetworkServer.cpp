@@ -1900,9 +1900,7 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
     }
     result.commandTag =
         structuredDml.available && structuredDml.metadataOnly &&
-                !structuredDml.commandTag.empty() &&
-                (keyword == "insert" || keyword == "update" ||
-                 keyword == "delete" || keyword == "merge")
+                !structuredDml.commandTag.empty()
             ? structuredDml.commandTag
             : commandTagFor(sql, lines, result.rows.size());
     dbms::recordQueryExecution(sql, elapsedMs, session.currentDB, true,

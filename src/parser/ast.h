@@ -438,6 +438,7 @@ public:
             case SqlCommand::Vacuum: return "VACUUM";
             case SqlCommand::Checkpoint: return "CHECKPOINT";
             case SqlCommand::Reindex: return "REINDEX";
+            case SqlCommand::RefreshMaterializedView: return "REFRESH MATERIALIZED VIEW";
             case SqlCommand::Cluster: return "CLUSTER";
             case SqlCommand::Comment: return "COMMENT ON";
             case SqlCommand::SecurityLabel: return "SECURITY LABEL";
@@ -1164,6 +1165,18 @@ struct CreateViewStmt : public Stmt {
           materialized(mat) {}
     std::string toString() const override {
         return materialized ? "CREATE MATERIALIZED VIEW" : "CREATE VIEW";
+    }
+};
+
+struct RefreshMaterializedViewStmt : public Stmt {
+    std::string viewName;
+    bool concurrently = false;
+    bool withData = true;
+
+    RefreshMaterializedViewStmt()
+        : Stmt(SqlCommand::RefreshMaterializedView) {}
+    std::string toString() const override {
+        return "REFRESH MATERIALIZED VIEW";
     }
 };
 

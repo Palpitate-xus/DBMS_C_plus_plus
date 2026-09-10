@@ -1078,6 +1078,15 @@ SqlCommand SQLParser::classify(const std::string& sql) {
     if (lsql.substr(0, 6) == "vacuum") return SqlCommand::Vacuum;
     if (lsql.substr(0, 10) == "checkpoint") return SqlCommand::Checkpoint;
     if (lsql.substr(0, 7) == "reindex") return SqlCommand::Reindex;
+    if (lsql.compare(0, 7, "refresh") == 0 &&
+        lsql.size() > 7 &&
+        std::isspace(static_cast<unsigned char>(lsql[7]))) {
+        const auto tokens = tokenize(lsql);
+        if (tokens.size() >= 3 && tokens[0] == "refresh" &&
+            tokens[1] == "materialized" && tokens[2] == "view") {
+            return SqlCommand::RefreshMaterializedView;
+        }
+    }
     if (lsql.substr(0, 7) == "cluster") return SqlCommand::Cluster;
     if (lsql.substr(0, 7) == "comment") return SqlCommand::Comment;
     if (lsql.substr(0, 8) == "security" && lsql.find("label") != std::string::npos)
@@ -1254,6 +1263,8 @@ ParseResult SQLParser::parse(const std::string& sql) {
             return parseCheckpoint(sql);
         case SqlCommand::Reindex:
             return parseReindex(sql);
+        case SqlCommand::RefreshMaterializedView:
+            return parseRefreshMaterializedView(sql);
         case SqlCommand::Cluster:
             return parseCluster(sql);
 
@@ -4513,6 +4524,73 @@ ParseResult SQLParser::parseReindex(const std::string&) {
     r.success = true;
     r.stmt = std::make_unique<Stmt>(SqlCommand::Reindex);
     return r;
+}
+
+ParseResult SQLParser::parseRefreshMaterializedView(const std::string& sql) {
+    ParseResult result;
+    const auto tokens = tokenize(sql);
+    size_t pos = 0;
+    const auto fail = [&](const std::string& message) {
+        result.success = false;
+        result.error = message;
+    };
+
+    if (tokens.size() < 4 || !match(tokens, pos, "refresh")) {
+        fail("invalid REFRESH MATERIALIZED VIEW statement");
+        return result;
+    }
+    ++pos;
+    if (pos >= tokens.size() || !match(tokens, pos, "materialized")) {
+        fail("expected MATERIALIZED VIEW after REFRESH");
+        return result;
+    }
+    ++pos;
+    if (pos >= tokens.size() || !match(tokens, pos, "view")) {
+        fail("expected VIEW after REFRESH MATERIALIZED");
+        return result;
+    }
+    ++pos;
+
+    auto stmt = std::make_unique<RefreshMaterializedViewStmt>();
+    if (pos < tokens.size() && match(tokens, pos, "concurrently")) {
+        stmt->concurrently = true;
+        ++pos;
+    }
+    if (pos >= tokens.size() || tokens[pos] == ";") {
+        fail("REFRESH MATERIALIZED VIEW requires a relation name");
+        return result;
+    }
+    stmt->viewName = tokens[pos++];
+    if (pos < tokens.size() && tokens[pos] == ".") {
+        ++pos;
+        if (pos >= tokens.size() || tokens[pos] == ";") {
+            fail("invalid qualified materialized-view name");
+            return result;
+        }
+        stmt->viewName += "." + tokens[pos++];
+    }
+
+    if (pos < tokens.size() && match(tokens, pos, "with")) {
+        ++pos;
+        if (pos < tokens.size() && match(tokens, pos, "no")) {
+            stmt->withData = false;
+            ++pos;
+        }
+        if (pos >= tokens.size() || !match(tokens, pos, "data")) {
+            fail("expected DATA after WITH in REFRESH MATERIALIZED VIEW");
+            return result;
+        }
+        ++pos;
+    }
+    if (pos < tokens.size() && tokens[pos] == ";") ++pos;
+    if (pos != tokens.size()) {
+        fail("unexpected trailing input in REFRESH MATERIALIZED VIEW");
+        return result;
+    }
+
+    result.success = true;
+    result.stmt = std::move(stmt);
+    return result;
 }
 
 ParseResult SQLParser::parseCluster(const std::string&) {

@@ -3,6 +3,7 @@
 // ============================================================================
 
 #include "commands/DdlExecutor.h"
+#include "commands/DmlExecutor.h"
 #include "commands/DdlTransaction.h"
 #include "parser/parser.h"
 #include "catalog/CatalogService.h"
@@ -1234,6 +1235,9 @@ bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
             return executeCreatePolicy(dynamic_cast<const CreatePolicyStmt*>(stmt.get()), s);
         case SqlCommand::CreateMaterializedView:
             return executeCreateMaterializedView(dynamic_cast<const CreateViewStmt*>(stmt.get()), s);
+        case SqlCommand::RefreshMaterializedView:
+            return executeRefreshMaterializedView(
+                dynamic_cast<const RefreshMaterializedViewStmt*>(stmt.get()), s);
         case SqlCommand::DropMaterializedView:
             return executeDropMaterializedView(dynamic_cast<const DropStmt*>(stmt.get()), s);
         case SqlCommand::CreateCollation:
@@ -1311,6 +1315,7 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         case dbms::SqlCommand::CreateProcedure:
         case dbms::SqlCommand::CreatePolicy:
         case dbms::SqlCommand::CreateMaterializedView:
+        case dbms::SqlCommand::RefreshMaterializedView:
         case dbms::SqlCommand::DropMaterializedView:
         case dbms::SqlCommand::CreateDatabase:
         case dbms::SqlCommand::DropDatabase:
@@ -8054,6 +8059,122 @@ bool DdlExecutor::executeDropView(const DropStmt* stmt, Session& s) {
     return false;
 }
 
+struct MaterializedRefreshRows {
+    std::vector<StorageEngine::SqlRow> rows;
+};
+
+static bool buildMaterializedRefreshRows(
+    const std::string& selectSql, const TableSchema& backingSchema,
+    Session& session, MaterializedRefreshRows& output,
+    std::string& error, std::string& sqlstate) {
+    std::vector<std::string> selectColumns;
+    std::string sourceTable;
+    std::vector<std::string> conditions;
+    if (!parseSimpleSelect(
+            selectSql, selectColumns, sourceTable, conditions)) {
+        error = "stored materialized-view query is not a supported SELECT";
+        sqlstate = "0A000";
+        return false;
+    }
+
+    sourceTable = resolveTableName(session, sourceTable);
+    if (!g_engine.tableExists(session.currentDB, sourceTable)) {
+        error = "materialized-view source relation does not exist";
+        sqlstate = "42P01";
+        return false;
+    }
+    const TableSchema sourceSchema =
+        g_engine.getTableSchema(session.currentDB, sourceTable);
+
+    std::vector<size_t> sourceColumnIndexes;
+    std::vector<std::string> outputColumnNames;
+    if (selectColumns.size() == 1 && selectColumns.front() == "*") {
+        for (size_t index = 0; index < sourceSchema.len; ++index) {
+            sourceColumnIndexes.push_back(index);
+            outputColumnNames.push_back(sourceSchema.cols[index].dataName);
+        }
+    } else {
+        for (const auto& requestedColumn : selectColumns) {
+            size_t sourceIndex = sourceSchema.len;
+            for (size_t index = 0; index < sourceSchema.len; ++index) {
+                if (toLower(sourceSchema.cols[index].dataName) ==
+                    requestedColumn) {
+                    sourceIndex = index;
+                    break;
+                }
+            }
+            if (sourceIndex == sourceSchema.len) {
+                error = "column \"" + requestedColumn +
+                    "\" does not exist in materialized-view source";
+                sqlstate = "42703";
+                return false;
+            }
+            sourceColumnIndexes.push_back(sourceIndex);
+            outputColumnNames.push_back(
+                sourceSchema.cols[sourceIndex].dataName);
+        }
+    }
+
+    if (sourceColumnIndexes.size() != backingSchema.len) {
+        error = "stored materialized-view query no longer matches its row type";
+        sqlstate = "42804";
+        return false;
+    }
+    for (size_t index = 0; index < backingSchema.len; ++index) {
+        if (toLower(backingSchema.cols[index].dataName) !=
+            toLower(outputColumnNames[index])) {
+            error = "stored materialized-view query no longer matches its row type";
+            sqlstate = "42804";
+            return false;
+        }
+    }
+
+    const auto parsedConditions = StorageEngine::parseConditions(conditions);
+    output.rows.clear();
+    const bool scanOk = g_engine.forEachVisibleRow(
+        session.currentDB, sourceTable, "SELECT",
+        [&](uint32_t pageId, uint16_t slotId,
+            const char* data, size_t length) {
+            const int64_t rid = StorageEngine::encodeRid(pageId, slotId);
+            StorageEngine::bindNullRow(
+                &g_engine, session.currentDB, sourceTable, rid,
+                sourceSchema.len);
+            struct BindingGuard {
+                ~BindingGuard() { StorageEngine::unbindNullRow(); }
+            } bindingGuard;
+
+            const std::string row(data, length);
+            for (const auto& condition : parsedConditions) {
+                if (!StorageEngine::evalConditionOnRow(
+                        condition, row, sourceSchema)) {
+                    return;
+                }
+            }
+
+            StorageEngine::SqlRow values;
+            for (size_t outputIndex = 0;
+                 outputIndex < sourceColumnIndexes.size(); ++outputIndex) {
+                const size_t sourceIndex =
+                    sourceColumnIndexes[outputIndex];
+                bool isNull = false;
+                std::string value = g_engine.extractColumnValue(
+                    row, sourceSchema, sourceIndex, session.currentDB, true,
+                    &isNull);
+                const std::string& targetName =
+                    backingSchema.cols[outputIndex].dataName;
+                if (isNull) values[targetName] = std::nullopt;
+                else values[targetName] = std::move(value);
+            }
+            output.rows.push_back(std::move(values));
+        });
+    if (!scanOk) {
+        error = "failed to scan materialized-view source relation";
+        sqlstate = "58030";
+        return false;
+    }
+    return true;
+}
+
 // ----------------------------------------------------------------------------
 // CREATE MATERIALIZED VIEW
 // ----------------------------------------------------------------------------
@@ -8264,6 +8385,144 @@ bool DdlExecutor::executeCreateMaterializedView(const CreateViewStmt* stmt, Sess
     txn.recordCreate(DdlObjectKind::MaterializedView, viewname);
     if (!txn.commit()) return true;
     std::cout << "CREATE MATERIALIZED VIEW succeeded: " << inserted << " rows" << std::endl;
+    return false;
+}
+
+// ----------------------------------------------------------------------------
+// REFRESH MATERIALIZED VIEW
+// ----------------------------------------------------------------------------
+
+bool DdlExecutor::executeRefreshMaterializedView(
+    const RefreshMaterializedViewStmt* stmt, Session& s) {
+    if (!stmt) return true;
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+
+    const std::string viewName = stmt->viewName;
+    if (!g_engine.isMaterializedView(s.currentDB, viewName)) {
+        std::cout << "ERROR: relation \"" << viewName
+                  << "\" does not exist (SQLSTATE 42P01)" << std::endl;
+        return true;
+    }
+    // The old handler silently ran an ordinary destructive refresh after
+    // stripping CONCURRENTLY. Until a snapshot-preserving two-version swap is
+    // available, fail before opening a transaction or touching the backing
+    // relation.
+    if (stmt->concurrently) {
+        std::cout << "ERROR: REFRESH MATERIALIZED VIEW CONCURRENTLY is not "
+                     "supported (SQLSTATE 0A000)"
+                  << std::endl;
+        return true;
+    }
+
+    const std::string backingTable =
+        StorageEngine::materializedViewPrefix(viewName);
+    if (!g_engine.tableExists(s.currentDB, backingTable)) {
+        std::cout << "ERROR: materialized view \"" << viewName
+                  << "\" has no backing relation (SQLSTATE XX001)"
+                  << std::endl;
+        return true;
+    }
+    const std::string selectSql =
+        g_engine.getMaterializedViewSQL(s.currentDB, viewName);
+    if (selectSql.empty()) {
+        std::cout << "ERROR: materialized view \"" << viewName
+                  << "\" has no stored query (SQLSTATE XX001)"
+                  << std::endl;
+        return true;
+    }
+
+    DdlTransaction transaction(s);
+    transaction.enableSnapshotRollback();
+    if (!transaction.begin()) {
+        std::cout << "ERROR: REFRESH MATERIALIZED VIEW could not start its "
+                     "atomic replacement (SQLSTATE 58030)"
+                  << std::endl;
+        return true;
+    }
+
+    const TableSchema backingSchema =
+        g_engine.getTableSchema(s.currentDB, backingTable);
+    MaterializedRefreshRows replacement;
+    if (stmt->withData) {
+        std::string error;
+        std::string sqlstate;
+        if (!buildMaterializedRefreshRows(
+                selectSql, backingSchema, s, replacement,
+                error, sqlstate)) {
+            std::cout << "ERROR: " << error << " (SQLSTATE "
+                      << sqlstate << ")" << std::endl;
+            return true;
+        }
+    }
+
+    transaction.markSnapshotDirty();
+    DBStatus status =
+        g_engine.truncateTable(s.currentDB, backingTable);
+    if (status != DBStatus::OK) {
+        std::cout << "ERROR: REFRESH MATERIALIZED VIEW could not replace its "
+                     "backing relation (SQLSTATE "
+                  << sqlstateForDBStatus(status) << ")" << std::endl;
+        return true;
+    }
+
+    size_t inserted = 0;
+    for (const auto& row : replacement.rows) {
+        status = g_engine.insertRow(s.currentDB, backingTable, row);
+        if (status != DBStatus::OK) {
+            std::cout << "ERROR: REFRESH MATERIALIZED VIEW row copy failed "
+                         "(SQLSTATE "
+                      << sqlstateForDBStatus(status) << ")" << std::endl;
+            return true;
+        }
+        ++inserted;
+    }
+
+    CatalogManager::QualifiedName qualifiedName;
+    if (!CatalogManager::parseQualifiedName(viewName, qualifiedName) ||
+        qualifiedName.name.empty()) {
+        std::cout << "ERROR: invalid materialized-view name (SQLSTATE 42601)"
+                  << std::endl;
+        return true;
+    }
+    const std::string schemaName = qualifiedName.schema.empty()
+        ? "public" : qualifiedName.schema;
+    try {
+        CatalogManager& catalog =
+            g_engine.catalogService().get(s.currentDB);
+        const PgClassRow* relation = catalog.resolveRelation(
+            qualifiedName.name, {schemaName});
+        if (!relation || relation->relkind != 'm') {
+            std::cout << "ERROR: materialized-view catalog entry is missing "
+                         "(SQLSTATE XX001)"
+                      << std::endl;
+            return true;
+        }
+        PgClassRow updated = *relation;
+        updated.relispopulated = stmt->withData;
+        if (!catalog.updateClass(updated.oid, updated) ||
+            !catalog.persistAll()) {
+            std::cout << "ERROR: materialized-view catalog update failed "
+                         "(SQLSTATE 58030)"
+                      << std::endl;
+            return true;
+        }
+    } catch (const std::exception& error) {
+        std::cout << "ERROR: materialized-view catalog update failed: "
+                  << error.what() << " (SQLSTATE 58030)" << std::endl;
+        return true;
+    }
+
+    transaction.recordUpdate(DdlObjectKind::MaterializedView, viewName);
+    if (!transaction.commit()) return true;
+
+    DmlResult result;
+    result.available = true;
+    result.metadataOnly = true;
+    result.commandTag = "REFRESH MATERIALIZED VIEW";
+    publishLastDmlResult(std::move(result));
+    std::cout << "REFRESH MATERIALIZED VIEW succeeded: " << inserted
+              << " rows" << std::endl;
     return false;
 }
 

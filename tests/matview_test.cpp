@@ -1,14 +1,17 @@
 #include "commands/DdlExecutor.h"
+#include "commands/DmlExecutor.h"
 #include "commands/TableManage.h"
 #include "Session.h"
 #include "catalog/CatalogService.h"
 #include "catalog/systables.h"
 #include "catalog/type_registry.h"
+#include "process/OutputCapture.h"
 #include <algorithm>
 #include <cassert>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <vector>
 #include "test_utils.h"
 
@@ -293,6 +296,148 @@ static void test_create_matview_with_no_data() {
     std::cout << "[MATVIEW] WITH NO DATA OK" << std::endl;
 }
 
+static void test_refresh_preserves_typed_values_and_population_state() {
+    const std::string db = testDbPath("matview_refresh_exact");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE TABLE source_values ("
+        "id INT, note VARCHAR(100), marker VARCHAR(100))", s));
+    assert(!ddl.executeSql(
+        "CREATE MATERIALIZED VIEW refreshed_values AS "
+        "SELECT id, note, marker FROM source_values", s));
+
+    using SqlRow = dbms::StorageEngine::SqlRow;
+    const std::vector<SqlRow> sourceRows = {
+        {{"id", std::string("1")},
+         {"note", std::string("hello world")},
+         {"marker", std::string("")}},
+        {{"id", std::string("2")},
+         {"note", std::string("")},
+         {"marker", std::nullopt}},
+        {{"id", std::string("3")},
+         {"note", std::string("  padded text  ")},
+         {"marker", std::string("NULL")}},
+        {{"id", std::string("4")},
+         {"note", std::string("line one\nline two")},
+         {"marker", std::string("two words")}},
+    };
+    for (const auto& row : sourceRows) {
+        assert(g_engine.insertRow(db, "source_values", row) ==
+               dbms::DBStatus::OK);
+    }
+
+    assert(!ddl.executeSql(
+        "REFRESH MATERIALIZED VIEW refreshed_values", s));
+    dbms::DmlResult result = dbms::takeLastDmlResult();
+    assert(result.available && result.metadataOnly);
+    assert(result.commandTag == "REFRESH MATERIALIZED VIEW");
+
+    const std::string backing =
+        dbms::StorageEngine::materializedViewPrefix("refreshed_values");
+    const auto refreshed = readStructuredRows(db, backing);
+    assert(refreshed == sourceRows);
+
+    assert(g_engine.insertRow(
+               db, "source_values",
+               SqlRow{{"id", std::string("5")},
+                      {"note", std::string("not published")},
+                      {"marker", std::string("yet")}}) ==
+           dbms::DBStatus::OK);
+    std::ostringstream concurrentOutput;
+    bool concurrentError = false;
+    {
+        dbms::ScopedOutputCapture capture(concurrentOutput);
+        concurrentError = ddl.executeSql(
+            "REFRESH MATERIALIZED VIEW CONCURRENTLY refreshed_values", s);
+    }
+    assert(concurrentError);
+    assert(concurrentOutput.str().find("SQLSTATE 0A000") !=
+           std::string::npos);
+    assert(readStructuredRows(db, backing) == sourceRows);
+
+    assert(!ddl.executeSql(
+        "REFRESH MATERIALIZED VIEW refreshed_values WITH NO DATA", s));
+    assert(readStructuredRows(db, backing).empty());
+    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
+    const auto* relation =
+        catalog.resolveRelation("refreshed_values", {"public"});
+    assert(relation != nullptr && !relation->relispopulated);
+
+    assert(!ddl.executeSql(
+        "REFRESH MATERIALIZED VIEW refreshed_values WITH DATA", s));
+    assert(readStructuredRows(db, backing).size() == 5);
+    relation = catalog.resolveRelation("refreshed_values", {"public"});
+    assert(relation != nullptr && relation->relispopulated);
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[MATVIEW] typed atomic REFRESH values/state OK"
+              << std::endl;
+}
+
+static void test_refresh_failure_preserves_old_contents() {
+    const std::string db = testDbPath("matview_refresh_rollback");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE TABLE refresh_source (id INT, note VARCHAR(100))", s));
+    using SqlRow = dbms::StorageEngine::SqlRow;
+    const SqlRow oldRow{{"id", std::string("1")},
+                        {"note", std::string("old value")}};
+    assert(g_engine.insertRow(db, "refresh_source", oldRow) ==
+           dbms::DBStatus::OK);
+    assert(!ddl.executeSql(
+        "CREATE MATERIALIZED VIEW rollback_mv AS "
+        "SELECT id, note FROM refresh_source", s));
+
+    const std::string backing =
+        dbms::StorageEngine::materializedViewPrefix("rollback_mv");
+    assert(readStructuredRows(db, backing) ==
+           std::vector<SqlRow>{oldRow});
+    assert(g_engine.createIndex(
+               db, backing, "id", true, {}, "", "", false, true) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insertRow(
+               db, "refresh_source",
+               SqlRow{{"id", std::string("1")},
+                      {"note", std::string("duplicate replacement")}}) ==
+           dbms::DBStatus::OK);
+
+    std::ostringstream failureOutput;
+    bool refreshError = false;
+    {
+        dbms::ScopedOutputCapture capture(failureOutput);
+        refreshError = ddl.executeSql(
+            "REFRESH MATERIALIZED VIEW rollback_mv", s);
+    }
+    assert(refreshError);
+    assert(failureOutput.str().find("SQLSTATE 23505") !=
+           std::string::npos);
+    assert(!g_engine.inTransaction());
+    assert(readStructuredRows(db, backing) ==
+           std::vector<SqlRow>{oldRow});
+    const auto indexes = g_engine.getIndexMetadata(db, backing);
+    assert(indexes.size() == 1 && indexes.front().isUnique);
+
+    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
+    const auto* relation = catalog.resolveRelation("rollback_mv", {"public"});
+    assert(relation != nullptr && relation->relispopulated);
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[MATVIEW] failed REFRESH preserves old contents OK"
+              << std::endl;
+}
+
 static void test_drop_matview_cleans_catalog_atomically() {
     const std::string db = testDbPath("matview_drop_catalog");
     cleanup(db);
@@ -523,6 +668,8 @@ int main() {
     test_create_matview_reversed_projection();
     test_create_matview_preserves_exact_sql_values();
     test_create_matview_with_no_data();
+    test_refresh_preserves_typed_values_and_population_state();
+    test_refresh_failure_preserves_old_contents();
     test_drop_matview_cleans_catalog_atomically();
     test_matview_metadata_write_failure_rolls_back();
     test_matview_drop_io_failure_rolls_back();
