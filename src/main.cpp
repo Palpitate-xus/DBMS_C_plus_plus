@@ -5148,6 +5148,15 @@ string resolveTableName(Session& s, const string& name) {
         if (g_engine.schemaExists(s.currentDB, schema)) {
             string physical = schema == "public"
                 ? table : schema + "__" + table;
+            if (const auto materialized = g_engine.resolveMaterializedView(
+                    s.currentDB, schema, table)) {
+                if (!materialized->populated) {
+                    throw dbms::DbError(
+                        "55000", "materialized view \"" + schema + "." +
+                                     table + "\" has not been populated");
+                }
+                return materialized->backingTable;
+            }
             const string legacyPublic = "public__" + table;
             if (schema == "public" &&
                 !g_engine.tableExists(s.currentDB, physical) &&
@@ -5188,6 +5197,15 @@ string resolveTableName(Session& s, const string& name) {
         }
         string physical = schema == "public"
             ? name : schema + "__" + name;
+        if (const auto materialized = g_engine.resolveMaterializedView(
+                s.currentDB, schema, name)) {
+            if (!materialized->populated) {
+                throw dbms::DbError(
+                    "55000", "materialized view \"" + schema + "." +
+                                 name + "\" has not been populated");
+            }
+            return materialized->backingTable;
+        }
         const string legacyPublic = "public__" + name;
         if (schema == "public" &&
             !g_engine.tableExists(s.currentDB, physical) &&

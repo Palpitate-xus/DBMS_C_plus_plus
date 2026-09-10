@@ -5,6 +5,7 @@
 #include "catalog/CatalogService.h"
 #include "catalog/systables.h"
 #include "catalog/type_registry.h"
+#include "common/DbError.h"
 #include "process/OutputCapture.h"
 #include <algorithm>
 #include <cassert>
@@ -16,6 +17,7 @@
 #include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
+auto resolveTableName(Session& s, const std::string& name) -> std::string;
 
 namespace fs = std::filesystem;
 
@@ -294,6 +296,80 @@ static void test_create_matview_with_no_data() {
     g_engine.catalogService().evict(db);
     cleanup(db);
     std::cout << "[MATVIEW] WITH NO DATA OK" << std::endl;
+}
+
+static void test_unpopulated_query_gate_and_search_path_refresh() {
+    const std::string db = testDbPath("matview_population_gate");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE t (id INT)", s));
+    assert(g_engine.insert(db, "t", {{"id", "7"}}) ==
+           dbms::DBStatus::OK);
+
+    assert(!ddl.executeSql(
+        "CREATE MATERIALIZED VIEW mv AS SELECT id FROM t WITH NO DATA", s));
+    const auto publicView =
+        g_engine.resolveMaterializedView(db, "public", "mv");
+    assert(publicView && !publicView->populated);
+    for (const std::string& name : {std::string("mv"),
+                                    std::string("public.mv")}) {
+        bool rejected = false;
+        try {
+            (void)resolveTableName(s, name);
+        } catch (const dbms::DbError& error) {
+            rejected = error.sqlState() == "55000";
+        }
+        assert(rejected);
+    }
+    assert(!ddl.executeSql("REFRESH MATERIALIZED VIEW mv", s));
+    assert(resolveTableName(s, "mv") == publicView->backingTable);
+
+    assert(!ddl.executeSql("CREATE SCHEMA reporting", s));
+    assert(!ddl.executeSql(
+        "CREATE MATERIALIZED VIEW reporting.mv AS "
+        "SELECT id FROM t WITH NO DATA", s));
+    s.searchPath = "reporting, public";
+    const auto reportingView =
+        g_engine.resolveMaterializedView(db, "reporting", "mv");
+    assert(reportingView && !reportingView->populated);
+    for (const std::string& name : {std::string("mv"),
+                                    std::string("reporting.mv")}) {
+        bool rejected = false;
+        try {
+            (void)resolveTableName(s, name);
+        } catch (const dbms::DbError& error) {
+            rejected = error.sqlState() == "55000";
+        }
+        assert(rejected);
+    }
+    assert(!ddl.executeSql("CREATE TABLE sink (id INT)", s));
+    bool dmlRejected = false;
+    try {
+        bool handled = false;
+        (void)dbms::tryDmlBridge(
+            "INSERT INTO sink SELECT id FROM mv",
+            dbms::SqlCommand::Insert, s, handled);
+    } catch (const dbms::DbError& error) {
+        dmlRejected = error.sqlState() == "55000";
+    }
+    assert(dmlRejected);
+
+    // REFRESH itself is a relation lookup and must honor search_path too.
+    assert(!ddl.executeSql("REFRESH MATERIALIZED VIEW mv", s));
+    const auto populated =
+        g_engine.resolveMaterializedView(db, "reporting", "mv");
+    assert(populated && populated->populated);
+    assert(resolveTableName(s, "mv") == populated->backingTable);
+    assert(resolveTableName(s, "reporting.mv") == populated->backingTable);
+
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[MATVIEW] unpopulated query gate/search_path REFRESH OK"
+              << std::endl;
 }
 
 static void test_refresh_preserves_typed_values_and_population_state() {
@@ -668,6 +744,7 @@ int main() {
     test_create_matview_reversed_projection();
     test_create_matview_preserves_exact_sql_values();
     test_create_matview_with_no_data();
+    test_unpopulated_query_gate_and_search_path_refresh();
     test_refresh_preserves_typed_values_and_population_state();
     test_refresh_failure_preserves_old_contents();
     test_drop_matview_cleans_catalog_atomically();

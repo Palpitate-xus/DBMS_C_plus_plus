@@ -8,6 +8,7 @@
 #include "access/HashIndex.h"
 #include "catalog/type_registry.h"
 #include "commands/TableManage.h"
+#include "common/DbError.h"
 #include "expression/ExprEvaluator.h"
 #include "expression/expr_helper.h"
 #include "parser/parser.h"
@@ -444,6 +445,15 @@ std::string resolveTable(Session& s, const std::string& name) {
         if (g_engine.schemaExists(s.currentDB, schema)) {
             std::string physical = schema == "public"
                 ? table : schema + "__" + table;
+            if (const auto materialized = g_engine.resolveMaterializedView(
+                    s.currentDB, schema, table)) {
+                if (!materialized->populated) {
+                    throw DbError(
+                        "55000", "materialized view \"" + schema + "." +
+                                     table + "\" has not been populated");
+                }
+                return materialized->backingTable;
+            }
             const std::string legacyPublic = "public__" + table;
             if (schema == "public" &&
                 !g_engine.tableExists(s.currentDB, physical) &&
@@ -479,6 +489,15 @@ std::string resolveTable(Session& s, const std::string& name) {
         }
         std::string physical = schema == "public"
             ? name : schema + "__" + name;
+        if (const auto materialized = g_engine.resolveMaterializedView(
+                s.currentDB, schema, name)) {
+            if (!materialized->populated) {
+                throw DbError(
+                    "55000", "materialized view \"" + schema + "." +
+                                 name + "\" has not been populated");
+            }
+            return materialized->backingTable;
+        }
         const std::string legacyPublic = "public__" + name;
         if (schema == "public" &&
             !g_engine.tableExists(s.currentDB, physical) &&

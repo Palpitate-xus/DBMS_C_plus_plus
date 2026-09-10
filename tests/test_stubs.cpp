@@ -5,6 +5,7 @@
 #include "Session.h"
 #include "commands/TableManage.h"
 #include "common/Config.h"
+#include "common/DbError.h"
 
 struct Session;
 
@@ -43,6 +44,15 @@ std::string resolveTableName(Session& s, const std::string& name) {
         if (g_engine.schemaExists(s.currentDB, schema)) {
             const std::string physical = schema == "public"
                 ? table : schema + "__" + table;
+            if (const auto materialized = g_engine.resolveMaterializedView(
+                    s.currentDB, schema, table)) {
+                if (!materialized->populated) {
+                    throw dbms::DbError(
+                        "55000", "materialized view \"" + schema + "." +
+                                     table + "\" has not been populated");
+                }
+                return materialized->backingTable;
+            }
             const std::string legacyPublic = "public__" + table;
             if (schema == "public" &&
                 !g_engine.tableExists(s.currentDB, physical) &&
@@ -74,6 +84,15 @@ std::string resolveTableName(Session& s, const std::string& name) {
         }
         std::string physical = schema == "public"
             ? name : schema + "__" + name;
+        if (const auto materialized = g_engine.resolveMaterializedView(
+                s.currentDB, schema, name)) {
+            if (!materialized->populated) {
+                throw dbms::DbError(
+                    "55000", "materialized view \"" + schema + "." +
+                                 name + "\" has not been populated");
+            }
+            return materialized->backingTable;
+        }
         const std::string legacyPublic = "public__" + name;
         if (schema == "public" &&
             !g_engine.tableExists(s.currentDB, physical) &&

@@ -58,6 +58,79 @@ def main():
         assert type_oids == [23, 1043, 1043], type_oids
         assert command_tag == "SELECT 4", command_tag
 
+        # A WITH NO DATA materialized view exists but is not scannable until
+        # it has been populated.  Both qualified and search_path resolution
+        # must report PostgreSQL's object-not-in-prerequisite-state code.
+        population_setup = [
+            ("CREATE MATERIALIZED VIEW unpopulated_mv AS "
+             "SELECT id, note FROM refresh_values WITH NO DATA;"),
+            "CREATE SCHEMA reporting;",
+            ("CREATE MATERIALIZED VIEW reporting.unpopulated_mv AS "
+             "SELECT id, note FROM refresh_values WITH NO DATA;"),
+        ]
+        for sql in population_setup:
+            _, state, message, _, _, _ = query(
+                runner, client, server, sql)
+            assert state is None, (sql, state, message)
+
+        for sql in [
+                "SELECT * FROM unpopulated_mv;",
+                "SELECT * FROM public.unpopulated_mv;",
+                "SELECT * FROM reporting.unpopulated_mv;"]:
+            _, state, _, _, _, _ = query(runner, client, server, sql)
+            assert state == "55000", (sql, state)
+
+        _, state, message, _, _, _ = query(
+            runner, client, server,
+            "SET search_path TO reporting, public;")
+        assert state is None, (state, message)
+        _, state, _, _, _, _ = query(
+            runner, client, server, "SELECT * FROM unpopulated_mv;")
+        assert state == "55000", state
+
+        # REFRESH uses the same namespace rules and publishes the new state
+        # only after its existing atomic replacement commits.
+        _, state, message, _, command_tag, _ = query(
+            runner, client, server,
+            "REFRESH MATERIALIZED VIEW unpopulated_mv;")
+        assert state is None, (state, message)
+        assert command_tag == "REFRESH MATERIALIZED VIEW", command_tag
+        rows, state, message, headers, command_tag, _ = query(
+            runner, client, server,
+            "SELECT id, note FROM unpopulated_mv ORDER BY id;")
+        assert state is None, (state, message)
+        assert rows == [row[:2] for row in expected], rows
+        assert headers == ["id", "note"], headers
+        assert command_tag == "SELECT 4", command_tag
+
+        _, state, message, _, _, _ = query(
+            runner, client, server,
+            "SET search_path TO public;")
+        assert state is None, (state, message)
+        _, state, message, _, _, _ = query(
+            runner, client, server,
+            "REFRESH MATERIALIZED VIEW unpopulated_mv;")
+        assert state is None, (state, message)
+        rows, state, message, _, _, _ = query(
+            runner, client, server,
+            "SELECT id FROM public.unpopulated_mv ORDER BY id;")
+        assert state is None, (state, message)
+        assert rows == [["1"], ["2"], ["3"], ["4"]], rows
+
+        _, state, message, _, command_tag, _ = query(
+            runner, client, server,
+            "REFRESH MATERIALIZED VIEW public.unpopulated_mv WITH NO DATA;")
+        assert state is None, (state, message)
+        assert command_tag == "REFRESH MATERIALIZED VIEW", command_tag
+        _, state, _, _, _, _ = query(
+            runner, client, server,
+            "SELECT * FROM public.unpopulated_mv;")
+        assert state == "55000", state
+        _, state, message, _, _, _ = query(
+            runner, client, server,
+            "REFRESH MATERIALIZED VIEW public.unpopulated_mv WITH DATA;")
+        assert state is None, (state, message)
+
         _, state, message, _, _, _ = query(
             runner, client, server,
             "INSERT INTO refresh_values VALUES (5, 'new', 'row');")

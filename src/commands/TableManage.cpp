@@ -4335,6 +4335,64 @@ static std::filesystem::path materializedViewPath(const std::string& dbname,
     return engine->viewsDir(dbname) / (viewname + ".mview");
 }
 
+std::optional<StorageEngine::MaterializedViewResolution>
+StorageEngine::resolveMaterializedView(const std::string& dbname,
+                                       const std::string& schemaName,
+                                       const std::string& relationName) {
+    if (!databaseExists(dbname) || schemaName.empty() || relationName.empty()) {
+        return std::nullopt;
+    }
+
+    // The catalog is authoritative for the relation kind and population
+    // state, while existing installations may have one of three historical
+    // physical spellings.  Check the inexpensive metadata files first so an
+    // ordinary table lookup does not need to load the catalog.
+    std::vector<std::string> candidates;
+    auto addCandidate = [&](std::string candidate) {
+        if (std::find(candidates.begin(), candidates.end(), candidate) ==
+            candidates.end()) {
+            candidates.push_back(std::move(candidate));
+        }
+    };
+    if (schemaName == "public") addCandidate(relationName);
+    addCandidate(schemaName + "." + relationName);
+    addCandidate(schemaName == "public"
+                     ? "public__" + relationName
+                     : schemaName + "__" + relationName);
+
+    std::string storageName;
+    for (const auto& candidate : candidates) {
+        if (isMaterializedView(dbname, candidate)) {
+            storageName = candidate;
+            break;
+        }
+    }
+    if (storageName.empty()) return std::nullopt;
+
+    CatalogManager& catalog = catalogService().get(dbname);
+    const PgClassRow* relation =
+        catalog.resolveRelation(relationName, {schemaName});
+    if (!relation || relation->relkind != 'm') {
+        throw DbError(
+            "XX001",
+            "materialized view metadata is inconsistent for \"" +
+                schemaName + "." + relationName + "\"");
+    }
+
+    MaterializedViewResolution resolution;
+    resolution.schemaName = schemaName;
+    resolution.relationName = relationName;
+    resolution.storageName = storageName;
+    resolution.backingTable = materializedViewPrefix(storageName);
+    resolution.populated = relation->relispopulated;
+    if (!tableExists(dbname, resolution.backingTable)) {
+        throw DbError(
+            "XX001", "materialized view \"" + schemaName + "." +
+                         relationName + "\" has no backing relation");
+    }
+    return resolution;
+}
+
 bool StorageEngine::isMaterializedView(const std::string& dbname,
                                        const std::string& viewname) const {
     if (!databaseExists(dbname) || !validMetadataObjectName(viewname)) {

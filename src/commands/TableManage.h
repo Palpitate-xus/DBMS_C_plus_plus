@@ -227,6 +227,19 @@ public:
 
     // Materialized view (stores query results in a backing table)
     static std::string materializedViewPrefix(const std::string& viewname) { return "__mv_" + viewname; }
+    struct MaterializedViewResolution {
+        std::string schemaName;
+        std::string relationName;
+        // File-backed materialized views historically used the SQL spelling
+        // (for example reporting.mv) as their storage key.  Keep that key
+        // separate from the catalog identity and from the backing table.
+        std::string storageName;
+        std::string backingTable;
+        bool populated = true;
+    };
+    std::optional<MaterializedViewResolution> resolveMaterializedView(
+        const std::string& dbname, const std::string& schemaName,
+        const std::string& relationName);
     bool isMaterializedView(const std::string& dbname, const std::string& viewname) const;
     std::string getMaterializedViewSQL(const std::string& dbname, const std::string& viewname) const;
     std::vector<std::string> getMaterializedViewNames(const std::string& dbname) const;

@@ -50,6 +50,41 @@ std::string trim(const std::string& s) {
     return s.substr(a, b - a);
 }
 
+std::optional<StorageEngine::MaterializedViewResolution>
+resolveMaterializedViewForSession(Session& session,
+                                  const std::string& requestedName) {
+    CatalogManager::QualifiedName qualified;
+    if (!CatalogManager::parseQualifiedName(requestedName, qualified) ||
+        qualified.name.empty()) {
+        return std::nullopt;
+    }
+    if (!qualified.schema.empty()) {
+        return g_engine.resolveMaterializedView(
+            session.currentDB, qualified.schema, qualified.name);
+    }
+
+    std::vector<std::string> searchPath;
+    std::string canonical;
+    if (!dbms::parseSessionSearchPath(
+            session.searchPath, searchPath, canonical)) {
+        searchPath = {"public"};
+    }
+    for (const auto& rawSchema : searchPath) {
+        const std::string schema = dbms::expandSessionSearchPathEntry(
+            rawSchema, session.username);
+        if (schema == "pg_catalog" || schema == "pg_temp" ||
+            schema.rfind("pg_temp_", 0) == 0 ||
+            !g_engine.schemaExists(session.currentDB, schema)) {
+            continue;
+        }
+        if (auto materialized = g_engine.resolveMaterializedView(
+                session.currentDB, schema, qualified.name)) {
+            return materialized;
+        }
+    }
+    return std::nullopt;
+}
+
 std::string stripQuotes(const std::string& s) {
     if (s.size() >= 2 && ((s.front() == '\'' && s.back() == '\'') ||
                           (s.front() == '"' && s.back() == '"'))) {
@@ -8512,12 +8547,15 @@ bool DdlExecutor::executeRefreshMaterializedView(
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
-    const std::string viewName = stmt->viewName;
-    if (!g_engine.isMaterializedView(s.currentDB, viewName)) {
-        std::cout << "ERROR: relation \"" << viewName
+    const std::string requestedViewName = stmt->viewName;
+    const auto materialized =
+        resolveMaterializedViewForSession(s, requestedViewName);
+    if (!materialized) {
+        std::cout << "ERROR: relation \"" << requestedViewName
                   << "\" does not exist (SQLSTATE 42P01)" << std::endl;
         return true;
     }
+    const std::string& viewName = materialized->storageName;
     // The old handler silently ran an ordinary destructive refresh after
     // stripping CONCURRENTLY. Until a snapshot-preserving two-version swap is
     // available, fail before opening a transaction or touching the backing
@@ -8529,14 +8567,7 @@ bool DdlExecutor::executeRefreshMaterializedView(
         return true;
     }
 
-    const std::string backingTable =
-        StorageEngine::materializedViewPrefix(viewName);
-    if (!g_engine.tableExists(s.currentDB, backingTable)) {
-        std::cout << "ERROR: materialized view \"" << viewName
-                  << "\" has no backing relation (SQLSTATE XX001)"
-                  << std::endl;
-        return true;
-    }
+    const std::string& backingTable = materialized->backingTable;
     const std::string selectSql =
         g_engine.getMaterializedViewSQL(s.currentDB, viewName);
     if (selectSql.empty()) {
@@ -8592,20 +8623,11 @@ bool DdlExecutor::executeRefreshMaterializedView(
         ++inserted;
     }
 
-    CatalogManager::QualifiedName qualifiedName;
-    if (!CatalogManager::parseQualifiedName(viewName, qualifiedName) ||
-        qualifiedName.name.empty()) {
-        std::cout << "ERROR: invalid materialized-view name (SQLSTATE 42601)"
-                  << std::endl;
-        return true;
-    }
-    const std::string schemaName = qualifiedName.schema.empty()
-        ? "public" : qualifiedName.schema;
     try {
         CatalogManager& catalog =
             g_engine.catalogService().get(s.currentDB);
         const PgClassRow* relation = catalog.resolveRelation(
-            qualifiedName.name, {schemaName});
+            materialized->relationName, {materialized->schemaName});
         if (!relation || relation->relkind != 'm') {
             std::cout << "ERROR: materialized-view catalog entry is missing "
                          "(SQLSTATE XX001)"
@@ -8627,7 +8649,8 @@ bool DdlExecutor::executeRefreshMaterializedView(
         return true;
     }
 
-    transaction.recordUpdate(DdlObjectKind::MaterializedView, viewName);
+    transaction.recordUpdate(
+        DdlObjectKind::MaterializedView, materialized->storageName);
     if (!transaction.commit()) return true;
 
     DmlResult result;
