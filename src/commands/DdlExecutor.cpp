@@ -3323,6 +3323,7 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
     std::string domainName;
     std::string domainCheck;
     std::vector<std::string> domainTypeMods;
+    std::string enumTypeName;
     std::vector<std::string> enumValues;
     if (!dbname.empty()) {
         auto dom = g_engine.getDomain(dbname, baseType);
@@ -3342,6 +3343,7 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
         }
         auto et = g_engine.getEnumType(dbname, baseType);
         if (!et.name.empty()) {
+            enumTypeName = baseType;
             enumValues = et.labels;
             baseType = "varchar"; // store enum values as strings
         }
@@ -3550,6 +3552,11 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
     col.isUnique = cd.isUnique;
     col.isArray = cd.isArray;
     col.enumValues = enumValues;
+    // Keep the declared enum type as the column's persisted type identity.
+    // The varchar factory above still supplies the variable-length physical
+    // layout; replacing dataType with "varchar" made two independent enum
+    // types with the same labels indistinguishable after CREATE TABLE.
+    if (!enumTypeName.empty()) col.dataType = enumTypeName;
     if (!domainName.empty()) {
         col.domainName = domainName;
         // Re-apply domain default if column has no explicit default.

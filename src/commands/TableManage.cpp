@@ -14140,7 +14140,14 @@ bool foreignKeyColumnTypesCompatible(const Column& local,
                local.domainName == referenced.domainName;
     }
     if (!local.enumValues.empty() || !referenced.enumValues.empty()) {
-        return local.enumValues == referenced.enumValues;
+        // Named enums are assignment-compatible only with the same enum
+        // type.  The labels are not their identity: PostgreSQL treats two
+        // separately declared enums as distinct even when their current
+        // label lists happen to be identical.  Inline legacy ENUM columns
+        // have no named identity and retain their historical label-based
+        // compatibility.
+        return local.dataType == referenced.dataType &&
+               local.enumValues == referenced.enumValues;
     }
 
     const auto baseType = [](const Column& column) {

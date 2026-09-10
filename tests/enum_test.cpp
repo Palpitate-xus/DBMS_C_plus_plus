@@ -40,6 +40,27 @@ static void test_enum_basic() {
     err = ddl.executeSql("CREATE TABLE t (id INT PRIMARY KEY, m mood)", s);
     assert(!err);
 
+    // The named enum identity must survive schema serialization.  It is not
+    // interchangeable with another enum merely because the labels match.
+    {
+        dbms::StorageEngine reopened;
+        const auto schema = reopened.getTableSchema(db, "t");
+        assert(schema.len == 2);
+        assert(schema.cols[1].dataType == "mood");
+        assert((schema.cols[1].enumValues ==
+                std::vector<std::string>{"happy", "sad", "neutral"}));
+    }
+    assert(!ddl.executeSql(
+        "CREATE TYPE other_mood AS ENUM ('happy', 'sad', 'neutral')", s));
+    assert(ddl.executeSql(
+        "CREATE TABLE enum_parent (m mood PRIMARY KEY)", s) == false);
+    assert(ddl.executeSql(
+        "CREATE TABLE enum_child_bad (id INT PRIMARY KEY, m other_mood "
+        "REFERENCES enum_parent(m))", s));
+    assert(ddl.executeSql(
+        "CREATE TABLE enum_child_ok (id INT PRIMARY KEY, m mood "
+        "REFERENCES enum_parent(m))", s) == false);
+
     assert(g_engine.insert(db, "t", {{"id", "1"}, {"m", "happy"}}) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "t", {{"id", "2"}, {"m", "sad"}}) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "t", {{"id", "3"}, {"m", "angry"}}) == dbms::DBStatus::INVALID_VALUE);
