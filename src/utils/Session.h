@@ -147,6 +147,9 @@ struct Session {
     std::map<std::string, std::string> preparedStmts;
     // PostgreSQL PREPARE name(types) AS ...: declared parameter types
     std::map<std::string, std::vector<std::string>> preparedStmtTypes;
+    // Protocol OIDs for the same statement registry.  SQL PREPARE and wire
+    // Parse share this namespace; zero means an as-yet unspecified type.
+    std::map<std::string, std::vector<uint32_t>> preparedStmtParameterOids;
     // SELECT/UPDATE/DELETE ... FROM ONLY t: suppress inheritance expansion
     // for the next statement (reset after each execution).
     bool onlyNext = false;

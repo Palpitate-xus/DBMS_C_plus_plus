@@ -54,9 +54,28 @@ static void test_head_parse() {
     assert(ps_parsePrepareHead("q3( varchar )", name, types));
     assert(name == "q3" && types.size() == 1 && types[0] == "varchar");
 
+    assert(ps_parsePrepareHead("q4(numeric(10, 2), text)", name, types));
+    assert(name == "q4" && types.size() == 2);
+    assert(types[0] == "numeric(10, 2)" && types[1] == "text");
+
     assert(!ps_parsePrepareHead("  ", name, types));
     assert(!ps_parsePrepareHead("bad(unbalanced", name, types));
+    assert(!ps_parsePrepareHead("bad(int) trailing", name, types));
+    assert(!ps_parsePrepareHead("bad(int,)", name, types));
     std::cout << "[PREP-PG] head parser OK" << std::endl;
+}
+
+static void test_parameter_analysis() {
+    size_t count = 0;
+    std::string err;
+    assert(ps_analyzeDollarParams(
+        "SELECT $2, $1, '$99', \"$88\", $$ $77 $$, "
+        "/* $66 /* $65 */ */ $2 -- $55\n",
+        count, err));
+    assert(count == 2);
+    assert(!ps_analyzeDollarParams("SELECT $0", count, err));
+    assert(err.find("$0") != std::string::npos);
+    std::cout << "[PREP-PG] parameter analysis OK" << std::endl;
 }
 
 static void test_arg_split() {
@@ -103,12 +122,19 @@ static void test_dollar_subst() {
     // adjacency: $1$2
     assert(ps_substituteDollarParams("$1$2", {"a", "b"}, out, err));
     assert(out == "ab");
+
+    assert(ps_substituteDollarParams(
+        "SELECT $1, '$1', \"$1\", $$ $1 $$, /* $1 */ $2 -- $1\n",
+        {"11", "22"}, out, err));
+    assert(out ==
+        "SELECT 11, '$1', \"$1\", $$ $1 $$, /* $1 */ 22 -- $1\n");
     std::cout << "[PREP-PG] $n substitution OK" << std::endl;
 }
 
 int main() {
     test_find_as();
     test_head_parse();
+    test_parameter_analysis();
     test_arg_split();
     test_dollar_subst();
     std::cout << "[PREP-PG] all tests passed" << std::endl;

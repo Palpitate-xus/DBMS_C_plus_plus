@@ -1,4 +1,5 @@
 #include "systables.h"
+#include <algorithm>
 #include <sstream>
 #include <unordered_map>
 
@@ -70,6 +71,13 @@ Oid mapBuiltinTypeNameToOid(const std::string& typeName) {
     auto it = kBuiltinTypeMap.find(typeName);
     if (it != kBuiltinTypeMap.end()) return it->second;
     return INVALID_OID;
+}
+
+bool isBuiltinTypeOid(Oid oid) {
+    if (oid == INVALID_OID) return false;
+    return std::any_of(
+        kBuiltinTypeMap.begin(), kBuiltinTypeMap.end(),
+        [oid](const auto& entry) { return entry.second == oid; });
 }
 
 std::string PgNamespaceRow::toString() const {

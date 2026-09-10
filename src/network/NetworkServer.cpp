@@ -25,6 +25,7 @@
 #include "process/RuntimeStats.h"
 #include "process/OutputCapture.h"
 #include "process/AdvisoryLockManager.h"
+#include "utils/prepared_stmts.h"
 #include "Config.h"
 #include <netinet/tcp.h>
 
@@ -316,11 +317,6 @@ struct QueryResult {
     std::vector<std::vector<bool>> nulls;
     std::vector<QueryNotice> notices;
     std::string commandTag;
-};
-
-struct ProtocolPreparedStatement {
-    std::string sql;
-    std::vector<uint32_t> parameterTypes;
 };
 
 struct ProtocolPortal {
@@ -903,70 +899,6 @@ static const char* protocolParameterErrorSqlstate(
         return "22P02";  // invalid_text_representation
     }
     return "0A000";      // unsupported type/format capability
-}
-
-bool substituteProtocolParameters(const std::string& sql,
-                                  const std::vector<std::string>& literals,
-                                  std::string& expanded,
-                                  std::string& error) {
-    expanded.clear();
-    expanded.reserve(sql.size());
-    bool singleQuoted = false;
-    bool doubleQuoted = false;
-    for (size_t i = 0; i < sql.size(); ++i) {
-        const char c = sql[i];
-        if (singleQuoted) {
-            expanded.push_back(c);
-            if (c == '\'' && i + 1 < sql.size() && sql[i + 1] == '\'') {
-                expanded.push_back(sql[++i]);
-            } else if (c == '\'') {
-                singleQuoted = false;
-            }
-            continue;
-        }
-        if (doubleQuoted) {
-            expanded.push_back(c);
-            if (c == '"' && i + 1 < sql.size() && sql[i + 1] == '"') {
-                expanded.push_back(sql[++i]);
-            } else if (c == '"') {
-                doubleQuoted = false;
-            }
-            continue;
-        }
-        if (c == '\'') {
-            singleQuoted = true;
-            expanded.push_back(c);
-            continue;
-        }
-        if (c == '"') {
-            doubleQuoted = true;
-            expanded.push_back(c);
-            continue;
-        }
-        if (c != '$' || i + 1 >= sql.size() ||
-            !std::isdigit(static_cast<unsigned char>(sql[i + 1]))) {
-            expanded.push_back(c);
-            continue;
-        }
-        size_t number = 0;
-        size_t end = i + 1;
-        while (end < sql.size() && std::isdigit(static_cast<unsigned char>(sql[end]))) {
-            const size_t digit = static_cast<size_t>(sql[end] - '0');
-            if (number > (std::numeric_limits<size_t>::max() - digit) / 10) {
-                error = "parameter number is too large";
-                return false;
-            }
-            number = number * 10 + digit;
-            ++end;
-        }
-        if (number == 0 || number > literals.size()) {
-            error = "there is no parameter $" + std::to_string(number);
-            return false;
-        }
-        expanded += literals[number - 1];
-        i = end - 1;
-    }
-    return true;
 }
 
 std::string trimText(const std::string& value) {
@@ -2546,7 +2478,6 @@ void handleClient(SecureSocket socket, std::string clientHost) {
     // Connection-local extended-query state. In transaction/statement pool
     // modes these do not travel across backend rentals (PgBouncer has the
     // same restriction for session-level features).
-    std::map<std::string, ProtocolPreparedStatement> preparedStatements;
     std::map<std::string, ProtocolPortal> portals;
     const auto readyStatus = [&]() -> char {
         if (transactionFailed) return 'E';
@@ -2634,7 +2565,9 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             }
             updateProcessInfo(pid, "Query", "executing", trimText(sql));
             // A Simple Query invalidates the unnamed extended-query objects.
-            preparedStatements.erase("");
+            session.preparedStmts.erase("");
+            session.preparedStmtTypes.erase("");
+            session.preparedStmtParameterOids.erase("");
             portals.erase("");
             const std::vector<std::string> statements =
                 splitSimpleQueryStatements(sql);
@@ -2683,6 +2616,11 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     }
                 }
             }
+            if (!g_engine.inTransaction()) {
+                // Named portals are transaction-scoped even when COMMIT or
+                // ROLLBACK arrived through the Simple Query protocol.
+                portals.clear();
+            }
             updateProcessDb(pid, session.currentDB);
             updateProcessInfo(pid, "Idle", "", "");
             if (!sendPendingNotifications(protocol, session.pid)) break;
@@ -2706,28 +2644,65 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             }
             const uint16_t parameterCount = PostgresProtocol::readUInt16(message.payload, offset);
             offset += 2;
-            if (parameterCount > 1024 ||
-                message.payload.size() - offset != static_cast<size_t>(parameterCount) * 4) {
+            if (message.payload.size() - offset !=
+                static_cast<size_t>(parameterCount) * 4) {
                 protocol.sendErrorResponse("ERROR", "08P01", "malformed Parse parameter type list");
                 extendedQueryError = true;
                 continue;
             }
-            ProtocolPreparedStatement prepared;
-            prepared.sql = std::move(sql);
-            prepared.parameterTypes.reserve(parameterCount);
+            std::vector<uint32_t> parameterTypes;
+            parameterTypes.reserve(parameterCount);
+            uint32_t unknownParameterType = 0;
+            auto& parameterCatalog =
+                g_engine.catalogService().get(session.currentDB);
             for (uint16_t i = 0; i < parameterCount; ++i) {
-                prepared.parameterTypes.push_back(
-                    PostgresProtocol::readUInt32(message.payload, offset));
+                const uint32_t parameterType =
+                    PostgresProtocol::readUInt32(message.payload, offset);
                 offset += 4;
+                parameterTypes.push_back(parameterType);
+                if (parameterType != 0 &&
+                    !dbms::isBuiltinTypeOid(parameterType) &&
+                    parameterCatalog.findType(parameterType) == nullptr) {
+                    unknownParameterType = parameterType;
+                }
             }
-            if (splitSimpleQueryStatements(prepared.sql).size() > 1) {
+            if (unknownParameterType != 0) {
+                protocol.sendErrorResponse(
+                    "ERROR", "42704",
+                    "type with OID " + std::to_string(unknownParameterType) +
+                        " does not exist");
+                extendedQueryError = true;
+                continue;
+            }
+            if (splitSimpleQueryStatements(sql).size() > 1) {
                 protocol.sendErrorResponse(
                     "ERROR", "42601",
                     "cannot insert multiple commands into a prepared statement");
                 extendedQueryError = true;
                 continue;
             }
-            if (!statement.empty() && preparedStatements.count(statement) != 0) {
+            size_t inferredParameterCount = 0;
+            std::string parameterError;
+            if (!dbms::ps_analyzeDollarParams(
+                    sql, inferredParameterCount, parameterError)) {
+                protocol.sendErrorResponse("ERROR", "42P02", parameterError);
+                extendedQueryError = true;
+                continue;
+            }
+            if (inferredParameterCount >
+                static_cast<size_t>(std::numeric_limits<uint16_t>::max())) {
+                protocol.sendErrorResponse(
+                    "ERROR", "54000", "too many prepared statement parameters");
+                extendedQueryError = true;
+                continue;
+            }
+            // Parse may omit all or a suffix of its parameter OIDs.  Those
+            // slots are unspecified (OID zero) until a full analyzer can
+            // infer a stronger type from the expression context.
+            parameterTypes.resize(
+                std::max(parameterTypes.size(), inferredParameterCount), 0);
+            if (!statement.empty() &&
+                session.preparedStmts.count(statement) != 0) {
                 protocol.sendErrorResponse(
                     "ERROR", "42P05",
                     "prepared statement \"" + statement + "\" already exists");
@@ -2738,10 +2713,16 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 // A new unnamed statement replaces the old unnamed statement
                 // and invalidates the unnamed portal. Named portals retain
                 // their already-bound query text.
-                preparedStatements.erase(statement);
+                session.preparedStmts.erase(statement);
+                session.preparedStmtTypes.erase(statement);
+                session.preparedStmtParameterOids.erase(statement);
                 portals.erase("");
             }
-            preparedStatements[statement] = std::move(prepared);
+            session.preparedStmts[statement] = std::move(sql);
+            session.preparedStmtTypes[statement] =
+                std::vector<std::string>(parameterTypes.size());
+            session.preparedStmtParameterOids[statement] =
+                std::move(parameterTypes);
             protocol.sendParseComplete();
             continue;
         }
@@ -2750,13 +2731,21 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             std::string portal;
             std::string statement;
             if (!PostgresProtocol::readCString(message.payload, offset, portal) ||
-                !PostgresProtocol::readCString(message.payload, offset, statement) ||
-                preparedStatements.find(statement) == preparedStatements.end()) {
+                !PostgresProtocol::readCString(message.payload, offset, statement)) {
+                protocol.sendErrorResponse("ERROR", "08P01", "malformed Bind message");
+                extendedQueryError = true;
+                continue;
+            }
+            const auto statementIt = session.preparedStmts.find(statement);
+            const auto oidIt = session.preparedStmtParameterOids.find(statement);
+            if (statementIt == session.preparedStmts.end() ||
+                oidIt == session.preparedStmtParameterOids.end()) {
                 protocol.sendErrorResponse("ERROR", "26000", "prepared statement does not exist");
                 extendedQueryError = true;
                 continue;
             }
-            const auto& prepared = preparedStatements.at(statement);
+            const std::string& preparedSql = statementIt->second;
+            const std::vector<uint32_t>& preparedParameterTypes = oidIt->second;
             if (offset + 2 > message.payload.size()) {
                 protocol.sendErrorResponse("ERROR", "08P01", "malformed Bind message");
                 extendedQueryError = true;
@@ -2787,7 +2776,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             }
             const uint16_t valueCount = PostgresProtocol::readUInt16(message.payload, offset);
             offset += 2;
-            if (valueCount != prepared.parameterTypes.size()) {
+            if (valueCount != preparedParameterTypes.size()) {
                 protocol.sendErrorResponse("ERROR", "08P01", "bind message supplies a different number of parameters");
                 extendedQueryError = true;
                 continue;
@@ -2836,7 +2825,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                         message.payload.begin() + static_cast<std::ptrdiff_t>(offset + valueLength));
                     offset += static_cast<size_t>(valueLength);
                     std::string literal = protocolParameterLiteral(
-                        prepared.parameterTypes[i], raw, format == 1,
+                        preparedParameterTypes[i], raw, format == 1,
                         session.lcMonetary, bindErrorMessage);
                     if (!bindErrorMessage.empty()) {
                         bindError = true;
@@ -2881,7 +2870,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             if (extendedQueryError) continue;
             std::string expandedSql;
             std::string substitutionError;
-            if (!substituteProtocolParameters(prepared.sql, literals, expandedSql, substitutionError)) {
+            if (!dbms::ps_substituteDollarParams(
+                    preparedSql, literals, expandedSql, substitutionError)) {
                 protocol.sendErrorResponse("ERROR", "42P02", substitutionError);
                 extendedQueryError = true;
                 continue;
@@ -3036,13 +3026,15 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 continue;
             }
             if (target == 'S') {
-                auto statementIt = preparedStatements.find(name);
-                if (statementIt == preparedStatements.end()) {
+                const auto statementIt = session.preparedStmts.find(name);
+                const auto oidIt = session.preparedStmtParameterOids.find(name);
+                if (statementIt == session.preparedStmts.end() ||
+                    oidIt == session.preparedStmtParameterOids.end()) {
                     protocol.sendErrorResponse("ERROR", "26000", "prepared statement does not exist");
                     extendedQueryError = true;
                     continue;
                 }
-                if (!protocol.sendParameterDescription(statementIt->second.parameterTypes) ||
+                if (!protocol.sendParameterDescription(oidIt->second) ||
                     !protocol.sendNoData()) {
                     extendedQueryError = true;
                 }
@@ -3077,16 +3069,11 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 continue;
             }
             if (target == 'S') {
-                if (preparedStatements.erase(name) != 0) {
-                    for (auto portalIt = portals.begin();
-                         portalIt != portals.end();) {
-                        if (portalIt->second.statement == name) {
-                            portalIt = portals.erase(portalIt);
-                        } else {
-                            ++portalIt;
-                        }
-                    }
-                }
+                // A bound portal owns its query independently. Closing the
+                // source statement must not invalidate an existing portal.
+                session.preparedStmts.erase(name);
+                session.preparedStmtTypes.erase(name);
+                session.preparedStmtParameterOids.erase(name);
             } else if (target == 'P') {
                 portals.erase(name);
             } else {

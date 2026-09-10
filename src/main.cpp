@@ -43,6 +43,7 @@
 #include "commands/DdlExecutor.h"
 #include "commands/DmlExecutor.h"
 #include "catalog/CatalogService.h"
+#include "catalog/systables.h"
 #include "catalog/type_registry.h"
 #include "process/SqlStats.h"
 #include "process/RuntimeStats.h"
@@ -4058,6 +4059,50 @@ static bool handleCopy(const string& sql, Session& s) {
     return true;
 }
 
+static dbms::Oid resolvePreparedParameterType(const string& typeSpec,
+                                              const Session& s) {
+    string typeName = trim(typeSpec);
+    const size_t modifier = typeName.find('(');
+    if (modifier != string::npos) {
+        const size_t close = typeName.rfind(')');
+        if (close == string::npos || close < modifier) return dbms::INVALID_OID;
+        typeName = trim(typeName.substr(0, modifier) + typeName.substr(close + 1));
+    }
+
+    dbms::CatalogManager::QualifiedName qualified;
+    if (!dbms::CatalogManager::parseQualifiedName(typeName, qualified))
+        return dbms::INVALID_OID;
+    if (qualified.schema.empty() || qualified.schema == "pg_catalog") {
+        const dbms::Oid builtin =
+            dbms::mapBuiltinTypeNameToOid(qualified.name);
+        if (builtin != dbms::INVALID_OID) return builtin;
+    }
+    if (!g_engine.databaseExists(s.currentDB)) return dbms::INVALID_OID;
+    auto& catalog = g_engine.catalogService().get(s.currentDB);
+    if (!qualified.schema.empty()) {
+        const auto* nameSpace = catalog.findNamespaceByName(qualified.schema);
+        if (!nameSpace) return dbms::INVALID_OID;
+        const auto* type = catalog.findTypeByName(qualified.name, nameSpace->oid);
+        return type ? type->oid : dbms::INVALID_OID;
+    }
+    vector<string> searchPath;
+    string canonical;
+    if (!dbms::parseSessionSearchPath(s.searchPath, searchPath, canonical))
+        searchPath = {"public"};
+    searchPath.insert(searchPath.begin(), "pg_catalog");
+    for (const auto& rawSchema : searchPath) {
+        const string schema = dbms::expandSessionSearchPathEntry(
+            rawSchema, s.username);
+        const auto* nameSpace = catalog.findNamespaceByName(schema);
+        if (!nameSpace) continue;
+        if (const auto* type =
+                catalog.findTypeByName(qualified.name, nameSpace->oid)) {
+            return type->oid;
+        }
+    }
+    return dbms::INVALID_OID;
+}
+
 static bool handlePrepare(const string& sql, Session& s) {
     string rest = trim(sql.substr(8));
     if (rest.substr(0, 12) == "transaction ") {
@@ -4122,12 +4167,53 @@ static bool handlePrepare(const string& sql, Session& s) {
         string templateSql = trim(rest.substr(asPos + 4));
         string stmtName;
         vector<string> paramTypes;
+        const bool typesDeclared = head.find('(') != string::npos;
         if (!dbms::ps_parsePrepareHead(head, stmtName, paramTypes)) {
-            cout << "SQL syntax error: PREPARE requires a statement name" << endl;
+            cout << "ERROR: invalid PREPARE statement (SQLSTATE 42601)" << endl;
             return true;
+        }
+        if (templateSql.empty()) {
+            cout << "ERROR: prepared statement query is empty (SQLSTATE 42601)"
+                 << endl;
+            return true;
+        }
+        if (s.preparedStmts.count(stmtName) != 0) {
+            cout << "ERROR: prepared statement \"" << stmtName
+                 << "\" already exists (SQLSTATE 42P05)" << endl;
+            return true;
+        }
+        size_t parameterCount = 0;
+        string parameterError;
+        if (!dbms::ps_analyzeDollarParams(templateSql, parameterCount,
+                                           parameterError)) {
+            cout << "ERROR: " << parameterError << " (SQLSTATE 42P02)"
+                 << endl;
+            return true;
+        }
+        if (typesDeclared && parameterCount > paramTypes.size()) {
+            cout << "ERROR: there is no parameter $" << parameterCount
+                 << " (SQLSTATE 42P02)" << endl;
+            return true;
+        }
+        if (!typesDeclared) paramTypes.resize(parameterCount);
+        vector<uint32_t> parameterOids;
+        parameterOids.reserve(paramTypes.size());
+        for (const auto& type : paramTypes) {
+            if (type.empty()) {
+                parameterOids.push_back(0);
+                continue;
+            }
+            const dbms::Oid oid = resolvePreparedParameterType(type, s);
+            if (oid == dbms::INVALID_OID) {
+                cout << "ERROR: type \"" << type
+                     << "\" does not exist (SQLSTATE 42704)" << endl;
+                return true;
+            }
+            parameterOids.push_back(oid);
         }
         s.preparedStmts[stmtName] = templateSql;
         s.preparedStmtTypes[stmtName] = paramTypes;
+        s.preparedStmtParameterOids[stmtName] = std::move(parameterOids);
         cout << "Statement " << stmtName << " prepared" << endl;
         return false;
     }
@@ -4140,11 +4226,23 @@ static bool handlePrepare(const string& sql, Session& s) {
     string templateSql = trim(rest.substr(fromPos + 6));
     templateSql = stripQuotes(templateSql);
     if (templateSql.empty()) {
-        cout << "SQL syntax error: empty statement" << endl;
+        cout << "ERROR: prepared statement query is empty (SQLSTATE 42601)"
+             << endl;
+        return true;
+    }
+    if (stmtName.empty()) {
+        cout << "ERROR: PREPARE requires a statement name (SQLSTATE 42601)"
+             << endl;
+        return true;
+    }
+    if (s.preparedStmts.count(stmtName) != 0) {
+        cout << "ERROR: prepared statement \"" << stmtName
+             << "\" already exists (SQLSTATE 42P05)" << endl;
         return true;
     }
     s.preparedStmts[stmtName] = templateSql;
     s.preparedStmtTypes[stmtName] = {};
+    s.preparedStmtParameterOids[stmtName] = {};
     cout << "Statement " << stmtName << " prepared" << endl;
     return false;
 }
@@ -4156,7 +4254,7 @@ static bool handleExecutePrepared(const string& sql, Session& s) {
     string stmtName, usingClause;
     bool pgForm = false;
     size_t op = rest.find('(');
-    if (op != string::npos && rest.back() == ')') {
+    if (!rest.empty() && op != string::npos && rest.back() == ')') {
         pgForm = true;
         stmtName = trim(rest.substr(0, op));
         usingClause = trim(rest.substr(op + 1, rest.size() - op - 2));
@@ -4169,9 +4267,15 @@ static bool handleExecutePrepared(const string& sql, Session& s) {
             usingClause = trim(rest.substr(usingPos + 7));
         }
     }
+    if (stmtName.empty()) {
+        cout << "ERROR: EXECUTE requires a prepared statement name "
+                "(SQLSTATE 42601)" << endl;
+        return true;
+    }
     auto it = s.preparedStmts.find(stmtName);
     if (it == s.preparedStmts.end()) {
-        cout << "Prepared statement " << stmtName << " not found" << endl;
+        cout << "ERROR: prepared statement \"" << stmtName
+             << "\" does not exist (SQLSTATE 26000)" << endl;
         return true;
     }
     string expanded = it->second;
@@ -4179,16 +4283,33 @@ static bool handleExecutePrepared(const string& sql, Session& s) {
     if (!usingClause.empty()) {
         values = dbms::ps_splitExecuteArgs(usingClause);
     }
-    if (!values.empty()) {
-        // PostgreSQL $n substitution: values pass through verbatim.
-        if (pgForm || expanded.find('$') != string::npos) {
-            string sub, perr;
-            if (!dbms::ps_substituteDollarParams(expanded, values, sub, perr)) {
-                cout << "ERROR: " << perr << endl;
-                return true;
+    const auto typeIt = s.preparedStmtTypes.find(stmtName);
+    const vector<string> noTypes;
+    const vector<string>& parameterTypes = typeIt == s.preparedStmtTypes.end()
+        ? noTypes : typeIt->second;
+    const bool dollarForm = pgForm || !parameterTypes.empty() ||
+                            expanded.find('$') != string::npos;
+    if (dollarForm && values.size() != parameterTypes.size()) {
+        cout << "ERROR: wrong number of parameters for prepared statement \""
+             << stmtName << "\": expected " << parameterTypes.size()
+             << " but got " << values.size() << " (SQLSTATE 42601)" << endl;
+        return true;
+    }
+    if (dollarForm) {
+        vector<string> typedValues = values;
+        for (size_t i = 0; i < typedValues.size(); ++i) {
+            if (!parameterTypes[i].empty()) {
+                typedValues[i] = "(" + typedValues[i] + ")::" + parameterTypes[i];
             }
-            expanded = sub;
         }
+        string sub, perr;
+        if (!dbms::ps_substituteDollarParams(expanded, typedValues, sub, perr)) {
+            cout << "ERROR: " << perr << " (SQLSTATE 42P02)" << endl;
+            return true;
+        }
+        expanded = std::move(sub);
+    }
+    if (!values.empty() && !dollarForm) {
         // Legacy '?' substitution for templates without $n.
         size_t vidx = 0;
         size_t pos = 0;
@@ -4206,7 +4327,26 @@ static bool handleExecutePrepared(const string& sql, Session& s) {
             return true;
         }
     }
-    return execute(expanded, s);
+    // EXECUTE is a transparent wrapper around the prepared query. Capture the
+    // nested statement's typed result at its recursion depth, then republish
+    // it for the outer protocol/CLI boundary instead of losing all rows and
+    // returning a metadata-only EXECUTE tag.
+    const unsigned previousCaptureDepth = metadataCaptureDepth;
+    metadataCaptureDepth = executeDepth + 1;
+    dbms::clearLastDmlResult();
+    bool failed = false;
+    try {
+        failed = execute(expanded, s);
+    } catch (...) {
+        metadataCaptureDepth = previousCaptureDepth;
+        throw;
+    }
+    dbms::DmlResult preparedResult = dbms::takeLastDmlResult();
+    metadataCaptureDepth = previousCaptureDepth;
+    if (preparedResult.available) {
+        dbms::publishLastDmlResult(std::move(preparedResult));
+    }
+    return failed;
 }
 
 static bool handleDeallocate(const string& sql, Session& s) {
@@ -4218,18 +4358,27 @@ static bool handleDeallocate(const string& sql, Session& s) {
         size_t n = s.preparedStmts.size();
         s.preparedStmts.clear();
         s.preparedStmtTypes.clear();
+        s.preparedStmtParameterOids.clear();
         cout << "Deallocated " << n << " prepared statements" << endl;
         return false;
     }
-    if (low.rfind("prepare", 0) == 0) {
+    if (low == "prepare" || low.rfind("prepare ", 0) == 0) {
         rest = trim(rest.substr(7));
     }
     string stmtName = trim(rest);
+    if (stmtName.empty()) {
+        cout << "ERROR: DEALLOCATE requires a prepared statement name "
+                "(SQLSTATE 42601)" << endl;
+        return true;
+    }
     if (s.preparedStmts.erase(stmtName)) {
         s.preparedStmtTypes.erase(stmtName);
+        s.preparedStmtParameterOids.erase(stmtName);
         cout << "Statement " << stmtName << " deallocated" << endl;
     } else {
-        cout << "Prepared statement " << stmtName << " not found" << endl;
+        cout << "ERROR: prepared statement \"" << stmtName
+             << "\" does not exist (SQLSTATE 26000)" << endl;
+        return true;
     }
     return false;
 }
@@ -14507,6 +14656,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             dbms::advisoryLockManager().releaseSession(advisoryOwner(s));
             s.preparedStmts.clear();
             s.preparedStmtTypes.clear();
+            s.preparedStmtParameterOids.clear();
             s.sequenceLastValues.clear();
             s.sequenceLastValuesByOid.clear();
             s.lastUsedSequenceOid = 0;
@@ -16264,6 +16414,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
             Session tmpS = s;
             tmpS.preparedStmts.clear();
+            tmpS.preparedStmtTypes.clear();
+            tmpS.preparedStmtParameterOids.clear();
             std::stringstream joinOutput;
             {
                 dbms::ScopedOutputCapture capture(joinOutput);
@@ -16578,6 +16730,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
             // Execute JOIN query to get matching target rows
             Session tmpS = s;
             tmpS.preparedStmts.clear();
+            tmpS.preparedStmtTypes.clear();
+            tmpS.preparedStmtParameterOids.clear();
             std::stringstream joinOutput;
             {
                 dbms::ScopedOutputCapture capture(joinOutput);
@@ -18437,6 +18591,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
         // Clear prepared statements
         s.preparedStmts.clear();
         s.preparedStmtTypes.clear();
+        s.preparedStmtParameterOids.clear();
         s.sequenceLastValues.clear();
         s.sequenceLastValuesByOid.clear();
         s.lastUsedSequenceOid = 0;
@@ -25895,6 +26050,8 @@ int main(int argc, char* argv[]) {
         if (!activeSession) return true;
         Session triggerSession = *activeSession;
         triggerSession.preparedStmts.clear();
+        triggerSession.preparedStmtTypes.clear();
+        triggerSession.preparedStmtParameterOids.clear();
         // EXECUTE FUNCTION actions are stored as "name(args)".  Those are
         // not executable SQL: dispatch them through the UDF runtime (SQL
         // expression or PL/pgSQL interpreter) instead of the SQL pipeline.

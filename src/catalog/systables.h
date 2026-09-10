@@ -256,5 +256,6 @@ struct PgDescriptionRow {
 // Map a canonical/alias type name to its standard PostgreSQL bootstrap OID.
 // Returns INVALID_OID if the name is not a known built-in type.
 Oid mapBuiltinTypeNameToOid(const std::string& typeName);
+bool isBuiltinTypeOid(Oid oid);
 
 } // namespace dbms
