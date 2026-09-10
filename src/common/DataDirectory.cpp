@@ -355,6 +355,39 @@ private:
     int fd_ = -1;
 };
 
+bool readTablespaceMarker(const std::filesystem::path& marker,
+                          std::string& target, std::string& error) {
+    target.clear();
+    ReadOnlyDescriptor descriptor(marker);
+    if (descriptor.get() < 0) {
+        error = "could not open tablespace marker without following links: " +
+            marker.string();
+        return false;
+    }
+    struct stat status {};
+    constexpr off_t maximumBytes = 64 * 1024;
+    if (::fstat(descriptor.get(), &status) != 0 ||
+        !S_ISREG(status.st_mode) || status.st_size <= 0 ||
+        status.st_size > maximumBytes) {
+        error = "invalid tablespace marker: " + marker.string();
+        return false;
+    }
+    target.resize(static_cast<size_t>(status.st_size));
+    if (!readExactlyAt(
+            descriptor.get(), target.data(), target.size(), 0)) {
+        error = "could not read tablespace marker: " + marker.string();
+        return false;
+    }
+    if (!target.empty() && target.back() == '\n') target.pop_back();
+    if (target.empty() || target.find('\0') != std::string::npos ||
+        target.find('\n') != std::string::npos ||
+        target.find('\r') != std::string::npos) {
+        error = "invalid tablespace marker: " + marker.string();
+        return false;
+    }
+    return true;
+}
+
 struct HeapVerificationStats {
     uint64_t files = 0;
     uint64_t blocks = 0;
@@ -463,17 +496,20 @@ bool readTablespaceRoots(const std::filesystem::path& root,
                     markers->path().string();
                 return false;
             }
-            std::ifstream marker(markers->path());
             std::string target;
-            if (!marker || !std::getline(marker, target) || target.empty()) {
-                error = "invalid tablespace marker: " +
-                    markers->path().string();
+            if (!readTablespaceMarker(markers->path(), target, error))
                 return false;
-            }
             std::filesystem::path tablespaceRoot(target);
             if (tablespaceRoot.is_relative()) tablespaceRoot = root / tablespaceRoot;
-            tablespaceRoot = tablespaceRoot.lexically_normal();
-            if (!std::filesystem::is_directory(tablespaceRoot, ec) || ec) {
+            tablespaceRoot = std::filesystem::weakly_canonical(tablespaceRoot, ec);
+            if (ec) {
+                error = "could not resolve tablespace directory: " + target;
+                return false;
+            }
+            const auto rootStatus =
+                std::filesystem::symlink_status(tablespaceRoot, ec);
+            if (ec || rootStatus.type() !=
+                          std::filesystem::file_type::directory) {
                 error = "tablespace directory is unavailable: " +
                     tablespaceRoot.string();
                 return false;
@@ -488,7 +524,10 @@ bool readTablespaceRoots(const std::filesystem::path& root,
                 return false;
             }
             if (!databaseRootExists) continue;
-            if (!std::filesystem::is_directory(databaseRoot, ec) || ec) {
+            const auto databaseRootStatus =
+                std::filesystem::symlink_status(databaseRoot, ec);
+            if (ec || databaseRootStatus.type() !=
+                          std::filesystem::file_type::directory) {
                 error = "tablespace database path is not a directory: " +
                     databaseRoot.string();
                 return false;

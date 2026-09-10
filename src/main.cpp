@@ -6196,41 +6196,6 @@ static string catalogUnescape(const string& s) {
     return out;
 }
 
-struct TablespaceInfo {
-    string name;
-    string owner;
-    string location;
-    string options;
-};
-
-static std::filesystem::path tablespaceCatalogPath() {
-    return ".tablespaces";
-}
-
-static map<string, TablespaceInfo> loadTablespaces() {
-    map<string, TablespaceInfo> result;
-    ifstream in(tablespaceCatalogPath());
-    string line;
-    while (getline(in, line)) {
-        if (trim(line).empty()) continue;
-        auto parts = splitByDelimiter(line, '|');
-        if (parts.size() < 4) continue;
-        TablespaceInfo ts{parts[0], parts[1], parts[2], parts[3]};
-        result[ts.name] = ts;
-    }
-    return result;
-}
-
-static bool saveTablespaces(const map<string, TablespaceInfo>& spaces) {
-    ofstream out(tablespaceCatalogPath(), ios::trunc);
-    if (!out) return false;
-    for (const auto& kv : spaces) {
-        const auto& ts = kv.second;
-        out << ts.name << "|" << ts.owner << "|" << ts.location << "|" << ts.options << "\n";
-    }
-    return true;
-}
-
 struct ExtendedStatisticInfo {
     string name;
     string tableName;
@@ -12654,6 +12619,7 @@ static bool handleDropPolicy(const string& sql, Session& s) {
 
 static bool handleCreateTablespace(const string& sql, Session& s) {
     if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
     string rest = trim(sql.substr(17));
     bool ifNotExists = false;
     if (rest.substr(0, 13) == "if not exists") {
@@ -12672,51 +12638,69 @@ static bool handleCreateTablespace(const string& sql, Session& s) {
         cout << "SQL syntax error: CREATE TABLESPACE requires a name" << endl;
         return true;
     }
-    string name = tokens[0];
-    string owner = s.username;
-    for (size_t i = 1; i + 1 < tokens.size(); ++i) {
-        if (tokens[i] == "owner") owner = tokens[i + 1];
+    const string name = decodeQuotedIdentifier(tokens[0]);
+    if (tokens.size() != 1) {
+        if (tokens.size() == 3 && tokens[1] == "owner") {
+            cout << "ERROR: CREATE TABLESPACE OWNER is not supported "
+                    "(SQLSTATE 0A000)" << endl;
+        } else {
+            cout << "SQL syntax error: CREATE TABLESPACE name LOCATION 'path'"
+                 << endl;
+        }
+        return true;
     }
 
     string location;
-    string options;
-    if (!afterLoc.empty() && afterLoc.front() == '\'') {
-        size_t q2 = afterLoc.find('\'', 1);
-        if (q2 == string::npos) {
-            cout << "SQL syntax error: unterminated LOCATION string" << endl;
-            return true;
-        }
-        location = afterLoc.substr(1, q2 - 1);
-        afterLoc = trim(afterLoc.substr(q2 + 1));
-    } else {
-        size_t sp = afterLoc.find(' ');
-        location = stripQuotes(sp == string::npos ? afterLoc : afterLoc.substr(0, sp));
-        afterLoc = (sp == string::npos) ? "" : trim(afterLoc.substr(sp + 1));
+    if (afterLoc.empty() || afterLoc.front() != '\'') {
+        cout << "SQL syntax error: LOCATION must be a string literal" << endl;
+        return true;
     }
-    if (afterLoc.substr(0, 4) == "with") options = trim(afterLoc.substr(4));
-    if (location.empty()) {
-        cout << "SQL syntax error: CREATE TABLESPACE requires LOCATION" << endl;
+    size_t cursor = 1;
+    bool closed = false;
+    while (cursor < afterLoc.size()) {
+        if (afterLoc[cursor] != '\'') {
+            location += afterLoc[cursor++];
+            continue;
+        }
+        if (cursor + 1 < afterLoc.size() && afterLoc[cursor + 1] == '\'') {
+            location += '\'';
+            cursor += 2;
+            continue;
+        }
+        closed = true;
+        ++cursor;
+        break;
+    }
+    if (!closed || location.empty()) {
+        cout << "SQL syntax error: invalid LOCATION string" << endl;
+        return true;
+    }
+    const string trailing = trim(afterLoc.substr(cursor));
+    if (!trailing.empty()) {
+        if (trailing.rfind("with", 0) == 0) {
+            cout << "ERROR: CREATE TABLESPACE options are not supported "
+                    "(SQLSTATE 0A000)" << endl;
+        } else {
+            cout << "SQL syntax error: trailing input after LOCATION" << endl;
+        }
+        return true;
+    }
+    if (!std::filesystem::path(location).is_absolute()) {
+        cout << "ERROR: tablespace location must be an absolute path "
+                "(SQLSTATE 22023)" << endl;
         return true;
     }
 
-    auto spaces = loadTablespaces();
-    if (spaces.count(name)) {
-        if (ifNotExists) {
-            cout << "Tablespace " << name << " already exists, skipping" << endl;
-            return false;
-        }
-        cout << "Tablespace " << name << " already exists" << endl;
-        return true;
+    const dbms::DBStatus status =
+        g_engine.createTablespace(s.currentDB, name, location);
+    if (status == dbms::DBStatus::TABLE_ALREADY_EXISTS && ifNotExists) {
+        cout << "Tablespace " << name << " already exists, skipping" << endl;
+        return false;
     }
-    try {
-        std::filesystem::create_directories(location);
-    } catch (...) {
-        cout << "Could not create tablespace location: " << location << endl;
-        return true;
-    }
-    spaces[name] = {name, owner, location, options};
-    if (!saveTablespaces(spaces)) {
-        cout << "Create tablespace failed" << endl;
+    if (status != dbms::DBStatus::OK) {
+        cout << "ERROR: could not create tablespace " << name
+             << " (SQLSTATE " << dbms::sqlstateForDBStatus(status) << ")"
+             << endl;
         return true;
     }
     cout << "Tablespace " << name << " created" << endl;
@@ -12725,75 +12709,44 @@ static bool handleCreateTablespace(const string& sql, Session& s) {
 
 static bool handleAlterTablespace(const string& sql, Session& s) {
     if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
     string rest = trim(sql.substr(16));
     vector<string> tokens = tokenize(rest);
-    if (tokens.size() < 3) {
+    if (tokens.size() < 2) {
         cout << "SQL syntax error: ALTER TABLESPACE name RENAME TO newname | OWNER TO user | SET (...)" << endl;
         return true;
     }
-    string name = tokens[0];
-    auto spaces = loadTablespaces();
-    auto it = spaces.find(name);
-    if (it == spaces.end()) {
-        cout << "Tablespace " << name << " not exist" << endl;
-        return true;
-    }
-    if (tokens[1] == "rename" && tokens.size() >= 4 && tokens[2] == "to") {
-        string newName = tokens[3];
-        if (spaces.count(newName)) {
-            cout << "Tablespace " << newName << " already exists" << endl;
-            return true;
-        }
-        auto info = it->second;
-        spaces.erase(it);
-        info.name = newName;
-        spaces[newName] = info;
-        saveTablespaces(spaces);
-        cout << "Tablespace " << name << " renamed to " << newName << endl;
-        return false;
-    }
-    if (tokens[1] == "owner" && tokens.size() >= 4 && tokens[2] == "to") {
-        it->second.owner = tokens[3];
-        saveTablespaces(spaces);
-        cout << "Tablespace " << name << " owner changed" << endl;
-        return false;
-    }
-    if (tokens[1] == "set" || tokens[1] == "reset") {
-        size_t actionPos = rest.find(tokens[1]);
-        it->second.options = trim(rest.substr(actionPos + tokens[1].size()));
-        saveTablespaces(spaces);
-        cout << "Tablespace " << name << " options updated" << endl;
-        return false;
-    }
-    cout << "SQL syntax error: ALTER TABLESPACE name RENAME TO newname | OWNER TO user | SET (...)" << endl;
+    cout << "ERROR: ALTER TABLESPACE is not supported safely yet "
+            "(SQLSTATE 0A000)" << endl;
     return true;
 }
 
 static bool handleDropTablespace(const string& sql, Session& s) {
     if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
     string rest = trim(sql.substr(15));
     bool ifExists = false;
     if (rest.substr(0, 9) == "if exists") {
         ifExists = true;
         rest = trim(rest.substr(9));
     }
-    string name = trim(rest);
-    if (name.empty()) {
+    const vector<string> tokens = tokenize(rest);
+    if (tokens.size() != 1) {
         cout << "SQL syntax error: DROP TABLESPACE name" << endl;
         return true;
     }
-    auto spaces = loadTablespaces();
-    auto it = spaces.find(name);
-    if (it == spaces.end()) {
-        if (ifExists) {
-            cout << "Tablespace " << name << " does not exist, skipping" << endl;
-            return false;
-        }
-        cout << "Tablespace " << name << " not exist" << endl;
+    const string name = decodeQuotedIdentifier(tokens[0]);
+    const dbms::DBStatus status = g_engine.dropTablespace(s.currentDB, name);
+    if (status == dbms::DBStatus::TABLE_NOT_FOUND && ifExists) {
+        cout << "Tablespace " << name << " does not exist, skipping" << endl;
+        return false;
+    }
+    if (status != dbms::DBStatus::OK) {
+        cout << "ERROR: could not drop tablespace " << name
+             << " (SQLSTATE " << dbms::sqlstateForDBStatus(status) << ")"
+             << endl;
         return true;
     }
-    spaces.erase(it);
-    saveTablespaces(spaces);
     cout << "Tablespace " << name << " dropped" << endl;
     return false;
 }

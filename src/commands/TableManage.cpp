@@ -2713,6 +2713,33 @@ bool copyRegularFileDurably(const std::filesystem::path& source,
     return syncRegularFileDurably(destination);
 }
 
+bool syncMovedTreeDurably(const std::filesystem::path& root) {
+    std::vector<std::filesystem::path> directories{root};
+    std::error_code error;
+    std::filesystem::recursive_directory_iterator iterator(root, error);
+    const std::filesystem::recursive_directory_iterator end;
+    if (error) return false;
+    for (; iterator != end; iterator.increment(error)) {
+        if (error || iterator->is_symlink(error) || error) return false;
+        if (iterator->is_directory(error) && !error) {
+            directories.push_back(iterator->path());
+        } else if (error || !iterator->is_regular_file(error) || error ||
+                   !syncRegularFileDurably(iterator->path())) {
+            return false;
+        }
+    }
+    if (error) return false;
+    std::sort(directories.begin(), directories.end(),
+              [](const auto& left, const auto& right) {
+                  return std::distance(left.begin(), left.end()) >
+                         std::distance(right.begin(), right.end());
+              });
+    for (const auto& directory : directories) {
+        if (!index_file::syncDirectory(directory)) return false;
+    }
+    return true;
+}
+
 bool validReindexSwapEntry(const ReindexSwapEntry& entry,
                            const std::filesystem::path& relationRoot,
                            const std::string& tablename) {
@@ -5747,19 +5774,204 @@ std::filesystem::path StorageEngine::indexPath(const std::string& dbname,
 // ========================================================================
 // Tablespace management
 // ========================================================================
+namespace {
+
+constexpr uintmax_t kMaximumTablespaceMarkerBytes = 64 * 1024;
+
+std::filesystem::path tablespaceMetadataDirectory(
+    const StorageEngine& engine, const std::string& dbname) {
+    return engine.dbPath(dbname) / "pg_tblspc";
+}
+
+std::filesystem::path tablespaceCatalogLockPath(
+    const StorageEngine& engine, const std::string& dbname) {
+    const auto database = engine.dbPath(dbname);
+    const auto parent = database.parent_path().empty()
+        ? std::filesystem::path(".") : database.parent_path();
+    return parent / ".tablespace_locks" /
+        (database.filename().string() + ".lock");
+}
+
+bool ensureTablespaceMetadataDirectory(const StorageEngine& engine,
+                                       const std::string& dbname) {
+    const auto directory = tablespaceMetadataDirectory(engine, dbname);
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(directory, error);
+    if (!error && status.type() != std::filesystem::file_type::not_found) {
+        return status.type() == std::filesystem::file_type::directory;
+    }
+    if (error && error != std::errc::no_such_file_or_directory) return false;
+    error.clear();
+    if (!std::filesystem::create_directory(directory, error) || error) {
+        return false;
+    }
+    return index_file::syncDirectory(engine.dbPath(dbname));
+}
+
+class TablespaceCatalogLock {
+public:
+    TablespaceCatalogLock(const std::filesystem::path& path,
+                          bool exclusive) {
+        const auto directory = path.parent_path();
+        std::error_code error;
+        auto directoryStatus =
+            std::filesystem::symlink_status(directory, error);
+        if (error == std::errc::no_such_file_or_directory ||
+            (!error &&
+             directoryStatus.type() == std::filesystem::file_type::not_found)) {
+            error.clear();
+            if (!std::filesystem::create_directory(directory, error) && error) {
+                return;
+            }
+            directoryStatus =
+                std::filesystem::symlink_status(directory, error);
+            const auto parent = directory.parent_path().empty()
+                ? std::filesystem::path(".") : directory.parent_path();
+            if (error ||
+                directoryStatus.type() !=
+                    std::filesystem::file_type::directory ||
+                !index_file::syncDirectory(parent)) {
+                return;
+            }
+        } else if (error ||
+                   directoryStatus.type() !=
+                       std::filesystem::file_type::directory) {
+            return;
+        }
+        fd_ = ::open(path.c_str(),
+                     O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+        if (fd_ < 0) return;
+        struct stat descriptorStatus {};
+        if (::fstat(fd_, &descriptorStatus) != 0 ||
+            !S_ISREG(descriptorStatus.st_mode)) {
+            ::close(fd_);
+            fd_ = -1;
+            return;
+        }
+        const int operation = exclusive ? LOCK_EX : LOCK_SH;
+        int result;
+        do {
+            result = ::flock(fd_, operation);
+        } while (result != 0 && errno == EINTR);
+        if (result != 0) {
+            ::close(fd_);
+            fd_ = -1;
+        }
+    }
+
+    TablespaceCatalogLock(const TablespaceCatalogLock&) = delete;
+    TablespaceCatalogLock& operator=(const TablespaceCatalogLock&) = delete;
+
+    ~TablespaceCatalogLock() {
+        if (fd_ < 0) return;
+        (void)::flock(fd_, LOCK_UN);
+        (void)::close(fd_);
+    }
+
+    bool acquired() const { return fd_ >= 0; }
+
+private:
+    int fd_ = -1;
+};
+
+bool pathIsWithin(const std::filesystem::path& candidate,
+                  const std::filesystem::path& root) {
+    auto candidatePart = candidate.begin();
+    for (auto rootPart = root.begin(); rootPart != root.end();
+         ++rootPart, ++candidatePart) {
+        if (candidatePart == candidate.end() || *candidatePart != *rootPart) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool canonicalDirectory(const std::filesystem::path& input,
+                        std::filesystem::path& result) {
+    std::error_code error;
+    result = std::filesystem::weakly_canonical(input, error);
+    if (error || result.empty() || !result.is_absolute()) return false;
+    const auto status = std::filesystem::symlink_status(result, error);
+    return !error && status.type() == std::filesystem::file_type::directory;
+}
+
+bool readTablespaceMarker(const std::filesystem::path& marker,
+                          std::filesystem::path& root) {
+    root.clear();
+    std::error_code error;
+    const auto markerStatus = std::filesystem::symlink_status(marker, error);
+    if (error || markerStatus.type() != std::filesystem::file_type::regular) {
+        return false;
+    }
+
+    const int fd = ::open(marker.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return false;
+    struct stat status {};
+    bool ok = ::fstat(fd, &status) == 0 && S_ISREG(status.st_mode) &&
+              status.st_size > 0 &&
+              static_cast<uintmax_t>(status.st_size) <=
+                  kMaximumTablespaceMarkerBytes;
+    std::string contents;
+    if (ok) {
+        contents.resize(static_cast<size_t>(status.st_size));
+        size_t offset = 0;
+        while (offset < contents.size()) {
+            const ssize_t count = ::read(fd, contents.data() + offset,
+                                         contents.size() - offset);
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) {
+                ok = false;
+                break;
+            }
+            offset += static_cast<size_t>(count);
+        }
+    }
+    if (::close(fd) != 0) ok = false;
+    if (!ok) return false;
+
+    if (!contents.empty() && contents.back() == '\n') contents.pop_back();
+    if (contents.empty() || contents.find('\0') != std::string::npos ||
+        contents.find('\n') != std::string::npos ||
+        contents.find('\r') != std::string::npos) {
+        return false;
+    }
+    std::filesystem::path stored(contents);
+    if (stored.is_relative()) {
+        // Read legacy markers relative to the cluster root. All newly written
+        // markers contain a canonical absolute path.
+        stored = std::filesystem::absolute(stored, error);
+        if (error) return false;
+    }
+    return canonicalDirectory(stored, root);
+}
+
+bool validTablespaceName(const std::string& name) {
+    return validMetadataObjectName(name) && name.front() != '.';
+}
+
+bool resolveTablespaceRoot(const StorageEngine& engine,
+                           const std::string& dbname,
+                           const std::string& tablespaceName,
+                           std::filesystem::path& root) {
+    if (!validTablespaceName(tablespaceName) ||
+        tablespaceName == "pg_default" || tablespaceName == "pg_global") {
+        return false;
+    }
+    return readTablespaceMarker(
+        tablespaceMetadataDirectory(engine, dbname) /
+            (tablespaceName + ".path"),
+        root);
+}
+
+}  // namespace
+
 std::filesystem::path StorageEngine::tablespaceDir(const std::string& dbname,
                                                     const std::string& tablespaceName) const {
     if (tablespaceName.empty() || tablespaceName == "pg_default") {
         return dbPath(dbname);
     }
-    auto tsPath = dbPath(dbname) / "pg_tblspc" / (tablespaceName + ".path");
-    if (std::filesystem::exists(tsPath)) {
-        std::ifstream ifs(tsPath);
-        std::string path;
-        if (std::getline(ifs, path) && !path.empty()) {
-            return std::filesystem::path(path);
-        }
-    }
+    std::filesystem::path root;
+    if (resolveTablespaceRoot(*this, dbname, tablespaceName, root)) return root;
     // Never silently fall back to pg_default: doing so can make a relation
     // appear empty after restart and can overwrite unrelated data.
     return dbPath(dbname) / "pg_tblspc" / (tablespaceName + ".missing");
@@ -5768,35 +5980,150 @@ std::filesystem::path StorageEngine::tablespaceDir(const std::string& dbname,
 DBStatus StorageEngine::createTablespace(const std::string& dbname,
                                           const std::string& tsName,
                                           const std::string& physicalPath) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    if (tsName.empty() || tsName == "pg_default" || tsName == "pg_global") {
+    if (!validTablespaceName(tsName) || tsName == "pg_default" ||
+        tsName == "pg_global" || physicalPath.empty()) {
         return DBStatus::INVALID_VALUE; // reserved names
     }
-    auto tsDir = dbPath(dbname) / "pg_tblspc";
-    if (!std::filesystem::exists(tsDir)) {
-        std::filesystem::create_directories(tsDir);
+    if (!ensureTablespaceMetadataDirectory(*this, dbname)) {
+        return DBStatus::IO_ERROR;
     }
-    auto tsPath = tsDir / (tsName + ".path");
-    if (std::filesystem::exists(tsPath)) return DBStatus::TABLE_ALREADY_EXISTS;
+    const auto tsDir = tablespaceMetadataDirectory(*this, dbname);
+    TablespaceCatalogLock catalogLock(
+        tablespaceCatalogLockPath(*this, dbname), true);
+    if (!catalogLock.acquired()) {
+        return DBStatus::IO_ERROR;
+    }
 
-    // Ensure physical directory exists
-    if (!std::filesystem::exists(physicalPath)) {
-        std::filesystem::create_directories(physicalPath);
+    const auto tsPath = tsDir / (tsName + ".path");
+    std::error_code error;
+    const auto markerStatus = std::filesystem::symlink_status(tsPath, error);
+    if (!error && markerStatus.type() != std::filesystem::file_type::not_found) {
+        std::filesystem::path existingRoot;
+        if (!readTablespaceMarker(tsPath, existingRoot)) {
+            return DBStatus::CORRUPTED_DATA;
+        }
+        return DBStatus::TABLE_ALREADY_EXISTS;
     }
-    std::ofstream ofs(tsPath);
-    if (!ofs) return DBStatus::INVALID_VALUE;
-    ofs << physicalPath << "\n";
+    if (error && error != std::errc::no_such_file_or_directory) {
+        return DBStatus::IO_ERROR;
+    }
+
+    std::filesystem::path requested = physicalPath;
+    if (requested.is_relative()) {
+        requested = std::filesystem::absolute(requested, error);
+        if (error) return DBStatus::INVALID_VALUE;
+    }
+    requested = requested.lexically_normal();
+    bool createdRoot = false;
+    error.clear();
+    const auto requestedStatus = std::filesystem::symlink_status(requested, error);
+    if (!error && requestedStatus.type() != std::filesystem::file_type::not_found) {
+        if (requestedStatus.type() != std::filesystem::file_type::directory) {
+            return DBStatus::INVALID_VALUE;
+        }
+    } else {
+        if (error && error != std::errc::no_such_file_or_directory) {
+            return DBStatus::IO_ERROR;
+        }
+        error.clear();
+        if (!std::filesystem::create_directories(requested, error) || error) {
+            return DBStatus::IO_ERROR;
+        }
+        createdRoot = true;
+    }
+
+    std::filesystem::path root;
+    std::filesystem::path databaseRoot;
+    if (!canonicalDirectory(requested, root) ||
+        !canonicalDirectory(dbPath(dbname), databaseRoot) ||
+        pathIsWithin(root, databaseRoot) || pathIsWithin(databaseRoot, root)) {
+        if (createdRoot) {
+            error.clear();
+            std::filesystem::remove(requested, error);
+        }
+        return DBStatus::INVALID_VALUE;
+    }
+
+    for (const auto& entry : std::filesystem::directory_iterator(tsDir, error)) {
+        if (error) return DBStatus::IO_ERROR;
+        const std::string filename = entry.path().filename().string();
+        if (filename.size() <= 5 ||
+            filename.compare(filename.size() - 5, 5, ".path") != 0) {
+            continue;
+        }
+        std::filesystem::path registeredRoot;
+        if (!readTablespaceMarker(entry.path(), registeredRoot)) {
+            return DBStatus::CORRUPTED_DATA;
+        }
+        if (registeredRoot == root) return DBStatus::INVALID_VALUE;
+    }
+    if (error) return DBStatus::IO_ERROR;
+
+    const auto relationDirectory = root / dbname;
+    bool createdRelationDirectory = false;
+    error.clear();
+    const auto relationStatus =
+        std::filesystem::symlink_status(relationDirectory, error);
+    if (!error && relationStatus.type() != std::filesystem::file_type::not_found) {
+        if (relationStatus.type() != std::filesystem::file_type::directory ||
+            !std::filesystem::is_empty(relationDirectory, error) || error) {
+            return DBStatus::INVALID_VALUE;
+        }
+    } else {
+        if (error && error != std::errc::no_such_file_or_directory) {
+            return DBStatus::IO_ERROR;
+        }
+        error.clear();
+        if (!std::filesystem::create_directory(relationDirectory, error) || error) {
+            return DBStatus::IO_ERROR;
+        }
+        createdRelationDirectory = true;
+    }
+    if (!index_file::syncDirectory(relationDirectory) ||
+        !index_file::syncDirectory(root) ||
+        !index_file::writeAtomically(tsPath, root.string() + "\n")) {
+        std::error_code ignored;
+        std::filesystem::remove(tsPath, ignored);
+        if (createdRelationDirectory) {
+            ignored.clear();
+            std::filesystem::remove(relationDirectory, ignored);
+            (void)index_file::syncDirectory(root);
+        }
+        if (createdRoot) {
+            ignored.clear();
+            std::filesystem::remove(root, ignored);
+        }
+        return DBStatus::IO_ERROR;
+    }
     return DBStatus::OK;
 }
 
 DBStatus StorageEngine::dropTablespace(const std::string& dbname,
                                         const std::string& tsName) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    if (tsName.empty() || tsName == "pg_default" || tsName == "pg_global") {
+    if (!validTablespaceName(tsName) || tsName == "pg_default" ||
+        tsName == "pg_global") {
         return DBStatus::INVALID_VALUE;
     }
-    auto tsPath = dbPath(dbname) / "pg_tblspc" / (tsName + ".path");
-    if (!std::filesystem::exists(tsPath)) return DBStatus::TABLE_NOT_FOUND;
+    const auto tsDir = tablespaceMetadataDirectory(*this, dbname);
+    std::error_code error;
+    if (!std::filesystem::is_directory(tsDir, error) || error) {
+        return error ? DBStatus::IO_ERROR : DBStatus::TABLE_NOT_FOUND;
+    }
+    TablespaceCatalogLock catalogLock(
+        tablespaceCatalogLockPath(*this, dbname), true);
+    if (!catalogLock.acquired()) return DBStatus::IO_ERROR;
+    const auto tsPath = tsDir / (tsName + ".path");
+    const auto markerStatus = std::filesystem::symlink_status(tsPath, error);
+    if (!error && markerStatus.type() == std::filesystem::file_type::not_found) {
+        return DBStatus::TABLE_NOT_FOUND;
+    }
+    if (error) return DBStatus::IO_ERROR;
+    std::filesystem::path root;
+    if (!readTablespaceMarker(tsPath, root)) return DBStatus::CORRUPTED_DATA;
 
     // Check if any table uses this tablespace
     auto tables = getTableNames(dbname);
@@ -5804,21 +6131,46 @@ DBStatus StorageEngine::dropTablespace(const std::string& dbname,
         TableSchema tbl = getTableSchema(dbname, tname);
         if (tbl.tablespace == tsName) return DBStatus::INVALID_VALUE; // not empty
     }
-    std::filesystem::remove(tsPath);
+
+    const auto relationDirectory = root / dbname;
+    error.clear();
+    const auto relationStatus =
+        std::filesystem::symlink_status(relationDirectory, error);
+    if (error) return DBStatus::IO_ERROR;
+    if (relationStatus.type() != std::filesystem::file_type::not_found) {
+        if (relationStatus.type() != std::filesystem::file_type::directory ||
+            !std::filesystem::is_empty(relationDirectory, error) || error) {
+            return DBStatus::INVALID_VALUE;
+        }
+        if (!std::filesystem::remove(relationDirectory, error) || error ||
+            !index_file::syncDirectory(root)) {
+            return DBStatus::IO_ERROR;
+        }
+    }
+    if (!index_file::removeDurably(tsPath)) return DBStatus::IO_ERROR;
     return DBStatus::OK;
 }
 
 std::vector<std::string> StorageEngine::listTablespaces(const std::string& dbname) const {
     std::vector<std::string> result;
     result.push_back("pg_default");
-    auto tsDir = dbPath(dbname) / "pg_tblspc";
-    if (!std::filesystem::exists(tsDir)) return result;
-    for (const auto& entry : std::filesystem::directory_iterator(tsDir)) {
+    const auto tsDir = tablespaceMetadataDirectory(*this, dbname);
+    std::error_code error;
+    if (!std::filesystem::is_directory(tsDir, error) || error) return result;
+    TablespaceCatalogLock catalogLock(
+        tablespaceCatalogLockPath(*this, dbname), false);
+    if (!catalogLock.acquired()) return result;
+    for (const auto& entry : std::filesystem::directory_iterator(tsDir, error)) {
+        if (error) return {"pg_default"};
         std::string fname = entry.path().filename().string();
         if (fname.size() > 5 && fname.substr(fname.size() - 5) == ".path") {
-            result.push_back(fname.substr(0, fname.size() - 5));
+            std::filesystem::path root;
+            if (readTablespaceMarker(entry.path(), root)) {
+                result.push_back(fname.substr(0, fname.size() - 5));
+            }
         }
     }
+    std::sort(result.begin() + 1, result.end());
     return result;
 }
 
@@ -5861,8 +6213,11 @@ PageAllocator* StorageEngine::getPageAllocator(const std::string& dbname,
     }
     const std::string tablespace = tbl.tablespace.empty() ? "pg_default" : tbl.tablespace;
     if (tablespace != "pg_default") {
-        auto marker = dbPath(dbname) / "pg_tblspc" / (tablespace + ".path");
-        if (!std::filesystem::exists(marker)) return nullptr;
+        std::filesystem::path tablespaceRoot;
+        if (!resolveTablespaceRoot(
+                *this, dbname, tablespace, tablespaceRoot)) {
+            return nullptr;
+        }
     }
     std::filesystem::path dt = dataPath(dbname, tablename);
 
@@ -14600,11 +14955,23 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
         }
     }
     if (tblWithVersion.tablespace.empty()) tblWithVersion.tablespace = "pg_default";
+    std::unique_ptr<TablespaceCatalogLock> tablespaceCatalogLock;
     if (tblWithVersion.tablespace != "pg_default") {
-        const auto marker = dbPath(dbname) / "pg_tblspc" /
-            (tblWithVersion.tablespace + ".path");
-        if (!std::filesystem::exists(marker)) {
-            if (error) *error = "tablespace does not exist";
+        const auto metadataDirectory =
+            tablespaceMetadataDirectory(*this, dbname);
+        std::error_code tablespaceError;
+        if (!std::filesystem::is_directory(
+                metadataDirectory, tablespaceError) || tablespaceError) {
+            if (error) *error = "tablespace metadata is unavailable";
+            return DBStatus::INVALID_VALUE;
+        }
+        tablespaceCatalogLock = std::make_unique<TablespaceCatalogLock>(
+            tablespaceCatalogLockPath(*this, dbname), true);
+        std::filesystem::path tablespaceRoot;
+        if (!tablespaceCatalogLock->acquired() ||
+            !resolveTablespaceRoot(
+                *this, dbname, tblWithVersion.tablespace, tablespaceRoot)) {
+            if (error) *error = "tablespace does not exist or is corrupt";
             return DBStatus::INVALID_VALUE;
         }
     }
@@ -18306,15 +18673,34 @@ DBStatus StorageEngine::alterTableTablespace(const std::string& dbname,
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     const std::string targetTablespace = tablespace.empty() ? "pg_default" : tablespace;
-    if (targetTablespace != "pg_default") {
-        const auto marker = dbPath(dbname) / "pg_tblspc" /
-            (targetTablespace + ".path");
-        if (!std::filesystem::exists(marker)) return DBStatus::INVALID_VALUE;
-    }
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     const std::string oldTablespace = tbl.tablespace.empty() ? "pg_default" : tbl.tablespace;
+    std::unique_ptr<TablespaceCatalogLock> tablespaceCatalogLock;
+    if (oldTablespace != "pg_default" || targetTablespace != "pg_default") {
+        const auto metadataDirectory =
+            tablespaceMetadataDirectory(*this, dbname);
+        std::error_code tablespaceError;
+        if (!std::filesystem::is_directory(
+                metadataDirectory, tablespaceError) || tablespaceError) {
+            lockManager_.unlock(tablename);
+            return DBStatus::INVALID_VALUE;
+        }
+        tablespaceCatalogLock = std::make_unique<TablespaceCatalogLock>(
+            tablespaceCatalogLockPath(*this, dbname), true);
+        std::filesystem::path resolvedRoot;
+        if (!tablespaceCatalogLock->acquired() ||
+            (oldTablespace != "pg_default" &&
+             !resolveTablespaceRoot(
+                 *this, dbname, oldTablespace, resolvedRoot)) ||
+            (targetTablespace != "pg_default" &&
+             !resolveTablespaceRoot(
+                 *this, dbname, targetTablespace, resolvedRoot))) {
+            lockManager_.unlock(tablename);
+            return DBStatus::INVALID_VALUE;
+        }
+    }
     if (oldTablespace == targetTablespace) {
         lockManager_.unlock(tablename);
         return DBStatus::OK;
@@ -18356,13 +18742,22 @@ DBStatus StorageEngine::alterTableTablespace(const std::string& dbname,
                 rollbackEc.clear();
             }
         }
+        (void)index_file::syncDirectory(oldDir);
+        if (newDir != oldDir) (void)index_file::syncDirectory(newDir);
     };
 
     try {
+        static std::atomic<uint64_t> moveSequence{0};
         if (std::filesystem::exists(oldDir)) {
             for (const auto& entry : std::filesystem::directory_iterator(oldDir)) {
                 const auto name = entry.path().filename().string();
                 if (!isRelationPhysicalFileName(name, tablename)) continue;
+                if (entry.is_symlink()) {
+                    rollbackMove();
+                    lockManager_.unlock(tablename);
+                    return DBStatus::INVALID_VALUE;
+                }
+                const bool sourceIsDirectory = entry.is_directory();
                 const auto destination = newDir / name;
                 if (std::filesystem::exists(destination)) {
                     rollbackMove();
@@ -18372,21 +18767,60 @@ DBStatus StorageEngine::alterTableTablespace(const std::string& dbname,
                 std::error_code moveEc;
                 std::filesystem::rename(entry.path(), destination, moveEc);
                 if (moveEc) {
+                    const auto staging = std::filesystem::path(
+                        destination.string() + ".tablespace_move." +
+                        std::to_string(::getpid()) + "." +
+                        std::to_string(moveSequence.fetch_add(
+                            1, std::memory_order_relaxed)));
                     moveEc.clear();
-                    if (entry.is_directory()) {
-                        std::filesystem::copy(entry.path(), destination,
+                    if (sourceIsDirectory) {
+                        std::filesystem::copy(entry.path(), staging,
                             std::filesystem::copy_options::recursive, moveEc);
                     } else {
-                        std::filesystem::copy_file(entry.path(), destination, moveEc);
+                        std::filesystem::copy_file(
+                            entry.path(), staging,
+                            std::filesystem::copy_options::none, moveEc);
                     }
-                    if (!moveEc) std::filesystem::remove_all(entry.path(), moveEc);
-                }
-                if (moveEc) {
-                    rollbackMove();
-                    lockManager_.unlock(tablename);
-                    return DBStatus::INVALID_VALUE;
+                    const bool stagedDurably = !moveEc &&
+                        (sourceIsDirectory
+                             ? syncMovedTreeDurably(staging)
+                             : syncRegularFileDurably(staging));
+                    if (!stagedDurably) {
+                        std::error_code ignored;
+                        std::filesystem::remove_all(staging, ignored);
+                        rollbackMove();
+                        lockManager_.unlock(tablename);
+                        return DBStatus::IO_ERROR;
+                    }
+                    moveEc.clear();
+                    std::filesystem::rename(staging, destination, moveEc);
+                    if (moveEc || !index_file::syncDirectory(newDir)) {
+                        std::error_code ignored;
+                        std::filesystem::remove_all(staging, ignored);
+                        std::filesystem::remove_all(destination, ignored);
+                        (void)index_file::syncDirectory(newDir);
+                        rollbackMove();
+                        lockManager_.unlock(tablename);
+                        return DBStatus::IO_ERROR;
+                    }
+                    moved.emplace_back(destination, entry.path());
+                    moveEc.clear();
+                    std::filesystem::remove_all(entry.path(), moveEc);
+                    if (moveEc || !index_file::syncDirectory(oldDir)) {
+                        rollbackMove();
+                        lockManager_.unlock(tablename);
+                        return DBStatus::IO_ERROR;
+                    }
+                    continue;
                 }
                 moved.emplace_back(destination, entry.path());
+                if (!index_file::syncDirectory(newDir) ||
+                    (oldDir != newDir &&
+                     !index_file::syncDirectory(oldDir))) {
+                    rollbackMove();
+                    lockManager_.unlock(tablename);
+                    return DBStatus::IO_ERROR;
+                }
             }
         }
 
@@ -37204,14 +37638,14 @@ bool StorageEngine::recoverAllDatabases() {
                     if (std::filesystem::exists(markerDir, markerEc) && !markerEc) {
                         for (const auto& marker : std::filesystem::directory_iterator(
                                  markerDir, std::filesystem::directory_options::skip_permission_denied)) {
-                            if (!marker.is_regular_file() ||
-                                marker.path().extension() != ".path") continue;
-                            std::ifstream markerIn(marker.path());
-                            std::string location;
-                            if (!std::getline(markerIn, location) || location.empty()) continue;
+                            if (marker.path().extension() != ".path") continue;
+                            std::filesystem::path location;
+                            if (!readTablespaceMarker(marker.path(), location)) {
+                                return fail("invalid tablespace marker");
+                            }
                             std::error_code tablespaceEc;
                             const auto tablespaceRoot = std::filesystem::weakly_canonical(
-                                std::filesystem::path(location) / dbname, tablespaceEc);
+                                location / dbname, tablespaceEc);
                             if (!tablespaceEc && isWithinRoot(canonicalPath, tablespaceRoot)) {
                                 pathAllowed = true;
                                 break;
@@ -38165,7 +38599,14 @@ bool StorageEngine::physicalBackup(const std::string& dbname,
 bool StorageEngine::physicalBackupLocked(
     const std::string& dbname, const std::string& backupPath,
     const MaintenanceProgress& progress, bool includeUnloggedMain) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname)) return false;
+    // The lock lives outside the replaceable database generation, so marker
+    // creation/drop and relation placement cannot change underneath the
+    // snapshot even when another backend is serving the same cluster.
+    TablespaceCatalogLock tablespaceLock(
+        tablespaceCatalogLockPath(*this, dbname), false);
+    if (!tablespaceLock.acquired()) return false;
     const auto backupTables = getTableNames(dbname);
     for (const auto& tableName : backupTables) {
         const TableSchema table = getTableSchema(dbname, tableName);
@@ -38273,14 +38714,13 @@ bool StorageEngine::physicalBackupLocked(
         auto markerSourceDir = src / "pg_tblspc";
         if (std::filesystem::exists(markerSourceDir)) {
             for (const auto& marker : std::filesystem::directory_iterator(markerSourceDir)) {
-                if (!marker.is_regular_file() || marker.path().extension() != ".path") continue;
-                std::ifstream in(marker.path());
-                std::string location;
-                if (!std::getline(in, location) || location.empty()) {
+                if (marker.path().extension() != ".path") continue;
+                std::filesystem::path location;
+                if (!readTablespaceMarker(marker.path(), location)) {
                     discardStagedBackup();
                     return false;
                 }
-                auto relationRoot = std::filesystem::path(location) / dbname;
+                auto relationRoot = location / dbname;
                 if (restorePathsOverlap(relationRoot, dst)) {
                     discardStagedBackup();
                     return false;
@@ -38471,6 +38911,9 @@ bool StorageEngine::physicalRestore(const std::string& dbname,
     const auto databaseMutex = databaseTxnLockFor(dbname);
     std::unique_lock<std::shared_mutex> databaseLock(*databaseMutex);
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    TablespaceCatalogLock tablespaceLock(
+        tablespaceCatalogLockPath(*this, dbname), true);
+    if (!tablespaceLock.acquired()) return false;
     if (catalogService_) catalogService_->evict(dbname);
     closeDatabaseCaches(dbname);
     return physicalRestoreLocked(dbname, backupPath, progress);
@@ -38514,20 +38957,15 @@ bool StorageEngine::physicalRestoreLocked(
             if (!std::filesystem::is_directory(markerSourceDir)) return false;
             for (const auto& marker :
                  std::filesystem::directory_iterator(markerSourceDir)) {
-                if (!marker.is_regular_file() ||
-                    marker.path().extension() != ".path") {
-                    continue;
-                }
-                std::ifstream in(marker.path());
-                std::string location;
-                if (!std::getline(in, location) || location.empty()) {
+                if (marker.path().extension() != ".path") continue;
+                std::filesystem::path location;
+                if (!readTablespaceMarker(marker.path(), location)) {
                     return false;
                 }
                 const auto source =
                     tablespaceBackup / marker.path().stem();
                 if (!std::filesystem::is_directory(source)) return false;
-                const auto relationRoot =
-                    std::filesystem::path(location) / dbname;
+                const auto relationRoot = location / dbname;
                 if (restorePathsOverlap(src, relationRoot) ||
                     restorePathsOverlap(dst, relationRoot) ||
                     restorePathsOverlap(walArchiveDir(dbname), relationRoot)) {
