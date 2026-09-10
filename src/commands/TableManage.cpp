@@ -18556,6 +18556,138 @@ static std::filesystem::path sequencePath(const std::string& dbname, const std::
     return std::filesystem::path(dbname) / (storageName + ".seq");
 }
 
+struct ResolvedSequenceReference {
+    Oid oid = INVALID_OID;
+    std::string storageName;
+    std::string displayName;
+    char persistence = 'p';
+};
+
+static std::optional<std::string> normalizeRegclassPart(std::string part) {
+    size_t first = 0;
+    size_t last = part.size();
+    while (first < last && std::isspace(
+               static_cast<unsigned char>(part[first]))) ++first;
+    while (last > first && std::isspace(
+               static_cast<unsigned char>(part[last - 1]))) --last;
+    part = part.substr(first, last - first);
+    if (part.empty()) return std::nullopt;
+    if (part.front() == '"') {
+        if (part.size() < 2 || part.back() != '"') return std::nullopt;
+        std::string decoded;
+        for (size_t i = 1; i + 1 < part.size(); ++i) {
+            if (part[i] != '"') {
+                decoded.push_back(part[i]);
+                continue;
+            }
+            if (i + 2 >= part.size() || part[i + 1] != '"') {
+                return std::nullopt;
+            }
+            decoded.push_back('"');
+            ++i;
+        }
+        return decoded.empty() ? std::nullopt
+                               : std::optional<std::string>(decoded);
+    }
+    if (part.find('"') != std::string::npos) return std::nullopt;
+    for (char& c : part) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return part;
+}
+
+static std::optional<std::string> normalizeRegclassText(
+    const std::string& input) {
+    bool quoted = false;
+    size_t separator = std::string::npos;
+    for (size_t i = 0; i < input.size(); ++i) {
+        if (input[i] == '"') {
+            if (quoted && i + 1 < input.size() && input[i + 1] == '"') {
+                ++i;
+            } else {
+                quoted = !quoted;
+            }
+        } else if (input[i] == '.' && !quoted) {
+            if (separator != std::string::npos) return std::nullopt;
+            separator = i;
+        }
+    }
+    if (quoted) return std::nullopt;
+    if (separator == std::string::npos) return normalizeRegclassPart(input);
+    const auto schema = normalizeRegclassPart(input.substr(0, separator));
+    const auto relation = normalizeRegclassPart(input.substr(separator + 1));
+    if (!schema || !relation) return std::nullopt;
+    return *schema + "." + *relation;
+}
+
+static ResolvedSequenceReference resolveSequenceReference(
+    StorageEngine& engine, const std::string& dbname,
+    const std::string& input) {
+    if (dbname.empty() || !engine.databaseExists(dbname)) {
+        throw DbError("3D000", "database does not exist");
+    }
+    const auto normalized = normalizeRegclassText(input);
+    if (!normalized || !validSequenceName(*normalized)) {
+        throw DbError("42P01", "relation \"" + input + "\" does not exist");
+    }
+
+    Session* session = currentSession();
+    if (!session) {
+        return {INVALID_OID,
+                normalized->rfind("public.", 0) == 0
+                    ? normalized->substr(7) : *normalized,
+                *normalized, 'p'};
+    }
+
+    std::vector<std::string> searchPath;
+    std::string canonical;
+    if (!parseSessionSearchPath(session->searchPath, searchPath, canonical)) {
+        searchPath = {"public"};
+    }
+    for (auto& entry : searchPath) {
+        entry = expandSessionSearchPathEntry(entry, session->username);
+    }
+    CatalogManager& catalog = engine.catalogService().get(dbname);
+    const PgClassRow* relation = catalog.resolveRelation(
+        *normalized, searchPath.empty() ? std::vector<std::string>{"public"}
+                                        : searchPath);
+    if (!relation) {
+        throw DbError("42P01",
+                      "relation \"" + input + "\" does not exist");
+    }
+    if (relation->relkind != 'S') {
+        throw DbError("42809",
+                      "\"" + input + "\" is not a sequence");
+    }
+    const PgNamespaceRow* relationNamespace =
+        catalog.findNamespace(relation->relnamespace);
+    if (!relationNamespace) {
+        throw DbError("XX001", "sequence namespace metadata is corrupt");
+    }
+    const std::string storageName = relationNamespace->nspname == "public"
+        ? relation->relname
+        : relationNamespace->nspname + "." + relation->relname;
+    return {relation->oid, storageName, storageName,
+            relation->relpersistence};
+}
+
+static void throwSequenceReadError(const std::filesystem::path& path,
+                                   const std::string& displayName) {
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(path, error);
+    if (!error && !std::filesystem::exists(status)) {
+        throw DbError("42P01",
+                      "relation \"" + displayName + "\" does not exist");
+    }
+    throw DbError("XX001",
+                  "could not read sequence \"" + displayName + "\"");
+}
+
+static std::string fallbackSequenceStateKey(
+    const std::string& dbname, const std::string& storageName) {
+    return dbname + '\x1f' + storageName;
+}
+
 static bool checkedAdd(int64_t lhs, int64_t rhs, int64_t& result) {
     return !__builtin_add_overflow(lhs, rhs, &result);
 }
@@ -18576,6 +18708,7 @@ static void sequencePredecessor(int64_t value, int64_t increment,
 }
 
 static constexpr const char* SEQUENCE_FILE_V2 = "DBMSSEQ2";
+static constexpr const char* SEQUENCE_FILE_V3 = "DBMSSEQ3";
 
 static bool parseSequenceInt64(const std::string& token, int64_t& value) {
     if (token.empty()) return false;
@@ -18589,19 +18722,21 @@ static bool parseSequenceInt64(const std::string& token, int64_t& value) {
     return parsed.ec == std::errc{} && parsed.ptr == end;
 }
 
-// V2 sequence file format (space-separated):
-// DBMSSEQ2 start increment min max cache cycle nextValue lastAllocated
-//          minIsExplicit maxIsExplicit [ownedTable ownedColumn]
-// Legacy unversioned files remain readable and are upgraded on the next write.
+// V3 sequence file format adds an explicit exhausted bit.  Without it the
+// on-disk boundary value cannot distinguish "not returned yet" from "already
+// returned", which made non-cycling sequences repeat their final value.
+// V2 and legacy unversioned files remain readable and upgrade on next write.
 static bool readSequenceFile(const std::filesystem::path& path,
                              dbms::SequenceInfo& info,
                              int64_t& nextValue,
-                             int64_t& lastAllocated) {
+                             int64_t& lastAllocated,
+                             bool* exhaustedOut = nullptr) {
     std::ifstream ifs(path);
     if (!ifs) return false;
     std::string firstToken;
     if (!(ifs >> firstToken)) return false;
 
+    const bool version3 = firstToken == SEQUENCE_FILE_V3;
     const bool version2 = firstToken == SEQUENCE_FILE_V2;
     int64_t start = 1;
     int64_t increment = 1;
@@ -18613,7 +18748,19 @@ static bool readSequenceFile(const std::filesystem::path& path,
     int64_t last = 0;
     int64_t minExplicit = 0;
     int64_t maxExplicit = 0;
-    if (version2) {
+    int64_t exhaustedFlag = 0;
+    if (version3) {
+        if (!(ifs >> start >> increment >> minValue >> maxValue >> cache >>
+              cycleFlag >> next >> last >> minExplicit >> maxExplicit >>
+              exhaustedFlag)) {
+            return false;
+        }
+        if ((minExplicit != 0 && minExplicit != 1) ||
+            (maxExplicit != 0 && maxExplicit != 1) ||
+            (exhaustedFlag != 0 && exhaustedFlag != 1)) {
+            return false;
+        }
+    } else if (version2) {
         if (!(ifs >> start >> increment >> minValue >> maxValue >> cache >>
               cycleFlag >> next >> last >> minExplicit >> maxExplicit)) {
             return false;
@@ -18655,7 +18802,7 @@ static bool readSequenceFile(const std::filesystem::path& path,
         if (last != initialPredecessor) return false;
     }
 
-    if (!version2) {
+    if (!version2 && !version3) {
         const int64_t defaultMinimum = increment > 0
             ? 1 : -std::numeric_limits<int64_t>::max();
         const int64_t defaultMaximum = increment > 0
@@ -18677,15 +18824,17 @@ static bool readSequenceFile(const std::filesystem::path& path,
     info.ownedByColumn = std::move(ownedColumn);
     nextValue = next;
     lastAllocated = last;
+    if (exhaustedOut) *exhaustedOut = exhaustedFlag != 0;
     return true;
 }
 
 static bool writeSequenceFile(const std::filesystem::path& path,
                               const dbms::SequenceInfo& info,
                               int64_t nextValue,
-                              int64_t lastAllocated) {
+                              int64_t lastAllocated,
+                              bool exhausted = false) {
     std::ostringstream serialized;
-    serialized << SEQUENCE_FILE_V2 << " "
+    serialized << SEQUENCE_FILE_V3 << " "
                << info.start << " "
                << info.increment << " "
                << info.minValue << " "
@@ -18696,6 +18845,7 @@ static bool writeSequenceFile(const std::filesystem::path& path,
                << lastAllocated << " "
                << (info.hasMinValue ? 1 : 0) << " "
                << (info.hasMaxValue ? 1 : 0) << " "
+               << (exhausted ? 1 : 0) << " "
                << info.ownedByTable << " "
                << info.ownedByColumn << "\n";
     return index_file::writeAtomically(path, serialized.str());
@@ -18767,7 +18917,8 @@ DBStatus StorageEngine::alterSequence(const std::string& dbname,
     if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
     dbms::SequenceInfo old;
     int64_t nextValue, lastAllocated;
-    if (!readSequenceFile(path, old, nextValue, lastAllocated))
+    bool exhausted = false;
+    if (!readSequenceFile(path, old, nextValue, lastAllocated, &exhausted))
         return DBStatus::INVALID_VALUE;
 
     dbms::SequenceInfo merged = old;
@@ -18781,6 +18932,7 @@ DBStatus StorageEngine::alterSequence(const std::string& dbname,
         // bounds loaded from the versioned file remain unchanged.
         merged.applyDefaults();
         sequencePredecessor(nextValue, merged.increment, lastAllocated);
+        exhausted = false;
     }
     if (info.hasMinValue) { merged.minValue = info.minValue; merged.hasMinValue = true; merged.noMinValue = false; }
     if (info.noMinValue) { merged.noMinValue = true; merged.hasMinValue = false; }
@@ -18806,14 +18958,28 @@ DBStatus StorageEngine::alterSequence(const std::string& dbname,
         }
         nextValue = restartValue;
         sequencePredecessor(nextValue, merged.increment, lastAllocated);
+        exhausted = false;
     } else if (nextValue < merged.minValue || nextValue > merged.maxValue) {
         // PG adjusts nextValue to be within bounds when ALTER changes bounds.
         if (merged.increment > 0) nextValue = merged.minValue;
         else nextValue = merged.maxValue;
         sequencePredecessor(nextValue, merged.increment, lastAllocated);
+        exhausted = false;
+    }
+    if (exhausted) {
+        int64_t successor = 0;
+        if (checkedAdd(nextValue, merged.increment, successor) &&
+            successor >= merged.minValue && successor <= merged.maxValue) {
+            // Expanding the active bound makes an exhausted sequence usable
+            // again.  nextValue stores the last returned boundary value while
+            // exhausted, so advance once before the next allocation.
+            nextValue = successor;
+            exhausted = false;
+        }
     }
     if (merged.cache < 1) return DBStatus::INVALID_VALUE;
-    if (!writeSequenceFile(path, merged, nextValue, lastAllocated))
+    if (!writeSequenceFile(
+            path, merged, nextValue, lastAllocated, exhausted))
         return DBStatus::IO_ERROR;
     return DBStatus::OK;
 }
@@ -18901,18 +19067,32 @@ DBStatus StorageEngine::getSequenceInfo(const std::string& dbname,
 
 int64_t StorageEngine::nextval(const std::string& dbname,
                                 const std::string& seqname) {
+    const ResolvedSequenceReference resolved =
+        resolveSequenceReference(*this, dbname, seqname);
     if (transactionContext().inTransaction &&
-        transactionContext().readOnly) {
+        transactionContext().readOnly && resolved.persistence != 't') {
         throw DbError("25006",
                       "cannot execute nextval() in a read-only transaction");
     }
-    if (dbname.empty() || !validStoredIdentifier(dbname, MAX_TABLE_NAME_LEN) ||
-        !validSequenceName(seqname)) return 0;
-    auto path = sequencePath(dbname, seqname);
+    const auto path = sequencePath(dbname, resolved.storageName);
     std::lock_guard<std::mutex> lock(g_sequenceMutex);
     dbms::SequenceInfo info;
     int64_t nextValue, lastAllocated;
-    if (!readSequenceFile(path, info, nextValue, lastAllocated)) return 0;
+    bool exhausted = false;
+    if (!readSequenceFile(
+            path, info, nextValue, lastAllocated, &exhausted)) {
+        throwSequenceReadError(path, resolved.displayName);
+    }
+    if (exhausted) {
+        if (!info.cycle) {
+            throw DbError(
+                "2200H", "nextval: reached maximum or minimum value of "
+                         "sequence \"" + resolved.displayName + "\"");
+        }
+        nextValue = info.increment > 0 ? info.minValue : info.maxValue;
+        sequencePredecessor(nextValue, info.increment, lastAllocated);
+        exhausted = false;
+    }
 
     auto allocateBatch = [&](int64_t from) {
         // Allocate 'cache' values starting from 'from' in the direction of increment.
@@ -18940,7 +19120,9 @@ int64_t StorageEngine::nextval(const std::string& dbname,
 
     if (needAllocation()) {
         const auto end = allocateBatch(nextValue);
-        if (!end) return 0;
+        if (!end) {
+            throw DbError("2200H", "sequence allocation overflow");
+        }
         lastAllocated = *end;
     }
 
@@ -18956,70 +19138,128 @@ int64_t StorageEngine::nextval(const std::string& dbname,
         } else {
             nextValue = result;
             lastAllocated = result;
+            exhausted = true;
         }
     } else {
         nextValue = advanced;
-        const bool exhausted = (info.increment > 0)
+        const bool crossedBoundary = (info.increment > 0)
             ? (nextValue > info.maxValue) : (nextValue < info.minValue);
-        if (exhausted) {
+        if (crossedBoundary) {
             if (info.cycle) {
                 nextValue = (info.increment > 0) ? info.minValue : info.maxValue;
                 sequencePredecessor(nextValue, info.increment, lastAllocated);
             } else {
-                // Keep returning the boundary rather than deriving it from
-                // an out-of-range nextValue (which can itself overflow for
-                // INT64_MIN with a negative increment).
                 nextValue = result;
                 lastAllocated = result;
+                exhausted = true;
             }
         }
     }
 
-    if (!writeSequenceFile(path, info, nextValue, lastAllocated)) return 0;
-    transactionContext().lastvalDb = dbname;
-    transactionContext().lastvalSeq = seqname;
-    transactionContext().lastvalValue = result;
-    if (g_currentSession) {
-        g_currentSession->sequenceLastValues[seqname] = result;
+    if (!writeSequenceFile(
+            path, info, nextValue, lastAllocated, exhausted)) {
+        throw DbError("58030",
+                      "could not write sequence \"" +
+                          resolved.displayName + "\"");
+    }
+    if (g_currentSession && resolved.oid != INVALID_OID) {
+        g_currentSession->sequenceLastValuesByOid[resolved.oid] = result;
+        g_currentSession->sequenceLastValues[resolved.storageName] = result;
+        g_currentSession->lastUsedSequenceOid = resolved.oid;
+        g_currentSession->lastUsedSequenceDatabase = dbname;
+    } else {
+        TransactionContext& context = transactionContext();
+        context.sequenceLastValues[fallbackSequenceStateKey(
+            dbname, resolved.storageName)] = result;
+        context.lastvalDb = dbname;
+        context.lastvalSeq = resolved.storageName;
+        context.lastvalValue = result;
+        context.lastvalDefined = true;
     }
     return result;
 }
 
 int64_t StorageEngine::currval(const std::string& dbname,
                                const std::string& seqname) {
-    if (dbname.empty() || !validStoredIdentifier(dbname, MAX_TABLE_NAME_LEN) ||
-        !validSequenceName(seqname)) return 0;
-    auto path = sequencePath(dbname, seqname);
+    const ResolvedSequenceReference resolved =
+        resolveSequenceReference(*this, dbname, seqname);
+    const auto path = sequencePath(dbname, resolved.storageName);
     std::lock_guard<std::mutex> lock(g_sequenceMutex);
     dbms::SequenceInfo info;
     int64_t nextValue, lastAllocated;
-    if (!readSequenceFile(path, info, nextValue, lastAllocated)) return 0;
-    if (nextValue == lastAllocated) return nextValue;
-    int64_t result = 0;
-    return checkedSub(nextValue, info.increment, result) ? result : 0;
+    if (!readSequenceFile(path, info, nextValue, lastAllocated)) {
+        throwSequenceReadError(path, resolved.displayName);
+    }
+    if (g_currentSession && resolved.oid != INVALID_OID) {
+        const auto value =
+            g_currentSession->sequenceLastValuesByOid.find(resolved.oid);
+        if (value == g_currentSession->sequenceLastValuesByOid.end()) {
+            throw DbError(
+                "55000", "currval of sequence \"" + resolved.displayName +
+                             "\" is not yet defined in this session");
+        }
+        return value->second;
+    }
+    const auto key = fallbackSequenceStateKey(dbname, resolved.storageName);
+    const auto value = transactionContext().sequenceLastValues.find(key);
+    if (value == transactionContext().sequenceLastValues.end()) {
+        throw DbError(
+            "55000", "currval of sequence \"" + resolved.displayName +
+                         "\" is not yet defined in this session");
+    }
+    return value->second;
 }
 
 int64_t StorageEngine::lastval() const {
+    if (g_currentSession) {
+        if (g_currentSession->lastUsedSequenceOid == INVALID_OID ||
+            g_currentSession->lastUsedSequenceDatabase.empty()) {
+            throw DbError("55000",
+                          "lastval is not yet defined in this session");
+        }
+        CatalogManager& catalog = const_cast<StorageEngine*>(this)
+            ->catalogService().get(g_currentSession->lastUsedSequenceDatabase);
+        const PgClassRow* relation = catalog.findClass(
+            g_currentSession->lastUsedSequenceOid);
+        const auto value = g_currentSession->sequenceLastValuesByOid.find(
+            g_currentSession->lastUsedSequenceOid);
+        if (!relation || relation->relkind != 'S' ||
+            value == g_currentSession->sequenceLastValuesByOid.end()) {
+            throw DbError("55000",
+                          "lastval is not yet defined in this session");
+        }
+        return value->second;
+    }
+    if (!transactionContext().lastvalDefined) {
+        throw DbError("55000", "lastval is not yet defined in this session");
+    }
     return transactionContext().lastvalValue;
 }
 
 int64_t StorageEngine::setval(const std::string& dbname,
                                const std::string& seqname,
                                int64_t value, bool isCalled) {
+    const ResolvedSequenceReference resolved =
+        resolveSequenceReference(*this, dbname, seqname);
     if (transactionContext().inTransaction &&
-        transactionContext().readOnly) {
+        transactionContext().readOnly && resolved.persistence != 't') {
         throw DbError("25006",
                       "cannot execute setval() in a read-only transaction");
     }
-    if (dbname.empty() || !validStoredIdentifier(dbname, MAX_TABLE_NAME_LEN) ||
-        !validSequenceName(seqname)) return 0;
-    auto path = sequencePath(dbname, seqname);
+    const auto path = sequencePath(dbname, resolved.storageName);
     std::lock_guard<std::mutex> lock(g_sequenceMutex);
     dbms::SequenceInfo info;
     int64_t nextValue, lastAllocated;
-    if (!readSequenceFile(path, info, nextValue, lastAllocated)) return 0;
-    if (value < info.minValue) value = info.minValue;
-    if (value > info.maxValue) value = info.maxValue;
+    if (!readSequenceFile(path, info, nextValue, lastAllocated)) {
+        throwSequenceReadError(path, resolved.displayName);
+    }
+    if (value < info.minValue || value > info.maxValue) {
+        throw DbError(
+            "22003", "setval: value " + std::to_string(value) +
+                         " is out of bounds for sequence \"" +
+                         resolved.displayName + "\"");
+    }
+    bool exhausted = false;
     if (isCalled) {
         int64_t advanced = 0;
         const bool representable = checkedAdd(value, info.increment, advanced);
@@ -19027,9 +19267,13 @@ int64_t StorageEngine::setval(const std::string& dbname,
             ((info.increment > 0 && advanced > info.maxValue) ||
              (info.increment < 0 && advanced < info.minValue));
         if (!representable || outside) {
-            nextValue = info.cycle
-                ? ((info.increment > 0) ? info.minValue : info.maxValue)
-                : value;
+            if (info.cycle) {
+                nextValue = info.increment > 0
+                    ? info.minValue : info.maxValue;
+            } else {
+                nextValue = value;
+                exhausted = true;
+            }
         } else {
             nextValue = advanced;
         }
@@ -19037,7 +19281,26 @@ int64_t StorageEngine::setval(const std::string& dbname,
         nextValue = value;
     }
     sequencePredecessor(nextValue, info.increment, lastAllocated);
-    if (!writeSequenceFile(path, info, nextValue, lastAllocated)) return 0;
+    if (!writeSequenceFile(
+            path, info, nextValue, lastAllocated, exhausted)) {
+        throw DbError("58030",
+                      "could not write sequence \"" +
+                          resolved.displayName + "\"");
+    }
+    if (isCalled) {
+        if (g_currentSession && resolved.oid != INVALID_OID) {
+            g_currentSession->sequenceLastValuesByOid[resolved.oid] = value;
+            g_currentSession->sequenceLastValues[resolved.storageName] = value;
+        } else {
+            transactionContext().sequenceLastValues[
+                fallbackSequenceStateKey(dbname, resolved.storageName)] = value;
+            if (transactionContext().lastvalDefined &&
+                transactionContext().lastvalDb == dbname &&
+                transactionContext().lastvalSeq == resolved.storageName) {
+                transactionContext().lastvalValue = value;
+            }
+        }
+    }
     return value;
 }
 

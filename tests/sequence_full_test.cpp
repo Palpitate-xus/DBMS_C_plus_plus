@@ -671,7 +671,13 @@ static void test_sequence_numeric_input_fails_closed() {
         std::ofstream out(corruptPath);
         out << "1 1 1 2 1 0 1 0 owned col trailing\n";
     }
-    assert(restarted.nextval(db, "corrupt") == 0);
+    bool corruptRejected = false;
+    try {
+        (void)restarted.nextval(db, "corrupt");
+    } catch (const dbms::DbError& error) {
+        corruptRejected = error.sqlState() == "XX001";
+    }
+    assert(corruptRejected);
 
     cleanup(db);
     std::cout << "[SEQUENCE] invalid numeric options fail closed OK" << std::endl;
@@ -1065,7 +1071,7 @@ static void test_sequence_bound_defaults_and_file_upgrade() {
         std::ifstream input(boundedPath);
         std::string magic;
         assert(input >> magic);
-        assert(magic == "DBMSSEQ2");
+        assert(magic == "DBMSSEQ3");
     }
 
     assert(!ddl.executeSql(
@@ -1088,7 +1094,7 @@ static void test_sequence_bound_defaults_and_file_upgrade() {
         std::ifstream input(legacyPath);
         std::string magic;
         assert(input >> magic);
-        assert(magic == "DBMSSEQ2");
+        assert(magic == "DBMSSEQ3");
     }
     dbms::SequenceInfo legacyAlter;
     legacyAlter.increment = -1;
@@ -1116,7 +1122,13 @@ static void test_sequence_integer_boundaries() {
     upper.maxValue = std::numeric_limits<int64_t>::max();
     assert(g_engine.createSequence(db, "upper", upper) == dbms::DBStatus::OK);
     assert(g_engine.nextval(db, "upper") == std::numeric_limits<int64_t>::max());
-    assert(g_engine.nextval(db, "upper") == std::numeric_limits<int64_t>::max());
+    bool upperExhausted = false;
+    try {
+        (void)g_engine.nextval(db, "upper");
+    } catch (const dbms::DbError& error) {
+        upperExhausted = error.sqlState() == "2200H";
+    }
+    assert(upperExhausted);
     assert(g_engine.currval(db, "upper") == std::numeric_limits<int64_t>::max());
     assert(g_engine.setval(db, "upper", std::numeric_limits<int64_t>::max()) ==
            std::numeric_limits<int64_t>::max());
@@ -1128,10 +1140,45 @@ static void test_sequence_integer_boundaries() {
     lower.maxValue = -1;
     assert(g_engine.createSequence(db, "lower", lower) == dbms::DBStatus::OK);
     assert(g_engine.nextval(db, "lower") == -std::numeric_limits<int64_t>::max());
-    assert(g_engine.nextval(db, "lower") == -std::numeric_limits<int64_t>::max());
+    bool lowerExhausted = false;
+    try {
+        (void)g_engine.nextval(db, "lower");
+    } catch (const dbms::DbError& error) {
+        lowerExhausted = error.sqlState() == "2200H";
+    }
+    assert(lowerExhausted);
     assert(g_engine.setval(db, "lower", -std::numeric_limits<int64_t>::max()) ==
            -std::numeric_limits<int64_t>::max());
-    assert(g_engine.nextval(db, "lower") == -std::numeric_limits<int64_t>::max());
+    lowerExhausted = false;
+    try {
+        (void)g_engine.nextval(db, "lower");
+    } catch (const dbms::DbError& error) {
+        lowerExhausted = error.sqlState() == "2200H";
+    }
+    assert(lowerExhausted);
+
+    dbms::SequenceInfo expandable;
+    expandable.start = 2;
+    expandable.minValue = 1;
+    expandable.maxValue = 2;
+    expandable.startSpecified = true;
+    expandable.hasMinValue = true;
+    expandable.hasMaxValue = true;
+    assert(g_engine.createSequence(db, "expandable", expandable) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.nextval(db, "expandable") == 2);
+    try {
+        (void)g_engine.nextval(db, "expandable");
+        assert(false);
+    } catch (const dbms::DbError& error) {
+        assert(error.sqlState() == "2200H");
+    }
+    dbms::SequenceInfo expandedBound;
+    expandedBound.maxValue = 3;
+    expandedBound.hasMaxValue = true;
+    assert(g_engine.alterSequence(db, "expandable", expandedBound) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.nextval(db, "expandable") == 3);
 
     cleanup(db);
     std::cout << "[SEQUENCE] integer boundaries OK" << std::endl;

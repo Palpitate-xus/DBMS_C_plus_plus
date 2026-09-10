@@ -6174,6 +6174,30 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
 // CREATE / DROP SEQUENCE
 // ----------------------------------------------------------------------------
 
+static std::vector<std::string> effectiveSequenceSearchPath(
+    const Session& session) {
+    std::vector<std::string> searchPath;
+    std::string canonical;
+    if (!dbms::parseSessionSearchPath(
+            session.searchPath, searchPath, canonical)) {
+        return {"public"};
+    }
+    for (auto& schema : searchPath) {
+        schema = dbms::expandSessionSearchPathEntry(
+            schema, session.username);
+    }
+    return searchPath.empty() ? std::vector<std::string>{"public"}
+                              : searchPath;
+}
+
+static std::string schemaNameForRelation(
+    CatalogManager& catalog, const PgClassRow* relation) {
+    if (!relation) return {};
+    const PgNamespaceRow* relationNamespace =
+        catalog.findNamespace(relation->relnamespace);
+    return relationNamespace ? relationNamespace->nspname : std::string{};
+}
+
 bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s) {
     if (!stmt) return false;
     if (!checkAdmin(s)) return true;
@@ -6194,8 +6218,24 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
         std::cout << "CREATE SEQUENCE has an invalid name" << std::endl;
         return true;
     }
-    const std::string sequenceSchema = sequenceName.schema.empty()
-        ? "public" : sequenceName.schema;
+    std::string sequenceSchema = sequenceName.schema;
+    if (sequenceSchema.empty()) {
+        for (const auto& candidate : effectiveSequenceSearchPath(s)) {
+            if (candidate == "pg_catalog" || candidate == "pg_temp" ||
+                candidate.rfind("pg_temp_", 0) == 0) {
+                continue;
+            }
+            if (g_engine.schemaExists(s.currentDB, candidate)) {
+                sequenceSchema = candidate;
+                break;
+            }
+        }
+        if (sequenceSchema.empty()) {
+            std::cout << "ERROR: no schema has been selected to create in"
+                      << std::endl;
+            return true;
+        }
+    }
     const std::string seqname = sequenceSchema == "public"
         ? sequenceName.name
         : sequenceSchema + "." + sequenceName.name;
@@ -6404,8 +6444,16 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
         std::cout << "ALTER SEQUENCE has an invalid name" << std::endl;
         return true;
     }
-    const std::string sequenceSchema = sequenceName.schema.empty()
-        ? "public" : sequenceName.schema;
+    std::string sequenceSchema = sequenceName.schema;
+    if (sequenceSchema.empty()) {
+        CatalogManager& catalog =
+            g_engine.catalogService().get(s.currentDB);
+        sequenceSchema = schemaNameForRelation(
+            catalog, catalog.resolveRelation(
+                         sequenceName.name,
+                         effectiveSequenceSearchPath(s)));
+        if (sequenceSchema.empty()) sequenceSchema = "public";
+    }
     const std::string seqname = sequenceSchema == "public"
         ? sequenceName.name : sequenceSchema + "." + sequenceName.name;
     dbms::SequenceInfo info;
@@ -6825,8 +6873,14 @@ bool DdlExecutor::executeDropSequence(const DropStmt* stmt, Session& s) {
                           << requestedName << std::endl;
                 return true;
             }
-            const std::string schema = qualifiedName.schema.empty()
-                ? "public" : qualifiedName.schema;
+            std::string schema = qualifiedName.schema;
+            const PgClassRow* resolvedRelation = nullptr;
+            if (schema.empty()) {
+                resolvedRelation = catalog->resolveRelation(
+                    qualifiedName.name, effectiveSequenceSearchPath(s));
+                schema = schemaNameForRelation(*catalog, resolvedRelation);
+                if (schema.empty()) schema = "public";
+            }
             const std::string storageName = schema == "public"
                 ? qualifiedName.name : schema + "." + qualifiedName.name;
             if (!targetStorageNames.insert(storageName).second) continue;
@@ -6835,10 +6889,12 @@ bool DdlExecutor::executeDropSequence(const DropStmt* stmt, Session& s) {
                 g_engine.sequenceExists(s.currentDB, storageName);
             const auto* sequenceNamespace =
                 catalog->findNamespaceByName(schema);
-            const PgClassRow* sequence = sequenceNamespace
-                ? catalog->findClassByName(
-                      qualifiedName.name, sequenceNamespace->oid)
-                : nullptr;
+            const PgClassRow* sequence = resolvedRelation
+                ? resolvedRelation
+                : (sequenceNamespace
+                       ? catalog->findClassByName(
+                             qualifiedName.name, sequenceNamespace->oid)
+                       : nullptr);
             if (!sequence) {
                 if (physicalExists) {
                     std::cout << "DROP SEQUENCE failed: sequence catalog entry is missing for \""

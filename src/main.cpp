@@ -14442,29 +14442,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     cout << (reloadOk ? "t" : "f") << endl;
                     return false;
                 }
-                if (func == "nextval" || func == "currval") {
-                    if (!checkDB(s)) return true;
-                    string seqName = stripQuotes(arg);
-                    if (!g_engine.sequenceExists(s.currentDB, seqName)) {
-                        cout << "Sequence " << seqName << " not exist" << endl;
-                        return true;
-                    }
-                    if (func == "nextval") {
-                        int64_t value = g_engine.nextval(s.currentDB, seqName);
-                        s.sequenceLastValues[seqName] = value;
-                        cout << func << endl;
-                        cout << value << endl;
-                    } else {
-                        auto it = s.sequenceLastValues.find(seqName);
-                        if (it == s.sequenceLastValues.end()) {
-                            cout << "currval of sequence " << seqName << " is not yet defined in this session" << endl;
-                            return true;
-                        }
-                        cout << func << endl;
-                        cout << it->second << endl;
-                    }
-                    return false;
-                }
             }
         }
     }
@@ -14554,6 +14531,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
             s.preparedStmts.clear();
             s.preparedStmtTypes.clear();
             s.sequenceLastValues.clear();
+            s.sequenceLastValuesByOid.clear();
+            s.lastUsedSequenceOid = 0;
+            s.lastUsedSequenceDatabase.clear();
             s.userVariables.clear();
             s.constraintsDeferred = false;
             s.currentDB = dbname;
@@ -18566,13 +18546,32 @@ static bool executeInternal(const string& rawSql, Session& s) {
         return handleDropPolicy(sql, s);
     }
 
-    // DISCARD ALL: reset session state
+    // DISCARD SEQUENCES clears backend-local currval/lastval state.  ALL also
+    // includes it, but PostgreSQL prohibits DISCARD ALL in a transaction.
+    if (sql == "discard sequences") {
+        s.sequenceLastValues.clear();
+        s.sequenceLastValuesByOid.clear();
+        s.lastUsedSequenceOid = 0;
+        s.lastUsedSequenceDatabase.clear();
+        cout << "DISCARD SEQUENCES" << endl;
+        return false;
+    }
     if (sql == "discard all") {
+        if (g_engine.inTransaction()) {
+            cout << "ERROR: DISCARD ALL cannot run inside a transaction block "
+                    "(SQLSTATE 25001)" << endl;
+            return true;
+        }
         // Drop all session-owned temporary tables.
         cleanupSessionTempTables(s);
         dbms::advisoryLockManager().releaseSession(advisoryOwner(s));
         // Clear prepared statements
         s.preparedStmts.clear();
+        s.preparedStmtTypes.clear();
+        s.sequenceLastValues.clear();
+        s.sequenceLastValuesByOid.clear();
+        s.lastUsedSequenceOid = 0;
+        s.lastUsedSequenceDatabase.clear();
         // Reset session variables
         s.timezoneOffsetMinutes = 0;
         s.statementTimeoutMs = s.defaultStatementTimeoutMs;
@@ -18648,43 +18647,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
     if (startsWithKeyword(sql, "select")) {
         bool handledSelectInto = false;
-        bool failedSelectInto = handleSelectIntoTable(sql, s, handledSelectInto);
+        const bool failedSelectInto =
+            handleSelectIntoTable(sql, s, handledSelectInto);
         if (handledSelectInto) return failedSelectInto;
-        string expr = trim(sql.substr(6));
-        if (findTopLevelKeyword(expr, "from") == string::npos) {
-            string funcName;
-            if (startsWithKeyword(expr, "nextval")) funcName = "nextval";
-            else if (startsWithKeyword(expr, "currval")) funcName = "currval";
-            if (!funcName.empty()) {
-                if (!checkDB(s)) return true;
-                size_t lp = expr.find('(');
-                size_t rp = expr.find(')', lp);
-                if (lp == string::npos || rp == string::npos || rp <= lp + 1) {
-                    cout << "SQL syntax error: SELECT " << funcName << "('sequence')" << endl;
-                    return true;
-                }
-                string seqName = stripQuotes(trim(expr.substr(lp + 1, rp - lp - 1)));
-                if (!g_engine.sequenceExists(s.currentDB, seqName)) {
-                    cout << "Sequence " << seqName << " not exist" << endl;
-                    return true;
-                }
-                if (funcName == "nextval") {
-                    int64_t value = g_engine.nextval(s.currentDB, seqName);
-                    s.sequenceLastValues[seqName] = value;
-                    cout << funcName << endl;
-                    cout << value << endl;
-                } else {
-                    auto it = s.sequenceLastValues.find(seqName);
-                    if (it == s.sequenceLastValues.end()) {
-                        cout << "currval of sequence " << seqName << " is not yet defined in this session" << endl;
-                        return true;
-                    }
-                    cout << funcName << endl;
-                    cout << it->second << endl;
-                }
-                return false;
-            }
-        }
     }
 
     if (sql.substr(0, 6) == "select" || sql.substr(0, 5) == "with ") {

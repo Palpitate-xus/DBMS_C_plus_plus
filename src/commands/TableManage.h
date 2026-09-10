@@ -2015,9 +2015,14 @@ private:
             std::string newRow;
         };
         std::vector<LogicalChangeBuf> txnLogicalChanges;
+        // Sequence values are backend-local but deliberately not part of
+        // transaction/savepoint snapshots.  This fallback state is used by
+        // storage-level callers that do not have a protocol Session bound.
+        std::map<std::string, int64_t> sequenceLastValues;
         std::string lastvalDb;
         std::string lastvalSeq;
         int64_t lastvalValue = 0;
+        bool lastvalDefined = false;
         std::shared_ptr<std::shared_mutex> databaseTxnMutex;
         std::unique_ptr<std::shared_lock<std::shared_mutex>> databaseSharedLock;
         std::unique_ptr<std::unique_lock<std::shared_mutex>> databaseExclusiveLock;

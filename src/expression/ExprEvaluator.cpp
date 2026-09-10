@@ -2,6 +2,7 @@
 #include "commands/TableManage.h"
 #include "common/DateType.h"
 #include "common/BooleanCodec.h"
+#include "common/DbError.h"
 #include "common/NotificationManager.h"
 #include "common/sha256.h"
 #include "common/sha2_extended.h"
@@ -10198,30 +10199,59 @@ void ExprEvaluator::registerBuiltins() {
     // ------------------------------------------------------------------------
     // Sequence functions (delegate to the global StorageEngine)
     // ------------------------------------------------------------------------
-    auto seqNameArg = [](const std::vector<ExprValue>& a) -> std::string {
-        if (a.empty() || a[0].isNull) return "";
-        std::string s = a[0].value;
-        // Strip surrounding quotes if present.
-        if (s.size() >= 2 && s.front() == '\'' && s.back() == '\'') {
-            s = s.substr(1, s.size() - 2);
+    auto requireSequenceArity = [](const std::vector<ExprValue>& arguments,
+                                   size_t expected,
+                                   const char* signature) {
+        if (arguments.size() != expected) {
+            throw DbError("42883", std::string("function ") + signature +
+                                       " does not exist");
         }
-        return s;
     };
-    functions_["nextval"] = [this, seqNameArg](const std::vector<ExprValue>& a) -> ExprValue {
-        std::string seq = seqNameArg(a);
-        if (seq.empty() || currentDB_.empty()) return ExprValue("bigint", "", true);
-        int64_t v = g_engine.nextval(currentDB_, seq);
+    functions_["nextval"] = [this, requireSequenceArity](
+        const std::vector<ExprValue>& a) -> ExprValue {
+        requireSequenceArity(a, 1, "nextval(regclass)");
+        if (a[0].isNull) return ExprValue("bigint", "", true);
+        int64_t v = g_engine.nextval(currentDB_, a[0].value);
         return ExprValue("bigint", std::to_string(v), false);
     };
-    functions_["currval"] = [this, seqNameArg](const std::vector<ExprValue>& a) -> ExprValue {
-        std::string seq = seqNameArg(a);
-        if (seq.empty() || currentDB_.empty()) return ExprValue("bigint", "", true);
-        int64_t v = g_engine.currval(currentDB_, seq);
+    functions_["currval"] = [this, requireSequenceArity](
+        const std::vector<ExprValue>& a) -> ExprValue {
+        requireSequenceArity(a, 1, "currval(regclass)");
+        if (a[0].isNull) return ExprValue("bigint", "", true);
+        int64_t v = g_engine.currval(currentDB_, a[0].value);
         return ExprValue("bigint", std::to_string(v), false);
     };
-    functions_["lastval"] = [this](const std::vector<ExprValue>&) -> ExprValue {
-        if (currentDB_.empty()) return ExprValue("bigint", "", true);
+    functions_["lastval"] = [this, requireSequenceArity](
+        const std::vector<ExprValue>& a) -> ExprValue {
+        requireSequenceArity(a, 0, "lastval()");
         int64_t v = g_engine.lastval();
+        return ExprValue("bigint", std::to_string(v), false);
+    };
+    functions_["setval"] = [this](
+        const std::vector<ExprValue>& a) -> ExprValue {
+        if (a.size() != 2 && a.size() != 3) {
+            throw DbError("42883",
+                          "function setval(regclass, bigint [, boolean]) "
+                          "does not exist");
+        }
+        for (const auto& argument : a) {
+            if (argument.isNull) return ExprValue("bigint", "", true);
+        }
+        long long parsedValue = 0;
+        if (!parseInt64Exact(a[1].value, parsedValue)) {
+            throw DbError("22P02", "invalid input syntax for type bigint");
+        }
+        bool isCalled = true;
+        if (a.size() == 3) {
+            const auto parsedBoolean = parsePostgresBoolean(a[2].value);
+            if (!parsedBoolean) {
+                throw DbError("22P02", "invalid input syntax for type boolean");
+            }
+            isCalled = *parsedBoolean;
+        }
+        const int64_t v = g_engine.setval(
+            currentDB_, a[0].value, static_cast<int64_t>(parsedValue),
+            isCalled);
         return ExprValue("bigint", std::to_string(v), false);
     };
 
@@ -10262,6 +10292,7 @@ void ExprEvaluator::registerBuiltins() {
     volatility_["nextval"] = 'v';
     volatility_["currval"] = 'v';
     volatility_["lastval"] = 'v';
+    volatility_["setval"] = 'v';
     volatility_["random"] = 'v';
 }
 

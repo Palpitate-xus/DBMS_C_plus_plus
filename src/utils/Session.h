@@ -164,6 +164,12 @@ struct Session {
     std::string originalRole;     // Session user's role (set at login)
     std::map<std::string, std::string> userVariables; // user-defined variables @var
     std::map<std::string, int64_t> sequenceLastValues; // session-local currval state
+    // PostgreSQL identifies sequence session state by relation OID, not by
+    // the spelling used in nextval().  Keep the string map above only as a
+    // compatibility mirror for older internal callers and tests.
+    std::map<uint32_t, int64_t> sequenceLastValuesByOid;
+    uint32_t lastUsedSequenceOid = 0;
+    std::string lastUsedSequenceDatabase;
     bool constraintsDeferred = false; // SET CONSTRAINTS ALL/constraint_list DEFERRED
     std::set<std::string> listenedChannels; // channels this session is LISTENing to
     // Connection-local protocol portals are owned by NetworkServer. Mirror
