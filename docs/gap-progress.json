@@ -167,7 +167,7 @@
     {"id":"WAL-03","status":"unverified","evidence":[]},
     {"id":"WAL-04","status":"unverified","evidence":[]},
     {"id":"WAL-05","status":"unverified","evidence":[]},
-    {"id":"WAL-06","status":"unverified","evidence":[]},
+    {"id":"WAL-06","status":"partial","evidence":["docs/code-review-progress.md","docs/PACKAGING.md","src/common/DataDirectory.h","src/common/DataDirectory.cpp"],"tests":["tests/checksum_verification_e2e_test.py","tests/checksum_test.cpp","tests/data_directory_e2e_test.py"],"commits":["a007be0"]},
     {"id":"WAL-07","status":"partial","evidence":["docs/code-review-progress.md","src/access/IndexFileUtil.h","src/commands/TableManage.cpp"],"tests":["tests/physical_backup_replacement_test.cpp","tests/physical_restore_validation_test.cpp","tests/logical_decoding_test.cpp"],"commits":["2ff499c","d28da5f","e1f48e5"]},
     {"id":"WAL-08","status":"partial","evidence":["docs/code-review-progress.md","src/commands/TableManage.cpp"],"tests":["tests/alter_table_only_test.cpp","tests/ddl_transaction_skeleton_test.cpp","tests/prepared_transaction_test.cpp","tests/temp_table_ddl_test.cpp"],"commits":["7cb852b","986f186","7530a48"]},
     {"id":"STO-07","status":"partial","evidence":["docs/code-review-progress.md"]},

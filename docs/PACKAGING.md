@@ -28,6 +28,16 @@ V1→V2 control 升级，不会转换 catalog/关系/索引数据。损坏或未
 无 DBMS 标识的任意非空目录以及含 `PG_VERSION` 的 PostgreSQL cluster
 都会在引擎全局对象构造前被拒绝。
 
+部署或恢复后可在服务停止时执行严格只读的 heap 校验：
+
+```bash
+/path/to/dbms_main -D /srv/dbms-instance --verify-data-checksums
+```
+
+该命令验证主/分区/TOAST/unlogged init heap、外部 tablespace 和已有 TDE 边车；
+报错定位到文件和 block。当前它不覆盖索引与全部 catalog/metadata，也没有锁机制
+替代运维侧的停服保证，因此不得与 server 并发执行。
+
 | 路径 | 内容 |
 |---|---|
 | `DBMS_CONTROL` | DBMS-C++ cluster identity 与持久化格式边界；不得复制到另一套独立 cluster 或手工编辑 |
