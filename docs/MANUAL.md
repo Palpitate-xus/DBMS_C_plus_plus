@@ -1010,6 +1010,14 @@ Simple Query 的一个 `Q` 消息可以包含多条顶层分号分隔语句；�
 一次 ReadyForQuery。空串、纯注释或只有分号的消息返回一次
 EmptyQueryResponse，不伪造 command tag。
 
+Extended Query 的 named statement/portal 禁止被同名 Parse/Bind 覆盖，空名称仍按
+协议替换。Parse 只接受一条语句；发生错误后丢弃消息直到 Sync。关闭不存在的
+statement/portal 仍返回 CloseComplete。一个 Sync group 内的 Execute 共用隐式
+事务，Sync 统一提交或回滚并释放事务级 portal；需要分页的 portal 必须在 Sync
+前继续 Execute。空 prepared query 的 Execute 返回 EmptyQueryResponse。
+当前 Describe 的结果列分析和大型 portal 的真正流式执行仍未完成，因此客户端
+不应把这一子集当作完整的 PostgreSQL Extended Query 实现。
+
 ---
 
 ## 19. 预编译语句
