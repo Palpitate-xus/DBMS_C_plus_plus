@@ -185,6 +185,34 @@ void testEncodingConversions() {
                 "22023");
 }
 
+void testDigests() {
+    dbms::ExprEvaluator evaluator;
+    const dbms::ExprValue abc = bytea("\\x616263");
+    assert(call(evaluator, "md5", {abc}).value ==
+           "900150983cd24fb0d6963f7d28e17f72");
+    assert(call(evaluator, "sha224", {abc}).value ==
+           "\\x23097d223405d8228642a477bda255b32aadbce4bda0b3f7e36c9da7");
+    assert(call(evaluator, "sha256", {abc}).value ==
+           "\\xba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    assert(call(evaluator, "sha384", {abc}).value ==
+           "\\xcb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff"
+           "5bed8086072ba1e7cc2358baeca134c825a7");
+    assert(call(evaluator, "sha512", {abc}).value ==
+           "\\xddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d"
+           "39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54"
+           "ca49f");
+
+    const dbms::ExprValue binary = bytea("\\x0061626300");
+    assert(call(evaluator, "sha224", {binary}).value ==
+           "\\xa29e18bf3df333b8289f6769d0761f559c0d2f0f2abed0ad51457fd6");
+    assert(call(evaluator, "sha384", {binary}).value ==
+           "\\x278217c228368518a415a50853162abd4253541b6600e1ab4896150afce0f0c5"
+           "26b6559d804e51bc08e6fdb9954217ac");
+    assert(call(evaluator, "sha512", {binary}).value ==
+           "\\xbfb2b7e1fad00b91e7cc9a0111a6a31cb0b7cd310298d56be47adeec765b8a6f"
+           "db1956aea9d02c728336bd60852f553dc0c53e29e33fbef42d1847683ef07044");
+}
+
 }  // namespace
 
 int main() {
@@ -193,6 +221,7 @@ int main() {
     testByteFunctions();
     testIntegerCasts();
     testEncodingConversions();
+    testDigests();
     std::cout << "[BYTEA FUNCTIONS] all passed" << std::endl;
     return 0;
 }

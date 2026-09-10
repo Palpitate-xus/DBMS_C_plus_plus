@@ -3,6 +3,8 @@
 #include "common/DateType.h"
 #include "common/BooleanCodec.h"
 #include "common/NotificationManager.h"
+#include "common/sha256.h"
+#include "common/sha2_extended.h"
 #include "types/numeric.h"
 #include "types/money.h"
 #include "types/uuid.h"
@@ -11,6 +13,7 @@
 #include "utils/Session.h"
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <charconv>
 #include <chrono>
@@ -128,6 +131,16 @@ static std::string convertEncodingOrThrow(const std::string& input,
             "(SQLSTATE 22021)");
     }
     return output;
+}
+
+template <size_t Size>
+static ExprValue byteaDigestValue(const std::array<uint8_t, Size>& digest) {
+    return ExprValue(
+        "bytea",
+        ByteaValue::fromBytes(std::string(
+            reinterpret_cast<const char*>(digest.data()),
+            digest.size())).toString(),
+        false);
 }
 
 static std::string normalizeDecimalMagnitude(std::string value) {
@@ -8311,6 +8324,26 @@ void ExprEvaluator::registerBuiltins() {
         const std::string input = isCanonicalByteaType(a[0].typeName)
             ? parseByteaOrThrow(a[0]).bytes() : textArgumentValue(a[0]);
         return ExprValue("text", md5Hex(input), false);
+    };
+    functions_["sha224"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("bytea", "", true);
+        return byteaDigestValue(
+            SHA224::digestBytes(parseByteaOrThrow(a[0]).bytes()));
+    };
+    functions_["sha256"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("bytea", "", true);
+        return byteaDigestValue(
+            SHA256::digestBytes(parseByteaOrThrow(a[0]).bytes()));
+    };
+    functions_["sha384"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("bytea", "", true);
+        return byteaDigestValue(
+            SHA384::digestBytes(parseByteaOrThrow(a[0]).bytes()));
+    };
+    functions_["sha512"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("bytea", "", true);
+        return byteaDigestValue(
+            SHA512::digestBytes(parseByteaOrThrow(a[0]).bytes()));
     };
     // encode(data, format) — format is 'hex', 'base64', or 'escape'
     functions_["encode"] = [](const std::vector<ExprValue>& a) {

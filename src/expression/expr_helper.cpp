@@ -264,12 +264,16 @@ std::string inferAstResultType(
         if (name == "uuid_extract_version") return "smallint";
         if (name == "uuid_extract_timestamp") return "timestamptz";
         if (name == "decode" || name == "convert" || name == "convert_to" ||
+            name == "sha224" || name == "sha256" || name == "sha384" ||
+            name == "sha512" ||
             name == "reverse" || name == "set_byte" ||
             name == "set_bit" || name == "substring" || name == "substr" ||
             name == "overlay" || name == "btrim" || name == "ltrim" ||
             name == "rtrim") {
             if (name == "decode" || name == "convert" ||
-                name == "convert_to") return "bytea";
+                name == "convert_to" || name == "sha224" ||
+                name == "sha256" || name == "sha384" ||
+                name == "sha512") return "bytea";
             const std::string input = argType(0);
             if (input == "bytea") return "bytea";
         }
