@@ -1,4 +1,5 @@
 #include "commands/TableManage.h"
+#include "catalog/CatalogService.h"
 #include "catalog/type_registry.h"
 #include <cassert>
 #include <filesystem>
@@ -36,6 +37,18 @@ static void test_update_append() {
     assert(after.labels.size() == 3);
     assert(hasLabel(after, "happy"));
     assert(after.labels.back() == "happy");
+
+    // A legacy enum sidecar with no pg_type/pg_enum rows is repaired on the
+    // first successful update.
+    auto& catalog = g_engine.catalogService().get(db);
+    const auto* publicNamespace = catalog.findNamespaceByName("public");
+    assert(publicNamespace);
+    const auto* catalogType =
+        catalog.findTypeByName("mood", publicNamespace->oid);
+    assert(catalogType && catalogType->typtype == 'e');
+    const auto catalogLabels = catalog.findEnumLabels(catalogType->oid);
+    assert(catalogLabels.size() == 3);
+    assert(catalogLabels.back().enumlabel == "happy");
     cleanup(db);
     std::cout << "[ENUM-ALTER] append value OK" << std::endl;
 }

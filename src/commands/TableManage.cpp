@@ -44033,11 +44033,73 @@ DBStatus StorageEngine::updateEnumType(const std::string& dbname, const EnumType
         unlockTables();
         return DBStatus::IO_ERROR;
     }
+
+    // Keep the SQL-visible type catalog synchronized before publishing the
+    // heap transaction.  Older databases can have the sidecar without a
+    // pg_type row, so repair that representation on the first ALTER.
+    CatalogManager* enumCatalog = nullptr;
+    Oid enumCatalogTypeOid = INVALID_OID;
+    bool createdCatalogType = false;
+    bool catalogLabelsChanged = false;
+    auto restoreEnumCatalog = [&]() {
+        if (!enumCatalog || enumCatalogTypeOid == INVALID_OID) return;
+        if (createdCatalogType) {
+            (void)enumCatalog->dropType(enumCatalogTypeOid);
+        } else if (catalogLabelsChanged) {
+            (void)enumCatalog->replaceEnumLabels(enumCatalogTypeOid,
+                                                 previous.labels);
+        }
+        (void)enumCatalog->persistAll();
+    };
+    try {
+        CatalogManager::QualifiedName qualifiedName;
+        if (!CatalogManager::parseQualifiedName(et.name, qualifiedName) ||
+            qualifiedName.name.empty()) {
+            throw std::runtime_error("invalid enum catalog name");
+        }
+        const std::string namespaceName = qualifiedName.schema.empty()
+            ? "public" : qualifiedName.schema;
+        enumCatalog = &catalogService().get(dbname);
+        const PgNamespaceRow* typeNamespace =
+            enumCatalog->findNamespaceByName(namespaceName);
+        if (!typeNamespace)
+            throw std::runtime_error("enum namespace is not cataloged");
+        const PgTypeRow* catalogType = enumCatalog->findTypeByName(
+            qualifiedName.name, typeNamespace->oid);
+        if (catalogType) {
+            if (catalogType->typtype != 'e')
+                throw std::runtime_error("catalog type is not an enum");
+            enumCatalogTypeOid = catalogType->oid;
+        } else {
+            PgTypeRow newType;
+            newType.typname = qualifiedName.name;
+            newType.typnamespace = typeNamespace->oid;
+            newType.typlen = 4;
+            newType.typbyval = true;
+            newType.typtype = 'e';
+            newType.typcategory = 'E';
+            enumCatalogTypeOid = enumCatalog->createType(newType);
+            createdCatalogType = true;
+        }
+        if (!enumCatalog->replaceEnumLabels(enumCatalogTypeOid, et.labels))
+            throw std::runtime_error("cannot update enum catalog labels");
+        catalogLabelsChanged = true;
+        if (!enumCatalog->persistAll())
+            throw std::runtime_error("cannot persist enum catalog labels");
+    } catch (const std::exception&) {
+        restoreEnumCatalog();
+        index_file::writeAtomically(path, serializeEnumTypes(originalTypes));
+        if (ownsRenameTransaction) (void)rollbackTransaction();
+        restoreSchemas();
+        unlockTables();
+        return DBStatus::IO_ERROR;
+    }
     if (ownsRenameTransaction) {
         const DBStatus commitStatus = commitTransaction();
         if (commitStatus != DBStatus::OK) {
             if (transactionContext().inTransaction)
                 (void)rollbackTransaction();
+            restoreEnumCatalog();
             index_file::writeAtomically(path,
                                         serializeEnumTypes(originalTypes));
             restoreSchemas();

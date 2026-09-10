@@ -146,6 +146,17 @@ static void test_named_enum_alter_updates_dependent_schemas() {
     priority.labels.insert(priority.labels.begin() + 1, "medium");
     assert(g_engine.updateEnumType(db, priority) == dbms::DBStatus::OK);
     {
+        auto& catalog = g_engine.catalogService().get(db);
+        const auto* publicNamespace = catalog.findNamespaceByName("public");
+        assert(publicNamespace);
+        const auto* catalogType =
+            catalog.findTypeByName("priority", publicNamespace->oid);
+        assert(catalogType && catalogType->typtype == 'e');
+        const auto catalogLabels = catalog.findEnumLabels(catalogType->oid);
+        assert(catalogLabels.size() == priority.labels.size());
+        for (size_t index = 0; index < priority.labels.size(); ++index)
+            assert(catalogLabels[index].enumlabel == priority.labels[index]);
+
         dbms::StorageEngine reopened;
         const auto schema = reopened.getTableSchema(db, "tasks");
         assert(schema.cols[1].dataType == "priority");
@@ -196,6 +207,18 @@ static void test_named_enum_alter_updates_dependent_schemas() {
     const auto renamedRows = g_engine.query(
         db, "tasks", {"=id 1"}, {"p"});
     assert((renamedRows == std::vector<std::string>{"minor "}));
+    {
+        auto& catalog = g_engine.catalogService().get(db);
+        const auto* publicNamespace = catalog.findNamespaceByName("public");
+        assert(publicNamespace);
+        const auto* catalogType =
+            catalog.findTypeByName("priority", publicNamespace->oid);
+        assert(catalogType);
+        const auto catalogLabels = catalog.findEnumLabels(catalogType->oid);
+        assert(catalogLabels.size() == priority.labels.size());
+        for (size_t index = 0; index < priority.labels.size(); ++index)
+            assert(catalogLabels[index].enumlabel == priority.labels[index]);
+    }
 
     cleanup(db);
     std::cout << "[ENUM] dependent schema updates OK" << std::endl;
