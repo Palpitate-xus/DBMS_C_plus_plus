@@ -542,20 +542,27 @@ def extended_query_portal_pagination(sock):
     kind, _ = read_message(sock)
     assert kind == b"2"
 
-    def execute_batch(expected_rows, suspended):
-        sock.sendall(typed(b"E", b"paged\0" + struct.pack("!I", 1)) + typed(b"S"))
-        messages = read_until_ready(sock)
-        assert data_row_values(messages) == expected_rows, messages
-        assert any(kind == b"s" for kind, _ in messages) if suspended else not any(kind == b"s" for kind, _ in messages), messages
-        assert not any(kind == b"C" for kind, _ in messages) if suspended else any(kind == b"C" for kind, _ in messages), messages
-        return messages
+    # A suspended portal can be resumed before Sync.  Sync commits the
+    # implicit extended-query transaction and destroys transaction-scoped
+    # portals, so it must not be sent between pagination Execute messages.
+    sock.sendall(typed(b"E", b"paged\0" + struct.pack("!I", 1)))
+    first_batch = []
+    while not first_batch or first_batch[-1][0] != b"s":
+        first_batch.append(read_message(sock))
+    assert data_row_values(first_batch) == [[b"1"]], first_batch
+    assert not any(kind == b"C" for kind, _ in first_batch), first_batch
 
-    execute_batch([[b"1"]], True)
-    execute_batch([[b"3"]], False)
+    sock.sendall(typed(b"E", b"paged\0" + struct.pack("!I", 1)) + typed(b"S"))
+    second_batch = read_until_ready(sock)
+    assert data_row_values(second_batch) == [[b"3"]], second_batch
+    assert not any(kind == b"s" for kind, _ in second_batch), second_batch
+    assert any(kind == b"C" for kind, _ in second_batch), second_batch
+
     sock.sendall(typed(b"E", b"paged\0" + struct.pack("!I", 1)) + typed(b"S"))
     messages = read_until_ready(sock)
     assert data_row_values(messages) == []
-    assert any(kind == b"C" for kind, _ in messages)
+    assert b"C34000\0" in next(body for kind, body in messages
+                               if kind == b"E"), messages
 
     sock.sendall(typed(b"C", b"P\0") + typed(b"C", b"S\0") + typed(b"S"))
     messages = read_until_ready(sock)
@@ -1043,9 +1050,43 @@ def main():
         sock.sendall(typed(b"S"))
         assert read_until_ready(sock) == [(b"Z", b"I")]
 
+        # Execute messages before one Sync share an implicit transaction.
+        # A later execution error rolls back writes from earlier portals.
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE extended_sync_atomic (id INT PRIMARY KEY)"))
+        first_parse = (b"sync_insert_ok\0"
+                       b"INSERT INTO extended_sync_atomic VALUES (1)\0" +
+                       struct.pack("!H", 0))
+        first_bind = (b"sync_portal_ok\0sync_insert_ok\0" +
+                      struct.pack("!H", 0) + struct.pack("!H", 0) +
+                      struct.pack("!H", 0))
+        second_parse = (b"sync_insert_bad\0"
+                        b"INSERT INTO extended_sync_missing VALUES (2)\0" +
+                        struct.pack("!H", 0))
+        second_bind = (b"sync_portal_bad\0sync_insert_bad\0" +
+                       struct.pack("!H", 0) + struct.pack("!H", 0) +
+                       struct.pack("!H", 0))
+        execute_ok = b"sync_portal_ok\0" + struct.pack("!I", 0)
+        execute_bad = b"sync_portal_bad\0" + struct.pack("!I", 0)
+        sock.sendall(
+            typed(b"P", first_parse) + typed(b"B", first_bind) +
+            typed(b"E", execute_ok) + typed(b"P", second_parse) +
+            typed(b"B", second_bind) + typed(b"E", execute_bad) +
+            typed(b"S"))
+        failed_group = read_until_ready(sock)
+        assert any(kind == b"C" and body.startswith(b"INSERT")
+                   for kind, body in failed_group), failed_group
+        assert any(kind == b"E" for kind, _ in failed_group), failed_group
+        assert failed_group[-1] == (b"Z", b"I"), failed_group
+        assert data_row_values(simple_query(
+            sock, "SELECT id FROM extended_sync_atomic")) == []
+
         # Named statements and portals cannot be silently replaced.  A
         # duplicate Parse/Bind enters extended-query recovery, keeps the
         # original object intact, and reports PostgreSQL's dedicated codes.
+        # Keep an explicit transaction open because Sync ends an implicit
+        # extended-query transaction and therefore destroys its portals.
+        assert simple_query(sock, "BEGIN")[-1] == (b"Z", b"T")
         named_parse = (b"duplicate_stmt\0SELECT 21\0" +
                        struct.pack("!H", 0))
         sock.sendall(typed(b"P", named_parse))
@@ -1056,7 +1097,7 @@ def main():
         kind, body = read_message(sock)
         assert kind == b"E" and b"C42P05\0" in body, (kind, body)
         sock.sendall(typed(b"S"))
-        assert read_until_ready(sock)[-1] == (b"Z", b"I")
+        assert read_until_ready(sock)[-1] == (b"Z", b"T")
 
         named_bind = (b"duplicate_portal\0duplicate_stmt\0" +
                       struct.pack("!H", 0) + struct.pack("!H", 0) +
@@ -1067,13 +1108,15 @@ def main():
         kind, body = read_message(sock)
         assert kind == b"E" and b"C42P03\0" in body, (kind, body)
         sock.sendall(typed(b"S"))
-        assert read_until_ready(sock)[-1] == (b"Z", b"I")
+        assert read_until_ready(sock)[-1] == (b"Z", b"T")
         sock.sendall(typed(
             b"E", b"duplicate_portal\0" + struct.pack("!I", 0)) +
             typed(b"S"))
         duplicate_object_result = read_until_ready(sock)
         assert data_row_values(duplicate_object_result) == [[b"21"]], \
             duplicate_object_result
+        assert duplicate_object_result[-1] == (b"Z", b"T")
+        assert simple_query(sock, "ROLLBACK")[-1] == (b"Z", b"I")
 
         # LISTEN/NOTIFY is backend-local, transactional, and transported as
         # protocol NotificationResponse rather than text prepended to a query.

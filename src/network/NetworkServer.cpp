@@ -2297,6 +2297,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
     } backendRelease{pool, backend, sessionMode, backend};
     bool transactionFailed = false;
     bool extendedQueryError = false;
+    bool extendedImplicitTransaction = false;
     // Connection-local extended-query state. In transaction/statement pool
     // modes these do not travel across backend rentals (PgBouncer has the
     // same restriction for session-level features).
@@ -2387,6 +2388,9 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 continue;
             }
             updateProcessInfo(pid, "Query", "executing", trimText(sql));
+            // A Simple Query invalidates the unnamed extended-query objects.
+            preparedStatements.erase("");
+            portals.erase("");
             const std::vector<std::string> statements =
                 splitSimpleQueryStatements(sql);
             if (statements.empty()) {
@@ -2674,6 +2678,18 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             }
             auto& portalState = portalIt->second;
             if (!portalState.executed) {
+                if (!g_engine.inTransaction() &&
+                    !isTransactionControlStatement(portalState.sql)) {
+                    QueryResult beginResult = executeForProtocol("BEGIN");
+                    if (beginResult.error) {
+                        protocol.sendErrorResponse(
+                            "ERROR", beginResult.sqlState,
+                            beginResult.errorMessage);
+                        extendedQueryError = true;
+                        continue;
+                    }
+                    extendedImplicitTransaction = true;
+                }
                 portalState.result = executeForProtocol(portalState.sql);
                 portalState.executed = true;
             }
@@ -2838,6 +2854,24 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 protocol.sendReadyForQuery(readyStatus());
                 extendedQueryError = false;
                 continue;
+            }
+            if (extendedImplicitTransaction) {
+                QueryResult endResult = executeForProtocol(
+                    extendedQueryError ? "ROLLBACK" : "COMMIT");
+                extendedImplicitTransaction = false;
+                portals.clear();
+                if (endResult.error) {
+                    protocol.sendErrorResponse(
+                        "ERROR", endResult.sqlState,
+                        trimText(endResult.errorMessage));
+                    if (transactionFailed || g_engine.inTransaction()) {
+                        (void)executeForProtocol("ROLLBACK");
+                    }
+                }
+            } else if (!g_engine.inTransaction()) {
+                // Named portals are transaction-scoped.  This also covers
+                // an explicit COMMIT/ROLLBACK executed in the current group.
+                portals.clear();
             }
             if (!sendPendingNotifications(protocol, session.pid)) break;
             if (!sendChangedParameterStatuses()) break;
