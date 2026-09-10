@@ -5,11 +5,13 @@
 #include "common/NotificationManager.h"
 #include "types/numeric.h"
 #include "types/money.h"
+#include "types/uuid.h"
 #include "utils/Session.h"
 
 #include <algorithm>
 #include <cerrno>
 #include <charconv>
+#include <chrono>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
@@ -80,6 +82,12 @@ static std::optional<Money> tryParseMoney(const std::string& value,
         : Money::parse(value, money, locale);
     if (!parsed) return std::nullopt;
     return money;
+}
+
+static std::optional<UuidValue> tryParseUuid(const std::string& value) {
+    UuidValue uuid;
+    if (!UuidValue::parse(value, uuid)) return std::nullopt;
+    return uuid;
 }
 
 static std::string normalizeDecimalMagnitude(std::string value) {
@@ -1133,6 +1141,97 @@ static std::string timestampShift(const std::string& ts, const IntervalParts& iv
     return buf;
 }
 
+static bool parseIsoTimestampMicros(const std::string& timestamp,
+                                     int64_t& result) {
+    if (timestamp.size() < 19) return false;
+    Date date(timestamp.substr(0, 10).c_str());
+    if (date.year == 0) return false;
+    long long hour = 0;
+    long long minute = 0;
+    long long second = 0;
+    if (std::sscanf(timestamp.c_str() + 11, "%lld:%lld:%lld",
+                    &hour, &minute, &second) != 3 ||
+        hour > 23 || minute > 59 || second > 59) {
+        return false;
+    }
+    long long fraction = 0;
+    const size_t dot = timestamp.find('.', 19);
+    if (dot != std::string::npos) {
+        size_t digits = 0;
+        for (size_t i = dot + 1; i < timestamp.size(); ++i) {
+            const unsigned char character = timestamp[i];
+            if (!std::isdigit(character) || digits == 6) return false;
+            fraction = fraction * 10 + (character - '0');
+            ++digits;
+        }
+        while (digits++ < 6) fraction *= 10;
+    }
+    const __int128 micros =
+        (static_cast<__int128>(civilToDays(
+             date.year, static_cast<unsigned>(date.month),
+             static_cast<unsigned>(date.day))) * 86400 +
+         hour * 3600 + minute * 60 + second) * 1000000 + fraction;
+    if (micros < std::numeric_limits<int64_t>::min() ||
+        micros > std::numeric_limits<int64_t>::max()) {
+        return false;
+    }
+    result = static_cast<int64_t>(micros);
+    return true;
+}
+
+static bool shiftUuidTimestamp(int64_t baseMicros,
+                               const IntervalParts& interval,
+                               int64_t& result) {
+    long long seconds = baseMicros / 1000000;
+    long long fraction = baseMicros % 1000000;
+    if (fraction < 0) {
+        fraction += 1000000;
+        --seconds;
+    }
+    long long days = seconds / 86400;
+    long long secondsOfDay = seconds % 86400;
+    if (secondsOfDay < 0) {
+        secondsOfDay += 86400;
+        --days;
+    }
+    const auto [year, month, day] = daysToCivil(days);
+    if (year < 1 || year > 9999) return false;
+    char buffer[80];
+    std::snprintf(
+        buffer, sizeof(buffer), "%04lld-%02u-%02u %02lld:%02lld:%02lld.%06lld",
+        year, month, day, secondsOfDay / 3600,
+        (secondsOfDay % 3600) / 60, secondsOfDay % 60, fraction);
+    const std::string shifted = timestampShift(buffer, interval, true);
+    return !shifted.empty() && parseIsoTimestampMicros(shifted, result);
+}
+
+static std::string formatUuidTimestamp(int64_t unixMicros) {
+    long long days = unixMicros / 86400000000LL;
+    long long dayMicros = unixMicros % 86400000000LL;
+    if (dayMicros < 0) {
+        dayMicros += 86400000000LL;
+        --days;
+    }
+    const auto [year, month, day] = daysToCivil(days);
+    if (year < 1 || year > 9999) return {};
+    const long long hour = dayMicros / 3600000000LL;
+    const long long minute = (dayMicros / 60000000LL) % 60;
+    const long long second = (dayMicros / 1000000LL) % 60;
+    const long long fraction = dayMicros % 1000000LL;
+    char buffer[80];
+    std::snprintf(buffer, sizeof(buffer),
+                  "%04lld-%02u-%02u %02lld:%02lld:%02lld",
+                  year, month, day, hour, minute, second);
+    std::string result = buffer;
+    if (fraction != 0) {
+        std::string digits = std::to_string(fraction);
+        digits.insert(digits.begin(), 6 - digits.size(), '0');
+        while (!digits.empty() && digits.back() == '0') digits.pop_back();
+        result += "." + digits;
+    }
+    return result + "+00";
+}
+
 // Resolve a timezone name to a UTC offset in minutes. Supports UTC-style
 // fixed offsets ("UTC", "UTC+8", "UTC-05:30") and POSIX abbreviated forms
 // ("+08", "-0530"). Full IANA tzdata is out of scope for this layer.
@@ -1523,6 +1622,17 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
         const bool ba = a.asBool();
         const bool bb = b.asBool();
         return (ba > bb) - (ba < bb);
+    }
+
+    if (ta == "uuid" || tb == "uuid") {
+        const auto left = tryParseUuid(a.value);
+        const auto right = tryParseUuid(b.value);
+        if (!left || !right) {
+            throw std::runtime_error(
+                "invalid input syntax for type uuid (SQLSTATE 22P02)");
+        }
+        if (*left == *right) return 0;
+        return *left < *right ? -1 : 1;
     }
 
     const bool blankPaddedA = isBlankPaddedCharacterType(ta);
@@ -3317,6 +3427,22 @@ static bool isTextCastSourceType(const std::string& sourceType) {
            sourceType.rfind("character varying(", 0) == 0;
 }
 
+static ExprValue castToUuid(const ExprValue& value) {
+    const std::string sourceType = toLower(value.typeName);
+    if (sourceType != "uuid" && !isTextCastSourceType(sourceType)) {
+        throw std::runtime_error(
+            "cannot cast type " + sourceType +
+            " to uuid (SQLSTATE 42846)");
+    }
+    UuidValue uuid;
+    if (!UuidValue::parse(value.value, uuid)) {
+        throw std::runtime_error(
+            "invalid input syntax for type uuid: '" +
+            trimStr(value.value) + "' (SQLSTATE 22P02)");
+    }
+    return ExprValue("uuid", uuid.toString(), false);
+}
+
 static bool isTimestampCastSourceType(const std::string& sourceType) {
     return sourceType == "timestamp" || sourceType == "timestamptz" ||
            sourceType == "timestamp without time zone" ||
@@ -3671,6 +3797,7 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
     const NumericCastSpec numericSpec = parseNumericCastSpec(target);
     if (numericSpec.matches) return castToNumeric(v, numericSpec);
     if (target == "money") return castToMoney(v);
+    if (target == "uuid") return castToUuid(v);
     const CharacterCastSpec characterSpec = parseCharacterCastSpec(target);
     if (characterSpec.kind != CharacterCastKind::None)
         return castToCharacter(v, characterSpec);
@@ -6862,6 +6989,86 @@ void ExprEvaluator::registerBuiltins() {
     functions_["random"] = [](const std::vector<ExprValue>&) {
         return ExprValue("double precision", std::to_string(static_cast<double>(std::rand()) / RAND_MAX), false);
     };
+    functions_["gen_random_uuid"] = [](const std::vector<ExprValue>& a) {
+        if (!a.empty()) {
+            throw std::runtime_error(
+                "function gen_random_uuid() does not accept arguments "
+                "(SQLSTATE 42883)");
+        }
+        return ExprValue("uuid", UuidValue::generateV4().toString(), false);
+    };
+    functions_["uuidv4"] = [](const std::vector<ExprValue>& a) {
+        if (!a.empty()) {
+            throw std::runtime_error(
+                "function uuidv4() does not accept arguments "
+                "(SQLSTATE 42883)");
+        }
+        return ExprValue("uuid", UuidValue::generateV4().toString(), false);
+    };
+    functions_["uuidv7"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() > 1) {
+            throw std::runtime_error(
+                "function uuidv7(interval) accepts at most one argument "
+                "(SQLSTATE 42883)");
+        }
+        if (!a.empty() && a[0].isNull)
+            return ExprValue("uuid", "", true);
+        const auto now = std::chrono::time_point_cast<
+            std::chrono::microseconds>(std::chrono::system_clock::now());
+        int64_t unixMicros = now.time_since_epoch().count();
+        if (!a.empty()) {
+            const IntervalParts shift = parseIntervalText(a[0].value);
+            if (!shift.ok || !shiftUuidTimestamp(
+                                 unixMicros, shift, unixMicros)) {
+                throw std::runtime_error(
+                    "UUIDv7 timestamp is out of range (SQLSTATE 22008)");
+            }
+        }
+        UuidValue uuid;
+        if (!UuidValue::generateV7At(unixMicros, a.empty(), uuid)) {
+            throw std::runtime_error(
+                "UUIDv7 timestamp is out of range (SQLSTATE 22008)");
+        }
+        return ExprValue("uuid", uuid.toString(), false);
+    };
+    functions_["uuid_extract_version"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() != 1) {
+            throw std::runtime_error(
+                "function uuid_extract_version(uuid) requires one argument "
+                "(SQLSTATE 42883)");
+        }
+        if (a[0].isNull) return ExprValue("smallint", "", true);
+        UuidValue uuid;
+        if (!UuidValue::parse(a[0].value, uuid)) {
+            throw std::runtime_error(
+                "invalid input syntax for type uuid (SQLSTATE 22P02)");
+        }
+        const int version = uuid.version();
+        return version < 0
+            ? ExprValue("smallint", "", true)
+            : ExprValue("smallint", std::to_string(version), false);
+    };
+    functions_["uuid_extract_timestamp"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() != 1) {
+            throw std::runtime_error(
+                "function uuid_extract_timestamp(uuid) requires one argument "
+                "(SQLSTATE 42883)");
+        }
+        if (a[0].isNull) return ExprValue("timestamptz", "", true);
+        UuidValue uuid;
+        if (!UuidValue::parse(a[0].value, uuid)) {
+            throw std::runtime_error(
+                "invalid input syntax for type uuid (SQLSTATE 22P02)");
+        }
+        int64_t unixMicros = 0;
+        if (!uuid.extractUnixMicros(unixMicros))
+            return ExprValue("timestamptz", "", true);
+        const std::string timestamp = formatUuidTimestamp(unixMicros);
+        return ExprValue(
+            "timestamptz", timestamp, timestamp.empty());
+    };
+    volatility_["uuid_extract_version"] = 'i';
+    volatility_["uuid_extract_timestamp"] = 'i';
     // pow — alias of power; ceiling — alias of ceil
     functions_["pow"] = functions_["power"];
     functions_["ceiling"] = [integralRound](const auto& a) { return integralRound(a, true); };

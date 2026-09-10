@@ -375,7 +375,7 @@ void TypeRegistry::registerTextSearchTypes() {
 }
 
 void TypeRegistry::registerUuidTypes() {
-    registerType({"uuid", 36, 'c', 'p', TypeCategory::UUID, false, -1, 0, false});
+    registerType({"uuid", 16, 'c', 'p', TypeCategory::UUID, false, -1, 0, false});
 }
 
 void TypeRegistry::registerXmlJsonTypes() {

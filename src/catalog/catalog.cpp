@@ -1435,6 +1435,7 @@ void CatalogManager::bootstrapSystemTypes() {
     ensureType(1266,  "timetz",     12,   'b', 'D');
     ensureType(1700,  "numeric",    -1,   'b', 'N');
     ensureType(2950,  "uuid",       16,   'b', 'U');
+    ensureType(2951,  "_uuid",      -1,   'b', 'A');
     ensureType(3802,  "jsonb",      -1,   'b', 'U');
 }
 

@@ -22,6 +22,7 @@ static void test_bootstrap_has_core_types() {
     assert(reg.findType("timestamptz") != nullptr);
     assert(reg.findType("bytea") != nullptr);
     assert(reg.findType("uuid") != nullptr);
+    assert(reg.findType("uuid")->typlen == 16);
     assert(reg.findType("jsonb") != nullptr);
     assert(reg.findType("point") != nullptr);
     assert(reg.findType("inet") != nullptr);

@@ -1945,6 +1945,47 @@ def main():
             "('2026-08-07', '12:34:56', '2026-08-07 12:34:56', "
             "'2026-08-07 12:34:56+00:00', "
             "'550e8400-e29b-41d4-a716-446655440000')"))
+        uuid_column_messages = simple_query(
+            sock, "SELECT u FROM protocol_temporal")
+        uuid_column_description = row_description_fields(uuid_column_messages)
+        assert uuid_column_description[0][3] == 2950
+        assert uuid_column_description[0][4] == 16
+        assert data_row_values(simple_query(
+            sock, "SELECT u FROM protocol_temporal WHERE "
+                  "u = '550E-8400-E29B-41D4-A716-4466-5544-0000'")) == [
+                      [b"550e8400-e29b-41d4-a716-446655440000"]]
+
+        uuid_v4_messages = simple_query(sock, "SELECT uuidv4()")
+        uuid_v4_rows = data_row_values(uuid_v4_messages)
+        assert row_description_fields(uuid_v4_messages)[0][3] == 2950
+        assert len(uuid_v4_rows) == 1 and len(uuid_v4_rows[0][0]) == 36
+        assert uuid_v4_rows[0][0][14:15] == b"4"
+        assert uuid_v4_rows[0][0][19:20] in (b"8", b"9", b"a", b"b")
+        random_uuid_rows = data_row_values(simple_query(
+            sock, "SELECT gen_random_uuid()"))
+        assert random_uuid_rows[0][0][14:15] == b"4"
+        assert random_uuid_rows[0][0][19:20] in (b"8", b"9", b"a", b"b")
+        uuid_v7_messages = simple_query(sock, "SELECT uuidv7()")
+        uuid_v7_rows = data_row_values(uuid_v7_messages)
+        assert row_description_fields(uuid_v7_messages)[0][3] == 2950
+        assert uuid_v7_rows[0][0][14:15] == b"7"
+        shifted_uuid_v7 = data_row_values(simple_query(
+            sock, "SELECT uuidv7(INTERVAL '1 day')"))
+        assert shifted_uuid_v7[0][0][14:15] == b"7"
+        uuid_version_messages = simple_query(
+            sock, "SELECT uuid_extract_version("
+                  "'019535d9-3df7-79fb-b466-fa907fa17f9e'::uuid)")
+        assert data_row_values(uuid_version_messages) == [[b"7"]]
+        assert row_description_fields(uuid_version_messages)[0][3] == 21
+        uuid_timestamp_messages = simple_query(
+            sock, "SELECT uuid_extract_timestamp("
+                  "'019535d9-3df7-79fb-b466-fa907fa17f9e'::uuid)")
+        assert data_row_values(uuid_timestamp_messages) == [
+            [b"2025-02-24 02:46:24.503623+00"]]
+        assert row_description_fields(uuid_timestamp_messages)[0][3] == 1184
+        invalid_uuid_cast = simple_query(sock, "SELECT 'bad'::uuid")
+        assert any(kind == b"E" and b"C22P02\x00" in body
+                   for kind, body in invalid_uuid_cast), invalid_uuid_cast
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "CREATE TABLE protocol_infinity_pos "
             "(ts TIMESTAMP, tz TIMESTAMPTZ)"))

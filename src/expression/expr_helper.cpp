@@ -256,6 +256,10 @@ std::string inferAstResultType(
         if (name == "exists" || name == "is_null" || name == "is_not_null" ||
             name == "isdistinct" || name == "isnotdistinct") return "boolean";
         if (name == "pg_notify") return "void";
+        if (name == "gen_random_uuid" || name == "uuidv4" ||
+            name == "uuidv7") return "uuid";
+        if (name == "uuid_extract_version") return "smallint";
+        if (name == "uuid_extract_timestamp") return "timestamptz";
         if (name == "pg_notification_queue_usage") return "double precision";
         if (name == "count" || name == "row_number" || name == "rank" ||
             name == "dense_rank") return "bigint";

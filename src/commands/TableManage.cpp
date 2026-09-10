@@ -12,6 +12,7 @@
 #include "type_registry.h"
 #include "types/numeric.h"
 #include "types/money.h"
+#include "types/uuid.h"
 #include "catalog/collation.h"
 #include "catalog/CatalogService.h"
 #include "expression/expr_helper.h"
@@ -727,6 +728,11 @@ static std::string canonicalColumnKeyValue(const Column& column,
         int64_t minorUnits = 0;
         if (!parseMoneyLiteral(value, minorUnits)) return value;
         return moneyIndexKey(minorUnits);
+    }
+    if (column.dataType == "uuid") {
+        UuidValue uuid;
+        if (!UuidValue::parse(value, uuid)) return value;
+        return uuid.indexKey();
     }
     return value;
 }
@@ -1737,7 +1743,7 @@ Column makeUuidColumn(const std::string& name, bool isNull, bool isPK) {
     c.isNull = isNull;
     c.isPrimaryKey = isPK;
     c.dataType = "uuid";
-    c.dsize = 36;  // UUID string: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    c.dsize = 16;
     return c;
 }
 
@@ -7499,24 +7505,35 @@ static std::string formatMacAddr(const uint8_t* bytes, int numBytes) {
 
 // ========================================================================
 // UUID helper
-// Stored as the canonical 36-char text "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx".
-// Accepts optional surrounding braces and any hyphen placement (PostgreSQL is
-// lenient); requires exactly 32 hex digits. Emits lowercase 8-4-4-4-12.
+// New relations store the UUID's 16 RFC bytes.  The text helper also keeps
+// pre-migration 36-byte schemas readable.
 // ========================================================================
 static bool normalizeUuid(const std::string& in, std::string& out) {
-    std::string s = in;
-    if (s.size() >= 2 && s.front() == '{' && s.back() == '}')
-        s = s.substr(1, s.size() - 2);
-    std::string hex;
-    hex.reserve(32);
-    for (char ch : s) {
-        if (ch == '-') continue;
-        if (!std::isxdigit(static_cast<unsigned char>(ch))) return false;
-        hex += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    UuidValue uuid;
+    if (!UuidValue::parse(in, uuid)) return false;
+    out = uuid.toString();
+    return true;
+}
+
+static bool parseUuidValue(const std::string& input, UuidValue& output) {
+    return UuidValue::parse(input, output);
+}
+
+static bool writeUuidStorage(const std::string& input, char* destination,
+                             size_t length) {
+    std::memset(destination, 0, length);
+    if (input.empty()) return true;
+    UuidValue uuid;
+    if (!UuidValue::parse(input, uuid)) return false;
+    if (length == uuid.bytes().size()) {
+        std::memcpy(destination, uuid.bytes().data(), uuid.bytes().size());
+        return true;
     }
-    if (hex.size() != 32) return false;
-    out = hex.substr(0, 8) + "-" + hex.substr(8, 4) + "-" + hex.substr(12, 4) +
-          "-" + hex.substr(16, 4) + "-" + hex.substr(20, 12);
+    // Old schema files used a 36-byte canonical text datum.  Preserve their
+    // physical layout until ALTER/rewrite migrates the relation.
+    const std::string canonical = uuid.toString();
+    if (canonical.size() > length) return false;
+    std::memcpy(destination, canonical.data(), canonical.size());
     return true;
 }
 
@@ -8104,6 +8121,10 @@ static bool validateArrayScalar(const std::string& tok, const std::string& elemT
     if (elemType == "money") {
         int64_t minorUnits = 0;
         return parseMoneyLiteral(tok, minorUnits);
+    }
+    if (elemType == "uuid") {
+        UuidValue uuid;
+        return UuidValue::parse(tok, uuid);
     }
     return true;  // text-like element types accept any contents
 }
@@ -8836,8 +8857,22 @@ std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer
         if (!tbl.cols[i].isVariableLength) offset += tbl.cols[i].dsize;
     }
     if (offset + col.dsize > rowBuffer.size()) return "";
+    if (col.dataType == "uuid") {
+        if (col.dsize == UuidValue::Bytes{}.size()) {
+            UuidValue::Bytes bytes{};
+            std::memcpy(bytes.data(), rowBuffer.data() + offset,
+                        bytes.size());
+            return UuidValue(bytes).toString();
+        }
+        std::string legacy(col.dsize, '\0');
+        std::memcpy(legacy.data(), rowBuffer.data() + offset, col.dsize);
+        const size_t nul = legacy.find('\0');
+        if (nul != std::string::npos) legacy.resize(nul);
+        std::string canonical;
+        return normalizeUuid(legacy, canonical) ? canonical : legacy;
+    }
     if (col.dataType == "char" || col.dataType == "nchar" ||
-        col.dataType == "binary" || col.dataType == "uuid") {
+        col.dataType == "binary") {
         std::string val(col.dsize, '\0');
         std::memcpy(val.data(), rowBuffer.data() + offset, col.dsize);
         auto nul = val.find('\0');
@@ -15743,6 +15778,10 @@ static bool valueConvertibleToType(const std::string& raw, const std::string& ta
     if (targetType == "boolean") {
         return parsePostgresBoolean(v).has_value();
     }
+    if (targetType == "uuid") {
+        UuidValue uuid;
+        return parseUuidValue(v, uuid);
+    }
     // Other targets (char/varchar/text/date/timestamp/...) accept any text;
     // insert() re-encodes per the new type on a best-effort basis.
     return true;
@@ -19289,7 +19328,18 @@ StorageEngine::PredicateTruth StorageEngine::compareValues(
         return result ? PredicateTruth::True : PredicateTruth::False;
     };
 
-    if (col.dataType == "char" || col.dataType == "uuid" ||
+    if (col.dataType == "uuid") {
+        UuidValue leftUuid;
+        UuidValue rightUuid;
+        if (!parseUuidValue(left, leftUuid) ||
+            !parseUuidValue(right, rightUuid)) {
+            return PredicateTruth::Unknown;
+        }
+        const int cmp = leftUuid == rightUuid
+            ? 0 : (leftUuid < rightUuid ? -1 : 1);
+        return fromCompare(cmp);
+    }
+    if (col.dataType == "char" ||
         (col.isVariableLength && col.dataType != "numeric")) {
         const int cmp = compareTextValues(col, left, right);
         return fromCompare(cmp);
@@ -19630,7 +19680,40 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
     // value is a real empty string (storage distinguishes empty from NULL),
     // so comparisons proceed - including empty = empty.
 
-    if (col.dataType == "char" || col.dataType == "uuid" ||
+    if (col.dataType == "uuid") {
+        UuidValue valueUuid;
+        if (!parseUuidValue(val, valueUuid)) return false;
+        const auto compareUuid = [&](const std::string& candidate,
+                                     int& comparison) {
+            UuidValue candidateUuid;
+            if (!parseUuidValue(candidate, candidateUuid)) return false;
+            comparison = valueUuid == candidateUuid
+                ? 0 : (valueUuid < candidateUuid ? -1 : 1);
+            return true;
+        };
+        if (cond.op == "between" || cond.op == "notbetween") {
+            const size_t separator = cond.value.find(' ');
+            if (separator == std::string::npos) return false;
+            int lower = 0;
+            int upper = 0;
+            if (!compareUuid(cond.value.substr(0, separator), lower) ||
+                !compareUuid(cond.value.substr(separator + 1), upper)) {
+                return false;
+            }
+            const bool inRange = lower >= 0 && upper <= 0;
+            return cond.op == "between" ? inRange : !inRange;
+        }
+        int comparison = 0;
+        if (!compareUuid(cond.value, comparison)) return false;
+        if (cond.op == "=") return comparison == 0;
+        if (cond.op == "!=" || cond.op == "<>") return comparison != 0;
+        if (cond.op == "<") return comparison < 0;
+        if (cond.op == ">") return comparison > 0;
+        if (cond.op == "<=") return comparison <= 0;
+        if (cond.op == ">=") return comparison >= 0;
+        return false;
+    }
+    if (col.dataType == "char" ||
         (col.isVariableLength && col.dataType != "numeric")) {
         // Apply the column's collation for equality/comparison operators.
         auto scmp = [&](const std::string& a, const std::string& b) {
@@ -19991,8 +20074,10 @@ static std::string buildRowBuffer(const TableSchema& tbl,
             auto it = values.find(col.dataName);
             std::string val = (it != values.end()) ? it->second : "";
             if (columnIsNull(i)) val.clear();
-            if (col.dataType == "char" || col.dataType == "nchar" ||
-                col.dataType == "binary" || col.dataType == "uuid") {
+            if (col.dataType == "uuid") {
+                (void)writeUuidStorage(val, &rowBuffer[offset], col.dsize);
+            } else if (col.dataType == "char" || col.dataType == "nchar" ||
+                col.dataType == "binary") {
                 std::memset(&rowBuffer[offset], 0, col.dsize);
                 if (!val.empty()) {
                     size_t copyLen = std::min(val.size(), col.dsize);
@@ -20080,8 +20165,12 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                 if (val.size() > maxLen) val.resize(maxLen);
                 varDataList.push_back(val);
             } else {
-                if (col.dataType == "char" || col.dataType == "nchar" ||
-                    col.dataType == "binary" || col.dataType == "uuid") {
+                if (col.dataType == "uuid") {
+                    (void)writeUuidStorage(
+                        val, &fixedData[fixedOff], col.dsize);
+                } else if (col.dataType == "char" ||
+                           col.dataType == "nchar" ||
+                           col.dataType == "binary") {
                     std::memset(&fixedData[fixedOff], 0, col.dsize);
                     if (!val.empty()) {
                         size_t copyLen = std::min(val.size(), col.dsize);
@@ -27423,6 +27512,7 @@ std::vector<std::string> StorageEngine::query(
                             "", 0, 0.0, Date{},
                             val.empty() ? Numeric{} : Numeric(val));
                     } else if (scol.dataType == "char" ||
+                               scol.dataType == "uuid" ||
                                scol.isVariableLength) {
                         k.vals.emplace_back(val, 0, 0.0, Date{}, Numeric{});
                     } else if (scol.dataType == "date") {
@@ -27488,6 +27578,7 @@ std::vector<std::string> StorageEngine::query(
                     less = std::get<4>(a.vals[i]) < std::get<4>(b.vals[i]);
                     greater = std::get<4>(b.vals[i]) < std::get<4>(a.vals[i]);
                 } else if (scol.dataType == "char" ||
+                           scol.dataType == "uuid" ||
                            scol.isVariableLength) {
                     const int comparison = compareTextValues(
                         sortComparisonColumns[i], std::get<0>(a.vals[i]),
@@ -30389,23 +30480,44 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         }
         return evaluated.isNull ? "NULL" : evaluated.value;
     }
-    if (expr.funcName == "uuid_generate") {
-        // Generate UUID v4: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
-        // where y is one of {8, 9, a, b}
-        const char hex[] = "0123456789abcdef";
-        std::string uuid(36, '\0');
-        for (size_t i = 0; i < 36; ++i) {
-            if (i == 8 || i == 13 || i == 18 || i == 23) {
-                uuid[i] = '-';
-            } else if (i == 14) {
-                uuid[i] = '4';
-            } else if (i == 19) {
-                uuid[i] = hex[8 + (std::rand() & 3)];
-            } else {
-                uuid[i] = hex[std::rand() & 15];
-            }
+    if (expr.funcName == "gen_random_uuid" || expr.funcName == "uuidv4" ||
+        expr.funcName == "uuidv7" ||
+        expr.funcName == "uuid_extract_version" ||
+        expr.funcName == "uuid_extract_timestamp") {
+        std::map<std::string, std::string> rowContext;
+        std::map<std::string, std::string> typeHints;
+        std::set<std::string> nullColumns;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            bool valueIsNull = false;
+            const std::string value = engine && !dbname.empty()
+                ? engine->extractColumnValue(
+                      rowBuffer, tbl, i, dbname, true, &valueIsNull)
+                : StorageEngine::extractColumnValueStatic(
+                      rowBuffer, tbl, i);
+            rowContext[tbl.cols[i].dataName] = value;
+            typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+            if (valueIsNull || (!engine && value.empty()))
+                nullColumns.insert(tbl.cols[i].dataName);
         }
-        return uuid;
+        std::string expressionSql = expr.funcName + "(";
+        for (size_t i = 0; i < expr.funcArgs.size(); ++i) {
+            if (i != 0) expressionSql += ",";
+            expressionSql += expr.funcArgs[i];
+        }
+        expressionSql += ")";
+        const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
+            expressionSql, rowContext, nullColumns, typeHints, dbname,
+            expr.sessionUser);
+        if (!evaluated.ok) {
+            throw std::runtime_error(
+                evaluated.error.empty()
+                    ? "failed to evaluate UUID function"
+                    : evaluated.error);
+        }
+        return evaluated.isNull ? "NULL" : evaluated.value;
+    }
+    if (expr.funcName == "uuid_generate") {
+        return UuidValue::generateV4().toString();
     }
     if (expr.funcName == "date_add" && expr.funcArgs.size() >= 3) {
         std::string dstr = getVal(expr.funcArgs[0]);
