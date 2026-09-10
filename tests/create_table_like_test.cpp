@@ -223,6 +223,25 @@ static void test_like_plus_extra_column() {
     std::cout << "[LIKE] LIKE + extra column OK" << std::endl;
 }
 
+static void test_like_duplicate_columns_are_rejected() {
+    std::string db = testDbPath("like_duplicate_columns");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    assert(!ddl.executeSql("CREATE TABLE src (id INT, payload INT)", s));
+    assert(ddl.executeSql(
+        "CREATE TABLE duplicate_local (LIKE src, id INT)", s));
+    assert(ddl.executeSql(
+        "CREATE TABLE duplicate_like (LIKE src, LIKE src)", s));
+    assert(!g_engine.tableExists(db, "duplicate_local"));
+    assert(!g_engine.tableExists(db, "duplicate_like"));
+
+    cleanup(db);
+    std::cout << "[LIKE] duplicate copied columns rejected OK" << std::endl;
+}
+
 static void test_like_missing_source() {
     std::string db = testDbPath("like_missing");
     cleanup(db);
@@ -248,6 +267,7 @@ int main() {
     test_like_invalid_options_fail_before_creation();
     test_like_statistics_never_silently_ignored();
     test_like_plus_extra_column();
+    test_like_duplicate_columns_are_rejected();
     test_like_missing_source();
     std::cout << "[LIKE] all passed" << std::endl;
     return 0;

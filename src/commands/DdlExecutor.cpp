@@ -734,10 +734,22 @@ static PgAttributeRow catalogAttributeForColumn(
     attribute.attidentity = column.identityKind;
     attribute.attgenerated = column.generatedExpr.empty()
         ? '\0' : (column.generatedKind == 'v' ? 'v' : 's');
-    attribute.attislocal = true;
+    // Preserve inheritance provenance while synchronizing storage-backed
+    // column metadata after ALTER TABLE.  CREATE TABLE supplies the initial
+    // value below; an unrelated ALTER must not turn an inherited column into
+    // a local one.
+    if (!previous) attribute.attislocal = true;
     attribute.attisdropped = false;
     return attribute;
 }
+
+struct CatalogInheritanceColumn {
+    bool isLocal = true;
+    int32_t directParentCount = 0;
+};
+
+using CatalogInheritanceColumns =
+    std::map<std::string, CatalogInheritanceColumn>;
 
 static int16_t tableCheckConstraintCount(const TableSchema& table) {
     size_t count = 0;
@@ -847,7 +859,9 @@ static bool storageTableHasIndex(const std::string& dbname,
 
 static void registerTableInCatalog(CatalogManager& cat, const TableSchema& tbl,
                                    const std::string& logicalSchema,
-                                   const std::string& logicalName) {
+                                   const std::string& logicalName,
+                                   const CatalogInheritanceColumns*
+                                       inheritedColumns = nullptr) {
     const auto* ns = cat.findNamespaceByName(logicalSchema);
     if (!ns) {
         throw std::runtime_error("table schema has no catalog entry");
@@ -873,8 +887,18 @@ static void registerTableInCatalog(CatalogManager& cat, const TableSchema& tbl,
     Oid classOid = cat.createClass(cls);
 
     for (size_t i = 0; i < tbl.len; ++i) {
-        cat.addAttribute(catalogAttributeForColumn(
-            cat, classOid, nspOid, tbl.cols[i], i));
+        PgAttributeRow attribute = catalogAttributeForColumn(
+            cat, classOid, nspOid, tbl.cols[i], i);
+        if (inheritedColumns) {
+            const auto provenance =
+                inheritedColumns->find(tbl.cols[i].dataName);
+            if (provenance != inheritedColumns->end()) {
+                attribute.attislocal = provenance->second.isLocal;
+                attribute.attinhcount =
+                    provenance->second.directParentCount;
+            }
+        }
+        cat.addAttribute(attribute);
     }
 
     for (size_t i = 0; i < tbl.fkLen; ++i) {
@@ -1171,6 +1195,105 @@ static bool synchronizeTableHierarchyFlagsInCatalog(
                catalog.persistAll();
     } catch (const std::exception& error) {
         std::cerr << "table hierarchy catalog update failed: "
+                  << error.what() << std::endl;
+        return false;
+    }
+}
+
+static bool updateInheritanceColumnsInCatalog(
+    CatalogManager& catalog, const std::string& dbname,
+    const std::string& physicalChildName,
+    const std::string& physicalParentName, bool adding) {
+    const auto qualifiedChild =
+        CatalogService::logicalName(physicalChildName);
+    const std::string childSchema = qualifiedChild.schema.empty()
+        ? "public" : qualifiedChild.schema;
+    const auto* childRelation = catalog.resolveRelation(
+        qualifiedChild.name, {childSchema});
+    // Temporary and storage-only relations intentionally have no catalog row.
+    if (!childRelation) return true;
+
+    auto attributes = catalog.findAttributes(childRelation->oid);
+    std::map<std::string, int32_t> directParentCounts;
+    for (const auto& candidate : g_engine.getTableNames(dbname)) {
+        if (candidate == physicalChildName) continue;
+        const auto children =
+            g_engine.getInheritedChildren(dbname, candidate);
+        if (std::find(children.begin(), children.end(), physicalChildName) ==
+            children.end()) {
+            continue;
+        }
+        const TableSchema parent =
+            g_engine.getTableSchema(dbname, candidate);
+        for (size_t column = 0; column < parent.len; ++column) {
+            ++directParentCounts[parent.cols[column].dataName];
+        }
+    }
+
+    for (auto& attribute : attributes) {
+        attribute.attinhcount = directParentCounts[attribute.attname];
+    }
+    if (!adding) {
+        const TableSchema removedParent =
+            g_engine.getTableSchema(dbname, physicalParentName);
+        for (size_t parentColumn = 0; parentColumn < removedParent.len;
+             ++parentColumn) {
+            const auto attribute = std::find_if(
+                attributes.begin(), attributes.end(),
+                [&](const PgAttributeRow& row) {
+                    return row.attname ==
+                        removedParent.cols[parentColumn].dataName;
+                });
+            if (attribute == attributes.end()) return false;
+            // PostgreSQL deliberately retains columns after NO INHERIT by
+            // turning them into local definitions.
+            attribute->attislocal = true;
+        }
+    }
+    return catalog.replaceAttributes(childRelation->oid, attributes);
+}
+
+static bool columnHasInheritanceParents(
+    const std::string& dbname, const std::string& physicalTableName,
+    const std::string& columnName, bool& inherited) {
+    inherited = false;
+    try {
+        CatalogManager& catalog = g_engine.catalogService().get(dbname);
+        const auto qualifiedName =
+            CatalogService::logicalName(physicalTableName);
+        const std::string schemaName = qualifiedName.schema.empty()
+            ? "public" : qualifiedName.schema;
+        const auto* relation = catalog.resolveRelation(
+            qualifiedName.name, {schemaName});
+        if (!relation) return true;
+        const auto* attribute =
+            catalog.findAttribute(relation->oid, columnName);
+        inherited = attribute && attribute->attinhcount > 0;
+        // The graph is authoritative for databases created by older builds,
+        // whose pg_attribute rows always contained attinhcount=0.
+        if (!inherited) {
+            for (const auto& candidate : g_engine.getTableNames(dbname)) {
+                if (candidate == physicalTableName) continue;
+                const auto children =
+                    g_engine.getInheritedChildren(dbname, candidate);
+                if (std::find(children.begin(), children.end(),
+                              physicalTableName) == children.end()) {
+                    continue;
+                }
+                const TableSchema parent =
+                    g_engine.getTableSchema(dbname, candidate);
+                for (size_t column = 0; column < parent.len; ++column) {
+                    if (parent.cols[column].dataName == columnName) {
+                        inherited = true;
+                        break;
+                    }
+                }
+                if (inherited) break;
+            }
+        }
+        return true;
+    } catch (const std::exception& error) {
+        std::cerr << "inheritance catalog lookup failed: "
                   << error.what() << std::endl;
         return false;
     }
@@ -1636,6 +1759,18 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     std::cout << "SQL syntax error: DROP COLUMN requires a name" << std::endl;
                     return true;
                 }
+                if (!tableIsTemporary) {
+                    bool inherited = false;
+                    if (!columnHasInheritanceParents(
+                            s.currentDB, tableName, sub.name, inherited)) {
+                        return true;
+                    }
+                    if (inherited) {
+                        std::cout << "ERROR: cannot drop inherited column \""
+                                  << sub.name << "\"" << std::endl;
+                        return true;
+                    }
+                }
                 if (!g_engine.getColumnComment(
                          s.currentDB, tableName, sub.name).empty() &&
                     g_engine.commentOnColumn(
@@ -1705,6 +1840,18 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 if (sub.name.empty() || sub.newName.empty()) {
                     std::cout << "SQL syntax error: RENAME COLUMN requires two names" << std::endl;
                     return true;
+                }
+                if (!tableIsTemporary) {
+                    bool inherited = false;
+                    if (!columnHasInheritanceParents(
+                            s.currentDB, tableName, sub.name, inherited)) {
+                        return true;
+                    }
+                    if (inherited) {
+                        std::cout << "ERROR: cannot rename inherited column \""
+                                  << sub.name << "\"" << std::endl;
+                        return true;
+                    }
                 }
                 status = g_engine.alterTableRenameColumn(s.currentDB, tableName,
                                                          sub.name, sub.newName);
@@ -2375,9 +2522,10 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                             !actual->generatedExpr.empty();
                         if (parentGenerated != childGenerated ||
                             (parentGenerated &&
-                             expected.generatedKind != actual->generatedKind)) {
+                             (expected.generatedKind != actual->generatedKind ||
+                              expected.generatedExpr != actual->generatedExpr))) {
                             std::cout << "Child column " << expected.dataName
-                                      << " has incompatible generation status"
+                                      << " has incompatible generation expression"
                                       << std::endl;
                             return true;
                         }
@@ -2503,7 +2651,21 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     return true;
                 }
                 if (sub.action == AlterTableStmt::Action::Inherit &&
+                    edgeFound) {
+                    std::cout << "Relation \"" << stmt->tableName
+                              << "\" would be inherited from \""
+                              << sub.parentTable << "\" more than once"
+                              << std::endl;
+                    return true;
+                }
+                if (sub.action == AlterTableStmt::Action::NoInherit &&
                     !edgeFound) {
+                    std::cout << "Relation \"" << sub.parentTable
+                              << "\" is not a parent of relation \""
+                              << stmt->tableName << "\"" << std::endl;
+                    return true;
+                }
+                if (sub.action == AlterTableStmt::Action::Inherit) {
                     rewritten << parentName << '|' << tableName << '\n';
                     graphChanged = true;
                 }
@@ -2513,12 +2675,28 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                               << std::endl;
                     return true;
                 }
-                if (!tableIsTemporary &&
-                    !synchronizeTableHierarchyFlagsInCatalog(
-                        s.currentDB, parentName)) {
-                    std::cout << "ALTER TABLE inheritance catalog update failed"
-                              << std::endl;
-                    return true;
+                if (!tableIsTemporary) {
+                    try {
+                        CatalogManager& catalog =
+                            g_engine.catalogService().get(s.currentDB);
+                        if (!updateInheritanceColumnsInCatalog(
+                                catalog, s.currentDB, tableName, parentName,
+                                sub.action ==
+                                    AlterTableStmt::Action::Inherit) ||
+                            !updateTableHierarchyFlagsInCatalog(
+                                catalog, s.currentDB, parentName) ||
+                            !catalog.persistAll()) {
+                            std::cout
+                                << "ALTER TABLE inheritance catalog update failed"
+                                << std::endl;
+                            return true;
+                        }
+                    } catch (const std::exception& error) {
+                        std::cout
+                            << "ALTER TABLE inheritance catalog update failed: "
+                            << error.what() << std::endl;
+                        return true;
+                    }
                 }
                 break;
             }
@@ -4343,6 +4521,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     // INCLUDING option (or INCLUDING ALL).
     std::vector<std::pair<std::string, std::string>> likeColumnComments;
     size_t copiedPrimaryKeyCount = 0;
+    std::set<std::string> locallyDeclaredColumnNames;
     for (const auto& lc : stmt->likeClauses) {
         if (!lc.optionsValid) {
             std::cout << "ERROR: invalid CREATE TABLE LIKE option \""
@@ -4390,6 +4569,13 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         }
         const size_t destinationOffset = tbl.len;
         for (size_t i = 0; i < srcSchema.len; ++i) {
+            if (!locallyDeclaredColumnNames.insert(
+                    srcSchema.cols[i].dataName).second) {
+                std::cout << "ERROR: column \""
+                          << srcSchema.cols[i].dataName
+                          << "\" specified more than once" << std::endl;
+                return true;
+            }
             if (tbl.len >= MAX_COLUMNS) {
                 std::cout << "ERROR: table cannot have more than "
                           << MAX_COLUMNS << " columns" << std::endl;
@@ -4476,6 +4662,11 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     // declaration with the same name as a parent column is merged instead of
     // being appended as a duplicate after the inheritance pass.
     for (const auto& cd : stmt->columns) {
+        if (!locallyDeclaredColumnNames.insert(cd.name).second) {
+            std::cout << "ERROR: column \"" << cd.name
+                      << "\" specified more than once" << std::endl;
+            return true;
+        }
         Column column;
         std::string typeError;
         if (!columnDefToColumn(cd, s.currentDB, column, typeError,
@@ -4505,6 +4696,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     // same-named columns are not duplicated). The relationship is recorded
     // in <db>/.inherits so SELECT/UPDATE/DELETE can expand children.
     std::vector<std::string> inheritedParents;
+    CatalogInheritanceColumns inheritanceCatalogColumns;
     if (!stmt->inherits.empty()) {
         const TableSchema localSchema = tbl;
         TableSchema merged = localSchema;
@@ -4516,6 +4708,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         merged.additionalCheckConstraints.clear();
 
         std::map<std::string, size_t> mergedColumns;
+        std::set<std::string> resolvedParents;
         std::set<std::string> inheritedColumnNames;
         std::set<std::string> localDefaultOverrides;
         for (size_t i = 0; i < localSchema.len; ++i) {
@@ -4616,10 +4809,21 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                 std::cout << "Parent table " << parentRaw << " not found" << std::endl;
                 return true;
             }
+            if (!resolvedParents.insert(parent).second) {
+                std::cout << "ERROR: relation \"" << parentRaw
+                          << "\" would be inherited from more than once"
+                          << std::endl;
+                return true;
+            }
             inheritedParents.push_back(parent);
             TableSchema parentSchema = g_engine.getTableSchema(s.currentDB, parent);
             for (size_t i = 0; i < parentSchema.len; ++i) {
                 Column inherited = parentSchema.cols[i];
+                auto& provenance =
+                    inheritanceCatalogColumns[inherited.dataName];
+                provenance.isLocal =
+                    locallyDeclaredColumnNames.count(inherited.dataName) != 0;
+                ++provenance.directParentCount;
                 // These constraints are local to the parent. CHECK and
                 // NOT NULL remain on the inherited column.
                 inherited.isPrimaryKey = false;
@@ -5026,7 +5230,9 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         try {
             CatalogManager& cat = *tableCatalog;
             registerTableInCatalog(
-                cat, tbl, targetSchema, targetName.name);
+                cat, tbl, targetSchema, targetName.name,
+                inheritedParents.empty()
+                    ? nullptr : &inheritanceCatalogColumns);
             const PgClassRow* tableRelation = cat.findClassByName(
                 targetName.name,
                 cat.findNamespaceByName(targetSchema)->oid);
@@ -5657,6 +5863,26 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
         // table "x" does not exist (SQLSTATE 42P01 via the wire
         // layer's relation mapping).
         std::cout << "ERROR:  table \"" << tname << "\" does not exist" << std::endl;
+        return true;
+    }
+
+    const auto directInheritanceChildren =
+        g_engine.getInheritedChildren(s.currentDB, tname);
+    if (!directInheritanceChildren.empty()) {
+        if (stmt->cascade) {
+            // The catalog does not yet model inheritance dependencies in a
+            // drop plan.  Never detach surviving descendants silently under
+            // a command that PostgreSQL defines as recursively destructive.
+            std::cout
+                << "ERROR: DROP TABLE CASCADE for an inheritance hierarchy "
+                   "is not supported (SQLSTATE 0A000)"
+                << std::endl;
+        } else {
+            std::cout << "ERROR: cannot drop table \"" << logicalName
+                      << "\" because table \""
+                      << directInheritanceChildren.front()
+                      << "\" inherits from it" << std::endl;
+        }
         return true;
     }
 

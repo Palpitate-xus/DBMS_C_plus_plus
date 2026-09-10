@@ -87,6 +87,7 @@ static void test_inherit_execution() {
     assert(!ddl.executeSql("ALTER TABLE child INHERIT p1", s));
     assert(g_engine.getInheritedChildren(db, "p1") ==
            std::vector<std::string>{"child"});
+    assert(ddl.executeSql("ALTER TABLE child INHERIT p1", s));
     dbms::CatalogManager& catalog =
         g_engine.catalogService().get(db);
     const auto* parentRelation =
@@ -104,6 +105,7 @@ static void test_inherit_execution() {
     assert(!ddl.executeSql("ALTER TABLE child NO INHERIT p1", s));
     assert(g_engine.getInheritedChildren(db, "p1").empty());
     assert(!catalog.findClass(parentOid)->relhassubclass);
+    assert(ddl.executeSql("ALTER TABLE child NO INHERIT p1", s));
     assert(ddl.executeSql("ALTER TABLE child INHERIT missing_parent", s));
     assert(ddl.executeSql("ALTER TABLE missing_child INHERIT p1", s));
     assert(ddl.executeSql("ALTER TABLE child INHERIT child", s));
@@ -199,11 +201,88 @@ static void test_inherit_requires_parent_constraints() {
     assert(!ddl.executeSql(
         "CREATE TABLE generated_child (base INT, derived INT "
         "GENERATED ALWAYS AS (base + 2) STORED)", s));
-    assert(!ddl.executeSql(
+    assert(ddl.executeSql(
         "ALTER TABLE generated_child INHERIT generated_parent", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE matching_generated_child (base INT, derived INT "
+        "GENERATED ALWAYS AS (base + 1) STORED)", s));
+    assert(!ddl.executeSql(
+        "ALTER TABLE matching_generated_child INHERIT generated_parent", s));
 
     cleanup(db);
     std::cout << "[INHERIT] parent constraints required OK" << std::endl;
+}
+
+static void test_inherited_column_catalog_provenance() {
+    const std::string db = testDbPath("inh_catalog_provenance");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE parent_a (shared INT, from_a INT)", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE parent_b (shared INT, from_b INT)", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE child (shared INT DEFAULT 9, own_col INT) "
+        "INHERITS (parent_a, parent_b)", s));
+    assert(ddl.executeSql(
+        "CREATE TABLE duplicate_parent (extra INT) "
+        "INHERITS (parent_a, parent_a)", s));
+    assert(!g_engine.tableExists(db, "duplicate_parent"));
+
+    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
+    const auto* childRelation =
+        catalog.resolveRelation("child", {"public"});
+    assert(childRelation);
+    const dbms::Oid childOid = childRelation->oid;
+    const auto assertProvenance = [&](const std::string& column,
+                                      bool isLocal, int32_t parents) {
+        const dbms::CatalogManager& source =
+            g_engine.catalogService().get(db);
+        const auto* attribute = source.findAttribute(childOid, column);
+        assert(attribute);
+        assert(attribute->attislocal == isLocal);
+        assert(attribute->attinhcount == parents);
+    };
+    assertProvenance("shared", true, 2);
+    assertProvenance("from_a", false, 1);
+    assertProvenance("from_b", false, 1);
+    assertProvenance("own_col", true, 0);
+    {
+        dbms::CatalogManager durable(
+            (fs::path(g_engine.dbPath(db)) / "pg_catalog").string());
+        const auto* shared = durable.findAttribute(childOid, "shared");
+        const auto* fromA = durable.findAttribute(childOid, "from_a");
+        assert(shared && shared->attislocal && shared->attinhcount == 2);
+        assert(fromA && !fromA->attislocal && fromA->attinhcount == 1);
+    }
+
+    // Later schema synchronization must retain provenance, and an attribute
+    // with direct parents cannot be renamed or dropped even when it also has
+    // a local declaration.
+    assert(!ddl.executeSql("ALTER TABLE child ADD COLUMN later INT", s));
+    assertProvenance("from_a", false, 1);
+    assert(ddl.executeSql("ALTER TABLE child RENAME COLUMN shared TO moved", s));
+    assert(ddl.executeSql("ALTER TABLE child DROP COLUMN from_a", s));
+
+    assert(!ddl.executeSql("ALTER TABLE child NO INHERIT parent_a", s));
+    assertProvenance("shared", true, 1);
+    assertProvenance("from_a", true, 0);
+    assertProvenance("from_b", false, 1);
+    assert(!ddl.executeSql(
+        "ALTER TABLE child RENAME COLUMN from_a TO detached_a", s));
+    assert(ddl.executeSql("ALTER TABLE child DROP COLUMN shared", s));
+
+    assert(!ddl.executeSql("ALTER TABLE child NO INHERIT parent_b", s));
+    assertProvenance("shared", true, 0);
+    assertProvenance("from_b", true, 0);
+    assert(!ddl.executeSql("ALTER TABLE child DROP COLUMN shared", s));
+
+    cleanup(db);
+    std::cout << "[INHERIT] catalog column provenance OK" << std::endl;
 }
 
 static void test_drop_removes_inheritance_edges() {
@@ -233,9 +312,14 @@ static void test_drop_removes_inheritance_edges() {
     assert(g_engine.getInheritedChildren(db, "parent").empty());
     assert(!ddl.executeSql("ALTER TABLE child INHERIT parent", s));
     assert(catalog.findClass(parentOid)->relhassubclass);
-    assert(!ddl.executeSql("DROP TABLE parent", s));
-    assert(g_engine.getInheritedChildren(db, "parent").empty());
+    assert(ddl.executeSql("DROP TABLE parent", s));
+    assert(ddl.executeSql("DROP TABLE parent CASCADE", s));
+    assert(g_engine.getInheritedChildren(db, "parent") ==
+           std::vector<std::string>{"child"});
+    assert(g_engine.tableExists(db, "parent"));
     assert(g_engine.tableExists(db, "child"));
+    assert(!ddl.executeSql("ALTER TABLE child NO INHERIT parent", s));
+    assert(!ddl.executeSql("DROP TABLE parent", s));
     assert(!ddl.executeSql("CREATE TABLE parent (id INT)", s));
     assert(g_engine.getInheritedChildren(db, "parent").empty());
 
@@ -373,6 +457,7 @@ int main() {
     test_inherit_parser();
     test_inherit_execution();
     test_inherit_requires_parent_constraints();
+    test_inherited_column_catalog_provenance();
     test_table_rename_updates_inheritance_graph();
     test_drop_removes_inheritance_edges();
     test_create_inherits_metadata_failure_is_atomic();
