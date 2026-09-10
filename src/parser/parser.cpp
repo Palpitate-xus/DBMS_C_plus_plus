@@ -1917,14 +1917,21 @@ static ExprPtr parsePrimaryExpr(const std::vector<std::string>& tokens, size_t& 
         }
         pos = save; // fall through to generic handling on malformed input
     }
-    // INTERVAL 'text' typed literal — a LiteralExpr with typeName interval
-    // (the body keeps its raw text; the interval parser canonicalizes).
-    if (SQLParser::toLower(tokens[pos]) == "interval" && pos + 1 < tokens.size()
-        && tokens[pos + 1].size() >= 2 && tokens[pos + 1].front() == '\''
-        && tokens[pos + 1].back() == '\'') {
+    // SQL typed literals. Keep the declared type on the literal node so
+    // VALUES and other expression consumers do not mistake DATE/TIMESTAMP
+    // spellings for a column reference followed by stray text.
+    const std::string typedLiteralName = SQLParser::toLower(tokens[pos]);
+    static const std::set<std::string> typedLiteralNames = {
+        "boolean", "date", "interval", "numeric", "time",
+        "timestamp", "timestamptz"
+    };
+    if (typedLiteralNames.count(typedLiteralName) &&
+        pos + 1 < tokens.size() && tokens[pos + 1].size() >= 2 &&
+        tokens[pos + 1].front() == '\'' &&
+        tokens[pos + 1].back() == '\'') {
         auto lit = std::make_unique<LiteralExpr>();
-        lit->value = tokens[pos + 1].substr(1, tokens[pos + 1].size() - 2);
-        lit->typeName = "interval";
+        lit->value = tokens[pos + 1];
+        lit->typeName = typedLiteralName;
         pos += 2;
         return lit;
     }
@@ -3277,30 +3284,78 @@ ParseResult SQLParser::parseValues(const std::string& sql) {
     auto stmt = std::make_unique<SelectStmt>();
     stmt->command = SqlCommand::Values;
     size_t pos = 1; // skip VALUES
+    size_t expectedColumns = 0;
+
+    const auto fail = [&](const std::string& message) {
+        ParseResult failed;
+        failed.error = message;
+        return failed;
+    };
+
+    if (tokens.size() <= 1 || tokens[pos] == ";") {
+        return fail("VALUES requires at least one row");
+    }
 
     while (pos < tokens.size()) {
-        if (tokens[pos] == "(") {
-            ++pos;
-            std::vector<ExprPtr> row;
-            while (pos < tokens.size() && tokens[pos] != ")") {
-                auto expr = parseSimpleExpr(tokens, pos);
-                if (expr) row.push_back(std::move(expr));
-                if (pos < tokens.size() && tokens[pos] == ",") ++pos;
-            }
-            if (pos < tokens.size() && tokens[pos] == ")") ++pos;
-            // Back-compat: also flatten into selectList
-            for (auto& expr : row) {
-                SelectItem si;
-                si.expr = std::move(expr);
-                stmt->selectList.push_back(std::move(si));
-            }
-            stmt->valuesRows.push_back(std::move(row));
+        if (tokens[pos] != "(") {
+            return fail("VALUES requires parenthesized rows");
         }
-        if (pos < tokens.size() && tokens[pos] == ",") {
+        ++pos;
+        if (pos >= tokens.size() || tokens[pos] == ")" ||
+            tokens[pos] == ",") {
+            return fail("VALUES row contains an empty expression");
+        }
+
+        std::vector<ExprPtr> row;
+        while (true) {
+            const size_t expressionStart = pos;
+            auto expression = parseSimpleExpr(tokens, pos);
+            if (!expression || pos == expressionStart) {
+                return fail("invalid expression in VALUES row");
+            }
+            row.push_back(std::move(expression));
+
+            if (pos >= tokens.size()) {
+                return fail("unterminated VALUES row");
+            }
+            if (tokens[pos] == ")") {
+                ++pos;
+                break;
+            }
+            if (tokens[pos] != ",") {
+                return fail("unexpected token in VALUES row: " + tokens[pos]);
+            }
             ++pos;
+            if (pos >= tokens.size() || tokens[pos] == ")" ||
+                tokens[pos] == ",") {
+                return fail("VALUES row contains an empty expression");
+            }
+        }
+
+        if (expectedColumns == 0) {
+            expectedColumns = row.size();
+        } else if (row.size() != expectedColumns) {
+            return fail("VALUES lists must all be the same length");
+        }
+        stmt->valuesRows.push_back(std::move(row));
+
+        if (pos == tokens.size()) break;
+        if (tokens[pos] == ";") {
+            ++pos;
+            if (pos != tokens.size()) {
+                return fail("unexpected token after VALUES statement");
+            }
+            break;
+        }
+        if (tokens[pos] == ",") {
+            ++pos;
+            if (pos >= tokens.size() || tokens[pos] == ";") {
+                return fail("trailing comma after VALUES row");
+            }
             continue;
         }
-        break;
+        return fail("unexpected token after VALUES statement: " +
+                    tokens[pos]);
     }
 
     r.success = true;

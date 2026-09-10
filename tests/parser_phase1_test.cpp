@@ -488,6 +488,36 @@ int main() {
         assert(s && s->command == SqlCommand::Values);
         assert(s->valuesRows.size() == 2);
         assert(s->valuesRows[0].size() == 2);
+        assert(s->valuesRows[0][0]);
+        assert(s->valuesRows[0][0]->toString() == "1");
+        assert(s->valuesRows[0][1]);
+        assert(s->valuesRows[0][1]->toString() == "'a'");
+        assert(s->valuesRows[1][0]);
+        assert(s->valuesRows[1][0]->toString() == "2");
+        assert(s->valuesRows[1][1]);
+        assert(s->valuesRows[1][1]->toString() == "'b'");
+
+        auto typed = parser.parse(
+            "VALUES (DATE '2024-03-15'), "
+            "(TIMESTAMP '2024-03-16 10:30:00');");
+        assert(typed.success);
+        auto* typedValues = asSelect(typed.stmt);
+        assert(typedValues && typedValues->valuesRows.size() == 2);
+        auto* dateLiteral = dynamic_cast<LiteralExpr*>(
+            typedValues->valuesRows[0][0].get());
+        auto* timestampLiteral = dynamic_cast<LiteralExpr*>(
+            typedValues->valuesRows[1][0].get());
+        assert(dateLiteral && dateLiteral->typeName == "date");
+        assert(timestampLiteral &&
+               timestampLiteral->typeName == "timestamp");
+
+        for (const char* invalid : {
+                 "VALUES", "VALUES ()", "VALUES (1,)", "VALUES (,1)",
+                 "VALUES (1", "VALUES (1),", "VALUES (1), (2, 3)",
+                 "VALUES (1 AS x)", "VALUES (1) trailing"}) {
+            auto malformed = parser.parse(invalid);
+            assert(!malformed.success);
+        }
         std::cout << "[PARSER P1] VALUES OK\n";
     }
 
