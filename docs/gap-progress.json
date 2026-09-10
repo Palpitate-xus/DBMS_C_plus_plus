@@ -65,7 +65,7 @@
     {"id":"TYPE-10","status":"unverified","evidence":[]},
     {"id":"TYPE-11","status":"unverified","evidence":[]},
     {"id":"TYPE-12","status":"unverified","evidence":[]},
-    {"id":"TYPE-13","status":"unverified","evidence":[]},
+    {"id":"TYPE-13","status":"complete","evidence":["docs/code-review-progress.md","docs/implementation-plan.md","docs/all-gaps-todo.md","src/types/uuid.h","src/commands/TableManage.cpp","src/expression/ExprEvaluator.cpp","src/expression/expr_helper.cpp","src/catalog/type_registry.cpp","src/catalog/catalog.cpp","src/main.cpp","src/network/NetworkServer.cpp"],"tests":["tests/uuid_test.cpp","tests/type_registry_test.cpp","tests/expression_evaluator_test.cpp","tests/postgres_protocol_test.py"],"commits":["8db6c40"]},
     {"id":"TYPE-14","status":"unverified","evidence":[]},
     {"id":"TYPE-15","status":"unverified","evidence":[]},
     {"id":"TYPE-16","status":"partial","evidence":["docs/code-review-progress.md","src/catalog/systables.cpp"],"tests":["tests/compat/pg_diff_runner.py"],"commits":["8b6b5e4"]},

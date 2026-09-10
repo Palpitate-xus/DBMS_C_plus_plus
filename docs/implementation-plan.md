@@ -374,7 +374,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | ✅ 4.8 实现 `macaddr` / `macaddr8` 校验与网络函数 | 2.9 | 定长二进制存储 + 规范化校验（`tests/macaddr_test.cpp`）；网络函数待补 |
 | ✅ 4.9 实现 `bit` / `bit varying` 长度约束与位运算 | 2.10 | 字符串化 `0/1` 存储 + 长度约束/校验（`tests/bit_test.cpp`）；位运算函数待补 |
 | ✅ 4.10 实现 `tsvector` / `tsquery` 的 parser、ranking、operator | 2.11 | 字面量 parser + tsvector canonicalization + tsquery 文法校验（`tests/tsearch_test.cpp`）；ranking/operator/词典待补 |
-| ✅ 4.11 实现 `uuidv7()` 与 uuid 函数 | 2.12 | PG18；已实现 uuid 输入严格校验+规范化（`tests/uuid_test.cpp`），`uuidv7()`/uuid 函数待补 |
+| ✅ 4.11 实现 `uuidv7()` 与 uuid 函数 | 2.12 | 16-byte RFC datum、宽松输入/规范输出、原生 B+Tree/Hash/PK 键与 unsigned byte order；已实现 `gen_random_uuid()`、`uuidv4()`、`uuidv7([shift])`、`uuid_extract_version()`、`uuid_extract_timestamp()` 及 binary protocol（`tests/uuid_test.cpp`） |
 | ✅ 4.12 实现 XML 类型函数、XPath、XMLTABLE | 2.13 | well-formedness 校验已落地（`tests/xml_test.cpp`）；XML 函数/XPath/XMLTABLE 待补 |
 | ✅ 4.13 实现 jsonpath、SQL/JSON query functions、`JSON_TABLE` | 2.14 | PG18；jsonpath 结构化语法校验已落地（`tests/jsonpath_test.cpp`）；求值/SQL-JSON 函数/JSON_TABLE 待补 |
 | ✅ 4.14 实现多维数组、切片、`unnest`、array functions、ANY/ALL | 2.15 | 修复数组列识别 + 字面量校验/矩形多维（`tests/array_test.cpp`）；切片/unnest/函数/ANY-ALL 待补 |
@@ -552,11 +552,12 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
   - ✅ 新增 `tests/geometric_test.cpp`：line/lseg/circle 规范化与非法拒绝、box 角点重排、path 开/闭与 polygon、UPDATE 规范化/拒绝、point 二进制不受影响；二进制端到端验证。全部 57 个测试通过。
   - 🔄 仍待后续：几何运算符（`@>`/`<->`/`&&`/`#` 等）、`area`/`center`/`npoints`/`@-@` 等几何函数、`line` 双点输入推导系数、GiST 索引、PG box 浮点规范化细节。
 - **Wave 4 类型系统 — UUID 输入严格校验与规范化（4.11，本次完成）**：
-  - ✅ 新增 `normalizeUuid`：去可选花括号、忽略连字符位置（PG 宽松）、要求恰好 32 位十六进制，输出规范小写 `8-4-4-4-12`。
+  - ✅ 新增共享 `UuidValue`：按 PostgreSQL 规则接受可选花括号、无连字符或每四位后的连字符，要求恰好 32 位十六进制，输出规范小写 `8-4-4-4-12`；新表以 16-byte RFC datum 保存，旧 36-byte schema 继续可读写。
   - ✅ INSERT 校验路径拒绝非法 UUID（非十六进制/长度错误 → `INVALID_VALUE`）并规范化（大小写/无连字符/花括号 → 规范形式）。
   - ✅ 修复 UPDATE 路径 bug：此前 uuid 列（定长、`dataType != "char"`）落入整数回退分支 `parseInt` → `INVALID_VALUE`，导致 uuid 列无法 UPDATE；新增 uuid 分支做校验+规范化。
-  - ✅ 新增 `tests/uuid_test.cpp`：连字符/无连字符/花括号/大写四种输入规范化、坏字符/长度拒绝、UPDATE 规范化/拒绝；二进制端到端验证。全部 58 个测试通过。
-  - 🔄 仍待后续：`gen_random_uuid()`/`uuidv7()` 等生成函数、uuid 与 bytea 互转、版本/变体位语义。
+  - ✅ B+Tree、Hash、主键、唯一约束、谓词和排序均使用 16-byte UUID 语义；避免 20-byte B+Tree 对 32 位 hex 文本截断造成不同 UUID 假重复，并保持旧 schema 索引兼容。
+  - ✅ 实现 PostgreSQL 18 核心函数 `gen_random_uuid()`、`uuidv4()`、`uuidv7([shift interval])`、`uuid_extract_version()` 和 `uuid_extract_timestamp()`；v4/v7 设置 RFC 版本/变体位，非时间 UUID 的时间提取返回 NULL。
+  - ✅ `tests/uuid_test.cpp` 覆盖 codec、16/36-byte 存储、更新、比较/排序、同前缀 B+Tree/Hash/PK/唯一键、v1/v4/v7 与函数；完整协议覆盖 OID 2950、长度 16、函数类型、非法 cast `22P02` 和 UUID binary I/O。
 - **Wave 4 类型系统 — bytea 输入输出 escape/hex 语义（4.4，本次完成）**：
   - ✅ 新增 `normalizeBytea`：解析 PostgreSQL hex 格式 `\xDEADBEEF`（忽略空白、要求偶数位、校验十六进制）与 escape 格式（字面字节 + `\\` 反斜杠 + `\ooo` 八进制转义），解码为原始字节，再以规范小写 `\xhh..` 形式输出。
   - ✅ INSERT/UPDATE 校验路径拒绝非法 bytea（奇数十六进制位/非十六进制/非法转义序列 → `INVALID_VALUE`）并规范化（大写 → 小写、escape → hex）。

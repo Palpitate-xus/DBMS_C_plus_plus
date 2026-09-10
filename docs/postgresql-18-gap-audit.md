@@ -190,7 +190,7 @@
 - [ ] **TYPE-10** inet/cidr/macaddr 补完整网络运算、排序、包含、hash 和 binary protocol。
 - [ ] **TYPE-11** bit/varbit 补完整位运算、移位、比较、substring 和 binary I/O。
 - [ ] **TYPE-12** tsvector/tsquery 补配置/字典/parser、词干/停用词、完整 query tree、headline/rank 和 GIN/GiST opclass。
-- [ ] **TYPE-13** UUID 补 16-byte 内部/binary 语义和 PostgreSQL 18 `uuidv7()` 等函数。
+- [x] **TYPE-13** UUID 使用 16-byte RFC datum 与原生索引键，保留 PostgreSQL 宽松输入/规范输出，并实现 `gen_random_uuid()`、`uuidv4()`、`uuidv7([shift])`、版本/时间提取及 binary protocol。
 - [ ] **TYPE-14** XML 补 libxml 语义、well-formed document/content、XMLTABLE/XMLNAMESPACES 和相关函数。
 - [ ] **TYPE-15** JSON/JSONB 补真正 binary JSONB、完整 operators/functions、SQL/JSON、jsonpath evaluator、GIN opclass、duplicate key/numeric/collation 细节。
 - [ ] **TYPE-16** array 补任意元素类型、多维 lower bounds、rectangularity、comparison/hash、array assignment、record/array binary I/O 和完整函数集。

@@ -474,7 +474,7 @@ OID，原子改名物理文件并同步 `nextval` 默认表达式/依赖；冲�
 | 2.9 | 网络类型 | `inet/cidr` 已实现严格 IPv4/IPv6 解析（拒绝坏八位组/组、越界前缀）且 IPv6 现可真正存储（`tests/inet_test.cpp`）；`macaddr/macaddr8` 已实现定长二进制存储 + 输入规范化 + 校验 + 小写冒号规范输出（`tests/macaddr_test.cpp`）；仍缺 PG 全套网络函数（`host`/`masklen`/`network`/`abbrev` 等） | ⚠️ |
 | 2.10 | bit string | `bit` / `bit varying` 已统一为字符串化 `0/1` 存储 + 长度约束（`bit(n)` 精确、`bit varying(n)` ≤ n）+ `0/1` 校验 + `B'...'` 去包裹（`tests/bit_test.cpp`）；仍缺位运算操作符与位串函数 | ⚠️ |
 | 2.11 | 全文搜索类型 | `tsvector` 已实现字面量解析 + canonicalization（lexeme 长度优先排序、去重、位置合并/排序、默认权重 D 省略、单引号化）；`tsquery` 已实现布尔文法校验（`! > <-> > & > |`、括号、lexeme `:权重/*` 标志）（`tests/tsearch_test.cpp`）；仍缺文本搜索配置/词典/parser、ranking、operator 和 GIN opclass 语义 | ⚠️ |
-| 2.12 | UUID | 有 uuid 列，已实现输入严格校验（32 位十六进制、连字符任意/无、可带花括号、混合大小写）+ 规范化为小写 8-4-4-4-12（`tests/uuid_test.cpp`）；仍缺 PG 18 `uuidv7()`、uuid 函数与扩展生态 | ⚠️ |
+| 2.12 | UUID | 16-byte RFC datum；PostgreSQL 宽松输入与规范输出；原生比较、排序、B+Tree/Hash/PK/唯一键；`gen_random_uuid()`、`uuidv4()`、`uuidv7([shift])`、版本/时间提取及 binary protocol 已由 `tests/uuid_test.cpp` 和完整协议覆盖。uuid-ossp 等扩展生态单独归 EXT-11 | ✅ |
 | 2.13 | XML | 有 xml 列，已实现 well-formedness 校验（CONTENT 形式：标签平衡/嵌套、引号属性、自闭合、注释/CDATA/PI/声明、拒绝失配/未闭合/未引用属性/游离 `<`）（`tests/xml_test.cpp`）；仍缺 XML 函数、XPath、XMLTABLE、schema/encoding 语义 | ⚠️ |
 | 2.14 | JSON/JSONB | 有 JSON 校验和少量函数；`jsonpath` 列已实现结构化语法校验（mode 前缀、`()`/`[]` 平衡、空下标/`..`/尾随 `.`/未终止字符串拒绝）（`tests/jsonpath_test.cpp`）；仍缺 jsonpath 求值、SQL/JSON query functions、`JSON_TABLE`、完整操作符、GIN opclass | ⚠️ |
 | 2.15 | 数组 | 修复数组列被 `validateColumn` 误降级为标量的 bug（`INT[]`/`VARCHAR[]` 现正确识别为变长数组）；已实现数组字面量校验（括号结构、矩形多维、数值元素类型、NULL 元素、引号/空白规范化）（`tests/array_test.cpp`）；仍缺切片、`unnest`/array functions、ANY/ALL 完整语义 | ⚠️ |
