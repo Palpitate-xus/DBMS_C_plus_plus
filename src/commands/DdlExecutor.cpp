@@ -10031,6 +10031,12 @@ bool DdlExecutor::executeRefreshMaterializedView(
     }
 
     const std::string& backingTable = materialized->backingTable;
+    if (!g_engine.tableExists(s.currentDB, backingTable)) {
+        std::cout << "ERROR: materialized view \"" << viewName
+                  << "\" has no backing relation (SQLSTATE XX001)"
+                  << std::endl;
+        return true;
+    }
     const std::string selectSql =
         g_engine.getMaterializedViewSQL(s.currentDB, viewName);
     if (selectSql.empty()) {
