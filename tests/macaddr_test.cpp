@@ -56,12 +56,14 @@ static void test_macaddr_input_formats() {
     assert(g_engine.insert(db, "m", {{"id", "4"}, {"a", "08002b010203"}}) == dbms::DBStatus::OK);
     // Mixed case input normalizes to lowercase.
     assert(g_engine.insert(db, "m", {{"id", "5"}, {"a", "08:00:2B:01:02:03"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "m", {{"id", "6"}, {"a", "00:00:00:00:00:00"}}) == dbms::DBStatus::OK);
 
     const std::string canon = "08:00:2b:01:02:03";
     for (int id = 1; id <= 5; ++id) {
         std::string got = fetchOne(db, "m", {"=id " + std::to_string(id)}, "a");
         assert(got == canon);
     }
+    assert(fetchOne(db, "m", {"=id 6"}, "a") == "00:00:00:00:00:00");
 
     cleanup(db);
     std::cout << "[MACADDR] input formats normalize OK" << std::endl;
@@ -84,6 +86,8 @@ static void test_macaddr_invalid() {
     assert(g_engine.insert(db, "m", {{"id", "2"}, {"a", "08:00:2b:01:02"}}) == dbms::DBStatus::INVALID_VALUE);
     // Too many bytes (7).
     assert(g_engine.insert(db, "m", {{"id", "3"}, {"a", "08:00:2b:01:02:03:04"}}) == dbms::DBStatus::INVALID_VALUE);
+    // Whitespace is not part of PostgreSQL macaddr input syntax.
+    assert(g_engine.insert(db, "m", {{"id", "4"}, {"a", "08:00:2b: 01:02:03"}}) == dbms::DBStatus::INVALID_VALUE);
 
     // After rejected inserts the table is empty.
     auto rows = g_engine.query(db, "m", {}, {"id"}, {});

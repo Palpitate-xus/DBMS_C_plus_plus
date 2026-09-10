@@ -680,7 +680,9 @@ static PgAttributeRow catalogAttributeForColumn(
     attribute.attnum = static_cast<int16_t>(columnIndex + 1);
     attribute.attname = column.dataName;
     attribute.atttypid = ensureTypeInCatalog(cat, namespaceOid, column);
-    attribute.attlen = column.isVariableLength
+    const bool postgresVarlenaNetwork =
+        column.dataType == "inet" || column.dataType == "cidr";
+    attribute.attlen = column.isVariableLength || postgresVarlenaNetwork
         ? static_cast<int16_t>(-1)
         : static_cast<int16_t>(column.dsize);
     attribute.attndims = column.isArray ? 1 : 0;

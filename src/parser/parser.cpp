@@ -626,6 +626,12 @@ std::vector<std::string> SQLParser::tokenize(const std::string& sql) {
             if (i + 1 < sql.size()) {
                 char next = sql[i + 1];
                 std::string two = std::string(1, c) + next;
+                if (i + 2 < sql.size() &&
+                    ((two == "<<" || two == ">>") && sql[i + 2] == '=')) {
+                    tokens.push_back(two + "=");
+                    i += 2;
+                    continue;
+                }
                 if (two == "<=" || two == ">=" || two == "<>" || two == "!=" ||
                     two == "::" || two == "||" || two == "->" || two == "~*" ||
                     two == "!~" || two == "@@" || two == "&&" || two == "<<" ||
@@ -1643,7 +1649,7 @@ static ExprPtr parseRangeExpr(const std::vector<std::string>& tokens, size_t& po
 static ExprPtr parseConcatExpr(const std::vector<std::string>& tokens, size_t& pos) {
     auto left = parseJsonOpExpr(tokens, pos);
     static const std::set<std::string> genericOperators = {
-        "||", "&", "|", "#", "<<", ">>"
+        "||", "&", "|", "#", "<<", "<<=", ">>", ">>="
     };
     while (pos < tokens.size() && genericOperators.count(tokens[pos]) != 0) {
         const std::string op = tokens[pos];
@@ -1800,7 +1806,8 @@ static ExprPtr parseCastExpr(const std::vector<std::string>& tokens, size_t& pos
                 || tokens[pos] == "->" || tokens[pos] == "->>"
                 || tokens[pos] == "#>" || tokens[pos] == "#>>"
                 || tokens[pos] == "@>" || tokens[pos] == "<@"
-                || tokens[pos] == "&&" || tokens[pos] == "@@") {
+                || tokens[pos] == "&&" || tokens[pos] == "<<=" ||
+                   tokens[pos] == ">>=" || tokens[pos] == "@@") {
                 break;
             }
             if (tokens[pos] == "(") {

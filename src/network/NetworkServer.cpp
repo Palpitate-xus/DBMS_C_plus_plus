@@ -16,6 +16,7 @@
 #include "catalog/systables.h"
 #include "common/DateType.h"
 #include "common/BooleanCodec.h"
+#include "common/NetworkValue.h"
 #include "PostgresNumeric.h"
 #include "types/bytea.h"
 #include "types/money.h"
@@ -767,6 +768,27 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
             }
             return "B'" + value + "'";
         }
+        case 650: case 869: {
+            if (raw.size() != 8 && raw.size() != 20) break;
+            NetworkAddressValue address;
+            address.family = raw[0];
+            address.bits = raw[1];
+            const bool cidr = typeOid == 650;
+            const size_t addressLength = address.byteLength();
+            if (addressLength == 0 || raw[2] != (cidr ? 1 : 0) ||
+                raw[3] != addressLength || raw.size() != 4 + addressLength ||
+                address.bits > address.maxBits()) {
+                break;
+            }
+            std::copy(raw.begin() + 4, raw.end(), address.address.begin());
+            if (cidr && address.hasHostBits()) break;
+            return quoteProtocolText(address.toString(cidr), error);
+        }
+        case 829: case 774: {
+            const size_t length = typeOid == 829 ? 6 : 8;
+            if (raw.size() != length) break;
+            return quoteProtocolText(formatMacAddress(raw.data(), length), error);
+        }
         case 2950: {
             if (raw.size() != 16) break;
             static constexpr char hex[] = "0123456789abcdef";
@@ -830,6 +852,27 @@ std::string protocolParameterLiteral(uint32_t typeOid,
             return {};
         }
         return "B'" + value + "'";
+    }
+    if (typeOid == 650 || typeOid == 869) {
+        NetworkAddressValue address;
+        const bool cidr = typeOid == 650;
+        if (!parseNetworkAddress(value, address, cidr)) {
+            error = std::string("invalid input syntax for type ") +
+                    (cidr ? "cidr" : "inet");
+            return {};
+        }
+        return quoteProtocolText(address.toString(cidr), error);
+    }
+    if (typeOid == 829 || typeOid == 774) {
+        const size_t length = typeOid == 829 ? 6 : 8;
+        std::array<uint8_t, 8> address{};
+        if (!parseMacAddress(value, length, address)) {
+            error = std::string("invalid input syntax for type ") +
+                    (typeOid == 829 ? "macaddr" : "macaddr8");
+            return {};
+        }
+        return quoteProtocolText(formatMacAddress(address.data(), length),
+                                 error);
     }
     return quoteProtocolText(value, error);
 }
@@ -1237,6 +1280,9 @@ int16_t protocolTypeSize(uint32_t typeOid, const Column& column) {
         case 1083: return 8; // time
         case 1114: case 1184: return 8; // timestamp/timestamptz
         case 1700: return -1; // numeric
+        case 650: case 869: return -1; // cidr/inet
+        case 774: return 8;   // macaddr8
+        case 829: return 6;   // macaddr
         case 2278: return 4;  // void
         case 2950: return 16; // uuid
         default: return column.isVariableLength ? -1 : static_cast<int16_t>(column.dsize);
@@ -1295,7 +1341,10 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
                 lowerProtocolText(column.dataType);
             const bool structuredMatchesPhysical = hasStructuredType &&
                 (physicalTypeName == "bit" ||
-                 physicalTypeName == "bit varying") &&
+                 physicalTypeName == "bit varying" ||
+                 physicalTypeName == "inet" || physicalTypeName == "cidr" ||
+                 physicalTypeName == "macaddr" ||
+                 physicalTypeName == "macaddr8") &&
                 lowerProtocolText(result.columnTypes[columnIndex]) ==
                     physicalTypeName;
             if (!hasStructuredType || structuredMatchesPhysical) {

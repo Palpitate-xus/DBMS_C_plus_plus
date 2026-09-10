@@ -9,6 +9,10 @@
 #include "commands/TableManage.h"
 #include "Session.h"
 #include "catalog/type_registry.h"
+#include "catalog/systables.h"
+#include "common/DbError.h"
+#include "expression/ExprEvaluator.h"
+#include "parser/parser.h"
 #include <cassert>
 #include <filesystem>
 #include <iostream>
@@ -66,16 +70,64 @@ static void test_inet_ipv6() {
     dbms::DdlExecutor ddl;
     assert(!ddl.executeSql("CREATE TABLE t (id INT PRIMARY KEY, a INET)", s));
 
-    // IPv6 is now stored (previously silently dropped to family 0). Output is
-    // the full uncompressed group form.
+    // PostgreSQL canonical output uses inet_ntop-style zero compression.
     assert(g_engine.insert(db, "t", {{"id","1"}, {"a","::1"}}) == dbms::DBStatus::OK);
-    assert(fetchOne(db, "t", {"=id 1"}, "a") == "0000:0000:0000:0000:0000:0000:0000:0001");
+    assert(fetchOne(db, "t", {"=id 1"}, "a") == "::1");
 
     assert(g_engine.insert(db, "t", {{"id","2"}, {"a","2001:db8::1"}}) == dbms::DBStatus::OK);
-    assert(fetchOne(db, "t", {"=id 2"}, "a") == "2001:0db8:0000:0000:0000:0000:0000:0001");
+    assert(fetchOne(db, "t", {"=id 2"}, "a") == "2001:db8::1");
+    assert(g_engine.insert(db, "t", {{"id","3"}, {"a","::ffff:192.0.2.128"}}) == dbms::DBStatus::OK);
+    assert(fetchOne(db, "t", {"=id 3"}, "a") == "::ffff:192.0.2.128");
 
     cleanup(db);
     std::cout << "[INET] IPv6 storage OK" << std::endl;
+}
+
+static void test_cidr_host_bits_and_network_operators() {
+    std::string db = testDbPath("cidr_semantics");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE t (id INT PRIMARY KEY, c CIDR)", s));
+    assert(g_engine.insert(db, "t", {{"id","1"}, {"c","192.168.1.0/24"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "t", {{"id","2"}, {"c","192.168.1.1/24"}}) == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insert(db, "t", {{"id","3"}, {"c","2001:db8::1/64"}}) == dbms::DBStatus::INVALID_VALUE);
+
+    dbms::SQLParser parser;
+    const auto parsed = parser.parse(
+        "SELECT '192.168.1.7/24'::inet << '192.168.0.0/16'::cidr, "
+        "'192.168.1.7/24'::inet <<= '192.168.1.7/24'::inet, "
+        "'192.168.1.7/24'::inet << '192.168.1.7/24'::inet, "
+        "'192.168.0.0/16'::cidr >> '192.168.1.7/24'::inet, "
+        "'2001:db8::1/64'::inet && '2001:db8::/48'::cidr, "
+        "'10.0.0.1'::inet < '::1'::inet");
+    assert(parsed.success);
+    const auto* select = dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get());
+    assert(select && select->selectList.size() == 6);
+    const std::vector<std::string> expected = {"t", "t", "f", "t", "t", "t"};
+    dbms::ExprEvaluator evaluator;
+    for (size_t i = 0; i < expected.size(); ++i) {
+        const dbms::ExprValue value = evaluator.eval(select->selectList[i].expr.get(), {});
+        assert(value.typeName == "boolean" && value.value == expected[i]);
+    }
+    const auto bad = parser.parse("SELECT '192.168.1.1/24'::cidr");
+    assert(bad.success);
+    const auto* badSelect = dynamic_cast<const dbms::SelectStmt*>(bad.stmt.get());
+    bool rejected = false;
+    try {
+        (void)evaluator.eval(badSelect->selectList[0].expr.get(), {});
+    } catch (const dbms::DbError& error) {
+        rejected = error.sqlState() == "22P02";
+    }
+    assert(rejected);
+
+    assert(dbms::mapBuiltinTypeNameToOid("cidr") == 650);
+    assert(dbms::mapBuiltinTypeNameToOid("inet") == 869);
+    assert(dbms::mapBuiltinTypeNameToOid("macaddr") == 829);
+    assert(dbms::mapBuiltinTypeNameToOid("macaddr8") == 774);
+    cleanup(db);
+    std::cout << "[INET] cidr/operators/OIDs OK" << std::endl;
 }
 
 static void test_inet_invalid() {
@@ -133,6 +185,7 @@ int main() {
     test_inet_ipv6();
     test_inet_invalid();
     test_inet_update();
+    test_cidr_host_bits_and_network_operators();
     std::cout << "[INET] all passed" << std::endl;
     return 0;
 }

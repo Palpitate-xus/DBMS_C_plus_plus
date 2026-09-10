@@ -198,7 +198,8 @@ std::string inferAstResultType(
             "and", "or", "=", "<>", "!=", "<", ">", "<=", ">=",
             "like", "not like", "ilike", "not ilike", "in", "not in",
             "between", "not between", "is distinct from",
-            "is not distinct from", "similar to", "not similar to"
+            "is not distinct from", "similar to", "not similar to",
+            "<<=", ">>=", "&&"
         };
         if (booleanOperators.count(op)) return "boolean";
         const std::string left = inferAstResultType(binary->left.get(), typeHints);
@@ -212,6 +213,10 @@ std::string inferAstResultType(
         }
         if (op == "&" || op == "|" || op == "#" ||
             op == "<<" || op == ">>") {
+            if ((op == "<<" || op == ">>") &&
+                (left == "inet" || left == "cidr")) {
+                return "boolean";
+            }
             return left;
         }
         if (op == "+" || op == "-") {

@@ -2,6 +2,7 @@
 #include "common/DateType.h"
 #include "PostgresNumeric.h"
 #include "types/bytea.h"
+#include "common/NetworkValue.h"
 #include "types/money.h"
 
 #include <algorithm>
@@ -200,6 +201,26 @@ bool encodeBinaryValue(const std::string& value, const PgColumnDescription& colu
                     }
                     encoded.push_back(byte);
                 }
+                return true;
+            }
+            case 650: case 869: {
+                NetworkAddressValue address;
+                const bool cidr = column.typeOid == 650;
+                if (!parseNetworkAddress(value, address, cidr)) return false;
+                encoded.push_back(address.family);
+                encoded.push_back(address.bits);
+                encoded.push_back(cidr ? 1 : 0);
+                encoded.push_back(static_cast<uint8_t>(address.byteLength()));
+                encoded.insert(encoded.end(), address.address.begin(),
+                               address.address.begin() + address.byteLength());
+                return true;
+            }
+            case 829: case 774: {
+                const size_t length = column.typeOid == 829 ? 6 : 8;
+                std::array<uint8_t, 8> address{};
+                if (!parseMacAddress(value, length, address)) return false;
+                encoded.insert(encoded.end(), address.begin(),
+                               address.begin() + length);
                 return true;
             }
             case 2950:

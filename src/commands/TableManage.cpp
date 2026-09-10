@@ -1,6 +1,7 @@
 #include "TableManage.h"
 #include "common/DbError.h"
 #include "common/BooleanCodec.h"
+#include "common/NetworkValue.h"
 #include "common/NotificationManager.h"
 #include "common/sha256.h"
 #include "utils/plpgsql.h"
@@ -7482,32 +7483,15 @@ BPTree* StorageEngine::getCompositeIndexTree(const std::string& dbname,
 // 2*numBytes hex digits. Canonical output is lowercase colon-separated.
 // ========================================================================
 static bool normalizeMacAddr(const std::string& in, int numBytes, uint8_t* out) {
-    std::string hex;
-    hex.reserve(static_cast<size_t>(numBytes) * 2);
-    for (char ch : in) {
-        if (ch == ':' || ch == '-' || ch == '.' || ch == ' ') continue;
-        if (!std::isxdigit(static_cast<unsigned char>(ch))) return false;
-        hex += ch;
-    }
-    if (hex.size() != static_cast<size_t>(numBytes) * 2) return false;
-    auto hexVal = [](char c) -> int {
-        if (c >= '0' && c <= '9') return c - '0';
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        return c - 'a' + 10;
-    };
-    for (int i = 0; i < numBytes; ++i) {
-        out[i] = static_cast<uint8_t>((hexVal(hex[i * 2]) << 4) | hexVal(hex[i * 2 + 1]));
-    }
+    std::array<uint8_t, 8> bytes{};
+    if (!dbms::parseMacAddress(in, static_cast<size_t>(numBytes), bytes))
+        return false;
+    std::memcpy(out, bytes.data(), static_cast<size_t>(numBytes));
     return true;
 }
 
 static std::string formatMacAddr(const uint8_t* bytes, int numBytes) {
-    std::ostringstream oss;
-    for (int i = 0; i < numBytes; ++i) {
-        if (i > 0) oss << ':';
-        oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(bytes[i]);
-    }
-    return oss.str();
+    return dbms::formatMacAddress(bytes, static_cast<size_t>(numBytes));
 }
 
 // ========================================================================
@@ -7564,99 +7548,15 @@ static bool normalizeBytea(const std::string& in, std::string& out) {
 // address buffer. Returns false on any malformed octet/group or out-of-range
 // prefix. Mirrors the on-disk layout used by buildRowBuffer/extractColumnValue.
 // ========================================================================
-static bool parseIPv6Groups(const std::string& s, uint8_t addr[16]) {
-    auto hexVal = [](char c) -> int {
-        if (c >= '0' && c <= '9') return c - '0';
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        return c - 'a' + 10;
-    };
-    auto parseGroups = [&](const std::string& part, std::vector<uint16_t>& out) -> bool {
-        if (part.empty()) return true;
-        std::vector<std::string> groups;
-        std::string tok;
-        for (char c : part) {
-            if (c == ':') { groups.push_back(tok); tok.clear(); }
-            else tok.push_back(c);
-        }
-        groups.push_back(tok);
-        for (const auto& g : groups) {
-            if (g.empty() || g.size() > 4) return false;
-            uint16_t v = 0;
-            for (char c : g) {
-                if (!std::isxdigit(static_cast<unsigned char>(c))) return false;
-                v = static_cast<uint16_t>((v << 4) | hexVal(c));
-            }
-            out.push_back(v);
-        }
-        return true;
-    };
-    std::vector<uint16_t> full;
-    size_t dc = s.find("::");
-    if (dc != std::string::npos) {
-        std::string left = s.substr(0, dc);
-        std::string right = s.substr(dc + 2);
-        if (right.find("::") != std::string::npos) return false;  // only one ::
-        std::vector<uint16_t> head, tail;
-        if (!parseGroups(left, head)) return false;
-        if (!parseGroups(right, tail)) return false;
-        if (head.size() + tail.size() > 7) return false;  // :: must cover >=1 group
-        int zeros = 8 - static_cast<int>(head.size()) - static_cast<int>(tail.size());
-        for (auto v : head) full.push_back(v);
-        for (int i = 0; i < zeros; ++i) full.push_back(0);
-        for (auto v : tail) full.push_back(v);
-    } else {
-        if (!parseGroups(s, full)) return false;
-    }
-    if (full.size() != 8) return false;
-    for (int i = 0; i < 8; ++i) {
-        addr[i * 2] = static_cast<uint8_t>(full[i] >> 8);
-        addr[i * 2 + 1] = static_cast<uint8_t>(full[i] & 0xff);
-    }
-    return true;
-}
-
 static bool parseInetAddr(const std::string& in, uint8_t& family,
-                          uint8_t& prefix, uint8_t addr[16]) {
-    std::memset(addr, 0, 16);
-    std::string s = in;
-    int prefixVal = -1;
-    size_t slash = s.find('/');
-    if (slash != std::string::npos) {
-        std::string p = s.substr(slash + 1);
-        if (p.empty()) return false;
-        for (char c : p) if (!std::isdigit(static_cast<unsigned char>(c))) return false;
-        try { prefixVal = std::stoi(p); } catch (...) { return false; }
-        s = s.substr(0, slash);
-    }
-    if (s.empty()) return false;
-
-    if (s.find(':') != std::string::npos) {
-        family = 3;  // IPv6
-        if (prefixVal < 0) prefixVal = 128;
-        if (prefixVal > 128) return false;
-        prefix = static_cast<uint8_t>(prefixVal);
-        return parseIPv6Groups(s, addr);
-    }
-    // IPv4 dotted-quad
-    family = 2;
-    std::vector<std::string> octs;
-    std::string tok;
-    for (char c : s) {
-        if (c == '.') { octs.push_back(tok); tok.clear(); }
-        else tok.push_back(c);
-    }
-    octs.push_back(tok);
-    if (octs.size() != 4) return false;
-    for (int k = 0; k < 4; ++k) {
-        if (octs[k].empty() || octs[k].size() > 3) return false;
-        for (char c : octs[k]) if (!std::isdigit(static_cast<unsigned char>(c))) return false;
-        int v = std::stoi(octs[k]);
-        if (v > 255) return false;
-        addr[k] = static_cast<uint8_t>(v);
-    }
-    if (prefixVal < 0) prefixVal = 32;
-    if (prefixVal > 32) return false;
-    prefix = static_cast<uint8_t>(prefixVal);
+                          uint8_t& prefix, uint8_t addr[16],
+                          bool requireNetworkAddress = false) {
+    dbms::NetworkAddressValue parsed;
+    if (!dbms::parseNetworkAddress(in, parsed, requireNetworkAddress))
+        return false;
+    family = parsed.family;
+    prefix = parsed.bits;
+    std::memcpy(addr, parsed.address.data(), parsed.address.size());
     return true;
 }
 
@@ -8901,42 +8801,14 @@ std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer
         return formatPointCoordinate(x) + "," + formatPointCoordinate(y);
     } else if (col.dataType == "inet" || col.dataType == "cidr") {
         // Format: 1B family | 1B prefix_len | 1B is_cidr | 1B reserved | 16B addr
-        uint8_t family = static_cast<uint8_t>(rowBuffer[offset]);
-        uint8_t prefix = static_cast<uint8_t>(rowBuffer[offset + 1]);
-        std::string addrStr;
-        if (family == 2) {  // IPv4
-            uint8_t a = static_cast<uint8_t>(rowBuffer[offset + 4]);
-            uint8_t b = static_cast<uint8_t>(rowBuffer[offset + 5]);
-            uint8_t c = static_cast<uint8_t>(rowBuffer[offset + 6]);
-            uint8_t d = static_cast<uint8_t>(rowBuffer[offset + 7]);
-            std::ostringstream oss;
-            oss << (int)a << "." << (int)b << "." << (int)c << "." << (int)d;
-            addrStr = oss.str();
-            if (col.dataType == "cidr" || prefix < 32)
-                addrStr += "/" + std::to_string(prefix);
-        } else if (family == 3) {  // IPv6
-            std::ostringstream oss;
-            for (int i = 0; i < 16; ++i) {
-                if (i > 0 && i % 2 == 0) oss << ":";
-                oss << std::hex << std::setw(2) << std::setfill('0')
-                   << static_cast<int>(static_cast<uint8_t>(rowBuffer[offset + 4 + i]));
-            }
-            addrStr = oss.str();
-            if (col.dataType == "cidr" || prefix < 128)
-                addrStr += "/" + std::to_string(prefix);
-        } else {
-            addrStr = "unknown";
-        }
-        return addrStr;
+        dbms::NetworkAddressValue address;
+        address.family = static_cast<uint8_t>(rowBuffer[offset]);
+        address.bits = static_cast<uint8_t>(rowBuffer[offset + 1]);
+        std::memcpy(address.address.data(), rowBuffer.data() + offset + 4,
+                    address.address.size());
+        return address.toString(col.dataType == "cidr");
     } else if (col.dataType == "macaddr" || col.dataType == "macaddr8") {
         int n = (col.dataType == "macaddr8") ? 8 : 6;
-        // All-zero bytes are the unset/NULL sentinel (consistent with the
-        // engine's zero-means-empty convention for fixed-width types).
-        bool allZero = true;
-        for (int i = 0; i < n; ++i) {
-            if (rowBuffer[offset + i] != 0) { allZero = false; break; }
-        }
-        if (allZero) return "";
         uint8_t bytes[8] = {0};
         for (int i = 0; i < n; ++i)
             bytes[i] = static_cast<uint8_t>(rowBuffer[offset + i]);
@@ -20481,7 +20353,8 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                 uint8_t family = 0, prefix = 32;
                 uint8_t addr[16] = {0};
                 if (!val.empty()) {
-                    parseInetAddr(val, family, prefix, addr);  // validated at INSERT
+                    parseInetAddr(val, family, prefix, addr,
+                                  col.dataType == "cidr");  // validated at INSERT
                 }
                 rowBuffer[offset] = static_cast<char>(family);
                 rowBuffer[offset + 1] = static_cast<char>(prefix);
@@ -20579,7 +20452,8 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                     uint8_t family = 0, prefix = 32;
                     uint8_t addr[16] = {0};
                     if (!val.empty()) {
-                        parseInetAddr(val, family, prefix, addr);  // validated at INSERT
+                        parseInetAddr(val, family, prefix, addr,
+                                      col.dataType == "cidr");  // validated at INSERT
                     }
                     fixedData[fixedOff] = static_cast<char>(family);
                     fixedData[fixedOff + 1] = static_cast<char>(prefix);
@@ -21558,7 +21432,8 @@ DBStatus StorageEngine::insertInternal(
         // Validate inet/cidr address (strict IPv4/IPv6 + prefix range).
         if ((col.dataType == "inet" || col.dataType == "cidr") && !val.empty()) {
             uint8_t family = 0, prefix = 0, addr[16];
-            if (!parseInetAddr(val, family, prefix, addr)) {
+            if (!parseInetAddr(val, family, prefix, addr,
+                               col.dataType == "cidr")) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }
@@ -24773,7 +24648,8 @@ DBStatus StorageEngine::updateInternal(
                     } else if (col.dataType == "inet" || col.dataType == "cidr") {
                         if (!kv.second.empty()) {
                             uint8_t family = 0, prefix = 0, addr[16];
-                            if (!parseInetAddr(kv.second, family, prefix, addr))
+                            if (!parseInetAddr(kv.second, family, prefix, addr,
+                                               col.dataType == "cidr"))
                                 return DBStatus::INVALID_VALUE;
                         }
                     } else if (isRangeType(col.dataType)) {

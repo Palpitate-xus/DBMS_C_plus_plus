@@ -2,6 +2,7 @@
 #include "commands/TableManage.h"
 #include "common/DateType.h"
 #include "common/BooleanCodec.h"
+#include "common/NetworkValue.h"
 #include "common/DbError.h"
 #include "common/NotificationManager.h"
 #include "common/sha256.h"
@@ -376,6 +377,11 @@ static bool isBitStringTypeName(const std::string& typeName) {
     const std::string lowered = toLower(typeName);
     return lowered == "bit" || lowered == "bit varying" ||
            lowered == "varbit";
+}
+
+static bool isInetTypeName(const std::string& typeName) {
+    const std::string type = toLower(typeName);
+    return type == "inet" || type == "cidr";
 }
 
 static bool decodeBitStringLiteral(const std::string& input,
@@ -1755,6 +1761,35 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
         return left < right ? -1 : 1;
     }
 
+    if (isInetTypeName(ta) && isInetTypeName(tb)) {
+        NetworkAddressValue left;
+        NetworkAddressValue right;
+        if (!parseNetworkAddress(a.value, left, ta == "cidr") ||
+            !parseNetworkAddress(b.value, right, tb == "cidr")) {
+            throw DbError("22P02", "invalid input syntax for network address");
+        }
+        return compareNetworkAddresses(left, right);
+    }
+    const bool macA = ta == "macaddr" || ta == "macaddr8";
+    const bool macB = tb == "macaddr" || tb == "macaddr8";
+    if (macA && macB) {
+        const size_t leftLength = ta == "macaddr" ? 6 : 8;
+        const size_t rightLength = tb == "macaddr" ? 6 : 8;
+        std::array<uint8_t, 8> left{};
+        std::array<uint8_t, 8> right{};
+        if (!parseMacAddress(a.value, leftLength, left) ||
+            !parseMacAddress(b.value, rightLength, right)) {
+            throw DbError("22P02", "invalid input syntax for MAC address");
+        }
+        const int compared = std::lexicographical_compare(
+            left.begin(), left.begin() + leftLength,
+            right.begin(), right.begin() + rightLength) ? -1 :
+            std::lexicographical_compare(
+                right.begin(), right.begin() + rightLength,
+                left.begin(), left.begin() + leftLength) ? 1 : 0;
+        return compared;
+    }
+
     const bool blankPaddedA = isBlankPaddedCharacterType(ta);
     const bool blankPaddedB = isBlankPaddedCharacterType(tb);
     auto isVaryingCharacter = [](const std::string& type) {
@@ -2661,6 +2696,36 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
     }
 
     ExprValue r = eval(e->right.get(), ctx);
+
+    if (op == "<<" || op == "<<=" || op == ">>" || op == ">>=" ||
+        op == "&&") {
+        const bool leftNetwork = isInetTypeName(l.typeName);
+        const bool rightNetwork = isInetTypeName(r.typeName);
+        if (leftNetwork || rightNetwork) {
+            if (!leftNetwork || !rightNetwork) {
+                throw DbError("42883", "operator does not exist for network and non-network operands");
+            }
+            if (l.isNull || r.isNull)
+                return ExprValue("boolean", "", true);
+            NetworkAddressValue left;
+            NetworkAddressValue right;
+            if (!parseNetworkAddress(l.value, left,
+                                     toLower(l.typeName) == "cidr") ||
+                !parseNetworkAddress(r.value, right,
+                                     toLower(r.typeName) == "cidr")) {
+                throw DbError("22P02", "invalid input syntax for network address");
+            }
+            bool result = false;
+            if (op == "&&") {
+                result = networkOverlaps(left, right);
+            } else if (op == "<<" || op == "<<=") {
+                result = networkContains(right, left, op == "<<=");
+            } else {
+                result = networkContains(left, right, op == ">>=");
+            }
+            return ExprValue("boolean", result ? "t" : "f", false);
+        }
+    }
 
     if (op == "&" || op == "|" || op == "#") {
         if (!isBitStringTypeName(l.typeName) ||
@@ -4154,6 +4219,22 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
     if (target == "money") return castToMoney(v);
     if (target == "uuid") return castToUuid(v);
     if (target == "bytea" || target == "blob") return castToBytea(v);
+    if (target == "inet" || target == "cidr") {
+        NetworkAddressValue address;
+        const bool cidr = target == "cidr";
+        if (!parseNetworkAddress(v.value, address, cidr)) {
+            throw DbError("22P02", "invalid input syntax for type " + target);
+        }
+        return ExprValue(target, address.toString(cidr), false);
+    }
+    if (target == "macaddr" || target == "macaddr8") {
+        const size_t length = target == "macaddr" ? 6 : 8;
+        std::array<uint8_t, 8> address{};
+        if (!parseMacAddress(v.value, length, address)) {
+            throw DbError("22P02", "invalid input syntax for type " + target);
+        }
+        return ExprValue(target, formatMacAddress(address.data(), length), false);
+    }
     const BitCastSpec bitSpec = parseBitCastSpec(target);
     if (bitSpec.matches) return castToBitString(v, bitSpec);
     const CharacterCastSpec characterSpec = parseCharacterCastSpec(target);
