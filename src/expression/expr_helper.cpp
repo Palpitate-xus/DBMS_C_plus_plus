@@ -263,14 +263,17 @@ std::string inferAstResultType(
             name == "uuidv7") return "uuid";
         if (name == "uuid_extract_version") return "smallint";
         if (name == "uuid_extract_timestamp") return "timestamptz";
-        if (name == "decode" || name == "reverse" || name == "set_byte" ||
+        if (name == "decode" || name == "convert" || name == "convert_to" ||
+            name == "reverse" || name == "set_byte" ||
             name == "set_bit" || name == "substring" || name == "substr" ||
             name == "overlay" || name == "btrim" || name == "ltrim" ||
             name == "rtrim") {
-            if (name == "decode") return "bytea";
+            if (name == "decode" || name == "convert" ||
+                name == "convert_to") return "bytea";
             const std::string input = argType(0);
             if (input == "bytea") return "bytea";
         }
+        if (name == "convert_from") return "text";
         if (name == "pg_notification_queue_usage") return "double precision";
         if (name == "count" || name == "row_number" || name == "rank" ||
             name == "dense_rank") return "bigint";

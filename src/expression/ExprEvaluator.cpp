@@ -7,6 +7,7 @@
 #include "types/money.h"
 #include "types/uuid.h"
 #include "types/bytea.h"
+#include "types/encoding_conversion.h"
 #include "utils/Session.h"
 
 #include <algorithm>
@@ -103,6 +104,30 @@ static ByteaValue parseByteaOrThrow(const ExprValue& value) {
             "invalid input syntax for type bytea (SQLSTATE 22P02)");
     }
     return bytes;
+}
+
+static BuiltinEncoding parseEncodingOrThrow(const ExprValue& value) {
+    BuiltinEncoding encoding = BuiltinEncoding::Utf8;
+    if (!parseBuiltinEncoding(value.value, encoding)) {
+        throw std::runtime_error(
+            "invalid encoding name: \"" + value.value +
+            "\" (SQLSTATE 22023)");
+    }
+    return encoding;
+}
+
+static std::string convertEncodingOrThrow(const std::string& input,
+                                          BuiltinEncoding source,
+                                          BuiltinEncoding destination,
+                                          size_t* characterCount = nullptr) {
+    std::string output;
+    if (!convertBuiltinEncoding(
+            input, source, destination, output, characterCount)) {
+        throw std::runtime_error(
+            "character not in repertoire or invalid byte sequence "
+            "(SQLSTATE 22021)");
+    }
+    return output;
 }
 
 static std::string normalizeDecimalMagnitude(std::string value) {
@@ -6539,16 +6564,28 @@ void ExprEvaluator::registerBuiltins() {
             "double precision", formatFloatingCastValue(value), false);
     };
     functions_["length"] = [](const std::vector<ExprValue>& a) {
-        if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
+        if (a.empty() || a[0].isNull ||
+            (a.size() >= 2 && a[1].isNull)) {
+            return ExprValue("integer", "", true);
+        }
         const std::string type = toLower(a[0].typeName);
         const bool canonicalBytea = isCanonicalByteaType(type);
         const bool byteLength = canonicalBytea || type == "binary" ||
                                 type == "varbinary";
-        const size_t length = canonicalBytea
-            ? parseByteaOrThrow(a[0]).bytes().size()
-            : byteLength ? a[0].value.size()
-            : utf8CharCount(a[0].value.substr(
-                  0, logicalCharacterByteLength(a[0])));
+        size_t length = 0;
+        if (canonicalBytea && a.size() >= 2) {
+            const std::string bytes = parseByteaOrThrow(a[0]).bytes();
+            (void)convertEncodingOrThrow(
+                bytes, parseEncodingOrThrow(a[1]), BuiltinEncoding::Utf8,
+                &length);
+        } else if (canonicalBytea) {
+            length = parseByteaOrThrow(a[0]).bytes().size();
+        } else if (byteLength) {
+            length = a[0].value.size();
+        } else {
+            length = utf8CharCount(a[0].value.substr(
+                0, logicalCharacterByteLength(a[0])));
+        }
         return ExprValue("integer", std::to_string(length), false);
     };
     functions_["lower"] = [](const std::vector<ExprValue>& a) {
@@ -8353,6 +8390,34 @@ void ExprEvaluator::registerBuiltins() {
         throw std::runtime_error(
             "unrecognized encoding: \"" + a[1].value +
             "\" (SQLSTATE 22023)");
+    };
+    functions_["convert"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 3 || a[0].isNull || a[1].isNull || a[2].isNull)
+            return ExprValue("bytea", "", true);
+        const std::string converted = convertEncodingOrThrow(
+            parseByteaOrThrow(a[0]).bytes(), parseEncodingOrThrow(a[1]),
+            parseEncodingOrThrow(a[2]));
+        return ExprValue(
+            "bytea", ByteaValue::fromBytes(converted).toString(), false);
+    };
+    functions_["convert_from"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull)
+            return ExprValue("text", "", true);
+        return ExprValue(
+            "text",
+            convertEncodingOrThrow(
+                parseByteaOrThrow(a[0]).bytes(),
+                parseEncodingOrThrow(a[1]), BuiltinEncoding::Utf8),
+            false);
+    };
+    functions_["convert_to"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull)
+            return ExprValue("bytea", "", true);
+        const std::string converted = convertEncodingOrThrow(
+            textArgumentValue(a[0]), BuiltinEncoding::Utf8,
+            parseEncodingOrThrow(a[1]));
+        return ExprValue(
+            "bytea", ByteaValue::fromBytes(converted).toString(), false);
     };
     functions_["get_byte"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull)

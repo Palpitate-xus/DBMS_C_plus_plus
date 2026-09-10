@@ -208,6 +208,12 @@ int main() {
     assert(dbms::ExprHelper::inferResultType("reverse(b)", resultTypes) == "bytea");
     assert(dbms::ExprHelper::inferResultType(
                "decode('00', 'hex')", resultTypes) == "bytea");
+    assert(dbms::ExprHelper::inferResultType(
+               "convert(b, 'LATIN1', 'UTF8')", resultTypes) == "bytea");
+    assert(dbms::ExprHelper::inferResultType(
+               "convert_from(b, 'LATIN1')", resultTypes) == "text");
+    assert(dbms::ExprHelper::inferResultType(
+               "convert_to(v, 'LATIN1')", resultTypes) == "bytea");
     assert(dbms::ExprHelper::inferResultType("power(i + 1, 2)", resultTypes) == "double precision");
     assert(dbms::ExprHelper::inferResultType("round(n)", resultTypes) == "numeric");
     assert(dbms::ExprHelper::inferResultType("ARRAY[1,2]", resultTypes) == "integer[]");

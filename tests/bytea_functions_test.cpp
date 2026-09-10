@@ -20,6 +20,10 @@ dbms::ExprValue integer(const std::string& value,
     return dbms::ExprValue(type, value, false);
 }
 
+dbms::ExprValue text(const std::string& value) {
+    return dbms::ExprValue("text", value, false);
+}
+
 std::unique_ptr<dbms::LiteralExpr> literal(const dbms::ExprValue& value) {
     auto result = std::make_unique<dbms::LiteralExpr>();
     result->typeName = value.isNull ? "null" : value.typeName;
@@ -142,6 +146,45 @@ void testIntegerCasts() {
     assert(rejected);
 }
 
+void testEncodingConversions() {
+    dbms::ExprEvaluator evaluator;
+    assert(call(evaluator, "length",
+                {bytea("\\xe282ac"), text("UTF8")}).value == "1");
+    assert(call(evaluator, "length",
+                {bytea("\\xc4"), text("LATIN1")}).value == "1");
+    assert(call(evaluator, "convert",
+                {bytea("\\xc4"), text("LATIN1"), text("UTF8")}).value ==
+           "\\xc384");
+    assert(call(evaluator, "convert",
+                {bytea("\\xc384"), text("UTF8"), text("LATIN1")}).value ==
+           "\\xc4");
+    assert(call(evaluator, "convert_from",
+                {bytea("\\xc4"), text("LATIN1")}).value == "\xc3\x84");
+    assert(call(evaluator, "convert_to",
+                {text("\xc3\x84"), text("LATIN1")}).value == "\\xc4");
+    assert(call(evaluator, "convert_to",
+                {text("ASCII"), text("SQL_ASCII")}).value ==
+           "\\x4153434949");
+
+    auto expectError = [&](const std::string& function,
+                           const std::vector<dbms::ExprValue>& arguments,
+                           const std::string& sqlState) {
+        bool rejected = false;
+        try {
+            (void)call(evaluator, function, arguments);
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find(sqlState) !=
+                       std::string::npos;
+        }
+        assert(rejected);
+    };
+    expectError("length", {bytea("\\xc0af"), text("UTF8")}, "22021");
+    expectError("convert_to", {text("\xe2\x82\xac"), text("LATIN1")},
+                "22021");
+    expectError("convert_to", {text("x"), text("NO_SUCH_ENCODING")},
+                "22023");
+}
+
 }  // namespace
 
 int main() {
@@ -149,6 +192,7 @@ int main() {
     testOperatorsAndLengths();
     testByteFunctions();
     testIntegerCasts();
+    testEncodingConversions();
     std::cout << "[BYTEA FUNCTIONS] all passed" << std::endl;
     return 0;
 }
