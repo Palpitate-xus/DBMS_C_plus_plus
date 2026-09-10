@@ -3,7 +3,9 @@
 #include "interfaces/table_schema.h"
 #include "Config.h"
 #include <cassert>
+#include <cstdint>
 #include <iostream>
+#include <limits>
 #include <string>
 
 dbms::Config g_config;
@@ -158,6 +160,8 @@ static void test_type_categories() {
     assert(reg.findType("money")->category == TypeCategory::Numeric);
     assert(reg.findType("text")->category == TypeCategory::String);
     assert(reg.findType("bytea")->category == TypeCategory::Binary);
+    assert(reg.findType("bytea")->maxLength == static_cast<size_t>(
+        std::numeric_limits<int32_t>::max()));
     assert(reg.findType("timestamp")->category == TypeCategory::DateTime);
     assert(reg.findType("point")->category == TypeCategory::Geometric);
     assert(reg.findType("inet")->category == TypeCategory::Network);

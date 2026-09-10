@@ -1374,7 +1374,10 @@ Column makeBlobColumn(const std::string& name, bool isNull, bool isPK) {
     c.isPrimaryKey = isPK;
     c.isVariableLength = true;
     c.dataType = "blob";
-    c.dsize = 65535;
+    // bytea is varlena in PostgreSQL.  The heap stores only a compact TOAST
+    // marker for large values, so the schema limit is the largest size its
+    // signed 32-bit persisted length field can describe rather than 64 KiB.
+    c.dsize = static_cast<size_t>(std::numeric_limits<int32_t>::max());
     return c;
 }
 
@@ -13131,7 +13134,10 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
         tbl.cols[i].dataName = readFixedString(in, MAX_COL_NAME_LEN);
         int32_t dsize = 0;
         in.read(reinterpret_cast<char*>(&dsize), 4);
-        if (!in || dsize < 0 || dsize > MAX_PERSISTED_COLUMN_SIZE) return {};
+        if (!in || dsize < 0) return {};
+        const bool largeBinary = tbl.cols[i].dataType == "blob" ||
+                                 tbl.cols[i].dataType == "bytea";
+        if (!largeBinary && dsize > MAX_PERSISTED_COLUMN_SIZE) return {};
         tbl.cols[i].dsize = static_cast<size_t>(dsize);
         if (hasDefault) {
             tbl.cols[i].defaultValue = readFixedString(in, MAX_COL_NAME_LEN);
@@ -13812,8 +13818,8 @@ bool StorageEngine::readToast(const std::string& dbname,
                               std::string& data) {
     data.clear();
     if (toastId == 0 || maxSize == 0) return false;
-    maxSize = std::min(maxSize,
-                       static_cast<size_t>(std::numeric_limits<uint16_t>::max()));
+    maxSize = std::min(
+        maxSize, static_cast<size_t>(std::numeric_limits<int32_t>::max()));
     PageAllocator* pa = getToastPageAllocator(dbname, tablename);
     BPTree* idx = getToastIndex(dbname, tablename);
     if (!pa || !idx) return false;
@@ -13943,7 +13949,8 @@ std::string StorageEngine::readToast(const std::string& dbname,
                                      uint64_t toastId) {
     std::string data;
     if (!readToast(dbname, tablename, toastId,
-                   std::numeric_limits<uint16_t>::max(), data)) {
+                   static_cast<size_t>(std::numeric_limits<int32_t>::max()),
+                   data)) {
         return "";
     }
     return data;

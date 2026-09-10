@@ -327,7 +327,9 @@ void TypeRegistry::registerStringTypes() {
 }
 
 void TypeRegistry::registerBinaryTypes() {
-    registerType({"bytea", -1, 'i', 'x', TypeCategory::Binary, false, -1, 65535, false},
+    registerType({"bytea", -1, 'i', 'x', TypeCategory::Binary, false, -1,
+                  static_cast<size_t>(std::numeric_limits<int32_t>::max()),
+                  false},
                  {"blob"});
     registerType({"binary", -1, 'i', 'p', TypeCategory::Binary, true, 1, 1005, false});
     registerType({"varbinary", -1, 'i', 'p', TypeCategory::Binary, true, -1, 65535, false});
