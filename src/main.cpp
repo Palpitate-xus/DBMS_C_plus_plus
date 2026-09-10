@@ -8874,7 +8874,8 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd, const st
             } else if (ctype.substr(0, 3) == "bit") {
                 bool isVarbit = (ctype == "bit" && parts.size() >= 3 && parts[2] == "varying")
                     || ctype.substr(0, 11) == "bit varying" || ctype.substr(0, 6) == "varbit";
-                // Fallback path carries no length modifier → unlimited (0).
+                // BIT defaults to BIT(1); BIT VARYING without a modifier uses
+                // the factory's bounded unlimited representation.
                 col = isVarbit ? makeVarBitColumn(cname, isNull, 0, isPK)
                                : makeBitColumn(cname, isNull, 0, isPK);
                 colCreated = true;

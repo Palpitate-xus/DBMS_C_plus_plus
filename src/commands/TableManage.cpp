@@ -837,6 +837,7 @@ static bool variableColumnWidthsValid(
 
 static bool columnAcceptsEmptyValue(const Column& column) {
     if (column.isArray) return false;
+    if (column.dataType == "bit varying") return true;
     if (!column.enumValues.empty()) {
         return std::find(column.enumValues.begin(), column.enumValues.end(),
                          std::string()) != column.enumValues.end();
@@ -1623,28 +1624,30 @@ Column makeMacAddr8Column(const std::string& name, bool isNull, bool isPK) {
 
 Column makeBitColumn(const std::string& name, bool isNull, size_t length, bool isPK) {
     // bit(n) is stored as the literal '0'/'1' string (variable-length); dsize
-    // carries the declared bit length n for exact-length enforcement. length 0
-    // (no modifier, fallback path) means "no length constraint".
+    // carries the declared bit length n for exact-length enforcement.  SQL
+    // BIT without a modifier is BIT(1), so a zero factory argument means 1.
     Column c;
     c.dataName = name;
     c.isNull = isNull;
     c.isPrimaryKey = isPK;
     c.isVariableLength = true;
     c.dataType = "bit";
-    c.dsize = (length == 0 ? 65535 : length);
+    c.dsize = (length == 0 ? 1 : length);
     return c;
 }
 
 Column makeVarBitColumn(const std::string& name, bool isNull, size_t length, bool isPK) {
     // bit varying(n) stored as the '0'/'1' string; dsize is the max bit length,
-    // 65535 meaning unlimited.
+    // The engine currently caps a single textual bit datum at 8,388,608 bits;
+    // an omitted modifier uses that explicit fail-safe ceiling rather than the
+    // old accidental 65,535-bit limit.
     Column c;
     c.dataName = name;
     c.isNull = isNull;
     c.isPrimaryKey = isPK;
     c.isVariableLength = true;
     c.dataType = "bit varying";
-    c.dsize = (length == 0 ? 65535 : length);
+    c.dsize = (length == 0 ? 8388608 : length);
     return c;
 }
 
@@ -7660,8 +7663,8 @@ static bool parseInetAddr(const std::string& in, uint8_t& family,
 // ========================================================================
 // Bit string (bit / bit varying) helper
 // Storage: the literal '0'/'1' string (variable-length). `declaredLen` carries
-// the declared bit length n (Column::dsize); 0 or 65535 means "no constraint /
-// unlimited". For "bit" the value must be exactly n bits; for "bit varying" at
+// the declared bit length n (Column::dsize). For "bit" the value must be
+// exactly n bits; for "bit varying" at
 // most n bits. Accepts an optional B'...'/b'...' wrapper or plain quotes and
 // writes the canonical bare 0/1 string to `out`.
 // ========================================================================
@@ -7675,11 +7678,10 @@ static bool normalizeBitString(const std::string& in, const std::string& dataTyp
     for (char ch : s) {
         if (ch != '0' && ch != '1') return false;
     }
-    bool unlimited = (declaredLen == 0 || declaredLen == 65535);
     if (dataType == "bit") {
-        if (!unlimited && s.size() != declaredLen) return false;
+        if (s.size() != declaredLen) return false;
     } else {  // bit varying
-        if (!unlimited && s.size() > declaredLen) return false;
+        if (s.size() > declaredLen) return false;
     }
     out = s;
     return true;
@@ -13135,9 +13137,10 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
         int32_t dsize = 0;
         in.read(reinterpret_cast<char*>(&dsize), 4);
         if (!in || dsize < 0) return {};
-        const bool largeBinary = tbl.cols[i].dataType == "blob" ||
-                                 tbl.cols[i].dataType == "bytea";
-        if (!largeBinary && dsize > MAX_PERSISTED_COLUMN_SIZE) return {};
+        const bool largeVarlena = tbl.cols[i].dataType == "blob" ||
+                                  tbl.cols[i].dataType == "bytea" ||
+                                  tbl.cols[i].dataType == "bit varying";
+        if (!largeVarlena && dsize > MAX_PERSISTED_COLUMN_SIZE) return {};
         tbl.cols[i].dsize = static_cast<size_t>(dsize);
         if (hasDefault) {
             tbl.cols[i].defaultValue = readFixedString(in, MAX_COL_NAME_LEN);

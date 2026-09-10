@@ -740,6 +740,33 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
             if (!decodePostgresNumeric(raw, numeric)) break;
             return quoteProtocolText(numeric, error);
         }
+        case 1560: case 1562: {
+            if (raw.size() < 4 || !decodeBinaryUnsigned(
+                    std::vector<uint8_t>(raw.begin(), raw.begin() + 4),
+                    4, bits)) {
+                break;
+            }
+            const int32_t bitLength = static_cast<int32_t>(bits);
+            if (bitLength < 0 || bitLength > 8388608 ||
+                raw.size() != 4 + (static_cast<size_t>(bitLength) + 7) / 8) {
+                break;
+            }
+            std::string value;
+            value.reserve(static_cast<size_t>(bitLength));
+            for (int32_t bit = 0; bit < bitLength; ++bit) {
+                const uint8_t byte = raw[4 + static_cast<size_t>(bit) / 8];
+                value.push_back(
+                    (byte & (1U << (7U - (static_cast<unsigned>(bit) & 7U))))
+                        ? '1' : '0');
+            }
+            if (bitLength % 8 != 0 && !raw.empty()) {
+                const unsigned unused = 8U -
+                    (static_cast<unsigned>(bitLength) & 7U);
+                const uint8_t mask = static_cast<uint8_t>((1U << unused) - 1U);
+                if ((raw.back() & mask) != 0) break;
+            }
+            return "B'" + value + "'";
+        }
         case 2950: {
             if (raw.size() != 16) break;
             static constexpr char hex[] = "0123456789abcdef";
@@ -795,6 +822,14 @@ std::string protocolParameterLiteral(uint32_t typeOid,
             return {};
         }
         return value;
+    }
+    if (typeOid == 1560 || typeOid == 1562) {
+        if (std::any_of(value.begin(), value.end(),
+                        [](char bit) { return bit != '0' && bit != '1'; })) {
+            error = "invalid input syntax for type bit";
+            return {};
+        }
+        return "B'" + value + "'";
     }
     return quoteProtocolText(value, error);
 }
@@ -1256,16 +1291,27 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
         for (size_t i = 0; i < table.len; ++i) {
             const Column& column = table.cols[i];
             if (lowerProtocolText(column.dataName) != lowerProtocolText(name)) continue;
-            if (!hasStructuredType) {
-                const std::string typeName = lowerProtocolText(column.dataType);
+            const std::string physicalTypeName =
+                lowerProtocolText(column.dataType);
+            const bool structuredMatchesPhysical = hasStructuredType &&
+                (physicalTypeName == "bit" ||
+                 physicalTypeName == "bit varying") &&
+                lowerProtocolText(result.columnTypes[columnIndex]) ==
+                    physicalTypeName;
+            if (!hasStructuredType || structuredMatchesPhysical) {
+                const std::string typeName = physicalTypeName;
                 description.typeOid = isByteaTypeName(typeName)
                                           ? 17
                                           : mapBuiltinTypeNameToOid(typeName);
                 if (description.typeOid == INVALID_OID) description.typeOid = 25;
                 description.typeSize = protocolTypeSize(description.typeOid, column);
-                description.typeModifier = column.isVariableLength && column.dsize > 0
-                                               ? static_cast<int32_t>(column.dsize + 4)
-                                               : -1;
+                const bool unconstrainedVarbit =
+                    typeName == "bit varying" && column.dsize == 8388608;
+                description.typeModifier =
+                    column.isVariableLength && column.dsize > 0 &&
+                            !unconstrainedVarbit
+                        ? static_cast<int32_t>(column.dsize + 4)
+                        : -1;
             }
             description.tableOid = relationOid;
             description.attributeNumber = static_cast<uint16_t>(i + 1);
@@ -1273,7 +1319,7 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
                 if (attribute.attname == column.dataName) {
                     description.tableOid = relationOid;
                     description.attributeNumber = static_cast<uint16_t>(attribute.attnum);
-                    if (!hasStructuredType) {
+                    if (!hasStructuredType || structuredMatchesPhysical) {
                         if (attribute.atttypid != INVALID_OID) description.typeOid = attribute.atttypid;
                         if (attribute.attlen != 0) description.typeSize = attribute.attlen;
                         if (attribute.atttypmod >= 0) description.typeModifier = attribute.atttypmod;

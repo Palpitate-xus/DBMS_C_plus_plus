@@ -684,6 +684,12 @@ static PgAttributeRow catalogAttributeForColumn(
         : static_cast<int16_t>(column.dsize);
     attribute.attndims = column.isArray ? 1 : 0;
     attribute.atttypmod = -1;
+    if (!column.isArray && column.dataType == "bit") {
+        attribute.atttypmod = static_cast<int32_t>(column.dsize + 4);
+    } else if (!column.isArray && column.dataType == "bit varying" &&
+               column.dsize != 8388608) {
+        attribute.atttypmod = static_cast<int32_t>(column.dsize + 4);
+    }
     attribute.attnotnull = !column.isNull;
     attribute.atthasdef = !column.defaultValue.empty();
     attribute.attstorage = column.isVariableLength ? 'x' : 'p';
@@ -3449,6 +3455,23 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
             if (consumed != typeMods[1].size()) throw std::invalid_argument("trailing type modifier");
         } catch (...) {
             error = "invalid type modifier '" + typeMods[1] + "'";
+            return false;
+        }
+    }
+    if (baseType == "bit" || baseType == "bit varying" ||
+        baseType == "varbit") {
+        constexpr int kMaxSupportedBitLength = 8388608;
+        if (typeMods.size() > 1) {
+            error = "invalid type modifier for " + baseType +
+                    " (SQLSTATE 42601)";
+            return false;
+        }
+        if (!typeMods.empty() &&
+            (typeMod1 <= 0 || typeMod1 > kMaxSupportedBitLength)) {
+            error = "length for type " + baseType +
+                    " must be between 1 and " +
+                    std::to_string(kMaxSupportedBitLength) +
+                    " (SQLSTATE 22023)";
             return false;
         }
     }

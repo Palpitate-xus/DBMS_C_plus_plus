@@ -370,6 +370,46 @@ static bool isQuotedString(const std::string& s) {
                              (s.front() == '"' && s.back() == '"'));
 }
 
+static constexpr size_t kMaxSupportedBitStringLength = 8388608;
+
+static bool isBitStringTypeName(const std::string& typeName) {
+    const std::string lowered = toLower(typeName);
+    return lowered == "bit" || lowered == "bit varying" ||
+           lowered == "varbit";
+}
+
+static bool decodeBitStringLiteral(const std::string& input,
+                                   std::string& bits) {
+    if (input.size() < 3 || input[1] != '\'' || input.back() != '\'' ||
+        (input[0] != 'B' && input[0] != 'b' &&
+         input[0] != 'X' && input[0] != 'x')) {
+        return false;
+    }
+    const std::string body = input.substr(2, input.size() - 3);
+    bits.clear();
+    if (input[0] == 'B' || input[0] == 'b') {
+        if (body.size() > kMaxSupportedBitStringLength) return false;
+        for (char bit : body) {
+            if (bit != '0' && bit != '1') return false;
+        }
+        bits = body;
+        return true;
+    }
+    if (body.size() > kMaxSupportedBitStringLength / 4) return false;
+    bits.reserve(body.size() * 4);
+    for (char digit : body) {
+        unsigned value = 0;
+        if (digit >= '0' && digit <= '9') value = digit - '0';
+        else if (digit >= 'a' && digit <= 'f') value = digit - 'a' + 10;
+        else if (digit >= 'A' && digit <= 'F') value = digit - 'A' + 10;
+        else return false;
+        for (int shift = 3; shift >= 0; --shift) {
+            bits.push_back((value & (1U << shift)) ? '1' : '0');
+        }
+    }
+    return true;
+}
+
 static std::string unquote(const std::string& s) {
     // SQL string literal: strip the outer quotes and collapse doubled quotes.
     if (isQuotedString(s)) {
@@ -1432,6 +1472,16 @@ ExprValue ExprEvaluator::evalLiteral(const LiteralExpr* e) const {
     if (low == "true") return ExprValue("boolean", "t", false);
     if (low == "false") return ExprValue("boolean", "f", false);
 
+    if (raw.size() >= 3 && raw[1] == '\'' && raw.back() == '\'' &&
+        (raw[0] == 'B' || raw[0] == 'b' ||
+         raw[0] == 'X' || raw[0] == 'x')) {
+        std::string bits;
+        if (!decodeBitStringLiteral(raw, bits)) {
+            throw DbError("22P02", "invalid bit string literal");
+        }
+        return ExprValue("bit", std::move(bits), false);
+    }
+
     if (!e->typeName.empty()) {
         return ExprValue(e->typeName, unquote(raw), false);
     }
@@ -1520,6 +1570,15 @@ ExprValue ExprEvaluator::evalUnaryOp(const UnaryOpExpr* e, const RowContext& ctx
         // SQL three-valued logic: NOT NULL is NULL.
         if (v.isNull) return ExprValue("boolean", "", true);
         return ExprValue("boolean", v.asBool() ? "f" : "t", false);
+    }
+    if (op == "~") {
+        if (!isBitStringTypeName(v.typeName)) {
+            throw DbError("42883", "operator does not exist: ~ " + v.typeName);
+        }
+        if (v.isNull) return ExprValue(v.typeName, "", true);
+        std::string result = v.value;
+        for (char& bit : result) bit = bit == '0' ? '1' : '0';
+        return ExprValue(v.typeName, std::move(result), false);
     }
     if (op.rfind("at time zone", 0) == 0) {
         // AT TIME ZONE <zone>: timestamp input is a wall clock in the named
@@ -2603,6 +2662,57 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
 
     ExprValue r = eval(e->right.get(), ctx);
 
+    if (op == "&" || op == "|" || op == "#") {
+        if (!isBitStringTypeName(l.typeName) ||
+            !isBitStringTypeName(r.typeName)) {
+            throw DbError("42883", "operator does not exist for non-bit operands");
+        }
+        if (l.isNull || r.isNull) return ExprValue("bit", "", true);
+        if (l.value.size() != r.value.size()) {
+            throw DbError("22026", "cannot bitwise operate bit strings of different sizes");
+        }
+        std::string result(l.value.size(), '0');
+        for (size_t i = 0; i < result.size(); ++i) {
+            const bool left = l.value[i] == '1';
+            const bool right = r.value[i] == '1';
+            const bool value = op == "&" ? left && right
+                : op == "|" ? left || right : left != right;
+            result[i] = value ? '1' : '0';
+        }
+        return ExprValue("bit", std::move(result), false);
+    }
+    if (op == "<<" || op == ">>") {
+        if (!isBitStringTypeName(l.typeName) || !isIntegerTypeName(r.typeName)) {
+            throw DbError("42883", "operator does not exist for bit shift operands");
+        }
+        if (l.isNull || r.isNull) return ExprValue(l.typeName, "", true);
+        long long count = 0;
+        if (!parseInt64Exact(r.value, count)) {
+            throw DbError("22P02", "invalid input syntax for type integer");
+        }
+        bool shiftLeft = op == "<<";
+        uint64_t amount = 0;
+        if (count < 0) {
+            shiftLeft = !shiftLeft;
+            amount = count == std::numeric_limits<long long>::min()
+                ? uint64_t{1} << 63
+                : static_cast<uint64_t>(-count);
+        } else {
+            amount = static_cast<uint64_t>(count);
+        }
+        std::string result(l.value.size(), '0');
+        if (amount < l.value.size()) {
+            const size_t n = static_cast<size_t>(amount);
+            if (shiftLeft) {
+                std::copy(l.value.begin() + n, l.value.end(), result.begin());
+            } else {
+                std::copy(l.value.begin(), l.value.end() - n,
+                          result.begin() + n);
+            }
+        }
+        return ExprValue(l.typeName, std::move(result), false);
+    }
+
     // Comparison
     // IS [NOT] DISTINCT FROM: equality that treats NULLs as comparable
     // (never returns NULL).
@@ -2640,6 +2750,20 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
 
     // String concatenation; SQL arrays concatenate as arrays (PG ||).
     if (op == "||") {
+        const bool leftBit = isBitStringTypeName(l.typeName);
+        const bool rightBit = isBitStringTypeName(r.typeName);
+        if (leftBit || rightBit) {
+            if (!leftBit || !rightBit) {
+                throw DbError("42883", "operator does not exist for bit and non-bit operands");
+            }
+            if (l.isNull || r.isNull) return ExprValue("bit", "", true);
+            if (l.value.size() > kMaxSupportedBitStringLength ||
+                r.value.size() >
+                    kMaxSupportedBitStringLength - l.value.size()) {
+                throw DbError("54000", "bit string is too long");
+            }
+            return ExprValue("bit", l.value + r.value, false);
+        }
         const bool byteaResult = isCanonicalByteaType(l.typeName) &&
                                  isCanonicalByteaType(r.typeName);
         if (l.isNull || r.isNull)
@@ -3887,6 +4011,96 @@ ExprValue ExprEvaluator::evalCast(const CastExpr* e, const RowContext& ctx) cons
     return ExprValue{};
 }
 
+struct BitCastSpec {
+    bool matches = false;
+    bool varying = false;
+    bool hasLength = false;
+    size_t length = 0;
+};
+
+static BitCastSpec parseBitCastSpec(const std::string& target) {
+    BitCastSpec spec;
+    std::string base = target;
+    std::string modifier;
+    const size_t open = target.find('(');
+    if (open != std::string::npos) base = trimStr(target.substr(0, open));
+    base = toLower(trimStr(base));
+    if (base == "bit") {
+        spec.matches = true;
+    } else if (base == "bit varying" || base == "varbit") {
+        spec.matches = true;
+        spec.varying = true;
+    } else {
+        return spec;
+    }
+    if (open != std::string::npos) {
+        if (target.back() != ')') {
+            throw DbError("42601", "invalid bit type modifier");
+        }
+        modifier = trimStr(target.substr(open + 1,
+                                         target.size() - open - 2));
+        if (modifier.empty()) {
+            throw DbError("42601", "invalid bit type modifier");
+        }
+        uint64_t parsed = 0;
+        const auto result = std::from_chars(
+            modifier.data(), modifier.data() + modifier.size(), parsed);
+        if (result.ec != std::errc{} ||
+            result.ptr != modifier.data() + modifier.size() || parsed == 0 ||
+            parsed > kMaxSupportedBitStringLength) {
+            throw DbError("22023", "length for type bit must be between 1 and " +
+                                     std::to_string(kMaxSupportedBitStringLength));
+        }
+        spec.hasLength = true;
+        spec.length = static_cast<size_t>(parsed);
+    }
+    return spec;
+}
+
+static ExprValue castToBitString(const ExprValue& value,
+                                 const BitCastSpec& spec) {
+    size_t targetLength = spec.length;
+    if (!spec.varying && !spec.hasLength) targetLength = 1;
+
+    std::string bits;
+    if (isIntegerTypeName(value.typeName)) {
+        long long parsed = 0;
+        if (!parseInt64Exact(value.value, parsed)) {
+            throw DbError("22P02", "invalid input syntax for type bit");
+        }
+        size_t sourceWidth = 64;
+        const std::string sourceType = toLower(value.typeName);
+        if (sourceType == "smallint" || sourceType == "int2") sourceWidth = 16;
+        else if (sourceType == "integer" || sourceType == "int" ||
+                 sourceType == "int4") sourceWidth = 32;
+        if (!spec.hasLength && spec.varying) targetLength = sourceWidth;
+        const uint64_t raw = static_cast<uint64_t>(parsed);
+        bits.reserve(targetLength);
+        for (size_t position = targetLength; position > 0; --position) {
+            const size_t bitIndex = position - 1;
+            const bool one = bitIndex < 64
+                ? ((raw >> bitIndex) & 1U) != 0
+                : parsed < 0;
+            bits.push_back(one ? '1' : '0');
+        }
+    } else {
+        bits = value.value;
+        if (bits.size() > kMaxSupportedBitStringLength ||
+            std::any_of(bits.begin(), bits.end(),
+                        [](char bit) { return bit != '0' && bit != '1'; })) {
+            throw DbError("22P02", "invalid input syntax for type bit");
+        }
+        if (spec.hasLength || !spec.varying) {
+            if (bits.size() > targetLength) bits.resize(targetLength);
+            if (!spec.varying && bits.size() < targetLength) {
+                bits.append(targetLength - bits.size(), '0');
+            }
+        }
+    }
+    return ExprValue(spec.varying ? "bit varying" : "bit",
+                     std::move(bits), false);
+}
+
 // Helper overload used by BinaryOpExpr "::"
 ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
                                   const ExprValue& v, const std::string& targetTypeName) const {
@@ -3940,6 +4154,8 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
     if (target == "money") return castToMoney(v);
     if (target == "uuid") return castToUuid(v);
     if (target == "bytea" || target == "blob") return castToBytea(v);
+    const BitCastSpec bitSpec = parseBitCastSpec(target);
+    if (bitSpec.matches) return castToBitString(v, bitSpec);
     const CharacterCastSpec characterSpec = parseCharacterCastSpec(target);
     if (characterSpec.kind != CharacterCastKind::None)
         return castToCharacter(v, characterSpec);
@@ -4538,8 +4754,10 @@ static std::string trimUtf8Characters(const std::string& text,
 static ExprValue evaluateTextSubstring(const std::vector<ExprValue>& args) {
     if (args.empty()) return ExprValue("text", "", true);
     const bool byteaInput = isCanonicalByteaType(args[0].typeName);
+    const bool bitInput = isBitStringTypeName(args[0].typeName);
+    const char* resultType = byteaInput ? "bytea" : bitInput ? "bit" : "text";
     if (args[0].isNull)
-        return ExprValue(byteaInput ? "bytea" : "text", "", true);
+        return ExprValue(resultType, "", true);
     const std::string byteInput = byteaInput
         ? parseByteaOrThrow(args[0]).bytes() : std::string();
     const std::string input = textArgumentValue(args[0]);
@@ -4548,10 +4766,10 @@ static ExprValue evaluateTextSubstring(const std::vector<ExprValue>& args) {
             return ExprValue(
                 "bytea", ByteaValue::fromBytes(byteInput).toString(), false);
         }
-        return ExprValue("text", input, false);
+        return ExprValue(bitInput ? "bit" : "text", input, false);
     }
     if (args[1].isNull || (args.size() >= 3 && args[2].isNull))
-        return ExprValue(byteaInput ? "bytea" : "text", "", true);
+        return ExprValue(resultType, "", true);
 
     long long from = 0;
     if (!parseInt64Exact(args[1].value, from))
@@ -4567,13 +4785,14 @@ static ExprValue evaluateTextSubstring(const std::vector<ExprValue>& args) {
         }
     }
 
-    const size_t total = byteaInput ? byteInput.size() : utf8CharCount(input);
+    const size_t total = byteaInput ? byteInput.size()
+        : bitInput ? input.size() : utf8CharCount(input);
     const __int128 requestedEnd = hasLength
         ? static_cast<__int128>(from) + length
         : static_cast<__int128>(total) + 1;
     const __int128 requestedStart = std::max<__int128>(from, 1);
     if (requestedStart > static_cast<__int128>(total))
-        return ExprValue(byteaInput ? "bytea" : "text",
+        return ExprValue(resultType,
                          byteaInput ? "\\x" : "", false);
 
     const size_t beginCharacter =
@@ -4584,9 +4803,9 @@ static ExprValue evaluateTextSubstring(const std::vector<ExprValue>& args) {
     if (endCharacterWide > static_cast<__int128>(total))
         endCharacterWide = total;
     const size_t endCharacter = static_cast<size_t>(endCharacterWide);
-    const size_t beginByte = byteaInput
+    const size_t beginByte = byteaInput || bitInput
         ? beginCharacter : utf8ByteAt(input, beginCharacter);
-    const size_t endByte = byteaInput
+    const size_t endByte = byteaInput || bitInput
         ? endCharacter : utf8ByteAt(input, endCharacter);
     if (byteaInput) {
         return ExprValue(
@@ -4596,7 +4815,8 @@ static ExprValue evaluateTextSubstring(const std::vector<ExprValue>& args) {
             false);
     }
     return ExprValue(
-        "text", input.substr(beginByte, endByte - beginByte), false);
+        bitInput ? "bit" : "text",
+        input.substr(beginByte, endByte - beginByte), false);
 }
 
 static ExprValue evaluateByteaTrim(const std::vector<ExprValue>& args,
@@ -7765,8 +7985,11 @@ void ExprEvaluator::registerBuiltins() {
     };
     functions_["octet_length"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
-        const size_t length = isCanonicalByteaType(a[0].typeName)
-            ? parseByteaOrThrow(a[0]).bytes().size() : a[0].value.size();
+        const size_t length = isBitStringTypeName(a[0].typeName)
+            ? (a[0].value.size() + 7) / 8
+            : isCanonicalByteaType(a[0].typeName)
+                ? parseByteaOrThrow(a[0]).bytes().size()
+                : a[0].value.size();
         return ExprValue("integer", std::to_string(length), false);
     };
     functions_["bit_length"] = [](const std::vector<ExprValue>& a) {
@@ -7776,6 +7999,10 @@ void ExprEvaluator::registerBuiltins() {
                 "integer",
                 std::to_string(parseByteaOrThrow(a[0]).bytes().size() * 8),
                 false);
+        }
+        if (isBitStringTypeName(a[0].typeName)) {
+            return ExprValue(
+                "integer", std::to_string(a[0].value.size()), false);
         }
         return ExprValue(
             "integer", std::to_string(logicalCharacterByteLength(a[0]) * 8),
@@ -8492,8 +8719,19 @@ void ExprEvaluator::registerBuiltins() {
     functions_["get_bit"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull)
             return ExprValue("integer", "", true);
-        const std::string bytes = parseByteaOrThrow(a[0]).bytes();
         const int64_t offset = parseInt32Argument(a[1]);
+        if (isBitStringTypeName(a[0].typeName)) {
+            if (offset < 0 ||
+                static_cast<uint64_t>(offset) >= a[0].value.size()) {
+                throw std::runtime_error(
+                    "index out of valid range (SQLSTATE 2202E)");
+            }
+            return ExprValue(
+                "integer",
+                a[0].value[static_cast<size_t>(offset)] == '1' ? "1" : "0",
+                false);
+        }
+        const std::string bytes = parseByteaOrThrow(a[0]).bytes();
         if (offset < 0 || static_cast<uint64_t>(offset) >= bytes.size() * 8U) {
             throw std::runtime_error(
                 "index out of valid range (SQLSTATE 2202E)");
@@ -8506,10 +8744,27 @@ void ExprEvaluator::registerBuiltins() {
     };
     functions_["set_bit"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 3 || a[0].isNull || a[1].isNull || a[2].isNull)
-            return ExprValue("bytea", "", true);
-        std::string bytes = parseByteaOrThrow(a[0]).bytes();
+            return ExprValue(
+                !a.empty() && isBitStringTypeName(a[0].typeName)
+                    ? a[0].typeName : "bytea", "", true);
         const int64_t offset = parseInt32Argument(a[1]);
         const int64_t replacement = parseInt32Argument(a[2]);
+        if (isBitStringTypeName(a[0].typeName)) {
+            if (offset < 0 ||
+                static_cast<uint64_t>(offset) >= a[0].value.size()) {
+                throw std::runtime_error(
+                    "index out of valid range (SQLSTATE 2202E)");
+            }
+            if (replacement != 0 && replacement != 1) {
+                throw std::runtime_error(
+                    "new bit must be 0 or 1 (SQLSTATE 22023)");
+            }
+            std::string bits = a[0].value;
+            bits[static_cast<size_t>(offset)] =
+                replacement == 0 ? '0' : '1';
+            return ExprValue(a[0].typeName, std::move(bits), false);
+        }
+        std::string bytes = parseByteaOrThrow(a[0]).bytes();
         if (offset < 0 || static_cast<uint64_t>(offset) >= bytes.size() * 8U) {
             throw std::runtime_error(
                 "index out of valid range (SQLSTATE 2202E)");
@@ -8531,6 +8786,13 @@ void ExprEvaluator::registerBuiltins() {
     };
     functions_["bit_count"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("bigint", "", true);
+        if (isBitStringTypeName(a[0].typeName)) {
+            return ExprValue(
+                "bigint",
+                std::to_string(std::count(
+                    a[0].value.begin(), a[0].value.end(), '1')),
+                false);
+        }
         const std::string bytes = parseByteaOrThrow(a[0]).bytes();
         uint64_t count = 0;
         for (unsigned char byte : bytes) {

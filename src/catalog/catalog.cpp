@@ -1433,6 +1433,10 @@ void CatalogManager::bootstrapSystemTypes() {
     ensureType(1184,  "timestamptz", 8,   'b', 'D');
     ensureType(1186,  "interval",   16,   'b', 'D');
     ensureType(1266,  "timetz",     12,   'b', 'D');
+    ensureType(1560,  "bit",        -1,   'b', 'V');
+    ensureType(1561,  "_bit",       -1,   'b', 'A');
+    ensureType(1562,  "varbit",     -1,   'b', 'V');
+    ensureType(1563,  "_varbit",    -1,   'b', 'A');
     ensureType(1700,  "numeric",    -1,   'b', 'N');
     ensureType(2950,  "uuid",       16,   'b', 'U');
     ensureType(2951,  "_uuid",      -1,   'b', 'A');

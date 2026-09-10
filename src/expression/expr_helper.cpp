@@ -99,6 +99,7 @@ std::string protocolTypeName(std::string type) {
     if (type == "time with time zone") return "timetz";
     if (type == "time without time zone") return "time";
     if (type == "blob") return "bytea";
+    if (type == "varbit") return "bit varying";
     return type;
 }
 
@@ -152,6 +153,11 @@ std::string inferAstResultType(
         if (!literal->typeName.empty())
             return protocolTypeName(literal->typeName);
         const std::string value = toLower(literal->value);
+        if (literal->value.size() >= 3 && literal->value[1] == '\'' &&
+            (literal->value[0] == 'b' || literal->value[0] == 'B' ||
+             literal->value[0] == 'x' || literal->value[0] == 'X')) {
+            return "bit";
+        }
         if (value == "null" ||
             (literal->value.size() >= 2 && literal->value.front() == '\'' &&
              literal->value.back() == '\'')) return "unknown";
@@ -179,6 +185,15 @@ std::string inferAstResultType(
     }
     if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression)) {
         const std::string op = toLower(binary->op);
+        if (op == "::") {
+            if (const auto* target =
+                    dynamic_cast<const LiteralExpr*>(binary->right.get())) {
+                return protocolTypeName(target->value);
+            }
+            return protocolTypeName(binary->right
+                                        ? binary->right->toString()
+                                        : std::string("unknown"));
+        }
         static const std::set<std::string> booleanOperators = {
             "and", "or", "=", "<>", "!=", "<", ">", "<=", ">=",
             "like", "not like", "ilike", "not ilike", "in", "not in",
@@ -188,8 +203,17 @@ std::string inferAstResultType(
         if (booleanOperators.count(op)) return "boolean";
         const std::string left = inferAstResultType(binary->left.get(), typeHints);
         const std::string right = inferAstResultType(binary->right.get(), typeHints);
-        if (op == "||")
+        if (op == "||") {
+            if ((left == "bit" || left == "bit varying") &&
+                (right == "bit" || right == "bit varying")) {
+                return "bit";
+            }
             return left == "bytea" && right == "bytea" ? "bytea" : "text";
+        }
+        if (op == "&" || op == "|" || op == "#" ||
+            op == "<<" || op == ">>") {
+            return left;
+        }
         if (op == "+" || op == "-") {
             if (left == "money" && right == "money") return "money";
             if (left == "date" && right == "interval") return "timestamp";
@@ -276,6 +300,8 @@ std::string inferAstResultType(
                 name == "sha512") return "bytea";
             const std::string input = argType(0);
             if (input == "bytea") return "bytea";
+            if ((name == "substring" || name == "substr") &&
+                (input == "bit" || input == "bit varying")) return "bit";
         }
         if (name == "convert_from") return "text";
         if (name == "pg_notification_queue_usage") return "double precision";

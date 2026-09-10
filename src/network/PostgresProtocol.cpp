@@ -181,6 +181,27 @@ bool encodeBinaryValue(const std::string& value, const PgColumnDescription& colu
             }
             case 1700:
                 return encodePostgresNumeric(value, encoded);
+            case 1560: case 1562: {
+                if (std::any_of(value.begin(), value.end(),
+                                [](char bit) {
+                                    return bit != '0' && bit != '1';
+                                }) ||
+                    value.size() >
+                        static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+                    return false;
+                }
+                appendRawUInt32(encoded, static_cast<uint32_t>(value.size()));
+                for (size_t offset = 0; offset < value.size(); offset += 8) {
+                    uint8_t byte = 0;
+                    for (size_t bit = 0; bit < 8 && offset + bit < value.size(); ++bit) {
+                        if (value[offset + bit] == '1') {
+                            byte |= static_cast<uint8_t>(1U << (7U - bit));
+                        }
+                    }
+                    encoded.push_back(byte);
+                }
+                return true;
+            }
             case 2950:
                 return parseUuidBytes(value, encoded);
             case 25: case 1042: case 1043:

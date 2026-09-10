@@ -320,6 +320,13 @@ static bool isStringLiteralToken(const std::string& s) {
     return s.size() >= 2 && s.front() == '\'' && s.back() == '\'';
 }
 
+static bool isBitStringLiteralToken(const std::string& s) {
+    return s.size() >= 3 &&
+           (s.front() == 'B' || s.front() == 'b' ||
+            s.front() == 'X' || s.front() == 'x') &&
+           s[1] == '\'' && s.back() == '\'';
+}
+
 static std::string normalizeEscapeStringToken(const std::string& token) {
     // Convert E'...' into an equivalent standard-conforming quoted token so
     // every downstream parser consumer sees the same decoded literal form.
@@ -545,6 +552,18 @@ std::vector<std::string> SQLParser::tokenize(const std::string& sql) {
             if (c == '\'' && (cur == "E" || cur == "e")) {
                 inString = true;
                 inEscapeString = true;
+                stringChar = '\'';
+                cur += c;
+                continue;
+            }
+            // PostgreSQL bit-string constants have no whitespace between the
+            // B/X introducer and the quote. Preserve the introducer in the
+            // token so the expression analyzer can distinguish them from
+            // ordinary unknown string literals.
+            if (c == '\'' &&
+                (cur == "B" || cur == "b" || cur == "X" || cur == "x")) {
+                inString = true;
+                inEscapeString = false;
                 stringChar = '\'';
                 cur += c;
                 continue;
@@ -1607,14 +1626,19 @@ static ExprPtr parseRangeExpr(const std::vector<std::string>& tokens, size_t& po
     return left;
 }
 
-// || (concatenation, left-associative). Operands parse at the JSON-operator
-// level so ->/->>/#>/#>>/@>/<@ bind tighter than || (PostgreSQL).
+// PostgreSQL's generic-operator precedence tier.  Besides concatenation this
+// carries the bit-string boolean and shift operators.  Operands parse at the
+// JSON-operator level so ->/->>/#>/#>>/@>/<@ bind tighter.
 static ExprPtr parseConcatExpr(const std::vector<std::string>& tokens, size_t& pos) {
     auto left = parseJsonOpExpr(tokens, pos);
-    while (pos < tokens.size() && tokens[pos] == "||") {
+    static const std::set<std::string> genericOperators = {
+        "||", "&", "|", "#", "<<", ">>"
+    };
+    while (pos < tokens.size() && genericOperators.count(tokens[pos]) != 0) {
+        const std::string op = tokens[pos];
         ++pos;
         auto bin = std::make_unique<BinaryOpExpr>();
-        bin->op = "||";
+        bin->op = op;
         bin->left = std::move(left);
         bin->right = parseJsonOpExpr(tokens, pos);
         left = std::move(bin);
@@ -1697,9 +1721,10 @@ static ExprPtr parsePowerExpr(const std::vector<std::string>& tokens, size_t& po
     return left;
 }
 
-// Unary +, -, NOT
+// Unary +, -, ~.  NOT has its own lower-precedence grammar level.
 static ExprPtr parseUnaryExpr(const std::vector<std::string>& tokens, size_t& pos) {
-    if (pos < tokens.size() && (tokens[pos] == "+" || tokens[pos] == "-")) {
+    if (pos < tokens.size() &&
+        (tokens[pos] == "+" || tokens[pos] == "-" || tokens[pos] == "~")) {
         std::string op = tokens[pos];
         ++pos;
         auto unary = std::make_unique<UnaryOpExpr>();
@@ -1753,6 +1778,9 @@ static ExprPtr parseCastExpr(const std::vector<std::string>& tokens, size_t& pos
                 || w == "into" || w == "values" || w == "by" || w == "asc" || w == "desc"
                 || tokens[pos] == ")" || tokens[pos] == "," || tokens[pos] == ";"
                 || tokens[pos] == "::" || tokens[pos] == "||"
+                || tokens[pos] == "&" || tokens[pos] == "|"
+                || tokens[pos] == "#" || tokens[pos] == "<<"
+                || tokens[pos] == ">>"
                 || tokens[pos] == "+" || tokens[pos] == "-"
                 || tokens[pos] == "*" || tokens[pos] == "/" || tokens[pos] == "%"
                 || tokens[pos] == "^" || tokens[pos] == "=" || tokens[pos] == "<"
@@ -2047,7 +2075,8 @@ static ExprPtr parsePrimaryExpr(const std::vector<std::string>& tokens, size_t& 
     ++pos;
 
     // Literals: quoted strings, numbers, and boolean/null constants.
-    if (isStringLiteralToken(first) || isNumericToken(first)) {
+    if (isStringLiteralToken(first) || isBitStringLiteralToken(first) ||
+        isNumericToken(first)) {
         auto lit = std::make_unique<LiteralExpr>();
         lit->value = first;
         return lit;
