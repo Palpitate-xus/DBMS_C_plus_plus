@@ -900,6 +900,20 @@ struct CreateObjectStmt : public Stmt {
     std::string toString() const override { return "CREATE " + objectType; }
 };
 
+// CREATE DATABASE is cluster-scoped and its options change durable database
+// semantics.  Keep it separate from the generic CREATE-object carrier so an
+// option can never disappear between parsing and execution.
+struct CreateDatabaseStmt : public Stmt {
+    std::string databaseName;
+    // A null value represents SQL DEFAULT.  Option names are canonical
+    // lowercase names (for example, connection_limit).
+    std::map<std::string, std::optional<std::string>> options;
+    bool withClause = false;
+
+    CreateDatabaseStmt() : Stmt(SqlCommand::CreateDatabase) {}
+    std::string toString() const override { return "CREATE DATABASE"; }
+};
+
 // ============================================================================
 // DROP 语句
 // ============================================================================

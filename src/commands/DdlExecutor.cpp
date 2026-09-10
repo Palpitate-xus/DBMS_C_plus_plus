@@ -1245,7 +1245,7 @@ bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
         case SqlCommand::DropCollation:
             return executeDropCollation(dynamic_cast<const DropStmt*>(stmt.get()), s);
         case SqlCommand::CreateDatabase:
-            return executeCreateDatabase(dynamic_cast<const CreateObjectStmt*>(stmt.get()), s);
+            return executeCreateDatabase(dynamic_cast<const CreateDatabaseStmt*>(stmt.get()), s);
         case SqlCommand::DropDatabase:
             return executeDropDatabase(dynamic_cast<const DropStmt*>(stmt.get()), s);
         case SqlCommand::CreateSchema:
@@ -1278,7 +1278,7 @@ bool DdlExecutor::executeSql(const std::string& sql, Session& s) {
     if (!r.success || !r.stmt) {
         std::cout << "SQL syntax error";
         if (!r.error.empty()) std::cout << ": " << r.error;
-        std::cout << std::endl;
+        std::cout << " (SQLSTATE 42601)" << std::endl;
         return true;
     }
     return execute(r.stmt, s);
@@ -1358,7 +1358,7 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         handled = true;
         std::cout << "SQL syntax error";
         if (!r.error.empty()) std::cout << ": " << r.error;
-        std::cout << std::endl;
+        std::cout << " (SQLSTATE 42601)" << std::endl;
         return true;
     }
     if (parsedCmd == dbms::SqlCommand::AlterTable) {
@@ -2555,21 +2555,97 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
 // CREATE / DROP DATABASE
 // ----------------------------------------------------------------------------
 
-bool DdlExecutor::executeCreateDatabase(const CreateObjectStmt* stmt, Session& s) {
+bool DdlExecutor::executeCreateDatabase(const CreateDatabaseStmt* stmt, Session& s) {
     if (!stmt) return false;
     if (!checkAdmin(s)) return true;
     if (!checkDatabaseCommandOutsideTransaction(s)) return true;
-    std::string dbname = stmt->objectName;
+    const std::string& dbname = stmt->databaseName;
     if (dbname.empty()) {
         std::cout << "SQL syntax error: CREATE DATABASE name" << std::endl;
         return true;
     }
+
+    // Parsing every PostgreSQL option is intentional: accepting the syntax
+    // and then discarding its semantics creates a dangerously different
+    // database.  Until the cluster catalog and template/tablespace machinery
+    // exist, reject every option other than this server's fixed UTF-8
+    // encoding before StorageEngine can create a directory.
+    for (const auto& option : stmt->options) {
+        if (option.first == "encoding") continue;
+        std::cout << "ERROR: CREATE DATABASE option \"" << option.first
+                  << "\" is not supported (SQLSTATE 0A000)" << std::endl;
+        return true;
+    }
+
     std::string charset = "utf8";
     auto it = stmt->options.find("encoding");
-    if (it != stmt->options.end()) charset = it->second;
+    if (it != stmt->options.end() && it->second.has_value()) {
+        const std::string& rawEncoding = *it->second;
+        const bool quotedEncoding = rawEncoding.size() >= 2 &&
+            ((rawEncoding.front() == '\'' && rawEncoding.back() == '\'') ||
+             (rawEncoding.front() == '"' && rawEncoding.back() == '"'));
+        std::string encoding = stripQuotes(rawEncoding);
+        std::string normalizedEncoding;
+        normalizedEncoding.reserve(encoding.size());
+        for (unsigned char c : encoding) {
+            // PostgreSQL compares encoding names after discarding all
+            // non-alphanumeric characters (so UTF-8, UTF_8, and UTF8 are
+            // equivalent).
+            if (std::isalnum(c)) {
+                normalizedEncoding += static_cast<char>(std::tolower(c));
+            }
+        }
+        int numericEncoding = -1;
+        bool numericCode = false;
+        if (!quotedEncoding) {
+            try {
+                size_t consumed = 0;
+                const int parsed = std::stoi(encoding, &consumed, 10);
+                numericCode = consumed == encoding.size();
+                if (numericCode) numericEncoding = parsed;
+            } catch (...) {
+            }
+        }
+        if (normalizedEncoding == "utf8" ||
+            normalizedEncoding == "unicode" ||
+            (numericCode && numericEncoding == 6)) {
+            charset = "utf8";
+        } else {
+            // Normalized names and aliases accepted by PostgreSQL 18 for
+            // server encodings.  They are valid requests, but this storage
+            // engine cannot honor them, so report feature-not-supported.
+            static const std::set<std::string> serverEncodings = {
+                "abc", "alt", "euccn", "eucjis2004", "eucjp", "euckr",
+                "euctw", "iso88591", "iso885910", "iso885913",
+                "iso885914", "iso885915", "iso885916", "iso88592",
+                "iso88593", "iso88594", "iso88595", "iso88596",
+                "iso88597", "iso88598", "iso88599", "koi8", "koi8r",
+                "koi8u", "latin1", "latin10", "latin2", "latin3",
+                "latin4", "latin5", "latin6", "latin7", "latin8",
+                "latin9", "muleinternal", "sqlascii", "tcvn", "tcvn5712",
+                "vscii", "win", "win1250", "win1251", "win1252",
+                "win1253", "win1254", "win1255", "win1256", "win1257",
+                "win1258", "win866", "win874", "windows1250",
+                "windows1251", "windows1252", "windows1253", "windows1254",
+                "windows1255", "windows1256", "windows1257", "windows1258",
+                "windows866", "windows874"
+            };
+            if (serverEncodings.count(normalizedEncoding) != 0 ||
+                (numericCode && numericEncoding >= 0 && numericEncoding <= 34)) {
+                std::cout << "ERROR: database encoding \"" << encoding
+                          << "\" is not supported; only UTF8 is available "
+                             "(SQLSTATE 0A000)" << std::endl;
+            } else {
+                std::cout << "ERROR: encoding \"" << encoding
+                          << "\" does not exist (SQLSTATE 42704)" << std::endl;
+            }
+            return true;
+        }
+    }
     DBStatus res = g_engine.createDatabase(dbname, charset);
     if (res == DBStatus::TABLE_ALREADY_EXISTS || res == DBStatus::ALREADY_EXISTS) {
-        std::cout << "Database already exists" << std::endl;
+        std::cout << "ERROR: database \"" << dbname
+                  << "\" already exists (SQLSTATE 42P04)" << std::endl;
         return true;
     }
     if (res != DBStatus::OK) {

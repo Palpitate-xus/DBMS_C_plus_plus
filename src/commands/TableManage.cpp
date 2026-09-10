@@ -12820,6 +12820,16 @@ DBStatus StorageEngine::createDatabase(const std::string& dbname, const std::str
     if (dbname.empty() || !validStoredIdentifier(dbname, MAX_TABLE_NAME_LEN)) {
         return DBStatus::INVALID_ARGUMENT;
     }
+    std::string normalizedCharset;
+    normalizedCharset.reserve(charset.size());
+    for (unsigned char c : charset) {
+        if (std::isalnum(c)) {
+            normalizedCharset += static_cast<char>(std::tolower(c));
+        }
+    }
+    if (normalizedCharset != "utf8" && normalizedCharset != "unicode") {
+        return DBStatus::INVALID_VALUE;
+    }
     if (databaseExists(dbname)) return DBStatus::TABLE_ALREADY_EXISTS;
     // Embedded callers and tests may remove a database directory directly.
     // Drop every file-backed cache before reusing the name; otherwise the
@@ -12839,7 +12849,7 @@ DBStatus StorageEngine::createDatabase(const std::string& dbname, const std::str
         return DBStatus::IO_ERROR;
     };
     if (!index_file::writeAtomically(tableListPath(dbname), "") ||
-        !index_file::writeAtomically(dbPath(dbname) / ".charset", charset + "\n")) {
+        !index_file::writeAtomically(dbPath(dbname) / ".charset", "utf8\n")) {
         return failCreateDatabase();
     }
     // Every database has the PostgreSQL-compatible public schema. Persist it

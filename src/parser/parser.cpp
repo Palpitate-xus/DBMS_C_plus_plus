@@ -5888,21 +5888,192 @@ StmtPtr SQLParser::parseCreateView(const std::vector<std::string>& tokens, size_
 }
 
 StmtPtr SQLParser::parseCreateDatabase(const std::vector<std::string>& tokens, size_t& pos) {
-    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreateDatabase);
-    stmt->objectType = "DATABASE";
-    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
-        stmt->ifNotExists = true; pos += 3;
-    }
-    if (pos < tokens.size()) {
-        stmt->objectName = tokens[pos++];
-        if (pos < tokens.size() && tokens[pos] == ".") {
-            ++pos;
-            if (pos < tokens.size()) {
-                stmt->schema = stmt->objectName;
-                stmt->objectName = tokens[pos++];
+    auto stmt = std::make_unique<CreateDatabaseStmt>();
+
+    const auto decodeQuotedIdentifier = [](const std::string& token,
+                                           std::string& decoded) {
+        if (token.size() < 2 || token.front() != '"' ||
+            token.back() != '"') {
+            return false;
+        }
+        decoded.clear();
+        const std::string inner = token.substr(1, token.size() - 2);
+        for (size_t i = 0; i < inner.size(); ++i) {
+            decoded += inner[i];
+            if (inner[i] == '"' && i + 1 < inner.size() &&
+                inner[i + 1] == '"') {
+                ++i;
             }
         }
+        return true;
+    };
+    const auto isUnquotedIdentifier = [](const std::string& token) {
+        if (token.empty()) return false;
+        const unsigned char first = static_cast<unsigned char>(token.front());
+        if (!(std::isalpha(first) || first == '_' || first >= 0x80)) {
+            return false;
+        }
+        for (size_t i = 1; i < token.size(); ++i) {
+            const unsigned char c = static_cast<unsigned char>(token[i]);
+            if (!(std::isalnum(c) || c == '_' || c == '$' || c >= 0x80)) {
+                return false;
+            }
+        }
+        return true;
+    };
+    const auto isNumericOnly = [](const std::string& token) {
+        size_t i = 0;
+        if (i < token.size() && (token[i] == '+' || token[i] == '-')) ++i;
+        bool beforeDecimal = false;
+        while (i < token.size() &&
+               std::isdigit(static_cast<unsigned char>(token[i]))) {
+            beforeDecimal = true;
+            ++i;
+        }
+        bool afterDecimal = false;
+        if (i < token.size() && token[i] == '.') {
+            ++i;
+            while (i < token.size() &&
+                   std::isdigit(static_cast<unsigned char>(token[i]))) {
+                afterDecimal = true;
+                ++i;
+            }
+        }
+        if (!beforeDecimal && !afterDecimal) return false;
+        if (i < token.size() && (token[i] == 'e' || token[i] == 'E')) {
+            ++i;
+            if (i < token.size() && (token[i] == '+' || token[i] == '-')) ++i;
+            const size_t exponentStart = i;
+            while (i < token.size() &&
+                   std::isdigit(static_cast<unsigned char>(token[i]))) ++i;
+            if (i == exponentStart) return false;
+        }
+        return i == token.size();
+    };
+    static const std::set<std::string> reservedNameKeywords = {
+        // PostgreSQL 18's RESERVED_KEYWORD and TYPE_FUNC_NAME_KEYWORD
+        // categories cannot reduce to the `name`/ColId production.
+        "all", "analyse", "analyze", "and", "any", "array", "as", "asc",
+        "asymmetric", "authorization", "binary", "both", "case", "cast",
+        "check", "collate", "collation", "column", "concurrently",
+        "constraint", "create", "cross", "current_catalog", "current_date",
+        "current_role", "current_schema", "current_time", "current_timestamp",
+        "current_user", "default", "deferrable", "desc", "distinct", "do",
+        "else", "end", "except", "false", "fetch", "for", "foreign",
+        "freeze", "from", "full", "grant", "group", "having", "ilike", "in",
+        "initially", "inner", "intersect", "into", "is", "isnull", "join",
+        "lateral", "leading", "left", "like", "limit", "localtime",
+        "localtimestamp", "natural", "not", "notnull", "null", "offset", "on",
+        "only", "or", "order", "outer", "overlaps", "placing", "primary",
+        "references", "returning", "right", "select", "session_user", "similar",
+        "some", "symmetric", "system_user", "table", "tablesample", "then", "to",
+        "trailing", "true", "union", "unique", "user", "using", "variadic",
+        "verbose", "when", "where", "window", "with"
+    };
+    static const std::set<std::string> typeFunctionNameKeywords = {
+        "authorization", "binary", "collation", "concurrently", "cross",
+        "current_schema", "freeze", "full", "ilike", "inner", "is",
+        "isnull", "join", "left", "like", "natural", "notnull", "outer",
+        "overlaps", "right", "similar", "tablesample", "verbose"
+    };
+
+    // PostgreSQL has no CREATE DATABASE IF NOT EXISTS form.  Database names
+    // are also never schema-qualified.
+    if (pos >= tokens.size() || tokens[pos] == ";") {
+        return nullptr;
     }
+    const std::string nameToken = tokens[pos++];
+    if (decodeQuotedIdentifier(nameToken, stmt->databaseName)) {
+        // Quoted identifiers retain case and may spell a keyword.
+    } else {
+        if (!isUnquotedIdentifier(nameToken) ||
+            reservedNameKeywords.count(toLower(nameToken)) != 0) {
+            return nullptr;
+        }
+        stmt->databaseName = toLower(nameToken);
+    }
+    if (stmt->databaseName.empty()) return nullptr;
+
+    if (pos < tokens.size() && match(tokens, pos, "with")) {
+        stmt->withClause = true;
+        ++pos;
+    }
+
+    static const std::set<std::string> optionNames = {
+        "owner", "template", "encoding", "strategy", "locale",
+        "lc_collate", "lc_ctype", "builtin_locale", "icu_locale",
+        "icu_rules", "locale_provider", "collation_version",
+        "tablespace", "allow_connections", "is_template", "oid",
+        "connection_limit",
+        // Kept by PostgreSQL 18's grammar for compatibility; PostgreSQL
+        // itself warns that LOCATION is no longer supported.
+        "location"
+    };
+    const auto punctuation = [](const std::string& token) {
+        static const std::set<std::string> invalid = {
+            ".", ",", "(", ")", "[", "]", "*", "/", "%", "^",
+            "~", "!", "|", "&", "#", "@", "?", ":", "<", ">",
+            "=>", "::"
+        };
+        return invalid.count(token) != 0;
+    };
+
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        const std::string optionToken = tokens[pos++];
+        std::string option;
+        const bool quotedOption = decodeQuotedIdentifier(optionToken, option);
+        if (!quotedOption) {
+            if (!isUnquotedIdentifier(optionToken)) return nullptr;
+            option = toLower(optionToken);
+        }
+        if (!quotedOption && option == "connection") {
+            if (pos >= tokens.size() || !match(tokens, pos, "limit")) {
+                return nullptr;
+            }
+            ++pos;
+            option = "connection_limit";
+        } else if (optionNames.count(option) == 0) {
+            return nullptr;
+        }
+        if (stmt->options.count(option) != 0) return nullptr;
+
+        if (pos < tokens.size() && tokens[pos] == "=") ++pos;
+        if (pos >= tokens.size() || tokens[pos] == ";") return nullptr;
+        if (match(tokens, pos, "default")) {
+            stmt->options.emplace(option, std::nullopt);
+            ++pos;
+            continue;
+        }
+
+        std::string value = tokens[pos++];
+        if ((value == "+" || value == "-") && pos < tokens.size()) {
+            const std::string& magnitude = tokens[pos];
+            if (!isNumericOnly(magnitude)) {
+                return nullptr;
+            }
+            value += magnitude;
+            ++pos;
+        }
+        std::string ignoredQuotedIdentifier;
+        const bool singleQuoted = value.size() >= 2 &&
+            value.front() == '\'' && value.back() == '\'';
+        const std::string loweredValue = toLower(value);
+        const bool validValue = singleQuoted ||
+            decodeQuotedIdentifier(value, ignoredQuotedIdentifier) ||
+            isNumericOnly(value) ||
+            (isUnquotedIdentifier(value) &&
+             (loweredValue == "true" || loweredValue == "false" ||
+              reservedNameKeywords.count(loweredValue) == 0 ||
+              typeFunctionNameKeywords.count(loweredValue) != 0));
+        if (!validValue || value == "+" || value == "-" || value == "=" ||
+            punctuation(value)) {
+            return nullptr;
+        }
+        stmt->options.emplace(option, std::move(value));
+    }
+
+    if (pos < tokens.size() && tokens[pos] == ";") ++pos;
+    if (pos != tokens.size()) return nullptr;
     return stmt;
 }
 
