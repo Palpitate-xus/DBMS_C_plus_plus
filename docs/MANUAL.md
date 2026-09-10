@@ -987,6 +987,21 @@ SHOW DEADLOCKS;
 
 服务进程收到 `SIGINT` 或 `SIGTERM` 后会停止接收新连接，关闭活动连接并等待客户端 worker 退出；监听端口失败会以非零退出码结束。`--insecure` 仅用于本地开发。
 
+StartupMessage 支持 wire 3.0，并对 3.x 的更高 minor（含 PostgreSQL 18
+使用的 3.2）返回标准 NegotiateProtocolVersion 和未知 `_pq_.` option 列表。
+未给 `database` 时按 PostgreSQL 规则使用用户名。`application_name`、UTF-8
+`client_encoding`、常规连接模式、`options` 中的 `-c/--name=value` 以及当前
+实现的会话超时参数会成为真实会话默认值；未知参数、畸形 options、复制连接和
+非 UTF-8 编码会在 startup 阶段明确失败，不会静默忽略。复制协议和非 UTF-8
+转码分别仍由 PROTO-10、PROTO-11 清单项覆盖。
+
+认证成功后服务端发送 PostgreSQL 18 的 15 项 ParameterStatus、BackendKeyData，
+最后发送 idle ReadyForQuery。应用名、编码、搜索路径、时区、session authorization
+或有效角色的 superuser 状态变化时，会在一个 Simple Query 或 Extended Sync
+周期结束前至多发送一次最终 ParameterStatus；事务状态由 ReadyForQuery 的
+`I/T/E` 精确表示。BackendKeyData 的 CancelRequest 消费和长算子取消时效仍由
+PROTO-07 覆盖。
+
 Simple Query 的一个 `Q` 消息可以包含多条顶层分号分隔语句；分句器识别
 普通/escape 字符串、quoted identifier、dollar quote、行注释和嵌套块注释。
 没有显式事务控制的多语句消息属于同一个 implicit transaction，遇到首个错误

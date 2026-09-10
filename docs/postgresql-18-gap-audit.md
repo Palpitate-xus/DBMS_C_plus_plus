@@ -338,7 +338,7 @@
 
 ## 16. PostgreSQL 协议和客户端兼容
 
-- [ ] **PROTO-01** 协议 3.0/3.2 negotiation、startup parameters、ParameterStatus、BackendKeyData、ReadyForQuery 状态完整性。
+- [x] **PROTO-01** 协议 3.0/3.2 negotiation、startup parameters、ParameterStatus、BackendKeyData、ReadyForQuery 状态完整性。
 - [x] **PROTO-02** Simple Query 多 statement、implicit transaction、empty query、command tag 和错误后跳过规则。
 - [ ] **PROTO-03** Extended Query Parse/Bind/Describe/Execute/Close/Flush/Sync、unnamed replacement、portal suspension、error recovery 和 pipelining。
 - [ ] **PROTO-04** RowDescription/DataRow 使用准确 type OID/typmod/table OID/attnum/format；不能由文本输出猜列。
