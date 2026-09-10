@@ -1326,10 +1326,33 @@ def main():
             sock, "CREATE ROLE analyst"))
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "CREATE USER bob WITH PASSWORD 'bObPass9!'"))
+        changed_authorization = simple_query(
+            sock, "SET SESSION AUTHORIZATION bob")
+        assert parameter_status_values(changed_authorization) == [
+            (b"is_superuser", b"off"),
+            (b"session_authorization", b"bob"),
+        ], changed_authorization
+        reset_authorization = simple_query(
+            sock, "RESET SESSION AUTHORIZATION")
+        assert parameter_status_values(reset_authorization) == [
+            (b"is_superuser", b"on"),
+            (b"session_authorization", b"alice"),
+        ], reset_authorization
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "GRANT analyst TO bob"))
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "GRANT analyst TO bob WITH ADMIN OPTION"))
+        set_role = simple_query(sock, "SET ROLE analyst")
+        assert not any(kind == b"E" for kind, _ in set_role), set_role
+        assert parameter_status_values(set_role) == [
+            (b"is_superuser", b"off")], set_role
+        reset_role = simple_query(sock, "RESET ROLE")
+        assert not any(kind == b"E" for kind, _ in reset_role), reset_role
+        assert parameter_status_values(reset_role) == [
+            (b"is_superuser", b"on")], reset_role
+        set_constraints = simple_query(sock, "SET CONSTRAINTS ALL IMMEDIATE")
+        assert not any(kind == b"E" for kind, _ in set_constraints), \
+            set_constraints
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "CREATE USER carol WITH PASSWORD 'cArolPass9!'"))
         assert any(kind == b"C" for kind, _ in simple_query(sock, "CREATE TABLE t (id INT)"))

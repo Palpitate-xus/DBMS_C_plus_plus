@@ -2629,7 +2629,7 @@ static bool handleSetCommand(const string& sql, Session& s) {
 
     // SET CONSTRAINTS { ALL | constraint_name [, ...] } { DEFERRED | IMMEDIATE }
     if (sql.substr(0, 15) == "set constraints") {
-        string rest = trim(sql.substr(17));  // skip "restore database"
+        string rest = trim(sql.substr(15));
         if (rest.empty()) {
             cout << "SQL syntax error: SET CONSTRAINTS name [, ...] IMMEDIATE|DEFERRED" << endl;
             return true;
@@ -14080,6 +14080,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
         case dbms::SqlCommand::Set:
         case dbms::SqlCommand::SetTransaction:
+        case dbms::SqlCommand::SetRole:
+        case dbms::SqlCommand::SetSessionAuthorization:
+        case dbms::SqlCommand::SetConstraints:
             return handleSetCommand(sql, s);
 
         case dbms::SqlCommand::Reset:
