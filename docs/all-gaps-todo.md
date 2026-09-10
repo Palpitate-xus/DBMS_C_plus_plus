@@ -466,7 +466,7 @@ OID，原子改名物理文件并同步 `nextval` 默认表达式/依赖；冲�
 | 2.1 | 数值类型 | `numeric/decimal(p,s)` 精度、scale、四舍五入、溢出、NaN/Infinity、运算符族不完整；`money` 以 double 类路径处理，不是 PG money | ⚠️ |
 | 2.2 | 整数类型 | PG 无 tinyint；类型大小、溢出、隐式转换、序列联动与 PG 不完全一致 | ⚠️ |
 | 2.3 | 字符/文本 | 缺少 collation provider、ICU、排序规则、编码转换、正则/LIKE 全语义；标识符和列名长度限制明显不同 | ⚠️ |
-| 2.4 | 二进制 | `bytea`（dataType `blob`）已实现 hex（`\xDEADBEEF`）与 escape（字面字节 + `\\`/`\ooo` 八进制）输入解析、规范化为小写 `\xhh..` 输出、非法输入拒绝（`tests/bytea_test.cpp`）；仍缺 bytea 函数/操作符集 | ⚠️ |
+| 2.4 | 二进制 | `bytea`（dataType `blob`）已实现共享 raw-byte codec、hex/escape 输入与规范 hex 输出、完整比较/拼接和 PostgreSQL 18 bytea 函数族、integer casts、OID 17 binary protocol I/O，以及超过 64 KiB 的 TOAST 持久化与 VACUUM 回归 | ✅ |
 | 2.5 | 日期时间 | `interval` 已实现多格式输入解析（verbose 单位/`HH:MM:SS`/`Y-M` 简写/裸秒/`ago`、分数级联）+ 规范化为 PG postgres 风格输出（`tests/interval_test.cpp`）；仍缺 PG time zone 规则库、infinity、BC 日期、精度、interval 字段限定（`INTERVAL DAY TO SECOND` 等）、ISO 8601 输入。`datetime` 是非 PG 类型 | ⚠️ |
 | 2.6 | 布尔 | SQL 三值逻辑、类型转换、函数/聚合边界仍简化 | ⚠️ |
 | 2.7 | ENUM | `CREATE TYPE ... AS ENUM` 落地，列定义支持 enum 值校验；`ALTER TYPE ADD VALUE [IF NOT EXISTS] [BEFORE/AFTER]` 与 `RENAME VALUE` 已支持（`updateEnumType` 持久化）；仍缺 catalog `pg_enum` ordinal 排序语义与索引集成 | ⚠️ |

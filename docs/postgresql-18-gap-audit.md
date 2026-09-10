@@ -182,7 +182,7 @@
 - [ ] **TYPE-02** integer/float 补完整溢出、NaN ordering、implicit cast、平台无关 binary storage 和错误语义。
 - [x] **TYPE-03** `money` 补 locale-aware I/O 和精确内部表示；不能走 double/字符串近似。
 - [ ] **TYPE-04** character/text 补无限 text/bytea 语义、typmod、blank padding、encoding、collation 和 Unicode 行为；当前 65535 等项目限制不是 PG 限制。
-- [ ] **TYPE-05** bytea 补全部 operators/functions、binary I/O 和大值 TOAST 行为。
+- [x] **TYPE-05** bytea 补全部 operators/functions、binary I/O 和大值 TOAST 行为。
 - [ ] **TYPE-06** date/time/timestamp/timestamptz/interval 补微秒精度、BC/infinity、完整 timezone database、DST、timezone abbreviation、typmod 和所有边界值。
 - [ ] **TYPE-07** boolean 保持真正三值类型，避免预处理阶段把 `TRUE/FALSE` 文本改成 `1/0` 引起类型偏移。
 - [ ] **TYPE-08** enum 补 catalog ordering、rename/add value 的并发可见性、比较/hash 和 dump/restore。

@@ -367,7 +367,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | 🔄 4.1 补全 `numeric` / `decimal` 精度、scale、NaN/Infinity | 2.1 | 精确 decimal 文本存储、基础运算、NaN/Infinity 和 PostgreSQL numeric binary I/O 已落地；typmod 舍入/溢出、完整函数族和所有返回类型仍待后续。 |
 | ✅ 4.2 移除 `TINYINT` / `DATETIME` / `BLOB` / `NCHAR` 等非 PG 类型或提供兼容映射 | 2.2, 15.8 | 非 PG 类型别名映射已接入类型系统。 |
 | ✅ 4.3 实现 collation provider / ICU / 排序规则 | 2.3 | `CREATE/DROP COLLATION` 已落地，解析 `provider`/`locale` 参数，存储 `.collations` 文件；`src/catalog/collation.h` 提供 collation-aware 比较；schema 持久化 `collation` 字段。DDL executor 与 `tryDdlBridge` 已桥接。新增 `tests/collation_test.cpp`。ICU provider 仍待后续。 |
-| ✅ 4.4 实现 `bytea` 输入输出、escape/hex 语义 | 2.4 | hex/escape 输入解析 + 规范 `\xhh..` 输出（`tests/bytea_test.cpp`）；bytea 函数待补 |
+| ✅ 4.4 实现 `bytea` 输入输出、escape/hex 语义 | 2.4 | 共享 raw-byte codec、完整运算符/函数、integer casts、binary protocol I/O 与超过 64 KiB 的 TOAST 往返均已落地；字符编码全集仍由 TYPE-04 跟踪。 |
 | ✅ 4.5 实现 timezone 规则库、infinity、BC 日期、interval 字段限定 | 2.5 | interval 多格式输入 + PG 风格 canonicalization 已落地（`tests/interval_test.cpp`）；`parseTimestampToSeconds` 支持 `infinity`/`-infinity` 哨兵值（映射到 INT64_MAX/INT64_MIN）。时区规则库、BC 日期 `AD/BC` 后缀、interval 字段限定仍待后续。新增 `tests/date_infinity_test.cpp`。 |
 | ✅ 4.6 实现 `CREATE TYPE ... AS ENUM` 及 `ALTER TYPE ADD VALUE` | 2.7 | `parseCreateType` 支持 `AS ENUM (...)`；`DdlExecutor::executeCreateType` 写入 enum 文件；`ALTER TYPE ADD/RENAME VALUE` 已落地；新增 `tests/enum_alter_test.cpp`。enum 值删除、ordinal 维护仍待后续。 |
 | ✅ 4.7 实现几何类型完整集（`line`/`lseg`/`box`/`path`/`polygon`/`circle`） | 2.8 | 字符串化规范文本存储 + 结构校验/规范化（`tests/geometric_test.cpp`）；几何运算符/函数待补 |
@@ -559,11 +559,12 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
   - ✅ 实现 PostgreSQL 18 核心函数 `gen_random_uuid()`、`uuidv4()`、`uuidv7([shift interval])`、`uuid_extract_version()` 和 `uuid_extract_timestamp()`；v4/v7 设置 RFC 版本/变体位，非时间 UUID 的时间提取返回 NULL。
   - ✅ `tests/uuid_test.cpp` 覆盖 codec、16/36-byte 存储、更新、比较/排序、同前缀 B+Tree/Hash/PK/唯一键、v1/v4/v7 与函数；完整协议覆盖 OID 2950、长度 16、函数类型、非法 cast `22P02` 和 UUID binary I/O。
 - **Wave 4 类型系统 — bytea 输入输出 escape/hex 语义（4.4，本次完成）**：
-  - ✅ 新增 `normalizeBytea`：解析 PostgreSQL hex 格式 `\xDEADBEEF`（忽略空白、要求偶数位、校验十六进制）与 escape 格式（字面字节 + `\\` 反斜杠 + `\ooo` 八进制转义），解码为原始字节，再以规范小写 `\xhh..` 形式输出。
+  - ✅ 新增共享 `ByteaValue` codec：解析 PostgreSQL hex 格式 `\xDEADBEEF`（忽略空白、要求偶数位、校验十六进制）与 escape 格式（字面字节 + `\\` 反斜杠 + `\ooo` 八进制转义），解码为原始字节，再以规范小写 `\xhh..` 形式输出。
   - ✅ INSERT/UPDATE 校验路径拒绝非法 bytea（奇数十六进制位/非十六进制/非法转义序列 → `INVALID_VALUE`）并规范化（大写 → 小写、escape → hex）。
   - ✅ 仅作用于 `bytea`（dataType `blob`）；`binary`/`varbinary`（MySQL 兼容定/变长二进制）保持原字符串存储不变。
-  - ✅ 新增 `tests/bytea_test.cpp`：hex 大写规范化/空载荷/奇数位与坏字符拒绝、escape 字面文本/八进制 `\047`/双反斜杠、非法尾随反斜杠拒绝、UPDATE 规范化/拒绝；二进制端到端验证（hex 大小写无关，规避整句小写）。全部 59 个测试通过。
-  - 🔄 仍待后续：bytea 函数（`length`/`md5`/`encode`/`decode`/`get_byte`/`set_byte`/`substring`）、escape 输出格式（`bytea_output=escape`）、SQL 整句小写对 escape 字面字节的影响。
+  - ✅ 补齐 bytea 比较/拼接、长度、substring/overlay/position/trim/reverse、bit/byte 读写、bit_count、CRC、MD5/SHA-2、encode/decode、encoding conversion 与 integer casts；全部函数按原始字节而不是规范显示文本计算。
+  - ✅ PostgreSQL wire 的 OID 17 binary Bind/DataRow 直接收发原始字节，覆盖 NUL、引号、反斜杠、高位字节及空 bytea；文本格式继续使用 PostgreSQL 默认 hex 输出。
+  - ✅ 移除 bytea schema/TOAST 的 65535 限制，70–90 KiB 数据经过 INSERT/UPDATE、关闭重开、显式读取上限与 VACUUM orphan cleanup 后精确保真；`bytea_functions_test`、`bytea_large_toast_test`、`vacuum_toast_test` 和完整 wire 套件通过。
 - **Wave 4 类型系统 — inet/cidr 严格地址校验 + IPv6 存储（4.8b，本次完成）**：
   - ✅ 新增 `parseInetAddr`/`parseIPv6Groups`：严格解析 IPv4 点分四段（八位组 0-255、恰好 4 段）与 IPv6（支持 `::` 零压缩、十六进制组 ≤4 位、唯一 `::`）、可选 `/prefix`（IPv4 0-32、IPv6 0-128），任何越界/格式错误返回失败。
   - ✅ 替换 `buildRowBuffer` 两条编码路径中原仅 IPv4 且 `sscanf("%d.%d.%d.%d")` 不拒绝越界八位组、IPv6 静默存为 family 0（解码显示 unknown）的逻辑；IPv6 现真正写入 16 字节地址并由既有解码渲染为完整分组形式。
@@ -633,7 +634,8 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
   - ✅ 新增自包含 `md5Hex`（RFC 1321，输出 32 位小写十六进制）并注册 `md5(text)`，对照标准测试向量（空串/`abc`/quick-brown-fox）验证。
   - ✅ 新增 `encode(data, fmt)` / `decode(text, fmt)`，`fmt ∈ {hex, base64, escape}`：hex 大小写/空白容错、base64 标准填充（`=`/`==`）、escape 八进制 `\ooo` 与 `\\`；附 `base64Encode`/`base64Decode`/`hexEncode`/`hexDecode` 字节级辅助。
   - ✅ 新增 `tests/encoding_functions_test.cpp`：md5 三组向量 + NULL、hex 往返（奇数位拒绝）、base64 填充与长串往返、escape 控制字节往返。全部 71 个测试通过。
-  - 🔄 仍待后续：`sha224/256/384/512`、`gen_random_bytes`、`hmac`/`crypt`（pgcrypto）、bytea 输入输出在 SQL 层的真实 `bytea` 类型贯通。
+  - ✅ `md5(bytea)` 与 `sha224/256/384/512(bytea)` 按原始字节计算；新增自包含 SHA-2 实现及空串、`abc`、嵌入 NUL 标准向量，结果类型按 PostgreSQL 返回 bytea。
+  - 🔄 仍待后续：`gen_random_bytes`、`hmac`/`crypt`（pgcrypto 扩展范围）；更多服务端字符集转换由 TYPE-04 跟踪。
 - **Wave 4 函数库 — 数组函数（4.19e，本次完成）**：
   - ✅ 新增对 `{...}` 数组字面量文本操作的函数：`array_length(arr,dim)`（dim 1/2）、`cardinality`（递归全维计数）、`array_ndims`、`array_lower`/`array_upper`（默认下界 1）、`array_append`/`array_prepend`/`array_cat`、`array_position`（1-based，缺失→NULL）、`array_to_string(arr,delim[,null_str])`（默认省略 NULL，给定 null_str 则填充）、`string_to_array(str,delim[,null_str])`（NULL 分隔符按字符切分，含必要时加引号）。
   - ✅ 新增字节级辅助 `parseArrayElements`（顶层逗号分割，尊重 `{}` 嵌套与 `"` 引号/转义）、`arrayElemUnquote`/`arrayElemQuote`、`trimStr`。
