@@ -7435,7 +7435,69 @@ bool DdlExecutor::executeDropType(const DropStmt* stmt, Session& s) {
         ? "public" : qualifiedName.schema;
     const std::string name = schemaName == "public"
         ? qualifiedName.name : schemaName + "." + qualifiedName.name;
+
+    // Enum dependencies are represented in the physical table schemas.  A
+    // previous DROP TYPE path removed only the enum sidecar and left those
+    // columns behind with an undeclared type.  Preflight them before touching
+    // any metadata; CASCADE delegates each column removal to the normal ALTER
+    // TABLE path so indexes, owned sequences, catalog attribute numbers, and
+    // the row layout use the same guarded implementation.
+    struct TypeColumnDependency {
+        std::string tableName;
+        std::string columnName;
+    };
+    std::vector<TypeColumnDependency> enumDependencies;
+    const StorageEngine::EnumType enumDefinition =
+        g_engine.getEnumType(s.currentDB, name);
+    if (!enumDefinition.name.empty()) {
+        for (const auto& tableName :
+             g_engine.getTableNames(s.currentDB)) {
+            const TableSchema table =
+                g_engine.getTableSchema(s.currentDB, tableName);
+            if (table.len == 0) {
+                std::cout << "DROP TYPE dependency scan failed" << std::endl;
+                return true;
+            }
+            for (size_t columnIndex = 0; columnIndex < table.len;
+                 ++columnIndex) {
+                const Column& column = table.cols[columnIndex];
+                if (toLower(column.dataType) == toLower(name) &&
+                    !column.enumValues.empty()) {
+                    enumDependencies.push_back(
+                        {tableName, column.dataName});
+                }
+            }
+        }
+    }
+    if (!enumDependencies.empty() && !stmt->cascade) {
+        const auto& blocker = enumDependencies.front();
+        std::cout << "DROP TYPE failed: column " << blocker.tableName
+                  << "." << blocker.columnName << " depends on type "
+                  << name << "; use CASCADE" << std::endl;
+        return true;
+    }
+
     txn.markSnapshotDirty();
+    for (const auto& dependency : enumDependencies) {
+        const auto logicalTable =
+            CatalogService::logicalName(dependency.tableName);
+        AlterTableStmt alter;
+        alter.tableName = logicalTable.schema.empty()
+            ? logicalTable.name
+            : logicalTable.schema + "." + logicalTable.name;
+        AlterTableStmt::SubCmd dropColumn;
+        dropColumn.action = AlterTableStmt::Action::DropColumn;
+        dropColumn.name = dependency.columnName;
+        dropColumn.options["cascade"] = "true";
+        alter.subCommands.push_back(std::move(dropColumn));
+        if (executeAlterTable(&alter, s)) {
+            std::cout << "DROP TYPE CASCADE failed while dropping column "
+                      << dependency.tableName << "."
+                      << dependency.columnName << std::endl;
+            return true;
+        }
+    }
+
     DBStatus res = g_engine.dropCompositeType(s.currentDB, name);
     if (res != DBStatus::OK && res != DBStatus::TABLE_NOT_FOUND) {
         std::cout << "DROP TYPE failed (SQLSTATE "
@@ -7476,6 +7538,28 @@ bool DdlExecutor::executeDropType(const DropStmt* stmt, Session& s) {
         std::cout << "NOTICE: type " << name
                   << " does not exist, skipping" << std::endl;
         return false;
+    }
+
+    try {
+        CatalogManager& catalog =
+            g_engine.catalogService().get(s.currentDB);
+        const PgNamespaceRow* typeNamespace =
+            catalog.findNamespaceByName(schemaName);
+        const PgTypeRow* catalogType = typeNamespace
+            ? catalog.findTypeByName(qualifiedName.name,
+                                     typeNamespace->oid)
+            : nullptr;
+        if (catalogType) {
+            const Oid typeOid = catalogType->oid;
+            if (!catalog.dropType(typeOid) || !catalog.persistAll()) {
+                std::cout << "DROP TYPE catalog cleanup failed" << std::endl;
+                return true;
+            }
+        }
+    } catch (const std::exception& error) {
+        std::cout << "DROP TYPE catalog cleanup failed: "
+                  << error.what() << std::endl;
+        return true;
     }
     txn.recordDrop(DdlObjectKind::Type, name);
     if (!txn.commit()) return true;

@@ -321,6 +321,63 @@ static void test_enum_catalog_label_oid_stability() {
     std::cout << "[ENUM] catalog label OIDs OK" << std::endl;
 }
 
+static void test_enum_drop_dependencies_and_catalog_cleanup() {
+    std::string db = testDbPath("enum_drop_dependencies");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE TYPE lifecycle AS ENUM ('new', 'done')", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE jobs (id INT PRIMARY KEY, state lifecycle)", s));
+    assert(g_engine.insert(
+               db, "jobs", {{"id", "1"}, {"state", "new"}}) ==
+           dbms::DBStatus::OK);
+
+    auto& catalog = g_engine.catalogService().get(db);
+    const auto* publicNamespace = catalog.findNamespaceByName("public");
+    assert(publicNamespace);
+    const dbms::Oid publicNamespaceOid = publicNamespace->oid;
+    const auto* lifecycleType =
+        catalog.findTypeByName("lifecycle", publicNamespaceOid);
+    assert(lifecycleType);
+    const dbms::Oid lifecycleTypeOid = lifecycleType->oid;
+
+    // RESTRICT must leave all three representations untouched.
+    assert(ddl.executeSql("DROP TYPE lifecycle", s));
+    assert(!g_engine.getEnumType(db, "lifecycle").name.empty());
+    assert(g_engine.getTableSchema(db, "jobs").len == 2);
+    assert(catalog.findType(lifecycleTypeOid));
+
+    // CASCADE removes the dependent column through ALTER TABLE, preserving
+    // the surviving row, then removes both pg_type and pg_enum rows.
+    assert(!ddl.executeSql("DROP TYPE lifecycle CASCADE", s));
+    assert(g_engine.getEnumType(db, "lifecycle").name.empty());
+    const auto jobs = g_engine.getTableSchema(db, "jobs");
+    assert(jobs.len == 1);
+    assert(jobs.cols[0].dataName == "id");
+    assert((g_engine.query(db, "jobs", {}, {"id"}) ==
+            std::vector<std::string>{"1 "}));
+    assert(!catalog.findType(lifecycleTypeOid));
+    assert(catalog.findEnumLabels(lifecycleTypeOid).empty());
+
+    assert(!ddl.executeSql(
+        "CREATE TYPE standalone AS ENUM ('only')", s));
+    const auto* standaloneType =
+        catalog.findTypeByName("standalone", publicNamespaceOid);
+    assert(standaloneType);
+    const dbms::Oid standaloneTypeOid = standaloneType->oid;
+    assert(!ddl.executeSql("DROP TYPE standalone", s));
+    assert(!catalog.findType(standaloneTypeOid));
+    assert(catalog.findEnumLabels(standaloneTypeOid).empty());
+
+    cleanup(db);
+    std::cout << "[ENUM] drop dependency/catalog cleanup OK" << std::endl;
+}
+
 static void test_enum_legacy_migration_and_atomic_rewrites() {
     namespace fs = std::filesystem;
     using dbms::DBStatus;
@@ -395,6 +452,7 @@ int main() {
     test_named_enum_alter_updates_dependent_schemas();
     test_enum_labels_round_trip_losslessly();
     test_enum_catalog_label_oid_stability();
+    test_enum_drop_dependencies_and_catalog_cleanup();
     test_enum_legacy_migration_and_atomic_rewrites();
     std::cout << "[ENUM] all passed" << std::endl;
     return 0;
