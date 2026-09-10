@@ -15,6 +15,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -28,6 +29,16 @@ namespace {
 constexpr const char* kDatabase = "unlogged_recovery_db";
 constexpr const char* kNoWalDatabase = "unlogged_no_wal_db";
 constexpr const char* kTablespace = "unlogged_recovery_tablespace";
+constexpr const char* kBackup = "unlogged_recovery_backup";
+constexpr const char* kCorruptDatabase = "unlogged_corrupt_state_db";
+
+void simulateUncleanStop(const std::string& database) {
+    std::ofstream state(
+        fs::path(database) / ".unlogged_lifecycle",
+        std::ios::binary | std::ios::trunc);
+    state << "DBMS_UNLOGGED_LIFECYCLE_V1\nRUNNING\n";
+    assert(state.good());
+}
 
 std::string makePayload(size_t size) {
     static constexpr char alphabet[] =
@@ -55,6 +66,17 @@ size_t rowCount(StorageEngine& engine, const std::string& database,
 bool contains(const std::vector<std::string>& values,
               const std::string& value) {
     return std::find(values.begin(), values.end(), value) != values.end();
+}
+
+void assertNoReplicableRelationWal(WALManager& wal) {
+    Lsn lsn = wal.earliestAvailableLsn();
+    while (true) {
+        const auto record = wal.ReadRecord(lsn);
+        if (!record || record->header.xl_tot_len == 0) break;
+        assert(record->rmid() != RM_HEAP_ID);
+        assert(record->rmid() != RM_INDEX_ID);
+        lsn += record->header.xl_tot_len;
+    }
 }
 
 uint64_t readToastNextId(const fs::path& path) {
@@ -200,6 +222,7 @@ void testNoWalStartupStillResetsDefinitions() {
         stale << "stale 4294967297\n";
         assert(stale.good());
     }
+    simulateUncleanStop(kNoWalDatabase);
     {
         StorageEngine recovered;
         assert(recovered.hasFullTextIndex(
@@ -214,6 +237,7 @@ void testNoWalStartupStillResetsDefinitions() {
 void testAllForksAndIndexes() {
     fs::remove_all(kDatabase);
     fs::remove_all(kTablespace);
+    fs::remove_all(kBackup);
     fs::remove_all(".txnid");
     assert(PageCrypto::enable(std::string(64, '8')));
 
@@ -290,6 +314,8 @@ void testAllForksAndIndexes() {
                                "cache.toastmeta") > 1);
         WALManager* wal = engine.getWAL(kDatabase);
         assert(wal && wal->currentWriteLsn() > 0);
+        assert(engine.physicalBackup(kDatabase, kBackup));
+        assertNoReplicableRelationWal(*wal);
     }
 
     const fs::path relationRoot = fs::path(kTablespace) / kDatabase;
@@ -297,10 +323,47 @@ void testAllForksAndIndexes() {
     const fs::path heapTde = fs::path(heap.string() + ".tde");
     const fs::path toastHeap = relationRoot / "cache.toast.dt";
     const fs::path toastTde = fs::path(toastHeap.string() + ".tde");
+    const fs::path heapInit = fs::path(heap.string() + ".init");
+    const fs::path toastInit = fs::path(toastHeap.string() + ".init");
     assert(fs::file_size(heap) > 8192);
     assert(fs::file_size(heapTde) > PageCrypto::kRecordSize);
     assert(fs::file_size(toastHeap) > 8192);
     assert(fs::file_size(toastTde) > PageCrypto::kRecordSize);
+    assert(fs::file_size(heapInit) == 8192);
+    assert(fs::file_size(toastInit) == 8192);
+    for (size_t partition = 0; partition < 2; ++partition) {
+        const std::string prefix =
+            "partition_cache#p" + std::to_string(partition);
+        assert(fs::file_size(relationRoot / (prefix + ".dt.init")) == 8192);
+        for (size_t subpartition = 0; subpartition < 2; ++subpartition) {
+            assert(fs::file_size(
+                relationRoot /
+                (prefix + "#sp" + std::to_string(subpartition) +
+                 ".dt.init")) == 8192);
+        }
+    }
+
+    const fs::path backupRelation =
+        fs::path(kBackup) / "tablespaces" / "fast_space";
+    assert(fs::exists(backupRelation / "cache.dt.init"));
+    assert(fs::exists(backupRelation / "cache.toast.dt.init"));
+    assert(!fs::exists(backupRelation / "cache.dt"));
+    assert(!fs::exists(backupRelation / "cache.toast.dt"));
+    assert(!fs::exists(backupRelation / "cache.idx"));
+    assert(fs::file_size(backupRelation / "cache_payload.fti") == 0);
+    assert(fs::file_size(backupRelation / "cache_payload.gin") == 0);
+    assert(fs::file_size(backupRelation / "cache_score.brin") == 0);
+
+    // A normal shutdown preserves mutable UNLOGGED main forks.
+    {
+        StorageEngine cleanRestart;
+        assertPopulatedIndexes(cleanRestart, payload);
+        assert(rowCount(cleanRestart, kDatabase, "partition_cache") == 2);
+    }
+
+    // A process death leaves RUNNING durable. The next startup restores each
+    // main heap from its empty init fork and reconstructs derived state.
+    simulateUncleanStop(kDatabase);
 
     {
         StorageEngine recovered;
@@ -350,20 +413,69 @@ void testAllForksAndIndexes() {
                    ->search("fresh") == std::vector<int64_t>{freshRid});
     }
 
-    // Every startup clears the unlogged relation again, including data
-    // written after a previous successful recovery.
+    // Rows written after recovery also survive a subsequent clean restart.
     {
         StorageEngine restarted;
-        assertEmptyIndexes(restarted);
+        assert(rowCount(restarted, kDatabase, "cache") == 1);
         assert(restarted.query(
-                   kDatabase, "cache", {"=id 2"}, {"id"}).empty());
+                   kDatabase, "cache", {"=id 2"}, {"id"}).size() == 1);
+    }
+
+    simulateUncleanStop(kDatabase);
+    {
+        StorageEngine crashedAgain;
+        assertEmptyIndexes(crashedAgain);
+    }
+
+    // A physical restore publishes only init/definition state for UNLOGGED
+    // relations; it must not resurrect rows copied from the source server.
+    {
+        StorageEngine restored;
+        assert(restored.dropDatabase(kDatabase) == DBStatus::OK);
+        assert(restored.physicalRestore(kDatabase, kBackup));
+        assert(restored.getTableSchema(kDatabase, "cache").isUnlogged);
+        assertEmptyIndexes(restored);
+        assert(restored.hasFullTextIndex(kDatabase, "cache", "payload"));
+        assert(restored.hasGinIndex(kDatabase, "cache", "payload"));
+        assert(restored.hasBrinIndex(kDatabase, "cache", "score"));
     }
 
     fs::remove_all(kDatabase);
     fs::remove_all(kTablespace);
+    fs::remove_all(kBackup);
     fs::remove_all(".txnid");
     PageCrypto::disable();
     std::cout << "[UNLOGGED] heap, partitions, TOAST, indexes and TDE reset OK\n";
+}
+
+void testCorruptLifecycleFailsClosed() {
+    fs::remove_all(kCorruptDatabase);
+    {
+        StorageEngine engine;
+        assert(engine.createDatabase(kCorruptDatabase) == DBStatus::OK);
+        TableSchema table;
+        table.tablename = "cache";
+        table.formatVersion = 2;
+        table.isUnlogged = true;
+        table.append(makeIntColumn("id", false, 4, false));
+        assert(engine.createTable(kCorruptDatabase, table) == DBStatus::OK);
+    }
+    {
+        std::ofstream state(
+            fs::path(kCorruptDatabase) / ".unlogged_lifecycle",
+            std::ios::binary | std::ios::trunc);
+        state << "not a valid lifecycle state\n";
+        assert(state.good());
+    }
+    bool rejected = false;
+    try {
+        StorageEngine invalid;
+    } catch (const std::runtime_error&) {
+        rejected = true;
+    }
+    assert(rejected);
+    fs::remove_all(kCorruptDatabase);
+    std::cout << "[UNLOGGED] corrupt lifecycle state rejected OK\n";
 }
 
 }  // namespace
@@ -373,10 +485,13 @@ int main() {
     fs::remove_all(kDatabase);
     fs::remove_all(kNoWalDatabase);
     fs::remove_all(kTablespace);
+    fs::remove_all(kBackup);
+    fs::remove_all(kCorruptDatabase);
     fs::remove_all(".txnid");
 
     testNoWalStartupStillResetsDefinitions();
     testAllForksAndIndexes();
+    testCorruptLifecycleFailsClosed();
 
     std::cout << "[UNLOGGED] all passed\n";
     return 0;

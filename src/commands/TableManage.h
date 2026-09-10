@@ -1511,6 +1511,10 @@ private:
         const std::string& dbname, const std::string& tablename) const;
     bool resetTableStorage(const std::string& dbname,
                            const std::string& tablename);
+    // Maintain the durable empty init forks used to reset UNLOGGED heaps
+    // after an unclean server stop.  A normal shutdown keeps the main forks.
+    bool ensureUnloggedInitForks(const std::string& dbname,
+                                 const std::string& tablename);
 
     // Free Space Map + Visibility Map (fork files)
     mutable std::map<std::string, std::unique_ptr<FreeSpaceMap>> fsmCache_;
@@ -1752,7 +1756,8 @@ private:
     // transaction lock and flushed all durable state.
     bool physicalBackupLocked(const std::string& dbname,
                               const std::string& backupPath,
-                              const MaintenanceProgress& progress = {});
+                              const MaintenanceProgress& progress = {},
+                              bool includeUnloggedMain = false);
     // Restore a physical generation after the caller has acquired the
     // database transaction lock and discarded database-owned caches.
     bool physicalRestoreLocked(const std::string& dbname,

@@ -12808,6 +12808,12 @@ static bool handleCreatePublication(const string& sql, Session& s) {
             cout << "ERROR: table " << t << " does not exist" << endl;
             return true;
         }
+        if (g_engine.getTableSchema(s.currentDB, t).isUnlogged) {
+            cout << "ERROR: table " << t
+                 << " cannot be added to a publication because it is unlogged"
+                 << endl;
+            return true;
+        }
     }
     string error;
     if (!dbms::PublicationCatalog::instance().create(s.currentDB, pub, error)) {

@@ -1789,6 +1789,50 @@ Column makeIntervalColumn(const std::string& name, bool isNull, bool isPK) {
 // ========================================================================
 // StorageEngine
 // ========================================================================
+namespace {
+
+constexpr std::string_view kUnloggedLifecycleFile = ".unlogged_lifecycle";
+constexpr std::string_view kUnloggedLifecycleClean =
+    "DBMS_UNLOGGED_LIFECYCLE_V1\nCLEAN\n";
+constexpr std::string_view kUnloggedLifecycleRunning =
+    "DBMS_UNLOGGED_LIFECYCLE_V1\nRUNNING\n";
+
+enum class UnloggedLifecycleState { Missing, Clean, Running, Invalid };
+
+UnloggedLifecycleState readUnloggedLifecycle(
+    const std::filesystem::path& databasePath) {
+    const auto path = databasePath / std::string(kUnloggedLifecycleFile);
+    std::error_code error;
+    const bool exists = std::filesystem::exists(path, error);
+    if (error) return UnloggedLifecycleState::Invalid;
+    if (!exists) return UnloggedLifecycleState::Missing;
+    if (!std::filesystem::is_regular_file(path, error) || error) {
+        return UnloggedLifecycleState::Invalid;
+    }
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return UnloggedLifecycleState::Invalid;
+    const std::string contents{
+        std::istreambuf_iterator<char>(input),
+        std::istreambuf_iterator<char>()};
+    if (input.bad()) return UnloggedLifecycleState::Invalid;
+    if (contents == kUnloggedLifecycleClean) {
+        return UnloggedLifecycleState::Clean;
+    }
+    if (contents == kUnloggedLifecycleRunning) {
+        return UnloggedLifecycleState::Running;
+    }
+    return UnloggedLifecycleState::Invalid;
+}
+
+bool writeUnloggedLifecycle(const std::filesystem::path& databasePath,
+                            std::string_view state) {
+    return index_file::writeAtomically(
+        databasePath / std::string(kUnloggedLifecycleFile),
+        std::string(state));
+}
+
+}  // namespace
+
 StorageEngine::StorageEngine()
     : lockManager_(LockManager::global()) {
     if (!recoverAllDatabases()) {
@@ -1850,6 +1894,9 @@ void StorageEngine::endBackendSession() {
 StorageEngine::~StorageEngine() {
     stopBackgroundWorker();
 
+    bool cleanShutdown = true;
+    const auto shutdownDatabases = getDatabaseNames();
+
     // Persist deferred sequence counters before any teardown; rows inserted
     // outside an explicit transaction never pass a commit boundary.
     flushDeferredSequences();
@@ -1861,24 +1908,29 @@ StorageEngine::~StorageEngine() {
     // written directly by a B+Tree/Hash destructor.
     if (catalogService_ && !catalogService_->persistAll()) {
         std::cerr << "[storage] failed to persist catalog during engine shutdown" << std::endl;
+        cleanShutdown = false;
     }
-    for (const auto& dbname : getDatabaseNames()) {
+    for (const auto& dbname : shutdownDatabases) {
         if (!persistRuntimeStats(dbname, dbPath(dbname) / ".runtime_stats")) {
             std::cerr << "[storage] failed to persist runtime statistics for database "
                       << dbname << " during engine shutdown" << std::endl;
+            cleanShutdown = false;
         }
         if (!persistSqlStats(dbname, dbPath(dbname) / ".sql_stats")) {
             std::cerr << "[storage] failed to persist SQL statistics for database "
                       << dbname << " during engine shutdown" << std::endl;
+            cleanShutdown = false;
         }
         if (!flushDatabaseCaches(dbname)) {
             std::cerr << "[storage] failed to flush caches for database " << dbname
                       << " during engine shutdown" << std::endl;
+            cleanShutdown = false;
         }
         if (auto* wal = getWAL(dbname)) {
             if (!wal->XLogFlush(wal->currentWriteLsn())) {
                 std::cerr << "[storage] failed to flush WAL for database " << dbname
                           << " during engine shutdown" << std::endl;
+                cleanShutdown = false;
             }
         }
     }
@@ -1905,6 +1957,23 @@ StorageEngine::~StorageEngine() {
             }
         }
         transactionContexts_.clear();
+    }
+    if (!abandonedXids.empty()) cleanShutdown = false;
+
+    // CLEAN is published only after every relation and WAL flush succeeded
+    // and no transaction was abandoned.  A crash, failed flush, or embedded
+    // caller that destroys an engine with an open transaction leaves RUNNING
+    // in place, so the next startup restores UNLOGGED main forks from init.
+    if (cleanShutdown) {
+        for (const auto& dbname : shutdownDatabases) {
+            if (!databaseExists(dbname)) continue;
+            if (!writeUnloggedLifecycle(
+                    dbPath(dbname), kUnloggedLifecycleClean)) {
+                std::cerr
+                    << "[storage] failed to mark clean shutdown for database "
+                    << dbname << std::endl;
+            }
+        }
     }
     {
         std::lock_guard<std::mutex> lock(globalTxnMutex_);
@@ -2239,6 +2308,110 @@ bool partitionForkIsUnique(const TableSchema& table,
 
 }  // namespace
 
+bool StorageEngine::ensureUnloggedInitForks(
+    const std::string& dbname, const std::string& tablename) {
+    try {
+        const TableSchema table = getTableSchema(dbname, tablename);
+        if (!table.isUnlogged) return false;
+
+        std::vector<std::pair<std::filesystem::path, size_t>> heaps;
+        if (table.partitionType == TableSchema::PartitionType::None) {
+            heaps.emplace_back(dataPath(dbname, tablename), table.rowSize());
+        } else {
+            std::set<std::string> parentPartitions;
+            for (const auto& leaf : partitionLeaves(table)) {
+                if (parentPartitions.insert(leaf.partition).second) {
+                    heaps.emplace_back(
+                        partitionDataPath(
+                            dbname, tablename, leaf.partition),
+                        table.rowSize());
+                }
+                if (!leaf.subPartition.empty()) {
+                    heaps.emplace_back(
+                        partitionDataPath(
+                            dbname, tablename, leaf.partition,
+                            leaf.subPartition),
+                        table.rowSize());
+                }
+            }
+        }
+        const bool hasVariableLength = std::any_of(
+            table.cols, table.cols + table.len,
+            [](const Column& column) { return column.isVariableLength; });
+        if (hasVariableLength) {
+            heaps.emplace_back(toastDataPath(dbname, tablename), 0);
+        }
+
+        static std::atomic<uint64_t> initSequence{0};
+        for (const auto& [mainPath, rowSize] : heaps) {
+            auto initPath = mainPath;
+            initPath += ".init";
+            std::error_code error;
+            const bool exists = std::filesystem::exists(initPath, error);
+            if (error) return false;
+            bool valid = false;
+            if (exists &&
+                std::filesystem::is_regular_file(initPath, error) && !error &&
+                std::filesystem::file_size(initPath, error) ==
+                    pageSizeForFormatVersion(table.formatVersion) && !error) {
+                PageAllocator existing(
+                    initPath.string(), rowSize,
+                    pageSizeForFormatVersion(table.formatVersion),
+                    table.formatVersion);
+                valid = existing.open() && existing.numPages() == 1;
+                existing.close();
+            }
+            if (valid) continue;
+
+            auto temporary = initPath;
+            temporary += ".tmp." + std::to_string(::getpid()) + "." +
+                std::to_string(initSequence.fetch_add(
+                    1, std::memory_order_relaxed));
+            auto temporaryTde = temporary;
+            temporaryTde += ".tde";
+            std::filesystem::remove(temporary, error);
+            error.clear();
+            std::filesystem::remove(temporaryTde, error);
+
+            PageAllocator empty(
+                temporary.string(), rowSize,
+                pageSizeForFormatVersion(table.formatVersion),
+                table.formatVersion);
+            if (!empty.open() || empty.numPages() != 1 || !empty.flush()) {
+                empty.close();
+                std::filesystem::remove(temporary, error);
+                error.clear();
+                std::filesystem::remove(temporaryTde, error);
+                return false;
+            }
+            empty.close();
+
+            std::ifstream input(temporary, std::ios::binary);
+            const std::string bytes{
+                std::istreambuf_iterator<char>(input),
+                std::istreambuf_iterator<char>()};
+            const bool readOk = !input.bad() &&
+                bytes.size() == pageSizeForFormatVersion(table.formatVersion);
+            const bool published = readOk &&
+                index_file::writeAtomically(initPath, bytes);
+            std::filesystem::remove(temporary, error);
+            error.clear();
+            std::filesystem::remove(temporaryTde, error);
+            if (!published) return false;
+        }
+        return true;
+    } catch (const std::exception& error) {
+        std::cerr << "[storage] cannot initialize UNLOGGED forks for "
+                  << dbname << "/" << tablename << ": "
+                  << error.what() << std::endl;
+        return false;
+    } catch (...) {
+        std::cerr << "[storage] cannot initialize UNLOGGED forks for "
+                  << dbname << "/" << tablename << std::endl;
+        return false;
+    }
+}
+
 std::filesystem::path StorageEngine::fsmPath(const std::string& dbname,
                                                const std::string& tablename) const {
     return relationDir(dbname, tablename) / (tablename + ".fsm");
@@ -2255,9 +2428,16 @@ std::filesystem::path StorageEngine::vmPath(const std::string& dbname,
 // identical boundaries and never confuse table "t" with table "t2".
 static bool isRelationPhysicalFileName(const std::string& name,
                                         const std::string& tablename) {
+    static constexpr std::string_view initSuffix = ".init";
     static constexpr std::string_view tdeSuffix = ".tde";
     static constexpr std::string_view extentMarkerSuffix =
         ".extent_pending";
+    if (name.size() > initSuffix.size() &&
+        name.compare(name.size() - initSuffix.size(), initSuffix.size(),
+                     initSuffix) == 0) {
+        return isRelationPhysicalFileName(
+            name.substr(0, name.size() - initSuffix.size()), tablename);
+    }
     if (name.size() > tdeSuffix.size() &&
         name.compare(name.size() - tdeSuffix.size(), tdeSuffix.size(),
                      tdeSuffix) == 0) {
@@ -2288,6 +2468,19 @@ static bool isRelationPhysicalFileName(const std::string& name,
     }
     return name == tablename + ".toastmeta" ||
            name.rfind(tablename + ".idx_", 0) == 0;
+}
+
+static bool isDefinitionBearingSpecializedIndexFileName(
+    const std::string& name, const std::string& tablename) {
+    if (name.rfind(tablename + "_", 0) != 0) return false;
+    const std::array<std::string_view, 5> suffixes = {
+        ".fti", ".gin", ".gist", ".spgist", ".brin"};
+    return std::any_of(
+        suffixes.begin(), suffixes.end(), [&](std::string_view suffix) {
+            return name.size() > suffix.size() &&
+                name.compare(name.size() - suffix.size(), suffix.size(),
+                             suffix) == 0;
+        });
 }
 
 namespace {
@@ -5692,10 +5885,35 @@ bool StorageEngine::flushSelectedCaches(
     };
 
     bool ok = true;
+    std::vector<std::pair<std::filesystem::path, std::string>>
+        unloggedRelations;
+    try {
+        for (const auto& tableName : getTableNames(dbname)) {
+            const TableSchema table = getTableSchema(dbname, tableName);
+            if (table.isUnlogged) {
+                unloggedRelations.emplace_back(
+                    relationDir(dbname, tableName), tableName);
+            }
+        }
+    } catch (...) {
+        return false;
+    }
+    const auto belongsToUnloggedRelation =
+        [&](const std::filesystem::path& path) {
+            for (const auto& [root, tableName] : unloggedRelations) {
+                if (path.parent_path() == root &&
+                    isRelationPhysicalFileName(
+                        path.filename().string(), tableName)) {
+                    return true;
+                }
+            }
+            return false;
+        };
     auto flushWalLoggedIndex = [&](const std::filesystem::path& path,
                                    bool dirty,
                                    const std::function<bool()>& flush) {
         if (!dirty) return true;
+        if (belongsToUnloggedRelation(path)) return flush();
         // Write the whole-file WAL image pair at most once per checkpoint
         // epoch per file.  The physical flush below already puts committed
         // entries on disk at commit time (index consistency after kill -9
@@ -12730,6 +12948,13 @@ DBStatus StorageEngine::createDatabase(const std::string& dbname, const std::str
     if (!index_file::writeAtomically(dbPath(dbname) / ".schema_public", "")) {
         return failCreateDatabase();
     }
+    // The creating engine is already running.  Publishing this state with
+    // the database makes a process death before normal destruction visible
+    // even when the database has never emitted a WAL record.
+    if (!writeUnloggedLifecycle(
+            dbPath(dbname), kUnloggedLifecycleRunning)) {
+        return failCreateDatabase();
+    }
     return DBStatus::OK;
 }
 
@@ -14468,6 +14693,16 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
                 relationRoot / (tbl.tablename + suffix + ".dt"), ec);
             ec.clear();
         }
+        if (std::filesystem::exists(relationRoot, ec) && !ec) {
+            for (const auto& entry :
+                 std::filesystem::directory_iterator(relationRoot)) {
+                if (isRelationPhysicalFileName(
+                        entry.path().filename().string(), tbl.tablename)) {
+                    std::filesystem::remove_all(entry.path(), ec);
+                    ec.clear();
+                }
+            }
+        }
 
         std::vector<std::string> names = getTableNames(dbname);
         if (std::find(names.begin(), names.end(), tbl.tablename) != names.end()) {
@@ -14595,6 +14830,10 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
                 return failCreate("could not initialize unique index");
             }
         }
+    }
+    if (tblWithVersion.isUnlogged &&
+        !ensureUnloggedInitForks(dbname, tblWithVersion.tablename)) {
+        return failCreate("could not initialize UNLOGGED init forks");
     }
     createCompleted = true;
     dbms::resetRuntimeTableStats(dbname, tblWithVersion.tablename);
@@ -15068,6 +15307,10 @@ DBStatus StorageEngine::truncateTable(const std::string& dbname,
 
 void StorageEngine::bufferLogicalTruncate(const std::string& dbname,
                                           const std::string& tablename) {
+    if (!tableExists(dbname, tablename) ||
+        getTableSchema(dbname, tablename).isUnlogged) {
+        return;
+    }
     if (!PublicationCatalog::instance().publishes(
             dbname, tablename, LogicalChange::Op::Truncate)) {
         return;
@@ -17074,8 +17317,64 @@ DBStatus StorageEngine::alterTableSetLogged(const std::string& dbname,
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
     TableSchema tbl = getTableSchema(dbname, tablename);
+    if (tbl.isUnlogged == !logged) {
+        lockManager_.unlock(tablename);
+        return DBStatus::OK;
+    }
+    if (!logged) {
+        std::vector<Publication> publications;
+        std::string publicationError;
+        if (!PublicationCatalog::instance().list(
+                dbname, publications, publicationError)) {
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
+        }
+        const bool published = std::any_of(
+            publications.begin(), publications.end(),
+            [&](const Publication& publication) {
+                return publication.publishAllTables ||
+                    std::find(publication.tables.begin(),
+                              publication.tables.end(), tablename) !=
+                        publication.tables.end();
+            });
+        if (published) {
+            lockManager_.unlock(tablename);
+            return DBStatus::INVALID_VALUE;
+        }
+    }
+    if (logged) {
+        const auto relationRoot = relationDir(dbname, tablename);
+        std::error_code error;
+        for (std::filesystem::directory_iterator iterator(
+                 relationRoot,
+                 std::filesystem::directory_options::skip_permission_denied,
+                 error), end;
+             !error && iterator != end; iterator.increment(error)) {
+            const std::string filename =
+                iterator->path().filename().string();
+            if (filename.size() <= 5 ||
+                filename.compare(filename.size() - 5, 5, ".init") != 0 ||
+                !isRelationPhysicalFileName(filename, tablename)) {
+                continue;
+            }
+            std::filesystem::remove(iterator->path(), error);
+        }
+        if (error || !syncDirectoryDurably(relationRoot)) {
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
+        }
+    }
+    const TableSchema original = tbl;
     tbl.isUnlogged = !logged;
     if (!writeSchemaFile(dbname, tablename, tbl)) {
+        // Removing an init fork is harmless while the schema still says
+        // UNLOGGED: startup can regenerate the empty baseline. Do not publish
+        // a catalog/storage persistence mismatch on a failed schema write.
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
+    }
+    if (!logged && !ensureUnloggedInitForks(dbname, tablename)) {
+        (void)writeSchemaFile(dbname, tablename, original);
         lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
     }
@@ -22453,7 +22752,7 @@ DBStatus StorageEngine::insertInternal(
         return abortIndexUpdate();
     }
     // Logical decoding: buffer the change for streaming at commit.
-    if (PublicationCatalog::instance().publishes(
+    if (!tbl.isUnlogged && PublicationCatalog::instance().publishes(
             dbname, tablename, LogicalChange::Op::Insert)) {
         auto& txn = transactionContext();
         if (txn.inTransaction) {
@@ -24192,7 +24491,7 @@ DBStatus StorageEngine::removeInternal(
     }
     // Logical decoding: buffer the deletes (old images) for streaming at
     // commit.
-    if (PublicationCatalog::instance().publishes(
+    if (!tbl.isUnlogged && PublicationCatalog::instance().publishes(
             dbname, tablename, LogicalChange::Op::Delete)) {
         auto& txn = transactionContext();
         if (txn.inTransaction) {
@@ -26906,7 +27205,7 @@ DBStatus StorageEngine::updateInternal(
 
         // Logical decoding: buffer the update (old/new images) for
         // streaming at commit.
-        if (PublicationCatalog::instance().publishes(
+        if (!tbl.isUnlogged && PublicationCatalog::instance().publishes(
                 dbname, tablename, LogicalChange::Op::Update)) {
             auto& txn = transactionContext();
             if (txn.inTransaction) {
@@ -35145,11 +35444,18 @@ static std::vector<char> encodeHeapPayload(const std::string& tableName,
 Lsn StorageEngine::walPageImage(const std::string& dbname, const std::string& tablename,
                                 uint32_t pageId, const char* pageBuf, size_t pageSize,
                                 bool beforeImage, uint32_t forkNum) {
-    if (!usesHeapTupleHeader(getTableSchema(dbname, tablename).formatVersion)) {
+    const TableSchema table = getTableSchema(dbname, tablename);
+    if (!usesHeapTupleHeader(table.formatVersion)) {
         return INVALID_LSN;
     }
     WALManager* wal = getWAL(dbname);
     if (!wal) return INVALID_LSN;
+    // UNLOGGED heap contents must not enter WAL (and therefore physical or
+    // logical replication). Callers still need a valid page LSN for checksum
+    // and writeback ordering, so retain the current WAL boundary without
+    // inserting a page image. Crash recovery discards the main fork from its
+    // init fork before the database becomes available.
+    if (table.isUnlogged) return wal->currentWriteLsn();
     const uint64_t xid =
         transactionContext().inTransaction ? transactionContext().currentTxnId : 0;
     // Before-image dedup: recovery's undo pass applies uncommitted
@@ -35475,6 +35781,10 @@ bool StorageEngine::resetTableStorage(
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     try {
         const TableSchema table = getTableSchema(dbname, tablename);
+        if (table.isUnlogged &&
+            !ensureUnloggedInitForks(dbname, tablename)) {
+            return false;
+        }
 
         // Several simplified access methods use their physical sidecar as
         // the only definition catalog. Capture every definition before
@@ -35575,8 +35885,12 @@ bool StorageEngine::resetTableStorage(
                  std::filesystem::directory_options::skip_permission_denied,
                  fileError)) {
             if (fileError) break;
-            if (isRelationPhysicalFileName(
-                    entry.path().filename().string(), tablename) &&
+            const std::string filename =
+                entry.path().filename().string();
+            const bool isInitFork = filename.size() > 5 &&
+                filename.compare(filename.size() - 5, 5, ".init") == 0;
+            if (isRelationPhysicalFileName(filename, tablename) &&
+                !(table.isUnlogged && isInitFork) &&
                 definitionBearingIndexes.count(entry.path()) == 0) {
                 staleFiles.push_back(entry.path());
             }
@@ -35590,6 +35904,20 @@ bool StorageEngine::resetTableStorage(
 
         const auto createEmptyHeap = [&](const std::filesystem::path& path,
                                          size_t rowSize) {
+            if (table.isUnlogged) {
+                auto initPath = path;
+                initPath += ".init";
+                std::ifstream input(initPath, std::ios::binary);
+                const std::string bytes{
+                    std::istreambuf_iterator<char>(input),
+                    std::istreambuf_iterator<char>()};
+                if (input.bad() ||
+                    bytes.size() !=
+                        pageSizeForFormatVersion(table.formatVersion)) {
+                    return false;
+                }
+                return index_file::writeAtomically(path, bytes);
+            }
             PageAllocator pages(
                 path.string(), rowSize,
                 pageSizeForFormatVersion(table.formatVersion),
@@ -36029,6 +36357,7 @@ bool StorageEngine::recoverAllDatabases() {
     std::map<std::string, std::map<uint64_t, uint8_t>> xactWalStateByDb;
     std::map<std::string, uint64_t> recoveryTargetsByDb;
     std::map<std::string, RecoveryForkState> recoveryForksByDb;
+    std::map<std::string, bool> resetUnloggedByDb;
     std::set<std::pair<std::string, uint64_t>> inDoubtPreparedXids;
     std::map<std::pair<std::string, uint64_t>, std::filesystem::path> preparedFiles;
     std::map<std::pair<std::string, uint64_t>,
@@ -36054,6 +36383,26 @@ bool StorageEngine::recoverAllDatabases() {
             dbname = entry.path().filename().string();
         } catch (...) { continue; }
         if (!isDatabaseDirectory(dbname)) continue;
+
+        // Consume the previous process state before any recovery-side file
+        // mutation. Missing state belongs to an older build and is treated
+        // conservatively as an unclean stop. A malformed present marker is
+        // corruption: guessing CLEAN could expose stale UNLOGGED rows.
+        const UnloggedLifecycleState lifecycle =
+            readUnloggedLifecycle(dbPath(dbname));
+        if (lifecycle == UnloggedLifecycleState::Invalid) {
+            std::cerr << "[recovery] invalid UNLOGGED lifecycle state for "
+                      << dbname << std::endl;
+            return false;
+        }
+        resetUnloggedByDb[dbname] =
+            lifecycle != UnloggedLifecycleState::Clean;
+        if (!writeUnloggedLifecycle(
+                dbPath(dbname), kUnloggedLifecycleRunning)) {
+            std::cerr << "[recovery] cannot publish running state for "
+                      << dbname << std::endl;
+            return false;
+        }
 
         // REINDEX publishes each B+ tree together with its TDE sidecar. A
         // durable marker makes the multi-rename exchange recoverable before
@@ -36531,15 +36880,24 @@ bool StorageEngine::recoverAllDatabases() {
         const bool preservePreparedIndexState =
             preparedForDatabase != inDoubtPreparedXids.end() &&
             preparedForDatabase->first == dbname;
-        const auto resetUnloggedTables = [&]() -> bool {
+        const bool resetUnlogged =
+            !resetUnloggedByDb.count(dbname) || resetUnloggedByDb.at(dbname);
+        const auto prepareUnloggedTables = [&]() -> bool {
             try {
                 for (const auto& tableName : getTableNames(dbname)) {
                     const TableSchema table =
                         getTableSchema(dbname, tableName);
-                    if (table.isUnlogged &&
+                    if (!table.isUnlogged) continue;
+                    if (!ensureUnloggedInitForks(dbname, tableName)) {
+                        std::cerr
+                            << "[recovery] failed to prepare UNLOGGED init forks for "
+                            << dbname << "/" << tableName << std::endl;
+                        return false;
+                    }
+                    if (resetUnlogged &&
                         !resetTableStorage(dbname, tableName)) {
                         std::cerr
-                            << "[recovery] failed to reset unlogged table "
+                            << "[recovery] failed to reset UNLOGGED table "
                             << dbname << "/" << tableName << std::endl;
                         return false;
                     }
@@ -36558,7 +36916,7 @@ bool StorageEngine::recoverAllDatabases() {
             }
         };
         if (wal->currentWriteLsn() == 0) {
-            if (!resetUnloggedTables()) return false;
+            if (!prepareUnloggedTables()) return false;
             if (!preservePreparedIndexState &&
                 !rebuildAllSpecializedIndexes(dbname)) {
                 std::cerr
@@ -36944,10 +37302,10 @@ bool StorageEngine::recoverAllDatabases() {
             return false;
         }
 
-        // UNLOGGED rows are discarded after a restart, but their index
-        // definitions remain. Reset every heap/index/TOAST fork together so
-        // no access method can retain a stale RID into the new empty heap.
-        if (!resetUnloggedTables()) return false;
+        // A clean restart preserves UNLOGGED main forks. After an unclean
+        // stop, restore every heap from its durable empty init fork and reset
+        // indexes/TOAST together so no access method retains a stale RID.
+        if (!prepareUnloggedTables()) return false;
         // Specialized indexes are derivable whole-file sidecars and do not
         // emit per-row WAL. Rebuild them on every startup to close both an
         // interrupted replacement and a crash after heap WAL became durable.
@@ -37771,8 +38129,19 @@ bool StorageEngine::physicalBackup(const std::string& dbname,
 
 bool StorageEngine::physicalBackupLocked(
     const std::string& dbname, const std::string& backupPath,
-    const MaintenanceProgress& progress) {
+    const MaintenanceProgress& progress, bool includeUnloggedMain) {
     if (!databaseExists(dbname)) return false;
+    const auto backupTables = getTableNames(dbname);
+    for (const auto& tableName : backupTables) {
+        const TableSchema table = getTableSchema(dbname, tableName);
+        if (table.isUnlogged &&
+            !ensureUnloggedInitForks(dbname, tableName)) {
+            // A backup that lacks a usable init fork could expose stale main
+            // data after restore, so refuse it rather than silently copying
+            // an approximation of PostgreSQL backup semantics.
+            return false;
+        }
+    }
     auto src = dbPath(dbname);
     auto dst = std::filesystem::path(backupPath);
     std::filesystem::path stagedBackup;
@@ -37908,6 +38277,63 @@ bool StorageEngine::physicalBackupLocked(
                     // A newly-created tablespace may not have a database
                     // subdirectory until its first relation is created.
                     std::filesystem::create_directories(destination);
+                }
+            }
+        }
+
+        // PostgreSQL base backups retain UNLOGGED init forks but exclude the
+        // mutable main, TOAST, and index contents. Simplified specialized
+        // indexes encode their definition in the filename, so retain an
+        // empty sidecar for discovery while removing every stored RID.
+        // Apply the same rule to default and external tablespaces before the
+        // exact-file manifest is computed.
+        if (!includeUnloggedMain) {
+            for (const auto& tableName : backupTables) {
+                const TableSchema table = getTableSchema(dbname, tableName);
+                if (!table.isUnlogged) continue;
+                std::filesystem::path relationBackup = stagedBackup;
+                if (!table.tablespace.empty() &&
+                    table.tablespace != "pg_default") {
+                    relationBackup /= "tablespaces";
+                    relationBackup /= table.tablespace;
+                }
+                std::error_code filterError;
+                if (!std::filesystem::exists(relationBackup, filterError)) {
+                    if (filterError) {
+                        discardStagedBackup();
+                        return false;
+                    }
+                    continue;
+                }
+                for (std::filesystem::directory_iterator iterator(
+                         relationBackup,
+                         std::filesystem::directory_options::skip_permission_denied,
+                         filterError), end;
+                     !filterError && iterator != end;
+                     iterator.increment(filterError)) {
+                    const std::string filename =
+                        iterator->path().filename().string();
+                    const bool initFork = filename.size() > 5 &&
+                        filename.compare(
+                            filename.size() - 5, 5, ".init") == 0;
+                    if (isRelationPhysicalFileName(filename, tableName) &&
+                        !initFork) {
+                        if (isDefinitionBearingSpecializedIndexFileName(
+                                filename, tableName)) {
+                            if (!index_file::writeAtomically(
+                                    iterator->path(), "")) {
+                                filterError = std::make_error_code(
+                                    std::errc::io_error);
+                            }
+                        } else {
+                            std::filesystem::remove_all(
+                                iterator->path(), filterError);
+                        }
+                    }
+                }
+                if (filterError) {
+                    discardStagedBackup();
+                    return false;
                 }
             }
         }
@@ -40078,7 +40504,11 @@ bool StorageEngine::createTransactionBackup() {
         }
         if (!std::filesystem::exists(relationBackup)) continue;
         for (const auto& entry : std::filesystem::directory_iterator(relationBackup)) {
-            if (isRelationPhysicalFileName(entry.path().filename().string(), tn)) {
+            const std::string filename = entry.path().filename().string();
+            const bool initFork = filename.size() > 5 &&
+                filename.compare(filename.size() - 5, 5, ".init") == 0;
+            if (isRelationPhysicalFileName(filename, tn) && !initFork &&
+                !isDefinitionBearingSpecializedIndexFileName(filename, tn)) {
                 std::filesystem::remove_all(entry.path(), ec);
                 if (ec) {
                     std::filesystem::remove_all(backup, ec);
@@ -40115,7 +40545,7 @@ bool StorageEngine::createDdlStatementBackup(std::string& backupPath) {
 
     const auto backup = ddlStatementBackupPath(
         context.txnDB, context.currentTxnId);
-    if (!physicalBackupLocked(context.txnDB, backup.string())) {
+    if (!physicalBackupLocked(context.txnDB, backup.string(), {}, true)) {
         std::error_code error;
         std::filesystem::remove_all(backup, error);
         return false;

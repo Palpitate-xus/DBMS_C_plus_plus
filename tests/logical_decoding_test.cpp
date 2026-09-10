@@ -569,6 +569,35 @@ static void test_end_to_end_streaming() {
     assert(repl.advanceSlotLsn(
         "e2e_slot", static_cast<int64_t>(truncatePeek.nextLsn)));
 
+    // UNLOGGED relations never enter logical decoding.  The SQL frontend
+    // rejects explicit publication membership; this direct catalog setup
+    // models old metadata and proves the storage capture path still fails
+    // closed for INSERT and TRUNCATE. A published logged table also cannot be
+    // converted to UNLOGGED behind the publication's back.
+    assert(g_engine.alterTableSetLogged(db, "src_t", false) ==
+           DBStatus::INVALID_VALUE);
+    assert(!ddl.executeSql(
+        "CREATE UNLOGGED TABLE transient_t (id INT, v VARCHAR(32))", s));
+    pub.tables.push_back("transient_t");
+    pub.publishUpdate = true;
+    pub.publishDelete = true;
+    assert(PublicationCatalog::instance().update(db, pub, error));
+    assert(g_engine.insert(
+               db, "transient_t", {{"id", "1"}, {"v", "ephemeral"}}) ==
+           DBStatus::OK);
+    assert(LogicalChangeStore::instance().depth("e2e_slot") == 0);
+    assert(g_engine.update(
+               db, "transient_t", {{"v", "changed"}}, {"=id 1"}) ==
+           DBStatus::OK);
+    assert(g_engine.remove(db, "transient_t", {"=id 1"}) ==
+           DBStatus::OK);
+    assert(g_engine.insert(
+               db, "transient_t", {{"id", "2"}, {"v", "discarded"}}) ==
+           DBStatus::OK);
+    assert(LogicalChangeStore::instance().depth("e2e_slot") == 0);
+    assert(!ddl.executeSql("TRUNCATE TABLE transient_t", s));
+    assert(LogicalChangeStore::instance().depth("e2e_slot") == 0);
+
     // Dropping a slot must discard its retained stream.  Reusing the name
     // must start empty rather than exposing changes owned by the old slot.
     assert(g_engine.insert(

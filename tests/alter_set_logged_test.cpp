@@ -1,7 +1,7 @@
 // ============================================================================
 // ALTER TABLE SET LOGGED / SET UNLOGGED test — Phase 4 Wave 4.27f
-// alterTableSetLogged flips the persisted isUnlogged flag (metadata only; data
-// is kept). The owner / cluster / replica-identity sidecar subcommands run
+// alterTableSetLogged flips persisted relation state while keeping data and
+// creating/removing the crash-reset init fork. The remaining sidecar commands run
 // through the string dispatch in main.cpp and are covered by binary E2E instead.
 // ============================================================================
 
@@ -41,10 +41,12 @@ static void test_set_logged_unlogged() {
     // SET UNLOGGED.
     assert(g_engine.alterTableSetLogged(db, "t", false) == dbms::DBStatus::OK);
     assert(g_engine.getTableSchema(db, "t").isUnlogged);
+    assert(fs::file_size(fs::path(db) / "t.dt.init") == 8192);
 
     // SET LOGGED back; data still present.
     assert(g_engine.alterTableSetLogged(db, "t", true) == dbms::DBStatus::OK);
     assert(!g_engine.getTableSchema(db, "t").isUnlogged);
+    assert(!fs::exists(fs::path(db) / "t.dt.init"));
     size_t n = 0;
     g_engine.forEachRow(db, "t", [&](uint32_t, uint16_t, const char*, size_t) { ++n; });
     assert(n == 1);
