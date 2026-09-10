@@ -1,5 +1,6 @@
 #include "commands/DdlExecutor.h"
 #include "commands/TableManage.h"
+#include "executor/ExecutionPlan.h"
 #include "Session.h"
 #include "catalog/type_registry.h"
 #include <cassert>
@@ -103,10 +104,12 @@ static void test_named_enum_alter_updates_dependent_schemas() {
     setupSession(s, db);
     dbms::DdlExecutor ddl;
     assert(!ddl.executeSql(
-        "CREATE TYPE priority AS ENUM ('low', 'high')", s));
+        "CREATE TYPE priority AS ENUM ('low', 'high', 'obsolete')", s));
     assert(!ddl.executeSql(
         "CREATE TABLE tasks (id INT PRIMARY KEY, p priority)", s));
     assert(g_engine.insert(db, "tasks", {{"id", "1"}, {"p", "low"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "tasks", {{"id", "2"}, {"p", "high"}}) ==
            dbms::DBStatus::OK);
 
     auto priority = g_engine.getEnumType(db, "priority");
@@ -118,7 +121,7 @@ static void test_named_enum_alter_updates_dependent_schemas() {
         assert(schema.cols[1].dataType == "priority");
         assert(schema.cols[1].enumValues == priority.labels);
     }
-    assert(g_engine.insert(db, "tasks", {{"id", "2"}, {"p", "medium"}}) ==
+    assert(g_engine.insert(db, "tasks", {{"id", "3"}, {"p", "medium"}}) ==
            dbms::DBStatus::OK);
 
     // Renaming an unused label is safe and immediately updates every
@@ -126,10 +129,33 @@ static void test_named_enum_alter_updates_dependent_schemas() {
     // enum catalog or any table schema is published.
     priority.labels.back() = "urgent";
     assert(g_engine.updateEnumType(db, priority) == dbms::DBStatus::OK);
-    assert(g_engine.insert(db, "tasks", {{"id", "3"}, {"p", "urgent"}}) ==
+    assert(g_engine.insert(db, "tasks", {{"id", "4"}, {"p", "urgent"}}) ==
            dbms::DBStatus::OK);
-    assert(g_engine.insert(db, "tasks", {{"id", "4"}, {"p", "high"}}) ==
+    assert(g_engine.insert(db, "tasks", {{"id", "5"}, {"p", "obsolete"}}) ==
            dbms::DBStatus::INVALID_VALUE);
+
+    dbms::StorageEngine::OrderBySpec byPriority;
+    byPriority.colName = "p";
+    assert((g_engine.query(db, "tasks", {}, {"id"}, {byPriority}) ==
+            std::vector<std::string>{"1 ", "3 ", "2 ", "4 "}));
+    dbms::StorageEngine::OrderBySpec byId;
+    byId.colName = "id";
+    assert((g_engine.query(db, "tasks", {">p medium"}, {"id"}, {byId}) ==
+            std::vector<std::string>{"2 ", "4 "}));
+
+    const auto taskSchema = g_engine.getTableSchema(db, "tasks");
+    dbms::SortOp volcanoSort(
+        std::make_unique<dbms::TableScanOp>(&g_engine, db, "tasks"),
+        taskSchema, "p", true);
+    assert(volcanoSort.open());
+    std::vector<std::string> volcanoOrder;
+    std::string sortedRow;
+    while (volcanoSort.next(sortedRow)) {
+        volcanoOrder.push_back(dbms::StorageEngine::extractColumnValueStatic(
+            sortedRow, taskSchema, 0));
+    }
+    volcanoSort.close();
+    assert((volcanoOrder == std::vector<std::string>{"1", "3", "2", "4"}));
 
     const auto beforeRejectedRename = priority;
     priority.labels.front() = "minor";

@@ -2200,7 +2200,15 @@ bool SortOp::open() {
         std::sort(items.begin(), items.end(), [&](const auto& a, const auto& b) {
             if (a.second.isNull != b.second.isNull)
                 return a.second.isNull ? !asc_ : asc_;
-            if (scol.dataType == "char" || scol.isVariableLength) return asc_ ? (a.second.s < b.second.s) : (b.second.s < a.second.s);
+            if (scol.dataType == "char" || scol.isVariableLength) {
+                const auto comparison = StorageEngine::compareValues(
+                    scol, a.second.s, false, b.second.s, false, "<");
+                if (asc_)
+                    return comparison == StorageEngine::PredicateTruth::True;
+                return StorageEngine::compareValues(
+                           scol, b.second.s, false, a.second.s, false, "<") ==
+                       StorageEngine::PredicateTruth::True;
+            }
             if (scol.dataType == "date") return asc_ ? (a.second.d < b.second.d) : (b.second.d < a.second.d);
             if (scol.dataType == "float" || scol.dataType == "double" || scol.dataType == "decimal") return asc_ ? (a.second.f < b.second.f) : (b.second.f < a.second.f);
             return asc_ ? (a.second.n < b.second.n) : (b.second.n < a.second.n);

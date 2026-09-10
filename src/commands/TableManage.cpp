@@ -3314,6 +3314,23 @@ DBStatus resolveTableCollations(const StorageEngine& engine,
 
 int compareTextValues(const Column& column, const std::string& left,
                       const std::string& right) {
+    if (!column.enumValues.empty()) {
+        const auto leftPosition = std::find(
+            column.enumValues.begin(), column.enumValues.end(), left);
+        const auto rightPosition = std::find(
+            column.enumValues.begin(), column.enumValues.end(), right);
+        if (leftPosition != column.enumValues.end() &&
+            rightPosition != column.enumValues.end()) {
+            if (leftPosition == rightPosition) return 0;
+            return leftPosition < rightPosition ? -1 : 1;
+        }
+        // Corrupt/legacy values must still produce a deterministic strict
+        // ordering for callers such as std::sort.  Normal DML validation
+        // prevents this fallback for newly written rows.
+        if (leftPosition != column.enumValues.end()) return -1;
+        if (rightPosition != column.enumValues.end()) return 1;
+        return left.compare(right);
+    }
     if (column.collation.empty()) return left.compare(right);
     const std::string& effective = column.resolvedCollation.empty()
         ? column.collation : column.resolvedCollation;
