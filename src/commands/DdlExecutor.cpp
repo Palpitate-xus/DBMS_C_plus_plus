@@ -52,6 +52,144 @@ std::string trim(const std::string& s) {
     return s.substr(a, b - a);
 }
 
+bool splitProcedureStatements(const std::string& body,
+                              std::vector<std::string>& statements,
+                              std::string& error) {
+    statements.clear();
+    error.clear();
+    size_t statementStart = 0;
+    bool statementHasContent = false;
+    bool singleQuoted = false;
+    bool escapeSingleQuoted = false;
+    bool doubleQuoted = false;
+    bool lineComment = false;
+    size_t blockCommentDepth = 0;
+    std::string dollarDelimiter;
+
+    const auto appendStatement = [&](size_t end) {
+        if (!statementHasContent) return;
+        const std::string statement =
+            trim(body.substr(statementStart, end - statementStart));
+        if (!statement.empty()) statements.push_back(statement);
+    };
+    const auto markStatementContent = [&](size_t offset) {
+        if (!statementHasContent) statementStart = offset;
+        statementHasContent = true;
+    };
+
+    for (size_t i = 0; i < body.size(); ++i) {
+        const char current = body[i];
+        if (lineComment) {
+            if (current == '\n' || current == '\r') lineComment = false;
+            continue;
+        }
+        if (blockCommentDepth != 0) {
+            if (current == '/' && i + 1 < body.size() &&
+                body[i + 1] == '*') {
+                ++blockCommentDepth;
+                ++i;
+            } else if (current == '*' && i + 1 < body.size() &&
+                       body[i + 1] == '/') {
+                --blockCommentDepth;
+                ++i;
+            }
+            continue;
+        }
+        if (!dollarDelimiter.empty()) {
+            if (body.compare(i, dollarDelimiter.size(), dollarDelimiter) == 0) {
+                i += dollarDelimiter.size() - 1;
+                dollarDelimiter.clear();
+            }
+            continue;
+        }
+        if (singleQuoted) {
+            if (escapeSingleQuoted && current == '\\' &&
+                i + 1 < body.size()) {
+                ++i;
+            } else if (current == '\'' && i + 1 < body.size() &&
+                       body[i + 1] == '\'') {
+                ++i;
+            } else if (current == '\'') {
+                singleQuoted = false;
+                escapeSingleQuoted = false;
+            }
+            continue;
+        }
+        if (doubleQuoted) {
+            if (current == '"' && i + 1 < body.size() &&
+                body[i + 1] == '"') {
+                ++i;
+            } else if (current == '"') {
+                doubleQuoted = false;
+            }
+            continue;
+        }
+        if (current == '-' && i + 1 < body.size() && body[i + 1] == '-') {
+            lineComment = true;
+            ++i;
+            continue;
+        }
+        if (current == '/' && i + 1 < body.size() && body[i + 1] == '*') {
+            blockCommentDepth = 1;
+            ++i;
+            continue;
+        }
+        if (current == '\'') {
+            markStatementContent(i);
+            singleQuoted = true;
+            escapeSingleQuoted = i > 0 &&
+                (body[i - 1] == 'e' || body[i - 1] == 'E') &&
+                (i < 2 || (!std::isalnum(
+                    static_cast<unsigned char>(body[i - 2])) &&
+                    body[i - 2] != '_' && body[i - 2] != '$'));
+            continue;
+        }
+        if (current == '"') {
+            markStatementContent(i);
+            doubleQuoted = true;
+            continue;
+        }
+        if (current == '$') {
+            size_t end = i + 1;
+            if (end < body.size() &&
+                (std::isalpha(static_cast<unsigned char>(body[end])) ||
+                 body[end] == '_')) {
+                while (end < body.size() &&
+                       (std::isalnum(static_cast<unsigned char>(body[end])) ||
+                        body[end] == '_')) {
+                    ++end;
+                }
+            }
+            if (end < body.size() && body[end] == '$') {
+                markStatementContent(i);
+                dollarDelimiter = body.substr(i, end - i + 1);
+                i = end;
+                continue;
+            }
+        }
+        if (current == ';') {
+            appendStatement(i);
+            statementStart = i + 1;
+            statementHasContent = false;
+            continue;
+        }
+        if (!std::isspace(static_cast<unsigned char>(current))) {
+            markStatementContent(i);
+        }
+    }
+
+    if (singleQuoted) error = "unterminated string literal";
+    else if (doubleQuoted) error = "unterminated quoted identifier";
+    else if (!dollarDelimiter.empty()) error = "unterminated dollar quote";
+    else if (blockCommentDepth != 0) error = "unterminated block comment";
+    if (!error.empty()) {
+        statements.clear();
+        return false;
+    }
+    appendStatement(body.size());
+    return true;
+}
+
 std::optional<StorageEngine::MaterializedViewResolution>
 resolveMaterializedViewForSession(Session& session,
                                   const std::string& requestedName) {
@@ -1513,7 +1651,9 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
                          parsedCmd == dbms::SqlCommand::DropRole ||
                          parsedCmd == dbms::SqlCommand::DropUser;
     const bool preservesLiteralText =
-        authDdl || parsedCmd == dbms::SqlCommand::Comment;
+        authDdl || parsedCmd == dbms::SqlCommand::Comment ||
+        parsedCmd == dbms::SqlCommand::CreateFunction ||
+        parsedCmd == dbms::SqlCommand::CreateProcedure;
     const std::string& parseInput = preservesLiteralText && !rawSql.empty()
         ? rawSql : sql;
     dbms::SQLParser parser;
@@ -9435,13 +9575,11 @@ bool DdlExecutor::executeCreateProcedure(const CreateFunctionStmt* stmt, Session
     }
 
     std::vector<std::string> stmts;
-    size_t start = 0;
-    while (start < stmt->body.size()) {
-        size_t sc = stmt->body.find(';', start);
-        std::string part = trim(stmt->body.substr(start, sc == std::string::npos ? std::string::npos : sc - start));
-        if (!part.empty()) stmts.push_back(part);
-        if (sc == std::string::npos) break;
-        start = sc + 1;
+    std::string splitError;
+    if (!splitProcedureStatements(stmt->body, stmts, splitError)) {
+        std::cout << "SQL syntax error: invalid PROCEDURE body: "
+                  << splitError << " (SQLSTATE 42601)" << std::endl;
+        return true;
     }
     if (stmts.empty()) {
         std::cout << "SQL syntax error: PROCEDURE body is empty" << std::endl;

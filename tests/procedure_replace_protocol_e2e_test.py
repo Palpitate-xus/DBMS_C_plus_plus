@@ -29,6 +29,13 @@ def main():
              "y INTEGER) LANGUAGE sql "
              "AS $$ INSERT INTO procedure_values VALUES (40) $$"),
             "CALL typmod_proc(1.25, 2)",
+            "CREATE TABLE procedure_text (value TEXT)",
+            ("CREATE PROCEDURE semicolon_proc() LANGUAGE sql AS $$ "
+             "INSERT INTO procedure_text VALUES ('a;b'); "
+             "/* separator ; /* nested ; */ comment ; */ "
+             "-- line-comment ;\n"
+             "INSERT INTO procedure_text VALUES ('c') $$"),
+            "CALL semicolon_proc()",
         ]
         for sql in setup:
             rows, state, message, headers = runner.ours_query(
@@ -47,6 +54,12 @@ def main():
             rows, state, message, headers = runner.ours_query(
                 client, server["sock"], sql)
             assert state is not None, (sql, rows, headers)
+
+        rows, state, message, headers = runner.ours_query(
+            client, server["sock"],
+            "SELECT value FROM procedure_text ORDER BY value")
+        assert state is None, (state, message)
+        assert rows == [["a;b"], ["c"]], rows
 
         rows, state, message, headers = runner.ours_query(
             client, server["sock"], "CALL replace_proc(3)")

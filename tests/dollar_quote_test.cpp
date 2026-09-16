@@ -104,6 +104,38 @@ static void test_function_body_dollar_quoted() {
     assert(!ddl.executeSql(
         "CREATE PROCEDURE multi() AS $$\ninsert into nothing_here values (1);\ninsert into nothing_here values (2)\n$$ LANGUAGE sql", s));
     assert(g_engine.procedureExists(db, "multi"));
+    assert(g_engine.getProcedureStatements(db, "multi").size() == 2);
+
+    assert(!ddl.executeSql(
+        "CREATE PROCEDURE quoted_semicolons() AS $$\n"
+        "insert into nothing_here values ('a;b');\n"
+        "/* comment ; /* nested ; */ still comment ; */\n"
+        "insert into nothing_here values (E'c\\\\;d'); -- trailing ;\n"
+        "insert into nothing_here values ($tag$e;f$tag$)\n"
+        "$$ LANGUAGE sql", s));
+    auto statements =
+        g_engine.getProcedureStatements(db, "quoted_semicolons");
+    assert(statements.size() == 3);
+    assert(statements[0].find("'a;b'") != std::string::npos);
+    assert(statements[1].find("c\\\\;d") != std::string::npos);
+    assert(statements[2].find("$tag$e;f$tag$") != std::string::npos);
+
+    assert(ddl.executeSql(
+        "CREATE PROCEDURE broken_quote() AS $$ SELECT 'broken; SELECT 2 $$ "
+        "LANGUAGE sql", s));
+    assert(!g_engine.procedureExists(db, "broken_quote"));
+    assert(ddl.executeSql(
+        "CREATE PROCEDURE broken_comment() AS $$ SELECT 1; /* broken $$ "
+        "LANGUAGE sql", s));
+    assert(!g_engine.procedureExists(db, "broken_comment"));
+    assert(ddl.executeSql(
+        "CREATE PROCEDURE broken_identifier() AS $$ SELECT \"broken; $$ "
+        "LANGUAGE sql", s));
+    assert(!g_engine.procedureExists(db, "broken_identifier"));
+    assert(ddl.executeSql(
+        "CREATE PROCEDURE broken_dollar() AS $$ SELECT $tag$broken; $$ "
+        "LANGUAGE sql", s));
+    assert(!g_engine.procedureExists(db, "broken_dollar"));
 
     cleanup(db);
     std::cout << "[DQ] function/procedure bodies OK" << std::endl;

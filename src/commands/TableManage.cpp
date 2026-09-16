@@ -4495,6 +4495,40 @@ static bool readRoutineMetadataField(const std::string& input, size_t& offset,
     return true;
 }
 
+static std::string encodeRoutineStatement(const std::string& statement) {
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string encoded;
+    encoded.reserve(statement.size() * 2);
+    for (const unsigned char byte : statement) {
+        encoded.push_back(digits[byte >> 4]);
+        encoded.push_back(digits[byte & 0x0f]);
+    }
+    return encoded;
+}
+
+static bool decodeRoutineStatement(const std::string& encoded,
+                                   std::string& statement) {
+    if (encoded.size() % 2 != 0) return false;
+    const auto hexValue = [](char value) -> int {
+        if (value >= '0' && value <= '9') return value - '0';
+        if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+        if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+        return -1;
+    };
+    statement.clear();
+    statement.reserve(encoded.size() / 2);
+    for (size_t offset = 0; offset < encoded.size(); offset += 2) {
+        const int high = hexValue(encoded[offset]);
+        const int low = hexValue(encoded[offset + 1]);
+        if (high < 0 || low < 0) {
+            statement.clear();
+            return false;
+        }
+        statement.push_back(static_cast<char>((high << 4) | low));
+    }
+    return true;
+}
+
 DBStatus StorageEngine::createProcedure(const std::string& dbname,
                                          const std::string& procname,
                                          const std::vector<ProcParam>& params,
@@ -4516,7 +4550,7 @@ DBStatus StorageEngine::createProcedure(const std::string& dbname,
     }
     serialized << '\n';
     for (const auto& stmt : statements) {
-        serialized << stmt << '\n';
+        serialized << "STMT2:" << encodeRoutineStatement(stmt) << '\n';
     }
     return persistMetadata(procedurePath(dbname, procname), serialized.str());
 }
@@ -4550,7 +4584,13 @@ std::vector<std::string> StorageEngine::getProcedureStatements(
         if (line.empty()) continue;
         if (line.rfind("PARAMS:", 0) == 0 ||
             line.rfind("PARAMS2:", 0) == 0) continue;
-        result.push_back(line);
+        if (line.rfind("STMT2:", 0) == 0) {
+            std::string statement;
+            if (!decodeRoutineStatement(line.substr(6), statement)) return {};
+            result.push_back(std::move(statement));
+        } else {
+            result.push_back(line);
+        }
     }
     return result;
 }
