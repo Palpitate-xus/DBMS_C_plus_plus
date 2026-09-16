@@ -3690,32 +3690,50 @@ static bool handleCallProcedure(const string& sql, Session& s) {
     string procname;
     vector<string> args;
     size_t lp = rest.find('(');
-    if (lp != string::npos) {
-        procname = trim(rest.substr(0, lp));
-        size_t rp = string::npos;
-        int depth = 0;
-        bool inQuote = false;
-        for (size_t i = lp; i < rest.size(); ++i) {
-            if (rest[i] == '\'') inQuote = !inQuote;
-            if (!inQuote) {
-                if (rest[i] == '(') ++depth;
-                else if (rest[i] == ')') {
-                    --depth;
-                    if (depth == 0) { rp = i; break; }
-                }
+    if (lp == string::npos) {
+        cout << "SQL syntax error: CALL requires an argument list "
+                "(SQLSTATE 42601)" << endl;
+        return true;
+    }
+    procname = trim(rest.substr(0, lp));
+    size_t rp = string::npos;
+    int depth = 0;
+    bool inQuote = false;
+    for (size_t i = lp; i < rest.size(); ++i) {
+        if (rest[i] == '\'') {
+            if (inQuote && i + 1 < rest.size() && rest[i + 1] == '\'') {
+                ++i;
+                continue;
+            }
+            inQuote = !inQuote;
+        }
+        if (!inQuote) {
+            if (rest[i] == '(') ++depth;
+            else if (rest[i] == ')') {
+                --depth;
+                if (depth == 0) { rp = i; break; }
             }
         }
-        if (rp == string::npos) {
-            cout << "SQL syntax error: unclosed parenthesis in CALL" << endl;
-            return true;
-        }
-        string alist = trim(rest.substr(lp + 1, rp - lp - 1));
-        if (!alist.empty()) {
-            args = splitValues(alist);
-            for (auto& a : args) a = trim(a);
-        }
-    } else {
-        procname = rest;
+    }
+    if (rp == string::npos || inQuote) {
+        cout << "SQL syntax error: unclosed argument list in CALL "
+                "(SQLSTATE 42601)" << endl;
+        return true;
+    }
+    if (!trim(rest.substr(rp + 1)).empty()) {
+        cout << "SQL syntax error: unexpected tokens after CALL "
+                "(SQLSTATE 42601)" << endl;
+        return true;
+    }
+    string alist = trim(rest.substr(lp + 1, rp - lp - 1));
+    if (!alist.empty()) {
+        args = splitValues(alist);
+        for (auto& a : args) a = trim(a);
+    }
+    if (procname.empty()) {
+        cout << "SQL syntax error: CALL procedure_name (SQLSTATE 42601)"
+             << endl;
+        return true;
     }
     if (!g_engine.procedureExists(s.currentDB, procname)) {
         cout << "Procedure " << procname << " not exist" << endl;
@@ -3753,6 +3771,33 @@ static bool handleCallProcedure(const string& sql, Session& s) {
         }
     }
     auto stmts = g_engine.getProcedureStatements(s.currentDB, procname);
+    if (stmts.empty()) {
+        cout << "ERROR: procedure " << procname
+             << " has no executable statements (SQLSTATE 2F003)" << endl;
+        return true;
+    }
+
+    static atomic<uint64_t> callSavepointSequence{0};
+    const string callSavepoint = "__dbms_call_statement_" +
+        to_string(g_engine.currentTxnId()) + "_" +
+        to_string(callSavepointSequence.fetch_add(1));
+    if (!g_engine.inTransaction() ||
+        g_engine.savepoint(callSavepoint) != DBStatus::OK) {
+        cout << "ERROR: CALL cannot establish an atomic statement boundary "
+                "(SQLSTATE 0A000)" << endl;
+        return true;
+    }
+    if (!dbms::notificationManager().savepoint(s.pid, callSavepoint)) {
+        (void)g_engine.rollbackToSavepoint(callSavepoint);
+        (void)g_engine.releaseSavepoint(callSavepoint);
+        cout << "ERROR: CALL cannot establish a notification boundary "
+                "(SQLSTATE 0A000)" << endl;
+        return true;
+    }
+    dbms::advisoryLockManager().savepoint(
+        advisoryOwner(s), callSavepoint);
+
+    bool statementFailed = false;
     for (const auto& stmt : stmts) {
         string replaced = stmt;
         vector<pair<string, string>> sortedMap(argMap.begin(), argMap.end());
@@ -3766,8 +3811,59 @@ static bool handleCallProcedure(const string& sql, Session& s) {
                 pos += kv.second.size();
             }
         }
-        execute(replaced, s);
+        if (execute(replaced, s)) {
+            statementFailed = true;
+            break;
+        }
     }
+    if (statementFailed) {
+        const DBStatus rollbackStatus =
+            g_engine.rollbackToSavepoint(callSavepoint);
+        bool boundaryRestored = rollbackStatus == DBStatus::OK;
+        if (rollbackStatus == DBStatus::OK) {
+            boundaryRestored =
+                dbms::notificationManager().rollbackToSavepoint(
+                    s.pid, callSavepoint) && boundaryRestored;
+            dbms::advisoryLockManager().rollbackToSavepoint(
+                advisoryOwner(s), callSavepoint);
+            const DBStatus releaseStatus =
+                g_engine.releaseSavepoint(callSavepoint);
+            if (releaseStatus == DBStatus::OK) {
+                boundaryRestored =
+                    dbms::notificationManager().releaseSavepoint(
+                        s.pid, callSavepoint) && boundaryRestored;
+                dbms::advisoryLockManager().releaseSavepoint(
+                    advisoryOwner(s), callSavepoint);
+            } else {
+                boundaryRestored = false;
+            }
+        }
+        if (!boundaryRestored) {
+            if (g_engine.inTransaction())
+                (void)g_engine.rollbackTransaction();
+            rollbackNotificationTransaction(s);
+            dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
+            cout << "ERROR: CALL rollback failed (SQLSTATE XX000)" << endl;
+        }
+        return true;
+    }
+
+    const DBStatus releaseStatus =
+        g_engine.releaseSavepoint(callSavepoint);
+    const bool notificationReleased = releaseStatus == DBStatus::OK &&
+        dbms::notificationManager().releaseSavepoint(
+            s.pid, callSavepoint);
+    if (releaseStatus != DBStatus::OK || !notificationReleased) {
+        if (g_engine.inTransaction()) (void)g_engine.rollbackTransaction();
+        rollbackNotificationTransaction(s);
+        dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
+        cout << "ERROR: CALL could not release its statement boundary "
+                "(SQLSTATE XX000)" << endl;
+        return true;
+    }
+    dbms::advisoryLockManager().releaseSavepoint(
+        advisoryOwner(s), callSavepoint);
+    cout << "CALL" << endl;
     return false;
 }
 
@@ -25757,7 +25853,8 @@ bool isTopLevelDml(const std::string& rawSql) {
            startsWithKeyword(normalized, "update") ||
            startsWithKeyword(normalized, "delete") ||
            startsWithKeyword(normalized, "merge") ||
-           startsWithKeyword(normalized, "replace")) {
+           startsWithKeyword(normalized, "replace") ||
+           startsWithKeyword(normalized, "call")) {
         return true;
     }
     // The legacy CTE path executes DML bodies recursively, so a write CTE

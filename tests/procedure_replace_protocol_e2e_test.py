@@ -52,6 +52,56 @@ def main():
             client, server["sock"], "CALL replace_proc(3)")
         assert state is None, (state, message)
 
+        rejected_call_syntax = [
+            "CALL replace_proc",
+            "CALL replace_proc(3) garbage",
+            "CALL replace_proc('unterminated)",
+        ]
+        for sql in rejected_call_syntax:
+            rows, state, message, headers = runner.ours_query(
+                client, server["sock"], sql)
+            assert state == "42601", (sql, state, message, rows, headers)
+
+        atomic_setup = [
+            "CREATE TABLE procedure_atomic (value INT UNIQUE)",
+            ("CREATE PROCEDURE atomic_proc(x INT) LANGUAGE sql AS $$ "
+             "INSERT INTO procedure_atomic VALUES (?x); "
+             "INSERT INTO procedure_atomic VALUES (?x) $$"),
+        ]
+        for sql in atomic_setup:
+            rows, state, message, headers = runner.ours_query(
+                client, server["sock"], sql)
+            assert state is None, (sql, state, message)
+        rows, state, message, headers = runner.ours_query(
+            client, server["sock"], "CALL atomic_proc(7)")
+        assert state is not None, (rows, headers)
+        rows, state, message, headers = runner.ours_query(
+            client, server["sock"], "SELECT value FROM procedure_atomic")
+        assert state is None and rows == [], (state, message, rows)
+
+        explicit_prefix = [
+            "BEGIN",
+            "INSERT INTO procedure_atomic VALUES (1)",
+            "SAVEPOINT before_failed_call",
+        ]
+        for sql in explicit_prefix:
+            rows, state, message, headers = runner.ours_query(
+                client, server["sock"], sql)
+            assert state is None, (sql, state, message)
+        rows, state, message, headers = runner.ours_query(
+            client, server["sock"], "CALL atomic_proc(8)")
+        assert state is not None, (rows, headers)
+        rows, state, message, headers = runner.ours_query(
+            client, server["sock"],
+            "ROLLBACK TO SAVEPOINT before_failed_call")
+        assert state is None, (state, message)
+        rows, state, message, headers = runner.ours_query(
+            client, server["sock"], "SELECT value FROM procedure_atomic")
+        assert state is None and rows == [["1"]], (state, message, rows)
+        rows, state, message, headers = runner.ours_query(
+            client, server["sock"], "COMMIT")
+        assert state is None, (state, message)
+
         transaction = [
             "BEGIN",
             ("CREATE OR REPLACE PROCEDURE replace_proc(x INT) LANGUAGE sql "
