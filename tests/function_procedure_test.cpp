@@ -34,6 +34,7 @@ static void test_create_function_single_param() {
     assert(g_engine.udfExists(db, "inc"));
     auto info = g_engine.getUDF(db, "inc");
     assert(info.expression == "x + 1");
+    assert(info.returnType == "int");
 
     cleanup(db);
     std::cout << "[FUNCTION] single param OK" << std::endl;
@@ -52,6 +53,8 @@ static void test_create_function_multi_param() {
     assert(g_engine.udfExists(db, "add"));
     auto info = g_engine.getUDF(db, "add");
     assert(info.paramNames.size() == 2);
+    assert(info.language == "sql");
+    assert(info.returnType == "int");
 
     cleanup(db);
     std::cout << "[FUNCTION] multi param OK" << std::endl;

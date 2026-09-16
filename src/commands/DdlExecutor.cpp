@@ -9209,7 +9209,8 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
         if (stmt->params.size() <= 1) {
             std::string singleParam = stmt->params.empty() ? "" : stmt->params.front().first;
             res = g_engine.createUDF(s.currentDB, stmt->funcName, singleParam,
-                                     stmt->body, provolatile, lang);
+                                     stmt->body, provolatile, lang,
+                                     stmt->returnType);
         } else {
             std::vector<std::string> params;
             std::vector<std::string> types;
@@ -9218,7 +9219,8 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
                 types.push_back(p.second);
             }
             res = g_engine.createUDF(s.currentDB, stmt->funcName, params, types,
-                                     stmt->body, provolatile, lang);
+                                     stmt->body, provolatile, lang,
+                                     stmt->returnType);
         }
     }
 

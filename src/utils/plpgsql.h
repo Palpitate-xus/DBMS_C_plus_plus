@@ -60,7 +60,8 @@ public:
                     const PlPgsqlHost& host,
                     std::string& returnValue,
                     std::string& error,
-                    NoticeSink notice = nullptr);
+                    NoticeSink notice = nullptr,
+                    bool* returnIsNull = nullptr);
 };
 
 }  // namespace dbms

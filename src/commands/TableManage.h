@@ -331,17 +331,20 @@ public:
         std::vector<std::string> paramTypes; // multi-param support
         char provolatile = 'v'; // i=immutable, s=stable, v=volatile
         std::string language;   // "sql" (default) or "plpgsql"
+        std::string returnType = "text"; // declared scalar result type
     };
     DBStatus createUDF(const std::string& dbname, const std::string& funcname,
                        const std::string& param, const std::string& expression,
                        char provolatile = 'v',
-                       const std::string& language = "sql");
+                       const std::string& language = "sql",
+                       const std::string& returnType = "text");
     DBStatus createUDF(const std::string& dbname, const std::string& funcname,
                        const std::vector<std::string>& params,
                        const std::vector<std::string>& types,
                        const std::string& expression,
                        char provolatile = 'v',
-                       const std::string& language = "sql");
+                       const std::string& language = "sql",
+                       const std::string& returnType = "text");
     DBStatus dropUDF(const std::string& dbname, const std::string& funcname);
     bool udfExists(const std::string& dbname, const std::string& funcname) const;
     UDFInfo getUDF(const std::string& dbname, const std::string& funcname) const;
@@ -351,7 +354,8 @@ public:
     // Returns true on success and sets returnValue.
     bool callUDF(const std::string& dbname, const std::string& funcname,
                  const std::vector<std::string>& argValues,
-                 std::string& returnValue) const;
+                 std::string& returnValue,
+                 bool* returnIsNull = nullptr) const;
     // Trigger context for EXECUTE FUNCTION actions: pre-bound interpreter
     // variables (NEW.col / OLD.col flattened to "new.col" style keys, plus
     // tg_name / tg_op / ... diagnostics).
@@ -366,7 +370,8 @@ public:
     bool callUDFWithCtx(const std::string& dbname, const std::string& funcname,
                         const std::vector<std::string>& argValues,
                         const TriggerCtx& ctx,
-                        std::string& returnValue) const;
+                        std::string& returnValue,
+                        bool* returnIsNull = nullptr) const;
     std::vector<std::string> getUDFNames(const std::string& dbname) const;
 
     // Table-valued functions (return a result set)

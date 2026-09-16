@@ -7010,12 +7010,15 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                             a = a.substr(1, a.size() - 2);
                     }
                     string rv;
-                    if (!g_engine.callUDF(s.currentDB, fname, args, rv)) {
+                    bool rvIsNull = false;
+                    if (!g_engine.callUDF(s.currentDB, fname, args, rv,
+                                          &rvIsNull)) {
                         cout << "Function " << fname << " failed" << endl;
                         return true;
                     }
                     headers.push_back(disp == item ? fname : disp);
-                    appendValue(rv);
+                    appendValue(rvIsNull ? string{} : rv, rvIsNull,
+                                canonicalValuesType(udf.returnType));
                     continue;
                 }
             }

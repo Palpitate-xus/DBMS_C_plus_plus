@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <set>
 #include <sstream>
 
 namespace dbms {
@@ -472,7 +473,9 @@ static void touchUnused() {}
 struct Interp {
     const PlPgsqlHost& host;
     std::map<std::string, std::string> vars;
+    std::set<std::string> nullVars;
     std::string returnValue;
+    bool returnIsNull = false;
     bool hasReturn = false;
     bool exitLoop = false;
     std::string error;
@@ -574,13 +577,21 @@ struct Interp {
     // Evaluate a PL/pgSQL expression: numeric/boolean/text operations the
     // native evaluator understands are computed locally; anything else
     // (function calls, ||, column expressions) defers to the host.
-    std::optional<std::string> eval(const std::string& raw) {
+    std::optional<std::string> eval(const std::string& raw,
+                                    bool* valueIsNull = nullptr) {
+        if (valueIsNull) *valueIsNull = false;
         std::string expr = trimCopy(raw);
-        if (expr.empty()) return std::string("null");
+        if (expr.empty()) {
+            if (valueIsNull) *valueIsNull = true;
+            return std::string("null");
+        }
         std::string low = lowerCopy(expr);
         if (low == "true") return std::string("t");
         if (low == "false") return std::string("f");
-        if (low == "null") return std::string("null");
+        if (low == "null") {
+            if (valueIsNull) *valueIsNull = true;
+            return std::string("null");
+        }
         // numeric literal
         if (expr.find_first_not_of("0123456789.-") == std::string::npos && !expr.empty()) {
             return expr;
@@ -588,6 +599,18 @@ struct Interp {
         // quoted literal
         if (expr.size() >= 2 && expr.front() == '\'' && expr.back() == '\'') {
             return expr.substr(1, expr.size() - 2);
+        }
+        // Preserve NULL identity for variables instead of confusing it with
+        // the perfectly valid text value "null".
+        if (expr.find_first_not_of(
+                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") ==
+            std::string::npos) {
+            const std::string name = lowerCopy(expr);
+            auto variable = vars.find(name);
+            if (variable != vars.end()) {
+                if (valueIsNull) *valueIsNull = nullVars.count(name) != 0;
+                return variable->second;
+            }
         }
         auto native = nativeEval(expr);
         if (native) return native;
@@ -776,16 +799,21 @@ struct Interp {
 
     bool exec(const Stmt& s) {
         if (auto* a = dynamic_cast<const AssignStmt*>(&s)) {
-            auto v = eval(a->expr);
+            bool valueIsNull = false;
+            auto v = eval(a->expr, &valueIsNull);
             if (!v) return fail("assignment evaluation failed: " + a->expr.substr(0, 40));
             vars[a->var] = *v;
+            if (valueIsNull) nullVars.insert(a->var);
+            else nullVars.erase(a->var);
             return true;
         }
         if (auto* r = dynamic_cast<const ReturnStmt*>(&s)) {
             if (r->hasExpr) {
-                auto v = eval(r->expr);
+                auto v = eval(r->expr, &returnIsNull);
                 if (!v) return fail("RETURN evaluation failed: " + r->expr.substr(0, 40));
                 returnValue = *v;
+            } else {
+                returnIsNull = true;
             }
             hasReturn = true;
             return true;
@@ -941,10 +969,12 @@ bool PlPgsql::run(const std::string& body,
                   const PlPgsqlHost& host,
                   std::string& returnValue,
                   std::string& error,
-                  NoticeSink notice) {
+                  NoticeSink notice,
+                  bool* returnIsNull) {
     using namespace plpgsql_impl;
     returnValue.clear();
     error.clear();
+    if (returnIsNull) *returnIsNull = false;
 
     Parser parser(body);
     std::map<std::string, std::string> defaults;
@@ -976,12 +1006,15 @@ bool PlPgsql::run(const std::string& body,
         if (interp.vars.count(d.first)) continue;
         if (trimCopy(d.second).empty()) {
             interp.vars[d.first] = "null";
+            interp.nullVars.insert(d.first);
             continue;
         }
         // Evaluate the default expression in an environment holding only
         // previously declared defaults (PL/pgSQL allows earlier vars).
-        auto v = interp.eval(d.second);
+        bool valueIsNull = false;
+        auto v = interp.eval(d.second, &valueIsNull);
         interp.vars[d.first] = v ? *v : d.second;
+        if (valueIsNull) interp.nullVars.insert(d.first);
     }
     if (!interp.execCompound(program)) {
         error = interp.error.empty() ? "runtime error" : interp.error;
@@ -989,10 +1022,12 @@ bool PlPgsql::run(const std::string& body,
     }
     if (interp.hasReturn) {
         returnValue = interp.returnValue;
+        if (returnIsNull) *returnIsNull = interp.returnIsNull;
         return true;
     }
     // no RETURN: function body ends (NULL for functions)
     returnValue = "null";
+    if (returnIsNull) *returnIsNull = true;
     return true;
 }
 

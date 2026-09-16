@@ -122,6 +122,23 @@ int main() {
 
     // 8. Parameters pre-bound
     assert(run("BEGIN RETURN amount * 2; END;", {{"amount", "21"}}) == "42");
+
+    // SQL NULL is not the same value as the text string "null".  The
+    // function host needs this bit to publish a protocol NULL bitmap.
+    {
+        std::string rv, err;
+        bool isNull = false;
+        assert(PlPgsql::run("BEGIN RETURN NULL; END;", {}, nativeHost(),
+                            rv, err, nullptr, &isNull));
+        assert(isNull);
+        assert(PlPgsql::run("BEGIN RETURN 'null'; END;", {}, nativeHost(),
+                            rv, err, nullptr, &isNull));
+        assert(!isNull && rv == "null");
+        assert(PlPgsql::run(
+            "DECLARE v TEXT := NULL; BEGIN RETURN v; END;", {}, nativeHost(),
+            rv, err, nullptr, &isNull));
+        assert(isNull);
+    }
     std::cout << "[PLPGSQL] parameter binding OK" << std::endl;
 
     // 9. String literals in expressions and RETURN

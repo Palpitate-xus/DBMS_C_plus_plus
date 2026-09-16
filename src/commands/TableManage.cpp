@@ -4849,7 +4849,8 @@ DBStatus StorageEngine::createUDF(const std::string& dbname,
                                    const std::string& param,
                                    const std::string& expression,
                                    char provolatile,
-                                   const std::string& language) {
+                                   const std::string& language,
+                                   const std::string& returnType) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!validMetadataObjectName(funcname)) return DBStatus::INVALID_ARGUMENT;
     auto fdir = udfDir(dbname);
@@ -4859,7 +4860,8 @@ DBStatus StorageEngine::createUDF(const std::string& dbname,
     }
     std::ostringstream serialized;
     serialized << param << "\n" << expression << "\n" << provolatile << "\n"
-               << (language.empty() ? "sql" : language) << "\n";
+               << (language.empty() ? "sql" : language) << "\n"
+               << "RETURNS:" << (returnType.empty() ? "text" : returnType) << "\n";
     return persistMetadata(udfPath(dbname, funcname), serialized.str());
 }
 
@@ -4869,7 +4871,8 @@ DBStatus StorageEngine::createUDF(const std::string& dbname,
                                    const std::vector<std::string>& types,
                                    const std::string& expression,
                                    char provolatile,
-                                   const std::string& language) {
+                                   const std::string& language,
+                                   const std::string& returnType) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!validMetadataObjectName(funcname)) return DBStatus::INVALID_ARGUMENT;
     auto fdir = udfDir(dbname);
@@ -4883,7 +4886,9 @@ DBStatus StorageEngine::createUDF(const std::string& dbname,
         if (i > 0) serialized << ',';
         serialized << params[i] << ':' << (i < types.size() ? types[i] : "");
     }
-    serialized << "\n" << expression << "\n" << provolatile << "\n";
+    serialized << "\n" << expression << "\n" << provolatile << "\n"
+               << (language.empty() ? "sql" : language) << "\n"
+               << "RETURNS:" << (returnType.empty() ? "text" : returnType) << "\n";
     return persistMetadata(udfPath(dbname, funcname), serialized.str());
 }
 
@@ -4911,7 +4916,8 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
                         StorageEngine* engine,
                         const std::string& dbname,
                         std::string& returnValue,
-                        const std::map<std::string, std::string>* extraVars = nullptr);
+                        const std::map<std::string, std::string>* extraVars = nullptr,
+                        bool* returnIsNull = nullptr);
 
 // Stage EXECUTE FUNCTION context for the imminent trigger firing: NEW/OLD
 // row values (dotted lowercase keys) plus TG_* diagnostics.  Consumed by
@@ -5004,6 +5010,11 @@ StorageEngine::UDFInfo StorageEngine::getUDF(const std::string& dbname,
     } else {
         info.language = "sql";
     }
+    std::string returnLine;
+    if (std::getline(ifs, returnLine) && returnLine.rfind("RETURNS:", 0) == 0) {
+        info.returnType = trim(returnLine.substr(8));
+        if (info.returnType.empty()) info.returnType = "text";
+    }
     info.name = funcname;
     return info;
 }
@@ -5011,23 +5022,26 @@ StorageEngine::UDFInfo StorageEngine::getUDF(const std::string& dbname,
 
 bool StorageEngine::callUDF(const std::string& dbname, const std::string& funcname,
                             const std::vector<std::string>& argValues,
-                            std::string& returnValue) const {
+                            std::string& returnValue,
+                            bool* returnIsNull) const {
     auto udf = getUDF(dbname, funcname);
     if (udf.expression.empty()) return false;
     return evalUDFBody(udf, funcname, argValues,
-                       const_cast<StorageEngine*>(this), dbname, returnValue);
+                       const_cast<StorageEngine*>(this), dbname, returnValue,
+                       nullptr, returnIsNull);
 }
 
 bool StorageEngine::callUDFWithCtx(const std::string& dbname,
                                    const std::string& funcname,
                                    const std::vector<std::string>& argValues,
                                    const TriggerCtx& ctx,
-                                   std::string& returnValue) const {
+                                   std::string& returnValue,
+                                   bool* returnIsNull) const {
     auto udf = getUDF(dbname, funcname);
     if (udf.expression.empty()) return false;
     return evalUDFBody(udf, funcname, argValues,
                        const_cast<StorageEngine*>(this), dbname, returnValue,
-                       &ctx.vars);
+                       &ctx.vars, returnIsNull);
 }
 
 std::vector<std::string> StorageEngine::getUDFNames(const std::string& dbname) const {
@@ -28840,7 +28854,9 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
                         StorageEngine* engine,
                         const std::string& dbname,
                         std::string& returnValue,
-                        const std::map<std::string, std::string>* extraVars) {
+                        const std::map<std::string, std::string>* extraVars,
+                        bool* returnIsNull) {
+    if (returnIsNull) *returnIsNull = false;
     auto udf_ = udf;
     (void)udf_;
     std::vector<std::string> funcArgs = argValues;
@@ -28884,7 +28900,8 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
             return engine->plpgsqlSelectInto(dbname, list, from, "", intoVars, vars);
         };
         std::string rv, err;
-        if (!PlPgsql::run(udf.expression, params, host, rv, err)) {
+        if (!PlPgsql::run(udf.expression, params, host, rv, err, nullptr,
+                          returnIsNull)) {
             return false;
         }
         returnValue = rv;
