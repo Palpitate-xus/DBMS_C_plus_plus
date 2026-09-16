@@ -25019,6 +25019,19 @@ DBStatus StorageEngine::update(
     const UpdateResolver& updateResolver,
     const UpdateMatcher& updateMatcher,
     size_t* affectedRows) {
+    return update(dbname, tablename, updates, conditions, updatedRows,
+                  updateResolver, updateMatcher, affectedRows, nullptr);
+}
+
+DBStatus StorageEngine::update(
+    const std::string& dbname, const std::string& tablename,
+    const std::map<std::string, std::string>& updates,
+    const std::vector<std::string>& conditions,
+    std::vector<std::map<std::string, std::string>>* updatedRows,
+    const UpdateResolver& updateResolver,
+    const UpdateMatcher& updateMatcher,
+    size_t* affectedRows,
+    std::vector<UpdateRowImage>* rowImages) {
     SqlUpdateResolver typedResolver;
     if (updateResolver) {
         typedResolver = [updateResolver](const SqlRow& oldValues,
@@ -25040,7 +25053,7 @@ DBStatus StorageEngine::update(
     const DBStatus status = updateRows(
         dbname, tablename, sqlRowFromLegacy(updates), conditions,
         updatedRows ? &typedRows : nullptr, typedResolver, typedMatcher,
-        affectedRows);
+        affectedRows, rowImages);
     if (updatedRows) {
         for (const auto& row : typedRows) {
             updatedRows->push_back(legacyRowFromSql(row));
@@ -25069,6 +25082,19 @@ DBStatus StorageEngine::updateRows(
     const SqlUpdateResolver& updateResolver,
     const SqlUpdateMatcher& updateMatcher,
     size_t* affectedRows) {
+    return updateRows(dbname, tablename, sqlUpdates, conditions, updatedRows,
+                      updateResolver, updateMatcher, affectedRows, nullptr);
+}
+
+DBStatus StorageEngine::updateRows(
+    const std::string& dbname, const std::string& tablename,
+    const SqlRow& sqlUpdates,
+    const std::vector<std::string>& conditions,
+    std::vector<SqlRow>* updatedRows,
+    const SqlUpdateResolver& updateResolver,
+    const SqlUpdateMatcher& updateMatcher,
+    size_t* affectedRows,
+    std::vector<UpdateRowImage>* rowImages) {
     if (affectedRows) *affectedRows = 0;
     std::map<std::string, std::string> updates;
     std::set<std::string> updateNullColumns;
@@ -25083,6 +25109,7 @@ DBStatus StorageEngine::updateRows(
     // row cannot leave earlier rows permanently modified.
     const bool ownsTransaction = !transactionContext().inTransaction;
     const size_t returnedRowStart = updatedRows ? updatedRows->size() : 0;
+    const size_t returnedImageStart = rowImages ? rowImages->size() : 0;
     std::string statementSavepoint;
     bool hasStatementSavepoint = false;
     if (ownsTransaction) {
@@ -25104,7 +25131,7 @@ DBStatus StorageEngine::updateRows(
     const DBStatus updateStatus = updateInternal(
         dbname, tablename, updates, updateNullColumns, conditions,
         updatedRows, updateResolver, updateMatcher, nullptr,
-        referentialContext, affectedRows);
+        referentialContext, affectedRows, rowImages);
     if (updateStatus != DBStatus::OK) {
         DBStatus rollbackStatus = DBStatus::OK;
         if (ownsTransaction && transactionContext().inTransaction) {
@@ -25122,6 +25149,7 @@ DBStatus StorageEngine::updateRows(
             rollbackStatus = rollbackTransaction();
         }
         if (updatedRows) updatedRows->resize(returnedRowStart);
+        if (rowImages) rowImages->resize(returnedImageStart);
         if (affectedRows) *affectedRows = 0;
         return rollbackStatus == DBStatus::OK ? updateStatus : rollbackStatus;
     }
@@ -25131,6 +25159,7 @@ DBStatus StorageEngine::updateRows(
         const DBStatus releaseStatus = releaseSavepoint(statementSavepoint);
         if (releaseStatus == DBStatus::OK) return DBStatus::OK;
         if (updatedRows) updatedRows->resize(returnedRowStart);
+        if (rowImages) rowImages->resize(returnedImageStart);
         if (affectedRows) *affectedRows = 0;
         const DBStatus rollbackStatus = rollbackTransaction();
         return rollbackStatus == DBStatus::OK
@@ -25140,6 +25169,8 @@ DBStatus StorageEngine::updateRows(
     const DBStatus commitStatus = commitTransaction();
     if (commitStatus != DBStatus::OK && updatedRows)
         updatedRows->resize(returnedRowStart);
+    if (commitStatus != DBStatus::OK && rowImages)
+        rowImages->resize(returnedImageStart);
     if (commitStatus != DBStatus::OK && affectedRows) *affectedRows = 0;
     return commitStatus;
 }
@@ -25154,7 +25185,8 @@ DBStatus StorageEngine::updateInternal(
     const SqlUpdateMatcher& updateMatcher,
     const std::set<int64_t>* exactRids,
     ReferentialActionContext& referentialContext,
-    size_t* affectedRows) {
+    size_t* affectedRows,
+    std::vector<UpdateRowImage>* rowImages) {
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
         if ((transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
              transactionContext().txnIsolationLevel == IsolationLevel::READ_UNCOMMITTED) &&
@@ -27609,18 +27641,30 @@ DBStatus StorageEngine::updateInternal(
         // value PostgreSQL exposes through UPDATE ... RETURNING: after the
         // row has been rebuilt and generated columns/BEFORE triggers applied,
         // without a second predicate query that could select a different row.
-        if (updatedRows) {
-            SqlRow values;
+        if (updatedRows || rowImages) {
+            SqlRow oldValues;
+            SqlRow newValues;
             for (size_t i = 0; i < tbl.len; ++i) {
-                if (newColumnIsNull(i)) {
-                    values[tbl.cols[i].dataName] = std::nullopt;
+                if (i < oldNullColumns.size() && oldNullColumns[i]) {
+                    oldValues[tbl.cols[i].dataName] = std::nullopt;
                 } else {
-                    values[tbl.cols[i].dataName] =
+                    oldValues[tbl.cols[i].dataName] =
+                        valueFromRowMap(oldLogicalValues,
+                                        tbl.cols[i].dataName);
+                }
+                if (newColumnIsNull(i)) {
+                    newValues[tbl.cols[i].dataName] = std::nullopt;
+                } else {
+                    newValues[tbl.cols[i].dataName] =
                         extractColumnValue(
                             strippedNewRow, tbl, i, dbname, true);
                 }
             }
-            updatedRows->push_back(std::move(values));
+            if (updatedRows) updatedRows->push_back(newValues);
+            if (rowImages) {
+                rowImages->push_back(
+                    {std::move(oldValues), std::move(newValues)});
+            }
         }
     }
 

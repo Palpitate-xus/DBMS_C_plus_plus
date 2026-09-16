@@ -479,6 +479,10 @@ public:
     // still means DEFAULT (INSERT) or leave unchanged (UPDATE).
     using SqlCell = std::optional<std::string>;
     using SqlRow = std::map<std::string, SqlCell>;
+    struct UpdateRowImage {
+        SqlRow oldRow;
+        SqlRow newRow;
+    };
     enum class IdentityOverride {
         None,
         System,
@@ -527,6 +531,15 @@ public:
         const UpdateResolver& updateResolver,
         const UpdateMatcher& updateMatcher,
         size_t* affectedRows);
+    DBStatus update(
+        const std::string& dbname, const std::string& tablename,
+        const std::map<std::string, std::string>& updates,
+        const std::vector<std::string>& conditions,
+        std::vector<std::map<std::string, std::string>>* updatedRows,
+        const UpdateResolver& updateResolver,
+        const UpdateMatcher& updateMatcher,
+        size_t* affectedRows,
+        std::vector<UpdateRowImage>* rowImages);
     DBStatus updateRows(
         const std::string& dbname, const std::string& tablename,
         const SqlRow& updates, const std::vector<std::string>& conditions,
@@ -540,6 +553,14 @@ public:
         const SqlUpdateResolver& updateResolver,
         const SqlUpdateMatcher& updateMatcher,
         size_t* affectedRows);
+    DBStatus updateRows(
+        const std::string& dbname, const std::string& tablename,
+        const SqlRow& updates, const std::vector<std::string>& conditions,
+        std::vector<SqlRow>* updatedRows,
+        const SqlUpdateResolver& updateResolver,
+        const SqlUpdateMatcher& updateMatcher,
+        size_t* affectedRows,
+        std::vector<UpdateRowImage>* rowImages);
     DBStatus remove(
         const std::string& dbname, const std::string& tablename,
         const std::vector<std::string>& conditions,
@@ -1820,7 +1841,8 @@ private:
         const SqlUpdateMatcher& updateMatcher,
         const std::set<int64_t>* exactRids,
         ReferentialActionContext& referentialContext,
-        size_t* affectedRows = nullptr);
+        size_t* affectedRows = nullptr,
+        std::vector<UpdateRowImage>* rowImages = nullptr);
 
 
 private:

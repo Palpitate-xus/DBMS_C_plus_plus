@@ -606,6 +606,13 @@ struct SelectItem {
     std::string alias;         // AS alias
 };
 
+struct ReturningOptions {
+    bool oldAliased = false;
+    bool newAliased = false;
+    std::string oldAlias;
+    std::string newAlias;
+};
+
 struct FromItem {
     enum class Type { Table, Subquery, Join, Function };
     Type type = Type::Table;
@@ -702,6 +709,7 @@ struct InsertStmt : public Stmt {
     std::vector<std::pair<std::string, ExprPtr>> conflictUpdateSet;
     ExprPtr conflictWhere;
     std::vector<SelectItem> returning;
+    ReturningOptions returningOptions;
     bool defaultValues = false;                // DEFAULT VALUES
     std::string override_;                     // OVERRIDING SYSTEM VALUE / USER VALUE
 
@@ -721,6 +729,7 @@ struct UpdateStmt : public Stmt {
     std::string whereCurrentOf;                // WHERE CURRENT OF cursor
     std::unique_ptr<FromItem> fromClause;      // UPDATE ... FROM ...
     std::vector<SelectItem> returning;
+    ReturningOptions returningOptions;
     bool only = false;                         // UPDATE ONLY table
 
     UpdateStmt() : Stmt(SqlCommand::Update) {}
@@ -738,6 +747,7 @@ struct DeleteStmt : public Stmt {
     std::string whereCurrentOf;                // WHERE CURRENT OF cursor
     std::unique_ptr<FromItem> usingClause;     // DELETE ... USING ...
     std::vector<SelectItem> returning;
+    ReturningOptions returningOptions;
     bool only = false;                         // DELETE FROM ONLY table
 
     DeleteStmt() : Stmt(SqlCommand::Delete) {}
@@ -764,6 +774,7 @@ struct MergeStmt : public Stmt {
     };
     std::vector<WhenClause> whenClauses;
     std::vector<SelectItem> returning;
+    ReturningOptions returningOptions;
 
     MergeStmt() : Stmt(SqlCommand::Merge) {}
     std::string toString() const override { return "MERGE"; }

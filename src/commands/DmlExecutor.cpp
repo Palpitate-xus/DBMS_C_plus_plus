@@ -1033,11 +1033,70 @@ bool buildConditions(const ExprPtr& expr, std::vector<std::string>& conditions) 
 }
 
 struct ReturningProjection {
+    enum class Source { Default, Old, New, Action };
     const Expr* expression = nullptr;
     std::string column;
     std::string name;
     std::string typeName;
+    Source source = Source::Default;
 };
+
+struct ReturningBinding {
+    std::string oldName;
+    std::string newName;
+    std::set<std::string> defaultQualifiers;
+    bool allowMergeAction = false;
+};
+
+struct ReturningRowImage {
+    SqlRow oldRow;
+    SqlRow newRow;
+    ReturningProjection::Source defaultSource =
+        ReturningProjection::Source::New;
+    std::string action;
+};
+
+std::string unqualifiedRelationName(const std::string& name);
+
+ReturningBinding returningBinding(const ReturningOptions& options,
+                                  const std::string& tableName,
+                                  const std::string& tableAlias,
+                                  bool allowMergeAction = false) {
+    ReturningBinding binding;
+    binding.oldName = identifier(
+        options.oldAliased ? options.oldAlias : "old");
+    binding.newName = identifier(
+        options.newAliased ? options.newAlias : "new");
+    if (tableAlias.empty()) {
+        binding.defaultQualifiers.insert(
+            unqualifiedRelationName(identifier(tableName)));
+    } else {
+        binding.defaultQualifiers.insert(identifier(tableAlias));
+    }
+    binding.allowMergeAction = allowMergeAction;
+    return binding;
+}
+
+std::optional<ReturningProjection::Source> returningSourceForQualifier(
+    const std::string& rawQualifier, const ReturningBinding& binding) {
+    if (rawQualifier.empty()) return ReturningProjection::Source::Default;
+    const std::string qualifier = identifier(rawQualifier);
+    if (qualifier == binding.oldName) return ReturningProjection::Source::Old;
+    if (qualifier == binding.newName) return ReturningProjection::Source::New;
+    if (binding.defaultQualifiers.count(qualifier) != 0) {
+        return ReturningProjection::Source::Default;
+    }
+    return std::nullopt;
+}
+
+bool returningBindingIsValid(const ReturningBinding& binding) {
+    if (binding.oldName.empty() || binding.newName.empty() ||
+        binding.oldName == binding.newName) {
+        return false;
+    }
+    return binding.defaultQualifiers.count(binding.oldName) == 0 &&
+           binding.defaultQualifiers.count(binding.newName) == 0;
+}
 
 std::string tableColumnType(const TableSchema& table, const std::string& name) {
     const std::string column = identifier(name);
@@ -1134,11 +1193,13 @@ std::string inferReturningType(const Expr* expr, const TableSchema& table) {
 }
 
 bool supportsReturningExpression(const Expr* expr, const TableSchema& table,
+                                 const ReturningBinding& binding,
                                  ExprEvaluator& evaluator) {
     if (!expr) return false;
     if (dynamic_cast<const LiteralExpr*>(expr)) return true;
     if (const auto* ref = dynamic_cast<const ColumnRefExpr*>(expr)) {
-        if (!ref->schema.empty() || !ref->table.empty()) return false;
+        if (!ref->schema.empty() ||
+            !returningSourceForQualifier(ref->table, binding)) return false;
         const std::string column = identifier(ref->column);
         for (size_t i = 0; i < table.len; ++i) {
             if (table.cols[i].dataName == column) return true;
@@ -1151,7 +1212,8 @@ bool supportsReturningExpression(const Expr* expr, const TableSchema& table,
             "is true", "is not true", "is false", "is not false"
         };
         return supported.count(lower(unary->op)) != 0 &&
-               supportsReturningExpression(unary->operand.get(), table, evaluator);
+               supportsReturningExpression(
+                   unary->operand.get(), table, binding, evaluator);
     }
     if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expr)) {
         static const std::set<std::string> supported = {
@@ -1160,45 +1222,61 @@ bool supportsReturningExpression(const Expr* expr, const TableSchema& table,
             "ilike", "not ilike", "similar to", "not similar to", "in", "::"
         };
         return supported.count(lower(binary->op)) != 0 &&
-               supportsReturningExpression(binary->left.get(), table, evaluator) &&
-               supportsReturningExpression(binary->right.get(), table, evaluator);
+               supportsReturningExpression(
+                   binary->left.get(), table, binding, evaluator) &&
+               supportsReturningExpression(
+                   binary->right.get(), table, binding, evaluator);
     }
     if (const auto* call = dynamic_cast<const FunctionCallExpr*>(expr)) {
+        if (lower(call->funcName) == "merge_action") {
+            // Standalone merge_action() is materialized by the RETURNING
+            // publisher. Nested use needs evaluator support and therefore
+            // remains outside this bounded implementation.
+            return false;
+        }
         if (!evaluator.hasFunction(call->funcName) || call->distinct || call->filter ||
             call->hasOver || !call->namedArgs.empty() || !call->orderBy.empty()) {
             return false;
         }
         for (const auto& arg : call->args) {
-            if (!supportsReturningExpression(arg.get(), table, evaluator)) return false;
+            if (!supportsReturningExpression(arg.get(), table, binding,
+                                             evaluator)) return false;
         }
         return true;
     }
     if (const auto* cast = dynamic_cast<const CastExpr*>(expr)) {
-        return supportsReturningExpression(cast->operand.get(), table, evaluator);
+        return supportsReturningExpression(
+            cast->operand.get(), table, binding, evaluator);
     }
     if (const auto* caseExpr = dynamic_cast<const CaseExpr*>(expr)) {
         if (caseExpr->switchExpr &&
-            !supportsReturningExpression(caseExpr->switchExpr.get(), table, evaluator)) {
+            !supportsReturningExpression(
+                caseExpr->switchExpr.get(), table, binding, evaluator)) {
             return false;
         }
         for (const auto& clause : caseExpr->whenClauses) {
-            if (!supportsReturningExpression(clause.first.get(), table, evaluator) ||
-                !supportsReturningExpression(clause.second.get(), table, evaluator)) {
+            if (!supportsReturningExpression(
+                    clause.first.get(), table, binding, evaluator) ||
+                !supportsReturningExpression(
+                    clause.second.get(), table, binding, evaluator)) {
                 return false;
             }
         }
         return !caseExpr->elseExpr ||
-               supportsReturningExpression(caseExpr->elseExpr.get(), table, evaluator);
+               supportsReturningExpression(
+                   caseExpr->elseExpr.get(), table, binding, evaluator);
     }
     if (const auto* array = dynamic_cast<const ArrayExpr*>(expr)) {
         for (const auto& element : array->elements) {
-            if (!supportsReturningExpression(element.get(), table, evaluator)) return false;
+            if (!supportsReturningExpression(
+                    element.get(), table, binding, evaluator)) return false;
         }
         return true;
     }
     if (const auto* row = dynamic_cast<const RowExpr*>(expr)) {
         for (const auto& element : row->elements) {
-            if (!supportsReturningExpression(element.get(), table, evaluator)) return false;
+            if (!supportsReturningExpression(
+                    element.get(), table, binding, evaluator)) return false;
         }
         return true;
     }
@@ -1207,8 +1285,10 @@ bool supportsReturningExpression(const Expr* expr, const TableSchema& table,
 
 bool buildReturningProjections(const std::vector<SelectItem>& returning,
                                const TableSchema& table,
+                               const ReturningBinding& binding,
                                std::vector<ReturningProjection>& projections) {
     projections.clear();
+    if (!returningBindingIsValid(binding)) return false;
     ExprEvaluator evaluator;
     for (const auto& item : returning) {
         if (!item.expr) return false;
@@ -1217,25 +1297,47 @@ bool buildReturningProjections(const std::vector<SelectItem>& returning,
             if (!item.alias.empty()) return false;
             for (size_t i = 0; i < table.len; ++i) {
                 projections.push_back({nullptr, table.cols[i].dataName,
-                                       table.cols[i].dataName, table.cols[i].dataType});
+                                       table.cols[i].dataName,
+                                       table.cols[i].dataType,
+                                       ReturningProjection::Source::Default});
             }
             continue;
         }
         const auto* ref = dynamic_cast<const ColumnRefExpr*>(item.expr.get());
         if (ref && identifier(ref->column) == "*") {
             if (!item.alias.empty()) return false;
+            const auto source = returningSourceForQualifier(ref->table, binding);
+            if (!ref->schema.empty() || !source) return false;
             for (size_t i = 0; i < table.len; ++i) {
                 projections.push_back({nullptr, table.cols[i].dataName,
-                                       table.cols[i].dataName, table.cols[i].dataType});
+                                       table.cols[i].dataName,
+                                       table.cols[i].dataType, *source});
             }
             continue;
         }
-        if (!supportsReturningExpression(item.expr.get(), table, evaluator)) return false;
         const std::string name = item.alias.empty()
             ? (ref ? identifier(ref->column) : item.expr->toString())
             : identifier(item.alias);
-        projections.push_back({item.expr.get(), {}, name.empty() ? "?column?" : name,
-                               inferReturningType(item.expr.get(), table)});
+        const auto* call = dynamic_cast<const FunctionCallExpr*>(item.expr.get());
+        const bool mergeAction = call &&
+            lower(call->funcName) == "merge_action";
+        if (mergeAction) {
+            if (!binding.allowMergeAction || !call->args.empty() ||
+                call->distinct || call->filter || call->hasOver ||
+                !call->namedArgs.empty() || !call->orderBy.empty()) {
+                return false;
+            }
+        } else if (!supportsReturningExpression(
+                       item.expr.get(), table, binding, evaluator)) {
+            return false;
+        }
+        projections.push_back({mergeAction ? nullptr : item.expr.get(), {},
+                               name.empty() ? "?column?" : name,
+                               mergeAction ? "text" :
+                                   inferReturningType(item.expr.get(), table),
+                               mergeAction
+                                   ? ReturningProjection::Source::Action
+                                   : ReturningProjection::Source::Default});
     }
     return !projections.empty();
 }
@@ -1498,33 +1600,93 @@ InsertSelectBuildResult buildInsertSelectRows(
                             : InsertSelectBuildResult::Success;
 }
 
-RowContext returningContext(const std::map<std::string, std::string>& source,
-                            const TableSchema& table) {
-    RowContext context;
-    for (size_t i = 0; i < table.len; ++i) {
-        const Column& column = table.cols[i];
-        const auto it = source.find(column.dataName);
-        const bool isNull =
-            it == source.end() || it->second == "NULL";
-        context.set(column.dataName,
-                    ExprValue(column.dataType, isNull ? "" : it->second, isNull));
-    }
-    return context;
-}
-
-RowContext returningContext(const SqlRow& source,
-                            const TableSchema& table) {
-    RowContext context;
+void addReturningRowToContext(RowContext& context, const SqlRow& source,
+                              const TableSchema& table,
+                              const std::string& qualifier,
+                              bool unqualified) {
     for (size_t i = 0; i < table.len; ++i) {
         const Column& column = table.cols[i];
         const auto it = source.find(column.dataName);
         const bool isNull = it == source.end() || !it->second;
-        context.set(
-            column.dataName,
-            ExprValue(column.dataType,
-                      isNull ? std::string{} : *it->second, isNull));
+        const ExprValue value(
+            column.dataType,
+            isNull ? std::string{} : *it->second, isNull);
+        if (unqualified) context.set(column.dataName, value);
+        if (!qualifier.empty()) {
+            context.set(qualifier + "." + column.dataName, value);
+        }
     }
+}
+
+const SqlRow& returningSourceRow(
+    const ReturningRowImage& image, ReturningProjection::Source source) {
+    if (source == ReturningProjection::Source::Old) return image.oldRow;
+    if (source == ReturningProjection::Source::New) return image.newRow;
+    return image.defaultSource == ReturningProjection::Source::Old
+        ? image.oldRow : image.newRow;
+}
+
+RowContext returningContext(const ReturningRowImage& image,
+                            const TableSchema& table,
+                            const ReturningBinding& binding) {
+    RowContext context;
+    const SqlRow& defaultRow = returningSourceRow(
+        image, ReturningProjection::Source::Default);
+    addReturningRowToContext(context, defaultRow, table, "", true);
+    for (const auto& qualifier : binding.defaultQualifiers) {
+        addReturningRowToContext(
+            context, defaultRow, table, qualifier, false);
+    }
+    addReturningRowToContext(
+        context, image.oldRow, table, binding.oldName, false);
+    addReturningRowToContext(
+        context, image.newRow, table, binding.newName, false);
     return context;
+}
+
+SqlRow returningSqlRow(
+    const std::map<std::string, std::string>& legacyRow) {
+    SqlRow row;
+    for (const auto& [column, value] : legacyRow) {
+        // Legacy mutation APIs use the sentinel NULL for SQL NULL. New DML
+        // paths use SqlRow and therefore keep the ordinary text "NULL"
+        // distinct; this conversion is limited to the remaining legacy
+        // insert/update entry points.
+        row[column] = value == "NULL" ? SqlCell{} : SqlCell{value};
+    }
+    return row;
+}
+
+std::vector<ReturningRowImage> insertedReturningImages(
+    const std::vector<std::map<std::string, std::string>>& rows) {
+    std::vector<ReturningRowImage> images;
+    images.reserve(rows.size());
+    for (const auto& row : rows) {
+        images.push_back(
+            {{}, returningSqlRow(row), ReturningProjection::Source::New, {}});
+    }
+    return images;
+}
+
+std::vector<ReturningRowImage> updatedReturningImages(
+    const std::vector<StorageEngine::UpdateRowImage>& rows) {
+    std::vector<ReturningRowImage> images;
+    images.reserve(rows.size());
+    for (const auto& row : rows) {
+        images.push_back(
+            {row.oldRow, row.newRow, ReturningProjection::Source::New, {}});
+    }
+    return images;
+}
+
+std::vector<ReturningRowImage> deletedReturningImages(
+    const std::vector<SqlRow>& rows) {
+    std::vector<ReturningRowImage> images;
+    images.reserve(rows.size());
+    for (const auto& row : rows) {
+        images.push_back({row, {}, ReturningProjection::Source::Old, {}});
+    }
+    return images;
 }
 
 RowContext updateContext(const SqlRow& source,
@@ -1985,30 +2147,9 @@ bool evaluateUpdateExpression(const Expr* expression,
 }
 
 bool evaluateReturningExpression(const Expr* expression,
-                                 const std::map<std::string, std::string>& source,
+                                 const ReturningRowImage& image,
                                  const TableSchema& table,
-                                 const std::string& currentDB,
-                                 std::string& value,
-                                 std::string& typeName) {
-    ExprEvaluator evaluator;
-    evaluator.setCurrentDB(currentDB);
-    const ExprValue result = evaluator.eval(expression, returningContext(source, table));
-    if (!result.isNull && (result.isUnknown() || result.typeName == "unknown")) {
-        return false;
-    }
-    if (result.isNull) {
-        value = "NULL";
-        typeName = result.typeName;
-        return true;
-    }
-    value = result.value;
-    typeName = result.typeName;
-    return true;
-}
-
-bool evaluateReturningExpression(const Expr* expression,
-                                 const SqlRow& source,
-                                 const TableSchema& table,
+                                 const ReturningBinding& binding,
                                  const std::string& currentDB,
                                  std::string& value,
                                  bool& isNull,
@@ -2016,7 +2157,7 @@ bool evaluateReturningExpression(const Expr* expression,
     ExprEvaluator evaluator;
     evaluator.setCurrentDB(currentDB);
     const ExprValue result = evaluator.eval(
-        expression, returningContext(source, table));
+        expression, returningContext(image, table, binding));
     if (!result.isNull &&
         (result.isUnknown() || result.typeName == "unknown")) {
         return false;
@@ -2024,57 +2165,6 @@ bool evaluateReturningExpression(const Expr* expression,
     isNull = result.isNull;
     value = isNull ? std::string{} : result.value;
     typeName = result.typeName;
-    return true;
-}
-
-bool publishReturning(const std::vector<ReturningProjection>& projections,
-                      const TableSchema& table,
-                      const std::string& currentDB,
-                      const std::vector<std::map<std::string, std::string>>& rows,
-                      const std::string& command) {
-    g_lastDmlResult.available = true;
-    g_lastDmlResult.columns.clear();
-    g_lastDmlResult.columnTypes.clear();
-    g_lastDmlResult.rows.clear();
-    g_lastDmlResult.nulls.clear();
-    for (const auto& projection : projections) {
-        g_lastDmlResult.columns.push_back(projection.name);
-        g_lastDmlResult.columnTypes.push_back(projection.typeName);
-    }
-    g_lastDmlResult.commandTag = command == "INSERT"
-        ? "INSERT 0 " + std::to_string(rows.size())
-        : command + " " + std::to_string(rows.size());
-    g_lastDmlResult.rows.reserve(rows.size());
-    g_lastDmlResult.nulls.reserve(rows.size());
-    for (const auto& source : rows) {
-        std::vector<std::string> row;
-        std::vector<bool> nulls;
-        row.reserve(projections.size());
-        nulls.reserve(projections.size());
-        for (size_t i = 0; i < projections.size(); ++i) {
-            const auto& projection = projections[i];
-            std::string value;
-            if (projection.expression == nullptr) {
-                const auto it = source.find(projection.column);
-                value = it == source.end() || it->second == "NULL"
-                    ? "NULL" : it->second;
-            } else {
-                std::string typeName;
-                if (!evaluateReturningExpression(projection.expression, source, table,
-                                                  currentDB, value, typeName)) {
-                    std::cout << "RETURNING expression evaluation failed" << std::endl;
-                    return false;
-                }
-                if (!typeName.empty() && typeName != "unknown") {
-                    g_lastDmlResult.columnTypes[i] = typeName;
-                }
-            }
-            row.push_back(std::move(value));
-            nulls.push_back(row.back() == "NULL");
-        }
-        g_lastDmlResult.rows.push_back(std::move(row));
-        g_lastDmlResult.nulls.push_back(std::move(nulls));
-    }
     return true;
 }
 
@@ -2089,24 +2179,22 @@ void publishMutationCount(const std::string& command, size_t affectedRows) {
 
 bool publishReturning(const std::vector<ReturningProjection>& projections,
                       const TableSchema& table,
+                      const ReturningBinding& binding,
                       const std::string& currentDB,
-                      const std::vector<SqlRow>& rows,
+                      const std::vector<ReturningRowImage>& images,
                       const std::string& command) {
+    g_lastDmlResult = {};
     g_lastDmlResult.available = true;
-    g_lastDmlResult.columns.clear();
-    g_lastDmlResult.columnTypes.clear();
-    g_lastDmlResult.rows.clear();
-    g_lastDmlResult.nulls.clear();
     for (const auto& projection : projections) {
         g_lastDmlResult.columns.push_back(projection.name);
         g_lastDmlResult.columnTypes.push_back(projection.typeName);
     }
     g_lastDmlResult.commandTag = command == "INSERT"
-        ? "INSERT 0 " + std::to_string(rows.size())
-        : command + " " + std::to_string(rows.size());
-    g_lastDmlResult.rows.reserve(rows.size());
-    g_lastDmlResult.nulls.reserve(rows.size());
-    for (const auto& source : rows) {
+        ? "INSERT 0 " + std::to_string(images.size())
+        : command + " " + std::to_string(images.size());
+    g_lastDmlResult.rows.reserve(images.size());
+    g_lastDmlResult.nulls.reserve(images.size());
+    for (const auto& image : images) {
         std::vector<std::string> row;
         std::vector<bool> nulls;
         row.reserve(projections.size());
@@ -2116,16 +2204,24 @@ bool publishReturning(const std::vector<ReturningProjection>& projections,
             std::string value;
             bool isNull = false;
             if (projection.expression == nullptr) {
-                const auto it = source.find(projection.column);
-                isNull = it == source.end() || !it->second;
-                value = isNull ? "NULL" : *it->second;
+                if (projection.source == ReturningProjection::Source::Action) {
+                    isNull = image.action.empty();
+                    value = isNull ? "NULL" : image.action;
+                } else {
+                    const SqlRow& source = returningSourceRow(
+                        image, projection.source);
+                    const auto it = source.find(projection.column);
+                    isNull = it == source.end() || !it->second;
+                    value = isNull ? "NULL" : *it->second;
+                }
             } else {
                 std::string typeName;
                 if (!evaluateReturningExpression(
-                        projection.expression, source, table, currentDB,
-                        value, isNull, typeName)) {
+                        projection.expression, image, table, binding,
+                        currentDB, value, isNull, typeName)) {
                     std::cout << "RETURNING expression evaluation failed"
                               << std::endl;
+                    g_lastDmlResult = {};
                     return false;
                 }
                 if (!typeName.empty() && typeName != "unknown") {
@@ -2182,6 +2278,84 @@ bool referencesColumn(const Expr* expr) {
         for (const auto& element : row->elements) {
             if (referencesColumn(element.get())) return true;
         }
+    }
+    return false;
+}
+
+bool usesReturningRowImage(const Expr* expr,
+                           const std::set<std::string>& qualifiers) {
+    if (!expr) return false;
+    if (const auto* ref = dynamic_cast<const ColumnRefExpr*>(expr)) {
+        return !ref->table.empty() &&
+               qualifiers.count(identifier(ref->table)) != 0;
+    }
+    if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expr)) {
+        return usesReturningRowImage(unary->operand.get(), qualifiers);
+    }
+    if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expr)) {
+        return usesReturningRowImage(binary->left.get(), qualifiers) ||
+               usesReturningRowImage(binary->right.get(), qualifiers);
+    }
+    if (const auto* call = dynamic_cast<const FunctionCallExpr*>(expr)) {
+        for (const auto& arg : call->args) {
+            if (usesReturningRowImage(arg.get(), qualifiers)) return true;
+        }
+        for (const auto& arg : call->namedArgs) {
+            if (usesReturningRowImage(arg.value.get(), qualifiers)) return true;
+        }
+        if (usesReturningRowImage(call->filter.get(), qualifiers)) return true;
+        if (call->hasOver) {
+            for (const auto& partition : call->over.partitionBy) {
+                if (usesReturningRowImage(
+                        partition.get(), qualifiers)) return true;
+            }
+            for (const auto& order : call->over.orderBy) {
+                if (usesReturningRowImage(
+                        order.first.get(), qualifiers)) return true;
+            }
+            if (usesReturningRowImage(
+                    call->over.frameStart.get(), qualifiers) ||
+                usesReturningRowImage(
+                    call->over.frameEnd.get(), qualifiers)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (const auto* cast = dynamic_cast<const CastExpr*>(expr)) {
+        return usesReturningRowImage(cast->operand.get(), qualifiers);
+    }
+    if (const auto* caseExpr = dynamic_cast<const CaseExpr*>(expr)) {
+        if (usesReturningRowImage(
+                caseExpr->switchExpr.get(), qualifiers)) return true;
+        for (const auto& clause : caseExpr->whenClauses) {
+            if (usesReturningRowImage(clause.first.get(), qualifiers) ||
+                usesReturningRowImage(clause.second.get(), qualifiers)) {
+                return true;
+            }
+        }
+        return usesReturningRowImage(caseExpr->elseExpr.get(), qualifiers);
+    }
+    if (const auto* array = dynamic_cast<const ArrayExpr*>(expr)) {
+        for (const auto& element : array->elements) {
+            if (usesReturningRowImage(element.get(), qualifiers)) return true;
+        }
+    }
+    if (const auto* row = dynamic_cast<const RowExpr*>(expr)) {
+        for (const auto& element : row->elements) {
+            if (usesReturningRowImage(element.get(), qualifiers)) return true;
+        }
+    }
+    return false;
+}
+
+bool usesVersionedReturning(const std::vector<SelectItem>& returning,
+                            const ReturningOptions& options) {
+    if (returning.empty()) return false;
+    if (options.oldAliased || options.newAliased) return true;
+    const std::set<std::string> qualifiers = {"old", "new"};
+    for (const auto& item : returning) {
+        if (usesReturningRowImage(item.expr.get(), qualifiers)) return true;
     }
     return false;
 }
@@ -2479,9 +2653,13 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
         return true;
     };
 
+    const ReturningBinding insertReturningBinding = returningBinding(
+        stmt.returningOptions, requestedTable, "");
     std::vector<ReturningProjection> returningProjections;
     if (!stmt.returning.empty() &&
-        !buildReturningProjections(stmt.returning, table, returningProjections)) {
+        !buildReturningProjections(stmt.returning, table,
+                                   insertReturningBinding,
+                                   returningProjections)) {
         fallback = true;
         return false;
     }
@@ -2616,8 +2794,10 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
         }
         std::cout << inserted << " row(s) inserted" << std::endl;
         if (!stmt.returning.empty()) {
-            if (!publishReturning(returningProjections, table, s.currentDB,
-                                  insertedRows, "INSERT")) return true;
+            if (!publishReturning(
+                    returningProjections, table, insertReturningBinding,
+                    s.currentDB, insertedReturningImages(insertedRows),
+                    "INSERT")) return true;
             printReturningRows(g_lastDmlResult);
         }
         if (inserted > 0) g_engine.analyzeTable(s.currentDB, resolvedTable);
@@ -2647,8 +2827,10 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
         if (status == DBStatus::DUPLICATE_KEY && ignoreDuplicate) {
             std::cout << "INSERT 0 0 (ON CONFLICT DO NOTHING)" << std::endl;
             if (!stmt.returning.empty()) {
-                if (!publishReturning(returningProjections, table, s.currentDB,
-                                      insertedRows, "INSERT")) return true;
+                if (!publishReturning(
+                        returningProjections, table, insertReturningBinding,
+                        s.currentDB, insertedReturningImages(insertedRows),
+                        "INSERT")) return true;
                 printReturningRows(g_lastDmlResult);
             }
             if (!statementScope.finish()) {
@@ -2664,8 +2846,10 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
         }
         std::cout << "INSERT 0 1 (DEFAULT VALUES)" << std::endl;
         if (!stmt.returning.empty()) {
-            if (!publishReturning(returningProjections, table, s.currentDB,
-                                  insertedRows, "INSERT")) return true;
+            if (!publishReturning(
+                    returningProjections, table, insertReturningBinding,
+                    s.currentDB, insertedReturningImages(insertedRows),
+                    "INSERT")) return true;
             printReturningRows(g_lastDmlResult);
         }
         g_engine.analyzeTable(s.currentDB, resolvedTable);
@@ -2757,6 +2941,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
         return true;
     }
     int inserted = 0;
+    std::vector<ReturningRowImage> returningImages;
     for (const auto& values : pendingRows) {
         const DBStatus status = g_engine.insertRow(
             s.currentDB, resolvedTable, values,
@@ -2844,6 +3029,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
                     rowConflictUpdates[updateColumn] = std::move(value);
                 }
                 std::vector<SqlRow> updatedRows;
+                std::vector<StorageEngine::UpdateRowImage> updateImages;
                 const auto targetMatcher =
                     [&](const SqlRow& candidate) {
                         return conflictTargetMatches(
@@ -2851,15 +3037,16 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
                     };
                 const DBStatus updateStatus = g_engine.updateRows(
                     s.currentDB, resolvedTable, rowConflictUpdates, {},
-                    &updatedRows, {}, targetMatcher);
+                    &updatedRows, {}, targetMatcher, nullptr,
+                    stmt.returning.empty() ? nullptr : &updateImages);
                 if (updateStatus != DBStatus::OK || updatedRows.size() != 1) {
                     std::cout << "ON CONFLICT DO UPDATE failed" << std::endl;
                     return true;
                 }
                 if (!stmt.returning.empty()) {
-                    sqlInsertedRows.insert(sqlInsertedRows.end(),
-                                           updatedRows.begin(),
-                                           updatedRows.end());
+                    const auto images = updatedReturningImages(updateImages);
+                    returningImages.insert(returningImages.end(),
+                                           images.begin(), images.end());
                 }
                 ++inserted;
                 continue;
@@ -2871,13 +3058,19 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
             std::cout << "Invalid data, please check" << std::endl;
             return true;
         }
+        if (!stmt.returning.empty() && !sqlInsertedRows.empty()) {
+            returningImages.push_back(
+                {{}, sqlInsertedRows.back(),
+                 ReturningProjection::Source::New, {}});
+        }
         ++inserted;
     }
 
     std::cout << inserted << " row(s) inserted" << std::endl;
     if (!stmt.returning.empty()) {
-        if (!publishReturning(returningProjections, table, s.currentDB,
-                              sqlInsertedRows, "INSERT")) return true;
+        if (!publishReturning(
+                returningProjections, table, insertReturningBinding,
+                s.currentDB, returningImages, "INSERT")) return true;
         printReturningRows(g_lastDmlResult);
     }
     if (inserted > 0) g_engine.analyzeTable(s.currentDB, resolvedTable);
@@ -3025,13 +3218,18 @@ bool executeUpdateFromJoin(const UpdateStmt& stmt, Session& s, bool& fallback) {
         return true;
     }
 
+    const ReturningBinding updateReturningBinding = returningBinding(
+        stmt.returningOptions, requestedTable, stmt.alias);
     std::vector<ReturningProjection> returningProjections;
     if (!stmt.returning.empty() &&
-        !buildReturningProjections(stmt.returning, targetSchema, returningProjections)) {
+        !buildReturningProjections(stmt.returning, targetSchema,
+                                   updateReturningBinding,
+                                   returningProjections)) {
         fallback = true;
         return false;
     }
     std::vector<std::map<std::string, std::string>> updatedRows;
+    std::vector<StorageEngine::UpdateRowImage> updateImages;
     StorageEngine::UpdateResolver updateResolver;
     if (!expressionUpdates.empty()) {
         updateResolver = [matchedUpdates](
@@ -3051,15 +3249,18 @@ bool executeUpdateFromJoin(const UpdateStmt& stmt, Session& s, bool& fallback) {
     const DBStatus status = g_engine.update(
         s.currentDB, resolvedTable, staticUpdates, {},
         stmt.returning.empty() ? nullptr : &updatedRows,
-        updateResolver, updateMatcher, &affectedRows);
+        updateResolver, updateMatcher, &affectedRows,
+        stmt.returning.empty() ? nullptr : &updateImages);
     if (status != DBStatus::OK) {
         std::cout << "ERROR: UPDATE FROM failed (SQLSTATE "
                   << sqlstateForDBStatus(status) << ")" << std::endl;
         return true;
     }
     if (!stmt.returning.empty()) {
-        if (!publishReturning(returningProjections, targetSchema, s.currentDB,
-                              updatedRows, "UPDATE")) return true;
+        if (!publishReturning(
+                returningProjections, targetSchema, updateReturningBinding,
+                s.currentDB, updatedReturningImages(updateImages),
+                "UPDATE")) return true;
     }
     if (!statementScope.finish()) {
         clearLastDmlResult();
@@ -3229,13 +3430,18 @@ bool executeUpdateFrom(const UpdateStmt& stmt, Session& s, bool& fallback) {
         return true;
     }
 
+    const ReturningBinding updateReturningBinding = returningBinding(
+        stmt.returningOptions, requestedTable, stmt.alias);
     std::vector<ReturningProjection> returningProjections;
     if (!stmt.returning.empty() &&
-        !buildReturningProjections(stmt.returning, targetSchema, returningProjections)) {
+        !buildReturningProjections(stmt.returning, targetSchema,
+                                   updateReturningBinding,
+                                   returningProjections)) {
         fallback = true;
         return false;
     }
     std::vector<std::map<std::string, std::string>> updatedRows;
+    std::vector<StorageEngine::UpdateRowImage> updateImages;
     StorageEngine::UpdateResolver updateResolver;
     if (!expressionUpdates.empty()) {
         updateResolver = [matchedUpdates](
@@ -3255,15 +3461,18 @@ bool executeUpdateFrom(const UpdateStmt& stmt, Session& s, bool& fallback) {
     const DBStatus status = g_engine.update(
         s.currentDB, resolvedTable, staticUpdates, {},
         stmt.returning.empty() ? nullptr : &updatedRows,
-        updateResolver, updateMatcher, &affectedRows);
+        updateResolver, updateMatcher, &affectedRows,
+        stmt.returning.empty() ? nullptr : &updateImages);
     if (status != DBStatus::OK) {
         std::cout << "ERROR: UPDATE FROM failed (SQLSTATE "
                   << sqlstateForDBStatus(status) << ")" << std::endl;
         return true;
     }
     if (!stmt.returning.empty()) {
-        if (!publishReturning(returningProjections, targetSchema, s.currentDB,
-                              updatedRows, "UPDATE")) return true;
+        if (!publishReturning(
+                returningProjections, targetSchema, updateReturningBinding,
+                s.currentDB, updatedReturningImages(updateImages),
+                "UPDATE")) return true;
     }
     if (!statementScope.finish()) {
         clearLastDmlResult();
@@ -3351,13 +3560,18 @@ bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
         fallback = true;
         return false;
     }
+    const ReturningBinding updateReturningBinding = returningBinding(
+        stmt.returningOptions, requestedTable, stmt.alias);
     std::vector<ReturningProjection> returningProjections;
     if (!stmt.returning.empty() &&
-        !buildReturningProjections(stmt.returning, table, returningProjections)) {
+        !buildReturningProjections(stmt.returning, table,
+                                   updateReturningBinding,
+                                   returningProjections)) {
         fallback = true;
         return false;
     }
     std::vector<SqlRow> updatedRows;
+    std::vector<StorageEngine::UpdateRowImage> updateImages;
     StorageEngine::SqlUpdateResolver updateResolver;
     if (!expressionUpdates.empty()) {
         updateResolver = [&, targetQualifier](
@@ -3374,25 +3588,39 @@ bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
             return true;
         };
     }
+    DmlStatementScope statementScope(g_engine, s.currentDB);
+    if (!statementScope.ready()) {
+        std::cout << "ERROR: UPDATE could not establish an atomic statement "
+                     "boundary (SQLSTATE 58030)" << std::endl;
+        return true;
+    }
     size_t affectedRows = 0;
     const DBStatus status = g_engine.updateRows(
         s.currentDB, resolvedTable, updates, conditions,
         stmt.returning.empty() ? nullptr : &updatedRows, updateResolver,
-        StorageEngine::SqlUpdateMatcher{}, &affectedRows);
+        StorageEngine::SqlUpdateMatcher{}, &affectedRows,
+        stmt.returning.empty() ? nullptr : &updateImages);
     if (status != DBStatus::OK) {
         std::cout << "ERROR: Update failed (SQLSTATE "
                   << sqlstateForDBStatus(status) << ")" << std::endl;
         return true;
     }
-    std::cout << "Update done" << std::endl;
     if (!stmt.returning.empty()) {
-        if (!publishReturning(returningProjections, table, s.currentDB,
-                              updatedRows, "UPDATE")) return true;
-        printReturningRows(g_lastDmlResult);
-    } else {
-        publishMutationCount("UPDATE", affectedRows);
+        if (!publishReturning(
+                returningProjections, table, updateReturningBinding,
+                s.currentDB, updatedReturningImages(updateImages),
+                "UPDATE")) return true;
+    }
+    if (!statementScope.finish()) {
+        clearLastDmlResult();
+        std::cout << "ERROR: UPDATE transaction finish failed "
+                     "(SQLSTATE 58030)" << std::endl;
+        return true;
     }
     g_engine.analyzeTable(s.currentDB, resolvedTable);
+    std::cout << "Update done" << std::endl;
+    if (!stmt.returning.empty()) printReturningRows(g_lastDmlResult);
+    else publishMutationCount("UPDATE", affectedRows);
     return false;
 }
 
@@ -3643,6 +3871,8 @@ bool executeMerge(const MergeStmt& stmt, Session& s, bool& fallback) {
         return true;
     }
 
+    const ReturningBinding mergeReturningBinding = returningBinding(
+        stmt.returningOptions, requestedTarget, stmt.targetAlias, true);
     std::vector<ReturningProjection> returningProjections;
     if (!stmt.returning.empty()) {
         for (const auto& item : stmt.returning) {
@@ -3650,13 +3880,14 @@ bool executeMerge(const MergeStmt& stmt, Session& s, bool& fallback) {
                 ? dynamic_cast<const ColumnRefExpr*>(item.expr.get()) : nullptr;
             if (ref && identifier(ref->column) == "*" &&
                 (!ref->schema.empty() ||
-                 (!ref->table.empty() &&
-                  identifier(ref->table) != identifier(targetQualifier)))) {
+                 !returningSourceForQualifier(
+                     ref->table, mergeReturningBinding))) {
                 return unsupported(
                     "RETURNING source-qualified star is not implemented");
             }
         }
         if (!buildReturningProjections(stmt.returning, targetSchema,
+                                       mergeReturningBinding,
                                        returningProjections)) {
             return unsupported(
                 "RETURNING supports target columns and bounded scalar expressions only");
@@ -3829,6 +4060,7 @@ bool executeMerge(const MergeStmt& stmt, Session& s, bool& fallback) {
     std::vector<SqlRow> deletedRows;
     std::vector<SqlRow> updatedRows;
     std::vector<SqlRow> insertedRows;
+    std::vector<StorageEngine::UpdateRowImage> updateImages;
     size_t deleted = 0;
     if (!pendingDeletes.empty()) {
         const StorageEngine::SqlDeleteMatcher matcher = [pendingDeletes](
@@ -3862,7 +4094,7 @@ bool executeMerge(const MergeStmt& stmt, Session& s, bool& fallback) {
         };
         const DBStatus status = g_engine.updateRows(
             s.currentDB, targetTable, {}, {}, &updatedRows, resolver, matcher,
-            &updated);
+            &updated, stmt.returning.empty() ? nullptr : &updateImages);
         if (status != DBStatus::OK) return mutationFailure("UPDATE", status);
         if (updated != expectedUpdates) {
             std::cout << "ERROR: MERGE target row changed during execution "
@@ -3877,15 +4109,26 @@ bool executeMerge(const MergeStmt& stmt, Session& s, bool& fallback) {
         if (status != DBStatus::OK) return mutationFailure("INSERT", status);
     }
 
-    std::vector<SqlRow> returningRows;
-    returningRows.reserve(deletedRows.size() + updatedRows.size() +
-                          insertedRows.size());
-    returningRows.insert(returningRows.end(), deletedRows.begin(), deletedRows.end());
-    returningRows.insert(returningRows.end(), updatedRows.begin(), updatedRows.end());
-    returningRows.insert(returningRows.end(), insertedRows.begin(), insertedRows.end());
+    std::vector<ReturningRowImage> returningImages;
+    returningImages.reserve(deletedRows.size() + updateImages.size() +
+                            insertedRows.size());
+    for (const auto& row : deletedRows) {
+        returningImages.push_back(
+            {row, {}, ReturningProjection::Source::Old, "DELETE"});
+    }
+    for (const auto& row : updateImages) {
+        returningImages.push_back(
+            {row.oldRow, row.newRow,
+             ReturningProjection::Source::New, "UPDATE"});
+    }
+    for (const auto& row : insertedRows) {
+        returningImages.push_back(
+            {{}, row, ReturningProjection::Source::New, "INSERT"});
+    }
     if (!stmt.returning.empty() &&
-        !publishReturning(returningProjections, targetSchema, s.currentDB,
-                          returningRows, "MERGE")) {
+        !publishReturning(returningProjections, targetSchema,
+                          mergeReturningBinding, s.currentDB,
+                          returningImages, "MERGE")) {
         clearLastDmlResult();
         std::cout << "ERROR: MERGE RETURNING expression evaluation failed "
                      "(SQLSTATE 22023)" << std::endl;
@@ -3993,9 +4236,13 @@ bool executeDeleteUsingJoin(const DeleteStmt& stmt, Session& s, bool& fallback) 
         return true;
     }
 
+    const ReturningBinding deleteReturningBinding = returningBinding(
+        stmt.returningOptions, requestedTable, stmt.alias);
     std::vector<ReturningProjection> returningProjections;
     if (!stmt.returning.empty() &&
-        !buildReturningProjections(stmt.returning, targetSchema, returningProjections)) {
+        !buildReturningProjections(stmt.returning, targetSchema,
+                                   deleteReturningBinding,
+                                   returningProjections)) {
         fallback = true;
         return false;
     }
@@ -4016,8 +4263,10 @@ bool executeDeleteUsingJoin(const DeleteStmt& stmt, Session& s, bool& fallback) 
         return true;
     }
     if (!stmt.returning.empty()) {
-        if (!publishReturning(returningProjections, targetSchema, s.currentDB,
-                              deletedRows, "DELETE")) return true;
+        if (!publishReturning(
+                returningProjections, targetSchema, deleteReturningBinding,
+                s.currentDB, deletedReturningImages(deletedRows),
+                "DELETE")) return true;
     }
     if (!statementScope.finish()) {
         clearLastDmlResult();
@@ -4139,9 +4388,13 @@ bool executeDeleteUsing(const DeleteStmt& stmt, Session& s, bool& fallback) {
         return true;
     }
 
+    const ReturningBinding deleteReturningBinding = returningBinding(
+        stmt.returningOptions, requestedTable, stmt.alias);
     std::vector<ReturningProjection> returningProjections;
     if (!stmt.returning.empty() &&
-        !buildReturningProjections(stmt.returning, targetSchema, returningProjections)) {
+        !buildReturningProjections(stmt.returning, targetSchema,
+                                   deleteReturningBinding,
+                                   returningProjections)) {
         fallback = true;
         return false;
     }
@@ -4162,8 +4415,10 @@ bool executeDeleteUsing(const DeleteStmt& stmt, Session& s, bool& fallback) {
         return true;
     }
     if (!stmt.returning.empty()) {
-        if (!publishReturning(returningProjections, targetSchema, s.currentDB,
-                              deletedRows, "DELETE")) return true;
+        if (!publishReturning(
+                returningProjections, targetSchema, deleteReturningBinding,
+                s.currentDB, deletedReturningImages(deletedRows),
+                "DELETE")) return true;
     }
     if (!statementScope.finish()) {
         clearLastDmlResult();
@@ -4207,13 +4462,23 @@ bool executeDelete(const DeleteStmt& stmt, Session& s, bool& fallback) {
         return false;
     }
     const TableSchema table = g_engine.getTableSchema(s.currentDB, resolvedTable);
+    const ReturningBinding deleteReturningBinding = returningBinding(
+        stmt.returningOptions, requestedTable, stmt.alias);
     std::vector<ReturningProjection> returningProjections;
     if (!stmt.returning.empty() &&
-        !buildReturningProjections(stmt.returning, table, returningProjections)) {
+        !buildReturningProjections(stmt.returning, table,
+                                   deleteReturningBinding,
+                                   returningProjections)) {
         fallback = true;
         return false;
     }
     std::vector<SqlRow> deletedRows;
+    DmlStatementScope statementScope(g_engine, s.currentDB);
+    if (!statementScope.ready()) {
+        std::cout << "ERROR: DELETE could not establish an atomic statement "
+                     "boundary (SQLSTATE 58030)" << std::endl;
+        return true;
+    }
     size_t affectedRows = 0;
     const DBStatus status = g_engine.removeRows(
         s.currentDB, resolvedTable, conditions,
@@ -4223,15 +4488,22 @@ bool executeDelete(const DeleteStmt& stmt, Session& s, bool& fallback) {
         std::cout << "Delete failed" << std::endl;
         return true;
     }
-    std::cout << "Delete done" << std::endl;
     if (!stmt.returning.empty()) {
-        if (!publishReturning(returningProjections, table, s.currentDB,
-                              deletedRows, "DELETE")) return true;
-        printReturningRows(g_lastDmlResult);
-    } else {
-        publishMutationCount("DELETE", affectedRows);
+        if (!publishReturning(
+                returningProjections, table, deleteReturningBinding,
+                s.currentDB, deletedReturningImages(deletedRows),
+                "DELETE")) return true;
+    }
+    if (!statementScope.finish()) {
+        clearLastDmlResult();
+        std::cout << "ERROR: DELETE transaction finish failed "
+                     "(SQLSTATE 58030)" << std::endl;
+        return true;
     }
     g_engine.analyzeTable(s.currentDB, resolvedTable);
+    std::cout << "Delete done" << std::endl;
+    if (!stmt.returning.empty()) printReturningRows(g_lastDmlResult);
+    else publishMutationCount("DELETE", affectedRows);
     return false;
 }
 
@@ -4348,6 +4620,35 @@ bool tryDmlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         error = executeMerge(*stmt, s, fallback);
     }
     if (fallback) {
+        bool versionedReturning = false;
+        bool aliasedTargetReturning = false;
+        if (const auto* insert = dynamic_cast<const InsertStmt*>(
+                parsed.stmt.get())) {
+            versionedReturning = usesVersionedReturning(
+                insert->returning, insert->returningOptions);
+        } else if (const auto* update = dynamic_cast<const UpdateStmt*>(
+                       parsed.stmt.get())) {
+            versionedReturning = usesVersionedReturning(
+                update->returning, update->returningOptions);
+            aliasedTargetReturning = !update->alias.empty() &&
+                !update->returning.empty();
+        } else if (const auto* deleteStmt = dynamic_cast<const DeleteStmt*>(
+                       parsed.stmt.get())) {
+            versionedReturning = usesVersionedReturning(
+                deleteStmt->returning, deleteStmt->returningOptions);
+            aliasedTargetReturning = !deleteStmt->alias.empty() &&
+                !deleteStmt->returning.empty();
+        } else if (const auto* merge = dynamic_cast<const MergeStmt*>(
+                       parsed.stmt.get())) {
+            versionedReturning = usesVersionedReturning(
+                merge->returning, merge->returningOptions);
+        }
+        if (versionedReturning || aliasedTargetReturning) {
+            handled = true;
+            std::cout << "ERROR: unsupported versioned or aliased RETURNING expression "
+                         "(SQLSTATE 0A000)" << std::endl;
+            return true;
+        }
         if (parsedCmd == SqlCommand::Update) {
             const auto* update = dynamic_cast<const UpdateStmt*>(parsed.stmt.get());
             if (update && update->fromClause) {

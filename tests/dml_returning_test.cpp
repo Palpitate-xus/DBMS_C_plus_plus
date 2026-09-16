@@ -18,7 +18,8 @@ static void cleanup(const std::string& db) {
 static bool runDml(const std::string& sql, Session& session) {
     bool handled = false;
     const auto command = dbms::SQLParser::classify(sql);
-    const bool error = dbms::tryDmlBridge(sql, command, session, handled);
+    const bool error = dbms::tryDmlBridge(
+        sql, command, session, handled, sql);
     assert(handled);
     return error;
 }
@@ -298,6 +299,103 @@ int main() {
         "RETURNING required_text, optional_text", session));
     result = dbms::takeLastDmlResult();
     assert((result.rows == std::vector<std::vector<std::string>>{{"", ""}}));
+
+    // PostgreSQL 18 exposes both tuple versions in RETURNING. Missing tuple
+    // versions are SQL NULL (OLD for a plain INSERT, NEW for DELETE), while
+    // unqualified target columns retain the statement's normal row image.
+    assert(!runDml(
+        "INSERT INTO empty_returning VALUES (3, 'created', 'optional') "
+        "RETURNING old.id AS old_id, new.id AS new_id, "
+        "old.required_text IS NULL AS old_is_null, required_text", session));
+    result = dbms::takeLastDmlResult();
+    assert(result.commandTag == "INSERT 0 1");
+    assert((result.rows == std::vector<std::vector<std::string>>{
+        {"NULL", "3", "t", "created"}}));
+    assert((result.nulls == std::vector<std::vector<bool>>{
+        {true, false, false, false}}));
+
+    assert(!runDml(
+        "UPDATE empty_returning SET required_text = 'changed' WHERE id = 3 "
+        "RETURNING old.required_text AS before, "
+        "new.required_text AS after, required_text AS current, "
+        "old.id + new.id AS id_sum", session));
+    result = dbms::takeLastDmlResult();
+    assert(result.commandTag == "UPDATE 1");
+    assert((result.rows == std::vector<std::vector<std::string>>{
+        {"created", "changed", "changed", "6"}}));
+    assert((result.nulls == std::vector<std::vector<bool>>{
+        {false, false, false, false}}));
+
+    assert(!runDml(
+        "UPDATE empty_returning SET optional_text = 'renamed' WHERE id = 3 "
+        "RETURNING WITH (OLD AS before_row, NEW AS after_row) "
+        "before_row.required_text, after_row.optional_text", session));
+    result = dbms::takeLastDmlResult();
+    assert((result.rows == std::vector<std::vector<std::string>>{
+        {"changed", "renamed"}}));
+
+    // Renaming OLD hides its default name. The typed executor owns the new
+    // syntax and must fail closed before changing the row.
+    assert(runDml(
+        "UPDATE empty_returning SET required_text = 'must-not-stick' "
+        "WHERE id = 3 RETURNING WITH (OLD AS before_row) old.id", session));
+    assert(!runDml(
+        "UPDATE empty_returning SET required_text = required_text WHERE id = 3 "
+        "RETURNING required_text", session));
+    result = dbms::takeLastDmlResult();
+    assert((result.rows == std::vector<std::vector<std::string>>{{"changed"}}));
+
+    assert(!runDml(
+        "DELETE FROM empty_returning WHERE id = 3 "
+        "RETURNING old.id AS old_id, new.id AS new_id, "
+        "new.optional_text IS NULL AS new_is_null", session));
+    result = dbms::takeLastDmlResult();
+    assert(result.commandTag == "DELETE 1");
+    assert((result.rows == std::vector<std::vector<std::string>>{
+        {"3", "NULL", "t"}}));
+    assert((result.nulls == std::vector<std::vector<bool>>{
+        {false, true, false}}));
+
+    // ON CONFLICT DO UPDATE is the INSERT case where OLD is populated.
+    assert(!runDml(
+        "INSERT INTO conflict_t VALUES (1, 'old-new') "
+        "ON CONFLICT (id) DO UPDATE SET name = excluded.name "
+        "RETURNING old.name AS before, new.name AS after", session));
+    result = dbms::takeLastDmlResult();
+    assert(result.commandTag == "INSERT 0 1");
+    assert((result.rows == std::vector<std::vector<std::string>>{
+        {"where-update", "old-new"}}));
+
+    dbms::TableSchema mergeTarget = table;
+    mergeTarget.tablename = "merge_returning_target";
+    mergeTarget.cols[0].isPrimaryKey = true;
+    dbms::TableSchema mergeSource = table;
+    mergeSource.tablename = "merge_returning_source";
+    assert(g_engine.createTable(db, mergeTarget) == dbms::DBStatus::OK);
+    assert(g_engine.createTable(db, mergeSource) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, mergeTarget.tablename,
+                           {{"id", "1"}, {"name", "target-old"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(db, mergeSource.tablename,
+                           {{"id", "1"}, {"name", "source-new"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(db, mergeSource.tablename,
+                           {{"id", "2"}, {"name", "source-insert"}}) ==
+           dbms::DBStatus::OK);
+    assert(!runDml(
+        "MERGE INTO merge_returning_target AS dst "
+        "USING merge_returning_source AS src ON dst.id = src.id "
+        "WHEN MATCHED THEN UPDATE SET name = src.name "
+        "WHEN NOT MATCHED THEN INSERT (id, name) VALUES (src.id, src.name) "
+        "RETURNING old.name AS before, new.name AS after, merge_action() AS action",
+        session));
+    result = dbms::takeLastDmlResult();
+    assert(result.commandTag == "MERGE 2");
+    assert((result.rows == std::vector<std::vector<std::string>>{
+        {"target-old", "source-new", "UPDATE"},
+        {"NULL", "source-insert", "INSERT"}}));
+    assert((result.nulls == std::vector<std::vector<bool>>{
+        {false, false, false}, {true, false, false}}));
 
     cleanup(db);
     std::cout << "[DML-RETURNING] INSERT SELECT and storage-boundary RETURNING OK" << std::endl;

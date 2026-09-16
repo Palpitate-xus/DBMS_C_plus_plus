@@ -624,6 +624,65 @@ int main() {
             "UPDATE target SET val = 1 WHERE CURRENT OF").success);
         assert(!parser.parse(
             "DELETE FROM target WHERE CURRENT OF").success);
+
+        auto insertReturning = parser.parse(
+            "INSERT INTO target VALUES (1) "
+            "RETURNING WITH (OLD AS o, NEW AS n) o.id, n.*");
+        assert(insertReturning.success);
+        auto* insertReturningStmt = dynamic_cast<InsertStmt*>(
+            insertReturning.stmt.get());
+        assert(insertReturningStmt);
+        assert(insertReturningStmt->returningOptions.oldAliased);
+        assert(insertReturningStmt->returningOptions.newAliased);
+        assert(insertReturningStmt->returningOptions.oldAlias == "o");
+        assert(insertReturningStmt->returningOptions.newAlias == "n");
+        assert(insertReturningStmt->returning.size() == 2);
+
+        auto updateReturning = parser.parse(
+            "UPDATE target SET val = 2 "
+            "RETURNING old.val AS before, new.val AS after");
+        assert(updateReturning.success);
+        auto* updateReturningStmt = dynamic_cast<UpdateStmt*>(
+            updateReturning.stmt.get());
+        assert(updateReturningStmt &&
+               !updateReturningStmt->returningOptions.oldAliased &&
+               !updateReturningStmt->returningOptions.newAliased &&
+               updateReturningStmt->returning.size() == 2);
+
+        auto deleteReturning = parser.parse(
+            "DELETE FROM target RETURNING WITH (NEW AS n) old.*, n.*");
+        assert(deleteReturning.success);
+        auto* deleteReturningStmt = dynamic_cast<DeleteStmt*>(
+            deleteReturning.stmt.get());
+        assert(deleteReturningStmt &&
+               !deleteReturningStmt->returningOptions.oldAliased &&
+               deleteReturningStmt->returningOptions.newAliased &&
+               deleteReturningStmt->returningOptions.newAlias == "n");
+
+        auto mergeReturning = parser.parse(
+            "MERGE INTO target AS dst USING source AS src "
+            "ON dst.id = src.id WHEN MATCHED THEN DELETE "
+            "RETURNING WITH (OLD AS before, NEW AS after) "
+            "before.id, after.id, merge_action()");
+        assert(mergeReturning.success);
+        auto* mergeReturningStmt = dynamic_cast<MergeStmt*>(
+            mergeReturning.stmt.get());
+        assert(mergeReturningStmt &&
+               mergeReturningStmt->returningOptions.oldAlias == "before" &&
+               mergeReturningStmt->returningOptions.newAlias == "after" &&
+               mergeReturningStmt->returning.size() == 3);
+
+        for (const char* invalidReturning : {
+                 "UPDATE target SET val = 2 RETURNING WITH old.id",
+                 "UPDATE target SET val = 2 RETURNING WITH () val",
+                 "UPDATE target SET val = 2 RETURNING WITH (OLD o) o.val",
+                 "UPDATE target SET val = 2 RETURNING WITH (OLD AS o,) o.val",
+                 "UPDATE target SET val = 2 RETURNING WITH (OLD AS o, OLD AS p) o.val",
+                 "UPDATE target SET val = 2 RETURNING WITH (OLD AS new) new.val",
+                 "UPDATE target SET val = 2 RETURNING WITH (NEW AS old) old.val",
+                 "UPDATE target SET val = 2 RETURNING WITH (OLD AS o)"}) {
+            assert(!parser.parse(invalidReturning).success);
+        }
         std::cout << "[PARSER P1] INSERT AST DEFAULT handling OK\n";
     }
 

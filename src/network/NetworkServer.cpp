@@ -1500,7 +1500,8 @@ std::string whereUnknownFunctionError(const std::string& sql,
     for (size_t kw = wpos; kw + 1 < low.size(); ++kw) {
         if (low.compare(kw, 8, " group b") == 0 ||
             low.compare(kw, 8, " order b") == 0 ||
-            low.compare(kw, 7, " limit ") == 0)
+            low.compare(kw, 7, " limit ") == 0 ||
+            low.compare(kw, 11, " returning ") == 0)
             { wend = kw; break; }
     }
     // FROM table for type resolution (first table after ' from ').

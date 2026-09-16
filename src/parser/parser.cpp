@@ -2351,6 +2351,108 @@ static SelectItem parseSelectItem(const std::vector<std::string>& tokens, size_t
     return item;
 }
 
+static bool parseReturningClause(const std::vector<std::string>& tokens,
+                                 size_t& pos,
+                                 std::vector<SelectItem>& returning,
+                                 ReturningOptions& options,
+                                 std::string& error) {
+    if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "with") {
+        ++pos;
+        if (pos >= tokens.size() || tokens[pos] != "(") {
+            error = "RETURNING WITH requires a parenthesized alias list";
+            return false;
+        }
+        ++pos;
+        bool sawAlias = false;
+        while (pos < tokens.size() && tokens[pos] != ")") {
+            const std::string kind = SQLParser::toLower(tokens[pos++]);
+            if (kind != "old" && kind != "new") {
+                error = "RETURNING WITH accepts only OLD or NEW aliases";
+                return false;
+            }
+            bool& aliased = kind == "old"
+                ? options.oldAliased : options.newAliased;
+            std::string& alias = kind == "old"
+                ? options.oldAlias : options.newAlias;
+            if (aliased) {
+                error = "RETURNING WITH specifies " + kind + " more than once";
+                return false;
+            }
+            if (pos >= tokens.size() ||
+                SQLParser::toLower(tokens[pos]) != "as") {
+                error = "RETURNING WITH alias requires AS";
+                return false;
+            }
+            ++pos;
+            if (pos >= tokens.size() || tokens[pos] == "," ||
+                tokens[pos] == ")" || tokens[pos] == ";" ||
+                SQLParser::isKeyword(tokens[pos])) {
+                error = "RETURNING WITH requires an output alias";
+                return false;
+            }
+            alias = tokens[pos++];
+            aliased = true;
+            sawAlias = true;
+            if (pos < tokens.size() && tokens[pos] == ",") {
+                ++pos;
+                if (pos >= tokens.size() || tokens[pos] == ")") {
+                    error = "RETURNING WITH alias is missing after comma";
+                    return false;
+                }
+                continue;
+            }
+            if (pos >= tokens.size() || tokens[pos] != ")") {
+                error = "RETURNING WITH alias list requires comma or ')'";
+                return false;
+            }
+        }
+        if (!sawAlias || pos >= tokens.size() || tokens[pos] != ")") {
+            error = "RETURNING WITH requires at least one complete alias";
+            return false;
+        }
+        ++pos;
+        const auto normalizeAlias = [](std::string alias) {
+            if (alias.size() >= 2 && alias.front() == '"' &&
+                alias.back() == '"') {
+                alias = alias.substr(1, alias.size() - 2);
+            }
+            return SQLParser::toLower(alias);
+        };
+        const std::string activeOld = normalizeAlias(
+            options.oldAliased ? options.oldAlias : "old");
+        const std::string activeNew = normalizeAlias(
+            options.newAliased ? options.newAlias : "new");
+        if (activeOld == activeNew) {
+            error = "RETURNING OLD and NEW aliases must be distinct";
+            return false;
+        }
+    }
+
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        const size_t itemStart = pos;
+        SelectItem item = parseSelectItem(tokens, pos);
+        if (!item.expr || pos == itemStart) {
+            error = "RETURNING requires an expression";
+            return false;
+        }
+        returning.push_back(std::move(item));
+        if (pos < tokens.size() && tokens[pos] == ",") {
+            ++pos;
+            if (pos >= tokens.size() || tokens[pos] == ";") {
+                error = "RETURNING expression is missing after comma";
+                return false;
+            }
+            continue;
+        }
+        break;
+    }
+    if (returning.empty()) {
+        error = "RETURNING requires an expression";
+        return false;
+    }
+    return true;
+}
+
 // 解析 FROM 项（简化版：支持表名、别名、JOIN）
 static std::unique_ptr<FromItem> parseFromItem(const std::vector<std::string>& tokens, size_t& pos) {
     if (pos >= tokens.size()) return nullptr;
@@ -3063,9 +3165,9 @@ ParseResult SQLParser::parseInsert(const std::string& sql) {
     // RETURNING
     if (pos < tokens.size() && toLower(tokens[pos]) == "returning") {
         ++pos;
-        while (pos < tokens.size() && tokens[pos] != ";") {
-            stmt->returning.push_back(parseSelectItem(tokens, pos));
-            if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+        if (!parseReturningClause(tokens, pos, stmt->returning,
+                                  stmt->returningOptions, r.error)) {
+            return r;
         }
     }
 
@@ -3189,9 +3291,9 @@ ParseResult SQLParser::parseUpdate(const std::string& sql) {
     // RETURNING
     if (pos < tokens.size() && toLower(tokens[pos]) == "returning") {
         ++pos;
-        while (pos < tokens.size() && tokens[pos] != ";") {
-            stmt->returning.push_back(parseSelectItem(tokens, pos));
-            if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+        if (!parseReturningClause(tokens, pos, stmt->returning,
+                                  stmt->returningOptions, r.error)) {
+            return r;
         }
     }
 
@@ -3276,9 +3378,9 @@ ParseResult SQLParser::parseDelete(const std::string& sql) {
     // RETURNING
     if (pos < tokens.size() && toLower(tokens[pos]) == "returning") {
         ++pos;
-        while (pos < tokens.size() && tokens[pos] != ";") {
-            stmt->returning.push_back(parseSelectItem(tokens, pos));
-            if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+        if (!parseReturningClause(tokens, pos, stmt->returning,
+                                  stmt->returningOptions, r.error)) {
+            return r;
         }
     }
 
@@ -3517,24 +3619,11 @@ ParseResult SQLParser::parseMerge(const std::string& sql) {
 
     if (pos < tokens.size() && toLower(tokens[pos]) == "returning") {
         ++pos;
-        while (pos < tokens.size() && tokens[pos] != ";") {
-            const size_t itemStart = pos;
-            SelectItem item = parseSelectItem(tokens, pos);
-            if (!item.expr || pos == itemStart) {
-                return fail("MERGE RETURNING requires an expression");
-            }
-            stmt->returning.push_back(std::move(item));
-            if (pos < tokens.size() && tokens[pos] == ",") {
-                ++pos;
-                if (pos >= tokens.size() || tokens[pos] == ";") {
-                    return fail("MERGE RETURNING expression is missing");
-                }
-            } else {
-                break;
-            }
-        }
-        if (stmt->returning.empty()) {
-            return fail("MERGE RETURNING requires an expression");
+        std::string returningError;
+        if (!parseReturningClause(tokens, pos, stmt->returning,
+                                  stmt->returningOptions,
+                                  returningError)) {
+            return fail("MERGE " + returningError);
         }
     }
 
