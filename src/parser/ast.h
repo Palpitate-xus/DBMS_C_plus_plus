@@ -698,6 +698,7 @@ struct InsertStmt : public Stmt {
     StmtPtr selectSource;                      // INSERT INTO ... SELECT ...
     std::string conflictAction;                // ON CONFLICT DO NOTHING / UPDATE
     std::vector<std::string> conflictTarget;   // ON CONFLICT (col) ...
+    std::string conflictConstraint;            // ON CONFLICT ON CONSTRAINT name
     std::vector<std::pair<std::string, ExprPtr>> conflictUpdateSet;
     ExprPtr conflictWhere;
     std::vector<SelectItem> returning;

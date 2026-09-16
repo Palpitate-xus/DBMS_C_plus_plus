@@ -2990,10 +2990,23 @@ ParseResult SQLParser::parseInsert(const std::string& sql) {
     if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "on"
         && toLower(tokens[pos + 1]) == "conflict") {
         pos += 2;
-        if (pos < tokens.size() && tokens[pos] == "(") {
+        if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "on" &&
+            toLower(tokens[pos + 1]) == "constraint") {
+            pos += 2;
+            if (pos >= tokens.size() || tokens[pos] == ";" ||
+                toLower(tokens[pos]) == "do") {
+                r.error = "ON CONFLICT ON CONSTRAINT requires a constraint name";
+                return r;
+            }
+            stmt->conflictConstraint = tokens[pos++];
+        } else if (pos < tokens.size() && tokens[pos] == "(") {
             auto cols = collectParenthesized(tokens, pos);
             for (const auto& c : cols) {
                 if (c != ",") stmt->conflictTarget.push_back(c);
+            }
+            if (stmt->conflictTarget.empty()) {
+                r.error = "ON CONFLICT requires a non-empty inference target";
+                return r;
             }
         }
         if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "do"
@@ -3004,7 +3017,9 @@ ParseResult SQLParser::parseInsert(const std::string& sql) {
                    && toLower(tokens[pos + 1]) == "update") {
             stmt->conflictAction = "DO UPDATE";
             pos += 2;
+            bool sawSet = false;
             if (pos < tokens.size() && toLower(tokens[pos]) == "set") {
+                sawSet = true;
                 ++pos;
                 while (pos < tokens.size()) {
                     std::string w = toLower(tokens[pos]);
@@ -3013,6 +3028,10 @@ ParseResult SQLParser::parseInsert(const std::string& sql) {
                         std::string col = tokens[pos];
                         pos += 2; // skip col =
                         auto expr = parseSimpleExpr(tokens, pos);
+                        if (!expr) {
+                            r.error = "ON CONFLICT DO UPDATE requires a valid SET expression";
+                            return r;
+                        }
                         stmt->conflictUpdateSet.emplace_back(col, std::move(expr));
                     } else {
                         ++pos;
@@ -3024,6 +3043,18 @@ ParseResult SQLParser::parseInsert(const std::string& sql) {
                 ++pos;
                 stmt->conflictWhere = parseSimpleExpr(tokens, pos);
             }
+            if (!sawSet || stmt->conflictUpdateSet.empty()) {
+                r.error = "ON CONFLICT DO UPDATE requires SET assignments";
+                return r;
+            }
+            if (stmt->conflictTarget.empty() &&
+                stmt->conflictConstraint.empty()) {
+                r.error = "ON CONFLICT DO UPDATE requires an inference target";
+                return r;
+            }
+        } else {
+            r.error = "ON CONFLICT requires DO NOTHING or DO UPDATE";
+            return r;
         }
     }
 

@@ -541,16 +541,18 @@ bool isDefaultValue(const ExprPtr& expr) {
 
 bool supportsConflict(const InsertStmt& stmt) {
     const std::string action = lower(stmt.conflictAction);
+    const bool hasArbiter = !stmt.conflictTarget.empty() ||
+        !stmt.conflictConstraint.empty();
     // DO NOTHING may be target-less or explicitly constrained; DO UPDATE is
     // admitted only for a narrow VALUES shape and is constraint-backed by
     // buildConflictUpdatePlan().
     if (action.empty()) return true;
     if (action == "do nothing") {
-        if (stmt.conflictTarget.empty()) return !stmt.conflictWhere;
+        if (!hasArbiter) return !stmt.conflictWhere;
         return !stmt.conflictWhere && !stmt.defaultValues &&
                stmt.selectSource == nullptr && !stmt.values.empty();
     }
-    return action == "do update" && !stmt.conflictTarget.empty() &&
+    return action == "do update" && hasArbiter &&
            !stmt.defaultValues &&
            stmt.selectSource == nullptr && !stmt.values.empty();
 }
@@ -713,12 +715,111 @@ bool sameColumnSet(const std::vector<size_t>& left,
 bool resolveConflictTarget(const InsertStmt& stmt, const TableSchema& table,
                            const std::string& currentDB,
                            const std::string& tableName,
-                           std::vector<std::string>& targetColumns) {
+                           std::vector<std::string>& targetColumns,
+                           bool* namedConstraintFound = nullptr) {
+    if (namedConstraintFound) *namedConstraintFound = false;
+    targetColumns.clear();
+    if (!stmt.conflictConstraint.empty()) {
+        const std::string requested = identifier(stmt.conflictConstraint);
+        if (requested.empty()) return false;
+
+        std::vector<size_t> primaryKey = table.pkColIndices;
+        if (primaryKey.empty()) {
+            for (size_t i = 0; i < table.len; ++i) {
+                if (table.cols[i].isPrimaryKey) primaryKey.push_back(i);
+            }
+        }
+        std::string primaryName = table.tablename + "_pkey";
+        const auto storedPrimaryName = table.storageParams.find(
+            PRIMARY_KEY_CONSTRAINT_NAME_PARAM);
+        if (storedPrimaryName != table.storageParams.end() &&
+            !storedPrimaryName->second.empty()) {
+            primaryName = storedPrimaryName->second;
+        }
+        if (!primaryKey.empty() && identifier(primaryName) == requested) {
+            if (namedConstraintFound) *namedConstraintFound = true;
+            for (const size_t index : primaryKey) {
+                if (index >= table.len) return false;
+                targetColumns.push_back(table.cols[index].dataName);
+            }
+            return true;
+        }
+
+        for (size_t constraintIndex = 0;
+             constraintIndex < table.uniqueConstraints.size();
+             ++constraintIndex) {
+            const auto& columns = table.uniqueConstraints[constraintIndex];
+            std::string name;
+            if (constraintIndex < table.uniqueConstraintNames.size()) {
+                name = table.uniqueConstraintNames[constraintIndex];
+            }
+            if (name.empty()) {
+                name = table.tablename;
+                for (const size_t index : columns) {
+                    if (index >= table.len) {
+                        name.clear();
+                        break;
+                    }
+                    name += "_" + table.cols[index].dataName;
+                }
+                if (!name.empty()) name += "_key";
+            }
+            if (!name.empty() && identifier(name) == requested) {
+                if (namedConstraintFound) *namedConstraintFound = true;
+                for (const size_t index : columns) {
+                    if (index >= table.len) return false;
+                    targetColumns.push_back(table.cols[index].dataName);
+                }
+                return !targetColumns.empty();
+            }
+        }
+
+        for (size_t columnIndex = 0; columnIndex < table.len; ++columnIndex) {
+            if (!table.cols[columnIndex].isUnique) continue;
+            const std::string defaultName = table.tablename + "_" +
+                table.cols[columnIndex].dataName + "_key";
+            if (identifier(defaultName) == requested) {
+                if (namedConstraintFound) *namedConstraintFound = true;
+                targetColumns.push_back(table.cols[columnIndex].dataName);
+                return true;
+            }
+        }
+
+        const auto matches = [&](const std::string& name) {
+            return !name.empty() && identifier(name) == requested;
+        };
+        for (size_t i = 0; i < table.len; ++i) {
+            if (matches(table.cols[i].checkConstraintName)) {
+                if (namedConstraintFound) *namedConstraintFound = true;
+                return false;
+            }
+        }
+        for (const auto& check : table.additionalCheckConstraints) {
+            if (matches(check.name)) {
+                if (namedConstraintFound) *namedConstraintFound = true;
+                return false;
+            }
+        }
+        for (size_t i = 0; i < table.fkLen; ++i) {
+            if (matches(table.fks[i].name)) {
+                if (namedConstraintFound) *namedConstraintFound = true;
+                return false;
+            }
+        }
+        for (const auto& exclusion :
+             g_engine.getExclusionConstraints(currentDB, tableName)) {
+            if (matches(exclusion.name)) {
+                if (namedConstraintFound) *namedConstraintFound = true;
+                return false;
+            }
+        }
+        return false;
+    }
+
     if (stmt.conflictTarget.empty()) return false;
 
     std::set<std::string> seen;
     std::vector<size_t> targetIndices;
-    targetColumns.clear();
     targetColumns.reserve(stmt.conflictTarget.size());
     for (const auto& rawColumn : stmt.conflictTarget) {
         const std::string column = identifier(rawColumn);
@@ -2343,16 +2444,33 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
     std::vector<std::map<std::string, std::string>> insertedRows;
     const bool ignoreDuplicate = lower(stmt.conflictAction) == "do nothing";
     const bool conflictUpdate = lower(stmt.conflictAction) == "do update";
+    const bool hasConflictArbiter = !stmt.conflictTarget.empty() ||
+        !stmt.conflictConstraint.empty();
     std::vector<std::string> conflictTarget;
     SqlRow conflictUpdates;
     std::map<std::string, const Expr*> conflictExpressionUpdates;
     std::map<std::string, std::set<std::string>> conflictExpressionSources;
     std::set<std::string> conflictWhereExcludedColumns;
 
-    if (conflictUpdate || (ignoreDuplicate && !stmt.conflictTarget.empty())) {
-        if (!conflictUpdate &&
-            !resolveConflictTarget(stmt, table, s.currentDB, resolvedTable,
-                                   conflictTarget)) {
+    if (conflictUpdate || (ignoreDuplicate && hasConflictArbiter)) {
+        bool namedConstraintFound = false;
+        if (!resolveConflictTarget(stmt, table, s.currentDB, resolvedTable,
+                                   conflictTarget, &namedConstraintFound)) {
+            if (!stmt.conflictConstraint.empty()) {
+                const std::string constraint = identifier(
+                    stmt.conflictConstraint);
+                if (namedConstraintFound) {
+                    std::cout << "ERROR: constraint \"" << constraint
+                              << "\" has no associated unique index "
+                                 "(SQLSTATE 42809)" << std::endl;
+                } else {
+                    std::cout << "ERROR: constraint \"" << constraint
+                              << "\" for table \"" << requestedTable
+                              << "\" does not exist (SQLSTATE 42704)"
+                              << std::endl;
+                }
+                return true;
+            }
             fallback = true;
             return false;
         }

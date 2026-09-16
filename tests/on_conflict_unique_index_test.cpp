@@ -162,6 +162,78 @@ void test_composite_index(dbms::DdlExecutor& ddl, Session& session,
                database, "unique_composite", {"=id 2"}, {"id"}).empty());
 }
 
+void test_named_constraint_target(dbms::DdlExecutor& ddl, Session& session,
+                                  const std::string& database) {
+    using dbms::DBStatus;
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE named_conflict ("
+        "id INT, tenant INT, code VARCHAR(30), payload VARCHAR(30), "
+        "CONSTRAINT named_conflict_pkey PRIMARY KEY (id), "
+        "CONSTRAINT named_code_key UNIQUE (tenant, code), "
+        "CONSTRAINT positive_tenant CHECK (tenant > 0))",
+        session));
+    assert(g_engine.insert(
+               database, "named_conflict",
+               {{"id", "1"}, {"tenant", "10"}, {"code", "alpha"},
+                {"payload", "old"}}) == DBStatus::OK);
+
+    assert(!runDml(
+        "INSERT INTO named_conflict VALUES (2, 10, 'alpha', 'new') "
+        "ON CONFLICT ON CONSTRAINT named_code_key DO UPDATE "
+        "SET payload = excluded.payload RETURNING id, payload",
+        session));
+    expectReturning("INSERT 0 1", {{"1", "new"}});
+    assert(g_engine.query(
+               database, "named_conflict", {"=id 2"}, {"id"}).empty());
+
+    assert(!runDml(
+        "INSERT INTO named_conflict VALUES (3, 10, 'alpha', 'ignored') "
+        "ON CONFLICT ON CONSTRAINT named_code_key DO NOTHING "
+        "RETURNING id",
+        session));
+    expectReturning("INSERT 0 0", {});
+
+    assert(!runDml(
+        "INSERT INTO named_conflict VALUES (1, 20, 'beta', 'pkey') "
+        "ON CONFLICT ON CONSTRAINT named_conflict_pkey DO UPDATE "
+        "SET payload = excluded.payload RETURNING id, payload",
+        session));
+    expectReturning("INSERT 0 1", {{"1", "pkey"}});
+
+    assert(runDml(
+        "INSERT INTO named_conflict VALUES (4, 40, 'delta', 'bad') "
+        "ON CONFLICT ON CONSTRAINT missing_constraint DO NOTHING",
+        session));
+    assert(g_engine.query(
+               database, "named_conflict", {"=id 4"}, {"id"}).empty());
+
+    assert(runDml(
+        "INSERT INTO named_conflict VALUES (5, 50, 'echo', 'bad') "
+        "ON CONFLICT ON CONSTRAINT positive_tenant DO NOTHING",
+        session));
+    assert(g_engine.query(
+               database, "named_conflict", {"=id 5"}, {"id"}).empty());
+
+    dbms::SQLParser parser;
+    const auto missingName = parser.parse(
+        "INSERT INTO named_conflict VALUES (6, 60, 'f', 'bad') "
+        "ON CONFLICT ON CONSTRAINT DO NOTHING");
+    assert(!missingName.success);
+    const auto missingAction = parser.parse(
+        "INSERT INTO named_conflict VALUES (6, 60, 'f', 'bad') "
+        "ON CONFLICT");
+    assert(!missingAction.success);
+    const auto targetlessUpdate = parser.parse(
+        "INSERT INTO named_conflict VALUES (6, 60, 'f', 'bad') "
+        "ON CONFLICT DO UPDATE SET payload = excluded.payload");
+    assert(!targetlessUpdate.success);
+    const auto missingSet = parser.parse(
+        "INSERT INTO named_conflict VALUES (6, 60, 'f', 'bad') "
+        "ON CONFLICT ON CONSTRAINT named_code_key DO UPDATE");
+    assert(!missingSet.success);
+}
+
 }  // namespace
 
 int main() {
@@ -186,6 +258,7 @@ int main() {
     test_single_column_index(ddl, session, database);
     test_floating_index(ddl, session, database);
     test_composite_index(ddl, session, database);
+    test_named_constraint_target(ddl, session, database);
 
     cleanupTestDb(testName);
     finalCleanupTestData();
