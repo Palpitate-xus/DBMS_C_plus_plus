@@ -62,6 +62,7 @@ extern dbms::Config g_config;
 
 // Forward declare execute() and logSlowQuery() from main.cpp
 extern bool execute(const std::string& rawSql, Session& s);
+extern std::string resolveTableName(Session& s, const std::string& name);
 extern double g_slowQueryThresholdMs;
 extern void logSlowQuery(const std::string& sql, double ms,
                          const std::string& username,
@@ -1571,6 +1572,964 @@ std::string whereUnknownFunctionError(const std::string& sql,
 }
 }  // namespace
 
+enum class CopyWireDirection { None, FromStdin, ToStdout };
+
+struct CopyWirePlan {
+    bool matched = false;
+    bool wire = false;
+    CopyWireDirection direction = CopyWireDirection::None;
+    std::string relation;
+    std::string physicalTable;
+    std::vector<std::string> requestedColumns;
+    std::vector<size_t> columnIndexes;
+    char delimiter = '\t';
+    std::string nullMarker = "\\N";
+    std::string sqlState;
+    std::string error;
+};
+
+namespace {
+
+constexpr size_t kMaxCopyRecordBytes = 16 * 1024 * 1024;
+
+struct CopyToken {
+    enum class Kind {
+        End,
+        Word,
+        String,
+        LeftParen,
+        RightParen,
+        Comma,
+        Dot,
+        Equal,
+        Semicolon,
+        Invalid,
+    } kind = Kind::End;
+    std::string text;
+    bool quoted = false;
+};
+
+class CopySqlScanner {
+public:
+    explicit CopySqlScanner(const std::string& sql) : sql_(sql) {}
+
+    CopyToken next() {
+        if (held_) {
+            CopyToken token = std::move(*held_);
+            held_.reset();
+            return token;
+        }
+        if (!skipSpaceAndComments()) {
+            return {CopyToken::Kind::Invalid,
+                    "unterminated comment in COPY statement", false};
+        }
+        if (offset_ == sql_.size()) return {};
+        const char ch = sql_[offset_++];
+        switch (ch) {
+            case '(': return {CopyToken::Kind::LeftParen, "(", false};
+            case ')': return {CopyToken::Kind::RightParen, ")", false};
+            case ',': return {CopyToken::Kind::Comma, ",", false};
+            case '.': return {CopyToken::Kind::Dot, ".", false};
+            case '=': return {CopyToken::Kind::Equal, "=", false};
+            case ';': return {CopyToken::Kind::Semicolon, ";", false};
+            case '"': return quotedToken('"', CopyToken::Kind::Word);
+            case '\'': return quotedToken('\'', CopyToken::Kind::String);
+            default: break;
+        }
+        if (std::isalnum(static_cast<unsigned char>(ch)) || ch == '_' ||
+            ch == '$') {
+            const size_t begin = offset_ - 1;
+            while (offset_ < sql_.size()) {
+                const unsigned char current =
+                    static_cast<unsigned char>(sql_[offset_]);
+                if (!std::isalnum(current) && current != '_' &&
+                    current != '$') {
+                    break;
+                }
+                ++offset_;
+            }
+            std::string text = sql_.substr(begin, offset_ - begin);
+            std::transform(text.begin(), text.end(), text.begin(),
+                           [](unsigned char value) {
+                               return static_cast<char>(std::tolower(value));
+                           });
+            return {CopyToken::Kind::Word, std::move(text), false};
+        }
+        return {CopyToken::Kind::Invalid,
+                std::string("unexpected character '") + ch +
+                    "' in COPY statement",
+                false};
+    }
+
+    CopyToken peek() {
+        CopyToken token = next();
+        held_ = token;
+        return token;
+    }
+
+private:
+    bool skipSpaceAndComments() {
+        while (offset_ < sql_.size()) {
+            if (std::isspace(static_cast<unsigned char>(sql_[offset_]))) {
+                ++offset_;
+                continue;
+            }
+            if (offset_ + 1 < sql_.size() &&
+                sql_[offset_] == '-' && sql_[offset_ + 1] == '-') {
+                offset_ += 2;
+                while (offset_ < sql_.size() && sql_[offset_] != '\n' &&
+                       sql_[offset_] != '\r') {
+                    ++offset_;
+                }
+                continue;
+            }
+            if (offset_ + 1 < sql_.size() &&
+                sql_[offset_] == '/' && sql_[offset_ + 1] == '*') {
+                offset_ += 2;
+                size_t depth = 1;
+                while (offset_ < sql_.size() && depth != 0) {
+                    if (offset_ + 1 < sql_.size() &&
+                        sql_[offset_] == '/' && sql_[offset_ + 1] == '*') {
+                        ++depth;
+                        offset_ += 2;
+                    } else if (offset_ + 1 < sql_.size() &&
+                               sql_[offset_] == '*' &&
+                               sql_[offset_ + 1] == '/') {
+                        --depth;
+                        offset_ += 2;
+                    } else {
+                        ++offset_;
+                    }
+                }
+                if (depth != 0) return false;
+                continue;
+            }
+            break;
+        }
+        return true;
+    }
+
+    CopyToken quotedToken(char quote, CopyToken::Kind kind) {
+        std::string text;
+        while (offset_ < sql_.size()) {
+            const char ch = sql_[offset_++];
+            if (ch != quote) {
+                text.push_back(ch);
+                continue;
+            }
+            if (offset_ < sql_.size() && sql_[offset_] == quote) {
+                text.push_back(quote);
+                ++offset_;
+                continue;
+            }
+            return {kind, std::move(text), true};
+        }
+        return {CopyToken::Kind::Invalid,
+                quote == '\'' ? "unterminated COPY string literal"
+                               : "unterminated quoted COPY identifier",
+                false};
+    }
+
+    const std::string& sql_;
+    size_t offset_ = 0;
+    std::optional<CopyToken> held_;
+};
+
+bool copyKeyword(const CopyToken& token, const std::string& keyword) {
+    return token.kind == CopyToken::Kind::Word && !token.quoted &&
+           token.text == keyword;
+}
+
+void copyError(CopyWirePlan& plan, std::string sqlState,
+               std::string message) {
+    plan.sqlState = std::move(sqlState);
+    plan.error = std::move(message);
+}
+
+void copyUnsupported(CopyWirePlan& plan, const std::string& feature) {
+    copyError(plan, "0A000",
+              "COPY " + feature + " is not supported by the wire protocol");
+}
+
+bool parseCopyOptionValue(CopySqlScanner& scanner, CopyToken& value,
+                          CopyWirePlan& plan) {
+    if (scanner.peek().kind == CopyToken::Kind::Equal) (void)scanner.next();
+    value = scanner.next();
+    if (value.kind == CopyToken::Kind::Word ||
+        value.kind == CopyToken::Kind::String) {
+        return true;
+    }
+    copyError(plan, "42601", "COPY option requires a value");
+    return false;
+}
+
+CopyWirePlan parseCopyWirePlan(const std::string& sql) {
+    CopyWirePlan plan;
+    CopySqlScanner scanner(sql);
+    CopyToken token = scanner.next();
+    if (!copyKeyword(token, "copy")) return plan;
+    plan.matched = true;
+
+    token = scanner.next();
+    if (copyKeyword(token, "binary")) {
+        copyUnsupported(plan, "BINARY");
+        return plan;
+    }
+    if (token.kind == CopyToken::Kind::LeftParen) {
+        copyUnsupported(plan, "query form");
+        return plan;
+    }
+    if (copyKeyword(token, "only")) token = scanner.next();
+    if (token.kind != CopyToken::Kind::Word) {
+        copyError(plan, "42601", "COPY requires a relation name");
+        return plan;
+    }
+    plan.relation = token.text;
+    if (scanner.peek().kind == CopyToken::Kind::Dot) {
+        (void)scanner.next();
+        const CopyToken table = scanner.next();
+        if (table.kind != CopyToken::Kind::Word) {
+            copyError(plan, "42601", "malformed qualified relation name in COPY");
+            return plan;
+        }
+        plan.relation += "." + table.text;
+        if (scanner.peek().kind == CopyToken::Kind::Dot) {
+            copyUnsupported(plan, "three-part relation names");
+            return plan;
+        }
+    }
+
+    if (scanner.peek().kind == CopyToken::Kind::LeftParen) {
+        (void)scanner.next();
+        while (true) {
+            const CopyToken column = scanner.next();
+            if (column.kind != CopyToken::Kind::Word) {
+                copyError(plan, "42601", "malformed COPY column list");
+                return plan;
+            }
+            plan.requestedColumns.push_back(column.text);
+            token = scanner.next();
+            if (token.kind == CopyToken::Kind::RightParen) break;
+            if (token.kind != CopyToken::Kind::Comma) {
+                copyError(plan, "42601", "malformed COPY column list");
+                return plan;
+            }
+        }
+        if (plan.requestedColumns.empty()) {
+            copyError(plan, "42601", "COPY column list cannot be empty");
+            return plan;
+        }
+    }
+
+    token = scanner.next();
+    if (copyKeyword(token, "freeze")) {
+        copyUnsupported(plan, "FREEZE");
+        return plan;
+    }
+    const bool from = copyKeyword(token, "from");
+    const bool to = copyKeyword(token, "to");
+    if (!from && !to) {
+        copyError(plan, "42601", "COPY requires FROM or TO");
+        return plan;
+    }
+    token = scanner.next();
+    if (copyKeyword(token, "program")) {
+        copyUnsupported(plan, "PROGRAM");
+        return plan;
+    }
+    if (token.kind == CopyToken::Kind::String) {
+        // Server-side file COPY remains owned by the SQL executor.  Do not
+        // reinterpret it as a wire operation, but fail closed on option
+        // syntax that the legacy file executor would otherwise ignore.
+        token = scanner.next();
+        if (token.kind == CopyToken::Kind::Semicolon) token = scanner.next();
+        if (token.kind != CopyToken::Kind::End) {
+            copyUnsupported(plan, "server-side file options");
+        }
+        return plan;
+    }
+    if (from && copyKeyword(token, "stdin")) {
+        plan.direction = CopyWireDirection::FromStdin;
+    } else if (to && copyKeyword(token, "stdout")) {
+        plan.direction = CopyWireDirection::ToStdout;
+    } else if (copyKeyword(token, "stdin") || copyKeyword(token, "stdout")) {
+        copyError(plan, "42601", "COPY direction does not match STDIN/STDOUT");
+        return plan;
+    } else {
+        copyError(plan, "42601", "COPY requires a file, PROGRAM, STDIN, or STDOUT");
+        return plan;
+    }
+    plan.wire = true;
+
+    token = scanner.next();
+    if (token.kind == CopyToken::Kind::End ||
+        token.kind == CopyToken::Kind::Semicolon) {
+        if (token.kind == CopyToken::Kind::Semicolon &&
+            scanner.next().kind != CopyToken::Kind::End) {
+            copyError(plan, "42601", "trailing input after COPY statement");
+        }
+        return plan;
+    }
+    if (copyKeyword(token, "where")) {
+        copyUnsupported(plan, "WHERE");
+        return plan;
+    }
+    if (!copyKeyword(token, "with")) {
+        copyUnsupported(plan, "legacy option syntax");
+        return plan;
+    }
+    if (scanner.next().kind != CopyToken::Kind::LeftParen) {
+        copyUnsupported(plan, "legacy option syntax");
+        return plan;
+    }
+
+    std::set<std::string> seenOptions;
+    while (true) {
+        token = scanner.next();
+        if (token.kind == CopyToken::Kind::RightParen) break;
+        if (token.kind != CopyToken::Kind::Word || token.quoted) {
+            copyError(plan, "42601", "malformed COPY option list");
+            return plan;
+        }
+        const std::string option = token.text;
+        if (!seenOptions.insert(option).second) {
+            copyError(plan, "42601", "COPY option \"" + option +
+                                      "\" specified more than once");
+            return plan;
+        }
+        if (option == "binary" || option == "csv" || option == "freeze" ||
+            option == "header" || option == "on_error" ||
+            option == "reject_limit" || option == "log_verbosity" ||
+            option == "oids" || option.rfind("force_", 0) == 0) {
+            copyUnsupported(plan, option);
+            return plan;
+        }
+
+        CopyToken value;
+        if (!parseCopyOptionValue(scanner, value, plan)) return plan;
+        if (option == "format") {
+            std::string format = lowerAscii(value.text);
+            if (format != "text") {
+                copyUnsupported(plan, "FORMAT " + value.text);
+                return plan;
+            }
+        } else if (option == "delimiter") {
+            if (value.text.size() != 1 || value.text[0] == '\0' ||
+                value.text[0] == '\n' || value.text[0] == '\r' ||
+                value.text[0] == '\\') {
+                copyError(plan, "22023",
+                          "COPY delimiter must be one non-newline, non-backslash byte");
+                return plan;
+            }
+            plan.delimiter = value.text[0];
+        } else if (option == "null") {
+            if (value.text.size() > 1024 ||
+                value.text.find('\0') != std::string::npos ||
+                value.text.find('\r') != std::string::npos ||
+                value.text.find('\n') != std::string::npos) {
+                copyError(plan, "22023", "invalid COPY null marker");
+                return plan;
+            }
+            plan.nullMarker = value.text;
+        } else if (option == "encoding") {
+            std::string encoding = lowerAscii(value.text);
+            encoding.erase(std::remove_if(
+                encoding.begin(), encoding.end(), [](char ch) {
+                    return ch == '-' || ch == '_';
+                }), encoding.end());
+            if (encoding != "utf8" && encoding != "unicode") {
+                copyUnsupported(plan, "ENCODING " + value.text);
+                return plan;
+            }
+        } else {
+            copyUnsupported(plan, "option " + option);
+            return plan;
+        }
+
+        token = scanner.next();
+        if (token.kind == CopyToken::Kind::RightParen) break;
+        if (token.kind != CopyToken::Kind::Comma) {
+            copyError(plan, "42601", "malformed COPY option list");
+            return plan;
+        }
+    }
+    if (plan.nullMarker.find(plan.delimiter) != std::string::npos) {
+        copyError(plan, "22023", "COPY null marker cannot contain the delimiter");
+        return plan;
+    }
+    token = scanner.next();
+    if (token.kind == CopyToken::Kind::Semicolon) token = scanner.next();
+    if (token.kind != CopyToken::Kind::End) {
+        copyError(plan, "42601", "trailing input after COPY options");
+    }
+    return plan;
+}
+
+bool copyTableIsTemporary(const Session& session,
+                          const std::string& relation) {
+    const size_t dot = relation.rfind('.');
+    const std::string name = dot == std::string::npos
+                                 ? relation
+                                 : relation.substr(dot + 1);
+    return session.tempTables.count(name) != 0 ||
+           session.transientTempTables.count(name) != 0;
+}
+
+bool validateCopyWirePlan(CopyWirePlan& plan, Session& session) {
+    if (!plan.error.empty() || !plan.wire) return plan.error.empty();
+    try {
+        plan.physicalTable = resolveTableName(session, plan.relation);
+    } catch (const DbError& error) {
+        copyError(plan, error.sqlState(), error.message());
+        return false;
+    }
+    if (!g_engine.tableExists(session.currentDB, plan.physicalTable)) {
+        copyError(plan, "42P01",
+                  "relation \"" + plan.relation + "\" does not exist");
+        return false;
+    }
+    const TableSchema table =
+        g_engine.getTableSchema(session.currentDB, plan.physicalTable);
+    if (table.partitionType != TableSchema::PartitionType::None) {
+        copyUnsupported(plan, "partitioned relations");
+        return false;
+    }
+    if (plan.direction == CopyWireDirection::FromStdin &&
+        g_engine.rlsAppliesTo(session.currentDB, plan.physicalTable)) {
+        copyUnsupported(plan, "FROM on row-security-enabled relations");
+        return false;
+    }
+
+    std::set<size_t> selected;
+    if (plan.requestedColumns.empty()) {
+        for (size_t index = 0; index < table.len; ++index) {
+            if (plan.direction == CopyWireDirection::FromStdin &&
+                !table.cols[index].generatedExpr.empty()) {
+                continue;
+            }
+            plan.columnIndexes.push_back(index);
+        }
+    } else {
+        for (const auto& requested : plan.requestedColumns) {
+            size_t found = table.len;
+            for (size_t index = 0; index < table.len; ++index) {
+                if (table.cols[index].dataName == requested) {
+                    found = index;
+                    break;
+                }
+            }
+            if (found == table.len) {
+                copyError(plan, "42703",
+                          "column \"" + requested + "\" does not exist");
+                return false;
+            }
+            if (!selected.insert(found).second) {
+                copyError(plan, "42701",
+                          "column \"" + requested + "\" specified more than once");
+                return false;
+            }
+            if (plan.direction == CopyWireDirection::FromStdin &&
+                !table.cols[found].generatedExpr.empty()) {
+                copyError(plan, "428C9",
+                          "cannot copy into generated column \"" + requested + "\"");
+                return false;
+            }
+            plan.columnIndexes.push_back(found);
+        }
+    }
+    if (plan.columnIndexes.empty()) {
+        copyUnsupported(plan, "relations without writable/output columns");
+        return false;
+    }
+    if (plan.columnIndexes.size() >
+        static_cast<size_t>(std::numeric_limits<uint16_t>::max())) {
+        copyError(plan, "54000", "too many columns for COPY protocol response");
+        return false;
+    }
+
+    std::vector<std::string> columns;
+    columns.reserve(plan.columnIndexes.size());
+    for (const size_t index : plan.columnIndexes) {
+        const Column& column = table.cols[index];
+        columns.push_back(column.dataName);
+        if (plan.direction == CopyWireDirection::FromStdin &&
+            column.identityKind != 0) {
+            copyUnsupported(plan, "FROM on identity columns");
+            return false;
+        }
+    }
+    const bool temporary = copyTableIsTemporary(session, plan.relation);
+    const auto privilege = plan.direction == CopyWireDirection::FromStdin
+        ? StorageEngine::TablePrivilege::Insert
+        : StorageEngine::TablePrivilege::Select;
+    if (!sessionIsAdmin(session) && !temporary &&
+        !g_engine.hasColumnPermission(
+            session.currentDB, plan.physicalTable,
+            effectiveSessionRole(session), privilege, columns)) {
+        copyError(plan, "42501",
+                  "permission denied for table " + plan.relation);
+        return false;
+    }
+    if (plan.direction == CopyWireDirection::FromStdin &&
+        g_engine.inTransaction() && g_engine.isReadOnly() && !temporary) {
+        copyError(plan, "25006",
+                  "cannot execute COPY FROM in a read-only transaction");
+        return false;
+    }
+    if (plan.direction == CopyWireDirection::FromStdin) {
+        std::vector<StorageEngine::Trigger> before;
+        std::vector<StorageEngine::Trigger> after;
+        if (!g_engine.tryGetTriggers(session.currentDB, plan.physicalTable,
+                                     "before", "insert", before) ||
+            !g_engine.tryGetTriggers(session.currentDB, plan.physicalTable,
+                                     "after", "insert", after)) {
+            copyError(plan, "XX001", "could not read COPY target triggers");
+            return false;
+        }
+        const auto unsupportedStatementTrigger = [](const auto& trigger) {
+            return trigger.enabled && !trigger.forEachRow;
+        };
+        if (std::any_of(before.begin(), before.end(),
+                        unsupportedStatementTrigger) ||
+            std::any_of(after.begin(), after.end(),
+                        unsupportedStatementTrigger)) {
+            copyUnsupported(plan, "FROM with statement-level triggers");
+            return false;
+        }
+    }
+    return true;
+}
+
+bool validUtf8(const std::string& value) {
+    for (size_t offset = 0; offset < value.size();) {
+        const uint8_t lead = static_cast<uint8_t>(value[offset]);
+        if (lead < 0x80) {
+            if (lead == 0) return false;
+            ++offset;
+            continue;
+        }
+        size_t length = 0;
+        uint32_t codepoint = 0;
+        if ((lead & 0xe0) == 0xc0) {
+            length = 2;
+            codepoint = lead & 0x1f;
+        } else if ((lead & 0xf0) == 0xe0) {
+            length = 3;
+            codepoint = lead & 0x0f;
+        } else if ((lead & 0xf8) == 0xf0) {
+            length = 4;
+            codepoint = lead & 0x07;
+        } else {
+            return false;
+        }
+        if (offset + length > value.size()) return false;
+        for (size_t index = 1; index < length; ++index) {
+            const uint8_t next = static_cast<uint8_t>(value[offset + index]);
+            if ((next & 0xc0) != 0x80) return false;
+            codepoint = (codepoint << 6) | (next & 0x3f);
+        }
+        if ((length == 2 && codepoint < 0x80) ||
+            (length == 3 && codepoint < 0x800) ||
+            (length == 4 && codepoint < 0x10000) ||
+            codepoint > 0x10ffff ||
+            (codepoint >= 0xd800 && codepoint <= 0xdfff)) {
+            return false;
+        }
+        offset += length;
+    }
+    return true;
+}
+
+bool decodeCopyTextField(const std::string& raw, std::string& value,
+                         std::string& error) {
+    value.clear();
+    value.reserve(raw.size());
+    const auto hexDigit = [](char ch) -> int {
+        if (ch >= '0' && ch <= '9') return ch - '0';
+        if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+        if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+        return -1;
+    };
+    for (size_t offset = 0; offset < raw.size(); ++offset) {
+        const char ch = raw[offset];
+        if (ch != '\\') {
+            if (ch == '\0') {
+                error = "COPY text data contains a NUL byte";
+                return false;
+            }
+            value.push_back(ch);
+            continue;
+        }
+        if (++offset == raw.size()) {
+            error = "unterminated COPY backslash escape";
+            return false;
+        }
+        const char escaped = raw[offset];
+        switch (escaped) {
+            case 'b': value.push_back('\b'); break;
+            case 'f': value.push_back('\f'); break;
+            case 'n': value.push_back('\n'); break;
+            case 'r': value.push_back('\r'); break;
+            case 't': value.push_back('\t'); break;
+            case 'v': value.push_back('\v'); break;
+            case 'x': {
+                int result = 0;
+                size_t digits = 0;
+                while (digits < 2 && offset + 1 < raw.size()) {
+                    const int digit = hexDigit(raw[offset + 1]);
+                    if (digit < 0) break;
+                    result = result * 16 + digit;
+                    ++offset;
+                    ++digits;
+                }
+                if (digits == 0 || result == 0) {
+                    error = "invalid COPY hexadecimal escape";
+                    return false;
+                }
+                value.push_back(static_cast<char>(result));
+                break;
+            }
+            default:
+                if (escaped >= '0' && escaped <= '7') {
+                    int result = escaped - '0';
+                    size_t digits = 1;
+                    while (digits < 3 && offset + 1 < raw.size() &&
+                           raw[offset + 1] >= '0' &&
+                           raw[offset + 1] <= '7') {
+                        result = result * 8 + (raw[++offset] - '0');
+                        ++digits;
+                    }
+                    if (result == 0 || result > 255) {
+                        error = "invalid COPY octal escape";
+                        return false;
+                    }
+                    value.push_back(static_cast<char>(result));
+                } else {
+                    value.push_back(escaped);
+                }
+                break;
+        }
+    }
+    if (!validUtf8(value)) {
+        error = "invalid byte sequence for encoding UTF8 in COPY data";
+        return false;
+    }
+    return true;
+}
+
+bool decodeCopyTextRecord(
+        std::string record, const CopyWirePlan& plan,
+        std::vector<std::optional<std::string>>& fields,
+        std::string& error) {
+    if (!record.empty() && record.back() == '\r') record.pop_back();
+    std::vector<std::string> rawFields;
+    std::string field;
+    bool escaped = false;
+    for (const char ch : record) {
+        if (escaped) {
+            field.push_back(ch);
+            escaped = false;
+            continue;
+        }
+        if (ch == '\\') {
+            field.push_back(ch);
+            escaped = true;
+            continue;
+        }
+        if (ch == plan.delimiter) {
+            rawFields.push_back(std::move(field));
+            field.clear();
+            continue;
+        }
+        if (ch == '\0') {
+            error = "COPY text data contains a NUL byte";
+            return false;
+        }
+        field.push_back(ch);
+    }
+    rawFields.push_back(std::move(field));
+    if (rawFields.size() != plan.columnIndexes.size()) {
+        error = "COPY row has " + std::to_string(rawFields.size()) +
+                " fields but expected " +
+                std::to_string(plan.columnIndexes.size());
+        return false;
+    }
+    fields.clear();
+    fields.reserve(rawFields.size());
+    for (const auto& raw : rawFields) {
+        if (raw == plan.nullMarker) {
+            fields.push_back(std::nullopt);
+            continue;
+        }
+        std::string decoded;
+        if (!decodeCopyTextField(raw, decoded, error)) return false;
+        fields.emplace_back(std::move(decoded));
+    }
+    return true;
+}
+
+std::string encodeCopyTextField(const std::string& value, char delimiter) {
+    std::string encoded;
+    encoded.reserve(value.size());
+    const char* octal = "01234567";
+    for (const unsigned char byte : value) {
+        switch (byte) {
+            case '\b': encoded += "\\b"; break;
+            case '\f': encoded += "\\f"; break;
+            case '\n': encoded += "\\n"; break;
+            case '\r': encoded += "\\r"; break;
+            case '\t':
+                if (delimiter == '\t') encoded += "\\t";
+                else encoded.push_back('\t');
+                break;
+            case '\v': encoded += "\\v"; break;
+            case '\\': encoded += "\\\\"; break;
+            case 0:
+                encoded += "\\000";
+                break;
+            default:
+                if (byte == static_cast<unsigned char>(delimiter)) {
+                    encoded.push_back('\\');
+                    encoded.push_back(static_cast<char>(byte));
+                } else if (byte < 0x20 && byte != '\t') {
+                    encoded.push_back('\\');
+                    encoded.push_back(octal[(byte >> 6) & 7]);
+                    encoded.push_back(octal[(byte >> 3) & 7]);
+                    encoded.push_back(octal[byte & 7]);
+                } else {
+                    encoded.push_back(static_cast<char>(byte));
+                }
+                break;
+        }
+    }
+    return encoded;
+}
+
+struct CopyStreamResult {
+    bool transportOk = true;
+    bool success = false;
+    bool syncConsumed = false;
+    bool errorSent = false;
+    size_t rows = 0;
+    std::string sqlState;
+    std::string error;
+};
+
+class CopyInterruptGuard {
+public:
+    explicit CopyInterruptGuard(Session& session)
+        : session_(session), state_(session.interruptState) {
+        dbms::setCurrentSession(&session_);
+        g_engine.setRLSUser(effectiveSessionRole(session_));
+        state_->queryActive.store(true, std::memory_order_release);
+        dbms::setCurrentQueryInterruptState(state_);
+        g_engine.getLockManager().setInterruptHandler([state = state_]() {
+            if (state->terminateRequested.load(std::memory_order_acquire)) {
+                throw DbError(
+                    "57P01",
+                    "terminating connection due to administrator command");
+            }
+            if (state->cancelRequested.load(std::memory_order_acquire)) {
+                throw DbError("57014",
+                              "canceling COPY due to user request");
+            }
+        });
+    }
+
+    ~CopyInterruptGuard() {
+        g_engine.getLockManager().clearInterruptHandler();
+        dbms::setCurrentQueryInterruptState(nullptr);
+        state_->queryActive.store(false, std::memory_order_release);
+        state_->cancelRequested.store(false, std::memory_order_release);
+    }
+
+private:
+    Session& session_;
+    std::shared_ptr<SessionInterruptState> state_;
+};
+
+CopyStreamResult receiveCopyIn(PostgresProtocol& protocol,
+                               const CopyWirePlan& plan,
+                               Session& session) {
+    CopyStreamResult result;
+    std::string pending;
+    const TableSchema table =
+        g_engine.getTableSchema(session.currentDB, plan.physicalTable);
+    CopyInterruptGuard interruptGuard(session);
+
+    const auto fail = [&](std::string state, std::string message) {
+        if (!result.error.empty()) return;
+        result.sqlState = std::move(state);
+        result.error = std::move(message);
+        result.errorSent = protocol.sendErrorResponse(
+            "ERROR", result.sqlState, result.error);
+        if (!result.errorSent) result.transportOk = false;
+        pending.clear();
+    };
+    const auto insertRecord = [&](std::string record) {
+        if (!result.error.empty()) return;
+        try {
+            dbms::checkForQueryInterrupt();
+            std::vector<std::optional<std::string>> fields;
+            std::string decodeError;
+            if (!decodeCopyTextRecord(
+                    std::move(record), plan, fields, decodeError)) {
+                fail("22P04", decodeError);
+                return;
+            }
+            StorageEngine::SqlRow values;
+            for (size_t field = 0; field < fields.size(); ++field) {
+                values[table.cols[plan.columnIndexes[field]].dataName] =
+                    std::move(fields[field]);
+            }
+            const DBStatus status = g_engine.insertRow(
+                session.currentDB, plan.physicalTable, values);
+            if (status != DBStatus::OK) {
+                fail(sqlstateForDBStatus(status),
+                     "COPY FROM failed while inserting row " +
+                         std::to_string(result.rows + 1));
+                return;
+            }
+            ++result.rows;
+        } catch (const DbError& error) {
+            fail(error.sqlState(), error.message());
+        } catch (const std::exception& error) {
+            fail("XX000", error.what());
+        }
+    };
+
+    while (result.transportOk) {
+        PgFrontendMessage message;
+        std::string protocolError;
+        if (!protocol.readMessage(message, protocolError)) {
+            result.transportOk = false;
+            result.error = protocolError;
+            break;
+        }
+        if (message.type == 'd') {
+            if (!result.error.empty()) continue;
+            for (const uint8_t byte : message.payload) {
+                if (!result.error.empty()) break;
+                if (byte == '\n') {
+                    insertRecord(std::move(pending));
+                    pending.clear();
+                    continue;
+                }
+                if (pending.size() == kMaxCopyRecordBytes) {
+                    fail("54000", "COPY input row exceeds 16 MiB limit");
+                    break;
+                }
+                pending.push_back(static_cast<char>(byte));
+            }
+            continue;
+        }
+        if (message.type == 'c') {
+            if (!message.payload.empty()) {
+                fail("08P01", "malformed CopyDone message");
+            } else if (result.error.empty() && !pending.empty()) {
+                insertRecord(std::move(pending));
+            }
+            result.success = result.error.empty();
+            return result;
+        }
+        if (message.type == 'f') {
+            size_t offset = 0;
+            std::string reason;
+            if (!PostgresProtocol::readCString(
+                    message.payload, offset, reason) ||
+                offset != message.payload.size()) {
+                fail("08P01", "malformed CopyFail message");
+            } else {
+                fail("57014", "COPY from stdin failed: " + reason);
+            }
+            return result;
+        }
+        if (message.type == 'S') {
+            if (!message.payload.empty()) {
+                fail("08P01", "malformed Sync message during COPY");
+            } else if (result.error.empty()) {
+                fail("08P01", "Sync received before CopyDone or CopyFail");
+            }
+            result.syncConsumed = true;
+            return result;
+        }
+        if (message.type == 'H' && message.payload.empty()) continue;
+        if (message.type == 'X') {
+            result.transportOk = false;
+            result.error = "client terminated connection during COPY";
+            return result;
+        }
+        fail("08P01", "unexpected frontend message during COPY FROM");
+    }
+    return result;
+}
+
+CopyStreamResult sendCopyOut(PostgresProtocol& protocol,
+                             const CopyWirePlan& plan,
+                             Session& session) {
+    CopyStreamResult result;
+    const TableSchema table =
+        g_engine.getTableSchema(session.currentDB, plan.physicalTable);
+    CopyInterruptGuard interruptGuard(session);
+    try {
+        const bool scanned = g_engine.forEachVisibleRow(
+            session.currentDB, plan.physicalTable, "SELECT",
+            [&](uint32_t pageId, uint16_t slotId, const char* data,
+                size_t length) {
+                if (!result.transportOk || !result.error.empty()) return;
+                dbms::checkForQueryInterrupt();
+                const int64_t rid = StorageEngine::encodeRid(pageId, slotId);
+                StorageEngine::bindNullRow(
+                    &g_engine, session.currentDB, plan.physicalTable, rid,
+                    table.len);
+                struct NullBindingGuard {
+                    ~NullBindingGuard() { StorageEngine::unbindNullRow(); }
+                } nullBindingGuard;
+                const std::string row(data, length);
+                std::string output;
+                for (size_t selected = 0;
+                     selected < plan.columnIndexes.size(); ++selected) {
+                    if (selected != 0) output.push_back(plan.delimiter);
+                    const size_t column = plan.columnIndexes[selected];
+                    bool isNull = false;
+                    const std::string value = g_engine.extractColumnValue(
+                        row, table, column, session.currentDB, true, &isNull);
+                    output += isNull
+                        ? plan.nullMarker
+                        : encodeCopyTextField(value, plan.delimiter);
+                }
+                output.push_back('\n');
+                if (output.size() > kMaxCopyRecordBytes) {
+                    result.sqlState = "54000";
+                    result.error = "COPY output row exceeds 16 MiB limit";
+                    return;
+                }
+                if (!protocol.sendCopyData(output)) {
+                    result.transportOk = false;
+                    return;
+                }
+                ++result.rows;
+            });
+        if (!scanned && result.error.empty() && result.transportOk) {
+            result.sqlState = "XX001";
+            result.error = "COPY TO could not read the relation";
+        }
+    } catch (const DbError& error) {
+        result.sqlState = error.sqlState();
+        result.error = error.message();
+    } catch (const std::exception& error) {
+        result.sqlState = "XX000";
+        result.error = error.what();
+    }
+    if (result.transportOk && result.error.empty()) {
+        result.transportOk = protocol.sendCopyDone();
+        result.success = result.transportOk;
+    }
+    return result;
+}
+
+} // namespace
+
 QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
     QueryResult result;
     dbms::clearLastDmlResult();
@@ -2544,6 +3503,205 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         }
         return result;
     };
+    struct CopyStatementBoundary {
+        bool startedTransaction = false;
+        bool savepointCreated = false;
+        bool originallyInTransaction = false;
+        std::string savepoint;
+    };
+    const auto beginCopyBoundary = [&](CopyStatementBoundary& boundary,
+                                       QueryResult& error) -> bool {
+        boundary.originallyInTransaction = g_engine.inTransaction();
+        if (!boundary.originallyInTransaction) {
+            QueryResult begin = executeForProtocol("BEGIN");
+            if (begin.error) {
+                error = std::move(begin);
+                return false;
+            }
+            boundary.startedTransaction = true;
+        }
+        static std::atomic<uint64_t> sequence{0};
+        boundary.savepoint = "__dbms_wire_copy_" +
+            std::to_string(session.pid) + "_" +
+            std::to_string(sequence.fetch_add(1));
+        QueryResult savepoint = executeForProtocol(
+            "SAVEPOINT " + boundary.savepoint);
+        if (savepoint.error) {
+            error = std::move(savepoint);
+            if (boundary.startedTransaction) {
+                (void)executeForProtocol("ROLLBACK");
+            }
+            return false;
+        }
+        boundary.savepointCreated = true;
+        return true;
+    };
+    const auto finishCopyBoundary = [&](CopyStatementBoundary& boundary,
+                                        bool success,
+                                        QueryResult& error) -> bool {
+        if (!success) {
+            if (boundary.savepointCreated) {
+                QueryResult rollback = executeForProtocol(
+                    "ROLLBACK TO SAVEPOINT " + boundary.savepoint);
+                if (rollback.error && !error.error) error = std::move(rollback);
+                QueryResult release = executeForProtocol(
+                    "RELEASE SAVEPOINT " + boundary.savepoint);
+                if (release.error && !error.error) error = std::move(release);
+            }
+            if (boundary.startedTransaction) {
+                QueryResult rollback = executeForProtocol("ROLLBACK");
+                if (rollback.error && !error.error) error = std::move(rollback);
+            }
+            return !error.error;
+        }
+        if (boundary.savepointCreated) {
+            QueryResult release = executeForProtocol(
+                "RELEASE SAVEPOINT " + boundary.savepoint);
+            if (release.error) {
+                error = std::move(release);
+                if (boundary.startedTransaction) {
+                    (void)executeForProtocol("ROLLBACK");
+                }
+                return false;
+            }
+        }
+        if (boundary.startedTransaction) {
+            QueryResult commit = executeForProtocol("COMMIT");
+            if (commit.error) {
+                error = std::move(commit);
+                if (transactionFailed || g_engine.inTransaction()) {
+                    (void)executeForProtocol("ROLLBACK");
+                }
+                return false;
+            }
+        }
+        return true;
+    };
+    struct CopyExecutionOutcome {
+        bool connectionOk = true;
+        bool success = false;
+        bool syncConsumed = false;
+        bool failedInExistingTransaction = false;
+    };
+    const auto executeCopyWire = [&](CopyWirePlan plan)
+        -> CopyExecutionOutcome {
+        CopyExecutionOutcome outcome;
+        outcome.failedInExistingTransaction = g_engine.inTransaction();
+        if (!validateCopyWirePlan(plan, session)) {
+            outcome.connectionOk = protocol.sendErrorResponse(
+                "ERROR", plan.sqlState.empty() ? "XX000" : plan.sqlState,
+                plan.error);
+            return outcome;
+        }
+
+        CopyStatementBoundary boundary;
+        QueryResult boundaryError;
+        if (!beginCopyBoundary(boundary, boundaryError)) {
+            outcome.connectionOk = protocol.sendErrorResponse(
+                "ERROR", boundaryError.sqlState,
+                trimText(boundaryError.errorMessage));
+            return outcome;
+        }
+        outcome.failedInExistingTransaction =
+            boundary.originallyInTransaction;
+
+        const std::vector<uint16_t> formats(plan.columnIndexes.size(), 0);
+        if (plan.direction == CopyWireDirection::FromStdin) {
+            if (!protocol.sendCopyInResponse(0, formats)) {
+                QueryResult ignored;
+                (void)finishCopyBoundary(boundary, false, ignored);
+                outcome.connectionOk = false;
+                return outcome;
+            }
+            CopyStreamResult stream = receiveCopyIn(protocol, plan, session);
+            outcome.connectionOk = stream.transportOk;
+            outcome.syncConsumed = stream.syncConsumed;
+            QueryResult finishError;
+            const bool finished = finishCopyBoundary(
+                boundary, stream.success, finishError);
+            if (!outcome.connectionOk) return outcome;
+            if (!stream.success) {
+                if (!stream.errorSent) {
+                    outcome.connectionOk = protocol.sendErrorResponse(
+                        "ERROR",
+                        stream.sqlState.empty() ? "XX000" : stream.sqlState,
+                        stream.error.empty() ? "COPY FROM failed"
+                                             : stream.error);
+                }
+                if (!finished && !finishError.errorMessage.empty()) {
+                    protocol.sendNoticeResponse(
+                        "COPY rollback failed: " +
+                            trimText(finishError.errorMessage),
+                        "WARNING", "XX000");
+                }
+                return outcome;
+            }
+            if (!finished) {
+                outcome.connectionOk = protocol.sendErrorResponse(
+                    "ERROR", finishError.sqlState,
+                    trimText(finishError.errorMessage));
+                return outcome;
+            }
+            outcome.success = protocol.sendCommandComplete(
+                "COPY " + std::to_string(stream.rows));
+            outcome.connectionOk = outcome.success;
+            return outcome;
+        }
+
+        if (!protocol.sendCopyOutResponse(0, formats)) {
+            QueryResult ignored;
+            (void)finishCopyBoundary(boundary, false, ignored);
+            outcome.connectionOk = false;
+            return outcome;
+        }
+        CopyStreamResult stream = sendCopyOut(protocol, plan, session);
+        QueryResult finishError;
+        const bool finished = finishCopyBoundary(
+            boundary, stream.success, finishError);
+        outcome.connectionOk = stream.transportOk;
+        if (!outcome.connectionOk) return outcome;
+        if (!stream.success) {
+            outcome.connectionOk = protocol.sendErrorResponse(
+                "ERROR", stream.sqlState.empty() ? "XX000" : stream.sqlState,
+                stream.error.empty() ? "COPY TO failed" : stream.error);
+            return outcome;
+        }
+        if (!finished) {
+            outcome.connectionOk = protocol.sendErrorResponse(
+                "ERROR", finishError.sqlState,
+                trimText(finishError.errorMessage));
+            return outcome;
+        }
+        outcome.success = protocol.sendCommandComplete(
+            "COPY " + std::to_string(stream.rows));
+        outcome.connectionOk = outcome.success;
+        return outcome;
+    };
+    const auto finishExtendedSync = [&]() -> bool {
+        if (extendedImplicitTransaction) {
+            QueryResult endResult = executeForProtocol(
+                extendedQueryError ? "ROLLBACK" : "COMMIT");
+            extendedImplicitTransaction = false;
+            portals.clear();
+            if (endResult.error) {
+                if (!protocol.sendErrorResponse(
+                        "ERROR", endResult.sqlState,
+                        trimText(endResult.errorMessage))) {
+                    return false;
+                }
+                if (transactionFailed || g_engine.inTransaction()) {
+                    (void)executeForProtocol("ROLLBACK");
+                }
+            }
+        } else if (!g_engine.inTransaction()) {
+            portals.clear();
+        }
+        if (!sendPendingNotifications(protocol, session.pid)) return false;
+        if (!sendChangedParameterStatuses()) return false;
+        if (!protocol.sendReadyForQuery(readyStatus())) return false;
+        extendedQueryError = false;
+        return true;
+    };
     while (true) {
         if (!socket.hasBufferedInput()) {
             pollfd descriptor{};
@@ -2595,6 +3753,55 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 updateProcessInfo(pid, "Idle", "", "");
                 QueryResult empty;
                 sendQueryResult(protocol, empty, readyStatus());
+                continue;
+            }
+
+            std::vector<CopyWirePlan> copyPlans;
+            copyPlans.reserve(statements.size());
+            bool hasWireCopy = false;
+            bool hasCopyGateError = false;
+            for (const auto& statement : statements) {
+                CopyWirePlan plan = parseCopyWirePlan(statement);
+                hasWireCopy = hasWireCopy || plan.wire;
+                hasCopyGateError = hasCopyGateError ||
+                    (plan.matched && !plan.error.empty());
+                copyPlans.push_back(std::move(plan));
+            }
+            if (statements.size() > 1 &&
+                (hasWireCopy || hasCopyGateError)) {
+                const bool failedTransaction = g_engine.inTransaction();
+                protocol.sendErrorResponse(
+                    "ERROR", "0A000",
+                    "wire COPY cannot be combined with other statements in one Query message");
+                if (failedTransaction) transactionFailed = true;
+                updateProcessInfo(pid, "Idle", "", "");
+                protocol.sendReadyForQuery(readyStatus());
+                continue;
+            }
+            if (statements.size() == 1 && copyPlans.front().matched &&
+                !copyPlans.front().error.empty()) {
+                const bool failedTransaction = g_engine.inTransaction();
+                protocol.sendErrorResponse(
+                    "ERROR", copyPlans.front().sqlState,
+                    copyPlans.front().error);
+                if (failedTransaction) transactionFailed = true;
+                updateProcessInfo(pid, "Idle", "", "");
+                protocol.sendReadyForQuery(readyStatus());
+                continue;
+            }
+            if (statements.size() == 1 && copyPlans.front().wire) {
+                CopyExecutionOutcome copy =
+                    executeCopyWire(std::move(copyPlans.front()));
+                if (!copy.connectionOk) break;
+                if (!copy.success && copy.failedInExistingTransaction) {
+                    transactionFailed = true;
+                }
+                if (!g_engine.inTransaction()) portals.clear();
+                updateProcessDb(pid, session.currentDB);
+                updateProcessInfo(pid, "Idle", "", "");
+                if (!sendPendingNotifications(protocol, session.pid)) break;
+                if (!sendChangedParameterStatuses()) break;
+                if (!protocol.sendReadyForQuery(readyStatus())) break;
                 continue;
             }
 
@@ -2934,6 +4141,67 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             }
             auto& portalState = portalIt->second;
             if (!portalState.executed) {
+                CopyWirePlan copyPlan = parseCopyWirePlan(portalState.sql);
+                if (copyPlan.matched && !copyPlan.error.empty()) {
+                    protocol.sendErrorResponse(
+                        "ERROR", copyPlan.sqlState, copyPlan.error);
+                    portalState.executed = true;
+                    portalState.completed = true;
+                    extendedQueryError = true;
+                    if (g_engine.inTransaction()) transactionFailed = true;
+                    continue;
+                }
+                if (copyPlan.wire) {
+                    if (maxRows != 0) {
+                        protocol.sendErrorResponse(
+                            "ERROR", "0A000",
+                            "wire COPY does not support portal row limits");
+                        portalState.executed = true;
+                        portalState.completed = true;
+                        extendedQueryError = true;
+                        if (g_engine.inTransaction()) transactionFailed = true;
+                        continue;
+                    }
+                    if (std::any_of(
+                            portalState.resultFormats.begin(),
+                            portalState.resultFormats.end(),
+                            [](uint16_t format) { return format != 0; })) {
+                        protocol.sendErrorResponse(
+                            "ERROR", "0A000",
+                            "wire COPY binary result format is not supported");
+                        portalState.executed = true;
+                        portalState.completed = true;
+                        extendedQueryError = true;
+                        if (g_engine.inTransaction()) transactionFailed = true;
+                        continue;
+                    }
+                    if (!g_engine.inTransaction()) {
+                        QueryResult beginResult = executeForProtocol("BEGIN");
+                        if (beginResult.error) {
+                            protocol.sendErrorResponse(
+                                "ERROR", beginResult.sqlState,
+                                beginResult.errorMessage);
+                            portalState.executed = true;
+                            portalState.completed = true;
+                            extendedQueryError = true;
+                            continue;
+                        }
+                        extendedImplicitTransaction = true;
+                    }
+                    CopyExecutionOutcome copy =
+                        executeCopyWire(std::move(copyPlan));
+                    portalState.executed = true;
+                    portalState.completed = true;
+                    if (!copy.connectionOk) break;
+                    if (!copy.success) {
+                        extendedQueryError = true;
+                        if (copy.failedInExistingTransaction) {
+                            transactionFailed = true;
+                        }
+                    }
+                    if (copy.syncConsumed && !finishExtendedSync()) break;
+                    continue;
+                }
                 if (!g_engine.inTransaction() &&
                     !isTransactionControlStatement(portalState.sql)) {
                     QueryResult beginResult = executeForProtocol("BEGIN");
@@ -3112,28 +4380,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 extendedQueryError = false;
                 continue;
             }
-            if (extendedImplicitTransaction) {
-                QueryResult endResult = executeForProtocol(
-                    extendedQueryError ? "ROLLBACK" : "COMMIT");
-                extendedImplicitTransaction = false;
-                portals.clear();
-                if (endResult.error) {
-                    protocol.sendErrorResponse(
-                        "ERROR", endResult.sqlState,
-                        trimText(endResult.errorMessage));
-                    if (transactionFailed || g_engine.inTransaction()) {
-                        (void)executeForProtocol("ROLLBACK");
-                    }
-                }
-            } else if (!g_engine.inTransaction()) {
-                // Named portals are transaction-scoped.  This also covers
-                // an explicit COMMIT/ROLLBACK executed in the current group.
-                portals.clear();
-            }
-            if (!sendPendingNotifications(protocol, session.pid)) break;
-            if (!sendChangedParameterStatuses()) break;
-            protocol.sendReadyForQuery(readyStatus());
-            extendedQueryError = false;
+            if (!finishExtendedSync()) break;
             continue;
         }
         if (message.type == 'H') {

@@ -356,6 +356,28 @@ bool PostgresProtocol::sendMessage(char type, const std::vector<uint8_t>& body) 
     return writeAll(packet.data(), packet.size());
 }
 
+namespace {
+
+bool appendCopyResponseBody(uint8_t overallFormat,
+                            const std::vector<uint16_t>& columnFormats,
+                            std::vector<uint8_t>& body) {
+    if (overallFormat > 1 ||
+        columnFormats.size() >
+            static_cast<size_t>(std::numeric_limits<uint16_t>::max())) {
+        return false;
+    }
+    body.reserve(3 + columnFormats.size() * 2);
+    body.push_back(overallFormat);
+    appendRawUInt16(body, static_cast<uint16_t>(columnFormats.size()));
+    for (const uint16_t format : columnFormats) {
+        if (format > 1) return false;
+        appendRawUInt16(body, format);
+    }
+    return true;
+}
+
+} // namespace
+
 void PostgresProtocol::appendUInt16(std::vector<uint8_t>& body, uint16_t value) {
     body.push_back(static_cast<uint8_t>((value >> 8) & 0xff));
     body.push_back(static_cast<uint8_t>(value & 0xff));
@@ -531,6 +553,34 @@ bool PostgresProtocol::sendCommandComplete(const std::string& tag) {
     std::vector<uint8_t> body;
     appendCString(body, tag);
     return sendMessage('C', body);
+}
+
+bool PostgresProtocol::sendCopyInResponse(
+        uint8_t overallFormat,
+        const std::vector<uint16_t>& columnFormats) {
+    std::vector<uint8_t> body;
+    if (!appendCopyResponseBody(overallFormat, columnFormats, body)) {
+        return false;
+    }
+    return sendMessage('G', body);
+}
+
+bool PostgresProtocol::sendCopyOutResponse(
+        uint8_t overallFormat,
+        const std::vector<uint16_t>& columnFormats) {
+    std::vector<uint8_t> body;
+    if (!appendCopyResponseBody(overallFormat, columnFormats, body)) {
+        return false;
+    }
+    return sendMessage('H', body);
+}
+
+bool PostgresProtocol::sendCopyData(const std::string& data) {
+    return sendMessage('d', std::vector<uint8_t>(data.begin(), data.end()));
+}
+
+bool PostgresProtocol::sendCopyDone() {
+    return sendMessage('c', {});
 }
 
 bool PostgresProtocol::sendRowDescription(const std::vector<PgColumnDescription>& columns) {

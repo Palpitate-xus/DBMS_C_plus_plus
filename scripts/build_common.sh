@@ -58,6 +58,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/network_types_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/xml_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/prepared_statement_lifecycle_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/copy_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/matview_refresh_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/create_database_options_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/tablespace_protocol_e2e_test.py)

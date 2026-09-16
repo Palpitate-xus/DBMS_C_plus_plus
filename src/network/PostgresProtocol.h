@@ -76,6 +76,15 @@ public:
     bool sendNoData();
     bool sendPortalSuspended();
     bool sendCommandComplete(const std::string& tag);
+    // COPY sub-protocol messages.  The overall and per-column format codes
+    // are PostgreSQL's 0=text / 1=binary values.  Callers deliberately send
+    // one CopyData message at a time so socket backpressure bounds memory.
+    bool sendCopyInResponse(uint8_t overallFormat,
+                            const std::vector<uint16_t>& columnFormats);
+    bool sendCopyOutResponse(uint8_t overallFormat,
+                             const std::vector<uint16_t>& columnFormats);
+    bool sendCopyData(const std::string& data);
+    bool sendCopyDone();
     bool sendRowDescription(const std::vector<PgColumnDescription>& columns);
     bool sendDataRow(const std::vector<std::string>& values);
     bool sendDataRow(const std::vector<std::string>& values,
