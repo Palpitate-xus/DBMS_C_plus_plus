@@ -2912,7 +2912,15 @@ bool executeUpdateFromJoin(const UpdateStmt& stmt, Session& s, bool& fallback) {
                              StorageEngine::TablePrivilege::Update)) return true;
 
     const TableSchema targetSchema = g_engine.getTableSchema(s.currentDB, resolvedTable);
-    const std::string targetQualifier = unqualifiedRelationName(requestedTable);
+    const std::string targetQualifier = stmt.alias.empty()
+        ? unqualifiedRelationName(requestedTable)
+        : identifier(stmt.alias);
+    DmlStatementScope statementScope(g_engine, s.currentDB);
+    if (!statementScope.ready()) {
+        std::cout << "ERROR: UPDATE FROM could not establish an atomic statement "
+                     "boundary (SQLSTATE 58030)" << std::endl;
+        return true;
+    }
     std::vector<StructuredSourceRelation> sources;
     std::vector<const Expr*> joinPredicates;
     const StructuredRelationResult relationResult = collectStructuredRelations(
@@ -3045,18 +3053,24 @@ bool executeUpdateFromJoin(const UpdateStmt& stmt, Session& s, bool& fallback) {
         stmt.returning.empty() ? nullptr : &updatedRows,
         updateResolver, updateMatcher, &affectedRows);
     if (status != DBStatus::OK) {
-        std::cout << "UPDATE FROM failed" << std::endl;
+        std::cout << "ERROR: UPDATE FROM failed (SQLSTATE "
+                  << sqlstateForDBStatus(status) << ")" << std::endl;
         return true;
     }
-    std::cout << "Update done" << std::endl;
     if (!stmt.returning.empty()) {
         if (!publishReturning(returningProjections, targetSchema, s.currentDB,
                               updatedRows, "UPDATE")) return true;
-        printReturningRows(g_lastDmlResult);
-    } else {
-        publishMutationCount("UPDATE", affectedRows);
     }
-    g_engine.analyzeTable(s.currentDB, resolvedTable);
+    if (!statementScope.finish()) {
+        clearLastDmlResult();
+        std::cout << "ERROR: UPDATE FROM transaction finish failed "
+                     "(SQLSTATE 58030)" << std::endl;
+        return true;
+    }
+    if (affectedRows > 0) g_engine.analyzeTable(s.currentDB, resolvedTable);
+    std::cout << "Update done" << std::endl;
+    if (!stmt.returning.empty()) printReturningRows(g_lastDmlResult);
+    else publishMutationCount("UPDATE", affectedRows);
     return false;
 }
 
@@ -3100,7 +3114,9 @@ bool executeUpdateFrom(const UpdateStmt& stmt, Session& s, bool& fallback) {
 
     const TableSchema targetSchema = g_engine.getTableSchema(s.currentDB, resolvedTable);
     const TableSchema sourceSchema = g_engine.getTableSchema(s.currentDB, resolvedSource);
-    const std::string targetQualifier = unqualifiedRelationName(requestedTable);
+    const std::string targetQualifier = stmt.alias.empty()
+        ? unqualifiedRelationName(requestedTable)
+        : identifier(stmt.alias);
     const std::string sourceQualifier = stmt.fromClause->alias.empty()
         ? unqualifiedRelationName(requestedSource)
         : identifier(stmt.fromClause->alias);
@@ -3157,6 +3173,13 @@ bool executeUpdateFrom(const UpdateStmt& stmt, Session& s, bool& fallback) {
             fallback = true;
             return false;
         }
+    }
+
+    DmlStatementScope statementScope(g_engine, s.currentDB);
+    if (!statementScope.ready()) {
+        std::cout << "ERROR: UPDATE FROM could not establish an atomic statement "
+                     "boundary (SQLSTATE 58030)" << std::endl;
+        return true;
     }
 
     std::vector<std::map<std::string, std::string>> sourceRows;
@@ -3234,24 +3257,35 @@ bool executeUpdateFrom(const UpdateStmt& stmt, Session& s, bool& fallback) {
         stmt.returning.empty() ? nullptr : &updatedRows,
         updateResolver, updateMatcher, &affectedRows);
     if (status != DBStatus::OK) {
-        std::cout << "UPDATE FROM failed" << std::endl;
+        std::cout << "ERROR: UPDATE FROM failed (SQLSTATE "
+                  << sqlstateForDBStatus(status) << ")" << std::endl;
         return true;
     }
-    std::cout << "Update done" << std::endl;
     if (!stmt.returning.empty()) {
         if (!publishReturning(returningProjections, targetSchema, s.currentDB,
                               updatedRows, "UPDATE")) return true;
-        printReturningRows(g_lastDmlResult);
-    } else {
-        publishMutationCount("UPDATE", affectedRows);
     }
-    g_engine.analyzeTable(s.currentDB, resolvedTable);
+    if (!statementScope.finish()) {
+        clearLastDmlResult();
+        std::cout << "ERROR: UPDATE FROM transaction finish failed "
+                     "(SQLSTATE 58030)" << std::endl;
+        return true;
+    }
+    if (affectedRows > 0) g_engine.analyzeTable(s.currentDB, resolvedTable);
+    std::cout << "Update done" << std::endl;
+    if (!stmt.returning.empty()) printReturningRows(g_lastDmlResult);
+    else publishMutationCount("UPDATE", affectedRows);
     return false;
 }
 
 bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
-    if (stmt.fromClause) return executeUpdateFrom(stmt, s, fallback);
     fallback = false;
+    if (!stmt.whereCurrentOf.empty()) {
+        std::cout << "ERROR: WHERE CURRENT OF is not supported for UPDATE "
+                     "(SQLSTATE 0A000)" << std::endl;
+        return true;
+    }
+    if (stmt.fromClause) return executeUpdateFrom(stmt, s, fallback);
     if (!checkDatabase(s)) return true;
     const std::string requestedTable = identifier(stmt.tableName);
     const std::string resolvedTable = resolveTable(s, requestedTable);
@@ -3268,10 +3302,9 @@ bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
                              StorageEngine::TablePrivilege::Update)) return true;
 
     const TableSchema table = g_engine.getTableSchema(s.currentDB, resolvedTable);
-    const std::string targetQualifier = [&]() {
-        const size_t dot = requestedTable.rfind('.');
-        return dot == std::string::npos ? requestedTable : requestedTable.substr(dot + 1);
-    }();
+    const std::string targetQualifier = stmt.alias.empty()
+        ? unqualifiedRelationName(requestedTable)
+        : identifier(stmt.alias);
     std::vector<std::string> columns;
     SqlRow updates;
     std::map<std::string, const Expr*> expressionUpdates;
@@ -3900,7 +3933,15 @@ bool executeDeleteUsingJoin(const DeleteStmt& stmt, Session& s, bool& fallback) 
                              StorageEngine::TablePrivilege::Delete)) return true;
 
     const TableSchema targetSchema = g_engine.getTableSchema(s.currentDB, resolvedTable);
-    const std::string targetQualifier = unqualifiedRelationName(requestedTable);
+    const std::string targetQualifier = stmt.alias.empty()
+        ? unqualifiedRelationName(requestedTable)
+        : identifier(stmt.alias);
+    DmlStatementScope statementScope(g_engine, s.currentDB);
+    if (!statementScope.ready()) {
+        std::cout << "ERROR: DELETE USING could not establish an atomic statement "
+                     "boundary (SQLSTATE 58030)" << std::endl;
+        return true;
+    }
     std::vector<StructuredSourceRelation> sources;
     std::vector<const Expr*> joinPredicates;
     const StructuredRelationResult relationResult = collectStructuredRelations(
@@ -3946,8 +3987,9 @@ bool executeDeleteUsingJoin(const DeleteStmt& stmt, Session& s, bool& fallback) 
         if (evaluationFailed) break;
     }
     if (evaluationFailed) {
-        fallback = true;
-        return false;
+        std::cout << "ERROR: DELETE USING expression evaluation failed "
+                     "(SQLSTATE 22023)" << std::endl;
+        return true;
     }
 
     std::vector<ReturningProjection> returningProjections;
@@ -3968,18 +4010,24 @@ bool executeDeleteUsingJoin(const DeleteStmt& stmt, Session& s, bool& fallback) 
         stmt.returning.empty() ? nullptr : &deletedRows, deleteMatcher,
         &affectedRows);
     if (status != DBStatus::OK) {
-        std::cout << "DELETE USING failed" << std::endl;
+        std::cout << "ERROR: DELETE USING failed (SQLSTATE "
+                  << sqlstateForDBStatus(status) << ")" << std::endl;
         return true;
     }
-    std::cout << "Delete done" << std::endl;
     if (!stmt.returning.empty()) {
         if (!publishReturning(returningProjections, targetSchema, s.currentDB,
                               deletedRows, "DELETE")) return true;
-        printReturningRows(g_lastDmlResult);
-    } else {
-        publishMutationCount("DELETE", affectedRows);
     }
-    g_engine.analyzeTable(s.currentDB, resolvedTable);
+    if (!statementScope.finish()) {
+        clearLastDmlResult();
+        std::cout << "ERROR: DELETE USING transaction finish failed "
+                     "(SQLSTATE 58030)" << std::endl;
+        return true;
+    }
+    if (affectedRows > 0) g_engine.analyzeTable(s.currentDB, resolvedTable);
+    std::cout << "Delete done" << std::endl;
+    if (!stmt.returning.empty()) printReturningRows(g_lastDmlResult);
+    else publishMutationCount("DELETE", affectedRows);
     return false;
 }
 
@@ -4023,7 +4071,9 @@ bool executeDeleteUsing(const DeleteStmt& stmt, Session& s, bool& fallback) {
 
     const TableSchema targetSchema = g_engine.getTableSchema(s.currentDB, resolvedTable);
     const TableSchema sourceSchema = g_engine.getTableSchema(s.currentDB, resolvedSource);
-    const std::string targetQualifier = unqualifiedRelationName(requestedTable);
+    const std::string targetQualifier = stmt.alias.empty()
+        ? unqualifiedRelationName(requestedTable)
+        : identifier(stmt.alias);
     const std::string sourceQualifier = stmt.usingClause->alias.empty()
         ? unqualifiedRelationName(requestedSource)
         : identifier(stmt.usingClause->alias);
@@ -4036,6 +4086,13 @@ bool executeDeleteUsing(const DeleteStmt& stmt, Session& s, bool& fallback) {
             fallback = true;
             return false;
         }
+    }
+
+    DmlStatementScope statementScope(g_engine, s.currentDB);
+    if (!statementScope.ready()) {
+        std::cout << "ERROR: DELETE USING could not establish an atomic statement "
+                     "boundary (SQLSTATE 58030)" << std::endl;
+        return true;
     }
 
     std::vector<std::map<std::string, std::string>> sourceRows;
@@ -4076,8 +4133,9 @@ bool executeDeleteUsing(const DeleteStmt& stmt, Session& s, bool& fallback) {
         if (evaluationFailed) break;
     }
     if (evaluationFailed) {
-        fallback = true;
-        return false;
+        std::cout << "ERROR: DELETE USING expression evaluation failed "
+                     "(SQLSTATE 22023)" << std::endl;
+        return true;
     }
 
     std::vector<ReturningProjection> returningProjections;
@@ -4098,24 +4156,35 @@ bool executeDeleteUsing(const DeleteStmt& stmt, Session& s, bool& fallback) {
         stmt.returning.empty() ? nullptr : &deletedRows, deleteMatcher,
         &affectedRows);
     if (status != DBStatus::OK) {
-        std::cout << "DELETE USING failed" << std::endl;
+        std::cout << "ERROR: DELETE USING failed (SQLSTATE "
+                  << sqlstateForDBStatus(status) << ")" << std::endl;
         return true;
     }
-    std::cout << "Delete done" << std::endl;
     if (!stmt.returning.empty()) {
         if (!publishReturning(returningProjections, targetSchema, s.currentDB,
                               deletedRows, "DELETE")) return true;
-        printReturningRows(g_lastDmlResult);
-    } else {
-        publishMutationCount("DELETE", affectedRows);
     }
-    g_engine.analyzeTable(s.currentDB, resolvedTable);
+    if (!statementScope.finish()) {
+        clearLastDmlResult();
+        std::cout << "ERROR: DELETE USING transaction finish failed "
+                     "(SQLSTATE 58030)" << std::endl;
+        return true;
+    }
+    if (affectedRows > 0) g_engine.analyzeTable(s.currentDB, resolvedTable);
+    std::cout << "Delete done" << std::endl;
+    if (!stmt.returning.empty()) printReturningRows(g_lastDmlResult);
+    else publishMutationCount("DELETE", affectedRows);
     return false;
 }
 
 bool executeDelete(const DeleteStmt& stmt, Session& s, bool& fallback) {
-    if (stmt.usingClause) return executeDeleteUsing(stmt, s, fallback);
     fallback = false;
+    if (!stmt.whereCurrentOf.empty()) {
+        std::cout << "ERROR: WHERE CURRENT OF is not supported for DELETE "
+                     "(SQLSTATE 0A000)" << std::endl;
+        return true;
+    }
+    if (stmt.usingClause) return executeDeleteUsing(stmt, s, fallback);
     if (!checkDatabase(s)) return true;
     const std::string requestedTable = identifier(stmt.tableName);
     const std::string resolvedTable = resolveTable(s, requestedTable);
@@ -4278,6 +4347,24 @@ bool tryDmlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         error = executeMerge(*stmt, s, fallback);
     }
     if (fallback) {
+        if (parsedCmd == SqlCommand::Update) {
+            const auto* update = dynamic_cast<const UpdateStmt*>(parsed.stmt.get());
+            if (update && update->fromClause) {
+                handled = true;
+                std::cout << "ERROR: unsupported UPDATE ... FROM shape "
+                             "(SQLSTATE 0A000)" << std::endl;
+                return true;
+            }
+        }
+        if (parsedCmd == SqlCommand::Delete) {
+            const auto* deleteStmt = dynamic_cast<const DeleteStmt*>(parsed.stmt.get());
+            if (deleteStmt && deleteStmt->usingClause) {
+                handled = true;
+                std::cout << "ERROR: unsupported DELETE ... USING shape "
+                             "(SQLSTATE 0A000)" << std::endl;
+                return true;
+            }
+        }
         if (parsedCmd == SqlCommand::Insert) {
             const auto* insert = dynamic_cast<const InsertStmt*>(parsed.stmt.get());
             if (insert && !insert->override_.empty()) {

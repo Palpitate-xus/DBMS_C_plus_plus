@@ -65,6 +65,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/tablespace_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/comment_security_label_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/merge_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/update_delete_from_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/gap_progress_test.py tests/pg_diff_runner_test.py)
     DBMS_E2E_TESTS+=(tests/build_cache_routing_test.py)
     DBMS_E2E_TESTS+=(tests/e2e_binary_routing_test.py)

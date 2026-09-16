@@ -592,6 +592,38 @@ int main() {
         assert(dynamic_cast<MergeStmt*>(qualifiedMerge.stmt.get())
                    ->targetTable == "app.t");
         assert(!parser.parse("INSERT INTO app. VALUES (1)").success);
+
+        auto updateFrom = parser.parse(
+            "UPDATE target AS dst SET val = src.val FROM source AS src "
+            "WHERE dst.id = src.id");
+        assert(updateFrom.success);
+        auto* updateFromStmt = dynamic_cast<UpdateStmt*>(updateFrom.stmt.get());
+        assert(updateFromStmt && updateFromStmt->alias == "dst");
+        assert(updateFromStmt->fromClause &&
+               updateFromStmt->fromClause->alias == "src");
+
+        auto deleteUsing = parser.parse(
+            "DELETE FROM target AS dst USING source AS src "
+            "WHERE dst.id = src.id");
+        assert(deleteUsing.success);
+        auto* deleteUsingStmt = dynamic_cast<DeleteStmt*>(deleteUsing.stmt.get());
+        assert(deleteUsingStmt && deleteUsingStmt->alias == "dst");
+        assert(deleteUsingStmt->usingClause &&
+               deleteUsingStmt->usingClause->alias == "src");
+
+        auto updateCurrent = parser.parse(
+            "UPDATE target SET val = 1 WHERE CURRENT OF update_cursor");
+        auto deleteCurrent = parser.parse(
+            "DELETE FROM target WHERE CURRENT OF delete_cursor");
+        assert(updateCurrent.success && deleteCurrent.success);
+        assert(dynamic_cast<UpdateStmt*>(updateCurrent.stmt.get())
+                   ->whereCurrentOf == "update_cursor");
+        assert(dynamic_cast<DeleteStmt*>(deleteCurrent.stmt.get())
+                   ->whereCurrentOf == "delete_cursor");
+        assert(!parser.parse(
+            "UPDATE target SET val = 1 WHERE CURRENT OF").success);
+        assert(!parser.parse(
+            "DELETE FROM target WHERE CURRENT OF").success);
         std::cout << "[PARSER P1] INSERT AST DEFAULT handling OK\n";
     }
 

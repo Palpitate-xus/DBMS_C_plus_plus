@@ -3167,7 +3167,23 @@ ParseResult SQLParser::parseUpdate(const std::string& sql) {
     // WHERE
     if (pos < tokens.size() && toLower(tokens[pos]) == "where") {
         ++pos;
-        stmt->whereClause = parseSimpleExpr(tokens, pos);
+        if (pos + 1 < tokens.size() &&
+            toLower(tokens[pos]) == "current" &&
+            toLower(tokens[pos + 1]) == "of") {
+            pos += 2;
+            if (pos >= tokens.size() || tokens[pos] == ";" ||
+                toLower(tokens[pos]) == "returning") {
+                r.error = "WHERE CURRENT OF requires a cursor name";
+                return r;
+            }
+            stmt->whereCurrentOf = tokens[pos++];
+        } else {
+            stmt->whereClause = parseSimpleExpr(tokens, pos);
+            if (!stmt->whereClause) {
+                r.error = "UPDATE WHERE requires an expression";
+                return r;
+            }
+        }
     }
 
     // RETURNING
@@ -3213,6 +3229,22 @@ ParseResult SQLParser::parseDelete(const std::string& sql) {
         return r;
     }
 
+    // PostgreSQL hides the original relation name once an alias is supplied.
+    // Preserve the alias in the typed AST so USING predicates resolve against
+    // the same namespace as UPDATE ... FROM.
+    if (pos < tokens.size() && toLower(tokens[pos]) == "as") {
+        ++pos;
+        if (pos >= tokens.size() || tokens[pos] == ";" ||
+            isKeyword(tokens[pos])) {
+            r.error = "DELETE AS requires an alias";
+            return r;
+        }
+        stmt->alias = tokens[pos++];
+    } else if (pos < tokens.size() && !isKeyword(tokens[pos]) &&
+               tokens[pos] != ";") {
+        stmt->alias = tokens[pos++];
+    }
+
     // USING
     if (pos < tokens.size() && toLower(tokens[pos]) == "using") {
         ++pos;
@@ -3222,7 +3254,23 @@ ParseResult SQLParser::parseDelete(const std::string& sql) {
     // WHERE
     if (pos < tokens.size() && toLower(tokens[pos]) == "where") {
         ++pos;
-        stmt->whereClause = parseSimpleExpr(tokens, pos);
+        if (pos + 1 < tokens.size() &&
+            toLower(tokens[pos]) == "current" &&
+            toLower(tokens[pos + 1]) == "of") {
+            pos += 2;
+            if (pos >= tokens.size() || tokens[pos] == ";" ||
+                toLower(tokens[pos]) == "returning") {
+                r.error = "WHERE CURRENT OF requires a cursor name";
+                return r;
+            }
+            stmt->whereCurrentOf = tokens[pos++];
+        } else {
+            stmt->whereClause = parseSimpleExpr(tokens, pos);
+            if (!stmt->whereClause) {
+                r.error = "DELETE WHERE requires an expression";
+                return r;
+            }
+        }
     }
 
     // RETURNING

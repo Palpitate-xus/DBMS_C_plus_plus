@@ -718,6 +718,7 @@ struct UpdateStmt : public Stmt {
     std::string alias;                         // UPDATE t [AS] x
     std::map<std::string, ExprPtr> setClauses;
     ExprPtr whereClause;
+    std::string whereCurrentOf;                // WHERE CURRENT OF cursor
     std::unique_ptr<FromItem> fromClause;      // UPDATE ... FROM ...
     std::vector<SelectItem> returning;
     bool only = false;                         // UPDATE ONLY table
@@ -732,7 +733,9 @@ struct UpdateStmt : public Stmt {
 
 struct DeleteStmt : public Stmt {
     std::string tableName;
+    std::string alias;                         // DELETE FROM t [AS] x
     ExprPtr whereClause;
+    std::string whereCurrentOf;                // WHERE CURRENT OF cursor
     std::unique_ptr<FromItem> usingClause;     // DELETE ... USING ...
     std::vector<SelectItem> returning;
     bool only = false;                         // DELETE FROM ONLY table

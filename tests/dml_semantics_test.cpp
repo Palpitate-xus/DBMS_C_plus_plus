@@ -191,13 +191,20 @@ static void test_join_dml_engine() {
     assert((updated.rows[2] == std::vector<std::string>{"3", "330"}));
 
     handled = false;
-    // Outer joins remain explicitly owned by the legacy boundary until their
-    // NULL-extension semantics are represented by the structured executor.
-    assert(!dbms::tryDmlBridge(
+    // Unsupported source shapes stay owned by the typed bridge and fail
+    // before mutation; they must never fall through to the legacy slicer.
+    assert(dbms::tryDmlBridge(
         "UPDATE target SET val = b.delta FROM source_a AS a "
         "LEFT JOIN source_b AS b ON a.grp = b.grp WHERE target.id = a.id",
         dbms::SqlCommand::Update, s, handled));
-    assert(!handled);
+    assert(handled);
+
+    handled = false;
+    assert(dbms::tryDmlBridge(
+        "DELETE FROM target USING source_a AS a "
+        "LEFT JOIN source_b AS b ON a.grp = b.grp WHERE target.id = -1",
+        dbms::SqlCommand::Delete, s, handled));
+    assert(handled);
 
     handled = false;
     assert(!dbms::tryDmlBridge(
@@ -281,6 +288,114 @@ static std::map<std::string, std::string> readTwoColumnRows(
                 g_engine.extractColumnValue(row, schema, 1, db, true);
         });
     return rows;
+}
+
+// UPDATE ... FROM and DELETE ... USING use the target alias namespace,
+// affect a target row only once for duplicate source matches, reject cursor
+// updates before mutation, and roll back the whole statement on failure.
+static void test_source_driven_dml_hardening() {
+    const std::string db = testDbPath("dml_source_hardening");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE TABLE duplicate_target (id INT PRIMARY KEY, val INT)", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE duplicate_source (id INT, delta INT)", s));
+    assert(g_engine.insert(db, "duplicate_target",
+        {{"id", "1"}, {"val", "0"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "duplicate_source",
+        {{"id", "1"}, {"delta", "5"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "duplicate_source",
+        {{"id", "1"}, {"delta", "7"}}) == dbms::DBStatus::OK);
+
+    bool handled = false;
+    assert(!dbms::tryDmlBridge(
+        "UPDATE duplicate_target AS dst SET val = src.delta "
+        "FROM duplicate_source AS src WHERE dst.id = src.id "
+        "RETURNING id, val",
+        dbms::SqlCommand::Update, s, handled));
+    assert(handled);
+    const dbms::DmlResult updated = dbms::takeLastDmlResult();
+    assert(updated.available && updated.commandTag == "UPDATE 1");
+    assert(updated.rows.size() == 1);
+    const auto duplicateRows = readTwoColumnRows(db, "duplicate_target");
+    assert(duplicateRows.size() == 1);
+    assert(duplicateRows.at("1") == "5" || duplicateRows.at("1") == "7");
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE delete_target (id INT PRIMARY KEY, val INT)", s));
+    assert(g_engine.insert(db, "delete_target",
+        {{"id", "1"}, {"val", "10"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "delete_target",
+        {{"id", "2"}, {"val", "20"}}) == dbms::DBStatus::OK);
+    handled = false;
+    assert(!dbms::tryDmlBridge(
+        "DELETE FROM delete_target AS dst USING duplicate_source AS src "
+        "WHERE dst.id = src.id RETURNING id, val",
+        dbms::SqlCommand::Delete, s, handled));
+    assert(handled);
+    const dbms::DmlResult deleted = dbms::takeLastDmlResult();
+    assert(deleted.available && deleted.commandTag == "DELETE 1");
+    assert(deleted.rows.size() == 1 && deleted.rows[0][0] == "1");
+    assert((readTwoColumnRows(db, "delete_target") ==
+            std::map<std::string, std::string>{{"2", "20"}}));
+
+    const auto beforeCurrentOf = readTwoColumnRows(db, "duplicate_target");
+    handled = false;
+    assert(dbms::tryDmlBridge(
+        "UPDATE duplicate_target SET val = 99 WHERE CURRENT OF update_cursor",
+        dbms::SqlCommand::Update, s, handled));
+    assert(handled && readTwoColumnRows(db, "duplicate_target") == beforeCurrentOf);
+    handled = false;
+    assert(dbms::tryDmlBridge(
+        "DELETE FROM delete_target WHERE CURRENT OF delete_cursor",
+        dbms::SqlCommand::Delete, s, handled));
+    assert(handled);
+    assert((readTwoColumnRows(db, "delete_target") ==
+            std::map<std::string, std::string>{{"2", "20"}}));
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE atomic_target (id INT PRIMARY KEY, val INT UNIQUE)", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE atomic_source (id INT, val INT)", s));
+    assert(g_engine.insert(db, "atomic_target",
+        {{"id", "1"}, {"val", "10"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "atomic_target",
+        {{"id", "2"}, {"val", "20"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "atomic_target",
+        {{"id", "3"}, {"val", "40"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "atomic_source",
+        {{"id", "1"}, {"val", "30"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "atomic_source",
+        {{"id", "2"}, {"val", "40"}}) == dbms::DBStatus::OK);
+    const std::string conflictingUpdate =
+        "UPDATE atomic_target AS dst SET val = src.val "
+        "FROM atomic_source AS src WHERE dst.id = src.id";
+    handled = false;
+    assert(dbms::tryDmlBridge(
+        conflictingUpdate, dbms::SqlCommand::Update, s, handled));
+    assert(handled);
+    assert((readTwoColumnRows(db, "atomic_target") ==
+            std::map<std::string, std::string>{
+                {"1", "10"}, {"2", "20"}, {"3", "40"}}));
+
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "atomic_target",
+        {{"id", "9"}, {"val", "90"}}) == dbms::DBStatus::OK);
+    handled = false;
+    assert(dbms::tryDmlBridge(
+        conflictingUpdate, dbms::SqlCommand::Update, s, handled));
+    assert(handled && g_engine.inTransaction());
+    assert((readTwoColumnRows(db, "atomic_target") ==
+            std::map<std::string, std::string>{
+                {"1", "10"}, {"2", "20"}, {"3", "40"}, {"9", "90"}}));
+    assert(g_engine.commitTransaction() == dbms::DBStatus::OK);
+
+    cleanup(db);
+    std::cout << "[DML] source-driven mutation hardening OK" << std::endl;
 }
 
 // Multiple branches are ordered, every candidate is planned before writes,
@@ -462,6 +577,7 @@ int main() {
     test_delete_using_engine();
     test_join_dml_engine();
     test_merge_engine();
+    test_source_driven_dml_hardening();
     test_merge_branches_and_atomicity();
     std::cout << "[DML] all passed" << std::endl;
     return 0;
