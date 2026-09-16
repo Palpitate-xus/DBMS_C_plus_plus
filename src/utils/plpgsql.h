@@ -25,6 +25,7 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -61,7 +62,8 @@ public:
                     std::string& returnValue,
                     std::string& error,
                     NoticeSink notice = nullptr,
-                    bool* returnIsNull = nullptr);
+                    bool* returnIsNull = nullptr,
+                    const std::set<std::string>* nullParams = nullptr);
 };
 
 }  // namespace dbms

@@ -4850,7 +4850,8 @@ DBStatus StorageEngine::createUDF(const std::string& dbname,
                                    const std::string& expression,
                                    char provolatile,
                                    const std::string& language,
-                                   const std::string& returnType) {
+                                   const std::string& returnType,
+                                   const std::string& paramType) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!validMetadataObjectName(funcname)) return DBStatus::INVALID_ARGUMENT;
     auto fdir = udfDir(dbname);
@@ -4859,7 +4860,12 @@ DBStatus StorageEngine::createUDF(const std::string& dbname,
         return DBStatus::TABLE_ALREADY_EXISTS;
     }
     std::ostringstream serialized;
-    serialized << param << "\n" << expression << "\n" << provolatile << "\n"
+    if (!paramType.empty()) {
+        serialized << "PARAMS:" << param << ':' << paramType;
+    } else {
+        serialized << param;
+    }
+    serialized << "\n" << expression << "\n" << provolatile << "\n"
                << (language.empty() ? "sql" : language) << "\n"
                << "RETURNS:" << (returnType.empty() ? "text" : returnType) << "\n";
     return persistMetadata(udfPath(dbname, funcname), serialized.str());
@@ -4917,7 +4923,8 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
                         const std::string& dbname,
                         std::string& returnValue,
                         const std::map<std::string, std::string>* extraVars = nullptr,
-                        bool* returnIsNull = nullptr);
+                        bool* returnIsNull = nullptr,
+                        const std::vector<bool>* argNulls = nullptr);
 
 // Stage EXECUTE FUNCTION context for the imminent trigger firing: NEW/OLD
 // row values (dotted lowercase keys) plus TG_* diagnostics.  Consumed by
@@ -5023,12 +5030,13 @@ StorageEngine::UDFInfo StorageEngine::getUDF(const std::string& dbname,
 bool StorageEngine::callUDF(const std::string& dbname, const std::string& funcname,
                             const std::vector<std::string>& argValues,
                             std::string& returnValue,
-                            bool* returnIsNull) const {
+                            bool* returnIsNull,
+                            const std::vector<bool>* argNulls) const {
     auto udf = getUDF(dbname, funcname);
     if (udf.expression.empty()) return false;
     return evalUDFBody(udf, funcname, argValues,
                        const_cast<StorageEngine*>(this), dbname, returnValue,
-                       nullptr, returnIsNull);
+                       nullptr, returnIsNull, argNulls);
 }
 
 bool StorageEngine::callUDFWithCtx(const std::string& dbname,
@@ -5036,12 +5044,13 @@ bool StorageEngine::callUDFWithCtx(const std::string& dbname,
                                    const std::vector<std::string>& argValues,
                                    const TriggerCtx& ctx,
                                    std::string& returnValue,
-                                   bool* returnIsNull) const {
+                                   bool* returnIsNull,
+                                   const std::vector<bool>* argNulls) const {
     auto udf = getUDF(dbname, funcname);
     if (udf.expression.empty()) return false;
     return evalUDFBody(udf, funcname, argValues,
                        const_cast<StorageEngine*>(this), dbname, returnValue,
-                       &ctx.vars, returnIsNull);
+                       &ctx.vars, returnIsNull, argNulls);
 }
 
 std::vector<std::string> StorageEngine::getUDFNames(const std::string& dbname) const {
@@ -28855,15 +28864,22 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
                         const std::string& dbname,
                         std::string& returnValue,
                         const std::map<std::string, std::string>* extraVars,
-                        bool* returnIsNull) {
+                        bool* returnIsNull,
+                        const std::vector<bool>* argNulls) {
+    (void)funcName;
     if (returnIsNull) *returnIsNull = false;
-    auto udf_ = udf;
-    (void)udf_;
     std::vector<std::string> funcArgs = argValues;
+    size_t expectedArgs = udf.paramNames.size();
+    if (expectedArgs == 1 && udf.paramNames.front().empty()) expectedArgs = 0;
+    if (funcArgs.size() != expectedArgs) return false;
     if (udf.language == "plpgsql") {
         std::map<std::string, std::string> params;
+        std::set<std::string> nullParams;
         for (size_t i = 0; i < udf.paramNames.size() && i < funcArgs.size(); ++i) {
             params[udf.paramNames[i]] = funcArgs[i];
+            if (argNulls && i < argNulls->size() && (*argNulls)[i]) {
+                nullParams.insert(udf.paramNames[i]);
+            }
         }
         // Trigger context (NEW.col / OLD.col / TG_*): pre-bound like
         // parameters; explicit parameters take precedence.
@@ -28901,22 +28917,75 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
         };
         std::string rv, err;
         if (!PlPgsql::run(udf.expression, params, host, rv, err, nullptr,
-                          returnIsNull)) {
+                          returnIsNull, &nullParams)) {
             return false;
         }
         returnValue = rv;
         return true;
     }
-    std::string result = udf.expression;
+
+    // SQL scalar functions in this engine are deliberately limited to one
+    // FROM-less SELECT expression (the historic bare-expression form remains
+    // accepted).  Bind parameters as typed row values instead of textual
+    // replacement, which used to rewrite identifiers and quoted literals.
+    std::string expression = trim(udf.expression);
+    std::string lowerExpression;
+    lowerExpression.reserve(expression.size());
+    for (char ch : expression) {
+        lowerExpression += static_cast<char>(
+            std::tolower(static_cast<unsigned char>(ch)));
+    }
+    if (lowerExpression.rfind("select", 0) == 0 &&
+        (expression.size() == 6 ||
+         std::isspace(static_cast<unsigned char>(expression[6])))) {
+        expression = trim(expression.substr(6));
+    }
+    if (!expression.empty() && expression.back() == ';') {
+        expression.pop_back();
+        expression = trim(expression);
+    }
+    if (expression.empty()) return false;
+    {
+        const auto tokens = SQLParser::tokenize(expression);
+        int depth = 0;
+        static const std::set<std::string> queryClauses = {
+            "from", "where", "group", "having", "window", "order",
+            "limit", "offset", "fetch", "for", "union", "intersect",
+            "except"
+        };
+        for (const auto& token : tokens) {
+            if (token == "(") { ++depth; continue; }
+            if (token == ")") { --depth; continue; }
+            if (depth != 0) continue;
+            const std::string lowerToken = SQLParser::toLower(token);
+            if (token == "," || token == ";" ||
+                queryClauses.count(lowerToken) != 0) {
+                return false;
+            }
+        }
+        if (depth != 0) return false;
+    }
+
+    std::map<std::string, std::string> params;
+    std::map<std::string, std::string> typeHints;
+    std::set<std::string> nullParams;
     for (size_t i = 0; i < udf.paramNames.size() && i < funcArgs.size(); ++i) {
-        std::string val = funcArgs[i];
-        size_t pos = 0;
-        while ((pos = result.find(udf.paramNames[i], pos)) != std::string::npos) {
-            result.replace(pos, udf.paramNames[i].size(), val);
-            pos += val.size();
+        const std::string& name = udf.paramNames[i];
+        params[name] = funcArgs[i];
+        if (i < udf.paramTypes.size() && !udf.paramTypes[i].empty()) {
+            std::string type = TypeRegistry::instance().normalizeTypeName(
+                udf.paramTypes[i]);
+            typeHints[name] = type.empty() ? udf.paramTypes[i] : type;
+        }
+        if (argNulls && i < argNulls->size() && (*argNulls)[i]) {
+            nullParams.insert(name);
         }
     }
-    returnValue = result;
+    const auto evaluated = ExprHelper::evalStringWithNulls(
+        expression, params, nullParams, typeHints, dbname);
+    if (!evaluated.ok) return false;
+    if (returnIsNull) *returnIsNull = evaluated.isNull;
+    returnValue = evaluated.isNull ? std::string{} : evaluated.value;
     return true;
 }
 
@@ -32505,13 +32574,29 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         auto udf = engine->getUDF(dbname, expr.funcName);
         if (!udf.expression.empty()) {
             std::vector<std::string> argVals;
+            std::vector<bool> argNulls;
             argVals.reserve(expr.funcArgs.size());
-            for (const auto& a : expr.funcArgs) argVals.push_back(getVal(a));
-            std::string rv;
-            if (evalUDFBody(udf, expr.funcName, argVals, engine, dbname, rv)) {
-                return rv;
+            argNulls.reserve(expr.funcArgs.size());
+            for (const auto& a : expr.funcArgs) {
+                argVals.push_back(getVal(a));
+                std::string normalized = trim(a);
+                for (char& ch : normalized) {
+                    ch = static_cast<char>(
+                        std::tolower(static_cast<unsigned char>(ch)));
+                }
+                argNulls.push_back(
+                    normalized == "null" ||
+                    scalarArgColumnIsNull(a, rowBuffer, tbl, engine, dbname));
             }
-            return "null";
+            std::string rv;
+            bool rvIsNull = false;
+            if (evalUDFBody(udf, expr.funcName, argVals, engine, dbname, rv,
+                            nullptr, &rvIsNull, &argNulls)) {
+                if (knownNull) *knownNull = rvIsNull;
+                return rvIsNull ? "NULL" : rv;
+            }
+            throw DbError("22023", "function " + expr.funcName +
+                                      " evaluation failed");
         }
     }
     // PG 42883: undefined function over table columns aborts the

@@ -970,7 +970,8 @@ bool PlPgsql::run(const std::string& body,
                   std::string& returnValue,
                   std::string& error,
                   NoticeSink notice,
-                  bool* returnIsNull) {
+                  bool* returnIsNull,
+                  const std::set<std::string>* nullParams) {
     using namespace plpgsql_impl;
     returnValue.clear();
     error.clear();
@@ -1002,6 +1003,7 @@ bool PlPgsql::run(const std::string& body,
 
     std::function<void(const std::string&, const std::string&)> sink = notice;
     Interp interp(host, params, sink);
+    if (nullParams) interp.nullVars.insert(nullParams->begin(), nullParams->end());
     for (const auto& d : defaults) {
         if (interp.vars.count(d.first)) continue;
         if (trimCopy(d.second).empty()) {

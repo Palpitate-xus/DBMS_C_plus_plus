@@ -35,6 +35,11 @@ static void test_create_function_single_param() {
     auto info = g_engine.getUDF(db, "inc");
     assert(info.expression == "x + 1");
     assert(info.returnType == "int");
+    assert(info.paramTypes == std::vector<std::string>{"int"});
+    std::string result;
+    bool resultIsNull = false;
+    assert(g_engine.callUDF(db, "inc", {"4"}, result, &resultIsNull));
+    assert(!resultIsNull && result == "5");
 
     cleanup(db);
     std::cout << "[FUNCTION] single param OK" << std::endl;
@@ -55,6 +60,11 @@ static void test_create_function_multi_param() {
     assert(info.paramNames.size() == 2);
     assert(info.language == "sql");
     assert(info.returnType == "int");
+    std::string result;
+    bool resultIsNull = false;
+    assert(g_engine.callUDF(db, "add", {"20", "22"}, result,
+                            &resultIsNull));
+    assert(!resultIsNull && result == "42");
 
     cleanup(db);
     std::cout << "[FUNCTION] multi param OK" << std::endl;

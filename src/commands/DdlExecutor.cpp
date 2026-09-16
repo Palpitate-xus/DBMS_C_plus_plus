@@ -9208,9 +9208,10 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
     } else {
         if (stmt->params.size() <= 1) {
             std::string singleParam = stmt->params.empty() ? "" : stmt->params.front().first;
+            std::string singleType = stmt->params.empty() ? "" : stmt->params.front().second;
             res = g_engine.createUDF(s.currentDB, stmt->funcName, singleParam,
                                      stmt->body, provolatile, lang,
-                                     stmt->returnType);
+                                     stmt->returnType, singleType);
         } else {
             std::vector<std::string> params;
             std::vector<std::string> types;

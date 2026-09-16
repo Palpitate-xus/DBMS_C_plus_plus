@@ -7005,14 +7005,23 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                         }
                         if (!trim(cur).empty() || !args.empty()) args.push_back(trim(cur));
                     }
+                    vector<bool> argNulls;
+                    argNulls.reserve(args.size());
                     for (auto& a : args) {
-                        if (a.size() >= 2 && a.front() == '\'' && a.back() == '\'')
-                            a = a.substr(1, a.size() - 2);
+                        const auto evaluated = dbms::ExprHelper::evalString(
+                            a, {}, {}, s.currentDB, s.username);
+                        if (!evaluated.ok) {
+                            cout << "Function " << fname
+                                 << " argument evaluation failed" << endl;
+                            return true;
+                        }
+                        argNulls.push_back(evaluated.isNull);
+                        a = evaluated.isNull ? string{} : evaluated.value;
                     }
                     string rv;
                     bool rvIsNull = false;
                     if (!g_engine.callUDF(s.currentDB, fname, args, rv,
-                                          &rvIsNull)) {
+                                          &rvIsNull, &argNulls)) {
                         cout << "Function " << fname << " failed" << endl;
                         return true;
                     }
@@ -24364,9 +24373,17 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     metadata.metadataOnly = true;
                     for (size_t i = 0; i < rawTargets.size(); ++i) {
                         metadata.columns.push_back(selectExprs[i].displayName);
-                        metadata.columnTypes.push_back(
-                            dbms::ExprHelper::inferResultType(
-                                withoutAlias(rawTargets[i]), typeHints));
+                        string resultType = dbms::ExprHelper::inferResultType(
+                            withoutAlias(rawTargets[i]), typeHints);
+                        if (selectExprs[i].isScalar &&
+                            !selectExprs[i].funcName.empty()) {
+                            const auto udf = g_engine.getUDF(
+                                s.currentDB, selectExprs[i].funcName);
+                            if (!udf.expression.empty()) {
+                                resultType = canonicalValuesType(udf.returnType);
+                            }
+                        }
+                        metadata.columnTypes.push_back(std::move(resultType));
                     }
                     structuredScalarResult.columns = metadata.columns;
                     structuredScalarResult.columnTypes = metadata.columnTypes;
