@@ -479,6 +479,13 @@ int main() {
     assert(calledFunction.success);
     auto* calledStmt = dynamic_cast<CreateFunctionStmt*>(calledFunction.stmt.get());
     assert(calledStmt && !calledStmt->strict);
+    auto replaceFunction = parser.parse(
+        "CREATE OR REPLACE FUNCTION h(x int) RETURNS int "
+        "LANGUAGE sql AS 'SELECT x'");
+    assert(replaceFunction.success);
+    auto* replaceStmt =
+        dynamic_cast<CreateFunctionStmt*>(replaceFunction.stmt.get());
+    assert(replaceStmt && replaceStmt->replace);
     assert(!parser.parse(
         "CREATE FUNCTION bad(x int) RETURNS int RETURNS NULL ON NULL "
         "LANGUAGE sql AS 'SELECT x'").success);

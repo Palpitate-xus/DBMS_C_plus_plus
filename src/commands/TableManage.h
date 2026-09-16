@@ -340,7 +340,8 @@ public:
                        const std::string& language = "sql",
                        const std::string& returnType = "text",
                        const std::string& paramType = "",
-                       bool strict = false);
+                       bool strict = false,
+                       bool replace = false);
     DBStatus createUDF(const std::string& dbname, const std::string& funcname,
                        const std::vector<std::string>& params,
                        const std::vector<std::string>& types,
@@ -348,7 +349,8 @@ public:
                        char provolatile = 'v',
                        const std::string& language = "sql",
                        const std::string& returnType = "text",
-                       bool strict = false);
+                       bool strict = false,
+                       bool replace = false);
     DBStatus dropUDF(const std::string& dbname, const std::string& funcname);
     bool udfExists(const std::string& dbname, const std::string& funcname) const;
     UDFInfo getUDF(const std::string& dbname, const std::string& funcname) const;

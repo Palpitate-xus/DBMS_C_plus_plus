@@ -99,6 +99,48 @@ static void test_function_signature_validation() {
     std::cout << "[FUNCTION] signature validation OK" << std::endl;
 }
 
+static void test_create_or_replace_function() {
+    std::string db = testDbPath("func_replace");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    assert(!ddl.executeSql(
+        "CREATE FUNCTION replace_me(x int) RETURNS int "
+        "LANGUAGE sql AS 'SELECT x + 1'", s));
+    assert(!ddl.executeSql(
+        "CREATE OR REPLACE FUNCTION replace_me(x integer) RETURNS integer "
+        "STRICT LANGUAGE sql AS 'SELECT x + 2'", s));
+    auto info = g_engine.getUDF(db, "replace_me");
+    assert(info.strict && info.expression == "SELECT x + 2");
+    std::string result;
+    bool resultIsNull = false;
+    assert(g_engine.callUDF(db, "replace_me", {"3"}, result,
+                            &resultIsNull));
+    assert(!resultIsNull && result == "5");
+
+    assert(ddl.executeSql(
+        "CREATE OR REPLACE FUNCTION replace_me(x bigint) RETURNS integer "
+        "LANGUAGE sql AS 'SELECT 99'", s));
+    assert(ddl.executeSql(
+        "CREATE OR REPLACE FUNCTION replace_me(x integer) RETURNS text "
+        "LANGUAGE sql AS 'SELECT 99'", s));
+    assert(g_engine.getUDF(db, "replace_me").expression == "SELECT x + 2");
+
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(!ddl.executeSql(
+        "CREATE OR REPLACE FUNCTION replace_me(x integer) RETURNS integer "
+        "LANGUAGE sql AS 'SELECT x + 10'", s));
+    assert(g_engine.getUDF(db, "replace_me").expression == "SELECT x + 10");
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+    assert(g_engine.getUDF(db, "replace_me").expression == "SELECT x + 2");
+
+    cleanup(db);
+    std::cout << "[FUNCTION] create or replace OK" << std::endl;
+}
+
 static void test_create_tvf() {
     std::string db = testDbPath("func_tvf");
     cleanup(db);
@@ -258,6 +300,7 @@ int main() {
     test_create_function_single_param();
     test_create_function_multi_param();
     test_function_signature_validation();
+    test_create_or_replace_function();
     test_create_function_volatility();
     test_builtin_volatility();
     test_create_tvf();

@@ -9181,6 +9181,11 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
     if (!checkDB(s)) return true;
 
     DdlTransaction txn(s);
+    if (stmt->replace && !txn.enableSnapshotRollback()) {
+        std::cout << "CREATE OR REPLACE FUNCTION could not create rollback "
+                     "snapshot" << std::endl;
+        return true;
+    }
     if (!txn.begin()) {
         std::cout << "DDL transaction begin failed" << std::endl;
         return true;
@@ -9231,6 +9236,22 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
         if (!g_engine.getEnumType(s.currentDB, base).name.empty()) return true;
         return g_engine.isCompositeType(s.currentDB, base);
     };
+    const auto canonicalFunctionType = [&](const std::string& typeSpec) {
+        ColumnDef definition = columnDefFromAlterType("value", typeSpec);
+        std::string base = toLower(trim(definition.typeName));
+        const std::string canonical =
+            TypeRegistry::instance().normalizeTypeName(base);
+        if (!canonical.empty()) base = canonical;
+        if (!definition.typeMods.empty()) {
+            base += '(';
+            for (size_t i = 0; i < definition.typeMods.size(); ++i) {
+                if (i) base += ',';
+                base += trim(definition.typeMods[i]);
+            }
+            base += ')';
+        }
+        return base;
+    };
 
     for (const auto& parameter : stmt->params) {
         if (!validateFunctionType(parameter.second, false)) {
@@ -9241,6 +9262,7 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
         }
     }
 
+    bool replacedExisting = false;
     if (toLower(stmt->returnType) == "table") {
         if (lang != "sql") {
             std::cout << "ERROR: table-valued PL/pgSQL functions are not "
@@ -9255,13 +9277,36 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
                       << " is not supported (SQLSTATE 42704)" << std::endl;
             return true;
         }
+        const auto existing = g_engine.getUDF(s.currentDB, stmt->funcName);
+        replacedExisting = stmt->replace && !existing.expression.empty();
+        if (replacedExisting) {
+            std::vector<std::string> requestedTypes;
+            requestedTypes.reserve(stmt->params.size());
+            for (const auto& parameter : stmt->params) {
+                requestedTypes.push_back(
+                    canonicalFunctionType(parameter.second));
+            }
+            std::vector<std::string> storedTypes;
+            storedTypes.reserve(existing.paramTypes.size());
+            for (const auto& parameterType : existing.paramTypes) {
+                storedTypes.push_back(canonicalFunctionType(parameterType));
+            }
+            if (requestedTypes != storedTypes ||
+                canonicalFunctionType(stmt->returnType) !=
+                    canonicalFunctionType(existing.returnType)) {
+                std::cout << "ERROR: CREATE OR REPLACE FUNCTION cannot change "
+                             "argument or return types (SQLSTATE 42P13)"
+                          << std::endl;
+                return true;
+            }
+        }
         if (stmt->params.size() <= 1) {
             std::string singleParam = stmt->params.empty() ? "" : stmt->params.front().first;
             std::string singleType = stmt->params.empty() ? "" : stmt->params.front().second;
             res = g_engine.createUDF(s.currentDB, stmt->funcName, singleParam,
                                      stmt->body, provolatile, lang,
                                      stmt->returnType, singleType,
-                                     stmt->strict);
+                                     stmt->strict, stmt->replace);
         } else {
             std::vector<std::string> params;
             std::vector<std::string> types;
@@ -9271,7 +9316,8 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
             }
             res = g_engine.createUDF(s.currentDB, stmt->funcName, params, types,
                                      stmt->body, provolatile, lang,
-                                     stmt->returnType, stmt->strict);
+                                     stmt->returnType, stmt->strict,
+                                     stmt->replace);
         }
     }
 
@@ -9281,7 +9327,12 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
         return true;
     }
 
-    txn.recordCreate(DdlObjectKind::Function, stmt->funcName);
+    if (stmt->replace) txn.markSnapshotDirty();
+    if (replacedExisting) {
+        txn.recordUpdate(DdlObjectKind::Function, stmt->funcName);
+    } else {
+        txn.recordCreate(DdlObjectKind::Function, stmt->funcName);
+    }
     if (!txn.commit()) return true;
     std::cout << "CREATE FUNCTION succeeded" << std::endl;
     return false;

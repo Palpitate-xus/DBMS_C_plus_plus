@@ -3814,6 +3814,9 @@ ParseResult SQLParser::parseCreate(const std::string& sql) {
             r.stmt = parseCreateType(tokens, pos);
         } else if (kw == "function") {
             r.stmt = parseCreateFunction(tokens, pos);
+            if (r.stmt)
+                static_cast<CreateFunctionStmt*>(r.stmt.get())->replace =
+                    isReplace;
         } else if (kw == "procedure") {
             r.stmt = parseCreateProcedure(tokens, pos);
         } else if (kw == "trigger") {

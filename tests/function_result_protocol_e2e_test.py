@@ -42,6 +42,8 @@ def main():
              "LANGUAGE plpgsql AS $$ BEGIN RETURN 7; END $$"),
             ("CREATE FUNCTION fn_called(x INT) RETURNS INT CALLED ON NULL INPUT "
              "LANGUAGE sql AS $$ SELECT 7 $$"),
+            ("CREATE FUNCTION fn_replace(x INT) RETURNS INT LANGUAGE sql "
+             "AS $$ SELECT x + 1 $$"),
             "CREATE TABLE fn_inputs (id INT, missing INT)",
             "INSERT INTO fn_inputs VALUES (5, NULL)",
         ]
@@ -62,6 +64,17 @@ def main():
             rows, state, message, headers = runner.ours_query(
                 client, server["sock"], sql)
             assert state is not None, (sql, rows, headers)
+
+        rows, state, message, headers = runner.ours_query(
+            client, server["sock"],
+            "CREATE OR REPLACE FUNCTION fn_replace(x INTEGER) RETURNS INTEGER "
+            "STRICT LANGUAGE sql AS $$ SELECT x + 2 $$")
+        assert state is None, (state, message)
+        rows, state, message, headers = runner.ours_query(
+            client, server["sock"],
+            "CREATE OR REPLACE FUNCTION fn_replace(x BIGINT) RETURNS INTEGER "
+            "LANGUAGE sql AS $$ SELECT 99 $$")
+        assert state is not None, (rows, headers)
 
         rows, state, message, headers = runner.ours_query(
             client, server["sock"],
@@ -91,12 +104,12 @@ def main():
                 server["sock"],
                 "SELECT fn_strict(NULL) AS short_form, "
                 "fn_strict_long(NULL) AS long_form, "
-                "fn_called(NULL) AS called;"),
+                "fn_called(NULL) AS called, fn_replace(3) AS replaced;"),
             include_types=True)
         rows, state, message, headers, tag, type_oids = result
         assert state is None, (state, message)
-        assert rows == [[None, None, "7"]], rows
-        assert type_oids == [23, 23, 23], type_oids
+        assert rows == [[None, None, "7", "5"]], rows
+        assert type_oids == [23, 23, 23, 23], type_oids
         assert tag == "SELECT 1", tag
 
         result = runner.decode_wire_result(

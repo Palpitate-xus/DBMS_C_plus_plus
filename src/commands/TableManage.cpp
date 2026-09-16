@@ -4852,12 +4852,13 @@ DBStatus StorageEngine::createUDF(const std::string& dbname,
                                    const std::string& language,
                                    const std::string& returnType,
                                    const std::string& paramType,
-                                   bool strict) {
+                                   bool strict,
+                                   bool replace) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!validMetadataObjectName(funcname)) return DBStatus::INVALID_ARGUMENT;
     auto fdir = udfDir(dbname);
     if (!ensureMetadataDirectory(fdir)) return DBStatus::IO_ERROR;
-    if (std::filesystem::exists(udfPath(dbname, funcname))) {
+    if (!replace && std::filesystem::exists(udfPath(dbname, funcname))) {
         return DBStatus::TABLE_ALREADY_EXISTS;
     }
     std::ostringstream serialized;
@@ -4881,12 +4882,13 @@ DBStatus StorageEngine::createUDF(const std::string& dbname,
                                    char provolatile,
                                    const std::string& language,
                                    const std::string& returnType,
-                                   bool strict) {
+                                   bool strict,
+                                   bool replace) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!validMetadataObjectName(funcname)) return DBStatus::INVALID_ARGUMENT;
     auto fdir = udfDir(dbname);
     if (!ensureMetadataDirectory(fdir)) return DBStatus::IO_ERROR;
-    if (std::filesystem::exists(udfPath(dbname, funcname))) {
+    if (!replace && std::filesystem::exists(udfPath(dbname, funcname))) {
         return DBStatus::TABLE_ALREADY_EXISTS;
     }
     std::ostringstream serialized;
