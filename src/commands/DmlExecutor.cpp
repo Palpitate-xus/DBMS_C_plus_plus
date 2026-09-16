@@ -4264,6 +4264,7 @@ bool executeMerge(const MergeStmt& stmt, Session& s, bool& fallback) {
 
     const size_t inserted = insertedRows.size();
     const size_t affected = deleted + updated + inserted;
+    if (affected > 0) g_engine.analyzeTable(s.currentDB, targetTable);
     if (!stmt.returning.empty()) {
         printReturningRows(g_lastDmlResult);
     } else {
