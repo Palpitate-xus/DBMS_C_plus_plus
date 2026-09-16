@@ -23,6 +23,12 @@ def main():
              "AS $$ INSERT INTO procedure_values VALUES (20) $$ "
              "LANGUAGE sql"),
             "CALL replace_proc(2)",
+            ("CREATE PROCEDURE typmod_proc(x NUMERIC(10,2), y INT) "
+             "LANGUAGE sql AS $$ INSERT INTO procedure_values VALUES (40) $$"),
+            ("CREATE OR REPLACE PROCEDURE typmod_proc(x NUMERIC(10,2), "
+             "y INTEGER) LANGUAGE sql "
+             "AS $$ INSERT INTO procedure_values VALUES (40) $$"),
+            "CALL typmod_proc(1.25, 2)",
         ]
         for sql in setup:
             rows, state, message, headers = runner.ours_query(
@@ -62,7 +68,7 @@ def main():
             client, server["sock"],
             "SELECT value FROM procedure_values ORDER BY value")
         assert state is None, (state, message)
-        assert rows == [["1"], ["20"], ["20"], ["20"]], rows
+        assert rows == [["1"], ["20"], ["20"], ["20"], ["40"]], rows
         print("[PROCEDURE REPLACE PROTOCOL E2E] passed")
     finally:
         runner.stop_ours(server)

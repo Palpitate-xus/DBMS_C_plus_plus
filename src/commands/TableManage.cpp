@@ -4470,6 +4470,31 @@ static std::filesystem::path procedurePath(const std::string& dbname,
     return std::filesystem::path(dbname) / ".procs" / (procname + ".proc");
 }
 
+// Routine type names may contain commas (for example numeric(10,2)), so the
+// historical comma-separated metadata format cannot represent every valid
+// signature.  V2 fields are length-prefixed and remain confined to one line.
+static void appendRoutineMetadataField(std::ostringstream& output,
+                                       const std::string& value) {
+    output << value.size() << ':' << value;
+}
+
+static bool readRoutineMetadataField(const std::string& input, size_t& offset,
+                                     std::string& value) {
+    if (offset >= input.size()) return false;
+    const size_t separator = input.find(':', offset);
+    if (separator == std::string::npos || separator == offset) return false;
+    size_t length = 0;
+    const char* begin = input.data() + offset;
+    const char* end = input.data() + separator;
+    const auto parsed = std::from_chars(begin, end, length, 10);
+    if (parsed.ec != std::errc{} || parsed.ptr != end) return false;
+    offset = separator + 1;
+    if (length > input.size() - offset) return false;
+    value.assign(input, offset, length);
+    offset += length;
+    return true;
+}
+
 DBStatus StorageEngine::createProcedure(const std::string& dbname,
                                          const std::string& procname,
                                          const std::vector<ProcParam>& params,
@@ -4483,15 +4508,13 @@ DBStatus StorageEngine::createProcedure(const std::string& dbname,
         return DBStatus::TABLE_ALREADY_EXISTS;
     }
     std::ostringstream serialized;
-    // Write params metadata line first
-    if (!params.empty()) {
-        serialized << "PARAMS:";
-        for (size_t i = 0; i < params.size(); ++i) {
-            if (i > 0) serialized << ',';
-            serialized << params[i].name << ':' << params[i].mode << ':' << params[i].type;
-        }
-        serialized << '\n';
+    serialized << "PARAMS2:";
+    for (const auto& parameter : params) {
+        appendRoutineMetadataField(serialized, parameter.name);
+        appendRoutineMetadataField(serialized, parameter.mode);
+        appendRoutineMetadataField(serialized, parameter.type);
     }
+    serialized << '\n';
     for (const auto& stmt : statements) {
         serialized << stmt << '\n';
     }
@@ -4525,7 +4548,8 @@ std::vector<std::string> StorageEngine::getProcedureStatements(
     std::string line;
     while (std::getline(ifs, line)) {
         if (line.empty()) continue;
-        if (line.substr(0, 7) == "PARAMS:") continue;
+        if (line.rfind("PARAMS:", 0) == 0 ||
+            line.rfind("PARAMS2:", 0) == 0) continue;
         result.push_back(line);
     }
     return result;
@@ -4540,7 +4564,22 @@ std::vector<StorageEngine::ProcParam> StorageEngine::getProcedureParams(
     if (!ifs) return result;
     std::string line;
     if (std::getline(ifs, line)) {
-        if (line.substr(0, 7) == "PARAMS:") {
+        if (line.rfind("PARAMS2:", 0) == 0) {
+            const std::string encoded = line.substr(8);
+            size_t offset = 0;
+            while (offset < encoded.size()) {
+                ProcParam parameter;
+                if (!readRoutineMetadataField(
+                        encoded, offset, parameter.name) ||
+                    !readRoutineMetadataField(
+                        encoded, offset, parameter.mode) ||
+                    !readRoutineMetadataField(
+                        encoded, offset, parameter.type)) {
+                    return {};
+                }
+                result.push_back(std::move(parameter));
+            }
+        } else if (line.rfind("PARAMS:", 0) == 0) {
             std::string rest = line.substr(7);
             size_t p = 0;
             while (p < rest.size()) {
@@ -4863,10 +4902,10 @@ DBStatus StorageEngine::createUDF(const std::string& dbname,
         return DBStatus::TABLE_ALREADY_EXISTS;
     }
     std::ostringstream serialized;
-    if (!paramType.empty()) {
-        serialized << "PARAMS:" << param << ':' << paramType;
-    } else {
-        serialized << param;
+    serialized << "PARAMS2:";
+    if (!param.empty()) {
+        appendRoutineMetadataField(serialized, param);
+        appendRoutineMetadataField(serialized, paramType);
     }
     serialized << "\n" << expression << "\n" << provolatile << "\n"
                << (language.empty() ? "sql" : language) << "\n"
@@ -4893,10 +4932,11 @@ DBStatus StorageEngine::createUDF(const std::string& dbname,
         return DBStatus::TABLE_ALREADY_EXISTS;
     }
     std::ostringstream serialized;
-    serialized << "PARAMS:";
+    serialized << "PARAMS2:";
     for (size_t i = 0; i < params.size(); ++i) {
-        if (i > 0) serialized << ',';
-        serialized << params[i] << ':' << (i < types.size() ? types[i] : "");
+        appendRoutineMetadataField(serialized, params[i]);
+        appendRoutineMetadataField(
+            serialized, i < types.size() ? types[i] : "");
     }
     serialized << "\n" << expression << "\n" << provolatile << "\n"
                << (language.empty() ? "sql" : language) << "\n"
@@ -4985,7 +5025,22 @@ StorageEngine::UDFInfo StorageEngine::getUDF(const std::string& dbname,
     if (!ifs) return info;
     std::string line;
     if (std::getline(ifs, line)) {
-        if (line.substr(0, 7) == "PARAMS:") {
+        if (line.rfind("PARAMS2:", 0) == 0) {
+            const std::string encoded = line.substr(8);
+            size_t offset = 0;
+            while (offset < encoded.size()) {
+                std::string name;
+                std::string type;
+                if (!readRoutineMetadataField(encoded, offset, name) ||
+                    !readRoutineMetadataField(encoded, offset, type)) {
+                    return {};
+                }
+                info.paramNames.push_back(std::move(name));
+                info.paramTypes.push_back(std::move(type));
+            }
+            info.paramName =
+                info.paramNames.empty() ? "" : info.paramNames.front();
+        } else if (line.rfind("PARAMS:", 0) == 0) {
             std::string rest = line.substr(7);
             size_t p = 0;
             while (p < rest.size()) {

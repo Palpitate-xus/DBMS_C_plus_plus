@@ -141,6 +141,80 @@ static void test_create_or_replace_function() {
     std::cout << "[FUNCTION] create or replace OK" << std::endl;
 }
 
+static void test_routine_parameter_metadata() {
+    std::string db = testDbPath("routine_parameter_metadata");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    assert(g_engine.createUDF(
+        db, "typed_udf", std::vector<std::string>{"amount", "label"},
+        std::vector<std::string>{"numeric(10,2)", "varchar(20)"},
+        "SELECT amount", 'v', "sql", "numeric(10,2)") ==
+        dbms::DBStatus::OK);
+    const auto udf = g_engine.getUDF(db, "typed_udf");
+    assert(udf.paramNames ==
+           std::vector<std::string>({"amount", "label"}));
+    assert(udf.paramTypes ==
+           std::vector<std::string>({"numeric(10,2)", "varchar(20)"}));
+
+    assert(g_engine.createUDF(
+        db, "zero_arg", "", "SELECT 1", 'v', "sql", "int") ==
+        dbms::DBStatus::OK);
+    assert(g_engine.getUDF(db, "zero_arg").paramNames.empty());
+
+    std::vector<dbms::StorageEngine::ProcParam> params = {
+        {"amount", "IN", "numeric(10,2)"},
+        {"label", "IN", "varchar(20)"},
+    };
+    assert(g_engine.createProcedure(db, "typed_proc", params, {"SELECT 1"}) ==
+           dbms::DBStatus::OK);
+    const auto storedParams = g_engine.getProcedureParams(db, "typed_proc");
+    assert(storedParams.size() == 2);
+    assert(storedParams[0].name == "amount" &&
+           storedParams[0].mode == "IN" &&
+           storedParams[0].type == "numeric(10,2)");
+    assert(storedParams[1].name == "label" &&
+           storedParams[1].type == "varchar(20)");
+
+    // Existing sidecars must remain readable after the unambiguous V2 format
+    // becomes the writer default.
+    {
+        std::ofstream legacy(
+            std::filesystem::path(db) / ".funcs" / "legacy_udf.func");
+        legacy << "legacy_arg\nSELECT legacy_arg\nv\nsql\n"
+                  "RETURNS:text\nSTRICT:0\n";
+    }
+    const auto legacyUdf = g_engine.getUDF(db, "legacy_udf");
+    assert(legacyUdf.paramNames ==
+           std::vector<std::string>({"legacy_arg"}));
+    {
+        std::ofstream legacy(
+            std::filesystem::path(db) / ".procs" / "legacy_proc.proc");
+        legacy << "PARAMS:x:IN:int,y:IN:text\nSELECT 1\n";
+    }
+    const auto legacyProcedure =
+        g_engine.getProcedureParams(db, "legacy_proc");
+    assert(legacyProcedure.size() == 2);
+    assert(legacyProcedure[0].name == "x" &&
+           legacyProcedure[0].type == "int");
+    assert(legacyProcedure[1].name == "y" &&
+           legacyProcedure[1].type == "text");
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE PROCEDURE decimal_proc(x numeric(10,2), y int) "
+        "LANGUAGE sql AS 'SELECT 1'", s));
+    assert(!ddl.executeSql(
+        "CREATE OR REPLACE PROCEDURE decimal_proc(x numeric(10,2), y integer) "
+        "LANGUAGE sql AS 'SELECT 2'", s));
+    assert(g_engine.getProcedureParams(db, "decimal_proc").size() == 2);
+
+    cleanup(db);
+    std::cout << "[FUNCTION/PROCEDURE] parameter metadata OK" << std::endl;
+}
+
 static void test_create_tvf() {
     std::string db = testDbPath("func_tvf");
     cleanup(db);
@@ -328,6 +402,7 @@ int main() {
     test_create_function_multi_param();
     test_function_signature_validation();
     test_create_or_replace_function();
+    test_routine_parameter_metadata();
     test_create_function_volatility();
     test_builtin_volatility();
     test_create_tvf();
