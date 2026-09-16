@@ -326,17 +326,30 @@ namespace {
 using SqlCell = StorageEngine::SqlCell;
 using SqlRow = StorageEngine::SqlRow;
 
+const std::string& structuredNullValue() {
+    // Internal-only marker used by structured DML row snapshots. SQL text
+    // cannot contain a zero byte, so this distinguishes NULL from both the
+    // empty string and the ordinary text value "NULL" without leaking into
+    // storage APIs.
+    static const std::string marker("\0DBMS_STRUCTURED_NULL", 21);
+    return marker;
+}
+
+bool isStructuredNull(const std::string& value) {
+    return value == structuredNullValue();
+}
+
 std::map<std::string, std::string> logicalValues(const SqlRow& row) {
     std::map<std::string, std::string> values;
     for (const auto& [column, value] : row) {
-        values[column] = value.value_or(std::string{});
+        values[column] = value.value_or(structuredNullValue());
     }
     return values;
 }
 
-class InsertStatementScope {
+class DmlStatementScope {
 public:
-    InsertStatementScope(StorageEngine& engine, const std::string& database)
+    DmlStatementScope(StorageEngine& engine, const std::string& database)
         : engine_(engine) {
         if (!engine_.inTransaction()) {
             ready_ = engine_.beginTransaction(database) == DBStatus::OK;
@@ -345,20 +358,20 @@ public:
         }
 
         static std::atomic<uint64_t> sequence{0};
-        savepointName_ = "__dbms_dml_insert_statement_" +
+        savepointName_ = "__dbms_dml_statement_" +
             std::to_string(sequence.fetch_add(1));
         hasSavepoint_ = engine_.savepoint(savepointName_) == DBStatus::OK;
-        // Snapshot-backed DDL cannot currently create a savepoint. The INSERT
-        // may still proceed, but a later error must roll back the transaction
-        // rather than leave a partially applied multi-row statement.
+        // Snapshot-backed DDL cannot currently create a savepoint. DML may
+        // still proceed, but a later error must roll back the transaction
+        // rather than leave a partially applied statement.
         ready_ = true;
         rollbackWholeTransaction_ = !hasSavepoint_;
     }
 
-    InsertStatementScope(const InsertStatementScope&) = delete;
-    InsertStatementScope& operator=(const InsertStatementScope&) = delete;
+    DmlStatementScope(const DmlStatementScope&) = delete;
+    DmlStatementScope& operator=(const DmlStatementScope&) = delete;
 
-    ~InsertStatementScope() {
+    ~DmlStatementScope() {
         if (!completed_) rollback();
     }
 
@@ -1689,7 +1702,8 @@ RowContext structuredRelationContext(
         for (size_t i = 0; i < table.len; ++i) {
             const std::string& column = table.cols[i].dataName;
             const auto it = values.find(column);
-            const bool isNull = it == values.end() || it->second.empty();
+            const bool isNull = it == values.end() ||
+                                isStructuredNull(it->second);
             const ExprValue value(table.cols[i].dataType,
                                   isNull ? std::string{} : it->second, isNull);
             if (unqualified) context.set(column, value);
@@ -1732,8 +1746,11 @@ bool collectTableRows(const std::string& currentDB, const std::string& tableName
         const std::string row(data, len);
         std::map<std::string, std::string> values;
         for (size_t i = 0; i < table.len; ++i) {
-            values[table.cols[i].dataName] =
-                g_engine.extractColumnValue(row, table, i, currentDB, true);
+            bool isNull = false;
+            std::string value = g_engine.extractColumnValue(
+                row, table, i, currentDB, true, &isNull);
+            values[table.cols[i].dataName] = isNull
+                ? structuredNullValue() : std::move(value);
         }
         rows.push_back(std::move(values));
     });
@@ -1880,7 +1897,7 @@ bool evaluateUpdateFromExpression(
                                               {source}, rows));
     if (result.isUnknown() || result.typeName == "unknown") return false;
     if (result.isNull) {
-        value.clear();
+        value = "NULL";
         return true;
     }
     value = result.value;
@@ -1905,7 +1922,7 @@ bool evaluateStructuredExpression(
                                               sources, sourceRows));
     if (result.isUnknown() || result.typeName == "unknown") return false;
     if (result.isNull) {
-        value.clear();
+        value = "NULL";
         return true;
     }
     value = result.value;
@@ -1913,6 +1930,33 @@ bool evaluateStructuredExpression(
         if (value == "t") value = "1";
         else if (value == "f") value = "0";
     }
+    return true;
+}
+
+bool evaluateStructuredSqlExpression(
+    const Expr* expression,
+    const std::map<std::string, std::string>& targetValues,
+    const TableSchema& targetTable, const std::string& targetQualifier,
+    const std::vector<StructuredSourceRelation>& sources,
+    const std::vector<const std::map<std::string, std::string>*>& sourceRows,
+    const std::string& currentDB, SqlCell& value) {
+    ExprEvaluator evaluator;
+    evaluator.setCurrentDB(currentDB);
+    const ExprValue result = evaluator.eval(
+        expression, structuredRelationContext(targetValues, targetTable,
+                                              targetQualifier, sources,
+                                              sourceRows));
+    if (result.isUnknown() || result.typeName == "unknown") return false;
+    if (result.isNull) {
+        value = std::nullopt;
+        return true;
+    }
+    std::string evaluated = result.value;
+    if (result.typeName == "boolean") {
+        if (evaluated == "t") evaluated = "1";
+        else if (evaluated == "f") evaluated = "0";
+    }
+    value = std::move(evaluated);
     return true;
 }
 
@@ -2547,7 +2591,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
             }
         }
 
-        InsertStatementScope statementScope(g_engine, s.currentDB);
+        DmlStatementScope statementScope(g_engine, s.currentDB);
         if (!statementScope.ready()) {
             std::cout << "Could not start INSERT statement transaction"
                       << std::endl;
@@ -2591,7 +2635,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
                       << std::endl;
             return true;
         }
-        InsertStatementScope statementScope(g_engine, s.currentDB);
+        DmlStatementScope statementScope(g_engine, s.currentDB);
         if (!statementScope.ready()) {
             std::cout << "Could not start INSERT statement transaction"
                       << std::endl;
@@ -2706,7 +2750,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
         }
     }
 
-    InsertStatementScope statementScope(g_engine, s.currentDB);
+    DmlStatementScope statementScope(g_engine, s.currentDB);
     if (!statementScope.ready()) {
         std::cout << "Could not start INSERT statement transaction"
                   << std::endl;
@@ -3322,236 +3366,393 @@ bool executeMerge(const MergeStmt& stmt, Session& s, bool& fallback) {
     fallback = false;
     if (!checkDatabase(s)) return true;
 
-    // MERGE is deliberately owned by the typed executor now.  Unsupported
-    // PostgreSQL branches fail closed instead of silently returning to the
-    // removed string-slicing implementation in main.cpp.
+    // MERGE is deliberately owned by the typed executor. Unsupported shapes
+    // must fail before the statement scope below is opened; returning them to
+    // the legacy string slicer can execute only a prefix of the command.
     auto unsupported = [](const std::string& detail) {
-        std::cout << "MERGE unsupported: " << detail << std::endl;
+        std::cout << "ERROR: feature not supported: MERGE " << detail
+                  << " (SQLSTATE 0A000)" << std::endl;
         return true;
     };
-    if (!stmt.returning.empty()) return unsupported("RETURNING is not implemented");
-    if (!stmt.source || stmt.source->type != FromItem::Type::Table ||
-        !stmt.joinCondition) {
-        return unsupported("requires one source table and an ON predicate");
+    auto mutationFailure = [](const std::string& action, DBStatus status) {
+        std::cout << "ERROR: MERGE " << action << " failed (SQLSTATE "
+                  << sqlstateForDBStatus(status) << ")" << std::endl;
+        return true;
+    };
+    if (!stmt.source || !stmt.joinCondition) {
+        return unsupported("requires a source relation and an ON predicate");
     }
 
     const std::string requestedTarget = identifier(stmt.targetTable);
-    const std::string requestedSource = identifier(stmt.source->tableName);
     const std::string targetTable = resolveTable(s, requestedTarget);
-    const std::string sourceTable = resolveTable(s, requestedSource);
-    if (requestedTarget.empty() || requestedSource.empty()) {
-        return unsupported("target and source tables are required");
-    }
+    if (requestedTarget.empty()) return unsupported("target table is required");
     if (g_engine.viewExists(s.currentDB, requestedTarget) ||
-        g_engine.isMaterializedView(s.currentDB, requestedTarget) ||
-        g_engine.viewExists(s.currentDB, requestedSource) ||
-        g_engine.isMaterializedView(s.currentDB, requestedSource)) {
+        g_engine.isMaterializedView(s.currentDB, requestedTarget)) {
         return unsupported("views are not writable through MERGE");
     }
     if (!g_engine.tableExists(s.currentDB, targetTable)) {
         std::cout << "Table " << requestedTarget << " not exist" << std::endl;
         return true;
     }
-    if (!g_engine.tableExists(s.currentDB, sourceTable)) {
-        std::cout << "Table " << requestedSource << " not exist" << std::endl;
-        return true;
-    }
-    if (!checkTablePrivilege(s, requestedSource,
-                            StorageEngine::TablePrivilege::Select)) {
+    if (!checkTablePrivilege(s, requestedTarget,
+                             StorageEngine::TablePrivilege::Select)) {
         return true;
     }
 
     const TableSchema targetSchema = g_engine.getTableSchema(s.currentDB, targetTable);
-    const TableSchema sourceSchema = g_engine.getTableSchema(s.currentDB, sourceTable);
-    const std::string targetQualifier = unqualifiedRelationName(requestedTarget);
-    const std::string sourceQualifier = stmt.source->alias.empty()
-        ? unqualifiedRelationName(requestedSource)
-        : identifier(stmt.source->alias);
-    StructuredSourceRelation sourceRelation;
-    sourceRelation.requestedName = requestedSource;
-    sourceRelation.resolvedName = sourceTable;
-    sourceRelation.qualifier = sourceQualifier;
-    sourceRelation.schema = sourceSchema;
-    if (sourceQualifier.empty() || sourceQualifier == identifier(targetQualifier) ||
-        !collectTableRows(s.currentDB, sourceTable, sourceSchema, "SELECT",
-                          sourceRelation.rows)) {
-        return unsupported("source relation is invalid");
+    const std::string targetQualifier = stmt.targetAlias.empty()
+        ? unqualifiedRelationName(requestedTarget)
+        : identifier(stmt.targetAlias);
+    if (targetQualifier.empty()) return unsupported("target alias is invalid");
+
+    // Establish the command snapshot before reading either relation. Keeping
+    // source classification, target matching, and all physical actions in the
+    // same transaction prevents a concurrent insert/update from falling into
+    // the gap between MERGE planning and mutation. Early capability failures
+    // below still unwind this scope without writing anything.
+    DmlStatementScope statementScope(g_engine, s.currentDB);
+    if (!statementScope.ready()) {
+        std::cout << "ERROR: MERGE could not establish an atomic statement "
+                     "boundary (SQLSTATE 58030)" << std::endl;
+        return true;
+    }
+
+    std::vector<StructuredSourceRelation> sources;
+    std::vector<const Expr*> sourceJoinPredicates;
+    const StructuredRelationResult relationResult = collectStructuredRelations(
+        stmt.source.get(), s, targetQualifier, sources, sourceJoinPredicates);
+    if (relationResult == StructuredRelationResult::Error) return true;
+    if (relationResult != StructuredRelationResult::Success || sources.empty()) {
+        return unsupported(
+            "source must be a table or an INNER/CROSS table join");
+    }
+
+    // A JOIN inside USING is a source expression, not a lateral reference to
+    // the target. Validate and materialize its source tuples independently.
+    const TableSchema noTargetSchema;
+    for (const Expr* predicate : sourceJoinPredicates) {
+        ExprEvaluator evaluator;
+        if (!validateStructuredExpression(predicate, noTargetSchema, "",
+                                           sources, evaluator)) {
+            return unsupported(
+                "source JOIN predicate is outside the supported relation subset");
+        }
+    }
+    std::vector<std::vector<const std::map<std::string, std::string>*>> sourceRows;
+    bool evaluationFailed = false;
+    std::vector<const std::map<std::string, std::string>*> sourceTuple;
+    std::function<void(size_t)> visitSource = [&](size_t index) {
+        if (evaluationFailed) return;
+        if (index < sources.size()) {
+            for (const auto& row : sources[index].rows) {
+                sourceTuple.push_back(&row);
+                visitSource(index + 1);
+                sourceTuple.pop_back();
+                if (evaluationFailed) return;
+            }
+            return;
+        }
+        const std::map<std::string, std::string> emptyTarget;
+        const RowContext context = structuredRelationContext(
+            emptyTarget, noTargetSchema, "", sources, sourceTuple);
+        ExprEvaluator evaluator;
+        evaluator.setCurrentDB(s.currentDB);
+        for (const Expr* predicate : sourceJoinPredicates) {
+            if (!structuredPredicateMatches(predicate, context, evaluator,
+                                            evaluationFailed)) {
+                return;
+            }
+        }
+        sourceRows.push_back(sourceTuple);
+    };
+    visitSource(0);
+    if (evaluationFailed) {
+        return unsupported("source JOIN predicate evaluation failed");
     }
 
     ExprEvaluator expressionEvaluator;
     if (!validateStructuredExpression(stmt.joinCondition.get(), targetSchema,
-                                       targetQualifier, {sourceRelation},
+                                       targetQualifier, sources,
                                        expressionEvaluator)) {
         return unsupported("ON expression is outside the supported relation subset");
     }
 
-    const MergeStmt::WhenClause* matchedClause = nullptr;
-    const MergeStmt::WhenClause* notMatchedClause = nullptr;
+    enum class BranchKind { Matched, NotMatchedByTarget, NotMatchedBySource };
+    auto branchKind = [](const MergeStmt::WhenClause& clause) {
+        if (clause.matched) return BranchKind::Matched;
+        return lower(clause.bySource) == "source"
+            ? BranchKind::NotMatchedBySource
+            : BranchKind::NotMatchedByTarget;
+    };
+    std::vector<const MergeStmt::WhenClause*> matchedClauses;
+    std::vector<const MergeStmt::WhenClause*> byTargetClauses;
+    std::vector<const MergeStmt::WhenClause*> bySourceClauses;
+    std::set<std::string> updateColumns;
+    std::set<std::string> insertColumns;
+    bool needsDelete = false;
     for (const auto& clause : stmt.whenClauses) {
-        if (!clause.bySource.empty()) {
-            return unsupported("BY SOURCE/BY TARGET branches are not implemented");
-        }
         const std::string action = lower(clause.action);
-        if (action != "update" && action != "insert" && action != "do nothing") {
-            return unsupported("only UPDATE, INSERT and DO NOTHING actions are implemented");
+        const BranchKind kind = branchKind(clause);
+        if (action != "update" && action != "insert" && action != "delete" &&
+            action != "do nothing") {
+            return unsupported("WHEN action is not implemented");
         }
-        if (clause.matched) {
-            if (matchedClause) return unsupported("multiple MATCHED branches are not implemented");
-            matchedClause = &clause;
-        } else {
-            if (notMatchedClause) return unsupported("multiple NOT MATCHED branches are not implemented");
-            notMatchedClause = &clause;
+        if ((kind == BranchKind::Matched && action == "insert") ||
+            (kind == BranchKind::NotMatchedByTarget && action != "insert" &&
+             action != "do nothing") ||
+            (kind == BranchKind::NotMatchedBySource && action == "insert")) {
+            return unsupported("WHEN action is invalid for its match kind");
+        }
+        auto& clauses = kind == BranchKind::Matched
+            ? matchedClauses
+            : (kind == BranchKind::NotMatchedBySource
+                   ? bySourceClauses : byTargetClauses);
+        clauses.push_back(&clause);
+
+        const TableSchema& availableTarget = kind == BranchKind::NotMatchedByTarget
+            ? noTargetSchema : targetSchema;
+        const std::string availableTargetQualifier =
+            kind == BranchKind::NotMatchedByTarget ? std::string{} : targetQualifier;
+        const std::vector<StructuredSourceRelation> availableSources =
+            kind == BranchKind::NotMatchedBySource
+                ? std::vector<StructuredSourceRelation>{} : sources;
+        if (clause.condition) {
+            ExprEvaluator evaluator;
+            if (!validateStructuredExpression(
+                    clause.condition.get(), availableTarget,
+                    availableTargetQualifier, availableSources, evaluator)) {
+                return unsupported(
+                    "WHEN condition references an unavailable relation or expression");
+            }
+        }
+
+        if (action == "update") {
+            if (clause.updateSet.empty()) {
+                return unsupported("UPDATE action has an empty SET list");
+            }
+            std::set<std::string> clauseColumns;
+            for (const auto& [rawColumn, expression] : clause.updateSet) {
+                const std::string column = identifier(rawColumn);
+                if (column.empty() || !clauseColumns.insert(column).second ||
+                    !findTableColumn(targetSchema, column) ||
+                    isDefaultValue(expression)) {
+                    return unsupported(
+                        "UPDATE action contains a duplicate/invalid target column or DEFAULT");
+                }
+                ExprEvaluator evaluator;
+                if (!validateStructuredExpression(
+                        expression.get(), targetSchema, targetQualifier,
+                        availableSources, evaluator)) {
+                    return unsupported(
+                        "UPDATE expression references an unavailable relation or expression");
+                }
+                updateColumns.insert(column);
+            }
+        } else if (action == "insert") {
+            if (clause.insertCols.empty()) {
+                return unsupported(
+                    "INSERT action requires an explicit column/value list");
+            }
+            std::set<std::string> clauseColumns;
+            for (const auto& [rawColumn, expression] : clause.insertCols) {
+                const std::string column = identifier(rawColumn);
+                if (column.empty() || !clauseColumns.insert(column).second ||
+                    !findTableColumn(targetSchema, column) || !expression ||
+                    isDefaultValue(expression)) {
+                    return unsupported(
+                        "INSERT action contains duplicate/invalid columns or DEFAULT");
+                }
+                ExprEvaluator evaluator;
+                if (!validateStructuredExpression(
+                        expression.get(), noTargetSchema, "", sources,
+                        evaluator)) {
+                    return unsupported(
+                        "INSERT expression references an unavailable relation or expression");
+                }
+                insertColumns.insert(column);
+            }
+        } else if (action == "delete") {
+            needsDelete = true;
         }
     }
-    if (!matchedClause && !notMatchedClause) {
-        return unsupported("at least one WHEN branch is required");
+    if (stmt.whenClauses.empty()) {
+        return unsupported("requires at least one WHEN branch");
     }
 
-    std::vector<std::string> updateColumns;
-    if (matchedClause && lower(matchedClause->action) == "update") {
-        std::set<std::string> seen;
-        for (const auto& [rawColumn, expression] : matchedClause->updateSet) {
-            const std::string column = identifier(rawColumn);
-            if (column.empty() || !seen.insert(column).second ||
-                !findTableColumn(targetSchema, column) || isDefaultValue(expression)) {
-                return unsupported("MATCHED UPDATE contains an invalid target column or DEFAULT");
-            }
-            ExprEvaluator evaluator;
-            if (!validateUpdateFromExpression(expression.get(), targetSchema,
-                                              targetQualifier, sourceSchema,
-                                              sourceQualifier, evaluator)) {
-                return unsupported("MATCHED UPDATE expression is outside the supported relation subset");
-            }
-            updateColumns.push_back(column);
-        }
-        if (updateColumns.empty()) return unsupported("MATCHED UPDATE SET is empty");
+    if (!updateColumns.empty()) {
         if (!checkTablePrivilege(s, requestedTarget,
-                                StorageEngine::TablePrivilege::Update)) {
+                                 StorageEngine::TablePrivilege::Update)) {
             return true;
         }
+        const std::vector<std::string> columns(updateColumns.begin(),
+                                                updateColumns.end());
         if (!sessionIsAdmin(s) && !isTempTable(s, requestedTarget) &&
             !g_engine.hasColumnPermission(
                 s.currentDB, requestedTarget, effectiveSessionRole(s),
-                StorageEngine::TablePrivilege::Update, updateColumns)) {
+                StorageEngine::TablePrivilege::Update, columns)) {
             std::cout << "permission denied: UPDATE on restricted columns of table "
                       << requestedTarget << std::endl;
             return true;
         }
     }
-
-    std::vector<std::string> insertColumns;
-    if (notMatchedClause && lower(notMatchedClause->action) == "insert") {
-        std::set<std::string> seen;
-        for (const auto& [rawColumn, expression] : notMatchedClause->insertCols) {
-            const std::string column = identifier(rawColumn);
-            if (column.empty() || !seen.insert(column).second ||
-                !findTableColumn(targetSchema, column) || !expression ||
-                isDefaultValue(expression)) {
-                return unsupported("NOT MATCHED INSERT contains invalid columns or DEFAULT");
-            }
-            ExprEvaluator evaluator;
-            if (!validateStructuredExpression(expression.get(), targetSchema,
-                                              targetQualifier, {sourceRelation},
-                                              evaluator)) {
-                return unsupported("NOT MATCHED INSERT expression is outside the supported relation subset");
-            }
-            insertColumns.push_back(column);
-        }
-        if (insertColumns.empty()) return unsupported("NOT MATCHED INSERT requires a column/value list");
+    if (!insertColumns.empty()) {
+        const std::vector<std::string> columns(insertColumns.begin(),
+                                                insertColumns.end());
         if (!checkInsertTablePermission(s, requestedTarget) ||
-            !checkInsertColumns(s, requestedTarget, insertColumns)) {
+            !checkInsertColumns(s, requestedTarget, columns)) {
             return true;
         }
     }
-
-    if (matchedClause && matchedClause->condition) {
-        ExprEvaluator evaluator;
-        if (!validateStructuredExpression(matchedClause->condition.get(), targetSchema,
-                                           targetQualifier, {sourceRelation}, evaluator)) {
-            return unsupported("MATCHED condition is outside the supported relation subset");
-        }
+    if (needsDelete &&
+        !checkTablePrivilege(s, requestedTarget,
+                             StorageEngine::TablePrivilege::Delete)) {
+        return true;
     }
-    if (notMatchedClause && notMatchedClause->condition) {
-        ExprEvaluator evaluator;
-        if (!validateStructuredExpression(notMatchedClause->condition.get(), targetSchema,
-                                           targetQualifier, {sourceRelation}, evaluator)) {
-            return unsupported("NOT MATCHED condition is outside the supported relation subset");
+
+    std::vector<ReturningProjection> returningProjections;
+    if (!stmt.returning.empty()) {
+        for (const auto& item : stmt.returning) {
+            const auto* ref = item.expr
+                ? dynamic_cast<const ColumnRefExpr*>(item.expr.get()) : nullptr;
+            if (ref && identifier(ref->column) == "*" &&
+                (!ref->schema.empty() ||
+                 (!ref->table.empty() &&
+                  identifier(ref->table) != identifier(targetQualifier)))) {
+                return unsupported(
+                    "RETURNING source-qualified star is not implemented");
+            }
+        }
+        if (!buildReturningProjections(stmt.returning, targetSchema,
+                                       returningProjections)) {
+            return unsupported(
+                "RETURNING supports target columns and bounded scalar expressions only");
         }
     }
 
     std::vector<std::map<std::string, std::string>> targetRows;
-    if (!collectTableRows(s.currentDB, targetTable, targetSchema, "UPDATE", targetRows)) {
+    if (!collectTableRows(s.currentDB, targetTable, targetSchema, "SELECT",
+                          targetRows)) {
         return unsupported("target relation could not be read");
     }
 
-    std::map<std::string, std::map<std::string, std::string>> matchedUpdates;
-    std::vector<std::map<std::string, std::string>> pendingInserts;
-    bool evaluationFailed = false;
-    for (const auto& sourceValues : sourceRelation.rows) {
-        std::vector<const std::map<std::string, std::string>*> sourceRows = {&sourceValues};
-        std::vector<const std::map<std::string, std::string>*> matches;
-        for (const auto& targetValues : targetRows) {
-            const RowContext context = updateFromContext(
-                targetValues, targetSchema, targetQualifier,
-                sourceValues, sourceSchema, sourceQualifier);
+    std::vector<std::vector<size_t>> sourceMatches(sourceRows.size());
+    std::vector<std::vector<size_t>> targetMatches(targetRows.size());
+    for (size_t sourceIndex = 0; sourceIndex < sourceRows.size(); ++sourceIndex) {
+        for (size_t targetIndex = 0; targetIndex < targetRows.size(); ++targetIndex) {
+            const RowContext context = structuredRelationContext(
+                targetRows[targetIndex], targetSchema, targetQualifier,
+                sources, sourceRows[sourceIndex]);
             ExprEvaluator evaluator;
             evaluator.setCurrentDB(s.currentDB);
             if (structuredPredicateMatches(stmt.joinCondition.get(), context,
                                             evaluator, evaluationFailed)) {
-                matches.push_back(&targetValues);
+                sourceMatches[sourceIndex].push_back(targetIndex);
+                targetMatches[targetIndex].push_back(sourceIndex);
             }
             if (evaluationFailed) break;
         }
         if (evaluationFailed) break;
-        if (matches.size() > 1) {
-            std::cout << "MERGE failed: source row matched more than one target row" << std::endl;
+    }
+    if (evaluationFailed) {
+        std::cout << "ERROR: MERGE ON expression evaluation failed "
+                     "(SQLSTATE 22023)" << std::endl;
+        return true;
+    }
+
+    auto chooseClause = [&](const std::vector<const MergeStmt::WhenClause*>& clauses,
+                            const std::map<std::string, std::string>& targetValues,
+                            const std::vector<const std::map<std::string, std::string>*>& rows)
+        -> const MergeStmt::WhenClause* {
+        for (const auto* clause : clauses) {
+            if (!clause->condition) return clause;
+            const RowContext context = structuredRelationContext(
+                targetValues, targetSchema, targetQualifier, sources, rows);
+            ExprEvaluator evaluator;
+            evaluator.setCurrentDB(s.currentDB);
+            if (structuredPredicateMatches(clause->condition.get(), context,
+                                           evaluator, evaluationFailed)) {
+                return clause;
+            }
+            if (evaluationFailed) return nullptr;
+        }
+        return nullptr;
+    };
+
+    std::map<std::string, SqlRow> pendingUpdates;
+    std::set<std::string> pendingDeletes;
+    std::vector<SqlRow> pendingInserts;
+    std::vector<bool> targetModified(targetRows.size(), false);
+    size_t expectedUpdates = 0;
+    size_t expectedDeletes = 0;
+
+    auto planTargetAction = [&](
+        size_t targetIndex, const MergeStmt::WhenClause* clause,
+        const std::vector<const std::map<std::string, std::string>*>& rows) {
+        if (!clause || lower(clause->action) == "do nothing") return true;
+        if (targetModified[targetIndex]) {
+            std::cout << "ERROR: MERGE command cannot affect row a second time "
+                         "(SQLSTATE 21000)" << std::endl;
+            return false;
+        }
+        targetModified[targetIndex] = true;
+        const std::string action = lower(clause->action);
+        const std::string key = rowValueKey(targetRows[targetIndex]);
+        if (action == "delete") {
+            if (pendingUpdates.count(key) != 0) {
+                std::cout << "ERROR: MERGE cannot distinguish duplicate target "
+                             "rows with different actions (SQLSTATE 0A000)"
+                          << std::endl;
+                return false;
+            }
+            pendingDeletes.insert(key);
+            ++expectedDeletes;
             return true;
         }
-
-        const bool isMatched = !matches.empty();
-        const MergeStmt::WhenClause* clause = isMatched ? matchedClause : notMatchedClause;
-        if (!clause) continue;
-        const std::map<std::string, std::string> emptyTarget;
-        const auto& targetValues = isMatched ? *matches.front() : emptyTarget;
-        const RowContext context = updateFromContext(
-            targetValues, targetSchema, targetQualifier,
-            sourceValues, sourceSchema, sourceQualifier);
-        ExprEvaluator evaluator;
-        evaluator.setCurrentDB(s.currentDB);
-        if (clause->condition &&
-            !structuredPredicateMatches(clause->condition.get(), context, evaluator,
-                                         evaluationFailed)) {
-            if (evaluationFailed) break;
-            continue;
+        if (action != "update") return false;
+        if (pendingDeletes.count(key) != 0) {
+            std::cout << "ERROR: MERGE cannot distinguish duplicate target "
+                         "rows with different actions (SQLSTATE 0A000)"
+                      << std::endl;
+            return false;
         }
+        SqlRow updates;
+        for (const auto& [rawColumn, expression] : clause->updateSet) {
+            SqlCell value;
+            if (!evaluateStructuredSqlExpression(
+                    expression.get(), targetRows[targetIndex], targetSchema,
+                    targetQualifier, sources, rows, s.currentDB, value)) {
+                evaluationFailed = true;
+                return false;
+            }
+            updates[identifier(rawColumn)] = std::move(value);
+        }
+        const auto [it, inserted] = pendingUpdates.emplace(key, updates);
+        if (!inserted && it->second != updates) {
+            std::cout << "ERROR: MERGE cannot distinguish duplicate target "
+                         "rows with different UPDATE values (SQLSTATE 0A000)"
+                      << std::endl;
+            return false;
+        }
+        ++expectedUpdates;
+        return true;
+    };
 
-        const std::string action = lower(clause->action);
-        if (action == "do nothing") continue;
-        if (action == "update") {
-            std::map<std::string, std::string> updates;
-            for (const auto& [rawColumn, expression] : clause->updateSet) {
-                std::string value;
-                if (!evaluateUpdateFromExpression(
-                        expression.get(), targetValues, targetSchema, targetQualifier,
-                        sourceValues, sourceSchema, sourceQualifier, s.currentDB, value)) {
-                    evaluationFailed = true;
-                    break;
-                }
-                updates[identifier(rawColumn)] = std::move(value);
-            }
+    // Candidate change rows are classified from the immutable pre-statement
+    // snapshots. A target may be changed at most once, but a source row is
+    // allowed to match several distinct target rows.
+    for (size_t sourceIndex = 0; sourceIndex < sourceRows.size(); ++sourceIndex) {
+        if (sourceMatches[sourceIndex].empty()) {
+            const std::map<std::string, std::string> emptyTarget;
+            const auto* clause = chooseClause(byTargetClauses, emptyTarget,
+                                              sourceRows[sourceIndex]);
             if (evaluationFailed) break;
-            const std::string key = rowValueKey(targetValues);
-            if (!matchedUpdates.emplace(key, std::move(updates)).second) {
-                std::cout << "MERGE failed: target row matched more than one source row" << std::endl;
-                return true;
-            }
-        } else if (action == "insert") {
-            std::map<std::string, std::string> values;
+            if (!clause || lower(clause->action) == "do nothing") continue;
+            SqlRow values;
             for (const auto& [rawColumn, expression] : clause->insertCols) {
-                std::string value;
-                if (!evaluateStructuredExpression(
-                        expression.get(), targetValues, targetSchema, targetQualifier,
-                        {sourceRelation}, sourceRows, s.currentDB, value)) {
+                SqlCell value;
+                if (!evaluateStructuredSqlExpression(
+                        expression.get(), emptyTarget, noTargetSchema, "",
+                        sources, sourceRows[sourceIndex], s.currentDB, value)) {
                     evaluationFailed = true;
                     break;
                 }
@@ -3559,47 +3760,120 @@ bool executeMerge(const MergeStmt& stmt, Session& s, bool& fallback) {
             }
             if (evaluationFailed) break;
             pendingInserts.push_back(std::move(values));
+            continue;
+        }
+        for (const size_t targetIndex : sourceMatches[sourceIndex]) {
+            const auto* clause = chooseClause(
+                matchedClauses, targetRows[targetIndex], sourceRows[sourceIndex]);
+            if (evaluationFailed ||
+                !planTargetAction(targetIndex, clause, sourceRows[sourceIndex])) {
+                if (!evaluationFailed) return true;
+                break;
+            }
+        }
+        if (evaluationFailed) break;
+    }
+    if (!evaluationFailed) {
+        const std::vector<const std::map<std::string, std::string>*> noSourceRows;
+        for (size_t targetIndex = 0; targetIndex < targetRows.size(); ++targetIndex) {
+            if (!targetMatches[targetIndex].empty()) continue;
+            const auto* clause = chooseClause(
+                bySourceClauses, targetRows[targetIndex], noSourceRows);
+            if (evaluationFailed ||
+                !planTargetAction(targetIndex, clause, noSourceRows)) {
+                if (!evaluationFailed) return true;
+                break;
+            }
         }
     }
     if (evaluationFailed) {
-        std::cout << "MERGE expression evaluation failed" << std::endl;
+        std::cout << "ERROR: MERGE WHEN expression evaluation failed "
+                     "(SQLSTATE 22023)" << std::endl;
         return true;
     }
 
-    int updated = 0;
-    if (!matchedUpdates.empty()) {
-        StorageEngine::UpdateResolver resolver = [matchedUpdates](
-            const std::map<std::string, std::string>& oldValues,
-            std::map<std::string, std::string>& effectiveUpdates) {
-            const auto it = matchedUpdates.find(rowValueKey(oldValues));
-            if (it == matchedUpdates.end()) return false;
+    std::vector<SqlRow> deletedRows;
+    std::vector<SqlRow> updatedRows;
+    std::vector<SqlRow> insertedRows;
+    size_t deleted = 0;
+    if (!pendingDeletes.empty()) {
+        const StorageEngine::SqlDeleteMatcher matcher = [pendingDeletes](
+            const SqlRow& oldValues) {
+            return pendingDeletes.count(rowValueKey(logicalValues(oldValues))) != 0;
+        };
+        const DBStatus status = g_engine.removeRows(
+            s.currentDB, targetTable, {}, &deletedRows, matcher, &deleted);
+        if (status != DBStatus::OK) return mutationFailure("DELETE", status);
+        if (deleted != expectedDeletes) {
+            std::cout << "ERROR: MERGE target row changed during execution "
+                         "(SQLSTATE 40001)" << std::endl;
+            return true;
+        }
+    }
+
+    size_t updated = 0;
+    if (!pendingUpdates.empty()) {
+        const StorageEngine::SqlUpdateResolver resolver = [pendingUpdates](
+            const SqlRow& oldValues, SqlRow& effectiveUpdates) {
+            const auto it = pendingUpdates.find(
+                rowValueKey(logicalValues(oldValues)));
+            if (it == pendingUpdates.end()) return false;
             effectiveUpdates = it->second;
             return true;
         };
-        const StorageEngine::UpdateMatcher matcher = [matchedUpdates](
-            const std::map<std::string, std::string>& oldValues) {
-            return matchedUpdates.find(rowValueKey(oldValues)) != matchedUpdates.end();
+        const StorageEngine::SqlUpdateMatcher matcher = [pendingUpdates](
+            const SqlRow& oldValues) {
+            return pendingUpdates.count(
+                rowValueKey(logicalValues(oldValues))) != 0;
         };
-        const DBStatus status = g_engine.update(s.currentDB, targetTable, {}, {}, nullptr,
-                                                resolver, matcher);
-        if (status != DBStatus::OK) {
-            std::cout << "MERGE UPDATE failed" << std::endl;
+        const DBStatus status = g_engine.updateRows(
+            s.currentDB, targetTable, {}, {}, &updatedRows, resolver, matcher,
+            &updated);
+        if (status != DBStatus::OK) return mutationFailure("UPDATE", status);
+        if (updated != expectedUpdates) {
+            std::cout << "ERROR: MERGE target row changed during execution "
+                         "(SQLSTATE 40001)" << std::endl;
             return true;
         }
-        updated = static_cast<int>(matchedUpdates.size());
     }
 
-    int inserted = 0;
     for (const auto& values : pendingInserts) {
-        if (g_engine.insert(s.currentDB, targetTable, values) != DBStatus::OK) {
-            std::cout << "MERGE INSERT failed" << std::endl;
-            return true;
-        }
-        ++inserted;
+        const DBStatus status = g_engine.insertRow(
+            s.currentDB, targetTable, values, &insertedRows);
+        if (status != DBStatus::OK) return mutationFailure("INSERT", status);
     }
-    if (updated > 0 || inserted > 0) g_engine.analyzeTable(s.currentDB, targetTable);
-    std::cout << "MERGE completed: " << updated << " updated, " << inserted
-              << " inserted" << std::endl;
+
+    std::vector<SqlRow> returningRows;
+    returningRows.reserve(deletedRows.size() + updatedRows.size() +
+                          insertedRows.size());
+    returningRows.insert(returningRows.end(), deletedRows.begin(), deletedRows.end());
+    returningRows.insert(returningRows.end(), updatedRows.begin(), updatedRows.end());
+    returningRows.insert(returningRows.end(), insertedRows.begin(), insertedRows.end());
+    if (!stmt.returning.empty() &&
+        !publishReturning(returningProjections, targetSchema, s.currentDB,
+                          returningRows, "MERGE")) {
+        clearLastDmlResult();
+        std::cout << "ERROR: MERGE RETURNING expression evaluation failed "
+                     "(SQLSTATE 22023)" << std::endl;
+        return true;
+    }
+    if (!statementScope.finish()) {
+        clearLastDmlResult();
+        std::cout << "ERROR: MERGE transaction finish failed "
+                     "(SQLSTATE 58030)" << std::endl;
+        return true;
+    }
+
+    const size_t inserted = insertedRows.size();
+    const size_t affected = deleted + updated + inserted;
+    if (affected > 0) g_engine.analyzeTable(s.currentDB, targetTable);
+    if (!stmt.returning.empty()) {
+        printReturningRows(g_lastDmlResult);
+    } else {
+        publishMutationCount("MERGE", affected);
+    }
+    std::cout << "MERGE completed: " << updated << " updated, " << deleted
+              << " deleted, " << inserted << " inserted" << std::endl;
     return false;
 }
 

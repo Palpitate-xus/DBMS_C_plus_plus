@@ -270,6 +270,187 @@ static void test_merge_engine() {
     std::cout << "[DML] MERGE setup OK" << std::endl;
 }
 
+static std::map<std::string, std::string> readTwoColumnRows(
+    const std::string& db, const std::string& table) {
+    const auto schema = g_engine.getTableSchema(db, table);
+    std::map<std::string, std::string> rows;
+    g_engine.forEachRow(db, table,
+        [&](uint32_t, uint16_t, const char* data, size_t len) {
+            const std::string row(data, len);
+            rows[g_engine.extractColumnValue(row, schema, 0, db, true)] =
+                g_engine.extractColumnValue(row, schema, 1, db, true);
+        });
+    return rows;
+}
+
+// Multiple branches are ordered, every candidate is planned before writes,
+// and all physical actions share one statement rollback boundary.
+static void test_merge_branches_and_atomicity() {
+    const std::string db = testDbPath("dml_merge_branches");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE TABLE merge_target (id INT PRIMARY KEY, val INT UNIQUE)", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE merge_source (id INT, val INT)", s));
+    for (const auto& row : {std::pair{"1", "10"}, std::pair{"2", "20"},
+                            std::pair{"3", "30"}}) {
+        assert(g_engine.insert(db, "merge_target",
+            {{"id", row.first}, {"val", row.second}}) == dbms::DBStatus::OK);
+    }
+    for (const auto& row : {std::pair{"1", "110"}, std::pair{"2", "220"},
+                            std::pair{"4", "440"}, std::pair{"5", "-1"}}) {
+        assert(g_engine.insert(db, "merge_source",
+            {{"id", row.first}, {"val", row.second}}) == dbms::DBStatus::OK);
+    }
+
+    const std::string branchSql =
+        "MERGE INTO merge_target AS dst USING merge_source AS src "
+        "ON dst.id = src.id "
+        "WHEN MATCHED AND src.val > 200 THEN DELETE "
+        "WHEN MATCHED AND src.val < 0 THEN DO NOTHING "
+        "WHEN MATCHED THEN UPDATE SET val = src.val "
+        "WHEN NOT MATCHED BY TARGET AND src.val < 0 THEN DO NOTHING "
+        "WHEN NOT MATCHED BY TARGET THEN INSERT (id, val) "
+        "VALUES (src.id, src.val) "
+        "WHEN NOT MATCHED BY SOURCE THEN DELETE "
+        "RETURNING id, val";
+    dbms::SQLParser parser;
+    auto parsed = parser.parse(branchSql);
+    assert(parsed.success);
+    auto* merge = dynamic_cast<dbms::MergeStmt*>(parsed.stmt.get());
+    assert(merge && merge->targetAlias == "dst");
+    assert(merge->whenClauses.size() == 6);
+    assert(merge->whenClauses[3].bySource == "target");
+    assert(merge->whenClauses[5].bySource == "source");
+
+    bool handled = false;
+    assert(!dbms::tryDmlBridge(branchSql, dbms::SqlCommand::Merge, s, handled));
+    assert(handled);
+    auto result = dbms::takeLastDmlResult();
+    assert(result.available && result.commandTag == "MERGE 4");
+    std::map<std::string, std::string> returned;
+    for (const auto& row : result.rows) {
+        assert(row.size() == 2);
+        returned[row[0]] = row[1];
+    }
+    assert((returned == std::map<std::string, std::string>{
+        {"1", "110"}, {"2", "20"}, {"3", "30"}, {"4", "440"}}));
+    assert((readTwoColumnRows(db, "merge_target") ==
+            std::map<std::string, std::string>{{"1", "110"}, {"4", "440"}}));
+
+    // A bounded INNER JOIN source is materialized structurally. The source
+    // row may match and update more than one distinct target row.
+    assert(!ddl.executeSql("CREATE TABLE join_target (id INT PRIMARY KEY, val INT)", s));
+    assert(!ddl.executeSql("CREATE TABLE source_a (id INT, grp INT)", s));
+    assert(!ddl.executeSql("CREATE TABLE source_b (grp INT, delta INT)", s));
+    assert(g_engine.insert(db, "join_target", {{"id", "1"}, {"val", "5"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "source_a", {{"id", "1"}, {"grp", "7"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "source_b", {{"grp", "7"}, {"delta", "9"}}) ==
+           dbms::DBStatus::OK);
+    handled = false;
+    assert(!dbms::tryDmlBridge(
+        "MERGE INTO join_target AS dst "
+        "USING source_a AS a JOIN source_b AS b ON a.grp = b.grp "
+        "ON dst.id = a.id "
+        "WHEN MATCHED THEN UPDATE SET val = dst.val + b.delta",
+        dbms::SqlCommand::Merge, s, handled));
+    assert(handled);
+    assert((readTwoColumnRows(db, "join_target") ==
+            std::map<std::string, std::string>{{"1", "14"}}));
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE multi_target (id INT PRIMARY KEY, grp INT, val INT)", s));
+    assert(!ddl.executeSql("CREATE TABLE multi_source (grp INT, delta INT)", s));
+    assert(g_engine.insert(db, "multi_target",
+        {{"id", "1"}, {"grp", "7"}, {"val", "10"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "multi_target",
+        {{"id", "2"}, {"grp", "7"}, {"val", "20"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "multi_source", {{"grp", "7"}, {"delta", "5"}}) ==
+           dbms::DBStatus::OK);
+    handled = false;
+    assert(!dbms::tryDmlBridge(
+        "MERGE INTO multi_target AS dst USING multi_source AS src "
+        "ON dst.grp = src.grp "
+        "WHEN MATCHED THEN UPDATE SET val = dst.val + src.delta",
+        dbms::SqlCommand::Merge, s, handled));
+    assert(handled);
+    const dbms::DmlResult multiResult = dbms::takeLastDmlResult();
+    assert(multiResult.commandTag == "MERGE 2");
+    const auto multiSchema = g_engine.getTableSchema(db, "multi_target");
+    std::map<std::string, std::string> multiValues;
+    g_engine.forEachRow(db, "multi_target",
+        [&](uint32_t, uint16_t, const char* data, size_t len) {
+            const std::string row(data, len);
+            multiValues[g_engine.extractColumnValue(row, multiSchema, 0, db, true)] =
+                g_engine.extractColumnValue(row, multiSchema, 2, db, true);
+        });
+    assert((multiValues == std::map<std::string, std::string>{
+        {"1", "15"}, {"2", "25"}}));
+
+    // The update is physically executed before the conflicting insert. A
+    // uniqueness failure must nevertheless roll back both operations.
+    assert(!ddl.executeSql("CREATE TABLE atomic_target (id INT PRIMARY KEY, val INT UNIQUE)", s));
+    assert(!ddl.executeSql("CREATE TABLE atomic_source (id INT, val INT)", s));
+    assert(g_engine.insert(db, "atomic_target", {{"id", "1"}, {"val", "10"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "atomic_target", {{"id", "2"}, {"val", "20"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "atomic_source", {{"id", "1"}, {"val", "30"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "atomic_source", {{"id", "3"}, {"val", "20"}}) ==
+           dbms::DBStatus::OK);
+    handled = false;
+    assert(dbms::tryDmlBridge(
+        "MERGE INTO atomic_target AS dst USING atomic_source AS src "
+        "ON dst.id = src.id "
+        "WHEN MATCHED THEN UPDATE SET val = src.val "
+        "WHEN NOT MATCHED THEN INSERT (id, val) VALUES (src.id, src.val)",
+        dbms::SqlCommand::Merge, s, handled));
+    assert(handled);
+    assert((readTwoColumnRows(db, "atomic_target") ==
+            std::map<std::string, std::string>{{"1", "10"}, {"2", "20"}}));
+
+    // Within an explicit transaction, failure rolls back only the MERGE
+    // statement savepoint and preserves work from earlier statements.
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "atomic_target", {{"id", "9"}, {"val", "90"}}) ==
+           dbms::DBStatus::OK);
+    handled = false;
+    assert(dbms::tryDmlBridge(
+        "MERGE INTO atomic_target AS dst USING atomic_source AS src "
+        "ON dst.id = src.id "
+        "WHEN MATCHED THEN UPDATE SET val = src.val "
+        "WHEN NOT MATCHED THEN INSERT (id, val) VALUES (src.id, src.val)",
+        dbms::SqlCommand::Merge, s, handled));
+    assert(handled && g_engine.inTransaction());
+    assert((readTwoColumnRows(db, "atomic_target") ==
+            std::map<std::string, std::string>{
+                {"1", "10"}, {"2", "20"}, {"9", "90"}}));
+    assert(g_engine.commitTransaction() == dbms::DBStatus::OK);
+
+    // Valid-but-unimplemented source forms and malformed tails never reach
+    // storage. Parser failures also cannot yield a partially executable AST.
+    assert(!parser.parse(
+        "MERGE INTO merge_target USING merge_source ON "
+        "merge_target.id = merge_source.id WHEN MATCHED UPDATE SET val = 1").success);
+    assert(!parser.parse(
+        "MERGE INTO merge_target USING merge_source ON "
+        "merge_target.id = merge_source.id WHEN MATCHED THEN DELETE trailing").success);
+    assert(!parser.parse(
+        "MERGE INTO merge_target USING merge_source ON "
+        "merge_target.id = merge_source.id WHEN MATCHED THEN DELETE "
+        "WHEN MATCHED THEN DO NOTHING").success);
+
+    cleanup(db);
+    std::cout << "[DML] MERGE branches/atomicity OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_set_ops_parser();
@@ -281,6 +462,7 @@ int main() {
     test_delete_using_engine();
     test_join_dml_engine();
     test_merge_engine();
+    test_merge_branches_and_atomicity();
     std::cout << "[DML] all passed" << std::endl;
     return 0;
 }

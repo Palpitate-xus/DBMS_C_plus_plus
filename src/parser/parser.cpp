@@ -2357,7 +2357,7 @@ static std::unique_ptr<FromItem> parseFromItem(const std::vector<std::string>& t
 
     auto item = std::make_unique<FromItem>();
     item->type = FromItem::Type::Table;
-    item->tableName = tokens[pos++];
+    if (!parseQualifiedObjectName(tokens, pos, item->tableName)) return nullptr;
 
     // AS alias or implicit alias
     if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "as") {
@@ -2386,7 +2386,9 @@ static std::unique_ptr<FromItem> parseFromItem(const std::vector<std::string>& t
 
             auto rightItem = std::make_unique<FromItem>();
             rightItem->type = FromItem::Type::Table;
-            if (pos < tokens.size()) rightItem->tableName = tokens[pos++];
+            if (!parseQualifiedObjectName(tokens, pos, rightItem->tableName)) {
+                return nullptr;
+            }
             if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "as") {
                 ++pos;
                 if (pos < tokens.size()) rightItem->alias = tokens[pos++];
@@ -3246,128 +3248,252 @@ ParseResult SQLParser::parseDelete(const std::string& sql) {
 ParseResult SQLParser::parseMerge(const std::string& sql) {
     ParseResult r;
     auto tokens = tokenize(sql);
-    if (tokens.size() < 5) {
-        r.error = "MERGE statement too short";
-        return r;
-    }
+    const auto fail = [&](const std::string& message) {
+        ParseResult failed;
+        failed.error = message;
+        return failed;
+    };
+    if (tokens.size() < 5) return fail("MERGE statement too short");
 
     auto stmt = std::make_unique<MergeStmt>();
     size_t pos = 1; // skip MERGE
-
     if (pos < tokens.size() && toLower(tokens[pos]) == "into") ++pos;
-
-    // Target table
     if (!parseQualifiedObjectName(tokens, pos, stmt->targetTable)) {
-        r.error = "MERGE requires a valid target table";
-        return r;
+        return fail("MERGE requires a valid target table");
     }
 
-    // USING
-    if (pos < tokens.size() && toLower(tokens[pos]) == "using") {
+    // PostgreSQL permits a target alias.  Parsing it here is important: the
+    // old permissive parser otherwise skipped the alias together with the
+    // rest of the statement and returned a half-populated, executable AST.
+    if (pos < tokens.size() && toLower(tokens[pos]) == "as") {
         ++pos;
-        stmt->source = parseFromItem(tokens, pos);
+        if (pos >= tokens.size() || isKeyword(tokens[pos]) ||
+            tokens[pos] == ";") {
+            return fail("MERGE target alias is missing");
+        }
+        stmt->targetAlias = tokens[pos++];
+    } else if (pos < tokens.size() && toLower(tokens[pos]) != "using" &&
+               !isKeyword(tokens[pos]) && tokens[pos] != ";") {
+        stmt->targetAlias = tokens[pos++];
     }
 
-    // ON
-    if (pos < tokens.size() && toLower(tokens[pos]) == "on") {
-        ++pos;
-        stmt->joinCondition = parseSimpleExpr(tokens, pos);
+    if (pos >= tokens.size() || toLower(tokens[pos]) != "using") {
+        return fail("MERGE requires USING");
+    }
+    ++pos;
+    stmt->source = parseFromItem(tokens, pos);
+    if (!stmt->source) return fail("MERGE requires a valid source relation");
+
+    if (pos >= tokens.size() || toLower(tokens[pos]) != "on") {
+        return fail("MERGE requires ON");
+    }
+    ++pos;
+    const size_t joinStart = pos;
+    stmt->joinCondition = parseSimpleExpr(tokens, pos);
+    if (!stmt->joinCondition || pos == joinStart) {
+        return fail("MERGE ON requires an expression");
     }
 
-    // WHEN clauses
+    bool sawWhen = false;
+    bool unconditionalMatched = false;
+    bool unconditionalByTarget = false;
+    bool unconditionalBySource = false;
     while (pos < tokens.size() && toLower(tokens[pos]) == "when") {
+        sawWhen = true;
         ++pos;
         MergeStmt::WhenClause wc;
         if (pos < tokens.size() && toLower(tokens[pos]) == "matched") {
             wc.matched = true;
             ++pos;
-        } else if (pos < tokens.size() && toLower(tokens[pos]) == "not") {
-            ++pos;
-            if (pos < tokens.size() && toLower(tokens[pos]) == "matched") {
-                wc.matched = false;
+        } else if (pos + 1 < tokens.size() &&
+                   toLower(tokens[pos]) == "not" &&
+                   toLower(tokens[pos + 1]) == "matched") {
+            wc.matched = false;
+            wc.bySource = "target"; // bare NOT MATCHED means BY TARGET
+            pos += 2;
+            if (pos < tokens.size() && toLower(tokens[pos]) == "by") {
                 ++pos;
-                if (pos < tokens.size() && toLower(tokens[pos]) == "by") {
-                    ++pos;
-                    if (pos < tokens.size()) wc.bySource = toLower(tokens[pos++]);
+                if (pos >= tokens.size()) {
+                    return fail("MERGE NOT MATCHED BY requires SOURCE or TARGET");
+                }
+                wc.bySource = toLower(tokens[pos++]);
+                if (wc.bySource != "source" && wc.bySource != "target") {
+                    return fail("MERGE NOT MATCHED BY requires SOURCE or TARGET");
                 }
             }
+        } else {
+            return fail("MERGE WHEN requires MATCHED or NOT MATCHED");
         }
-        // AND condition
+
         if (pos < tokens.size() && toLower(tokens[pos]) == "and") {
             ++pos;
+            const size_t conditionStart = pos;
             wc.condition = parseSimpleExpr(tokens, pos);
+            if (!wc.condition || pos == conditionStart) {
+                return fail("MERGE WHEN AND requires an expression");
+            }
         }
-        if (pos < tokens.size() && toLower(tokens[pos]) == "then") ++pos;
-        if (pos < tokens.size() && toLower(tokens[pos]) == "do") ++pos;
+        if (pos >= tokens.size() || toLower(tokens[pos]) != "then") {
+            return fail("MERGE WHEN clause requires THEN");
+        }
+        ++pos;
 
-        if (pos < tokens.size() && toLower(tokens[pos]) == "nothing") {
+        if (pos < tokens.size() && toLower(tokens[pos]) == "do") {
+            ++pos;
+            if (pos >= tokens.size() || toLower(tokens[pos]) != "nothing") {
+                return fail("MERGE DO must be followed by NOTHING");
+            }
             wc.action = "DO NOTHING";
             ++pos;
         } else if (pos < tokens.size() && toLower(tokens[pos]) == "update") {
-            ++pos;
-            if (pos < tokens.size() && toLower(tokens[pos]) == "set") ++pos;
             wc.action = "UPDATE";
-            while (pos < tokens.size()) {
-                std::string w = toLower(tokens[pos]);
-                if (w == "when" || w == "returning" || tokens[pos] == ";") break;
-                if (pos + 1 < tokens.size() && tokens[pos + 1] == "=") {
-                    std::string col = tokens[pos];
-                    pos += 2;
-                    auto expr = parseSimpleExpr(tokens, pos);
-                    wc.updateSet[col] = std::move(expr);
-                } else {
-                    ++pos;
+            ++pos;
+            if (pos >= tokens.size() || toLower(tokens[pos]) != "set") {
+                return fail("MERGE UPDATE requires SET");
+            }
+            ++pos;
+            while (true) {
+                if (pos >= tokens.size() || tokens[pos] == ";" ||
+                    toLower(tokens[pos]) == "when" ||
+                    toLower(tokens[pos]) == "returning") {
+                    return fail("MERGE UPDATE SET requires an assignment");
                 }
-                if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+                const std::string column = tokens[pos++];
+                if (pos >= tokens.size() || tokens[pos] != "=") {
+                    return fail("MERGE UPDATE assignment requires =");
+                }
+                ++pos;
+                const size_t expressionStart = pos;
+                auto expression = parseSimpleExpr(tokens, pos);
+                if (!expression || pos == expressionStart) {
+                    return fail("MERGE UPDATE assignment requires an expression");
+                }
+                wc.updateSet.emplace_back(column, std::move(expression));
+                if (pos >= tokens.size() || tokens[pos] != ",") break;
+                ++pos;
             }
         } else if (pos < tokens.size() && toLower(tokens[pos]) == "insert") {
-            ++pos;
             wc.action = "INSERT";
-            if (pos < tokens.size() && toLower(tokens[pos]) == "(") {
-                auto cols = collectParenthesized(tokens, pos);
-                for (const auto& c : cols) {
-                    if (c != ",") {
-                        auto expr = std::make_unique<LiteralExpr>();
-                        expr->value = c;
-                        wc.insertCols.emplace_back(c, std::move(expr));
+            ++pos;
+            // This executor intentionally requires an explicit target column
+            // list.  Omitted-column and DEFAULT VALUES forms remain outside
+            // its capability boundary and are rejected before execution.
+            if (pos >= tokens.size() || tokens[pos] != "(") {
+                return fail("MERGE INSERT requires an explicit column list");
+            }
+            ++pos;
+            std::vector<std::string> columns;
+            while (pos < tokens.size() && tokens[pos] != ")") {
+                if (tokens[pos] == ",") {
+                    return fail("MERGE INSERT column name is missing");
+                }
+                columns.push_back(tokens[pos++]);
+                if (pos < tokens.size() && tokens[pos] == ",") {
+                    ++pos;
+                    if (pos < tokens.size() && tokens[pos] == ")") {
+                        return fail("MERGE INSERT column name is missing");
                     }
+                } else if (pos < tokens.size() && tokens[pos] != ")") {
+                    return fail("MERGE INSERT column list is malformed");
                 }
             }
-            if (pos < tokens.size() && toLower(tokens[pos]) == "values") {
-                ++pos;
-                if (pos < tokens.size() && tokens[pos] == "(") {
-                    ++pos;
-                    size_t columnIndex = 0;
-                    while (pos < tokens.size() && tokens[pos] != ")") {
-                        auto expr = parseSimpleExpr(tokens, pos);
-                        if (expr && columnIndex < wc.insertCols.size()) {
-                            wc.insertCols[columnIndex++].second = std::move(expr);
-                        }
-                        if (pos < tokens.size() && tokens[pos] == ",") {
-                            ++pos;
-                        } else if (pos < tokens.size() && tokens[pos] != ")") {
-                            ++pos;
-                        }
-                    }
-                    if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+            if (columns.empty() || pos >= tokens.size() || tokens[pos] != ")") {
+                return fail("MERGE INSERT column list is malformed");
+            }
+            ++pos;
+            if (pos >= tokens.size() || toLower(tokens[pos]) != "values") {
+                return fail("MERGE INSERT requires VALUES");
+            }
+            ++pos;
+            if (pos >= tokens.size() || tokens[pos] != "(") {
+                return fail("MERGE INSERT VALUES requires a parenthesized list");
+            }
+            ++pos;
+            std::vector<ExprPtr> values;
+            while (pos < tokens.size() && tokens[pos] != ")") {
+                const size_t expressionStart = pos;
+                auto expression = parseSimpleExpr(tokens, pos);
+                if (!expression || pos == expressionStart) {
+                    return fail("MERGE INSERT value expression is missing");
                 }
+                values.push_back(std::move(expression));
+                if (pos < tokens.size() && tokens[pos] == ",") {
+                    ++pos;
+                    if (pos < tokens.size() && tokens[pos] == ")") {
+                        return fail("MERGE INSERT value expression is missing");
+                    }
+                } else if (pos < tokens.size() && tokens[pos] != ")") {
+                    return fail("MERGE INSERT VALUES list is malformed");
+                }
+            }
+            if (pos >= tokens.size() || tokens[pos] != ")") {
+                return fail("MERGE INSERT VALUES list is malformed");
+            }
+            ++pos;
+            if (columns.size() != values.size()) {
+                return fail("MERGE INSERT has more target columns than expressions");
+            }
+            for (size_t i = 0; i < columns.size(); ++i) {
+                wc.insertCols.emplace_back(columns[i], std::move(values[i]));
             }
         } else if (pos < tokens.size() && toLower(tokens[pos]) == "delete") {
             wc.action = "DELETE";
             ++pos;
+        } else {
+            return fail("MERGE WHEN clause requires an action");
         }
+
+        const std::string action = toLower(wc.action);
+        if (wc.matched && action == "insert") {
+            return fail("MERGE MATCHED clause cannot INSERT");
+        }
+        if (!wc.matched && wc.bySource != "source" &&
+            action != "insert" && action != "do nothing") {
+            return fail("MERGE NOT MATCHED BY TARGET clause can only INSERT or DO NOTHING");
+        }
+        if (!wc.matched && wc.bySource == "source" && action == "insert") {
+            return fail("MERGE NOT MATCHED BY SOURCE clause cannot INSERT");
+        }
+
+        bool* unconditional = wc.matched
+            ? &unconditionalMatched
+            : (wc.bySource == "source"
+                   ? &unconditionalBySource : &unconditionalByTarget);
+        if (*unconditional) {
+            return fail("unreachable MERGE WHEN clause after unconditional clause");
+        }
+        if (!wc.condition) *unconditional = true;
         stmt->whenClauses.push_back(std::move(wc));
     }
+    if (!sawWhen) return fail("MERGE requires at least one WHEN clause");
 
-    // RETURNING
     if (pos < tokens.size() && toLower(tokens[pos]) == "returning") {
         ++pos;
         while (pos < tokens.size() && tokens[pos] != ";") {
-            stmt->returning.push_back(parseSelectItem(tokens, pos));
-            if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+            const size_t itemStart = pos;
+            SelectItem item = parseSelectItem(tokens, pos);
+            if (!item.expr || pos == itemStart) {
+                return fail("MERGE RETURNING requires an expression");
+            }
+            stmt->returning.push_back(std::move(item));
+            if (pos < tokens.size() && tokens[pos] == ",") {
+                ++pos;
+                if (pos >= tokens.size() || tokens[pos] == ";") {
+                    return fail("MERGE RETURNING expression is missing");
+                }
+            } else {
+                break;
+            }
+        }
+        if (stmt->returning.empty()) {
+            return fail("MERGE RETURNING requires an expression");
         }
     }
 
+    while (pos < tokens.size() && tokens[pos] == ";") ++pos;
+    if (pos != tokens.size()) {
+        return fail("unexpected token in MERGE statement: " + tokens[pos]);
+    }
     r.success = true;
     r.stmt = std::move(stmt);
     return r;

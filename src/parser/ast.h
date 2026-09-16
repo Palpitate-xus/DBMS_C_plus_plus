@@ -747,6 +747,7 @@ struct DeleteStmt : public Stmt {
 
 struct MergeStmt : public Stmt {
     std::string targetTable;
+    std::string targetAlias;
     std::unique_ptr<FromItem> source;
     ExprPtr joinCondition;
 
@@ -755,7 +756,7 @@ struct MergeStmt : public Stmt {
         std::string bySource;                  // BY SOURCE / BY TARGET
         ExprPtr condition;                     // AND condition
         std::string action;                    // UPDATE / INSERT / DELETE / DO NOTHING
-        std::map<std::string, ExprPtr> updateSet;
+        std::vector<std::pair<std::string, ExprPtr>> updateSet;
         std::vector<std::pair<std::string, ExprPtr>> insertCols;
     };
     std::vector<WhenClause> whenClauses;
