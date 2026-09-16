@@ -495,6 +495,25 @@ int main() {
     assert(replaceProcedureStmt && replaceProcedureStmt->replace &&
            replaceProcedureStmt->language == "sql" &&
            replaceProcedureStmt->body == "SELECT ?x");
+    auto foldedRoutine = parser.parse(
+        "CREATE PROCEDURE Mixed_Name(ArgValue INT) LANGUAGE SQL "
+        "AS $$ SELECT ?ArgValue $$");
+    assert(foldedRoutine.success);
+    auto* foldedRoutineStmt =
+        dynamic_cast<CreateFunctionStmt*>(foldedRoutine.stmt.get());
+    assert(foldedRoutineStmt && foldedRoutineStmt->funcName == "mixed_name" &&
+           foldedRoutineStmt->params.size() == 1 &&
+           foldedRoutineStmt->params[0].first == "argvalue" &&
+           foldedRoutineStmt->body == " SELECT ?ArgValue ");
+    auto quotedRoutine = parser.parse(
+        "CREATE FUNCTION \"Mixed\"(\"A\" INT) RETURNS INT LANGUAGE SQL "
+        "AS $$ SELECT ?A $$");
+    assert(quotedRoutine.success);
+    auto* quotedRoutineStmt =
+        dynamic_cast<CreateFunctionStmt*>(quotedRoutine.stmt.get());
+    assert(quotedRoutineStmt && quotedRoutineStmt->funcName == "Mixed" &&
+           quotedRoutineStmt->params.size() == 1 &&
+           quotedRoutineStmt->params[0].first == "A");
     assert(!parser.parse(
         "CREATE PROCEDURE p() AS 'SELECT 1' LANGUAGE sql garbage").success);
     assert(!parser.parse(

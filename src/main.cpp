@@ -3680,6 +3680,157 @@ static bool handleReindex(const string& sql, Session& s) {
     return true;
 }
 
+static bool bindProcedureStatement(
+    const string& statement,
+    const unordered_map<string, string>& arguments,
+    string& bound,
+    string& error) {
+    bound.clear();
+    error.clear();
+    bound.reserve(statement.size());
+    bool singleQuoted = false;
+    bool escapeSingleQuoted = false;
+    bool doubleQuoted = false;
+    bool lineComment = false;
+    size_t blockCommentDepth = 0;
+    string dollarDelimiter;
+
+    for (size_t i = 0; i < statement.size();) {
+        const char current = statement[i];
+        if (lineComment) {
+            bound.push_back(current);
+            ++i;
+            if (current == '\n' || current == '\r') lineComment = false;
+            continue;
+        }
+        if (blockCommentDepth != 0) {
+            if (current == '/' && i + 1 < statement.size() &&
+                statement[i + 1] == '*') {
+                bound += "/*";
+                i += 2;
+                ++blockCommentDepth;
+            } else if (current == '*' && i + 1 < statement.size() &&
+                       statement[i + 1] == '/') {
+                bound += "*/";
+                i += 2;
+                --blockCommentDepth;
+            } else {
+                bound.push_back(current);
+                ++i;
+            }
+            continue;
+        }
+        if (!dollarDelimiter.empty()) {
+            if (statement.compare(i, dollarDelimiter.size(),
+                                  dollarDelimiter) == 0) {
+                bound += dollarDelimiter;
+                i += dollarDelimiter.size();
+                dollarDelimiter.clear();
+            } else {
+                bound.push_back(current);
+                ++i;
+            }
+            continue;
+        }
+        if (singleQuoted || doubleQuoted) {
+            bound.push_back(current);
+            ++i;
+            const char quote = singleQuoted ? '\'' : '"';
+            if (singleQuoted && escapeSingleQuoted && current == '\\' &&
+                i < statement.size()) {
+                bound.push_back(statement[i++]);
+                continue;
+            }
+            if (current == quote) {
+                if (i < statement.size() && statement[i] == quote) {
+                    bound.push_back(statement[i++]);
+                } else if (singleQuoted) {
+                    singleQuoted = false;
+                    escapeSingleQuoted = false;
+                } else {
+                    doubleQuoted = false;
+                }
+            }
+            continue;
+        }
+        if (current == '-' && i + 1 < statement.size() &&
+            statement[i + 1] == '-') {
+            bound += "--";
+            i += 2;
+            lineComment = true;
+            continue;
+        }
+        if (current == '/' && i + 1 < statement.size() &&
+            statement[i + 1] == '*') {
+            bound += "/*";
+            i += 2;
+            blockCommentDepth = 1;
+            continue;
+        }
+        if (current == '\'' || current == '"') {
+            escapeSingleQuoted = current == '\'' && i > 0 &&
+                (statement[i - 1] == 'e' || statement[i - 1] == 'E') &&
+                (i < 2 || (!isalnum(static_cast<unsigned char>(
+                    statement[i - 2])) && statement[i - 2] != '_' &&
+                    statement[i - 2] != '$'));
+            bound.push_back(current);
+            ++i;
+            singleQuoted = current == '\'';
+            doubleQuoted = current == '"';
+            continue;
+        }
+        if (current == '$') {
+            size_t end = i + 1;
+            if (end < statement.size() &&
+                (isalpha(static_cast<unsigned char>(statement[end])) ||
+                 statement[end] == '_')) {
+                while (end < statement.size() &&
+                       (isalnum(static_cast<unsigned char>(statement[end])) ||
+                        statement[end] == '_')) {
+                    ++end;
+                }
+            }
+            if (end < statement.size() && statement[end] == '$') {
+                dollarDelimiter = statement.substr(i, end - i + 1);
+                bound += dollarDelimiter;
+                i = end + 1;
+                continue;
+            }
+        }
+        if (current == '?' && i + 1 < statement.size() &&
+            (isalpha(static_cast<unsigned char>(statement[i + 1])) ||
+             statement[i + 1] == '_')) {
+            size_t end = i + 2;
+            while (end < statement.size() &&
+                   (isalnum(static_cast<unsigned char>(statement[end])) ||
+                    statement[end] == '_' || statement[end] == '$')) {
+                ++end;
+            }
+            const string name = statement.substr(i + 1, end - i - 1);
+            auto argument = arguments.find(name);
+            if (argument == arguments.end()) {
+                string folded = name;
+                transform(folded.begin(), folded.end(), folded.begin(),
+                          [](unsigned char value) {
+                              return static_cast<char>(tolower(value));
+                          });
+                argument = arguments.find(folded);
+            }
+            if (argument == arguments.end()) {
+                error = "procedure body references unknown parameter ?" + name;
+                bound.clear();
+                return false;
+            }
+            bound += argument->second;
+            i = end;
+            continue;
+        }
+        bound.push_back(current);
+        ++i;
+    }
+    return true;
+}
+
 static bool handleCallProcedure(const string& sql, Session& s) {
     if (!checkDB(s)) return true;
     string rest = trim(sql.substr(4));
@@ -3695,7 +3846,7 @@ static bool handleCallProcedure(const string& sql, Session& s) {
                 "(SQLSTATE 42601)" << endl;
         return true;
     }
-    procname = trim(rest.substr(0, lp));
+    procname = decodeQuotedIdentifier(trim(rest.substr(0, lp)));
     size_t rp = string::npos;
     int depth = 0;
     bool inQuote = false;
@@ -3799,17 +3950,12 @@ static bool handleCallProcedure(const string& sql, Session& s) {
 
     bool statementFailed = false;
     for (const auto& stmt : stmts) {
-        string replaced = stmt;
-        vector<pair<string, string>> sortedMap(argMap.begin(), argMap.end());
-        sort(sortedMap.begin(), sortedMap.end(),
-             [](const auto& a, const auto& b) { return a.first.size() > b.first.size(); });
-        for (const auto& kv : sortedMap) {
-            string placeholder = "?" + kv.first;
-            size_t pos = 0;
-            while ((pos = replaced.find(placeholder, pos)) != string::npos) {
-                replaced.replace(pos, placeholder.size(), kv.second);
-                pos += kv.second.size();
-            }
+        string replaced;
+        string bindError;
+        if (!bindProcedureStatement(stmt, argMap, replaced, bindError)) {
+            cout << "ERROR: " << bindError << " (SQLSTATE 42703)" << endl;
+            statementFailed = true;
+            break;
         }
         if (execute(replaced, s)) {
             statementFailed = true;

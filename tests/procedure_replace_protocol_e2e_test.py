@@ -36,6 +36,14 @@ def main():
              "-- line-comment ;\n"
              "INSERT INTO procedure_text VALUES ('c') $$"),
             "CALL semicolon_proc()",
+            ("CREATE PROCEDURE Mixed_Bind(ArgValue TEXT) LANGUAGE SQL AS $$ "
+             "INSERT INTO procedure_text VALUES ('?ArgValue'); "
+             "INSERT INTO procedure_text VALUES (?ArgValue) $$"),
+            "CALL mixed_bind('bound')",
+            ("CREATE PROCEDURE \"QuotedProc\"(\"ArgName\" TEXT) "
+             "LANGUAGE SQL AS $$ INSERT INTO procedure_text "
+             "VALUES (?ArgName) $$"),
+            "CALL \"QuotedProc\"('quoted')",
         ]
         for sql in setup:
             rows, state, message, headers = runner.ours_query(
@@ -59,7 +67,22 @@ def main():
             client, server["sock"],
             "SELECT value FROM procedure_text ORDER BY value")
         assert state is None, (state, message)
-        assert rows == [["a;b"], ["c"]], rows
+        assert rows == [
+            ["?ArgValue"], ["a;b"], ["bound"], ["c"], ["quoted"]
+        ], rows
+
+        rows, state, message, headers = runner.ours_query(
+            client, server["sock"],
+            "CREATE PROCEDURE bad_bind(x INT) LANGUAGE sql AS $$ "
+            "INSERT INTO procedure_values VALUES (?xyz) $$")
+        assert state is None, (state, message)
+        rows, state, message, headers = runner.ours_query(
+            client, server["sock"], "CALL bad_bind(99)")
+        assert state == "42703", (state, message, rows, headers)
+        rows, state, message, headers = runner.ours_query(
+            client, server["sock"],
+            "SELECT value FROM procedure_values WHERE value = 99")
+        assert state is None and rows == [], (state, message, rows)
 
         rows, state, message, headers = runner.ours_query(
             client, server["sock"], "CALL replace_proc(3)")

@@ -81,6 +81,27 @@ static std::string stripQuotes(const std::string& s) {
     return s;
 }
 
+static std::string parseRoutineIdentifier(const std::string& token) {
+    if (token.size() >= 2 && token.front() == '"' && token.back() == '"') {
+        std::string identifier;
+        identifier.reserve(token.size() - 2);
+        for (size_t i = 1; i + 1 < token.size(); ++i) {
+            if (token[i] == '"' && i + 2 < token.size() &&
+                token[i + 1] == '"') {
+                ++i;
+            }
+            identifier.push_back(token[i]);
+        }
+        return identifier;
+    }
+    std::string identifier = token;
+    std::transform(identifier.begin(), identifier.end(), identifier.begin(),
+                   [](unsigned char value) {
+                       return static_cast<char>(std::tolower(value));
+                   });
+    return identifier;
+}
+
 static bool parseNonNegativeInteger(const std::string& token, size_t& value) {
     if (token.empty()) return false;
     for (unsigned char c : token) {
@@ -6843,14 +6864,14 @@ StmtPtr SQLParser::parseCreateType(const std::vector<std::string>& tokens, size_
 StmtPtr SQLParser::parseCreateFunction(const std::vector<std::string>& tokens, size_t& pos) {
     auto stmt = std::make_unique<CreateFunctionStmt>();
     if (pos >= tokens.size()) return stmt;
-    stmt->funcName = tokens[pos++];
+    stmt->funcName = parseRoutineIdentifier(tokens[pos++]);
 
     // Optional parameter list: (name type [, ...])
     if (pos < tokens.size() && tokens[pos] == "(") {
         ++pos;
         while (pos < tokens.size() && tokens[pos] != ")") {
             if (tokens[pos] == ",") { ++pos; continue; }
-            std::string pname = tokens[pos++];
+            std::string pname = parseRoutineIdentifier(tokens[pos++]);
             std::string ptype;
             // Collect type tokens until comma or closing paren, handling typemods like varchar(20).
             int depth = 0;
@@ -6987,13 +7008,13 @@ StmtPtr SQLParser::parseCreateFunction(const std::vector<std::string>& tokens, s
 StmtPtr SQLParser::parseCreateProcedure(const std::vector<std::string>& tokens, size_t& pos) {
     auto stmt = std::make_unique<CreateFunctionStmt>(true);
     if (pos >= tokens.size()) return stmt;
-    stmt->funcName = tokens[pos++];
+    stmt->funcName = parseRoutineIdentifier(tokens[pos++]);
 
     if (pos < tokens.size() && tokens[pos] == "(") {
         ++pos;
         while (pos < tokens.size() && tokens[pos] != ")") {
             if (tokens[pos] == ",") { ++pos; continue; }
-            std::string pname = tokens[pos++];
+            std::string pname = parseRoutineIdentifier(tokens[pos++]);
             std::string ptype;
             int depth = 0;
             while (pos < tokens.size() && (tokens[pos] != "," || depth > 0) &&
