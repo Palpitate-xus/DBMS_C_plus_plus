@@ -38,12 +38,20 @@ V1→V2 control 升级，不会转换 catalog/关系/索引数据。损坏或未
 报错定位到文件和 block。当前它不覆盖索引与全部 catalog/metadata，也没有锁机制
 替代运维侧的停服保证，因此不得与 server 并发执行。
 
+`CREATE TABLESPACE name LOCATION '/absolute/path'` 使用 data directory 内的严格
+`pg_tblspc/<name>.path` marker，并在外部 root 下为当前数据库建立独立子目录。
+marker 不得手工编辑或改成 symlink；location 不得与 data directory 重叠，也不能被
+另一 tablespace 重复注册。`ALTER TABLE ... SET TABLESPACE`、备份/恢复和离线 checksum
+共用该解析规则及跨 backend flock。当前 tablespace 仍是每数据库的项目格式，
+不兼容 PostgreSQL 的 cluster-wide OID/symlink locator；服务运行时不要在外部移动目录。
+
 | 路径 | 内容 |
 |---|---|
 | `DBMS_CONTROL` | DBMS-C++ cluster identity 与持久化格式边界；不得复制到另一套独立 cluster 或手工编辑 |
 | `info/` | 集群级元数据根 |
 | `info/pg_catalog/pg_authid.cat` | 角色目录。CSV 行：`oid,"name",super,createdb,createrole,inherit,login,replication,bypassrls,-1,"SCRAM-SHA-256$iter:salt$stored:server",""`（注意 stored/server 之间是 `:`） |
 | `info/tlist.lst` | 数据库清单（每行一个数据库名） |
+| `<dbname>/pg_tblspc/*.path` | 当前数据库的外部 tablespace canonical root marker；只允许普通单行文件 |
 | `pg_hba.conf` | 可选但服务端建议：`host all <user> 127.0.0.1/32 scram-sha-256`。**无匹配行时连接在认证前悬挂** |
 | `dbms.conf` | 可选 `key=value`：`tde_keyring`、`pool_mode`、`pool_size`、`checkpoint_interval`（1..1000000，0 非法）、`audit_level` 等。服务端启动时读取一次；CLI 每进程读取 |
 | `<dbname>/` | 每数据库一目录：`*.dt` 堆文件、`*.idx` 索引、`<file>.tde` TDE 边车信封（48B/页 nonce+MAC）、`.publication` 逻辑复制目录、`.runtime_stats` |
