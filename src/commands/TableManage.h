@@ -253,7 +253,8 @@ public:
     };
     DBStatus createProcedure(const std::string& dbname, const std::string& procname,
                              const std::vector<ProcParam>& params,
-                             const std::vector<std::string>& statements);
+                             const std::vector<std::string>& statements,
+                             bool replace = false);
     DBStatus dropProcedure(const std::string& dbname, const std::string& procname);
     bool procedureExists(const std::string& dbname, const std::string& procname) const;
     std::vector<std::string> getProcedureStatements(const std::string& dbname,

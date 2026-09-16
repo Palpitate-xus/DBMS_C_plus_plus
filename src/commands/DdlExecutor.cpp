@@ -9344,6 +9344,11 @@ bool DdlExecutor::executeCreateProcedure(const CreateFunctionStmt* stmt, Session
     if (!checkDB(s)) return true;
 
     DdlTransaction txn(s);
+    if (stmt->replace && !txn.enableSnapshotRollback()) {
+        std::cout << "CREATE OR REPLACE PROCEDURE could not create rollback "
+                     "snapshot" << std::endl;
+        return true;
+    }
     if (!txn.begin()) {
         std::cout << "DDL transaction begin failed" << std::endl;
         return true;
@@ -9354,13 +9359,79 @@ bool DdlExecutor::executeCreateProcedure(const CreateFunctionStmt* stmt, Session
         return true;
     }
 
+    const std::string language = stmt->language.empty()
+        ? "sql" : toLower(stmt->language);
+    if (language != "sql") {
+        std::cout << "ERROR: procedure language " << language
+                  << " is not supported (SQLSTATE 0A000)" << std::endl;
+        return true;
+    }
+
+    const auto canonicalProcedureType = [&](const std::string& typeSpec,
+                                             bool* valid = nullptr) {
+        ColumnDef definition = columnDefFromAlterType("value", typeSpec);
+        std::string base = toLower(trim(definition.typeName));
+        const std::string canonical =
+            TypeRegistry::instance().normalizeTypeName(base);
+        bool known = false;
+        if (!canonical.empty()) {
+            base = canonical;
+            const TypeEntry* entry = TypeRegistry::instance().findType(base);
+            Column column;
+            known = entry && entry->category != TypeCategory::Pseudo &&
+                TypeRegistry::instance().resolveColumnType(
+                    column, base, definition.typeMods, false).empty();
+        } else {
+            known = !g_engine.getDomain(s.currentDB, base).name.empty() ||
+                !g_engine.getEnumType(s.currentDB, base).name.empty() ||
+                g_engine.isCompositeType(s.currentDB, base);
+        }
+        if (valid) *valid = known;
+        if (!definition.typeMods.empty()) {
+            base += '(';
+            for (size_t i = 0; i < definition.typeMods.size(); ++i) {
+                if (i) base += ',';
+                base += trim(definition.typeMods[i]);
+            }
+            base += ')';
+        }
+        return base;
+    };
+
     std::vector<dbms::StorageEngine::ProcParam> params;
     for (const auto& p : stmt->params) {
+        bool valid = false;
+        canonicalProcedureType(p.second, &valid);
+        if (!valid) {
+            std::cout << "ERROR: procedure parameter type " << p.second
+                      << " is not supported (SQLSTATE 42704)" << std::endl;
+            return true;
+        }
         dbms::StorageEngine::ProcParam pp;
         pp.mode = "IN";
         pp.name = p.first;
         pp.type = p.second;
         params.push_back(pp);
+    }
+
+    const bool replacedExisting =
+        stmt->replace && g_engine.procedureExists(s.currentDB, stmt->funcName);
+    if (replacedExisting) {
+        const auto existingParams =
+            g_engine.getProcedureParams(s.currentDB, stmt->funcName);
+        if (existingParams.size() != params.size()) {
+            std::cout << "ERROR: CREATE OR REPLACE PROCEDURE cannot change "
+                         "argument types (SQLSTATE 42P13)" << std::endl;
+            return true;
+        }
+        for (size_t i = 0; i < params.size(); ++i) {
+            if (canonicalProcedureType(existingParams[i].type) !=
+                canonicalProcedureType(params[i].type)) {
+                std::cout << "ERROR: CREATE OR REPLACE PROCEDURE cannot change "
+                             "argument types (SQLSTATE 42P13)" << std::endl;
+                return true;
+            }
+        }
     }
 
     std::vector<std::string> stmts;
@@ -9377,14 +9448,20 @@ bool DdlExecutor::executeCreateProcedure(const CreateFunctionStmt* stmt, Session
         return true;
     }
 
-    DBStatus res = g_engine.createProcedure(s.currentDB, stmt->funcName, params, stmts);
+    DBStatus res = g_engine.createProcedure(
+        s.currentDB, stmt->funcName, params, stmts, stmt->replace);
     if (res != DBStatus::OK) {
         std::cout << "CREATE PROCEDURE failed (SQLSTATE "
                   << sqlstateForDBStatus(res) << ")" << std::endl;
         return true;
     }
 
-    txn.recordCreate(DdlObjectKind::Procedure, stmt->funcName);
+    if (stmt->replace) txn.markSnapshotDirty();
+    if (replacedExisting) {
+        txn.recordUpdate(DdlObjectKind::Procedure, stmt->funcName);
+    } else {
+        txn.recordCreate(DdlObjectKind::Procedure, stmt->funcName);
+    }
     if (!txn.commit()) return true;
     std::cout << "CREATE PROCEDURE succeeded" << std::endl;
     return false;

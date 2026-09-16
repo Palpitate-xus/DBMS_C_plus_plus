@@ -486,6 +486,17 @@ int main() {
     auto* replaceStmt =
         dynamic_cast<CreateFunctionStmt*>(replaceFunction.stmt.get());
     assert(replaceStmt && replaceStmt->replace);
+    auto replaceProcedure = parser.parse(
+        "CREATE OR REPLACE PROCEDURE p(x int) LANGUAGE sql "
+        "AS 'SELECT ?x'");
+    assert(replaceProcedure.success);
+    auto* replaceProcedureStmt =
+        dynamic_cast<CreateFunctionStmt*>(replaceProcedure.stmt.get());
+    assert(replaceProcedureStmt && replaceProcedureStmt->replace &&
+           replaceProcedureStmt->language == "sql" &&
+           replaceProcedureStmt->body == "SELECT ?x");
+    assert(!parser.parse(
+        "CREATE PROCEDURE p() AS 'SELECT 1' LANGUAGE sql garbage").success);
     assert(!parser.parse(
         "CREATE FUNCTION bad(x int) RETURNS int RETURNS NULL ON NULL "
         "LANGUAGE sql AS 'SELECT x'").success);

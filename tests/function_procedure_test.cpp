@@ -173,6 +173,33 @@ static void test_create_procedure() {
     auto stmts = g_engine.getProcedureStatements(db, "ins");
     assert(stmts.size() == 2);
 
+    assert(!ddl.executeSql(
+        "CREATE PROCEDURE replace_proc(x int) LANGUAGE sql "
+        "AS 'SELECT ?x'", s));
+    assert(!ddl.executeSql(
+        "CREATE OR REPLACE PROCEDURE replace_proc(x integer) "
+        "AS 'SELECT 2' LANGUAGE sql", s));
+    assert(g_engine.getProcedureStatements(db, "replace_proc") ==
+           std::vector<std::string>{"SELECT 2"});
+    assert(ddl.executeSql(
+        "CREATE OR REPLACE PROCEDURE replace_proc(x bigint) "
+        "LANGUAGE sql AS 'SELECT 3'", s));
+    assert(ddl.executeSql(
+        "CREATE OR REPLACE PROCEDURE replace_proc(x integer) "
+        "LANGUAGE plpgsql AS 'BEGIN NULL; END'", s));
+    assert(g_engine.getProcedureStatements(db, "replace_proc") ==
+           std::vector<std::string>{"SELECT 2"});
+
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(!ddl.executeSql(
+        "CREATE OR REPLACE PROCEDURE replace_proc(x int) "
+        "LANGUAGE sql AS 'SELECT 4'", s));
+    assert(g_engine.getProcedureStatements(db, "replace_proc") ==
+           std::vector<std::string>{"SELECT 4"});
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+    assert(g_engine.getProcedureStatements(db, "replace_proc") ==
+           std::vector<std::string>{"SELECT 2"});
+
     cleanup(db);
     std::cout << "[PROCEDURE] basic OK" << std::endl;
 }

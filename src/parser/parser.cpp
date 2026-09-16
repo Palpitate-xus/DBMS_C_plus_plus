@@ -3819,6 +3819,9 @@ ParseResult SQLParser::parseCreate(const std::string& sql) {
                     isReplace;
         } else if (kw == "procedure") {
             r.stmt = parseCreateProcedure(tokens, pos);
+            if (r.stmt)
+                static_cast<CreateFunctionStmt*>(r.stmt.get())->replace =
+                    isReplace;
         } else if (kw == "trigger") {
             r.stmt = parseCreateTrigger(tokens, pos);
         } else if (kw == "role" || kw == "user") {
@@ -7006,17 +7009,21 @@ StmtPtr SQLParser::parseCreateProcedure(const std::vector<std::string>& tokens, 
         if (pos < tokens.size() && tokens[pos] == ")") ++pos;
     }
 
-    if (match(tokens, pos, "as")) {
-        ++pos;
-        if (pos < tokens.size()) {
-            stmt->body = stripQuotes(tokens[pos]);
-            ++pos;
+    // PostgreSQL permits the AS and LANGUAGE clauses in either order.
+    for (int round = 0; round < 2 && pos < tokens.size(); ++round) {
+        if (match(tokens, pos, "language") && pos + 1 < tokens.size()) {
+            stmt->language = toLower(tokens[pos + 1]);
+            pos += 2;
+            continue;
         }
+        if (match(tokens, pos, "as") && pos + 1 < tokens.size()) {
+            stmt->body = stripQuotes(tokens[pos + 1]);
+            pos += 2;
+            continue;
+        }
+        break;
     }
-    if (match(tokens, pos, "language") && pos + 1 < tokens.size()) {
-        stmt->language = toLower(tokens[pos + 1]);
-        pos += 2;
-    }
+    if (pos < tokens.size()) return nullptr;
     return stmt;
 }
 

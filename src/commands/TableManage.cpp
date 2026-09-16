@@ -4473,12 +4473,13 @@ static std::filesystem::path procedurePath(const std::string& dbname,
 DBStatus StorageEngine::createProcedure(const std::string& dbname,
                                          const std::string& procname,
                                          const std::vector<ProcParam>& params,
-                                         const std::vector<std::string>& statements) {
+                                         const std::vector<std::string>& statements,
+                                         bool replace) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!validMetadataObjectName(procname)) return DBStatus::INVALID_ARGUMENT;
     auto pdir = proceduresDir(dbname);
     if (!ensureMetadataDirectory(pdir)) return DBStatus::IO_ERROR;
-    if (std::filesystem::exists(procedurePath(dbname, procname))) {
+    if (!replace && std::filesystem::exists(procedurePath(dbname, procname))) {
         return DBStatus::TABLE_ALREADY_EXISTS;
     }
     std::ostringstream serialized;
