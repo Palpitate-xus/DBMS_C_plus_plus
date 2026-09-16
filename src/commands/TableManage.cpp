@@ -25529,6 +25529,14 @@ DBStatus StorageEngine::updateInternal(
     // from these.  Transactional updates keep OLD and NEW at separate RIDs.
     std::map<int64_t, std::map<std::string, std::string>> oldImages;
     std::map<int64_t, int64_t> newVersionRids;
+    // Heap scans use the command snapshot, so a later row in the same UPDATE
+    // cannot necessarily see an earlier row's new version. Track every
+    // immediate final key by its participating columns and compare with SQL
+    // equality semantics (including collation) before either version is
+    // allowed to land. Deferred constraints remain commit-time checks.
+    std::map<std::vector<size_t>,
+             std::vector<std::pair<int64_t, std::vector<std::string>>>>
+        statementImmediateUniqueKeys;
     for (int64_t rid : matchIds) {
         std::string row;
         std::vector<bool> oldNullColumns;
@@ -26433,6 +26441,17 @@ DBStatus StorageEngine::updateInternal(
                 return DBStatus::OK;
             }
 
+            auto& statementKeys = statementImmediateUniqueKeys[columns];
+            bool alreadyRecordedForRow = false;
+            for (const auto& [otherRid, otherValues] : statementKeys) {
+                if (!constraintKeyValuesEqual(
+                        tbl, columns, otherValues, newValues)) {
+                    continue;
+                }
+                if (otherRid != rid) return DBStatus::DUPLICATE_KEY;
+                alreadyRecordedForRow = true;
+            }
+
             bool duplicate = false;
             const bool scanOk = forEachRow(
                 dbname, tablename,
@@ -26465,7 +26484,11 @@ DBStatus StorageEngine::updateInternal(
                     duplicate = true;
                 });
             if (!scanOk) return DBStatus::IO_ERROR;
-            return duplicate ? DBStatus::DUPLICATE_KEY : DBStatus::OK;
+            if (duplicate) return DBStatus::DUPLICATE_KEY;
+            if (!alreadyRecordedForRow) {
+                statementKeys.emplace_back(rid, std::move(newValues));
+            }
+            return DBStatus::OK;
         };
 
         if (tbl.hasPrimaryKey()) {

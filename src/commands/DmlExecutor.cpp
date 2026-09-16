@@ -3380,7 +3380,8 @@ bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
         stmt.returning.empty() ? nullptr : &updatedRows, updateResolver,
         StorageEngine::SqlUpdateMatcher{}, &affectedRows);
     if (status != DBStatus::OK) {
-        std::cout << "Update failed" << std::endl;
+        std::cout << "ERROR: Update failed (SQLSTATE "
+                  << sqlstateForDBStatus(status) << ")" << std::endl;
         return true;
     }
     std::cout << "Update done" << std::endl;

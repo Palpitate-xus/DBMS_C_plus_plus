@@ -14,6 +14,7 @@
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include <map>
 #include <string>
 #include "test_utils.h"
 
@@ -284,6 +285,90 @@ static void test_immediate_unique_updates() {
               << std::endl;
 }
 
+static std::map<std::string, std::string> readTwoColumnRows(
+    const std::string& table) {
+    const TableSchema schema = g_engine.getTableSchema(db, table);
+    std::map<std::string, std::string> rows;
+    assert(g_engine.forEachRow(
+        db, table,
+        [&](uint32_t, uint16_t, const char* data, size_t length) {
+            const std::string row(data, length);
+            rows[g_engine.extractColumnValue(row, schema, 0, db, true)] =
+                g_engine.extractColumnValue(row, schema, 1, db, true);
+        }));
+    return rows;
+}
+
+static void test_immediate_unique_batch_updates() {
+    Session s;
+    setupSession(s, db);
+    DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE TABLE batch_unique "
+        "(id INT PRIMARY KEY, tag VARCHAR(20) UNIQUE)", s));
+    assert(g_engine.insert(
+        db, "batch_unique", {{"id", "1"}, {"tag", "a"}}) == DBStatus::OK);
+    assert(g_engine.insert(
+        db, "batch_unique", {{"id", "2"}, {"tag", "b"}}) == DBStatus::OK);
+
+    // Both final keys are new to the statement snapshot. The second row must
+    // still conflict with the first row's staged final key, and the first
+    // physical update must roll back with it.
+    assert(g_engine.update(db, "batch_unique", {{"tag", "same"}}, {}) ==
+           DBStatus::DUPLICATE_KEY);
+    assert((readTwoColumnRows("batch_unique") ==
+            std::map<std::string, std::string>{{"1", "a"}, {"2", "b"}}));
+
+    // A storage-level statement savepoint preserves earlier work in an
+    // explicit transaction while rolling back only the failed UPDATE.
+    assert(g_engine.beginTransaction(db) == DBStatus::OK);
+    assert(g_engine.insert(
+        db, "batch_unique", {{"id", "9"}, {"tag", "prior"}}) == DBStatus::OK);
+    assert(g_engine.update(db, "batch_unique", {{"tag", "collision"}}, {}) ==
+           DBStatus::DUPLICATE_KEY);
+    assert(g_engine.inTransaction());
+    assert((readTwoColumnRows("batch_unique") ==
+            std::map<std::string, std::string>{
+                {"1", "a"}, {"2", "b"}, {"9", "prior"}}));
+    assert(g_engine.commitTransaction() == DBStatus::OK);
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE batch_composite "
+        "(id INT PRIMARY KEY, a INT, b INT, UNIQUE (a, b))", s));
+    assert(g_engine.insert(db, "batch_composite",
+        {{"id", "1"}, {"a", "7"}, {"b", "10"}}) == DBStatus::OK);
+    assert(g_engine.insert(db, "batch_composite",
+        {{"id", "2"}, {"a", "7"}, {"b", "20"}}) == DBStatus::OK);
+    assert(g_engine.update(db, "batch_composite", {{"b", "30"}}, {}) ==
+           DBStatus::DUPLICATE_KEY);
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE batch_index (id INT PRIMARY KEY, tag VARCHAR(20))", s));
+    assert(!ddl.executeSql(
+        "CREATE UNIQUE INDEX batch_index_tag_key ON batch_index (tag)", s));
+    assert(g_engine.insert(
+        db, "batch_index", {{"id", "1"}, {"tag", "x"}}) == DBStatus::OK);
+    assert(g_engine.insert(
+        db, "batch_index", {{"id", "2"}, {"tag", "y"}}) == DBStatus::OK);
+    assert(g_engine.update(db, "batch_index", {{"tag", "z"}}, {}) ==
+           DBStatus::DUPLICATE_KEY);
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE batch_nulls "
+        "(id INT PRIMARY KEY, tag VARCHAR(20) UNIQUE)", s));
+    assert(g_engine.insert(
+        db, "batch_nulls", {{"id", "1"}, {"tag", "x"}}) == DBStatus::OK);
+    assert(g_engine.insert(
+        db, "batch_nulls", {{"id", "2"}, {"tag", "y"}}) == DBStatus::OK);
+    StorageEngine::SqlRow nullUpdate;
+    nullUpdate["tag"] = std::nullopt;
+    assert(g_engine.updateRows(db, "batch_nulls", nullUpdate, {}) ==
+           DBStatus::OK);
+
+    std::cout << "[DEFER] immediate batch UNIQUE keys are statement-visible and atomic OK"
+              << std::endl;
+}
+
 static void test_set_constraints_immediate() {
     assert(g_engine.beginTransaction(db) == DBStatus::OK);
     assert(g_engine.setConstraintMode({"all"}, false) == DBStatus::OK);
@@ -368,6 +453,7 @@ int main() {
     test_unique_autocommit_rejects_duplicate();
     test_unique_deferred_swap();
     test_immediate_unique_updates();
+    test_immediate_unique_batch_updates();
     test_unique_deferred_update_violation();
     test_unique_deferred_violation();
     test_set_constraints_immediate();
