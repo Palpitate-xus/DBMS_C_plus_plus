@@ -28888,6 +28888,27 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
         if (returnIsNull) *returnIsNull = true;
         return true;
     }
+    const auto coerceReturn = [&](const std::string& value, bool valueIsNull,
+                                  const std::string& sourceType) {
+        if (valueIsNull ||
+            TypeRegistry::instance().normalizeTypeName(udf.returnType) ==
+                "void") {
+            returnValue.clear();
+            if (returnIsNull) *returnIsNull = true;
+            return true;
+        }
+        const std::string binding = "__dbms_function_result";
+        std::map<std::string, std::string> row{{binding, value}};
+        std::map<std::string, std::string> hints{
+            {binding, sourceType.empty() ? "text" : sourceType}};
+        const auto converted = ExprHelper::evalString(
+            "CAST(" + binding + " AS " + udf.returnType + ")",
+            row, hints, dbname);
+        if (!converted.ok || converted.isNull) return false;
+        returnValue = converted.value;
+        if (returnIsNull) *returnIsNull = false;
+        return true;
+    };
     if (udf.language == "plpgsql") {
         std::map<std::string, std::string> params;
         std::set<std::string> nullParams;
@@ -28932,12 +28953,12 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
             return engine->plpgsqlSelectInto(dbname, list, from, "", intoVars, vars);
         };
         std::string rv, err;
+        bool plpgsqlIsNull = false;
         if (!PlPgsql::run(udf.expression, params, host, rv, err, nullptr,
-                          returnIsNull, &nullParams)) {
+                          &plpgsqlIsNull, &nullParams)) {
             return false;
         }
-        returnValue = rv;
-        return true;
+        return coerceReturn(rv, plpgsqlIsNull, "text");
     }
 
     // SQL scalar functions in this engine are deliberately limited to one
@@ -29000,9 +29021,8 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
     const auto evaluated = ExprHelper::evalStringWithNulls(
         expression, params, nullParams, typeHints, dbname);
     if (!evaluated.ok) return false;
-    if (returnIsNull) *returnIsNull = evaluated.isNull;
-    returnValue = evaluated.isNull ? std::string{} : evaluated.value;
-    return true;
+    return coerceReturn(evaluated.value, evaluated.isNull,
+                        evaluated.typeName);
 }
 
 struct ParsedProjectionSubquery {

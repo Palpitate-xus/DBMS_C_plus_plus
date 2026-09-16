@@ -70,6 +70,35 @@ static void test_create_function_multi_param() {
     std::cout << "[FUNCTION] multi param OK" << std::endl;
 }
 
+static void test_function_signature_validation() {
+    std::string db = testDbPath("func_signature_validation");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    assert(ddl.executeSql(
+        "CREATE FUNCTION bad_return() RETURNS no_such_type "
+        "LANGUAGE sql AS 'SELECT 1'", s));
+    assert(!g_engine.udfExists(db, "bad_return"));
+    assert(ddl.executeSql(
+        "CREATE FUNCTION bad_parameter(x no_such_type) RETURNS int "
+        "LANGUAGE sql AS 'SELECT 1'", s));
+    assert(!g_engine.udfExists(db, "bad_parameter"));
+    assert(ddl.executeSql(
+        "CREATE FUNCTION bad_table_parameter(x no_such_type) RETURNS TABLE "
+        "LANGUAGE sql AS 'SELECT 1'", s));
+    assert(!g_engine.tvfExists(db, "bad_table_parameter"));
+    assert(ddl.executeSql(
+        "CREATE FUNCTION bad_language() RETURNS int "
+        "LANGUAGE python AS 'SELECT 1'", s));
+    assert(!g_engine.udfExists(db, "bad_language"));
+
+    cleanup(db);
+    std::cout << "[FUNCTION] signature validation OK" << std::endl;
+}
+
 static void test_create_tvf() {
     std::string db = testDbPath("func_tvf");
     cleanup(db);
@@ -228,6 +257,7 @@ int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_create_function_single_param();
     test_create_function_multi_param();
+    test_function_signature_validation();
     test_create_function_volatility();
     test_builtin_volatility();
     test_create_tvf();

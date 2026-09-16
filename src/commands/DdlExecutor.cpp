@@ -8,6 +8,7 @@
 #include "parser/parser.h"
 #include "catalog/CatalogService.h"
 #include "catalog/systables.h"
+#include "catalog/type_registry.h"
 #include "access/IndexFileUtil.h"
 #include "common/logs.h"
 #include "common/FeatureGate.h"
@@ -9202,10 +9203,58 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
 
     const std::string lang = stmt->language.empty()
         ? "sql" : toLower(stmt->language);
+    if (lang != "sql" && lang != "plpgsql") {
+        std::cout << "ERROR: function language " << lang
+                  << " is not supported (SQLSTATE 0A000)" << std::endl;
+        return true;
+    }
+
+    const auto validateFunctionType = [&](const std::string& typeSpec,
+                                          bool returnType) {
+        if (trim(typeSpec).empty()) return false;
+        ColumnDef definition = columnDefFromAlterType("value", typeSpec);
+        const std::string base = toLower(trim(definition.typeName));
+        const std::string canonical =
+            TypeRegistry::instance().normalizeTypeName(base);
+        if (!canonical.empty()) {
+            const TypeEntry* entry =
+                TypeRegistry::instance().findType(canonical);
+            if (!entry) return false;
+            if (entry->category == TypeCategory::Pseudo) {
+                return returnType && canonical == "void";
+            }
+            Column column;
+            return TypeRegistry::instance().resolveColumnType(
+                       column, canonical, definition.typeMods, false).empty();
+        }
+        if (!g_engine.getDomain(s.currentDB, base).name.empty()) return true;
+        if (!g_engine.getEnumType(s.currentDB, base).name.empty()) return true;
+        return g_engine.isCompositeType(s.currentDB, base);
+    };
+
+    for (const auto& parameter : stmt->params) {
+        if (!validateFunctionType(parameter.second, false)) {
+            std::cout << "ERROR: function parameter type "
+                      << parameter.second
+                      << " is not supported (SQLSTATE 42704)" << std::endl;
+            return true;
+        }
+    }
+
     if (toLower(stmt->returnType) == "table") {
+        if (lang != "sql") {
+            std::cout << "ERROR: table-valued PL/pgSQL functions are not "
+                         "supported (SQLSTATE 0A000)" << std::endl;
+            return true;
+        }
         std::string singleParam = stmt->params.empty() ? "" : stmt->params.front().first;
         res = g_engine.createTVF(s.currentDB, stmt->funcName, singleParam, stmt->body);
     } else {
+        if (!validateFunctionType(stmt->returnType, true)) {
+            std::cout << "ERROR: function return type " << stmt->returnType
+                      << " is not supported (SQLSTATE 42704)" << std::endl;
+            return true;
+        }
         if (stmt->params.size() <= 1) {
             std::string singleParam = stmt->params.empty() ? "" : stmt->params.front().first;
             std::string singleType = stmt->params.empty() ? "" : stmt->params.front().second;

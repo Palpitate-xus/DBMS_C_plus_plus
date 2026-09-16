@@ -50,6 +50,28 @@ def main():
                 client, server["sock"], sql)
             assert state is None, (sql, state, message, rows, headers)
 
+        rejected = [
+            ("CREATE FUNCTION bad_type() RETURNS no_such_type LANGUAGE sql "
+             "AS $$ SELECT 1 $$"),
+            ("CREATE FUNCTION bad_parameter(x no_such_type) RETURNS INT "
+             "LANGUAGE sql AS $$ SELECT 1 $$"),
+            ("CREATE FUNCTION bad_language() RETURNS INT LANGUAGE python "
+             "AS $$ SELECT 1 $$"),
+        ]
+        for sql in rejected:
+            rows, state, message, headers = runner.ours_query(
+                client, server["sock"], sql)
+            assert state is not None, (sql, rows, headers)
+
+        rows, state, message, headers = runner.ours_query(
+            client, server["sock"],
+            "CREATE FUNCTION bad_result() RETURNS INT LANGUAGE sql "
+            "AS $$ SELECT 'abc' $$")
+        assert state is None, (state, message)
+        rows, state, message, headers = runner.ours_query(
+            client, server["sock"], "SELECT bad_result();")
+        assert state is not None, (rows, headers)
+
         result = runner.decode_wire_result(
             client.simple_query(
                 server["sock"],
