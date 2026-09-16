@@ -35,6 +35,13 @@ def main():
              "AS $$ SELECT 'null' $$"),
             ("CREATE FUNCTION fn_sql_from() RETURNS INT LANGUAGE sql "
              "AS $$ SELECT id FROM fn_inputs $$"),
+            ("CREATE FUNCTION fn_strict(x INT) RETURNS INT STRICT "
+             "LANGUAGE sql AS $$ SELECT 7 $$"),
+            ("CREATE FUNCTION fn_strict_long(x INT) RETURNS INT "
+             "RETURNS NULL ON NULL INPUT "
+             "LANGUAGE plpgsql AS $$ BEGIN RETURN 7; END $$"),
+            ("CREATE FUNCTION fn_called(x INT) RETURNS INT CALLED ON NULL INPUT "
+             "LANGUAGE sql AS $$ SELECT 7 $$"),
             "CREATE TABLE fn_inputs (id INT, missing INT)",
             "INSERT INTO fn_inputs VALUES (5, NULL)",
         ]
@@ -55,6 +62,19 @@ def main():
         assert headers == ["doubled", "total", "missing", "literal", "flag"], headers
         assert rows == [["8", "42", None, "null", "t"]], rows
         assert type_oids == [23, 20, 23, 25, 16], type_oids
+        assert tag == "SELECT 1", tag
+
+        result = runner.decode_wire_result(
+            client.simple_query(
+                server["sock"],
+                "SELECT fn_strict(NULL) AS short_form, "
+                "fn_strict_long(NULL) AS long_form, "
+                "fn_called(NULL) AS called;"),
+            include_types=True)
+        rows, state, message, headers, tag, type_oids = result
+        assert state is None, (state, message)
+        assert rows == [[None, None, "7"]], rows
+        assert type_oids == [23, 23, 23], type_oids
         assert tag == "SELECT 1", tag
 
         result = runner.decode_wire_result(

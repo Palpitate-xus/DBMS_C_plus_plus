@@ -467,6 +467,21 @@ int main() {
 
     assert(!parser.parse("CREATE FUNCTION f() RETURNS int COST nope AS 'SELECT 1'").success);
     assert(!parser.parse("CREATE FUNCTION f() RETURNS int ROWS -1 AS 'SELECT 1'").success);
+    auto strictFunction = parser.parse(
+        "CREATE FUNCTION f(x int) RETURNS int RETURNS NULL ON NULL INPUT "
+        "LANGUAGE sql AS 'SELECT x'");
+    assert(strictFunction.success);
+    auto* strictStmt = dynamic_cast<CreateFunctionStmt*>(strictFunction.stmt.get());
+    assert(strictStmt && strictStmt->strict);
+    auto calledFunction = parser.parse(
+        "CREATE FUNCTION g(x int) RETURNS int CALLED ON NULL INPUT "
+        "LANGUAGE sql AS 'SELECT x'");
+    assert(calledFunction.success);
+    auto* calledStmt = dynamic_cast<CreateFunctionStmt*>(calledFunction.stmt.get());
+    assert(calledStmt && !calledStmt->strict);
+    assert(!parser.parse(
+        "CREATE FUNCTION bad(x int) RETURNS int RETURNS NULL ON NULL "
+        "LANGUAGE sql AS 'SELECT x'").success);
     assert(!parser.parse("CREATE ROLE r CONNECTION LIMIT nope").success);
     auto unlimitedRole = parser.parse(
         "CREATE ROLE unlimited CONNECTION LIMIT -1");

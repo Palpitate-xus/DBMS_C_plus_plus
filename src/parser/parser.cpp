@@ -6883,7 +6883,8 @@ StmtPtr SQLParser::parseCreateFunction(const std::vector<std::string>& tokens, s
             while (pos < tokens.size() && !match(tokens, pos, "as") &&
                    !match(tokens, pos, "language") && !match(tokens, pos, "immutable") &&
                    !match(tokens, pos, "stable") && !match(tokens, pos, "volatile") &&
-                   !match(tokens, pos, "strict") && !match(tokens, pos, "security") &&
+                   !match(tokens, pos, "strict") && !match(tokens, pos, "returns") &&
+                   !match(tokens, pos, "called") && !match(tokens, pos, "security") &&
                    !match(tokens, pos, "parallel") && !match(tokens, pos, "cost") &&
                    !match(tokens, pos, "rows") && !match(tokens, pos, "set")) {
                 if (!rtype.empty()) rtype += " ";
@@ -6898,9 +6899,24 @@ StmtPtr SQLParser::parseCreateFunction(const std::vector<std::string>& tokens, s
         if (match(tokens, pos, "immutable")) { stmt->immutable = true; stmt->volatile_ = false; ++pos; }
         else if (match(tokens, pos, "stable")) { stmt->stable = true; stmt->volatile_ = false; ++pos; }
         else if (match(tokens, pos, "volatile")) { stmt->volatile_ = true; ++pos; }
-        else if (match(tokens, pos, "strict") || (match(tokens, pos, "returns") && pos + 1 < tokens.size() && match(tokens, pos + 1, "null") && match(tokens, pos + 2, "on") && match(tokens, pos + 3, "null"))) {
-            // Simplified: STRICT keyword only
-            stmt->strict = true; ++pos;
+        else if (match(tokens, pos, "strict")) {
+            stmt->strict = true;
+            ++pos;
+        }
+        else if (match(tokens, pos, "returns") && pos + 4 < tokens.size() &&
+                 match(tokens, pos + 1, "null") &&
+                 match(tokens, pos + 2, "on") &&
+                 match(tokens, pos + 3, "null") &&
+                 match(tokens, pos + 4, "input")) {
+            stmt->strict = true;
+            pos += 5;
+        }
+        else if (match(tokens, pos, "called") && pos + 3 < tokens.size() &&
+                 match(tokens, pos + 1, "on") &&
+                 match(tokens, pos + 2, "null") &&
+                 match(tokens, pos + 3, "input")) {
+            stmt->strict = false;
+            pos += 4;
         }
         else if (match(tokens, pos, "security") && pos + 1 < tokens.size() && match(tokens, pos + 1, "definer")) {
             stmt->securityDefiner = true; pos += 2;
@@ -6954,6 +6970,10 @@ StmtPtr SQLParser::parseCreateFunction(const std::vector<std::string>& tokens, s
         }
         break;
     }
+
+    // Never accept an option prefix while silently discarding the remaining
+    // function definition. Unsupported option order/shape must fail closed.
+    if (pos < tokens.size()) return nullptr;
 
     return stmt;
 }

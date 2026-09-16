@@ -332,20 +332,23 @@ public:
         char provolatile = 'v'; // i=immutable, s=stable, v=volatile
         std::string language;   // "sql" (default) or "plpgsql"
         std::string returnType = "text"; // declared scalar result type
+        bool strict = false;    // RETURNS NULL ON NULL INPUT
     };
     DBStatus createUDF(const std::string& dbname, const std::string& funcname,
                        const std::string& param, const std::string& expression,
                        char provolatile = 'v',
                        const std::string& language = "sql",
                        const std::string& returnType = "text",
-                       const std::string& paramType = "");
+                       const std::string& paramType = "",
+                       bool strict = false);
     DBStatus createUDF(const std::string& dbname, const std::string& funcname,
                        const std::vector<std::string>& params,
                        const std::vector<std::string>& types,
                        const std::string& expression,
                        char provolatile = 'v',
                        const std::string& language = "sql",
-                       const std::string& returnType = "text");
+                       const std::string& returnType = "text",
+                       bool strict = false);
     DBStatus dropUDF(const std::string& dbname, const std::string& funcname);
     bool udfExists(const std::string& dbname, const std::string& funcname) const;
     UDFInfo getUDF(const std::string& dbname, const std::string& funcname) const;

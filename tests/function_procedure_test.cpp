@@ -127,6 +127,18 @@ static void test_create_function_volatility() {
     auto info_v = g_engine.getUDF(db, "volatile_add1");
     assert(info_v.provolatile == 'v');
 
+    assert(!ddl.executeSql(
+        "CREATE FUNCTION strict_add1(x int) RETURNS int STRICT "
+        "AS 'x + 1' LANGUAGE sql", s));
+    auto strict_info = g_engine.getUDF(db, "strict_add1");
+    assert(strict_info.strict);
+    std::string result;
+    bool resultIsNull = false;
+    const std::vector<bool> nullArg{true};
+    assert(g_engine.callUDF(db, "strict_add1", {""}, result,
+                            &resultIsNull, &nullArg));
+    assert(resultIsNull && result.empty());
+
     cleanup(db);
     std::cout << "[FUNCTION] volatility persistence OK" << std::endl;
 }
