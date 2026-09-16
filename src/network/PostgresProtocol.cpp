@@ -3,6 +3,7 @@
 #include "PostgresNumeric.h"
 #include "types/bytea.h"
 #include "common/NetworkValue.h"
+#include "common/GeometryValue.h"
 #include "types/money.h"
 #include "types/xml.h"
 
@@ -105,6 +106,9 @@ bool parseUuidBytes(const std::string& value, std::vector<uint8_t>& bytes) {
 bool encodeBinaryValue(const std::string& value, const PgColumnDescription& column,
                        std::vector<uint8_t>& encoded) {
     try {
+        if (geometryTypeNameForOid(column.typeOid)) {
+            return encodeGeometryBinary(value, column.typeOid, encoded);
+        }
         switch (column.typeOid) {
             case 142: {
                 if (!validateXml(value, XmlParseMode::Content).ok) return false;
@@ -572,8 +576,15 @@ bool PostgresProtocol::sendDataRow(
         } else {
             std::vector<uint8_t> encoded;
             if (columns[i].formatCode == 0) {
-                if (value.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max())) return false;
-                encoded.assign(value.begin(), value.end());
+                std::string text = value;
+                if (const char* geometryType =
+                        geometryTypeNameForOid(columns[i].typeOid)) {
+                    if (!normalizeGeometryText(value, geometryType, text, true)) {
+                        return false;
+                    }
+                }
+                if (text.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max())) return false;
+                encoded.assign(text.begin(), text.end());
             } else if (columns[i].formatCode == 1) {
                 if (!encodeBinaryValue(value, columns[i], encoded)) return false;
             } else {

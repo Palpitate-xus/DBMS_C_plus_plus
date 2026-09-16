@@ -17,6 +17,7 @@
 #include "common/DateType.h"
 #include "common/BooleanCodec.h"
 #include "common/NetworkValue.h"
+#include "common/GeometryValue.h"
 #include "PostgresNumeric.h"
 #include "types/bytea.h"
 #include "types/money.h"
@@ -657,6 +658,14 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
                                            const std::string& moneyLocale,
                                            std::string& error) {
     uint64_t bits = 0;
+    if (geometryTypeNameForOid(typeOid)) {
+        std::string value;
+        if (!decodeGeometryBinary(typeOid, raw, value)) {
+            error = "invalid binary input syntax for geometric type";
+            return {};
+        }
+        return quoteProtocolText(value, error);
+    }
     switch (typeOid) {
         case 17:
             return quoteProtocolText(
@@ -884,6 +893,14 @@ std::string protocolParameterLiteral(uint32_t typeOid,
             error = "invalid input syntax for type xml";
             return {};
         }
+    }
+    if (const char* geometryType = geometryTypeNameForOid(typeOid)) {
+        std::string canonical;
+        if (!normalizeGeometryText(value, geometryType, canonical, true)) {
+            error = std::string("invalid input syntax for type ") + geometryType;
+            return {};
+        }
+        return quoteProtocolText(canonical, error);
     }
     return quoteProtocolText(value, error);
 }
@@ -1215,6 +1232,8 @@ std::string protocolRelationFromQuery(const std::string& sql) {
 }
 
 int16_t protocolTypeSize(uint32_t typeOid, const Column& column) {
+    const int16_t geometryLength = geometryTypeLengthForOid(typeOid);
+    if (geometryLength != 0) return geometryLength;
     switch (typeOid) {
         case 16: return 1;   // bool
         case 20: return 8;   // int8
@@ -1291,7 +1310,8 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
                  physicalTypeName == "bit varying" ||
                  physicalTypeName == "inet" || physicalTypeName == "cidr" ||
                  physicalTypeName == "macaddr" ||
-                 physicalTypeName == "macaddr8") &&
+                 physicalTypeName == "macaddr8" ||
+                 isGeometryTypeName(physicalTypeName)) &&
                 lowerProtocolText(result.columnTypes[columnIndex]) ==
                     physicalTypeName;
             if (!hasStructuredType || structuredMatchesPhysical) {

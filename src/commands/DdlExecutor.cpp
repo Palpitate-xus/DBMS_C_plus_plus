@@ -11,6 +11,7 @@
 #include "access/IndexFileUtil.h"
 #include "common/logs.h"
 #include "common/FeatureGate.h"
+#include "common/GeometryValue.h"
 #include "common/scram_sha256.h"
 #include "permissions.h"
 #include <algorithm>
@@ -717,9 +718,13 @@ static PgAttributeRow catalogAttributeForColumn(
     attribute.atttypid = ensureTypeInCatalog(cat, namespaceOid, column);
     const bool postgresVarlenaNetwork =
         column.dataType == "inet" || column.dataType == "cidr";
-    attribute.attlen = column.isVariableLength || postgresVarlenaNetwork
-        ? static_cast<int16_t>(-1)
-        : static_cast<int16_t>(column.dsize);
+    const int16_t postgresGeometryLength =
+        geometryTypeLengthForOid(attribute.atttypid);
+    attribute.attlen = postgresGeometryLength != 0
+        ? postgresGeometryLength
+        : (column.isVariableLength || postgresVarlenaNetwork
+               ? static_cast<int16_t>(-1)
+               : static_cast<int16_t>(column.dsize));
     attribute.attndims = column.isArray ? 1 : 0;
     attribute.atttypmod = -1;
     if (!column.isArray && column.dataType == "bit") {

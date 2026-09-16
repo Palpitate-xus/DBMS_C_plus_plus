@@ -10,6 +10,8 @@
 #include "commands/TableManage.h"
 #include "Session.h"
 #include "catalog/type_registry.h"
+#include "catalog/systables.h"
+#include "common/GeometryValue.h"
 #include <cassert>
 #include <filesystem>
 #include <fstream>
@@ -59,9 +61,16 @@ static void test_line_lseg_circle() {
     assert(g_engine.insert(db, "g", {{"id","4"}, {"ln","{1,2,3}"}, {"ls","[(0,0),(1,1),(2,2)]"}, {"c","<(0,0),5>"}}) == dbms::DBStatus::INVALID_VALUE);
     // Garbage characters rejected.
     assert(g_engine.insert(db, "g", {{"id","5"}, {"ln","{1,2,x}"}, {"ls","[(0,0),(1,1)]"}, {"c","<(0,0),5>"}}) == dbms::DBStatus::INVALID_VALUE);
+    // Coordinate counts alone are insufficient: delimiter kind, balance and
+    // nesting are part of PostgreSQL's geometric input grammar.
+    assert(g_engine.insert(db, "g", {{"id","6"}, {"ln","{1,2,3)"}, {"ls","[(0,0),(1,1)]"}, {"c","<(0,0),5>"}}) == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insert(db, "g", {{"id","7"}, {"ln","{1,2,3}"}, {"ls","{(0,0),(1,1)}"}, {"c","<(0,0),5>"}}) == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insert(db, "g", {{"id","8"}, {"ln","[(0,0),(2,2)]"}, {"ls","[(0,0),(1,1)]"}, {"c","<(0,0),NaN>"}}) == dbms::DBStatus::OK);
+    assert(fetchOne(db, "g", {"=id 8"}, "ln") == "{1,-1,0}");
+    assert(fetchOne(db, "g", {"=id 8"}, "c") == "<(0,0),NaN>");
 
     auto rows = g_engine.query(db, "g", {}, {"id"}, {});
-    assert(rows.size() == 1);
+    assert(rows.size() == 2);
     cleanup(db);
     std::cout << "[GEO] line/lseg/circle OK" << std::endl;
 }
@@ -106,9 +115,68 @@ static void test_path_polygon() {
         {"po","[(0,0),(1,1),(2)]"},
         {"pc","((0,0),(1,1))"},
         {"pg","((0,0),(1,1),(2,2))"}}) == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insert(db, "g", {{"id","3"},
+        {"po","[(0,0),(1,1))"},
+        {"pc","((0,0),(1,1))"},
+        {"pg","((0,0),(1,1),(2,2))"}}) == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insert(db, "g", {{"id","4"},
+        {"po","[(0,0),(1,1)]"},
+        {"pc","((0,0),(1,1))"},
+        {"pg","[(0,0),(1,1),(2,2)]"}}) == dbms::DBStatus::INVALID_VALUE);
 
     cleanup(db);
     std::cout << "[GEO] path/polygon open/closed OK" << std::endl;
+}
+
+static void test_binary_and_catalog_contract() {
+    using dbms::decodeGeometryBinary;
+    using dbms::encodeGeometryBinary;
+    using dbms::mapBuiltinTypeNameToOid;
+
+    assert(mapBuiltinTypeNameToOid("point") == 600);
+    assert(mapBuiltinTypeNameToOid("lseg") == 601);
+    assert(mapBuiltinTypeNameToOid("path") == 602);
+    assert(mapBuiltinTypeNameToOid("box") == 603);
+    assert(mapBuiltinTypeNameToOid("polygon") == 604);
+    assert(mapBuiltinTypeNameToOid("line") == 628);
+    assert(mapBuiltinTypeNameToOid("circle") == 718);
+    assert(mapBuiltinTypeNameToOid("circle[]") == 719);
+
+    struct RoundTrip {
+        uint32_t oid;
+        const char* input;
+        const char* canonical;
+        size_t bytes;
+    };
+    const std::vector<RoundTrip> cases = {
+        {600, "1,2", "(1,2)", 16},
+        {601, "[(0,0),(1,2)]", "[(0,0),(1,2)]", 32},
+        {602, "[(0,0),(1,2)]", "[(0,0),(1,2)]", 37},
+        {603, "(0,0),(2,3)", "(2,3),(0,0)", 32},
+        {604, "((0,0),(1,0),(0,1))", "((0,0),(1,0),(0,1))", 52},
+        {628, "{1,2,3}", "{1,2,3}", 24},
+        {718, "<(1,2),3>", "<(1,2),3>", 24},
+    };
+    for (const auto& test : cases) {
+        std::vector<uint8_t> binary;
+        assert(encodeGeometryBinary(test.input, test.oid, binary));
+        assert(binary.size() == test.bytes);
+        std::string decoded;
+        assert(decodeGeometryBinary(test.oid, binary, decoded));
+        assert(decoded == test.canonical);
+    }
+
+    std::string decoded;
+    assert(!decodeGeometryBinary(600, std::vector<uint8_t>(15), decoded));
+    std::vector<uint8_t> nanPoint(16, 0);
+    nanPoint[0] = 0x7f;
+    nanPoint[1] = 0xf8;
+    assert(!decodeGeometryBinary(600, nanPoint, decoded));
+    assert(!decodeGeometryBinary(602, {2, 0, 0, 0, 1,
+                                      0, 0, 0, 0, 0, 0, 0, 0,
+                                      0, 0, 0, 0, 0, 0, 0, 0}, decoded));
+    assert(!decodeGeometryBinary(604, {0, 0, 0, 2}, decoded));
+    std::cout << "[GEO] OID/binary contract OK" << std::endl;
 }
 
 static void test_geo_update() {
@@ -212,6 +280,7 @@ int main() {
     test_path_polygon();
     test_geo_update();
     test_point_still_works();
+    test_binary_and_catalog_contract();
     std::cout << "[GEO] all passed" << std::endl;
     return 0;
 }

@@ -23,6 +23,7 @@ src/network/PostgresNumeric.cpp
 src/common/Config.cpp
 src/common/DataDirectory.cpp
 src/common/FeatureGate.cpp
+src/common/GeometryValue.cpp
 src/parser/parser.cpp
 src/catalog/catalog.cpp
 src/catalog/oid.cpp

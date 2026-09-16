@@ -2,6 +2,7 @@
 #include "common/DbError.h"
 #include "common/BooleanCodec.h"
 #include "common/NetworkValue.h"
+#include "common/GeometryValue.h"
 #include "common/NotificationManager.h"
 #include "common/sha256.h"
 #include "utils/plpgsql.h"
@@ -762,41 +763,12 @@ static bool floatingPredicateMatches(const std::string& op, int comparison) {
 static bool normalizePointLiteral(const std::string& input, std::string& output,
                                   double* parsedX = nullptr,
                                   double* parsedY = nullptr) {
-    std::string value = trim(input);
-    if (value.size() >= 2 && value.front() == '\'' && value.back() == '\'')
-        value = trim(value.substr(1, value.size() - 2));
-
-    if (value.size() >= 5) {
-        std::string prefix = value.substr(0, 5);
-        for (char& ch : prefix)
-            ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-        if (prefix == "point" &&
-            (value.size() == 5 || value[5] == '(' ||
-             std::isspace(static_cast<unsigned char>(value[5])))) {
-            value = trim(value.substr(5));
-            if (value.size() < 2 || value.front() != '(' || value.back() != ')')
-                return false;
-        }
-    }
-    if ((!value.empty() && value.front() == '(') ||
-        (!value.empty() && value.back() == ')')) {
-        if (value.size() < 2 || value.front() != '(' || value.back() != ')')
-            return false;
-        value = trim(value.substr(1, value.size() - 2));
-    }
-
-    const size_t comma = value.find(',');
-    if (comma == std::string::npos || value.find(',', comma + 1) != std::string::npos)
-        return false;
-    double x = 0.0;
-    double y = 0.0;
-    if (!parseFiniteDouble(value.substr(0, comma), x) ||
-        !parseFiniteDouble(value.substr(comma + 1), y)) {
-        return false;
-    }
-    output = formatPointCoordinate(x) + "," + formatPointCoordinate(y);
-    if (parsedX) *parsedX = x;
-    if (parsedY) *parsedY = y;
+    dbms::GeometryValue value;
+    if (!dbms::parseGeometryValue(input, "point", value)) return false;
+    output = dbms::formatGeometryValue(value, false);
+    if (output.empty()) return false;
+    if (parsedX) *parsedX = value.coordinates[0];
+    if (parsedY) *parsedY = value.coordinates[1];
     return true;
 }
 
@@ -8231,91 +8203,8 @@ static bool isGeometricTextType(const std::string& dt) {
            dt == "path" || dt == "polygon" || dt == "circle";
 }
 
-static std::string geoFmtNum(double v) {
-    return formatPointCoordinate(v);
-}
-
-static std::string geoFmtPoint(double x, double y) {
-    return "(" + geoFmtNum(x) + "," + geoFmtNum(y) + ")";
-}
-
-// Extract numeric coordinates from a geometric literal. Only digits, signs,
-// decimal points, exponent markers, commas, whitespace and the bracket
-// characters ()[]{}<> are permitted; anything else fails. `opener` receives the
-// first bracket character (used to distinguish open vs closed paths).
-static bool extractGeoNumbers(const std::string& in, std::vector<double>& nums,
-                              std::string& opener) {
-    opener.clear();
-    for (size_t j = 0; j < in.size(); ++j) {
-        if (std::isspace(static_cast<unsigned char>(in[j]))) continue;
-        if (in[j] == '[' || in[j] == '(' || in[j] == '{' || in[j] == '<')
-            opener = std::string(1, in[j]);
-        break;
-    }
-    size_t i = 0;
-    while (i < in.size()) {
-        char c = in[i];
-        if (std::isspace(static_cast<unsigned char>(c)) || c == ',' ||
-            c == '(' || c == ')' || c == '[' || c == ']' ||
-            c == '{' || c == '}' || c == '<' || c == '>') { ++i; continue; }
-        if (c == '-' || c == '+' || c == '.' || std::isdigit(static_cast<unsigned char>(c))) {
-            size_t start = i;
-            ++i;
-            while (i < in.size() &&
-                   (std::isdigit(static_cast<unsigned char>(in[i])) || in[i] == '.' ||
-                    in[i] == 'e' || in[i] == 'E' ||
-                    ((in[i] == '-' || in[i] == '+') && (in[i-1] == 'e' || in[i-1] == 'E'))))
-                ++i;
-            try {
-                size_t consumed = 0;
-                const std::string token = in.substr(start, i - start);
-                double v = std::stod(token, &consumed);
-                if (consumed != token.size() || !std::isfinite(v)) return false;
-                nums.push_back(v);
-            } catch (...) { return false; }
-        } else {
-            return false;  // disallowed character
-        }
-    }
-    return true;
-}
-
 static bool normalizeGeometry(const std::string& in, const std::string& type, std::string& out) {
-    std::vector<double> n;
-    std::string opener;
-    if (!extractGeoNumbers(in, n, opener)) return false;
-    if (type == "line") {
-        if (n.size() != 3) return false;
-        if (n[0] == 0 && n[1] == 0) return false;  // A and B cannot both be zero
-        out = "{" + geoFmtNum(n[0]) + "," + geoFmtNum(n[1]) + "," + geoFmtNum(n[2]) + "}";
-    } else if (type == "lseg") {
-        if (n.size() != 4) return false;
-        out = "[" + geoFmtPoint(n[0], n[1]) + "," + geoFmtPoint(n[2], n[3]) + "]";
-    } else if (type == "box") {
-        if (n.size() != 4) return false;
-        // PG stores (high-right, low-left) corners.
-        double hx = std::max(n[0], n[2]), hy = std::max(n[1], n[3]);
-        double lx = std::min(n[0], n[2]), ly = std::min(n[1], n[3]);
-        out = geoFmtPoint(hx, hy) + "," + geoFmtPoint(lx, ly);
-    } else if (type == "circle") {
-        if (n.size() != 3) return false;
-        if (n[2] < 0) return false;  // radius must be non-negative
-        out = "<" + geoFmtPoint(n[0], n[1]) + "," + geoFmtNum(n[2]) + ">";
-    } else if (type == "path" || type == "polygon") {
-        if (n.size() < 2 || n.size() % 2 != 0) return false;
-        std::string body;
-        for (size_t k = 0; k < n.size(); k += 2) {
-            if (!body.empty()) body += ",";
-            body += geoFmtPoint(n[k], n[k + 1]);
-        }
-        if (type == "path" && opener == "[")
-            out = "[" + body + "]";          // open path
-        else
-            out = "(" + body + ")";          // closed path / polygon
-    } else {
-        return false;
-    }
-    return true;
+    return dbms::normalizeGeometryText(in, type, out, true);
 }
 
 // ========================================================================
