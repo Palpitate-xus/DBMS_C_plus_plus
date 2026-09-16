@@ -638,7 +638,7 @@ int main() {
         assert(r2.success);
         auto* c2 = dynamic_cast<const CommentStmt*>(r2.stmt.get());
         assert(c2 && c2->objectType == "COLUMN" && c2->objectName == "t" &&
-               c2->columnName == "id" && c2->comment.empty());
+               c2->columnName == "id" && c2->comment.empty() && c2->isNull);
 
         auto r3 = parser.parse("COMMENT ON MATERIALIZED VIEW mv IS 'mv note'");
         assert(r3.success);
@@ -657,10 +657,16 @@ int main() {
             "COMMENT ON TABLE \"Object IS Name\" IS 'Payload IS Intact'");
         assert(r5.success);
         auto* c5 = dynamic_cast<const CommentStmt*>(r5.stmt.get());
-        assert(c5 && c5->objectName == "\"Object IS Name\"" &&
+        assert(c5 && c5->objectName == "Object IS Name" &&
                c5->comment == "Payload IS Intact");
 
         assert(!parser.parse("COMMENT ON TABLE missing_is_clause").success);
+        assert(!parser.parse(
+            "COMMENT ON TABLE t IS unquoted_comment").success);
+        assert(!parser.parse(
+            "COMMENT ON TABLE t IS \"identifier_not_string\"").success);
+        assert(!parser.parse(
+            "COMMENT ON TABLE t IS 'closed' trailing 'text'").success);
         std::cout << "[PARSER P1] COMMENT ON OK\n";
     }
 

@@ -67,6 +67,7 @@ std::string dbms::sqlstateForDBStatus(DBStatus res) {
         case DBStatus::CHECK_VIOLATION: return "23514";
         case DBStatus::FOREIGN_KEY_VIOLATION: return "23503";
         case DBStatus::EXCLUSION_VIOLATION: return "23P01";
+        case DBStatus::FEATURE_NOT_SUPPORTED: return "0A000";
         case DBStatus::LOCK_CONFLICT: return "55P03";
         case DBStatus::SERIALIZATION_FAILURE: return "40001";
         case DBStatus::IO_ERROR: return "58030";
@@ -44479,48 +44480,15 @@ DBStatus StorageEngine::setSecurityLabel(
     const std::string& objName, const std::string& label) {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    if (objType.empty() || objName.empty() ||
-        objType.find('\0') != std::string::npos ||
-        objName.find('\0') != std::string::npos) {
-        return DBStatus::INVALID_ARGUMENT;
-    }
-
-    std::string normalizedType = objType;
-    std::transform(normalizedType.begin(), normalizedType.end(),
-                   normalizedType.begin(), [](unsigned char c) {
-                       return static_cast<char>(std::tolower(c));
-                   });
-    if (normalizedType == "table") {
-        if (!tableExists(dbname, objName)) return DBStatus::TABLE_NOT_FOUND;
-    } else if (normalizedType == "column") {
-        const size_t separator = objName.rfind('.');
-        if (separator == std::string::npos || separator == 0 ||
-            separator + 1 >= objName.size()) {
-            return DBStatus::INVALID_ARGUMENT;
-        }
-        const std::string tableName = objName.substr(0, separator);
-        const std::string columnName = objName.substr(separator + 1);
-        if (!tableExists(dbname, tableName)) return DBStatus::TABLE_NOT_FOUND;
-        const TableSchema table = getTableSchema(dbname, tableName);
-        bool found = false;
-        for (size_t i = 0; i < table.len; ++i) {
-            if (table.cols[i].dataName == columnName) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) return DBStatus::INVALID_VALUE;
-    }
-
-    const auto path = seclabelPath(dbname);
-    SecurityLabelMap labels;
-    DBStatus status = readSecurityLabels(path, labels);
-    if (status != DBStatus::OK) return status;
-
-    const SecurityLabelKey key{objType, objName};
-    if (label.empty()) labels.erase(key);
-    else labels[key] = label;
-    return writeSecurityLabels(path, labels);
+    (void)objType;
+    (void)objName;
+    (void)label;
+    // A stored string is not a security label unless a provider validates it
+    // and the object-access hook enforces it.  No provider exists yet, so a
+    // successful write would be a dangerous false claim of MAC enforcement.
+    // Legacy files remain readable and participate in rename/drop cleanup,
+    // but no new inert policy metadata may be published.
+    return DBStatus::FEATURE_NOT_SUPPORTED;
 }
 
 std::string StorageEngine::getSecurityLabel(const std::string& dbname, const std::string& objType,

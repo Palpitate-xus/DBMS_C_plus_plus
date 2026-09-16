@@ -9345,46 +9345,315 @@ bool DdlExecutor::executeCreatePolicy(const CreatePolicyStmt* stmt, Session& s) 
 // ----------------------------------------------------------------------------
 
 bool DdlExecutor::executeComment(const CommentStmt* stmt, Session& s) {
-    if (!stmt) return false;
+    if (!stmt) return true;
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
     DdlTransaction txn(s);
+    txn.enableSnapshotRollback();
     if (!txn.begin()) {
         std::cout << "DDL transaction begin failed" << std::endl;
         return true;
     }
 
-    std::string objType = toLower(stmt->objectType);
-    if (objType == "table") {
-        const std::string tableName =
-            resolveTableName(s, stmt->objectName);
-        DBStatus res = g_engine.commentOnTable(
-            s.currentDB, tableName, stmt->comment);
-        if (res != DBStatus::OK) {
-            std::cout << "COMMENT ON TABLE failed" << std::endl;
-            return true;
-        }
-        txn.recordUpdate(DdlObjectKind::Table, tableName);
-    } else if (objType == "column") {
-        std::string tname = resolveTableName(s, stmt->objectName);
-        std::string cname = stmt->columnName;
-        if (tname.empty() || cname.empty()) {
-            std::cout << "COMMENT ON COLUMN requires table.column" << std::endl;
-            return true;
-        }
-        DBStatus res = g_engine.commentOnColumn(s.currentDB, tname, cname, stmt->comment);
-        if (res != DBStatus::OK) {
-            std::cout << "COMMENT ON COLUMN failed" << std::endl;
-            return true;
-        }
-        txn.recordUpdate(DdlObjectKind::Table, tname, cname);
-    } else {
-        std::cout << "COMMENT ON " << objType << " not yet supported via AST bridge" << std::endl;
+    const std::string objType = toLower(stmt->objectType);
+    if (objType == "unknown" || objType == "function" ||
+        objType == "procedure") {
+        std::cout << "ERROR: COMMENT ON " << stmt->objectType
+                  << " is not supported by the catalog object resolver "
+                     "(SQLSTATE 0A000)" << std::endl;
         return true;
     }
+
+    std::vector<std::string> searchPath;
+    std::string canonicalSearchPath;
+    if (!parseSessionSearchPath(
+            s.searchPath, searchPath, canonicalSearchPath)) {
+        std::cout << "ERROR: invalid search_path (SQLSTATE 22023)"
+                  << std::endl;
+        return true;
+    }
+    for (std::string& entry : searchPath) {
+        entry = expandSessionSearchPathEntry(entry, s.username);
+    }
+    if (std::find(searchPath.begin(), searchPath.end(), "pg_catalog") ==
+        searchPath.end()) {
+        searchPath.insert(searchPath.begin(), "pg_catalog");
+    }
+    if (searchPath.empty()) searchPath.push_back("public");
+
+    // Temporary relations are currently session-owned storage objects and do
+    // not yet have pg_class rows.  Retain their existing lifecycle-aware
+    // sidecar path, but never use it as a fallback for a permanent relation
+    // missing catalog identity.
+    if (objType == "table" || objType == "column") {
+        CatalogManager::QualifiedName temporaryName;
+        if (CatalogManager::parseQualifiedName(
+                stmt->objectName, temporaryName) &&
+            !temporaryName.name.empty()) {
+            const bool temporarySchema = temporaryName.schema.empty() ||
+                temporaryName.schema == "pg_temp" ||
+                temporaryName.schema.rfind("pg_temp_", 0) == 0;
+            const bool sessionTemporary = temporarySchema &&
+                (s.tempTables.count(temporaryName.name) != 0 ||
+                 s.transientTempTables.count(temporaryName.name) != 0);
+            if (sessionTemporary) {
+                const std::string physicalName =
+                    tempTablePrefix(s, temporaryName.name);
+                txn.markSnapshotDirty();
+                const DBStatus status = objType == "table"
+                    ? g_engine.commentOnTable(
+                          s.currentDB, physicalName,
+                          stmt->isNull ? std::string() : stmt->comment)
+                    : g_engine.commentOnColumn(
+                          s.currentDB, physicalName, stmt->columnName,
+                          stmt->isNull ? std::string() : stmt->comment);
+                if (status != DBStatus::OK) {
+                    std::cout << "ERROR: COMMENT ON " << stmt->objectType
+                              << " failed (SQLSTATE "
+                              << sqlstateForDBStatus(status) << ')'
+                              << std::endl;
+                    return true;
+                }
+                txn.recordUpdate(
+                    DdlObjectKind::Table, physicalName,
+                    objType == "column" ? stmt->columnName : std::string());
+                if (!txn.commit()) return true;
+                std::cout << "COMMENT" << std::endl;
+                return false;
+            }
+        }
+    }
+
+    Oid classOid = INVALID_OID;
+    Oid objectOid = INVALID_OID;
+    int32_t objectSubId = 0;
+    DdlObjectKind ddlKind = DdlObjectKind::Table;
+    std::string ddlName = stmt->objectName;
+    std::string ddlExtra;
+    std::string compatibilityStorageName;
+    bool writeTableCompatibilityComment = false;
+    bool writeColumnCompatibilityComment = false;
+
+    CatalogManager* catalog = nullptr;
+    try {
+        catalog = &g_engine.catalogService().get(s.currentDB);
+        if (objType == "table" || objType == "column" ||
+            objType == "index" || objType == "view" ||
+            objType == "materialized view" || objType == "sequence") {
+            const PgClassRow* relation = catalog->resolveRelation(
+                stmt->objectName, searchPath);
+            // Embedded callers and clusters created before catalog wiring can
+            // legitimately have a durable heap without pg_class identity.
+            // Promote only a proven heap target before accepting COMMENT;
+            // never fall back to a name-only comment row.  The surrounding
+            // database snapshot makes this migration atomic with the comment.
+            if (!relation && (objType == "table" || objType == "column")) {
+                const std::string physicalName =
+                    resolveTableName(s, stmt->objectName);
+                if (g_engine.tableExists(s.currentDB, physicalName)) {
+                    const CatalogManager::QualifiedName logicalName =
+                        CatalogService::logicalName(physicalName);
+                    const std::string logicalSchema =
+                        logicalName.schema.empty()
+                            ? "public" : logicalName.schema;
+                    const PgNamespaceRow* nameSpace =
+                        catalog->findNamespaceByName(logicalSchema);
+                    const TableSchema table = g_engine.getTableSchema(
+                        s.currentDB, physicalName);
+                    if (!nameSpace || table.len == 0) {
+                        std::cout << "ERROR: relation \""
+                                  << stmt->objectName
+                                  << "\" has incomplete catalog migration "
+                                     "metadata (SQLSTATE XX001)"
+                                  << std::endl;
+                        return true;
+                    }
+                    txn.markSnapshotDirty();
+                    registerTableInCatalog(
+                        *catalog, table, logicalSchema, logicalName.name);
+                    relation = catalog->findClassByName(
+                        logicalName.name, nameSpace->oid);
+                }
+            }
+            if (!relation) {
+                std::cout << "ERROR: relation \"" << stmt->objectName
+                          << "\" does not exist (SQLSTATE 42P01)"
+                          << std::endl;
+                return true;
+            }
+            const char expectedKind = objType == "index" ? 'i'
+                : objType == "view" ? 'v'
+                : objType == "materialized view" ? 'm'
+                : objType == "sequence" ? 'S' : 'r';
+            if (relation->relkind != expectedKind && objType != "column") {
+                std::cout << "ERROR: \"" << stmt->objectName
+                          << "\" is not a " << objType
+                          << " (SQLSTATE 42809)" << std::endl;
+                return true;
+            }
+            if (objType == "column" &&
+                relation->relkind != 'r' && relation->relkind != 'v' &&
+                relation->relkind != 'm') {
+                std::cout << "ERROR: \"" << stmt->objectName
+                          << "\" has no columns (SQLSTATE 42809)"
+                          << std::endl;
+                return true;
+            }
+
+            classOid = PgClassOid_Class;
+            objectOid = relation->oid;
+            if (objType == "column") {
+                const PgAttributeRow* attribute = catalog->findAttribute(
+                    relation->oid, stmt->columnName);
+                if (!attribute) {
+                    std::cout << "ERROR: column \"" << stmt->columnName
+                              << "\" does not exist (SQLSTATE 42703)"
+                              << std::endl;
+                    return true;
+                }
+                objectSubId = attribute->attnum;
+                ddlExtra = stmt->columnName;
+            }
+
+            const PgNamespaceRow* relationNamespace =
+                catalog->findNamespace(relation->relnamespace);
+            if (!relationNamespace) {
+                std::cout << "ERROR: relation namespace metadata is corrupt "
+                             "(SQLSTATE XX001)" << std::endl;
+                return true;
+            }
+            compatibilityStorageName =
+                relationNamespace->nspname == "public"
+                    ? relation->relname
+                    : relationNamespace->nspname + "__" + relation->relname;
+            if (objType == "table") {
+                ddlKind = DdlObjectKind::Table;
+                writeTableCompatibilityComment = true;
+            } else if (objType == "column") {
+                ddlKind = relation->relkind == 'v'
+                    ? DdlObjectKind::View
+                    : relation->relkind == 'm'
+                        ? DdlObjectKind::MaterializedView
+                        : DdlObjectKind::Table;
+                writeColumnCompatibilityComment = relation->relkind == 'r';
+            } else if (objType == "index") {
+                ddlKind = DdlObjectKind::Index;
+            } else if (objType == "view") {
+                ddlKind = DdlObjectKind::View;
+            } else if (objType == "materialized view") {
+                ddlKind = DdlObjectKind::MaterializedView;
+            } else {
+                ddlKind = DdlObjectKind::Sequence;
+            }
+        } else if (objType == "schema") {
+            CatalogManager::QualifiedName schemaName;
+            if (!CatalogManager::parseQualifiedName(
+                    stmt->objectName, schemaName) ||
+                !schemaName.schema.empty() || schemaName.name.empty()) {
+                std::cout << "ERROR: invalid schema name (SQLSTATE 42601)"
+                          << std::endl;
+                return true;
+            }
+            const PgNamespaceRow* nameSpace =
+                catalog->findNamespaceByName(schemaName.name);
+            if (!nameSpace) {
+                std::cout << "ERROR: schema \"" << schemaName.name
+                          << "\" does not exist (SQLSTATE 3F000)"
+                          << std::endl;
+                return true;
+            }
+            classOid = PgClassOid_Namespace;
+            objectOid = nameSpace->oid;
+            ddlKind = DdlObjectKind::Schema;
+            ddlName = schemaName.name;
+        } else if (objType == "type") {
+            CatalogManager::QualifiedName typeName;
+            if (!CatalogManager::parseQualifiedName(
+                    stmt->objectName, typeName) || typeName.name.empty()) {
+                std::cout << "ERROR: invalid type name (SQLSTATE 42601)"
+                          << std::endl;
+                return true;
+            }
+            const PgTypeRow* type = nullptr;
+            if (!typeName.schema.empty()) {
+                const PgNamespaceRow* nameSpace =
+                    catalog->findNamespaceByName(typeName.schema);
+                if (nameSpace) {
+                    type = catalog->findTypeByName(
+                        typeName.name, nameSpace->oid);
+                }
+            } else {
+                for (const std::string& schema : searchPath) {
+                    const PgNamespaceRow* nameSpace =
+                        catalog->findNamespaceByName(schema);
+                    if (!nameSpace) continue;
+                    type = catalog->findTypeByName(
+                        typeName.name, nameSpace->oid);
+                    if (type) break;
+                }
+            }
+            if (!type) {
+                std::cout << "ERROR: type \"" << stmt->objectName
+                          << "\" does not exist (SQLSTATE 42704)"
+                          << std::endl;
+                return true;
+            }
+            classOid = PgClassOid_Type;
+            objectOid = type->oid;
+            ddlKind = DdlObjectKind::Type;
+        } else {
+            std::cout << "ERROR: COMMENT ON " << stmt->objectType
+                      << " is not supported (SQLSTATE 0A000)"
+                      << std::endl;
+            return true;
+        }
+    } catch (const std::exception& error) {
+        std::cout << "ERROR: COMMENT catalog lookup failed: "
+                  << error.what() << " (SQLSTATE XX000)" << std::endl;
+        return true;
+    }
+
+    if (!catalog || classOid == INVALID_OID || objectOid == INVALID_OID) {
+        std::cout << "ERROR: COMMENT target has no catalog identity "
+                     "(SQLSTATE XX001)" << std::endl;
+        return true;
+    }
+
+    txn.markSnapshotDirty();
+    if (writeTableCompatibilityComment || writeColumnCompatibilityComment) {
+        const std::string compatibilityComment =
+            stmt->isNull ? std::string() : stmt->comment;
+        const DBStatus status = writeTableCompatibilityComment
+            ? g_engine.commentOnTable(
+                  s.currentDB, compatibilityStorageName,
+                  compatibilityComment)
+            : g_engine.commentOnColumn(
+                  s.currentDB, compatibilityStorageName,
+                  stmt->columnName, compatibilityComment);
+        if (status != DBStatus::OK) {
+            std::cout << "ERROR: COMMENT compatibility metadata update failed "
+                         "(SQLSTATE " << sqlstateForDBStatus(status) << ')'
+                      << std::endl;
+            return true;
+        }
+    }
+
+    if (stmt->isNull) {
+        (void)catalog->removeDescription(
+            objectOid, classOid, objectSubId);
+    } else {
+        catalog->setDescription(
+            objectOid, classOid, objectSubId, stmt->comment);
+    }
+    if (!catalog->persistAll()) {
+        std::cout << "ERROR: COMMENT catalog persistence failed "
+                     "(SQLSTATE 58030)" << std::endl;
+        return true;
+    }
+    txn.recordUpdate(ddlKind, ddlName, ddlExtra);
     if (!txn.commit()) return true;
-    std::cout << "COMMENT succeeded" << std::endl;
+    std::cout << "COMMENT" << std::endl;
     return false;
 }
 

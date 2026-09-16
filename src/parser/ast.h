@@ -1228,7 +1228,10 @@ struct GrantStmt : public Stmt {
 struct CommentStmt : public Stmt {
     std::string objectType;
     std::string objectName;
-    std::string comment;       // 空字符串 = 删除注释
+    std::string comment;
+    // PostgreSQL distinguishes an empty comment from IS NULL.  Keeping that
+    // distinction in the AST is required for pg_description row lifecycle.
+    bool isNull = false;
     std::string columnName;    // COMMENT ON COLUMN table.column
 
     CommentStmt() : Stmt(SqlCommand::Comment) {}

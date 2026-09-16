@@ -23,24 +23,12 @@ static TableSchema makeTable(const std::string& name) {
     return table;
 }
 
-static bool containsLabel(
-    const std::vector<std::tuple<std::string, std::string, std::string>>& labels,
-    const std::string& type, const std::string& name,
-    const std::string& label) {
-    for (const auto& entry : labels) {
-        if (std::get<0>(entry) == type && std::get<1>(entry) == name &&
-            std::get<2>(entry) == label) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static void testRoundTripAndValidation(StorageEngine& engine) {
+static void testWritesFailClosedWithoutProvider(StorageEngine& engine) {
     const std::string database = testDbPath("security_labels");
     cleanupTestDb("security_labels");
     assert(engine.createDatabase(database) == DBStatus::OK);
     assert(engine.createTable(database, makeTable("docs")) == DBStatus::OK);
+    assert(sqlstateForDBStatus(DBStatus::FEATURE_NOT_SUPPORTED) == "0A000");
     const fs::path labelsPath = fs::path(database) / ".security_labels";
 
     assert(engine.setSecurityLabel(
@@ -48,57 +36,30 @@ static void testRoundTripAndValidation(StorageEngine& engine) {
            DBStatus::DATABASE_NOT_FOUND);
     assert(engine.setSecurityLabel(
                database, "table", "missing", "label") ==
-           DBStatus::TABLE_NOT_FOUND);
+           DBStatus::FEATURE_NOT_SUPPORTED);
     assert(engine.setSecurityLabel(
                database, "column", "docs", "label") ==
-           DBStatus::INVALID_ARGUMENT);
+           DBStatus::FEATURE_NOT_SUPPORTED);
     assert(engine.setSecurityLabel(
                database, "column", "docs.missing", "label") ==
-           DBStatus::INVALID_VALUE);
+           DBStatus::FEATURE_NOT_SUPPORTED);
     assert(!fs::exists(labelsPath));
 
-    std::string tableLabel = "system_u:object_r:data_t:s0|pipe\n";
-    tableLabel.push_back('\0');
-    tableLabel += "tail";
-    const std::string columnLabel =
-        "column label\nS2|forged|record|value";
     assert(engine.setSecurityLabel(
-               database, "table", "docs", tableLabel) == DBStatus::OK);
+               database, "table", "docs", "inert policy") ==
+           DBStatus::FEATURE_NOT_SUPPORTED);
     assert(engine.setSecurityLabel(
-               database, "column", "docs.body", columnLabel) ==
-           DBStatus::OK);
+               database, "column", "docs.body", "inert policy") ==
+           DBStatus::FEATURE_NOT_SUPPORTED);
     assert(engine.setSecurityLabel(
                database, "role", "role with spaces", "role label") ==
-           DBStatus::OK);
-
-    assert(engine.getSecurityLabel(database, "table", "docs") == tableLabel);
-    assert(engine.getSecurityLabel(
-               database, "column", "docs.body") == columnLabel);
-    assert(engine.getSecurityLabel(
-               database, "role", "role with spaces") == "role label");
-    const auto allLabels = engine.getAllSecurityLabels(database);
-    assert(allLabels.size() == 3);
-    assert(containsLabel(allLabels, "table", "docs", tableLabel));
-    assert(containsLabel(
-        allLabels, "column", "docs.body", columnLabel));
-    assert(containsLabel(
-        allLabels, "role", "role with spaces", "role label"));
-
-    std::ifstream stored(labelsPath, std::ios::binary);
-    assert(stored);
-    size_t records = 0;
-    std::string line;
-    while (std::getline(stored, line)) {
-        assert(line.rfind("S2|", 0) == 0);
-        assert(line.find("forged") == std::string::npos);
-        ++records;
-    }
-    assert(records == 3);
+           DBStatus::FEATURE_NOT_SUPPORTED);
+    assert(!fs::exists(labelsPath));
 
     assert(engine.setSecurityLabel(database, "table", "docs", "") ==
-           DBStatus::OK);
+           DBStatus::FEATURE_NOT_SUPPORTED);
     assert(engine.getSecurityLabel(database, "table", "docs").empty());
-    assert(engine.getAllSecurityLabels(database).size() == 2);
+    assert(engine.getAllSecurityLabels(database).empty());
 
     cleanupTestDb("security_labels");
 }
@@ -123,18 +84,18 @@ static void testLegacyMigration(StorageEngine& engine) {
 
     assert(engine.setSecurityLabel(
                database, "table", "docs", "new table label") ==
-           DBStatus::OK);
+           DBStatus::FEATURE_NOT_SUPPORTED);
     assert(engine.getSecurityLabel(database, "table", "docs") ==
-           "new table label");
+           "old table label");
     assert(engine.getSecurityLabel(database, "column", "docs.body") ==
            "old column label");
 
     std::ifstream stored(labelsPath, std::ios::binary);
     assert(stored);
-    std::string line;
-    while (std::getline(stored, line)) {
-        assert(line.rfind("S2|", 0) == 0);
-    }
+    const std::string bytes((std::istreambuf_iterator<char>(stored)),
+                            std::istreambuf_iterator<char>());
+    assert(bytes == "table docs old table label\n"
+                    "column docs.body old column label\n");
     cleanupTestDb("legacy_security_labels");
 }
 
@@ -154,7 +115,7 @@ static void testStorageFailures(StorageEngine& engine) {
     }
     assert(engine.setSecurityLabel(
                corruptDatabase, "table", "docs", "must fail") ==
-           DBStatus::CORRUPTED_DATA);
+           DBStatus::FEATURE_NOT_SUPPORTED);
     std::ifstream unchanged(corruptPath, std::ios::binary);
     assert(unchanged);
     const std::string bytes((std::istreambuf_iterator<char>(unchanged)),
@@ -170,7 +131,7 @@ static void testStorageFailures(StorageEngine& engine) {
     assert(fs::create_directory(ioPath));
     assert(engine.setSecurityLabel(
                ioDatabase, "table", "docs", "must fail") ==
-           DBStatus::IO_ERROR);
+           DBStatus::FEATURE_NOT_SUPPORTED);
     assert(fs::is_directory(ioPath));
     cleanupTestDb("security_label_io");
 }
@@ -189,20 +150,16 @@ static void testRenameAndDropLifecycle(StorageEngine& engine) {
     assert(engine.createTable(database, makeTable("source")) == DBStatus::OK);
     assert(engine.createTable(database, makeTable("unrelated")) ==
            DBStatus::OK);
-    assert(engine.setSecurityLabel(
-               database, "table", "source", "live table") == DBStatus::OK);
-    assert(engine.setSecurityLabel(
-               database, "column", "source.body", "live column") ==
-           DBStatus::OK);
-    assert(engine.setSecurityLabel(
-               database, "table", "unrelated", "keep me") == DBStatus::OK);
-
-    // Seed destination records left by an older DROP implementation.  The
-    // live source labels must replace these instead of being shadowed by them.
+    // Seed legacy metadata directly. New writes are refused without a loaded
+    // provider, but old rows still have to follow rename/drop lifecycle so
+    // they cannot become attached to a later object with the same name.
     {
         std::ofstream stale(fs::path(database) / ".security_labels",
-                            std::ios::binary | std::ios::app);
+                            std::ios::binary | std::ios::trunc);
         assert(stale);
+        stale << "table source live table\n";
+        stale << "column source.body live column\n";
+        stale << "table unrelated keep me\n";
         stale << "table renamed stale table\n";
         stale << "column renamed.renamed_body stale column\n";
         assert(stale);
@@ -269,7 +226,7 @@ static void testLifecycleMetadataFailures(StorageEngine& engine) {
 int main() {
     cleanupAllTestData();
     StorageEngine engine;
-    testRoundTripAndValidation(engine);
+    testWritesFailClosedWithoutProvider(engine);
     testLegacyMigration(engine);
     testStorageFailures(engine);
     testRenameAndDropLifecycle(engine);

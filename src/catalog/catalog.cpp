@@ -1139,6 +1139,18 @@ void CatalogManager::removeDependRecordsUnlocked(Oid classid, Oid objid) {
                                         (d.refclassid == classid && d.refobjid == objid);
                              });
     depends_.erase(it, depends_.end());
+
+    // pg_description rows are addressed by the same ObjectAddress as the
+    // object they describe.  They are not independent dependents, so every
+    // object-drop path must remove them together with pg_depend metadata.
+    descriptions_.erase(
+        std::remove_if(
+            descriptions_.begin(), descriptions_.end(),
+            [classid, objid](const PgDescriptionRow& description) {
+                return description.classoid == classid &&
+                       description.objoid == objid;
+            }),
+        descriptions_.end());
 }
 
 bool CatalogManager::removeDepend(Oid classid, Oid objid, int32_t objsubid,

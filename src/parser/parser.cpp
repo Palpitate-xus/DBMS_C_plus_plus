@@ -4727,22 +4727,28 @@ ParseResult SQLParser::parseComment(const std::string& sql) {
     std::string afterIs = trim(rest.substr(isPos + 4));
 
     if (!afterIs.empty() && afterIs.size() >= 2 &&
-        ((afterIs.front() == '\'' && afterIs.back() == '\'') ||
-         (afterIs.front() == '"' && afterIs.back() == '"'))) {
-        const char quote = afterIs.front();
+        afterIs.front() == '\'' && afterIs.back() == '\'') {
+        const char quote = '\'';
         for (size_t i = 1; i + 1 < afterIs.size(); ++i) {
             if (afterIs[i] == quote && i + 2 < afterIs.size() &&
                 afterIs[i + 1] == quote) {
                 stmt->comment.push_back(quote);
                 ++i;
+            } else if (afterIs[i] == quote) {
+                r.success = false;
+                r.error = "unexpected text after COMMENT string literal";
+                return r;
             } else {
                 stmt->comment.push_back(afterIs[i]);
             }
         }
     } else if (toLower(afterIs) == "null") {
+        stmt->isNull = true;
         stmt->comment.clear();
     } else {
-        stmt->comment = afterIs;
+        r.success = false;
+        r.error = "COMMENT text must be a string literal or NULL";
+        return r;
     }
 
     std::string normalizedBeforeIs = beforeIs;
@@ -4802,12 +4808,93 @@ ParseResult SQLParser::parseComment(const std::string& sql) {
         stmt->objectName = normalizedBeforeIs;
     }
 
+    const auto normalizeQualifiedIdentifier = [](const std::string& input,
+                                                  std::string& output) {
+        std::vector<std::string> parts;
+        std::string current;
+        bool quoted = false;
+        for (size_t index = 0; index < input.size(); ++index) {
+            const char c = input[index];
+            if (c == '"') {
+                current.push_back(c);
+                if (quoted && index + 1 < input.size() &&
+                    input[index + 1] == '"') {
+                    current.push_back(input[++index]);
+                } else {
+                    quoted = !quoted;
+                }
+                continue;
+            }
+            if (c == '.' && !quoted) {
+                parts.push_back(trim(current));
+                current.clear();
+                continue;
+            }
+            current.push_back(c);
+        }
+        if (quoted) return false;
+        parts.push_back(trim(current));
+
+        output.clear();
+        for (std::string part : parts) {
+            if (part.empty()) return false;
+            std::string decoded;
+            if (part.front() == '"') {
+                if (part.size() < 2 || part.back() != '"') return false;
+                for (size_t index = 1; index + 1 < part.size(); ++index) {
+                    if (part[index] != '"') {
+                        decoded.push_back(part[index]);
+                        continue;
+                    }
+                    if (index + 2 >= part.size() ||
+                        part[index + 1] != '"') {
+                        return false;
+                    }
+                    decoded.push_back('"');
+                    ++index;
+                }
+                // The current catalog name API does not carry quote metadata;
+                // accepting a quoted dot would later retarget the object.
+                if (decoded.empty() || decoded.find('.') != std::string::npos)
+                    return false;
+            } else {
+                if (part.find('"') != std::string::npos) return false;
+                for (const unsigned char c : part) {
+                    if (std::isspace(c)) return false;
+                    decoded.push_back(static_cast<char>(std::tolower(c)));
+                }
+            }
+            if (!output.empty()) output.push_back('.');
+            output += decoded;
+        }
+        return !output.empty();
+    };
+
+    if (stmt->objectType != "UNKNOWN" &&
+        stmt->objectType != "FUNCTION" &&
+        stmt->objectType != "PROCEDURE") {
+        std::string identifier;
+        if (!normalizeQualifiedIdentifier(stmt->objectName, identifier)) {
+            r.success = false;
+            r.error = "invalid COMMENT object identifier";
+            return r;
+        }
+        stmt->objectName = std::move(identifier);
+    }
+
     if (stmt->objectType == "COLUMN") {
         size_t dot = stmt->objectName.rfind('.');
         if (dot != std::string::npos) {
             stmt->columnName = trim(stmt->objectName.substr(dot + 1));
             stmt->objectName = trim(stmt->objectName.substr(0, dot));
         }
+    }
+
+    if (stmt->objectName.empty() ||
+        (stmt->objectType == "COLUMN" && stmt->columnName.empty())) {
+        r.success = false;
+        r.error = "COMMENT object name is missing or invalid";
+        return r;
     }
 
     r.success = true;

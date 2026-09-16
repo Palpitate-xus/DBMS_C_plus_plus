@@ -3457,66 +3457,13 @@ static bool handleAlterSystem(const string& sql, Session& s) {
 // Utility command handlers
 // ========================================================================
 static bool handleCommentOn(const string& sql, Session& s, const string& rawSql) {
-    if (!checkDB(s)) return true;
-    size_t onPos = sql.find(" on ");
-    if (onPos == string::npos) {
-        cout << "SQL syntax error" << endl;
-        return true;
-    }
-    string rest = trim(sql.substr(onPos + 4));
-    auto extractComment = [&](const string& raw) -> string {
-        size_t rawIsPos = raw.find(" is ");
-        if (rawIsPos == string::npos) return "";
-        string afterIs = trim(raw.substr(rawIsPos + 4));
-        if (afterIs.size() >= 2 && ((afterIs.front() == '\'' && afterIs.back() == '\'') ||
-                                           (afterIs.front() == '"' && afterIs.back() == '"'))) {
-            return afterIs.substr(1, afterIs.size() - 2);
-        }
-        return afterIs;
-    };
-    if (rest.substr(0, 5) == "table") {
-        string afterTable = trim(rest.substr(5));
-        size_t isPos = afterTable.find(" is ");
-        if (isPos == string::npos) {
-            cout << "SQL syntax error" << endl;
-            return true;
-        }
-        string tname = resolveTableName(s, trim(afterTable.substr(0, isPos)));
-        string comment = extractComment(rawSql);
-        auto res = g_engine.commentOnTable(s.currentDB, tname, comment);
-        if (res == DBStatus::TABLE_NOT_FOUND) {
-            cout << "Table not found" << endl;
-            return true;
-        }
-        cout << "Comment added" << endl;
-        return false;
-    }
-    if (rest.substr(0, 6) == "column") {
-        string afterCol = trim(rest.substr(6));
-        size_t isPos = afterCol.find(" is ");
-        if (isPos == string::npos) {
-            cout << "SQL syntax error" << endl;
-            return true;
-        }
-        string qual = trim(afterCol.substr(0, isPos));
-        size_t dotPos = qual.find('.');
-        if (dotPos == string::npos) {
-            cout << "SQL syntax error: use table.column" << endl;
-            return true;
-        }
-        string tname = resolveTableName(s, trim(qual.substr(0, dotPos)));
-        string cname = trim(qual.substr(dotPos + 1));
-        string comment = extractComment(rawSql);
-        auto res = g_engine.commentOnColumn(s.currentDB, tname, cname, comment);
-        if (res == DBStatus::TABLE_NOT_FOUND) {
-            cout << "Table not found" << endl;
-            return true;
-        }
-        cout << "Comment added" << endl;
-        return false;
-    }
-    cout << "SQL syntax error" << endl;
-    return true;
+    (void)sql;
+    // COMMENT must use the same typed ObjectAddress resolver as direct DDL
+    // execution.  The old protocol-only handler wrote name-keyed sidecars,
+    // bypassed pg_description, mishandled quotes, and silently accepted I/O
+    // failures.  Preserve the original statement so literal bytes survive.
+    dbms::DdlExecutor executor;
+    return executor.executeSql(rawSql, s);
 }
 
 static bool handleLockTable(const string& sql, Session& s) {
@@ -3698,52 +3645,15 @@ static bool handleVacuum(const string& sql, Session& s) {
 }
 
 static bool handleSecurityLabel(const string& sql, Session& s) {
+    (void)sql;
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
-    string rest = trim(sql.substr(15));
-    if (rest.substr(0, 3) != "on ") {
-        cout << "SQL syntax error: SECURITY LABEL ON object_type object_name IS 'label'" << endl;
-        return true;
-    }
-    rest = trim(rest.substr(3));
-    size_t isPos = rest.find(" is ");
-    if (isPos == string::npos) {
-        cout << "SQL syntax error: SECURITY LABEL ON object IS 'label'" << endl;
-        return true;
-    }
-    string objPart = trim(rest.substr(0, isPos));
-    string labelPart = trim(rest.substr(isPos + 4));
-    if (labelPart.size() >= 2 && labelPart.front() == '\'' && labelPart.back() == '\'') {
-        labelPart = labelPart.substr(1, labelPart.size() - 2);
-    }
-    if (labelPart == "NULL" || labelPart == "null") {
-        labelPart.clear();
-    }
-    string objType = "table";
-    string objName = objPart;
-    size_t sp = objPart.find(' ');
-    if (sp != string::npos) {
-        objType = objPart.substr(0, sp);
-        objName = trim(objPart.substr(sp + 1));
-    }
-    string resolvedName = resolveTableName(s, objName);
-    if (objType == "table" && !g_engine.tableExists(s.currentDB, resolvedName)) {
-        cout << "Table " << resolvedName << " not exist" << endl;
-        return true;
-    }
-    DBStatus labelStatus = g_engine.setSecurityLabel(
-        s.currentDB, objType, resolvedName, labelPart);
-    if (labelStatus != DBStatus::OK) {
-        cout << "SECURITY LABEL failed (SQLSTATE "
-             << dbms::sqlstateForDBStatus(labelStatus) << ")" << endl;
-        return true;
-    }
-    if (labelPart.empty()) {
-        cout << "Security label removed from " << objType << " " << resolvedName << endl;
-    } else {
-        cout << "Security label set on " << objType << " " << resolvedName << endl;
-    }
-    return false;
+    // There is no loaded SecurityLabelProvider and no object-access/MAC hook.
+    // Persisting an inert label would falsely claim that the policy is being
+    // enforced.  Fail closed until provider validation and enforcement exist.
+    cout << "ERROR: SECURITY LABEL providers and policy enforcement are not "
+            "supported (SQLSTATE 0A000)" << endl;
+    return true;
 }
 
 static bool handleReindex(const string& sql, Session& s) {
@@ -20569,10 +20479,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
             } else if (tname == "pg_seclabels") {
                 cout << "objtype objname label " << endl;
-                auto labels = g_engine.getAllSecurityLabels(s.currentDB);
-                for (const auto& [ot, on, lab] : labels) {
-                    cout << ot << " " << on << " " << lab << endl;
-                }
+                // .security_labels is a legacy cleanup source only.  Without
+                // a provider and object-access hook these rows are not active
+                // PostgreSQL security labels and must not be advertised via
+                // pg_seclabels.
             } else if (tname == "pg_buffercache") {
                 cout << "relname pageid dirty pincount " << endl;
                 auto entries = g_engine.getBufferCacheEntries();
