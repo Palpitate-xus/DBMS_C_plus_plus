@@ -337,7 +337,6 @@ struct ProtocolPortal {
     QueryResult result;
     size_t rowOffset = 0;
     bool executed = false;
-    bool rowDescriptionSent = false;
     bool completed = false;
 };
 
@@ -1387,7 +1386,7 @@ bool describePreparedSelect(const std::string& sql, Session& session,
             if (relation.empty()) return false;
             for (size_t i = 0; i < schema.len; ++i) {
                 shape.columns.push_back(schema.cols[i].dataName);
-                shape.columnTypes.emplace_back();
+                shape.columnTypes.push_back(schema.cols[i].dataType);
                 outputNames.push_back(schema.cols[i].dataName);
                 directParameterOids.push_back(0);
             }
@@ -1399,7 +1398,7 @@ bool describePreparedSelect(const std::string& sql, Session& session,
                 if (lowerProtocolText(schema.cols[i].dataName) !=
                     lowerProtocolText(reference->column)) continue;
                 shape.columns.push_back(schema.cols[i].dataName);
-                shape.columnTypes.emplace_back();
+                shape.columnTypes.push_back(schema.cols[i].dataType);
                 outputNames.push_back(item.alias.empty() ? reference->column
                                                           : item.alias);
                 directParameterOids.push_back(0);
@@ -3548,7 +3547,6 @@ void handleClient(SecureSocket socket, std::string clientHost) {
     // modes these do not travel across backend rentals (PgBouncer has the
     // same restriction for session-level features).
     std::map<std::string, ProtocolPortal> portals;
-    std::set<std::string> describedStatements;
     const auto readyStatus = [&]() -> char {
         if (transactionFailed) return 'E';
         return g_engine.inTransaction() ? 'T' : 'I';
@@ -4035,10 +4033,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 session.preparedStmtTypes.erase(statement);
                 session.preparedStmtParameterOids.erase(statement);
                 portals.erase("");
-                describedStatements.erase(statement);
             }
             session.preparedStmts[statement] = std::move(sql);
-            describedStatements.erase(statement);
             session.preparedStmtTypes[statement] =
                 std::vector<std::string>(parameterTypes.size());
             session.preparedStmtParameterOids[statement] =
@@ -4204,8 +4200,6 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 continue;
             }
             portals[portal] = ProtocolPortal{statement, std::move(expandedSql), std::move(resultFormats)};
-            portals[portal].rowDescriptionSent =
-                describedStatements.count(statement) != 0;
             protocol.sendBindComplete();
             continue;
         }
@@ -4347,13 +4341,6 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                         columns[i].formatCode = static_cast<int16_t>(portalState.resultFormats[i]);
                     }
                 }
-                if (!portalState.rowDescriptionSent) {
-                    if (!protocol.sendRowDescription(columns)) {
-                        extendedQueryError = true;
-                        continue;
-                    }
-                    portalState.rowDescriptionSent = true;
-                }
                 const size_t remaining = result.rows.size() - portalState.rowOffset;
                 const size_t batchSize = maxRows == 0
                                              ? remaining
@@ -4425,12 +4412,6 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     !(hasColumns ? protocol.sendRowDescription(columns)
                                  : protocol.sendNoData())) {
                     extendedQueryError = true;
-                } else if (hasColumns) {
-                    describedStatements.insert(name);
-                    for (auto& bound : portals) {
-                        if (bound.second.statement == name)
-                            bound.second.rowDescriptionSent = true;
-                    }
                 }
                 continue;
             }
@@ -4472,7 +4453,6 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                                                  ? formats.front() : formats[i]);
                 }
                 if (!protocol.sendRowDescription(columns)) extendedQueryError = true;
-                else portalIt->second.rowDescriptionSent = true;
                 continue;
             }
             protocol.sendErrorResponse("ERROR", "08P01", "invalid Describe target");
@@ -4500,7 +4480,6 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 session.preparedStmts.erase(name);
                 session.preparedStmtTypes.erase(name);
                 session.preparedStmtParameterOids.erase(name);
-                describedStatements.erase(name);
             } else if (target == 'P') {
                 portals.erase(name);
             } else {

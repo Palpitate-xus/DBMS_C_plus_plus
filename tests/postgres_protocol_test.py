@@ -388,6 +388,7 @@ def extended_query_int_parameter(sock, sql, value):
     sock.sendall(typed(b"E", b"\0" + struct.pack("!I", 0)) + typed(b"S"))
     messages = read_until_ready(sock)
     assert data_row_values(messages) == [[str(value).encode()]], messages
+    assert not any(kind == b"T" for kind, _ in messages), messages
     assert any(kind == b"C" for kind, _ in messages)
 
 
@@ -409,11 +410,14 @@ def extended_query_boolean_text_parameter(sock):
     sock.sendall(typed(b"B", bind))
     kind, body = read_message(sock)
     assert kind == b"2" and body == b"", (kind, body)
+    sock.sendall(typed(b"D", b"P" + portal + b"\0"))
+    kind, body = read_message(sock)
+    fields = row_description_fields([(kind, body)])
+    assert kind == b"T" and len(fields) == 1 and fields[0][3] == 16, fields
     sock.sendall(typed(b"E", portal + b"\0" + struct.pack("!I", 0)) +
                  typed(b"S"))
     messages = read_until_ready(sock)
-    fields = row_description_fields(messages)
-    assert len(fields) == 1 and fields[0][3] == 16, fields
+    assert not any(kind == b"T" for kind, _ in messages), messages
     assert data_row_values(messages) == [[b"t"]], messages
 
     sock.sendall(typed(b"C", b"P" + portal + b"\0") +
@@ -453,10 +457,13 @@ def extended_query_binary_int_parameter(sock, sql, value):
     sock.sendall(typed(b"B", bind))
     kind, _ = read_message(sock)
     assert kind == b"2"
+    sock.sendall(typed(b"D", b"P\0"))
+    kind, body = read_message(sock)
+    fields = row_description_fields([(kind, body)])
+    assert kind == b"T" and len(fields) == 1 and fields[0][3] == 23 and fields[0][6] == 1, fields
     sock.sendall(typed(b"E", b"\0" + struct.pack("!I", 0)) + typed(b"S"))
     messages = read_until_ready(sock)
-    fields = row_description_fields(messages)
-    assert len(fields) == 1 and fields[0][3] == 23 and fields[0][6] == 1, fields
+    assert not any(kind == b"T" for kind, _ in messages), messages
     assert data_row_values(messages) == [[struct.pack("!i", value)]], messages
     assert any(kind == b"C" for kind, _ in messages)
 
@@ -477,10 +484,13 @@ def extended_query_binary_parameter(sock, suffix, sql, type_oid, raw, expected):
     sock.sendall(typed(b"B", bind))
     kind, _ = read_message(sock)
     assert kind == b"2"
+    sock.sendall(typed(b"D", b"P" + portal_name + b"\0"))
+    kind, body = read_message(sock)
+    fields = row_description_fields([(kind, body)])
+    assert kind == b"T" and len(fields) == 1 and fields[0][3] == type_oid and fields[0][6] == 1, fields
     sock.sendall(typed(b"E", portal_name + b"\0" + struct.pack("!I", 0)) + typed(b"S"))
     messages = read_until_ready(sock)
-    fields = row_description_fields(messages)
-    assert len(fields) == 1 and fields[0][3] == type_oid and fields[0][6] == 1, fields
+    assert not any(kind == b"T" for kind, _ in messages), messages
     assert data_row_values(messages) == [[expected]], messages
     assert any(kind == b"C" for kind, _ in messages)
 
@@ -588,6 +598,7 @@ def extended_query_portal_pagination(sock):
     first_batch = []
     while not first_batch or first_batch[-1][0] != b"s":
         first_batch.append(read_message(sock))
+    assert not any(kind == b"T" for kind, _ in first_batch), first_batch
     assert data_row_values(first_batch) == [[b"1"]], first_batch
     assert not any(kind == b"C" for kind, _ in first_batch), first_batch
 
