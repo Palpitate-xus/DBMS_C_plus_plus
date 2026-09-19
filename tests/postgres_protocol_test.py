@@ -346,8 +346,10 @@ def extended_query(sock, sql):
     sock.sendall(typed(b"D", b"S\0"))
     kind, body = read_message(sock)
     assert kind == b"t" and body == struct.pack("!H", 0)
-    kind, _ = read_message(sock)
-    assert kind == b"n"
+    kind, described_body = read_message(sock)
+    assert kind == b"T", (kind, described_body)
+    described_fields = row_description_fields([(kind, described_body)])
+    assert len(described_fields) == 1 and described_fields[0][0] == b"id", described_fields
 
     # Bind unnamed portal to unnamed statement with text formats and no args.
     bind = b"\0\0" + struct.pack("!H", 0) + struct.pack("!H", 0) + struct.pack("!H", 0)
@@ -359,9 +361,10 @@ def extended_query(sock, sql):
     sock.sendall(typed(b"E", execute))
     sock.sendall(typed(b"S"))
     messages = read_until_ready(sock)
-    fields = row_description_fields(messages)
+    fields = described_fields
     assert len(fields) == 1 and fields[0][0] == b"id", fields
     assert fields[0][1] != 0 and fields[0][2:] == (1, 23, 4, -1, 0), fields
+    assert not any(kind == b"T" for kind, _ in messages), messages
     assert any(kind == b"D" for kind, _ in messages)
     assert any(kind == b"C" for kind, _ in messages)
 
@@ -603,6 +606,68 @@ def extended_query_portal_pagination(sock):
     sock.sendall(typed(b"C", b"P\0") + typed(b"C", b"S\0") + typed(b"S"))
     messages = read_until_ready(sock)
     assert sum(kind == b"3" for kind, _ in messages) == 2, messages
+
+
+def extended_query_describe(sock):
+    parse = b"describe_stmt\0SELECT id AS ident FROM t\0" + struct.pack("!H", 0)
+    bind = (b"describe_portal\0describe_stmt\0" +
+            struct.pack("!H", 0) + struct.pack("!H", 0) +
+            struct.pack("!H", 0))
+    execute = b"describe_portal\0" + struct.pack("!I", 0)
+    sock.sendall(typed(b"P", parse) + typed(b"D", b"Sdescribe_stmt\0") +
+                 typed(b"B", bind) + typed(b"D", b"Pdescribe_portal\0") +
+                 typed(b"E", execute) + typed(b"S"))
+    messages = read_until_ready(sock)
+    descriptions = [row_description_fields([item]) for item in messages
+                    if item[0] == b"T"]
+    assert len(descriptions) == 2, messages
+    for fields in descriptions:
+        assert len(fields) == 1 and fields[0][0] == b"ident", fields
+        assert fields[0][1] != 0 and fields[0][2:5] == (1, 23, 4), fields
+    assert any(kind == b"t" and body == struct.pack("!H", 0)
+               for kind, body in messages), messages
+    assert data_row_values(messages), messages
+    assert messages[-1] == (b"Z", b"I"), messages
+
+    literal_parse = (b"describe_literal\0SELECT 42 AS answer\0" +
+                     struct.pack("!H", 0))
+    sock.sendall(typed(b"P", literal_parse) +
+                 typed(b"D", b"Sdescribe_literal\0") + typed(b"S"))
+    literal = read_until_ready(sock)
+    fields = row_description_fields(literal)
+    assert fields == [(b"answer", 0, 0, 23, 4, -1, 0)], literal
+
+    aliased_expression = (b"describe_expression\0SELECT 42 AS id FROM t\0" +
+                          struct.pack("!H", 0))
+    sock.sendall(typed(b"P", aliased_expression) +
+                 typed(b"D", b"Sdescribe_expression\0") + typed(b"S"))
+    expression = read_until_ready(sock)
+    assert row_description_fields(expression) == [
+        (b"id", 0, 0, 23, 4, -1, 0)
+    ], expression
+
+    typed_parse = (b"describe_parameter\0SELECT $1 AS answer\0" +
+                   struct.pack("!H", 1) + struct.pack("!I", 23))
+    sock.sendall(typed(b"P", typed_parse) +
+                 typed(b"D", b"Sdescribe_parameter\0") + typed(b"S"))
+    typed_result = read_until_ready(sock)
+    assert row_description_fields(typed_result) == [
+        (b"answer", 0, 0, 23, 4, -1, 0)
+    ], typed_result
+
+    # Describe is analysis only: a non-returning INSERT reports NoData and
+    # must not execute before an Execute message arrives.
+    write_parse = (b"describe_write\0INSERT INTO t VALUES (909)\0" +
+                   struct.pack("!H", 0))
+    sock.sendall(typed(b"P", write_parse) +
+                 typed(b"D", b"Sdescribe_write\0") + typed(b"S"))
+    described_write = read_until_ready(sock)
+    assert described_write == [
+        (b"1", b""), (b"t", struct.pack("!H", 0)),
+        (b"n", b""), (b"Z", b"I")
+    ], described_write
+    assert data_row_values(simple_query(
+        sock, "SELECT id FROM t WHERE id = 909")) == []
 
 
 def extended_query_error_recovery(sock):
@@ -2921,6 +2986,7 @@ def main():
         extended_query_money_binary_parameter(sock)
         extended_query_bytea_binary_parameter(sock)
         extended_query_portal_pagination(sock)
+        extended_query_describe(sock)
         extended_query_error_recovery(sock)
         transaction_error_state_recovery(sock)
         prepared_transaction_error_boundaries(sock)

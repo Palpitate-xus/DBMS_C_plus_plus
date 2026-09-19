@@ -28,6 +28,8 @@
 #include "process/AdvisoryLockManager.h"
 #include "utils/prepared_stmts.h"
 #include "Config.h"
+#include "parser/parser.h"
+#include "expression/expr_helper.h"
 #include <netinet/tcp.h>
 
 #include <algorithm>
@@ -1349,6 +1351,93 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
         descriptions.push_back(std::move(description));
     }
     return descriptions;
+}
+
+// Describe must not execute the statement: even a SELECT can call a function
+// with side effects.  Resolve the common, statically knowable projections
+// against the catalog and leave other query shapes to the execution path.
+bool describePreparedSelect(const std::string& sql, Session& session,
+                            std::vector<PgColumnDescription>& columns,
+                            const std::vector<uint32_t>& parameterOids = {}) {
+    if (SQLParser::classify(sql) != SqlCommand::Select) return false;
+    SQLParser parser;
+    ParseResult parsed = parser.parse(sql);
+    if (!parsed.isValid()) return false;
+    const auto* select = dynamic_cast<const SelectStmt*>(parsed.stmt.get());
+    if (!select || !select->ctes.empty() || select->setOp != SetOp::None ||
+        !select->valuesRows.empty()) return false;
+
+    std::string relation;
+    TableSchema schema;
+    if (select->fromClause) {
+        if (select->fromClause->type != FromItem::Type::Table) return false;
+        relation = resolveTableName(session, select->fromClause->tableName);
+        if (!g_engine.tableExists(session.currentDB, relation)) return false;
+        schema = g_engine.getTableSchema(session.currentDB, relation);
+    }
+
+    QueryResult shape;
+    std::vector<std::string> outputNames;
+    std::vector<uint32_t> directParameterOids;
+    for (const auto& item : select->selectList) {
+        if (!item.expr) return false;
+        const auto* literal = dynamic_cast<const LiteralExpr*>(item.expr.get());
+        const auto* reference = dynamic_cast<const ColumnRefExpr*>(item.expr.get());
+        if (literal && literal->value == "*") {
+            if (relation.empty()) return false;
+            for (size_t i = 0; i < schema.len; ++i) {
+                shape.columns.push_back(schema.cols[i].dataName);
+                shape.columnTypes.emplace_back();
+                outputNames.push_back(schema.cols[i].dataName);
+                directParameterOids.push_back(0);
+            }
+            continue;
+        }
+        if (reference && !relation.empty()) {
+            bool found = false;
+            for (size_t i = 0; i < schema.len; ++i) {
+                if (lowerProtocolText(schema.cols[i].dataName) !=
+                    lowerProtocolText(reference->column)) continue;
+                shape.columns.push_back(schema.cols[i].dataName);
+                shape.columnTypes.emplace_back();
+                outputNames.push_back(item.alias.empty() ? reference->column
+                                                          : item.alias);
+                directParameterOids.push_back(0);
+                found = true;
+                break;
+            }
+            if (!found) return false;
+            continue;
+        }
+        const std::string expression = item.expr->toString();
+        if (expression.empty()) return false;
+        // Use a synthetic lookup key: an expression aliased to a physical
+        // column must not inherit that column's table OID/attribute number.
+        shape.columns.push_back("\x1f" "expression_" +
+                                std::to_string(shape.columns.size()));
+        shape.columnTypes.push_back(ExprHelper::inferResultType(expression));
+        outputNames.push_back(item.alias.empty() ? expression : item.alias);
+        uint32_t parameterOid = 0;
+        if (expression.size() > 1 && expression.front() == '$' &&
+            std::all_of(expression.begin() + 1, expression.end(),
+                        [](unsigned char ch) { return std::isdigit(ch); })) {
+            const unsigned long index = std::stoul(expression.substr(1));
+            if (index > 0 && index <= parameterOids.size())
+                parameterOid = parameterOids[index - 1];
+        }
+        directParameterOids.push_back(parameterOid);
+    }
+    if (shape.columns.empty()) return false;
+    columns = describeProtocolColumns(shape,
+        relation.empty() ? sql : "SELECT * FROM " + relation, session);
+    for (size_t i = 0; i < columns.size(); ++i) {
+        columns[i].name = outputNames[i];
+        if (directParameterOids[i] != 0) {
+            columns[i].typeOid = directParameterOids[i];
+            columns[i].typeSize = protocolTypeSize(columns[i].typeOid, Column{});
+        }
+    }
+    return true;
 }
 
 std::string commandTagFor(const std::string& sql, const std::vector<std::string>& lines,
@@ -3459,6 +3548,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
     // modes these do not travel across backend rentals (PgBouncer has the
     // same restriction for session-level features).
     std::map<std::string, ProtocolPortal> portals;
+    std::set<std::string> describedStatements;
     const auto readyStatus = [&]() -> char {
         if (transactionFailed) return 'E';
         return g_engine.inTransaction() ? 'T' : 'I';
@@ -3945,8 +4035,10 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 session.preparedStmtTypes.erase(statement);
                 session.preparedStmtParameterOids.erase(statement);
                 portals.erase("");
+                describedStatements.erase(statement);
             }
             session.preparedStmts[statement] = std::move(sql);
+            describedStatements.erase(statement);
             session.preparedStmtTypes[statement] =
                 std::vector<std::string>(parameterTypes.size());
             session.preparedStmtParameterOids[statement] =
@@ -4112,6 +4204,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 continue;
             }
             portals[portal] = ProtocolPortal{statement, std::move(expandedSql), std::move(resultFormats)};
+            portals[portal].rowDescriptionSent =
+                describedStatements.count(statement) != 0;
             protocol.sendBindComplete();
             continue;
         }
@@ -4323,19 +4417,62 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     extendedQueryError = true;
                     continue;
                 }
+                std::vector<PgColumnDescription> columns;
+                const bool hasColumns =
+                    describePreparedSelect(statementIt->second, session,
+                                           columns, oidIt->second);
                 if (!protocol.sendParameterDescription(oidIt->second) ||
-                    !protocol.sendNoData()) {
+                    !(hasColumns ? protocol.sendRowDescription(columns)
+                                 : protocol.sendNoData())) {
                     extendedQueryError = true;
+                } else if (hasColumns) {
+                    describedStatements.insert(name);
+                    for (auto& bound : portals) {
+                        if (bound.second.statement == name)
+                            bound.second.rowDescriptionSent = true;
+                    }
                 }
                 continue;
             }
             if (target == 'P') {
-                if (portals.find(name) == portals.end()) {
+                auto portalIt = portals.find(name);
+                if (portalIt == portals.end()) {
                     protocol.sendErrorResponse("ERROR", "34000", "portal does not exist");
                     extendedQueryError = true;
                     continue;
                 }
-                protocol.sendNoData();
+                std::vector<PgColumnDescription> columns;
+                const auto sourceIt =
+                    session.preparedStmts.find(portalIt->second.statement);
+                const auto typeIt = session.preparedStmtParameterOids.find(
+                    portalIt->second.statement);
+                const std::string& sourceSql =
+                    sourceIt == session.preparedStmts.end()
+                        ? portalIt->second.sql : sourceIt->second;
+                const std::vector<uint32_t> sourceTypes =
+                    typeIt == session.preparedStmtParameterOids.end()
+                        ? std::vector<uint32_t>{} : typeIt->second;
+                if (!describePreparedSelect(sourceSql, session, columns,
+                                            sourceTypes)) {
+                    if (!protocol.sendNoData()) extendedQueryError = true;
+                    continue;
+                }
+                const auto& formats = portalIt->second.resultFormats;
+                if (!formats.empty() && formats.size() != 1 &&
+                    formats.size() != columns.size()) {
+                    protocol.sendErrorResponse(
+                        "ERROR", "08P01",
+                        "result format count does not match result columns");
+                    extendedQueryError = true;
+                    continue;
+                }
+                for (size_t i = 0; i < columns.size(); ++i) {
+                    if (!formats.empty()) columns[i].formatCode =
+                        static_cast<int16_t>(formats.size() == 1
+                                                 ? formats.front() : formats[i]);
+                }
+                if (!protocol.sendRowDescription(columns)) extendedQueryError = true;
+                else portalIt->second.rowDescriptionSent = true;
                 continue;
             }
             protocol.sendErrorResponse("ERROR", "08P01", "invalid Describe target");
@@ -4363,6 +4500,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 session.preparedStmts.erase(name);
                 session.preparedStmtTypes.erase(name);
                 session.preparedStmtParameterOids.erase(name);
+                describedStatements.erase(name);
             } else if (target == 'P') {
                 portals.erase(name);
             } else {
