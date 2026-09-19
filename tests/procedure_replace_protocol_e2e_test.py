@@ -44,6 +44,16 @@ def main():
              "LANGUAGE SQL AS $$ INSERT INTO procedure_text "
              "VALUES (?ArgName) $$"),
             "CALL \"QuotedProc\"('quoted')",
+            ("CREATE PROCEDURE \"Paren(Name)\"() LANGUAGE sql "
+             "AS $$ INSERT INTO procedure_text VALUES ('paren') $$"),
+            "CALL \"Paren(Name)\"()",
+            "CREATE TABLE procedure_typed (n INTEGER, t TEXT)",
+            ("CREATE PROCEDURE typed_proc(x INTEGER, y TEXT) "
+             "LANGUAGE sql AS $$ INSERT INTO procedure_typed "
+             "VALUES (?x, ?y) $$"),
+            "CALL typed_proc(1 + 2, COALESCE('A,B', 'fallback'))",
+            "CALL typed_proc(5, 'O''Reilly')",
+            "CALL typed_proc(NULL, NULL)",
         ]
         for sql in setup:
             rows, state, message, headers = runner.ours_query(
@@ -68,8 +78,30 @@ def main():
             "SELECT value FROM procedure_text ORDER BY value")
         assert state is None, (state, message)
         assert rows == [
-            ["?ArgValue"], ["a;b"], ["bound"], ["c"], ["quoted"]
+            ["?ArgValue"], ["a;b"], ["bound"], ["c"], ["paren"],
+            ["quoted"]
         ], rows
+
+        rows, state, message, headers = runner.ours_query(
+            client, server["sock"], "SELECT n, t FROM procedure_typed")
+        assert state is None and rows == [
+            ["3", "A,B"], ["5", "O'Reilly"], [None, None]
+        ], (
+            state, message, rows)
+
+        for sql, expected_state in [
+            ("CALL typed_proc('not an integer', 'bad')", "22P02"),
+            ("CALL typed_proc(4, 'bad',)", "42601"),
+        ]:
+            rows, state, message, headers = runner.ours_query(
+                client, server["sock"], sql)
+            assert state == expected_state, (sql, state, message, rows)
+        rows, state, message, headers = runner.ours_query(
+            client, server["sock"], "SELECT n, t FROM procedure_typed")
+        assert state is None and rows == [
+            ["3", "A,B"], ["5", "O'Reilly"], [None, None]
+        ], (
+            state, message, rows)
 
         rows, state, message, headers = runner.ours_query(
             client, server["sock"],

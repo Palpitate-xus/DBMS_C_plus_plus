@@ -3831,6 +3831,99 @@ static bool bindProcedureStatement(
     return true;
 }
 
+static bool splitProcedureCallArguments(const string& input,
+                                        vector<string>& arguments) {
+    arguments.clear();
+    if (trim(input).empty()) return true;
+    size_t start = 0;
+    int depth = 0;
+    bool singleQuoted = false;
+    bool escapeSingleQuoted = false;
+    bool doubleQuoted = false;
+    string dollarDelimiter;
+    for (size_t i = 0; i < input.size(); ++i) {
+        const char current = input[i];
+        if (!dollarDelimiter.empty()) {
+            if (input.compare(i, dollarDelimiter.size(), dollarDelimiter) == 0) {
+                i += dollarDelimiter.size() - 1;
+                dollarDelimiter.clear();
+            }
+            continue;
+        }
+        if (singleQuoted) {
+            if (escapeSingleQuoted && current == '\\' && i + 1 < input.size()) {
+                ++i;
+            } else if (current == '\'' && i + 1 < input.size() &&
+                       input[i + 1] == '\'') {
+                ++i;
+            } else if (current == '\'') {
+                singleQuoted = false;
+                escapeSingleQuoted = false;
+            }
+            continue;
+        }
+        if (doubleQuoted) {
+            if (current == '"' && i + 1 < input.size() && input[i + 1] == '"') {
+                ++i;
+            } else if (current == '"') {
+                doubleQuoted = false;
+            }
+            continue;
+        }
+        if (current == '\'' || current == '"') {
+            escapeSingleQuoted = current == '\'' && i > 0 &&
+                (input[i - 1] == 'e' || input[i - 1] == 'E') &&
+                (i < 2 || (!isalnum(static_cast<unsigned char>(input[i - 2])) &&
+                    input[i - 2] != '_' && input[i - 2] != '$'));
+            singleQuoted = current == '\'';
+            doubleQuoted = current == '"';
+            continue;
+        }
+        if (current == '$') {
+            size_t end = i + 1;
+            if (end < input.size() &&
+                (isalpha(static_cast<unsigned char>(input[end])) ||
+                 input[end] == '_')) {
+                while (end < input.size() &&
+                       (isalnum(static_cast<unsigned char>(input[end])) ||
+                        input[end] == '_')) ++end;
+            }
+            if (end < input.size() && input[end] == '$') {
+                dollarDelimiter = input.substr(i, end - i + 1);
+                i = end;
+                continue;
+            }
+        }
+        if (current == '(' || current == '[') {
+            ++depth;
+        } else if (current == ')' || current == ']') {
+            if (--depth < 0) return false;
+        } else if (current == ',' && depth == 0) {
+            string argument = trim(input.substr(start, i - start));
+            if (argument.empty()) return false;
+            arguments.push_back(std::move(argument));
+            start = i + 1;
+        }
+    }
+    if (singleQuoted || doubleQuoted || !dollarDelimiter.empty() || depth != 0)
+        return false;
+    string argument = trim(input.substr(start));
+    if (argument.empty()) return false;
+    arguments.push_back(std::move(argument));
+    return true;
+}
+
+static string quoteProcedureArgument(const string& value,
+                                     const string& targetType) {
+    string quoted = "CAST('";
+    for (const char current : value) {
+        quoted.push_back(current);
+        if (current == '\'') quoted.push_back('\'');
+    }
+    quoted += "' AS " + targetType + ")";
+    return quoted;
+}
+
 static bool handleCallProcedure(const string& sql, Session& s) {
     if (!checkDB(s)) return true;
     string rest = trim(sql.substr(4));
@@ -3840,7 +3933,20 @@ static bool handleCallProcedure(const string& sql, Session& s) {
     }
     string procname;
     vector<string> args;
-    size_t lp = rest.find('(');
+    size_t lp = string::npos;
+    bool quotedName = false;
+    for (size_t i = 0; i < rest.size(); ++i) {
+        if (rest[i] == '"') {
+            if (quotedName && i + 1 < rest.size() && rest[i + 1] == '"') {
+                ++i;
+            } else {
+                quotedName = !quotedName;
+            }
+        } else if (rest[i] == '(' && !quotedName) {
+            lp = i;
+            break;
+        }
+    }
     if (lp == string::npos) {
         cout << "SQL syntax error: CALL requires an argument list "
                 "(SQLSTATE 42601)" << endl;
@@ -3849,24 +3955,70 @@ static bool handleCallProcedure(const string& sql, Session& s) {
     procname = decodeQuotedIdentifier(trim(rest.substr(0, lp)));
     size_t rp = string::npos;
     int depth = 0;
-    bool inQuote = false;
+    bool singleQuoted = false;
+    bool escapeSingleQuoted = false;
+    bool doubleQuoted = false;
+    string dollarDelimiter;
     for (size_t i = lp; i < rest.size(); ++i) {
-        if (rest[i] == '\'') {
-            if (inQuote && i + 1 < rest.size() && rest[i + 1] == '\'') {
+        const char current = rest[i];
+        if (!dollarDelimiter.empty()) {
+            if (rest.compare(i, dollarDelimiter.size(), dollarDelimiter) == 0) {
+                i += dollarDelimiter.size() - 1;
+                dollarDelimiter.clear();
+            }
+            continue;
+        }
+        if (singleQuoted) {
+            if (escapeSingleQuoted && current == '\\' && i + 1 < rest.size()) {
                 ++i;
+            } else if (current == '\'' && i + 1 < rest.size() &&
+                       rest[i + 1] == '\'') {
+                ++i;
+            } else if (current == '\'') {
+                singleQuoted = false;
+                escapeSingleQuoted = false;
+            }
+            continue;
+        }
+        if (doubleQuoted) {
+            if (current == '"' && i + 1 < rest.size() && rest[i + 1] == '"')
+                ++i;
+            else if (current == '"')
+                doubleQuoted = false;
+            continue;
+        }
+        if (current == '\'' || current == '"') {
+            escapeSingleQuoted = current == '\'' && i > 0 &&
+                (rest[i - 1] == 'e' || rest[i - 1] == 'E') &&
+                (i < 2 || (!isalnum(static_cast<unsigned char>(rest[i - 2])) &&
+                    rest[i - 2] != '_' && rest[i - 2] != '$'));
+            singleQuoted = current == '\'';
+            doubleQuoted = current == '"';
+            continue;
+        }
+        if (current == '$') {
+            size_t end = i + 1;
+            if (end < rest.size() &&
+                (isalpha(static_cast<unsigned char>(rest[end])) ||
+                 rest[end] == '_')) {
+                while (end < rest.size() &&
+                       (isalnum(static_cast<unsigned char>(rest[end])) ||
+                        rest[end] == '_')) ++end;
+            }
+            if (end < rest.size() && rest[end] == '$') {
+                dollarDelimiter = rest.substr(i, end - i + 1);
+                i = end;
                 continue;
             }
-            inQuote = !inQuote;
         }
-        if (!inQuote) {
-            if (rest[i] == '(') ++depth;
-            else if (rest[i] == ')') {
-                --depth;
-                if (depth == 0) { rp = i; break; }
-            }
+        if (current == '(') ++depth;
+        else if (current == ')') {
+            --depth;
+            if (depth == 0) { rp = i; break; }
         }
     }
-    if (rp == string::npos || inQuote) {
+    if (rp == string::npos || singleQuoted || doubleQuoted ||
+        !dollarDelimiter.empty()) {
         cout << "SQL syntax error: unclosed argument list in CALL "
                 "(SQLSTATE 42601)" << endl;
         return true;
@@ -3877,9 +4029,10 @@ static bool handleCallProcedure(const string& sql, Session& s) {
         return true;
     }
     string alist = trim(rest.substr(lp + 1, rp - lp - 1));
-    if (!alist.empty()) {
-        args = splitValues(alist);
-        for (auto& a : args) a = trim(a);
+    if (!splitProcedureCallArguments(alist, args)) {
+        cout << "SQL syntax error: invalid CALL argument list "
+                "(SQLSTATE 42601)" << endl;
+        return true;
     }
     if (procname.empty()) {
         cout << "SQL syntax error: CALL procedure_name (SQLSTATE 42601)"
@@ -3917,7 +4070,20 @@ static bool handleCallProcedure(const string& sql, Session& s) {
                 auto it = s.userVariables.find(arg.substr(1));
                 argMap[pp.name] = (it != s.userVariables.end()) ? it->second : "null";
             } else {
-                argMap[pp.name] = arg;
+                const auto converted = dbms::ExprHelper::evalString(
+                    "CAST((" + arg + ") AS " + pp.type + ")",
+                    {}, {}, s.currentDB, s.username);
+                if (!converted.ok) {
+                    cout << "ERROR: "
+                         << (converted.error.empty()
+                                 ? "invalid CALL argument (SQLSTATE 22023)"
+                                 : converted.error)
+                         << endl;
+                    return true;
+                }
+                argMap[pp.name] = converted.isNull
+                    ? "CAST(NULL AS " + pp.type + ")"
+                    : quoteProcedureArgument(converted.value, pp.type);
             }
         }
     }
