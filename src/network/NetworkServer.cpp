@@ -1384,21 +1384,33 @@ bool describePreparedSelect(const std::string& sql, Session& session,
     QueryResult shape;
     std::vector<std::string> outputNames;
     std::vector<uint32_t> directParameterOids;
+    const auto appendPhysicalColumns = [&]() {
+        for (size_t i = 0; i < schema.len; ++i) {
+            shape.columns.push_back(schema.cols[i].dataName);
+            shape.columnTypes.push_back(schema.cols[i].dataType);
+            outputNames.push_back(schema.cols[i].dataName);
+            directParameterOids.push_back(0);
+        }
+    };
+    const auto qualifierMatches = [&](const ColumnRefExpr& reference) {
+        if (reference.table.empty()) return true;
+        const std::string source = select->fromClause->alias.empty()
+            ? relation : select->fromClause->alias;
+        return lowerProtocolText(reference.table) == lowerProtocolText(source);
+    };
     for (const auto& item : select->selectList) {
         if (!item.expr) return false;
         const auto* literal = dynamic_cast<const LiteralExpr*>(item.expr.get());
         const auto* reference = dynamic_cast<const ColumnRefExpr*>(item.expr.get());
-        if (literal && literal->value == "*") {
+        if ((literal && literal->value == "*") ||
+            (reference && reference->column == "*")) {
             if (relation.empty()) return false;
-            for (size_t i = 0; i < schema.len; ++i) {
-                shape.columns.push_back(schema.cols[i].dataName);
-                shape.columnTypes.push_back(schema.cols[i].dataType);
-                outputNames.push_back(schema.cols[i].dataName);
-                directParameterOids.push_back(0);
-            }
+            if (reference && !qualifierMatches(*reference)) return false;
+            appendPhysicalColumns();
             continue;
         }
         if (reference && !relation.empty()) {
+            if (!qualifierMatches(*reference)) return false;
             bool found = false;
             for (size_t i = 0; i < schema.len; ++i) {
                 if (lowerProtocolText(schema.cols[i].dataName) !=

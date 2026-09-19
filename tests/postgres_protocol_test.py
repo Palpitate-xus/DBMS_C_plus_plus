@@ -687,6 +687,22 @@ def extended_query_describe(sock):
     assert data_row_values(rebound) == [[b"7"]], rebound
     assert not any(kind == b"E" for kind, _ in rebound), rebound
 
+    qualified_star = (b"qualified_star\0SELECT t.* FROM t\0" +
+                      struct.pack("!H", 0))
+    sock.sendall(typed(b"P", qualified_star) +
+                 typed(b"D", b"Squalified_star\0") + typed(b"S"))
+    star_description = read_until_ready(sock)
+    star_fields = row_description_fields(star_description)
+    assert len(star_fields) == 1 and star_fields[0][0] == b"id", star_fields
+    assert star_fields[0][1] != 0 and star_fields[0][2:5] == (1, 23, 4), star_fields
+
+    alias_star = (b"alias_star\0SELECT x.* FROM t AS x\0" +
+                  struct.pack("!H", 0))
+    sock.sendall(typed(b"P", alias_star) +
+                 typed(b"D", b"Salias_star\0") + typed(b"S"))
+    alias_fields = row_description_fields(read_until_ready(sock))
+    assert alias_fields == star_fields, (alias_fields, star_fields)
+
     # Describe is analysis only: a non-returning INSERT reports NoData and
     # must not execute before an Execute message arrives.
     write_parse = (b"describe_write\0INSERT INTO t VALUES (909)\0" +
