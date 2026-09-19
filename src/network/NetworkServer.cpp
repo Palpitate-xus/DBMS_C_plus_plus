@@ -1374,11 +1374,21 @@ bool describePreparedSelect(const std::string& sql, Session& session,
 
     std::string relation;
     TableSchema schema;
+    std::map<std::string, std::string> typeHints;
     if (select->fromClause) {
         if (select->fromClause->type != FromItem::Type::Table) return false;
         relation = resolveTableName(session, select->fromClause->tableName);
         if (!g_engine.tableExists(session.currentDB, relation)) return false;
         schema = g_engine.getTableSchema(session.currentDB, relation);
+        for (size_t i = 0; i < schema.len; ++i) {
+            const Column& column = schema.cols[i];
+            typeHints[column.dataName] = column.dataType;
+            typeHints[relation + "." + column.dataName] = column.dataType;
+            if (!select->fromClause->alias.empty()) {
+                typeHints[select->fromClause->alias + "." + column.dataName] =
+                    column.dataType;
+            }
+        }
     }
 
     QueryResult shape;
@@ -1432,7 +1442,8 @@ bool describePreparedSelect(const std::string& sql, Session& session,
         // column must not inherit that column's table OID/attribute number.
         shape.columns.push_back("\x1f" "expression_" +
                                 std::to_string(shape.columns.size()));
-        shape.columnTypes.push_back(ExprHelper::inferResultType(expression));
+        shape.columnTypes.push_back(
+            ExprHelper::inferResultType(expression, typeHints));
         outputNames.push_back(item.alias.empty() ? expression : item.alias);
         uint32_t parameterOid = 0;
         if (expression.size() > 1 && expression.front() == '$' &&

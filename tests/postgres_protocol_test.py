@@ -703,6 +703,15 @@ def extended_query_describe(sock):
     alias_fields = row_description_fields(read_until_ready(sock))
     assert alias_fields == star_fields, (alias_fields, star_fields)
 
+    arithmetic_parse = (b"describe_arithmetic\0SELECT id + 1 AS next_id FROM t\0" +
+                        struct.pack("!H", 0))
+    sock.sendall(typed(b"P", arithmetic_parse) +
+                 typed(b"D", b"Sdescribe_arithmetic\0") + typed(b"S"))
+    arithmetic_fields = row_description_fields(read_until_ready(sock))
+    assert arithmetic_fields == [
+        (b"next_id", 0, 0, 23, 4, -1, 0)
+    ], arithmetic_fields
+
     # Describe is analysis only: a non-returning INSERT reports NoData and
     # must not execute before an Execute message arrives.
     write_parse = (b"describe_write\0INSERT INTO t VALUES (909)\0" +
