@@ -494,41 +494,59 @@ def run_case(name, stmts, client, sock):
 
 def start_ours(client):
     work_dir = tempfile.mkdtemp(prefix="dbms-pgdiff-")
-    os.mkdir(os.path.join(work_dir, "info"))
-    open(os.path.join(work_dir, "info", "tlist.lst"), "wb").close()
-    client.write_auth_catalog(work_dir, "alice", "secret")
-    with open(os.path.join(work_dir, "pg_hba.conf"), "w", encoding="utf-8") as hba:
-        hba.write("host all alice 127.0.0.1/32 scram-sha-256\n")
-    probe = socket.socket()
-    probe.bind(("127.0.0.1", 0))
-    port = probe.getsockname()[1]
-    probe.close()
-    process = subprocess.Popen(
-        [DBMS_MAIN, "--data-dir", work_dir,
-         "--server", str(port), "--insecure"],
-        cwd=work_dir,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL)
-    sock = socket.socket()
-    sock.settimeout(15)
-    deadline = time.time() + 20
-    while True:
+    process = None
+    sock = None
+    try:
+        os.mkdir(os.path.join(work_dir, "info"))
+        open(os.path.join(work_dir, "info", "tlist.lst"), "wb").close()
+        client.write_auth_catalog(work_dir, "alice", "secret")
+        with open(os.path.join(work_dir, "pg_hba.conf"), "w", encoding="utf-8") as hba:
+            hba.write("host all alice 127.0.0.1/32 scram-sha-256\n")
+        probe = socket.socket()
         try:
-            sock.connect(("127.0.0.1", port))
-            break
-        except OSError:
-            if time.time() >= deadline:
-                raise
-            time.sleep(0.05)
-    client.startup(sock, "alice", "info")
-    return {"process": process, "sock": sock, "dir": work_dir, "port": port}
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        finally:
+            probe.close()
+        process = subprocess.Popen(
+            [DBMS_MAIN, "--data-dir", work_dir,
+             "--server", str(port), "--insecure"],
+            cwd=work_dir,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL)
+        sock = socket.socket()
+        sock.settimeout(15)
+        deadline = time.time() + 20
+        while True:
+            try:
+                sock.connect(("127.0.0.1", port))
+                break
+            except OSError:
+                if time.time() >= deadline:
+                    raise
+                time.sleep(0.05)
+        client.startup(sock, "alice", "info")
+        return {"process": process, "sock": sock, "dir": work_dir, "port": port}
+    except BaseException:
+        if process is not None:
+            try:
+                stop_ours({"process": process, "sock": sock, "dir": work_dir})
+            except Exception:
+                # Keep the startup exception as the primary failure.
+                shutil.rmtree(work_dir, ignore_errors=True)
+        else:
+            if sock is not None:
+                sock.close()
+            shutil.rmtree(work_dir, ignore_errors=True)
+        raise
 
 
 def stop_ours(server):
-    try:
-        server["sock"].close()
-    except OSError:
-        pass
+    if server.get("sock") is not None:
+        try:
+            server["sock"].close()
+        except OSError:
+            pass
     work_dir = os.path.realpath(server["dir"])
     if (os.path.dirname(work_dir) != os.path.realpath(tempfile.gettempdir()) or
             not os.path.basename(work_dir).startswith("dbms-pgdiff-")):

@@ -3,6 +3,7 @@
 
 import importlib.util
 from pathlib import Path
+import shutil
 import tempfile
 import struct
 import subprocess
@@ -45,6 +46,53 @@ class DifferentialValuesTest(unittest.TestCase):
 
 
 class DifferentialCleanupTest(unittest.TestCase):
+    def test_start_failure_before_spawn_removes_data_directory(self):
+        created = []
+        original_make_dir = tempfile.mkdtemp
+
+        def make_dir(*args, **kwargs):
+            directory = original_make_dir(*args, **kwargs)
+            created.append(directory)
+            return directory
+
+        with mock.patch.object(RUNNER.tempfile, "mkdtemp",
+                               side_effect=make_dir), \
+             mock.patch.object(RUNNER.subprocess, "Popen",
+                               side_effect=FileNotFoundError("dbms_main")):
+            with self.assertRaises(FileNotFoundError):
+                RUNNER.start_ours(mock.Mock())
+        directory = Path(created[0])
+        try:
+            self.assertFalse(directory.exists())
+        finally:
+            shutil.rmtree(directory, ignore_errors=True)
+
+    def test_startup_failure_stops_spawned_server(self):
+        created = []
+        original_make_dir = tempfile.mkdtemp
+
+        def make_dir(*args, **kwargs):
+            directory = original_make_dir(*args, **kwargs)
+            created.append(directory)
+            return directory
+
+        probe = mock.Mock()
+        probe.getsockname.return_value = ("127.0.0.1", 54321)
+        wire = mock.Mock()
+        process = mock.Mock()
+        client = mock.Mock()
+        client.startup.side_effect = RuntimeError("startup failed")
+        with mock.patch.object(RUNNER.tempfile, "mkdtemp", side_effect=make_dir), \
+             mock.patch.object(RUNNER.socket, "socket", side_effect=[probe, wire]), \
+             mock.patch.object(RUNNER.subprocess, "Popen", return_value=process):
+            with self.assertRaisesRegex(RuntimeError, "startup failed"):
+                RUNNER.start_ours(client)
+        process.terminate.assert_called_once()
+        process.wait.assert_called_once()
+        wire.close.assert_called_once()
+        probe.close.assert_called_once()
+        self.assertFalse(Path(created[0]).exists())
+
     def test_stuck_server_is_killed_and_temporary_data_removed(self):
         with tempfile.TemporaryDirectory(prefix="dbms-pgdiff-") as directory:
             process = mock.Mock()
