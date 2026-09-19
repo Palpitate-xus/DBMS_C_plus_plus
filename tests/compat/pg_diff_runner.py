@@ -456,7 +456,11 @@ def run_case(name, stmts, client, sock):
 
     ours = []
     for sql in stmts:
-        response = ours_query(client, sock, sql, include_tag=True)
+        try:
+            response = ours_query(client, sock, sql, include_tag=True)
+        except Exception as exc:
+            raise RuntimeError(
+                "%s: local query did not complete: %r" % (name, sql)) from exc
         if len(response) == 4:  # compatibility with focused unit-test mocks
             rows, state, message, ohead = response
             otag = None

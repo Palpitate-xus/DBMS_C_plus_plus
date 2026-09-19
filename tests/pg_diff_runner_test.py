@@ -117,6 +117,18 @@ class DifferentialCleanupTest(unittest.TestCase):
 
 
 class DifferentialErrorsTest(unittest.TestCase):
+    def test_local_timeout_identifies_the_case_and_sql_without_retry(self):
+        with mock.patch.object(RUNNER, "reference_multi", return_value=[]), \
+             mock.patch.object(RUNNER, "ours_query",
+                               side_effect=TimeoutError("wire timeout")) as query:
+            with self.assertRaisesRegex(
+                    RuntimeError, "stuck_case: local query did not complete") as raised:
+                RUNNER.run_case("stuck_case", ["CREATE TABLE stuck (id INT)"],
+                                None, None)
+        self.assertIn("CREATE TABLE stuck (id INT)", str(raised.exception))
+        self.assertIsInstance(raised.exception.__cause__, TimeoutError)
+        query.assert_called_once()
+
     def test_reference_requests_and_reads_sqlstate(self):
         output = subprocess.CompletedProcess([], 0, b"", b"ERROR:  22012\n")
         with mock.patch.object(RUNNER.subprocess, "run", return_value=output) as run:
