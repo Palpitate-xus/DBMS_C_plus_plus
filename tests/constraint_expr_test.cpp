@@ -238,6 +238,12 @@ int main() {
                "date_part('month', DATE '2026-05-06')") ==
            "double precision");
     assert(dbms::ExprHelper::inferResultType(
+               "date_trunc('month', DATE '2026-05-06')") ==
+           "timestamptz");
+    assert(dbms::ExprHelper::inferResultType(
+               "date_trunc('month', TIMESTAMP '2026-05-06 12:34:56')") ==
+           "timestamp");
+    assert(dbms::ExprHelper::inferResultType(
                "to_timestamp('2026-08-15', 'YYYY-MM-DD')") ==
            "timestamptz");
     assert(dbms::ExprHelper::inferResultType(

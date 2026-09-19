@@ -330,7 +330,12 @@ std::string inferAstResultType(
         if (name == "extract") return "numeric";
         if (name == "age") return "interval";
         if (name == "to_timestamp") return "timestamptz";
-        if (name == "date_trunc") return argType(1);
+        if (name == "date_trunc") {
+            const std::string input = argType(1);
+            // PostgreSQL resolves date input through the timestamptz
+            // overload; the evaluator also returns a zoned timestamp.
+            return input == "date" ? "timestamptz" : input;
+        }
         if (name == "current_date") return "date";
         if (name == "now" || name == "current_timestamp") return "timestamptz";
         if (name == "string_to_array" || name == "regexp_split_to_array" ||
