@@ -375,6 +375,7 @@
 | 446 | PROTO-03 | 简单 SELECT 的 Describe 能展开裸 `*`，但把 `t.*` / `alias.*` 当作普通列引用，返回 NoData；限定列引用又不校验来源别名，可能把错误限定名误描述为当前表列。现对合法来源限定的星号按表结构展开，并在直接列推断前验证表限定名 | 修复前独立 wire 场景的 `SELECT t.* FROM t` 在 D Statement 无 RowDescription；修复后 `t.*` 与 `x.* FROM t AS x` 均返回 id 的真实 table OID/attnum/int4 类型，完整 PostgreSQL 协议回归通过。PROTO-03 保持 partial：JOIN/CTE/RETURNING 等复杂结果形状仍需正式分析器 | `bbb38c4` |
 | 447 | P0-02 / PROTO-03 | Describe 简单表查询中的计算表达式未传入 schema 列类型提示；`SELECT id + 1 AS next_id FROM t` 被推断为 text OID 25，而执行得到整数。预执行结果分析现在提供物理列及当前表别名的类型提示给表达式推断器，仍不执行表达式 | 独立 wire 复现 `next_id` 原为 `(OID 25, size -1)`；修复后为 `(OID 23, size 4)`，并与前述 portal 生命周期、限定星号测试一并通过；完整 PostgreSQL 协议回归通过。两项保持 partial：复杂表达式/关系形状及全类型 metadata 尚需统一分析器 | `fe513a7` |
 | 448 | PROTO-03 | Describe 无别名表达式曾直接用表达式 SQL 作列名：`SELECT 42` 描述为 `42`，而实际简单查询和 PostgreSQL 都是 `?column?`；函数与 CAST 也不能使用整段 SQL 作为列名。静态描述按 AST 形状生成常量/算术默认名、函数名及常见 CAST 的 catalog 类型名，显式 AS 不变 | 独立 wire 回归修复前见 `SELECT 42` 名称为 `42`；修复后验证 42、`1+2`、`lower('X')`、`CAST(42 AS integer)` 的名称/OID/长度，以及此前别名、portal 生命周期和星号场景；完整 PostgreSQL 协议测试通过。PROTO-03 仍为 partial，复杂表达式命名及完整 parse analysis 尚未完成 | `c997a8f` |
+| 449 | P0-16 | 差分工具 `start_ours` 创建临时数据目录后，若 binary 不存在、连接失败或 startup/auth 报错，原代码直接抛异常，不停止已启动进程也不删除目录。启动全过程现在有异常清理：关闭 socket、终止进程、删除仅由工具创建的目录，并保留原始异常；端口探测 socket 也总是关闭 | 失败注入新增 binary 启动前失败与进程启动后认证失败两条路径，确认目录和进程均清理；`pg_diff_runner_test.py` 共 30 项通过，真实 `cast_arith` 差分通过。P0-16 仍为 partial，PG18 基线/并发/崩溃差分尚未完成 | `82325e4` |
 
 本批新增的待修复复现（仍计入总清单）：
 
