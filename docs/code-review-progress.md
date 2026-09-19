@@ -376,6 +376,7 @@
 | 447 | P0-02 / PROTO-03 | Describe 简单表查询中的计算表达式未传入 schema 列类型提示；`SELECT id + 1 AS next_id FROM t` 被推断为 text OID 25，而执行得到整数。预执行结果分析现在提供物理列及当前表别名的类型提示给表达式推断器，仍不执行表达式 | 独立 wire 复现 `next_id` 原为 `(OID 25, size -1)`；修复后为 `(OID 23, size 4)`，并与前述 portal 生命周期、限定星号测试一并通过；完整 PostgreSQL 协议回归通过。两项保持 partial：复杂表达式/关系形状及全类型 metadata 尚需统一分析器 | `fe513a7` |
 | 448 | PROTO-03 | Describe 无别名表达式曾直接用表达式 SQL 作列名：`SELECT 42` 描述为 `42`，而实际简单查询和 PostgreSQL 都是 `?column?`；函数与 CAST 也不能使用整段 SQL 作为列名。静态描述按 AST 形状生成常量/算术默认名、函数名及常见 CAST 的 catalog 类型名，显式 AS 不变 | 独立 wire 回归修复前见 `SELECT 42` 名称为 `42`；修复后验证 42、`1+2`、`lower('X')`、`CAST(42 AS integer)` 的名称/OID/长度，以及此前别名、portal 生命周期和星号场景；完整 PostgreSQL 协议测试通过。PROTO-03 仍为 partial，复杂表达式命名及完整 parse analysis 尚未完成 | `c997a8f` |
 | 449 | P0-16 | 差分工具 `start_ours` 创建临时数据目录后，若 binary 不存在、连接失败或 startup/auth 报错，原代码直接抛异常，不停止已启动进程也不删除目录。启动全过程现在有异常清理：关闭 socket、终止进程、删除仅由工具创建的目录，并保留原始异常；端口探测 socket 也总是关闭 | 失败注入新增 binary 启动前失败与进程启动后认证失败两条路径，确认目录和进程均清理；`pg_diff_runner_test.py` 共 30 项通过，真实 `cast_arith` 差分通过。P0-16 仍为 partial，PG18 基线/并发/崩溃差分尚未完成 | `82325e4` |
+| 450 | P0-16 | 全量差分偶发 wire 超时时，原 traceback 只有 socket 读超时，不指明正在运行哪个 case/SQL；复查容易误判为固定 SQL 结果错误。运行器现在在不重试、不修改事务状态的前提下，给本地查询异常附加 case 名及原 SQL，并保留根因异常 | 单测新增模拟 wire 超时，确认错误上下文、`TimeoutError` cause 与仅调用一次；31 个 Python 单测通过。早期 4 组 case 连跑 20 轮未复现超时；正式 binary 的 122 组全量差分本次 `failed=0`。偶发超时根因未证实，不计为已修复；P0-16 保持 partial | `1f341f4` |
 
 本批新增的待修复复现（仍计入总清单）：
 
