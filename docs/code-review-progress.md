@@ -369,6 +369,7 @@
 | 440 | P0-02 / PROTO-02 | 无 FROM 标量子查询走 legacy 输出，却发布了 metadata-only 结构化对象；对象的空 rows 被误用来生成 `SELECT 0` command tag，即使 wire 已返回一行。metadata-only 对象不再发布虚假的行数 tag，由网络层按实际解析到的结果行数生成 | `derived_type_protocol_e2e_test.py` 的标量 `SELECT (SELECT count(*))` 断言在修复前稳定失败（`SELECT 0`），修复后通过；PostgreSQL 差分 `subqueries` 从 failed=1 变为 failed=0。P0-02 保持 partial：标量子查询仍依赖文本回读，尚未统一 typed rows / NULL bitmap / diagnostics | `4143083` |
 | 441 | P0-02 / TYPE-06 / FUNC-01 | `date_trunc(field, date)` 的执行器按 PostgreSQL 将 DATE 转成 timestamptz 返回，类型推断却沿用输入 DATE，wire RowDescription 发 OID 1082 而不是 1184。推断逻辑与执行结果对齐，timestamp/interval 原有类型不变 | `constraint_expr_test` 新增 DATE 与 TIMESTAMP 输入类型断言通过；PostgreSQL 差分 `date_trunc_tz` 由 failed=1 变为 failed=0，覆盖 year/quarter/month/day DATE 与 timestamp 输入。功能族仍保持 partial | `88af25b` |
 | 442 | SQL-01 / P0-02 / TYPE-01 | 表达式 parser 读取 `::numeric(4,2)` 时丢弃左括号，生成 `numeric4,2)` 等无效类型名；单独 CAST 看似可用，但 CAST 参与 `+` / `*` 后类型推断退回 text，wire OID 25 错于 numeric 1700。解析器现在完整保留 typmod 括号与标记，避免运算表达式丢失数值类型 | `constraint_expr_test` 新增 numeric(4,2) 加/乘类型断言，`parser_phase1_test` 和完整协议回归通过；PostgreSQL 差分 `cast_arith` 由 failed=1 变为 failed=0，直接 CAST 与复合运算均一致。功能族仍保持 partial：numeric 全精度、特殊值、binary codec 等尚未全面验收 | `5ccf04c` |
+| 443 | P0-16 | 差分运行器在数据库进程未响应 SIGTERM 时，`stop_ours` 的十秒等待再次抛 `TimeoutExpired`，掩盖原测试故障并跳过临时数据目录清理。现在超时后 kill 并等待，只允许清理由该工具创建的临时目录；意外目录拒绝删除 | 28 个 Python 单测通过，新增模拟不响应终止的进程和非工具目录拒绝用例；122 组差分在修复前的生产逻辑下重跑达到 `failed=0`，本项仅改变运行器清理路径。P0-16 仍为 partial，PG18 基线/并发/崩溃点与零 allowlist 门禁未完成 | `de95868` |
 
 本批新增的待修复复现（仍计入总清单）：
 
