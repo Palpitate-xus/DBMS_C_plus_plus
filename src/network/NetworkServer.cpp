@@ -1442,9 +1442,36 @@ bool describePreparedSelect(const std::string& sql, Session& session,
         // column must not inherit that column's table OID/attribute number.
         shape.columns.push_back("\x1f" "expression_" +
                                 std::to_string(shape.columns.size()));
-        shape.columnTypes.push_back(
-            ExprHelper::inferResultType(expression, typeHints));
-        outputNames.push_back(item.alias.empty() ? expression : item.alias);
+        const std::string inferredType =
+            ExprHelper::inferResultType(expression, typeHints);
+        shape.columnTypes.push_back(inferredType);
+        std::string outputName = item.alias;
+        if (outputName.empty()) {
+            const auto* call =
+                dynamic_cast<const FunctionCallExpr*>(item.expr.get());
+            const auto* cast = dynamic_cast<const CastExpr*>(item.expr.get());
+            const auto* binary =
+                dynamic_cast<const BinaryOpExpr*>(item.expr.get());
+            if (call) {
+                outputName = lowerProtocolText(call->funcName);
+            } else if (cast || (binary && binary->op == "::") ||
+                       (literal && !literal->typeName.empty())) {
+                switch (mapBuiltinTypeNameToOid(inferredType)) {
+                    case 16: outputName = "bool"; break;
+                    case 20: outputName = "int8"; break;
+                    case 21: outputName = "int2"; break;
+                    case 23: outputName = "int4"; break;
+                    case 700: outputName = "float4"; break;
+                    case 701: outputName = "float8"; break;
+                    default: outputName = lowerProtocolText(inferredType); break;
+                }
+            } else if (dynamic_cast<const CaseExpr*>(item.expr.get())) {
+                outputName = "case";
+            } else {
+                outputName = "?column?";
+            }
+        }
+        outputNames.push_back(std::move(outputName));
         uint32_t parameterOid = 0;
         if (expression.size() > 1 && expression.front() == '$' &&
             std::all_of(expression.begin() + 1, expression.end(),

@@ -712,6 +712,27 @@ def extended_query_describe(sock):
         (b"next_id", 0, 0, 23, 4, -1, 0)
     ], arithmetic_fields
 
+    unnamed_literal = (b"describe_unnamed\0SELECT 42\0" +
+                       struct.pack("!H", 0))
+    sock.sendall(typed(b"P", unnamed_literal) +
+                 typed(b"D", b"Sdescribe_unnamed\0") + typed(b"S"))
+    unnamed_fields = row_description_fields(read_until_ready(sock))
+    assert unnamed_fields == [
+        (b"?column?", 0, 0, 23, 4, -1, 0)
+    ], unnamed_fields
+
+    for statement_name, query, expected_name, expected_oid, expected_size in (
+            (b"describe_sum", b"SELECT 1 + 2", b"?column?", 23, 4),
+            (b"describe_function", b"SELECT lower('X')", b"lower", 25, -1),
+            (b"describe_cast", b"SELECT CAST(42 AS integer)", b"int4", 23, 4)):
+        parse = statement_name + b"\0" + query + b"\0" + struct.pack("!H", 0)
+        sock.sendall(typed(b"P", parse) +
+                     typed(b"D", b"S" + statement_name + b"\0") + typed(b"S"))
+        fields = row_description_fields(read_until_ready(sock))
+        assert fields == [
+            (expected_name, 0, 0, expected_oid, expected_size, -1, 0)
+        ], (query, fields)
+
     # Describe is analysis only: a non-returning INSERT reports NoData and
     # must not execute before an Execute message arrives.
     write_parse = (b"describe_write\0INSERT INTO t VALUES (909)\0" +
