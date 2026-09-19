@@ -22,6 +22,7 @@ import io
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -528,9 +529,22 @@ def stop_ours(server):
         server["sock"].close()
     except OSError:
         pass
-    server["process"].terminate()
-    server["process"].wait(timeout=10)
-    subprocess.run(["rm", "-rf", server["dir"]], check=False)
+    work_dir = os.path.realpath(server["dir"])
+    if (os.path.dirname(work_dir) != os.path.realpath(tempfile.gettempdir()) or
+            not os.path.basename(work_dir).startswith("dbms-pgdiff-")):
+        raise ValueError("refusing to remove a non-runner data directory")
+    try:
+        server["process"].terminate()
+        try:
+            server["process"].wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            # A backend stuck in a query may ignore graceful termination.
+            # Preserve the original test failure instead of raising a second
+            # timeout from this finally/cleanup path.
+            server["process"].kill()
+            server["process"].wait(timeout=10)
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 def main():

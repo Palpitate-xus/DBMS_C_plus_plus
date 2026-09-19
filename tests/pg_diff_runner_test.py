@@ -3,6 +3,7 @@
 
 import importlib.util
 from pathlib import Path
+import tempfile
 import struct
 import subprocess
 import unittest
@@ -41,6 +42,30 @@ class DifferentialValuesTest(unittest.TestCase):
         with mock.patch.object(RUNNER, "reference_multi", return_value=[(rows, None, None, "")]), \
              mock.patch.object(RUNNER, "ours_query", return_value=(rows, None, "", [])):
             self.assertEqual(RUNNER.run_case("same", ["SELECT NULL, '', 'x'"], None, None), [])
+
+
+class DifferentialCleanupTest(unittest.TestCase):
+    def test_stuck_server_is_killed_and_temporary_data_removed(self):
+        with tempfile.TemporaryDirectory(prefix="dbms-pgdiff-") as directory:
+            process = mock.Mock()
+            process.wait.side_effect = [
+                subprocess.TimeoutExpired("dbms_main", 10), 0]
+            sock = mock.Mock()
+            RUNNER.stop_ours({"sock": sock, "process": process,
+                              "dir": directory})
+            sock.close.assert_called_once()
+            process.terminate.assert_called_once()
+            process.kill.assert_called_once()
+            self.assertFalse(Path(directory).exists())
+
+    def test_cleanup_rejects_an_unowned_directory(self):
+        with tempfile.TemporaryDirectory(prefix="different-owner-") as directory:
+            process = mock.Mock()
+            with self.assertRaises(ValueError):
+                RUNNER.stop_ours({"sock": mock.Mock(), "process": process,
+                                  "dir": directory})
+            process.terminate.assert_not_called()
+            self.assertTrue(Path(directory).exists())
 
 
 class DifferentialErrorsTest(unittest.TestCase):
