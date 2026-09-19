@@ -7807,8 +7807,13 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                 }
             }
         }
-        queryResult.commandTag = "SELECT " +
-            std::to_string(queryResult.rows.size());
+        // Legacy scalar subqueries still publish their rows via CLI output.
+        // Do not derive a zero-row command tag from metadata-only rows; the
+        // protocol layer counts the parsed result rows after execution.
+        if (!queryResult.metadataOnly) {
+            queryResult.commandTag = "SELECT " +
+                std::to_string(queryResult.rows.size());
+        }
         dbms::publishLastDmlResult(std::move(queryResult));
     }
 
