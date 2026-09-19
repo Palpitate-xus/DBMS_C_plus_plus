@@ -326,13 +326,19 @@ struct QueryResult {
 struct ProtocolPortal {
     ProtocolPortal() = default;
     ProtocolPortal(std::string statementName, std::string query,
+                   std::string sourceQuery,
+                   std::vector<uint32_t> sourceParameterOids,
                    std::vector<uint16_t> formats)
         : statement(std::move(statementName)),
           sql(std::move(query)),
+          preparedSql(std::move(sourceQuery)),
+          parameterOids(std::move(sourceParameterOids)),
           resultFormats(std::move(formats)) {}
 
     std::string statement;
     std::string sql;
+    std::string preparedSql;
+    std::vector<uint32_t> parameterOids;
     std::vector<uint16_t> resultFormats;
     QueryResult result;
     size_t rowOffset = 0;
@@ -4199,7 +4205,9 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 extendedQueryError = true;
                 continue;
             }
-            portals[portal] = ProtocolPortal{statement, std::move(expandedSql), std::move(resultFormats)};
+            portals[portal] = ProtocolPortal{
+                statement, std::move(expandedSql), preparedSql,
+                preparedParameterTypes, std::move(resultFormats)};
             protocol.sendBindComplete();
             continue;
         }
@@ -4423,18 +4431,9 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     continue;
                 }
                 std::vector<PgColumnDescription> columns;
-                const auto sourceIt =
-                    session.preparedStmts.find(portalIt->second.statement);
-                const auto typeIt = session.preparedStmtParameterOids.find(
-                    portalIt->second.statement);
-                const std::string& sourceSql =
-                    sourceIt == session.preparedStmts.end()
-                        ? portalIt->second.sql : sourceIt->second;
-                const std::vector<uint32_t> sourceTypes =
-                    typeIt == session.preparedStmtParameterOids.end()
-                        ? std::vector<uint32_t>{} : typeIt->second;
-                if (!describePreparedSelect(sourceSql, session, columns,
-                                            sourceTypes)) {
+                if (!describePreparedSelect(
+                        portalIt->second.preparedSql, session, columns,
+                        portalIt->second.parameterOids)) {
                     if (!protocol.sendNoData()) extendedQueryError = true;
                     continue;
                 }

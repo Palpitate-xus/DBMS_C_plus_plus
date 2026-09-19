@@ -666,6 +666,27 @@ def extended_query_describe(sock):
         (b"answer", 0, 0, 23, 4, -1, 0)
     ], typed_result
 
+    # A portal retains the statement it was bound to after Close Statement,
+    # even if the same statement name is later reused for different SQL.
+    original = (b"bound_stmt\0SELECT $1 AS bound_value\0" +
+                struct.pack("!H", 1) + struct.pack("!I", 23))
+    bound = (b"bound_portal\0bound_stmt\0" + struct.pack("!H", 0) +
+             struct.pack("!H", 1) + struct.pack("!i", 1) + b"7" +
+             struct.pack("!H", 0))
+    replacement = (b"bound_stmt\0SELECT 'new' AS replacement\0" +
+                   struct.pack("!H", 0))
+    sock.sendall(typed(b"P", original) + typed(b"B", bound) +
+                 typed(b"C", b"Sbound_stmt\0") + typed(b"P", replacement) +
+                 typed(b"D", b"Pbound_portal\0") +
+                 typed(b"E", b"bound_portal\0" + struct.pack("!I", 0)) +
+                 typed(b"S"))
+    rebound = read_until_ready(sock)
+    assert row_description_fields(rebound) == [
+        (b"bound_value", 0, 0, 23, 4, -1, 0)
+    ], rebound
+    assert data_row_values(rebound) == [[b"7"]], rebound
+    assert not any(kind == b"E" for kind, _ in rebound), rebound
+
     # Describe is analysis only: a non-returning INSERT reports NoData and
     # must not execute before an Execute message arrives.
     write_parse = (b"describe_write\0INSERT INTO t VALUES (909)\0" +
