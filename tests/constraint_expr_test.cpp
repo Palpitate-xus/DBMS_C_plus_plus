@@ -225,6 +225,10 @@ int main() {
     assert(dbms::ExprHelper::inferResultType("i::text", resultTypes) == "text");
     assert(dbms::ExprHelper::inferResultType(
                "(i + 1)::numeric(6,2)", resultTypes) == "numeric");
+    assert(dbms::ExprHelper::inferResultType(
+               "1.5::numeric(4,2) + 1") == "numeric");
+    assert(dbms::ExprHelper::inferResultType(
+               "2.5::numeric(4,2) * 2") == "numeric");
     assert(dbms::ExprHelper::inferResultType("sign(i)", resultTypes) ==
            "double precision");
     assert(dbms::ExprHelper::inferResultType(

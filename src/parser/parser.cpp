@@ -1832,9 +1832,9 @@ static ExprPtr parseCastExpr(const std::vector<std::string>& tokens, size_t& pos
                 break;
             }
             if (tokens[pos] == "(") {
+                typeName += "(";
                 ++pos;
                 while (pos < tokens.size() && tokens[pos] != ")") {
-                    if (!typeName.empty()) typeName += " ";
                     typeName += tokens[pos++];
                 }
                 if (pos < tokens.size() && tokens[pos] == ")") {
