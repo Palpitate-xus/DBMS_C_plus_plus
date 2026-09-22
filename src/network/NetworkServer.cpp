@@ -1403,6 +1403,14 @@ bool describePreparedResult(const std::string& sql, Session& session,
         projections = &deletion->returning;
         sourceName = deletion->tableName;
         sourceAlias = deletion->alias;
+    } else if (const auto* merge =
+                   dynamic_cast<const MergeStmt*>(parsed.stmt.get())) {
+        if (merge->returning.empty() ||
+            merge->returningOptions.oldAliased ||
+            merge->returningOptions.newAliased) return false;
+        projections = &merge->returning;
+        sourceName = merge->targetTable;
+        sourceAlias = merge->targetAlias;
     } else {
         return false;
     }

@@ -779,6 +779,18 @@ def extended_query_describe(sock):
     assert data_row_values(simple_query(
         sock, "SELECT id FROM t WHERE id = 1")) == [[b"1"]]
 
+    merge_returning = (
+        b"describe_merge_returning\0MERGE INTO t AS dst USING t AS src "
+        b"ON dst.id = src.id WHEN MATCHED THEN DO NOTHING "
+        b"RETURNING dst.id AS merged_id\0" + struct.pack("!H", 0))
+    sock.sendall(typed(b"P", merge_returning) +
+                 typed(b"D", b"Sdescribe_merge_returning\0") + typed(b"S"))
+    merge_fields = row_description_fields(read_until_ready(sock))
+    assert len(merge_fields) == 1 and merge_fields[0][0] == b"merged_id", merge_fields
+    assert merge_fields[0][1] != 0 and merge_fields[0][2:5] == (1, 23, 4), merge_fields
+    assert data_row_values(simple_query(
+        sock, "SELECT id FROM t WHERE id = 1")) == [[b"1"]]
+
 
 def extended_query_error_recovery(sock):
     # A Parse error puts the extended-query protocol into the ignore-until-Sync
