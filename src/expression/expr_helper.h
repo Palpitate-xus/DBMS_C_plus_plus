@@ -4,6 +4,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <vector>
 
 namespace dbms {
 
@@ -31,6 +32,15 @@ public:
     static std::string inferResultType(
         const std::string& exprSql,
         const std::map<std::string, std::string>& typeHints = {});
+
+    // VALUES analysis shared by execution and protocol Describe.  The first
+    // helper preserves PostgreSQL integer literal widths and unknown string
+    // literals; the second chooses one common type for a VALUES column.
+    static std::string canonicalResultTypeName(std::string typeName);
+    static std::string inferValuesResultType(const std::string& exprSql);
+    static bool resolveValuesResultType(
+        const std::vector<std::string>& inputTypes,
+        std::string& resultType, std::string& error);
 
     // Evaluate `exprSql` against the supplied row values.
     //

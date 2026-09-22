@@ -1369,34 +1369,46 @@ bool describePreparedResult(const std::string& sql, Session& session,
     if (!parsed.isValid()) return false;
     const auto* select = dynamic_cast<const SelectStmt*>(parsed.stmt.get());
     if (select && select->command == SqlCommand::Values) {
-        if (select->valuesRows.size() != 1 ||
+        if (select->valuesRows.empty() ||
             select->valuesRows.front().empty()) return false;
+        const size_t width = select->valuesRows.front().size();
         QueryResult shape;
-        std::vector<uint32_t> directParameterOids;
-        const auto& row = select->valuesRows.front();
-        for (size_t i = 0; i < row.size(); ++i) {
-            if (!row[i]) return false;
-            const std::string expression = row[i]->toString();
-            if (expression.empty()) return false;
-            shape.columns.push_back("column" + std::to_string(i + 1));
-            shape.columnTypes.push_back(
-                ExprHelper::inferResultType(expression));
-            uint32_t parameterOid = 0;
-            if (expression.size() > 1 && expression.front() == '$' &&
-                std::all_of(expression.begin() + 1, expression.end(),
-                            [](unsigned char ch) { return std::isdigit(ch); })) {
-                const unsigned long index = std::stoul(expression.substr(1));
-                if (index > 0 && index <= parameterOids.size())
-                    parameterOid = parameterOids[index - 1];
+        std::vector<std::vector<std::string>> inputTypes(width);
+        for (const auto& row : select->valuesRows) {
+            if (row.size() != width) return false;
+            for (size_t i = 0; i < width; ++i) {
+                if (!row[i]) return false;
+                const std::string expression = row[i]->toString();
+                if (expression.empty()) return false;
+                inputTypes[i].push_back(
+                    ExprHelper::inferValuesResultType(expression));
             }
-            directParameterOids.push_back(parameterOid);
+        }
+        for (size_t i = 0; i < width; ++i) {
+            std::string typeName;
+            std::string error;
+            if (!ExprHelper::resolveValuesResultType(
+                    inputTypes[i], typeName, error)) return false;
+            shape.columns.push_back("column" + std::to_string(i + 1));
+            shape.columnTypes.push_back(std::move(typeName));
         }
         columns = describeProtocolColumns(shape, sql, session);
-        for (size_t i = 0; i < columns.size(); ++i) {
-            if (directParameterOids[i] == 0) continue;
-            columns[i].typeOid = directParameterOids[i];
-            columns[i].typeSize =
-                protocolTypeSize(columns[i].typeOid, Column{});
+        if (select->valuesRows.size() == 1) {
+            const auto& row = select->valuesRows.front();
+            for (size_t i = 0; i < columns.size(); ++i) {
+                const std::string expression = row[i]->toString();
+                if (expression.size() <= 1 || expression.front() != '$' ||
+                    !std::all_of(expression.begin() + 1, expression.end(),
+                                 [](unsigned char ch) {
+                                     return std::isdigit(ch);
+                                 })) continue;
+                const unsigned long index = std::stoul(expression.substr(1));
+                if (index == 0 || index > parameterOids.size() ||
+                    parameterOids[index - 1] == 0) continue;
+                columns[i].typeOid = parameterOids[index - 1];
+                columns[i].typeSize =
+                    protocolTypeSize(columns[i].typeOid, Column{});
+            }
         }
         return !columns.empty();
     }

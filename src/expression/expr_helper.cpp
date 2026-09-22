@@ -2,10 +2,12 @@
 #include "ExprEvaluator.h"
 #include "parser/parser.h"
 #include "parser/ast.h"
+#include "catalog/type_registry.h"
 
 #include <algorithm>
 #include <cctype>
 #include <ctime>
+#include <cstring>
 #include <memory>
 #include <sstream>
 #include <vector>
@@ -757,6 +759,169 @@ std::vector<size_t> columnReferenceSourceTokens(
 }
 
 } // namespace
+
+std::string ExprHelper::canonicalResultTypeName(std::string typeName) {
+    const size_t first = typeName.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return {};
+    const size_t last = typeName.find_last_not_of(" \t\r\n");
+    typeName = typeName.substr(first, last - first + 1);
+    const size_t modifier = typeName.find('(');
+    if (modifier != std::string::npos) {
+        typeName.resize(modifier);
+        while (!typeName.empty() &&
+               std::isspace(static_cast<unsigned char>(typeName.back()))) {
+            typeName.pop_back();
+        }
+    }
+    std::string canonical =
+        TypeRegistry::instance().normalizeTypeName(typeName);
+    return canonical.empty() ? toLower(typeName) : canonical;
+}
+
+std::string ExprHelper::inferValuesResultType(const std::string& exprSql) {
+    const auto trimCopy = [](const std::string& input) {
+        const size_t first = input.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos) return std::string{};
+        const size_t last = input.find_last_not_of(" \t\r\n");
+        return input.substr(first, last - first + 1);
+    };
+    const std::string value = trimCopy(exprSql);
+    std::string lower = toLower(value);
+    if (lower == "null") return "unknown";
+    size_t quote = 0;
+    bool escapeString = false;
+    if (value.size() >= 2 && (value[0] == 'e' || value[0] == 'E') &&
+        value[1] == '\'') {
+        escapeString = true;
+        quote = 1;
+    }
+    bool stringLiteral = quote < value.size() && value[quote] == '\'';
+    if (stringLiteral) {
+        ++quote;
+        bool closed = false;
+        while (quote < value.size()) {
+            if (escapeString && value[quote] == '\\') {
+                quote += std::min<size_t>(2, value.size() - quote);
+                continue;
+            }
+            if (value[quote] != '\'') { ++quote; continue; }
+            if (quote + 1 < value.size() && value[quote + 1] == '\'') {
+                quote += 2;
+                continue;
+            }
+            closed = ++quote == value.size();
+            break;
+        }
+        if (closed) return "unknown";
+    }
+    if (lower == "current_user" || lower == "session_user" ||
+        lower == "user") return "name";
+    if (lower == "current_date") return "date";
+    if (lower == "current_timestamp") return "timestamptz";
+    if (lower == "localtimestamp") return "timestamp";
+
+    size_t index = 0;
+    bool negative = false;
+    if (index < value.size() &&
+        (value[index] == '+' || value[index] == '-')) {
+        negative = value[index] == '-';
+        ++index;
+    }
+    const size_t digitStart = index;
+    while (index < value.size() &&
+           std::isdigit(static_cast<unsigned char>(value[index]))) ++index;
+    if (digitStart != index && index == value.size()) {
+        size_t significantStart = digitStart;
+        while (significantStart < value.size() &&
+               value[significantStart] == '0') ++significantStart;
+        const std::string magnitude = significantStart == value.size()
+            ? "0" : value.substr(significantStart);
+        const auto within = [&](const char* bound) {
+            const size_t size = std::strlen(bound);
+            return magnitude.size() < size ||
+                   (magnitude.size() == size && magnitude <= bound);
+        };
+        if (within(negative ? "2147483648" : "2147483647"))
+            return "integer";
+        if (within(negative ? "9223372036854775808" :
+                              "9223372036854775807")) return "bigint";
+        return "numeric";
+    }
+    return canonicalResultTypeName(inferResultType(exprSql));
+}
+
+bool ExprHelper::resolveValuesResultType(
+    const std::vector<std::string>& inputTypes,
+    std::string& resultType, std::string& error) {
+    std::vector<std::string> known;
+    for (const auto& input : inputTypes) {
+        if (!input.empty() && input != "unknown")
+            known.push_back(canonicalResultTypeName(input));
+    }
+    if (known.empty()) {
+        resultType = "text";
+        return true;
+    }
+    resultType = known.front();
+    const auto numericRank = [](const std::string& type) {
+        if (type == "smallint") return 0;
+        if (type == "integer") return 1;
+        if (type == "bigint") return 2;
+        if (type == "numeric") return 3;
+        if (type == "real") return 4;
+        if (type == "double precision") return 5;
+        return -1;
+    };
+    for (size_t i = 1; i < known.size(); ++i) {
+        const std::string& next = known[i];
+        if (next == resultType) continue;
+        const auto* currentEntry =
+            TypeRegistry::instance().findType(resultType);
+        const auto* nextEntry = TypeRegistry::instance().findType(next);
+        if (!currentEntry || !nextEntry ||
+            currentEntry->category != nextEntry->category) {
+            error = "VALUES types " + resultType + " and " + next +
+                    " cannot be matched";
+            return false;
+        }
+        if (currentEntry->category == TypeCategory::Numeric) {
+            const int currentRank = numericRank(resultType);
+            const int nextRank = numericRank(next);
+            if (currentRank < 0 || nextRank < 0) {
+                error = "VALUES types " + resultType + " and " + next +
+                        " cannot be matched";
+                return false;
+            }
+            if (nextRank > currentRank) resultType = next;
+            continue;
+        }
+        if (currentEntry->category == TypeCategory::String) continue;
+        if (currentEntry->category == TypeCategory::DateTime) {
+            const bool currentTimestamp = resultType == "date" ||
+                resultType == "timestamp" || resultType == "timestamptz";
+            const bool nextTimestamp = next == "date" ||
+                next == "timestamp" || next == "timestamptz";
+            if (currentTimestamp && nextTimestamp) {
+                if (resultType == "timestamptz" || next == "timestamptz")
+                    resultType = "timestamptz";
+                else if (resultType == "timestamp" || next == "timestamp")
+                    resultType = "timestamp";
+                continue;
+            }
+            const bool currentTime =
+                resultType == "time" || resultType == "timetz";
+            const bool nextTime = next == "time" || next == "timetz";
+            if (currentTime && nextTime) {
+                if (next == "timetz") resultType = "timetz";
+                continue;
+            }
+        }
+        error = "VALUES types " + resultType + " and " + next +
+                " cannot be matched";
+        return false;
+    }
+    return true;
+}
 
 std::string ExprHelper::inferResultType(
     const std::string& exprSql,

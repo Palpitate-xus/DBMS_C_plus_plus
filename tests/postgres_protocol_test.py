@@ -789,6 +789,35 @@ def extended_query_describe(sock):
         (b"column2", 0, 0, 25, -1, -1, 0),
     ], values_fields
 
+    multi_values = (
+        b"describe_multi_values\0VALUES (1, 'x'), (2.5, 'y')\0" +
+        struct.pack("!H", 0))
+    sock.sendall(typed(b"P", multi_values) +
+                 typed(b"D", b"Sdescribe_multi_values\0") + typed(b"S"))
+    assert row_description_fields(read_until_ready(sock)) == [
+        (b"column1", 0, 0, 1700, -1, -1, 0),
+        (b"column2", 0, 0, 25, -1, -1, 0),
+    ]
+
+    mixed_unknown_values = (
+        b"describe_mixed_unknown_values\0VALUES (1), ('2'), (NULL)\0" +
+        struct.pack("!H", 0))
+    sock.sendall(typed(b"P", mixed_unknown_values) +
+                 typed(b"D", b"Sdescribe_mixed_unknown_values\0") +
+                 typed(b"S"))
+    assert row_description_fields(read_until_ready(sock)) == [
+        (b"column1", 0, 0, 23, 4, -1, 0)
+    ]
+
+    wide_values = (
+        b"describe_wide_values\0VALUES (2147483648), "
+        b"(9223372036854775808)\0" + struct.pack("!H", 0))
+    sock.sendall(typed(b"P", wide_values) +
+                 typed(b"D", b"Sdescribe_wide_values\0") + typed(b"S"))
+    assert row_description_fields(read_until_ready(sock)) == [
+        (b"column1", 0, 0, 1700, -1, -1, 0)
+    ]
+
     parameter_values = (b"describe_parameter_values\0VALUES ($1)\0" +
                         struct.pack("!H", 1) + struct.pack("!I", 20))
     sock.sendall(typed(b"P", parameter_values) +

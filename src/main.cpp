@@ -1511,116 +1511,12 @@ static bool validateValuesExpression(const string& expression,
     return true;
 }
 
-static bool isUnknownValuesExpression(const string& expression) {
-    const string value = trim(expression);
-    string lower;
-    lower.reserve(value.size());
-    for (char c : value) {
-        lower += static_cast<char>(tolower(static_cast<unsigned char>(c)));
-    }
-    if (lower == "null") return true;
-    size_t index = 0;
-    bool escapeString = false;
-    if (value.size() >= 2 && (value[0] == 'e' || value[0] == 'E') &&
-        value[1] == '\'') {
-        escapeString = true;
-        index = 1;
-    }
-    if (index >= value.size() || value[index] != '\'') return false;
-    ++index;
-    while (index < value.size()) {
-        if (escapeString && value[index] == '\\') {
-            index += std::min<size_t>(2, value.size() - index);
-            continue;
-        }
-        if (value[index] != '\'') {
-            ++index;
-            continue;
-        }
-        if (index + 1 < value.size() && value[index + 1] == '\'') {
-            index += 2;
-            continue;
-        }
-        return index + 1 == value.size();
-    }
-    return false;
-}
-
-static string valuesIntegerLiteralType(const string& expression) {
-    const string value = trim(expression);
-    size_t index = 0;
-    bool negative = false;
-    if (index < value.size() && (value[index] == '+' || value[index] == '-')) {
-        negative = value[index] == '-';
-        ++index;
-    }
-    const size_t digitStart = index;
-    while (index < value.size() &&
-           isdigit(static_cast<unsigned char>(value[index]))) {
-        ++index;
-    }
-    if (digitStart == index || index != value.size()) return {};
-    size_t significantStart = digitStart;
-    while (significantStart < value.size() &&
-           value[significantStart] == '0') {
-        ++significantStart;
-    }
-    const string magnitude = significantStart == value.size()
-        ? "0" : value.substr(significantStart);
-    const auto within = [&](const char* bound) {
-        const size_t boundSize = std::strlen(bound);
-        return magnitude.size() < boundSize ||
-               (magnitude.size() == boundSize && magnitude <= bound);
-    };
-    if (within(negative ? "2147483648" : "2147483647")) return "integer";
-    if (within(negative ? "9223372036854775808" : "9223372036854775807")) {
-        return "bigint";
-    }
-    return "numeric";
-}
-
-static string canonicalValuesType(string type);
-
 static string inferValuesExpressionType(const string& expression) {
-    if (isUnknownValuesExpression(expression)) return "unknown";
-    string lower = trim(expression);
-    for (char& c : lower) {
-        c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-    }
-    if (lower == "current_user" || lower == "session_user" ||
-        lower == "user") {
-        return "name";
-    }
-    if (lower == "current_date") return "date";
-    if (lower == "current_timestamp") return "timestamptz";
-    if (lower == "localtimestamp") return "timestamp";
-    const string integerType = valuesIntegerLiteralType(expression);
-    if (!integerType.empty()) return integerType;
-    return canonicalValuesType(
-        dbms::ExprHelper::inferResultType(expression));
+    return dbms::ExprHelper::inferValuesResultType(expression);
 }
 
 static string canonicalValuesType(string type) {
-    type = trim(type);
-    const size_t modifier = type.find('(');
-    if (modifier != string::npos) type = trim(type.substr(0, modifier));
-    string canonical =
-        dbms::TypeRegistry::instance().normalizeTypeName(type);
-    if (!canonical.empty()) return canonical;
-    for (char& c : type) {
-        c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-    }
-    return type;
-}
-
-static int valuesNumericRank(const string& type) {
-    if (type == "smallint") return 0;
-    if (type == "integer") return 1;
-    if (type == "bigint") return 2;
-    if (type == "numeric") return 3;
-    if (type == "real") return 4;
-    if (type == "double precision") return 5;
-    return -1;
+    return dbms::ExprHelper::canonicalResultTypeName(std::move(type));
 }
 
 static bool isSupportedValuesTarget(const string& type) {
@@ -1637,73 +1533,8 @@ static bool isSupportedValuesTarget(const string& type) {
 static bool resolveValuesColumnType(const vector<string>& inputTypes,
                                     string& resultType,
                                     string& error) {
-    vector<string> known;
-    for (const auto& input : inputTypes) {
-        if (!input.empty() && input != "unknown") {
-            known.push_back(canonicalValuesType(input));
-        }
-    }
-    if (known.empty()) {
-        resultType = "text";
-        return true;
-    }
-    resultType = known.front();
-    for (size_t i = 1; i < known.size(); ++i) {
-        const string& next = known[i];
-        if (next == resultType) continue;
-
-        const auto* currentEntry =
-            dbms::TypeRegistry::instance().findType(resultType);
-        const auto* nextEntry =
-            dbms::TypeRegistry::instance().findType(next);
-        if (!currentEntry || !nextEntry ||
-            currentEntry->category != nextEntry->category) {
-            error = "VALUES types " + resultType + " and " + next +
-                    " cannot be matched";
-            return false;
-        }
-        if (currentEntry->category == dbms::TypeCategory::Numeric) {
-            const int currentRank = valuesNumericRank(resultType);
-            const int nextRank = valuesNumericRank(next);
-            if (currentRank < 0 || nextRank < 0) {
-                error = "VALUES types " + resultType + " and " + next +
-                        " cannot be matched";
-                return false;
-            }
-            if (nextRank > currentRank) resultType = next;
-            continue;
-        }
-        if (currentEntry->category == dbms::TypeCategory::String) {
-            continue;
-        }
-        if (currentEntry->category == dbms::TypeCategory::DateTime) {
-            const bool currentTimestamp =
-                resultType == "date" || resultType == "timestamp" ||
-                resultType == "timestamptz";
-            const bool nextTimestamp =
-                next == "date" || next == "timestamp" ||
-                next == "timestamptz";
-            if (currentTimestamp && nextTimestamp) {
-                if (resultType == "timestamptz" || next == "timestamptz") {
-                    resultType = "timestamptz";
-                } else if (resultType == "timestamp" || next == "timestamp") {
-                    resultType = "timestamp";
-                }
-                continue;
-            }
-            const bool currentTime =
-                resultType == "time" || resultType == "timetz";
-            const bool nextTime = next == "time" || next == "timetz";
-            if (currentTime && nextTime) {
-                if (next == "timetz") resultType = "timetz";
-                continue;
-            }
-        }
-        error = "VALUES types " + resultType + " and " + next +
-                " cannot be matched";
-        return false;
-    }
-    return true;
+    return dbms::ExprHelper::resolveValuesResultType(
+        inputTypes, resultType, error);
 }
 
 static bool executeValuesStatement(const string& sql, const Session& session) {

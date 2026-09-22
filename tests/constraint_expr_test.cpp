@@ -191,6 +191,7 @@ static void test_generated_identity() {
 }
 
 int main() {
+    dbms::TypeRegistry::instance().bootstrap();
     const std::map<std::string, std::string> resultTypes = {
         {"i", "integer"}, {"n", "numeric"}, {"d", "date"},
         {"v", "varchar"}, {"b", "blob"}
@@ -275,7 +276,16 @@ int main() {
     assert(dbms::ExprHelper::inferResultType(
                "array[1,2,3] @> array[1,2]") == "boolean");
 
-    dbms::TypeRegistry::instance().bootstrap();
+    assert(dbms::ExprHelper::inferValuesResultType("'text'") == "unknown");
+    assert(dbms::ExprHelper::inferValuesResultType("2147483648") == "bigint");
+    assert(dbms::ExprHelper::inferValuesResultType("9223372036854775808") ==
+           "numeric");
+    std::string valuesType;
+    std::string valuesError;
+    assert(dbms::ExprHelper::resolveValuesResultType(
+        {"integer", "numeric", "unknown"}, valuesType, valuesError));
+    assert(valuesType == "numeric");
+
     test_expr_helper_basic();
     test_default_literal();
     test_default_expression();
