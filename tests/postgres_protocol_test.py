@@ -747,6 +747,38 @@ def extended_query_describe(sock):
     assert data_row_values(simple_query(
         sock, "SELECT id FROM t WHERE id = 909")) == []
 
+    returning_parse = (
+        b"describe_returning\0INSERT INTO t VALUES (910) "
+        b"RETURNING id AS inserted_id\0" + struct.pack("!H", 0))
+    sock.sendall(typed(b"P", returning_parse) +
+                 typed(b"D", b"Sdescribe_returning\0") + typed(b"S"))
+    returning_messages = read_until_ready(sock)
+    returning_fields = row_description_fields(returning_messages)
+    assert len(returning_fields) == 1 and returning_fields[0][0] == b"inserted_id", returning_fields
+    assert returning_fields[0][1] != 0 and returning_fields[0][2:5] == (1, 23, 4), returning_fields
+    assert data_row_values(simple_query(
+        sock, "SELECT id FROM t WHERE id = 910")) == []
+
+    update_returning = (
+        b"describe_update_returning\0UPDATE t SET id = 911 WHERE id = 1 "
+        b"RETURNING id + 1 AS next_id\0" + struct.pack("!H", 0))
+    sock.sendall(typed(b"P", update_returning) +
+                 typed(b"D", b"Sdescribe_update_returning\0") + typed(b"S"))
+    assert row_description_fields(read_until_ready(sock)) == [
+        (b"next_id", 0, 0, 23, 4, -1, 0)
+    ]
+
+    delete_returning = (
+        b"describe_delete_returning\0DELETE FROM t WHERE id = 1 RETURNING *\0" +
+        struct.pack("!H", 0))
+    sock.sendall(typed(b"P", delete_returning) +
+                 typed(b"D", b"Sdescribe_delete_returning\0") + typed(b"S"))
+    delete_fields = row_description_fields(read_until_ready(sock))
+    assert len(delete_fields) == 1 and delete_fields[0][0] == b"id", delete_fields
+    assert delete_fields[0][1] != 0 and delete_fields[0][2:5] == (1, 23, 4), delete_fields
+    assert data_row_values(simple_query(
+        sock, "SELECT id FROM t WHERE id = 1")) == [[b"1"]]
+
 
 def extended_query_error_recovery(sock):
     # A Parse error puts the extended-query protocol into the ignore-until-Sync

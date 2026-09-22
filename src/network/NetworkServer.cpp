@@ -1359,33 +1359,67 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
 }
 
 // Describe must not execute the statement: even a SELECT can call a function
-// with side effects.  Resolve the common, statically knowable projections
+// with side effects. Resolve statically knowable SELECT/RETURNING projections
 // against the catalog and leave other query shapes to the execution path.
-bool describePreparedSelect(const std::string& sql, Session& session,
+bool describePreparedResult(const std::string& sql, Session& session,
                             std::vector<PgColumnDescription>& columns,
                             const std::vector<uint32_t>& parameterOids = {}) {
-    if (SQLParser::classify(sql) != SqlCommand::Select) return false;
     SQLParser parser;
     ParseResult parsed = parser.parse(sql);
     if (!parsed.isValid()) return false;
     const auto* select = dynamic_cast<const SelectStmt*>(parsed.stmt.get());
-    if (!select || !select->ctes.empty() || select->setOp != SetOp::None ||
-        !select->valuesRows.empty()) return false;
-
+    const std::vector<SelectItem>* projections = nullptr;
+    std::string sourceName;
+    std::string sourceAlias;
+    if (select) {
+        if (!select->ctes.empty() || select->setOp != SetOp::None ||
+            !select->valuesRows.empty()) return false;
+        projections = &select->selectList;
+        if (select->fromClause) {
+            if (select->fromClause->type != FromItem::Type::Table) return false;
+            sourceName = select->fromClause->tableName;
+            sourceAlias = select->fromClause->alias;
+        }
+    } else if (const auto* insert =
+                   dynamic_cast<const InsertStmt*>(parsed.stmt.get())) {
+        if (insert->returning.empty() ||
+            insert->returningOptions.oldAliased ||
+            insert->returningOptions.newAliased) return false;
+        projections = &insert->returning;
+        sourceName = insert->tableName;
+    } else if (const auto* update =
+                   dynamic_cast<const UpdateStmt*>(parsed.stmt.get())) {
+        if (update->returning.empty() || update->fromClause ||
+            update->returningOptions.oldAliased ||
+            update->returningOptions.newAliased) return false;
+        projections = &update->returning;
+        sourceName = update->tableName;
+        sourceAlias = update->alias;
+    } else if (const auto* deletion =
+                   dynamic_cast<const DeleteStmt*>(parsed.stmt.get())) {
+        if (deletion->returning.empty() || deletion->usingClause ||
+            deletion->returningOptions.oldAliased ||
+            deletion->returningOptions.newAliased) return false;
+        projections = &deletion->returning;
+        sourceName = deletion->tableName;
+        sourceAlias = deletion->alias;
+    } else {
+        return false;
+    }
+    if (!projections || projections->empty()) return false;
     std::string relation;
     TableSchema schema;
     std::map<std::string, std::string> typeHints;
-    if (select->fromClause) {
-        if (select->fromClause->type != FromItem::Type::Table) return false;
-        relation = resolveTableName(session, select->fromClause->tableName);
+    if (!sourceName.empty()) {
+        relation = resolveTableName(session, sourceName);
         if (!g_engine.tableExists(session.currentDB, relation)) return false;
         schema = g_engine.getTableSchema(session.currentDB, relation);
         for (size_t i = 0; i < schema.len; ++i) {
             const Column& column = schema.cols[i];
             typeHints[column.dataName] = column.dataType;
             typeHints[relation + "." + column.dataName] = column.dataType;
-            if (!select->fromClause->alias.empty()) {
-                typeHints[select->fromClause->alias + "." + column.dataName] =
+            if (!sourceAlias.empty()) {
+                typeHints[sourceAlias + "." + column.dataName] =
                     column.dataType;
             }
         }
@@ -1404,11 +1438,10 @@ bool describePreparedSelect(const std::string& sql, Session& session,
     };
     const auto qualifierMatches = [&](const ColumnRefExpr& reference) {
         if (reference.table.empty()) return true;
-        const std::string source = select->fromClause->alias.empty()
-            ? relation : select->fromClause->alias;
+        const std::string source = sourceAlias.empty() ? relation : sourceAlias;
         return lowerProtocolText(reference.table) == lowerProtocolText(source);
     };
-    for (const auto& item : select->selectList) {
+    for (const auto& item : *projections) {
         if (!item.expr) return false;
         const auto* literal = dynamic_cast<const LiteralExpr*>(item.expr.get());
         const auto* reference = dynamic_cast<const ColumnRefExpr*>(item.expr.get());
@@ -4464,7 +4497,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 }
                 std::vector<PgColumnDescription> columns;
                 const bool hasColumns =
-                    describePreparedSelect(statementIt->second, session,
+                    describePreparedResult(statementIt->second, session,
                                            columns, oidIt->second);
                 if (!protocol.sendParameterDescription(oidIt->second) ||
                     !(hasColumns ? protocol.sendRowDescription(columns)
@@ -4481,7 +4514,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     continue;
                 }
                 std::vector<PgColumnDescription> columns;
-                if (!describePreparedSelect(
+                if (!describePreparedResult(
                         portalIt->second.preparedSql, session, columns,
                         portalIt->second.parameterOids)) {
                     if (!protocol.sendNoData()) extendedQueryError = true;
