@@ -1401,8 +1401,11 @@ bool describePreparedResult(const std::string& sql, Session& session,
                 if (!row[i]) return false;
                 const std::string expression = row[i]->toString();
                 if (expression.empty()) return false;
-                std::string typeName =
-                    ExprHelper::inferValuesResultType(expression);
+                const auto* literal =
+                    dynamic_cast<const LiteralExpr*>(row[i].get());
+                std::string typeName = literal && !literal->typeName.empty()
+                    ? ExprHelper::canonicalResultTypeName(literal->typeName)
+                    : ExprHelper::inferValuesResultType(expression);
                 if (expression.size() > 1 && expression.front() == '$' &&
                     std::all_of(expression.begin() + 1, expression.end(),
                                 [](unsigned char ch) {
@@ -1558,7 +1561,9 @@ bool describePreparedResult(const std::string& sql, Session& session,
         shape.columns.push_back("\x1f" "expression_" +
                                 std::to_string(shape.columns.size()));
         const std::string inferredType =
-            ExprHelper::inferResultType(expression, typeHints);
+            literal && !literal->typeName.empty()
+                ? ExprHelper::canonicalResultTypeName(literal->typeName)
+                : ExprHelper::inferResultType(expression, typeHints);
         shape.columnTypes.push_back(inferredType);
         std::string outputName = item.alias;
         if (outputName.empty()) {

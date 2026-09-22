@@ -721,6 +721,14 @@ def extended_query_describe(sock):
         (b"?column?", 0, 0, 23, 4, -1, 0)
     ], unnamed_fields
 
+    typed_date = (b"describe_typed_date\0SELECT DATE '2024-01-01'\0" +
+                  struct.pack("!H", 0))
+    sock.sendall(typed(b"P", typed_date) +
+                 typed(b"D", b"Sdescribe_typed_date\0") + typed(b"S"))
+    assert row_description_fields(read_until_ready(sock)) == [
+        (b"date", 0, 0, 1082, 4, -1, 0)
+    ]
+
     for statement_name, query, expected_name, expected_oid, expected_size in (
             (b"describe_sum", b"SELECT 1 + 2", b"?column?", 23, 4),
             (b"describe_function", b"SELECT lower('X')", b"lower", 25, -1),
@@ -816,6 +824,18 @@ def extended_query_describe(sock):
                  typed(b"D", b"Sdescribe_wide_values\0") + typed(b"S"))
     assert row_description_fields(read_until_ready(sock)) == [
         (b"column1", 0, 0, 1700, -1, -1, 0)
+    ]
+
+    typed_temporal_values = (
+        b"describe_typed_temporal_values\0"
+        b"VALUES (DATE '2024-01-01'), "
+        b"(TIMESTAMP '2024-01-02 03:04:05')\0" +
+        struct.pack("!H", 0))
+    sock.sendall(typed(b"P", typed_temporal_values) +
+                 typed(b"D", b"Sdescribe_typed_temporal_values\0") +
+                 typed(b"S"))
+    assert row_description_fields(read_until_ready(sock)) == [
+        (b"column1", 0, 0, 1114, 8, -1, 0)
     ]
 
     parameter_values = (b"describe_parameter_values\0VALUES ($1)\0" +
