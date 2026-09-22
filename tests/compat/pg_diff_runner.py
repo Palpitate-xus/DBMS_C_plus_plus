@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """P0-16 differential compatibility runner.
 
-Drives the same SQL case files against a reference PostgreSQL (`pgref`
-container) and this DBMS through their wire protocols, comparing decoded
+Drives the same SQL case files against a PostgreSQL 18.6 reference and this
+DBMS through their wire protocols, comparing decoded
 rows without changing values, SQLSTATE, and optionally column headers.
 
 Usage:
@@ -33,6 +33,7 @@ import uuid
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CONTAINER = os.environ.get("PGREF_CONTAINER", "pgref")
 DBMS_MAIN = os.environ.get("DBMS_MAIN", os.path.join(REPO, "dbms_main"))
+REFERENCE_VERSION_NUM = "180006"
 
 
 def load_protocol_client():
@@ -369,6 +370,19 @@ def decode_wire_result(messages, include_types=False):
     return decoded + (type_oids,) if include_types else decoded
 
 
+def verify_reference_version(client, sock):
+    """Reject a reference from another release before trusting its results."""
+    rows, state, message, _, _, _ = decode_wire_result(
+        client.simple_query(sock, "SHOW server_version_num"),
+        include_types=True)
+    if state is not None or rows != [[REFERENCE_VERSION_NUM]]:
+        observed = rows[0][0] if state is None and len(rows) == 1 and \
+            len(rows[0]) == 1 else message or repr(rows)
+        raise RuntimeError(
+            "reference PostgreSQL must be 18.6 (server_version_num " +
+            REFERENCE_VERSION_NUM + "); observed " + str(observed))
+
+
 def reference_multi(statements, client=None):
     """Execute a case through PostgreSQL's wire protocol in one session."""
     if client is None:
@@ -381,6 +395,7 @@ def reference_multi(statements, client=None):
         # server_version, TimeZone and version-dependent extra fields.
         startup_reference = getattr(client, "startup_reference", client.startup)
         startup_reference(sock, user, database, password=password)
+        verify_reference_version(client, sock)
         results = []
         for sql in statements:
             statement = describe_statement(sql)
@@ -576,6 +591,13 @@ def main():
     args = ap.parse_args()
 
     client = load_protocol_client()
+
+    # Check the oracle before starting a local server or comparing SQL.
+    try:
+        reference_multi([], client)
+    except RuntimeError as exc:
+        print("reference preflight failed: " + str(exc), file=sys.stderr)
+        return 2
 
     server = start_ours(client)
     try:

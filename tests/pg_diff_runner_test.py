@@ -279,7 +279,8 @@ class DifferentialSessionTest(unittest.TestCase):
         with mock.patch.object(RUNNER, "_reference_connection_settings",
                                return_value=settings), \
              mock.patch.object(RUNNER.socket, "create_connection",
-                               return_value=sock) as connect:
+                               return_value=sock) as connect, \
+             mock.patch.object(RUNNER, "verify_reference_version") as verify:
             results = RUNNER.reference_multi(["BEGIN", "SELECT 1"], client)
         connect.assert_called_once_with(("127.0.0.1", 55432), timeout=15)
         self.assertEqual(len(client.started), 1)
@@ -288,6 +289,7 @@ class DifferentialSessionTest(unittest.TestCase):
         self.assertEqual([result[2] for result in results],
                          ["BEGIN", "SELECT 1"])
         self.assertEqual([result[5] for result in results], [[], []])
+        verify.assert_called_once_with(client, sock)
         sock.close.assert_called_once()
 
     def test_wire_reference_uses_reference_startup_policy(self):
@@ -311,10 +313,38 @@ class DifferentialSessionTest(unittest.TestCase):
                 RUNNER, "_reference_connection_settings",
                 return_value=("127.0.0.1", 55432, "postgres", "postgres", "secret")), \
              mock.patch.object(RUNNER.socket, "create_connection",
-                               return_value=sock):
+                               return_value=sock), \
+             mock.patch.object(RUNNER, "verify_reference_version"):
             RUNNER.reference_multi(["SELECT 1"], client)
         self.assertEqual(client.reference_startups, 1)
         self.assertEqual(client.dbms_startups, 0)
+
+    def test_reference_version_requires_exact_18_6(self):
+        client = mock.Mock()
+        sock = mock.Mock()
+        with mock.patch.object(RUNNER, "decode_wire_result",
+                               return_value=([['180006']], None, '',
+                                             ['server_version_num'], 'SHOW', [25])):
+            RUNNER.verify_reference_version(client, sock)
+        client.simple_query.assert_called_once_with(
+            sock, "SHOW server_version_num")
+
+        with mock.patch.object(RUNNER, "decode_wire_result",
+                               return_value=([['170002']], None, '',
+                                             ['server_version_num'], 'SHOW', [25])):
+            with self.assertRaisesRegex(RuntimeError, "must be 18.6"):
+                RUNNER.verify_reference_version(client, sock)
+
+    def test_wrong_reference_stops_before_local_server_start(self):
+        with mock.patch.object(RUNNER, "load_protocol_client",
+                               return_value=mock.Mock()), \
+             mock.patch.object(RUNNER, "reference_multi",
+                               side_effect=RuntimeError("must be 18.6")), \
+             mock.patch.object(RUNNER, "start_ours") as start, \
+             mock.patch.object(RUNNER.sys, "argv", ["pg_diff_runner.py"]), \
+             mock.patch.object(RUNNER.sys, "stderr"):
+            self.assertEqual(RUNNER.main(), 2)
+        start.assert_not_called()
 
     def test_command_tag_mismatch_is_reported(self):
         reference = [([['1']], None, "SELECT 1", "", ["?column?"])]

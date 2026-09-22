@@ -1309,9 +1309,12 @@ SHOW 入口已经删除。该模式是会话级设置，进入事务后不可切
 ### 25.2 差分兼容测试（P0-16）
 
 `tests/compat/pg_diff_runner.py` 将 `tests/compat/cases/*.sql` 中的同一组
-语句分别发往参考 PostgreSQL（docker 容器 `pgref`，psql `-A -t` + NULL
-标记）和本 DBMS（wire protocol），规范化不稳定字段后逐条比对行数据与
-SQLSTATE。任何差异必须显式加入 allowlist 并注明原因与过期版本。
+语句分别发往 PostgreSQL 18.6 参考实例（默认读取 Docker 容器 `pgref` 的
+连接信息，也可设置 `PGREF_HOST` / `PGREF_PORT` / `PGREF_PASSWORD`）和本
+DBMS。两端都使用 wire protocol，比较无损行数据、NULL、列名/type OID、
+SQLSTATE 和 command tag。运行器在启动本地 DBMS 前读取参考端
+`server_version_num`，仅接受 `180006`；旧版本结果不能充当 18.6 验收。
+当前运行器无 allowlist，任何差异都会直接报错。
 
 当前覆盖（69 个用例文件）：算术、字符串函数、布尔/NULL 三值逻辑
 （含 `NOT NULL`→NULL 三值逻辑、`NULL::text IS NULL` 的 `::` 后缀 cast
