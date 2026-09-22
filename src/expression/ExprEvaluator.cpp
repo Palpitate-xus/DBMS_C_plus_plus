@@ -1,4 +1,5 @@
 #include "ExprEvaluator.h"
+#include "expr_helper.h"
 #include "commands/TableManage.h"
 #include "common/DateType.h"
 #include "common/BooleanCodec.h"
@@ -1510,7 +1511,7 @@ ExprValue ExprEvaluator::evalLiteral(const LiteralExpr* e) const {
         if (raw.find('.') != std::string::npos ||
             raw.find_first_of("eE") != std::string::npos)
             return ExprValue("numeric", raw, false);
-        return ExprValue("integer", raw, false);
+        return ExprValue(ExprHelper::inferValuesResultType(raw), raw, false);
     }
 
     return ExprValue("character varying", raw, false);
@@ -1547,6 +1548,21 @@ ExprValue ExprEvaluator::evalUnaryOp(const UnaryOpExpr* e, const RowContext& ctx
     if (op == "-") {
         if (v.isNull) return v;
         if (v.value.empty()) return ExprValue(v.typeName, "0", false);
+        // The positive spelling of INT_MIN needs a wider type, but the
+        // negative literal itself fits int4/int8. Resolve the signed token
+        // before applying ordinary integer negation and range checks.
+        if (const auto* literal =
+                dynamic_cast<const LiteralExpr*>(e->operand.get());
+            literal && literal->typeName.empty() &&
+            isNumericLiteral(literal->value) &&
+            literal->value.find_first_of(".eE") == std::string::npos) {
+            const std::string signedValue = "-" + literal->value;
+            const std::string type =
+                ExprHelper::inferValuesResultType(signedValue);
+            const bool zero =
+                literal->value.find_first_not_of('0') == std::string::npos;
+            return ExprValue(type, zero ? "0" : signedValue, false);
+        }
         if (toLower(v.typeName) == "money") {
             const auto money = tryParseMoney(v.value);
             if (!money || money->minorUnits() ==

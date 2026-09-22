@@ -166,7 +166,8 @@ std::string inferAstResultType(
         if (value == "true" || value == "false") return "boolean";
         if (looksLikeNumber(literal->value))
             return literal->value.find_first_of(".eE") == std::string::npos
-                ? "integer" : "numeric";
+                ? ExprHelper::inferValuesResultType(literal->value)
+                : "numeric";
         return "unknown";
     }
     if (const auto* column = dynamic_cast<const ColumnRefExpr*>(expression)) {
@@ -183,6 +184,16 @@ std::string inferAstResultType(
     if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expression)) {
         const std::string op = toLower(unary->op);
         if (op == "not" || op.find("is ") == 0) return "boolean";
+        if (op == "-") {
+            if (const auto* literal = dynamic_cast<const LiteralExpr*>(
+                    unary->operand.get());
+                literal && literal->typeName.empty() &&
+                looksLikeNumber(literal->value) &&
+                literal->value.find_first_of(".eE") == std::string::npos) {
+                return ExprHelper::inferValuesResultType(
+                    "-" + literal->value);
+            }
+        }
         return inferAstResultType(unary->operand.get(), typeHints);
     }
     if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression)) {

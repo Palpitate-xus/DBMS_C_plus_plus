@@ -48,6 +48,24 @@ def main():
         assert type_oids == [23, 1700, 16, 1082, 1114, 19, 2206], type_oids
         assert command_tag == "SELECT 1", command_tag
 
+        integers = runner.decode_wire_result(
+            client.simple_query(
+                server["sock"],
+                "SELECT 2147483647 AS i4, 2147483648 AS i8, "
+                "9223372036854775808 AS n, -2147483648 AS neg_i4, "
+                "-9223372036854775808 AS neg_i8, "
+                "-9223372036854775809 AS neg_n;"),
+            include_types=True)
+        values, state, message, headers, tag, type_oids = integers
+        assert state is None, (state, message)
+        assert values == [[
+            "2147483647", "2147483648", "9223372036854775808",
+            "-2147483648", "-9223372036854775808",
+            "-9223372036854775809",
+        ]], values
+        assert type_oids == [23, 20, 1700, 23, 20, 1700], type_oids
+        assert tag == "SELECT 1", tag
+
         decoded = runner.decode_wire_result(
             client.simple_query(
                 server["sock"],

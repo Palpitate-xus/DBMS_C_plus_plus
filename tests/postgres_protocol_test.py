@@ -729,6 +729,18 @@ def extended_query_describe(sock):
         (b"date", 0, 0, 1082, 4, -1, 0)
     ]
 
+    for statement_name, number, expected_oid, expected_size in (
+            (b"describe_int8_literal", b"2147483648", 20, 8),
+            (b"describe_numeric_literal", b"9223372036854775808", 1700, -1),
+            (b"describe_negative_int4", b"-2147483648", 23, 4)):
+        parse = (statement_name + b"\0SELECT " + number + b"\0" +
+                 struct.pack("!H", 0))
+        sock.sendall(typed(b"P", parse) +
+                     typed(b"D", b"S" + statement_name + b"\0") + typed(b"S"))
+        assert row_description_fields(read_until_ready(sock)) == [
+            (b"?column?", 0, 0, expected_oid, expected_size, -1, 0)
+        ]
+
     for statement_name, query, expected_name, expected_oid, expected_size in (
             (b"describe_sum", b"SELECT 1 + 2", b"?column?", 23, 4),
             (b"describe_function", b"SELECT lower('X')", b"lower", 25, -1),

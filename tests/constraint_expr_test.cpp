@@ -275,6 +275,19 @@ int main() {
            "double precision");
     assert(dbms::ExprHelper::inferResultType(
                "array[1,2,3] @> array[1,2]") == "boolean");
+    assert(dbms::ExprHelper::inferResultType("2147483648") == "bigint");
+    assert(dbms::ExprHelper::inferResultType("9223372036854775808") ==
+           "numeric");
+    assert(dbms::ExprHelper::inferResultType("-2147483648") == "integer");
+    assert(dbms::ExprHelper::inferResultType("-9223372036854775808") ==
+           "bigint");
+    assert(dbms::ExprHelper::inferResultType("-9223372036854775809") ==
+           "numeric");
+    const auto signedBoundary =
+        dbms::ExprHelper::evalString("-9223372036854775808", {});
+    assert(signedBoundary.ok && !signedBoundary.isNull &&
+           signedBoundary.typeName == "bigint" &&
+           signedBoundary.value == "-9223372036854775808");
 
     assert(dbms::ExprHelper::inferValuesResultType("'text'") == "unknown");
     assert(dbms::ExprHelper::inferValuesResultType("2147483648") == "bigint");
