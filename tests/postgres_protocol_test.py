@@ -779,6 +779,24 @@ def extended_query_describe(sock):
     assert data_row_values(simple_query(
         sock, "SELECT id FROM t WHERE id = 1")) == [[b"1"]]
 
+    values_parse = (b"describe_values\0VALUES (1, 'x')\0" +
+                    struct.pack("!H", 0))
+    sock.sendall(typed(b"P", values_parse) +
+                 typed(b"D", b"Sdescribe_values\0") + typed(b"S"))
+    values_fields = row_description_fields(read_until_ready(sock))
+    assert values_fields == [
+        (b"column1", 0, 0, 23, 4, -1, 0),
+        (b"column2", 0, 0, 25, -1, -1, 0),
+    ], values_fields
+
+    parameter_values = (b"describe_parameter_values\0VALUES ($1)\0" +
+                        struct.pack("!H", 1) + struct.pack("!I", 20))
+    sock.sendall(typed(b"P", parameter_values) +
+                 typed(b"D", b"Sdescribe_parameter_values\0") + typed(b"S"))
+    assert row_description_fields(read_until_ready(sock)) == [
+        (b"column1", 0, 0, 20, 8, -1, 0)
+    ]
+
     merge_returning = (
         b"describe_merge_returning\0MERGE INTO t AS dst USING t AS src "
         b"ON dst.id = src.id WHEN MATCHED THEN DO NOTHING "

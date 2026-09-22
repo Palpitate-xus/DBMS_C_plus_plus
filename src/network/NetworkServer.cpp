@@ -1368,6 +1368,38 @@ bool describePreparedResult(const std::string& sql, Session& session,
     ParseResult parsed = parser.parse(sql);
     if (!parsed.isValid()) return false;
     const auto* select = dynamic_cast<const SelectStmt*>(parsed.stmt.get());
+    if (select && select->command == SqlCommand::Values) {
+        if (select->valuesRows.size() != 1 ||
+            select->valuesRows.front().empty()) return false;
+        QueryResult shape;
+        std::vector<uint32_t> directParameterOids;
+        const auto& row = select->valuesRows.front();
+        for (size_t i = 0; i < row.size(); ++i) {
+            if (!row[i]) return false;
+            const std::string expression = row[i]->toString();
+            if (expression.empty()) return false;
+            shape.columns.push_back("column" + std::to_string(i + 1));
+            shape.columnTypes.push_back(
+                ExprHelper::inferResultType(expression));
+            uint32_t parameterOid = 0;
+            if (expression.size() > 1 && expression.front() == '$' &&
+                std::all_of(expression.begin() + 1, expression.end(),
+                            [](unsigned char ch) { return std::isdigit(ch); })) {
+                const unsigned long index = std::stoul(expression.substr(1));
+                if (index > 0 && index <= parameterOids.size())
+                    parameterOid = parameterOids[index - 1];
+            }
+            directParameterOids.push_back(parameterOid);
+        }
+        columns = describeProtocolColumns(shape, sql, session);
+        for (size_t i = 0; i < columns.size(); ++i) {
+            if (directParameterOids[i] == 0) continue;
+            columns[i].typeOid = directParameterOids[i];
+            columns[i].typeSize =
+                protocolTypeSize(columns[i].typeOid, Column{});
+        }
+        return !columns.empty();
+    }
     const std::vector<SelectItem>* projections = nullptr;
     std::string sourceName;
     std::string sourceAlias;
