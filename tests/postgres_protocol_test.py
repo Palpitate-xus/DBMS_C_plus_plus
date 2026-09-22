@@ -826,6 +826,34 @@ def extended_query_describe(sock):
         (b"column1", 0, 0, 20, 8, -1, 0)
     ]
 
+    # A declared int8 parameter must retain that type across every VALUES
+    # row, even when its bound text happens to fit in int4.
+    multi_parameter_parse = (
+        b"describe_multi_parameter_values\0VALUES ($1), ($1), (2)\0" +
+        struct.pack("!H", 1) + struct.pack("!I", 20))
+    multi_parameter_bind = (
+        b"multi_parameter_values_portal\0describe_multi_parameter_values\0" +
+        struct.pack("!H", 0) + struct.pack("!H", 1) +
+        struct.pack("!i", 1) + b"7" + struct.pack("!H", 0))
+    sock.sendall(
+        typed(b"P", multi_parameter_parse) +
+        typed(b"D", b"Sdescribe_multi_parameter_values\0") +
+        typed(b"B", multi_parameter_bind) +
+        typed(b"D", b"Pmulti_parameter_values_portal\0") +
+        typed(b"E", b"multi_parameter_values_portal\0" +
+              struct.pack("!I", 0)) + typed(b"S"))
+    multi_parameter_messages = read_until_ready(sock)
+    multi_parameter_fields = [
+        row_description_fields([message]) for message in
+        multi_parameter_messages if message[0] == b"T"]
+    assert multi_parameter_fields == [
+        [(b"column1", 0, 0, 20, 8, -1, 0)],
+        [(b"column1", 0, 0, 20, 8, -1, 0)],
+    ], multi_parameter_messages
+    assert data_row_values(multi_parameter_messages) == [
+        [b"7"], [b"7"], [b"2"]
+    ], multi_parameter_messages
+
     merge_returning = (
         b"describe_merge_returning\0MERGE INTO t AS dst USING t AS src "
         b"ON dst.id = src.id WHEN MATCHED THEN DO NOTHING "

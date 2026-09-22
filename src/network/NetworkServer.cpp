@@ -913,6 +913,26 @@ std::string protocolParameterLiteral(uint32_t typeOid,
     return quoteProtocolText(value, error);
 }
 
+// These types can be represented as SQL casts in the bare VALUES execution
+// path.  Keeping the cast on a bound parameter preserves its declared type
+// when VALUES chooses a common type across rows.
+const char* valuesParameterCastType(uint32_t typeOid) {
+    switch (typeOid) {
+        case 16: return "boolean";
+        case 20: return "bigint";
+        case 21: return "smallint";
+        case 23: return "integer";
+        case 25: return "text";
+        case 700: return "real";
+        case 701: return "double precision";
+        case 1082: return "date";
+        case 1114: return "timestamp";
+        case 1184: return "timestamptz";
+        case 1700: return "numeric";
+        default: return nullptr;
+    }
+}
+
 static const char* protocolParameterErrorSqlstate(
     const std::string& message) {
     if (message.rfind("invalid binary input", 0) == 0 ||
@@ -1374,14 +1394,33 @@ bool describePreparedResult(const std::string& sql, Session& session,
         const size_t width = select->valuesRows.front().size();
         QueryResult shape;
         std::vector<std::vector<std::string>> inputTypes(width);
+        std::vector<uint32_t> directParameterOids(width, 0);
         for (const auto& row : select->valuesRows) {
             if (row.size() != width) return false;
             for (size_t i = 0; i < width; ++i) {
                 if (!row[i]) return false;
                 const std::string expression = row[i]->toString();
                 if (expression.empty()) return false;
-                inputTypes[i].push_back(
-                    ExprHelper::inferValuesResultType(expression));
+                std::string typeName =
+                    ExprHelper::inferValuesResultType(expression);
+                if (expression.size() > 1 && expression.front() == '$' &&
+                    std::all_of(expression.begin() + 1, expression.end(),
+                                [](unsigned char ch) {
+                                    return std::isdigit(ch);
+                                })) {
+                    const unsigned long index = std::stoul(expression.substr(1));
+                    if (index == 0 || index > parameterOids.size()) return false;
+                    const uint32_t parameterOid = parameterOids[index - 1];
+                    if (const char* castType =
+                            valuesParameterCastType(parameterOid)) {
+                        typeName = castType;
+                    } else if (select->valuesRows.size() > 1) {
+                        return false;
+                    }
+                    if (select->valuesRows.size() == 1)
+                        directParameterOids[i] = parameterOid;
+                }
+                inputTypes[i].push_back(std::move(typeName));
             }
         }
         for (size_t i = 0; i < width; ++i) {
@@ -1394,18 +1433,9 @@ bool describePreparedResult(const std::string& sql, Session& session,
         }
         columns = describeProtocolColumns(shape, sql, session);
         if (select->valuesRows.size() == 1) {
-            const auto& row = select->valuesRows.front();
             for (size_t i = 0; i < columns.size(); ++i) {
-                const std::string expression = row[i]->toString();
-                if (expression.size() <= 1 || expression.front() != '$' ||
-                    !std::all_of(expression.begin() + 1, expression.end(),
-                                 [](unsigned char ch) {
-                                     return std::isdigit(ch);
-                                 })) continue;
-                const unsigned long index = std::stoul(expression.substr(1));
-                if (index == 0 || index > parameterOids.size() ||
-                    parameterOids[index - 1] == 0) continue;
-                columns[i].typeOid = parameterOids[index - 1];
+                if (directParameterOids[i] == 0) continue;
+                columns[i].typeOid = directParameterOids[i];
                 columns[i].typeSize =
                     protocolTypeSize(columns[i].typeOid, Column{});
             }
@@ -4203,6 +4233,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             }
             const std::string& preparedSql = statementIt->second;
             const std::vector<uint32_t>& preparedParameterTypes = oidIt->second;
+            const bool bareValues = firstSqlKeyword(preparedSql) == "values";
             if (offset + 2 > message.payload.size()) {
                 protocol.sendErrorResponse("ERROR", "08P01", "malformed Bind message");
                 extendedQueryError = true;
@@ -4291,6 +4322,13 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                         break;
                     }
                     literals.push_back(std::move(literal));
+                }
+                if (bareValues) {
+                    if (const char* castType =
+                            valuesParameterCastType(preparedParameterTypes[i])) {
+                        literals.back() = "CAST(" + literals.back() +
+                            " AS " + castType + ")";
+                    }
                 }
             }
             if (bindError) {
