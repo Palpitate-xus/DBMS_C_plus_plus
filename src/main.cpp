@@ -6956,7 +6956,8 @@ static std::string inferSubQueryResultType(
 // clause there is no row namespace at all, so reject column references at
 // binding time instead of allowing them to become NULL (or COALESCE defaults).
 static bool validateFromlessColumnBindings(const string& expression,
-                                           string& error, string& sqlState) {
+                                           string& error, string& sqlState,
+                                           const string& visibleQualifier = "") {
     dbms::SQLParser parser;
     const auto parsed = parser.parse("SELECT " + expression);
     const auto* select = parsed.success
@@ -6977,6 +6978,14 @@ static bool validateFromlessColumnBindings(const string& expression,
                     for (char& c : name) {
                         c = static_cast<char>(
                             tolower(static_cast<unsigned char>(c)));
+                    }
+                    if (!visibleQualifier.empty()) {
+                        if (column->table.empty() ||
+                            (column->schema.empty() &&
+                             toLower(column->table) ==
+                                 toLower(visibleQualifier))) return;
+                        unbound = column;
+                        return;
                     }
                     static const set<string> pseudoColumns = {
                         "current_user", "session_user", "user", "current_date",
@@ -22174,6 +22183,18 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     collation = resolveCollationForSort(queryDb, trim(afterCollate));
                     sortItem = trim(sortItem.substr(0, collatePos));
                 }
+                {
+                    string bindingError, bindingSqlState;
+                    const string& visibleQualifier = tableAlias.empty()
+                        ? tnameOrig : tableAlias;
+                    if (!validateFromlessColumnBindings(
+                            sortItem, bindingError, bindingSqlState,
+                            visibleQualifier)) {
+                        cout << "ERROR: " << bindingError << " (SQLSTATE "
+                             << bindingSqlState << ")" << endl;
+                        return true;
+                    }
+                }
                 size_t lp = sortItem.find('(');
                 size_t rp = sortItem.rfind(')');
                 if (lp != string::npos && rp != string::npos && rp > lp) {
@@ -23449,6 +23470,18 @@ static bool executeInternal(const string& rawSql, Session& s) {
                            : (limitPos != string::npos) ? limitPos
                            : (offsetPos != string::npos) ? offsetPos : sql.size();
             string whereClause = trim(sql.substr(wherePos + 5, condEnd - wherePos - 5));
+            {
+                string bindingError, bindingSqlState;
+                const string& visibleQualifier = tableAlias.empty()
+                    ? tnameOrig : tableAlias;
+                if (!validateFromlessColumnBindings(
+                        whereClause, bindingError, bindingSqlState,
+                        visibleQualifier)) {
+                    cout << "ERROR: " << bindingError << " (SQLSTATE "
+                         << bindingSqlState << ")" << endl;
+                    return true;
+                }
+            }
             // Strip "<alias>." and "<tablename>." qualifiers: the single-
             // table engine matches bare column names, and a table-name-
             // qualified predicate ("emp.id = 2") used to be silently

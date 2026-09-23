@@ -1,0 +1,10 @@
+DROP TABLE IF EXISTS diff_single_alias_clauses;
+CREATE TABLE diff_single_alias_clauses (v int);
+INSERT INTO diff_single_alias_clauses VALUES (1), (2);
+SELECT v FROM diff_single_alias_clauses AS x WHERE diff_single_alias_clauses.v = 1;
+SELECT v FROM diff_single_alias_clauses AS x WHERE other.v = 1;
+SELECT v FROM diff_single_alias_clauses AS x WHERE x.v = 1;
+SELECT v FROM diff_single_alias_clauses AS x ORDER BY diff_single_alias_clauses.v;
+SELECT v FROM diff_single_alias_clauses AS x ORDER BY other.v;
+SELECT v FROM diff_single_alias_clauses AS x ORDER BY x.v;
+DROP TABLE diff_single_alias_clauses;
