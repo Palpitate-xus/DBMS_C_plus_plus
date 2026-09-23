@@ -18736,7 +18736,7 @@ DBStatus StorageEngine::alterTableRenameConstraint(const std::string& dbname,
     if (oldName == newName) {
         const bool found = nameInUse(oldName);
         lockManager_.unlock(tablename);
-        return found ? DBStatus::OK : DBStatus::INVALID_VALUE;
+        return found ? DBStatus::OK : DBStatus::NOT_FOUND;
     }
     if (nameInUse(newName)) {
         lockManager_.unlock(tablename);
@@ -18775,7 +18775,7 @@ DBStatus StorageEngine::alterTableRenameConstraint(const std::string& dbname,
     }
     if (!found) {
         lockManager_.unlock(tablename);
-        return DBStatus::INVALID_VALUE;
+        return DBStatus::NOT_FOUND;
     }
 
     if (!writeSchemaFile(dbname, tablename, tbl)) {

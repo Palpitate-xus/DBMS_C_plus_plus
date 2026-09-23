@@ -2177,9 +2177,16 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 }
                 status = g_engine.alterTableRenameConstraint(s.currentDB, tableName,
                                                              sub.name, sub.newName);
-                if (status == DBStatus::INVALID_VALUE && sub.ifExists) {
+                if (status == DBStatus::NOT_FOUND && sub.ifExists) {
                     std::cout << "NOTICE: constraint does not exist, skipping" << std::endl;
                     break;
+                }
+                if (status == DBStatus::NOT_FOUND) {
+                    std::cout << "ERROR: constraint \"" << sub.name
+                              << "\" for table \"" << stmt->tableName
+                              << "\" does not exist (SQLSTATE 42704)"
+                              << std::endl;
+                    return true;
                 }
                 if (status == DBStatus::TABLE_ALREADY_EXISTS) {
                     std::cout << "ERROR: constraint \"" << sub.newName

@@ -98,7 +98,7 @@ static void test_rename_rejections() {
     assert(g_engine.alterTableAddUniqueConstraint(db, "t", "uq_id", {"id"}) == dbms::DBStatus::OK);
 
     // Unknown constraint -> INVALID_VALUE.
-    assert(g_engine.alterTableRenameConstraint(db, "t", "ghost", "x") == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.alterTableRenameConstraint(db, "t", "ghost", "x") == dbms::DBStatus::NOT_FOUND);
     // New name already in use -> TABLE_ALREADY_EXISTS.
     assert(g_engine.alterTableRenameConstraint(db, "t", "chk_age", "uq_id") == dbms::DBStatus::TABLE_ALREADY_EXISTS);
     // Missing table -> TABLE_NOT_FOUND.

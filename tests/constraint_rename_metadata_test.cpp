@@ -109,7 +109,7 @@ void testRenameRejectsPrimaryKeyNameCollisionAndMissingNoop() {
            dbms::DBStatus::TABLE_ALREADY_EXISTS);
     assert(g_engine.alterTableRenameConstraint(
                database, "items", "missing_name", "missing_name") ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::NOT_FOUND);
     cleanup(database);
 }
 
