@@ -8442,10 +8442,6 @@ void ExprEvaluator::registerBuiltins() {
             count = static_cast<long long>(
                 byteaInput ? repl.size() : utf8CharCount(repl));
         }
-        if (count < 0) {
-            throw std::runtime_error(
-                "negative substring length not allowed (SQLSTATE 22011)");
-        }
         if (start < 1) {
             throw std::runtime_error(
                 "negative substring length not allowed (SQLSTATE 22011)");
