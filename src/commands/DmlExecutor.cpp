@@ -2787,6 +2787,11 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
                 return true;
             }
             if (status != DBStatus::OK) {
+                if (status == DBStatus::STRING_DATA_RIGHT_TRUNCATION) {
+                    std::cout << "value too long for character column "
+                                 "(SQLSTATE 22001)" << std::endl;
+                    return true;
+                }
                 std::cout << "Invalid data, please check" << std::endl;
                 return true;
             }
@@ -3055,6 +3060,11 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
             return true;
         }
         if (status != DBStatus::OK) {
+            if (status == DBStatus::STRING_DATA_RIGHT_TRUNCATION) {
+                std::cout << "value too long for character column "
+                             "(SQLSTATE 22001)" << std::endl;
+                return true;
+            }
             std::cout << "Invalid data, please check" << std::endl;
             return true;
         }

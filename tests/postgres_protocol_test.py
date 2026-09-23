@@ -762,6 +762,21 @@ def extended_query_describe(sock):
         sock, "SELECT v FROM char_default_regression"))
     assert len(default_char_column) == 1 and default_char_column[0][2:6] == (
         1, 1042, -1, 5), default_char_column
+    overlong_char = simple_query(
+        sock, "INSERT INTO char_oid_regression VALUES ('abcd')")
+    assert b"C22001\0" in next(body for kind, body in overlong_char if kind == b"E")
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "INSERT INTO char_oid_regression VALUES ('ok')"))
+    overlong_update = simple_query(
+        sock, "UPDATE char_oid_regression SET v = 'abcd'")
+    assert b"C22001\0" in next(body for kind, body in overlong_update if kind == b"E")
+    assert len(data_row_values(simple_query(
+        sock, "SELECT v FROM char_oid_regression"))) == 1
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "CREATE TABLE varchar_width_regression (v VARCHAR(3))"))
+    overlong_varchar = simple_query(
+        sock, "INSERT INTO varchar_width_regression VALUES ('abcd')")
+    assert b"C22001\0" in next(body for kind, body in overlong_varchar if kind == b"E")
     for name, type_spec in (
             ("invalid_char_zero", "CHAR(0)"),
             ("invalid_varchar_zero", "VARCHAR(0)"),

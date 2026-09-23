@@ -16435,6 +16435,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 continue;
             }
             if (res != DBStatus::OK) {
+                if (res == DBStatus::STRING_DATA_RIGHT_TRUNCATION) {
+                    cout << "value too long for character column "
+                            "(SQLSTATE 22001)" << endl;
+                    return true;
+                }
                 cout << "Invalid data, please check" << endl;
                 return true;
             }

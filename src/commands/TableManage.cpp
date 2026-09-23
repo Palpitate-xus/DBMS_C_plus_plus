@@ -59,6 +59,7 @@ std::string dbms::sqlstateForDBStatus(DBStatus res) {
         case DBStatus::DATABASE_NOT_FOUND: return "3D000";
         case DBStatus::TABLE_ALREADY_EXISTS: return "42P07";
         case DBStatus::INVALID_VALUE: return "22023";
+        case DBStatus::STRING_DATA_RIGHT_TRUNCATION: return "22001";
         case DBStatus::INVALID_ARGUMENT: return "22023";
         case DBStatus::NULL_NOT_ALLOWED: return "23502";
         case DBStatus::SYNTAX_ERROR: return "42601";
@@ -808,6 +809,25 @@ static bool variableColumnWidthsValid(
         if (value->second.size() > maxLength) return false;
     }
     return true;
+}
+
+static DBStatus characterColumnWidthStatus(
+    const TableSchema& table,
+    const std::map<std::string, std::string>& values,
+    const std::set<std::string>* nullColumns = nullptr) {
+    for (size_t i = 0; i < table.len; ++i) {
+        const Column& column = table.cols[i];
+        if (column.isArray ||
+            (column.dataType != "char" && column.dataType != "character" &&
+             column.dataType != "bpchar" && column.dataType != "varchar" &&
+             column.dataType != "character varying")) continue;
+        const auto value = values.find(column.dataName);
+        if (value == values.end() ||
+            (nullColumns && nullColumns->count(column.dataName) != 0)) continue;
+        if (value->second.size() > column.dsize)
+            return DBStatus::STRING_DATA_RIGHT_TRUNCATION;
+    }
+    return DBStatus::OK;
 }
 
 static bool columnAcceptsEmptyValue(const Column& column) {
@@ -22330,6 +22350,12 @@ DBStatus StorageEngine::insertInternal(
     if (inputValidation != DBStatus::OK) return inputValidation;
     // Width is measured on the canonical SQL value. In particular BIT
     // literals may enter as B'1010' but are stored as the bare bit string.
+    const DBStatus characterWidthStatus =
+        characterColumnWidthStatus(tbl, actualValues, &actualNullColumns);
+    if (characterWidthStatus != DBStatus::OK) {
+        lockManager_.unlock(tablename);
+        return characterWidthStatus;
+    }
     if (!variableColumnWidthsValid(tbl, actualValues, &actualNullColumns)) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
@@ -22462,6 +22488,12 @@ DBStatus StorageEngine::insertInternal(
     if (!normalizePointColumns(tbl, actualValues, &actualNullColumns)) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
+    }
+    const DBStatus finalCharacterWidthStatus =
+        characterColumnWidthStatus(tbl, actualValues, &actualNullColumns);
+    if (finalCharacterWidthStatus != DBStatus::OK) {
+        lockManager_.unlock(tablename);
+        return finalCharacterWidthStatus;
     }
     if (!variableColumnWidthsValid(tbl, actualValues, &actualNullColumns)) {
         lockManager_.unlock(tablename);
@@ -25556,6 +25588,14 @@ DBStatus StorageEngine::updateInternal(
                     const size_t maxLength = col.isArray ? 1024 : col.dsize;
                     if (col.isVariableLength &&
                         storeVal.size() > maxLength) {
+                        if (!col.isArray &&
+                            (col.dataType == "char" ||
+                             col.dataType == "character" ||
+                             col.dataType == "bpchar" ||
+                             col.dataType == "varchar" ||
+                             col.dataType == "character varying")) {
+                            return DBStatus::STRING_DATA_RIGHT_TRUNCATION;
+                        }
                         return DBStatus::INVALID_VALUE;
                     }
                     prepared[i] = storeVal;
@@ -26240,6 +26280,13 @@ DBStatus StorageEngine::updateInternal(
                 tbl, rowValues, &finalNullColumnNames)) {
             lockManager_.unlock(tablename);
             return DBStatus::INVALID_VALUE;
+        }
+        const DBStatus updatedCharacterWidthStatus =
+            characterColumnWidthStatus(
+                tbl, rowValues, &finalNullColumnNames);
+        if (updatedCharacterWidthStatus != DBStatus::OK) {
+            lockManager_.unlock(tablename);
+            return updatedCharacterWidthStatus;
         }
         if (!variableColumnWidthsValid(
                 tbl, rowValues, &finalNullColumnNames)) {
