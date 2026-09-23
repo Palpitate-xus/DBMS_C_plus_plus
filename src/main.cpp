@@ -20169,20 +20169,29 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 const auto* onSelect = parsedOn.success
                     ? dynamic_cast<const dbms::SelectStmt*>(parsedOn.stmt.get())
                     : nullptr;
-                vector<const dbms::BinaryOpExpr*> comparisons;
+                vector<const dbms::Expr*> onPredicates;
                 function<bool(const dbms::Expr*)> collectOnComparisons;
                 collectOnComparisons = [&](const dbms::Expr* expression) {
                     const auto* binary = dynamic_cast<
                         const dbms::BinaryOpExpr*>(expression);
-                    if (!binary) return false;
-                    if (binary->op == "AND")
-                        return collectOnComparisons(binary->left.get()) &&
-                            collectOnComparisons(binary->right.get());
-                    if (binary->op != "=" && binary->op != "<>" &&
-                        binary->op != "!=" && binary->op != "<" &&
-                        binary->op != ">" && binary->op != "<=" &&
-                        binary->op != ">=") return false;
-                    comparisons.push_back(binary);
+                    if (binary) {
+                        if (binary->op == "AND")
+                            return collectOnComparisons(binary->left.get()) &&
+                                collectOnComparisons(binary->right.get());
+                        if (binary->op != "=" && binary->op != "<>" &&
+                            binary->op != "!=" && binary->op != "<" &&
+                            binary->op != ">" && binary->op != "<=" &&
+                            binary->op != ">=") return false;
+                        onPredicates.push_back(binary);
+                        return true;
+                    }
+                    const auto* unary = dynamic_cast<
+                        const dbms::UnaryOpExpr*>(expression);
+                    if (!unary || (unary->op != "IS NULL" &&
+                                   unary->op != "IS NOT NULL") ||
+                        !dynamic_cast<const dbms::ColumnRefExpr*>(
+                            unary->operand.get())) return false;
+                    onPredicates.push_back(unary);
                     return true;
                 };
                 if (!onSelect || onSelect->selectList.size() != 1 ||
@@ -20255,7 +20264,23 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     cout << "ERROR: column \"" << ref->column
                          << "\" does not exist (SQLSTATE 42703)" << endl;
                 };
-                for (const auto* comparison : comparisons) {
+                for (const auto* predicate : onPredicates) {
+                    if (const auto* unary = dynamic_cast<
+                            const dbms::UnaryOpExpr*>(predicate)) {
+                        int side = -1;
+                        string name, qualified;
+                        if (!resolveOnColumn(unary->operand.get(), -1, side,
+                                             name, qualified)) {
+                            reportOnBindingError(unary->operand.get());
+                            return true;
+                        }
+                        onConditions.push_back(
+                            (unary->op == "IS NULL" ? "isnull " : "isnotnull ") +
+                            qualified);
+                        continue;
+                    }
+                    const auto* comparison = static_cast<
+                        const dbms::BinaryOpExpr*>(predicate);
                     int firstSide = -1, secondSide = -1;
                     string firstName, secondName, firstQualified, secondQualified;
                     bool firstColumn = resolveOnColumn(
