@@ -4606,7 +4606,8 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                     return false;
                 }
                 std::cout << "ERROR: relation \"" << stmt->tableName
-                          << "\" already exists" << std::endl;
+                          << "\" already exists (SQLSTATE 42P07)"
+                          << std::endl;
                 return true;
             }
         } catch (const std::exception& error) {
@@ -4627,7 +4628,8 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             std::cout << "NOTICE: table \"" << tname << "\" already exists, skipping" << std::endl;
             return false;
         }
-        std::cout << "Table " << tname << " already exists" << std::endl;
+        std::cout << "ERROR: relation \"" << tname
+                  << "\" already exists (SQLSTATE 42P07)" << std::endl;
         return true;
     }
 
