@@ -728,11 +728,23 @@ def extended_query_describe(sock):
     sock.sendall(typed(b"P", char_parse) +
                  typed(b"D", b"Sdescribe_sql_char\0") + typed(b"S"))
     assert row_description_fields(read_until_ready(sock)) == [
-        (b"bpchar", 0, 0, 1042, -1, -1, 0)
+        (b"bpchar", 0, 0, 1042, -1, 5, 0)
     ]
     assert row_description_fields(simple_query(sock, char_query)) == [
-        (b"bpchar", 0, 0, 1042, -1, -1, 0)
+        (b"bpchar", 0, 0, 1042, -1, 5, 0)
     ]
+    char_cast = "SELECT CAST('abc' AS CHAR(3))"
+    char_cast_parse = (b"describe_char_cast\0" + char_cast.encode() + b"\0" +
+                       struct.pack("!H", 0))
+    sock.sendall(typed(b"P", char_cast_parse) +
+                 typed(b"D", b"Sdescribe_char_cast\0") + typed(b"S"))
+    assert row_description_fields(read_until_ready(sock)) == [
+        (b"bpchar", 0, 0, 1042, -1, 7, 0)
+    ]
+    char_cast_messages = simple_query(sock, char_cast)
+    assert row_description_fields(char_cast_messages) == [
+        (b"bpchar", 0, 0, 1042, -1, 7, 0)
+    ], char_cast_messages
     assert any(kind == b"C" for kind, _ in simple_query(
         sock, "CREATE TABLE char_oid_regression (v CHAR(3))"))
     char_column = row_description_fields(simple_query(

@@ -7435,7 +7435,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                     };
                     size_t p4 = tname.find('(');
                     string tbase = (p4 == string::npos) ? tname : tname.substr(0, p4);
-                    auto tmap = pgTn2.find(trim(tbase));
+                    auto tmap = pgTn2.find(toLower(trim(tbase)));
                     if (tmap != pgTn2.end()) tbase = tmap->second;
                     if (tbase.find(' ') == string::npos) { headers.push_back(tbase); goto headerDone; }
                 }

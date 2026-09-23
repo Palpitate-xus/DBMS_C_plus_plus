@@ -1289,6 +1289,42 @@ int16_t protocolTypeSize(uint32_t typeOid, const Column& column) {
     }
 }
 
+int32_t protocolCharacterCastModifier(const Expr* expression) {
+    if (!expression) return -1;
+    std::string typeName;
+    std::vector<std::string> modifiers;
+    if (const auto* cast = dynamic_cast<const CastExpr*>(expression)) {
+        typeName = lowerProtocolText(cast->typeName);
+        modifiers = cast->typeMods;
+    } else if (const auto* binary =
+                   dynamic_cast<const BinaryOpExpr*>(expression);
+               binary && binary->op == "::" && binary->right) {
+        typeName = lowerProtocolText(binary->right->toString());
+        const size_t open = typeName.find('(');
+        if (open != std::string::npos && typeName.back() == ')') {
+            modifiers.push_back(typeName.substr(open + 1,
+                typeName.size() - open - 2));
+            typeName.resize(open);
+        }
+    } else {
+        return -1;
+    }
+    if (typeName != "char" && typeName != "character") return -1;
+    if (modifiers.empty()) return 5; // SQL CHAR defaults to CHAR(1).
+    if (modifiers.size() != 1 || modifiers.front().empty()) return -1;
+    const std::string& lengthText = modifiers.front();
+    if (!std::all_of(lengthText.begin(), lengthText.end(),
+                     [](unsigned char c) { return std::isdigit(c); })) return -1;
+    try {
+        const unsigned long length = std::stoul(lengthText);
+        if (length > static_cast<unsigned long>(
+                std::numeric_limits<int32_t>::max() - 4)) return -1;
+        return static_cast<int32_t>(length + 4);
+    } catch (const std::exception&) {
+        return -1;
+    }
+}
+
 std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& result,
                                                           const std::string& sql,
                                                           const Session& session) {
@@ -1383,6 +1419,19 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
             break;
         }
         descriptions.push_back(std::move(description));
+    }
+    if (descriptions.size() == 1 && descriptions[0].typeOid == 1042 &&
+        descriptions[0].tableOid == INVALID_OID) {
+        SQLParser parser;
+        ParseResult parsed = parser.parse(sql);
+        if (parsed.isValid()) {
+            const auto* select = dynamic_cast<const SelectStmt*>(parsed.stmt.get());
+            if (select && select->selectList.size() == 1) {
+                const int32_t modifier = protocolCharacterCastModifier(
+                    select->selectList.front().expr.get());
+                if (modifier >= 0) descriptions[0].typeModifier = modifier;
+            }
+        }
     }
     return descriptions;
 }
