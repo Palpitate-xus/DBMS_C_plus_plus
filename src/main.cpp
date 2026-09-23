@@ -7353,6 +7353,12 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             string low2;
             for (char c : expr) low2 += static_cast<char>(tolower(static_cast<unsigned char>(c)));
             {
+                if (low2 == "current_date" ||
+                    low2 == "current_timestamp" ||
+                    low2 == "localtimestamp") {
+                    headers.push_back(low2);
+                    goto headerDone;
+                }
                 // Only a TRAILING "::type" (cast of the whole expression)
                 // names the output after the type; a cast nested inside
                 // arithmetic ("1.5::numeric(4,2) + 1") leaves the default

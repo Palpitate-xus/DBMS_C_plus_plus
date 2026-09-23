@@ -743,11 +743,10 @@ def extended_query_describe(sock):
         assert row_description_fields(read_until_ready(sock)) == [
             (keyword, 0, 0, expected_oid, expected_size, -1, 0)
         ]
-        if expected_oid == 19:
-            assert row_description_fields(simple_query(
-                sock, "SELECT " + keyword.decode())) == [
-                (keyword, 0, 0, expected_oid, expected_size, -1, 0)
-            ]
+        assert row_description_fields(simple_query(
+            sock, "SELECT " + keyword.decode())) == [
+            (keyword, 0, 0, expected_oid, expected_size, -1, 0)
+        ]
 
     for statement_name, query, expected_name, expected_oid, expected_size in (
             (b"describe_interval_size", b"SELECT INTERVAL '1 day'",
