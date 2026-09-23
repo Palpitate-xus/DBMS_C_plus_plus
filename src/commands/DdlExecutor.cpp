@@ -3811,7 +3811,8 @@ bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
                     return false;
                 }
                 std::cout << "ERROR: schema \"" << name
-                          << "\" does not exist" << std::endl;
+                          << "\" does not exist (SQLSTATE 3F000)"
+                          << std::endl;
             } else {
                 std::cout << "DROP SCHEMA refused: storage objects for "
                           << name << " have no catalog namespace" << std::endl;
