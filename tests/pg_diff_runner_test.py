@@ -161,6 +161,35 @@ class DifferentialErrorsTest(unittest.TestCase):
 
 
 class DifferentialSessionTest(unittest.TestCase):
+    def test_local_cases_get_fresh_sessions(self):
+        first = mock.Mock()
+        second = mock.Mock()
+        client = mock.Mock()
+        server = {"sock": first, "port": 54321}
+        with mock.patch.object(RUNNER.socket, "create_connection",
+                               return_value=second) as connect:
+            RUNNER.reconnect_ours(server, client)
+        first.close.assert_called_once()
+        connect.assert_called_once_with(("127.0.0.1", 54321), timeout=15)
+        client.startup.assert_called_once_with(second, "alice", "info")
+        self.assertIs(server["sock"], second)
+
+    def test_main_reconnects_between_cases(self):
+        server = {"sock": mock.Mock(), "port": 54321}
+        cases = [("first", ["SET TIME ZONE 'Asia/Shanghai'"]),
+                 ("second", ["SELECT 1"])]
+        with mock.patch.object(RUNNER, "load_protocol_client",
+                               return_value=mock.Mock()), \
+             mock.patch.object(RUNNER, "reference_multi", return_value=[]), \
+             mock.patch.object(RUNNER, "start_ours", return_value=server), \
+             mock.patch.object(RUNNER, "load_cases", return_value=cases), \
+             mock.patch.object(RUNNER, "run_case", return_value=[]), \
+             mock.patch.object(RUNNER, "reconnect_ours") as reconnect, \
+             mock.patch.object(RUNNER, "stop_ours"), \
+             mock.patch("sys.argv", ["pg_diff_runner.py"]):
+            self.assertEqual(RUNNER.main(), 0)
+        reconnect.assert_called_once()
+
     def test_reference_case_uses_one_psql_session(self):
         stdout = (
             b"__PGDIFF_TOKEN_BEGIN_0__\n"

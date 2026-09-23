@@ -584,6 +584,20 @@ def stop_ours(server):
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
+def reconnect_ours(server, client):
+    """Give each case a fresh local session, matching reference_multi()."""
+    if server.get("sock") is not None:
+        server["sock"].close()
+        server["sock"] = None
+    sock = socket.create_connection(("127.0.0.1", server["port"]), timeout=15)
+    try:
+        client.startup(sock, "alice", "info")
+    except BaseException:
+        sock.close()
+        raise
+    server["sock"] = sock
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--case-dir", default=os.path.join(REPO, "tests", "compat", "cases"))
@@ -606,7 +620,9 @@ def main():
             print("no cases found in", args.case_dir)
             return 1
         failed = 0
-        for name, stmts in cases:
+        for case_index, (name, stmts) in enumerate(cases):
+            if case_index:
+                reconnect_ours(server, client)
             diffs = run_case(name, stmts, client, server["sock"])
             if diffs:
                 failed += 1
