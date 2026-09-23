@@ -479,12 +479,15 @@
 
 | 506 | P0-01 / P0-02 / P0-04 / FUNC-04 / EXT-04 / PROTO-08 / P0-16 | `DROP PROCEDURE` 原走 legacy 路径，`IF EXISTS` 对缺失过程误报 `XX000`，且在检查前可能隐式提交用户事务。现由 typed DDL 接管：不存在时按 `IF EXISTS` 决定 NOTICE/`42883`，存在时用 DDL 快照回滚；显式空签名核对参数数目，其他签名/多目标和 CASCADE 明确拒绝，避免误删别的过程 | 新增 `drop_procedure_transaction`，真实 18.6 定向差分覆盖过程删除回滚、缺失过程、DDL 后事务回滚；`parser_phase1_test`、`ddl_ast_bridge_test`、`ddl_bridge_routing_test` 通过。过程重载、非空签名、依赖与完整 catalog/WAL 仍为 partial | `bef0365` |
 
-2026-09-23 复验：截至第 506 项新增的 24 个 DDL/协议差分用例并入全量集，153 组真实 PostgreSQL 18.6 差分 `failed=0`；当前源码生产对象重链的完整 PostgreSQL 协议回归通过。正式 `scripts/build.sh` 在第 505 项状态成功；第 506 项经重链编译验证，正式生产构建仍待复跑。schema 重名、缺失 schema 和唯一索引探针的定向运行曾偶发超时，随后重试或连续复跑及后续全量运行通过，间歇性原因未定位。该结果不代表 P0-02、P0-04、P0-16、CAT-02 或 PROTO-08 完成。总账仍为 273 项，其中 24 complete、119 partial、115 unverified、15 deferred_by_user；被延期的安全 / TDE 项没有被计作完成。
+| 507 | P0-01 / P0-02 / P0-04 / FUNC-04 / EXT-04 / PROTO-08 / P0-16 | `DROP ROUTINE` 原落入兼容对象拒绝路径，对真实函数/过程也报 `0A000`。现由 typed DDL 接管，在当前名字索引下区分函数、表函数和过程；缺失对象按 `IF EXISTS` 决定 NOTICE/`42883`，歧义报 `42725`，且复用相应的事务化删除路径 | 新增 `drop_routine_transaction`，真实 18.6 差分覆盖函数与过程的删除/回滚、缺失对象、DDL 后事务回滚；`parser_phase1_test`、`ddl_ast_bridge_test`、`ddl_bridge_routing_test` 通过。非空签名、重载与依赖级联仍为 partial | `c2a52a7` |
+
+2026-09-23 复验：截至第 507 项新增的 25 个 DDL/协议差分用例并入全量集，154 组真实 PostgreSQL 18.6 差分 `failed=0`；当前源码生产对象重链的完整 PostgreSQL 协议回归通过。正式 `scripts/build.sh` 在第 506 项状态成功；第 507 项经重链编译验证，正式生产构建仍待复跑。schema 重名、缺失 schema 和唯一索引探针的定向运行曾偶发超时，随后重试或连续复跑及后续全量运行通过，间歇性原因未定位。该结果不代表 P0-02、P0-04、P0-16、CAT-02 或 PROTO-08 完成。总账仍为 273 项，其中 24 complete、119 partial、115 unverified、15 deferred_by_user；被延期的安全 / TDE 项没有被计作完成。
 
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-01 / P0-04 / FUNC-04：第 505 项已将受支持的 `DROP FUNCTION` 名字/空签名路径迁入事务化 typed DDL；非空签名、多个同名重载、跨对象依赖与 `CASCADE` 仍没有 PostgreSQL 等价实现，不得把函数族或事务化 DDL 判作完成。
 - P0-01 / P0-04 / EXT-04：第 506 项已将受支持的 `DROP PROCEDURE` 名字/空签名路径迁入事务化 typed DDL；非空签名、过程重载、跨对象依赖与 `CASCADE` 仍没有 PostgreSQL 等价实现，不得把过程族或事务化 DDL 判作完成。
+- P0-01 / P0-04 / FUNC-04 / EXT-04：第 507 项已将能唯一识别的 `DROP ROUTINE` 名字/空签名路径迁入事务化 typed DDL；非空签名、跨函数与过程的重载解析、跨对象依赖与 `CASCADE` 仍没有 PostgreSQL 等价实现，不得把 routine 族或事务化 DDL 判作完成。
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；第 428–429 项又迁移了 FROM-less 与普通表 scalar UDF 的声明类型和 NULL，并执行有限的 SQL function expression。混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF、完整 SQL function query body 及二进制值仍存在显示文本边界，继续计入总清单。
 - P0-02 / TYPE：第 217 项已修复无 FROM 基础表达式的已知 OID 回退；表查询、复杂表达式、数组 / composite / domain、typmod 和 binary format 类型元数据仍需完整差分。
 
