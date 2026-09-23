@@ -557,7 +557,21 @@ static string sqlProcessor(string raw, bool /*normalizeBooleanLiterals*/ = false
     if (start == string::npos) raw.clear();
     else raw = raw.substr(start, raw.find_last_not_of(' ') - start + 1);
     if (!raw.empty() && raw.back() == ';') raw.pop_back();
-    raw = preprocessCaseWhen(raw);
+    // JOIN projections are evaluated from the CASE AST.  The legacy
+    // case_when rewrite encodes comparisons as evaluator-only pseudo-tokens
+    // (for example >a.id 0), which are invalid column references to the
+    // JOIN projection binder.  Keep the SELECT list intact while retaining
+    // the legacy rewrite for ON/WHERE clauses after FROM.
+    const size_t joinKeyword = findTopLevelKeyword(raw, "join", 0);
+    const size_t fromKeyword = findTopLevelKeyword(raw, "from", 0);
+    if (toLower(raw).rfind("select ", 0) == 0 &&
+        joinKeyword != string::npos && fromKeyword != string::npos &&
+        fromKeyword < joinKeyword) {
+        raw = raw.substr(0, fromKeyword) +
+            preprocessCaseWhen(raw.substr(fromKeyword));
+    } else {
+        raw = preprocessCaseWhen(raw);
+    }
     // Convert array subscript syntax: col[n] -> array_get(col, n)
     {
         string out;
@@ -19998,11 +20012,22 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                     } else {
                                         castName = pgCastHeaderName(cast->typeName);
                                     }
+                                } else if (const auto* caseExpr = dynamic_cast<
+                                               const dbms::CaseExpr*>(
+                                               selectName->selectList.front().expr.get())) {
+                                    const dbms::Expr* nameExpr =
+                                        caseExpr->elseExpr.get();
+                                    if (const auto* cast = dynamic_cast<
+                                            const dbms::CastExpr*>(nameExpr))
+                                        nameExpr = cast->operand.get();
+                                    if (const auto* ref = dynamic_cast<
+                                            const dbms::ColumnRefExpr*>(nameExpr))
+                                        expressionName = ref->column;
+                                    else
+                                        expressionName = "case";
                                 } else if (dynamic_cast<const dbms::BinaryOpExpr*>(
                                                selectName->selectList.front().expr.get()) ||
                                            dynamic_cast<const dbms::UnaryOpExpr*>(
-                                               selectName->selectList.front().expr.get()) ||
-                                           dynamic_cast<const dbms::CaseExpr*>(
                                                selectName->selectList.front().expr.get()) ||
                                            dynamic_cast<const dbms::LiteralExpr*>(
                                                selectName->selectList.front().expr.get())) {
