@@ -29881,11 +29881,18 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     // bound as column context.
     if (expr.funcName == "expreval" && !expr.funcArgs.empty()) {
         std::map<std::string, std::string> rowCtx;
+        std::map<std::string, std::string> typeHints;
+        std::set<std::string> nullColumns;
         for (size_t i = 0; i < tbl.len; ++i) {
+            bool valueIsNull = false;
             std::string v = engine && !dbname.empty()
-                ? engine->extractColumnValue(rowBuffer, tbl, i, dbname, true)
+                ? engine->extractColumnValue(
+                      rowBuffer, tbl, i, dbname, true, &valueIsNull)
                 : StorageEngine::extractColumnValueStatic(rowBuffer, tbl, i);
             rowCtx[tbl.cols[i].dataName] = v;
+            typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+            if (valueIsNull || (!engine && v.empty()))
+                nullColumns.insert(tbl.cols[i].dataName);
         }
         // Strip redundant outer parens once, up front: "(a = b)" evaluates
         // like "a = b".
@@ -29940,7 +29947,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 while (col.size() > 1 && col.front() == '(' && col.back() == ')') col = col.substr(1, col.size() - 2);
                 auto it = rowCtx.find(col);
                 if (it != rowCtx.end()) {
-                    const bool isNull = it->second.empty() || it->second == "NULL";
+                    const bool isNull = nullColumns.count(col) != 0;
                     return (isNull == wantNull) ? "t" : "f";
                 }
                 return "f";
@@ -30026,7 +30033,9 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                         if (!ok2) break;
                         a2 = a2.substr(1, a2.size() - 2);
                     }
-                    auto r3 = dbms::ExprHelper::evalString(a2, rowCtx, {}, dbname, std::string());
+                    auto r3 = dbms::ExprHelper::evalStringWithNulls(
+                        a2, rowCtx, nullColumns, typeHints, dbname,
+                        expr.sessionUser);
                     if (!r3.ok) { anyNull = true; continue; }
                     if (r3.isNull) { anyNull = true; continue; }
                     const std::string& v = r3.value;
@@ -30055,7 +30064,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 size_t sp2 = colPart.find(' ');
                 if (sp2 != std::string::npos) colPart = colPart.substr(0, sp2);
                 for (const auto& kv : rowCtx) {
-                    if (!kv.second.empty() && kv.second != "NULL") continue;
+                    if (nullColumns.count(kv.first) == 0) continue;
                     if (colPart == kv.first) return "NULL";
                     size_t at = lowAtom.find(kv.first);
                     while (at != std::string::npos) {
@@ -30068,8 +30077,9 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 }
             }
         }
-        auto r2 = dbms::ExprHelper::evalString(
-            evalSrc, rowCtx, {}, dbname, std::string());
+        auto r2 = dbms::ExprHelper::evalStringWithNulls(
+            evalSrc, rowCtx, nullColumns, typeHints, dbname,
+            expr.sessionUser);
         if (!r2.ok) {
             // PG aborts the statement when a projection expression
             // errors (e.g. undefined function 42883); surface the
