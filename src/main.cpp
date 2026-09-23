@@ -22315,9 +22315,32 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             // "float8", ...).
                             string headerName = func;
                             if (func == "isdistinct" || func == "isnotdistinct") headerName = "?column?";
-                            // PG names every CASE expression column "case"
-                            // (figure_colname for CaseExpr).
-                            if (func == "case_when") headerName = "case";;
+                            // PostgreSQL derives a CASE target name from its
+                            // ELSE expression when that is a column (possibly
+                            // wrapped in a cast); otherwise it uses "case".
+                            if (func == "case_when") {
+                                headerName = "case";
+                                const auto caseArgs = splitFuncArgs(arg);
+                                if (caseArgs.size() >= 3 &&
+                                    caseArgs.size() % 2 == 1) {
+                                    dbms::SQLParser nameParser;
+                                    const auto parsedName = nameParser.parse(
+                                        "SELECT " + caseArgs.back());
+                                    const auto* selectName = parsedName.success
+                                        ? dynamic_cast<const dbms::SelectStmt*>(
+                                              parsedName.stmt.get()) : nullptr;
+                                    if (selectName && selectName->selectList.size() == 1) {
+                                        const dbms::Expr* nameExpr =
+                                            selectName->selectList.front().expr.get();
+                                        if (const auto* cast = dynamic_cast<
+                                                const dbms::CastExpr*>(nameExpr))
+                                            nameExpr = cast->operand.get();
+                                        if (const auto* ref = dynamic_cast<
+                                                const dbms::ColumnRefExpr*>(nameExpr))
+                                            headerName = ref->column;
+                                    }
+                                }
+                            }
                             if (func == "cast") {
                                 auto castArgs = splitFuncArgs(arg);
                                 if (castArgs.size() >= 2) {
