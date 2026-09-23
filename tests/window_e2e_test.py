@@ -38,7 +38,7 @@ def run_sql(sql):
     # extended-mode extension (DIV-01); run the session in extended mode.
     env["DBMS_COMPATIBILITY_MODE"] = "extended"
     proc = subprocess.run(
-        [DBMS_MAIN],
+        [DBMS_MAIN, "--data-dir", os.getcwd()],
         input=script,
         capture_output=True,
         text=True,

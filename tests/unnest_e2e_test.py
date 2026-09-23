@@ -39,7 +39,7 @@ def scram_verifier(password, salt=b"0123456789abcdef", iterations=4096):
 def run_sql(statements):
     script = "admin admin\n" + "\n".join(statements) + "\nexit\n"
     proc = subprocess.run(
-        [DBMS_MAIN],
+        [DBMS_MAIN, "--data-dir", os.getcwd()],
         input=script,
         capture_output=True,
         text=True,

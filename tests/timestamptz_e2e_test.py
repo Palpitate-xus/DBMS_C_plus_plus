@@ -43,7 +43,7 @@ def run_sql(statements):
     # USE DATABASE is an extended-mode project command (DIV-01).
     env["DBMS_COMPATIBILITY_MODE"] = "extended"
     proc = subprocess.run(
-        [DBMS_MAIN],
+        [DBMS_MAIN, "--data-dir", os.getcwd()],
         input=script,
         capture_output=True,
         text=True,
