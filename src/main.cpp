@@ -19914,16 +19914,34 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     }
                     string source = normalizeJoinColumn(expression);
                     if (outputName.empty()) {
-                        const size_t callParen = expression.find('(');
-                        const bool timezoneCall = callParen != string::npos &&
-                            expression.back() == ')' &&
-                            toLower(trim(expression.substr(0, callParen))) ==
-                                "timezone";
                         const bool timezoneOperator =
                             findTopLevelKeyword(expression, "at time zone") !=
                                 string::npos;
-                        if (timezoneCall || timezoneOperator) {
+                        string functionName;
+                        if (!timezoneOperator && expression.find('(') != string::npos) {
+                            dbms::SQLParser nameParser;
+                            auto parsedName = nameParser.parse(
+                                "SELECT " + expression);
+                            const auto* selectName = parsedName.success
+                                ? dynamic_cast<const dbms::SelectStmt*>(
+                                      parsedName.stmt.get())
+                                : nullptr;
+                            if (selectName && selectName->selectList.size() == 1) {
+                                const auto* call = dynamic_cast<
+                                    const dbms::FunctionCallExpr*>(
+                                        selectName->selectList.front().expr.get());
+                                if (call) {
+                                    functionName = toLower(call->funcName);
+                                    const size_t qualifier = functionName.rfind('.');
+                                    if (qualifier != string::npos)
+                                        functionName.erase(0, qualifier + 1);
+                                }
+                            }
+                        }
+                        if (timezoneOperator) {
                             outputName = "timezone";
+                        } else if (!functionName.empty()) {
+                            outputName = functionName;
                         } else {
                             const size_t dot = expression.rfind('.');
                             outputName = dot == string::npos
