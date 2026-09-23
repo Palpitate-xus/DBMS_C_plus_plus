@@ -788,6 +788,27 @@ def extended_query_describe(sock):
     assert row_description_fields(simple_query(
         sock, "SELECT v FROM varchar_unbounded_meta"))[0][2:6] == (
         1, 1043, -1, -1)
+    long_varchar = "x" * 256
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "INSERT INTO varchar_unbounded_meta VALUES ('" + long_varchar + "')"))
+    assert data_row_values(simple_query(
+        sock, "SELECT v FROM varchar_unbounded_meta")) == [[long_varchar.encode()]]
+    for name, width, expected_typmod in (
+            ("varchar_255_meta", 255, 259),
+            ("varchar_max_meta", 65535, 65539)):
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE " + name + " (v VARCHAR(" + str(width) + "))"))
+        assert row_description_fields(simple_query(
+            sock, "SELECT v FROM " + name))[0][2:6] == (
+            1, 1043, -1, expected_typmod)
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "ALTER TABLE varchar_max_meta ALTER COLUMN v SET DEFAULT 'x'"))
+    assert row_description_fields(simple_query(
+        sock, "SELECT v FROM varchar_max_meta"))[0][5] == 65539
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "ALTER TABLE varchar_max_meta ALTER COLUMN v TYPE VARCHAR"))
+    assert row_description_fields(simple_query(
+        sock, "SELECT v FROM varchar_max_meta"))[0][5] == -1
     overlong_varchar = simple_query(
         sock, "INSERT INTO varchar_width_regression VALUES ('abcd')")
     assert b"C22001\0" in next(body for kind, body in overlong_varchar if kind == b"E")

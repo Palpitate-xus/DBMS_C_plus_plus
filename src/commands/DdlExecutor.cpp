@@ -52,6 +52,26 @@ std::string trim(const std::string& s) {
     return s.substr(a, b - a);
 }
 
+bool declaredVarcharTypeMod(const ColumnDef& definition, int32_t& modifier) {
+    const std::string type = toLower(trim(definition.typeName));
+    if (definition.isArray ||
+        (type != "varchar" && type != "character varying")) return false;
+    if (definition.typeMods.empty()) {
+        modifier = -1;
+        return true;
+    }
+    if (definition.typeMods.size() != 1) return false;
+    const std::string& length = definition.typeMods.front();
+    int32_t parsed = 0;
+    const auto result = std::from_chars(
+        length.data(), length.data() + length.size(), parsed);
+    if (result.ec != std::errc() ||
+        result.ptr != length.data() + length.size() ||
+        parsed <= 0 || parsed > 65535) return false;
+    modifier = parsed + 4;
+    return true;
+}
+
 bool splitProcedureStatements(const std::string& body,
                               std::vector<std::string>& statements,
                               std::string& error) {
@@ -882,8 +902,15 @@ static PgAttributeRow catalogAttributeForColumn(
                 column.dataType == "bpchar") && column.dsize > 0) {
         attribute.atttypmod = static_cast<int32_t>(column.dsize + 4);
     } else if (!column.isArray && column.dataType == "varchar" &&
-               column.dsize > 0 && column.dsize != 255) {
+               column.dsize > 0 && column.dsize != 65535) {
         attribute.atttypmod = static_cast<int32_t>(column.dsize + 4);
+    }
+    if (previous && attribute.atttypid == previous->atttypid &&
+        attribute.atttypid == 1043 && previous->atttypmod >= 4 &&
+        static_cast<size_t>(previous->atttypmod - 4) == column.dsize) {
+        // A catalog-backed VARCHAR bound can equal the physical capacity.
+        // Preserve it across unrelated ALTER TABLE catalog synchronizations.
+        attribute.atttypmod = previous->atttypmod;
     }
     attribute.attnotnull = !column.isNull;
     attribute.atthasdef = !column.defaultValue.empty();
@@ -1018,7 +1045,9 @@ static void registerTableInCatalog(CatalogManager& cat, const TableSchema& tbl,
                                    const std::string& logicalSchema,
                                    const std::string& logicalName,
                                    const CatalogInheritanceColumns*
-                                       inheritedColumns = nullptr) {
+                                       inheritedColumns = nullptr,
+                                   const std::map<std::string, int32_t>*
+                                       declaredVarcharMods = nullptr) {
     const auto* ns = cat.findNamespaceByName(logicalSchema);
     if (!ns) {
         throw std::runtime_error("table schema has no catalog entry");
@@ -1046,6 +1075,12 @@ static void registerTableInCatalog(CatalogManager& cat, const TableSchema& tbl,
     for (size_t i = 0; i < tbl.len; ++i) {
         PgAttributeRow attribute = catalogAttributeForColumn(
             cat, classOid, nspOid, tbl.cols[i], i);
+        if (declaredVarcharMods) {
+            const auto declared = declaredVarcharMods->find(tbl.cols[i].dataName);
+            if (declared != declaredVarcharMods->end()) {
+                attribute.atttypmod = declared->second;
+            }
+        }
         if (inheritedColumns) {
             const auto provenance =
                 inheritedColumns->find(tbl.cols[i].dataName);
@@ -1160,7 +1195,8 @@ static Oid registerViewInCatalog(
 }
 
 static bool synchronizeTableAttributesInCatalog(
-    const std::string& dbname, const std::string& physicalTableName) {
+    const std::string& dbname, const std::string& physicalTableName,
+    const std::map<std::string, int32_t>* declaredVarcharMods = nullptr) {
     try {
         CatalogManager& catalog = g_engine.catalogService().get(dbname);
         const auto qualifiedName =
@@ -1200,9 +1236,16 @@ static bool synchronizeTableAttributesInCatalog(
                     }
                 }
             }
-            replacement.push_back(catalogAttributeForColumn(
+            PgAttributeRow attribute = catalogAttributeForColumn(
                 catalog, relationOid, namespaceOid, column,
-                columnIndex, retained));
+                columnIndex, retained);
+            if (declaredVarcharMods) {
+                const auto declared = declaredVarcharMods->find(column.dataName);
+                if (declared != declaredVarcharMods->end()) {
+                    attribute.atttypmod = declared->second;
+                }
+            }
+            replacement.push_back(std::move(attribute));
         }
         if (!catalog.replaceAttributes(relationOid, replacement)) {
             return false;
@@ -1904,9 +1947,14 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     break;
                 }
                 if (!alterStatusOk(status, "Column")) return true;
+                std::map<std::string, int32_t> declaredVarcharMods;
+                int32_t varcharModifier = -1;
+                if (declaredVarcharTypeMod(sub.colDef, varcharModifier)) {
+                    declaredVarcharMods[sub.colDef.name] = varcharModifier;
+                }
                 if (!tableIsTemporary &&
                     !synchronizeTableAttributesInCatalog(
-                        s.currentDB, tableName)) {
+                        s.currentDB, tableName, &declaredVarcharMods)) {
                     std::cout << "ALTER TABLE ADD COLUMN catalog update failed"
                               << std::endl;
                     return true;
@@ -2142,6 +2190,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     std::cout << "SQL syntax error: ALTER COLUMN requires a name" << std::endl;
                     return true;
                 }
+                std::map<std::string, int32_t> declaredVarcharMods;
                 if (!sub.identityAction.empty()) {
                     if (sub.colDef.hasIdentityOptions) {
                         std::cout << "ERROR: identity sequence options are not "
@@ -2170,6 +2219,10 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                         std::cout << "Invalid column type: " << error << std::endl;
                         return true;
                     }
+                    int32_t varcharModifier = -1;
+                    if (declaredVarcharTypeMod(cd, varcharModifier)) {
+                        declaredVarcharMods[sub.name] = varcharModifier;
+                    }
                     status = g_engine.alterTableAlterColumnType(
                         s.currentDB, tableName, sub.name, column);
                 } else {
@@ -2179,7 +2232,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 if (!alterStatusOk(status, "Column")) return true;
                 if (!tableIsTemporary &&
                     !synchronizeTableAttributesInCatalog(
-                        s.currentDB, tableName)) {
+                        s.currentDB, tableName, &declaredVarcharMods)) {
                     std::cout << "ALTER COLUMN catalog update failed"
                               << std::endl;
                     return true;
@@ -3979,7 +4032,9 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
         col = makeIntColumn(cd.name, cd.isNull, 3, cd.isPrimaryKey,
                             cd.isUnsignedExtension);
     } else if (baseType == "varchar" || baseType == "character varying") {
-        size_t len = typeMod1 > 0 ? static_cast<size_t>(typeMod1) : 255;
+        // The SQL type is unbounded when no length is supplied.  This is
+        // still capped by our current physical varchar storage capacity.
+        size_t len = typeMod1 > 0 ? static_cast<size_t>(typeMod1) : 65535;
         col = makeVarCharColumn(cd.name, cd.isNull, len, cd.isPrimaryKey);
     } else if (baseType == "char" || baseType == "character") {
         size_t len = typeMod1 > 0 ? static_cast<size_t>(typeMod1) : 1;
@@ -5397,10 +5452,18 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     if (!temporary) {
         try {
             CatalogManager& cat = *tableCatalog;
+            std::map<std::string, int32_t> declaredVarcharMods;
+            for (const auto& definition : stmt->columns) {
+                int32_t modifier = -1;
+                if (declaredVarcharTypeMod(definition, modifier)) {
+                    declaredVarcharMods[definition.name] = modifier;
+                }
+            }
             registerTableInCatalog(
                 cat, tbl, targetSchema, targetName.name,
                 inheritedParents.empty()
-                    ? nullptr : &inheritanceCatalogColumns);
+                    ? nullptr : &inheritanceCatalogColumns,
+                &declaredVarcharMods);
             const PgClassRow* tableRelation = cat.findClassByName(
                 targetName.name,
                 cat.findNamespaceByName(targetSchema)->oid);
