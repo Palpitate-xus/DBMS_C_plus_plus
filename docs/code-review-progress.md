@@ -429,6 +429,10 @@
 
 | 481 | FUNC-01 / P0-16 | `overlay(text placing text from int for 负数)` 被误套用 `substring` 的负长度拒绝规则，返回 22011；PostgreSQL 18.6 允许负数并按起点与终点生成重叠结果。删除错误拒绝，保留起点小于 1 的错误 | 真实 18.6 对 ASCII 与 UTF-8 负长度输出逐项核对；字符串函数 C++ 回归通过，新增 `overlay_negative_count` 差分通过；126 组全量差分及完整协议回归通过。完整函数族仍为 partial | `f7601f4` |
 
+| 482 | P0-02 / PROTO-08 / P0-16 | 显式事务中重复 `CREATE TABLE` 原给出无 SQLSTATE 的文本错误，wire 层误映射为 `XX000`；PostgreSQL 18.6 返回 `42P07 duplicate_table`。typed DDL 的 catalog 预检和 storage 重名预检均明确返回 `42P07` | 新增 `ddl_error_txn` 真实差分，覆盖第二次建表的 42P07、后续 25P02 事务中止及 ROLLBACK；正式生产构建、完整协议回归和 129 组 18.6 差分均通过。所有 DDL 错误分支及诊断字段仍未穷尽，功能族保持 partial | `a3b8db1` |
+
+| 483 | P0-04 / P0-16 | 此前差分集没有显式事务中的 CREATE/ALTER 及 DML 回滚序列，不能用单语句 DDL 成功推断事务化 DDL。新增两个无 allowlist 的 wire 差分用例，分别核对建表后写入回滚、加列后写入回滚 | `ddl_transaction`、`alter_transaction` 对真实 18.6 均通过；129 组全量差分 `failed=0`，完整协议回归通过。并发 DDL、savepoint 全矩阵、catalog WAL 和 crash recovery 等 P0-04 验收仍未完成 | `23148e0` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；第 428–429 项又迁移了 FROM-less 与普通表 scalar UDF 的声明类型和 NULL，并执行有限的 SQL function expression。混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF、完整 SQL function query body 及二进制值仍存在显示文本边界，继续计入总清单。
