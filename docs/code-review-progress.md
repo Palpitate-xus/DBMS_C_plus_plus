@@ -407,6 +407,8 @@
 
 | 470 | P0-02 / CAT-02 / TYPE-04 / PROTO-04 | `VARCHAR(3)` 的列目录未写入 typmod，结构化结果又未把 varchar 识别为物理列，致 Simple Query/Describe 都报 `-1`；协议还会把物理容量误猜成 SQL typmod。现为可区分的显式 VARCHAR 长度记录 n+4，并让协议使用目录的真实 typmod（包括 `-1`） | 修复前隔离 wire 复现 `VARCHAR(3)` 与无长度 `VARCHAR` 都报 `-1`；修复后前者两种协议模式报 7，后者保持 -1，完整 PostgreSQL 协议回归通过。当前 schema 仅以 `dsize=255` 表示默认容量，因此显式 `VARCHAR(255)` 仍与无长度列混淆；无长度列仍受 255 字节内部容量限制，功能族保持 partial | `bb5ff38` |
 
+| 471 | P0-02 / CAT-02 / TYPE-04 / PROTO-04 | 无长度 `VARCHAR` 的物理容量原默认为 255 字节，256 字节写入即报 22001；显式 `VARCHAR(255)` 与默认容量相撞，typmod 错报 -1。现将默认物理容量提升到当前 65535 字节上限，并把 SQL 显式声明的 typmod 单独带入 CREATE/ALTER catalog，保留显式 `VARCHAR(65535)` 的 typmod 65539；不相关 ALTER 保留原值，`ALTER ... TYPE VARCHAR` 清除它 | 隔离 wire 复现无长度列写入/读回 256 字节，以及 `VARCHAR(255)`/`VARCHAR(65535)` 的元数据和 ALTER 边界；完整协议回归两轮、DDL 路由、类型注册测试通过。`ddl_ast_bridge_test` 在独立的 CREATE DATABASE 错误传播断言处失败，已列为下一项修复，不能算通过。真正无限长度、UTF-8 字符数、LIKE/继承元数据全路径仍未完成，功能族保持 partial | `ab51da1` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；第 428–429 项又迁移了 FROM-less 与普通表 scalar UDF 的声明类型和 NULL，并执行有限的 SQL function expression。混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF、完整 SQL function query body 及二进制值仍存在显示文本边界，继续计入总清单。
