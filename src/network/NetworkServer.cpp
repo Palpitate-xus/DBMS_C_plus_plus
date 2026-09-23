@@ -1381,6 +1381,7 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
                  physicalTypeName == "character" ||
                  physicalTypeName == "char" ||
                  physicalTypeName == "bpchar" ||
+                 physicalTypeName == "varchar" ||
                  physicalTypeName == "inet" || physicalTypeName == "cidr" ||
                  physicalTypeName == "macaddr" ||
                  physicalTypeName == "macaddr8" ||
@@ -1411,7 +1412,7 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
                     if (!hasStructuredType || structuredMatchesPhysical) {
                         if (attribute.atttypid != INVALID_OID) description.typeOid = attribute.atttypid;
                         if (attribute.attlen != 0) description.typeSize = attribute.attlen;
-                        if (attribute.atttypmod >= 0) description.typeModifier = attribute.atttypmod;
+                        description.typeModifier = attribute.atttypmod;
                     }
                     break;
                 }

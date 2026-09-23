@@ -774,6 +774,20 @@ def extended_query_describe(sock):
         sock, "SELECT v FROM char_oid_regression"))) == 1
     assert any(kind == b"C" for kind, _ in simple_query(
         sock, "CREATE TABLE varchar_width_regression (v VARCHAR(3))"))
+    varchar_column = row_description_fields(simple_query(
+        sock, "SELECT v FROM varchar_width_regression"))
+    assert len(varchar_column) == 1 and varchar_column[0][2:6] == (
+        1, 1043, -1, 7), varchar_column
+    varchar_column_parse = (b"describe_varchar_column\0SELECT v FROM varchar_width_regression\0" +
+                            struct.pack("!H", 0))
+    sock.sendall(typed(b"P", varchar_column_parse) +
+                 typed(b"D", b"Sdescribe_varchar_column\0") + typed(b"S"))
+    assert row_description_fields(read_until_ready(sock)) == varchar_column
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "CREATE TABLE varchar_unbounded_meta (v VARCHAR)"))
+    assert row_description_fields(simple_query(
+        sock, "SELECT v FROM varchar_unbounded_meta"))[0][2:6] == (
+        1, 1043, -1, -1)
     overlong_varchar = simple_query(
         sock, "INSERT INTO varchar_width_regression VALUES ('abcd')")
     assert b"C22001\0" in next(body for kind, body in overlong_varchar if kind == b"E")

@@ -881,6 +881,9 @@ static PgAttributeRow catalogAttributeForColumn(
                (column.dataType == "character" || column.dataType == "char" ||
                 column.dataType == "bpchar") && column.dsize > 0) {
         attribute.atttypmod = static_cast<int32_t>(column.dsize + 4);
+    } else if (!column.isArray && column.dataType == "varchar" &&
+               column.dsize > 0 && column.dsize != 255) {
+        attribute.atttypmod = static_cast<int32_t>(column.dsize + 4);
     }
     attribute.attnotnull = !column.isNull;
     attribute.atthasdef = !column.defaultValue.empty();
