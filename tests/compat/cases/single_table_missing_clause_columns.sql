@@ -1,0 +1,12 @@
+DROP TABLE IF EXISTS diff_missing_clause_col;
+CREATE TABLE diff_missing_clause_col (v int);
+INSERT INTO diff_missing_clause_col VALUES (1), (2);
+SELECT v FROM diff_missing_clause_col WHERE missing_column = 1;
+SELECT v FROM diff_missing_clause_col AS x WHERE x.missing_column = 1;
+SELECT v FROM diff_missing_clause_col WHERE missing_column = ANY (SELECT v FROM diff_missing_clause_col);
+SELECT v FROM diff_missing_clause_col ORDER BY missing_column;
+SELECT v FROM diff_missing_clause_col AS x ORDER BY x.missing_column;
+SELECT v FROM diff_missing_clause_col WHERE v = 1;
+SELECT v FROM diff_missing_clause_col ORDER BY v;
+SELECT v AS output_name FROM diff_missing_clause_col ORDER BY output_name;
+DROP TABLE diff_missing_clause_col;

@@ -6957,7 +6957,8 @@ static std::string inferSubQueryResultType(
 // binding time instead of allowing them to become NULL (or COALESCE defaults).
 static bool validateFromlessColumnBindings(const string& expression,
                                            string& error, string& sqlState,
-                                           const string& visibleQualifier = "") {
+                                           const string& visibleQualifier = "",
+                                           const set<string>* visibleColumns = nullptr) {
     dbms::SQLParser parser;
     const auto parsed = parser.parse("SELECT " + expression);
     const auto* select = parsed.success
@@ -6979,20 +6980,23 @@ static bool validateFromlessColumnBindings(const string& expression,
                         c = static_cast<char>(
                             tolower(static_cast<unsigned char>(c)));
                     }
-                    if (!visibleQualifier.empty()) {
-                        if (column->table.empty() ||
-                            (column->schema.empty() &&
-                             toLower(column->table) ==
-                                 toLower(visibleQualifier))) return;
-                        unbound = column;
-                        return;
-                    }
                     static const set<string> pseudoColumns = {
                         "current_user", "session_user", "user", "current_date",
                         "current_timestamp", "localtimestamp"
                     };
                     if (column->schema.empty() && column->table.empty() &&
                         pseudoColumns.count(name)) return;
+                    if (!visibleQualifier.empty()) {
+                        const bool qualifierVisible = column->table.empty() ||
+                            (column->schema.empty() &&
+                             toLower(column->table) ==
+                                 toLower(visibleQualifier));
+                        if (qualifierVisible &&
+                            (!visibleColumns ||
+                             visibleColumns->count(column->column))) return;
+                        unbound = column;
+                        return;
+                    }
                     unbound = column;
                     return;
                 }
@@ -7015,6 +7019,11 @@ static bool validateFromlessColumnBindings(const string& expression,
                         c = static_cast<char>(
                             tolower(static_cast<unsigned char>(c)));
                     }
+                    // The parser currently represents quantified ANY/ALL
+                    // subqueries as calls; their argument has its own scope
+                    // and is handled by the legacy quantified-query path.
+                    if (functionName == "any" || functionName == "all")
+                        return;
                     for (size_t i = 0; i < call->args.size(); ++i) {
                         // EXTRACT(field FROM source) stores its field token
                         // as a ColumnRef in the parser; it is not a binding.
@@ -7063,7 +7072,9 @@ static bool validateFromlessColumnBindings(const string& expression,
         };
     inspect(select->selectList.front().expr.get());
     if (!unbound) return true;
-    if (!unbound->table.empty()) {
+    if (!unbound->table.empty() &&
+        (visibleQualifier.empty() || !unbound->schema.empty() ||
+         toLower(unbound->table) != toLower(visibleQualifier))) {
         error = "missing FROM-clause entry for table \"" +
                 unbound->table + "\"";
         sqlState = "42P01";
@@ -22125,6 +22136,16 @@ static bool executeInternal(const string& rawSql, Session& s) {
         if (queryDb != "pg_catalog" && queryDb != "information_schema" &&
             !isTempTable(s, tnameOrig) && !checkSelectColumnPermission(s, tnameOrig, columns)) return true;
 
+        TableSchema tbl = g_engine.getTableSchema(queryDb, tname);
+        set<string> visibleColumns;
+        for (size_t i = 0; i < tbl.len; ++i)
+            visibleColumns.insert(tbl.cols[i].dataName);
+        set<string> orderVisibleColumns = visibleColumns;
+        for (const auto& [alias, expression] : selectAliasMap) {
+            (void)expression;
+            orderVisibleColumns.insert(alias);
+        }
+
         vector<dbms::StorageEngine::OrderBySpec> orderBySpecs;
         vector<dbms::StorageEngine::OrderBySpec> exprOrderBySpecs; // expressions sorted post-query
         if (orderPos != string::npos) {
@@ -22189,7 +22210,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         ? tnameOrig : tableAlias;
                     if (!validateFromlessColumnBindings(
                             sortItem, bindingError, bindingSqlState,
-                            visibleQualifier)) {
+                            visibleQualifier, &orderVisibleColumns)) {
                         cout << "ERROR: " << bindingError << " (SQLSTATE "
                              << bindingSqlState << ")" << endl;
                         return true;
@@ -22539,7 +22560,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
         }
 
-        TableSchema tbl = g_engine.getTableSchema(queryDb, tname);
         set<string> selectCols;
         bool selectAll = (columns == "*");
         // Plain-column projection in SELECT-list order (PG projects columns
@@ -23476,7 +23496,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     ? tnameOrig : tableAlias;
                 if (!validateFromlessColumnBindings(
                         whereClause, bindingError, bindingSqlState,
-                        visibleQualifier)) {
+                        visibleQualifier, &visibleColumns)) {
                     cout << "ERROR: " << bindingError << " (SQLSTATE "
                          << bindingSqlState << ")" << endl;
                     return true;
