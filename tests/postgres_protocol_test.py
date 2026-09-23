@@ -762,6 +762,14 @@ def extended_query_describe(sock):
         sock, "SELECT v FROM char_default_regression"))
     assert len(default_char_column) == 1 and default_char_column[0][2:6] == (
         1, 1042, -1, 5), default_char_column
+    for name, type_spec in (
+            ("invalid_char_zero", "CHAR(0)"),
+            ("invalid_varchar_zero", "VARCHAR(0)"),
+            ("unsupported_char_length", "CHAR(1006)"),
+            ("unsupported_varchar_length", "VARCHAR(65536)")):
+        rejected = simple_query(sock, "CREATE TABLE " + name + " (v " + type_spec + ")")
+        assert any(kind == b"E" for kind, _ in rejected), (type_spec, rejected)
+        assert b"C22023\0" in next(body for kind, body in rejected if kind == b"E")
 
     typed_date = (b"describe_typed_date\0SELECT DATE '2024-01-01'\0" +
                   struct.pack("!H", 0))

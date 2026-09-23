@@ -97,6 +97,12 @@ TypeModResult TypeRegistry::applyTypeMods(const std::string& canonicalName,
         if (c == "character" || c == "character varying" || c == "bit" || c == "bit varying" ||
             c == "varchar" || c == "char" || c == "nchar" || c == "nvarchar" ||
             c == "binary" || c == "varbinary") {
+            if (n == 0 && (c == "character" || c == "character varying" ||
+                           c == "varchar" || c == "char")) {
+                res.error = "length for type " + canonicalName +
+                            " must be greater than zero";
+                return res;
+            }
             size_t len = static_cast<size_t>(n);
             if (entry->maxLength > 0 && len > entry->maxLength) {
                 res.error = "length " + std::to_string(len) + " exceeds maximum " +

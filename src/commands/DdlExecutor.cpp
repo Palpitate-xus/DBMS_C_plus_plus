@@ -3929,6 +3929,15 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
             return false;
         }
     }
+    if ((baseType == "char" || baseType == "varchar") &&
+        !typeMods.empty()) {
+        const TypeModResult checked =
+            TypeRegistry::instance().applyTypeMods(baseType, typeMods);
+        if (!checked.ok()) {
+            error = checked.error + " (SQLSTATE 22023)";
+            return false;
+        }
+    }
     if (baseType == "bit" || baseType == "bit varying" ||
         baseType == "varbit") {
         constexpr int kMaxSupportedBitLength = 8388608;

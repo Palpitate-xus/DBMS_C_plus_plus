@@ -64,8 +64,13 @@ static void test_apply_type_mods_varchar() {
     assert(r.isVariableLength);
 
     r = reg.applyTypeMods("varchar", {"0"});
-    assert(r.ok());
-    assert(r.dsize == 0);
+    assert(!r.ok());
+    r = reg.applyTypeMods("character", {"0"});
+    assert(!r.ok());
+    r = reg.applyTypeMods("character", {"1006"});
+    assert(!r.ok());
+    r = reg.applyTypeMods("character varying", {"65536"});
+    assert(!r.ok());
 
     r = reg.applyTypeMods("character varying", {});
     assert(r.ok());
