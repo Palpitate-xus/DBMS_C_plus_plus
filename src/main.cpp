@@ -14167,15 +14167,6 @@ static void applySessionTimezoneToAnswers(
             if (!cur.empty()) vals.push_back(cur);
         }
         bool changed = false;
-        for (size_t p : tzPositions) {
-            if (p >= vals.size()) continue;
-            const std::string& v = vals[p];
-            // Expect "YYYY-MM-DD HH:MM:SS" — but the split above broke it
-            // into two tokens; rejoin positionally instead: a timestamp
-            // occupies TWO tokens.  Recompute by scanning tokens with the
-            // knowledge that timestamptz consumes pairs.
-            (void)v;
-        }
         // Positional pass: rebuild with pair-aware mapping.
         std::vector<std::string> logical;
         {
@@ -14204,10 +14195,23 @@ static void applySessionTimezoneToAnswers(
                     }
                     return colons >= 2;
                 };
+                auto looksLikeOffset = [](const std::string& x) {
+                    return x.size() == 6 && (x[0] == '+' || x[0] == '-') &&
+                           std::isdigit(static_cast<unsigned char>(x[1])) &&
+                           std::isdigit(static_cast<unsigned char>(x[2])) &&
+                           x[3] == ':' &&
+                           std::isdigit(static_cast<unsigned char>(x[4])) &&
+                           std::isdigit(static_cast<unsigned char>(x[5]));
+                };
                 if (isTs && t + 1 < vals.size() &&
                     looksLikeDate(vals[t]) && looksLikeTime(vals[t + 1])) {
-                    logical.push_back(vals[t] + " " + vals[t + 1]);
+                    std::string value = vals[t] + " " + vals[t + 1];
                     t += 2;
+                    if ((ty == "timestamptz" || ty == "timestamp with time zone") &&
+                        t < vals.size() && looksLikeOffset(vals[t])) {
+                        value += " " + vals[t++];
+                    }
+                    logical.push_back(std::move(value));
                 } else {
                     logical.push_back(vals[t]);
                     t += 1;
@@ -25868,10 +25872,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
         } else {
             applyLimitOffset(answers);
         }
-        // Re-render TIMESTAMPTZ values in the session's TimeZone (SET TIME
-        // ZONE).  Executor paths emit UTC; the legacy engine query() already
-        // applied the offset and suffixed "+HH:MM", which the post-processor
-        // detects and leaves untouched (no double application).
+        // Volcano emits UTC values; StorageEngine::query may already have
+        // rendered the session offset, which the helper detects and preserves.
         {
             std::vector<std::pair<std::string, std::string>> projCols;
             if (g_engine.tableExists(queryDb, tname)) {
