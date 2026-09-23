@@ -16598,7 +16598,6 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!validStoredIdentifier(newName, MAX_COL_NAME_LEN)) return DBStatus::INVALID_VALUE;
-    if (oldName == newName) return DBStatus::OK;
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -16609,6 +16608,10 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
     if (colIdx >= tbl.len) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
+    }
+    if (oldName == newName) {
+        lockManager_.unlock(tablename);
+        return DBStatus::OK;
     }
     for (size_t i = 0; i < tbl.len; ++i) {
         if (tbl.cols[i].dataName == newName) {

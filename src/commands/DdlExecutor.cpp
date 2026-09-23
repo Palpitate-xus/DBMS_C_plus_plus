@@ -2094,9 +2094,27 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 }
                 status = g_engine.alterTableRenameColumn(s.currentDB, tableName,
                                                          sub.name, sub.newName);
-                if (status == DBStatus::INVALID_VALUE && sub.ifExists) {
-                    std::cout << "NOTICE: column does not exist, skipping" << std::endl;
-                    break;
+                if (status == DBStatus::INVALID_VALUE) {
+                    const TableSchema currentSchema =
+                        g_engine.getTableSchema(s.currentDB, tableName);
+                    bool sourceColumnExists = false;
+                    for (size_t i = 0; i < currentSchema.len; ++i) {
+                        if (currentSchema.cols[i].dataName == sub.name) {
+                            sourceColumnExists = true;
+                            break;
+                        }
+                    }
+                    if (!sourceColumnExists) {
+                        if (sub.ifExists) {
+                            std::cout << "NOTICE: column does not exist, skipping"
+                                      << std::endl;
+                            break;
+                        }
+                        std::cout << "ERROR: column \"" << sub.name
+                                  << "\" does not exist (SQLSTATE 42703)"
+                                  << std::endl;
+                        return true;
+                    }
                 }
                 if (status == DBStatus::TABLE_ALREADY_EXISTS) {
                     std::cout << "ERROR: column \"" << sub.newName
