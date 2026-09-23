@@ -38,6 +38,23 @@ static void test_expr_helper_basic() {
     assert(r.ok);
     assert(r.value == "3");
 
+    const std::map<std::string, std::string> paddedRow = {
+        {"fixed", "éé "}, {"plain", "éé "}};
+    const std::map<std::string, std::string> paddedTypes = {
+        {"fixed", "char"}, {"plain", "text"}};
+    r = dbms::ExprHelper::evalString("length(fixed)", paddedRow,
+                                     paddedTypes);
+    assert(r.ok && r.value == "2");
+    r = dbms::ExprHelper::evalString("char_length(fixed)", paddedRow,
+                                     paddedTypes);
+    assert(r.ok && r.value == "2");
+    r = dbms::ExprHelper::evalString("octet_length(fixed)", paddedRow,
+                                     paddedTypes);
+    assert(r.ok && r.value == "5");
+    r = dbms::ExprHelper::evalString("length(plain)", paddedRow,
+                                     paddedTypes);
+    assert(r.ok && r.value == "3");
+
     r = dbms::ExprHelper::evalString("sum('abc')", {});
     assert(!r.ok && r.error.find("SQLSTATE 42725") != std::string::npos);
     r = dbms::ExprHelper::evalString("avg(NULL)", {});

@@ -62,9 +62,10 @@ std::string canonicalTypeName(const std::string& storageType) {
     if (t == "float4" || t == "real") return "real";
     if (t == "float8" || t == "double precision") return "double precision";
     if (t == "numeric" || t == "decimal") return "numeric";
-    if (t == "varchar" || t == "character varying" ||
-        t == "char" || t == "character" || t == "text" ||
-        t == "bpchar") {
+    if (t == "char" || t == "character" || t == "bpchar") {
+        return "bpchar";
+    }
+    if (t == "varchar" || t == "character varying" || t == "text") {
         return "text";
     }
     if (t == "bool" || t == "boolean") return "boolean";
