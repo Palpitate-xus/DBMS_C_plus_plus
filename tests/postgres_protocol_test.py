@@ -3151,11 +3151,12 @@ def main():
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "INSERT INTO jo_plain VALUES (1, 5)"))
         jo_rows = data_row_values(simple_query(
-            sock, "SELECT x, y FROM jo_plain JOIN jo_loc ON jo_plain.x = jo_loc.x"))
+            sock, "SELECT jo_plain.x, y FROM jo_plain JOIN jo_loc "
+            "ON jo_plain.x = jo_loc.x"))
         assert jo_rows == [[b"1", b"2"]], jo_rows
         # Same for a left join with an aliased "on"-bearing right table.
         jo_left = data_row_values(simple_query(
-            sock, "SELECT x, y FROM jo_plain LEFT JOIN jo_loc AS l "
+            sock, "SELECT jo_plain.x, y FROM jo_plain LEFT JOIN jo_loc AS l "
             "ON jo_plain.x = l.x"))
         assert jo_left == [[b"1", b"2"]], jo_left
 

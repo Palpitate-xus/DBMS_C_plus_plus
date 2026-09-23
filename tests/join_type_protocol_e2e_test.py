@@ -297,6 +297,19 @@ def main():
                 include_types=True)
             assert state == sqlstate, (invalid_sql, state, message)
 
+        for bad_column, sqlstate in [
+            ("txt", "42702"),
+            ("missing.txt", "42P01"),
+            ("l.missing_txt", "42703"),
+        ]:
+            invalid_sql = (
+                "SELECT " + bad_column + " FROM join_exact_left l "
+                "JOIN join_exact_right r ON l.id = r.id;")
+            _, state, message, _, _, _ = runner.decode_wire_result(
+                client.simple_query(server["sock"], invalid_sql),
+                include_types=True)
+            assert state == sqlstate, (invalid_sql, state, message)
+
         left_where_sql = (
             "SELECT l.id, r.txt FROM join_exact_left l "
             "LEFT JOIN join_exact_right r ON l.id = r.id "

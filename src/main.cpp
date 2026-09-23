@@ -19035,20 +19035,25 @@ static bool executeInternal(const string& rawSql, Session& s) {
             while (fromTokEnd < sql.size() &&
                    !isspace(static_cast<unsigned char>(sql[fromTokEnd]))) ++fromTokEnd;
             string tableName = trim(sql.substr(fromTokStart, fromTokEnd - fromTokStart));
-            for (const auto& qual : {fromTableAlias, tableName}) {
-                if (qual.empty() || qual == ".") continue;
-                string prefix = qual + ".";
-                size_t cpos = 0;
-                while ((cpos = findTextOutsideQuotes(
-                            columns, prefix, cpos)) != string::npos) {
-                    if (cpos > 0 &&
-                        (isalnum(static_cast<unsigned char>(columns[cpos - 1])) ||
-                         columns[cpos - 1] == '_')) {
-                        cpos += prefix.size();
-                        continue;
+            // A JOIN needs both qualifiers to bind duplicate column names.
+            // Stripping the first relation here turned `left.x` into bare
+            // `x`, which then looked ambiguous or read the wrong side.
+            if (findTopLevelKeyword(sql, "join", fromPos) == string::npos) {
+                for (const auto& qual : {fromTableAlias, tableName}) {
+                    if (qual.empty() || qual == ".") continue;
+                    string prefix = qual + ".";
+                    size_t cpos = 0;
+                    while ((cpos = findTextOutsideQuotes(
+                                columns, prefix, cpos)) != string::npos) {
+                        if (cpos > 0 &&
+                            (isalnum(static_cast<unsigned char>(columns[cpos - 1])) ||
+                             columns[cpos - 1] == '_')) {
+                            cpos += prefix.size();
+                            continue;
+                        }
+                        columns = columns.substr(0, cpos) +
+                                  columns.substr(cpos + prefix.size());
                     }
-                    columns = columns.substr(0, cpos) +
-                              columns.substr(cpos + prefix.size());
                 }
             }
         }
@@ -20024,7 +20029,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 };
                 dbms::SQLParser projectionParser;
                 for (size_t i = 0; i < requestedCols.size(); ++i) {
-                    if (enginePos(requestedCols[i]).first >= 0) continue;
                     const auto parsed = projectionParser.parse(
                         "SELECT " + requestedExpressions[i]);
                     const auto* select = parsed.success
@@ -20042,7 +20046,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                              << bindingState << ")" << endl;
                         return true;
                     }
-                    joinExpressionProjection[i] = true;
+                    joinExpressionProjection[i] =
+                        enginePos(requestedCols[i]).first < 0;
                 }
             }
             if (pureJoinAgg) {
