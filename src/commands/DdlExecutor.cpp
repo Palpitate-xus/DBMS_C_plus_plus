@@ -2079,6 +2079,13 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     std::cout << "NOTICE: column does not exist, skipping" << std::endl;
                     break;
                 }
+                if (status == DBStatus::TABLE_ALREADY_EXISTS) {
+                    std::cout << "ERROR: column \"" << sub.newName
+                              << "\" of relation \"" << stmt->tableName
+                              << "\" already exists (SQLSTATE 42701)"
+                              << std::endl;
+                    return true;
+                }
                 if (!alterStatusOk(status, "Column")) return true;
                 if (!tableIsTemporary) {
                     try {
