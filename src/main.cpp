@@ -3,6 +3,7 @@
 #include "types/money.h"
 #include <chrono>
 #include <cctype>
+#include <cmath>
 #include <filesystem>
 #include <functional>
 #include <future>
@@ -3098,22 +3099,61 @@ static bool handleSetCommand(const string& sql, Session& s) {
         return false;
     }
 
-    // SET TIMEZONE = '+08:00' | SET TIME ZONE '+08:00' | SET TIME ZONE 'UTC'
+    // PostgreSQL interprets signed string offsets using POSIX's west-positive
+    // convention, while numeric hours are east-positive.
     if (sql.substr(0, 13) == "set timezone " || sql.substr(0, 14) == "set time zone ") {
         size_t off = (sql.substr(0, 13) == "set timezone ") ? 13 : 14;
         string tzVal = trim(sql.substr(off));
         if (!tzVal.empty() && tzVal[0] == '=') tzVal = trim(tzVal.substr(1));
-        s.timezoneOffsetMinutes = parseTimezoneOffset(tzVal);
-        int absOff = std::abs(s.timezoneOffsetMinutes);
-        int tzh = absOff / 60;
-        int tzm = absOff % 60;
-        std::string sign = (s.timezoneOffsetMinutes >= 0) ? "+" : "-";
-        char buf[32];
-        snprintf(buf, sizeof(buf), "%s%02d:%02d", sign.c_str(), tzh, tzm);
-        s.timeZone = (s.timezoneOffsetMinutes == 0)
-                         ? "UTC"
-                         : std::string("UTC") + buf;
-        cout << "Timezone set to UTC" << buf << " (" << tzVal << ")" << endl;
+        const bool quoted = tzVal.size() >= 2 &&
+            (tzVal.front() == '\'' || tzVal.front() == '"') &&
+            tzVal.back() == tzVal.front();
+        const string zone = quoted ? tzVal.substr(1, tzVal.size() - 2) : tzVal;
+        char* numberEnd = nullptr;
+        const double numericHours = std::strtod(zone.c_str(), &numberEnd);
+        const bool numeric = !zone.empty() && numberEnd != zone.c_str() &&
+            *numberEnd == '\0' && std::isfinite(numericHours);
+        int offsetMinutes = 0;
+        string displayZone = zone;
+        if (numeric) {
+            if (std::abs(numericHours) > 15.99) {
+                cout << "ERROR: invalid value for parameter TimeZone (SQLSTATE 22023)" << endl;
+                return true;
+            }
+            offsetMinutes = static_cast<int>(std::lround(numericHours * 60));
+            const bool posixOffset = quoted &&
+                (zone.front() == '+' || zone.front() == '-');
+            if (posixOffset) {
+                offsetMinutes = -offsetMinutes;
+            } else {
+                const int absolute = std::abs(offsetMinutes);
+                char east[16], west[16];
+                snprintf(east, sizeof(east), "%c%02d", offsetMinutes >= 0 ? '+' : '-', absolute / 60);
+                snprintf(west, sizeof(west), "%c%02d", offsetMinutes >= 0 ? '-' : '+', absolute / 60);
+                displayZone = string("<") + east;
+                if (absolute % 60) {
+                    char minutes[8];
+                    snprintf(minutes, sizeof(minutes), ":%02d", absolute % 60);
+                    displayZone += minutes;
+                }
+                displayZone += ">";
+                displayZone += west;
+                if (absolute % 60) {
+                    char minutes[8];
+                    snprintf(minutes, sizeof(minutes), ":%02d", absolute % 60);
+                    displayZone += minutes;
+                }
+            }
+        } else {
+            offsetMinutes = parseTimezoneOffset(zone);
+            if (quoted && !zone.empty() && (zone.front() == '+' || zone.front() == '-'))
+                offsetMinutes = -offsetMinutes;
+            if (zone == "utc" || zone == "UTC") displayZone = "UTC";
+            if (zone == "gmt" || zone == "GMT") displayZone = "GMT";
+        }
+        s.timezoneOffsetMinutes = offsetMinutes;
+        s.timeZone = displayZone;
+        cout << "Timezone set to " << displayZone << endl;
         return false;
     }
 

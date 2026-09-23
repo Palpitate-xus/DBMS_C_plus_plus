@@ -146,7 +146,7 @@ def main():
         "SELECT * FROM tt",
     ])
     rows = data_rows(out)
-    check("offset syntax + repeat", rows == ["1 2026-08-17 18:00:00+08"], str(rows))
+    check("POSIX offset syntax + repeat", rows == ["1 2026-08-17 02:00:00-08"], str(rows))
 
     out, _, _ = run_sql(use + [
         "SET TIME ZONE 'Asia/Kolkata'",

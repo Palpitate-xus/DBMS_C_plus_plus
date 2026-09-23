@@ -1493,7 +1493,7 @@ def main():
         timezone_change = simple_query(
             startup_settings_sock, "SET TIME ZONE '+08:00'")
         assert parameter_status_values(timezone_change) == [
-            (b"TimeZone", b"UTC+08:00")], timezone_change
+            (b"TimeZone", b"+08:00")], timezone_change
         timezone_reset = simple_query(startup_settings_sock,
                                       "RESET TIME ZONE")
         assert parameter_status_values(timezone_reset) == [
