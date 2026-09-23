@@ -19914,9 +19914,21 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     }
                     string source = normalizeJoinColumn(expression);
                     if (outputName.empty()) {
-                        const size_t dot = expression.rfind('.');
-                        outputName = dot == string::npos
-                            ? expression : expression.substr(dot + 1);
+                        const size_t callParen = expression.find('(');
+                        const bool timezoneCall = callParen != string::npos &&
+                            expression.back() == ')' &&
+                            toLower(trim(expression.substr(0, callParen))) ==
+                                "timezone";
+                        const bool timezoneOperator =
+                            findTopLevelKeyword(expression, "at time zone") !=
+                                string::npos;
+                        if (timezoneCall || timezoneOperator) {
+                            outputName = "timezone";
+                        } else {
+                            const size_t dot = expression.rfind('.');
+                            outputName = dot == string::npos
+                                ? expression : expression.substr(dot + 1);
+                        }
                     }
                     requestedExpressions.push_back(expression);
                     requestedCols.push_back(std::move(source));
