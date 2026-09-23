@@ -19244,10 +19244,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
         // modifier, not part of the first target expression.
         for (const auto& rawItem : splitSelectColumns(columns)) {
             const string item = trim(rawItem);
-            const size_t asPos = findLastTextOutsideQuotes(item, " as ");
+            const size_t asPos = findTopLevelKeyword(toLower(item), "as");
             if (asPos == string::npos) continue;
             const string expression = trim(item.substr(0, asPos));
-            const string alias = trim(item.substr(asPos + 4));
+            const string alias = trim(item.substr(asPos + 2));
             if (!expression.empty() && !alias.empty() &&
                 alias.find_first_of(" ,()+-*/%") == string::npos) {
                 selectAliasMap[alias] = expression;
@@ -19883,10 +19883,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
             bool selectAll = (columns == "*");
             auto normalizeJoinColumn = [&](string column) {
                 column = trim(column);
-                const string lowerColumn = toLower(column);
-                const size_t asPos = findLastTextOutsideQuotes(
-                    lowerColumn, " as ");
-                if (asPos != string::npos) column = trim(column.substr(0, asPos));
                 const size_t dot = column.find('.');
                 if (dot == string::npos) return column;
                 const string qualifier = column.substr(0, dot);
@@ -19900,16 +19896,27 @@ static bool executeInternal(const string& rawSql, Session& s) {
             vector<string> requestedCols;
             vector<string> requestedHeaders;
             vector<string> requestedExpressions;
+            auto pgCastHeaderName = [](string type) {
+                type = dbms::ExprHelper::canonicalResultTypeName(std::move(type));
+                if (type == "smallint") return string("int2");
+                if (type == "integer") return string("int4");
+                if (type == "bigint") return string("int8");
+                if (type == "real") return string("float4");
+                if (type == "double precision") return string("float8");
+                if (type == "boolean") return string("bool");
+                if (type == "character varying") return string("varchar");
+                return type;
+            };
             if (!selectAll) {
                 for (const auto& item : splitSelectColumns(columns)) {
                     string expression = trim(item);
                     string outputName;
                     const string lowerExpression = toLower(expression);
-                    const size_t asPos = findLastTextOutsideQuotes(
-                        lowerExpression, " as ");
+                    const size_t asPos = findTopLevelKeyword(
+                        lowerExpression, "as");
                     if (asPos != string::npos) {
                         outputName = decodeQuotedIdentifier(
-                            trim(expression.substr(asPos + 4)));
+                            trim(expression.substr(asPos + 2)));
                         expression = trim(expression.substr(0, asPos));
                     }
                     string source = normalizeJoinColumn(expression);
@@ -19918,7 +19925,53 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             findTopLevelKeyword(expression, "at time zone") !=
                                 string::npos;
                         string functionName;
-                        if (!timezoneOperator && expression.find('(') != string::npos) {
+                        string castName;
+                        string expressionName;
+                        size_t postfixCast = string::npos;
+                        int castDepth = 0;
+                        char castQuote = 0;
+                        for (size_t at = 0; at + 1 < expression.size(); ++at) {
+                            const char ch = expression[at];
+                            if (castQuote) {
+                                if (ch == castQuote) {
+                                    if (at + 1 < expression.size() &&
+                                        expression[at + 1] == castQuote) ++at;
+                                    else castQuote = 0;
+                                }
+                                continue;
+                            }
+                            if (ch == '\'' || ch == '"') { castQuote = ch; continue; }
+                            if (ch == '(') { ++castDepth; continue; }
+                            if (ch == ')') { --castDepth; continue; }
+                            if (castDepth == 0 && ch == ':' &&
+                                expression[at + 1] == ':') {
+                                postfixCast = at;
+                                ++at;
+                            }
+                        }
+                        if (postfixCast != string::npos &&
+                            dbms::ExprHelper::canonicalResultTypeName(
+                                trim(expression.substr(postfixCast + 2))) !=
+                            dbms::ExprHelper::canonicalResultTypeName(
+                                dbms::ExprHelper::inferResultType(expression))) {
+                            postfixCast = string::npos;
+                        }
+                        if (postfixCast != string::npos) {
+                            dbms::SQLParser operandParser;
+                            const auto operand = operandParser.parse(
+                                "SELECT " + trim(expression.substr(0, postfixCast)));
+                            const auto* operandSelect = operand.success
+                                ? dynamic_cast<const dbms::SelectStmt*>(
+                                      operand.stmt.get()) : nullptr;
+                            const auto* ref = operandSelect &&
+                                operandSelect->selectList.size() == 1
+                                ? dynamic_cast<const dbms::ColumnRefExpr*>(
+                                      operandSelect->selectList.front().expr.get())
+                                : nullptr;
+                            castName = ref ? ref->column : pgCastHeaderName(
+                                dbms::ExprHelper::inferResultType(expression));
+                        }
+                        if (!timezoneOperator) {
                             dbms::SQLParser nameParser;
                             auto parsedName = nameParser.parse(
                                 "SELECT " + expression);
@@ -19935,6 +19988,25 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                     const size_t qualifier = functionName.rfind('.');
                                     if (qualifier != string::npos)
                                         functionName.erase(0, qualifier + 1);
+                                } else if (const auto* cast = dynamic_cast<
+                                               const dbms::CastExpr*>(
+                                               selectName->selectList.front().expr.get())) {
+                                    if (const auto* ref = dynamic_cast<
+                                            const dbms::ColumnRefExpr*>(
+                                            cast->operand.get())) {
+                                        castName = ref->column;
+                                    } else {
+                                        castName = pgCastHeaderName(cast->typeName);
+                                    }
+                                } else if (dynamic_cast<const dbms::BinaryOpExpr*>(
+                                               selectName->selectList.front().expr.get()) ||
+                                           dynamic_cast<const dbms::UnaryOpExpr*>(
+                                               selectName->selectList.front().expr.get()) ||
+                                           dynamic_cast<const dbms::CaseExpr*>(
+                                               selectName->selectList.front().expr.get()) ||
+                                           dynamic_cast<const dbms::LiteralExpr*>(
+                                               selectName->selectList.front().expr.get())) {
+                                    expressionName = "?column?";
                                 }
                             }
                         }
@@ -19942,6 +20014,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             outputName = "timezone";
                         } else if (!functionName.empty()) {
                             outputName = functionName;
+                        } else if (!castName.empty()) {
+                            outputName = castName;
+                        } else if (!expressionName.empty()) {
+                            outputName = expressionName;
                         } else {
                             const size_t dot = expression.rfind('.');
                             outputName = dot == string::npos
@@ -19966,11 +20042,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     string it = trim(item);
                     string low = toLower(it);
                     string aggregateAlias;
-                    const size_t aggregateAsPos = findLastTextOutsideQuotes(
-                        low, " as ");
+                    const size_t aggregateAsPos = findTopLevelKeyword(
+                        low, "as");
                     if (aggregateAsPos != string::npos) {
                         aggregateAlias = decodeQuotedIdentifier(
-                            trim(it.substr(aggregateAsPos + 4)));
+                            trim(it.substr(aggregateAsPos + 2)));
                         it = trim(it.substr(0, aggregateAsPos));
                         low = toLower(it);
                     }
@@ -20226,7 +20302,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         return true;
                     }
                     joinExpressionProjection[i] =
-                        enginePos(requestedCols[i]).first < 0;
+                        dynamic_cast<const dbms::ColumnRefExpr*>(
+                            select->selectList[0].expr.get()) == nullptr;
                 }
             }
             if (pureJoinAgg) {
@@ -20271,7 +20348,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         joinProtocolResult.columns.push_back(requestedHeaders[i]);
                         const auto position = enginePos(column);
                         string type = "text";
-                        if (position.first == 0 && position.second >= 0)
+                        if (joinExpressionProjection[i])
+                            type = dbms::ExprHelper::inferResultType(
+                                requestedExpressions[i], joinTypeHints);
+                        else if (position.first == 0 && position.second >= 0)
                             type = leftTbl.cols[position.second].dataType;
                         else if (position.first == 1 && position.second >= 0)
                             type = rightTbl.cols[position.second].dataType;
