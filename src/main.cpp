@@ -19745,6 +19745,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             };
             vector<string> requestedCols;
             vector<string> requestedHeaders;
+            vector<string> requestedExpressions;
             if (!selectAll) {
                 for (const auto& item : splitSelectColumns(columns)) {
                     string expression = trim(item);
@@ -19763,6 +19764,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         outputName = dot == string::npos
                             ? expression : expression.substr(dot + 1);
                     }
+                    requestedExpressions.push_back(expression);
                     requestedCols.push_back(std::move(source));
                     requestedHeaders.push_back(std::move(outputName));
                 }
@@ -19848,6 +19850,29 @@ static bool executeInternal(const string& rawSql, Session& s) {
             TableSchema rightTbl = g_engine.getTableSchema(s.currentDB, rightTable);
             string leftPrefix = leftAlias.empty() ? leftTableName : leftAlias;
             string rightPrefix = rightAlias.empty() ? rightTableName : rightAlias;
+            map<string, size_t> joinBareNameCounts;
+            for (size_t i = 0; i < leftTbl.len; ++i)
+                ++joinBareNameCounts[leftTbl.cols[i].dataName];
+            for (size_t i = 0; i < rightTbl.len; ++i)
+                ++joinBareNameCounts[rightTbl.cols[i].dataName];
+            map<string, string> joinTypeHints;
+            auto addJoinTypeHints = [&](const TableSchema& table,
+                                        const string& tableName,
+                                        const string& prefix,
+                                        const string& physicalName) {
+                for (size_t i = 0; i < table.len; ++i) {
+                    const string& name = table.cols[i].dataName;
+                    const string& type = table.cols[i].dataType;
+                    if (joinBareNameCounts[name] == 1)
+                        joinTypeHints[name] = type;
+                    for (const auto& qualifier : {tableName, prefix, physicalName}) {
+                        if (!qualifier.empty())
+                            joinTypeHints[qualifier + "." + name] = type;
+                    }
+                }
+            };
+            addJoinTypeHints(leftTbl, leftTableName, leftPrefix, leftTable);
+            addJoinTypeHints(rightTbl, rightTableName, rightPrefix, rightTable);
             auto joinOperandSide = [&](const string& qualifier,
                                        const string& column) {
                 if (!qualifier.empty()) {
@@ -19899,6 +19924,127 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     if (rightTbl.cols[i].dataName == col) return {1, (int)i};
                 return {-1, -1};
             };
+            vector<bool> joinExpressionProjection(requestedCols.size(), false);
+            if (!selectAll && !pureJoinAgg) {
+                string bindingError;
+                string bindingState;
+                auto rejectJoinReference = [&](string error, string state) {
+                    bindingError = std::move(error);
+                    bindingState = std::move(state);
+                    return false;
+                };
+                auto hasJoinColumn = [](const TableSchema& table,
+                                        const string& name) {
+                    for (size_t i = 0; i < table.len; ++i)
+                        if (table.cols[i].dataName == name) return true;
+                    return false;
+                };
+                function<bool(const dbms::Expr*)> validateJoinExpression;
+                validateJoinExpression = [&](const dbms::Expr* expression) -> bool {
+                    if (!expression) return false;
+                    if (dynamic_cast<const dbms::LiteralExpr*>(expression)) return true;
+                    if (const auto* ref =
+                            dynamic_cast<const dbms::ColumnRefExpr*>(expression)) {
+                        if (!ref->schema.empty())
+                            return rejectJoinReference(
+                                "schema-qualified JOIN projection is not supported",
+                                "0A000");
+                        const bool inLeft = hasJoinColumn(leftTbl, ref->column);
+                        const bool inRight = hasJoinColumn(rightTbl, ref->column);
+                        if (ref->table.empty()) {
+                            if (inLeft && inRight)
+                                return rejectJoinReference(
+                                    "column \"" + ref->column +
+                                        "\" is ambiguous", "42702");
+                            if (inLeft || inRight ||
+                                ref->column == "current_user" ||
+                                ref->column == "session_user" ||
+                                ref->column == "current_date" ||
+                                ref->column == "current_timestamp" ||
+                                ref->column == "localtimestamp") return true;
+                            return rejectJoinReference(
+                                "column \"" + ref->column +
+                                    "\" does not exist", "42703");
+                        }
+                        const bool leftQualifier =
+                            ref->table == leftTableName ||
+                            ref->table == leftPrefix || ref->table == leftTable;
+                        const bool rightQualifier =
+                            ref->table == rightTableName ||
+                            ref->table == rightPrefix || ref->table == rightTable;
+                        if (leftQualifier && rightQualifier)
+                            return rejectJoinReference(
+                                "table reference \"" + ref->table +
+                                    "\" is ambiguous", "42712");
+                        if (!leftQualifier && !rightQualifier)
+                            return rejectJoinReference(
+                                "missing FROM-clause entry for table \"" +
+                                    ref->table + "\"", "42P01");
+                        if ((leftQualifier && inLeft) ||
+                            (rightQualifier && inRight)) return true;
+                        return rejectJoinReference(
+                            "column \"" + ref->toString() +
+                                "\" does not exist", "42703");
+                    }
+                    if (const auto* unary =
+                            dynamic_cast<const dbms::UnaryOpExpr*>(expression))
+                        return validateJoinExpression(unary->operand.get());
+                    if (const auto* binary =
+                            dynamic_cast<const dbms::BinaryOpExpr*>(expression))
+                        return validateJoinExpression(binary->left.get()) &&
+                            validateJoinExpression(binary->right.get());
+                    if (const auto* call =
+                            dynamic_cast<const dbms::FunctionCallExpr*>(expression)) {
+                        if (call->hasOver || call->filter ||
+                            !call->namedArgs.empty() || !call->orderBy.empty())
+                            return rejectJoinReference(
+                                "complex JOIN projection is not supported",
+                                "0A000");
+                        for (const auto& arg : call->args)
+                            if (!validateJoinExpression(arg.get())) return false;
+                        return true;
+                    }
+                    if (const auto* cast =
+                            dynamic_cast<const dbms::CastExpr*>(expression))
+                        return validateJoinExpression(cast->operand.get());
+                    if (const auto* caseExpr =
+                            dynamic_cast<const dbms::CaseExpr*>(expression)) {
+                        if (caseExpr->switchExpr &&
+                            !validateJoinExpression(caseExpr->switchExpr.get()))
+                            return false;
+                        for (const auto& clause : caseExpr->whenClauses)
+                            if (!validateJoinExpression(clause.first.get()) ||
+                                !validateJoinExpression(clause.second.get()))
+                                return false;
+                        return !caseExpr->elseExpr ||
+                            validateJoinExpression(caseExpr->elseExpr.get());
+                    }
+                    return rejectJoinReference(
+                        "JOIN projection expression is not supported", "0A000");
+                };
+                dbms::SQLParser projectionParser;
+                for (size_t i = 0; i < requestedCols.size(); ++i) {
+                    if (enginePos(requestedCols[i]).first >= 0) continue;
+                    const auto parsed = projectionParser.parse(
+                        "SELECT " + requestedExpressions[i]);
+                    const auto* select = parsed.success
+                        ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get())
+                        : nullptr;
+                    if (!select || select->selectList.size() != 1 ||
+                        !select->selectList[0].expr) {
+                        cout << "ERROR: invalid JOIN projection (SQLSTATE 42601)"
+                             << endl;
+                        return true;
+                    }
+                    if (!validateJoinExpression(
+                            select->selectList[0].expr.get())) {
+                        cout << "ERROR: " << bindingError << " (SQLSTATE "
+                             << bindingState << ")" << endl;
+                        return true;
+                    }
+                    joinExpressionProjection[i] = true;
+                }
+            }
             if (pureJoinAgg) {
                 for (const auto& ja : joinAggs) cout << ja.outputName << ' ';
                 cout << '\n';
@@ -19917,21 +20063,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
             if (shouldPublishQueryMetadata()) {
                 joinProtocolResult.available = true;
                 joinProtocolResult.metadataOnly = true;
-                map<string, string> joinTypeHints;
-                for (size_t i = 0; i < leftTbl.len; ++i) {
-                    const string& name = leftTbl.cols[i].dataName;
-                    const string& type = leftTbl.cols[i].dataType;
-                    joinTypeHints[name] = type;
-                    joinTypeHints[leftTableName + "." + name] = type;
-                    joinTypeHints[leftPrefix + "." + name] = type;
-                }
-                for (size_t i = 0; i < rightTbl.len; ++i) {
-                    const string& name = rightTbl.cols[i].dataName;
-                    const string& type = rightTbl.cols[i].dataType;
-                    if (!joinTypeHints.count(name)) joinTypeHints[name] = type;
-                    joinTypeHints[rightTableName + "." + name] = type;
-                    joinTypeHints[rightPrefix + "." + name] = type;
-                }
 
                 if (pureJoinAgg) {
                     for (const auto& aggregate : joinAggs) {
@@ -19960,6 +20091,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             type = leftTbl.cols[position.second].dataType;
                         else if (position.first == 1 && position.second >= 0)
                             type = rightTbl.cols[position.second].dataType;
+                        else
+                            type = dbms::ExprHelper::inferResultType(
+                                requestedExpressions[i], joinTypeHints);
                         joinProtocolResult.columnTypes.push_back(std::move(type));
                     }
                 }
@@ -20165,6 +20299,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
             answers.reserve(sourceRows.size());
             joinRows.reserve(sourceRows.size());
             joinNulls.reserve(sourceRows.size());
+            const bool hasJoinExpressionProjection =
+                any_of(joinExpressionProjection.begin(),
+                       joinExpressionProjection.end(),
+                       [](bool expression) { return expression; });
             auto sourceCellIndex = [&](const string& column) -> int {
                 const auto position = enginePos(column);
                 if (position.first == 0 && position.second >= 0)
@@ -20175,6 +20313,41 @@ static bool executeInternal(const string& rawSql, Session& s) {
             };
             for (size_t rowIndex = 0; rowIndex < sourceRows.size(); ++rowIndex) {
                 if (rowIndex >= sourceNulls.size()) break;
+                map<string, string> expressionRow;
+                set<string> expressionNulls;
+                if (hasJoinExpressionProjection) {
+                    auto addExpressionValue = [&](const string& key, size_t at) {
+                        if (at >= sourceRows[rowIndex].size() ||
+                            at >= sourceNulls[rowIndex].size()) return;
+                        expressionRow[key] = sourceRows[rowIndex][at];
+                        if (sourceNulls[rowIndex][at])
+                            expressionNulls.insert(key);
+                    };
+                    auto addTableValues = [&](const TableSchema& table,
+                                              size_t offset,
+                                              const string& tableName,
+                                              const string& prefix,
+                                              const string& physicalName) {
+                        for (size_t columnIndex = 0;
+                             columnIndex < table.len; ++columnIndex) {
+                            const string& name =
+                                table.cols[columnIndex].dataName;
+                            const size_t at = offset + columnIndex;
+                            if (joinBareNameCounts[name] == 1)
+                                addExpressionValue(name, at);
+                            for (const auto& qualifier : {
+                                     tableName, prefix, physicalName}) {
+                                if (!qualifier.empty())
+                                    addExpressionValue(
+                                        qualifier + "." + name, at);
+                            }
+                        }
+                    };
+                    addTableValues(leftTbl, 0, leftTableName,
+                                   leftPrefix, leftTable);
+                    addTableValues(rightTbl, leftTbl.len, rightTableName,
+                                   rightPrefix, rightTable);
+                }
                 vector<string> cells;
                 vector<bool> nulls;
                 if (selectAll) {
@@ -20183,8 +20356,27 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 } else {
                     cells.reserve(requestedCols.size());
                     nulls.reserve(requestedCols.size());
-                    for (const auto& column : requestedCols) {
-                        const int at = sourceCellIndex(column);
+                    for (size_t columnIndex = 0;
+                         columnIndex < requestedCols.size(); ++columnIndex) {
+                        if (joinExpressionProjection[columnIndex]) {
+                            const auto evaluated =
+                                dbms::ExprHelper::evalStringWithNulls(
+                                    requestedExpressions[columnIndex],
+                                    expressionRow, expressionNulls,
+                                    joinTypeHints, s.currentDB, s.username);
+                            if (!evaluated.ok) {
+                                cout << "ERROR: JOIN projection evaluation "
+                                        "failed: " << evaluated.error
+                                     << " (SQLSTATE 0A000)" << endl;
+                                return true;
+                            }
+                            cells.push_back(evaluated.isNull
+                                ? string{} : evaluated.value);
+                            nulls.push_back(evaluated.isNull);
+                            continue;
+                        }
+                        const int at = sourceCellIndex(
+                            requestedCols[columnIndex]);
                         const bool isNull = at < 0 ||
                             static_cast<size_t>(at) >= sourceRows[rowIndex].size() ||
                             static_cast<size_t>(at) >= sourceNulls[rowIndex].size() ||

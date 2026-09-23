@@ -265,6 +265,38 @@ def main():
         assert type_oids == [23, 25, 25], type_oids
         assert command_tag == "SELECT 5", command_tag
 
+        expression_sql = (
+            "SELECT l.id, l.txt || r.txt AS joined, "
+            "COALESCE(l.txt, 'nil') AS left_value "
+            "FROM join_exact_left l LEFT JOIN join_exact_right r "
+            "ON l.id = r.id ORDER BY l.id;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], expression_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [
+            ["1", "r one", ""], ["2", None, "nil"],
+            ["3", None, "NULL"], ["4", "a bNULL", "a b"],
+            ["5", None, "left only"],
+        ], rows
+        assert headers == ["id", "joined", "left_value"], headers
+        assert type_oids == [23, 25, 25], type_oids
+        assert command_tag == "SELECT 5", command_tag
+
+        for bad_expression, sqlstate in [
+            ("COALESCE(txt, 'nil')", "42702"),
+            ("COALESCE(missing.txt, 'nil')", "42P01"),
+            ("COALESCE(l.missing_txt, 'nil')", "42703"),
+        ]:
+            invalid_sql = (
+                "SELECT " + bad_expression + " FROM join_exact_left l "
+                "JOIN join_exact_right r ON l.id = r.id;")
+            _, state, message, _, _, _ = runner.decode_wire_result(
+                client.simple_query(server["sock"], invalid_sql),
+                include_types=True)
+            assert state == sqlstate, (invalid_sql, state, message)
+
         left_where_sql = (
             "SELECT l.id, r.txt FROM join_exact_left l "
             "LEFT JOIN join_exact_right r ON l.id = r.id "
