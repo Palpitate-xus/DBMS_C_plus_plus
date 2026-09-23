@@ -1716,6 +1716,9 @@ std::string commandTagFor(const std::string& sql, const std::vector<std::string>
         startsWithSqlPhrase(sql, "create temporary table")) {
         return "CREATE TABLE";
     }
+    if (startsWithSqlPhrase(sql, "create or replace view")) {
+        return "CREATE VIEW";
+    }
     const auto mutationCount = [](const std::string& line,
                                   const std::string& prefix)
         -> std::optional<std::string> {
