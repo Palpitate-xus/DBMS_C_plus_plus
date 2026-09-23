@@ -3957,15 +3957,20 @@ static ExprValue castToTimestamp(const ExprValue& value,
         ? "" : formattedTime.substr(fractionPosition);
     const std::string localTimestamp = str(normalizedDate) + " " + wholeTime;
 
-    // Validate an explicit displacement even when a timestamp-without-zone
-    // target will ignore it, matching PostgreSQL's input rules.
-    const int64_t zonedTimestamp = parseTimestampToSeconds(
-        localTimestamp + zone);
-    if (zonedTimestamp == 0) throwTemporalCastError(targetType, text);
-
     const bool sourceHasTimeZone =
         sourceType == "timestamptz" ||
         sourceType == "timestamp with time zone";
+    // Validate an explicit displacement even when a timestamp-without-zone
+    // target will ignore it, matching PostgreSQL's input rules.  An unzoned
+    // value cast to timestamptz is local wall time in the current session.
+    int64_t zonedTimestamp = parseTimestampToSeconds(localTimestamp + zone);
+    if (zonedTimestamp == 0) throwTemporalCastError(targetType, text);
+    if (targetType == "timestamptz" && zone.empty() && !sourceHasTimeZone) {
+        const Session* session = currentSession();
+        if (session)
+            zonedTimestamp -= static_cast<int64_t>(
+                session->timezoneOffsetMinutes) * 60;
+    }
     const bool convertToUtc = targetType == "timestamptz" ||
                               sourceHasTimeZone;
     std::string formatted = localTimestamp;
@@ -8384,22 +8389,26 @@ void ExprEvaluator::registerBuiltins() {
         return ExprValue("date", str(date), false);
     };
 
-    // to_timestamp(text, fmt): pattern parse like to_date plus HH24/MI/SS;
-    // renders "YYYY-MM-DD HH:MM:SS+00" (UTC offset like PG).
+    // to_timestamp(text, fmt) interprets parsed wall time in the session zone
+    // and stores a UTC instant, which the result boundary renders locally.
     functions_["to_timestamp"] = [](const std::vector<ExprValue>& a) -> ExprValue {
         if (a.empty() || a[0].isNull || (a.size() >= 2 && a[1].isNull))
-            return ExprValue("timestamp", "", true);
+            return ExprValue("timestamptz", "", true);
         const std::string& s = a[0].value;
         const std::string fmt = a.size() >= 2
             ? a[1].value : "YYYY-MM-DD HH24:MI:SS";
         Date date;
         int32_t timeSeconds = 0;
         if (!parseTemporalFormatValue(s, fmt, date, timeSeconds))
-            return ExprValue("timestamp", "", true);
-        return ExprValue("timestamp",
-                         str(date) + " " + formatTimeSeconds(timeSeconds) +
-                             "+00",
-                         false);
+            return ExprValue("timestamptz", "", true);
+        int64_t utcSeconds = parseTimestampToSeconds(
+            str(date) + " " + formatTimeSeconds(timeSeconds));
+        const Session* session = currentSession();
+        if (session)
+            utcSeconds -= static_cast<int64_t>(
+                session->timezoneOffsetMinutes) * 60;
+        const std::string utcText = formatTimestampSeconds(utcSeconds);
+        return ExprValue("timestamptz", utcText + "+00", utcText.empty());
     };
 
     // to_number(text, fmt): extract the numeric literal; pattern characters
