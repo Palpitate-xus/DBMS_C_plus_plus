@@ -35415,6 +35415,8 @@ std::vector<std::string> StorageEngine::join(
     };
 
     auto conds = parseConditions(conditions);
+    const auto extraOnConds = parseConditions(onConditions);
+    conds.insert(conds.end(), extraOnConds.begin(), extraOnConds.end());
 
     // Predicate pushdown: classify conditions by which table they reference
     std::vector<Condition> leftConds, rightConds, joinConds;
@@ -35754,20 +35756,19 @@ std::vector<std::string> StorageEngine::leftJoin(
     for (const auto& lr : leftRows) {
         bool hasOnMatch = false;
         for (const auto& rr : rightRows) {
-            if (!onConds.empty()) {
-                bool matchesOn = true;
-                for (const auto& condition : onConds) {
-                    if (!evalCond(condition, &lr, &rr)) {
-                        matchesOn = false;
-                        break;
-                    }
-                }
-                if (!matchesOn) continue;
-            } else {
+            if (!leftCol.empty() && !rightCol.empty()) {
                 if (leftColIdx >= leftTbl.len || rightColIdx >= rightTbl.len) continue;
                 if (lr.joinKeyNull || rr.joinKeyNull) continue;
                 if (lr.joinKey != rr.joinKey) continue;
+            } else if (onConds.empty()) continue;
+            bool matchesOn = true;
+            for (const auto& condition : onConds) {
+                if (!evalCond(condition, &lr, &rr)) {
+                    matchesOn = false;
+                    break;
+                }
             }
+            if (!matchesOn) continue;
             hasOnMatch = true;
             bool whereMatch = true;
             for (const auto& c : conds) {
@@ -36001,20 +36002,19 @@ std::vector<std::string> StorageEngine::rightJoin(
     for (const auto& rr : rightRows) {
         bool hasOnMatch = false;
         for (const auto& lr : leftRows) {
-            if (!onConds.empty()) {
-                bool matchesOn = true;
-                for (const auto& condition : onConds) {
-                    if (!evalCond(condition, &lr, &rr)) {
-                        matchesOn = false;
-                        break;
-                    }
-                }
-                if (!matchesOn) continue;
-            } else {
+            if (!leftCol.empty() && !rightCol.empty()) {
                 if (leftColIdx >= leftTbl.len || rightColIdx >= rightTbl.len) continue;
                 if (lr.joinKeyNull || rr.joinKeyNull) continue;
                 if (lr.joinKey != rr.joinKey) continue;
+            } else if (onConds.empty()) continue;
+            bool matchesOn = true;
+            for (const auto& condition : onConds) {
+                if (!evalCond(condition, &lr, &rr)) {
+                    matchesOn = false;
+                    break;
+                }
             }
+            if (!matchesOn) continue;
             hasOnMatch = true;
             bool whereMatch = true;
             for (const auto& c : conds) {

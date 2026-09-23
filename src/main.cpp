@@ -20169,16 +20169,25 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 const auto* onSelect = parsedOn.success
                     ? dynamic_cast<const dbms::SelectStmt*>(parsedOn.stmt.get())
                     : nullptr;
-                const auto* comparison = onSelect &&
-                    onSelect->selectList.size() == 1
-                    ? dynamic_cast<const dbms::BinaryOpExpr*>(
-                          onSelect->selectList.front().expr.get())
-                    : nullptr;
-                if (!comparison ||
-                    (comparison->op != "=" && comparison->op != "<>" &&
-                     comparison->op != "!=" && comparison->op != "<" &&
-                     comparison->op != ">" && comparison->op != "<=" &&
-                     comparison->op != ">=")) {
+                vector<const dbms::BinaryOpExpr*> comparisons;
+                function<bool(const dbms::Expr*)> collectOnComparisons;
+                collectOnComparisons = [&](const dbms::Expr* expression) {
+                    const auto* binary = dynamic_cast<
+                        const dbms::BinaryOpExpr*>(expression);
+                    if (!binary) return false;
+                    if (binary->op == "AND")
+                        return collectOnComparisons(binary->left.get()) &&
+                            collectOnComparisons(binary->right.get());
+                    if (binary->op != "=" && binary->op != "<>" &&
+                        binary->op != "!=" && binary->op != "<" &&
+                        binary->op != ">" && binary->op != "<=" &&
+                        binary->op != ">=") return false;
+                    comparisons.push_back(binary);
+                    return true;
+                };
+                if (!onSelect || onSelect->selectList.size() != 1 ||
+                    !collectOnComparisons(
+                        onSelect->selectList.front().expr.get())) {
                     cout << "ERROR: unsupported JOIN ON predicate (SQLSTATE 0A000)"
                          << endl;
                     return true;
@@ -20214,55 +20223,58 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         "." + name;
                     return true;
                 };
-                int firstSide = -1, secondSide = -1;
-                string firstName, secondName, firstQualified, secondQualified;
-                bool firstColumn = resolveOnColumn(
-                    comparison->left.get(), -1, firstSide,
-                    firstName, firstQualified);
-                const bool secondColumn = resolveOnColumn(
-                    comparison->right.get(),
-                    firstColumn ? 1 - firstSide : -1, secondSide,
-                    secondName, secondQualified);
-                if (!firstColumn && secondColumn) {
-                    firstColumn = resolveOnColumn(
-                        comparison->left.get(), 1 - secondSide,
-                        firstSide, firstName, firstQualified);
-                }
-                const auto* firstLiteral = dynamic_cast<
-                    const dbms::LiteralExpr*>(comparison->left.get());
-                const auto* secondLiteral = dynamic_cast<
-                    const dbms::LiteralExpr*>(comparison->right.get());
-                if ((!firstColumn && !firstLiteral) ||
-                    (!secondColumn && !secondLiteral) ||
-                    (!firstColumn && !secondColumn)) {
-                    cout << "ERROR: unsupported JOIN ON operand (SQLSTATE 0A000)"
-                         << endl;
-                    return true;
-                }
-                if (comparison->op == "=" && firstColumn && secondColumn &&
-                    firstSide != secondSide) {
-                    leftOnCol = firstName;
-                    rightOnCol = secondName;
-                    leftOnQualifier = firstSide == 0 ? leftTable : rightTable;
-                    rightOnQualifier = secondSide == 0 ? leftTable : rightTable;
-                } else {
-                    string op = comparison->op;
-                    string operand;
-                    if (!firstColumn) {
-                        firstQualified = secondQualified;
-                        operand = firstLiteral->value;
-                        if (op == "<") op = ">";
-                        else if (op == ">") op = "<";
-                        else if (op == "<=") op = ">=";
-                        else if (op == ">=") op = "<=";
-                    } else {
-                        operand = secondColumn
-                            ? secondQualified : secondLiteral->value;
+                for (const auto* comparison : comparisons) {
+                    int firstSide = -1, secondSide = -1;
+                    string firstName, secondName, firstQualified, secondQualified;
+                    bool firstColumn = resolveOnColumn(
+                        comparison->left.get(), -1, firstSide,
+                        firstName, firstQualified);
+                    const bool secondColumn = resolveOnColumn(
+                        comparison->right.get(),
+                        firstColumn ? 1 - firstSide : -1, secondSide,
+                        secondName, secondQualified);
+                    if (!firstColumn && secondColumn) {
+                        firstColumn = resolveOnColumn(
+                            comparison->left.get(), 1 - secondSide,
+                            firstSide, firstName, firstQualified);
                     }
-                    onConditions.push_back(op + firstQualified + " " + operand);
+                    const auto* firstLiteral = dynamic_cast<
+                        const dbms::LiteralExpr*>(comparison->left.get());
+                    const auto* secondLiteral = dynamic_cast<
+                        const dbms::LiteralExpr*>(comparison->right.get());
+                    if ((!firstColumn && !firstLiteral) ||
+                        (!secondColumn && !secondLiteral) ||
+                        (!firstColumn && !secondColumn)) {
+                        cout << "ERROR: unsupported JOIN ON operand (SQLSTATE 0A000)"
+                             << endl;
+                        return true;
+                    }
+                    if (leftOnCol.empty() && comparison->op == "=" &&
+                        firstColumn && secondColumn && firstSide != secondSide) {
+                        leftOnCol = firstName;
+                        rightOnCol = secondName;
+                        leftOnQualifier = firstSide == 0 ? leftTable : rightTable;
+                        rightOnQualifier = secondSide == 0 ? leftTable : rightTable;
+                    } else {
+                        string op = comparison->op;
+                        string operand;
+                        if (!firstColumn) {
+                            firstQualified = secondQualified;
+                            operand = firstLiteral->value;
+                            if (op == "<") op = ">";
+                            else if (op == ">") op = "<";
+                            else if (op == "<=") op = ">=";
+                            else if (op == ">=") op = "<=";
+                        } else {
+                            operand = secondColumn
+                                ? secondQualified : secondLiteral->value;
+                        }
+                        onConditions.push_back(op + firstQualified + " " + operand);
+                    }
                 }
             }
-            if (jt == JoinType::FullOuter && !onConditions.empty()) {
+            if (jt == JoinType::FullOuter &&
+                (leftOnCol.empty() || rightOnCol.empty())) {
                 cout << "ERROR: FULL JOIN is only supported with merge-joinable "
                         "or hash-joinable join conditions (SQLSTATE 0A000)"
                      << endl;
