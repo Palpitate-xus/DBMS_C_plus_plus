@@ -789,6 +789,20 @@ def extended_query_describe(sock):
         sock, "UPDATE varchar_width_regression SET v = 'xy  '"))
     assert data_row_values(simple_query(
         sock, "SELECT v FROM varchar_width_regression")) == [[b"xy "]]
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "CREATE TABLE char_padding_regression (v CHAR(3) UNIQUE)"))
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "INSERT INTO char_padding_regression VALUES ('ok')"))
+    assert data_row_values(simple_query(
+        sock, "SELECT v FROM char_padding_regression")) == [[b"ok "]]
+    for predicate in ("v = 'ok'", "v = 'ok '"):
+        assert data_row_values(simple_query(
+            sock, "SELECT v FROM char_padding_regression WHERE " + predicate)) == [[b"ok "]]
+    duplicate_padded = simple_query(
+        sock, "INSERT INTO char_padding_regression VALUES ('ok ')")
+    assert any(kind == b"E" for kind, _ in duplicate_padded), duplicate_padded
+    assert data_row_values(simple_query(
+        sock, "SELECT v FROM char_padding_regression")) == [[b"ok "]]
     for name, type_spec in (
             ("invalid_char_zero", "CHAR(0)"),
             ("invalid_varchar_zero", "VARCHAR(0)"),

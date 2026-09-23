@@ -718,6 +718,10 @@ static std::string formatPointCoordinate(double value) {
 static std::string canonicalColumnKeyValue(const Column& column,
                                            const std::string& value) {
     if (value.empty()) return {};
+    if (column.dataType == "char" || column.dataType == "character") {
+        const size_t end = value.find_last_not_of(' ');
+        return end == std::string::npos ? std::string() : value.substr(0, end + 1);
+    }
     if (column.dataType == "float") {
         float parsed = 0.0f;
         if (!parseFloatLiteral(value, parsed)) return value;
@@ -838,6 +842,10 @@ static DBStatus normalizeCharacterColumnWidths(
             if (!characterExcessIsSpaces(value->second, column.dsize))
                 return DBStatus::STRING_DATA_RIGHT_TRUNCATION;
             value->second.resize(column.dsize);
+        }
+        if ((column.dataType == "char" || column.dataType == "character") &&
+            value->second.size() < column.dsize) {
+            value->second.append(column.dsize - value->second.size(), ' ');
         }
     }
     return DBStatus::OK;
@@ -3611,13 +3619,19 @@ int compareTextValues(const Column& column, const std::string& left,
         if (rightPosition != column.enumValues.end()) return 1;
         return left.compare(right);
     }
-    if (column.collation.empty()) return left.compare(right);
+    const bool blankPadded = column.dataType == "char" ||
+                             column.dataType == "character";
+    const std::string comparisonLeft = blankPadded
+        ? canonicalColumnKeyValue(column, left) : left;
+    const std::string comparisonRight = blankPadded
+        ? canonicalColumnKeyValue(column, right) : right;
+    if (column.collation.empty()) return comparisonLeft.compare(comparisonRight);
     const std::string& effective = column.resolvedCollation.empty()
         ? column.collation : column.resolvedCollation;
     if (column.resolvedCollationUsesLocale) {
-        return collation::compareLocale(left, right, effective);
+        return collation::compareLocale(comparisonLeft, comparisonRight, effective);
     }
-    return collation::compare(left, right, effective);
+    return collation::compare(comparisonLeft, comparisonRight, effective);
 }
 
 bool columnUsesBinaryCollation(const Column& column) {
@@ -25608,6 +25622,11 @@ DBStatus StorageEngine::updateInternal(
                         } else {
                             return DBStatus::INVALID_VALUE;
                         }
+                    }
+                    if ((col.dataType == "char" ||
+                         col.dataType == "character") &&
+                        storeVal.size() < maxLength) {
+                        storeVal.append(maxLength - storeVal.size(), ' ');
                     }
                     prepared[i] = storeVal;
                     break;
