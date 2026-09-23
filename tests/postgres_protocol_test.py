@@ -729,6 +729,21 @@ def extended_query_describe(sock):
         (b"date", 0, 0, 1082, 4, -1, 0)
     ]
 
+    for statement_name, keyword, expected_oid, expected_size in (
+            (b"describe_current_user", b"current_user", 19, -1),
+            (b"describe_session_user", b"session_user", 19, -1),
+            (b"describe_user", b"user", 19, -1),
+            (b"describe_current_date", b"current_date", 1082, 4),
+            (b"describe_current_timestamp", b"current_timestamp", 1184, 8),
+            (b"describe_localtimestamp", b"localtimestamp", 1114, 8)):
+        parse = (statement_name + b"\0SELECT " + keyword + b"\0" +
+                 struct.pack("!H", 0))
+        sock.sendall(typed(b"P", parse) +
+                     typed(b"D", b"S" + statement_name + b"\0") + typed(b"S"))
+        assert row_description_fields(read_until_ready(sock)) == [
+            (keyword, 0, 0, expected_oid, expected_size, -1, 0)
+        ]
+
     for statement_name, number, expected_oid, expected_size in (
             (b"describe_int8_literal", b"2147483648", 20, 8),
             (b"describe_numeric_literal", b"9223372036854775808", 1700, -1),

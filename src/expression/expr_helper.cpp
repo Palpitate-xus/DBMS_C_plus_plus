@@ -945,6 +945,12 @@ std::string ExprHelper::inferResultType(
     }();
     const std::string lower = toLower(trimmed);
 
+    if (lower == "current_user" || lower == "session_user" ||
+        lower == "user") return "name";
+    if (lower == "current_date") return "date";
+    if (lower == "current_timestamp") return "timestamptz";
+    if (lower == "localtimestamp") return "timestamp";
+
     // JSON extraction operators preserve the JSON container type; their
     // text variants deliberately return text.  Handle these before looking
     // for a postfix cast because the cast belongs to the left operand.

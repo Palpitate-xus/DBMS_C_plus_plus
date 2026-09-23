@@ -283,6 +283,12 @@ int main() {
            "bigint");
     assert(dbms::ExprHelper::inferResultType("-9223372036854775809") ==
            "numeric");
+    assert(dbms::ExprHelper::inferResultType("current_user") == "name");
+    assert(dbms::ExprHelper::inferResultType("current_date") == "date");
+    assert(dbms::ExprHelper::inferResultType("current_timestamp") ==
+           "timestamptz");
+    assert(dbms::ExprHelper::inferResultType("localtimestamp") ==
+           "timestamp");
     const auto signedBoundary =
         dbms::ExprHelper::evalString("-9223372036854775808", {});
     assert(signedBoundary.ok && !signedBoundary.isNull &&

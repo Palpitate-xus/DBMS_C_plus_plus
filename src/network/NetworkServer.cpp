@@ -1587,6 +1587,17 @@ bool describePreparedResult(const std::string& sql, Session& session,
                 }
             } else if (dynamic_cast<const CaseExpr*>(item.expr.get())) {
                 outputName = "case";
+            } else if (reference && relation.empty() &&
+                       (inferredType == "name" || inferredType == "date" ||
+                        inferredType == "timestamp" ||
+                        inferredType == "timestamptz") &&
+                       (lowerProtocolText(reference->column) == "current_user" ||
+                        lowerProtocolText(reference->column) == "session_user" ||
+                        lowerProtocolText(reference->column) == "user" ||
+                        lowerProtocolText(reference->column) == "current_date" ||
+                        lowerProtocolText(reference->column) == "current_timestamp" ||
+                        lowerProtocolText(reference->column) == "localtimestamp")) {
+                outputName = lowerProtocolText(reference->column);
             } else {
                 outputName = "?column?";
             }
