@@ -413,6 +413,8 @@
 
 | 473 | P0-01 / P0-02 / SQL-01 | 复查发现 25 处 typed DDL 入口/handler 在收到空指针或命令标记与实际 AST 节点不一致时返回 false（调用方按无错处理），问题不限于 CREATE DATABASE。现统一返回带 XX000 的错误，保持正常“不由桥接处理”的 default 分支不变 | 完整 `ddl_ast_bridge_test` 两轮通过，新增空语句及 30 余种错配 AST 命令矩阵；`ddl_bridge_routing_test` 用新生产对象重链后通过。测试中仍偶见 heap allocator close 的既有告警，另行核实；统一 SQL 执行管线与结构化错误模型仍未完成，三类条目保持 partial | `70b4296` |
 
+| 474 | P0-02 / TYPE-04 / PROTO-03 / PROTO-04 | `CAST('abcd' AS VARCHAR(3))` 和 `::VARCHAR(3)` 已截断值，但 Simple Query/Extended Describe 将结果 typmod 报 -1；前者的无别名列名还保留大写 `VARCHAR`。现将直接单投影 VARCHAR/CHARACTER VARYING 强转的长度用于协议 typmod，并规范 CAST 默认列名 | 修复前隔离 wire 复现上述两项；修复后完整 PostgreSQL 协议回归通过，覆盖 CAST 与 `::`、VARCHAR 与 CHARACTER VARYING、显式长度及无长度四类 Simple/Extended 元数据和返回值。复杂多投影、Unicode 列存储及 PostgreSQL 18.6 全量差分仍未完成，功能族保持 partial | `29c7639` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；第 428–429 项又迁移了 FROM-less 与普通表 scalar UDF 的声明类型和 NULL，并执行有限的 SQL function expression。混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF、完整 SQL function query body 及二进制值仍存在显示文本边界，继续计入总清单。
