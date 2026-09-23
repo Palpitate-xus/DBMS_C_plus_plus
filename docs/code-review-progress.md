@@ -405,6 +405,8 @@
 
 | 469 | P0-02 / PROTO-08 | typed INSERT 的直接写入、冲突目标不匹配及一般冲突分支，以及 legacy INSERT 的重复键分支，原仅输出 `Duplicate key`，使 PostgreSQL wire 将唯一约束错误误报为 `XX000`。四个分支现明确携带 `SQLSTATE 23505` | 隔离 wire 验证普通 PRIMARY KEY 重复值、`CHAR(3)` 补空格后 UNIQUE 重复值均返回 `23505` 且原行保持；完整 PostgreSQL 协议回归通过并固定断言。错误文本与 PostgreSQL 键名/约束名仍未完全一致，功能族保持 partial | `3d0e38b` |
 
+| 470 | P0-02 / CAT-02 / TYPE-04 / PROTO-04 | `VARCHAR(3)` 的列目录未写入 typmod，结构化结果又未把 varchar 识别为物理列，致 Simple Query/Describe 都报 `-1`；协议还会把物理容量误猜成 SQL typmod。现为可区分的显式 VARCHAR 长度记录 n+4，并让协议使用目录的真实 typmod（包括 `-1`） | 修复前隔离 wire 复现 `VARCHAR(3)` 与无长度 `VARCHAR` 都报 `-1`；修复后前者两种协议模式报 7，后者保持 -1，完整 PostgreSQL 协议回归通过。当前 schema 仅以 `dsize=255` 表示默认容量，因此显式 `VARCHAR(255)` 仍与无长度列混淆；无长度列仍受 255 字节内部容量限制，功能族保持 partial | `bb5ff38` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；第 428–429 项又迁移了 FROM-less 与普通表 scalar UDF 的声明类型和 NULL，并执行有限的 SQL function expression。混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF、完整 SQL function query body 及二进制值仍存在显示文本边界，继续计入总清单。
