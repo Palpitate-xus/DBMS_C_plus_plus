@@ -2783,7 +2783,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
                 identityOverride);
             if (status == DBStatus::DUPLICATE_KEY) {
                 if (ignoreDuplicate) continue;
-                std::cout << "Duplicate key" << std::endl;
+                std::cout << "Duplicate key (SQLSTATE 23505)" << std::endl;
                 return true;
             }
             if (status != DBStatus::OK) {
@@ -2980,7 +2980,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
                 }
                 // A target-specific DO NOTHING must not hide a duplicate
                 // raised by a different unique constraint.
-                std::cout << "Duplicate key" << std::endl;
+                std::cout << "Duplicate key (SQLSTATE 23505)" << std::endl;
                 return true;
             }
             if (conflictUpdate) {
@@ -3056,7 +3056,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
                 ++inserted;
                 continue;
             }
-            std::cout << "Duplicate key" << std::endl;
+            std::cout << "Duplicate key (SQLSTATE 23505)" << std::endl;
             return true;
         }
         if (status != DBStatus::OK) {

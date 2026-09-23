@@ -800,7 +800,7 @@ def extended_query_describe(sock):
             sock, "SELECT v FROM char_padding_regression WHERE " + predicate)) == [[b"ok "]]
     duplicate_padded = simple_query(
         sock, "INSERT INTO char_padding_regression VALUES ('ok ')")
-    assert any(kind == b"E" for kind, _ in duplicate_padded), duplicate_padded
+    assert b"C23505\0" in next(body for kind, body in duplicate_padded if kind == b"E")
     assert data_row_values(simple_query(
         sock, "SELECT v FROM char_padding_regression")) == [[b"ok "]]
     for name, type_spec in (

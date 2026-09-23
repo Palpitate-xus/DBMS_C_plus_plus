@@ -16408,7 +16408,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     }
                 }
                 if (conflictCol.empty()) {
-                    cout << "Duplicate key" << endl;
+                    cout << "Duplicate key (SQLSTATE 23505)" << endl;
                     return true;
                 }
                 // UPSERT: perform UPDATE on conflict
