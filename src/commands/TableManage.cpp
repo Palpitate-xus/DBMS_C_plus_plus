@@ -811,21 +811,34 @@ static bool variableColumnWidthsValid(
     return true;
 }
 
-static DBStatus characterColumnWidthStatus(
+static bool characterWidthLimitedType(const Column& column) {
+    return !column.isArray &&
+        (column.dataType == "char" || column.dataType == "character" ||
+         column.dataType == "bpchar" || column.dataType == "varchar" ||
+         column.dataType == "character varying");
+}
+
+static bool characterExcessIsSpaces(const std::string& value,
+                                    size_t maximumLength) {
+    return std::all_of(value.begin() + maximumLength, value.end(),
+                       [](char c) { return c == ' '; });
+}
+
+static DBStatus normalizeCharacterColumnWidths(
     const TableSchema& table,
-    const std::map<std::string, std::string>& values,
+    std::map<std::string, std::string>& values,
     const std::set<std::string>* nullColumns = nullptr) {
     for (size_t i = 0; i < table.len; ++i) {
         const Column& column = table.cols[i];
-        if (column.isArray ||
-            (column.dataType != "char" && column.dataType != "character" &&
-             column.dataType != "bpchar" && column.dataType != "varchar" &&
-             column.dataType != "character varying")) continue;
-        const auto value = values.find(column.dataName);
+        if (!characterWidthLimitedType(column)) continue;
+        auto value = values.find(column.dataName);
         if (value == values.end() ||
             (nullColumns && nullColumns->count(column.dataName) != 0)) continue;
-        if (value->second.size() > column.dsize)
-            return DBStatus::STRING_DATA_RIGHT_TRUNCATION;
+        if (value->second.size() > column.dsize) {
+            if (!characterExcessIsSpaces(value->second, column.dsize))
+                return DBStatus::STRING_DATA_RIGHT_TRUNCATION;
+            value->second.resize(column.dsize);
+        }
     }
     return DBStatus::OK;
 }
@@ -22351,7 +22364,7 @@ DBStatus StorageEngine::insertInternal(
     // Width is measured on the canonical SQL value. In particular BIT
     // literals may enter as B'1010' but are stored as the bare bit string.
     const DBStatus characterWidthStatus =
-        characterColumnWidthStatus(tbl, actualValues, &actualNullColumns);
+        normalizeCharacterColumnWidths(tbl, actualValues, &actualNullColumns);
     if (characterWidthStatus != DBStatus::OK) {
         lockManager_.unlock(tablename);
         return characterWidthStatus;
@@ -22490,7 +22503,7 @@ DBStatus StorageEngine::insertInternal(
         return DBStatus::INVALID_VALUE;
     }
     const DBStatus finalCharacterWidthStatus =
-        characterColumnWidthStatus(tbl, actualValues, &actualNullColumns);
+        normalizeCharacterColumnWidths(tbl, actualValues, &actualNullColumns);
     if (finalCharacterWidthStatus != DBStatus::OK) {
         lockManager_.unlock(tablename);
         return finalCharacterWidthStatus;
@@ -25588,15 +25601,13 @@ DBStatus StorageEngine::updateInternal(
                     const size_t maxLength = col.isArray ? 1024 : col.dsize;
                     if (col.isVariableLength &&
                         storeVal.size() > maxLength) {
-                        if (!col.isArray &&
-                            (col.dataType == "char" ||
-                             col.dataType == "character" ||
-                             col.dataType == "bpchar" ||
-                             col.dataType == "varchar" ||
-                             col.dataType == "character varying")) {
-                            return DBStatus::STRING_DATA_RIGHT_TRUNCATION;
+                        if (characterWidthLimitedType(col)) {
+                            if (!characterExcessIsSpaces(storeVal, maxLength))
+                                return DBStatus::STRING_DATA_RIGHT_TRUNCATION;
+                            storeVal.resize(maxLength);
+                        } else {
+                            return DBStatus::INVALID_VALUE;
                         }
-                        return DBStatus::INVALID_VALUE;
                     }
                     prepared[i] = storeVal;
                     break;
@@ -26282,7 +26293,7 @@ DBStatus StorageEngine::updateInternal(
             return DBStatus::INVALID_VALUE;
         }
         const DBStatus updatedCharacterWidthStatus =
-            characterColumnWidthStatus(
+            normalizeCharacterColumnWidths(
                 tbl, rowValues, &finalNullColumnNames);
         if (updatedCharacterWidthStatus != DBStatus::OK) {
             lockManager_.unlock(tablename);

@@ -777,6 +777,18 @@ def extended_query_describe(sock):
     overlong_varchar = simple_query(
         sock, "INSERT INTO varchar_width_regression VALUES ('abcd')")
     assert b"C22001\0" in next(body for kind, body in overlong_varchar if kind == b"E")
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "INSERT INTO char_oid_regression VALUES ('ab  ')"))
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "INSERT INTO varchar_width_regression VALUES ('ab  ')"))
+    assert [b"ab "] in data_row_values(simple_query(
+        sock, "SELECT v FROM char_oid_regression"))
+    assert data_row_values(simple_query(
+        sock, "SELECT v FROM varchar_width_regression")) == [[b"ab "]]
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "UPDATE varchar_width_regression SET v = 'xy  '"))
+    assert data_row_values(simple_query(
+        sock, "SELECT v FROM varchar_width_regression")) == [[b"xy "]]
     for name, type_spec in (
             ("invalid_char_zero", "CHAR(0)"),
             ("invalid_varchar_zero", "VARCHAR(0)"),
