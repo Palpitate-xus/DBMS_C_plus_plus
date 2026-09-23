@@ -6808,7 +6808,9 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
                 std::cout << "NOTICE: index \"" << indexName << "\" does not exist, skipping" << std::endl;
                 continue;
             }
-            std::cout << "Index " << indexName << " does not exist" << std::endl;
+            std::cout << "ERROR: index \"" << indexName
+                      << "\" does not exist (SQLSTATE 42704)"
+                      << std::endl;
             return true;
         }
 
@@ -6850,7 +6852,9 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
                 std::cout << "NOTICE: index \"" << indexName << "\" does not exist, skipping" << std::endl;
                 continue;
             }
-            std::cout << "Index " << indexName << " does not exist" << std::endl;
+            std::cout << "ERROR: index \"" << indexName
+                      << "\" does not exist (SQLSTATE 42704)"
+                      << std::endl;
             return true;
         }
 
