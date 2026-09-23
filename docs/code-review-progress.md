@@ -417,6 +417,8 @@
 
 | 475 | TYPE-04 | `VARCHAR(3)` 写入三个 `é` 原按 6 字节判超宽，且即使放过校验，行缓冲和 TOAST 读回仍按声明字符数限制字节，会截断或丢失多字节文本。现按 UTF-8 字符边界检查 VARCHAR(n)、仅截断越界尾随空格，并统一校验/行缓冲/TOAST 的物理字节上限 | 修复前隔离 wire 复现 `ééé` 报 22001；修复后插入、更新、尾空格截断与失败更新保留原值均通过，3000 个 `é` 的长值按原字节完整读回。完整协议及 INSERT 最终校验、UPDATE 类型校验、空字符串唯一约束、collation 回归通过。`CHAR(n)` 仍按固定字节存储，无长度 VARCHAR/长文本仍受 65535 字节内部上限，功能族保持 partial | `c90473b` |
 
+| 476 | TYPE-04 | 新建 SQL `CHAR(3)` 的固定 3 字节物理列无法容纳三个多字节字符，`'汉字é'` 错报 22001。新建 typed SQL CHAR 现保留声明字符数但使用变长物理槽；写入/更新按 UTF-8 字符边界裁剪尾空格并按字符数补空格，行缓冲与 TOAST 字节容量同步扩大；旧固定格式 schema 仍走原路径 | 修复前隔离 wire 复现拒绝三字符值；修复后完整读回、短值补空格、超长更新回滚、补空格唯一冲突 23505，以及 1005 个 `é` 的长值完整读回通过。完整协议测试首次在独立 `cancel_wait` 步骤超时，30 秒阈值串行重跑通过；INSERT/UPDATE、唯一约束、collation、DDL 桥接五组 C++ 测试通过。旧固定 CHAR 表仍有 Unicode 限制，迁移及 PostgreSQL 18.6 全量差分未完成，TYPE-04 保持 partial | `03abde9` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；第 428–429 项又迁移了 FROM-less 与普通表 scalar UDF 的声明类型和 NULL，并执行有限的 SQL function expression。混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF、完整 SQL function query body 及二进制值仍存在显示文本边界，继续计入总清单。
