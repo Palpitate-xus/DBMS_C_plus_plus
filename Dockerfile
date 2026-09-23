@@ -1,6 +1,6 @@
 # ============================================================
 # DBMS_C_plus_plus — Multi-stage Docker build
-# Stage 1: compile the C++17 source with g++, OpenSSL and zlib
+# Stage 1: compile the C++17 source with g++, OpenSSL, zlib and ICU
 # Stage 2: slim runtime image with the binary and runtime libraries
 # ============================================================
 
@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     libssl-dev \
     zlib1g-dev \
+    libicu-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -26,7 +27,7 @@ COPY scripts/ scripts/
 COPY cmake/ cmake/
 COPY CMakeLists.txt ./
 
-# Build the binary (build.sh detects OpenSSL and requires zlib)
+# Build the binary (build.sh detects OpenSSL and requires zlib/ICU)
 RUN chmod +x scripts/build.sh && scripts/build.sh
 
 # ---- Runtime stage ----
@@ -38,6 +39,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl3 \
     zlib1g \
+    libicu-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

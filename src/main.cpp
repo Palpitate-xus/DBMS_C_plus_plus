@@ -37,6 +37,7 @@
 #include "Session.h"
 #include "expression/expr_helper.h"
 #include "common/DateType.h"
+#include "common/TimeZoneRules.h"
 #include <fcntl.h>
 #include <unistd.h>
 #include "Config.h"
@@ -3145,15 +3146,25 @@ static bool handleSetCommand(const string& sql, Session& s) {
                 }
             }
         } else {
-            const auto parsedOffset = parseTimezoneOffset(zone);
-            if (!parsedOffset) {
-                cout << "ERROR: invalid value for parameter TimeZone "
-                        "(SQLSTATE 22023)" << endl;
-                return true;
+            const int64_t nowSeconds = static_cast<int64_t>(
+                std::chrono::system_clock::to_time_t(
+                    std::chrono::system_clock::now())) +
+                Date(1970, 1, 1).convert() * 86400LL;
+            if (const auto namedOffset =
+                    dbms::ianaTimezoneOffsetMinutes(zone, nowSeconds)) {
+                offsetMinutes = *namedOffset;
+            } else {
+                const auto parsedOffset = parseTimezoneOffset(zone);
+                if (!parsedOffset) {
+                    cout << "ERROR: invalid value for parameter TimeZone "
+                            "(SQLSTATE 22023)" << endl;
+                    return true;
+                }
+                offsetMinutes = *parsedOffset;
+                if (quoted && !zone.empty() &&
+                    (zone.front() == '+' || zone.front() == '-'))
+                    offsetMinutes = -offsetMinutes;
             }
-            offsetMinutes = *parsedOffset;
-            if (quoted && !zone.empty() && (zone.front() == '+' || zone.front() == '-'))
-                offsetMinutes = -offsetMinutes;
             if (zone == "utc" || zone == "UTC") displayZone = "UTC";
             if (zone == "gmt" || zone == "GMT") displayZone = "GMT";
         }
@@ -7129,7 +7140,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
     auto appendValue = [&](string value, bool isNull = false,
                            string typeName = "text") {
         const string loweredType = toLower(trim(typeName));
-        if (!isNull && s.timezoneOffsetMinutes != 0 &&
+        if (!isNull &&
             (loweredType == "timestamptz" ||
              loweredType == "timestamp with time zone") &&
             value != "infinity" && value != "-infinity") {
@@ -7153,8 +7164,12 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             }
             const int64_t utcSeconds = parseTimestampToSeconds(parseValue);
             if (utcSeconds != 0) {
+                int renderOffset = s.timezoneOffsetMinutes;
+                if (const auto namedOffset = dbms::ianaTimezoneOffsetMinutes(
+                        s.timeZone, utcSeconds))
+                    renderOffset = *namedOffset;
                 string rendered = formatTimestampWithTz(
-                    utcSeconds, s.timezoneOffsetMinutes);
+                    utcSeconds, renderOffset);
                 if (!rendered.empty()) {
                     if (!fraction.empty()) {
                         const size_t displayTime = rendered.find(' ');
@@ -14223,7 +14238,7 @@ static void applySessionTimezoneToAnswers(
     std::vector<std::string>& answers,
     const std::vector<std::pair<std::string, std::string>>& projCols,
     int tzOffsetMinutes) {
-    if (tzOffsetMinutes == 0 || answers.empty() || projCols.empty()) return;
+    if (answers.empty() || projCols.empty()) return;
     std::vector<size_t> tzPositions;
     for (size_t i = 0; i < projCols.size(); ++i) {
         std::string ty;
@@ -14365,7 +14380,13 @@ static void applySessionTimezoneToAnswers(
             d.day = dc[2];
             int hh = tc[0], mm = tc[1], ss = tc[2];
             int64_t epoch = CONVERT(d) * 86400LL + hh * 3600 + mm * 60 + ss;
-            logical[p] = formatTimestampWithTz(epoch, tzOffsetMinutes);
+            int renderOffset = tzOffsetMinutes;
+            if (const Session* session = dbms::currentSession()) {
+                if (const auto namedOffset = dbms::ianaTimezoneOffsetMinutes(
+                        session->timeZone, epoch))
+                    renderOffset = *namedOffset;
+            }
+            logical[p] = formatTimestampWithTz(epoch, renderOffset);
             changed = true;
         }
         if (changed) {

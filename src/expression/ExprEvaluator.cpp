@@ -15,6 +15,7 @@
 #include "types/encoding_conversion.h"
 #include "types/xml.h"
 #include "utils/Session.h"
+#include "common/TimeZoneRules.h"
 
 #include <algorithm>
 #include <array>
@@ -3967,9 +3968,13 @@ static ExprValue castToTimestamp(const ExprValue& value,
     if (zonedTimestamp == 0) throwTemporalCastError(targetType, text);
     if (targetType == "timestamptz" && zone.empty() && !sourceHasTimeZone) {
         const Session* session = currentSession();
-        if (session)
-            zonedTimestamp -= static_cast<int64_t>(
-                session->timezoneOffsetMinutes) * 60;
+        if (session) {
+            int inputOffset = session->timezoneOffsetMinutes;
+            if (const auto namedOffset = dbms::ianaTimezoneOffsetMinutes(
+                    session->timeZone, zonedTimestamp, true))
+                inputOffset = *namedOffset;
+            zonedTimestamp -= static_cast<int64_t>(inputOffset) * 60;
+        }
     }
     const bool convertToUtc = targetType == "timestamptz" ||
                               sourceHasTimeZone;
@@ -8404,9 +8409,13 @@ void ExprEvaluator::registerBuiltins() {
         int64_t utcSeconds = parseTimestampToSeconds(
             str(date) + " " + formatTimeSeconds(timeSeconds));
         const Session* session = currentSession();
-        if (session)
-            utcSeconds -= static_cast<int64_t>(
-                session->timezoneOffsetMinutes) * 60;
+        if (session) {
+            int inputOffset = session->timezoneOffsetMinutes;
+            if (const auto namedOffset = dbms::ianaTimezoneOffsetMinutes(
+                    session->timeZone, utcSeconds, true))
+                inputOffset = *namedOffset;
+            utcSeconds -= static_cast<int64_t>(inputOffset) * 60;
+        }
         const std::string utcText = formatTimestampSeconds(utcSeconds);
         return ExprValue("timestamptz", utcText + "+00", utcText.empty());
     };

@@ -105,6 +105,17 @@ dbms_init_build_config() {
         return 1
     fi
 
+    if ! pkg-config --exists icu-i18n 2>/dev/null; then
+        echo "[build] ICU i18n is required for named timezone rules" >&2
+        return 1
+    fi
+    DBMS_CXXFLAGS+=(-DHAS_ICU=1)
+    local icu_cflags icu_libs
+    read -r -a icu_cflags <<< "$(pkg-config --cflags icu-i18n)"
+    read -r -a icu_libs <<< "$(pkg-config --libs icu-i18n)"
+    DBMS_CXXFLAGS+=("${icu_cflags[@]}")
+    DBMS_LDFLAGS+=("${icu_libs[@]}")
+
     mapfile -t DBMS_MANIFEST_SOURCES < <(
         sed '/^[[:space:]]*#/d;/^[[:space:]]*$/d' "$DBMS_MANIFEST"
     )

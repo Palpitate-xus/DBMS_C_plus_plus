@@ -4,7 +4,7 @@
 Verifies through the real SQL shell:
   - default (UTC) session renders a stored timestamptz with +00
   - SET TIME ZONE 'Asia/Shanghai' renders +08 shifted values
-  - SET TIME ZONE 'America/New_York' renders -05 shifted values
+  - SET TIME ZONE 'America/New_York' renders the date-specific DST offset
   - offset GUC syntax and repeatability (no double application)
 
 Runs dbms_main in a temp working directory with a SCRAM admin account.
@@ -131,13 +131,13 @@ def main():
     rows = data_rows(out)
     check("Asia/Shanghai +08", rows == ["1 2026-08-17 18:00:00+08"], str(rows))
 
-    # America/New_York: -5h
+    # America/New_York: -4h in August (daylight saving time).
     out, _, _ = run_sql(use + [
         "SET TIME ZONE 'America/New_York'",
         "SELECT * FROM tt",
     ])
     rows = data_rows(out)
-    check("America/New_York -05", rows == ["1 2026-08-17 05:00:00-05"], str(rows))
+    check("America/New_York -04", rows == ["1 2026-08-17 06:00:00-04"], str(rows))
 
     # Offset GUC syntax + idempotence (same query twice)
     out, _, _ = run_sql(use + [

@@ -23,6 +23,7 @@
 #include "expression/ExprEvaluator.h"
 #include "permissions.h"
 #include "utils/Session.h"
+#include "common/TimeZoneRules.h"
 #include "process/RuntimeStats.h"
 #include "process/SqlStats.h"
 #include "access/IndexFileUtil.h"
@@ -29099,7 +29100,14 @@ std::vector<std::string> StorageEngine::query(
                 if (offset + TIMESTAMP_SIZE <= mr.second.size()) {
                     int64_t utcSec = 0;
                     std::memcpy(&utcSec, mr.second.data() + offset, TIMESTAMP_SIZE);
-                    val = formatTimestampWithTz(utcSec, timezoneOffsetMinutes);
+                    int renderOffset = timezoneOffsetMinutes;
+                    if (const Session* session = currentSession()) {
+                        if (const auto namedOffset =
+                                dbms::ianaTimezoneOffsetMinutes(
+                                    session->timeZone, utcSec))
+                            renderOffset = *namedOffset;
+                    }
+                    val = formatTimestampWithTz(utcSec, renderOffset);
                 }
             }
             if (resultIsNull) rowStr += "NULL ";

@@ -92,6 +92,10 @@ target_compile_definitions(dbms_main PRIVATE
     DBMS_VERSION_STRING="${PROJECT_VERSION}"
 )
 
+find_package(ICU REQUIRED COMPONENTS i18n uc data)
+target_link_libraries(dbms_main PRIVATE ICU::i18n ICU::uc ICU::data)
+target_compile_definitions(dbms_main PRIVATE HAS_ICU=1)
+
 # ============================================================================
 # TLS support: auto-detect OpenSSL
 # ============================================================================

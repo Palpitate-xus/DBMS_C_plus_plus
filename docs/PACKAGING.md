@@ -15,7 +15,7 @@ cd dbms-<version>
 ./scripts/build_tests.sh  # 可选: 全量回归
 ```
 
-依赖：g++ (C++17)、make/cmake（按构建脚本）、Python 3（E2E 测试）、zlib（`-DHAS_ZLIB=1`，缺失时 WAL 压缩降级）。
+依赖：g++ (C++17)、make/cmake（按构建脚本）、Python 3（E2E 测试）、zlib 开发库（TOAST 压缩存储格式必需）、ICU i18n/uc/data 开发库（IANA 时区和夏令时规则必需）。运行时还须安装匹配的 zlib 和 ICU 共享库。OpenSSL 开发库用于网络 TLS；生产部署必须启用真实 TLS。
 
 ## 目录约定（显式 data directory）
 

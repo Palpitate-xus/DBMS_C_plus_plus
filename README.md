@@ -229,7 +229,7 @@ cmake --build build --target check
 
 > CMake 与全部 shell 构建/测试入口共同使用 [`cmake/dbms_sources.txt`](cmake/dbms_sources.txt)；CMake 的 `check`/CTest 和 shell 测试入口统一调用唯一的 `scripts/build_tests.sh` 测试编排器，避免测试链接、桩选择和 E2E 调度漂移。shell 对象缓存复用 [`scripts/build_common.sh`](scripts/build_common.sh) 的配置指纹。
 
-> **依赖说明**：zlib 开发库是当前 TOAST 压缩存储格式的必需依赖（Ubuntu/Debian 安装 `zlib1g-dev`）；CMake 与全部 shell 构建入口会统一链接它。若系统已安装 OpenSSL 开发库（`libssl-dev`），CMake 和 `build.sh` 会编译真实 TLS；否则只保留离线构建所需的 stub，网络服务默认 fail-closed。生产部署必须使用真实 OpenSSL、证书和私钥。
+> **依赖说明**：zlib 与 ICU 开发库是必需依赖（Ubuntu/Debian 安装 `zlib1g-dev`、`libicu-dev`）；前者用于 TOAST 压缩，后者用于按日期查询 IANA 时区及夏令时规则。CMake 与全部 shell 构建入口会统一链接它们。若系统已安装 OpenSSL 开发库（`libssl-dev`），CMake 和 `build.sh` 会编译真实 TLS；否则只保留离线构建所需的 stub，网络服务默认 fail-closed。生产部署必须使用真实 OpenSSL、证书和私钥。
 
 ### 交互式运行
 ```bash
