@@ -7192,10 +7192,10 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
         }
         if (lowItem == "version()" || lowItem == "version ( )") {
             headers.push_back(disp == item ? "version" : disp);
-            // PG-compatible version banner (matches the reference server
-            // shape: PostgreSQL <ver> (<distro>) on <arch>, compiled by ...).
-            appendValue("PostgreSQL 17.2 (Debian 17.2-1.pgdg120+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 12.2.0-14) 12.2.0, 64-bit",
-                        false, "text");
+            // Report this server's identity, not a fabricated PostgreSQL
+            // release/build that can mislead clients about supported behavior.
+            appendValue(std::string("DBMS-C++ ") + DBMS_VERSION_STRING +
+                            " (PostgreSQL protocol 3.0)", false, "text");
             continue;
         }
         if (lowItem == "user" || lowItem == "current_user" || lowItem == "session_user") {

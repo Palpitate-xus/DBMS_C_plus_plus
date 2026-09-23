@@ -107,6 +107,7 @@ def main():
             "who am I", "su", "usr", "db", "sch", "type_name", "banner",
         ], headers
         assert len(rows) == 1 and len(rows[0]) == 7, rows
+        assert rows[0][6] == "DBMS-C++ 0.2.0 (PostgreSQL protocol 3.0)", rows
 
         decoded = runner.decode_wire_result(
             client.simple_query(

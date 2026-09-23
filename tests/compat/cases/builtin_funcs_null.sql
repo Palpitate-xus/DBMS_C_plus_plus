@@ -31,7 +31,8 @@ SELECT age(timestamp '2024-01-01 12:00:00', timestamp '2023-06-01 10:30:00')
 SELECT age(date '2024-03-15', date '2023-06-01')
 SELECT timestamp '2024-03-15 07:30:00'
 SELECT date_trunc('day', timestamp '2024-03-15 07:30:00')
-SELECT version()
+-- Product/build identity is not a PostgreSQL-vs-DBMS behavioral comparison.
+-- It is checked against this project's own version in the protocol E2E test.
 DROP TABLE IF EXISTS n14
 CREATE TABLE n14 (a TEXT, b TEXT)
 INSERT INTO n14 VALUES ('x', 'y'), ('x', NULL), (NULL, 'y')
