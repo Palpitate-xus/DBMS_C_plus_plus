@@ -20177,6 +20177,99 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 ++joinBareNameCounts[leftTbl.cols[i].dataName];
             for (size_t i = 0; i < rightTbl.len; ++i)
                 ++joinBareNameCounts[rightTbl.cols[i].dataName];
+            if (wherePos != string::npos) {
+                const size_t whereEnd = min({groupPos, havingPos, windowPos,
+                    orderPos, limitPos, offsetPos, sql.size()});
+                const string predicate = trim(
+                    sql.substr(wherePos + 5, whereEnd - wherePos - 5));
+                dbms::SQLParser whereParser;
+                const auto parsedWhere = whereParser.parse("SELECT " + predicate);
+                const auto* whereSelect = parsedWhere.success
+                    ? dynamic_cast<const dbms::SelectStmt*>(
+                          parsedWhere.stmt.get()) : nullptr;
+                if (whereSelect && whereSelect->selectList.size() == 1) {
+                    string bindingError, bindingState;
+                    auto failWhereBinding = [&](string error, string state) {
+                        bindingError = std::move(error);
+                        bindingState = std::move(state);
+                        return false;
+                    };
+                    function<bool(const dbms::Expr*)> bindWhereReferences;
+                    bindWhereReferences = [&](const dbms::Expr* expression) {
+                        if (!expression) return true;
+                        if (const auto* ref = dynamic_cast<
+                                const dbms::ColumnRefExpr*>(expression)) {
+                            if (ref->table.empty() &&
+                                (ref->column == "current_user" ||
+                                 ref->column == "session_user" ||
+                                 ref->column == "current_date" ||
+                                 ref->column == "current_timestamp" ||
+                                 ref->column == "localtimestamp")) return true;
+                            if (!ref->schema.empty())
+                                return failWhereBinding(
+                                    "missing FROM-clause entry for table \"" +
+                                        ref->table + "\"", "42P01");
+                            const bool inLeft = [&] {
+                                for (size_t i = 0; i < leftTbl.len; ++i)
+                                    if (leftTbl.cols[i].dataName == ref->column)
+                                        return true;
+                                return false;
+                            }();
+                            const bool inRight = [&] {
+                                for (size_t i = 0; i < rightTbl.len; ++i)
+                                    if (rightTbl.cols[i].dataName == ref->column)
+                                        return true;
+                                return false;
+                            }();
+                            if (ref->table.empty()) {
+                                if (inLeft && inRight)
+                                    return failWhereBinding(
+                                        "column reference \"" + ref->column +
+                                            "\" is ambiguous", "42702");
+                                if (inLeft || inRight) return true;
+                            } else {
+                                const bool leftVisible =
+                                    ref->table == leftPrefix ||
+                                    (leftAlias.empty() && ref->table == leftTable);
+                                const bool rightVisible =
+                                    ref->table == rightPrefix ||
+                                    (rightAlias.empty() && ref->table == rightTable);
+                                if (!leftVisible && !rightVisible)
+                                    return failWhereBinding(
+                                        "missing FROM-clause entry for table \"" +
+                                            ref->table + "\"", "42P01");
+                                if ((leftVisible && inLeft) ||
+                                    (rightVisible && inRight)) return true;
+                            }
+                            return failWhereBinding(
+                                "column \"" + ref->column +
+                                    "\" does not exist", "42703");
+                        }
+                        if (const auto* unary = dynamic_cast<
+                                const dbms::UnaryOpExpr*>(expression))
+                            return bindWhereReferences(unary->operand.get());
+                        if (const auto* binary = dynamic_cast<
+                                const dbms::BinaryOpExpr*>(expression))
+                            return bindWhereReferences(binary->left.get()) &&
+                                bindWhereReferences(binary->right.get());
+                        if (const auto* call = dynamic_cast<
+                                const dbms::FunctionCallExpr*>(expression)) {
+                            for (const auto& arg : call->args)
+                                if (!bindWhereReferences(arg.get())) return false;
+                        }
+                        if (const auto* cast = dynamic_cast<
+                                const dbms::CastExpr*>(expression))
+                            return bindWhereReferences(cast->operand.get());
+                        return true;
+                    };
+                    if (!bindWhereReferences(
+                            whereSelect->selectList.front().expr.get())) {
+                        cout << "ERROR: " << bindingError << " (SQLSTATE "
+                             << bindingState << ")" << endl;
+                        return true;
+                    }
+                }
+            }
             map<string, string> joinTypeHints;
             auto addJoinTypeHints = [&](const TableSchema& table,
                                         const string& tableName,

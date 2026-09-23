@@ -23520,11 +23520,6 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
     for (const auto& s : cstr) {
         if (s.empty()) continue;
         Condition c;
-        if (s == "__join_on_true__" || s == "__join_on_false__") {
-            c.op = s == "__join_on_true__" ? "jointrue" : "joinfalse";
-            conds.push_back(std::move(c));
-            continue;
-        }
         // Handle LIKE operator
         // Accept both "notlike<col> <val>" (glued, from modifyLogic's
         // compact path) and "notlike <col> <val>" (spaced, from splitConds
@@ -35287,6 +35282,26 @@ static bool joinValuePredicateMatches(
     return false;
 }
 
+static std::vector<StorageEngine::Condition> parseJoinOnConditions(
+    const std::vector<std::string>& onConditions) {
+    std::vector<std::string> ordinary;
+    std::vector<StorageEngine::Condition> constants;
+    for (const auto& condition : onConditions) {
+        if (condition == "__join_on_true__" ||
+            condition == "__join_on_false__") {
+            StorageEngine::Condition parsed;
+            parsed.op = condition == "__join_on_true__"
+                ? "jointrue" : "joinfalse";
+            constants.push_back(std::move(parsed));
+        } else {
+            ordinary.push_back(condition);
+        }
+    }
+    auto parsed = StorageEngine::parseConditions(ordinary);
+    parsed.insert(parsed.end(), constants.begin(), constants.end());
+    return parsed;
+}
+
 std::vector<std::string> StorageEngine::join(
     const std::string& dbname,
     const std::string& leftTable,
@@ -35303,7 +35318,12 @@ std::vector<std::string> StorageEngine::join(
     if (structuredNulls) structuredNulls->clear();
     if (!tableExists(dbname, leftTable) || !tableExists(dbname, rightTable)) return result;
     if (leftCol.empty() && rightCol.empty() && !onConditions.empty()) {
-        std::vector<std::string> filters = onConditions;
+        std::vector<std::string> filters;
+        for (const auto& condition : onConditions) {
+            if (condition == "__join_on_false__") return result;
+            if (condition != "__join_on_true__")
+                filters.push_back(condition);
+        }
         filters.insert(filters.end(), conditions.begin(), conditions.end());
         return crossJoin(dbname, leftTable, rightTable, filters, selectCols,
                          structuredRows, structuredNulls);
@@ -35422,7 +35442,7 @@ std::vector<std::string> StorageEngine::join(
     };
 
     auto conds = parseConditions(conditions);
-    const auto extraOnConds = parseConditions(onConditions);
+    const auto extraOnConds = parseJoinOnConditions(onConditions);
     conds.insert(conds.end(), extraOnConds.begin(), extraOnConds.end());
 
     // Predicate pushdown: classify conditions by which table they reference
@@ -35701,7 +35721,7 @@ std::vector<std::string> StorageEngine::leftJoin(
     };
 
     auto conds = parseConditions(conditions);
-    const auto onConds = parseConditions(onConditions);
+    const auto onConds = parseJoinOnConditions(onConditions);
 
     size_t leftColIdx = leftTbl.len;
     for (size_t i = 0; i < leftTbl.len; ++i) {
@@ -35949,7 +35969,7 @@ std::vector<std::string> StorageEngine::rightJoin(
     };
 
     auto conds = parseConditions(conditions);
-    const auto onConds = parseConditions(onConditions);
+    const auto onConds = parseJoinOnConditions(onConditions);
 
     size_t leftColIdx = leftTbl.len;
     for (size_t i = 0; i < leftTbl.len; ++i) {
