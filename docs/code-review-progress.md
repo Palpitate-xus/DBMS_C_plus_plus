@@ -423,6 +423,12 @@
 
 | 478 | TYPE-04 / P0-16 | 新建 `CHAR(3)` 存储 `éé ` 后，列值在表达式 helper 中被归一为 `text`，`length(c)` 错把填充空格计入：参考 PostgreSQL 18.6 返回 2，本项目返回 3。现向表达式求值器保留 `bpchar` 类型；`TEXT` 的同一尾空格仍计入长度 | C++ 表达式回归验证 UTF-8 `CHAR` 的 length/char_length=2、octet_length=5，以及 TEXT length=3；新增差分用例覆盖 `CHAR`/`VARCHAR` 的 UTF-8 插入、更新、长度和超限 SQLSTATE。使用 `en_US.utf8` 排序及货币区域设置的 18.6 参考库，123 组差分 `failed=0`；完整本项目协议回归通过。旧固定 CHAR schema 迁移及其他类型语义仍待做，TYPE-04 保持 partial | `98d7171` |
 
+| 479 | TYPE-04 / P0-16 | `CHAR(3)` 与文本拼接原把物理补齐空格直接保留，`'a  '::char(3) || 'b'` 错得 `a  b`；PostgreSQL 的 `||` 先作 `bpchar → text`，结果为 `ab`，但 `concat(c,'b')` 仍保留空格。现让表达式 `||` 裁去 `bpchar` 填充，并将表查询拼接投影交给带列类型的表达式求值器 | 直接表达式 C++ 回归及真实 18.6 `char_concat` 差分通过；126 组差分和完整协议回归通过。复杂拼接类型组合仍需补全，TYPE-04 保持 partial | `a5ffc8e` |
+
+| 480 | P0-02 / TYPE-04 / P0-16 | 表查询投影中的比较表达式把每列当无类型文本并把空串或文本 `NULL` 当 SQL NULL；因此 `CHAR(3)` 的 `a  ` 与 `'a'`、同值 VARCHAR 错报不等。现传递实际列类型与 null bitmap，投影比较、AND/OR、IS NULL、BETWEEN 共用这些绑定信息 | 新增 `char_comparison` 差分覆盖填充比较、真实 NULL 与空串；126 组真实 18.6 差分及完整协议回归通过。更复杂投影和统一 binder 仍未完成，P0-02/TYPE-04 保持 partial | `5a10482` |
+
+| 481 | FUNC-01 / P0-16 | `overlay(text placing text from int for 负数)` 被误套用 `substring` 的负长度拒绝规则，返回 22011；PostgreSQL 18.6 允许负数并按起点与终点生成重叠结果。删除错误拒绝，保留起点小于 1 的错误 | 真实 18.6 对 ASCII 与 UTF-8 负长度输出逐项核对；字符串函数 C++ 回归通过，新增 `overlay_negative_count` 差分通过；126 组全量差分及完整协议回归通过。完整函数族仍为 partial | `f7601f4` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；第 428–429 项又迁移了 FROM-less 与普通表 scalar UDF 的声明类型和 NULL，并执行有限的 SQL function expression。混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF、完整 SQL function query body 及二进制值仍存在显示文本边界，继续计入总清单。
