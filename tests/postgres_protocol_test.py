@@ -730,9 +730,9 @@ def extended_query_describe(sock):
     ]
 
     for statement_name, keyword, expected_oid, expected_size in (
-            (b"describe_current_user", b"current_user", 19, -1),
-            (b"describe_session_user", b"session_user", 19, -1),
-            (b"describe_user", b"user", 19, -1),
+            (b"describe_current_user", b"current_user", 19, 64),
+            (b"describe_session_user", b"session_user", 19, 64),
+            (b"describe_user", b"user", 19, 64),
             (b"describe_current_date", b"current_date", 1082, 4),
             (b"describe_current_timestamp", b"current_timestamp", 1184, 8),
             (b"describe_localtimestamp", b"localtimestamp", 1114, 8)):
@@ -742,6 +742,27 @@ def extended_query_describe(sock):
                      typed(b"D", b"S" + statement_name + b"\0") + typed(b"S"))
         assert row_description_fields(read_until_ready(sock)) == [
             (keyword, 0, 0, expected_oid, expected_size, -1, 0)
+        ]
+        if expected_oid == 19:
+            assert row_description_fields(simple_query(
+                sock, "SELECT " + keyword.decode())) == [
+                (keyword, 0, 0, expected_oid, expected_size, -1, 0)
+            ]
+
+    for statement_name, query, expected_name, expected_oid, expected_size in (
+            (b"describe_interval_size", b"SELECT INTERVAL '1 day'",
+             b"interval", 1186, 16),
+            (b"describe_oid_size", b"SELECT 1::oid", b"oid", 26, 4),
+            (b"describe_regtype_size", b"SELECT 1::regtype",
+             b"regtype", 2206, 4)):
+        parse = statement_name + b"\0" + query + b"\0" + struct.pack("!H", 0)
+        sock.sendall(typed(b"P", parse) +
+                     typed(b"D", b"S" + statement_name + b"\0") + typed(b"S"))
+        assert row_description_fields(read_until_ready(sock)) == [
+            (expected_name, 0, 0, expected_oid, expected_size, -1, 0)
+        ]
+        assert row_description_fields(simple_query(sock, query.decode())) == [
+            (expected_name, 0, 0, expected_oid, expected_size, -1, 0)
         ]
 
     for statement_name, number, expected_oid, expected_size in (
