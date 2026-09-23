@@ -409,6 +409,8 @@
 
 | 471 | P0-02 / CAT-02 / TYPE-04 / PROTO-04 | 无长度 `VARCHAR` 的物理容量原默认为 255 字节，256 字节写入即报 22001；显式 `VARCHAR(255)` 与默认容量相撞，typmod 错报 -1。现将默认物理容量提升到当前 65535 字节上限，并把 SQL 显式声明的 typmod 单独带入 CREATE/ALTER catalog，保留显式 `VARCHAR(65535)` 的 typmod 65539；不相关 ALTER 保留原值，`ALTER ... TYPE VARCHAR` 清除它 | 隔离 wire 复现无长度列写入/读回 256 字节，以及 `VARCHAR(255)`/`VARCHAR(65535)` 的元数据和 ALTER 边界；完整协议回归两轮、DDL 路由、类型注册测试通过。`ddl_ast_bridge_test` 在独立的 CREATE DATABASE 错误传播断言处失败，已列为下一项修复，不能算通过。真正无限长度、UTF-8 字符数、LIKE/继承元数据全路径仍未完成，功能族保持 partial | `ab51da1` |
 
+| 472 | P0-01 / P0-02 / SQL-01 | `DdlExecutor::execute` 遇到命令标记为 CREATE DATABASE、实际却是另一类 AST 节点时，`dynamic_cast` 得到空指针，而 `executeCreateDatabase` 把空指针返回为无错，造成虚假的成功。该入口现返回显式内部错误；测试同时改为用真正的 CreateDatabaseStmt 检查非法数据库名字经存储层返回错误 | 修改前完整 `ddl_ast_bridge_test` 在原断言处失败；修改后整套 DDL 桥接测试通过，输出分别包含 malformed AST 的 XX000 和非法名字的 22023。其他 DDL handler 仍有同类空指针无错返回，需要另项统一处理 | `1b9e126` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；第 428–429 项又迁移了 FROM-less 与普通表 scalar UDF 的声明类型和 NULL，并执行有限的 SQL function expression。混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF、完整 SQL function query body 及二进制值仍存在显示文本边界，继续计入总清单。
