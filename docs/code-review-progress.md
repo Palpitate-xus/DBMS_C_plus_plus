@@ -457,7 +457,15 @@
 
 | 495 | P0-02 / PROTO-08 / P0-16 | `DROP INDEX` 缺失对象的两条失败路径原均报 `XX000`，现统一报 `42704 undefined_object` | 新增 `drop_missing_index`，真实 18.6 定向差分通过；功能族仍为 partial | `6cfd7b4` |
 
-2026-09-23 复验：截至第 495 项新增的 12 个 DDL 差分用例并入全量集，141 组真实 PostgreSQL 18.6 差分 `failed=0`；当前源码生产对象重链的完整 PostgreSQL 协议回归通过。正式 `scripts/build.sh` 曾在第 491 项状态成功；第 492–495 项仅经重链编译验证，正式生产构建仍待复跑。schema 重名及缺失 schema 的定向运行曾偶发超时，之后分别连续 20、30 次定向及本次全量运行通过，间歇性原因未定位。该结果不代表 P0-02、P0-04、P0-16、CAT-02 或 PROTO-08 完成。总账仍为 273 项，其中 24 complete、119 partial、115 unverified、15 deferred_by_user；被延期的安全 / TDE 项没有被计作完成。
+| 496 | P0-02 / PROTO-08 / P0-16 | `DROP VIEW` 缺失对象原报 `XX000`，现报 `42P01 undefined_table` | 新增 `drop_missing_view`，真实 18.6 定向差分通过；功能族仍为 partial | `b5b815e` |
+
+| 497 | P0-02 / PROTO-08 / P0-16 | `DROP SEQUENCE` 缺失对象原报 `XX000`，现报 `42P01 undefined_table` | 新增 `drop_missing_sequence`，真实 18.6 定向差分通过；功能族仍为 partial | `3741974` |
+
+| 498 | P0-02 / PROTO-08 / P0-16 | `DROP MATERIALIZED VIEW` 缺失对象原报 `XX000`，现报 `42P01 undefined_table` | 新增 `drop_missing_materialized_view`，真实 18.6 定向差分通过；功能族仍为 partial | `3afdd2c` |
+
+| 499 | P0-02 / PROTO-03 / P0-16 | `DROP MATERIALIZED VIEW IF EXISTS` 对缺失对象成功跳过时，wire command tag 错为 `DROP MATERIALIZED`；现返回完整 `DROP MATERIALIZED VIEW` | 新增 `drop_materialized_view_if_exists`，真实 18.6 定向差分同时核对命令标签和后续查询通过；其他多词命令仍需逐项差分 | `d816611` |
+
+2026-09-23 复验：截至第 499 项新增的 16 个 DDL 差分用例并入全量集，145 组真实 PostgreSQL 18.6 差分 `failed=0`；当前源码生产对象重链的完整 PostgreSQL 协议回归通过。正式 `scripts/build.sh` 在第 495 项状态成功；第 496–499 项仅经重链编译验证，正式生产构建仍待复跑。schema 重名及缺失 schema 的定向运行曾偶发超时，之后分别连续 20、30 次定向及后续全量运行通过，间歇性原因未定位。该结果不代表 P0-02、P0-04、P0-16、CAT-02 或 PROTO-08 完成。总账仍为 273 项，其中 24 complete、119 partial、115 unverified、15 deferred_by_user；被延期的安全 / TDE 项没有被计作完成。
 
 本批新增的待修复复现（仍计入总清单）：
 
