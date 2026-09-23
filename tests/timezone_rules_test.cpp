@@ -12,12 +12,20 @@ int main() {
 #ifdef HAS_ICU
     assert(dbms::ianaTimezoneOffsetMinutes("America/New_York", winter) == -300);
     assert(dbms::ianaTimezoneOffsetMinutes("America/New_York", summer) == -240);
+    assert(dbms::ianaTimezoneOffsetMinutes("america/new_york", summer) == -240);
+    assert(dbms::resolveIanaTimezoneName("america/new_york") == "America/New_York");
+    assert(dbms::resolveIanaTimezoneName("us/eastern") == "US/Eastern");
+    assert(!dbms::resolveIanaTimezoneName("Asia/Osaka"));
+    assert(!dbms::resolveIanaTimezoneName("America/Miami"));
+    assert(!dbms::resolveIanaTimezoneName("America/Seattle"));
+    assert(!dbms::resolveIanaTimezoneName("Z"));
     assert(dbms::ianaTimezoneOffsetMinutes("Europe/London", winter) == 0);
     assert(dbms::ianaTimezoneOffsetMinutes("Europe/London", summer) == 60);
     assert(dbms::ianaTimezoneOffsetMinutes("Europe/Kyiv", summer) == 180);
     assert(dbms::ianaTimezoneOffsetMinutes("America/New_York", winter, true) == -300);
     assert(dbms::ianaTimezoneOffsetMinutes("America/New_York", summer, true) == -240);
     assert(!dbms::ianaTimezoneOffsetMinutes("Mars/Phobos", summer));
+    assert(dbms::ianaTimezoneOffsetMinutes("America/New_York", summer) == -240);
 #else
     assert(!dbms::ianaTimezoneOffsetMinutes("America/New_York", summer));
 #endif

@@ -3150,11 +3150,23 @@ static bool handleSetCommand(const string& sql, Session& s) {
                 std::chrono::system_clock::to_time_t(
                     std::chrono::system_clock::now())) +
                 Date(1970, 1, 1).convert() * 86400LL;
-            if (const auto namedOffset =
-                    dbms::ianaTimezoneOffsetMinutes(zone, nowSeconds)) {
+            const auto resolvedZone = dbms::resolveIanaTimezoneName(zone);
+            const auto namedOffset = resolvedZone
+                ? dbms::ianaTimezoneOffsetMinutes(*resolvedZone, nowSeconds)
+                : std::optional<int>{};
+            if (namedOffset) {
                 offsetMinutes = *namedOffset;
+                displayZone = *resolvedZone;
             } else {
-                const auto parsedOffset = parseTimezoneOffset(zone);
+                // The legacy parser contains approximate mappings for a few
+                // non-existent names (for example Asia/Osaka). Only explicit
+                // fixed offsets and universal names may bypass IANA lookup.
+                const string lowerZone = toLower(zone);
+                const bool fixedZone = !zone.empty() &&
+                    (zone.front() == '+' || zone.front() == '-' ||
+                     lowerZone == "utc" || lowerZone == "gmt");
+                const auto parsedOffset = fixedZone
+                    ? parseTimezoneOffset(zone) : std::optional<int>{};
                 if (!parsedOffset) {
                     cout << "ERROR: invalid value for parameter TimeZone "
                             "(SQLSTATE 22023)" << endl;
@@ -3165,8 +3177,8 @@ static bool handleSetCommand(const string& sql, Session& s) {
                     (zone.front() == '+' || zone.front() == '-'))
                     offsetMinutes = -offsetMinutes;
             }
-            if (zone == "utc" || zone == "UTC") displayZone = "UTC";
-            if (zone == "gmt" || zone == "GMT") displayZone = "GMT";
+            if (toLower(zone) == "utc") displayZone = "UTC";
+            if (toLower(zone) == "gmt") displayZone = "GMT";
         }
         s.timezoneOffsetMinutes = offsetMinutes;
         s.timeZone = displayZone;
