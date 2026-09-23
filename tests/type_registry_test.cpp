@@ -1,4 +1,5 @@
 #include "catalog/type_registry.h"
+#include "catalog/systables.h"
 #include "types/numeric.h"
 #include "interfaces/table_schema.h"
 #include "Config.h"
@@ -41,6 +42,10 @@ static void test_normalize_aliases() {
     assert(reg.normalizeTypeName("Int4") == "integer");
     assert(reg.normalizeTypeName("varchar") == "character varying");
     assert(reg.normalizeTypeName("char") == "character");
+    assert(mapBuiltinTypeNameToOid("char") == 1042);
+    assert(mapBuiltinTypeNameToOid("character") == 1042);
+    assert(mapBuiltinTypeNameToOid("character[]") == 1014);
+    assert(isBuiltinTypeOid(18));
     assert(reg.normalizeTypeName("bool") == "boolean");
     assert(reg.normalizeTypeName("float") == "real");
     assert(reg.normalizeTypeName("double") == "double precision");

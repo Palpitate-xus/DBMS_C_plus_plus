@@ -721,6 +721,25 @@ def extended_query_describe(sock):
         (b"?column?", 0, 0, 23, 4, -1, 0)
     ], unnamed_fields
 
+    # SQL CHAR is bpchar (OID 1042), not PostgreSQL's internal "char"
+    # type (OID 18). Check both expression and catalog-backed column paths.
+    char_query = "SELECT 'a'::char"
+    char_parse = b"describe_sql_char\0" + char_query.encode() + b"\0" + struct.pack("!H", 0)
+    sock.sendall(typed(b"P", char_parse) +
+                 typed(b"D", b"Sdescribe_sql_char\0") + typed(b"S"))
+    assert row_description_fields(read_until_ready(sock)) == [
+        (b"bpchar", 0, 0, 1042, -1, -1, 0)
+    ]
+    assert row_description_fields(simple_query(sock, char_query)) == [
+        (b"bpchar", 0, 0, 1042, -1, -1, 0)
+    ]
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "CREATE TABLE char_oid_regression (v CHAR(3))"))
+    char_column = row_description_fields(simple_query(
+        sock, "SELECT v FROM char_oid_regression"))
+    assert len(char_column) == 1 and char_column[0][0] == b"v", char_column
+    assert char_column[0][1] != 0 and char_column[0][2:5] == (1, 1042, -1), char_column
+
     typed_date = (b"describe_typed_date\0SELECT DATE '2024-01-01'\0" +
                   struct.pack("!H", 0))
     sock.sendall(typed(b"P", typed_date) +

@@ -7408,7 +7408,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                         {"real", "float4"}, {"int", "int4"}, {"integer", "int4"},
                         {"bigint", "int8"}, {"smallint", "int2"},
                         {"decimal", "numeric"}, {"character varying", "varchar"},
-                        {"character", "bpchar"}, {"boolean", "bool"},
+                        {"character", "bpchar"}, {"char", "bpchar"}, {"boolean", "bool"},
                     };
                     auto tmap3 = pgTn3.find(trim(tn2));
                     if (tmap3 != pgTn3.end()) tn2 = tmap3->second;
@@ -7429,7 +7429,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                         {"bigint", "int8"}, {"smallint", "int2"},
                         {"int2", "int2"}, {"int4", "int4"}, {"int8", "int8"},
                         {"decimal", "numeric"}, {"character varying", "varchar"},
-                        {"character", "bpchar"}, {"boolean", "bool"},
+                        {"character", "bpchar"}, {"char", "bpchar"}, {"boolean", "bool"},
                         {"numeric", "numeric"},
                         {"bool", "bool"},
                     };

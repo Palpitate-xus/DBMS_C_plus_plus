@@ -1588,6 +1588,7 @@ bool describePreparedResult(const std::string& sql, Session& session,
                     case 23: outputName = "int4"; break;
                     case 700: outputName = "float4"; break;
                     case 701: outputName = "float8"; break;
+                    case 1042: outputName = "bpchar"; break;
                     default: outputName = lowerProtocolText(inferredType); break;
                 }
             } else if (dynamic_cast<const CaseExpr*>(item.expr.get())) {

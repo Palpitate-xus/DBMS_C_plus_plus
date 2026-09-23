@@ -9,7 +9,6 @@ static const std::unordered_map<std::string, Oid> kBuiltinTypeMap = {
     {"bool", 16}, {"boolean", 16},
     {"bytea", 17},
     {"bytea[]", 1001},
-    {"char", 18},
     {"name", 19},
     {"name[]", 1003},
     {"bigint", 20}, {"int8", 20},
@@ -38,8 +37,8 @@ static const std::unordered_map<std::string, Oid> kBuiltinTypeMap = {
     {"real[]", 1021}, {"float4[]", 1021},
     {"double precision", 701}, {"float8", 701}, {"float", 701},
     {"double precision[]", 1022}, {"float8[]", 1022}, {"float[]", 1022},
-    {"bpchar", 1042}, {"char", 1042},
-    {"bpchar[]", 1014}, {"char[]", 1014},
+    {"bpchar", 1042}, {"char", 1042}, {"character", 1042},
+    {"bpchar[]", 1014}, {"char[]", 1014}, {"character[]", 1014},
     {"varchar", 1043}, {"character varying", 1043},
     {"varchar[]", 1015}, {"character varying[]", 1015},
     {"date", 1082},
@@ -82,6 +81,9 @@ Oid mapBuiltinTypeNameToOid(const std::string& typeName) {
 
 bool isBuiltinTypeOid(Oid oid) {
     if (oid == INVALID_OID) return false;
+    // OID 18 is PostgreSQL's internal "char" type, distinct from SQL CHAR.
+    // It has no unquoted SQL type-name mapping but remains a built-in OID.
+    if (oid == 18) return true;
     return std::any_of(
         kBuiltinTypeMap.begin(), kBuiltinTypeMap.end(),
         [oid](const auto& entry) { return entry.second == oid; });
