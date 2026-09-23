@@ -19817,7 +19817,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 windowPos, orderPos, limitPos, offsetPos, sql.size()});
             string rightTableOrig;
             string leftOnCol, rightOnCol;
-            string leftOnQualifier, rightOnQualifier;
             string onClause;
 
             if (isCrossJoin) {
@@ -19885,9 +19884,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 if (dot == string::npos) return column;
                 const string qualifier = column.substr(0, dot);
                 const string name = column.substr(dot + 1);
-                if (qualifier == leftAlias || qualifier == leftTableName)
+                if ((!leftAlias.empty() && qualifier == leftAlias) ||
+                    (leftAlias.empty() && qualifier == leftTableName))
                     return leftTable + "." + name;
-                if (qualifier == rightAlias || qualifier == rightTableName)
+                if ((!rightAlias.empty() && qualifier == rightAlias) ||
+                    (rightAlias.empty() && qualifier == rightTableName))
                     return rightTable + "." + name;
                 return column;
             };
@@ -20145,10 +20146,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
             auto joinOperandSide = [&](const string& qualifier,
                                        const string& column) {
                 if (!qualifier.empty()) {
-                    if (qualifier == leftAlias || qualifier == leftTableName ||
-                        qualifier == leftTable) return 0;
-                    if (qualifier == rightAlias || qualifier == rightTableName ||
-                        qualifier == rightTable) return 1;
+                    if ((!leftAlias.empty() && qualifier == leftAlias) ||
+                        (leftAlias.empty() &&
+                         (qualifier == leftTableName || qualifier == leftTable)))
+                        return 0;
+                    if ((!rightAlias.empty() && qualifier == rightAlias) ||
+                        (rightAlias.empty() &&
+                         (qualifier == rightTableName || qualifier == rightTable)))
+                        return 1;
                     return -1;
                 }
                 bool inLeft = false;
@@ -20314,10 +20319,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     }
                     if (leftOnCol.empty() && comparison->op == "=" &&
                         firstColumn && secondColumn && firstSide != secondSide) {
-                        leftOnCol = firstName;
-                        rightOnCol = secondName;
-                        leftOnQualifier = firstSide == 0 ? leftTable : rightTable;
-                        rightOnQualifier = secondSide == 0 ? leftTable : rightTable;
+                        leftOnCol = firstSide == 0 ? firstName : secondName;
+                        rightOnCol = firstSide == 1 ? firstName : secondName;
                     } else {
                         string op = comparison->op;
                         string operand;
@@ -20342,12 +20345,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         "or hash-joinable join conditions (SQLSTATE 0A000)"
                      << endl;
                 return true;
-            }
-            if (!isCrossJoin &&
-                joinOperandSide(leftOnQualifier, leftOnCol) == 1 &&
-                joinOperandSide(rightOnQualifier, rightOnCol) == 0) {
-                std::swap(leftOnCol, rightOnCol);
-                std::swap(leftOnQualifier, rightOnQualifier);
             }
             // The engine emits join rows as left-table columns followed by
             // right-table columns.  The projected header must list columns
@@ -20417,11 +20414,15 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                     "\" does not exist", "42703");
                         }
                         const bool leftQualifier =
-                            ref->table == leftTableName ||
-                            ref->table == leftPrefix || ref->table == leftTable;
+                            ref->table == leftPrefix ||
+                            (leftAlias.empty() &&
+                             (ref->table == leftTableName ||
+                              ref->table == leftTable));
                         const bool rightQualifier =
-                            ref->table == rightTableName ||
-                            ref->table == rightPrefix || ref->table == rightTable;
+                            ref->table == rightPrefix ||
+                            (rightAlias.empty() &&
+                             (ref->table == rightTableName ||
+                              ref->table == rightTable));
                         if (leftQualifier && rightQualifier)
                             return rejectJoinReference(
                                 "table reference \"" + ref->table +
