@@ -2160,6 +2160,12 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                            : qualifiedName.schema + "__" + sub.newName);
                 status = g_engine.alterTableRenameTable(
                     s.currentDB, tableName, physicalNewName);
+                if (status == DBStatus::TABLE_ALREADY_EXISTS) {
+                    std::cout << "ERROR: relation \"" << sub.newName
+                              << "\" already exists (SQLSTATE 42P07)"
+                              << std::endl;
+                    return true;
+                }
                 if (!alterStatusOk(status, "Table")) return true;
                 if (tableIsTemporary) {
                     pendingTemporaryRename = sub.newName;
