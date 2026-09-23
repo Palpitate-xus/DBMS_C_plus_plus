@@ -2001,9 +2001,28 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     return true;
                 }
                 status = g_engine.alterTableDropColumn(s.currentDB, tableName, sub.name);
-                if (status == DBStatus::INVALID_VALUE && sub.ifExists) {
-                    std::cout << "NOTICE: column does not exist, skipping" << std::endl;
-                    break;
+                if (status == DBStatus::INVALID_VALUE) {
+                    const TableSchema currentSchema =
+                        g_engine.getTableSchema(s.currentDB, tableName);
+                    bool columnExists = false;
+                    for (size_t i = 0; i < currentSchema.len; ++i) {
+                        if (currentSchema.cols[i].dataName == sub.name) {
+                            columnExists = true;
+                            break;
+                        }
+                    }
+                    if (!columnExists) {
+                        if (sub.ifExists) {
+                            std::cout << "NOTICE: column does not exist, skipping"
+                                      << std::endl;
+                            break;
+                        }
+                        std::cout << "ERROR: column \"" << sub.name
+                                  << "\" of relation \"" << stmt->tableName
+                                  << "\" does not exist (SQLSTATE 42703)"
+                                  << std::endl;
+                        return true;
+                    }
                 }
                 if (!alterStatusOk(status, "Column")) return true;
                 if (!tableIsTemporary) {
