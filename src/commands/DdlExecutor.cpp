@@ -7656,7 +7656,8 @@ bool DdlExecutor::executeDropSequence(const DropStmt* stmt, Session& s) {
                     continue;
                 }
                 std::cout << "ERROR: sequence \"" << requestedName
-                          << "\" does not exist" << std::endl;
+                          << "\" does not exist (SQLSTATE 42P01)"
+                          << std::endl;
                 return true;
             }
             if (sequence->relkind != 'S') {
