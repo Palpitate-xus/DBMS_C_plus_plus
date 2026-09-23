@@ -60,6 +60,7 @@ private:
     bool executeDropFunction(const DropStmt* stmt, Session& s);
     bool executeCreateProcedure(const CreateFunctionStmt* stmt, Session& s);
     bool executeDropProcedure(const DropStmt* stmt, Session& s);
+    bool executeDropRoutine(const DropStmt* stmt, Session& s);
     bool executeCreatePolicy(const CreatePolicyStmt* stmt, Session& s);
     bool executeCreateMaterializedView(const CreateViewStmt* stmt, Session& s);
     bool executeRefreshMaterializedView(

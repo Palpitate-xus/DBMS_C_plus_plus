@@ -1601,6 +1601,8 @@ bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
             return executeCreateProcedure(dynamic_cast<const CreateFunctionStmt*>(stmt.get()), s);
         case SqlCommand::DropProcedure:
             return executeDropProcedure(dynamic_cast<const DropStmt*>(stmt.get()), s);
+        case SqlCommand::DropRoutine:
+            return executeDropRoutine(dynamic_cast<const DropStmt*>(stmt.get()), s);
         case SqlCommand::CreatePolicy:
             return executeCreatePolicy(dynamic_cast<const CreatePolicyStmt*>(stmt.get()), s);
         case SqlCommand::CreateMaterializedView:
@@ -1685,6 +1687,7 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         case dbms::SqlCommand::DropFunction:
         case dbms::SqlCommand::CreateProcedure:
         case dbms::SqlCommand::DropProcedure:
+        case dbms::SqlCommand::DropRoutine:
         case dbms::SqlCommand::CreatePolicy:
         case dbms::SqlCommand::CreateMaterializedView:
         case dbms::SqlCommand::RefreshMaterializedView:
@@ -1723,7 +1726,8 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         parsedCmd == dbms::SqlCommand::CreateFunction ||
         parsedCmd == dbms::SqlCommand::DropFunction ||
         parsedCmd == dbms::SqlCommand::CreateProcedure ||
-        parsedCmd == dbms::SqlCommand::DropProcedure;
+        parsedCmd == dbms::SqlCommand::DropProcedure ||
+        parsedCmd == dbms::SqlCommand::DropRoutine;
     const std::string& parseInput = preservesLiteralText && !rawSql.empty()
         ? rawSql : sql;
     dbms::SQLParser parser;
@@ -9952,6 +9956,73 @@ bool DdlExecutor::executeDropProcedure(const DropStmt* stmt, Session& s) {
     if (!txn.commit()) return true;
     std::cout << "DROP PROCEDURE succeeded" << std::endl;
     return false;
+}
+
+bool DdlExecutor::executeDropRoutine(const DropStmt* stmt, Session& s) {
+    if (!stmt) return rejectMalformedDdlAst();
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+
+    const auto& parts = stmt->objectNames;
+    const bool bareName = parts.size() == 1;
+    const bool zeroArgumentSignature =
+        parts.size() == 3 && parts[1] == "(" && parts[2] == ")";
+    if ((!bareName && !zeroArgumentSignature) || parts[0].empty()) {
+        std::cout << "ERROR: DROP ROUTINE signatures or multiple targets "
+                     "are not supported (SQLSTATE 0A000)" << std::endl;
+        return true;
+    }
+    const std::string& name = parts[0];
+    const bool scalarExists = g_engine.udfExists(s.currentDB, name);
+    const bool tableFunctionExists = g_engine.tvfExists(s.currentDB, name);
+    const bool procedureExists = g_engine.procedureExists(s.currentDB, name);
+    bool scalarMatches = scalarExists;
+    bool tableFunctionMatches = tableFunctionExists;
+    bool procedureMatches = procedureExists;
+    if (zeroArgumentSignature) {
+        if (scalarExists) {
+            const auto function = g_engine.getUDF(s.currentDB, name);
+            if (function.expression.empty()) {
+                std::cout << "ERROR: function metadata is invalid "
+                             "(SQLSTATE 58030)" << std::endl;
+                return true;
+            }
+            scalarMatches = function.paramTypes.empty();
+        }
+        if (tableFunctionExists) {
+            tableFunctionMatches =
+                g_engine.getTVFParam(s.currentDB, name).empty();
+        }
+        if (procedureExists) {
+            procedureMatches =
+                g_engine.getProcedureParams(s.currentDB, name).empty();
+        }
+    }
+    const int matches = static_cast<int>(scalarMatches) +
+        static_cast<int>(tableFunctionMatches) +
+        static_cast<int>(procedureMatches);
+    if (matches == 0) {
+        if (stmt->ifExists) {
+            std::cout << "NOTICE: routine \"" << name
+                      << "\" does not exist, skipping" << std::endl;
+            return false;
+        }
+        std::cout << "ERROR: routine \"" << name
+                  << "\" does not exist (SQLSTATE 42883)" << std::endl;
+        return true;
+    }
+    if (matches > 1) {
+        std::cout << "ERROR: routine \"" << name
+                  << "\" is ambiguous (SQLSTATE 42725)" << std::endl;
+        return true;
+    }
+
+    DropStmt target(procedureMatches ? SqlCommand::DropProcedure
+                                     : SqlCommand::DropFunction);
+    target.objectNames = parts;
+    target.cascade = stmt->cascade;
+    if (procedureMatches) return executeDropProcedure(&target, s);
+    return executeDropFunction(&target, s);
 }
 
 // ----------------------------------------------------------------------------

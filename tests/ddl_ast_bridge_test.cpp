@@ -110,6 +110,39 @@ static void test_drop_procedure_uses_transactional_ddl() {
               << std::endl;
 }
 
+static void test_drop_routine_selects_function_or_procedure() {
+    const std::string db = testDbPath("ddl_drop_routine_transaction");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session session;
+    setupSession(session, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE FUNCTION routine_fn() RETURNS int LANGUAGE SQL "
+        "AS $$ SELECT 7 $$", session));
+    assert(!ddl.executeSql(
+        "CREATE PROCEDURE routine_proc() LANGUAGE SQL "
+        "AS $$ SELECT 7 $$", session));
+    assert(!ddl.executeSql("DROP ROUTINE IF EXISTS missing_routine()", session));
+    assert(ddl.executeSql("DROP ROUTINE routine_fn(int)", session));
+    assert(g_engine.udfExists(db, "routine_fn"));
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(!ddl.executeSql("DROP ROUTINE routine_fn()", session));
+    assert(!g_engine.udfExists(db, "routine_fn"));
+    assert(!ddl.executeSql("DROP ROUTINE routine_proc()", session));
+    assert(!g_engine.procedureExists(db, "routine_proc"));
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+    assert(g_engine.udfExists(db, "routine_fn"));
+    assert(g_engine.procedureExists(db, "routine_proc"));
+    assert(!ddl.executeSql("DROP ROUTINE routine_fn()", session));
+    assert(!ddl.executeSql("DROP ROUTINE routine_proc()", session));
+
+    cleanup(db);
+    std::cout << "[DDL] DROP ROUTINE target resolution and rollback OK"
+              << std::endl;
+}
+
 static void test_create_table_registers_in_catalog() {
     std::string db = testDbPath("ddl_bridge_t1_cat");
     cleanup(db);
@@ -1128,6 +1161,7 @@ static void test_mismatched_ddl_ast_types_fail_closed() {
              dbms::SqlCommand::CreateFunction,
              dbms::SqlCommand::CreateProcedure,
              dbms::SqlCommand::DropProcedure,
+             dbms::SqlCommand::DropRoutine,
              dbms::SqlCommand::CreatePolicy,
              dbms::SqlCommand::CreateMaterializedView,
              dbms::SqlCommand::RefreshMaterializedView,
@@ -1236,6 +1270,7 @@ int main() {
     test_create_drop_table();
     test_drop_function_uses_transactional_ddl();
     test_drop_procedure_uses_transactional_ddl();
+    test_drop_routine_selects_function_or_procedure();
     test_create_table_registers_in_catalog();
     test_create_table_requires_existing_schema();
     test_alter_table_rename_updates_catalog();
