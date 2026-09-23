@@ -55,6 +55,17 @@ static void test_expr_helper_basic() {
                                      paddedTypes);
     assert(r.ok && r.value == "3");
 
+    const std::map<std::string, std::string> comparisonRow = {
+        {"fixed", "a  "}, {"plain", "a"}};
+    const std::map<std::string, std::string> comparisonTypes = {
+        {"fixed", "char"}, {"plain", "text"}};
+    r = dbms::ExprHelper::evalString("fixed = 'a'", comparisonRow,
+                                     comparisonTypes);
+    assert(r.ok && r.value == "t");
+    r = dbms::ExprHelper::evalString("fixed || 'b'", comparisonRow,
+                                     comparisonTypes);
+    assert(r.ok && r.value == "ab");
+
     r = dbms::ExprHelper::evalString("sum('abc')", {});
     assert(!r.ok && r.error.find("SQLSTATE 42725") != std::string::npos);
     r = dbms::ExprHelper::evalString("avg(NULL)", {});

@@ -30291,7 +30291,9 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     }
     if (expr.funcName == "arith") {
         bool moneyExpression = false;
+        bool concatExpression = false;
         for (const auto& argument : expr.funcArgs) {
+            if (argument == "||") concatExpression = true;
             const std::string operand = trim(argument.substr(
                 0, argument.find("::")));
             for (size_t columnIndex = 0; columnIndex < tbl.len;
@@ -30310,7 +30312,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             if (lowered.find("::money") != std::string::npos)
                 moneyExpression = true;
         }
-        if (moneyExpression) {
+        if (moneyExpression || concatExpression) {
             std::map<std::string, std::string> rowContext;
             std::map<std::string, std::string> typeHints;
             std::set<std::string> nullColumns;
@@ -30337,7 +30339,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             if (!evaluated.ok) {
                 throw std::runtime_error(
                     evaluated.error.empty()
-                        ? "failed to evaluate money expression"
+                        ? "failed to evaluate typed expression"
                         : evaluated.error);
             }
             return evaluated.isNull ? "NULL" : evaluated.value;

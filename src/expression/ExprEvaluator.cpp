@@ -2878,7 +2878,13 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
             if (!add.empty()) out += (inner.empty() ? "" : ",") + add;
             return ExprValue("text", std::string(1, 0x7B) + out + std::string(1, 0x7D), false);
         }
-        return ExprValue("text", l.value + r.value, false);
+        // The text concatenation operator casts bpchar operands to text.
+        // That cast discards the blank padding, unlike concat(), which
+        // preserves the original character datum's visible spaces.
+        return ExprValue("text",
+                         l.value.substr(0, logicalCharacterByteLength(l)) +
+                             r.value.substr(0, logicalCharacterByteLength(r)),
+                         false);
     }
 
     // JSON access operators (PostgreSQL):
