@@ -57,6 +57,7 @@ private:
     bool executeCreateTrigger(const CreateTriggerStmt* stmt, Session& s);
     bool executeDropTrigger(const DropStmt* stmt, Session& s);
     bool executeCreateFunction(const CreateFunctionStmt* stmt, Session& s);
+    bool executeDropFunction(const DropStmt* stmt, Session& s);
     bool executeCreateProcedure(const CreateFunctionStmt* stmt, Session& s);
     bool executeCreatePolicy(const CreatePolicyStmt* stmt, Session& s);
     bool executeCreateMaterializedView(const CreateViewStmt* stmt, Session& s);

@@ -54,6 +54,34 @@ static void test_create_drop_table() {
     std::cout << "[DDL] create/drop table OK" << std::endl;
 }
 
+static void test_drop_function_uses_transactional_ddl() {
+    const std::string db = testDbPath("ddl_drop_function_transaction");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session session;
+    setupSession(session, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE FUNCTION drop_tx_fn() RETURNS int LANGUAGE SQL "
+        "AS $$ SELECT 7 $$", session));
+    assert(g_engine.udfExists(db, "drop_tx_fn"));
+    assert(!ddl.executeSql("DROP FUNCTION IF EXISTS missing_fn()", session));
+    assert(ddl.executeSql("DROP FUNCTION drop_tx_fn(int)", session));
+    assert(g_engine.udfExists(db, "drop_tx_fn"));
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(!ddl.executeSql("DROP FUNCTION drop_tx_fn()", session));
+    assert(!g_engine.udfExists(db, "drop_tx_fn"));
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+    assert(g_engine.udfExists(db, "drop_tx_fn"));
+    assert(!ddl.executeSql("DROP FUNCTION drop_tx_fn()", session));
+    assert(!g_engine.udfExists(db, "drop_tx_fn"));
+
+    cleanup(db);
+    std::cout << "[DDL] DROP FUNCTION rollback and IF EXISTS OK"
+              << std::endl;
+}
+
 static void test_create_table_registers_in_catalog() {
     std::string db = testDbPath("ddl_bridge_t1_cat");
     cleanup(db);
@@ -1177,6 +1205,7 @@ int main() {
     cleanupAllTestData();
     dbms::TypeRegistry::instance().bootstrap();
     test_create_drop_table();
+    test_drop_function_uses_transactional_ddl();
     test_create_table_registers_in_catalog();
     test_create_table_requires_existing_schema();
     test_alter_table_rename_updates_catalog();

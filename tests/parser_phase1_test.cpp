@@ -55,6 +55,17 @@ static const FunctionCallExpr* asFuncCall(const ExprPtr& expr) {
 int main() {
     SQLParser parser;
 
+    {
+        const auto parsed = parser.parse(
+            "DROP FUNCTION IF EXISTS pgdiff_drop_fn()");
+        assert(parsed.success);
+        const auto* drop = dynamic_cast<const DropStmt*>(parsed.stmt.get());
+        assert(drop && drop->command == SqlCommand::DropFunction &&
+               drop->ifExists);
+        assert((drop->objectNames ==
+                std::vector<std::string>{"pgdiff_drop_fn", "(", ")"}));
+    }
+
     // PostgreSQL's default NULL position follows the sort direction, and
     // OFFSET's optional ROW(S) must not consume the following FETCH clause.
     {

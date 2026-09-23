@@ -1595,6 +1595,8 @@ bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
             return executeDropTrigger(dynamic_cast<const DropStmt*>(stmt.get()), s);
         case SqlCommand::CreateFunction:
             return executeCreateFunction(dynamic_cast<const CreateFunctionStmt*>(stmt.get()), s);
+        case SqlCommand::DropFunction:
+            return executeDropFunction(dynamic_cast<const DropStmt*>(stmt.get()), s);
         case SqlCommand::CreateProcedure:
             return executeCreateProcedure(dynamic_cast<const CreateFunctionStmt*>(stmt.get()), s);
         case SqlCommand::CreatePolicy:
@@ -1678,6 +1680,7 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         case dbms::SqlCommand::CreateTrigger:
         case dbms::SqlCommand::DropTrigger:
         case dbms::SqlCommand::CreateFunction:
+        case dbms::SqlCommand::DropFunction:
         case dbms::SqlCommand::CreateProcedure:
         case dbms::SqlCommand::CreatePolicy:
         case dbms::SqlCommand::CreateMaterializedView:
@@ -1715,6 +1718,7 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
     const bool preservesLiteralText =
         authDdl || parsedCmd == dbms::SqlCommand::Comment ||
         parsedCmd == dbms::SqlCommand::CreateFunction ||
+        parsedCmd == dbms::SqlCommand::DropFunction ||
         parsedCmd == dbms::SqlCommand::CreateProcedure;
     const std::string& parseInput = preservesLiteralText && !rawSql.empty()
         ? rawSql : sql;
@@ -9685,6 +9689,80 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
     }
     if (!txn.commit()) return true;
     std::cout << "CREATE FUNCTION succeeded" << std::endl;
+    return false;
+}
+
+bool DdlExecutor::executeDropFunction(const DropStmt* stmt, Session& s) {
+    if (!stmt) return rejectMalformedDdlAst();
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+
+    // The current function store is keyed by name, not by PostgreSQL's
+    // (name, argument types) identity. Never drop a different overload just
+    // because a signature was present in the statement.
+    const auto& parts = stmt->objectNames;
+    const bool bareName = parts.size() == 1;
+    const bool zeroArgumentSignature =
+        parts.size() == 3 && parts[1] == "(" && parts[2] == ")";
+    if ((!bareName && !zeroArgumentSignature) || parts[0].empty()) {
+        std::cout << "ERROR: DROP FUNCTION signatures or multiple targets "
+                     "are not supported (SQLSTATE 0A000)" << std::endl;
+        return true;
+    }
+    const std::string& name = parts[0];
+    const bool scalarExists = g_engine.udfExists(s.currentDB, name);
+    const bool tableFunctionExists = g_engine.tvfExists(s.currentDB, name);
+    if (scalarExists && tableFunctionExists) {
+        std::cout << "ERROR: function \"" << name
+                  << "\" is ambiguous (SQLSTATE 42725)" << std::endl;
+        return true;
+    }
+    bool signatureMatches = scalarExists || tableFunctionExists;
+    if (zeroArgumentSignature && scalarExists) {
+        const auto function = g_engine.getUDF(s.currentDB, name);
+        if (function.expression.empty()) {
+            std::cout << "ERROR: function metadata is invalid (SQLSTATE 58030)"
+                      << std::endl;
+            return true;
+        }
+        signatureMatches = function.paramTypes.empty();
+    } else if (zeroArgumentSignature && tableFunctionExists) {
+        signatureMatches = g_engine.getTVFParam(s.currentDB, name).empty();
+    }
+    if (!signatureMatches) {
+        if (stmt->ifExists) {
+            std::cout << "NOTICE: function \"" << name
+                      << "\" does not exist, skipping" << std::endl;
+            return false;
+        }
+        std::cout << "ERROR: function \"" << name
+                  << "\" does not exist (SQLSTATE 42883)" << std::endl;
+        return true;
+    }
+    if (stmt->cascade) {
+        std::cout << "ERROR: DROP FUNCTION CASCADE is not supported "
+                     "(SQLSTATE 0A000)" << std::endl;
+        return true;
+    }
+
+    DdlTransaction txn(s);
+    txn.enableSnapshotRollback();
+    if (!txn.begin()) {
+        std::cout << "DROP FUNCTION transaction begin failed" << std::endl;
+        return true;
+    }
+    txn.markSnapshotDirty();
+    const DBStatus status = scalarExists
+        ? g_engine.dropUDF(s.currentDB, name)
+        : g_engine.dropTVF(s.currentDB, name);
+    if (status != DBStatus::OK) {
+        std::cout << "ERROR: DROP FUNCTION failed (SQLSTATE "
+                  << sqlstateForDBStatus(status) << ")" << std::endl;
+        return true;
+    }
+    txn.recordDrop(DdlObjectKind::Function, name);
+    if (!txn.commit()) return true;
+    std::cout << "DROP FUNCTION succeeded" << std::endl;
     return false;
 }
 
