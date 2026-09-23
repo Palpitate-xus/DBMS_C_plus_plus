@@ -1335,26 +1335,14 @@ static std::string formatUuidTimestamp(int64_t unixMicros) {
     return result + "+00";
 }
 
-// Resolve a timezone name to a UTC offset in minutes. Supports UTC-style
-// fixed offsets ("UTC", "UTC+8", "UTC-05:30") and POSIX abbreviated forms
-// ("+08", "-0530"). Full IANA tzdata is out of scope for this layer.
+// Resolve fixed-offset timezone spellings. Named zones use IANA rules at the
+// input instant in timezoneOffsetAt() instead of a timeless lookup table.
 static bool parseTimeZoneOffset(const std::string& name, long long& offsetMinutes) {
     std::string s = trimStr(name);
     if (s.size() >= 2 && s.front() == '\'' && s.back() == '\'') s = trimStr(s.substr(1, s.size() - 2));
     if (s.empty()) return false;
     std::string low;
     for (char c : s) low += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    // Common named zones (fixed standard-time offsets; no DST model).
-    static const std::map<std::string, long long> namedZones = {
-        {"asia/tokyo", 540}, {"asia/shanghai", 480}, {"asia/kolkata", 330},
-        {"asia/seoul", 540}, {"asia/dubai", 240}, {"asia/singapore", 480},
-        {"europe/london", 0}, {"europe/paris", 60}, {"europe/berlin", 60},
-        {"europe/moscow", 180}, {"america/new_york", -300}, {"america/chicago", -360},
-        {"america/denver", -420}, {"america/los_angeles", -480},
-        {"australia/sydney", 600}, {"pacific/auckland", 720},
-    };
-    auto it = namedZones.find(low);
-    if (it != namedZones.end()) { offsetMinutes = it->second; return true; }
     if (low == "utc" || low == "gmt" || low == "z") { offsetMinutes = 0; return true; }
     if (low.rfind("utc", 0) == 0 || low.rfind("gmt", 0) == 0) s = s.substr(3);
     // [+-]HH[:MM] or [+-]HHMM
@@ -1395,9 +1383,24 @@ static bool parseTimeZoneOffset(const std::string& name, long long& offsetMinute
     }
     if (hh > 15 || mm > 59) return false;
     // POSIX-style numeric zones invert the sign (UTC+8 means UTC-8),
-    // while IANA named zones above keep the natural sign.
+    // while IANA named zones use their date-specific natural displacement.
     offsetMinutes = -sign * (hh * 60 + mm);
     return true;
+}
+
+static long long timezoneOffsetAt(const std::string& name,
+                                  const std::string& input,
+                                  bool localTime) {
+    std::string zone = trimStr(name);
+    if (zone.size() >= 2 && zone.front() == '\'' && zone.back() == '\'')
+        zone = zone.substr(1, zone.size() - 2);
+    const int64_t seconds = parseTimestampToSeconds(input);
+    if (const auto namedOffset = dbms::ianaTimezoneOffsetMinutes(
+            zone, seconds, localTime))
+        return *namedOffset;
+    long long fixedOffset = 0;
+    if (parseTimeZoneOffset(zone, fixedOffset)) return fixedOffset;
+    throw DbError("22023", "time zone \"" + zone + "\" not recognized");
 }
 
 // JSON helpers defined later in this file; forward-declared for the JSON
@@ -1616,14 +1619,14 @@ ExprValue ExprEvaluator::evalUnaryOp(const UnaryOpExpr* e, const RowContext& ctx
     if (op.rfind("at time zone", 0) == 0) {
         // AT TIME ZONE <zone>: timestamp input is a wall clock in the named
         // zone and becomes a UTC timestamptz; timestamptz input is a UTC
-        // instant rendered as a local timestamp. Offset-only zone model.
+        // instant rendered as a local timestamp.
         std::string zone = trimStr(e->op.substr(std::string("at time zone").size()));
-        long long offMin = 0;
-        if (v.isNull || !parseTimeZoneOffset(zone, offMin))
+        if (v.isNull)
             return ExprValue("timestamp", "", true);
         const std::string inputType = toLower(v.typeName);
         const bool tzIn = inputType == "timestamptz" ||
                           inputType == "timestamp with time zone";
+        const long long offMin = timezoneOffsetAt(zone, v.value, !tzIn);
         IntervalParts shift;
         shift.micros = (tzIn ? offMin : -offMin) * 60000000LL;
         std::string out = timestampShift(v.value, shift, true);
@@ -6802,11 +6805,11 @@ void ExprEvaluator::registerBuiltins() {
 
     functions_["timezone"] = [](const std::vector<ExprValue>& a) {
         if (a.size() != 2 || a[0].isNull || a[1].isNull) return ExprValue("timestamp", "", true);
-        long long offMin = 0;
-        if (!parseTimeZoneOffset(a[0].value, offMin)) return ExprValue("timestamp", "", true);
         const std::string inTn = toLower(a[1].typeName);
         const bool timestampIn = inTn == "timestamp" ||
                                  inTn == "timestamp without time zone";
+        const long long offMin = timezoneOffsetAt(
+            a[0].value, a[1].value, timestampIn);
         IntervalParts shift;
         shift.micros = (timestampIn ? -offMin : offMin) * 60000000LL;
         std::string out = timestampShift(a[1].value, shift, true);
