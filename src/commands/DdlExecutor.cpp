@@ -1952,6 +1952,13 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     std::cout << "NOTICE: column already exists, skipping" << std::endl;
                     break;
                 }
+                if (status == DBStatus::TABLE_ALREADY_EXISTS) {
+                    std::cout << "ERROR: column \"" << sub.colDef.name
+                              << "\" of relation \"" << stmt->tableName
+                              << "\" already exists (SQLSTATE 42701)"
+                              << std::endl;
+                    return true;
+                }
                 if (!alterStatusOk(status, "Column")) return true;
                 std::map<std::string, int32_t> declaredVarcharMods;
                 int32_t varcharModifier = -1;
