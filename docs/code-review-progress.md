@@ -403,6 +403,8 @@
 
 | 468 | TYPE-04 | `CHAR(3)` 写入短值 `'ok'` 原样读回 `ok`，`WHERE v = 'ok '` 不匹配，UNIQUE 也允许 `'ok'` 与 `'ok '` 并存。现将短值补到声明宽度，并在字符列比较/唯一键规范化时忽略尾随空格；UPDATE 赋值走同一补齐规则 | 修复前隔离 wire 复现上述三项；修复后读回 `ok `，两种尾随空格谓词均匹配，第二次插入被唯一约束拦截且原行保持。完整协议、空字符串唯一约束、collation、UPDATE 类型校验回归通过。[PostgreSQL 18 字符类型文档](https://www.postgresql.org/docs/18/datatype-character.html)确认补空格和比较规则。唯一冲突错误码仍错报 XX000，单列后续；Unicode 字符计数和完整 CHAR 语义仍未完成 | `773c6dc` |
 
+| 469 | P0-02 / PROTO-08 | typed INSERT 的直接写入、冲突目标不匹配及一般冲突分支，以及 legacy INSERT 的重复键分支，原仅输出 `Duplicate key`，使 PostgreSQL wire 将唯一约束错误误报为 `XX000`。四个分支现明确携带 `SQLSTATE 23505` | 隔离 wire 验证普通 PRIMARY KEY 重复值、`CHAR(3)` 补空格后 UNIQUE 重复值均返回 `23505` 且原行保持；完整 PostgreSQL 协议回归通过并固定断言。错误文本与 PostgreSQL 键名/约束名仍未完全一致，功能族保持 partial | `3d0e38b` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；第 428–429 项又迁移了 FROM-less 与普通表 scalar UDF 的声明类型和 NULL，并执行有限的 SQL function expression。混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF、完整 SQL function query body 及二进制值仍存在显示文本边界，继续计入总清单。
