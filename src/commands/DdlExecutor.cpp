@@ -2144,6 +2144,13 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     std::cout << "NOTICE: constraint does not exist, skipping" << std::endl;
                     break;
                 }
+                if (status == DBStatus::TABLE_ALREADY_EXISTS) {
+                    std::cout << "ERROR: constraint \"" << sub.newName
+                              << "\" for relation \"" << stmt->tableName
+                              << "\" already exists (SQLSTATE 42710)"
+                              << std::endl;
+                    return true;
+                }
                 if (!alterStatusOk(status, "Constraint")) return true;
                 break;
             case AlterTableStmt::Action::RenameTable: {
