@@ -8712,7 +8712,8 @@ bool DdlExecutor::executeDropView(const DropStmt* stmt, Session& s) {
             return !txn.commit();
         }
         std::cout << "ERROR: view \"" << viewName
-                  << "\" does not exist" << std::endl;
+                  << "\" does not exist (SQLSTATE 42P01)"
+                  << std::endl;
         return true;
     }
 
