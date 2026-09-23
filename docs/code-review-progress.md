@@ -481,7 +481,11 @@
 
 | 507 | P0-01 / P0-02 / P0-04 / FUNC-04 / EXT-04 / PROTO-08 / P0-16 | `DROP ROUTINE` 原落入兼容对象拒绝路径，对真实函数/过程也报 `0A000`。现由 typed DDL 接管，在当前名字索引下区分函数、表函数和过程；缺失对象按 `IF EXISTS` 决定 NOTICE/`42883`，歧义报 `42725`，且复用相应的事务化删除路径 | 新增 `drop_routine_transaction`，真实 18.6 差分覆盖函数与过程的删除/回滚、缺失对象、DDL 后事务回滚；`parser_phase1_test`、`ddl_ast_bridge_test`、`ddl_bridge_routing_test` 通过。非空签名、重载与依赖级联仍为 partial | `c2a52a7` |
 
-2026-09-23 复验：截至第 507 项新增的 25 个 DDL/协议差分用例并入全量集，154 组真实 PostgreSQL 18.6 差分 `failed=0`；当前源码生产对象重链的完整 PostgreSQL 协议回归通过。正式 `scripts/build.sh` 在第 506 项状态成功；第 507 项经重链编译验证，正式生产构建仍待复跑。schema 重名、缺失 schema 和唯一索引探针的定向运行曾偶发超时，随后重试或连续复跑及后续全量运行通过，间歇性原因未定位。该结果不代表 P0-02、P0-04、P0-16、CAT-02 或 PROTO-08 完成。总账仍为 273 项，其中 24 complete、119 partial、115 unverified、15 deferred_by_user；被延期的安全 / TDE 项没有被计作完成。
+| 508 | P0-02 / PROTO-03 / P0-16 | `CREATE OR REPLACE PROCEDURE` 成功后 wire 标签错为 `CREATE OR`，现报告 `CREATE PROCEDURE` | 新增 `create_replace_procedure_tag`，真实 18.6 定向差分覆盖创建、替换与删除过程通过；过程语义及完整 command tag 集仍为 partial | `0b66938` |
+
+| 509 | P0-02 / PROTO-03 / P0-16 | `CREATE UNLOGGED TABLE` 成功后 wire 标签错为 `CREATE UNLOGGED`，现报告 `CREATE TABLE` | 新增 `create_unlogged_table_tag`，真实 18.6 定向差分覆盖建表、插入、查询、删除通过；unlogged 持久化及完整 command tag 集仍为 partial | `398e741` |
+
+2026-09-23 复验：截至第 509 项新增的 27 个 DDL/协议差分用例并入全量集，156 组真实 PostgreSQL 18.6 差分 `failed=0`；当前源码生产对象重链的完整 PostgreSQL 协议回归通过。正式 `scripts/build.sh` 在第 507 项状态成功；第 508–509 项经重链编译验证，正式生产构建仍待复跑。schema 重名、缺失 schema 和唯一索引探针的定向运行曾偶发超时，随后重试或连续复跑及后续全量运行通过，间歇性原因未定位。该结果不代表 P0-02、P0-04、P0-16、CAT-02 或 PROTO-08 完成。总账仍为 273 项，其中 24 complete、119 partial、115 unverified、15 deferred_by_user；被延期的安全 / TDE 项没有被计作完成。
 
 本批新增的待修复复现（仍计入总清单）：
 
