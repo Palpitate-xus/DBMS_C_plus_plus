@@ -8,6 +8,7 @@
 #include <cassert>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -1048,6 +1049,59 @@ static void test_database_invalid_name_and_malformed_ast_fail_closed() {
               << std::endl;
 }
 
+static void test_mismatched_ddl_ast_types_fail_closed() {
+    Session s;
+    setupSession(s, "");
+    dbms::DdlExecutor ddl;
+    dbms::StmtPtr missing;
+    assert(ddl.execute(missing, s));
+    for (const dbms::SqlCommand command : {
+             dbms::SqlCommand::CreateTable,
+             dbms::SqlCommand::DropTable,
+             dbms::SqlCommand::AlterTable,
+             dbms::SqlCommand::CreateIndex,
+             dbms::SqlCommand::DropIndex,
+             dbms::SqlCommand::AlterSequence,
+             dbms::SqlCommand::DropSequence,
+             dbms::SqlCommand::DropDomain,
+             dbms::SqlCommand::DropType,
+             dbms::SqlCommand::CreateView,
+             dbms::SqlCommand::DropView,
+             dbms::SqlCommand::CreateTrigger,
+             dbms::SqlCommand::DropTrigger,
+             dbms::SqlCommand::CreateFunction,
+             dbms::SqlCommand::CreateProcedure,
+             dbms::SqlCommand::CreatePolicy,
+             dbms::SqlCommand::CreateMaterializedView,
+             dbms::SqlCommand::RefreshMaterializedView,
+             dbms::SqlCommand::DropMaterializedView,
+             dbms::SqlCommand::DropCollation,
+             dbms::SqlCommand::CreateDatabase,
+             dbms::SqlCommand::DropDatabase,
+             dbms::SqlCommand::CreateRole,
+             dbms::SqlCommand::AlterRole,
+             dbms::SqlCommand::AlterUser,
+             dbms::SqlCommand::AlterDefaultPrivileges,
+             dbms::SqlCommand::Truncate,
+             dbms::SqlCommand::DropRole,
+             dbms::SqlCommand::DropUser,
+             dbms::SqlCommand::DropSchema,
+             dbms::SqlCommand::Comment}) {
+        dbms::StmtPtr wrong = std::make_unique<dbms::CreateObjectStmt>(command);
+        assert(ddl.execute(wrong, s));
+    }
+    for (const dbms::SqlCommand command : {
+             dbms::SqlCommand::CreateSequence,
+             dbms::SqlCommand::CreateDomain,
+             dbms::SqlCommand::CreateType,
+             dbms::SqlCommand::CreateCollation,
+             dbms::SqlCommand::CreateSchema}) {
+        dbms::StmtPtr wrong = std::make_unique<dbms::DropStmt>(command);
+        assert(ddl.execute(wrong, s));
+    }
+    std::cout << "[DDL] mismatched AST types fail closed OK" << std::endl;
+}
+
 static void test_domain_storage_errors_are_not_success() {
     const std::string db = testDbPath("domain_storage_error");
     cleanup(db);
@@ -1143,6 +1197,7 @@ int main() {
     test_schema_replica_identity_updates_catalog();
     test_long_identifiers_round_trip();
     test_database_invalid_name_and_malformed_ast_fail_closed();
+    test_mismatched_ddl_ast_types_fail_closed();
     test_domain_storage_errors_are_not_success();
     test_index_metadata_failures_are_not_success();
     test_table_catalog_persistence_failure_rolls_back();

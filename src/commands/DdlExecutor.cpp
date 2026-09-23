@@ -52,6 +52,12 @@ std::string trim(const std::string& s) {
     return s.substr(a, b - a);
 }
 
+bool rejectMalformedDdlAst() {
+    std::cout << "ERROR: malformed DDL statement (SQLSTATE XX000)"
+              << std::endl;
+    return true;
+}
+
 bool declaredVarcharTypeMod(const ColumnDef& definition, int32_t& modifier) {
     const std::string type = toLower(trim(definition.typeName));
     if (definition.isArray ||
@@ -1535,7 +1541,7 @@ static bool updateColumnStatisticsInCatalog(
 // ----------------------------------------------------------------------------
 
 bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
-    if (!stmt) return false;
+    if (!stmt) return rejectMalformedDdlAst();
     Session* previousSession = currentSession();
     setCurrentSession(&s);
     struct SessionGuard {
@@ -3099,7 +3105,7 @@ bool DdlExecutor::executeCreateDatabase(const CreateDatabaseStmt* stmt, Session&
 }
 
 bool DdlExecutor::executeDropDatabase(const DropStmt* stmt, Session& s) {
-    if (!stmt) return false;
+    if (!stmt) return rejectMalformedDdlAst();
     if (!checkAdmin(s)) return true;
     if (!checkDatabaseCommandOutsideTransaction(s)) return true;
     if (stmt->objectNames.empty()) {
@@ -3527,7 +3533,7 @@ bool DdlExecutor::executeDropRole(const DropStmt* stmt, Session& s) {
 }
 
 bool DdlExecutor::executeCreateSchema(const CreateObjectStmt* stmt, Session& s) {
-    if (!stmt) return false;
+    if (!stmt) return rejectMalformedDdlAst();
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
@@ -3577,7 +3583,7 @@ bool DdlExecutor::executeCreateSchema(const CreateObjectStmt* stmt, Session& s) 
 }
 
 bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
-    if (!stmt) return false;
+    if (!stmt) return rejectMalformedDdlAst();
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
@@ -4523,7 +4529,7 @@ static std::string renameNextvalSequenceReference(const std::string& expression,
 }
 
 bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
-    if (!stmt) return false;
+    if (!stmt) return rejectMalformedDdlAst();
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
@@ -6066,7 +6072,7 @@ static bool dropOwnedSequencesForColumn(
 }
 
 bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
-    if (!stmt) return false;
+    if (!stmt) return rejectMalformedDdlAst();
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
@@ -6354,7 +6360,7 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
 // ----------------------------------------------------------------------------
 
 bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
-    if (!stmt) return false;
+    if (!stmt) return rejectMalformedDdlAst();
     if (!stmt->compatibilityShortcut.empty() &&
         !isExtendedCompatMode(s.compatibilityMode)) {
         const std::string canonical = stmt->compatibilityShortcut == "hash"
@@ -6837,7 +6843,7 @@ static std::string schemaNameForRelation(
 }
 
 bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s) {
-    if (!stmt) return false;
+    if (!stmt) return rejectMalformedDdlAst();
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
@@ -7056,7 +7062,7 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
 }
 
 bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) {
-    if (!stmt) return false;
+    if (!stmt) return rejectMalformedDdlAst();
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
@@ -7470,7 +7476,7 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
 }
 
 bool DdlExecutor::executeDropSequence(const DropStmt* stmt, Session& s) {
-    if (!stmt) return false;
+    if (!stmt) return rejectMalformedDdlAst();
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
@@ -7697,7 +7703,7 @@ bool DdlExecutor::executeDropSequence(const DropStmt* stmt, Session& s) {
 // ----------------------------------------------------------------------------
 
 bool DdlExecutor::executeCreateDomain(const CreateObjectStmt* stmt, Session& s) {
-    if (!stmt) return false;
+    if (!stmt) return rejectMalformedDdlAst();
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
@@ -7734,7 +7740,7 @@ bool DdlExecutor::executeCreateDomain(const CreateObjectStmt* stmt, Session& s) 
 }
 
 bool DdlExecutor::executeCreateCollation(const CreateObjectStmt* stmt, Session& s) {
-    if (!stmt) return false;
+    if (!stmt) return rejectMalformedDdlAst();
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
@@ -7833,7 +7839,7 @@ bool DdlExecutor::executeCreateCollation(const CreateObjectStmt* stmt, Session& 
 }
 
 bool DdlExecutor::executeDropCollation(const DropStmt* stmt, Session& s) {
-    if (!stmt) return false;
+    if (!stmt) return rejectMalformedDdlAst();
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
@@ -7897,7 +7903,7 @@ bool DdlExecutor::executeDropCollation(const DropStmt* stmt, Session& s) {
 }
 
 bool DdlExecutor::executeDropDomain(const DropStmt* stmt, Session& s) {
-    if (!stmt) return false;
+    if (!stmt) return rejectMalformedDdlAst();
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
@@ -7930,7 +7936,7 @@ bool DdlExecutor::executeDropDomain(const DropStmt* stmt, Session& s) {
 // ----------------------------------------------------------------------------
 
 bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
-    if (!stmt) return false;
+    if (!stmt) return rejectMalformedDdlAst();
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
@@ -8129,7 +8135,7 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
 }
 
 bool DdlExecutor::executeDropType(const DropStmt* stmt, Session& s) {
-    if (!stmt) return false;
+    if (!stmt) return rejectMalformedDdlAst();
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
@@ -8297,7 +8303,7 @@ bool DdlExecutor::executeDropType(const DropStmt* stmt, Session& s) {
 // ----------------------------------------------------------------------------
 
 bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
-    if (!stmt) return false;
+    if (!stmt) return rejectMalformedDdlAst();
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
@@ -8555,7 +8561,7 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
 // ----------------------------------------------------------------------------
 
 bool DdlExecutor::executeDropView(const DropStmt* stmt, Session& s) {
-    if (!stmt) return false;
+    if (!stmt) return rejectMalformedDdlAst();
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
@@ -8790,7 +8796,7 @@ static bool buildMaterializedRefreshRows(
 // ----------------------------------------------------------------------------
 
 bool DdlExecutor::executeCreateMaterializedView(const CreateViewStmt* stmt, Session& s) {
-    if (!stmt) return false;
+    if (!stmt) return rejectMalformedDdlAst();
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
@@ -9129,7 +9135,7 @@ bool DdlExecutor::executeRefreshMaterializedView(
 // ----------------------------------------------------------------------------
 
 bool DdlExecutor::executeDropMaterializedView(const DropStmt* stmt, Session& s) {
-    if (!stmt) return false;
+    if (!stmt) return rejectMalformedDdlAst();
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
@@ -9255,7 +9261,7 @@ bool DdlExecutor::executeDropMaterializedView(const DropStmt* stmt, Session& s) 
 // ----------------------------------------------------------------------------
 
 bool DdlExecutor::executeCreateTrigger(const CreateTriggerStmt* stmt, Session& s) {
-    if (!stmt) return false;
+    if (!stmt) return rejectMalformedDdlAst();
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
@@ -9336,7 +9342,7 @@ bool DdlExecutor::executeCreateTrigger(const CreateTriggerStmt* stmt, Session& s
 }
 
 bool DdlExecutor::executeDropTrigger(const DropStmt* stmt, Session& s) {
-    if (!stmt) return false;
+    if (!stmt) return rejectMalformedDdlAst();
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
     if (stmt->objectNames.size() != 1 || stmt->objectNames.front().empty() ||
@@ -9405,7 +9411,7 @@ bool DdlExecutor::executeDropTrigger(const DropStmt* stmt, Session& s) {
 // ----------------------------------------------------------------------------
 
 bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session& s) {
-    if (!stmt) return false;
+    if (!stmt) return rejectMalformedDdlAst();
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
@@ -9568,7 +9574,7 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
 }
 
 bool DdlExecutor::executeCreateProcedure(const CreateFunctionStmt* stmt, Session& s) {
-    if (!stmt) return false;
+    if (!stmt) return rejectMalformedDdlAst();
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
@@ -9699,7 +9705,7 @@ bool DdlExecutor::executeCreateProcedure(const CreateFunctionStmt* stmt, Session
 // ----------------------------------------------------------------------------
 
 bool DdlExecutor::executeCreatePolicy(const CreatePolicyStmt* stmt, Session& s) {
-    if (!stmt) return false;
+    if (!stmt) return rejectMalformedDdlAst();
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
