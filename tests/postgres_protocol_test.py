@@ -839,6 +839,32 @@ def extended_query_describe(sock):
     assert data_row_values(simple_query(
         sock, "SELECT v FROM varchar_width_regression")) == [[b"xy "]]
     assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "CREATE TABLE unicode_varchar_regression (v VARCHAR(3))"))
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "INSERT INTO unicode_varchar_regression VALUES ('ééé')"))
+    assert data_row_values(simple_query(
+        sock, "SELECT v FROM unicode_varchar_regression")) == [["ééé".encode()]]
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "UPDATE unicode_varchar_regression SET v = 'ééé '"))
+    assert data_row_values(simple_query(
+        sock, "SELECT v FROM unicode_varchar_regression")) == [["ééé".encode()]]
+    unicode_overflow = simple_query(
+        sock, "UPDATE unicode_varchar_regression SET v = 'éééé'")
+    assert b"C22001\0" in next(body for kind, body in unicode_overflow if kind == b"E")
+    assert data_row_values(simple_query(
+        sock, "SELECT v FROM unicode_varchar_regression")) == [["ééé".encode()]]
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "UPDATE unicode_varchar_regression SET v = '汉字é'"))
+    assert data_row_values(simple_query(
+        sock, "SELECT v FROM unicode_varchar_regression")) == [["汉字é".encode()]]
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "CREATE TABLE toasted_unicode_varchar (v VARCHAR(3000))"))
+    long_unicode = "é" * 3000
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "INSERT INTO toasted_unicode_varchar VALUES ('" + long_unicode + "')"))
+    assert data_row_values(simple_query(
+        sock, "SELECT v FROM toasted_unicode_varchar")) == [[long_unicode.encode()]]
+    assert any(kind == b"C" for kind, _ in simple_query(
         sock, "CREATE TABLE char_padding_regression (v CHAR(3) UNIQUE)"))
     assert any(kind == b"C" for kind, _ in simple_query(
         sock, "INSERT INTO char_padding_regression VALUES ('ok')"))

@@ -797,6 +797,8 @@ static bool normalizePointColumns(const TableSchema& table,
     return true;
 }
 
+static size_t characterColumnByteLimit(const Column& column);
+
 static bool variableColumnWidthsValid(
     const TableSchema& table,
     const std::map<std::string, std::string>& values,
@@ -809,7 +811,8 @@ static bool variableColumnWidthsValid(
             (nullColumns ? nullColumns->count(column.dataName) != 0
                          : value->second == "NULL");
         if (value == values.end() || isNull) continue;
-        const size_t maxLength = column.isArray ? 1024 : column.dsize;
+        const size_t maxLength = column.isArray ? 1024 :
+            characterColumnByteLimit(column);
         if (value->second.size() > maxLength) return false;
     }
     return true;
@@ -820,6 +823,43 @@ static bool characterWidthLimitedType(const Column& column) {
         (column.dataType == "char" || column.dataType == "character" ||
          column.dataType == "bpchar" || column.dataType == "varchar" ||
          column.dataType == "character varying");
+}
+
+static bool characterExcessIsSpaces(const std::string& value,
+                                    size_t maximumLength);
+
+static bool varyingCharacterColumn(const Column& column) {
+    return !column.isArray &&
+        (column.dataType == "varchar" ||
+         column.dataType == "character varying");
+}
+
+static size_t characterColumnByteLimit(const Column& column) {
+    if (!varyingCharacterColumn(column)) return column.dsize;
+    // The row/TOAST representation still caps a varchar value at 64 KiB.
+    // Four bytes per declared character covers valid UTF-8 code points.
+    return std::min(column.dsize * size_t(4), size_t(65535));
+}
+
+static bool truncateVaryingCharacterValue(std::string& value,
+                                          size_t maximumCharacters) {
+    size_t characters = 0;
+    size_t excessByte = value.size();
+    for (size_t offset = 0; offset < value.size();) {
+        if (characters == maximumCharacters && excessByte == value.size()) {
+            excessByte = offset;
+        }
+        const unsigned char first = static_cast<unsigned char>(value[offset]);
+        const size_t bytes = first < 0x80 ? 1 :
+            (first & 0xe0) == 0xc0 ? 2 :
+            (first & 0xf0) == 0xe0 ? 3 : 4;
+        offset += std::min(bytes, value.size() - offset);
+        ++characters;
+    }
+    if (characters <= maximumCharacters) return true;
+    if (!characterExcessIsSpaces(value, excessByte)) return false;
+    value.resize(excessByte);
+    return true;
 }
 
 static bool characterExcessIsSpaces(const std::string& value,
@@ -838,6 +878,13 @@ static DBStatus normalizeCharacterColumnWidths(
         auto value = values.find(column.dataName);
         if (value == values.end() ||
             (nullColumns && nullColumns->count(column.dataName) != 0)) continue;
+        if (varyingCharacterColumn(column)) {
+            if (!truncateVaryingCharacterValue(value->second, column.dsize) ||
+                value->second.size() > characterColumnByteLimit(column)) {
+                return DBStatus::STRING_DATA_RIGHT_TRUNCATION;
+            }
+            continue;
+        }
         if (value->second.size() > column.dsize) {
             if (!characterExcessIsSpaces(value->second, column.dsize))
                 return DBStatus::STRING_DATA_RIGHT_TRUNCATION;
@@ -9561,7 +9608,8 @@ std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
         if (parseToastMarker(val, toastId)) {
             std::string resolved;
             if (!valueEngine->readToast(
-                    valueDb, tbl.tablename, toastId, col.dsize, resolved))
+                    valueDb, tbl.tablename, toastId,
+                    characterColumnByteLimit(col), resolved))
                 return "";
             return resolved;
         }
@@ -14715,7 +14763,8 @@ std::string StorageEngine::resolveToastValues(const std::string& dbname,
         uint64_t toastId = 0;
         if (parseToastMarker(val, toastId)) {
             std::string resolved;
-            if (!readToast(dbname, tablename, toastId, tbl.cols[i].dsize,
+            if (!readToast(dbname, tablename, toastId,
+                           characterColumnByteLimit(tbl.cols[i]),
                            resolved)) {
                 if (ok) *ok = false;
                 return rowBuffer;
@@ -21226,7 +21275,8 @@ static std::string buildRowBuffer(const TableSchema& tbl,
             std::string val = (it != values.end()) ? it->second : "";
             if (columnIsNull(i)) val.clear();
             if (col.isVariableLength) {
-                size_t maxLen = col.isArray ? 1024 : col.dsize;
+                size_t maxLen = col.isArray ? 1024 :
+                    characterColumnByteLimit(col);
                 if (val.size() > maxLen) val.resize(maxLen);
                 varDataList.push_back(val);
             } else {
@@ -25613,7 +25663,13 @@ DBStatus StorageEngine::updateInternal(
                         }
                     }
                     const size_t maxLength = col.isArray ? 1024 : col.dsize;
-                    if (col.isVariableLength &&
+                    if (varyingCharacterColumn(col)) {
+                        if (!truncateVaryingCharacterValue(
+                                storeVal, col.dsize) ||
+                            storeVal.size() > characterColumnByteLimit(col)) {
+                            return DBStatus::STRING_DATA_RIGHT_TRUNCATION;
+                        }
+                    } else if (col.isVariableLength &&
                         storeVal.size() > maxLength) {
                         if (characterWidthLimitedType(col)) {
                             if (!characterExcessIsSpaces(storeVal, maxLength))
