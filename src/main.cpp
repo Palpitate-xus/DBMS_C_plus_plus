@@ -20324,7 +20324,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 collectOnComparisons = [&](const dbms::Expr* expression) {
                     if (const auto* literal = dynamic_cast<
                             const dbms::LiteralExpr*>(expression)) {
-                        if (literal->value != "true" && literal->value != "false")
+                        if (literal->value != "true" && literal->value != "false" &&
+                            literal->value != "null")
                             return false;
                         onPredicates.push_back(literal);
                         return true;
@@ -20462,6 +20463,38 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         const dbms::LiteralExpr*>(comparison->left.get());
                     const auto* secondLiteral = dynamic_cast<
                         const dbms::LiteralExpr*>(comparison->right.get());
+                    if (firstLiteral && secondLiteral) {
+                        auto parseInteger = [](const dbms::LiteralExpr* literal)
+                            -> optional<long long> {
+                            try {
+                                size_t consumed = 0;
+                                const long long value = stoll(
+                                    literal->value, &consumed, 10);
+                                if (consumed == literal->value.size())
+                                    return value;
+                            } catch (...) {}
+                            return nullopt;
+                        };
+                        const auto leftValue = parseInteger(firstLiteral);
+                        const auto rightValue = parseInteger(secondLiteral);
+                        if (!leftValue || !rightValue) {
+                            cout << "ERROR: unsupported JOIN ON operand (SQLSTATE 0A000)"
+                                 << endl;
+                            return true;
+                        }
+                        const string& op = comparison->op;
+                        const bool matches =
+                            (op == "=" && *leftValue == *rightValue) ||
+                            ((op == "<>" || op == "!=") &&
+                             *leftValue != *rightValue) ||
+                            (op == "<" && *leftValue < *rightValue) ||
+                            (op == ">" && *leftValue > *rightValue) ||
+                            (op == "<=" && *leftValue <= *rightValue) ||
+                            (op == ">=" && *leftValue >= *rightValue);
+                        onConditions.push_back(matches
+                            ? "__join_on_true__" : "__join_on_false__");
+                        continue;
+                    }
                     if (!firstColumn && !firstLiteral) {
                         reportOnBindingError(comparison->left.get());
                         return true;
