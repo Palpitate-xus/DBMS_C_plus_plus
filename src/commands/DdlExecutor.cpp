@@ -9107,6 +9107,13 @@ bool DdlExecutor::executeCreateMaterializedView(const CreateViewStmt* stmt, Sess
 
     txn.recordCreate(DdlObjectKind::MaterializedView, viewname);
     if (!txn.commit()) return true;
+    DmlResult result;
+    result.available = true;
+    result.metadataOnly = true;
+    result.commandTag = stmt->withData
+        ? "SELECT " + std::to_string(inserted)
+        : "CREATE MATERIALIZED VIEW";
+    publishLastDmlResult(std::move(result));
     std::cout << "CREATE MATERIALIZED VIEW succeeded: " << inserted << " rows" << std::endl;
     return false;
 }
