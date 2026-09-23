@@ -1099,7 +1099,7 @@ static string preprocessCaseWhen(string s) {
 static bool isScalarFunc(const string& name) {
     static const set<string> scalars = {"length", "char_length", "character_length", "upper", "lower", "trim", "substring", "concat",
                                          "abs", "round", "trunc", "ceil", "floor",
-                                         "now", "current_timestamp", "extract",
+                                         "now", "current_timestamp", "extract", "timezone",
                                          "year", "month", "day",
                                          "hour", "minute", "second",
                                          "case_when", "cast", "convert",
@@ -22486,7 +22486,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 // ("t = 'abc'", "t LIKE 'a%'"): evaluate
                                 // per-row through the expression evaluator
                                 // instead of rejecting as a column name.
-                                bool isCompareItem = false;
+                                const bool isTimezoneExpr =
+                                    findTopLevelKeyword(item, "at time zone") != string::npos;
+                                bool isCompareItem = isTimezoneExpr;
                                 {
                                     string lowItem2;
                                     {
@@ -22545,7 +22547,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                     // pushed above; convert it in place.
                                     if (!selectExprs.empty()) {
                                         auto& expr2 = selectExprs.back();
-                                        expr2.displayName = itemAlias.empty() ? "?column?" : itemAlias;
+                                        expr2.displayName = itemAlias.empty()
+                                            ? (isTimezoneExpr ? "timezone" : "?column?")
+                                            : itemAlias;
                                         expr2.isScalar = true;
                                         expr2.colName.clear();
                                         expr2.funcName = "expreval";

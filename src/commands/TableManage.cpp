@@ -29845,13 +29845,14 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     // evaluator (float8 shortest-repr, numeric display scales, banker's rounding).
     // Delegate the whole family there and preserve its SQL errors; falling
     // through to the legacy handlers would turn domain errors into values.
-    static const std::set<std::string> kEvaluatorMath = {
+    static const std::set<std::string> kEvaluatorBuiltins = {
         "round", "ceil", "floor", "trunc", "power", "pow", "exp", "ln", "log",
         "log10", "sqrt", "cbrt", "sin", "cos", "tan", "asin", "acos", "atan",
         "atan2", "cot", "degrees", "radians", "pi", "sinh", "cosh", "tanh",
-        "asinh", "acosh", "atanh", "mod", "sign", "div", "width_bucket"
+        "asinh", "acosh", "atanh", "mod", "sign", "div", "width_bucket",
+        "timezone"
     };
-    if (kEvaluatorMath.count(expr.funcName)) {
+    if (kEvaluatorBuiltins.count(expr.funcName)) {
         std::map<std::string, std::string> rowContext;
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;

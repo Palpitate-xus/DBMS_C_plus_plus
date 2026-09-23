@@ -222,8 +222,21 @@ int main() {
     dbms::TypeRegistry::instance().bootstrap();
     const std::map<std::string, std::string> resultTypes = {
         {"i", "integer"}, {"n", "numeric"}, {"d", "date"},
-        {"v", "varchar"}, {"b", "blob"}
+        {"v", "varchar"}, {"b", "blob"},
+        {"instant", "timestamptz"}, {"wall", "timestamp"}
     };
+    assert(dbms::ExprHelper::inferResultType(
+               "timezone('America/New_York', instant)", resultTypes) ==
+           "timestamp");
+    assert(dbms::ExprHelper::inferResultType(
+               "timezone('America/New_York', wall)", resultTypes) ==
+           "timestamptz");
+    assert(dbms::ExprHelper::inferResultType(
+               "instant AT TIME ZONE 'America/New_York'", resultTypes) ==
+           "timestamp");
+    assert(dbms::ExprHelper::inferResultType(
+               "wall AT TIME ZONE 'America/New_York'", resultTypes) ==
+           "timestamptz");
     assert(dbms::ExprHelper::inferResultType("i + 1", resultTypes) == "integer");
     assert(dbms::ExprHelper::inferResultType("n * 2", resultTypes) == "numeric");
     assert(dbms::ExprHelper::inferResultType("i BETWEEN 1 AND 2", resultTypes) == "boolean");

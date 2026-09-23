@@ -185,6 +185,11 @@ std::string inferAstResultType(
     if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expression)) {
         const std::string op = toLower(unary->op);
         if (op == "not" || op.find("is ") == 0) return "boolean";
+        if (op.rfind("at time zone", 0) == 0) {
+            const std::string input = inferAstResultType(
+                unary->operand.get(), typeHints);
+            return input == "timestamptz" ? "timestamp" : "timestamptz";
+        }
         if (op == "-") {
             if (const auto* literal = dynamic_cast<const LiteralExpr*>(
                     unary->operand.get());
@@ -344,6 +349,8 @@ std::string inferAstResultType(
         if (name == "extract") return "numeric";
         if (name == "age") return "interval";
         if (name == "to_timestamp") return "timestamptz";
+        if (name == "timezone")
+            return argType(1) == "timestamp" ? "timestamptz" : "timestamp";
         if (name == "date_trunc") {
             const std::string input = argType(1);
             // PostgreSQL resolves date input through the timestamptz
@@ -1014,11 +1021,11 @@ std::string ExprHelper::inferResultType(
                 return "date";
         }
     }
-    if (lower.find(" at time zone ") != std::string::npos) {
-        if (lower.find("::timestamptz") != std::string::npos ||
-            lower.rfind("timestamptz ", 0) == 0)
-            return "timestamp";
-        return "timestamptz";
+    if (const size_t atZone = lower.rfind(" at time zone ");
+        atZone != std::string::npos) {
+        const std::string input = inferResultType(
+            trimmed.substr(0, atZone), typeHints);
+        return input == "timestamptz" ? "timestamp" : "timestamptz";
     }
     if (lower.rfind("round(", 0) == 0 || lower.rfind("trunc(", 0) == 0) {
         if (lower.find("::float8") != std::string::npos ||
