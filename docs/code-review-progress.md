@@ -473,10 +473,15 @@
 
 | 503 | P0-02 / PROTO-03 / P0-16 | `CREATE OR REPLACE VIEW` 成功后 wire 标签错为 `CREATE OR`，现报告 `CREATE VIEW` | 新增 `create_replace_view_tag`，真实 18.6 定向差分覆盖创建、替换与查询通过；其他多词 DDL 标签仍待核对 | `f1f1a90` |
 
-2026-09-23 复验：截至第 503 项新增的 20 个 DDL/协议差分用例并入全量集，149 组真实 PostgreSQL 18.6 差分 `failed=0`；当前源码生产对象重链的完整 PostgreSQL 协议回归通过。正式 `scripts/build.sh` 在第 495 项状态成功；第 496–503 项仅经重链编译验证，正式生产构建仍待复跑。schema 重名、缺失 schema 和唯一索引探针的定向运行曾偶发超时，随后重试或连续复跑及后续全量运行通过，间歇性原因未定位。该结果不代表 P0-02、P0-04、P0-16、CAT-02 或 PROTO-08 完成。总账仍为 273 项，其中 24 complete、119 partial、115 unverified、15 deferred_by_user；被延期的安全 / TDE 项没有被计作完成。
+| 504 | P0-02 / PROTO-03 / P0-16 | `CREATE OR REPLACE FUNCTION` 成功后 wire 标签错为 `CREATE OR`，现报告 `CREATE FUNCTION` | 新增 `create_replace_function_tag`，真实 18.6 定向差分覆盖函数创建/替换与调用通过；`DROP FUNCTION IF EXISTS` 另暴露 legacy 路径错误及事务边界问题，尚未修复 | `1bfaad8` |
+
+| 505 | P0-01 / P0-02 / P0-04 / FUNC-04 / PROTO-08 / P0-16 | `DROP FUNCTION` 原走 legacy 路径，`IF EXISTS` 对缺失对象误报 `XX000`，且在检查前可能隐式提交用户事务。现由 typed DDL 接管：不存在时按 `IF EXISTS` 决定 NOTICE/`42883`，存在时用 DDL 快照回滚；显式空签名核对参数数目，其他签名/多目标和 CASCADE 明确拒绝，避免误删别的函数 | 新增 `drop_function_transaction`、`drop_function_signature_guard`，真实 18.6 定向差分覆盖函数删除回滚、缺失函数、DDL 后事务回滚及参数签名保护；`parser_phase1_test`、`ddl_ast_bridge_test`、`ddl_bridge_routing_test` 通过。函数重载、非空签名、依赖与完整 catalog/WAL 仍为 partial | `d99139b` |
+
+2026-09-23 复验：截至第 505 项新增的 23 个 DDL/协议差分用例并入全量集，152 组真实 PostgreSQL 18.6 差分 `failed=0`；当前源码生产对象重链的完整 PostgreSQL 协议回归通过。正式 `scripts/build.sh` 在第 495 项状态成功；第 496–505 项仅经重链编译验证，正式生产构建仍待复跑。schema 重名、缺失 schema 和唯一索引探针的定向运行曾偶发超时，随后重试或连续复跑及后续全量运行通过，间歇性原因未定位。该结果不代表 P0-02、P0-04、P0-16、CAT-02 或 PROTO-08 完成。总账仍为 273 项，其中 24 complete、119 partial、115 unverified、15 deferred_by_user；被延期的安全 / TDE 项没有被计作完成。
 
 本批新增的待修复复现（仍计入总清单）：
 
+- P0-01 / P0-04 / FUNC-04：第 505 项已将受支持的 `DROP FUNCTION` 名字/空签名路径迁入事务化 typed DDL；非空签名、多个同名重载、跨对象依赖与 `CASCADE` 仍没有 PostgreSQL 等价实现，不得把函数族或事务化 DDL 判作完成。
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；第 428–429 项又迁移了 FROM-less 与普通表 scalar UDF 的声明类型和 NULL，并执行有限的 SQL function expression。混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF、完整 SQL function query body 及二进制值仍存在显示文本边界，继续计入总清单。
 - P0-02 / TYPE：第 217 项已修复无 FROM 基础表达式的已知 OID 回退；表查询、复杂表达式、数组 / composite / domain、typmod 和 binary format 类型元数据仍需完整差分。
 
