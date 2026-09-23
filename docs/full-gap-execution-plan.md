@@ -19,5 +19,5 @@
 
 1. P0-02：继续迁移 SELECT 的结构化结果输出。quoted alias、无 FROM 普通投影、有限 scalar SQL/PLpgSQL UDF、独立 `VALUES` 和普通标量子查询投影已迁移；CTE / set operation、相关及 legacy scalar subquery、SRF、完整 SQL function query body 和剩余 utility/function 分支仍需统一 typed rows / NULL bitmap，不能靠显示文本反推数据。
 2. P0-01 / SQL-01 / QRY-10：删除剩余改变语义的字符串路径；继续处理无 FROM 查询、顶层 WITH TIES、LIMIT/OFFSET 表达式和执行短路，不能用部分行切片测试关闭整项。
-3. P0-16：参考端已通过 PostgreSQL wire protocol 在同一 session 无损读取 rows / NULL / headers / type OID / SQLSTATE / command tag，并要求精确 PostgreSQL 18.6 版本。已在临时目录从官方源码构建 18.6 实例，校准 `en_US.utf8` 排序/货币区域设置后，当前 179 个用例文件的差分为 `failed=0`；本地端也按 case 重建 session。下一步仍需扩充 SQL、并发 schedule、catalog、crash point 和零 allowlist 发布门；这 179 组不能替代总清单验收。
+3. P0-16：参考端已通过 PostgreSQL wire protocol 在同一 session 无损读取 rows / NULL / headers / type OID / SQLSTATE / command tag，并要求精确 PostgreSQL 18.6 版本。已在临时目录从官方源码构建 18.6 实例，校准 `en_US.utf8` 排序/货币区域设置后，当前 180 个用例文件的差分为 `failed=0`；本地端也按 case 重建 session。下一步仍需扩充 SQL、并发 schedule、catalog、crash point 和零 allowlist 发布门；这 180 组不能替代总清单验收。
 4. 然后按 B2–B5 推进 catalog / 事务化 DDL、持久性、资源治理及剩余功能族，逐项补实测证据。用户跳过的安全 / TDE 专项仍不计完成。
