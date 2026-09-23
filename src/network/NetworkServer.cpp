@@ -1706,6 +1706,9 @@ std::string commandTagFor(const std::string& sql, const std::vector<std::string>
     if (startsWithSqlPhrase(sql, "rollback prepared")) {
         return "ROLLBACK PREPARED";
     }
+    if (startsWithSqlPhrase(sql, "drop materialized view")) {
+        return "DROP MATERIALIZED VIEW";
+    }
     const auto mutationCount = [](const std::string& line,
                                   const std::string& prefix)
         -> std::optional<std::string> {
