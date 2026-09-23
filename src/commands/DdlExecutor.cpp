@@ -1599,6 +1599,8 @@ bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
             return executeDropFunction(dynamic_cast<const DropStmt*>(stmt.get()), s);
         case SqlCommand::CreateProcedure:
             return executeCreateProcedure(dynamic_cast<const CreateFunctionStmt*>(stmt.get()), s);
+        case SqlCommand::DropProcedure:
+            return executeDropProcedure(dynamic_cast<const DropStmt*>(stmt.get()), s);
         case SqlCommand::CreatePolicy:
             return executeCreatePolicy(dynamic_cast<const CreatePolicyStmt*>(stmt.get()), s);
         case SqlCommand::CreateMaterializedView:
@@ -1682,6 +1684,7 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         case dbms::SqlCommand::CreateFunction:
         case dbms::SqlCommand::DropFunction:
         case dbms::SqlCommand::CreateProcedure:
+        case dbms::SqlCommand::DropProcedure:
         case dbms::SqlCommand::CreatePolicy:
         case dbms::SqlCommand::CreateMaterializedView:
         case dbms::SqlCommand::RefreshMaterializedView:
@@ -1719,7 +1722,8 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         authDdl || parsedCmd == dbms::SqlCommand::Comment ||
         parsedCmd == dbms::SqlCommand::CreateFunction ||
         parsedCmd == dbms::SqlCommand::DropFunction ||
-        parsedCmd == dbms::SqlCommand::CreateProcedure;
+        parsedCmd == dbms::SqlCommand::CreateProcedure ||
+        parsedCmd == dbms::SqlCommand::DropProcedure;
     const std::string& parseInput = preservesLiteralText && !rawSql.empty()
         ? rawSql : sql;
     dbms::SQLParser parser;
@@ -9890,6 +9894,63 @@ bool DdlExecutor::executeCreateProcedure(const CreateFunctionStmt* stmt, Session
     }
     if (!txn.commit()) return true;
     std::cout << "CREATE PROCEDURE succeeded" << std::endl;
+    return false;
+}
+
+bool DdlExecutor::executeDropProcedure(const DropStmt* stmt, Session& s) {
+    if (!stmt) return rejectMalformedDdlAst();
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+
+    // Procedure storage currently uses only the name as its key. A nonempty
+    // signature could name a different overload, so fail closed instead of
+    // silently removing the stored procedure.
+    const auto& parts = stmt->objectNames;
+    const bool bareName = parts.size() == 1;
+    const bool zeroArgumentSignature =
+        parts.size() == 3 && parts[1] == "(" && parts[2] == ")";
+    if ((!bareName && !zeroArgumentSignature) || parts[0].empty()) {
+        std::cout << "ERROR: DROP PROCEDURE signatures or multiple targets "
+                     "are not supported (SQLSTATE 0A000)" << std::endl;
+        return true;
+    }
+    const std::string& name = parts[0];
+    bool exists = g_engine.procedureExists(s.currentDB, name);
+    if (zeroArgumentSignature && exists) {
+        exists = g_engine.getProcedureParams(s.currentDB, name).empty();
+    }
+    if (!exists) {
+        if (stmt->ifExists) {
+            std::cout << "NOTICE: procedure \"" << name
+                      << "\" does not exist, skipping" << std::endl;
+            return false;
+        }
+        std::cout << "ERROR: procedure \"" << name
+                  << "\" does not exist (SQLSTATE 42883)" << std::endl;
+        return true;
+    }
+    if (stmt->cascade) {
+        std::cout << "ERROR: DROP PROCEDURE CASCADE is not supported "
+                     "(SQLSTATE 0A000)" << std::endl;
+        return true;
+    }
+
+    DdlTransaction txn(s);
+    txn.enableSnapshotRollback();
+    if (!txn.begin()) {
+        std::cout << "DROP PROCEDURE transaction begin failed" << std::endl;
+        return true;
+    }
+    txn.markSnapshotDirty();
+    const DBStatus status = g_engine.dropProcedure(s.currentDB, name);
+    if (status != DBStatus::OK) {
+        std::cout << "ERROR: DROP PROCEDURE failed (SQLSTATE "
+                  << sqlstateForDBStatus(status) << ")" << std::endl;
+        return true;
+    }
+    txn.recordDrop(DdlObjectKind::Procedure, name);
+    if (!txn.commit()) return true;
+    std::cout << "DROP PROCEDURE succeeded" << std::endl;
     return false;
 }
 

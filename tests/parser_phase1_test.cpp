@@ -65,6 +65,16 @@ int main() {
         assert((drop->objectNames ==
                 std::vector<std::string>{"pgdiff_drop_fn", "(", ")"}));
     }
+    {
+        const auto parsed = parser.parse(
+            "DROP PROCEDURE IF EXISTS pgdiff_drop_proc()");
+        assert(parsed.success);
+        const auto* drop = dynamic_cast<const DropStmt*>(parsed.stmt.get());
+        assert(drop && drop->command == SqlCommand::DropProcedure &&
+               drop->ifExists);
+        assert((drop->objectNames ==
+                std::vector<std::string>{"pgdiff_drop_proc", "(", ")"}));
+    }
 
     // PostgreSQL's default NULL position follows the sort direction, and
     // OFFSET's optional ROW(S) must not consume the following FETCH clause.

@@ -82,6 +82,34 @@ static void test_drop_function_uses_transactional_ddl() {
               << std::endl;
 }
 
+static void test_drop_procedure_uses_transactional_ddl() {
+    const std::string db = testDbPath("ddl_drop_procedure_transaction");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session session;
+    setupSession(session, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE PROCEDURE drop_tx_proc() LANGUAGE SQL "
+        "AS $$ SELECT 7 $$", session));
+    assert(g_engine.procedureExists(db, "drop_tx_proc"));
+    assert(!ddl.executeSql("DROP PROCEDURE IF EXISTS missing_proc()", session));
+    assert(ddl.executeSql("DROP PROCEDURE drop_tx_proc(int)", session));
+    assert(g_engine.procedureExists(db, "drop_tx_proc"));
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(!ddl.executeSql("DROP PROCEDURE drop_tx_proc()", session));
+    assert(!g_engine.procedureExists(db, "drop_tx_proc"));
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+    assert(g_engine.procedureExists(db, "drop_tx_proc"));
+    assert(!ddl.executeSql("DROP PROCEDURE drop_tx_proc()", session));
+    assert(!g_engine.procedureExists(db, "drop_tx_proc"));
+
+    cleanup(db);
+    std::cout << "[DDL] DROP PROCEDURE rollback and IF EXISTS OK"
+              << std::endl;
+}
+
 static void test_create_table_registers_in_catalog() {
     std::string db = testDbPath("ddl_bridge_t1_cat");
     cleanup(db);
@@ -1099,6 +1127,7 @@ static void test_mismatched_ddl_ast_types_fail_closed() {
              dbms::SqlCommand::DropTrigger,
              dbms::SqlCommand::CreateFunction,
              dbms::SqlCommand::CreateProcedure,
+             dbms::SqlCommand::DropProcedure,
              dbms::SqlCommand::CreatePolicy,
              dbms::SqlCommand::CreateMaterializedView,
              dbms::SqlCommand::RefreshMaterializedView,
@@ -1206,6 +1235,7 @@ int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_create_drop_table();
     test_drop_function_uses_transactional_ddl();
+    test_drop_procedure_uses_transactional_ddl();
     test_create_table_registers_in_catalog();
     test_create_table_requires_existing_schema();
     test_alter_table_rename_updates_catalog();
