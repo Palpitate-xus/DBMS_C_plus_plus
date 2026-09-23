@@ -6535,7 +6535,8 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
             std::cout << "NOTICE: index \"" << idxName << "\" already exists, skipping" << std::endl;
             return false;
         }
-        std::cout << "ERROR: index \"" << idxName << "\" already exists" << std::endl;
+        std::cout << "ERROR: relation \"" << idxName
+                  << "\" already exists (SQLSTATE 42P07)" << std::endl;
         return true;
     }
 
