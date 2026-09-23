@@ -1,0 +1,10 @@
+SELECT missing_column;
+SELECT missing_column + 1;
+SELECT 1, missing_column;
+SELECT missing_column, 1;
+SELECT coalesce(missing_column, 1);
+SELECT missing_relation.value;
+SELECT current_date;
+SELECT 1;
+SELECT 'missing_column';
+SELECT extract(year from date '2024-03-15');

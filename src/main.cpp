@@ -6952,6 +6952,119 @@ static std::vector<std::string> runSubQuery(const std::string& rawSql, Session& 
 static std::string inferSubQueryResultType(
     const std::string& rawSql, const Session& s);
 
+// The expression evaluator uses NULL for a missing row value.  With no FROM
+// clause there is no row namespace at all, so reject column references at
+// binding time instead of allowing them to become NULL (or COALESCE defaults).
+static bool validateFromlessColumnBindings(const string& expression,
+                                           string& error, string& sqlState) {
+    dbms::SQLParser parser;
+    const auto parsed = parser.parse("SELECT " + expression);
+    const auto* select = parsed.success
+        ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
+    if (!select || select->selectList.size() != 1 ||
+        !select->selectList.front().expr || select->fromClause) {
+        return true; // Other syntax paths retain their own diagnostics.
+    }
+    const dbms::ColumnRefExpr* unbound = nullptr;
+    std::function<void(const dbms::Expr*)> inspect =
+        [&](const dbms::Expr* node) {
+            if (!node || unbound) return;
+            switch (node->type) {
+                case dbms::ExprType::ColumnRef: {
+                    const auto* column =
+                        static_cast<const dbms::ColumnRefExpr*>(node);
+                    string name = column->column;
+                    for (char& c : name) {
+                        c = static_cast<char>(
+                            tolower(static_cast<unsigned char>(c)));
+                    }
+                    static const set<string> pseudoColumns = {
+                        "current_user", "session_user", "user", "current_date",
+                        "current_timestamp", "localtimestamp"
+                    };
+                    if (column->schema.empty() && column->table.empty() &&
+                        pseudoColumns.count(name)) return;
+                    unbound = column;
+                    return;
+                }
+                case dbms::ExprType::UnaryOp:
+                    inspect(static_cast<const dbms::UnaryOpExpr*>(node)
+                                ->operand.get());
+                    return;
+                case dbms::ExprType::BinaryOp: {
+                    const auto* binary =
+                        static_cast<const dbms::BinaryOpExpr*>(node);
+                    inspect(binary->left.get());
+                    inspect(binary->right.get());
+                    return;
+                }
+                case dbms::ExprType::FunctionCall: {
+                    const auto* call =
+                        static_cast<const dbms::FunctionCallExpr*>(node);
+                    string functionName = call->funcName;
+                    for (char& c : functionName) {
+                        c = static_cast<char>(
+                            tolower(static_cast<unsigned char>(c)));
+                    }
+                    for (size_t i = 0; i < call->args.size(); ++i) {
+                        // EXTRACT(field FROM source) stores its field token
+                        // as a ColumnRef in the parser; it is not a binding.
+                        if (functionName == "extract" && i == 0) continue;
+                        inspect(call->args[i].get());
+                    }
+                    for (const auto& arg : call->namedArgs) {
+                        inspect(arg.value.get());
+                    }
+                    inspect(call->filter.get());
+                    return;
+                }
+                case dbms::ExprType::CastExpr:
+                    inspect(static_cast<const dbms::CastExpr*>(node)
+                                ->operand.get());
+                    return;
+                case dbms::ExprType::CaseExpr: {
+                    const auto* caseExpr =
+                        static_cast<const dbms::CaseExpr*>(node);
+                    inspect(caseExpr->switchExpr.get());
+                    for (const auto& clause : caseExpr->whenClauses) {
+                        inspect(clause.first.get());
+                        inspect(clause.second.get());
+                    }
+                    inspect(caseExpr->elseExpr.get());
+                    return;
+                }
+                case dbms::ExprType::ArrayExpr:
+                    for (const auto& element :
+                         static_cast<const dbms::ArrayExpr*>(node)->elements) {
+                        inspect(element.get());
+                    }
+                    return;
+                case dbms::ExprType::RowExpr:
+                    for (const auto& element :
+                         static_cast<const dbms::RowExpr*>(node)->elements) {
+                        inspect(element.get());
+                    }
+                    return;
+                case dbms::ExprType::Subquery:
+                case dbms::ExprType::Literal:
+                case dbms::ExprType::Parameter:
+                case dbms::ExprType::A_Star:
+                    return;
+            }
+        };
+    inspect(select->selectList.front().expr.get());
+    if (!unbound) return true;
+    if (!unbound->table.empty()) {
+        error = "missing FROM-clause entry for table \"" +
+                unbound->table + "\"";
+        sqlState = "42P01";
+    } else {
+        error = "column \"" + unbound->column + "\" does not exist";
+        sqlState = "42703";
+    }
+    return false;
+}
+
 static bool handleFromlessSelect(const string& sql, Session& s) {
     string cols = trim(string(sql.substr(6)));
     if (!cols.empty() && cols.back() == ';') cols.pop_back();
@@ -7252,6 +7365,15 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             }
         }
         if (disp.empty()) disp = item;
+        {
+            string bindingError, bindingSqlState;
+            if (!validateFromlessColumnBindings(expr, bindingError,
+                                                bindingSqlState)) {
+                cout << "ERROR: " << bindingError << " (SQLSTATE "
+                     << bindingSqlState << ")" << endl;
+                return true;
+            }
+        }
         string lowItem;
         for (char c : expr) lowItem += static_cast<char>(tolower(static_cast<unsigned char>(c)));
 
