@@ -35291,11 +35291,18 @@ std::vector<std::string> StorageEngine::join(
     const std::vector<std::string>& conditions,
     const std::set<std::string>& selectCols,
     std::vector<std::vector<std::string>>* structuredRows,
-    std::vector<std::vector<bool>>* structuredNulls) {
+    std::vector<std::vector<bool>>* structuredNulls,
+    const std::vector<std::string>& onConditions) {
     std::vector<std::string> result;
     if (structuredRows) structuredRows->clear();
     if (structuredNulls) structuredNulls->clear();
     if (!tableExists(dbname, leftTable) || !tableExists(dbname, rightTable)) return result;
+    if (leftCol.empty() && rightCol.empty() && !onConditions.empty()) {
+        std::vector<std::string> filters = onConditions;
+        filters.insert(filters.end(), conditions.begin(), conditions.end());
+        return crossJoin(dbname, leftTable, rightTable, filters, selectCols,
+                         structuredRows, structuredNulls);
+    }
 
     // Lock both tables in alphabetical order to avoid deadlock
     if (leftTable < rightTable) {
@@ -35569,7 +35576,8 @@ std::vector<std::string> StorageEngine::leftJoin(
     const std::vector<std::string>& conditions,
     const std::set<std::string>& selectCols,
     std::vector<std::vector<std::string>>* structuredRows,
-    std::vector<std::vector<bool>>* structuredNulls) {
+    std::vector<std::vector<bool>>* structuredNulls,
+    const std::vector<std::string>& onConditions) {
     std::vector<std::string> result;
     if (structuredRows) structuredRows->clear();
     if (structuredNulls) structuredNulls->clear();
@@ -35682,6 +35690,7 @@ std::vector<std::string> StorageEngine::leftJoin(
     };
 
     auto conds = parseConditions(conditions);
+    const auto onConds = parseConditions(onConditions);
 
     size_t leftColIdx = leftTbl.len;
     for (size_t i = 0; i < leftTbl.len; ++i) {
@@ -35745,9 +35754,20 @@ std::vector<std::string> StorageEngine::leftJoin(
     for (const auto& lr : leftRows) {
         bool hasOnMatch = false;
         for (const auto& rr : rightRows) {
-            if (leftColIdx >= leftTbl.len || rightColIdx >= rightTbl.len) continue;
-            if (lr.joinKeyNull || rr.joinKeyNull) continue;
-            if (lr.joinKey != rr.joinKey) continue;
+            if (!onConds.empty()) {
+                bool matchesOn = true;
+                for (const auto& condition : onConds) {
+                    if (!evalCond(condition, &lr, &rr)) {
+                        matchesOn = false;
+                        break;
+                    }
+                }
+                if (!matchesOn) continue;
+            } else {
+                if (leftColIdx >= leftTbl.len || rightColIdx >= rightTbl.len) continue;
+                if (lr.joinKeyNull || rr.joinKeyNull) continue;
+                if (lr.joinKey != rr.joinKey) continue;
+            }
             hasOnMatch = true;
             bool whereMatch = true;
             for (const auto& c : conds) {
@@ -35803,7 +35823,8 @@ std::vector<std::string> StorageEngine::rightJoin(
     const std::vector<std::string>& conditions,
     const std::set<std::string>& selectCols,
     std::vector<std::vector<std::string>>* structuredRows,
-    std::vector<std::vector<bool>>* structuredNulls) {
+    std::vector<std::vector<bool>>* structuredNulls,
+    const std::vector<std::string>& onConditions) {
     std::vector<std::string> result;
     if (structuredRows) structuredRows->clear();
     if (structuredNulls) structuredNulls->clear();
@@ -35916,6 +35937,7 @@ std::vector<std::string> StorageEngine::rightJoin(
     };
 
     auto conds = parseConditions(conditions);
+    const auto onConds = parseConditions(onConditions);
 
     size_t leftColIdx = leftTbl.len;
     for (size_t i = 0; i < leftTbl.len; ++i) {
@@ -35979,9 +36001,20 @@ std::vector<std::string> StorageEngine::rightJoin(
     for (const auto& rr : rightRows) {
         bool hasOnMatch = false;
         for (const auto& lr : leftRows) {
-            if (leftColIdx >= leftTbl.len || rightColIdx >= rightTbl.len) continue;
-            if (lr.joinKeyNull || rr.joinKeyNull) continue;
-            if (lr.joinKey != rr.joinKey) continue;
+            if (!onConds.empty()) {
+                bool matchesOn = true;
+                for (const auto& condition : onConds) {
+                    if (!evalCond(condition, &lr, &rr)) {
+                        matchesOn = false;
+                        break;
+                    }
+                }
+                if (!matchesOn) continue;
+            } else {
+                if (leftColIdx >= leftTbl.len || rightColIdx >= rightTbl.len) continue;
+                if (lr.joinKeyNull || rr.joinKeyNull) continue;
+                if (lr.joinKey != rr.joinKey) continue;
+            }
             hasOnMatch = true;
             bool whereMatch = true;
             for (const auto& c : conds) {
@@ -36033,7 +36066,8 @@ std::vector<std::string> StorageEngine::fullOuterJoin(
     const std::vector<std::string>& conditions,
     const std::set<std::string>& selectCols,
     std::vector<std::vector<std::string>>* structuredRows,
-    std::vector<std::vector<bool>>* structuredNulls) {
+    std::vector<std::vector<bool>>* structuredNulls,
+    const std::vector<std::string>& onConditions) {
     // FULL OUTER JOIN uses bag semantics.  LEFT and RIGHT each contain the
     // matched rows, so subtract exactly the INNER multiplicity from RIGHT
     // before appending it.  Use the structured identity: display text can
@@ -36042,13 +36076,13 @@ std::vector<std::string> StorageEngine::fullOuterJoin(
     std::vector<std::vector<bool>> leftNulls, rightNulls, innerNulls;
     auto leftResult = leftJoin(
         dbname, leftTable, rightTable, leftCol, rightCol, conditions, selectCols,
-        &leftCells, &leftNulls);
+        &leftCells, &leftNulls, onConditions);
     auto rightResult = rightJoin(
         dbname, leftTable, rightTable, leftCol, rightCol, conditions, selectCols,
-        &rightCells, &rightNulls);
+        &rightCells, &rightNulls, onConditions);
     join(
         dbname, leftTable, rightTable, leftCol, rightCol, conditions, selectCols,
-        &innerCells, &innerNulls);
+        &innerCells, &innerNulls, onConditions);
     auto rowIdentity = [](const std::vector<std::string>& cells,
                           const std::vector<bool>& nulls) {
         std::string key;

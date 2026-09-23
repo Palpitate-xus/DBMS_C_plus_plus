@@ -19818,6 +19818,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             string rightTableOrig;
             string leftOnCol, rightOnCol;
             string leftOnQualifier, rightOnQualifier;
+            string onClause;
 
             if (isCrossJoin) {
                 rightTableOrig = trim(sql.substr(tableNameStart, clauseEnd - tableNameStart));
@@ -19827,24 +19828,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     return true;
                 }
                 rightTableOrig = trim(sql.substr(tableNameStart, onPos - tableNameStart));
-                string onClause = normalizeConditionStr(trim(sql.substr(onPos + 2, clauseEnd - onPos - 2)));
-                size_t eqPos = onClause.find('=');
-                if (eqPos == string::npos) {
-                    cout << "SQL syntax error: invalid ON clause" << endl;
-                    return true;
-                }
-                leftOnCol = trim(onClause.substr(0, eqPos));
-                rightOnCol = trim(onClause.substr(eqPos + 1));
-                size_t dot = leftOnCol.find('.');
-                if (dot != string::npos) {
-                    leftOnQualifier = leftOnCol.substr(0, dot);
-                    leftOnCol = leftOnCol.substr(dot + 1);
-                }
-                dot = rightOnCol.find('.');
-                if (dot != string::npos) {
-                    rightOnQualifier = rightOnCol.substr(0, dot);
-                    rightOnCol = rightOnCol.substr(dot + 1);
-                }
+                onClause = trim(sql.substr(onPos + 2, clauseEnd - onPos - 2));
             }
 
             // Extract both PostgreSQL alias forms: "table alias" and
@@ -20178,6 +20162,112 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 if (inLeft != inRight) return inLeft ? 0 : 1;
                 return -1;
             };
+            vector<string> onConditions;
+            if (!isCrossJoin) {
+                dbms::SQLParser onParser;
+                const auto parsedOn = onParser.parse("SELECT " + onClause);
+                const auto* onSelect = parsedOn.success
+                    ? dynamic_cast<const dbms::SelectStmt*>(parsedOn.stmt.get())
+                    : nullptr;
+                const auto* comparison = onSelect &&
+                    onSelect->selectList.size() == 1
+                    ? dynamic_cast<const dbms::BinaryOpExpr*>(
+                          onSelect->selectList.front().expr.get())
+                    : nullptr;
+                if (!comparison ||
+                    (comparison->op != "=" && comparison->op != "<>" &&
+                     comparison->op != "!=" && comparison->op != "<" &&
+                     comparison->op != ">" && comparison->op != "<=" &&
+                     comparison->op != ">=")) {
+                    cout << "ERROR: unsupported JOIN ON predicate (SQLSTATE 0A000)"
+                         << endl;
+                    return true;
+                }
+                auto resolveOnColumn = [&](const dbms::Expr* expression,
+                                           int preferredSide,
+                                           int& side, string& name,
+                                           string& qualified) {
+                    const auto* ref = dynamic_cast<
+                        const dbms::ColumnRefExpr*>(expression);
+                    if (!ref || !ref->schema.empty()) return false;
+                    side = joinOperandSide(ref->table, ref->column);
+                    // Derived-table materialization currently removes its
+                    // alias qualifier (b.id -> id).  Restore only that known
+                    // source when the other ON operand identifies a side;
+                    // ordinary ambiguous bare references remain invalid.
+                    if (side < 0 && ref->table.empty() &&
+                        preferredSide >= 0 &&
+                        ((preferredSide == 0 &&
+                          leftTableName.rfind("__cte_", 0) == 0) ||
+                         (preferredSide == 1 &&
+                          rightTableName.rfind("__cte_", 0) == 0))) {
+                        side = preferredSide;
+                    }
+                    if (side < 0) return false;
+                    const TableSchema& table = side == 0 ? leftTbl : rightTbl;
+                    bool found = false;
+                    for (size_t index = 0; index < table.len; ++index)
+                        found = found || table.cols[index].dataName == ref->column;
+                    if (!found) return false;
+                    name = ref->column;
+                    qualified = (side == 0 ? leftTable : rightTable) +
+                        "." + name;
+                    return true;
+                };
+                int firstSide = -1, secondSide = -1;
+                string firstName, secondName, firstQualified, secondQualified;
+                bool firstColumn = resolveOnColumn(
+                    comparison->left.get(), -1, firstSide,
+                    firstName, firstQualified);
+                const bool secondColumn = resolveOnColumn(
+                    comparison->right.get(),
+                    firstColumn ? 1 - firstSide : -1, secondSide,
+                    secondName, secondQualified);
+                if (!firstColumn && secondColumn) {
+                    firstColumn = resolveOnColumn(
+                        comparison->left.get(), 1 - secondSide,
+                        firstSide, firstName, firstQualified);
+                }
+                const auto* firstLiteral = dynamic_cast<
+                    const dbms::LiteralExpr*>(comparison->left.get());
+                const auto* secondLiteral = dynamic_cast<
+                    const dbms::LiteralExpr*>(comparison->right.get());
+                if ((!firstColumn && !firstLiteral) ||
+                    (!secondColumn && !secondLiteral) ||
+                    (!firstColumn && !secondColumn)) {
+                    cout << "ERROR: unsupported JOIN ON operand (SQLSTATE 0A000)"
+                         << endl;
+                    return true;
+                }
+                if (comparison->op == "=" && firstColumn && secondColumn &&
+                    firstSide != secondSide) {
+                    leftOnCol = firstName;
+                    rightOnCol = secondName;
+                    leftOnQualifier = firstSide == 0 ? leftTable : rightTable;
+                    rightOnQualifier = secondSide == 0 ? leftTable : rightTable;
+                } else {
+                    string op = comparison->op;
+                    string operand;
+                    if (!firstColumn) {
+                        firstQualified = secondQualified;
+                        operand = firstLiteral->value;
+                        if (op == "<") op = ">";
+                        else if (op == ">") op = "<";
+                        else if (op == "<=") op = ">=";
+                        else if (op == ">=") op = "<=";
+                    } else {
+                        operand = secondColumn
+                            ? secondQualified : secondLiteral->value;
+                    }
+                    onConditions.push_back(op + firstQualified + " " + operand);
+                }
+            }
+            if (jt == JoinType::FullOuter && !onConditions.empty()) {
+                cout << "ERROR: FULL JOIN is only supported with merge-joinable "
+                        "or hash-joinable join conditions (SQLSTATE 0A000)"
+                     << endl;
+                return true;
+            }
             if (!isCrossJoin &&
                 joinOperandSide(leftOnQualifier, leftOnCol) == 1 &&
                 joinOperandSide(rightOnQualifier, rightOnCol) == 0) {
@@ -20419,22 +20509,22 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 if (jt == JoinType::Left) {
                     return g_engine.leftJoin(s.currentDB, leftTable, rightTable,
                                               leftOnCol, rightOnCol, conds, allJoinColumns,
-                                              rows, nulls);
+                                              rows, nulls, onConditions);
                 } else if (jt == JoinType::Right) {
                     return g_engine.rightJoin(s.currentDB, leftTable, rightTable,
                                                leftOnCol, rightOnCol, conds, allJoinColumns,
-                                               rows, nulls);
+                                               rows, nulls, onConditions);
                 } else if (jt == JoinType::FullOuter) {
                     return g_engine.fullOuterJoin(s.currentDB, leftTable, rightTable,
                                                    leftOnCol, rightOnCol, conds, allJoinColumns,
-                                                   rows, nulls);
+                                                   rows, nulls, onConditions);
                 } else if (jt == JoinType::Cross) {
                     return g_engine.crossJoin(s.currentDB, leftTable, rightTable,
                                               conds, allJoinColumns, rows, nulls);
                 } else {
                     return g_engine.join(s.currentDB, leftTable, rightTable,
                                           leftOnCol, rightOnCol, conds, allJoinColumns,
-                                          rows, nulls);
+                                          rows, nulls, onConditions);
                 }
             };
             auto joinRowIdentity = [](const vector<string>& cells,

@@ -716,7 +716,8 @@ public:
                                    const std::vector<std::string>& conditions,
                                    const std::set<std::string>& selectCols,
                                    std::vector<std::vector<std::string>>* structuredRows = nullptr,
-                                   std::vector<std::vector<bool>>* structuredNulls = nullptr);
+                                   std::vector<std::vector<bool>>* structuredNulls = nullptr,
+                                   const std::vector<std::string>& onConditions = {});
 
     // LEFT JOIN: preserve all left rows, fill NULL for non-matching right
     std::vector<std::string> leftJoin(const std::string& dbname,
@@ -727,7 +728,8 @@ public:
                                        const std::vector<std::string>& conditions,
                                        const std::set<std::string>& selectCols,
                                        std::vector<std::vector<std::string>>* structuredRows = nullptr,
-                                       std::vector<std::vector<bool>>* structuredNulls = nullptr);
+                                       std::vector<std::vector<bool>>* structuredNulls = nullptr,
+                                       const std::vector<std::string>& onConditions = {});
 
     // RIGHT JOIN: preserve all right rows, fill NULL for non-matching left
     std::vector<std::string> rightJoin(const std::string& dbname,
@@ -738,7 +740,8 @@ public:
                                         const std::vector<std::string>& conditions,
                                         const std::set<std::string>& selectCols,
                                         std::vector<std::vector<std::string>>* structuredRows = nullptr,
-                                        std::vector<std::vector<bool>>* structuredNulls = nullptr);
+                                        std::vector<std::vector<bool>>* structuredNulls = nullptr,
+                                        const std::vector<std::string>& onConditions = {});
 
     // FULL OUTER JOIN: union of LEFT and RIGHT JOIN
     std::vector<std::string> fullOuterJoin(const std::string& dbname,
@@ -749,7 +752,8 @@ public:
                                             const std::vector<std::string>& conditions,
                                             const std::set<std::string>& selectCols,
                                             std::vector<std::vector<std::string>>* structuredRows = nullptr,
-                                            std::vector<std::vector<bool>>* structuredNulls = nullptr);
+                                            std::vector<std::vector<bool>>* structuredNulls = nullptr,
+                                            const std::vector<std::string>& onConditions = {});
 
     // CROSS JOIN: cartesian product
     std::vector<std::string> crossJoin(const std::string& dbname,
