@@ -1316,7 +1316,16 @@ SQLSTATE 和 command tag。运行器在启动本地 DBMS 前读取参考端
 `server_version_num`，仅接受 `180006`；旧版本结果不能充当 18.6 验收。
 当前运行器无 allowlist，任何差异都会直接报错。
 
-当前覆盖（69 个用例文件）：算术、字符串函数、布尔/NULL 三值逻辑
+参考库应使用 `en_US.utf8` 数据库排序规则，并将 `lc_monetary` 设为
+`en_US.utf8`；当前项目的默认文本排序与货币符号测试按这组设置比较。
+若参考库使用 `C.UTF-8`，大小写排序和 `to_char(..., 'L9999')` 会因区域
+设置产生差异，不能当作内核回归。2026-09-23 使用官方 18.6 源码构建的
+临时参考实例，设置 `PGREF_HOST`、`PGREF_PORT`、`PGREF_USER`、
+`PGREF_DATABASE`、`PGREF_PASSWORD` 后，123 组差分为 `failed=0`。
+`version()` 的产品/构建身份由本项目 E2E 单独验证，不做逐字跨产品比较。
+这组用例不覆盖 273 项总清单的完整语义。
+
+当前覆盖（123 个用例文件）：算术、字符串函数、布尔/NULL 三值逻辑
 （含 `NOT NULL`→NULL 三值逻辑、`NULL::text IS NULL` 的 `::` 后缀 cast
 与 postfix `IS NULL` 解析修复、`NULL = NULL IS NULL` 的比较级 IS 绑定、
 bool_and/bool_or/every 表达式参数聚合以 t/f 渲染、存储 NULL 语义（物理 NULL 经由

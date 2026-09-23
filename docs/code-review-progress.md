@@ -419,6 +419,10 @@
 
 | 476 | TYPE-04 | 新建 SQL `CHAR(3)` 的固定 3 字节物理列无法容纳三个多字节字符，`'汉字é'` 错报 22001。新建 typed SQL CHAR 现保留声明字符数但使用变长物理槽；写入/更新按 UTF-8 字符边界裁剪尾空格并按字符数补空格，行缓冲与 TOAST 字节容量同步扩大；旧固定格式 schema 仍走原路径 | 修复前隔离 wire 复现拒绝三字符值；修复后完整读回、短值补空格、超长更新回滚、补空格唯一冲突 23505，以及 1005 个 `é` 的长值完整读回通过。完整协议测试首次在独立 `cancel_wait` 步骤超时，30 秒阈值串行重跑通过；INSERT/UPDATE、唯一约束、collation、DDL 桥接五组 C++ 测试通过。旧固定 CHAR 表仍有 Unicode 限制，迁移及 PostgreSQL 18.6 全量差分未完成，TYPE-04 保持 partial | `03abde9` |
 
+| 477 | ENG-15 / P0-16 | `version()` 原返回固定的 PostgreSQL 17.2 Debian 构建横幅，与本项目真实产品版本、18.6 差分目标和客户端可用能力均不符。现返回 `DBMS-C++ 0.2.0 (PostgreSQL protocol 3.0)`；跨产品差分不再逐字比较各自的构建身份，而由本项目协议 E2E 精确断言 | 官方 PostgreSQL 18.6 源码包及 SHA-256 校验后在临时目录构建，`server_version_num=180006`。本项目正式构建、版本一致性、兼容性契约、33 项 runner 单测和 FROM-less 协议 E2E 通过。目标差分仍只覆盖有限 SQL 用例，P0-16 保持 partial | `938f577` |
+
+| 478 | TYPE-04 / P0-16 | 新建 `CHAR(3)` 存储 `éé ` 后，列值在表达式 helper 中被归一为 `text`，`length(c)` 错把填充空格计入：参考 PostgreSQL 18.6 返回 2，本项目返回 3。现向表达式求值器保留 `bpchar` 类型；`TEXT` 的同一尾空格仍计入长度 | C++ 表达式回归验证 UTF-8 `CHAR` 的 length/char_length=2、octet_length=5，以及 TEXT length=3；新增差分用例覆盖 `CHAR`/`VARCHAR` 的 UTF-8 插入、更新、长度和超限 SQLSTATE。使用 `en_US.utf8` 排序及货币区域设置的 18.6 参考库，123 组差分 `failed=0`；完整本项目协议回归通过。旧固定 CHAR schema 迁移及其他类型语义仍待做，TYPE-04 保持 partial | `98d7171` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；第 428–429 项又迁移了 FROM-less 与普通表 scalar UDF 的声明类型和 NULL，并执行有限的 SQL function expression。混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF、完整 SQL function query body 及二进制值仍存在显示文本边界，继续计入总清单。
