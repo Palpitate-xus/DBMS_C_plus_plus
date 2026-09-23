@@ -161,6 +161,16 @@ class DifferentialErrorsTest(unittest.TestCase):
 
 
 class DifferentialSessionTest(unittest.TestCase):
+    def test_local_socket_honors_protocol_timeout(self):
+        client = mock.Mock()
+        server = {"sock": mock.Mock(), "port": 54321}
+        with mock.patch.dict(RUNNER.os.environ,
+                             {"DBMS_PROTOCOL_TEST_TIMEOUT": "37"}), \
+             mock.patch.object(RUNNER.socket, "create_connection",
+                               return_value=mock.Mock()) as connect:
+            RUNNER.reconnect_ours(server, client)
+        connect.assert_called_once_with(("127.0.0.1", 54321), timeout=37.0)
+
     def test_local_cases_get_fresh_sessions(self):
         first = mock.Mock()
         second = mock.Mock()

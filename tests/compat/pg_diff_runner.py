@@ -36,6 +36,14 @@ DBMS_MAIN = os.environ.get("DBMS_MAIN", os.path.join(REPO, "dbms_main"))
 REFERENCE_VERSION_NUM = "180006"
 
 
+def wire_timeout():
+    """Share the protocol client's configured socket timeout for diff runs."""
+    timeout = float(os.environ.get("DBMS_PROTOCOL_TEST_TIMEOUT", "15"))
+    if timeout <= 0:
+        raise ValueError("DBMS_PROTOCOL_TEST_TIMEOUT must be positive")
+    return timeout
+
+
 def load_protocol_client():
     spec = importlib.util.spec_from_file_location(
         "pgproto", os.path.join(REPO, "tests", "postgres_protocol_test.py"))
@@ -388,7 +396,7 @@ def reference_multi(statements, client=None):
     if client is None:
         client = load_protocol_client()
     host, port, user, database, password = _reference_connection_settings()
-    sock = socket.create_connection((host, port), timeout=15)
+    sock = socket.create_connection((host, port), timeout=wire_timeout())
     try:
         # The shared DBMS protocol helper validates our exact ParameterStatus
         # contract.  A real PostgreSQL reference legitimately has a different
@@ -534,7 +542,7 @@ def start_ours(client):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL)
         sock = socket.socket()
-        sock.settimeout(15)
+        sock.settimeout(wire_timeout())
         deadline = time.time() + 20
         while True:
             try:
@@ -589,7 +597,8 @@ def reconnect_ours(server, client):
     if server.get("sock") is not None:
         server["sock"].close()
         server["sock"] = None
-    sock = socket.create_connection(("127.0.0.1", server["port"]), timeout=15)
+    sock = socket.create_connection(
+        ("127.0.0.1", server["port"]), timeout=wire_timeout())
     try:
         client.startup(sock, "alice", "info")
     except BaseException:
