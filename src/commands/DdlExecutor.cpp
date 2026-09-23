@@ -859,17 +859,27 @@ static PgAttributeRow catalogAttributeForColumn(
         column.dataType == "inet" || column.dataType == "cidr";
     const int16_t postgresGeometryLength =
         geometryTypeLengthForOid(attribute.atttypid);
-    attribute.attlen = postgresGeometryLength != 0
-        ? postgresGeometryLength
-        : (column.isVariableLength || postgresVarlenaNetwork
-               ? static_cast<int16_t>(-1)
-               : static_cast<int16_t>(column.dsize));
+    if (attribute.atttypid == 1042) {
+        // SQL CHAR is bpchar, a varlena protocol type even when our storage
+        // column has a fixed declared width.
+        attribute.attlen = -1;
+    } else {
+        attribute.attlen = postgresGeometryLength != 0
+            ? postgresGeometryLength
+            : (column.isVariableLength || postgresVarlenaNetwork
+                   ? static_cast<int16_t>(-1)
+                   : static_cast<int16_t>(column.dsize));
+    }
     attribute.attndims = column.isArray ? 1 : 0;
     attribute.atttypmod = -1;
     if (!column.isArray && column.dataType == "bit") {
         attribute.atttypmod = static_cast<int32_t>(column.dsize + 4);
     } else if (!column.isArray && column.dataType == "bit varying" &&
                column.dsize != 8388608) {
+        attribute.atttypmod = static_cast<int32_t>(column.dsize + 4);
+    } else if (!column.isArray &&
+               (column.dataType == "character" || column.dataType == "char" ||
+                column.dataType == "bpchar") && column.dsize > 0) {
         attribute.atttypmod = static_cast<int32_t>(column.dsize + 4);
     }
     attribute.attnotnull = !column.isNull;

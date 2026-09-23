@@ -1278,6 +1278,7 @@ int16_t protocolTypeSize(uint32_t typeOid, const Column& column) {
         case 1083: return 8; // time
         case 1114: case 1184: return 8; // timestamp/timestamptz
         case 1186: return 16; // interval
+        case 1042: case 1043: return -1; // bpchar/varchar
         case 1700: return -1; // numeric
         case 650: case 869: return -1; // cidr/inet
         case 774: return 8;   // macaddr8
@@ -1341,6 +1342,9 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
             const bool structuredMatchesPhysical = hasStructuredType &&
                 (physicalTypeName == "bit" ||
                  physicalTypeName == "bit varying" ||
+                 physicalTypeName == "character" ||
+                 physicalTypeName == "char" ||
+                 physicalTypeName == "bpchar" ||
                  physicalTypeName == "inet" || physicalTypeName == "cidr" ||
                  physicalTypeName == "macaddr" ||
                  physicalTypeName == "macaddr8" ||

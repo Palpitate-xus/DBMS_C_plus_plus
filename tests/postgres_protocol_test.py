@@ -738,7 +738,18 @@ def extended_query_describe(sock):
     char_column = row_description_fields(simple_query(
         sock, "SELECT v FROM char_oid_regression"))
     assert len(char_column) == 1 and char_column[0][0] == b"v", char_column
-    assert char_column[0][1] != 0 and char_column[0][2:5] == (1, 1042, -1), char_column
+    assert char_column[0][1] != 0 and char_column[0][2:6] == (1, 1042, -1, 7), char_column
+    char_column_parse = (b"describe_char_column\0SELECT v FROM char_oid_regression\0" +
+                         struct.pack("!H", 0))
+    sock.sendall(typed(b"P", char_column_parse) +
+                 typed(b"D", b"Sdescribe_char_column\0") + typed(b"S"))
+    assert row_description_fields(read_until_ready(sock)) == char_column
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "CREATE TABLE char_default_regression (v CHAR)"))
+    default_char_column = row_description_fields(simple_query(
+        sock, "SELECT v FROM char_default_regression"))
+    assert len(default_char_column) == 1 and default_char_column[0][2:6] == (
+        1, 1042, -1, 5), default_char_column
 
     typed_date = (b"describe_typed_date\0SELECT DATE '2024-01-01'\0" +
                   struct.pack("!H", 0))
