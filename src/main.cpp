@@ -19863,6 +19863,56 @@ static bool executeInternal(const string& rawSql, Session& s) {
             };
             auto [leftTableName, leftAlias] = extractTableAndAlias(leftTableOrig);
             auto [rightTableName, rightAlias] = extractTableAndAlias(rightTableOrig);
+            function<string(const dbms::Expr*)> hiddenJoinQualifier;
+            hiddenJoinQualifier = [&](const dbms::Expr* expression) -> string {
+                if (!expression) return {};
+                if (const auto* ref = dynamic_cast<
+                        const dbms::ColumnRefExpr*>(expression)) {
+                    if (!leftAlias.empty() && ref->table == leftTableName &&
+                        ref->table != rightAlias)
+                        return ref->table;
+                    if (!rightAlias.empty() && ref->table == rightTableName &&
+                        ref->table != leftAlias)
+                        return ref->table;
+                    return {};
+                }
+                if (const auto* unary = dynamic_cast<
+                        const dbms::UnaryOpExpr*>(expression))
+                    return hiddenJoinQualifier(unary->operand.get());
+                if (const auto* binary = dynamic_cast<
+                        const dbms::BinaryOpExpr*>(expression)) {
+                    string hidden = hiddenJoinQualifier(binary->left.get());
+                    return hidden.empty()
+                        ? hiddenJoinQualifier(binary->right.get()) : hidden;
+                }
+                if (const auto* call = dynamic_cast<
+                        const dbms::FunctionCallExpr*>(expression)) {
+                    for (const auto& arg : call->args) {
+                        string hidden = hiddenJoinQualifier(arg.get());
+                        if (!hidden.empty()) return hidden;
+                    }
+                }
+                if (const auto* cast = dynamic_cast<
+                        const dbms::CastExpr*>(expression))
+                    return hiddenJoinQualifier(cast->operand.get());
+                return {};
+            };
+            auto rejectHiddenJoinQualifier = [&](const string& expression) {
+                dbms::SQLParser parser;
+                const auto parsed = parser.parse("SELECT " + expression);
+                const auto* select = parsed.success
+                    ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get())
+                    : nullptr;
+                if (!select) return false;
+                for (const auto& item : select->selectList) {
+                    string hidden = hiddenJoinQualifier(item.expr.get());
+                    if (hidden.empty()) continue;
+                    cout << "ERROR: missing FROM-clause entry for table \""
+                         << hidden << "\" (SQLSTATE 42P01)" << endl;
+                    return true;
+                }
+                return false;
+            };
 
             string leftTable = resolveTableName(s, leftTableName);
             string rightTable = resolveTableName(s, rightTableName);
@@ -20078,12 +20128,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
             }
             if (pureJoinAgg && joinAggs.empty()) pureJoinAgg = false;
+            if (pureJoinAgg && rejectHiddenJoinQualifier(columns)) return true;
 
 
             vector<string> condTokens;
             if (wherePos != string::npos) {
                 size_t condEnd = (orderPos != string::npos) ? orderPos : sql.size();
                 string whereClause = trim(sql.substr(wherePos + 5, condEnd - wherePos - 5));
+                if (rejectHiddenJoinQualifier(whereClause)) return true;
                 whereClause = expandSubqueries(whereClause, s);
                 // Resolve JOIN aliases to physical relation names.  Dropping
                 // the qualifier makes same-named columns bind to the left side.
@@ -20937,6 +20989,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         part = trim(part.substr(0, part.size() - 4));
                     }
                     if (!nullsSpecified) nullsFirst = !ascending;
+                    if (rejectHiddenJoinQualifier(part)) return true;
 
                     JoinOrderKey key;
                     key.ascending = ascending;
