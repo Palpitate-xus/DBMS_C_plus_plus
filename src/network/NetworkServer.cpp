@@ -1309,8 +1309,14 @@ int32_t protocolCharacterCastModifier(const Expr* expression) {
     } else {
         return -1;
     }
-    if (typeName != "char" && typeName != "character") return -1;
-    if (modifiers.empty()) return 5; // SQL CHAR defaults to CHAR(1).
+    const bool fixedCharacter = typeName == "char" ||
+                                typeName == "character";
+    const bool varyingCharacter = typeName == "varchar" ||
+                                  typeName == "character varying";
+    if (!fixedCharacter && !varyingCharacter) return -1;
+    if (modifiers.empty()) {
+        return fixedCharacter ? 5 : -1; // Only SQL CHAR defaults to length 1.
+    }
     if (modifiers.size() != 1 || modifiers.front().empty()) return -1;
     const std::string& lengthText = modifiers.front();
     if (!std::all_of(lengthText.begin(), lengthText.end(),
@@ -1421,7 +1427,9 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
         }
         descriptions.push_back(std::move(description));
     }
-    if (descriptions.size() == 1 && descriptions[0].typeOid == 1042 &&
+    if (descriptions.size() == 1 &&
+        (descriptions[0].typeOid == 1042 ||
+         descriptions[0].typeOid == 1043) &&
         descriptions[0].tableOid == INVALID_OID) {
         SQLParser parser;
         ParseResult parsed = parser.parse(sql);

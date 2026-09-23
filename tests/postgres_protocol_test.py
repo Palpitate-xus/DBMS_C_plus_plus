@@ -745,6 +745,20 @@ def extended_query_describe(sock):
     assert row_description_fields(char_cast_messages) == [
         (b"bpchar", 0, 0, 1042, -1, 7, 0)
     ], char_cast_messages
+    for index, (sql, typmod, value) in enumerate((
+            ("SELECT CAST('abcd' AS VARCHAR(3))", 7, b"abc"),
+            ("SELECT 'abcd'::VARCHAR(3)", 7, b"abc"),
+            ("SELECT CAST('abc' AS CHARACTER VARYING(3))", 7, b"abc"),
+            ("SELECT CAST('abc' AS VARCHAR)", -1, b"abc"))):
+        expected = [(b"varchar", 0, 0, 1043, -1, typmod, 0)]
+        messages = simple_query(sock, sql)
+        assert row_description_fields(messages) == expected, (sql, messages)
+        assert data_row_values(messages) == [[value]], (sql, messages)
+        statement = ("describe_varchar_cast_" + str(index)).encode()
+        sock.sendall(typed(b"P", statement + b"\0" + sql.encode() + b"\0" +
+                           struct.pack("!H", 0)) +
+                     typed(b"D", b"S" + statement + b"\0") + typed(b"S"))
+        assert row_description_fields(read_until_ready(sock)) == expected, sql
     assert any(kind == b"C" for kind, _ in simple_query(
         sock, "CREATE TABLE char_oid_regression (v CHAR(3))"))
     char_column = row_description_fields(simple_query(
