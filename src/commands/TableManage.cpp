@@ -29090,7 +29090,7 @@ std::vector<std::string> StorageEngine::query(
                 (col.generatedKind != 'v' && isColumnNullByRid(
                     dbname, tbl.tablename, mr.first, i));
             // Apply session timezone for TIMESTAMPTZ columns
-            if (timezoneOffsetMinutes != 0 && col.dataType == "timestamptz" && !val.empty()) {
+            if (col.dataType == "timestamptz" && !resultIsNull && !val.empty()) {
                 // Read raw seconds directly from row buffer (extractColumnValue already formats it)
                 size_t offset = 0;
                 for (size_t j = 0; j < i; ++j) {
@@ -29099,9 +29099,7 @@ std::vector<std::string> StorageEngine::query(
                 if (offset + TIMESTAMP_SIZE <= mr.second.size()) {
                     int64_t utcSec = 0;
                     std::memcpy(&utcSec, mr.second.data() + offset, TIMESTAMP_SIZE);
-                    if (utcSec != INF && utcSec != 0) {
-                        val = formatTimestampWithTz(utcSec, timezoneOffsetMinutes);
-                    }
+                    val = formatTimestampWithTz(utcSec, timezoneOffsetMinutes);
                 }
             }
             if (resultIsNull) rowStr += "NULL ";

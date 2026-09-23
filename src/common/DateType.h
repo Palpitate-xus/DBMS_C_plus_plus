@@ -473,15 +473,19 @@ inline std::string formatTimestampWithTz(int64_t utcSeconds, int tzOffsetMinutes
     std::string base =
         formatTimestampSeconds(static_cast<int64_t>(adjusted));
     if (base.empty()) return "";
-    // Append timezone offset: [+-]HH:MM
+    // PostgreSQL text format appends the offset without a separating space;
+    // whole-hour offsets omit the redundant minutes.
     int absOff = std::abs(tzOffsetMinutes);
     int tzh = absOff / 60;
     int tzm = absOff % 60;
-    base += (tzOffsetMinutes >= 0) ? " +" : " -";
+    base += (tzOffsetMinutes >= 0) ? "+" : "-";
     if (tzh < 10) base += "0";
-    base += transstr(tzh) + ":";
-    if (tzm < 10) base += "0";
-    base += transstr(tzm);
+    base += transstr(tzh);
+    if (tzm != 0) {
+        base += ":";
+        if (tzm < 10) base += "0";
+        base += transstr(tzm);
+    }
     return base;
 }
 

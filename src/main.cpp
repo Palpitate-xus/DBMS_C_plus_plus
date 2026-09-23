@@ -14132,7 +14132,7 @@ static bool extractUnnestLiteral(const string& rawSql, string& outLiteral) {
 // projCols (schema order when the projection is empty).  Values for
 // timestamptz columns were produced in UTC by the executor paths; this
 // converts "YYYY-MM-DD HH:MM:SS" back to epoch seconds and re-formats
-// with the session offset (+HH:MM suffix like PostgreSQL).
+// with the session offset (+HH or +HH:MM suffix).
 static void applySessionTimezoneToAnswers(
     std::vector<std::string>& answers,
     const std::vector<std::pair<std::string, std::string>>& projCols,
@@ -14189,8 +14189,22 @@ static void applySessionTimezoneToAnswers(
                 auto looksLikeTime = [](const std::string& x) {
                     if (x.size() < 5) return false;
                     int colons = 0;
-                    for (char c : x) {
+                    for (size_t n = 0; n < x.size(); ++n) {
+                        char c = x[n];
                         if (c == ':') ++colons;
+                        else if ((c == '+' || c == '-') && colons >= 2) {
+                            const std::string suffix = x.substr(n + 1);
+                            if (suffix.size() != 2 && suffix.size() != 5)
+                                return false;
+                            for (size_t k = 0; k < suffix.size(); ++k) {
+                                if (k == 2 && suffix.size() == 5) {
+                                    if (suffix[k] != ':') return false;
+                                } else if (!isdigit(static_cast<unsigned char>(suffix[k]))) {
+                                    return false;
+                                }
+                            }
+                            return true;
+                        }
                         else if (!isdigit(static_cast<unsigned char>(c))) return false;
                     }
                     return colons >= 2;
@@ -14221,9 +14235,21 @@ static void applySessionTimezoneToAnswers(
         for (size_t p : tzPositions) {
             if (p >= logical.size()) continue;
             const std::string& v = logical[p];
-            // Already rendered with an offset suffix by the legacy path.
-            if (v.size() > 6 && (v[v.size() - 6] == '+' || v[v.size() - 6] == '-')
-                && v[v.size() - 3] == ':') continue;
+            // Already rendered with an offset suffix by the storage path.
+            const size_t timeStart = v.find(' ');
+            const size_t sign = timeStart == std::string::npos
+                ? std::string::npos : v.find_first_of("+-", timeStart + 1);
+            if (sign != std::string::npos) {
+                const std::string suffix = v.substr(sign + 1);
+                if ((suffix.size() == 2 || suffix.size() == 5) &&
+                    std::isdigit(static_cast<unsigned char>(suffix[0])) &&
+                    std::isdigit(static_cast<unsigned char>(suffix[1])) &&
+                    (suffix.size() == 2 ||
+                     (suffix[2] == ':' &&
+                      std::isdigit(static_cast<unsigned char>(suffix[3])) &&
+                      std::isdigit(static_cast<unsigned char>(suffix[4])))))
+                    continue;
+            }
             // parse [Y]YYY-M-D H:M:S (components may be unpadded) -> epoch
             size_t sp = v.find(' ');
             if (sp == std::string::npos) continue;

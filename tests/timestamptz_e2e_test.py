@@ -2,9 +2,9 @@
 """E2E test for timestamptz rendering under the session TimeZone GUC.
 
 Verifies through the real SQL shell:
-  - default (UTC) session renders a stored timestamptz without offset
-  - SET TIME ZONE 'Asia/Shanghai' renders +08:00 shifted values
-  - SET TIME ZONE 'America/New_York' renders -05:00 shifted values
+  - default (UTC) session renders a stored timestamptz with +00
+  - SET TIME ZONE 'Asia/Shanghai' renders +08 shifted values
+  - SET TIME ZONE 'America/New_York' renders -05 shifted values
   - offset GUC syntax and repeatability (no double application)
 
 Runs dbms_main in a temp working directory with a SCRAM admin account.
@@ -118,10 +118,10 @@ def main():
             failed += 1
             print(f"[TZ-E2E] {name} FAIL {ctx}")
 
-    # Default session (UTC): no offset suffix
+    # Default session (UTC): PostgreSQL includes the +00 suffix.
     out, _, _ = run_sql(use + ["SELECT * FROM tt"])
     rows = data_rows(out)
-    check("default UTC render", rows == ["1 2026-08-17 10:00:00"], str(rows))
+    check("default UTC render", rows == ["1 2026-08-17 10:00:00+00"], str(rows))
 
     # Asia/Shanghai: +8h
     out, _, _ = run_sql(use + [
@@ -129,7 +129,7 @@ def main():
         "SELECT * FROM tt",
     ])
     rows = data_rows(out)
-    check("Asia/Shanghai +08:00", rows == ["1 2026-08-17 18:00:00 +08:00"], str(rows))
+    check("Asia/Shanghai +08", rows == ["1 2026-08-17 18:00:00+08"], str(rows))
 
     # America/New_York: -5h
     out, _, _ = run_sql(use + [
@@ -137,7 +137,7 @@ def main():
         "SELECT * FROM tt",
     ])
     rows = data_rows(out)
-    check("America/New_York -05:00", rows == ["1 2026-08-17 05:00:00 -05:00"], str(rows))
+    check("America/New_York -05", rows == ["1 2026-08-17 05:00:00-05"], str(rows))
 
     # Offset GUC syntax + idempotence (same query twice)
     out, _, _ = run_sql(use + [
@@ -146,7 +146,14 @@ def main():
         "SELECT * FROM tt",
     ])
     rows = data_rows(out)
-    check("offset syntax + repeat", rows == ["1 2026-08-17 18:00:00 +08:00"], str(rows))
+    check("offset syntax + repeat", rows == ["1 2026-08-17 18:00:00+08"], str(rows))
+
+    out, _, _ = run_sql(use + [
+        "SET TIME ZONE 'Asia/Kolkata'",
+        "SELECT * FROM tt",
+    ])
+    rows = data_rows(out)
+    check("half-hour named zone", rows == ["1 2026-08-17 15:30:00+05:30"], str(rows))
 
     print(f"[TZ-E2E] {passed} passed, {failed} failed")
     return 1 if failed else 0
