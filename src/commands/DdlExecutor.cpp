@@ -2204,6 +2204,27 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 }
                 const auto qualifiedName =
                     dbms::CatalogService::logicalName(tableName);
+                if (!tableIsTemporary &&
+                    sub.newName != qualifiedName.name) {
+                    try {
+                        dbms::CatalogManager& catalog =
+                            g_engine.catalogService().get(s.currentDB);
+                        const std::string schemaName =
+                            qualifiedName.schema.empty()
+                                ? "public" : qualifiedName.schema;
+                        if (catalog.resolveRelation(sub.newName,
+                                                    {schemaName})) {
+                            std::cout << "ERROR: relation \"" << sub.newName
+                                      << "\" already exists (SQLSTATE 42P07)"
+                                      << std::endl;
+                            return true;
+                        }
+                    } catch (const std::exception& error) {
+                        std::cout << "ALTER TABLE RENAME catalog lookup failed: "
+                                  << error.what() << std::endl;
+                        return true;
+                    }
+                }
                 const std::string physicalNewName = tableIsTemporary
                     ? tempTablePrefix(s, sub.newName)
                     : (qualifiedName.schema.empty()
