@@ -469,7 +469,11 @@
 
 | 501 | P0-02 / PROTO-03 / P0-16 | `CREATE TEMP/TEMPORARY TABLE` 成功后，wire command tag 错为 `CREATE TEMP`/`CREATE TEMPORARY`；现报告 `CREATE TABLE` | 新增 `create_temp_table_tag`，真实 18.6 定向差分覆盖两种写法、插入和查询通过；功能族仍为 partial | `1c6a633` |
 
-2026-09-23 复验：截至第 501 项新增的 18 个 DDL/协议差分用例并入全量集，147 组真实 PostgreSQL 18.6 差分 `failed=0`；当前源码生产对象重链的完整 PostgreSQL 协议回归通过。正式 `scripts/build.sh` 在第 495 项状态成功；第 496–501 项仅经重链编译验证，正式生产构建仍待复跑。schema 重名、缺失 schema 和唯一索引探针的定向运行曾偶发超时，随后重试或连续复跑及后续全量运行通过，间歇性原因未定位。该结果不代表 P0-02、P0-04、P0-16、CAT-02 或 PROTO-08 完成。总账仍为 273 项，其中 24 complete、119 partial、115 unverified、15 deferred_by_user；被延期的安全 / TDE 项没有被计作完成。
+| 502 | P0-02 / PROTO-03 / P0-16 | `CREATE MATERIALIZED VIEW` 的成功标签原固定为 `CREATE MATERIALIZED`，且无法表示构建行数。执行器现直接发布结构化标签：带数据为 `SELECT n`，`WITH NO DATA` 为 `CREATE MATERIALIZED VIEW` | 新增 `materialized_view_tags`，真实 18.6 定向差分覆盖带数据、无数据、刷新和查询通过；完整对象语义仍为 partial | `9235a3f` |
+
+| 503 | P0-02 / PROTO-03 / P0-16 | `CREATE OR REPLACE VIEW` 成功后 wire 标签错为 `CREATE OR`，现报告 `CREATE VIEW` | 新增 `create_replace_view_tag`，真实 18.6 定向差分覆盖创建、替换与查询通过；其他多词 DDL 标签仍待核对 | `f1f1a90` |
+
+2026-09-23 复验：截至第 503 项新增的 20 个 DDL/协议差分用例并入全量集，149 组真实 PostgreSQL 18.6 差分 `failed=0`；当前源码生产对象重链的完整 PostgreSQL 协议回归通过。正式 `scripts/build.sh` 在第 495 项状态成功；第 496–503 项仅经重链编译验证，正式生产构建仍待复跑。schema 重名、缺失 schema 和唯一索引探针的定向运行曾偶发超时，随后重试或连续复跑及后续全量运行通过，间歇性原因未定位。该结果不代表 P0-02、P0-04、P0-16、CAT-02 或 PROTO-08 完成。总账仍为 273 项，其中 24 complete、119 partial、115 unverified、15 deferred_by_user；被延期的安全 / TDE 项没有被计作完成。
 
 本批新增的待修复复现（仍计入总清单）：
 
