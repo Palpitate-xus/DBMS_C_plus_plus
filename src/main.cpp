@@ -7122,6 +7122,46 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
     bool hasLegacyScalarSubquery = false;
     auto appendValue = [&](string value, bool isNull = false,
                            string typeName = "text") {
+        const string loweredType = toLower(trim(typeName));
+        if (!isNull && s.timezoneOffsetMinutes != 0 &&
+            (loweredType == "timestamptz" ||
+             loweredType == "timestamp with time zone") &&
+            value != "infinity" && value != "-infinity") {
+            // Expression evaluation retains UTC plus an explicit +00 suffix.
+            // Convert only the presentation value; fractional seconds belong
+            // before the displayed offset, not after it.
+            string parseValue = value;
+            string fraction;
+            const size_t timeStart = parseValue.find(' ');
+            const size_t dot = timeStart == string::npos
+                ? string::npos : parseValue.find('.', timeStart + 1);
+            if (dot != string::npos) {
+                size_t fractionEnd = dot + 1;
+                while (fractionEnd < parseValue.size() &&
+                       isdigit(static_cast<unsigned char>(parseValue[fractionEnd])))
+                    ++fractionEnd;
+                if (fractionEnd > dot + 1) {
+                    fraction = parseValue.substr(dot, fractionEnd - dot);
+                    parseValue.erase(dot, fractionEnd - dot);
+                }
+            }
+            const int64_t utcSeconds = parseTimestampToSeconds(parseValue);
+            if (utcSeconds != 0) {
+                string rendered = formatTimestampWithTz(
+                    utcSeconds, s.timezoneOffsetMinutes);
+                if (!rendered.empty()) {
+                    if (!fraction.empty()) {
+                        const size_t displayTime = rendered.find(' ');
+                        const size_t offsetAt = displayTime == string::npos
+                            ? string::npos
+                            : rendered.find_first_of("+-", displayTime + 1);
+                        if (offsetAt != string::npos)
+                            rendered.insert(offsetAt, fraction);
+                    }
+                    value = std::move(rendered);
+                }
+            }
+        }
         values.push_back(std::move(value));
         valueNulls.push_back(isNull);
         columnTypes.push_back(typeName.empty() ? "text" : std::move(typeName));
