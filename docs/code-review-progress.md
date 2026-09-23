@@ -397,6 +397,8 @@
 
 | 465 | P0-02 / TYPE-04 | 建表列定义原接受 `CHAR(0)`/`VARCHAR(0)` 并改为默认长度，也接受超出本项目内部上限的 `CHAR(1006)`/`VARCHAR(65536)` 后静默截短。类型注册表现拒绝零长度，typed DDL 在进入列工厂前校验声明长度，无法表示的容量明确报 22023，避免持久化与用户声明不符的 schema | 正式构建在此修改前成功；修复前隔离 wire 复现四例全部返回 CREATE TABLE，修复后四例均报 22023、合法 `CHAR(3)` 仍成功；`type_registry_test` 和完整协议回归通过。[PostgreSQL 18 文档](https://www.postgresql.org/docs/18/datatype-character.html)确认长度必须大于零且 PostgreSQL 容量上限高于本项目。超出本项目容量而 PostgreSQL 有效的长度仍是兼容差距，TYPE-04 保持 partial | `7019818` |
 
+| 466 | P0-02 / TYPE-04 / PROTO-08 | `INSERT` 到 `CHAR(3)`/`VARCHAR(3)` 超长值原走通用 `Invalid data`，wire 报 XX000；`UPDATE` 的早期宽度检查报 22023。存储状态现区分字符列右截断，INSERT/UPDATE 的早期与最终行校验均传出 22001；typed 和 legacy INSERT 都保留该状态 | 修复前隔离 wire 复现 `INSERT CHAR(3) VALUES ('abcd')` 报 XX000；第一次修改后 UPDATE 仍为 22023，补齐早期校验后 INSERT/UPDATE 均为 22001，失败 UPDATE 后原行保持不变。完整协议、insert final validation、update type validation 通过。[PostgreSQL 18 错误码表](https://www.postgresql.org/docs/18/errcodes-appendix.html)确认 22001。仍未覆盖 Unicode 字符长度、超长尾空格例外和全部写入路径，功能族保持 partial | `48ea6a8` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；第 428–429 项又迁移了 FROM-less 与普通表 scalar UDF 的声明类型和 NULL，并执行有限的 SQL function expression。混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF、完整 SQL function query body 及二进制值仍存在显示文本边界，继续计入总清单。
