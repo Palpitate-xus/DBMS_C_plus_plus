@@ -19423,7 +19423,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
         }
         {
-            // Projection: strip both "<alias>." and "<table>." qualifiers.
+            // An alias hides the underlying relation name in PostgreSQL.
+            // Strip only the qualifier visible to this SELECT scope.
             // The table name is the first whitespace-delimited token in
             // the FROM region (before any alias).
             size_t fromTokStart = fromPos + 4;
@@ -19437,9 +19438,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
             // Stripping the first relation here turned `left.x` into bare
             // `x`, which then looked ambiguous or read the wrong side.
             if (findTopLevelKeyword(sql, "join", fromPos) == string::npos) {
-                for (const auto& qual : {fromTableAlias, tableName}) {
-                    if (qual.empty() || qual == ".") continue;
-                    string prefix = qual + ".";
+                const string& qualifier = fromTableAlias.empty()
+                    ? tableName : fromTableAlias;
+                if (!qualifier.empty() && qualifier != ".") {
+                    const string prefix = qualifier + ".";
                     size_t cpos = 0;
                     while ((cpos = findTextOutsideQuotes(
                                 columns, prefix, cpos)) != string::npos) {
