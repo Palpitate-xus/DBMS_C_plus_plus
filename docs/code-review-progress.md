@@ -433,6 +433,24 @@
 
 | 483 | P0-04 / P0-16 | 此前差分集没有显式事务中的 CREATE/ALTER 及 DML 回滚序列，不能用单语句 DDL 成功推断事务化 DDL。新增两个无 allowlist 的 wire 差分用例，分别核对建表后写入回滚、加列后写入回滚 | `ddl_transaction`、`alter_transaction` 对真实 18.6 均通过；129 组全量差分 `failed=0`，完整协议回归通过。并发 DDL、savepoint 全矩阵、catalog WAL 和 crash recovery 等 P0-04 验收仍未完成 | `23148e0` |
 
+| 484 | P0-02 / PROTO-08 / P0-16 | `ALTER TABLE ... ADD COLUMN` 重名原被 wire 误报为 `XX000`；typed DDL 现明确报告 `42701 duplicate_column` | 新增 `duplicate_column`，真实 PostgreSQL 18.6 定向差分通过；后续 131 组差分 `failed=0`。DDL 错误族仍为 partial | `99b7ea3` |
+
+| 485 | P0-02 / PROTO-08 / P0-16 | `RENAME COLUMN` 目标列重名原报 `XX000`，现报告 `42701` | 新增 `rename_duplicate_column`，18.6 定向差分、DDL 桥接测试及 131 组全量差分通过；功能族仍为 partial | `cb7d12f` |
+
+| 486 | P0-02 / PROTO-08 / P0-16 | `RENAME TO` 目标表名重名原报 `XX000`，现报告 `42P07 duplicate_table` | 新增 `rename_duplicate_table`，18.6 定向差分通过；首轮在与全量差分并发时发生一次超时，独立复跑未复现，故不据此宣称已排除所有并发问题 | `a7d8513` |
+
+| 487 | P0-02 / PROTO-08 / P0-16 | `RENAME CONSTRAINT` 目标名重名原报 `XX000`，现报告 `42710 duplicate_object` | 新增 `rename_duplicate_constraint`，18.6 定向差分通过；功能族仍为 partial | `fd0f605` |
+
+| 488 | P0-02 / PROTO-08 / P0-16 | `DROP COLUMN` 缺失列原报 `XX000`；且 `IF EXISTS` 把其他无效删除也误当作缺列跳过。现只在列确实缺失时跳过或报 `42703` | 新增 `drop_missing_column`，18.6 定向差分通过；其他依赖错误仍需逐项差分 | `9c4a070` |
+
+| 489 | P0-02 / PROTO-08 / P0-16 | `RENAME COLUMN` 缺失源列原报 `XX000`；同名重命名还在检查源列存在前直接返回成功。现先验证源列，并对缺失列报 `42703` | 新增 `rename_missing_column`，覆盖不同名及同名缺失两例，18.6 定向差分通过；功能族仍为 partial | `0c657ee` |
+
+| 490 | P0-02 / PROTO-08 / P0-16 | `RENAME CONSTRAINT` 缺失源对象原与无效目标名共用 `INVALID_VALUE`，wire 报 `XX000`；现将缺失源对象返回独立 `NOT_FOUND` 状态并映射 `42704 undefined_object` | 新增 `rename_missing_constraint`，覆盖不同名及同名缺失两例，18.6 定向差分及 `alter_rename_constraint_test`、`constraint_rename_metadata_test` 通过，功能族仍为 partial | `4dda1c7` |
+
+| 491 | P0-02 / CAT-02 / PROTO-08 / P0-16 | 表重命名到已有索引名时，物理表名检查放过、catalog 拒绝后只报 `XX000`，还先发生物理改名再回滚。现先检查同一 schema 的 catalog relation namespace，直接报告 `42P07` | 新增 `rename_to_index_collision`，18.6 定向差分及 `ddl_ast_bridge_test` 通过，原表仍存在；功能族仍为 partial | `9bc7ef5` |
+
+2026-09-23 复验：上述新增 8 个 DDL 差分用例已并入全量集，137 组真实 PostgreSQL 18.6 差分 `failed=0`；这是有限覆盖的回归结果，不代表 P0-02、P0-04、P0-16、CAT-02 或 PROTO-08 完成。总账仍为 273 项，其中 24 complete、119 partial、115 unverified、15 deferred_by_user；被延期的安全 / TDE 项没有被计作完成。
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；第 428–429 项又迁移了 FROM-less 与普通表 scalar UDF 的声明类型和 NULL，并执行有限的 SQL function expression。混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF、完整 SQL function query body 及二进制值仍存在显示文本边界，继续计入总清单。
