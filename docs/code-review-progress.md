@@ -393,6 +393,8 @@
 
 | 463 | P0-02 / CAT-02 / TYPE-04 / PROTO-04 | `CHAR(n)` 的列目录 `atttypmod` 始终为 -1，结构化结果投影还跳过物理列修饰符；本地固定宽度存储的 `char` 又把协议 `attlen`/类型长度误报为 n。现将 bpchar 列目录 typmod 设为 n+4、协议长度固定为 -1，并在匹配物理 character 列时保留目录元数据 | 修复前 wire 复现 `CHAR(3)` 为 `(OID 1042, attlen -1, typmod -1)`；首次改动后测试抓到长度 3，随即补齐两层长度映射。最终完整 PostgreSQL 协议回归通过，覆盖 `CHAR(3)` 和默认 `CHAR` 的 Simple Query 与 D Statement。仍未覆盖表达式 CAST 的 typmod、其他字符类型的全部限制和 PostgreSQL 18.6 全量差分，功能族保持 partial | `296e866` |
 
+| 464 | P0-02 / TYPE-04 / PROTO-03 / PROTO-04 | `SELECT 'a'::char` 和 `CAST('abc' AS CHAR(3))` 已有 bpchar OID，但表达式 RowDescription 的 typmod 一律 -1；后者 Simple Query 默认列名还保留原始大写 `CHAR`。现对单投影直接 SQL CHAR 强转按 AST 类型修饰符填入 n+4（无长度时默认 5），并按大小写无关的类型别名表输出 `bpchar` | 完整 PostgreSQL 协议回归通过，Simple Query 与 D Statement 均验证两类 CAST 的名称、OID、长度、typmod；表列 `CHAR(3)` 的描述仍保持正确。此修复限单投影直接强转，复杂/多投影表达式及 PG18.6 全量差分仍未完成，功能族保持 partial | `4f1500c` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；第 428–429 项又迁移了 FROM-less 与普通表 scalar UDF 的声明类型和 NULL，并执行有限的 SQL function expression。混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF、完整 SQL function query body 及二进制值仍存在显示文本边界，继续计入总清单。
