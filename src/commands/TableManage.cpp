@@ -23520,6 +23520,11 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
     for (const auto& s : cstr) {
         if (s.empty()) continue;
         Condition c;
+        if (s == "__join_on_true__" || s == "__join_on_false__") {
+            c.op = s == "__join_on_true__" ? "jointrue" : "joinfalse";
+            conds.push_back(std::move(c));
+            continue;
+        }
         // Handle LIKE operator
         // Accept both "notlike<col> <val>" (glued, from modifyLogic's
         // compact path) and "notlike <col> <val>" (spaced, from splitConds
@@ -35384,6 +35389,8 @@ std::vector<std::string> StorageEngine::join(
     // Evaluate a condition on left/right row pair
     auto evalCond = [&](const Condition& c, const JoinRow& leftRow,
                         const JoinRow& rightRow) -> bool {
+        if (c.op == "jointrue" || c.op == "joinfalse")
+            return c.op == "jointrue";
         auto it = colMap.find(c.colName);
         if (it == colMap.end()) return false;
         const TableSchema& tbl = it->second.isLeft ? leftTbl : rightTbl;
@@ -35654,6 +35661,8 @@ std::vector<std::string> StorageEngine::leftJoin(
 
     auto evalCond = [&](const Condition& c, const JoinRow* leftRow,
                         const JoinRow* rightRow) -> bool {
+        if (c.op == "jointrue" || c.op == "joinfalse")
+            return c.op == "jointrue";
         auto it = colMap.find(c.colName);
         if (it == colMap.end()) return false;
         const TableSchema& tbl = it->second.isLeft ? leftTbl : rightTbl;
@@ -35900,6 +35909,8 @@ std::vector<std::string> StorageEngine::rightJoin(
 
     auto evalCond = [&](const Condition& c, const JoinRow* leftRow,
                         const JoinRow* rightRow) -> bool {
+        if (c.op == "jointrue" || c.op == "joinfalse")
+            return c.op == "jointrue";
         auto it = colMap.find(c.colName);
         if (it == colMap.end()) return false;
         const TableSchema& tbl = it->second.isLeft ? leftTbl : rightTbl;
@@ -36196,6 +36207,8 @@ std::vector<std::string> StorageEngine::crossJoin(
 
     auto evalCond = [&](const Condition& c, const JoinRow& leftRow,
                         const JoinRow& rightRow) -> bool {
+        if (c.op == "jointrue" || c.op == "joinfalse")
+            return c.op == "jointrue";
         auto it = colMap.find(c.colName);
         if (it == colMap.end()) return false;
         const TableSchema& tbl = it->second.isLeft ? leftTbl : rightTbl;

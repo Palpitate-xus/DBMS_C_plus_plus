@@ -20229,6 +20229,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 vector<const dbms::Expr*> onPredicates;
                 function<bool(const dbms::Expr*)> collectOnComparisons;
                 collectOnComparisons = [&](const dbms::Expr* expression) {
+                    if (const auto* literal = dynamic_cast<
+                            const dbms::LiteralExpr*>(expression)) {
+                        if (literal->value != "true" && literal->value != "false")
+                            return false;
+                        onPredicates.push_back(literal);
+                        return true;
+                    }
                     const auto* binary = dynamic_cast<
                         const dbms::BinaryOpExpr*>(expression);
                     if (binary) {
@@ -20322,6 +20329,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
                          << "\" does not exist (SQLSTATE 42703)" << endl;
                 };
                 for (const auto* predicate : onPredicates) {
+                    if (const auto* literal = dynamic_cast<
+                            const dbms::LiteralExpr*>(predicate)) {
+                        onConditions.push_back(literal->value == "true"
+                            ? "__join_on_true__" : "__join_on_false__");
+                        continue;
+                    }
                     if (const auto* unary = dynamic_cast<
                             const dbms::UnaryOpExpr*>(predicate)) {
                         int side = -1;
@@ -20391,8 +20404,15 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     }
                 }
             }
+            const bool constantOnlyOn = !onConditions.empty() &&
+                all_of(onConditions.begin(), onConditions.end(),
+                       [](const string& condition) {
+                           return condition == "__join_on_true__" ||
+                                  condition == "__join_on_false__";
+                       });
             if (jt == JoinType::FullOuter &&
-                (leftOnCol.empty() || rightOnCol.empty())) {
+                (leftOnCol.empty() || rightOnCol.empty()) &&
+                !constantOnlyOn) {
                 cout << "ERROR: FULL JOIN is only supported with merge-joinable "
                         "or hash-joinable join conditions (SQLSTATE 0A000)"
                      << endl;
