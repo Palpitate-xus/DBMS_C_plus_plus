@@ -9298,7 +9298,8 @@ bool DdlExecutor::executeDropMaterializedView(const DropStmt* stmt, Session& s) 
                 continue;
             }
             std::cout << "ERROR: materialized view \"" << name
-                      << "\" does not exist" << std::endl;
+                      << "\" does not exist (SQLSTATE 42P01)"
+                      << std::endl;
             return true;
         }
 
