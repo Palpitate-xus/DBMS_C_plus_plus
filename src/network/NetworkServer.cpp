@@ -1712,6 +1712,10 @@ std::string commandTagFor(const std::string& sql, const std::vector<std::string>
     if (startsWithSqlPhrase(sql, "create unique index")) {
         return "CREATE INDEX";
     }
+    if (startsWithSqlPhrase(sql, "create temp table") ||
+        startsWithSqlPhrase(sql, "create temporary table")) {
+        return "CREATE TABLE";
+    }
     const auto mutationCount = [](const std::string& line,
                                   const std::string& prefix)
         -> std::optional<std::string> {
