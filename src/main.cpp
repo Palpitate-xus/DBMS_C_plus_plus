@@ -20821,7 +20821,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 condTokens.push_back(")");
                 for (auto& t : condTokens) t = modifyLogic(t);
                 auto groups = breakDownConditions(condTokens);
-                set<string> seen;
+                map<string, size_t> emittedCounts;
                 for (const auto& g : groups) {
                     vector<vector<string>> partRows;
                     vector<vector<bool>> partNulls;
@@ -20832,13 +20832,16 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         joinNulls.clear();
                         continue;
                     }
+                    map<string, size_t> groupCounts;
                     for (size_t i = 0; i < part.size(); ++i) {
                         const string key = joinRowIdentity(partRows[i], partNulls[i]);
-                        if (seen.insert(key).second) {
-                            answers.push_back(std::move(part[i]));
-                            joinRows.push_back(std::move(partRows[i]));
-                            joinNulls.push_back(std::move(partNulls[i]));
-                        }
+                        const size_t occurrence = ++groupCounts[key];
+                        size_t& emitted = emittedCounts[key];
+                        if (occurrence <= emitted) continue;
+                        emitted = occurrence;
+                        answers.push_back(std::move(part[i]));
+                        joinRows.push_back(std::move(partRows[i]));
+                        joinNulls.push_back(std::move(partNulls[i]));
                     }
                 }
             }
