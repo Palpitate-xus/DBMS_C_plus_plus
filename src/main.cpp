@@ -23308,7 +23308,23 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                     hasScalar = true;
                                     goto nextProjItem;
                                 }
-                                cout << "Invalid column name " << item << endl;
+                                const auto* missingColumn =
+                                    literalParsed.success && literalSelect &&
+                                    literalSelect->selectList.size() == 1
+                                        ? dynamic_cast<const dbms::ColumnRefExpr*>(
+                                              literalSelect->selectList.front().expr.get())
+                                        : nullptr;
+                                if (missingColumn &&
+                                    !missingColumn->table.empty()) {
+                                    cout << "ERROR: missing FROM-clause entry for table \""
+                                         << missingColumn->table
+                                         << "\" (SQLSTATE 42P01)" << endl;
+                                } else {
+                                    cout << "ERROR: column \""
+                                         << (missingColumn ? missingColumn->column : item)
+                                         << "\" does not exist (SQLSTATE 42703)"
+                                         << endl;
+                                }
                                 return true;
                             }
                             selectCols.insert(item);

@@ -1,0 +1,11 @@
+SELECT missing_column FROM (SELECT 1 AS v) AS x;
+SELECT x.missing_column FROM (SELECT 1 AS v) AS x;
+SELECT v FROM (SELECT 1 AS v) AS x;
+SELECT other.v FROM (SELECT 1 AS v) AS x;
+DROP TABLE IF EXISTS diff_derived_bind;
+CREATE TABLE diff_derived_bind (v int);
+INSERT INTO diff_derived_bind VALUES (1);
+SELECT missing_column FROM diff_derived_bind;
+SELECT other.v FROM diff_derived_bind;
+SELECT v FROM diff_derived_bind;
+DROP TABLE diff_derived_bind;
