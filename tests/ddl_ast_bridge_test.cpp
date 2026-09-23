@@ -1021,7 +1021,7 @@ static void test_drop_database_evicts_catalog() {
     std::cout << "[DDL] DROP DATABASE evicts catalog OK" << std::endl;
 }
 
-static void test_database_storage_errors_are_not_success() {
+static void test_database_invalid_name_and_malformed_ast_fail_closed() {
     const std::string parent = testDbPath("database_error_parent");
     const std::string nested = parent + "/child";
     cleanup(parent);
@@ -1029,18 +1029,23 @@ static void test_database_storage_errors_are_not_success() {
     Session s;
     setupSession(s, "");
     dbms::DdlExecutor ddl;
-    auto createStmt = std::make_unique<dbms::CreateObjectStmt>(
+    auto wrongType = std::make_unique<dbms::CreateObjectStmt>(
         dbms::SqlCommand::CreateDatabase);
-    createStmt->objectName = nested;
-    dbms::StmtPtr create = std::move(createStmt);
+    wrongType->objectName = nested;
+    dbms::StmtPtr malformed = std::move(wrongType);
+    assert(ddl.execute(malformed, s));
 
-    // The parent does not exist, so StorageEngine returns IO_ERROR.  The DDL
-    // layer must not report a false successful CREATE DATABASE.
+    auto createStmt = std::make_unique<dbms::CreateDatabaseStmt>();
+    createStmt->databaseName = nested;
+    dbms::StmtPtr create = std::move(createStmt);
+    // A slash is not a valid stored database name.  The storage error must
+    // propagate rather than look like a successful CREATE DATABASE.
     assert(ddl.execute(create, s));
     assert(!std::filesystem::exists(parent));
 
     cleanup(parent);
-    std::cout << "[DDL] database storage errors propagate OK" << std::endl;
+    std::cout << "[DDL] invalid database name and malformed AST fail closed OK"
+              << std::endl;
 }
 
 static void test_domain_storage_errors_are_not_success() {
@@ -1137,7 +1142,7 @@ int main() {
     test_alter_table_metadata_actions();
     test_schema_replica_identity_updates_catalog();
     test_long_identifiers_round_trip();
-    test_database_storage_errors_are_not_success();
+    test_database_invalid_name_and_malformed_ast_fail_closed();
     test_domain_storage_errors_are_not_success();
     test_index_metadata_failures_are_not_success();
     test_table_catalog_persistence_failure_rolls_back();

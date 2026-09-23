@@ -2993,7 +2993,11 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
 // ----------------------------------------------------------------------------
 
 bool DdlExecutor::executeCreateDatabase(const CreateDatabaseStmt* stmt, Session& s) {
-    if (!stmt) return false;
+    if (!stmt) {
+        std::cout << "ERROR: malformed CREATE DATABASE statement (SQLSTATE XX000)"
+                  << std::endl;
+        return true;
+    }
     if (!checkAdmin(s)) return true;
     if (!checkDatabaseCommandOutsideTransaction(s)) return true;
     const std::string& dbname = stmt->databaseName;
