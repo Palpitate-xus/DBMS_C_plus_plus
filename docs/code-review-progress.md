@@ -411,6 +411,8 @@
 
 | 472 | P0-01 / P0-02 / SQL-01 | `DdlExecutor::execute` 遇到命令标记为 CREATE DATABASE、实际却是另一类 AST 节点时，`dynamic_cast` 得到空指针，而 `executeCreateDatabase` 把空指针返回为无错，造成虚假的成功。该入口现返回显式内部错误；测试同时改为用真正的 CreateDatabaseStmt 检查非法数据库名字经存储层返回错误 | 修改前完整 `ddl_ast_bridge_test` 在原断言处失败；修改后整套 DDL 桥接测试通过，输出分别包含 malformed AST 的 XX000 和非法名字的 22023。其他 DDL handler 仍有同类空指针无错返回，需要另项统一处理 | `1b9e126` |
 
+| 473 | P0-01 / P0-02 / SQL-01 | 复查发现 25 处 typed DDL 入口/handler 在收到空指针或命令标记与实际 AST 节点不一致时返回 false（调用方按无错处理），问题不限于 CREATE DATABASE。现统一返回带 XX000 的错误，保持正常“不由桥接处理”的 default 分支不变 | 完整 `ddl_ast_bridge_test` 两轮通过，新增空语句及 30 余种错配 AST 命令矩阵；`ddl_bridge_routing_test` 用新生产对象重链后通过。测试中仍偶见 heap allocator close 的既有告警，另行核实；统一 SQL 执行管线与结构化错误模型仍未完成，三类条目保持 partial | `70b4296` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；第 428–429 项又迁移了 FROM-less 与普通表 scalar UDF 的声明类型和 NULL，并执行有限的 SQL function expression。混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF、完整 SQL function query body 及二进制值仍存在显示文本边界，继续计入总清单。
