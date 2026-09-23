@@ -3648,7 +3648,8 @@ bool DdlExecutor::executeCreateSchema(const CreateObjectStmt* stmt, Session& s) 
                       << std::endl;
             return false;
         }
-        std::cout << "ERROR: schema \"" << name << "\" already exists" << std::endl;
+        std::cout << "ERROR: schema \"" << name
+                  << "\" already exists (SQLSTATE 42P06)" << std::endl;
         return true;
     }
     if (res != DBStatus::OK) {
