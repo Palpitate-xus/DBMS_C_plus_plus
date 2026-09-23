@@ -834,15 +834,23 @@ static bool varyingCharacterColumn(const Column& column) {
          column.dataType == "character varying");
 }
 
+static bool variableBlankPaddedCharacterColumn(const Column& column) {
+    return !column.isArray && column.isVariableLength &&
+        (column.dataType == "char" || column.dataType == "character" ||
+         column.dataType == "bpchar");
+}
+
 static size_t characterColumnByteLimit(const Column& column) {
-    if (!varyingCharacterColumn(column)) return column.dsize;
-    // The row/TOAST representation still caps a varchar value at 64 KiB.
+    if (!varyingCharacterColumn(column) &&
+        !variableBlankPaddedCharacterColumn(column)) return column.dsize;
+    // The row/TOAST representation still caps character values at 64 KiB.
     // Four bytes per declared character covers valid UTF-8 code points.
     return std::min(column.dsize * size_t(4), size_t(65535));
 }
 
-static bool truncateVaryingCharacterValue(std::string& value,
-                                          size_t maximumCharacters) {
+static bool truncateCharacterValue(std::string& value,
+                                   size_t maximumCharacters,
+                                   size_t* retainedCharacters = nullptr) {
     size_t characters = 0;
     size_t excessByte = value.size();
     for (size_t offset = 0; offset < value.size();) {
@@ -856,9 +864,13 @@ static bool truncateVaryingCharacterValue(std::string& value,
         offset += std::min(bytes, value.size() - offset);
         ++characters;
     }
-    if (characters <= maximumCharacters) return true;
+    if (characters <= maximumCharacters) {
+        if (retainedCharacters) *retainedCharacters = characters;
+        return true;
+    }
     if (!characterExcessIsSpaces(value, excessByte)) return false;
     value.resize(excessByte);
+    if (retainedCharacters) *retainedCharacters = maximumCharacters;
     return true;
 }
 
@@ -878,9 +890,18 @@ static DBStatus normalizeCharacterColumnWidths(
         auto value = values.find(column.dataName);
         if (value == values.end() ||
             (nullColumns && nullColumns->count(column.dataName) != 0)) continue;
-        if (varyingCharacterColumn(column)) {
-            if (!truncateVaryingCharacterValue(value->second, column.dsize) ||
-                value->second.size() > characterColumnByteLimit(column)) {
+        if (varyingCharacterColumn(column) ||
+            variableBlankPaddedCharacterColumn(column)) {
+            size_t characters = 0;
+            if (!truncateCharacterValue(
+                    value->second, column.dsize, &characters)) {
+                return DBStatus::STRING_DATA_RIGHT_TRUNCATION;
+            }
+            if (variableBlankPaddedCharacterColumn(column) &&
+                characters < column.dsize) {
+                value->second.append(column.dsize - characters, ' ');
+            }
+            if (value->second.size() > characterColumnByteLimit(column)) {
                 return DBStatus::STRING_DATA_RIGHT_TRUNCATION;
             }
             continue;
@@ -25663,12 +25684,19 @@ DBStatus StorageEngine::updateInternal(
                         }
                     }
                     const size_t maxLength = col.isArray ? 1024 : col.dsize;
-                    if (varyingCharacterColumn(col)) {
-                        if (!truncateVaryingCharacterValue(
-                                storeVal, col.dsize) ||
-                            storeVal.size() > characterColumnByteLimit(col)) {
+                    if (varyingCharacterColumn(col) ||
+                        variableBlankPaddedCharacterColumn(col)) {
+                        size_t characters = 0;
+                        if (!truncateCharacterValue(
+                                storeVal, col.dsize, &characters)) {
                             return DBStatus::STRING_DATA_RIGHT_TRUNCATION;
                         }
+                        if (variableBlankPaddedCharacterColumn(col) &&
+                            characters < col.dsize) {
+                            storeVal.append(col.dsize - characters, ' ');
+                        }
+                        if (storeVal.size() > characterColumnByteLimit(col))
+                            return DBStatus::STRING_DATA_RIGHT_TRUNCATION;
                     } else if (col.isVariableLength &&
                         storeVal.size() > maxLength) {
                         if (characterWidthLimitedType(col)) {
@@ -25679,7 +25707,8 @@ DBStatus StorageEngine::updateInternal(
                             return DBStatus::INVALID_VALUE;
                         }
                     }
-                    if ((col.dataType == "char" ||
+                    if (!col.isVariableLength &&
+                        (col.dataType == "char" ||
                          col.dataType == "character") &&
                         storeVal.size() < maxLength) {
                         storeVal.append(maxLength - storeVal.size(), ' ');

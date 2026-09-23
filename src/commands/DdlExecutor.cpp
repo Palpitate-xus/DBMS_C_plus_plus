@@ -4049,6 +4049,10 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
     } else if (baseType == "char" || baseType == "character") {
         size_t len = typeMod1 > 0 ? static_cast<size_t>(typeMod1) : 1;
         col = makeStringColumn(cd.name, cd.isNull, len, cd.isPrimaryKey);
+        // SQL bpchar(n) counts characters; a fixed n-byte heap slot cannot
+        // hold n multibyte UTF-8 characters.  Keep the declared character
+        // width in dsize and use a varlena physical slot for new SQL columns.
+        col.isVariableLength = true;
     } else if (baseType == "text") {
         col = makeTextColumn(cd.name, cd.isNull, cd.isPrimaryKey);
     } else if (baseType == "boolean" || baseType == "bool") {

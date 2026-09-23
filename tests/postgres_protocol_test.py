@@ -870,6 +870,28 @@ def extended_query_describe(sock):
         sock, "INSERT INTO char_padding_regression VALUES ('ok')"))
     assert data_row_values(simple_query(
         sock, "SELECT v FROM char_padding_regression")) == [[b"ok "]]
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "CREATE TABLE unicode_char_regression (v CHAR(3))"))
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "INSERT INTO unicode_char_regression VALUES ('汉字é')"))
+    assert data_row_values(simple_query(
+        sock, "SELECT v FROM unicode_char_regression")) == [["汉字é".encode()]]
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "UPDATE unicode_char_regression SET v = '汉字'"))
+    assert data_row_values(simple_query(
+        sock, "SELECT v FROM unicode_char_regression")) == [["汉字 ".encode()]]
+    unicode_char_overflow = simple_query(
+        sock, "UPDATE unicode_char_regression SET v = '汉字éx'")
+    assert b"C22001\0" in next(body for kind, body in unicode_char_overflow if kind == b"E")
+    assert data_row_values(simple_query(
+        sock, "SELECT v FROM unicode_char_regression")) == [["汉字 ".encode()]]
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "CREATE TABLE toasted_unicode_char (v CHAR(1005))"))
+    long_char = "é" * 1005
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "INSERT INTO toasted_unicode_char VALUES ('" + long_char + "')"))
+    assert data_row_values(simple_query(
+        sock, "SELECT v FROM toasted_unicode_char")) == [[long_char.encode()]]
     for predicate in ("v = 'ok'", "v = 'ok '"):
         assert data_row_values(simple_query(
             sock, "SELECT v FROM char_padding_regression WHERE " + predicate)) == [[b"ok "]]
