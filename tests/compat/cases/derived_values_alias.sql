@@ -1,0 +1,12 @@
+SELECT v FROM (VALUES (1)) AS x(v);
+SELECT x.v FROM (VALUES (1)) AS x(v);
+SELECT column1 FROM (VALUES (1)) AS x;
+SELECT missing_column FROM (VALUES (1)) AS x(v);
+SELECT x.missing_column FROM (VALUES (1)) AS x(v);
+SELECT other.v FROM (VALUES (1)) AS x(v);
+SELECT v FROM (VALUES (1), (2)) AS x(v) ORDER BY v;
+SELECT v, t FROM (VALUES (1, 'a'), (2, NULL)) AS x(v, t) ORDER BY v;
+SELECT v FROM (VALUES (1)) x(v);
+SELECT column1 FROM (VALUES (1)) x;
+SELECT v FROM (VALUES (missing_column)) AS x(v);
+SELECT a FROM (VALUES (1)) AS x(a, b);

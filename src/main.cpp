@@ -11667,12 +11667,22 @@ static std::string processCTEs(const std::string& sql, Session& s, bool& failed)
 // Detect and process derived tables (subqueries in FROM clause).
 // Replaces (SELECT ...) AS alias with a temporary table name.
 // Returns modified SQL.
-static std::string processDerivedTables(const std::string& sql, Session& s) {
+static std::string processDerivedTables(const std::string& sql, Session& s,
+                                        bool& failed) {
     std::string result = sql;
     int derivedCount = 0;
+    failed = false;
+
+    auto findDerivedStart = [](const std::string& text, size_t start = 0) {
+        const size_t selectAt = findTextOutsideQuotes(text, "(select", start);
+        const size_t valuesAt = findTextOutsideQuotes(text, "(values", start);
+        if (selectAt == std::string::npos) return valuesAt;
+        if (valuesAt == std::string::npos) return selectAt;
+        return std::min(selectAt, valuesAt);
+    };
 
     while (true) {
-        size_t parenStart = findTextOutsideQuotes(result, "(select");
+        size_t parenStart = findDerivedStart(result);
         if (parenStart == std::string::npos) break;
         // A derived table must be preceded by FROM / JOIN / comma / lateral,
         // otherwise the "(select" belongs to a scalar or predicate subquery
@@ -11694,8 +11704,7 @@ static std::string processDerivedTables(const std::string& sql, Session& s) {
             if (!fromCtx) {
                 // Not a FROM item: skip this occurrence to avoid an
                 // infinite loop.
-                parenStart = findTextOutsideQuotes(
-                    result, "(select", parenStart + 1);
+                parenStart = findDerivedStart(result, parenStart + 1);
                 if (parenStart == std::string::npos) break;
                 // Re-check the new occurrence's context once; if still not
                 // FROM, give up this pass (the outer SELECT machinery will
@@ -11720,8 +11729,7 @@ static std::string processDerivedTables(const std::string& sql, Session& s) {
         std::string beforeParen = trim(result.substr(0, parenStart));
         if (beforeParen.size() >= 7 && beforeParen.substr(beforeParen.size() - 7) == "lateral") {
             // Move past this occurrence to avoid infinite loop
-            parenStart = findTextOutsideQuotes(
-                result, "(select", parenStart + 1);
+            parenStart = findDerivedStart(result, parenStart + 1);
             if (parenStart == std::string::npos) break;
             beforeParen = trim(result.substr(0, parenStart));
             if (beforeParen.size() >= 7 && beforeParen.substr(beforeParen.size() - 7) == "lateral") {
@@ -11763,6 +11771,29 @@ static std::string processDerivedTables(const std::string& sql, Session& s) {
                 break;
         }
         size_t aliasExprStart = p;
+        std::vector<std::string> columnAliases;
+        if (p < result.size() && result[p] == '(') {
+            const size_t close = findMatchingParen(result, p);
+            if (close == std::string::npos) {
+                cout << "ERROR: unterminated derived-table column list "
+                        "(SQLSTATE 42601)" << endl;
+                failed = true;
+                return result;
+            }
+            for (const auto& raw : splitTopLevelComma(
+                     result.substr(p + 1, close - p - 1))) {
+                const std::string name = trim(raw);
+                if (name.empty()) {
+                    cout << "ERROR: empty derived-table column name "
+                            "(SQLSTATE 42601)" << endl;
+                    failed = true;
+                    return result;
+                }
+                columnAliases.push_back(
+                    name.front() == '"' ? decodeQuotedIdentifier(name) : name);
+            }
+            aliasExprStart = close + 1;
+        }
 
         std::string afterParen = trim(result.substr(parenEnd + 1));
         std::string innerSelect = trim(result.substr(parenStart + 1, parenEnd - parenStart - 1));
@@ -11771,9 +11802,17 @@ static std::string processDerivedTables(const std::string& sql, Session& s) {
         std::vector<std::vector<std::string>> structuredRows;
         std::vector<std::vector<bool>> structuredNulls;
         bool structuredAvailable = false;
+        bool innerFailed = false;
+        std::string innerFailure;
         auto rows = runDerivedSubQueryFull(
             innerSelect, s, colNames, &colTypes,
-            &structuredRows, &structuredNulls, &structuredAvailable);
+            &structuredRows, &structuredNulls, &structuredAvailable,
+            &innerFailed, &innerFailure);
+        if (innerFailed) {
+            reportNestedQueryFailure(innerFailure);
+            failed = true;
+            return result;
+        }
         if (colNames.empty()) {
             colNames.clear();
             rows = runDerivedSubQuery(innerSelect, s, colNames);
@@ -11782,6 +11821,16 @@ static std::string processDerivedTables(const std::string& sql, Session& s) {
             structuredAvailable = false;
         }
         if (colNames.empty()) break;
+        if (columnAliases.size() > colNames.size()) {
+            cout << "ERROR: table \"" << alias << "\" has "
+                 << colNames.size() << " columns available but "
+                 << columnAliases.size()
+                 << " columns specified (SQLSTATE 42P10)" << endl;
+            failed = true;
+            return result;
+        }
+        for (size_t i = 0; i < columnAliases.size(); ++i)
+            colNames[i] = columnAliases[i];
 
         int counter = derivedCount;
         if (colTypes.empty())
@@ -19221,7 +19270,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
         }
 
         // Process derived tables: (SELECT ...) AS alias
-        sql = processDerivedTables(sql, s);
+        bool derivedFailed = false;
+        sql = processDerivedTables(sql, s, derivedFailed);
+        if (derivedFailed) return true;
         // Process LATERAL JOINs: materialize into temp tables
         sql = processLateralJoins(sql, s);
 
