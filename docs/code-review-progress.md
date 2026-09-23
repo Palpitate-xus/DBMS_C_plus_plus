@@ -395,6 +395,8 @@
 
 | 464 | P0-02 / TYPE-04 / PROTO-03 / PROTO-04 | `SELECT 'a'::char` 和 `CAST('abc' AS CHAR(3))` 已有 bpchar OID，但表达式 RowDescription 的 typmod 一律 -1；后者 Simple Query 默认列名还保留原始大写 `CHAR`。现对单投影直接 SQL CHAR 强转按 AST 类型修饰符填入 n+4（无长度时默认 5），并按大小写无关的类型别名表输出 `bpchar` | 完整 PostgreSQL 协议回归通过，Simple Query 与 D Statement 均验证两类 CAST 的名称、OID、长度、typmod；表列 `CHAR(3)` 的描述仍保持正确。此修复限单投影直接强转，复杂/多投影表达式及 PG18.6 全量差分仍未完成，功能族保持 partial | `4f1500c` |
 
+| 465 | P0-02 / TYPE-04 | 建表列定义原接受 `CHAR(0)`/`VARCHAR(0)` 并改为默认长度，也接受超出本项目内部上限的 `CHAR(1006)`/`VARCHAR(65536)` 后静默截短。类型注册表现拒绝零长度，typed DDL 在进入列工厂前校验声明长度，无法表示的容量明确报 22023，避免持久化与用户声明不符的 schema | 正式构建在此修改前成功；修复前隔离 wire 复现四例全部返回 CREATE TABLE，修复后四例均报 22023、合法 `CHAR(3)` 仍成功；`type_registry_test` 和完整协议回归通过。[PostgreSQL 18 文档](https://www.postgresql.org/docs/18/datatype-character.html)确认长度必须大于零且 PostgreSQL 容量上限高于本项目。超出本项目容量而 PostgreSQL 有效的长度仍是兼容差距，TYPE-04 保持 partial | `7019818` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；第 428–429 项又迁移了 FROM-less 与普通表 scalar UDF 的声明类型和 NULL，并执行有限的 SQL function expression。混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF、完整 SQL function query body 及二进制值仍存在显示文本边界，继续计入总清单。
