@@ -20223,6 +20223,38 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         "." + name;
                     return true;
                 };
+                auto reportOnBindingError = [&](const dbms::Expr* expression) {
+                    const auto* ref = dynamic_cast<
+                        const dbms::ColumnRefExpr*>(expression);
+                    if (!ref) {
+                        cout << "ERROR: unsupported JOIN ON operand (SQLSTATE 0A000)"
+                             << endl;
+                        return;
+                    }
+                    if (!ref->schema.empty() ||
+                        (!ref->table.empty() &&
+                         joinOperandSide(ref->table, ref->column) < 0)) {
+                        cout << "ERROR: missing FROM-clause entry for table \""
+                             << ref->table << "\" (SQLSTATE 42P01)" << endl;
+                        return;
+                    }
+                    if (ref->table.empty()) {
+                        bool inLeft = false, inRight = false;
+                        for (size_t index = 0; index < leftTbl.len; ++index)
+                            inLeft = inLeft ||
+                                leftTbl.cols[index].dataName == ref->column;
+                        for (size_t index = 0; index < rightTbl.len; ++index)
+                            inRight = inRight ||
+                                rightTbl.cols[index].dataName == ref->column;
+                        if (inLeft && inRight) {
+                            cout << "ERROR: column reference \"" << ref->column
+                                 << "\" is ambiguous (SQLSTATE 42702)" << endl;
+                            return;
+                        }
+                    }
+                    cout << "ERROR: column \"" << ref->column
+                         << "\" does not exist (SQLSTATE 42703)" << endl;
+                };
                 for (const auto* comparison : comparisons) {
                     int firstSide = -1, secondSide = -1;
                     string firstName, secondName, firstQualified, secondQualified;
@@ -20242,9 +20274,15 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         const dbms::LiteralExpr*>(comparison->left.get());
                     const auto* secondLiteral = dynamic_cast<
                         const dbms::LiteralExpr*>(comparison->right.get());
-                    if ((!firstColumn && !firstLiteral) ||
-                        (!secondColumn && !secondLiteral) ||
-                        (!firstColumn && !secondColumn)) {
+                    if (!firstColumn && !firstLiteral) {
+                        reportOnBindingError(comparison->left.get());
+                        return true;
+                    }
+                    if (!secondColumn && !secondLiteral) {
+                        reportOnBindingError(comparison->right.get());
+                        return true;
+                    }
+                    if (!firstColumn && !secondColumn) {
                         cout << "ERROR: unsupported JOIN ON operand (SQLSTATE 0A000)"
                              << endl;
                         return true;
