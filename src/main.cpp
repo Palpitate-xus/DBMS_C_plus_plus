@@ -3145,7 +3145,13 @@ static bool handleSetCommand(const string& sql, Session& s) {
                 }
             }
         } else {
-            offsetMinutes = parseTimezoneOffset(zone);
+            const auto parsedOffset = parseTimezoneOffset(zone);
+            if (!parsedOffset) {
+                cout << "ERROR: invalid value for parameter TimeZone "
+                        "(SQLSTATE 22023)" << endl;
+                return true;
+            }
+            offsetMinutes = *parsedOffset;
             if (quoted && !zone.empty() && (zone.front() == '+' || zone.front() == '-'))
                 offsetMinutes = -offsetMinutes;
             if (zone == "utc" || zone == "UTC") displayZone = "UTC";

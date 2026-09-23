@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -491,7 +492,7 @@ inline std::string formatTimestampWithTz(int64_t utcSeconds, int tzOffsetMinutes
 
 // Parse timezone name or offset string to minutes offset from UTC
 // Supports: "+08:00", "-05:30", "UTC", "Asia/Shanghai", "America/New_York", etc.
-inline int parseTimezoneOffset(const std::string& tzStr) {
+inline std::optional<int> parseTimezoneOffset(const std::string& tzStr) {
     std::string s = tzStr;
     // Trim whitespace and quotes
     {
@@ -503,18 +504,26 @@ inline int parseTimezoneOffset(const std::string& tzStr) {
     }
     // Normalize to lowercase for case-insensitive comparison
     for (char& c : s) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-    if (s.empty() || s == "utc" || s == "gmt" || s == "z") return 0;
+    if (s.empty()) return std::nullopt;
+    if (s == "utc" || s == "gmt" || s == "z") return 0;
     // Parse [+-]HH:MM or [+-]HH
     if (s[0] == '+' || s[0] == '-') {
         bool negative = (s[0] == '-');
         int tzh = 0, tzm = 0;
         size_t colon = s.find(':');
         if (colon != std::string::npos) {
-            for (size_t i = 1; i < colon; ++i) if (s[i] >= '0' && s[i] <= '9') tzh = tzh * 10 + s[i] - '0';
-            for (size_t i = colon + 1; i < s.size(); ++i) if (s[i] >= '0' && s[i] <= '9') tzm = tzm * 10 + s[i] - '0';
+            if (s.find(':', colon + 1) != std::string::npos ||
+                !parseTemporalUnsigned(
+                    std::string_view(s).substr(1, colon - 1), 2, tzh) ||
+                !parseTemporalUnsigned(
+                    std::string_view(s).substr(colon + 1), 2, tzm))
+                return std::nullopt;
         } else {
-            for (size_t i = 1; i < s.size(); ++i) if (s[i] >= '0' && s[i] <= '9') tzh = tzh * 10 + s[i] - '0';
+            if (!parseTemporalUnsigned(
+                    std::string_view(s).substr(1), 2, tzh))
+                return std::nullopt;
         }
+        if (tzh > 15 || tzm > 59) return std::nullopt;
         return (negative ? -1 : 1) * (tzh * 60 + tzm);
     }
     // Named timezone mapping (common zones) — all lowercase
@@ -540,5 +549,5 @@ inline int parseTimezoneOffset(const std::string& tzStr) {
     if (s == "africa/johannesburg") return 120;
     if (s == "america/sao_paulo" || s == "america/buenos_aires") return -180;
     if (s == "pacific/auckland") return 720;
-    return 0; // Default to UTC for unknown zones
+    return std::nullopt;
 }

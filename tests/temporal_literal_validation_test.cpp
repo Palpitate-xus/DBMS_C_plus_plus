@@ -45,6 +45,12 @@ int main() {
     assert(formatTimestampWithTz(
                parseTimestampToSeconds("2024-01-01 00:00:00"),
                std::numeric_limits<int>::min()).empty());
+    assert(parseTimezoneOffset("+08:00") == 480);
+    assert(parseTimezoneOffset("Asia/Kolkata") == 330);
+    assert(!parseTimezoneOffset("+bogus"));
+    assert(!parseTimezoneOffset("+16:00"));
+    assert(!parseTimezoneOffset("Mars/Phobos"));
+    assert(!parseTimezoneOffset(""));
 
     const std::string testName = "temporal_literal_validation";
     const std::string database = testDbPath(testName);
