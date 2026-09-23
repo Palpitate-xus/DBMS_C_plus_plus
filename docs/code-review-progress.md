@@ -401,6 +401,8 @@
 
 | 467 | TYPE-04 | 列赋值 `CHAR(3)`/`VARCHAR(3)` 写入 `'ab  '` 原报 22001，未遵守 SQL 对“仅超出尾随空格”可截断的例外。存储层现在在 INSERT 的原始/最终行和 UPDATE 的早期/最终赋值阶段统一检查：超出的字节全部为空格时截到声明容量，否则继续报 22001 | 修复前隔离 wire 探针确认两类列都拒绝；修复后 INSERT 和 UPDATE 均成功，读回为 `'ab '`/`'xy '`；完整 PostgreSQL 协议回归两次通过并加入长期断言。[PostgreSQL 18 字符类型文档](https://www.postgresql.org/docs/18/datatype-character.html)确认尾随空格例外。该实现仍按字节容量，Unicode 字符计数、CHAR 短值补空格和完整比较语义未完成，TYPE-04 保持 partial | `508829f` |
 
+| 468 | TYPE-04 | `CHAR(3)` 写入短值 `'ok'` 原样读回 `ok`，`WHERE v = 'ok '` 不匹配，UNIQUE 也允许 `'ok'` 与 `'ok '` 并存。现将短值补到声明宽度，并在字符列比较/唯一键规范化时忽略尾随空格；UPDATE 赋值走同一补齐规则 | 修复前隔离 wire 复现上述三项；修复后读回 `ok `，两种尾随空格谓词均匹配，第二次插入被唯一约束拦截且原行保持。完整协议、空字符串唯一约束、collation、UPDATE 类型校验回归通过。[PostgreSQL 18 字符类型文档](https://www.postgresql.org/docs/18/datatype-character.html)确认补空格和比较规则。唯一冲突错误码仍错报 XX000，单列后续；Unicode 字符计数和完整 CHAR 语义仍未完成 | `773c6dc` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；第 428–429 项又迁移了 FROM-less 与普通表 scalar UDF 的声明类型和 NULL，并执行有限的 SQL function expression。混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF、完整 SQL function query body 及二进制值仍存在显示文本边界，继续计入总清单。
