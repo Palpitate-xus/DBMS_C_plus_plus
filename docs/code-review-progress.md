@@ -389,6 +389,8 @@
 | 460 | P0-02 / TYPE-06 / PROTO-04 | `protocolTypeSize` 未覆盖多种 PostgreSQL 固定长度内置类型：INTERVAL/OID/regtype/name 的简单查询及 Describe 分别错误报 -1，而参考类型目录为 16/4/4/64。补齐内置固定长度 OID 映射（含 char、regproc、tid、xid/cid），让两条协议路径使用同一准确长度 | PG17 wire 只用于定位稳定内置类型长度，不充当 18.6 验收；修复后完整 PostgreSQL 协议回归通过，INTERVAL/OID/regtype 的 Simple Query 与 D Statement 均断言长度，name 类型还覆盖 current_user/session_user/user 两条路径。仍为 partial：其余自定义类型与全 typmod/catalog 元数据未完成 | `c55d6a8` |
 | 461 | P0-02 / PROTO-04 | `SELECT current_date/current_timestamp/localtimestamp` 的 Extended Query Describe 已能给出正确默认列名，但 Simple Query 的无 FROM 执行路径仍用通用表达式名 `?column?`，导致同一 SQL 两种协议模式的 headers 不一致。简单投影的无别名命名规则现识别这三个 SQL 时间关键字 | 修复前同一 wire 会话中 D Statement 返回关键字列名、Simple Query 返回 `?column?`；修复后完整 PostgreSQL 协议回归逐项对比两种路径的列名/OID/长度，FROM-less 结构化协议回归通过。两项保持 partial：通用表达式命名仍存在 legacy 路径 | `3085ab7` |
 
+| 462 | P0-02 / CAT-02 / TYPE-04 / PROTO-04 | 内置类型名表重复登记 `char`：首个 OID 18 覆盖 SQL `CHAR` 应有的 bpchar OID 1042，且缺失规范名 `character`。`CREATE TABLE ... CHAR(3)` 列和 `SELECT 'a'::char` 的 RowDescription 会报内部类型 OID 18。现将 SQL 别名统一映射到 1042、数组映射到 1014，保留内部 OID 18 的 built-in 判定，并校正 Simple/Extended 默认列名 `bpchar` | 修复前独立 wire 复现建表列和强转表达式均为 OID 18；修复后完整 PostgreSQL 协议回归和 `type_registry_test` 通过，覆盖目录列/强转两条协议路径。`CHAR(3)` 的 typmod 仍为 -1，另列后续待修；PostgreSQL 18.6 全量差分仍未运行，功能族保持 partial | `ff7e26a` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；第 428–429 项又迁移了 FROM-less 与普通表 scalar UDF 的声明类型和 NULL，并执行有限的 SQL function expression。混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF、完整 SQL function query body 及二进制值仍存在显示文本边界，继续计入总清单。
