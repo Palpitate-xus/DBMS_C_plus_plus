@@ -7103,6 +7103,13 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             const string proj = trim(cols.substr(0, whereAt));
             const string pred = trim(cols.substr(whereAt + 5));
             cols = proj;
+            string bindingError, bindingSqlState;
+            if (!validateFromlessColumnBindings(pred, bindingError,
+                                                bindingSqlState)) {
+                cout << "ERROR: " << bindingError << " (SQLSTATE "
+                     << bindingSqlState << ")" << endl;
+                return true;
+            }
             auto constEvalPredicate = [](const string& p) -> int {
                 // returns 1 true, 0 false, -1 unknown
                 string s2;
