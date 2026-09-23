@@ -10789,13 +10789,15 @@ static std::vector<std::string> runDerivedSubQueryFull(
     std::vector<std::vector<std::string>>* outStructuredRows = nullptr,
     std::vector<std::vector<bool>>* outStructuredNulls = nullptr,
     bool* outStructuredAvailable = nullptr,
-    bool* outExecutionFailed = nullptr) {
+    bool* outExecutionFailed = nullptr,
+    std::string* outFailureText = nullptr) {
     outColNames.clear();
     if (outColTypes) outColTypes->clear();
     if (outStructuredRows) outStructuredRows->clear();
     if (outStructuredNulls) outStructuredNulls->clear();
     if (outStructuredAvailable) *outStructuredAvailable = false;
     if (outExecutionFailed) *outExecutionFailed = false;
+    if (outFailureText) outFailureText->clear();
     std::stringstream captured;
     const unsigned previousCaptureDepth = metadataCaptureDepth;
     metadataCaptureDepth = executeDepth + 1;
@@ -10814,6 +10816,7 @@ static std::vector<std::string> runDerivedSubQueryFull(
     metadataCaptureDepth = previousCaptureDepth;
     if (failed) {
         if (outExecutionFailed) *outExecutionFailed = true;
+        if (outFailureText) *outFailureText = captured.str();
         return {};
     }
     std::vector<std::string> lines;
@@ -10865,6 +10868,18 @@ static std::vector<std::string> runDerivedSubQueryFull(
     if (lines.size() > 1)
         rows.assign(lines.begin() + 1, lines.end());
     return rows;
+}
+
+static void reportNestedQueryFailure(const std::string& captured) {
+    std::istringstream lines(captured);
+    std::string line, error;
+    while (std::getline(lines, line)) {
+        if (line.find("SQLSTATE ") != std::string::npos)
+            error = trim(line);
+    }
+    if (error.empty())
+        error = "ERROR: nested query failed (SQLSTATE XX000)";
+    cout << error << endl;
 }
 
 static std::vector<std::string> inferIntegerLiteralDerivedTypes(
@@ -11072,10 +11087,12 @@ static std::string materializeRecursiveCte(
     std::vector<std::vector<bool>> anchorNulls;
     bool anchorStructured = false;
     bool anchorFailed = false;
+    std::string anchorError;
     std::vector<std::string> anchorRows = runDerivedSubQueryFull(
         anchorSql, s, colNames, &colTypes, &anchorCells, &anchorNulls,
-        &anchorStructured, &anchorFailed);
+        &anchorStructured, &anchorFailed, &anchorError);
     if (anchorFailed) {
+        reportNestedQueryFailure(anchorError);
         failed = true;
         return {};
     }
@@ -11170,11 +11187,13 @@ static std::string materializeRecursiveCte(
         std::vector<std::vector<bool>> recursiveNulls;
         bool recursiveStructured = false;
         bool recursiveFailed = false;
+        std::string recursiveError;
         std::vector<std::string> recursiveRows = runDerivedSubQueryFull(
             iterationSql, s, recursiveNames, &recursiveTypes,
             &recursiveCells, &recursiveNulls,
-            &recursiveStructured, &recursiveFailed);
+            &recursiveStructured, &recursiveFailed, &recursiveError);
         if (recursiveFailed) {
+            reportNestedQueryFailure(recursiveError);
             dropTransientQueryTable(s, workName);
             failed = true;
             return {};
@@ -11313,6 +11332,32 @@ static std::string processCTEs(const std::string& sql, Session& s, bool& failed)
 
         std::string innerSelect = trim(result.substr(parenStart + 1, parenEnd - parenStart - 1));
 
+        // Without RECURSIVE, this CTE's name is not visible inside its own
+        // body.  A real relation of the same name remains visible there.
+        auto hasSelfRelationReference = [&](const std::string& body) {
+            for (const char* keyword : {"from ", "join "}) {
+                const std::string needle = std::string(keyword) + cteName;
+                size_t found = 0;
+                while ((found = findTextOutsideQuotes(body, needle, found)) !=
+                       std::string::npos) {
+                    const size_t after = found + needle.size();
+                    if (after == body.size() ||
+                        !(isalnum(static_cast<unsigned char>(body[after])) ||
+                          body[after] == '_')) return true;
+                    found += needle.size();
+                }
+            }
+            return false;
+        };
+        if (!recursiveMode &&
+            !g_engine.tableExists(s.currentDB, resolveTableName(s, cteName)) &&
+            hasSelfRelationReference(innerSelect)) {
+            cout << "ERROR: relation \"" << cteName
+                 << "\" does not exist (SQLSTATE 42P01)" << endl;
+            failed = true;
+            return {};
+        }
+
         std::string tmpName;
         std::vector<std::string> colNames;
 
@@ -11331,11 +11376,13 @@ static std::string processCTEs(const std::string& sql, Session& s, bool& failed)
             std::vector<std::vector<bool>> structuredNulls;
             bool structuredAvailable = false;
             bool executionFailed = false;
+            std::string executionError;
             std::vector<std::string> rows = runDerivedSubQueryFull(
                 innerSelect, s, colNames, &colTypes,
                 &structuredRows, &structuredNulls,
-                &structuredAvailable, &executionFailed);
+                &structuredAvailable, &executionFailed, &executionError);
             if (executionFailed) {
+                reportNestedQueryFailure(executionError);
                 failed = true;
                 return {};
             }
@@ -11394,9 +11441,17 @@ static std::string processCTEs(const std::string& sql, Session& s, bool& failed)
             std::vector<std::vector<std::string>> structuredRows;
             std::vector<std::vector<bool>> structuredNulls;
             bool structuredAvailable = false;
+            bool executionFailed = false;
+            std::string executionError;
             auto rows = runDerivedSubQueryFull(
                 innerSelect, s, colNames, &colTypes,
-                &structuredRows, &structuredNulls, &structuredAvailable);
+                &structuredRows, &structuredNulls, &structuredAvailable,
+                &executionFailed, &executionError);
+            if (executionFailed) {
+                reportNestedQueryFailure(executionError);
+                failed = true;
+                return {};
+            }
             if (colNames.empty()) {
                 colNames.clear();
                 rows = runDerivedSubQuery(innerSelect, s, colNames);
