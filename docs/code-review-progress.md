@@ -399,6 +399,8 @@
 
 | 466 | P0-02 / TYPE-04 / PROTO-08 | `INSERT` 到 `CHAR(3)`/`VARCHAR(3)` 超长值原走通用 `Invalid data`，wire 报 XX000；`UPDATE` 的早期宽度检查报 22023。存储状态现区分字符列右截断，INSERT/UPDATE 的早期与最终行校验均传出 22001；typed 和 legacy INSERT 都保留该状态 | 修复前隔离 wire 复现 `INSERT CHAR(3) VALUES ('abcd')` 报 XX000；第一次修改后 UPDATE 仍为 22023，补齐早期校验后 INSERT/UPDATE 均为 22001，失败 UPDATE 后原行保持不变。完整协议、insert final validation、update type validation 通过。[PostgreSQL 18 错误码表](https://www.postgresql.org/docs/18/errcodes-appendix.html)确认 22001。仍未覆盖 Unicode 字符长度、超长尾空格例外和全部写入路径，功能族保持 partial | `48ea6a8` |
 
+| 467 | TYPE-04 | 列赋值 `CHAR(3)`/`VARCHAR(3)` 写入 `'ab  '` 原报 22001，未遵守 SQL 对“仅超出尾随空格”可截断的例外。存储层现在在 INSERT 的原始/最终行和 UPDATE 的早期/最终赋值阶段统一检查：超出的字节全部为空格时截到声明容量，否则继续报 22001 | 修复前隔离 wire 探针确认两类列都拒绝；修复后 INSERT 和 UPDATE 均成功，读回为 `'ab '`/`'xy '`；完整 PostgreSQL 协议回归两次通过并加入长期断言。[PostgreSQL 18 字符类型文档](https://www.postgresql.org/docs/18/datatype-character.html)确认尾随空格例外。该实现仍按字节容量，Unicode 字符计数、CHAR 短值补空格和完整比较语义未完成，TYPE-04 保持 partial | `508829f` |
+
 本批新增的待修复复现（仍计入总清单）：
 
 - P0-02：quoted alias、无 FROM 普通投影、基础表列和基础表标量投影已由第 211–212、234–240 项迁移；第 428–429 项又迁移了 FROM-less 与普通表 scalar UDF 的声明类型和 NULL，并执行有限的 SQL function expression。混合物理列/输出表达式排序、DISTINCT ON、任意表达式排序、聚合 / JOIN / 窗口 rows、CTE / set operation、legacy scalar subquery、SRF、完整 SQL function query body 及二进制值仍存在显示文本边界，继续计入总清单。
