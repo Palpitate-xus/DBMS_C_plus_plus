@@ -9131,9 +9131,13 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                 } else {
                     if (pos + 2 < tokens.size() && toLower(tokens[pos]) == "if" &&
                         toLower(tokens[pos + 1]) == "exists") { sub.ifExists = true; pos += 2; }
-                    if (pos < tokens.size()) sub.name = tokens[pos++];
+                    if (pos < tokens.size()) {
+                        sub.name = parseRoutineIdentifier(tokens[pos++]);
+                    }
                     if (pos < tokens.size() && toLower(tokens[pos]) == "to") ++pos;
-                    if (pos < tokens.size()) sub.newName = tokens[pos++];
+                    if (pos < tokens.size()) {
+                        sub.newName = parseRoutineIdentifier(tokens[pos++]);
+                    }
                     sub.action = AlterTableStmt::Action::RenameColumn;
                     recognized = true;
                 }
