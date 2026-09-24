@@ -22457,6 +22457,19 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
         }
 
+        for (const auto& groupColumn : groupByCols) {
+            string bindingError, bindingSqlState;
+            const string& visibleQualifier = tableAlias.empty()
+                ? tnameOrig : tableAlias;
+            if (!validateFromlessColumnBindings(
+                    groupColumn, bindingError, bindingSqlState,
+                    visibleQualifier, &visibleColumns)) {
+                cout << "ERROR: " << bindingError << " (SQLSTATE "
+                     << bindingSqlState << ")" << endl;
+                return true;
+            }
+        }
+
         if (havingPos != string::npos && groupPos == string::npos) {
             cout << "SQL syntax error: HAVING without GROUP BY" << endl;
             return true;
