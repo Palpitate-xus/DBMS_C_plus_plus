@@ -2693,7 +2693,8 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                         s.currentDB, tableName, constraintName, tc.columns);
                 } else if (type == "foreign key") {
                     status = g_engine.alterTableAddFKConstraint(
-                        s.currentDB, tableName, constraintName, tc.columns, tc.refTable,
+                        s.currentDB, tableName, constraintName, tc.columns,
+                        resolveTableName(s, tc.refTable),
                         tc.refColumns, tc.onDelete, tc.onUpdate);
                 } else {
                     std::cout << "ALTER TABLE constraint type is unsupported" << std::endl;
@@ -5427,6 +5428,10 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             tbl.uniqueConstraintNames.push_back(tc.name);
         } else if (t == "foreign key") {
             ForeignKey fk = tableConstraintToForeignKey(tc);
+            // Store the relation selected by the creation-time search_path.
+            // Re-resolving an unqualified name during a later DROP or DML
+            // can bind to an unrelated relation after search_path changes.
+            fk.refTable = resolveTableName(s, fk.refTable);
             if (fk.name.empty()) {
                 const std::string base = targetName.name + "_" +
                     (tc.columns.empty() ? "key" : tc.columns.front()) +
@@ -6281,10 +6286,24 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
         const TableSchema child =
             g_engine.getTableSchema(s.currentDB, candidate);
         for (size_t i = 0; i < child.fkLen; ++i) {
-            const std::string referenced =
-                resolveTableName(s, child.fks[i].refTable);
-            if (referenced != tname) continue;
+            const std::string& storedReference = child.fks[i].refTable;
+            const bool exactReference = storedReference == tname ||
+                (storedReference.find('.') != std::string::npos &&
+                 resolveTableName(s, storedReference) == tname);
+            // Old schema files may contain a bare name.  Its original
+            // search_path was not persisted, so fail conservatively rather
+            // than delete a possibly referenced relation.
+            const bool ambiguousLegacyReference = !exactReference &&
+                storedReference.find('.') == std::string::npos &&
+                CatalogService::logicalName(tname).name == storedReference;
+            if (!exactReference && !ambiguousLegacyReference) continue;
             if (stmt->cascade) {
+                if (ambiguousLegacyReference) {
+                    std::cout << "ERROR: ambiguous legacy foreign key target "
+                                 "requires migration (SQLSTATE 0A000)"
+                              << std::endl;
+                    return true;
+                }
                 if (child.fks[i].name.empty()) {
                     std::cout << "ERROR: cannot drop unnamed foreign key "
                                  "constraint (SQLSTATE 0A000)" << std::endl;
