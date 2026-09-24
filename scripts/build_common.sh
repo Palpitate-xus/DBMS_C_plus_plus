@@ -72,6 +72,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/procedure_replace_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/gap_progress_test.py tests/pg_diff_runner_test.py)
     DBMS_E2E_TESTS+=(tests/build_cache_routing_test.py)
+    DBMS_E2E_TESTS+=(tests/main_build_incremental_test.py)
     DBMS_E2E_TESTS+=(tests/e2e_binary_routing_test.py)
     DBMS_E2E_TESTS+=(tests/version_consistency_test.py)
     DBMS_E2E_TESTS+=(tests/documentation_status_test.py)
@@ -133,14 +134,38 @@ dbms_main_needs_rebuild() {
     [[ ! -x "$binary" ]] && return 0
     [[ ! -f "$stamp" || "$(<"$stamp")" != "$(dbms_cache_signature)" ]] && return 0
     [[ "${DBMS_MANIFEST}" -nt "$binary" ]] && return 0
+    [[ "${DBMS_SOURCE_DIR}/scripts/build_common.sh" -nt "$binary" ]] && return 0
 
     for source in "${DBMS_MAIN_SOURCES[@]}"; do
+        [[ ! -f "${DBMS_SOURCE_DIR}/build/main_obj/${source}.o" ]] && return 0
         [[ "${DBMS_SOURCE_DIR}/${source}" -nt "$binary" ]] && return 0
     done
     while IFS= read -r header; do
         [[ "$header" -nt "$binary" ]] && return 0
     done < <(find "${DBMS_SOURCE_DIR}/src" -type f \( -name '*.h' -o -name '*.hpp' \) -print)
     return 1
+}
+
+dbms_main_compile_signature() {
+    {
+        command -v g++
+        g++ -dumpfullversion -dumpversion
+        printf '%s\n' "${DBMS_CXXFLAGS[@]}"
+        printf '%s\n' "${DBMS_PRODUCTION_INCLUDES[@]}"
+        local header
+        while IFS= read -r header; do
+            sha256sum -- "$header"
+        done < <(find "${DBMS_SOURCE_DIR}/src" -type f \( -name '*.h' -o -name '*.hpp' \) -print | sort)
+    } | sha256sum | awk '{print $1}'
+}
+
+dbms_main_object_signature() {
+    local source="${1:?source is required}"
+    local compile_signature="${2:?compile signature is required}"
+    {
+        printf '%s\n' "$compile_signature" "$source"
+        sha256sum -- "${DBMS_SOURCE_DIR}/${source}"
+    } | sha256sum | awk '{print $1}'
 }
 
 dbms_build_main() {
@@ -154,12 +179,51 @@ dbms_build_main() {
         return 0
     fi
 
-    echo "[build] Compiling production binary..."
-    if ! (cd "${DBMS_SOURCE_DIR}" && \
-        g++ "${DBMS_CXXFLAGS[@]}" "${DBMS_PRODUCTION_INCLUDES[@]}" \
-            "${DBMS_MAIN_SOURCES[@]}" -o "$temporary_binary" "${DBMS_LDFLAGS[@]}"); then
+    local initial_signature compile_signature source object object_stamp
+    local expected_signature temporary_object
+    local -a objects=()
+    initial_signature="$(dbms_cache_signature)"
+    compile_signature="$(dbms_main_compile_signature)"
+    for source in "${DBMS_MAIN_SOURCES[@]}"; do
+        object="${DBMS_SOURCE_DIR}/build/main_obj/${source}.o"
+        object_stamp="${object}.sha256"
+        expected_signature="$(dbms_main_object_signature "$source" "$compile_signature")"
+        mkdir -p -- "$(dirname "$object")"
+        if [[ ! -f "$object" || ! -f "$object_stamp" ||
+              "$(<"$object_stamp")" != "$expected_signature" ]]; then
+            temporary_object="${object}.tmp.$$"
+            echo "[build] Compiling ${source}"
+            if ! (cd "${DBMS_SOURCE_DIR}" &&
+                g++ "${DBMS_CXXFLAGS[@]}" "${DBMS_PRODUCTION_INCLUDES[@]}" \
+                    -c "$source" -o "$temporary_object"); then
+                rm -f -- "$temporary_object"
+                echo "[build] Production object compilation failed: ${source}" >&2
+                return 1
+            fi
+            if [[ "$(dbms_main_object_signature "$source" "$compile_signature")" != "$expected_signature" ]]; then
+                rm -f -- "$temporary_object"
+                echo "[build] Source changed during compilation: ${source}" >&2
+                return 1
+            fi
+            mv -f -- "$temporary_object" "$object"
+            printf '%s\n' "$expected_signature" > "${object_stamp}.tmp.$$"
+            mv -f -- "${object_stamp}.tmp.$$" "$object_stamp"
+        fi
+        objects+=("$object")
+    done
+    if [[ "$(dbms_cache_signature)" != "$initial_signature" ]]; then
+        echo "[build] Inputs changed during compilation" >&2
+        return 1
+    fi
+    echo "[build] Linking production binary..."
+    if ! g++ "${objects[@]}" -o "$temporary_binary" "${DBMS_LDFLAGS[@]}"; then
         rm -f -- "$temporary_binary"
-        echo "[build] Production binary compilation failed" >&2
+        echo "[build] Production binary link failed" >&2
+        return 1
+    fi
+    if [[ "$(dbms_cache_signature)" != "$initial_signature" ]]; then
+        rm -f -- "$temporary_binary"
+        echo "[build] Inputs changed during linking" >&2
         return 1
     fi
     if ! mv -f -- "$temporary_binary" "$binary"; then
@@ -167,7 +231,7 @@ dbms_build_main() {
         echo "[build] Could not publish production binary" >&2
         return 1
     fi
-    printf '%s\n' "$(dbms_cache_signature)" > "${stamp}.tmp"
+    printf '%s\n' "$initial_signature" > "${stamp}.tmp"
     if ! mv -f -- "${stamp}.tmp" "$stamp"; then
         rm -f -- "${stamp}.tmp"
         echo "[build] Could not publish production build stamp" >&2
