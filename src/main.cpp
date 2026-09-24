@@ -27016,11 +27016,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 queryDb != "information_schema" && queryDb != "pg_catalog" &&
                 (s.onlyNext ||
                  g_engine.getInheritedChildren(queryDb, tname).empty());
-            vector<StorageEngine::OrderBySpec> structuredPlainOrderSpecs =
-                orderBySpecs;
-            structuredPlainOrderSpecs.insert(
-                structuredPlainOrderSpecs.end(), exprOrderBySpecs.begin(),
-                exprOrderBySpecs.end());
+            vector<StorageEngine::OrderBySpec> structuredPlainOrderSpecs;
+            structuredPlainOrderSpecs.reserve(orderKeyRefs.size());
+            for (const auto& [isExpression, keyIndex] : orderKeyRefs)
+                structuredPlainOrderSpecs.push_back(isExpression
+                    ? exprOrderBySpecs[keyIndex] : orderBySpecs[keyIndex]);
 
             // Determine the first simple ORDER BY spec (if any) that the volcano
             // path can consume (only plain column ORDER BY without NULLS / expr).

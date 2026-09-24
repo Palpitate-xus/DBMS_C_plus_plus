@@ -28902,19 +28902,23 @@ std::vector<std::string> StorageEngine::query(
     if (hasExprOrder) {
         std::vector<Column> expressionComparisonColumns;
         for (const auto& spec : orderBy) {
-            if (!spec.isExpression) continue;
             Column comparisonColumn;
             comparisonColumn.dataType = "text";
             comparisonColumn.isVariableLength = true;
-            if (spec.exprFunc == "upper" || spec.exprFunc == "lower" ||
-                spec.exprFunc.empty()) {
+            if (!spec.isExpression || spec.exprFunc == "upper" ||
+                spec.exprFunc == "lower" || spec.exprFunc.empty()) {
                 for (size_t columnIndex = 0; columnIndex < tbl.len;
                      ++columnIndex) {
-                    if (tbl.cols[columnIndex].dataName == spec.exprArg) {
+                    if (tbl.cols[columnIndex].dataName ==
+                        (spec.isExpression ? spec.exprArg : spec.colName)) {
                         comparisonColumn = tbl.cols[columnIndex];
                         break;
                     }
                 }
+            } else if (spec.exprFunc == "add" || spec.exprFunc == "sub" ||
+                       spec.exprFunc == "abs" || spec.exprFunc == "length") {
+                comparisonColumn.dataType = "numeric";
+                comparisonColumn.isVariableLength = true;
             }
             if (!spec.collation.empty()) {
                 comparisonColumn.collation =
@@ -28959,7 +28963,13 @@ std::vector<std::string> StorageEngine::query(
                          dbname, tbl.tablename, matchRows[ri].first, ci));
             }
             for (const auto& spec : orderBy) {
-                if (!spec.isExpression) continue;
+                if (!spec.isExpression) {
+                    const auto value = rowData.find(spec.colName);
+                    const auto isNull = rowNulls.find(spec.colName);
+                    ek.exprVals.push_back(value == rowData.end() ? "" : value->second);
+                    ek.exprNulls.push_back(isNull == rowNulls.end() || isNull->second);
+                    continue;
+                }
                 std::string ev;
                 bool expressionIsNull = false;
                 auto getCol = [&](const std::string& name) -> std::string {
@@ -28993,36 +29003,25 @@ std::vector<std::string> StorageEngine::query(
             ekeys.push_back(std::move(ek));
         }
         std::stable_sort(ekeys.begin(), ekeys.end(), [&](const ExprKey& a, const ExprKey& b) {
-            size_t evi = 0;
-            for (const auto& spec : orderBy) {
-                if (!spec.isExpression) continue;
-                const std::string& av = a.exprVals[evi];
-                const std::string& bv = b.exprVals[evi];
-                const bool aNull = a.exprNulls[evi];
-                const bool bNull = b.exprNulls[evi];
-                if (aNull && bNull) { ++evi; continue; }
+            for (size_t keyIndex = 0; keyIndex < orderBy.size(); ++keyIndex) {
+                const auto& spec = orderBy[keyIndex];
+                const std::string& av = a.exprVals[keyIndex];
+                const std::string& bv = b.exprVals[keyIndex];
+                const bool aNull = a.exprNulls[keyIndex];
+                const bool bNull = b.exprNulls[keyIndex];
+                if (aNull && bNull) continue;
                 if (aNull) return spec.nullsFirst;
                 if (bNull) return !spec.nullsFirst;
-                bool less = false, greater = false;
-                if (!expressionComparisonColumns[evi].collation.empty()) {
-                    const int comparison = compareTextValues(
-                        expressionComparisonColumns[evi], av, bv);
-                    less = comparison < 0;
-                    greater = comparison > 0;
-                } else {
-                    try {
-                        int64_t na = std::stoll(av);
-                        int64_t nb = std::stoll(bv);
-                        less = na < nb;
-                        greater = na > nb;
-                    } catch (...) {
-                        less = av < bv;
-                        greater = av > bv;
-                    }
-                }
-                if (less) return spec.ascending;
-                if (greater) return !spec.ascending;
-                ++evi;
+                const auto less = compareValues(
+                    expressionComparisonColumns[keyIndex], av, false,
+                    bv, false, "<");
+                const auto greater = compareValues(
+                    expressionComparisonColumns[keyIndex], av, false,
+                    bv, false, ">");
+                const bool isLess = less == PredicateTruth::True;
+                const bool isGreater = greater == PredicateTruth::True;
+                if (isLess) return spec.ascending;
+                if (isGreater) return !spec.ascending;
             }
             return false;
         });
