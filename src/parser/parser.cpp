@@ -9129,7 +9129,9 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                 if (explicitColumn) ++pos;
                 if (!explicitColumn && pos < tokens.size() && toLower(tokens[pos]) == "to") {
                     ++pos;
-                    if (pos < tokens.size()) sub.newName = tokens[pos++];
+                    if (pos < tokens.size()) {
+                        sub.newName = parseRoutineIdentifier(tokens[pos++]);
+                    }
                     sub.action = AlterTableStmt::Action::RenameTable;
                     recognized = true;
                 } else {
