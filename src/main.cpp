@@ -7085,6 +7085,99 @@ static bool validateFromlessColumnBindings(const string& expression,
     return false;
 }
 
+// Return the first ungrouped input column in a SELECT expression.  Aggregate
+// arguments have their own per-group scope, while scalar expression operands
+// must be grouping keys unless the table's primary key is grouped.
+static string ungroupedProjectionColumn(
+    const string& expression, const set<string>& groupedColumns,
+    const set<string>& visibleColumns) {
+    dbms::SQLParser parser;
+    const auto parsed = parser.parse("SELECT " + expression);
+    const auto* select = parsed.success
+        ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
+    if (!select || select->selectList.size() != 1 ||
+        !select->selectList.front().expr) return "";
+    string missing;
+    std::function<void(const dbms::Expr*)> inspect =
+        [&](const dbms::Expr* node) {
+            if (!node || !missing.empty()) return;
+            switch (node->type) {
+                case dbms::ExprType::ColumnRef: {
+                    const auto* column =
+                        static_cast<const dbms::ColumnRefExpr*>(node);
+                    if (visibleColumns.count(column->column) &&
+                        !groupedColumns.count(column->column))
+                        missing = column->column;
+                    return;
+                }
+                case dbms::ExprType::UnaryOp:
+                    inspect(static_cast<const dbms::UnaryOpExpr*>(node)
+                                ->operand.get());
+                    return;
+                case dbms::ExprType::BinaryOp: {
+                    const auto* binary =
+                        static_cast<const dbms::BinaryOpExpr*>(node);
+                    inspect(binary->left.get());
+                    inspect(binary->right.get());
+                    return;
+                }
+                case dbms::ExprType::FunctionCall: {
+                    const auto* call =
+                        static_cast<const dbms::FunctionCallExpr*>(node);
+                    static const set<string> aggregateFunctions = {
+                        "count", "sum", "avg", "min", "max", "string_agg",
+                        "array_agg", "json_agg", "jsonb_agg", "bool_and",
+                        "bool_or", "every", "stddev", "variance"
+                    };
+                    const string functionName = toLower(call->funcName);
+                    if (aggregateFunctions.count(functionName) ||
+                        functionName == "any" || functionName == "all")
+                        return;
+                    for (size_t i = 0; i < call->args.size(); ++i) {
+                        if (functionName == "extract" && i == 0) continue;
+                        inspect(call->args[i].get());
+                    }
+                    for (const auto& arg : call->namedArgs)
+                        inspect(arg.value.get());
+                    inspect(call->filter.get());
+                    return;
+                }
+                case dbms::ExprType::CastExpr:
+                    inspect(static_cast<const dbms::CastExpr*>(node)
+                                ->operand.get());
+                    return;
+                case dbms::ExprType::CaseExpr: {
+                    const auto* caseExpr =
+                        static_cast<const dbms::CaseExpr*>(node);
+                    inspect(caseExpr->switchExpr.get());
+                    for (const auto& clause : caseExpr->whenClauses) {
+                        inspect(clause.first.get());
+                        inspect(clause.second.get());
+                    }
+                    inspect(caseExpr->elseExpr.get());
+                    return;
+                }
+                case dbms::ExprType::ArrayExpr:
+                    for (const auto& element :
+                         static_cast<const dbms::ArrayExpr*>(node)->elements)
+                        inspect(element.get());
+                    return;
+                case dbms::ExprType::RowExpr:
+                    for (const auto& element :
+                         static_cast<const dbms::RowExpr*>(node)->elements)
+                        inspect(element.get());
+                    return;
+                case dbms::ExprType::Subquery:
+                case dbms::ExprType::Literal:
+                case dbms::ExprType::Parameter:
+                case dbms::ExprType::A_Star:
+                    return;
+            }
+        };
+    inspect(select->selectList.front().expr.get());
+    return missing;
+}
+
 static bool handleFromlessSelect(const string& sql, Session& s) {
     string cols = trim(string(sql.substr(6)));
     if (!cols.empty() && cols.back() == ';') cols.pop_back();
@@ -22509,16 +22602,28 @@ static bool executeInternal(const string& rawSql, Session& s) {
             groupFunctionallyDependent = primaryKeyColumns > 0 &&
                 primaryKeyColumns == groupedPrimaryKeyColumns;
             if (!groupFunctionallyDependent) {
+                const set<string> groupedNames(
+                    groupByCols.begin(), groupByCols.end());
+                bool simpleGroupingKeys = true;
+                for (const auto& key : groupByCols)
+                    if (!visibleColumns.count(key))
+                        simpleGroupingKeys = false;
                 for (const auto& rawItem : splitSelectColumns(columns)) {
                     string item = trim(rawItem);
                     const size_t asAt = findLastTextOutsideQuotes(
                         toLower(item), " as ");
                     if (asAt != string::npos)
                         item = trim(item.substr(0, asAt));
+                    string ungrouped;
                     if (visibleColumns.count(item) &&
-                        find(groupByCols.begin(), groupByCols.end(), item) ==
-                            groupByCols.end()) {
-                        cout << "ERROR: column \"" << item
+                        !groupedNames.count(item)) {
+                        ungrouped = item;
+                    } else if (simpleGroupingKeys) {
+                        ungrouped = ungroupedProjectionColumn(
+                            item, groupedNames, visibleColumns);
+                    }
+                    if (!ungrouped.empty()) {
+                        cout << "ERROR: column \"" << ungrouped
                              << "\" must appear in the GROUP BY clause or "
                                 "be used in an aggregate function "
                                 "(SQLSTATE 42803)" << endl;
