@@ -5373,6 +5373,26 @@ void cleanupSessionTempTables(Session& s) {
 }
 
 string resolveTableName(Session& s, const string& name) {
+    if (name.find('"') != string::npos) {
+        string decoded;
+        decoded.reserve(name.size());
+        bool quoted = false;
+        for (size_t i = 0; i < name.size(); ++i) {
+            if (name[i] != '"') {
+                decoded += name[i];
+                continue;
+            }
+            if (quoted && i + 1 < name.size() && name[i + 1] == '"') {
+                decoded += '"';
+                ++i;
+                continue;
+            }
+            quoted = !quoted;
+        }
+        if (!quoted && decoded != name) {
+            return resolveTableName(s, decoded);
+        }
+    }
     const size_t dotPos = name.find('.');
     if (dotPos != string::npos && dotPos > 0 && dotPos + 1 < name.size()) {
         string schema = name.substr(0, dotPos);

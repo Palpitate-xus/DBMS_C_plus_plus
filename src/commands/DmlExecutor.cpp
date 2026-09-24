@@ -427,10 +427,25 @@ std::string lower(std::string value) {
 }
 
 std::string identifier(std::string value) {
-    if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
-        value = value.substr(1, value.size() - 2);
+    std::string decoded;
+    decoded.reserve(value.size());
+    bool quoted = false;
+    for (size_t i = 0; i < value.size(); ++i) {
+        const char c = value[i];
+        if (c == '"') {
+            if (quoted && i + 1 < value.size() && value[i + 1] == '"') {
+                decoded += '"';
+                ++i;
+            } else {
+                quoted = !quoted;
+            }
+            continue;
+        }
+        decoded += quoted
+            ? c
+            : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     }
-    return lower(value);
+    return quoted ? lower(value) : decoded;
 }
 
 bool isTempTable(const Session& s, const std::string& name) {
