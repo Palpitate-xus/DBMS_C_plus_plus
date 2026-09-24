@@ -22668,14 +22668,20 @@ static bool executeInternal(const string& rawSql, Session& s) {
             size_t havingEnd = (orderPos != string::npos) ? orderPos
                              : (limitPos != string::npos) ? limitPos
                              : (offsetPos != string::npos) ? offsetPos : sql.size();
-            string havingClause = normalizeConditionStr(trim(sql.substr(havingPos + 6, havingEnd - havingPos - 6)));
-            implicitHavingClause = havingClause;
+            const string rawHavingClause =
+                trim(sql.substr(havingPos + 6,
+                                havingEnd - havingPos - 6));
+            string havingClause = normalizeConditionStr(rawHavingClause);
+            // The legacy storage predicate tokenizer needs normalized text,
+            // but SQL binding and expression evaluation need the original
+            // syntax: normalization glues "IS NULL" into "isnull".
+            implicitHavingClause = rawHavingClause;
             {
                 string bindingError, bindingSqlState;
                 const string& visibleQualifier = tableAlias.empty()
                     ? tnameOrig : tableAlias;
                 if (!validateFromlessColumnBindings(
-                        havingClause, bindingError, bindingSqlState,
+                        rawHavingClause, bindingError, bindingSqlState,
                         visibleQualifier, &visibleColumns)) {
                     cout << "ERROR: " << bindingError << " (SQLSTATE "
                          << bindingSqlState << ")" << endl;
