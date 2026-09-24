@@ -22906,7 +22906,26 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         item = trim(item.substr(0, asPos));
                     }
                 }
-                if (item == "current_user" || item == "session_user") {
+                bool quotedPlainColumn = false;
+                if (item.size() >= 2 && item.front() == '"' &&
+                    item.back() == '"') {
+                    bool singleIdentifier = true;
+                    for (size_t i = 1; i + 1 < item.size(); ++i) {
+                        if (item[i] != '"') continue;
+                        if (i + 2 < item.size() && item[i + 1] == '"') {
+                            ++i;
+                            continue;
+                        }
+                        singleIdentifier = false;
+                        break;
+                    }
+                    if (singleIdentifier) {
+                        item = decodeQuotedIdentifier(item);
+                        quotedPlainColumn = true;
+                    }
+                }
+                if (!quotedPlainColumn &&
+                    (item == "current_user" || item == "session_user")) {
                     dbms::StorageEngine::SelectExpr expr;
                     expr.displayName = itemAlias.empty() ? item : itemAlias;
                     expr.isScalar = true;

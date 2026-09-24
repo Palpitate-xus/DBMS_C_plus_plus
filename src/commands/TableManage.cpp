@@ -23486,6 +23486,22 @@ DBStatus StorageEngine::insertInternal(
 std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
     const std::vector<std::string>& cstr) {
     std::vector<Condition> conds;
+    auto decodeSqlIdentifier = [](const std::string& value) {
+        if (value.size() < 2 || value.front() != '"' ||
+            value.back() != '"') return value;
+        std::string decoded;
+        decoded.reserve(value.size() - 2);
+        for (size_t i = 1; i + 1 < value.size(); ++i) {
+            if (value[i] == '"') {
+                if (i + 2 >= value.size() || value[i + 1] != '"') {
+                    return value;
+                }
+                ++i;
+            }
+            decoded += value[i];
+        }
+        return decoded;
+    };
     auto decodeSqlLiteral = [](std::string value) {
         if (value.size() < 2 || value.front() != '\'' ||
             value.back() != '\'') {
@@ -23705,6 +23721,9 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
         c.colName = s.substr(opEnd, sp - opEnd);
         c.value = decodeSqlLiteral(s.substr(sp + 1));
         conds.push_back(c);
+    }
+    for (auto& condition : conds) {
+        condition.colName = decodeSqlIdentifier(condition.colName);
     }
     return conds;
 }

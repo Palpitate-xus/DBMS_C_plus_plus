@@ -2358,9 +2358,11 @@ static ExprPtr parsePrimaryExpr(const std::vector<std::string>& tokens, size_t& 
     }
 
     auto colRef = std::make_unique<ColumnRefExpr>();
-    colRef->schema = schemaName;
-    colRef->table = tableName;
-    colRef->column = colName;
+    colRef->schema = schemaName.empty()
+        ? "" : parseRoutineIdentifier(schemaName);
+    colRef->table = tableName.empty()
+        ? "" : parseRoutineIdentifier(tableName);
+    colRef->column = parseRoutineIdentifier(colName);
     return colRef;
 }
 
@@ -5902,7 +5904,7 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
             } else {
                 // Column definition
                 ColumnDef col;
-                col.name = tokens[pos++];
+                col.name = parseRoutineIdentifier(tokens[pos++]);
                 if (pos < tokens.size()) {
                     col.typeName = tokens[pos++];
                     // Multi-word type names: "bit varying", "character varying",
