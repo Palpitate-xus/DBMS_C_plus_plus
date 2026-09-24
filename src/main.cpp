@@ -24671,13 +24671,24 @@ static bool executeInternal(const string& rawSql, Session& s) {
             // Simple output ORDER BY keys are applied below after grouping;
             // they do not require falling back to the legacy aggregates.
             vector<vector<string>> volcanoGroupConditions;
+            vector<vector<dbms::StorageEngine::Condition>>
+                volcanoGroupBranches;
             if (canUseVolcanoGroup && !condTokens.empty()) {
                 vector<string> condCopy = condTokens;
                 condCopy.insert(condCopy.begin(), "(");
                 condCopy.push_back(")");
                 for (auto& token : condCopy) token = modifyLogic(token);
                 volcanoGroupConditions = breakDownConditions(condCopy);
-                canUseVolcanoGroup = volcanoGroupConditions.size() <= 1;
+                canUseVolcanoGroup = !volcanoGroupConditions.empty();
+                for (const auto& branch : volcanoGroupConditions) {
+                    auto parsed =
+                        dbms::StorageEngine::parseConditions(branch);
+                    if (parsed.empty()) {
+                        canUseVolcanoGroup = false;
+                        break;
+                    }
+                    volcanoGroupBranches.push_back(std::move(parsed));
+                }
             }
             auto hasColumn = [&](const string& name) {
                 for (size_t i = 0; i < tbl.len; ++i) {
@@ -24750,6 +24761,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
             }
 
+            if (!canUseVolcanoGroup &&
+                volcanoGroupConditions.size() > 1) {
+                cout << "ERROR: this grouped OR predicate is not yet "
+                        "supported (SQLSTATE 0A000)" << endl;
+                return true;
+            }
             if (canUseVolcanoGroup) {
                 dbms::PlanContext ctx;
                 ctx.dbname = queryDb;
@@ -24758,8 +24775,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 ctx.groupingSets = isGroupingSets ? groupingSets : vector<vector<string>>{};
                 ctx.aggregateItems = pureAgg;
                 ctx.havingConds = havingConds;
-                if (!volcanoGroupConditions.empty()) {
-                    ctx.conds = dbms::StorageEngine::parseConditions(volcanoGroupConditions.front());
+                if (volcanoGroupBranches.size() == 1) {
+                    ctx.conds = std::move(volcanoGroupBranches.front());
+                } else if (volcanoGroupBranches.size() > 1) {
+                    ctx.disjunctiveConds =
+                        std::move(volcanoGroupBranches);
                 }
                 auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
                 auto execution = dbms::QueryPlanner::executePlanChecked(std::move(plan));
