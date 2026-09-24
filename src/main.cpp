@@ -22481,6 +22481,18 @@ static bool executeInternal(const string& rawSql, Session& s) {
                              : (limitPos != string::npos) ? limitPos
                              : (offsetPos != string::npos) ? offsetPos : sql.size();
             string havingClause = normalizeConditionStr(trim(sql.substr(havingPos + 6, havingEnd - havingPos - 6)));
+            {
+                string bindingError, bindingSqlState;
+                const string& visibleQualifier = tableAlias.empty()
+                    ? tnameOrig : tableAlias;
+                if (!validateFromlessColumnBindings(
+                        havingClause, bindingError, bindingSqlState,
+                        visibleQualifier, &visibleColumns)) {
+                    cout << "ERROR: " << bindingError << " (SQLSTATE "
+                         << bindingSqlState << ")" << endl;
+                    return true;
+                }
+            }
             size_t pos = 0;
             while (pos < havingClause.size()) {
                 size_t andPos = havingClause.find("and", pos);
@@ -22490,52 +22502,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
                 havingConds.push_back(trim(havingClause.substr(pos, andPos - pos)));
                 pos = andPos + 3;
-            }
-            // PG semantics: HAVING may reference a SELECT-list alias
-            // ("SELECT count(*) AS cnt ... HAVING cnt > 1").  Resolve each
-            // whole-word alias token through the SELECT list.
-            {
-                std::map<string, string> aliasToExpr;
-                for (const auto& itemRaw : splitSelectColumns(columns)) {
-                    string it = trim(itemRaw);
-                    string lower;
-                    lower.reserve(it.size());
-                    for (char ch : it)
-                        lower += static_cast<char>(tolower(static_cast<unsigned char>(ch)));
-                    size_t ap = findTextOutsideQuotes(lower, " as ");
-                    while (ap != string::npos) {
-                        string tail = trim(it.substr(ap + 4));
-                        if (!tail.empty() &&
-                            tail.find_first_of(" ,()+-*/%") == string::npos) {
-                            aliasToExpr[tail] = trim(it.substr(0, ap));
-                            break;
-                        }
-                        ap = findTextOutsideQuotes(lower, " as ", ap + 4);
-                    }
-                }
-                if (!aliasToExpr.empty()) {
-                    for (auto& hc : havingConds) {
-                        for (const auto& kv : aliasToExpr) {
-                            const string& al = kv.first;
-                            size_t hp = 0;
-                            while ((hp = hc.find(al, hp)) != string::npos) {
-                                bool leftOk = (hp == 0) ||
-                                    !(isalnum(static_cast<unsigned char>(hc[hp - 1])) ||
-                                      hc[hp - 1] == '_' || hc[hp - 1] == '.');
-                                size_t ae = hp + al.size();
-                                bool rightOk = (ae >= hc.size()) ||
-                                    !(isalnum(static_cast<unsigned char>(hc[ae])) ||
-                                      hc[ae] == '_' || hc[ae] == '(');
-                                if (leftOk && rightOk) {
-                                    hc = hc.substr(0, hp) + kv.second + hc.substr(ae);
-                                    hp = hp + kv.second.size();
-                                } else {
-                                    hp = ae;
-                                }
-                            }
-                        }
-                    }
-                }
             }
         }
 

@@ -2874,9 +2874,7 @@ def main():
         dnb = data_row_values(simple_query(sock, "SELECT id FROM pred_t"))
         assert dnb == [[b"2"], [b"3"]], dnb
 
-        # GROUP BY / HAVING referencing SELECT-list aliases (PG semantics):
-        # "GROUP BY d" / "HAVING cnt > 1" previously returned wrong results
-        # (alias unresolved: group produced all rows / having was dropped).
+        # PostgreSQL permits SELECT-list aliases in GROUP BY but not HAVING.
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "CREATE TABLE grp_t (id INT PRIMARY KEY, dept TEXT, salary INT)"))
         assert any(kind == b"C" for kind, _ in simple_query(
@@ -2887,10 +2885,10 @@ def main():
         g2 = data_row_values(simple_query(
             sock, "SELECT dept AS d FROM grp_t GROUP BY d ORDER BY d"))
         assert g2 == [[b"eng"], [b"ops"]], g2
-        h1 = data_row_values(simple_query(
+        h1 = simple_query(
             sock, "SELECT dept, COUNT(*) AS cnt FROM grp_t "
-            "GROUP BY dept HAVING cnt > 1"))
-        assert h1 == [[b"eng", b"2"]], h1
+            "GROUP BY dept HAVING cnt > 1")
+        assert b"C42703\0" in next(body for kind, body in h1 if kind == b"E"), h1
         # Regressions: plain column GROUP BY, non-alias HAVING, ORDER BY agg.
         g3 = data_row_values(simple_query(
             sock, "SELECT dept, COUNT(*) FROM grp_t GROUP BY dept ORDER BY dept"))
