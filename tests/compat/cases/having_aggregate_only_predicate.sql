@@ -1,0 +1,12 @@
+DROP TABLE IF EXISTS diff_hap;
+CREATE TABLE diff_hap (x integer);
+SELECT 1 FROM diff_hap HAVING count(*) > 0;
+SELECT 1 FROM diff_hap HAVING count(*) = 0;
+SELECT 1 FROM diff_hap HAVING sum(x) > 0;
+INSERT INTO diff_hap VALUES (1), (3);
+INSERT INTO diff_hap VALUES (NULL);
+SELECT 1 FROM diff_hap HAVING count(*) > 0;
+SELECT 1 FROM diff_hap HAVING count(*) = 0;
+SELECT 1 FROM diff_hap HAVING count(x) = 2;
+SELECT 1 FROM diff_hap HAVING count(*) = 3;
+SELECT 1 FROM diff_hap HAVING sum(x) > 3;

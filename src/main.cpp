@@ -24232,16 +24232,109 @@ static bool executeInternal(const string& rawSql, Session& s) {
         bool groupProjectionComplete = false;
         if (havingPos != string::npos && groupPos == string::npos &&
             !hasAgg) {
-            bool constantOnly = !columns.empty() &&
+            bool constantProjection = !columns.empty() &&
                 !implicitHavingClause.empty();
             for (const auto& item : splitSelectColumns(columns)) {
                 string error, sqlState;
                 if (!validateFromlessColumnBindings(
                         item, error, sqlState)) {
-                    constantOnly = false;
+                    constantProjection = false;
                     break;
                 }
             }
+            if (constantProjection) {
+                // An aggregate in HAVING also creates one implicit group,
+                // even when the SELECT list contains only constants.
+                static const regex aggregateCall(
+                    R"(\b(count|sum)\s*\(\s*(\*|[A-Za-z_][A-Za-z_0-9]*)\s*\))",
+                    regex::icase);
+                smatch call;
+                if (regex_search(implicitHavingClause, call, aggregateCall) &&
+                    findTextOutsideQuotes(implicitHavingClause,
+                                          call.str()) ==
+                        static_cast<size_t>(call.position())) {
+                    const string function = toLower(call[1].str());
+                    const string argument = toLower(call[2].str());
+                    if (wherePos != string::npos) {
+                        cout << "ERROR: this implicit HAVING aggregate with "
+                                "WHERE is not yet supported (SQLSTATE 0A000)"
+                             << endl;
+                        return true;
+                    }
+                    if (argument != "*" &&
+                        !visibleColumns.count(argument)) {
+                        cout << "ERROR: column \"" << argument
+                             << "\" does not exist (SQLSTATE 42703)"
+                             << endl;
+                        return true;
+                    }
+                    if (function == "sum" && argument == "*") {
+                        cout << "ERROR: function sum(*) does not exist "
+                                "(SQLSTATE 42883)" << endl;
+                        return true;
+                    }
+                    dbms::StorageEngine::AggItem aggregate;
+                    aggregate.func = function;
+                    aggregate.arg = argument;
+                    dbms::PlanContext context;
+                    context.dbname = queryDb;
+                    context.tablename = tname;
+                    context.aggregateItems.push_back(aggregate);
+                    const auto execution =
+                        dbms::QueryPlanner::executePlanChecked(
+                            dbms::QueryPlanner::buildSelectPlan(
+                                &g_engine, context));
+                    if (!execution.ok) {
+                        cout << "ERROR: " << execution.error << endl;
+                        return true;
+                    }
+                    if (!execution.structuredRowsAvailable ||
+                        execution.structuredRows.size() != 1 ||
+                        execution.structuredNulls.size() != 1 ||
+                        execution.structuredRows.front().size() != 1 ||
+                        execution.structuredNulls.front().size() != 1) {
+                        cout << "ERROR: implicit HAVING aggregate failed "
+                                "(SQLSTATE XX000)" << endl;
+                        return true;
+                    }
+                    const bool valueIsNull =
+                        execution.structuredNulls.front().front();
+                    const string& value =
+                        execution.structuredRows.front().front();
+                    string predicateText = implicitHavingClause;
+                    predicateText.replace(
+                        static_cast<size_t>(call.position()),
+                        static_cast<size_t>(call.length()),
+                        valueIsNull ? "NULL" : value);
+                    string error, sqlState;
+                    if (!validateFromlessColumnBindings(
+                            predicateText, error, sqlState)) {
+                        cout << "ERROR: " << error << " (SQLSTATE "
+                             << sqlState << ")" << endl;
+                        return true;
+                    }
+                    const auto predicate =
+                        dbms::ExprHelper::evalStringWithNulls(
+                            predicateText, {}, {}, {},
+                            s.currentDB, s.username);
+                    if (!predicate.ok) {
+                        cout << "ERROR: " << predicate.error << endl;
+                        return true;
+                    }
+                    if (toLower(predicate.typeName) != "boolean") {
+                        cout << "ERROR: argument of HAVING must be type "
+                                "boolean (SQLSTATE 42804)" << endl;
+                        return true;
+                    }
+                    const string truth = toLower(predicate.value);
+                    const bool passes = !predicate.isNull &&
+                        (truth == "t" || truth == "true" || truth == "1");
+                    return handleFromlessSelect(
+                        "select " + columns +
+                        (passes ? "" : " where 1 = 2"), s);
+                }
+            }
+            bool constantOnly = constantProjection;
             if (constantOnly) {
                 string error, sqlState;
                 constantOnly = validateFromlessColumnBindings(
