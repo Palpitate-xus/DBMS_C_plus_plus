@@ -1,0 +1,12 @@
+DROP TABLE IF EXISTS diff_aon;
+CREATE TABLE diff_aon (g integer, x integer);
+INSERT INTO diff_aon VALUES (1, NULL), (1, 2), (1, 2), (2, NULL), (2, 3);
+SELECT count(*) FROM diff_aon WHERE x IS NULL OR x = 2;
+SELECT count(x) FROM diff_aon WHERE x IS NULL OR x = 2;
+SELECT sum(x) FROM diff_aon WHERE x IS NULL OR x = 2;
+SELECT count(*) FROM diff_aon WHERE (x IS NULL OR x = 2) AND g = 1;
+SELECT count(*) FROM diff_aon WHERE x IS NULL OR (x = 2 AND g = 1);
+SELECT count(*) FROM diff_aon WHERE x IS NULL OR x = 2 AND g = 1;
+SELECT count(*) FROM diff_aon WHERE g = 1 AND (x IS NULL OR x = 2);
+SELECT g, count(*) FROM diff_aon WHERE x IS NULL OR x = 2 GROUP BY g ORDER BY g;
+SELECT g, sum(x) FROM diff_aon WHERE x IS NULL OR x = 2 GROUP BY g ORDER BY g;

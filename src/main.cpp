@@ -9,6 +9,7 @@
 #include <future>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <numeric>
@@ -8901,7 +8902,7 @@ static string modifyLogic(const string& logic) {
 // ========================================================================
 // Breakdown logic expressions into DNF (OR of ANDs)
 // ========================================================================
-static vector<vector<string>> breakDownConditions(const vector<string>& tokens) {
+static vector<vector<string>> legacyBreakDownConditions(const vector<string>& tokens) {
     if (tokens.size() == 3) {  // single condition wrapped in parens: ( cond )
         return {{tokens[1]}};
     }
@@ -9014,6 +9015,79 @@ static vector<vector<string>> breakDownConditions(const vector<string>& tokens) 
         stack.back().groups.push_back({operandStack.back()});
     }
     return stack.empty() ? vector<vector<string>>{} : stack.back().groups;
+}
+
+
+static vector<vector<string>> breakDownConditions(const vector<string>& tokens) {
+    // Each inner vector is an AND branch; the outer vector is OR.  Parse
+    // parentheses and SQL's AND-before-OR precedence before distributing
+    // AND over OR.  The old shared operand stack dropped the left predicate
+    // of "a OR (b AND c)" when entering the parenthesized right side.
+    using Groups = vector<vector<string>>;
+    size_t position = 0;
+    bool valid = true;
+    std::function<Groups()> parseOr;
+    std::function<Groups()> parseAnd;
+    std::function<Groups()> parseAtom;
+
+    parseAtom = [&]() -> Groups {
+        if (position >= tokens.size()) {
+            valid = false;
+            return {};
+        }
+        if (tokens[position] == "(") {
+            ++position;
+            Groups nested = parseOr();
+            if (position >= tokens.size() || tokens[position] != ")") {
+                valid = false;
+                return {};
+            }
+            ++position;
+            return nested;
+        }
+        if (tokens[position] == ")" || tokens[position] == "and" ||
+            tokens[position] == "or") {
+            valid = false;
+            return {};
+        }
+        return {{tokens[position++]}};
+    };
+    parseAnd = [&]() -> Groups {
+        Groups left = parseAtom();
+        while (valid && position < tokens.size() &&
+               tokens[position] == "and") {
+            ++position;
+            Groups right = parseAtom();
+            Groups combined;
+            for (const auto& l : left) {
+                for (const auto& r : right) {
+                    vector<string> branch = l;
+                    branch.insert(branch.end(), r.begin(), r.end());
+                    combined.push_back(std::move(branch));
+                }
+            }
+            left = std::move(combined);
+        }
+        return left;
+    };
+    parseOr = [&]() -> Groups {
+        Groups left = parseAnd();
+        while (valid && position < tokens.size() &&
+               tokens[position] == "or") {
+            ++position;
+            Groups right = parseAnd();
+            left.insert(left.end(),
+                        std::make_move_iterator(right.begin()),
+                        std::make_move_iterator(right.end()));
+        }
+        return left;
+    };
+    Groups groups = parseOr();
+    // Some legacy predicates still arrive as multiple tokens (notably IN and
+    // ANY lists). Preserve their decoding until normalization provides one
+    // atom per predicate; structured Boolean streams use the parser above.
+    return valid && position == tokens.size()
+        ? groups : legacyBreakDownConditions(tokens);
 }
 
 // ========================================================================
