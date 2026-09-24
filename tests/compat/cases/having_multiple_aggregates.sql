@@ -1,0 +1,10 @@
+DROP TABLE IF EXISTS diff_hma;
+CREATE TABLE diff_hma (x integer, y text);
+SELECT 1 FROM diff_hma HAVING count(*) = 0 AND sum(x) IS NULL;
+INSERT INTO diff_hma VALUES (1, 'b'), (3, 'a'), (NULL, NULL);
+SELECT 1 FROM diff_hma HAVING count(*) = 3 AND count(x) = 2;
+SELECT 1 FROM diff_hma HAVING sum(x) = 4 AND avg(x) = 2;
+SELECT 1 FROM diff_hma HAVING min(x) = 1 AND max(x) = 3;
+SELECT 1 FROM diff_hma HAVING min(y) = 'a' AND max(y) = 'b';
+SELECT 1 FROM diff_hma HAVING count(*) = 2 OR sum(x) = 4;
+SELECT 1 FROM diff_hma HAVING avg(x) > 2;

@@ -24252,13 +24252,24 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 // An aggregate in HAVING also creates one implicit group,
                 // even when the SELECT list contains only constants.
                 static const regex aggregateCall(
-                    R"(\b(count|sum)\s*\(\s*(\*|[A-Za-z_][A-Za-z_0-9]*)\s*\))",
+                    R"(\b(count|sum|avg|min|max)\s*\(\s*(\*|[A-Za-z_][A-Za-z_0-9]*)\s*\))",
                     regex::icase);
-                smatch call;
-                if (regex_search(implicitHavingClause, call, aggregateCall) &&
-                    findTextOutsideQuotes(implicitHavingClause,
-                                          call.str()) ==
-                        static_cast<size_t>(call.position())) {
+                struct HavingAggregateCall {
+                    size_t position;
+                    size_t length;
+                    dbms::StorageEngine::AggItem aggregate;
+                };
+                vector<HavingAggregateCall> calls;
+                for (sregex_iterator it(implicitHavingClause.begin(),
+                                        implicitHavingClause.end(),
+                                        aggregateCall), end;
+                     it != end; ++it) {
+                    const smatch& call = *it;
+                    const size_t position =
+                        static_cast<size_t>(call.position());
+                    if (findTextOutsideQuotes(implicitHavingClause,
+                                              call.str(), position) !=
+                        position) continue;
                     const string function = toLower(call[1].str());
                     const string argument = toLower(call[2].str());
                     if (argument != "*" &&
@@ -24268,18 +24279,25 @@ static bool executeInternal(const string& rawSql, Session& s) {
                              << endl;
                         return true;
                     }
-                    if (function == "sum" && argument == "*") {
-                        cout << "ERROR: function sum(*) does not exist "
-                                "(SQLSTATE 42883)" << endl;
+                    if (function != "count" && argument == "*") {
+                        cout << "ERROR: function " << function
+                             << "(*) does not exist (SQLSTATE 42883)"
+                             << endl;
                         return true;
                     }
                     dbms::StorageEngine::AggItem aggregate;
                     aggregate.func = function;
                     aggregate.arg = argument;
+                    calls.push_back({position,
+                                     static_cast<size_t>(call.length()),
+                                     std::move(aggregate)});
+                }
+                if (!calls.empty()) {
                     dbms::PlanContext context;
                     context.dbname = queryDb;
                     context.tablename = tname;
-                    context.aggregateItems.push_back(aggregate);
+                    for (const auto& call : calls)
+                        context.aggregateItems.push_back(call.aggregate);
                     if (wherePos != string::npos) {
                         if (condTokens.empty() || !semiJoins.empty() ||
                             !existenceFilters.empty() ||
@@ -24330,21 +24348,48 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     if (!execution.structuredRowsAvailable ||
                         execution.structuredRows.size() != 1 ||
                         execution.structuredNulls.size() != 1 ||
-                        execution.structuredRows.front().size() != 1 ||
-                        execution.structuredNulls.front().size() != 1) {
+                        execution.structuredRows.front().size() !=
+                            calls.size() ||
+                        execution.structuredNulls.front().size() !=
+                            calls.size()) {
                         cout << "ERROR: implicit HAVING aggregate failed "
                                 "(SQLSTATE XX000)" << endl;
                         return true;
                     }
-                    const bool valueIsNull =
-                        execution.structuredNulls.front().front();
-                    const string& value =
-                        execution.structuredRows.front().front();
                     string predicateText = implicitHavingClause;
-                    predicateText.replace(
-                        static_cast<size_t>(call.position()),
-                        static_cast<size_t>(call.length()),
-                        valueIsNull ? "NULL" : value);
+                    // Replace from right to left so each source span remains
+                    // stable, preserving SQL NULL and quoting textual extrema.
+                    for (size_t i = calls.size(); i > 0; --i) {
+                        const size_t index = i - 1;
+                        string literal = "NULL";
+                        if (!execution.structuredNulls.front()[index]) {
+                            const string& value =
+                                execution.structuredRows.front()[index];
+                            const string type = toLower(
+                                aggregateProtocolType(
+                                    calls[index].aggregate));
+                            static const set<string> numericTypes = {
+                                "smallint", "integer", "bigint", "numeric",
+                                "real", "double precision"
+                            };
+                            if (numericTypes.count(type)) {
+                                literal = value;
+                            } else if (type == "boolean") {
+                                literal = (value == "t" || value == "true")
+                                    ? "true" : "false";
+                            } else {
+                                literal = "'";
+                                for (char c : value) {
+                                    if (c == '\'') literal += '\'';
+                                    literal += c;
+                                }
+                                literal += '\'';
+                            }
+                        }
+                        predicateText.replace(calls[index].position,
+                                              calls[index].length,
+                                              literal);
+                    }
                     string error, sqlState;
                     if (!validateFromlessColumnBindings(
                             predicateText, error, sqlState)) {
