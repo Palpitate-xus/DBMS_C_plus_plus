@@ -3842,7 +3842,9 @@ bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
             : CatalogManager::DropBehavior::Restrict;
         catalogDropPlan = cat.planDrop(PgClassOid_Namespace, ns->oid, behavior);
         if (!catalogDropPlan.ok()) {
-            std::cout << "ERROR: " << catalogDropPlan.error << std::endl;
+            std::cout << "ERROR: " << catalogDropPlan.error;
+            if (!stmt->cascade) std::cout << " (SQLSTATE 2BP01)";
+            std::cout << std::endl;
             return true;
         }
         hasCatalogDropPlan = true;
@@ -5968,6 +5970,70 @@ static bool executeSchemaPhysicalDropPlan(
             droppedTableStorageNames.insert(action.name);
         } else if (action.kind == PhysicalCascadeAction::Kind::Sequence) {
             sequenceStorageNames.insert(action.name);
+        }
+    }
+
+    // pg_depend does not yet include stored foreign-key constraints.  A
+    // namespace CASCADE drops its tables but must only remove an external
+    // child's FK, not the child relation itself.
+    std::vector<std::pair<std::string, std::string>> foreignKeysToDrop;
+    for (const auto& childName : g_engine.getTableNames(dbname)) {
+        if (droppedTableStorageNames.count(childName) != 0) continue;
+        const TableSchema child = g_engine.getTableSchema(dbname, childName);
+        for (size_t i = 0; i < child.fkLen; ++i) {
+            const auto& fk = child.fks[i];
+            bool referencesDroppedTable =
+                droppedTableStorageNames.count(fk.refTable) != 0;
+            if (!referencesDroppedTable && fk.refTable.find('.') !=
+                    std::string::npos) {
+                const auto dot = fk.refTable.find('.');
+                const std::string physical = fk.refTable.substr(0, dot) ==
+                        "public"
+                    ? fk.refTable.substr(dot + 1)
+                    : fk.refTable.substr(0, dot) + "__" +
+                          fk.refTable.substr(dot + 1);
+                referencesDroppedTable =
+                    droppedTableStorageNames.count(physical) != 0;
+            }
+            if (!referencesDroppedTable && fk.refTable.find('.') ==
+                    std::string::npos &&
+                !g_engine.tableExists(dbname, fk.refTable)) {
+                for (const auto& target : droppedTableStorageNames) {
+                    if (CatalogService::logicalName(target).name ==
+                        fk.refTable) {
+                        error = "ambiguous legacy foreign key target on " +
+                                childName;
+                        return false;
+                    }
+                }
+            }
+            if (!referencesDroppedTable) continue;
+            if (!cascade) {
+                error = "foreign key in " + childName +
+                        " depends on a table in the schema";
+                return false;
+            }
+            if (fk.name.empty()) {
+                error = "unnamed foreign key in " + childName +
+                        " cannot be removed safely";
+                return false;
+            }
+            foreignKeysToDrop.emplace_back(childName, fk.name);
+        }
+    }
+    for (const auto& [childName, constraintName] : foreignKeysToDrop) {
+        if (g_engine.alterTableDropConstraint(
+                dbname, childName, constraintName) != DBStatus::OK ||
+            g_engine.updateStorageParams(
+                dbname, childName,
+                {{constraintMetadataKey(constraintName, "validated"), ""},
+                 {constraintMetadataKey(constraintName, "not_valid"), ""},
+                 {constraintMetadataKey(constraintName, "deferrable"), ""},
+                 {constraintMetadataKey(constraintName, "initially_deferred"), ""}})
+                != DBStatus::OK) {
+            error = "cannot remove foreign key " + constraintName +
+                    " from " + childName;
+            return false;
         }
     }
 
