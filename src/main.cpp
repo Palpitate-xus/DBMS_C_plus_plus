@@ -22403,6 +22403,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         }
                     }
                     for (auto& gc : groupByCols) {
+                        // PostgreSQL resolves an ambiguous GROUP BY name
+                        // against input columns before SELECT-list aliases.
+                        if (visibleColumns.count(gc)) continue;
                         auto it = aliasToExpr.find(gc);
                         if (it != aliasToExpr.end()) gc = it->second;
                     }
@@ -22491,6 +22494,38 @@ static bool executeInternal(const string& rawSql, Session& s) {
         for (auto& key : groupByCols) lowerGroupKey(key);
         for (auto& groupingSet : groupingSets)
             for (auto& key : groupingSet) lowerGroupKey(key);
+        if (!groupByCols.empty()) {
+            size_t primaryKeyColumns = 0;
+            size_t groupedPrimaryKeyColumns = 0;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (!tbl.cols[i].isPrimaryKey) continue;
+                ++primaryKeyColumns;
+                if (find(groupByCols.begin(), groupByCols.end(),
+                         tbl.cols[i].dataName) != groupByCols.end()) {
+                    ++groupedPrimaryKeyColumns;
+                }
+            }
+            const bool functionallyDependent = primaryKeyColumns > 0 &&
+                primaryKeyColumns == groupedPrimaryKeyColumns;
+            if (!functionallyDependent) {
+                for (const auto& rawItem : splitSelectColumns(columns)) {
+                    string item = trim(rawItem);
+                    const size_t asAt = findLastTextOutsideQuotes(
+                        toLower(item), " as ");
+                    if (asAt != string::npos)
+                        item = trim(item.substr(0, asAt));
+                    if (visibleColumns.count(item) &&
+                        find(groupByCols.begin(), groupByCols.end(), item) ==
+                            groupByCols.end()) {
+                        cout << "ERROR: column \"" << item
+                             << "\" must appear in the GROUP BY clause or "
+                                "be used in an aggregate function "
+                                "(SQLSTATE 42803)" << endl;
+                        return true;
+                    }
+                }
+            }
+        }
 
         if (havingPos != string::npos && groupPos == string::npos) {
             cout << "SQL syntax error: HAVING without GROUP BY" << endl;
