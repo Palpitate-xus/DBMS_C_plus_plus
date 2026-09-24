@@ -24255,12 +24255,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         static_cast<size_t>(call.position())) {
                     const string function = toLower(call[1].str());
                     const string argument = toLower(call[2].str());
-                    if (wherePos != string::npos) {
-                        cout << "ERROR: this implicit HAVING aggregate with "
-                                "WHERE is not yet supported (SQLSTATE 0A000)"
-                             << endl;
-                        return true;
-                    }
                     if (argument != "*" &&
                         !visibleColumns.count(argument)) {
                         cout << "ERROR: column \"" << argument
@@ -24280,6 +24274,31 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     context.dbname = queryDb;
                     context.tablename = tname;
                     context.aggregateItems.push_back(aggregate);
+                    if (wherePos != string::npos) {
+                        if (condTokens.empty() || !semiJoins.empty() ||
+                            !existenceFilters.empty() ||
+                            !quantifiedSubqueries.empty()) {
+                            cout << "ERROR: this implicit HAVING WHERE shape "
+                                    "is not yet supported (SQLSTATE 0A000)"
+                                 << endl;
+                            return true;
+                        }
+                        vector<string> tokens = condTokens;
+                        tokens.insert(tokens.begin(), "(");
+                        tokens.push_back(")");
+                        for (auto& token : tokens)
+                            token = modifyLogic(token);
+                        const auto groups = breakDownConditions(tokens);
+                        if (groups.size() != 1) {
+                            cout << "ERROR: this implicit HAVING WHERE shape "
+                                    "is not yet supported (SQLSTATE 0A000)"
+                                 << endl;
+                            return true;
+                        }
+                        context.conds =
+                            dbms::StorageEngine::parseConditions(
+                                groups.front());
+                    }
                     const auto execution =
                         dbms::QueryPlanner::executePlanChecked(
                             dbms::QueryPlanner::buildSelectPlan(
