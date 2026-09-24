@@ -34516,6 +34516,12 @@ std::unordered_set<std::string> arraySeen;
         std::string func, colName, op, value;
     };
     std::vector<HavingCond> havings;
+    struct GroupHavingCond {
+        size_t columnIndex;
+        std::string op, value;
+        bool valueIsNull;
+    };
+    std::vector<GroupHavingCond> groupHavings;
     for (const auto& hc : havingConds) {
         if (hc.empty()) continue;
         // Format: "func(col) op value" or "op col value" (if already modified)
@@ -34535,6 +34541,35 @@ std::unordered_set<std::string> arraySeen;
                 h.op = rest.substr(0, opEnd);
                 h.value = trim(rest.substr(opEnd));
                 havings.push_back(h);
+            }
+        } else {
+            const size_t opStart = s.find_first_of("<>=!");
+            if (opStart == std::string::npos) continue;
+            size_t opEnd = opStart;
+            while (opEnd < s.size() &&
+                   (s[opEnd] == '<' || s[opEnd] == '>' ||
+                    s[opEnd] == '=' || s[opEnd] == '!')) ++opEnd;
+            const std::string colName = trim(s.substr(0, opStart));
+            if (std::find(groupByCols.begin(), groupByCols.end(), colName) ==
+                groupByCols.end()) continue;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].dataName != colName) continue;
+                std::string value = trim(s.substr(opEnd));
+                const bool valueIsNull = SQLParser::toLower(value) == "null";
+                if (value.size() >= 2 && value.front() == '\'' &&
+                    value.back() == '\'') {
+                    std::string decoded;
+                    for (size_t j = 1; j + 1 < value.size(); ++j) {
+                        decoded.push_back(value[j]);
+                        if (value[j] == '\'' && j + 2 < value.size() &&
+                            value[j + 1] == '\'') ++j;
+                    }
+                    value = std::move(decoded);
+                }
+                groupHavings.push_back(
+                    {i, s.substr(opStart, opEnd - opStart),
+                     std::move(value), valueIsNull});
+                break;
             }
         }
     }
@@ -34564,6 +34599,26 @@ std::unordered_set<std::string> arraySeen;
         bool pass = true;
         for (const auto& h : havings) {
             if (!evalHaving(h, gids)) { pass = false; break; }
+        }
+        if (pass && !groupHavings.empty()) {
+            std::string sourceRow;
+            if (gids.empty() || !readRowByRid(pa, gids.front(), sourceRow, tbl)) {
+                pass = false;
+            } else {
+                NullRowBinding binding(this, dbname, tablename,
+                                       gids.front(), tbl.len);
+                for (const auto& h : groupHavings) {
+                    bool leftIsNull = false;
+                    const std::string left =
+                        logicalValue(sourceRow, h.columnIndex, &leftIsNull);
+                    if (compareValues(tbl.cols[h.columnIndex], left,
+                                      leftIsNull, h.value, h.valueIsNull,
+                                      h.op) != PredicateTruth::True) {
+                        pass = false;
+                        break;
+                    }
+                }
+            }
         }
         if (!pass) continue;
 
