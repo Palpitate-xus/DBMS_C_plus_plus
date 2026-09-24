@@ -24306,6 +24306,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
         bool structuredPlainRows = false;
         dbms::DmlResult structuredScalarResult;
         bool structuredScalarRows = false;
+        bool structuredScalarExprOrderHandled = false;
         dbms::DmlResult structuredAggregateResult;
         bool structuredAggregateRows = false;
         vector<size_t> groupProjectionSources;
@@ -26635,11 +26636,39 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 [](const auto& expr) {
                     return expr.isScalar && expr.funcName == "unnest";
                 });
+            vector<size_t> scalarExprOrderIndexes;
+            bool canSortScalarExprOutput = !exprOrderBySpecs.empty() &&
+                                           orderBySpecs.empty();
+            if (canSortScalarExprOutput) {
+                for (const auto& spec : exprOrderBySpecs) {
+                    const string op = spec.exprFunc == "add" ? "+" :
+                                      spec.exprFunc == "sub" ? "-" : "";
+                    size_t match = selectExprs.size();
+                    if (!op.empty()) {
+                        for (size_t i = 0; i < selectExprs.size(); ++i) {
+                            const auto& expr = selectExprs[i];
+                            if (expr.funcName == "arith" &&
+                                expr.funcArgs.size() == 3 &&
+                                trim(expr.funcArgs[0]) == spec.exprArg &&
+                                expr.funcArgs[1] == op &&
+                                trim(expr.funcArgs[2]) == spec.exprArg2) {
+                                match = i;
+                                break;
+                            }
+                        }
+                    }
+                    if (match == selectExprs.size()) {
+                        canSortScalarExprOutput = false;
+                        break;
+                    }
+                    scalarExprOrderIndexes.push_back(match);
+                }
+            }
             const bool captureStructuredScalar =
                 shouldPublishQueryMetadata() &&
                 !structuredScalar && !hasSetReturningScalar &&
                 distinctOnCols.empty() &&
-                exprOrderBySpecs.empty() &&
+                (exprOrderBySpecs.empty() || canSortScalarExprOutput) &&
                 queryDb != "information_schema" && queryDb != "pg_catalog" &&
                 structuredScalarResult.columns.size() == selectExprs.size() &&
                 g_engine.getInheritedChildren(queryDb, tname).empty();
@@ -26815,6 +26844,49 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         }
                     }
                 }
+            }
+            if (structuredScalarRows && canSortScalarExprOutput &&
+                structuredScalarResult.rows.size() == answers.size() &&
+                structuredScalarResult.nulls.size() == answers.size()) {
+                vector<size_t> order(answers.size());
+                iota(order.begin(), order.end(), 0);
+                stable_sort(order.begin(), order.end(),
+                    [&](size_t a, size_t b) {
+                        for (size_t key = 0; key < scalarExprOrderIndexes.size(); ++key) {
+                            const size_t index = scalarExprOrderIndexes[key];
+                            const auto& spec = exprOrderBySpecs[key];
+                            const bool aNull = structuredScalarResult.nulls[a][index];
+                            const bool bNull = structuredScalarResult.nulls[b][index];
+                            if (aNull != bNull) return aNull == spec.nullsFirst;
+                            if (aNull) continue;
+                            const string& left = structuredScalarResult.rows[a][index];
+                            const string& right = structuredScalarResult.rows[b][index];
+                            int comparison = 0;
+                            try {
+                                const dbms::Numeric leftNumber(left);
+                                const dbms::Numeric rightNumber(right);
+                                comparison = leftNumber < rightNumber ? -1 :
+                                    (rightNumber < leftNumber ? 1 : 0);
+                            } catch (...) {
+                                comparison = ciTextCompare(left, right);
+                            }
+                            if (comparison != 0)
+                                return spec.ascending ? comparison < 0 : comparison > 0;
+                        }
+                        return false;
+                    });
+                auto oldAnswers = std::move(answers);
+                auto oldRows = std::move(structuredScalarResult.rows);
+                auto oldNulls = std::move(structuredScalarResult.nulls);
+                answers.reserve(order.size());
+                structuredScalarResult.rows.reserve(order.size());
+                structuredScalarResult.nulls.reserve(order.size());
+                for (size_t index : order) {
+                    answers.push_back(std::move(oldAnswers[index]));
+                    structuredScalarResult.rows.push_back(std::move(oldRows[index]));
+                    structuredScalarResult.nulls.push_back(std::move(oldNulls[index]));
+                }
+                structuredScalarExprOrderHandled = true;
             }
         } else {
             // PG header order follows the SELECT list for plain columns.
@@ -27127,7 +27199,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
         }
         // Post-query expression sorting
-        if (!exprOrderBySpecs.empty() && !structuredPlainRows) {
+        if (!exprOrderBySpecs.empty() && !structuredPlainRows &&
+            !structuredScalarExprOrderHandled) {
             answers = g_engine.sortByExpression(s.currentDB, tname, std::move(answers), exprOrderBySpecs);
         }
         // Plain-path ORDER BY on output aliases or ordinals ("ORDER BY c",
