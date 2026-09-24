@@ -26861,11 +26861,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
             // therefore asks StorageEngine for exact cells and a separate
             // NULL bitmap.  Complex operator shapes remain on their existing
             // path until those operators expose structured tuples too.
-            const string plainWhereLower = toLower(rawWhereClause);
             const bool simpleStructuredPlainPredicate =
                 condTokens.empty() ||
-                (rawWhereClause.find_first_of("()") == string::npos &&
-                 plainWhereLower.find(" is ") == string::npos);
+                rawWhereClause.find_first_of("()") == string::npos;
             const bool captureStructuredPlain =
                 shouldPublishQueryMetadata() &&
                 simpleStructuredPlainPredicate &&
