@@ -8747,7 +8747,9 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                 sub.ifNotExists = true;
                 pos += 3;
             }
-            if (pos < tokens.size()) sub.colDef.name = tokens[pos++];
+            if (pos < tokens.size()) {
+                sub.colDef.name = parseRoutineIdentifier(tokens[pos++]);
+            }
             if (pos < tokens.size()) {
                 sub.colDef.typeName = tokens[pos++];
                 std::string type = toLower(sub.colDef.typeName);
