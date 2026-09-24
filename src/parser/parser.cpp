@@ -8981,7 +8981,9 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                 sub.ifExists = true;
                 pos += 3; // IF EXISTS
             }
-            if (pos < tokens.size()) sub.name = tokens[pos++];
+            if (pos < tokens.size()) {
+                sub.name = parseRoutineIdentifier(tokens[pos++]);
+            }
             if (pos < tokens.size() && toLower(tokens[pos]) == "cascade") { sub.options["cascade"] = "true"; ++pos; }
         } else if (kw == "drop") {
             recognized = true;
@@ -8996,7 +8998,9 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
         } else if (kw == "alter" && pos + 1 < tokens.size() && toLower(tokens[pos + 1]) == "column") {
             recognized = true;
             sub.action = AlterTableStmt::Action::AlterColumn; pos += 2;
-            if (pos < tokens.size()) sub.name = tokens[pos++];
+            if (pos < tokens.size()) {
+                sub.name = parseRoutineIdentifier(tokens[pos++]);
+            }
             if (pos < tokens.size() && toLower(tokens[pos]) == "set") {
                 ++pos;
                 if (pos < tokens.size() && toLower(tokens[pos]) == "default") {
