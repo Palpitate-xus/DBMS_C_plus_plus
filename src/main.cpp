@@ -22633,11 +22633,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
         }
 
-        if (havingPos != string::npos && groupPos == string::npos) {
-            cout << "SQL syntax error: HAVING without GROUP BY" << endl;
-            return true;
-        }
-
         vector<string> havingConds;
         if (havingPos != string::npos) {
             size_t havingEnd = (orderPos != string::npos) ? orderPos
@@ -24204,6 +24199,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
         bool structuredAggregateRows = false;
         vector<size_t> groupProjectionSources;
         bool groupProjectionComplete = false;
+        if (havingPos != string::npos && groupPos == string::npos &&
+            !hasAgg) {
+            cout << "ERROR: HAVING without an aggregate is not yet supported "
+                    "(SQLSTATE 0A000)" << endl;
+            return true;
+        }
         if (!groupByCols.empty()) {
             if (forUpdate) { cout << "FOR UPDATE not supported with GROUP BY" << endl; return true; }
             vector<string> groupProtocolColumns;
@@ -25289,6 +25290,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 ctx.dbname = queryDb;
                 ctx.tablename = tname;
                 ctx.aggregateItems = pureAgg;
+                ctx.havingConds = havingConds;
                 if (!volcanoAggregateConditions.empty()) {
                     ctx.conds = dbms::StorageEngine::parseConditions(
                         volcanoAggregateConditions.front());
@@ -25309,6 +25311,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         std::move(execution.structuredNulls);
                     structuredAggregateRows = true;
                 }
+            } else if (!havingConds.empty()) {
+                cout << "ERROR: this HAVING aggregate shape is not yet "
+                        "supported (SQLSTATE 0A000)" << endl;
+                return true;
             } else if (condTokens.empty()) {
                 answers = g_engine.aggregate(s.currentDB, tname, {}, pureAgg);
             } else {
