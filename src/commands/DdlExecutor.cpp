@@ -5343,6 +5343,16 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         hasPrimaryKeyDefinition = inlinePrimaryKeys == 1;
     }
 
+    // Keep implicit foreign-key names addressable by ALTER/DROP CONSTRAINT
+    // and by DROP TABLE ... CASCADE.  PostgreSQL derives these from the
+    // relation and referencing column, adding a suffix for collisions.
+    std::set<std::string> usedConstraintNames;
+    for (const auto& constraint : stmt->constraints) {
+        if (!constraint.name.empty()) {
+            usedConstraintNames.insert(constraint.name);
+        }
+    }
+
     // Table-level constraints
     for (const auto& tc : stmt->constraints) {
         std::string t = toLower(tc.type);
@@ -5416,7 +5426,19 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             tbl.uniqueConstraints.push_back(std::move(idxs));
             tbl.uniqueConstraintNames.push_back(tc.name);
         } else if (t == "foreign key") {
-            tbl.appendFK(tableConstraintToForeignKey(tc));
+            ForeignKey fk = tableConstraintToForeignKey(tc);
+            if (fk.name.empty()) {
+                const std::string base = targetName.name + "_" +
+                    (tc.columns.empty() ? "key" : tc.columns.front()) +
+                    "_fkey";
+                fk.name = base;
+                for (size_t suffix = 1;
+                     !usedConstraintNames.insert(fk.name).second;
+                     ++suffix) {
+                    fk.name = base + std::to_string(suffix);
+                }
+            }
+            tbl.appendFK(fk);
         } else if (t == "check") {
             if (tbl.len == 0 || !tc.checkExpr) {
                 std::cout << "ERROR: CHECK constraint requires an expression"
@@ -5565,6 +5587,17 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         if (!alterStatusOk(persistConstraintMetadata(
                 s.currentDB, tname, tc.name, !tc.notValid, tc.notValid,
                 tc.deferrable, tc.initiallyDeferred), "Constraint")) return true;
+    }
+    for (size_t i = 0; i < tbl.fkLen; ++i) {
+        const auto& fk = tbl.fks[i];
+        if (fk.name.empty() || std::any_of(
+                stmt->constraints.begin(), stmt->constraints.end(),
+                [&](const TableConstraint& tc) { return tc.name == fk.name; })) {
+            continue;
+        }
+        if (!alterStatusOk(persistConstraintMetadata(
+                s.currentDB, tname, fk.name, true, false, false, false),
+                "Constraint")) return true;
     }
     if (!temporary) {
         g_engine.applyDefaultPrivileges(s.currentDB, targetSchema, "table", tname,
@@ -6242,6 +6275,7 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
     // Foreign keys live in table storage metadata and are not necessarily
     // represented by pg_depend.  Do not let a catalog-only RESTRICT plan
     // remove a referenced relation while leaving a live child constraint.
+    std::vector<std::pair<std::string, std::string>> foreignKeysToDrop;
     for (const auto& candidate : g_engine.getTableNames(s.currentDB)) {
         if (candidate == tname) continue;
         const TableSchema child =
@@ -6251,19 +6285,19 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
                 resolveTableName(s, child.fks[i].refTable);
             if (referenced != tname) continue;
             if (stmt->cascade) {
-                // CASCADE must remove the child constraint, not its table.
-                // Until that operation is transactional across storage and
-                // catalog, reject it rather than leave a dangling reference.
-                std::cout << "ERROR: DROP TABLE CASCADE with a referencing "
-                             "foreign key is not supported (SQLSTATE 0A000)"
-                          << std::endl;
+                if (child.fks[i].name.empty()) {
+                    std::cout << "ERROR: cannot drop unnamed foreign key "
+                                 "constraint (SQLSTATE 0A000)" << std::endl;
+                    return true;
+                }
+                foreignKeysToDrop.emplace_back(candidate, child.fks[i].name);
             } else {
                 std::cout << "ERROR: cannot drop table \"" << logicalName
                           << "\" because foreign key in table \""
                           << candidate << "\" depends on it "
                              "(SQLSTATE 2BP01)" << std::endl;
+                return true;
             }
-            return true;
         }
     }
 
@@ -6419,6 +6453,23 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
     }
 
     txn.markSnapshotDirty();
+    for (const auto& [childTable, constraintName] : foreignKeysToDrop) {
+        if (droppedTableStorageNames.count(childTable) != 0) continue;
+        if (g_engine.alterTableDropConstraint(
+                s.currentDB, childTable, constraintName) != DBStatus::OK ||
+            g_engine.updateStorageParams(
+                s.currentDB, childTable,
+                {{constraintMetadataKey(constraintName, "validated"), ""},
+                 {constraintMetadataKey(constraintName, "not_valid"), ""},
+                 {constraintMetadataKey(constraintName, "deferrable"), ""},
+                 {constraintMetadataKey(constraintName, "initially_deferred"), ""}})
+                != DBStatus::OK) {
+            std::cout << "DROP TABLE failed to remove foreign key \""
+                      << constraintName << "\" from \"" << childTable
+                      << "\"" << std::endl;
+            return true;
+        }
+    }
     std::set<std::string> changedDefaultTables;
     for (const auto& dependency : defaultsToClear) {
         if (g_engine.alterTableDropDefault(
