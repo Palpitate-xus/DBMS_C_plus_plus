@@ -1,0 +1,11 @@
+DROP TABLE IF EXISTS diff_qqc;
+CREATE TABLE diff_qqc (id integer PRIMARY KEY, "MixedValue" integer);
+INSERT INTO diff_qqc (id, "MixedValue") VALUES (1, 10);
+SELECT diff_qqc."MixedValue" FROM diff_qqc;
+SELECT q."MixedValue" FROM diff_qqc AS q;
+SELECT id FROM diff_qqc WHERE diff_qqc."MixedValue" = 10;
+DROP SCHEMA IF EXISTS diff_qqc_ns CASCADE;
+CREATE SCHEMA diff_qqc_ns;
+CREATE TABLE diff_qqc_ns.items (id integer PRIMARY KEY, "MixedValue" integer);
+INSERT INTO diff_qqc_ns.items (id, "MixedValue") VALUES (2, 20);
+SELECT diff_qqc_ns.items."MixedValue" FROM diff_qqc_ns.items;
