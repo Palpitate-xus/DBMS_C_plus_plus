@@ -24244,6 +24244,15 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 if (asPos != string::npos) body = trim(body.substr(0, asPos));
                 rawGroupBodies.push_back(std::move(body));
             }
+            bool hasOtherGroupExtras = false;
+            for (size_t ei = 0; ei < exprTypes.size(); ++ei) {
+                if (exprTypes[ei] != 3) continue;
+                if (selectExprs[ei].funcName != "arith" ||
+                    ei >= rawGroupBodies.size() ||
+                    rawGroupBodies[ei].find('(') != string::npos)
+                    hasOtherGroupExtras = true;
+            }
+            vector<string> derivedGroupExpressions;
             auto groupKeyIndex = [&](size_t expressionIndex) -> size_t {
                 vector<string> candidates;
                 if (expressionIndex < selectExprs.size() &&
@@ -24297,6 +24306,23 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         groupByCols.size() +
                         dependentAggregateIndex[column]);
                     ++aggregateItemIndex;
+                    continue;
+                }
+                if (!hasOtherGroupExtras && exprTypes[ei] == 3 &&
+                    selectExprs[ei].funcName == "arith" &&
+                    ei < rawGroupBodies.size() &&
+                    rawGroupBodies[ei].find('(') == string::npos) {
+                    map<string, string> typeHints;
+                    for (size_t ci = 0; ci < tbl.len; ++ci)
+                        typeHints[tbl.cols[ci].dataName] =
+                            tbl.cols[ci].dataType;
+                    groupProtocolColumns.push_back(
+                        selectExprs[ei].displayName);
+                    groupProtocolTypes.push_back(
+                        dbms::ExprHelper::inferResultType(
+                            rawGroupBodies[ei], typeHints));
+                    groupProjectionSources.push_back(extraResultIndex++);
+                    derivedGroupExpressions.push_back(rawGroupBodies[ei]);
                     continue;
                 }
                 if (exprTypes[ei] == 0 || exprTypes[ei] == 1 ||
@@ -24385,8 +24411,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
                 if (scalarSeen == 0) arithGroupKeyOnly = false;
             }
+            const bool derivedGroupOnly =
+                !derivedGroupExpressions.empty() &&
+                !hasOtherGroupExtras && groupProjectionComplete;
             bool canUseVolcanoGroup = !noWait && !skipLocked &&
-                                      !hasWindow && (!hasScalar || arithGroupKeyOnly) &&
+                                      !hasWindow &&
+                                      (!hasScalar || arithGroupKeyOnly ||
+                                       derivedGroupOnly) &&
                                       distinctOnCols.empty() &&
                                       (exprOrderBySpecs.empty() || arithGroupKeyOnly);
             // Simple output ORDER BY keys are applied below after grouping;
@@ -24528,6 +24559,107 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         for (const auto& row : part) {
                             if (seen.insert(row).second) answers.push_back(row);
                         }
+                    }
+                }
+            }
+            if (structuredAggregateRows &&
+                !derivedGroupExpressions.empty() &&
+                !orderBySpecs.empty()) {
+                vector<pair<size_t,
+                    const dbms::StorageEngine::OrderBySpec*>> groupSortKeys;
+                for (const auto& spec : orderBySpecs) {
+                    const auto found = find(groupByCols.begin(),
+                                            groupByCols.end(), spec.colName);
+                    if (spec.isExpression || found == groupByCols.end()) {
+                        groupSortKeys.clear();
+                        break;
+                    }
+                    groupSortKeys.push_back({
+                        static_cast<size_t>(found - groupByCols.begin()),
+                        &spec});
+                }
+                if (groupSortKeys.size() == orderBySpecs.size()) {
+                    vector<size_t> order(answers.size());
+                    std::iota(order.begin(), order.end(), 0);
+                    std::stable_sort(order.begin(), order.end(),
+                        [&](size_t a, size_t b) {
+                            for (const auto& key : groupSortKeys) {
+                                const size_t index = key.first;
+                                const bool aNull =
+                                    structuredAggregateResult.nulls[a][index];
+                                const bool bNull =
+                                    structuredAggregateResult.nulls[b][index];
+                                if (aNull != bNull)
+                                    return aNull == key.second->nullsFirst;
+                                if (aNull) continue;
+                                const string& av =
+                                    structuredAggregateResult.rows[a][index];
+                                const string& bv =
+                                    structuredAggregateResult.rows[b][index];
+                                int comparison = 0;
+                                try {
+                                    const dbms::Numeric an(av), bn(bv);
+                                    comparison = an < bn ? -1
+                                        : (bn < an ? 1 : 0);
+                                } catch (...) {
+                                    comparison = ciTextCompare(av, bv);
+                                }
+                                if (comparison != 0)
+                                    return key.second->ascending
+                                        ? comparison < 0
+                                        : comparison > 0;
+                            }
+                            return false;
+                        });
+                    auto oldAnswers = std::move(answers);
+                    auto oldRows = std::move(
+                        structuredAggregateResult.rows);
+                    auto oldNulls = std::move(
+                        structuredAggregateResult.nulls);
+                    answers.reserve(order.size());
+                    structuredAggregateResult.rows.reserve(order.size());
+                    structuredAggregateResult.nulls.reserve(order.size());
+                    for (size_t index : order) {
+                        answers.push_back(std::move(oldAnswers[index]));
+                        structuredAggregateResult.rows.push_back(
+                            std::move(oldRows[index]));
+                        structuredAggregateResult.nulls.push_back(
+                            std::move(oldNulls[index]));
+                    }
+                }
+            }
+            if (structuredAggregateRows &&
+                !derivedGroupExpressions.empty()) {
+                map<string, string> typeHints;
+                for (size_t ci = 0; ci < tbl.len; ++ci)
+                    typeHints[tbl.cols[ci].dataName] =
+                        tbl.cols[ci].dataType;
+                for (size_t ri = 0;
+                     ri < structuredAggregateResult.rows.size(); ++ri) {
+                    map<string, string> groupValues;
+                    set<string> groupNulls;
+                    for (size_t gi = 0; gi < groupByCols.size(); ++gi) {
+                        if (gi >= structuredAggregateResult.rows[ri].size())
+                            break;
+                        groupValues[groupByCols[gi]] =
+                            structuredAggregateResult.rows[ri][gi];
+                        if (gi < structuredAggregateResult.nulls[ri].size() &&
+                            structuredAggregateResult.nulls[ri][gi])
+                            groupNulls.insert(groupByCols[gi]);
+                    }
+                    for (const auto& expression : derivedGroupExpressions) {
+                        const auto value =
+                            dbms::ExprHelper::evalStringWithNulls(
+                                expression, groupValues, groupNulls,
+                                typeHints, s.currentDB, s.username);
+                        if (!value.ok) {
+                            cout << "ERROR: " << value.error << endl;
+                            return true;
+                        }
+                        structuredAggregateResult.rows[ri].push_back(
+                            value.isNull ? "" : value.value);
+                        structuredAggregateResult.nulls[ri].push_back(
+                            value.isNull);
                     }
                 }
             }
