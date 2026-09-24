@@ -6295,6 +6295,7 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
             // than delete a possibly referenced relation.
             const bool ambiguousLegacyReference = !exactReference &&
                 storedReference.find('.') == std::string::npos &&
+                !g_engine.tableExists(s.currentDB, storedReference) &&
                 CatalogService::logicalName(tname).name == storedReference;
             if (!exactReference && !ambiguousLegacyReference) continue;
             if (stmt->cascade) {
