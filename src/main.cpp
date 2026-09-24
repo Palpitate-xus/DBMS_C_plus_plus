@@ -7223,10 +7223,17 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                      << bindingSqlState << ")" << endl;
                 return true;
             }
-            auto constEvalPredicate = [](const string& p) -> int {
-                // returns 1 true, 0 false, -1 unknown
+            auto constEvalPredicate = [](const string& p) -> optional<int> {
+                // 1 = true, 0 = false, -1 = SQL UNKNOWN; nullopt means
+                // this legacy fast path did not recognize the predicate.
                 string s2;
                 for (char c : p) s2 += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                // Composite boolean expressions need SQL operator precedence;
+                // the fast path below only handles one atomic predicate.
+                if (s2.find(" and ") != string::npos ||
+                    s2.find(" or ") != string::npos ||
+                    s2.rfind("not ", 0) == 0)
+                    return nullopt;
                 size_t inAt = string::npos; bool neg = false;
                 {
                     const size_t nAt = s2.find(" not in ");
@@ -7352,9 +7359,31 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                     if (op == "<") return l < r ? 1 : 0;
                     if (op == ">") return l > r ? 1 : 0;
                 }
-                return -1;
+                return nullopt;
             };
-            const int verdict = constEvalPredicate(pred);
+            const optional<int> fastVerdict = constEvalPredicate(pred);
+            int verdict = -1;
+            if (fastVerdict.has_value()) {
+                verdict = *fastVerdict;
+            } else {
+                const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
+                    pred, {}, {}, {}, s.currentDB, s.username);
+                if (!evaluated.ok) {
+                    cout << "ERROR: " << evaluated.error << endl;
+                    return true;
+                }
+                const bool bareUnknownNull = evaluated.isNull &&
+                    toLower(trim(pred)) == "null";
+                if (!bareUnknownNull &&
+                    toLower(evaluated.typeName) != "boolean") {
+                    cout << "ERROR: argument of WHERE must be type boolean "
+                            "(SQLSTATE 42804)" << endl;
+                    return true;
+                }
+                const string truth = toLower(evaluated.value);
+                verdict = evaluated.isNull ? -1 :
+                    (truth == "t" || truth == "true" || truth == "1" ? 1 : 0);
+            }
             if (verdict != 1) {
                 // Predicate FALSE/UNKNOWN: PG still sends the row description
                 // (and zero data rows).  Suppress the value emission below.
