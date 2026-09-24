@@ -22634,11 +22634,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
         }
 
         vector<string> havingConds;
+        string implicitHavingClause;
         if (havingPos != string::npos) {
             size_t havingEnd = (orderPos != string::npos) ? orderPos
                              : (limitPos != string::npos) ? limitPos
                              : (offsetPos != string::npos) ? offsetPos : sql.size();
             string havingClause = normalizeConditionStr(trim(sql.substr(havingPos + 6, havingEnd - havingPos - 6)));
+            implicitHavingClause = havingClause;
             {
                 string bindingError, bindingSqlState;
                 const string& visibleQualifier = tableAlias.empty()
@@ -24201,8 +24203,47 @@ static bool executeInternal(const string& rawSql, Session& s) {
         bool groupProjectionComplete = false;
         if (havingPos != string::npos && groupPos == string::npos &&
             !hasAgg) {
-            cout << "ERROR: HAVING without an aggregate is not yet supported "
-                    "(SQLSTATE 0A000)" << endl;
+            bool constantOnly = !columns.empty() &&
+                !implicitHavingClause.empty();
+            for (const auto& item : splitSelectColumns(columns)) {
+                string error, sqlState;
+                if (!validateFromlessColumnBindings(
+                        item, error, sqlState)) {
+                    constantOnly = false;
+                    break;
+                }
+            }
+            if (constantOnly) {
+                string error, sqlState;
+                constantOnly = validateFromlessColumnBindings(
+                    implicitHavingClause, error, sqlState);
+            }
+            if (constantOnly) {
+                const auto predicate =
+                    dbms::ExprHelper::evalStringWithNulls(
+                        implicitHavingClause, {}, {}, {},
+                        s.currentDB, s.username);
+                if (!predicate.ok) {
+                    cout << "ERROR: " << predicate.error << endl;
+                    return true;
+                }
+                const bool bareUnknownNull = predicate.isNull &&
+                    toLower(trim(implicitHavingClause)) == "null";
+                if (!bareUnknownNull &&
+                    toLower(predicate.typeName) != "boolean") {
+                    cout << "ERROR: argument of HAVING must be type boolean "
+                            "(SQLSTATE 42804)" << endl;
+                    return true;
+                }
+                const string truth = toLower(predicate.value);
+                const bool passes = !predicate.isNull &&
+                    (truth == "t" || truth == "true" || truth == "1");
+                return handleFromlessSelect(
+                    "select " + columns +
+                    (passes ? "" : " where 1 = 2"), s);
+            }
+            cout << "ERROR: this implicit HAVING shape is not yet "
+                    "supported (SQLSTATE 0A000)" << endl;
             return true;
         }
         if (!groupByCols.empty()) {

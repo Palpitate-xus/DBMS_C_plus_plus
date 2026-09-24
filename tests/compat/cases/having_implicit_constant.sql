@@ -1,0 +1,12 @@
+DROP TABLE IF EXISTS diff_having_constant;
+CREATE TABLE diff_having_constant (v int);
+INSERT INTO diff_having_constant VALUES (1), (2);
+SELECT 1 FROM diff_having_constant HAVING true;
+SELECT 1 FROM diff_having_constant HAVING false;
+SELECT 1 FROM diff_having_constant HAVING NULL;
+SELECT 1 FROM diff_having_constant HAVING 1 = 1;
+SELECT 1 FROM diff_having_constant HAVING 1;
+DELETE FROM diff_having_constant;
+SELECT 1 FROM diff_having_constant HAVING true;
+SELECT 1 FROM diff_having_constant HAVING false;
+DROP TABLE diff_having_constant;
