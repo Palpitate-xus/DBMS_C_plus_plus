@@ -22344,6 +22344,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
         vector<dbms::StorageEngine::OrderBySpec> orderBySpecs;
         vector<dbms::StorageEngine::OrderBySpec> exprOrderBySpecs; // expressions sorted post-query
+        vector<pair<bool, size_t>> orderKeyRefs; // expression flag, index; preserve SQL key order
         if (orderPos != string::npos) {
             size_t orderEnd = (limitPos != string::npos) ? limitPos
                             : (offsetPos != string::npos) ? offsetPos : sql.size();
@@ -22427,6 +22428,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         spec.nullsFirst = nullsFirst;
                         spec.collation = collation;
                         exprOrderBySpecs.push_back(spec);
+                        orderKeyRefs.emplace_back(true, exprOrderBySpecs.size() - 1);
                         continue;
                     }
                 }
@@ -22448,6 +22450,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             spec.nullsFirst = nullsFirst;
                             spec.collation = collation;
                             exprOrderBySpecs.push_back(spec);
+                            orderKeyRefs.emplace_back(true, exprOrderBySpecs.size() - 1);
                             continue;
                         }
                     }
@@ -22471,6 +22474,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 spec.nullsFirst = nullsFirst;
                 spec.collation = collation;
                 orderBySpecs.push_back(spec);
+                orderKeyRefs.emplace_back(false, orderBySpecs.size() - 1);
             }
         }
 
@@ -26636,18 +26640,20 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 [](const auto& expr) {
                     return expr.isScalar && expr.funcName == "unnest";
                 });
-            vector<size_t> scalarExprOrderIndexes;
-            bool canSortScalarExprOutput = !exprOrderBySpecs.empty() &&
-                                           orderBySpecs.empty();
-            if (canSortScalarExprOutput) {
-                for (const auto& spec : exprOrderBySpecs) {
-                    const string op = spec.exprFunc == "add" ? "+" :
-                                      spec.exprFunc == "sub" ? "-" : "";
+            vector<pair<size_t, const dbms::StorageEngine::OrderBySpec*>>
+                scalarProjectedSortKeys;
+            bool canSortScalarProjected = !exprOrderBySpecs.empty();
+            if (canSortScalarProjected) {
+                for (const auto& [isExpression, keyIndex] : orderKeyRefs) {
+                    const auto& spec = isExpression
+                        ? exprOrderBySpecs[keyIndex] : orderBySpecs[keyIndex];
                     size_t match = selectExprs.size();
-                    if (!op.empty()) {
+                    if (isExpression) {
+                        const string op = spec.exprFunc == "add" ? "+" :
+                                          spec.exprFunc == "sub" ? "-" : "";
                         for (size_t i = 0; i < selectExprs.size(); ++i) {
                             const auto& expr = selectExprs[i];
-                            if (expr.funcName == "arith" &&
+                            if (!op.empty() && expr.funcName == "arith" &&
                                 expr.funcArgs.size() == 3 &&
                                 trim(expr.funcArgs[0]) == spec.exprArg &&
                                 expr.funcArgs[1] == op &&
@@ -26656,19 +26662,27 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 break;
                             }
                         }
+                    } else {
+                        for (size_t i = 0; i < selectExprs.size(); ++i) {
+                            if (!selectExprs[i].isScalar &&
+                                selectExprs[i].colName == spec.colName) {
+                                match = i;
+                                break;
+                            }
+                        }
                     }
                     if (match == selectExprs.size()) {
-                        canSortScalarExprOutput = false;
+                        canSortScalarProjected = false;
                         break;
                     }
-                    scalarExprOrderIndexes.push_back(match);
+                    scalarProjectedSortKeys.emplace_back(match, &spec);
                 }
             }
             const bool captureStructuredScalar =
                 shouldPublishQueryMetadata() &&
                 !structuredScalar && !hasSetReturningScalar &&
                 distinctOnCols.empty() &&
-                (exprOrderBySpecs.empty() || canSortScalarExprOutput) &&
+                (exprOrderBySpecs.empty() || canSortScalarProjected) &&
                 queryDb != "information_schema" && queryDb != "pg_catalog" &&
                 structuredScalarResult.columns.size() == selectExprs.size() &&
                 g_engine.getInheritedChildren(queryDb, tname).empty();
@@ -26698,6 +26712,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 vector<HiddenOrderKey> hiddenOrderKeys;
                 bool hasOutputOrderKey = false;
                 for (const auto& spec : orderBySpecs) {
+                    if (canSortScalarProjected) break;
                     size_t tableIndex = tbl.len;
                     for (size_t i = 0; i < tbl.len; ++i) {
                         if (tbl.cols[i].dataName == spec.colName) {
@@ -26845,16 +26860,15 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     }
                 }
             }
-            if (structuredScalarRows && canSortScalarExprOutput &&
+            if (structuredScalarRows && canSortScalarProjected &&
                 structuredScalarResult.rows.size() == answers.size() &&
                 structuredScalarResult.nulls.size() == answers.size()) {
                 vector<size_t> order(answers.size());
                 iota(order.begin(), order.end(), 0);
                 stable_sort(order.begin(), order.end(),
                     [&](size_t a, size_t b) {
-                        for (size_t key = 0; key < scalarExprOrderIndexes.size(); ++key) {
-                            const size_t index = scalarExprOrderIndexes[key];
-                            const auto& spec = exprOrderBySpecs[key];
+                        for (const auto& [index, specPtr] : scalarProjectedSortKeys) {
+                            const auto& spec = *specPtr;
                             const bool aNull = structuredScalarResult.nulls[a][index];
                             const bool bNull = structuredScalarResult.nulls[b][index];
                             if (aNull != bNull) return aNull == spec.nullsFirst;
