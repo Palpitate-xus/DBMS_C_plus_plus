@@ -6239,6 +6239,34 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
         return true;
     }
 
+    // Foreign keys live in table storage metadata and are not necessarily
+    // represented by pg_depend.  Do not let a catalog-only RESTRICT plan
+    // remove a referenced relation while leaving a live child constraint.
+    for (const auto& candidate : g_engine.getTableNames(s.currentDB)) {
+        if (candidate == tname) continue;
+        const TableSchema child =
+            g_engine.getTableSchema(s.currentDB, candidate);
+        for (size_t i = 0; i < child.fkLen; ++i) {
+            const std::string referenced =
+                resolveTableName(s, child.fks[i].refTable);
+            if (referenced != tname) continue;
+            if (stmt->cascade) {
+                // CASCADE must remove the child constraint, not its table.
+                // Until that operation is transactional across storage and
+                // catalog, reject it rather than leave a dangling reference.
+                std::cout << "ERROR: DROP TABLE CASCADE with a referencing "
+                             "foreign key is not supported (SQLSTATE 0A000)"
+                          << std::endl;
+            } else {
+                std::cout << "ERROR: cannot drop table \"" << logicalName
+                          << "\" because foreign key in table \""
+                          << candidate << "\" depends on it "
+                             "(SQLSTATE 2BP01)" << std::endl;
+            }
+            return true;
+        }
+    }
+
     std::vector<std::string> inheritanceParents;
     for (const auto& candidate :
          g_engine.getTableNames(s.currentDB)) {

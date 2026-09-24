@@ -1,0 +1,12 @@
+DROP TABLE IF EXISTS diff_dfdt_child;
+DROP TABLE IF EXISTS diff_dfdt_parent;
+CREATE TABLE diff_dfdt_parent (id integer PRIMARY KEY);
+CREATE TABLE diff_dfdt_child (id integer REFERENCES diff_dfdt_parent(id));
+INSERT INTO diff_dfdt_parent VALUES (1);
+BEGIN;
+DROP TABLE diff_dfdt_parent;
+INSERT INTO diff_dfdt_parent VALUES (2);
+ROLLBACK;
+SELECT id FROM diff_dfdt_parent;
+INSERT INTO diff_dfdt_child VALUES (1);
+SELECT id FROM diff_dfdt_child;
