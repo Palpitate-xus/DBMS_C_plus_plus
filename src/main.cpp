@@ -22494,6 +22494,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
         for (auto& key : groupByCols) lowerGroupKey(key);
         for (auto& groupingSet : groupingSets)
             for (auto& key : groupingSet) lowerGroupKey(key);
+        bool groupFunctionallyDependent = false;
         if (!groupByCols.empty()) {
             size_t primaryKeyColumns = 0;
             size_t groupedPrimaryKeyColumns = 0;
@@ -22505,9 +22506,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     ++groupedPrimaryKeyColumns;
                 }
             }
-            const bool functionallyDependent = primaryKeyColumns > 0 &&
+            groupFunctionallyDependent = primaryKeyColumns > 0 &&
                 primaryKeyColumns == groupedPrimaryKeyColumns;
-            if (!functionallyDependent) {
+            if (!groupFunctionallyDependent) {
                 for (const auto& rawItem : splitSelectColumns(columns)) {
                     string item = trim(rawItem);
                     const size_t asAt = findLastTextOutsideQuotes(
@@ -24106,6 +24107,24 @@ static bool executeInternal(const string& rawSql, Session& s) {
             for (const auto& it : aggItems) {
                 if (!it.func.empty()) pureAgg.push_back(it);
             }
+            std::map<string, size_t> dependentAggregateIndex;
+            if (groupFunctionallyDependent) {
+                for (size_t ei = 0; ei < exprTypes.size(); ++ei) {
+                    if (exprTypes[ei] != 0) continue;
+                    const string& column = selectExprs[ei].colName;
+                    if (!visibleColumns.count(column) ||
+                        find(groupByCols.begin(), groupByCols.end(), column) !=
+                            groupByCols.end() ||
+                        dependentAggregateIndex.count(column)) continue;
+                    dbms::StorageEngine::AggItem dependent;
+                    // A grouped primary key identifies one physical row.
+                    // MIN returns that row's value while preserving NULL.
+                    dependent.func = "min";
+                    dependent.arg = column;
+                    dependentAggregateIndex[column] = pureAgg.size();
+                    pureAgg.push_back(std::move(dependent));
+                }
+            }
             // GroupAggregate emits physical rows as all grouping keys followed
             // by aggregate values.  SQL projection order is independent of
             // that layout and may omit or repeat grouping keys, so build an
@@ -24155,6 +24174,24 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     groupProtocolTypes.push_back(std::move(type));
                     groupProjectionSources.push_back(keyIndex);
                     if (exprTypes[ei] == 0) ++aggregateItemIndex;
+                    continue;
+                }
+                if (exprTypes[ei] == 0 &&
+                    dependentAggregateIndex.count(selectExprs[ei].colName)) {
+                    const string& column = selectExprs[ei].colName;
+                    groupProtocolColumns.push_back(
+                        selectExprs[ei].displayName);
+                    for (size_t ci = 0; ci < tbl.len; ++ci) {
+                        if (tbl.cols[ci].dataName == column) {
+                            groupProtocolTypes.push_back(
+                                tbl.cols[ci].dataType);
+                            break;
+                        }
+                    }
+                    groupProjectionSources.push_back(
+                        groupByCols.size() +
+                        dependentAggregateIndex[column]);
+                    ++aggregateItemIndex;
                     continue;
                 }
                 if (exprTypes[ei] == 0 || exprTypes[ei] == 1 ||
@@ -24312,7 +24349,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         toLower(body), " as ");
                     if (asAt != string::npos) body = trim(body.substr(0, asAt));
                     const bool groupMatch = isGroupColumn(item) || isGroupColumn(body) ||
-                        body.find_first_of("+-*/%") != string::npos;
+                        body.find_first_of("+-*/%") != string::npos ||
+                        dependentAggregateIndex.count(body);
                     if (!groupMatch) canUseVolcanoGroup = false;
                     continue;
                 }
@@ -24390,8 +24428,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
             if (structuredAggregateRows) {
                 bool canProject = groupProjectionComplete &&
-                    groupProjectionSources.size() ==
-                        structuredAggregateResult.columns.size();
+                    !groupProjectionSources.empty();
                 for (const auto& row : structuredAggregateResult.rows) {
                     for (size_t source : groupProjectionSources) {
                         if (source >= row.size()) {
