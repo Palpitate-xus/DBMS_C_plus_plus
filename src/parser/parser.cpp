@@ -5745,7 +5745,7 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
             if (ltok == "constraint") {
                 ++pos;
                 std::string cname;
-                if (pos < tokens.size()) cname = tokens[pos++];
+                if (pos < tokens.size()) cname = parseRoutineIdentifier(tokens[pos++]);
                 // Now the actual constraint type
                 if (pos < tokens.size()) {
                     std::string ctype = toLower(tokens[pos]);
@@ -8808,7 +8808,7 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                         toLower(tokens[pos + 2]) != "check") {
                         return nullptr;
                     }
-                    pendingCheckName = tokens[pos + 1];
+                    pendingCheckName = parseRoutineIdentifier(tokens[pos + 1]);
                     pos += 2;
                 } else if (modifier == "check") {
                     ++pos;
@@ -8912,7 +8912,9 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
             sub.action = AlterTableStmt::Action::AddConstraint; ++pos;
             if (pos < tokens.size() && toLower(tokens[pos]) == "constraint") {
                 ++pos;
-                if (pos < tokens.size()) sub.constraint.name = tokens[pos++];
+                if (pos < tokens.size()) {
+                    sub.constraint.name = parseRoutineIdentifier(tokens[pos++]);
+                }
             }
             if (pos < tokens.size()) {
                 sub.constraint.type = toUpper(tokens[pos]); ++pos;
@@ -8993,7 +8995,7 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                 sub.ifExists = true;
                 pos += 2; // IF EXISTS
             }
-            if (pos < tokens.size()) sub.name = tokens[pos++];
+            if (pos < tokens.size()) sub.name = parseRoutineIdentifier(tokens[pos++]);
             if (pos < tokens.size() && toLower(tokens[pos]) == "cascade") { sub.options["cascade"] = "true"; ++pos; }
         } else if (kw == "alter" && pos + 1 < tokens.size() && toLower(tokens[pos + 1]) == "column") {
             recognized = true;
@@ -9121,9 +9123,9 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                 ++pos;
                 if (pos + 2 < tokens.size() && toLower(tokens[pos]) == "if" &&
                     toLower(tokens[pos + 1]) == "exists") { sub.ifExists = true; pos += 2; }
-                if (pos < tokens.size()) sub.name = tokens[pos++];
+                if (pos < tokens.size()) sub.name = parseRoutineIdentifier(tokens[pos++]);
                 if (pos < tokens.size() && toLower(tokens[pos]) == "to") ++pos;
-                if (pos < tokens.size()) sub.newName = tokens[pos++];
+                if (pos < tokens.size()) sub.newName = parseRoutineIdentifier(tokens[pos++]);
             } else {
                 bool explicitColumn = pos < tokens.size() && toLower(tokens[pos]) == "column";
                 if (explicitColumn) ++pos;
