@@ -5767,9 +5767,8 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                         }
                         if (pos < tokens.size() && toLower(tokens[pos]) == "references") {
                             ++pos;
-                            if (pos < tokens.size()) {
-                                tc.refTable = tokens[pos++];
-                            }
+                            if (!parseQualifiedObjectName(
+                                    tokens, pos, tc.refTable)) return nullptr;
                             if (pos < tokens.size() && tokens[pos] == "(") {
                                 auto refcols = collectParenthesized(tokens, pos);
                                 for (const auto& c : refcols) {
@@ -5838,7 +5837,8 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                 }
                 if (pos < tokens.size() && toLower(tokens[pos]) == "references") {
                     ++pos;
-                    if (pos < tokens.size()) tc.refTable = tokens[pos++];
+                    if (!parseQualifiedObjectName(
+                            tokens, pos, tc.refTable)) return nullptr;
                     if (pos < tokens.size() && tokens[pos] == "(") {
                         auto refcols = collectParenthesized(tokens, pos);
                         for (const auto& c : refcols) {
@@ -6066,7 +6066,9 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                     } else if (ckw == "references") {
                         ++pos;
                         if (pos < tokens.size()) {
-                            std::string refTable = tokens[pos++];
+                            std::string refTable;
+                            if (!parseQualifiedObjectName(
+                                    tokens, pos, refTable)) return nullptr;
                             std::string refCol;
                             if (pos < tokens.size() && tokens[pos] == "(") {
                                 auto refcols = collectParenthesized(tokens, pos);
@@ -8918,7 +8920,8 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
             }
             if (pos < tokens.size() && toLower(tokens[pos]) == "references") {
                 ++pos;
-                if (pos < tokens.size()) sub.constraint.refTable = tokens[pos++];
+                if (!parseQualifiedObjectName(
+                        tokens, pos, sub.constraint.refTable)) return nullptr;
                 if (pos < tokens.size() && tokens[pos] == "(") {
                     auto refcols = collectParenthesized(tokens, pos);
                     for (const auto& c : refcols) if (c != ",") sub.constraint.refColumns.push_back(c);
