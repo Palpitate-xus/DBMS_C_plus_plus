@@ -26642,12 +26642,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 });
             vector<pair<size_t, const dbms::StorageEngine::OrderBySpec*>>
                 scalarProjectedSortKeys;
+            vector<dbms::StorageEngine::SelectExpr> scalarSortHiddenExprs;
             bool canSortScalarProjected = !exprOrderBySpecs.empty();
             if (canSortScalarProjected) {
                 for (const auto& [isExpression, keyIndex] : orderKeyRefs) {
                     const auto& spec = isExpression
                         ? exprOrderBySpecs[keyIndex] : orderBySpecs[keyIndex];
                     size_t match = selectExprs.size();
+                    bool mapped = false;
                     if (isExpression) {
                         const string op = spec.exprFunc == "add" ? "+" :
                                           spec.exprFunc == "sub" ? "-" : "";
@@ -26659,6 +26661,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 expr.funcArgs[1] == op &&
                                 trim(expr.funcArgs[2]) == spec.exprArg2) {
                                 match = i;
+                                mapped = true;
                                 break;
                             }
                         }
@@ -26667,17 +26670,44 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             if (!selectExprs[i].isScalar &&
                                 selectExprs[i].colName == spec.colName) {
                                 match = i;
+                                mapped = true;
                                 break;
                             }
                         }
+                        if (!mapped) {
+                            bool tableColumn = false;
+                            for (size_t i = 0; i < tbl.len; ++i)
+                                tableColumn |= tbl.cols[i].dataName == spec.colName;
+                            if (tableColumn) {
+                                for (size_t i = 0; i < scalarSortHiddenExprs.size(); ++i) {
+                                    if (scalarSortHiddenExprs[i].colName == spec.colName) {
+                                        match = selectExprs.size() + i;
+                                        mapped = true;
+                                        break;
+                                    }
+                                }
+                                if (!mapped) {
+                                    dbms::StorageEngine::SelectExpr hidden;
+                                    hidden.displayName = spec.colName;
+                                    hidden.colName = spec.colName;
+                                    match = selectExprs.size() + scalarSortHiddenExprs.size();
+                                    scalarSortHiddenExprs.push_back(std::move(hidden));
+                                    mapped = true;
+                                }
+                            }
+                        }
                     }
-                    if (match == selectExprs.size()) {
+                    if (!mapped) {
                         canSortScalarProjected = false;
                         break;
                     }
                     scalarProjectedSortKeys.emplace_back(match, &spec);
                 }
             }
+            vector<dbms::StorageEngine::SelectExpr> scalarSortExprs = selectExprs;
+            if (canSortScalarProjected)
+                scalarSortExprs.insert(scalarSortExprs.end(),
+                    scalarSortHiddenExprs.begin(), scalarSortHiddenExprs.end());
             const bool captureStructuredScalar =
                 shouldPublishQueryMetadata() &&
                 !structuredScalar && !hasSetReturningScalar &&
@@ -26689,7 +26719,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             if (condTokens.empty()) {
                 if (captureStructuredScalar) {
                     answers = g_engine.queryExpr(
-                        queryDb, tname, {}, selectExprs, orderBySpecs,
+                        queryDb, tname, {}, scalarSortExprs, orderBySpecs,
                         &structuredScalarResult.rows,
                         &structuredScalarResult.nulls);
                     structuredScalarRows = true;
@@ -26703,7 +26733,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 for (auto& t : condTokens) t = modifyLogic(t);
                 auto groups = breakDownConditions(condTokens);
                 vector<dbms::StorageEngine::SelectExpr> mergeExprs =
-                    selectExprs;
+                    scalarSortExprs;
                 struct HiddenOrderKey {
                     const dbms::StorageEngine::OrderBySpec* spec;
                     size_t cellIndex;
@@ -26736,7 +26766,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     hasOutputOrderKey && !hiddenOrderKeys.empty();
                 if (captureStructuredScalar && groups.size() == 1) {
                     answers = g_engine.queryExpr(
-                        queryDb, tname, groups.front(), selectExprs,
+                        queryDb, tname, groups.front(),
+                        canSortScalarProjected ? mergeExprs : selectExprs,
                         orderBySpecs, &structuredScalarResult.rows,
                         &structuredScalarResult.nulls);
                     structuredScalarRows = true;
@@ -26831,21 +26862,23 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 std::move(oldNulls[index]));
                         }
                     }
-                    answers.clear();
-                    for (size_t i = 0;
-                         i < structuredScalarResult.rows.size(); ++i) {
-                        structuredScalarResult.rows[i].resize(
-                            selectExprs.size());
-                        structuredScalarResult.nulls[i].resize(
-                            selectExprs.size());
-                        string rendered;
-                        for (size_t cell = 0; cell < selectExprs.size(); ++cell) {
-                            rendered += structuredScalarResult.nulls[i][cell]
-                                ? "NULL"
-                                : structuredScalarResult.rows[i][cell];
-                            rendered += ' ';
+                    if (scalarSortHiddenExprs.empty()) {
+                        answers.clear();
+                        for (size_t i = 0;
+                             i < structuredScalarResult.rows.size(); ++i) {
+                            structuredScalarResult.rows[i].resize(
+                                selectExprs.size());
+                            structuredScalarResult.nulls[i].resize(
+                                selectExprs.size());
+                            string rendered;
+                            for (size_t cell = 0; cell < selectExprs.size(); ++cell) {
+                                rendered += structuredScalarResult.nulls[i][cell]
+                                    ? "NULL"
+                                    : structuredScalarResult.rows[i][cell];
+                                rendered += ' ';
+                            }
+                            answers.push_back(std::move(rendered));
                         }
-                        answers.push_back(std::move(rendered));
                     }
                     structuredScalarRows = true;
                 } else {
@@ -26899,6 +26932,20 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     answers.push_back(std::move(oldAnswers[index]));
                     structuredScalarResult.rows.push_back(std::move(oldRows[index]));
                     structuredScalarResult.nulls.push_back(std::move(oldNulls[index]));
+                }
+                if (!scalarSortHiddenExprs.empty()) {
+                    answers.clear();
+                    for (size_t row = 0; row < structuredScalarResult.rows.size(); ++row) {
+                        structuredScalarResult.rows[row].resize(selectExprs.size());
+                        structuredScalarResult.nulls[row].resize(selectExprs.size());
+                        string rendered;
+                        for (size_t cell = 0; cell < selectExprs.size(); ++cell) {
+                            rendered += structuredScalarResult.nulls[row][cell]
+                                ? "NULL" : structuredScalarResult.rows[row][cell];
+                            rendered += ' ';
+                        }
+                        answers.push_back(std::move(rendered));
+                    }
                 }
                 structuredScalarExprOrderHandled = true;
             }
