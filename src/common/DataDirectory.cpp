@@ -17,6 +17,7 @@
 #include <iomanip>
 #include <set>
 #include <sstream>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <system_error>
 #include <unistd.h>
@@ -28,7 +29,47 @@ namespace {
 struct BootstrapState {
     std::filesystem::path root;
     std::string systemIdentifier;
+    int lockFd = -1;
     bool ready = false;
+    ~BootstrapState() {
+        if (lockFd >= 0) (void)::close(lockFd);
+    }
+};
+
+class DirectoryLock {
+public:
+    ~DirectoryLock() {
+        if (fd_ >= 0) (void)::close(fd_);
+    }
+    DirectoryLock(const DirectoryLock&) = delete;
+    DirectoryLock& operator=(const DirectoryLock&) = delete;
+    DirectoryLock() = default;
+
+    bool acquire(const std::filesystem::path& root, std::string& error) {
+        fd_ = ::open(root.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (fd_ < 0) {
+            error = "could not open data directory for instance lock: " +
+                std::string(std::strerror(errno));
+            return false;
+        }
+        if (::flock(fd_, LOCK_EX | LOCK_NB) != 0) {
+            error = (errno == EWOULDBLOCK || errno == EAGAIN)
+                ? "data directory is already in use by another process"
+                : "could not lock data directory: " +
+                    std::string(std::strerror(errno));
+            return false;
+        }
+        return true;
+    }
+
+    int release() {
+        const int fd = fd_;
+        fd_ = -1;
+        return fd;
+    }
+
+private:
+    int fd_ = -1;
 };
 
 constexpr const char* kCurrentControlMagic =
@@ -803,6 +844,9 @@ bool runDataDirectoryUtility(DataDirectoryUtility utility,
         error = "data directory does not exist or is not a directory";
         return false;
     }
+    DirectoryLock offlineLock;
+    if (utility != DataDirectoryUtility::Check &&
+        !offlineLock.acquire(selected, error)) return false;
     const auto control = selected / "DBMS_CONTROL";
     if (!std::filesystem::is_regular_file(control, filesystemError) ||
         filesystemError) {
@@ -861,6 +905,8 @@ bool bootstrapDataDirectory(std::string& error) {
         error = "data directory does not exist or is not a directory";
         return false;
     }
+    DirectoryLock instanceLock;
+    if (!instanceLock.acquire(selected, error)) return false;
     if (!initializeControlFile(
             selected, bootstrap.systemIdentifier, error)) return false;
     std::filesystem::current_path(selected, filesystemError);
@@ -869,6 +915,7 @@ bool bootstrapDataDirectory(std::string& error) {
         return false;
     }
     bootstrap.root = selected;
+    bootstrap.lockFd = instanceLock.release();
     bootstrap.ready = true;
     return true;
 }

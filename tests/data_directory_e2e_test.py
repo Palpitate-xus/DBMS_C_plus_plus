@@ -110,6 +110,27 @@ def main():
             messages = _helpers.simple_query(sock, "SHOW compatibility_mode")
             assert _helpers.data_row_values(messages) == [[b"postgresql18"]], messages
             sock.close()
+
+            second = subprocess.run(
+                [DBMS_MAIN, "-D", str(cluster), "--server", str(free_port()),
+                 "--insecure"], cwd=launch, capture_output=True,
+                text=True, timeout=5, check=False)
+            assert second.returncode == 1, second
+            assert "data directory is already in use" in second.stderr, second
+            assert process.poll() is None
+
+            checked_live = subprocess.run(
+                [DBMS_MAIN, "-D", str(cluster), "--check-data-directory"],
+                cwd=launch, capture_output=True, text=True,
+                timeout=5, check=False)
+            assert checked_live.returncode == 0, checked_live
+            for utility in ("--verify-data-checksums",
+                            "--upgrade-data-directory"):
+                offline = subprocess.run(
+                    [DBMS_MAIN, "-D", str(cluster), utility], cwd=launch,
+                    capture_output=True, text=True, timeout=5, check=False)
+                assert offline.returncode == 1, offline
+                assert "data directory is already in use" in offline.stderr, offline
         finally:
             process.terminate()
             process.wait(timeout=30)
