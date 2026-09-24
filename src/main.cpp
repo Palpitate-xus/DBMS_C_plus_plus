@@ -22261,6 +22261,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 if (sortItem.find_first_of("()+-*/%") == string::npos) {
                     auto amIt = selectAliasMap.find(sortItem);
                     if (amIt != selectAliasMap.end()) sortItem = amIt->second;
+                    const string& visibleQualifier = tableAlias.empty()
+                        ? tnameOrig : tableAlias;
+                    const string prefix = visibleQualifier + ".";
+                    if (sortItem.rfind(prefix, 0) == 0 &&
+                        visibleColumns.count(sortItem.substr(prefix.size()))) {
+                        sortItem.erase(0, prefix.size());
+                    }
                 }
                 dbms::StorageEngine::OrderBySpec spec;
                 spec.colName = sortItem;
@@ -22469,6 +22476,21 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 return true;
             }
         }
+        // The binder above checks the SQL-visible qualifier.  The storage
+        // group operator uses physical column names, so lower a simple
+        // qualified grouping key only after that scope check succeeds.
+        const string& groupQualifier = tableAlias.empty()
+            ? tnameOrig : tableAlias;
+        auto lowerGroupKey = [&](string& key) {
+            const string prefix = groupQualifier + ".";
+            if (key.rfind(prefix, 0) == 0 &&
+                visibleColumns.count(key.substr(prefix.size()))) {
+                key.erase(0, prefix.size());
+            }
+        };
+        for (auto& key : groupByCols) lowerGroupKey(key);
+        for (auto& groupingSet : groupingSets)
+            for (auto& key : groupingSet) lowerGroupKey(key);
 
         if (havingPos != string::npos && groupPos == string::npos) {
             cout << "SQL syntax error: HAVING without GROUP BY" << endl;
@@ -22491,6 +22513,23 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     cout << "ERROR: " << bindingError << " (SQLSTATE "
                          << bindingSqlState << ")" << endl;
                     return true;
+                }
+                // A simple grouped-column predicate is evaluated by the
+                // single-table storage path against bare schema column names.
+                if (havingClause.find('(') == string::npos) {
+                    const string prefix = visibleQualifier + ".";
+                    size_t at = 0;
+                    while ((at = findTextOutsideQuotes(
+                                havingClause, prefix, at)) != string::npos) {
+                        if (at > 0 &&
+                            (isalnum(static_cast<unsigned char>(
+                                havingClause[at - 1])) ||
+                             havingClause[at - 1] == '_')) {
+                            at += prefix.size();
+                            continue;
+                        }
+                        havingClause.erase(at, prefix.size());
+                    }
                 }
             }
             size_t pos = 0;
