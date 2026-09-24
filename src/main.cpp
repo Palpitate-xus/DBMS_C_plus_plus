@@ -24295,15 +24295,29 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         for (auto& token : tokens)
                             token = modifyLogic(token);
                         const auto groups = breakDownConditions(tokens);
-                        if (groups.size() != 1) {
+                        if (groups.empty()) {
                             cout << "ERROR: this implicit HAVING WHERE shape "
                                     "is not yet supported (SQLSTATE 0A000)"
                                  << endl;
                             return true;
                         }
-                        context.conds =
-                            dbms::StorageEngine::parseConditions(
-                                groups.front());
+                        vector<vector<dbms::StorageEngine::Condition>>
+                            branches;
+                        for (const auto& group : groups) {
+                            auto parsed =
+                                dbms::StorageEngine::parseConditions(group);
+                            if (parsed.empty()) {
+                                cout << "ERROR: this implicit HAVING WHERE "
+                                        "shape is not yet supported "
+                                        "(SQLSTATE 0A000)" << endl;
+                                return true;
+                            }
+                            branches.push_back(std::move(parsed));
+                        }
+                        if (branches.size() == 1)
+                            context.conds = std::move(branches.front());
+                        else
+                            context.disjunctiveConds = std::move(branches);
                     }
                     const auto execution =
                         dbms::QueryPlanner::executePlanChecked(
