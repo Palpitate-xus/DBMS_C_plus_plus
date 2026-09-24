@@ -373,6 +373,8 @@ class FilterOp : public Operator {
 public:
     FilterOp(OpPtr child, const TableSchema& tbl,
              const std::vector<StorageEngine::Condition>& conds);
+    FilterOp(OpPtr child, const TableSchema& tbl,
+             const std::vector<std::vector<StorageEngine::Condition>>& branches);
 
     bool open() override;
     bool next(std::string& outRow) override;
@@ -383,6 +385,9 @@ public:
     }
     ScanOrigin scanOrigin() const override { return child_->scanOrigin(); }
     const std::vector<StorageEngine::Condition>& conditions() const { return conds_; }
+    const std::vector<std::vector<StorageEngine::Condition>>& branches() const {
+        return branches_;
+    }
 
     // Index condition recheck: apply conditions that the index could not fully evaluate
     // (bitmap heap scan recheck semantics).
@@ -393,6 +398,7 @@ private:
     OpPtr child_;
     TableSchema tbl_;
     std::vector<StorageEngine::Condition> conds_;
+    std::vector<std::vector<StorageEngine::Condition>> branches_;
     bool indexConditionRecheck_ = false;
 };
 
@@ -1094,6 +1100,8 @@ struct PlanContext {
     std::string dbname;
     std::string tablename;
     std::vector<StorageEngine::Condition> conds;
+    // OR of AND groups, evaluated once per physical row before aggregation.
+    std::vector<std::vector<StorageEngine::Condition>> disjunctiveConds;
     std::set<std::string> selectCols;
     std::string orderByCol;
     bool orderByAsc = true;

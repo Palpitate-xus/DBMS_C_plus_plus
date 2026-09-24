@@ -25465,13 +25465,30 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
             }
             vector<vector<string>> volcanoAggregateConditions;
+            vector<vector<dbms::StorageEngine::Condition>>
+                volcanoAggregateBranches;
             if (canUseVolcanoAggregate && !condTokens.empty()) {
                 vector<string> condCopy = condTokens;
                 condCopy.insert(condCopy.begin(), "(");
                 condCopy.push_back(")");
                 for (auto& token : condCopy) token = modifyLogic(token);
                 volcanoAggregateConditions = breakDownConditions(condCopy);
-                canUseVolcanoAggregate = volcanoAggregateConditions.size() <= 1;
+                canUseVolcanoAggregate = !volcanoAggregateConditions.empty();
+                for (const auto& branch : volcanoAggregateConditions) {
+                    auto parsed =
+                        dbms::StorageEngine::parseConditions(branch);
+                    if (parsed.empty()) {
+                        canUseVolcanoAggregate = false;
+                        break;
+                    }
+                    volcanoAggregateBranches.push_back(std::move(parsed));
+                }
+            }
+            if (!canUseVolcanoAggregate &&
+                volcanoAggregateConditions.size() > 1) {
+                cout << "ERROR: this aggregate OR predicate is not yet "
+                        "supported (SQLSTATE 0A000)" << endl;
+                return true;
             }
             if (canUseVolcanoAggregate) {
                 dbms::PlanContext ctx;
@@ -25479,9 +25496,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 ctx.tablename = tname;
                 ctx.aggregateItems = pureAgg;
                 ctx.havingConds = havingConds;
-                if (!volcanoAggregateConditions.empty()) {
-                    ctx.conds = dbms::StorageEngine::parseConditions(
-                        volcanoAggregateConditions.front());
+                if (volcanoAggregateBranches.size() == 1) {
+                    ctx.conds = std::move(volcanoAggregateBranches.front());
+                } else if (volcanoAggregateBranches.size() > 1) {
+                    ctx.disjunctiveConds =
+                        std::move(volcanoAggregateBranches);
                 }
                 auto execution = dbms::QueryPlanner::executePlanChecked(
                     dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx));

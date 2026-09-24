@@ -904,15 +904,20 @@ FilterOp::FilterOp(OpPtr child, const TableSchema& tbl,
                     const std::vector<StorageEngine::Condition>& conds)
     : child_(std::move(child)), tbl_(tbl), conds_(conds) {}
 
+FilterOp::FilterOp(
+    OpPtr child, const TableSchema& tbl,
+    const std::vector<std::vector<StorageEngine::Condition>>& branches)
+    : child_(std::move(child)), tbl_(tbl), branches_(branches) {}
+
 bool FilterOp::open() {
     return child_->open();
 }
 
 bool FilterOp::next(std::string& outRow) {
     NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
-    while (child_->next(outRow)) {
-        bool match = true;
-        for (const auto& c : conds_) {
+    const auto matchesBranch = [&](
+        const std::vector<StorageEngine::Condition>& conditions) {
+        for (const auto& c : conditions) {
             size_t colIdx = tbl_.len;
             for (size_t i = 0; i < tbl_.len; ++i) {
                 if (tbl_.cols[i].dataName == c.colName) {
@@ -920,14 +925,26 @@ bool FilterOp::next(std::string& outRow) {
                     break;
                 }
             }
-            const bool isNull = colIdx < tbl_.len && child_->lastColumnIsNull(colIdx);
+            const bool isNull =
+                colIdx < tbl_.len && child_->lastColumnIsNull(colIdx);
             const bool conditionMatches =
                 (c.op == "isnull") ? isNull :
                 (c.op == "isnotnull") ? !isNull :
                 !isNull && StorageEngine::evalConditionOnRow(c, outRow, tbl_);
-            if (!conditionMatches) {
-                match = false;
-                break;
+            if (!conditionMatches) return false;
+        }
+        return true;
+    };
+    while (child_->next(outRow)) {
+        bool match = false;
+        if (branches_.empty()) {
+            match = matchesBranch(conds_);
+        } else {
+            for (const auto& branch : branches_) {
+                if (matchesBranch(branch)) {
+                    match = true;
+                    break;
+                }
             }
         }
         if (match) {
@@ -4090,6 +4107,11 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
     if (!remainingConds.empty()) {
         TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
         root = std::make_unique<FilterOp>(std::move(root), tbl, remainingConds);
+    }
+    if (!ctx.disjunctiveConds.empty()) {
+        TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
+        root = std::make_unique<FilterOp>(
+            std::move(root), tbl, ctx.disjunctiveConds);
     }
 
     // Lower uncorrelated IN/NOT IN predicates after the outer filter and
