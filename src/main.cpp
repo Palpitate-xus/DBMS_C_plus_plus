@@ -26861,9 +26861,19 @@ static bool executeInternal(const string& rawSql, Session& s) {
             // therefore asks StorageEngine for exact cells and a separate
             // NULL bitmap.  Complex operator shapes remain on their existing
             // path until those operators expose structured tuples too.
+            bool hasBooleanGroupParenthesis = false;
+            for (size_t i = 0; i < condTokens.size(); ++i) {
+                if (condTokens[i] == "(" &&
+                    (i == 0 || condTokens[i - 1] == "and" ||
+                     condTokens[i - 1] == "or")) {
+                    hasBooleanGroupParenthesis = true;
+                    break;
+                }
+            }
             const bool simpleStructuredPlainPredicate =
                 condTokens.empty() ||
-                rawWhereClause.find_first_of("()") == string::npos;
+                rawWhereClause.find_first_of("()") == string::npos ||
+                hasBooleanGroupParenthesis;
             const bool captureStructuredPlain =
                 shouldPublishQueryMetadata() &&
                 simpleStructuredPlainPredicate &&
