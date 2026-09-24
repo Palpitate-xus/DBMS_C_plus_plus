@@ -28766,14 +28766,15 @@ std::vector<std::string> StorageEngine::query(
         }
 
         struct SortKey {
-            int64_t rid;
+            size_t rowIndex;
             std::vector<
                 std::tuple<std::string, int64_t, double, Date, Numeric>> vals;
             std::vector<bool> isNulls; // true if value is NULL
         };
         std::vector<SortKey> keys;
-        for (auto& mr : matchRows) {
-            SortKey k{mr.first, {}, {}};
+        for (size_t rowIndex = 0; rowIndex < matchRows.size(); ++rowIndex) {
+            auto& mr = matchRows[rowIndex];
+            SortKey k{rowIndex, {}, {}};
             NullRowBinding nbS(this, dbname, tbl.tablename, mr.first, tbl.len);
             for (size_t orderIndex = 0; orderIndex < orderBy.size();
                  ++orderIndex) {
@@ -28885,11 +28886,9 @@ std::vector<std::string> StorageEngine::query(
             return false;
         });
         std::vector<std::pair<int64_t, std::string>> sorted;
-        for (const auto& k : keys) {
-            for (auto& mr : matchRows) {
-                if (mr.first == k.rid) { sorted.push_back(std::move(mr)); break; }
-            }
-        }
+        sorted.reserve(matchRows.size());
+        for (const auto& k : keys)
+            sorted.push_back(std::move(matchRows[k.rowIndex]));
         matchRows = std::move(sorted);
     }
 
