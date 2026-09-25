@@ -4686,14 +4686,14 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             }
         }
         if (targetSchema.empty() && !temporary) {
-            std::cout << "ERROR: no schema has been selected to create in"
-                      << std::endl;
+            std::cout << "ERROR: no schema has been selected to create in "
+                         "(SQLSTATE 3F000)" << std::endl;
             return true;
         }
     }
     if (!temporary && !g_engine.schemaExists(s.currentDB, targetSchema)) {
         std::cout << "ERROR: schema \"" << targetSchema
-                  << "\" does not exist" << std::endl;
+                  << "\" does not exist (SQLSTATE 3F000)" << std::endl;
         return true;
     }
     CatalogManager* tableCatalog = nullptr;
