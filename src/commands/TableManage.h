@@ -2057,8 +2057,17 @@ private:
             std::map<std::string, bool> constraintMode;
             std::string ddlBackupPath;
             LockManager::LockCheckpoint lockCheckpoint;
+            bool tempNamespaceCreated = false;
+            std::set<std::string> tempTables;
+            std::map<std::string, std::string> tempTableOnCommit;
+            std::set<std::string> tempTablesCreatedInTransaction;
         };
         std::vector<SavepointState> savepoints;
+        bool tempNamespaceAtTransactionStart = false;
+        std::set<std::string> tempTablesAtTransactionStart;
+        std::map<std::string, std::string>
+            tempTableOnCommitAtTransactionStart;
+        std::set<std::string> tempTablesCreatedAtTransactionStart;
         bool containsSavepoint(const std::string& name) const {
             for (const auto& savepoint : savepoints) {
                 if (savepoint.name == name) return true;

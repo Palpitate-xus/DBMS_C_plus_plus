@@ -8117,7 +8117,10 @@ static bool handleSelectIntoTable(const string& sql, Session& s, bool& handled) 
         "table " + target + " as select " + selectList + " " + fromRest;
     handled = true;
     bool failed = execute(createSql, s);
-    if (!failed && temporary) s.tempTables.insert(target);
+    if (!failed && temporary) {
+        s.tempNamespaceCreated = true;
+        s.tempTables.insert(target);
+    }
     return failed;
 }
 
@@ -15443,6 +15446,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             s.userVariables.clear();
             s.constraintsDeferred = false;
             s.currentDB = dbname;
+            s.tempNamespaceCreated = false;
             g_engine.getLockManager().setResourceNamespace(dbname);
             g_engine.getLockManager().setLockTimeout(s.lockTimeoutMs);
             g_engine.getLockManager().setDeadlockTimeout(s.deadlockTimeoutMs);

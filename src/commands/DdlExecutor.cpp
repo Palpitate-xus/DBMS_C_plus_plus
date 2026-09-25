@@ -4746,6 +4746,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     }
     const auto registerTemporaryTable = [&]() {
         if (!temporary) return;
+        s.tempNamespaceCreated = true;
         s.tempTables.insert(stmt->tableName);
         s.tempTableOnCommit[stmt->tableName] = stmt->onCommit;
         if (g_engine.inTransaction()) {
@@ -6312,7 +6313,8 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
     if (CatalogManager::parseQualifiedName(logicalName, tableName) &&
         !tableName.schema.empty() &&
         !(tableName.schema == "pg_temp" &&
-          (s.tempTables.count(tableName.name) != 0 ||
+          (s.tempNamespaceCreated ||
+           s.tempTables.count(tableName.name) != 0 ||
            s.transientTempTables.count(tableName.name) != 0)) &&
         !g_engine.schemaExists(s.currentDB, tableName.schema)) {
         if (stmt->ifExists) {
@@ -6722,7 +6724,8 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
     if (CatalogManager::parseQualifiedName(stmt->tableName, tableName) &&
         !tableName.schema.empty() &&
         !(tableName.schema == "pg_temp" &&
-          (s.tempTables.count(tableName.name) != 0 ||
+          (s.tempNamespaceCreated ||
+           s.tempTables.count(tableName.name) != 0 ||
            s.transientTempTables.count(tableName.name) != 0)) &&
         !g_engine.schemaExists(s.currentDB, tableName.schema)) {
         std::cout << "ERROR: schema \"" << tableName.schema
@@ -7052,7 +7055,8 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
         }
         std::string tempIndexOwner;
         const bool tempNamespaceActive =
-            !s.tempTables.empty() || !s.transientTempTables.empty();
+            s.tempNamespaceCreated || !s.tempTables.empty() ||
+            !s.transientTempTables.empty();
         if (indexQn.schema.empty() || indexQn.schema == "pg_temp") {
             std::set<std::string> tempNames(
                 s.tempTables.begin(), s.tempTables.end());

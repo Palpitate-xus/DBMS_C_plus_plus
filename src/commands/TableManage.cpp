@@ -41228,10 +41228,16 @@ static void applySessionTempTableCommitActions(StorageEngine& engine,
 
 static void rollbackSessionTempTables(StorageEngine& engine,
                                       Session& session,
-                                      const std::string& dbname) {
+                                      const std::string& dbname,
+                                      const std::set<std::string>& preexisting) {
     const auto created = session.tempTablesCreatedInTransaction;
     for (const auto& logicalName : created) {
-        engine.dropTable(dbname, tempTablePrefix(session, logicalName));
+        // A transaction may DROP and recreate an existing temp table under
+        // the same name. The DDL snapshot has restored the original heap;
+        // dropping by name here would destroy that recovered table.
+        if (preexisting.count(logicalName) == 0) {
+            engine.dropTable(dbname, tempTablePrefix(session, logicalName));
+        }
         session.tempTables.erase(logicalName);
         session.tempTableOnCommit.erase(logicalName);
     }
@@ -41363,6 +41369,16 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
         return DBStatus::OK;
     }
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    if (Session* session = currentSession();
+        session && session->currentDB == dbname) {
+        context.tempNamespaceAtTransactionStart =
+            session->tempNamespaceCreated;
+        context.tempTablesAtTransactionStart = session->tempTables;
+        context.tempTableOnCommitAtTransactionStart =
+            session->tempTableOnCommit;
+        context.tempTablesCreatedAtTransactionStart =
+            session->tempTablesCreatedInTransaction;
+    }
 
     context.databaseTxnMutex = databaseTxnLockFor(dbname);
     if (ddlSnapshot) {
@@ -43182,7 +43198,17 @@ DBStatus StorageEngine::rollbackTransaction() {
 
     if (Session* session = currentSession();
         session && session->currentDB == transactionContext().txnDB) {
-        rollbackSessionTempTables(*this, *session, transactionContext().txnDB);
+        rollbackSessionTempTables(
+            *this, *session, transactionContext().txnDB,
+            transactionContext().tempTablesAtTransactionStart);
+        session->tempNamespaceCreated =
+            transactionContext().tempNamespaceAtTransactionStart;
+        session->tempTables =
+            transactionContext().tempTablesAtTransactionStart;
+        session->tempTableOnCommit =
+            transactionContext().tempTableOnCommitAtTransactionStart;
+        session->tempTablesCreatedInTransaction =
+            transactionContext().tempTablesCreatedAtTransactionStart;
     }
 
     if (!preserveBackup) discardTransactionBackup(rollbackDb);
@@ -44112,8 +44138,18 @@ DBStatus StorageEngine::savepoint(const std::string& name) {
         std::nullopt,
         context.constraintMode,
         std::move(ddlBackupPath),
-        lockManager_.captureCheckpoint()
+        lockManager_.captureCheckpoint(),
+        false, {}, {}, {}
     });
+    if (Session* session = currentSession();
+        session && session->currentDB == context.txnDB) {
+        auto& savepoint = context.savepoints.back();
+        savepoint.tempNamespaceCreated = session->tempNamespaceCreated;
+        savepoint.tempTables = session->tempTables;
+        savepoint.tempTableOnCommit = session->tempTableOnCommit;
+        savepoint.tempTablesCreatedInTransaction =
+            session->tempTablesCreatedInTransaction;
+    }
     return DBStatus::OK;
 }
 
@@ -44716,6 +44752,14 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
         context.savepoints.begin() +
             static_cast<std::ptrdiff_t>(savepointIndex + 1),
         context.savepoints.end());
+    if (Session* session = currentSession();
+        session && session->currentDB == context.txnDB) {
+        session->tempNamespaceCreated = target.tempNamespaceCreated;
+        session->tempTables = target.tempTables;
+        session->tempTableOnCommit = target.tempTableOnCommit;
+        session->tempTablesCreatedInTransaction =
+            target.tempTablesCreatedInTransaction;
+    }
     return DBStatus::OK;
 }
 

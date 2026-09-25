@@ -206,6 +206,9 @@ struct Session {
     // independently linked executor tests.
     std::string lcMonetary = "C";
     std::string defaultLcMonetary = "C";
+    // A session's pg_temp alias remains resolvable after its last temp table
+    // is dropped; it is not equivalent to tempTables being nonempty.
+    bool tempNamespaceCreated = false;
 };
 
 inline std::string tempTablePrefix(const Session& session, const std::string& name) {

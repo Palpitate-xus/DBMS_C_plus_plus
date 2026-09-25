@@ -1,0 +1,10 @@
+CREATE TEMP TABLE diff_temp_drop_savepoint (id integer);
+INSERT INTO diff_temp_drop_savepoint VALUES (9);
+BEGIN;
+SAVEPOINT temp_drop_sp;
+DROP TABLE diff_temp_drop_savepoint;
+ROLLBACK TO SAVEPOINT temp_drop_sp;
+SELECT id FROM diff_temp_drop_savepoint;
+COMMIT;
+DROP TABLE diff_temp_drop_savepoint;
+SELECT 1;

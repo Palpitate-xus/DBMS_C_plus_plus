@@ -1,0 +1,10 @@
+CREATE TEMP TABLE diff_temp_recreate_rollback (id integer);
+INSERT INTO diff_temp_recreate_rollback VALUES (7);
+BEGIN;
+DROP TABLE diff_temp_recreate_rollback;
+CREATE TEMP TABLE diff_temp_recreate_rollback (id integer);
+INSERT INTO diff_temp_recreate_rollback VALUES (8);
+ROLLBACK;
+SELECT id FROM diff_temp_recreate_rollback;
+DROP TABLE diff_temp_recreate_rollback;
+SELECT 1;

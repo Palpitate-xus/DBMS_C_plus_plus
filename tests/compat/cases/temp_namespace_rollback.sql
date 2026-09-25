@@ -1,0 +1,11 @@
+BEGIN;
+CREATE TEMP TABLE diff_temp_namespace_txn (id integer);
+ROLLBACK;
+DROP INDEX pg_temp.diff_temp_namespace_missing_idx;
+BEGIN;
+SAVEPOINT temp_namespace_sp;
+CREATE TEMP TABLE diff_temp_namespace_sp (id integer);
+ROLLBACK TO SAVEPOINT temp_namespace_sp;
+DROP INDEX pg_temp.diff_temp_namespace_missing_idx;
+ROLLBACK;
+SELECT 1;
