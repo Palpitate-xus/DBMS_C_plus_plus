@@ -5711,6 +5711,12 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
         parseCreateTableOnCommit(tokens, pos, *stmt);
     }
 
+    if (pos >= tokens.size() ||
+        (tokens[pos] != "(" && !match(tokens, pos, "as") &&
+         !match(tokens, pos, "of"))) {
+        return nullptr;
+    }
+
     // CREATE TABLE ... AS SELECT ...
     if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "as" && toLower(tokens[pos + 1]) == "select") {
         pos += 2;
