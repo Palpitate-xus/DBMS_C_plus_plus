@@ -577,6 +577,7 @@
 | 598 | SQL-11 / CAT-12 / P0-16 | `CREATE TABLE child (...) INHERITS` 缺少父表列表，或 `INHERITS ()` 空列表，原先仍创建关系；现要求非空括号列表，否则拒绝整个 DDL | 新增 `create_table_incomplete_inherits`，两种不完整形式修复前真实 18.6 差分失败，修复后定向 `failed=0`；普通建表相邻用例通过，正式构建通过。完整继承语义仍为 partial | `10a11a2` |
 | 599 | SQL-11 / CAT-11 / P0-16 | `CREATE TABLE ... PARTITION` 或 `PARTITION BY RANGE` 缺少必要语法时原先仍创建关系；现要求合法分区策略及非空键列表，否则整句拒绝 | 新增 `create_table_incomplete_partition`，修复前两种形式与真实 18.6 差分失败，修复后定向 `failed=0`，并验证有效的 `PARTITION BY RANGE (id)` 仍可创建；正式构建通过。完整分区验证/路由仍为 partial | `83d8e53` |
 | 600 | SQL-11 / CAT-20 / P0-16 | `CREATE TABLE ... TABLESPACE` 缺少表空间名时原先仍成功建表；现要求名称 token，不能把语法不完整的语句当成功 DDL | 新增 `create_table_incomplete_tablespace`，修复前真实 18.6 差分失败，修复后定向 `failed=0`，正式构建通过。表空间权限和实际文件迁移仍为 partial | `c38df63` |
+| 601 | SQL-11 / CAT-10 / TYPE-17 / P0-16 | `CREATE TABLE t OF` 缺少 composite type 名时原先仍建空表；现拒绝语法不完整的 typed table DDL | 新增 `create_table_incomplete_of`，修复前真实 18.6 差分表现为错误码和错误创建关系，修复后定向 `failed=0`，正式构建通过。完整 typed table 和 composite 语义仍为 partial | `1c63620` |
 
 2026-09-25 复验：截至第 591 项的 233 组真实 PostgreSQL 18.6 全量差分 `failed=0`，PostgreSQL 协议回归通过；第 592–593 项在此之后新增并分别完成定向差分，尚未包含在这次 233 组全量记录中。总清单仍有未完成项，不能据此宣称 PostgreSQL 兼容完成。
 
