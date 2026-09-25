@@ -578,6 +578,7 @@
 | 599 | SQL-11 / CAT-11 / P0-16 | `CREATE TABLE ... PARTITION` 或 `PARTITION BY RANGE` 缺少必要语法时原先仍创建关系；现要求合法分区策略及非空键列表，否则整句拒绝 | 新增 `create_table_incomplete_partition`，修复前两种形式与真实 18.6 差分失败，修复后定向 `failed=0`，并验证有效的 `PARTITION BY RANGE (id)` 仍可创建；正式构建通过。完整分区验证/路由仍为 partial | `83d8e53` |
 | 600 | SQL-11 / CAT-20 / P0-16 | `CREATE TABLE ... TABLESPACE` 缺少表空间名时原先仍成功建表；现要求名称 token，不能把语法不完整的语句当成功 DDL | 新增 `create_table_incomplete_tablespace`，修复前真实 18.6 差分失败，修复后定向 `failed=0`，正式构建通过。表空间权限和实际文件迁移仍为 partial | `c38df63` |
 | 601 | SQL-11 / CAT-10 / TYPE-17 / P0-16 | `CREATE TABLE t OF` 缺少 composite type 名时原先仍建空表；现拒绝语法不完整的 typed table DDL | 新增 `create_table_incomplete_of`，修复前真实 18.6 差分表现为错误码和错误创建关系，修复后定向 `failed=0`，正式构建通过。完整 typed table 和 composite 语义仍为 partial | `1c63620` |
+| 602 | SQL-02 / IDX-01 / CAT-10 / P0-16 | `CREATE INDEX ... ("MixedValue")` 的键列名仍带引号传给索引构建，导致 PostgreSQL 可创建的索引在本项目报 `XX000`；现索引键列按标识符规则解码，保留大小写 | 新增 `quoted_index_name`，覆盖带空格引号索引名、带引号索引键列、DROP/重建及 INCLUDE 语句接受性；修复前真实 18.6 差分失败，修复后定向 `failed=0`，正式构建通过。INCLUDE 存储语义及表达式索引仍待深入验证 | `94b20d8` |
 
 2026-09-25 复验：截至第 591 项的 233 组真实 PostgreSQL 18.6 全量差分 `failed=0`，PostgreSQL 协议回归通过；第 592–593 项在此之后新增并分别完成定向差分，尚未包含在这次 233 组全量记录中。总清单仍有未完成项，不能据此宣称 PostgreSQL 兼容完成。
 
