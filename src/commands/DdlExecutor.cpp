@@ -8735,7 +8735,7 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
                                          : schemaName + "." + qualifiedName.name;
     if (!g_engine.schemaExists(s.currentDB, schemaName)) {
         std::cout << "ERROR: schema \"" << schemaName
-                  << "\" does not exist" << std::endl;
+                  << "\" does not exist (SQLSTATE 3F000)" << std::endl;
         return true;
     }
     if (viewSql.empty()) {
