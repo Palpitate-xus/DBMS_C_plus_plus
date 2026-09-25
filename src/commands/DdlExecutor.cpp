@@ -7241,8 +7241,8 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
             }
         }
         if (sequenceSchema.empty()) {
-            std::cout << "ERROR: no schema has been selected to create in"
-                      << std::endl;
+            std::cout << "ERROR: no schema has been selected to create in "
+                         "(SQLSTATE 3F000)" << std::endl;
             return true;
         }
     }
@@ -7325,7 +7325,8 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
             catalog.findNamespaceByName(sequenceSchema);
         if (!sequenceNamespace) {
             std::cout << "ERROR: schema \"" << sequenceSchema
-                      << "\" does not exist" << std::endl;
+                      << "\" does not exist (SQLSTATE 3F000)"
+                      << std::endl;
             return true;
         }
         sequenceNamespaceOid = sequenceNamespace->oid;
