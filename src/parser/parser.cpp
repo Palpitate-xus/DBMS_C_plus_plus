@@ -6122,12 +6122,12 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
         std::string kw = toLower(tokens[pos]);
         if (kw == "inherits") {
             ++pos;
-            if (pos < tokens.size() && tokens[pos] == "(") {
-                auto parents = collectParenthesized(tokens, pos);
-                for (const auto& p : parents) {
-                    if (p != ",") stmt->inherits.push_back(p);
-                }
+            if (pos >= tokens.size() || tokens[pos] != "(") return nullptr;
+            auto parents = collectParenthesized(tokens, pos);
+            for (const auto& p : parents) {
+                if (p != ",") stmt->inherits.push_back(p);
             }
+            if (stmt->inherits.empty()) return nullptr;
         } else if (kw == "partition") {
             ++pos;
             if (pos < tokens.size() && toLower(tokens[pos]) == "by") {
