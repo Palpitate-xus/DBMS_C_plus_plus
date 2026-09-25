@@ -6702,6 +6702,14 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
         return true;
     }
 
+    CatalogManager::QualifiedName tableName;
+    if (CatalogManager::parseQualifiedName(stmt->tableName, tableName) &&
+        !tableName.schema.empty() &&
+        !g_engine.schemaExists(s.currentDB, tableName.schema)) {
+        std::cout << "ERROR: schema \"" << tableName.schema
+                  << "\" does not exist (SQLSTATE 3F000)" << std::endl;
+        return true;
+    }
     std::string tname = resolveTableName(s, stmt->tableName);
     if (!g_engine.tableExists(s.currentDB, tname)) {
         std::cout << "Table " << tname << " not found" << std::endl;
