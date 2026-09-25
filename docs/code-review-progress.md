@@ -601,7 +601,9 @@
 | 622 | SQL-11 / CAT-16 / P0-02 / P0-16 | `DROP VIEW` 指向普通表时原先报无 SQLSTATE 的文字错误，协议层映射 `XX000`；即使带 `IF EXISTS` 也应明确报对象类型错误而非忽略。现返回 `42809`，不触碰普通表 | 新增 `drop_view_wrong_relation_kind`，覆盖普通与 `IF EXISTS` 两种 DROP、原表行保留；修复前真实 18.6 差分失败，修复后定向 `failed=0`，相邻 search_path 与缺失视图用例通过，正式构建通过。其它 relation kind、CASCADE 依赖仍为 partial | `41b845c9` |
 | 623 | SQL-11 / CAT-16 / P0-02 / P0-16 | `DROP MATERIALIZED VIEW` 指向普通表时原先同样输出无 SQLSTATE 的文字错误，协议层误映射 `XX000`；`IF EXISTS` 也不能把对象类型不符视为不存在。现返回 `42809` 并保留普通表 | 新增 `drop_materialized_view_wrong_relation_kind`，覆盖普通与 `IF EXISTS` 两种 DROP、原表行保留；修复前真实 18.6 差分失败，修复后定向 `failed=0`，相邻物化视图 search_path 与缺失对象用例通过，正式构建通过。其它 relation kind 与依赖仍为 partial | `a8ea7fcd` |
 
-2026-09-25 最新全量复验：截至第 619 项的固定本地二进制运行真实 PostgreSQL 18.6 差分 260 组，`failed=0`；该二进制的完整 PostgreSQL 协议回归通过（120 秒启动/关闭超时）。后续新增的重复 `CREATE VIEW` 用例已单独复现 `42P07`/`XX000` 差异，未纳入这 260 组，也尚未修复。总清单仍未完成；用户延期的安全/TDE 项未触碰。
+2026-09-25 最新全量复验：截至第 623 项的固定本地二进制运行真实 PostgreSQL 18.6 差分 264 组，`failed=0`；该二进制的完整 PostgreSQL 协议回归通过（120 秒启动/关闭超时）。总清单仍为 273 项、24 complete、121 partial、113 unverified、15 deferred_by_user，不能因有限差分通过而称完成；用户延期的安全/TDE 项未触碰。
+
+2026-09-25 较早全量复验：截至第 619 项的固定本地二进制运行真实 PostgreSQL 18.6 差分 260 组，`failed=0`；该二进制的完整 PostgreSQL 协议回归通过（120 秒启动/关闭超时）。第 620–623 项在此轮之后分别完成定向差分，不计入这 260 组。
 
 2026-09-25 较早全量复验：截至第 611 项的固定本地二进制运行真实 PostgreSQL 18.6 差分 252 组，`failed=0`。第 612–614 项的用例和刷新/重复创建修复在此轮启动后新增，分别完成定向差分，不计入这 252 组。第 614 项后的最新正式构建也通过完整 PostgreSQL 协议回归（120 秒启动/关闭超时）。总清单仍未完成；用户延期的安全/TDE 项未触碰。
 
