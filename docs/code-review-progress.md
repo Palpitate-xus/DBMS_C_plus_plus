@@ -587,7 +587,9 @@
 | 608 | SQL-02 / CAT-09 / IDX-01 / P0-16 | quote-aware 的 DROP INDEX 现在按解码名称查找，但 CREATE INDEX 仍把 `"Mixed Idx"` 的引号存进索引元数据，导致 DROP 报 `42704`、重建报重复；现 CREATE 索引名也在解析时规范化 | 已有 `quoted_index_name` 在 247 组全量观察运行中暴露回归，随后单独定向复现；修复后该用例及索引名/限定表名/重复索引相邻差分均为 `failed=0`，正式构建通过。完整索引 catalog/AM 行为仍为 partial | `3561abd` |
 | 609 | SQL-06 / QRY-01 / P0-16 | 复查双表 JOIN 的未引号大小写折叠边界：当前基本 JOIN 形态下，`DIFF_UJOIN_A`/`DIFF_UJOIN_B` 与小写源表绑定相同；此项只增加证据，不把所有 JOIN scope 或 identifier folding 判作完成 | 新增 `unquoted_uppercase_join`，同一数据对比小写和大写双表 JOIN，真实 18.6 定向差分 `failed=0`。复杂 JOIN/子查询/别名边界仍为 partial | `ffbc593` |
 
-2026-09-25 最新复验：截至第 602 项，当前固定二进制上的 244 组真实 PostgreSQL 18.6 全量差分 `failed=0`，正式 `scripts/build.sh` 通过；完整 PostgreSQL 协议回归在差分结束后用 120 秒启动/关闭超时复跑通过。并行于差分时一次协议测试因本地服务端优雅关闭超过默认 30 秒而超时，不能把该次运行算通过，也未据此认定功能回归。总清单仍为 273 项，其中 24 complete、121 partial、113 unverified、15 deferred_by_user；这些有限用例不证明剩余功能族完成。
+2026-09-25 最新复验：截至第 608 项，固定本地二进制上的 249 组真实 PostgreSQL 18.6 全量差分 `failed=0`，正式 `scripts/build.sh` 通过；完整 PostgreSQL 协议回归在差分结束后用 120 秒启动/关闭超时通过。第 609 项新增 JOIN 用例已定向通过，尚未纳入这次 249 组全量记录。此前一次跨构建版本的 247 组观察运行在 `quoted_index_name` 暴露 1 组失败，已由第 608 项复现并修复，不能把该轮记为通过。总清单仍为 273 项，其中 24 complete、121 partial、113 unverified、15 deferred_by_user；这些有限用例不证明剩余功能族完成。
+
+2026-09-25 较早复验：截至第 602 项的 244 组真实 PostgreSQL 18.6 全量差分 `failed=0`，完整 PostgreSQL 协议回归通过。并行于差分时一次协议测试因本地服务端优雅关闭超过默认 30 秒而超时，不能把该次运行算通过，也未据此认定功能回归。
 
 2026-09-25 较早复验：截至第 591 项的 233 组真实 PostgreSQL 18.6 全量差分 `failed=0`，PostgreSQL 协议回归通过；第 592–593 项在此之后新增并分别完成定向差分，尚未包含在这次 233 组全量记录中。
 
