@@ -6967,6 +6967,13 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
         const std::string indexName = indexQn.name;
         const std::string schema = indexQn.schema.empty() ? "public" : indexQn.schema;
         const PgClassRow* indexRel = cat.resolveRelation(rawName, {schema});
+        if (indexRel && indexRel->relkind != 'i' &&
+            indexRel->relkind != 'I') {
+            std::cout << "ERROR: \"" << rawName
+                      << "\" is not an index (SQLSTATE 42809)"
+                      << std::endl;
+            return true;
+        }
         std::string tableName;
         std::optional<StorageEngine::NamedIndexInfo> named;
         Oid indexOid = INVALID_OID;
