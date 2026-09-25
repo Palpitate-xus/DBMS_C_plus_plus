@@ -19,6 +19,6 @@
 
 1. P0-02：继续迁移 SELECT 的结构化结果输出。quoted alias、无 FROM 普通投影、有限 scalar SQL/PLpgSQL UDF、独立 `VALUES` 和普通标量子查询投影已迁移；CTE / set operation、相关及 legacy scalar subquery、SRF、完整 SQL function query body 和剩余 utility/function 分支仍需统一 typed rows / NULL bitmap，不能靠显示文本反推数据。
 2. P0-01 / SQL-01 / QRY-10：删除剩余改变语义的字符串路径；继续处理无 FROM 查询、顶层 WITH TIES、LIMIT/OFFSET 表达式和执行短路，不能用部分行切片测试关闭整项。
-3. P0-16：参考端已通过 PostgreSQL wire protocol 在同一 session 无损读取 rows / NULL / headers / type OID / SQLSTATE / command tag，并要求精确 PostgreSQL 18.6 版本。已在临时目录从官方源码构建 18.6 实例，校准 `en_US.utf8` 排序/货币区域设置后，第 665 项修复后的固定本地二进制运行 287 个用例文件，全量差分 `failed=0`；同一二进制的完整 PostgreSQL 协议回归通过。第 666 项的 7 组临时命名空间/事务用例已定向通过，尚未包含在本轮 287 组中。差分用例数不是总清单完成数。本地端按 case 重建 session。下一步仍需扩充 SQL、并发 schedule、catalog、crash point 和零 allowlist 发布门；这些用例不能替代总清单验收。
+3. P0-16：参考端已通过 PostgreSQL wire protocol 在同一 session 无损读取 rows / NULL / headers / type OID / SQLSTATE / command tag，并要求精确 PostgreSQL 18.6 版本。已在临时目录从官方源码构建 18.6 实例，校准 `en_US.utf8` 排序/货币区域设置后，第 669 项修复后的固定本地二进制运行 297 个用例文件，全量差分 `failed=0`；同一二进制的完整 PostgreSQL 协议回归通过。第 670 项的序列差分已定向通过，新二进制的 298 组全量差分正在执行。差分用例数不是总清单完成数。本地端按 case 重建 session。下一步仍需扩充 SQL、并发 schedule、catalog、crash point 和零 allowlist 发布门；这些用例不能替代总清单验收。
 4. 然后按 B2–B5 推进 catalog / 事务化 DDL、持久性、资源治理及剩余功能族，逐项补实测证据。用户跳过的安全 / TDE 专项仍不计完成。
-5. CAT-15：第 652 项已复现 quoted schema 名含点号时序列创建/删除失败；先设计可逆、无碰撞的物理名称映射及旧目录迁移，再把 `tests/compat/known_gaps/quoted_sequence_dot_schema.sql` 移入正式差分集。当前不能仅放宽 `validSequenceName`，也不能称序列 namespace 已完成。
+5. CAT-15：第 652 项 quoted schema 名含点号的序列创建/使用/改名/删除已用 `seqv2..` 编码修复并纳入正式差分集；旧式可表示名称保持原文件名，故此复现路径无旧目录迁移需求。旧式 `public."a.b"` 与 `a.b` 等逻辑名称仍可能共用物理键，需要独立迁移与兼容性设计；序列 namespace 整体仍未完成。
