@@ -6787,6 +6787,10 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
     auto namedIndexExists = [&](const std::string& candidate) {
         if (g_engine.getNamedIndex(s.currentDB, tname, candidate).has_value()) return true;
         if (indexingSessionTemp) {
+            if (s.tempTables.count(candidate) != 0 ||
+                s.transientTempTables.count(candidate) != 0) {
+                return true;
+            }
             std::set<std::string> tempNames(
                 s.tempTables.begin(), s.tempTables.end());
             tempNames.insert(s.transientTempTables.begin(),
