@@ -1,0 +1,15 @@
+DROP MATERIALIZED VIEW IF EXISTS "MixedMV";
+DROP TABLE IF EXISTS diff_qmvsrc;
+CREATE TABLE diff_qmvsrc (id integer);
+INSERT INTO diff_qmvsrc VALUES (8);
+CREATE MATERIALIZED VIEW "MixedMV" AS SELECT id FROM diff_qmvsrc;
+SELECT id FROM "MixedMV";
+DROP SCHEMA IF EXISTS "Mv.Schema" CASCADE;
+CREATE SCHEMA "Mv.Schema";
+CREATE MATERIALIZED VIEW "Mv.Schema"."Mixed.MV" AS SELECT id FROM diff_qmvsrc;
+SELECT id FROM "Mv.Schema"."Mixed.MV";
+DROP MATERIALIZED VIEW "Mv.Schema"."Mixed.MV";
+SELECT id FROM "Mv.Schema"."Mixed.MV";
+DROP SCHEMA "Mv.Schema";
+DROP MATERIALIZED VIEW "MixedMV";
+SELECT id FROM "MixedMV";

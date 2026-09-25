@@ -9112,6 +9112,8 @@ bool DdlExecutor::executeCreateMaterializedView(const CreateViewStmt* stmt, Sess
     }
     const std::string schemaName = qualifiedName.schema.empty()
         ? "public" : qualifiedName.schema;
+    viewname = qualifiedName.schema.empty()
+        ? qualifiedName.name : qualifiedName.schema + "." + qualifiedName.name;
     if (!g_engine.schemaExists(s.currentDB, schemaName)) {
         std::cout << "ERROR: schema \"" << schemaName
                   << "\" does not exist" << std::endl;
@@ -9468,7 +9470,17 @@ bool DdlExecutor::executeDropMaterializedView(const DropStmt* stmt, Session& s) 
 
     std::set<std::string> requestedNames;
     std::vector<DropTarget> targets;
-    for (const std::string& name : stmt->objectNames) {
+    for (const std::string& rawName : stmt->objectNames) {
+        CatalogManager::QualifiedName qualifiedName;
+        if (!CatalogManager::parseQualifiedName(rawName, qualifiedName) ||
+            qualifiedName.name.empty()) {
+            std::cout << "ERROR: invalid materialized-view name \""
+                      << rawName << "\"" << std::endl;
+            return true;
+        }
+        const std::string name = qualifiedName.schema.empty()
+            ? qualifiedName.name
+            : qualifiedName.schema + "." + qualifiedName.name;
         if (name.empty() || !requestedNames.insert(name).second) {
             std::cout << "DROP MATERIALIZED VIEW: duplicate or empty name"
                       << std::endl;
@@ -9476,7 +9488,7 @@ bool DdlExecutor::executeDropMaterializedView(const DropStmt* stmt, Session& s) 
         }
 
         const PgClassRow* relation =
-            catalog->resolveRelation(name, {"public"});
+            catalog->resolveRelation(rawName, {"public"});
         const bool physicalExists =
             g_engine.isMaterializedView(s.currentDB, name);
         const bool catalogExists = relation && relation->relkind == 'm';

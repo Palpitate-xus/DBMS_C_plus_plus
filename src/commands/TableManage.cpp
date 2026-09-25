@@ -4486,8 +4486,11 @@ StorageEngine::resolveMaterializedView(const std::string& dbname,
     if (storageName.empty()) return std::nullopt;
 
     CatalogManager& catalog = catalogService().get(dbname);
-    const PgClassRow* relation =
-        catalog.resolveRelation(relationName, {schemaName});
+    const PgNamespaceRow* namespaceRow =
+        catalog.findNamespaceByName(schemaName);
+    const PgClassRow* relation = namespaceRow
+        ? catalog.findClassByName(relationName, namespaceRow->oid)
+        : nullptr;
     if (!relation || relation->relkind != 'm') {
         throw DbError(
             "XX001",
