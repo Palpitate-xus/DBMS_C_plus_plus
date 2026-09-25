@@ -4,6 +4,7 @@
 #include <sstream>
 #include <iostream>
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <iomanip>
 #include <limits>
@@ -431,7 +432,9 @@ std::string CatalogManager::classNameKey(Oid nspOid, const std::string& relname)
     return std::to_string(nspOid) + "." + relname;
 }
 
-bool CatalogManager::parseQualifiedName(const std::string& input, QualifiedName& out) {
+bool CatalogManager::parseQualifiedName(const std::string& input,
+                                        QualifiedName& out,
+                                        bool foldUnquoted) {
     out.schema.clear();
     out.name.clear();
     size_t dot = std::string::npos;
@@ -449,9 +452,15 @@ bool CatalogManager::parseQualifiedName(const std::string& input, QualifiedName&
         }
     }
     if (quoted || dot == 0 || dot + 1 == input.size()) return false;
-    const auto decode = [](const std::string& part) {
+    const auto decode = [foldUnquoted](const std::string& part) {
         if (part.size() < 2 || part.front() != '"' || part.back() != '"') {
-            return part;
+            if (!foldUnquoted) return part;
+            std::string folded = part;
+            std::transform(folded.begin(), folded.end(), folded.begin(),
+                           [](unsigned char ch) {
+                               return static_cast<char>(std::tolower(ch));
+                           });
+            return folded;
         }
         std::string result;
         result.reserve(part.size() - 2);

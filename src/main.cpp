@@ -1683,6 +1683,7 @@ bool checkAdmin(const Session& s);
 bool checkDB(const Session& s);
 bool execute(const std::string& rawSql, Session& s);
 string resolveTableName(Session& s, const string& name);
+string resolveTableName(Session& s, const string& name, bool foldUnquoted);
 static bool checkTablePermission(Session& s, const string& tname,
                                  dbms::StorageEngine::TablePrivilege privilege);
 static bool checkSelectColumnPermission(Session& s, const string& tname,
@@ -5372,9 +5373,10 @@ void cleanupSessionTempTables(Session& s) {
     s.tempTablesCreatedInTransaction.clear();
 }
 
-string resolveTableName(Session& s, const string& name) {
+string resolveTableName(Session& s, const string& name, bool foldUnquoted) {
     dbms::CatalogManager::QualifiedName qualified;
-    if (!dbms::CatalogManager::parseQualifiedName(name, qualified)) return name;
+    if (!dbms::CatalogManager::parseQualifiedName(name, qualified,
+                                                   foldUnquoted)) return name;
     if (!qualified.schema.empty()) {
         const string& schema = qualified.schema;
         const string& table = qualified.name;
@@ -5466,6 +5468,10 @@ string resolveTableName(Session& s, const string& name) {
         }
     }
     return firstCandidate.empty() ? table : firstCandidate;
+}
+
+string resolveTableName(Session& s, const string& name) {
+    return resolveTableName(s, name, false);
 }
 
 static bool isTempTable(Session& s, const string& name) {
@@ -21794,7 +21800,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
             }
         }
-        string tname = resolveTableName(s, tnameOrig);
+        string tname = resolveTableName(s, tnameOrig, true);
 
         // Support dbname.tablename syntax for special catalogs
         string queryDb = s.currentDB;

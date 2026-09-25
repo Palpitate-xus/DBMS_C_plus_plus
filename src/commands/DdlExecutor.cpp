@@ -4659,7 +4659,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         return true;
     }
     CatalogManager::QualifiedName targetName;
-    if (!CatalogManager::parseQualifiedName(stmt->tableName, targetName)) {
+    if (!CatalogManager::parseQualifiedName(stmt->tableName, targetName, true)) {
         std::cout << "ERROR: invalid table name \"" << stmt->tableName
                   << "\"" << std::endl;
         return true;

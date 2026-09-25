@@ -56,7 +56,8 @@ public:
     };
 
     // 解析 schema.name 或 name；返回是否成功
-    static bool parseQualifiedName(const std::string& input, QualifiedName& out);
+    static bool parseQualifiedName(const std::string& input, QualifiedName& out,
+                                   bool foldUnquoted = false);
 
     // 将 "public, pg_catalog" 风格的 search_path 拆分为列表
     static std::vector<std::string> parseSearchPath(const std::string& searchPathStr);
