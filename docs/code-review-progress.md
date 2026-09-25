@@ -580,6 +580,7 @@
 | 601 | SQL-11 / CAT-10 / TYPE-17 / P0-16 | `CREATE TABLE t OF` 缺少 composite type 名时原先仍建空表；现拒绝语法不完整的 typed table DDL | 新增 `create_table_incomplete_of`，修复前真实 18.6 差分表现为错误码和错误创建关系，修复后定向 `failed=0`，正式构建通过。完整 typed table 和 composite 语义仍为 partial | `1c63620` |
 | 602 | SQL-02 / IDX-01 / CAT-10 / P0-16 | `CREATE INDEX ... ("MixedValue")` 的键列名仍带引号传给索引构建，导致 PostgreSQL 可创建的索引在本项目报 `XX000`；现索引键列按标识符规则解码，保留大小写 | 新增 `quoted_index_name`，覆盖带空格引号索引名、带引号索引键列、DROP/重建及 INCLUDE 语句接受性；修复前真实 18.6 差分失败，修复后定向 `failed=0`，正式构建通过。INCLUDE 存储语义及表达式索引仍待深入验证 | `94b20d8` |
 | 603 | SQL-02 / CAT-09 / CAT-10 / IDX-01 / P0-16 | 未限定 schema 的 `CREATE TABLE "DiffQIT"` 把引号存进关系名，后续 `CREATE INDEX ... ON "DiffQIT"` 找不到同一物理关系并报 `XX000`；现建表对象名逐段按标识符规则解码 | 新增 `quoted_index_table`，覆盖创建带引号混合大小写表、索引、插入、查询、删除索引；修复前真实 18.6 差分失败，修复后定向 `failed=0`；相邻带引号限定 DML、表改名与索引名用例通过，正式构建通过。带点号等复杂名称及 namespace 存储仍为 partial | `9217661` |
+| 604 | SQL-02 / SQL-05 / CAT-09 / DML-01 / P0-16 | 单个带引号关系名 `"Diff.Quote"` 中的点号被 catalog/DDL/查询解析误认为 schema 分隔符，导致建表失败；现名称拆分只识别引号外点号，DDL 用拆分结果确定物理名，SELECT 与结构化 DML 保留原始引用到解析边界 | 新增 `quoted_table_dot_name`，覆盖 DROP/CREATE、INSERT、SELECT、UPDATE、DELETE；修复前真实 18.6 差分失败，修复后定向 `failed=0`，相邻限定 DML、带引号表名、索引及 FK 用例通过，正式构建通过。完整多段名称和复杂 catalog namespace 仍为 partial | `37c8a12` |
 
 2026-09-25 最新复验：截至第 602 项，当前固定二进制上的 244 组真实 PostgreSQL 18.6 全量差分 `failed=0`，正式 `scripts/build.sh` 通过；完整 PostgreSQL 协议回归在差分结束后用 120 秒启动/关闭超时复跑通过。并行于差分时一次协议测试因本地服务端优雅关闭超过默认 30 秒而超时，不能把该次运行算通过，也未据此认定功能回归。总清单仍为 273 项，其中 24 complete、121 partial、113 unverified、15 deferred_by_user；这些有限用例不证明剩余功能族完成。
 
