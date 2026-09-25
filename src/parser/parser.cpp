@@ -6148,17 +6148,16 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
             }
         } else if (kw == "with") {
             ++pos;
-            if (pos < tokens.size() && tokens[pos] == "(") {
-                auto opts = collectParenthesized(tokens, pos);
-                for (size_t i = 0; i < opts.size(); i += 2) {
-                    if (i + 1 < opts.size() && opts[i + 1] == "=") {
-                        if (i + 2 < opts.size()) {
-                            stmt->options[opts[i]] = opts[i + 2];
-                            i += 2;
-                        }
-                    } else if (i + 1 < opts.size()) {
-                        stmt->options[opts[i]] = opts[i + 1];
+            if (pos >= tokens.size() || tokens[pos] != "(") return nullptr;
+            auto opts = collectParenthesized(tokens, pos);
+            for (size_t i = 0; i < opts.size(); i += 2) {
+                if (i + 1 < opts.size() && opts[i + 1] == "=") {
+                    if (i + 2 < opts.size()) {
+                        stmt->options[opts[i]] = opts[i + 2];
+                        i += 2;
                     }
+                } else if (i + 1 < opts.size()) {
+                    stmt->options[opts[i]] = opts[i + 1];
                 }
             }
         } else if (kw == "without") {
