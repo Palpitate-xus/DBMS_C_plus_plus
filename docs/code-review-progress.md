@@ -580,7 +580,9 @@
 | 601 | SQL-11 / CAT-10 / TYPE-17 / P0-16 | `CREATE TABLE t OF` 缺少 composite type 名时原先仍建空表；现拒绝语法不完整的 typed table DDL | 新增 `create_table_incomplete_of`，修复前真实 18.6 差分表现为错误码和错误创建关系，修复后定向 `failed=0`，正式构建通过。完整 typed table 和 composite 语义仍为 partial | `1c63620` |
 | 602 | SQL-02 / IDX-01 / CAT-10 / P0-16 | `CREATE INDEX ... ("MixedValue")` 的键列名仍带引号传给索引构建，导致 PostgreSQL 可创建的索引在本项目报 `XX000`；现索引键列按标识符规则解码，保留大小写 | 新增 `quoted_index_name`，覆盖带空格引号索引名、带引号索引键列、DROP/重建及 INCLUDE 语句接受性；修复前真实 18.6 差分失败，修复后定向 `failed=0`，正式构建通过。INCLUDE 存储语义及表达式索引仍待深入验证 | `94b20d8` |
 
-2026-09-25 复验：截至第 591 项的 233 组真实 PostgreSQL 18.6 全量差分 `failed=0`，PostgreSQL 协议回归通过；第 592–593 项在此之后新增并分别完成定向差分，尚未包含在这次 233 组全量记录中。总清单仍有未完成项，不能据此宣称 PostgreSQL 兼容完成。
+2026-09-25 最新复验：截至第 602 项，当前固定二进制上的 244 组真实 PostgreSQL 18.6 全量差分 `failed=0`，正式 `scripts/build.sh` 通过；完整 PostgreSQL 协议回归在差分结束后用 120 秒启动/关闭超时复跑通过。并行于差分时一次协议测试因本地服务端优雅关闭超过默认 30 秒而超时，不能把该次运行算通过，也未据此认定功能回归。总清单仍为 273 项，其中 24 complete、121 partial、113 unverified、15 deferred_by_user；这些有限用例不证明剩余功能族完成。
+
+2026-09-25 较早复验：截至第 591 项的 233 组真实 PostgreSQL 18.6 全量差分 `failed=0`，PostgreSQL 协议回归通过；第 592–593 项在此之后新增并分别完成定向差分，尚未包含在这次 233 组全量记录中。
 
 2026-09-23 复验：截至第 511 项新增的 29 个 DDL/协议/查询差分用例并入全量集，158 组真实 PostgreSQL 18.6 差分 `failed=0`；当前源码生产对象重链的完整 PostgreSQL 协议回归通过。正式 `scripts/build.sh` 在第 509 项状态成功；第 510–511 项经重链编译验证，正式生产构建仍待复跑。schema 重名、缺失 schema 和唯一索引探针的定向运行曾偶发超时，随后重试或连续复跑及后续全量运行通过，间歇性原因未定位。该结果不代表 P0-02、P0-04、P0-16、CAT-02 或 PROTO-08 完成。总账仍为 273 项，其中 24 complete、119 partial、115 unverified、15 deferred_by_user；被延期的安全 / TDE 项没有被计作完成。
 
