@@ -9625,7 +9625,8 @@ bool DdlExecutor::executeDropMaterializedView(const DropStmt* stmt, Session& s) 
         const bool catalogExists = relation && relation->relkind == 'm';
         if (relation && relation->relkind != 'm') {
             std::cout << "ERROR: \"" << name
-                      << "\" is not a materialized view" << std::endl;
+                      << "\" is not a materialized view (SQLSTATE 42809)"
+                      << std::endl;
             return true;
         }
         if (!physicalExists && !catalogExists) {
