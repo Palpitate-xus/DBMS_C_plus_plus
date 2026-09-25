@@ -5373,30 +5373,11 @@ void cleanupSessionTempTables(Session& s) {
 }
 
 string resolveTableName(Session& s, const string& name) {
-    if (name.find('"') != string::npos) {
-        string decoded;
-        decoded.reserve(name.size());
-        bool quoted = false;
-        for (size_t i = 0; i < name.size(); ++i) {
-            if (name[i] != '"') {
-                decoded += name[i];
-                continue;
-            }
-            if (quoted && i + 1 < name.size() && name[i + 1] == '"') {
-                decoded += '"';
-                ++i;
-                continue;
-            }
-            quoted = !quoted;
-        }
-        if (!quoted && decoded != name) {
-            return resolveTableName(s, decoded);
-        }
-    }
-    const size_t dotPos = name.find('.');
-    if (dotPos != string::npos && dotPos > 0 && dotPos + 1 < name.size()) {
-        string schema = name.substr(0, dotPos);
-        string table = name.substr(dotPos + 1);
+    dbms::CatalogManager::QualifiedName qualified;
+    if (!dbms::CatalogManager::parseQualifiedName(name, qualified)) return name;
+    if (!qualified.schema.empty()) {
+        const string& schema = qualified.schema;
+        const string& table = qualified.name;
         if ((schema == "pg_temp" ||
              schema.rfind("pg_temp_", 0) == 0) &&
             (s.tempTables.count(table) ||
@@ -5436,8 +5417,9 @@ string resolveTableName(Session& s, const string& name) {
     // PostgreSQL implicitly searches the session temporary namespace before
     // the explicit path unless pg_temp is listed later for function/operator
     // lookup. This resolver is relation-only, so temp relations always win.
-    if (s.tempTables.count(name)) return tempTablePrefix(s, name);
-    if (s.transientTempTables.count(name)) return tempTablePrefix(s, name);
+    const string& table = qualified.name;
+    if (s.tempTables.count(table)) return tempTablePrefix(s, table);
+    if (s.transientTempTables.count(table)) return tempTablePrefix(s, table);
 
     std::vector<std::string> entries;
     std::string canonical;
@@ -5454,17 +5436,17 @@ string resolveTableName(Session& s, const string& name) {
             continue;
         }
         string physical = schema == "public"
-            ? name : schema + "__" + name;
+            ? table : schema + "__" + table;
         if (const auto materialized = g_engine.resolveMaterializedView(
-                s.currentDB, schema, name)) {
+                s.currentDB, schema, table)) {
             if (!materialized->populated) {
                 throw dbms::DbError(
                     "55000", "materialized view \"" + schema + "." +
-                                 name + "\" has not been populated");
+                                 table + "\" has not been populated");
             }
             return materialized->backingTable;
         }
-        const string legacyPublic = "public__" + name;
+        const string legacyPublic = "public__" + table;
         if (schema == "public" &&
             !g_engine.tableExists(s.currentDB, physical) &&
             !g_engine.viewExists(s.currentDB, physical) &&
@@ -5483,7 +5465,7 @@ string resolveTableName(Session& s, const string& name) {
             return physical;
         }
     }
-    return firstCandidate.empty() ? name : firstCandidate;
+    return firstCandidate.empty() ? table : firstCandidate;
 }
 
 static bool isTempTable(Session& s, const string& name) {

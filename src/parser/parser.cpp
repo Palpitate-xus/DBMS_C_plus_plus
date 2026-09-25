@@ -5665,12 +5665,12 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
 
     // Parse table name (may be schema-qualified)
     if (pos < tokens.size()) {
-        stmt->tableName = parseRoutineIdentifier(tokens[pos++]);
+        stmt->tableName = tokens[pos++];
         if (pos < tokens.size() && tokens[pos] == ".") {
             // schema.table
             ++pos;
             if (pos < tokens.size()) {
-                stmt->tableName += "." + parseRoutineIdentifier(tokens[pos++]);
+                stmt->tableName += "." + tokens[pos++];
             }
         }
     }

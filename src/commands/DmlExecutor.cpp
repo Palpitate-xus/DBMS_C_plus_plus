@@ -6,6 +6,7 @@
 
 #include "access/BPTree.h"
 #include "access/HashIndex.h"
+#include "catalog/catalog.h"
 #include "catalog/type_registry.h"
 #include "commands/TableManage.h"
 #include "common/DbError.h"
@@ -462,10 +463,11 @@ bool checkDatabase(const Session& s) {
 }
 
 std::string resolveTable(Session& s, const std::string& name) {
-    const size_t dot = name.find('.');
-    if (dot != std::string::npos && dot > 0 && dot + 1 < name.size()) {
-        const std::string schema = name.substr(0, dot);
-        const std::string table = name.substr(dot + 1);
+    CatalogManager::QualifiedName qualified;
+    if (!CatalogManager::parseQualifiedName(name, qualified)) return name;
+    if (!qualified.schema.empty()) {
+        const std::string& schema = qualified.schema;
+        const std::string& table = qualified.name;
         if ((schema == "pg_temp" || schema.rfind("pg_temp_", 0) == 0) &&
             isTempTable(s, table)) {
             return tempTablePrefix(s, table);
@@ -499,7 +501,8 @@ std::string resolveTable(Session& s, const std::string& name) {
         }
         return name;
     }
-    if (isTempTable(s, name)) return tempTablePrefix(s, name);
+    const std::string& table = qualified.name;
+    if (isTempTable(s, table)) return tempTablePrefix(s, table);
 
     std::vector<std::string> entries;
     std::string canonical;
@@ -516,17 +519,17 @@ std::string resolveTable(Session& s, const std::string& name) {
             continue;
         }
         std::string physical = schema == "public"
-            ? name : schema + "__" + name;
+            ? table : schema + "__" + table;
         if (const auto materialized = g_engine.resolveMaterializedView(
-                s.currentDB, schema, name)) {
+                s.currentDB, schema, table)) {
             if (!materialized->populated) {
                 throw DbError(
                     "55000", "materialized view \"" + schema + "." +
-                                 name + "\" has not been populated");
+                                 table + "\" has not been populated");
             }
             return materialized->backingTable;
         }
-        const std::string legacyPublic = "public__" + name;
+        const std::string legacyPublic = "public__" + table;
         if (schema == "public" &&
             !g_engine.tableExists(s.currentDB, physical) &&
             !g_engine.viewExists(s.currentDB, physical) &&
@@ -545,7 +548,7 @@ std::string resolveTable(Session& s, const std::string& name) {
             return physical;
         }
     }
-    return firstCandidate.empty() ? name : firstCandidate;
+    return firstCandidate.empty() ? table : firstCandidate;
 }
 
 bool checkInsertTablePermission(Session& s, const std::string& table) {
@@ -2571,7 +2574,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
     if (!checkDatabase(s)) return true;
 
     const std::string requestedTable = identifier(stmt.tableName);
-    const std::string resolvedTable = resolveTable(s, requestedTable);
+    const std::string resolvedTable = resolveTable(s, stmt.tableName);
 
     // Views and materialized views have separate rewrite/trigger semantics in
     // main.cpp.  Do not bypass those semantics while this bridge is partial.
@@ -3118,7 +3121,7 @@ bool executeUpdateFromJoin(const UpdateStmt& stmt, Session& s, bool& fallback) {
     if (!checkDatabase(s)) return true;
 
     const std::string requestedTable = identifier(stmt.tableName);
-    const std::string resolvedTable = resolveTable(s, requestedTable);
+    const std::string resolvedTable = resolveTable(s, stmt.tableName);
     if (g_engine.viewExists(s.currentDB, requestedTable) ||
         g_engine.isMaterializedView(s.currentDB, requestedTable)) {
         fallback = true;
@@ -3314,7 +3317,7 @@ bool executeUpdateFrom(const UpdateStmt& stmt, Session& s, bool& fallback) {
     if (!checkDatabase(s)) return true;
 
     const std::string requestedTable = identifier(stmt.tableName);
-    const std::string resolvedTable = resolveTable(s, requestedTable);
+    const std::string resolvedTable = resolveTable(s, stmt.tableName);
     if (g_engine.viewExists(s.currentDB, requestedTable) ||
         g_engine.isMaterializedView(s.currentDB, requestedTable)) {
         fallback = true;
@@ -3524,7 +3527,7 @@ bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
     if (stmt.fromClause) return executeUpdateFrom(stmt, s, fallback);
     if (!checkDatabase(s)) return true;
     const std::string requestedTable = identifier(stmt.tableName);
-    const std::string resolvedTable = resolveTable(s, requestedTable);
+    const std::string resolvedTable = resolveTable(s, stmt.tableName);
     if (g_engine.viewExists(s.currentDB, requestedTable) ||
         g_engine.isMaterializedView(s.currentDB, requestedTable)) {
         fallback = true;
@@ -4190,7 +4193,7 @@ bool executeDeleteUsingJoin(const DeleteStmt& stmt, Session& s, bool& fallback) 
     if (!checkDatabase(s)) return true;
 
     const std::string requestedTable = identifier(stmt.tableName);
-    const std::string resolvedTable = resolveTable(s, requestedTable);
+    const std::string resolvedTable = resolveTable(s, stmt.tableName);
     if (g_engine.viewExists(s.currentDB, requestedTable) ||
         g_engine.isMaterializedView(s.currentDB, requestedTable)) {
         fallback = true;
@@ -4320,7 +4323,7 @@ bool executeDeleteUsing(const DeleteStmt& stmt, Session& s, bool& fallback) {
     if (!checkDatabase(s)) return true;
 
     const std::string requestedTable = identifier(stmt.tableName);
-    const std::string resolvedTable = resolveTable(s, requestedTable);
+    const std::string resolvedTable = resolveTable(s, stmt.tableName);
     if (g_engine.viewExists(s.currentDB, requestedTable) ||
         g_engine.isMaterializedView(s.currentDB, requestedTable)) {
         fallback = true;
@@ -4470,7 +4473,7 @@ bool executeDelete(const DeleteStmt& stmt, Session& s, bool& fallback) {
     if (stmt.usingClause) return executeDeleteUsing(stmt, s, fallback);
     if (!checkDatabase(s)) return true;
     const std::string requestedTable = identifier(stmt.tableName);
-    const std::string resolvedTable = resolveTable(s, requestedTable);
+    const std::string resolvedTable = resolveTable(s, stmt.tableName);
     if (g_engine.viewExists(s.currentDB, requestedTable) ||
         g_engine.isMaterializedView(s.currentDB, requestedTable)) {
         fallback = true;

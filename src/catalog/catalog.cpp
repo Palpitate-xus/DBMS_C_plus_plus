@@ -433,12 +433,42 @@ std::string CatalogManager::classNameKey(Oid nspOid, const std::string& relname)
 
 bool CatalogManager::parseQualifiedName(const std::string& input, QualifiedName& out) {
     out.schema.clear();
-    out.name = input;
-    size_t dot = input.rfind('.');
-    if (dot == std::string::npos) return true;
-    if (dot == 0 || dot + 1 >= input.size()) return false;
-    out.schema = input.substr(0, dot);
-    out.name = input.substr(dot + 1);
+    out.name.clear();
+    size_t dot = std::string::npos;
+    bool quoted = false;
+    for (size_t i = 0; i < input.size(); ++i) {
+        if (input[i] == '"') {
+            if (quoted && i + 1 < input.size() && input[i + 1] == '"') {
+                ++i;
+            } else {
+                quoted = !quoted;
+            }
+        } else if (input[i] == '.' && !quoted) {
+            if (dot != std::string::npos) return false;
+            dot = i;
+        }
+    }
+    if (quoted || dot == 0 || dot + 1 == input.size()) return false;
+    const auto decode = [](const std::string& part) {
+        if (part.size() < 2 || part.front() != '"' || part.back() != '"') {
+            return part;
+        }
+        std::string result;
+        result.reserve(part.size() - 2);
+        for (size_t i = 1; i + 1 < part.size(); ++i) {
+            result += part[i];
+            if (part[i] == '"' && i + 2 < part.size() && part[i + 1] == '"') {
+                ++i;
+            }
+        }
+        return result;
+    };
+    if (dot != std::string::npos) {
+        out.schema = decode(input.substr(0, dot));
+        out.name = decode(input.substr(dot + 1));
+    } else {
+        out.name = decode(input);
+    }
     return true;
 }
 

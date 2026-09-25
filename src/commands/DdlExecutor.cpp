@@ -4729,9 +4729,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         ? targetName.name : targetSchema + "__" + targetName.name;
     const std::string tname = temporary
         ? tempTablePrefix(s, targetName.name)
-        : (targetName.schema.empty()
-               ? unqualifiedStorageName
-               : resolveTableName(s, stmt->tableName));
+        : unqualifiedStorageName;
     if (g_engine.tableExists(s.currentDB, tname) || g_engine.viewExists(s.currentDB, tname)) {
         if (stmt->ifNotExists) {
             std::cout << "NOTICE: table \"" << tname << "\" already exists, skipping" << std::endl;
