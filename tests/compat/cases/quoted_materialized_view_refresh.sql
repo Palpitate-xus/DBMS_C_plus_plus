@@ -1,0 +1,13 @@
+DROP SCHEMA IF EXISTS "Mv.Refresh" CASCADE;
+DROP TABLE IF EXISTS diff_qmvrefresh_source;
+CREATE TABLE diff_qmvrefresh_source (id integer);
+INSERT INTO diff_qmvrefresh_source VALUES (11);
+CREATE SCHEMA "Mv.Refresh";
+CREATE MATERIALIZED VIEW "Mv.Refresh"."Mixed.View" AS SELECT id FROM diff_qmvrefresh_source WITH NO DATA;
+REFRESH MATERIALIZED VIEW "Mv.Refresh"."Mixed.View";
+SELECT id FROM "Mv.Refresh"."Mixed.View" ORDER BY id;
+INSERT INTO diff_qmvrefresh_source VALUES (12);
+REFRESH MATERIALIZED VIEW "Mv.Refresh"."Mixed.View";
+SELECT id FROM "Mv.Refresh"."Mixed.View" ORDER BY id;
+DROP MATERIALIZED VIEW "Mv.Refresh"."Mixed.View";
+DROP SCHEMA "Mv.Refresh";

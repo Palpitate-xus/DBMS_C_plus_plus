@@ -9396,8 +9396,12 @@ bool DdlExecutor::executeRefreshMaterializedView(
     try {
         CatalogManager& catalog =
             g_engine.catalogService().get(s.currentDB);
-        const PgClassRow* relation = catalog.resolveRelation(
-            materialized->relationName, {materialized->schemaName});
+        const PgNamespaceRow* namespaceRow =
+            catalog.findNamespaceByName(materialized->schemaName);
+        const PgClassRow* relation = namespaceRow
+            ? catalog.findClassByName(
+                  materialized->relationName, namespaceRow->oid)
+            : nullptr;
         if (!relation || relation->relkind != 'm') {
             std::cout << "ERROR: materialized-view catalog entry is missing "
                          "(SQLSTATE XX001)"
