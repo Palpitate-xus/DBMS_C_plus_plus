@@ -42,7 +42,7 @@ int main() {
                database, "measurements", "measurements_value_check",
                "value > 0") == dbms::DBStatus::OK);
     assert(g_engine.update(database, "measurements", {{"value", "0"}},
-                           {"=id 2"}) == dbms::DBStatus::INVALID_VALUE);
+                           {"=id 2"}) == dbms::DBStatus::CHECK_VIOLATION);
     assert(g_engine.query(database, "measurements", {"=value 2"}, {"id"}) ==
            std::vector<std::string>{"2 "});
 
