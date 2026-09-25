@@ -6965,8 +6965,27 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
             return true;
         }
         const std::string indexName = indexQn.name;
-        const std::string schema = indexQn.schema.empty() ? "public" : indexQn.schema;
-        const PgClassRow* indexRel = cat.resolveRelation(rawName, {schema});
+        std::vector<std::string> indexSearchPath;
+        if (indexQn.schema.empty()) {
+            std::vector<std::string> rawSearchPath;
+            std::string canonicalSearchPath;
+            if (!dbms::parseSessionSearchPath(
+                    s.searchPath, rawSearchPath, canonicalSearchPath)) {
+                rawSearchPath = {"public"};
+            }
+            for (const auto& rawSchema : rawSearchPath) {
+                const std::string schema =
+                    dbms::expandSessionSearchPathEntry(
+                        rawSchema, s.username);
+                if (g_engine.schemaExists(s.currentDB, schema)) {
+                    indexSearchPath.push_back(schema);
+                }
+            }
+        } else {
+            indexSearchPath.push_back(indexQn.schema);
+        }
+        const PgClassRow* indexRel =
+            cat.resolveRelation(rawName, indexSearchPath);
         if (indexRel && indexRel->relkind != 'i' &&
             indexRel->relkind != 'I') {
             std::cout << "ERROR: \"" << rawName

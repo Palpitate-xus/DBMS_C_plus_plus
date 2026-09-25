@@ -1,0 +1,11 @@
+DROP SCHEMA IF EXISTS diff_drop_index_path CASCADE;
+CREATE SCHEMA diff_drop_index_path;
+CREATE TABLE diff_drop_index_path.items (id integer);
+INSERT INTO diff_drop_index_path.items VALUES (47);
+CREATE INDEX diff_drop_index_path_idx ON diff_drop_index_path.items (id);
+SET search_path TO diff_drop_index_path, public;
+DROP INDEX diff_drop_index_path_idx;
+SELECT id FROM items;
+SET search_path TO public;
+DROP TABLE diff_drop_index_path.items;
+DROP SCHEMA diff_drop_index_path CASCADE;
