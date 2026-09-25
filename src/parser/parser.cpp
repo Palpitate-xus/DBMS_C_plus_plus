@@ -6252,7 +6252,7 @@ StmtPtr SQLParser::parseCreateIndex(const std::vector<std::string>& tokens, size
                 elem.expr = std::make_unique<LiteralExpr>();
                 static_cast<LiteralExpr*>(elem.expr.get())->value = exprStr;
             } else {
-                elem.column = tokens[pos++];
+                elem.column = parseRoutineIdentifier(tokens[pos++]);
                 if (pos < tokens.size() && toLower(tokens[pos]) == "collate") {
                     ++pos;
                     if (pos < tokens.size()) elem.collation = tokens[pos++];
