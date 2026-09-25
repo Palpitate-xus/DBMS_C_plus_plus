@@ -1,0 +1,12 @@
+CREATE TEMP TABLE diff_create_index_temp_alias (id integer);
+INSERT INTO diff_create_index_temp_alias VALUES (2), (1);
+CREATE INDEX diff_create_index_temp_alias_idx ON pg_temp.diff_create_index_temp_alias (id);
+SELECT id FROM diff_create_index_temp_alias ORDER BY id;
+DROP INDEX diff_create_index_temp_alias_idx;
+CREATE INDEX diff_create_index_temp_unqualified_idx ON diff_create_index_temp_alias (id);
+DROP INDEX diff_create_index_temp_unqualified_idx;
+DROP TABLE diff_create_index_temp_alias;
+CREATE TEMP TABLE diff_create_index_temp_alias (id integer);
+CREATE INDEX diff_create_index_temp_alias_idx ON diff_create_index_temp_alias (id);
+DROP TABLE diff_create_index_temp_alias;
+SELECT 1;

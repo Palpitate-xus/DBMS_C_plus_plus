@@ -6721,6 +6721,9 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
     CatalogManager::QualifiedName tableName;
     if (CatalogManager::parseQualifiedName(stmt->tableName, tableName) &&
         !tableName.schema.empty() &&
+        !(tableName.schema == "pg_temp" &&
+          (s.tempTables.count(tableName.name) != 0 ||
+           s.transientTempTables.count(tableName.name) != 0)) &&
         !g_engine.schemaExists(s.currentDB, tableName.schema)) {
         std::cout << "ERROR: schema \"" << tableName.schema
                   << "\" does not exist (SQLSTATE 3F000)" << std::endl;
@@ -6913,10 +6916,18 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
         return true;
     }
 
-    bool catalogRegistered = false;
+    const bool indexingSessionTemp =
+        (tableName.schema.empty() || tableName.schema == "pg_temp") &&
+        (s.tempTables.count(tableName.name) != 0 ||
+         s.transientTempTables.count(tableName.name) != 0) &&
+        tname == tempTablePrefix(s, tableName.name);
+    // Session-local temp heaps are intentionally absent from the persistent
+    // catalog. Their named-index map and physical sidecar have the same
+    // session lifetime as the heap, so no persistent pg_class row is needed.
+    bool catalogRegistered = indexingSessionTemp;
     Oid catalogIndexOid = INVALID_OID;
     CatalogManager* catalogForCleanup = nullptr;
-    try {
+    if (!indexingSessionTemp) try {
         dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
         catalogForCleanup = &cat;
         auto qn = CatalogService::logicalName(tname);
