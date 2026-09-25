@@ -9310,7 +9310,7 @@ bool DdlExecutor::executeCreateMaterializedView(const CreateViewStmt* stmt, Sess
                                          : schemaName + "." + qualifiedName.name;
     if (!g_engine.schemaExists(s.currentDB, schemaName)) {
         std::cout << "ERROR: schema \"" << schemaName
-                  << "\" does not exist" << std::endl;
+                  << "\" does not exist (SQLSTATE 3F000)" << std::endl;
         return true;
     }
     if (selectSql.empty()) {
