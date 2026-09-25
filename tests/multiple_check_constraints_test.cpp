@@ -36,25 +36,25 @@ int main() {
            dbms::DBStatus::OK);
     assert(g_engine.insert(database, "checked_values",
                            {{"id", "2"}, {"value", "0"}}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::CHECK_VIOLATION);
     assert(g_engine.insert(database, "checked_values",
                            {{"id", "3"}, {"value", "1001"}}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::CHECK_VIOLATION);
     assert(g_engine.insert(database, "checked_values",
                            {{"id", "4"}, {"value", "5"}}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::CHECK_VIOLATION);
     assert(g_engine.insert(database, "checked_values",
                            {{"id", "5"}, {"value", "950"}}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::CHECK_VIOLATION);
     assert(g_engine.update(database, "checked_values", {{"value", "950"}},
-                           {"=id 1"}) == dbms::DBStatus::INVALID_VALUE);
+                           {"=id 1"}) == dbms::DBStatus::CHECK_VIOLATION);
 
     // Reload from disk before exercising constraint identity operations.
     {
         dbms::StorageEngine reloaded;
         assert(reloaded.insert(database, "checked_values",
                                {{"id", "6"}, {"value", "950"}}) ==
-               dbms::DBStatus::INVALID_VALUE);
+               dbms::DBStatus::CHECK_VIOLATION);
     }
 
     assert(!ddl.executeSql(
@@ -63,10 +63,10 @@ int main() {
         session));
     assert(g_engine.insert(database, "checked_copy",
                            {{"id", "1"}, {"value", "950"}}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::CHECK_VIOLATION);
     assert(g_engine.insert(database, "checked_copy",
                            {{"id", "2"}, {"value", "1001"}}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::CHECK_VIOLATION);
 
     assert(!ddl.executeSql(
         "ALTER TABLE checked_values DROP CONSTRAINT checked_values_floor",
@@ -76,7 +76,7 @@ int main() {
            dbms::DBStatus::OK);
     assert(g_engine.insert(database, "checked_values",
                            {{"id", "8"}, {"value", "950"}}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::CHECK_VIOLATION);
 
     assert(!ddl.executeSql(
         "ALTER TABLE checked_values RENAME CONSTRAINT "
@@ -90,7 +90,7 @@ int main() {
            dbms::DBStatus::OK);
     assert(g_engine.insert(database, "checked_values",
                            {{"id", "10"}, {"value", "1001"}}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::CHECK_VIOLATION);
 
     // Adding another CHECK to an already constrained column must append it,
     // not overwrite one of the existing expressions.
@@ -100,10 +100,10 @@ int main() {
         session));
     assert(g_engine.insert(database, "checked_values",
                            {{"id", "11"}, {"value", "500"}}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::CHECK_VIOLATION);
     assert(g_engine.insert(database, "checked_values",
                            {{"id", "12"}, {"value", "1001"}}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::CHECK_VIOLATION);
 
     assert(!ddl.executeSql(
         "ALTER TABLE checked_values ALTER CONSTRAINT checked_values_not_500 "
