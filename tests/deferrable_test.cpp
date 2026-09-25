@@ -38,7 +38,7 @@ static void test_immediate_check_still_fails_at_insert() {
         "CONSTRAINT chk_price CHECK (price > 0))",
         s));
 
-    assert(g_engine.insert(db, "t", {{"id", "1"}, {"price", "0"}}) == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insert(db, "t", {{"id", "1"}, {"price", "0"}}) == dbms::DBStatus::CHECK_VIOLATION);
     assert(g_engine.insert(db, "t", {{"id", "1"}, {"price", "10"}}) == dbms::DBStatus::OK);
 
     cleanup(db);
@@ -120,7 +120,7 @@ static void test_set_constraints_immediate_via_engine() {
 
     assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
     g_engine.setConstraintMode({"chk_price"}, false);
-    assert(g_engine.insert(db, "t", {{"id", "1"}, {"price", "0"}}) == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insert(db, "t", {{"id", "1"}, {"price", "0"}}) == dbms::DBStatus::CHECK_VIOLATION);
     assert(g_engine.insert(db, "t", {{"id", "1"}, {"price", "10"}}) == dbms::DBStatus::OK);
     assert(g_engine.commitTransaction() == dbms::DBStatus::OK);
 
@@ -144,7 +144,7 @@ static void test_set_constraints_all_deferred_via_engine() {
 
     assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
     g_engine.setConstraintMode({"all"}, true);
-    assert(g_engine.insert(db, "t", {{"id", "1"}, {"price", "0"}}) == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insert(db, "t", {{"id", "1"}, {"price", "0"}}) == dbms::DBStatus::CHECK_VIOLATION);
     assert(g_engine.insert(db, "t", {{"id", "1"}, {"price", "10"}}) == dbms::DBStatus::OK);
     assert(g_engine.commitTransaction() == dbms::DBStatus::OK);
 
