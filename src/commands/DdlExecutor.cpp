@@ -6768,6 +6768,11 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
         return true;
     }
 
+    const bool indexingSessionTemp =
+        (tableName.schema.empty() || tableName.schema == "pg_temp") &&
+        (s.tempTables.count(tableName.name) != 0 ||
+         s.transientTempTables.count(tableName.name) != 0) &&
+        tname == tempTablePrefix(s, tableName.name);
     txn.markSnapshotDirty();
 
     const std::vector<std::string> colnames = [&]() {
@@ -6781,6 +6786,7 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
     // append a numeric suffix when the derived name is already taken.
     auto namedIndexExists = [&](const std::string& candidate) {
         if (g_engine.getNamedIndex(s.currentDB, tname, candidate).has_value()) return true;
+        if (indexingSessionTemp) return false;
         try {
             const auto tableName = CatalogService::logicalName(tname);
             const std::string schema = tableName.schema.empty() ? "public" : tableName.schema;
@@ -6916,11 +6922,6 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
         return true;
     }
 
-    const bool indexingSessionTemp =
-        (tableName.schema.empty() || tableName.schema == "pg_temp") &&
-        (s.tempTables.count(tableName.name) != 0 ||
-         s.transientTempTables.count(tableName.name) != 0) &&
-        tname == tempTablePrefix(s, tableName.name);
     // Session-local temp heaps are intentionally absent from the persistent
     // catalog. Their named-index map and physical sidecar have the same
     // session lifetime as the heap, so no persistent pg_class row is needed.
@@ -7032,7 +7033,26 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
             std::cout << "SQL syntax error: invalid index name" << std::endl;
             return true;
         }
+        std::string tempIndexOwner;
+        const bool tempNamespaceActive =
+            !s.tempTables.empty() || !s.transientTempTables.empty();
+        if (indexQn.schema.empty() || indexQn.schema == "pg_temp") {
+            std::set<std::string> tempNames(
+                s.tempTables.begin(), s.tempTables.end());
+            tempNames.insert(s.transientTempTables.begin(),
+                             s.transientTempTables.end());
+            for (const auto& logicalName : tempNames) {
+                const std::string physicalName =
+                    tempTablePrefix(s, logicalName);
+                if (g_engine.getNamedIndex(
+                        s.currentDB, physicalName, indexQn.name)) {
+                    tempIndexOwner = physicalName;
+                    break;
+                }
+            }
+        }
         if (!indexQn.schema.empty() &&
+            !(indexQn.schema == "pg_temp" && tempNamespaceActive) &&
             !g_engine.schemaExists(s.currentDB, indexQn.schema)) {
             if (stmt->ifExists) {
                 std::cout << "NOTICE: index \"" << rawName
@@ -7064,8 +7084,8 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
         } else {
             indexSearchPath.push_back(indexQn.schema);
         }
-        const PgClassRow* indexRel =
-            cat.resolveRelation(rawName, indexSearchPath);
+        const PgClassRow* indexRel = tempIndexOwner.empty()
+            ? cat.resolveRelation(rawName, indexSearchPath) : nullptr;
         if (indexRel && indexRel->relkind != 'i' &&
             indexRel->relkind != 'I') {
             std::cout << "ERROR: \"" << rawName
@@ -7073,7 +7093,7 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
                       << std::endl;
             return true;
         }
-        std::string tableName;
+        std::string tableName = tempIndexOwner;
         std::optional<StorageEngine::NamedIndexInfo> named;
         Oid indexOid = INVALID_OID;
         Oid tableOid = INVALID_OID;

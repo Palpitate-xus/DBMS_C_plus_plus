@@ -1,0 +1,11 @@
+CREATE TABLE diff_temp_index_shadow_persistent (id integer);
+CREATE INDEX diff_temp_index_shadow_idx ON diff_temp_index_shadow_persistent (id);
+CREATE TEMP TABLE diff_temp_index_shadow_t (id integer);
+CREATE INDEX diff_temp_index_shadow_idx ON diff_temp_index_shadow_t (id);
+DROP INDEX diff_temp_index_shadow_idx;
+CREATE INDEX diff_temp_index_shadow_temp_only_idx ON diff_temp_index_shadow_t (id);
+DROP INDEX pg_temp.diff_temp_index_shadow_temp_only_idx;
+DROP TABLE diff_temp_index_shadow_t;
+DROP INDEX diff_temp_index_shadow_idx;
+DROP TABLE diff_temp_index_shadow_persistent;
+SELECT 1;
