@@ -8772,7 +8772,8 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
                 return true;
             }
             if (!stmt->replace) {
-                std::cout << "View " << viewname << " already exists"
+                std::cout << "ERROR: relation \"" << viewname
+                          << "\" already exists (SQLSTATE 42P07)"
                           << std::endl;
                 return true;
             }
@@ -8798,7 +8799,8 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
     }
     DBStatus res = g_engine.createView(s.currentDB, viewname, storeSql);
     if (res == DBStatus::TABLE_ALREADY_EXISTS) {
-        std::cout << "View " << viewname << " already exists" << std::endl;
+        std::cout << "ERROR: relation \"" << viewname
+                  << "\" already exists (SQLSTATE 42P07)" << std::endl;
         return true;
     }
     if (res != DBStatus::OK) {
