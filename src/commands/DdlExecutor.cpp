@@ -8604,11 +8604,33 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
                   << std::endl;
         return true;
     }
-    const std::string schemaName = qualifiedName.schema.empty()
-        ? "public" : qualifiedName.schema;
-    viewname = qualifiedName.schema.empty()
-        ? qualifiedName.name
-        : qualifiedName.schema + "." + qualifiedName.name;
+    std::string schemaName = qualifiedName.schema;
+    if (schemaName.empty()) {
+        std::vector<std::string> searchPath;
+        std::string canonicalSearchPath;
+        if (!dbms::parseSessionSearchPath(
+                s.searchPath, searchPath, canonicalSearchPath)) {
+            searchPath = {"public"};
+        }
+        for (const auto& rawSchema : searchPath) {
+            const std::string candidate =
+                dbms::expandSessionSearchPathEntry(rawSchema, s.username);
+            if (candidate == "pg_catalog" || candidate == "pg_temp" ||
+                candidate.rfind("pg_temp_", 0) == 0 ||
+                !g_engine.schemaExists(s.currentDB, candidate)) {
+                continue;
+            }
+            schemaName = candidate;
+            break;
+        }
+        if (schemaName.empty()) {
+            std::cout << "ERROR: no schema has been selected to create in "
+                         "(SQLSTATE 3F000)" << std::endl;
+            return true;
+        }
+    }
+    viewname = schemaName == "public" ? qualifiedName.name
+                                         : schemaName + "." + qualifiedName.name;
     if (!g_engine.schemaExists(s.currentDB, schemaName)) {
         std::cout << "ERROR: schema \"" << schemaName
                   << "\" does not exist" << std::endl;
