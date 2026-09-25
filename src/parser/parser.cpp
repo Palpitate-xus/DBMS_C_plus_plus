@@ -6130,22 +6130,26 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
             if (stmt->inherits.empty()) return nullptr;
         } else if (kw == "partition") {
             ++pos;
-            if (pos < tokens.size() && toLower(tokens[pos]) == "by") {
-                ++pos;
-                std::string ptype = toLower(tokens[pos++]); // range, list, hash
-                stmt->partitionType = ptype;
-                if (pos < tokens.size() && tokens[pos] == "(") {
-                    auto pcols = collectParenthesized(tokens, pos);
-                    for (const auto& c : pcols) {
-                        if (c != ",") {
-                            SelectItem si;
-                            si.expr = std::make_unique<ColumnRefExpr>();
-                            static_cast<ColumnRefExpr*>(si.expr.get())->column = c;
-                            stmt->partitionBy.push_back(std::move(si));
-                        }
-                    }
+            if (pos + 2 >= tokens.size() || toLower(tokens[pos]) != "by") {
+                return nullptr;
+            }
+            ++pos;
+            const std::string ptype = toLower(tokens[pos++]);
+            if (ptype != "range" && ptype != "list" && ptype != "hash") {
+                return nullptr;
+            }
+            if (tokens[pos] != "(") return nullptr;
+            auto pcols = collectParenthesized(tokens, pos);
+            stmt->partitionType = ptype;
+            for (const auto& c : pcols) {
+                if (c != ",") {
+                    SelectItem si;
+                    si.expr = std::make_unique<ColumnRefExpr>();
+                    static_cast<ColumnRefExpr*>(si.expr.get())->column = c;
+                    stmt->partitionBy.push_back(std::move(si));
                 }
             }
+            if (stmt->partitionBy.empty()) return nullptr;
         } else if (kw == "with") {
             ++pos;
             if (pos >= tokens.size() || tokens[pos] != "(") return nullptr;
