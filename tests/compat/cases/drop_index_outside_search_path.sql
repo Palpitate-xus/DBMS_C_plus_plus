@@ -1,0 +1,14 @@
+DROP SCHEMA IF EXISTS diff_idx_hidden CASCADE;
+CREATE SCHEMA diff_idx_hidden;
+CREATE TABLE diff_idx_hidden.items (id integer);
+INSERT INTO diff_idx_hidden.items VALUES (53);
+CREATE INDEX diff_hidden_idx ON diff_idx_hidden.items (id);
+SET search_path TO public;
+DROP INDEX diff_hidden_idx;
+DROP INDEX IF EXISTS diff_hidden_idx;
+SET search_path TO diff_idx_hidden, public;
+DROP INDEX diff_hidden_idx;
+SELECT id FROM items;
+SET search_path TO public;
+DROP TABLE diff_idx_hidden.items;
+DROP SCHEMA diff_idx_hidden;

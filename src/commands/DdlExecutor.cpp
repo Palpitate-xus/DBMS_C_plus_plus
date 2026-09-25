@@ -7035,6 +7035,16 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
             // the caller supplies ON table; standard name-only syntax is
             // deliberately fail-closed if ownership cannot be proven.
             for (const auto& candidate : g_engine.getTableNames(s.currentDB)) {
+                const auto candidateQn =
+                    CatalogService::logicalName(candidate);
+                const std::string candidateSchema =
+                    candidateQn.schema.empty() ? "public"
+                                               : candidateQn.schema;
+                if (std::find(indexSearchPath.begin(),
+                              indexSearchPath.end(), candidateSchema) ==
+                    indexSearchPath.end()) {
+                    continue;
+                }
                 if (g_engine.getNamedIndex(s.currentDB, candidate, indexName)) {
                     tableName = candidate;
                     break;
