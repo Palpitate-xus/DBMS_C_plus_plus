@@ -6308,6 +6308,22 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
     }
     const std::string logicalName = stmt->objectNames.front();
     const bool droppingTemp = s.tempTables.count(logicalName) != 0;
+    CatalogManager::QualifiedName tableName;
+    if (CatalogManager::parseQualifiedName(logicalName, tableName) &&
+        !tableName.schema.empty() &&
+        !(tableName.schema == "pg_temp" &&
+          (s.tempTables.count(tableName.name) != 0 ||
+           s.transientTempTables.count(tableName.name) != 0)) &&
+        !g_engine.schemaExists(s.currentDB, tableName.schema)) {
+        if (stmt->ifExists) {
+            std::cout << "NOTICE: table \"" << logicalName
+                      << "\" does not exist, skipping" << std::endl;
+            return false;
+        }
+        std::cout << "ERROR: schema \"" << tableName.schema
+                  << "\" does not exist (SQLSTATE 3F000)" << std::endl;
+        return true;
+    }
     std::string tname = resolveTableName(s, logicalName);
     // Relation kinds share a namespace. Check the catalog before looking for
     // the heap file: a view has no table schema file, while a materialized
