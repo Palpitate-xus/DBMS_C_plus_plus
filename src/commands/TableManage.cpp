@@ -22657,7 +22657,8 @@ DBStatus StorageEngine::insertInternal(
         if (!dbms::ExprHelper::evalCheck(
                 col.checkExpr, actualValues, typeHints, &err, dbname)) {
             lockManager_.unlock(tablename);
-            return DBStatus::INVALID_VALUE;
+            return err.empty() ? DBStatus::CHECK_VIOLATION
+                               : DBStatus::INVALID_VALUE;
         }
     }
     for (const auto& check : tbl.additionalCheckConstraints) {
@@ -22674,7 +22675,8 @@ DBStatus StorageEngine::insertInternal(
         if (!dbms::ExprHelper::evalCheck(
                 check.expression, actualValues, typeHints, &err, dbname)) {
             lockManager_.unlock(tablename);
-            return DBStatus::INVALID_VALUE;
+            return err.empty() ? DBStatus::CHECK_VIOLATION
+                               : DBStatus::INVALID_VALUE;
         }
     }
 
@@ -26523,7 +26525,8 @@ DBStatus StorageEngine::updateInternal(
             if (!dbms::ExprHelper::evalCheck(
                     col.checkExpr, rowValues, updateTypeHints, &err, dbname)) {
                 lockManager_.unlock(tablename);
-                return DBStatus::INVALID_VALUE;
+                return err.empty() ? DBStatus::CHECK_VIOLATION
+                                   : DBStatus::INVALID_VALUE;
             }
         }
         if (transactionContext().inTransaction && !deferredCheckCols.empty()) {
@@ -26556,7 +26559,8 @@ DBStatus StorageEngine::updateInternal(
                     storedCheck.expression, rowValues, updateTypeHints, &err,
                     dbname)) {
                 lockManager_.unlock(tablename);
-                return DBStatus::INVALID_VALUE;
+                return err.empty() ? DBStatus::CHECK_VIOLATION
+                                   : DBStatus::INVALID_VALUE;
             }
         }
         for (const CheckConstraint* storedCheck : deferredAdditionalChecks) {

@@ -2807,7 +2807,8 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
                                  "(SQLSTATE 22001)" << std::endl;
                     return true;
                 }
-                std::cout << "Invalid data, please check" << std::endl;
+                std::cout << "Invalid data, please check (SQLSTATE "
+                          << sqlstateForDBStatus(status) << ")" << std::endl;
                 return true;
             }
             ++inserted;
@@ -3080,7 +3081,8 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
                              "(SQLSTATE 22001)" << std::endl;
                 return true;
             }
-            std::cout << "Invalid data, please check" << std::endl;
+            std::cout << "Invalid data, please check (SQLSTATE "
+                      << sqlstateForDBStatus(status) << ")" << std::endl;
             return true;
         }
         if (!stmt.returning.empty() && !sqlInsertedRows.empty()) {

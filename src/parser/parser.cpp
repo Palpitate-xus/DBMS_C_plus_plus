@@ -5934,9 +5934,14 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                     }
                 }
                 // Column constraints
+                std::string pendingCheckName;
                 while (pos < tokens.size() && tokens[pos] != "," && tokens[pos] != ")") {
                     std::string ckw = toLower(tokens[pos]);
-                    if (ckw == "not" && pos + 1 < tokens.size() && toLower(tokens[pos + 1]) == "null") {
+                    if (ckw == "constraint" && pos + 2 < tokens.size() &&
+                        toLower(tokens[pos + 2]) == "check") {
+                        pendingCheckName = parseRoutineIdentifier(tokens[pos + 1]);
+                        pos += 2;
+                    } else if (ckw == "not" && pos + 1 < tokens.size() && toLower(tokens[pos + 1]) == "null") {
                         col.isNull = false;
                         pos += 2;
                     } else if (ckw == "null") {
@@ -6000,6 +6005,8 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                             }
                             col.checkExprs.push_back(std::make_unique<LiteralExpr>());
                             static_cast<LiteralExpr*>(col.checkExprs.back().get())->value = expr;
+                            col.checkNames.push_back(pendingCheckName);
+                            pendingCheckName.clear();
                         }
                     } else if (ckw == "generated") {
                         ++pos;
