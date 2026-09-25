@@ -6309,6 +6309,44 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
     const std::string logicalName = stmt->objectNames.front();
     const bool droppingTemp = s.tempTables.count(logicalName) != 0;
     std::string tname = resolveTableName(s, logicalName);
+    // Relation kinds share a namespace. Check the catalog before looking for
+    // the heap file: a view has no table schema file, while a materialized
+    // view may have a backing heap that must not be removed by DROP TABLE.
+    // A session temp table takes precedence over a same-named catalog object.
+    if (!droppingTemp) {
+        try {
+            std::vector<std::string> rawSearchPath;
+            std::vector<std::string> catalogSearchPath;
+            std::string canonicalSearchPath;
+            if (!dbms::parseSessionSearchPath(
+                    s.searchPath, rawSearchPath, canonicalSearchPath)) {
+                rawSearchPath = {"public"};
+            }
+            for (const auto& rawSchema : rawSearchPath) {
+                const std::string schema =
+                    dbms::expandSessionSearchPathEntry(
+                        rawSchema, s.username);
+                if (g_engine.schemaExists(s.currentDB, schema)) {
+                    catalogSearchPath.push_back(schema);
+                }
+            }
+            const PgClassRow* relation =
+                g_engine.catalogService().get(s.currentDB).resolveRelation(
+                    logicalName, catalogSearchPath);
+            if (relation && relation->relkind != 'r' &&
+                relation->relkind != 'p') {
+                std::cout << "ERROR: \"" << logicalName
+                          << "\" is not a table (SQLSTATE 42809)"
+                          << std::endl;
+                return true;
+            }
+        } catch (const std::exception& error) {
+            std::cout << "DROP TABLE: catalog lookup failed: "
+                      << error.what() << " (SQLSTATE XX001)"
+                      << std::endl;
+            return true;
+        }
+    }
     if (!g_engine.tableExists(s.currentDB, tname)) {
         if (stmt->ifExists) {
             std::cout << "NOTICE: table \"" << tname << "\" does not exist, skipping" << std::endl;

@@ -1,0 +1,16 @@
+DROP VIEW IF EXISTS diff_drop_table_kind_view;
+DROP MATERIALIZED VIEW IF EXISTS diff_drop_table_kind_mv;
+DROP TABLE IF EXISTS diff_drop_table_kind_source;
+CREATE TABLE diff_drop_table_kind_source (id integer);
+INSERT INTO diff_drop_table_kind_source VALUES (41);
+CREATE VIEW diff_drop_table_kind_view AS SELECT id FROM diff_drop_table_kind_source;
+CREATE MATERIALIZED VIEW diff_drop_table_kind_mv AS SELECT id FROM diff_drop_table_kind_source;
+DROP TABLE diff_drop_table_kind_view;
+DROP TABLE IF EXISTS diff_drop_table_kind_view;
+SELECT id FROM diff_drop_table_kind_view;
+DROP TABLE diff_drop_table_kind_mv;
+DROP TABLE IF EXISTS diff_drop_table_kind_mv;
+SELECT id FROM diff_drop_table_kind_mv;
+DROP VIEW diff_drop_table_kind_view;
+DROP MATERIALIZED VIEW diff_drop_table_kind_mv;
+DROP TABLE diff_drop_table_kind_source;
