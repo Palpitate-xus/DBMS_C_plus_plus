@@ -6964,6 +6964,18 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
             std::cout << "SQL syntax error: invalid index name" << std::endl;
             return true;
         }
+        if (!indexQn.schema.empty() &&
+            !g_engine.schemaExists(s.currentDB, indexQn.schema)) {
+            if (stmt->ifExists) {
+                std::cout << "NOTICE: index \"" << rawName
+                          << "\" does not exist, skipping" << std::endl;
+                continue;
+            }
+            std::cout << "ERROR: schema \"" << indexQn.schema
+                      << "\" does not exist (SQLSTATE 3F000)"
+                      << std::endl;
+            return true;
+        }
         const std::string indexName = indexQn.name;
         std::vector<std::string> indexSearchPath;
         if (indexQn.schema.empty()) {
