@@ -7923,7 +7923,8 @@ bool DdlExecutor::executeDropSequence(const DropStmt* stmt, Session& s) {
             }
             if (sequence->relkind != 'S') {
                 std::cout << "ERROR: relation \"" << requestedName
-                          << "\" is not a sequence" << std::endl;
+                          << "\" is not a sequence (SQLSTATE 42809)"
+                          << std::endl;
                 return true;
             }
             if (!physicalExists) {
