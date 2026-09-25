@@ -49,8 +49,8 @@ static void test_domain_check() {
     assert(!err);
 
     assert(g_engine.insert(db, "t", {{"id", "1"}, {"x", "10"}}) == dbms::DBStatus::OK);
-    assert(g_engine.insert(db, "t", {{"id", "2"}, {"x", "0"}}) == dbms::DBStatus::INVALID_VALUE);
-    assert(g_engine.insert(db, "t", {{"id", "3"}, {"x", "-5"}}) == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insert(db, "t", {{"id", "2"}, {"x", "0"}}) == dbms::DBStatus::CHECK_VIOLATION);
+    assert(g_engine.insert(db, "t", {{"id", "3"}, {"x", "-5"}}) == dbms::DBStatus::CHECK_VIOLATION);
 
     auto rows = g_engine.query(db, "t", {}, {"id", "x"});
     assert(rows.size() == 1);
@@ -104,7 +104,7 @@ static void test_domain_update() {
 
     assert(g_engine.insert(db, "t", {{"id", "1"}, {"x", "hi"}}) == dbms::DBStatus::OK);
     assert(g_engine.update(db, "t", {{"x", "hello"}}, {"=id 1"}) == dbms::DBStatus::OK);
-    assert(g_engine.update(db, "t", {{"x", "too long"}}, {"=id 1"}) == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.update(db, "t", {{"x", "too long"}}, {"=id 1"}) == dbms::DBStatus::CHECK_VIOLATION);
 
     cleanup(db);
     std::cout << "[DOMAIN] update OK" << std::endl;
