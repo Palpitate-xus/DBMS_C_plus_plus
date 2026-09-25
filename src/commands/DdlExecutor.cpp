@@ -8957,7 +8957,8 @@ bool DdlExecutor::executeDropView(const DropStmt* stmt, Session& s) {
     const bool physicalExists =
         g_engine.viewExists(s.currentDB, viewName);
     if (relation && relation->relkind != 'v') {
-        std::cout << "ERROR: \"" << viewName << "\" is not a view"
+        std::cout << "ERROR: \"" << viewName
+                  << "\" is not a view (SQLSTATE 42809)"
                   << std::endl;
         return true;
     }
