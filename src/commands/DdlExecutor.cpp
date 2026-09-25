@@ -4692,6 +4692,18 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             return true;
         }
     }
+    if (temporary && !targetName.schema.empty() &&
+        targetName.schema != "pg_temp") {
+        if (!g_engine.schemaExists(s.currentDB, targetName.schema)) {
+            std::cout << "ERROR: schema \"" << targetName.schema
+                      << "\" does not exist (SQLSTATE 3F000)" << std::endl;
+        } else {
+            std::cout << "ERROR: cannot create temporary relation in "
+                         "non-temporary schema (SQLSTATE 42P16)"
+                      << std::endl;
+        }
+        return true;
+    }
     if (!temporary && !g_engine.schemaExists(s.currentDB, targetSchema)) {
         std::cout << "ERROR: schema \"" << targetSchema
                   << "\" does not exist (SQLSTATE 3F000)" << std::endl;
