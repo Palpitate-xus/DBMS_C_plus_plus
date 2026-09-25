@@ -569,6 +569,9 @@
 | 590 | SQL-01 / DML-01 / CAT-10 / P0-16 | `ALTER TABLE ... RENAME COLUMN "MixedValue" TO "NewValue"` 把两端引号原样传给存储层，旧列查找报 `42703`；现在分别按 SQL 标识符规则解码旧名与新名 | 新增 `quoted_alter_rename_column`，覆盖改名、后续 SELECT/UPDATE；修复前真实 18.6 差分失败，修复后定向 `failed=0`，正式构建通过。其他 ALTER 子命令仍为 partial | `232f8ae` |
 | 591 | SQL-01 / DML-01 / CAT-10 / P0-16 | `ALTER TABLE ... ALTER COLUMN "MixedValue"` 和 `DROP COLUMN "MixedValue"` 仍用含引号的原始 token 查找物理列，导致默认值、NOT NULL 和删除失败；两条列目标解析现统一解码 | 新增 `quoted_alter_column_actions`，覆盖 SET DEFAULT、后续 INSERT、SET NOT NULL、DROP COLUMN 和查询；修复前真实 18.6 差分失败，修复后定向 `failed=0`，正式构建通过。其他 ALTER 行为与 rewrite/并发语义仍为 partial | `37414ed` |
 | 592 | SQL-01 / CAT-09 / P0-16 | `ALTER TABLE ... RENAME TO "MixedTable"` 把新表名的引号原样存储，后续按带引号的表名查找报 `42P01`；现按 SQL 标识符规则解码新名称 | 新增 `quoted_alter_rename_table`，修复前真实 PostgreSQL 18.6 差分失败，修复后定向 `failed=0`，正式构建通过。其他 RENAME/namespace 行为仍为 partial | `c2afbcf` |
+| 593 | SQL-01 / CAT-10 / P0-16 | 具名 CHECK 约束在 CREATE TABLE 时保留引号，ALTER ADD、RENAME、DROP 的约束名又分别按原始 token 处理，导致带引号约束不能按 PostgreSQL 语义管理；这些入口现统一解码并保留大小写 | 新增 `quoted_alter_rename_constraint`，覆盖创建、重命名、删除、ALTER ADD/DROP 和后续插入；修复前真实 18.6 差分失败，修复后定向 `failed=0`，正式构建通过。列级具名约束和其它约束类型仍待核实 | `52c1853` |
+
+2026-09-25 复验：截至第 591 项的 233 组真实 PostgreSQL 18.6 全量差分 `failed=0`，PostgreSQL 协议回归通过；第 592–593 项在此之后新增并分别完成定向差分，尚未包含在这次 233 组全量记录中。总清单仍有未完成项，不能据此宣称 PostgreSQL 兼容完成。
 
 2026-09-23 复验：截至第 511 项新增的 29 个 DDL/协议/查询差分用例并入全量集，158 组真实 PostgreSQL 18.6 差分 `failed=0`；当前源码生产对象重链的完整 PostgreSQL 协议回归通过。正式 `scripts/build.sh` 在第 509 项状态成功；第 510–511 项经重链编译验证，正式生产构建仍待复跑。schema 重名、缺失 schema 和唯一索引探针的定向运行曾偶发超时，随后重试或连续复跑及后续全量运行通过，间歇性原因未定位。该结果不代表 P0-02、P0-04、P0-16、CAT-02 或 PROTO-08 完成。总账仍为 273 项，其中 24 complete、119 partial、115 unverified、15 deferred_by_user；被延期的安全 / TDE 项没有被计作完成。
 
