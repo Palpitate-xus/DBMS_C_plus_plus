@@ -1,0 +1,13 @@
+SET search_path TO public;
+DROP SCHEMA IF EXISTS diff_mvcsp CASCADE;
+DROP MATERIALIZED VIEW IF EXISTS public.diff_mvcsp_view;
+DROP TABLE IF EXISTS diff_mvcsp_source;
+CREATE TABLE diff_mvcsp_source (id integer);
+INSERT INTO diff_mvcsp_source VALUES (51);
+CREATE SCHEMA diff_mvcsp;
+SET search_path TO diff_mvcsp, public;
+CREATE MATERIALIZED VIEW diff_mvcsp_view AS SELECT id FROM diff_mvcsp_source;
+SELECT id FROM diff_mvcsp.diff_mvcsp_view;
+DROP MATERIALIZED VIEW diff_mvcsp_view;
+SET search_path TO public;
+DROP SCHEMA diff_mvcsp;
