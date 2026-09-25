@@ -162,8 +162,8 @@ static void test_check_constraint_insert() {
     assert(!ddl.executeSql(
         "CREATE TABLE t (id INT PRIMARY KEY, price INT CHECK (price > 0))", s));
     assert(g_engine.insert(db, "t", {{"id", "1"}, {"price", "10"}}) == dbms::DBStatus::OK);
-    assert(g_engine.insert(db, "t", {{"id", "2"}, {"price", "0"}}) == dbms::DBStatus::INVALID_VALUE);
-    assert(g_engine.insert(db, "t", {{"id", "3"}, {"price", "-5"}}) == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insert(db, "t", {{"id", "2"}, {"price", "0"}}) == dbms::DBStatus::CHECK_VIOLATION);
+    assert(g_engine.insert(db, "t", {{"id", "3"}, {"price", "-5"}}) == dbms::DBStatus::CHECK_VIOLATION);
 
     auto rows = g_engine.query(db, "t", {}, {"id", "price"});
     assert(rows.size() == 1);
@@ -185,7 +185,7 @@ static void test_check_constraint_update() {
         "CREATE TABLE t (id INT PRIMARY KEY, price INT CHECK (price BETWEEN 1 AND 100))", s));
     assert(g_engine.insert(db, "t", {{"id", "1"}, {"price", "10"}}) == dbms::DBStatus::OK);
     assert(g_engine.update(db, "t", {{"price", "50"}}, {"=id 1"}) == dbms::DBStatus::OK);
-    assert(g_engine.update(db, "t", {{"price", "200"}}, {"=id 1"}) == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.update(db, "t", {{"price", "200"}}, {"=id 1"}) == dbms::DBStatus::CHECK_VIOLATION);
 
     auto rows = g_engine.query(db, "t", {"=id 1"}, {"price"});
     assert(rows.size() == 1);
