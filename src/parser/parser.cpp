@@ -5663,6 +5663,13 @@ static void parseCreateTableLikeOptions(const std::vector<std::string>& tokens,
 StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size_t& pos) {
     auto stmt = std::make_unique<CreateTableStmt>();
 
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") &&
+        match(tokens, pos + 1, "not") &&
+        match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true;
+        pos += 3;
+    }
+
     // Parse table name (may be schema-qualified)
     if (pos < tokens.size()) {
         stmt->tableName = tokens[pos++];
