@@ -609,6 +609,7 @@
 | 630 | CONS-03 / P0-02 | `alter_check_existing_rows_test` 的更新行 CHECK 失败断言仍期待 `INVALID_VALUE`；生产写路径已用专用 `CHECK_VIOLATION` 表示约束拒绝。保留 ADD CHECK 校验已有行失败的原返回值，仅修正 UPDATE 断言 | 原测试在 UPDATE 断言失败，修正后完整通过，包括已存在坏行阻止 ADD CHECK 发布、修正数据后成功添加，以及后续坏更新被拒且原行保留。测试预期修复，不宣称完整 ALTER/CHECK 语义 | `493b3515` |
 | 631 | CONS-03 / P0-02 | `constraint_expr_test` 对列 CHECK 失败的两条 INSERT 和一条 UPDATE 仍期待旧通用 `INVALID_VALUE`，与当前 `CHECK_VIOLATION` 错误契约不一致；仅修正这些测试断言 | 原测试在首条坏 INSERT 断言失败；修正后完整通过，覆盖表达式求值、DEFAULT、生成列、CHECK 插入/更新拒绝和 identity，且保留坏更新后的原行验证。未修改生产约束逻辑，也未将 CHECK 功能族标完成 | `e15f2c7e` |
 | 632 | CONS-03 / CONS-07 / P0-02 | `deferrable_test` 的即时 CHECK、`SET CONSTRAINTS ... IMMEDIATE` 与 NOT DEFERRABLE 三条坏 INSERT 仍期待 `INVALID_VALUE`，现行错误契约为 `CHECK_VIOLATION`；只更新测试预期 | 原测试在第一条坏 INSERT 断言失败；修正后完整通过，覆盖自动提交、延迟提交、模式切换、最终行状态和事务内数据库 DDL。生产约束行为未改，完整约束语义仍为 partial | `3ddb4134` |
+| 633 | CONS-03 / P0-02 | `check_null_semantics_test` 的真 CHECK 失败路径仍期待 `INVALID_VALUE`，而 SQL UNKNOWN 通过路径并无回归；现把坏值断言更新为 `CHECK_VIOLATION` | 原测试在坏值 INSERT 断言失败；修正后完整通过，覆盖立即/延迟/ALTER 添加的 CHECK 对 NULL/UNKNOWN 的接受性及非 NULL 坏值拒绝。生产代码未改，完整三值逻辑仍为 partial | `ba49faf1` |
 
 2026-09-25 最新全量复验：截至第 623 项的固定本地二进制运行真实 PostgreSQL 18.6 差分 264 组，`failed=0`；该二进制的完整 PostgreSQL 协议回归通过（120 秒启动/关闭超时）。总清单仍为 273 项、24 complete、121 partial、113 unverified、15 deferred_by_user，不能因有限差分通过而称完成；用户延期的安全/TDE 项未触碰。
 
