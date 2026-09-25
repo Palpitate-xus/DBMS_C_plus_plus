@@ -6216,7 +6216,7 @@ StmtPtr SQLParser::parseCreateIndex(const std::vector<std::string>& tokens, size
         stmt->ifNotExists = true; pos += 3;
     }
     if (pos < tokens.size() && !match(tokens, pos, "on")) {
-        stmt->indexName = tokens[pos++];
+        stmt->indexName = parseRoutineIdentifier(tokens[pos++]);
         if (pos < tokens.size() && tokens[pos] == ".") {
             // PostgreSQL always creates an index in its parent table's
             // namespace and does not permit a schema-qualified index name.
