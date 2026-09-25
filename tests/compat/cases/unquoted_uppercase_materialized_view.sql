@@ -1,0 +1,11 @@
+DROP MATERIALIZED VIEW IF EXISTS DIFF_UPPER_MV;
+DROP TABLE IF EXISTS diff_upper_mv_source;
+CREATE TABLE diff_upper_mv_source (id integer);
+INSERT INTO diff_upper_mv_source VALUES (21);
+CREATE MATERIALIZED VIEW DIFF_UPPER_MV AS SELECT id FROM diff_upper_mv_source;
+SELECT id FROM diff_upper_mv;
+INSERT INTO diff_upper_mv_source VALUES (22);
+REFRESH MATERIALIZED VIEW DIFF_UPPER_MV;
+SELECT id FROM diff_upper_mv ORDER BY id;
+DROP MATERIALIZED VIEW DIFF_UPPER_MV;
+SELECT id FROM diff_upper_mv;
