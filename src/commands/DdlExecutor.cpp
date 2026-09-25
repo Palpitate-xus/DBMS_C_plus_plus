@@ -6786,7 +6786,20 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
     // append a numeric suffix when the derived name is already taken.
     auto namedIndexExists = [&](const std::string& candidate) {
         if (g_engine.getNamedIndex(s.currentDB, tname, candidate).has_value()) return true;
-        if (indexingSessionTemp) return false;
+        if (indexingSessionTemp) {
+            std::set<std::string> tempNames(
+                s.tempTables.begin(), s.tempTables.end());
+            tempNames.insert(s.transientTempTables.begin(),
+                             s.transientTempTables.end());
+            for (const auto& logicalName : tempNames) {
+                if (g_engine.getNamedIndex(
+                        s.currentDB, tempTablePrefix(s, logicalName),
+                        candidate)) {
+                    return true;
+                }
+            }
+            return false;
+        }
         try {
             const auto tableName = CatalogService::logicalName(tname);
             const std::string schema = tableName.schema.empty() ? "public" : tableName.schema;
