@@ -1,0 +1,11 @@
+CREATE VIEW diff_create_index_wrong_kind AS SELECT 1 AS id;
+CREATE INDEX ON diff_create_index_wrong_kind (id);
+DROP VIEW diff_create_index_wrong_kind;
+CREATE SCHEMA diff_create_index_wrong_schema;
+CREATE VIEW diff_create_index_wrong_schema.v AS SELECT 2 AS id;
+SET search_path TO diff_create_index_wrong_schema, public;
+CREATE INDEX ON v (id);
+SET search_path TO public;
+DROP VIEW diff_create_index_wrong_schema.v;
+DROP SCHEMA diff_create_index_wrong_schema;
+SELECT 1;

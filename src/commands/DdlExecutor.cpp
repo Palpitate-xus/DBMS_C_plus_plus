@@ -6712,6 +6712,38 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
     }
     std::string tname = resolveTableName(s, stmt->tableName);
     if (!g_engine.tableExists(s.currentDB, tname)) {
+        try {
+            std::vector<std::string> rawSearchPath;
+            std::vector<std::string> catalogSearchPath;
+            std::string canonicalSearchPath;
+            if (!dbms::parseSessionSearchPath(
+                    s.searchPath, rawSearchPath, canonicalSearchPath)) {
+                rawSearchPath = {"public"};
+            }
+            for (const auto& rawSchema : rawSearchPath) {
+                const std::string schema =
+                    dbms::expandSessionSearchPathEntry(
+                        rawSchema, s.username);
+                if (g_engine.schemaExists(s.currentDB, schema)) {
+                    catalogSearchPath.push_back(schema);
+                }
+            }
+            const PgClassRow* relation =
+                g_engine.catalogService().get(s.currentDB).resolveRelation(
+                    stmt->tableName, catalogSearchPath);
+            if (relation && relation->relkind != 'r' &&
+                relation->relkind != 'p' && relation->relkind != 'm') {
+                std::cout << "ERROR: cannot create index on relation \""
+                          << stmt->tableName << "\" (SQLSTATE 42809)"
+                          << std::endl;
+                return true;
+            }
+        } catch (const std::exception& error) {
+            std::cout << "CREATE INDEX: catalog lookup failed: "
+                      << error.what() << " (SQLSTATE XX001)"
+                      << std::endl;
+            return true;
+        }
         std::cout << "Table " << tname << " not found" << std::endl;
         return true;
     }
