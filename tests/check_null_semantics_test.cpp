@@ -45,7 +45,7 @@ int main() {
                            {"=id 2"}) == dbms::DBStatus::OK);
     assert(g_engine.insert(database, "immediate_check",
                            {{"id", "3"}, {"value", "-1"}}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::CHECK_VIOLATION);
 
     dbms::TableSchema altered;
     altered.tablename = "altered_check";
