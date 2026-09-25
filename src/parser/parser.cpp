@@ -6569,12 +6569,12 @@ StmtPtr SQLParser::parseCreateSchema(const std::vector<std::string>& tokens, siz
         stmt->ifNotExists = true; pos += 3;
     }
     if (pos < tokens.size()) {
-        stmt->objectName = tokens[pos++];
+        stmt->objectName = parseRoutineIdentifier(tokens[pos++]);
         if (pos < tokens.size() && tokens[pos] == ".") {
             ++pos;
             if (pos < tokens.size()) {
                 stmt->schema = stmt->objectName;
-                stmt->objectName = tokens[pos++];
+                stmt->objectName = parseRoutineIdentifier(tokens[pos++]);
             }
         }
     }
@@ -8047,7 +8047,7 @@ StmtPtr SQLParser::parseDropSchema(const std::vector<std::string>& tokens, size_
         if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
         if (w == "restrict") { ++pos; continue; }
         if (w == ",") { ++pos; continue; }
-        stmt->objectNames.push_back(tokens[pos++]);
+        stmt->objectNames.push_back(parseRoutineIdentifier(tokens[pos++]));
     }
     return stmt;
 }
