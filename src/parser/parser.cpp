@@ -6190,7 +6190,9 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                    toLower(tokens[pos + 1]) == "commit") {
             parseCreateTableOnCommit(tokens, pos, *stmt);
         } else {
-            ++pos;
+            // An unknown table option is a syntax error, not an instruction
+            // to create the table while silently discarding SQL text.
+            return nullptr;
         }
     }
 
