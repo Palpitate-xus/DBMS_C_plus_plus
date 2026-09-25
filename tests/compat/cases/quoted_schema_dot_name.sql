@@ -3,5 +3,8 @@ CREATE SCHEMA "Diff.Schema";
 CREATE TABLE "Diff.Schema".items (id integer);
 INSERT INTO "Diff.Schema".items VALUES (5);
 SELECT id FROM "Diff.Schema".items;
+CREATE TABLE "Diff.Schema"."Diff.Table" (id integer);
+INSERT INTO "Diff.Schema"."Diff.Table" VALUES (6);
+SELECT id FROM "Diff.Schema"."Diff.Table";
 DROP SCHEMA "Diff.Schema" CASCADE;
 SELECT id FROM "Diff.Schema".items;
