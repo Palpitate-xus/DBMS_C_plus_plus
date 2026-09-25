@@ -6176,7 +6176,8 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
             stmt->tablespace = tokens[pos++];
         } else if (kw == "of") {
             ++pos;
-            if (pos < tokens.size()) stmt->ofType = tokens[pos++];
+            if (pos >= tokens.size() || tokens[pos] == ";") return nullptr;
+            stmt->ofType = tokens[pos++];
         } else if (kw == "like") {
             ++pos;
             if (pos < tokens.size()) {
