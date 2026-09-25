@@ -571,6 +571,7 @@
 | 592 | SQL-01 / CAT-09 / P0-16 | `ALTER TABLE ... RENAME TO "MixedTable"` 把新表名的引号原样存储，后续按带引号的表名查找报 `42P01`；现按 SQL 标识符规则解码新名称 | 新增 `quoted_alter_rename_table`，修复前真实 PostgreSQL 18.6 差分失败，修复后定向 `failed=0`，正式构建通过。其他 RENAME/namespace 行为仍为 partial | `c2afbcf` |
 | 593 | SQL-01 / CAT-10 / P0-16 | 具名 CHECK 约束在 CREATE TABLE 时保留引号，ALTER ADD、RENAME、DROP 的约束名又分别按原始 token 处理，导致带引号约束不能按 PostgreSQL 语义管理；这些入口现统一解码并保留大小写 | 新增 `quoted_alter_rename_constraint`，覆盖创建、重命名、删除、ALTER ADD/DROP 和后续插入；修复前真实 18.6 差分失败，修复后定向 `failed=0`，正式构建通过。列级具名约束和其它约束类型仍待核实 | `52c1853` |
 | 594 | SQL-01 / CAT-10 / CONS-01 / DML-01 / P0-16 | 列级 `CONSTRAINT "MixedCheck" CHECK (...)` 的名称被解析器丢弃；CHECK 违反又以 `INVALID_VALUE` 和无 SQLSTATE 的通用 INSERT 消息冒出，参考端应为 `23514`。现保留列级名称，区分表达式错误与约束失败，并在 INSERT 入口传出状态码 | 新增 `column_named_check_constraint`，覆盖违反 INSERT/UPDATE、按名称 DROP、删除后写入；修复前真实 18.6 差分失败，修复后定向 `failed=0`；相邻三个约束名差分通过，正式构建通过。其他约束种类及复杂 CHECK 表达式仍为 partial | `cca477b` |
+| 595 | SQL-11 / CAT-10 / P0-16 | `CREATE TABLE t (...) unexpected_token` 原先跳过尾随未知选项并真的建表，导致后续查询可见一个 PostgreSQL 会拒绝的关系；现遇未知表选项返回语法错误而不执行 DDL | 新增 `create_table_trailing_tokens`，修复前真实 18.6 差分出现错误码及关系存在性差异，修复后定向 `failed=0`；相邻普通/临时/unlogged 建表用例通过，正式构建通过。其他语句的尾随 token 校验仍为 partial | `01cb606` |
 
 2026-09-25 复验：截至第 591 项的 233 组真实 PostgreSQL 18.6 全量差分 `failed=0`，PostgreSQL 协议回归通过；第 592–593 项在此之后新增并分别完成定向差分，尚未包含在这次 233 组全量记录中。总清单仍有未完成项，不能据此宣称 PostgreSQL 兼容完成。
 
