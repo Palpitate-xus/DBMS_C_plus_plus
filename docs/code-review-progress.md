@@ -597,7 +597,9 @@
 | 618 | SQL-05 / CAT-16 / P0-16 | `DROP VIEW` 原先只在 `public` 查 catalog、对未限定名直接使用原文本物理名，导致非 public 首选 schema 中的视图无法删除；现按 session search_path 查 catalog，并由已解析的 namespace 与 relname 找到实际物理视图 | 新增 `view_drop_search_path`，覆盖非 public schema 中创建、未限定 DROP、删除后缺失查询和 schema 清理；修复前真实 18.6 差分失败，修复后定向 `failed=0`，带引号、缺失与 OR REPLACE 相邻视图用例通过，正式构建通过。多目标 DROP 与完整权限语义仍为 partial | `96a8171b` |
 | 619 | SQL-05 / QRY-01 / CAT-16 / P0-16 | 普通 `SELECT` 的关系解析只认识非 public 表物理名 `schema__name`，不认识视图物理名 `schema.name`；未限定视图名按 `search_path` 查询报 `42P01`，且可能错误落到后续 schema 的同名表。现视图也参与有序关系解析，展开器使用解析后的物理视图名 | 新增 `view_select_search_path`，覆盖非 public 视图与 public 同名表的双向 `search_path` 优先级；修复前真实 18.6 差分失败，修复后定向 `failed=0`，5 组相邻视图/物化视图/带点号表名用例通过，正式构建通过。更复杂 view rewrite、DML 视图路径与权限仍为 partial | `cca6670f` |
 
-2026-09-25 本轮全量复验：截至第 611 项的固定本地二进制运行真实 PostgreSQL 18.6 差分 252 组，`failed=0`。第 612–614 项的用例和刷新/重复创建修复在此轮启动后新增，分别完成定向差分，不计入这 252 组。第 614 项后的最新正式构建也通过完整 PostgreSQL 协议回归（120 秒启动/关闭超时）。总清单仍未完成；用户延期的安全/TDE 项未触碰。
+2026-09-25 最新全量复验：截至第 619 项的固定本地二进制运行真实 PostgreSQL 18.6 差分 260 组，`failed=0`；该二进制的完整 PostgreSQL 协议回归通过（120 秒启动/关闭超时）。后续新增的重复 `CREATE VIEW` 用例已单独复现 `42P07`/`XX000` 差异，未纳入这 260 组，也尚未修复。总清单仍未完成；用户延期的安全/TDE 项未触碰。
+
+2026-09-25 较早全量复验：截至第 611 项的固定本地二进制运行真实 PostgreSQL 18.6 差分 252 组，`failed=0`。第 612–614 项的用例和刷新/重复创建修复在此轮启动后新增，分别完成定向差分，不计入这 252 组。第 614 项后的最新正式构建也通过完整 PostgreSQL 协议回归（120 秒启动/关闭超时）。总清单仍未完成；用户延期的安全/TDE 项未触碰。
 
 2026-09-25 最新复验：截至第 608 项，固定本地二进制上的 249 组真实 PostgreSQL 18.6 全量差分 `failed=0`，正式 `scripts/build.sh` 通过；完整 PostgreSQL 协议回归在差分结束后用 120 秒启动/关闭超时通过。第 609 项新增 JOIN 用例已定向通过，尚未纳入这次 249 组全量记录。此前一次跨构建版本的 247 组观察运行在 `quoted_index_name` 暴露 1 组失败，已由第 608 项复现并修复，不能把该轮记为通过。总清单仍为 273 项，其中 24 complete、121 partial、113 unverified、15 deferred_by_user；这些有限用例不证明剩余功能族完成。
 
