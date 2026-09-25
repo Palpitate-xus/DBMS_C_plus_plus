@@ -8606,6 +8606,9 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
     }
     const std::string schemaName = qualifiedName.schema.empty()
         ? "public" : qualifiedName.schema;
+    viewname = qualifiedName.schema.empty()
+        ? qualifiedName.name
+        : qualifiedName.schema + "." + qualifiedName.name;
     if (!g_engine.schemaExists(s.currentDB, schemaName)) {
         std::cout << "ERROR: schema \"" << schemaName
                   << "\" does not exist" << std::endl;
@@ -8862,12 +8865,21 @@ bool DdlExecutor::executeDropView(const DropStmt* stmt, Session& s) {
         return true;
     }
 
-    const std::string& viewName = stmt->objectNames.front();
+    const std::string& rawViewName = stmt->objectNames.front();
+    CatalogManager::QualifiedName qualifiedView;
+    if (!CatalogManager::parseQualifiedName(rawViewName, qualifiedView) ||
+        qualifiedView.name.empty()) {
+        std::cout << "ERROR: invalid view name" << std::endl;
+        return true;
+    }
+    const std::string viewName = qualifiedView.schema.empty()
+        ? qualifiedView.name
+        : qualifiedView.schema + "." + qualifiedView.name;
     CatalogManager* catalog = nullptr;
     const PgClassRow* relation = nullptr;
     try {
         catalog = &g_engine.catalogService().get(s.currentDB);
-        relation = catalog->resolveRelation(viewName, {"public"});
+        relation = catalog->resolveRelation(rawViewName, {"public"});
     } catch (const std::exception& error) {
         std::cout << "DROP VIEW: catalog lookup failed: "
                   << error.what() << std::endl;

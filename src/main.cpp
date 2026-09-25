@@ -22278,8 +22278,16 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
         if (queryDb != "information_schema" && queryDb != "pg_catalog" &&
             !g_engine.tableExists(queryDb, tname)) {
-            if (g_engine.viewExists(queryDb, tnameOrig)) {
-                string viewSql = g_engine.getViewSQL(queryDb, tnameOrig);
+            dbms::CatalogManager::QualifiedName viewQualified;
+            string viewLookup = tnameOrig;
+            if (dbms::CatalogManager::parseQualifiedName(
+                    tnameOrig, viewQualified, true)) {
+                viewLookup = viewQualified.schema.empty()
+                    ? viewQualified.name
+                    : viewQualified.schema + "." + viewQualified.name;
+            }
+            if (g_engine.viewExists(queryDb, viewLookup)) {
+                string viewSql = g_engine.getViewSQL(queryDb, viewLookup);
                 if (!viewSql.empty()) {
                     // Strip BASE_TABLE metadata line for expansion
                     string expandedSql = viewSql;
@@ -22306,7 +22314,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     }
                     size_t fp = pattern.empty() ? std::string::npos : lowerRaw.find(pattern);
                     if (fp != string::npos) {
-                        string subq = "from (" + expandedSql + ") as __view_" + tnameOrig;
+                        const string internalAlias =
+                            "__view_expanded_" + std::to_string(executeDepth);
+                        string subq = "from (" + expandedSql + ") as " +
+                            internalAlias;
                         expanded = expanded.substr(0, fp) + subq + expanded.substr(fp + pattern.size());
                         const unsigned previousCaptureDepth = metadataCaptureDepth;
                         metadataCaptureDepth = executeDepth + 1;

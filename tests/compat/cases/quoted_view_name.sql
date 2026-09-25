@@ -1,0 +1,10 @@
+DROP VIEW IF EXISTS "MixedView";
+CREATE VIEW "MixedView" AS SELECT 1 AS id;
+SELECT id FROM "MixedView";
+DROP SCHEMA IF EXISTS diff_qview CASCADE;
+CREATE SCHEMA diff_qview;
+CREATE VIEW diff_qview."MixedView" AS SELECT 2 AS id;
+SELECT id FROM diff_qview."MixedView";
+DROP VIEW diff_qview."MixedView";
+DROP VIEW "MixedView";
+SELECT id FROM "MixedView";
