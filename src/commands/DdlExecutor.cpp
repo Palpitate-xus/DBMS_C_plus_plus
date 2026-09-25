@@ -8665,8 +8665,15 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
         : schemaName + "__" + qualifiedName.name;
     if (g_engine.tableExists(s.currentDB, physicalRelationName) ||
         g_engine.isMaterializedView(s.currentDB, viewname)) {
-        std::cout << "ERROR: relation \"" << viewname
-                  << "\" already exists" << std::endl;
+        if (stmt->replace) {
+            std::cout << "ERROR: \"" << viewname
+                      << "\" is not a view (SQLSTATE 42809)"
+                      << std::endl;
+        } else {
+            std::cout << "ERROR: relation \"" << viewname
+                      << "\" already exists (SQLSTATE 42P07)"
+                      << std::endl;
+        }
         return true;
     }
 
@@ -8767,8 +8774,15 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
             qualifiedName.name, viewNamespace->oid);
         if (existing) {
             if (existing->relkind != 'v') {
-                std::cout << "ERROR: relation \"" << viewname
-                          << "\" already exists" << std::endl;
+                if (stmt->replace) {
+                    std::cout << "ERROR: \"" << viewname
+                              << "\" is not a view (SQLSTATE 42809)"
+                              << std::endl;
+                } else {
+                    std::cout << "ERROR: relation \"" << viewname
+                              << "\" already exists (SQLSTATE 42P07)"
+                              << std::endl;
+                }
                 return true;
             }
             if (!stmt->replace) {
