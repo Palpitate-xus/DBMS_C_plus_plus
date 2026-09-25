@@ -7883,6 +7883,20 @@ bool DdlExecutor::executeDropSequence(const DropStmt* stmt, Session& s) {
                           << requestedName << std::endl;
                 return true;
             }
+            if (!qualifiedName.schema.empty() &&
+                !g_engine.schemaExists(s.currentDB,
+                                       qualifiedName.schema)) {
+                if (stmt->ifExists) {
+                    std::cout << "NOTICE: sequence \"" << requestedName
+                              << "\" does not exist, skipping"
+                              << std::endl;
+                    continue;
+                }
+                std::cout << "ERROR: schema \"" << qualifiedName.schema
+                          << "\" does not exist (SQLSTATE 3F000)"
+                          << std::endl;
+                return true;
+            }
             std::string schema = qualifiedName.schema;
             const PgClassRow* resolvedRelation = nullptr;
             if (schema.empty()) {
