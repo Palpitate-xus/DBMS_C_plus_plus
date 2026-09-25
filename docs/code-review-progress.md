@@ -599,6 +599,7 @@
 | 620 | SQL-11 / CAT-16 / P0-02 / P0-16 | 重复 `CREATE VIEW` 已在 catalog 查到同名视图，但原先只打印无 SQLSTATE 的文本，被协议层归类为 `XX000`；现对 catalog 重名和物理重名都返回 `42P07`，且保留原视图定义 | 新增 `create_duplicate_view`，覆盖重复创建的错误码和原视图查询结果；修复前真实 18.6 差分失败，修复后定向 `failed=0`，相邻 search_path、OR REPLACE、带引号视图用例通过，正式构建通过。其它对象类型冲突及并发重名仍为 partial | `2512597c` |
 | 621 | SQL-11 / CAT-16 / P0-02 / P0-16 | `CREATE VIEW` 与现有普通表冲突的早期物理检查未给 SQLSTATE，参考端应为 `42P07`；`CREATE OR REPLACE VIEW` 撞普通表应为对象类型错误 `42809`。现早期物理检查和后续 catalog 检查均区分这两种语义 | 新增 `create_view_table_conflict`，覆盖两种错误码，以及冲突后原表仍可写入/查询；修复前真实 18.6 差分失败，修复后定向 `failed=0`，相邻重复视图与 OR REPLACE 用例通过，正式构建通过。其它 relation kind 和并发冲突仍为 partial | `2b67f051` |
 | 622 | SQL-11 / CAT-16 / P0-02 / P0-16 | `DROP VIEW` 指向普通表时原先报无 SQLSTATE 的文字错误，协议层映射 `XX000`；即使带 `IF EXISTS` 也应明确报对象类型错误而非忽略。现返回 `42809`，不触碰普通表 | 新增 `drop_view_wrong_relation_kind`，覆盖普通与 `IF EXISTS` 两种 DROP、原表行保留；修复前真实 18.6 差分失败，修复后定向 `failed=0`，相邻 search_path 与缺失视图用例通过，正式构建通过。其它 relation kind、CASCADE 依赖仍为 partial | `41b845c9` |
+| 623 | SQL-11 / CAT-16 / P0-02 / P0-16 | `DROP MATERIALIZED VIEW` 指向普通表时原先同样输出无 SQLSTATE 的文字错误，协议层误映射 `XX000`；`IF EXISTS` 也不能把对象类型不符视为不存在。现返回 `42809` 并保留普通表 | 新增 `drop_materialized_view_wrong_relation_kind`，覆盖普通与 `IF EXISTS` 两种 DROP、原表行保留；修复前真实 18.6 差分失败，修复后定向 `failed=0`，相邻物化视图 search_path 与缺失对象用例通过，正式构建通过。其它 relation kind 与依赖仍为 partial | `a8ea7fcd` |
 
 2026-09-25 最新全量复验：截至第 619 项的固定本地二进制运行真实 PostgreSQL 18.6 差分 260 组，`failed=0`；该二进制的完整 PostgreSQL 协议回归通过（120 秒启动/关闭超时）。后续新增的重复 `CREATE VIEW` 用例已单独复现 `42P07`/`XX000` 差异，未纳入这 260 组，也尚未修复。总清单仍未完成；用户延期的安全/TDE 项未触碰。
 
