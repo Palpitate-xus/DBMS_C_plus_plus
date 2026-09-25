@@ -6310,7 +6310,9 @@ StmtPtr SQLParser::parseCreateIndex(const std::vector<std::string>& tokens, size
             ++pos;
             if (pos < tokens.size()) stmt->tablespace = tokens[pos++];
         } else {
-            ++pos;
+            // Do not create an index after silently ignoring an unknown
+            // trailing clause.
+            return nullptr;
         }
     }
     return stmt;
