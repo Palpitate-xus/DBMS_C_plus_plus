@@ -4653,15 +4653,16 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         std::cout << "DDL transaction begin failed" << std::endl;
         return true;
     }
-    const bool temporary = stmt->temp || stmt->localTemp;
-    if (!stmt->onCommitValid || (stmt->onCommitSpecified && !temporary)) {
-        std::cout << "ERROR: ON COMMIT is only supported for valid temporary tables" << std::endl;
-        return true;
-    }
     CatalogManager::QualifiedName targetName;
     if (!CatalogManager::parseQualifiedName(stmt->tableName, targetName, true)) {
         std::cout << "ERROR: invalid table name \"" << stmt->tableName
                   << "\"" << std::endl;
+        return true;
+    }
+    const bool temporary = stmt->temp || stmt->localTemp ||
+        targetName.schema == "pg_temp";
+    if (!stmt->onCommitValid || (stmt->onCommitSpecified && !temporary)) {
+        std::cout << "ERROR: ON COMMIT is only supported for valid temporary tables" << std::endl;
         return true;
     }
     std::string targetSchema = targetName.schema;
@@ -4747,10 +4748,10 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     const auto registerTemporaryTable = [&]() {
         if (!temporary) return;
         s.tempNamespaceCreated = true;
-        s.tempTables.insert(stmt->tableName);
-        s.tempTableOnCommit[stmt->tableName] = stmt->onCommit;
+        s.tempTables.insert(targetName.name);
+        s.tempTableOnCommit[targetName.name] = stmt->onCommit;
         if (g_engine.inTransaction()) {
-            s.tempTablesCreatedInTransaction.insert(stmt->tableName);
+            s.tempTablesCreatedInTransaction.insert(targetName.name);
         }
     };
 
@@ -6308,9 +6309,15 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
         return true;
     }
     const std::string logicalName = stmt->objectNames.front();
-    const bool droppingTemp = s.tempTables.count(logicalName) != 0;
     CatalogManager::QualifiedName tableName;
-    if (CatalogManager::parseQualifiedName(logicalName, tableName) &&
+    const bool validLogicalName =
+        CatalogManager::parseQualifiedName(logicalName, tableName);
+    const std::string tempLogicalName = validLogicalName
+        ? tableName.name : logicalName;
+    const bool droppingTemp =
+        (tableName.schema.empty() || tableName.schema == "pg_temp") &&
+        s.tempTables.count(tempLogicalName) != 0;
+    if (validLogicalName &&
         !tableName.schema.empty() &&
         !(tableName.schema == "pg_temp" &&
           (s.tempNamespaceCreated ||
@@ -6678,9 +6685,9 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
         }
     }
     if (droppingTemp) {
-        s.tempTables.erase(logicalName);
-        s.tempTableOnCommit.erase(logicalName);
-        s.tempTablesCreatedInTransaction.erase(logicalName);
+        s.tempTables.erase(tempLogicalName);
+        s.tempTableOnCommit.erase(tempLogicalName);
+        s.tempTablesCreatedInTransaction.erase(tempLogicalName);
     }
     std::cout << "DROP TABLE succeeded" << std::endl;
     return false;
