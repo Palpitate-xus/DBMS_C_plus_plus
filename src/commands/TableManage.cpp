@@ -1,4 +1,5 @@
 #include "TableManage.h"
+#include "commands/SequenceStorageName.h"
 #include "common/DbError.h"
 #include "common/BooleanCodec.h"
 #include "common/NetworkValue.h"
@@ -19438,6 +19439,16 @@ void StorageEngine::cleanupStaleSessionTemporaryFiles() {
 static std::mutex g_sequenceMutex;
 
 static bool validSequenceName(const std::string& seqname) {
+    if (seqname.rfind("seqv2..", 0) == 0) {
+        if (seqname.size() <= 7 || seqname.size() > 249) return false;
+        return std::all_of(seqname.begin() + 7, seqname.end(),
+                           [](unsigned char ch) {
+            return (ch >= 'A' && ch <= 'Z') ||
+                   (ch >= 'a' && ch <= 'z') ||
+                   (ch >= '0' && ch <= '9') ||
+                   ch == '_' || ch == '-';
+        });
+    }
     const size_t separator = seqname.find('.');
     if (separator == std::string::npos) {
         return validStoredIdentifier(seqname, MAX_TABLE_NAME_LEN);
@@ -19453,6 +19464,12 @@ static bool validSequenceName(const std::string& seqname) {
 }
 
 static std::filesystem::path sequencePath(const std::string& dbname, const std::string& seqname) {
+    if (seqname.rfind("seqv2..", 0) == 0) {
+        // A distinct extension prevents collision with a table's legacy
+        // auto-increment <tablename>.seq sidecar, even if a quoted table name
+        // happens to equal the encoded sequence key.
+        return std::filesystem::path(dbname) / (seqname + ".seqv2");
+    }
     const std::string storageName = seqname.rfind("public.", 0) == 0
         ? seqname.substr(7) : seqname;
     return std::filesystem::path(dbname) / (storageName + ".seq");
@@ -19498,6 +19515,16 @@ static std::optional<std::string> normalizeRegclassPart(std::string part) {
     return part;
 }
 
+static std::string quoteRegclassPart(const std::string& part) {
+    std::string quoted = "\"";
+    for (char ch : part) {
+        quoted += ch;
+        if (ch == '"') quoted += '"';
+    }
+    quoted += '"';
+    return quoted;
+}
+
 static std::optional<std::string> normalizeRegclassText(
     const std::string& input) {
     bool quoted = false;
@@ -19515,11 +19542,17 @@ static std::optional<std::string> normalizeRegclassText(
         }
     }
     if (quoted) return std::nullopt;
-    if (separator == std::string::npos) return normalizeRegclassPart(input);
+    if (separator == std::string::npos) {
+        const auto relation = normalizeRegclassPart(input);
+        return relation ? std::optional<std::string>(
+                              quoteRegclassPart(*relation))
+                        : std::nullopt;
+    }
     const auto schema = normalizeRegclassPart(input.substr(0, separator));
     const auto relation = normalizeRegclassPart(input.substr(separator + 1));
     if (!schema || !relation) return std::nullopt;
-    return *schema + "." + *relation;
+    return quoteRegclassPart(*schema) + "." +
+           quoteRegclassPart(*relation);
 }
 
 static ResolvedSequenceReference resolveSequenceReference(
@@ -19529,16 +19562,20 @@ static ResolvedSequenceReference resolveSequenceReference(
         throw DbError("3D000", "database does not exist");
     }
     const auto normalized = normalizeRegclassText(input);
-    if (!normalized || !validSequenceName(*normalized)) {
+    CatalogManager::QualifiedName qualified;
+    if (!normalized ||
+        !CatalogManager::parseQualifiedName(*normalized, qualified) ||
+        !validStoredIdentifier(qualified.name, MAX_TABLE_NAME_LEN) ||
+        (!qualified.schema.empty() &&
+         !validStoredIdentifier(qualified.schema, MAX_TABLE_NAME_LEN))) {
         throw DbError("42P01", "relation \"" + input + "\" does not exist");
     }
 
     Session* session = currentSession();
     if (!session) {
         return {INVALID_OID,
-                normalized->rfind("public.", 0) == 0
-                    ? normalized->substr(7) : *normalized,
-                *normalized, 'p'};
+                sequenceStorageName(qualified.schema, qualified.name),
+                input, 'p'};
     }
 
     std::vector<std::string> searchPath;
@@ -19566,10 +19603,9 @@ static ResolvedSequenceReference resolveSequenceReference(
     if (!relationNamespace) {
         throw DbError("XX001", "sequence namespace metadata is corrupt");
     }
-    const std::string storageName = relationNamespace->nspname == "public"
-        ? relation->relname
-        : relationNamespace->nspname + "." + relation->relname;
-    return {relation->oid, storageName, storageName,
+    const std::string storageName = sequenceStorageName(
+        relationNamespace->nspname, relation->relname);
+    return {relation->oid, storageName, input,
             relation->relpersistence};
 }
 
@@ -20219,6 +20255,12 @@ std::vector<std::string> StorageEngine::getSequenceNames(const std::string& dbna
     for (const auto& entry : std::filesystem::directory_iterator(dir)) {
         if (entry.is_regular_file()) {
             std::string fname = entry.path().filename().string();
+            if (fname.rfind("seqv2..", 0) == 0 &&
+                fname.size() > 13 &&
+                fname.compare(fname.size() - 6, 6, ".seqv2") == 0) {
+                names.push_back(fname.substr(0, fname.size() - 6));
+                continue;
+            }
             if (fname.size() > 4 && fname.substr(fname.size() - 4) == ".seq") {
                 // Exclude table auto-increment sequences (tablename.seq)
                 // Keep only sequences that don't match a table name

@@ -5,6 +5,7 @@
 #include "commands/DdlExecutor.h"
 #include "commands/DmlExecutor.h"
 #include "commands/DdlTransaction.h"
+#include "commands/SequenceStorageName.h"
 #include "parser/parser.h"
 #include "catalog/CatalogService.h"
 #include "catalog/systables.h"
@@ -4592,12 +4593,31 @@ static std::string extractNextvalSequence(const std::string& expr) {
 
 // Find all (table, column) pairs in the database whose default expression
 // references nextval('seqname') (or schema-qualified variant).
+static std::string canonicalSequenceReferenceName(
+    const std::string& name) {
+    CatalogManager::QualifiedName qualified;
+    if (CatalogManager::parseQualifiedName(name, qualified, true) &&
+        !qualified.name.empty()) {
+        return sequenceStorageName(qualified.schema, qualified.name);
+    }
+    return name;
+}
+
+static std::string quoteSequenceReferencePart(
+    const std::string& part) {
+    std::string quoted = "\"";
+    for (char ch : part) {
+        quoted += ch;
+        if (ch == '"') quoted += '"';
+    }
+    quoted += '"';
+    return quoted;
+}
+
 static std::vector<std::pair<std::string, std::string>> findDefaultNextvalDeps(
     const std::string& dbname, const std::string& seqname) {
-    auto canonicalSequenceName = [](const std::string& name) {
-        return name.rfind("public.", 0) == 0 ? name.substr(7) : name;
-    };
-    const std::string canonicalTarget = canonicalSequenceName(seqname);
+    const std::string canonicalTarget =
+        canonicalSequenceReferenceName(seqname);
     std::vector<std::pair<std::string, std::string>> deps;
     for (const auto& tname : g_engine.getTableNames(dbname)) {
         dbms::TableSchema tbl = g_engine.getTableSchema(dbname, tname);
@@ -4605,7 +4625,8 @@ static std::vector<std::pair<std::string, std::string>> findDefaultNextvalDeps(
             const std::string sequence =
                 extractNextvalSequence(tbl.cols[i].defaultValue);
             if (!sequence.empty() &&
-                canonicalSequenceName(sequence) == canonicalTarget) {
+                canonicalSequenceReferenceName(sequence) ==
+                    canonicalTarget) {
                 deps.emplace_back(tname, tbl.cols[i].dataName);
             }
         }
@@ -4621,11 +4642,8 @@ static std::string renameNextvalSequenceReference(const std::string& expression,
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     const std::string referenced = extractNextvalSequence(expression);
     if (referenced.empty()) return expression;
-    auto canonicalSequenceName = [](const std::string& name) {
-        return name.rfind("public.", 0) == 0 ? name.substr(7) : name;
-    };
-    if (canonicalSequenceName(referenced) !=
-        canonicalSequenceName(oldName)) return expression;
+    if (canonicalSequenceReferenceName(referenced) !=
+        canonicalSequenceReferenceName(oldName)) return expression;
 
     std::string replacement = newName;
     if (referenced.rfind("public.", 0) == 0 &&
@@ -5724,9 +5742,8 @@ static bool catalogSequenceStorageName(const CatalogManager& catalog,
         error = "sequence namespace is missing";
         return false;
     }
-    storageName = relationNamespace->nspname == "public"
-        ? relation.relname
-        : relationNamespace->nspname + "." + relation.relname;
+    storageName = sequenceStorageName(
+        relationNamespace->nspname, relation.relname);
     return true;
 }
 
@@ -7374,9 +7391,8 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
             return true;
         }
     }
-    const std::string seqname = sequenceSchema == "public"
-        ? sequenceName.name
-        : sequenceSchema + "." + sequenceName.name;
+    const std::string seqname = sequenceStorageName(
+        sequenceSchema, sequenceName.name);
     dbms::SequenceInfo info;
     auto opt = stmt->options.find("start");
     if (opt != stmt->options.end()) {
@@ -7578,8 +7594,7 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
         ? stmt->objectName : stmt->schema + "." + stmt->objectName;
     CatalogManager::QualifiedName sequenceName;
     if (!CatalogManager::parseQualifiedName(requestedName, sequenceName) ||
-        sequenceName.name.empty() ||
-        sequenceName.schema.find('.') != std::string::npos) {
+        sequenceName.name.empty()) {
         std::cout << "ALTER SEQUENCE has an invalid name" << std::endl;
         return true;
     }
@@ -7593,8 +7608,8 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
                          effectiveSequenceSearchPath(s)));
         if (sequenceSchema.empty()) sequenceSchema = "public";
     }
-    const std::string seqname = sequenceSchema == "public"
-        ? sequenceName.name : sequenceSchema + "." + sequenceName.name;
+    const std::string seqname = sequenceStorageName(
+        sequenceSchema, sequenceName.name);
     dbms::SequenceInfo info;
 
     std::string rest = stmt->subCommand;
@@ -7806,8 +7821,8 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
         if (renameRequested) {
             const auto* collision =
                 catalog.findClassByName(newName, sequenceNamespaceOid);
-            const std::string newStorageName = sequenceSchema == "public"
-                ? newName : sequenceSchema + "." + newName;
+            const std::string newStorageName = sequenceStorageName(
+                sequenceSchema, newName);
             if (collision ||
                 g_engine.sequenceExists(s.currentDB, newStorageName)) {
                 std::cout << "ERROR: relation \"" << newName
@@ -7855,8 +7870,13 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
     }
 
     if (renameRequested) {
-        const std::string newStorageName = sequenceSchema == "public"
-            ? newName : sequenceSchema + "." + newName;
+        const std::string newStorageName = sequenceStorageName(
+            sequenceSchema, newName);
+        const std::string newReferenceName =
+            newStorageName.rfind("seqv2..", 0) == 0
+                ? quoteSequenceReferencePart(sequenceSchema) + "." +
+                      quoteSequenceReferencePart(newName)
+                : newStorageName;
         const auto dependencies =
             findDefaultNextvalDeps(s.currentDB, seqname);
         txn.markSnapshotDirty();
@@ -7888,7 +7908,7 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
             const std::string updatedDefault =
                 renameNextvalSequenceReference(
                     table.cols[columnIndex].defaultValue,
-                    seqname, newStorageName);
+                    seqname, newReferenceName);
             if (g_engine.alterTableSetDefault(
                     s.currentDB, tableName, columnName,
                     updatedDefault) != DBStatus::OK) {
@@ -8006,8 +8026,7 @@ bool DdlExecutor::executeDropSequence(const DropStmt* stmt, Session& s) {
             CatalogManager::QualifiedName qualifiedName;
             if (!CatalogManager::parseQualifiedName(
                     requestedName, qualifiedName) ||
-                qualifiedName.name.empty() ||
-                qualifiedName.schema.find('.') != std::string::npos) {
+                qualifiedName.name.empty()) {
                 std::cout << "DROP SEQUENCE has an invalid name: "
                           << requestedName << std::endl;
                 return true;
@@ -8034,8 +8053,8 @@ bool DdlExecutor::executeDropSequence(const DropStmt* stmt, Session& s) {
                 schema = schemaNameForRelation(*catalog, resolvedRelation);
                 if (schema.empty()) schema = "public";
             }
-            const std::string storageName = schema == "public"
-                ? qualifiedName.name : schema + "." + qualifiedName.name;
+            const std::string storageName = sequenceStorageName(
+                schema, qualifiedName.name);
             if (!targetStorageNames.insert(storageName).second) continue;
 
             const bool physicalExists =
