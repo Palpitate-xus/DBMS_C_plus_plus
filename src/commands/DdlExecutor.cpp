@@ -9489,6 +9489,21 @@ bool DdlExecutor::executeDropMaterializedView(const DropStmt* stmt, Session& s) 
         return true;
     }
 
+    std::vector<std::string> catalogSearchPath;
+    std::vector<std::string> rawSearchPath;
+    std::string canonicalSearchPath;
+    if (!dbms::parseSessionSearchPath(
+            s.searchPath, rawSearchPath, canonicalSearchPath)) {
+        rawSearchPath = {"public"};
+    }
+    for (const auto& rawSchema : rawSearchPath) {
+        const std::string schema = dbms::expandSessionSearchPathEntry(
+            rawSchema, s.username);
+        if (g_engine.schemaExists(s.currentDB, schema)) {
+            catalogSearchPath.push_back(schema);
+        }
+    }
+
     std::set<std::string> requestedNames;
     std::vector<DropTarget> targets;
     for (const std::string& rawName : stmt->objectNames) {
@@ -9499,9 +9514,12 @@ bool DdlExecutor::executeDropMaterializedView(const DropStmt* stmt, Session& s) 
                       << rawName << "\"" << std::endl;
             return true;
         }
-        const std::string name = qualifiedName.schema.empty()
-            ? qualifiedName.name
-            : qualifiedName.schema + "." + qualifiedName.name;
+        const auto materialized =
+            resolveMaterializedViewForSession(s, rawName);
+        const std::string name = materialized ? materialized->storageName
+            : (qualifiedName.schema.empty() ? qualifiedName.name
+                                            : qualifiedName.schema + "." +
+                                                  qualifiedName.name);
         if (name.empty() || !requestedNames.insert(name).second) {
             std::cout << "DROP MATERIALIZED VIEW: duplicate or empty name"
                       << std::endl;
@@ -9509,7 +9527,7 @@ bool DdlExecutor::executeDropMaterializedView(const DropStmt* stmt, Session& s) 
         }
 
         const PgClassRow* relation =
-            catalog->resolveRelation(rawName, {"public"});
+            catalog->resolveRelation(rawName, catalogSearchPath);
         const bool physicalExists =
             g_engine.isMaterializedView(s.currentDB, name);
         const bool catalogExists = relation && relation->relkind == 'm';
