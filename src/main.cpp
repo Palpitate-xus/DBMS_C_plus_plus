@@ -5411,6 +5411,12 @@ string resolveTableName(Session& s, const string& name, bool foldUnquoted) {
             if (g_engine.isMaterializedView(s.currentDB, physical)) {
                 return dbms::StorageEngine::materializedViewPrefix(physical);
             }
+            if (!g_engine.tableExists(s.currentDB, physical)) {
+                const string viewPhysical = schema + "." + table;
+                if (g_engine.viewExists(s.currentDB, viewPhysical)) {
+                    return viewPhysical;
+                }
+            }
             return physical;
         }
         return name;
@@ -5465,6 +5471,10 @@ string resolveTableName(Session& s, const string& name, bool foldUnquoted) {
         if (g_engine.tableExists(s.currentDB, physical) ||
             g_engine.viewExists(s.currentDB, physical)) {
             return physical;
+        }
+        const string viewPhysical = schema + "." + table;
+        if (g_engine.viewExists(s.currentDB, viewPhysical)) {
+            return viewPhysical;
         }
     }
     return firstCandidate.empty() ? table : firstCandidate;
@@ -22279,8 +22289,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
         if (queryDb != "information_schema" && queryDb != "pg_catalog" &&
             !g_engine.tableExists(queryDb, tname)) {
             dbms::CatalogManager::QualifiedName viewQualified;
-            string viewLookup = tnameOrig;
-            if (dbms::CatalogManager::parseQualifiedName(
+            string viewLookup = g_engine.viewExists(queryDb, tname)
+                ? tname : tnameOrig;
+            if (!g_engine.viewExists(queryDb, viewLookup) &&
+                dbms::CatalogManager::parseQualifiedName(
                     tnameOrig, viewQualified, true)) {
                 viewLookup = viewQualified.schema.empty()
                     ? viewQualified.name
