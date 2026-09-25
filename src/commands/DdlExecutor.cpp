@@ -8894,14 +8894,44 @@ bool DdlExecutor::executeDropView(const DropStmt* stmt, Session& s) {
         std::cout << "ERROR: invalid view name" << std::endl;
         return true;
     }
-    const std::string viewName = qualifiedView.schema.empty()
+    std::string viewName = qualifiedView.schema.empty()
         ? qualifiedView.name
         : qualifiedView.schema + "." + qualifiedView.name;
+    std::vector<std::string> catalogSearchPath;
+    std::vector<std::string> rawSearchPath;
+    std::string canonicalSearchPath;
+    if (!dbms::parseSessionSearchPath(
+            s.searchPath, rawSearchPath, canonicalSearchPath)) {
+        rawSearchPath = {"public"};
+    }
+    for (const auto& rawSchema : rawSearchPath) {
+        const std::string schema = dbms::expandSessionSearchPathEntry(
+            rawSchema, s.username);
+        if (g_engine.schemaExists(s.currentDB, schema)) {
+            catalogSearchPath.push_back(schema);
+        }
+    }
     CatalogManager* catalog = nullptr;
     const PgClassRow* relation = nullptr;
     try {
         catalog = &g_engine.catalogService().get(s.currentDB);
-        relation = catalog->resolveRelation(rawViewName, {"public"});
+        relation = catalog->resolveRelation(rawViewName, catalogSearchPath);
+        if (relation && relation->relkind == 'v') {
+            const PgNamespaceRow* namespaceRow =
+                catalog->findNamespace(relation->relnamespace);
+            if (namespaceRow) {
+                const std::string prefix = namespaceRow->nspname == "public"
+                    ? "" : namespaceRow->nspname + ".";
+                const std::string candidate = prefix + relation->relname;
+                if (g_engine.viewExists(s.currentDB, candidate)) {
+                    viewName = candidate;
+                } else if (namespaceRow->nspname == "public" &&
+                           g_engine.viewExists(
+                               s.currentDB, "public." + relation->relname)) {
+                    viewName = "public." + relation->relname;
+                }
+            }
+        }
     } catch (const std::exception& error) {
         std::cout << "DROP VIEW: catalog lookup failed: "
                   << error.what() << std::endl;

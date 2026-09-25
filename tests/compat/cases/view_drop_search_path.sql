@@ -1,0 +1,12 @@
+SET search_path TO public;
+DROP SCHEMA IF EXISTS diff_vdsp CASCADE;
+DROP TABLE IF EXISTS diff_vdsp_source;
+CREATE TABLE diff_vdsp_source (id integer);
+INSERT INTO diff_vdsp_source VALUES (71);
+CREATE SCHEMA diff_vdsp;
+CREATE VIEW diff_vdsp.diff_vdsp_view AS SELECT id FROM diff_vdsp_source;
+SET search_path TO diff_vdsp, public;
+DROP VIEW diff_vdsp_view;
+SELECT id FROM diff_vdsp_view;
+SET search_path TO public;
+DROP SCHEMA diff_vdsp;
