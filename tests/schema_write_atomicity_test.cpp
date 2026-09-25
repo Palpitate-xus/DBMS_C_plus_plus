@@ -39,16 +39,15 @@ int main() {
     const std::string originalBytes = readFile(schemaPath);
     assert(!originalBytes.empty());
 
-    // Prime the parsed-schema cache, then substitute a directory with the
-    // exact same timestamp. This keeps the table readable for the operation
-    // while forcing the final atomic rename to fail on every user account,
-    // including root.
+    // Hold a catalog snapshot, then substitute a directory. The snapshot
+    // keeps the table readable while the final atomic rename fails, including
+    // when the test runs as root. A parsed-schema cache hit cannot do this:
+    // it correctly rejects a directory because file_size() fails.
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
     const auto originalSchema = g_engine.getTableSchema(db, "items");
     assert(originalSchema.len == 1);
-    const auto originalTimestamp = fs::last_write_time(schemaPath);
     fs::rename(schemaPath, savedPath);
     assert(fs::create_directory(schemaPath));
-    fs::last_write_time(schemaPath, originalTimestamp);
 
     const dbms::DBStatus failed = g_engine.alterTableSetDefault(
         db, "items", "id", "42");
@@ -58,6 +57,7 @@ int main() {
     fs::remove(schemaPath);
     fs::rename(savedPath, schemaPath);
     assert(readFile(schemaPath) == originalBytes);
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
 
     dbms::StorageEngine reloaded;
     const auto afterFailure = reloaded.getTableSchema(db, "items");
@@ -75,12 +75,11 @@ int main() {
     // the live .stc file with truncation. Exercise that path independently so
     // an I/O failure cannot expose a partial constraint definition.
     const std::string beforeConstraintBytes = readFile(schemaPath);
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
     const auto beforeConstraintSchema = g_engine.getTableSchema(db, "items");
     assert(!beforeConstraintSchema.cols[0].deferrable);
-    const auto beforeConstraintTimestamp = fs::last_write_time(schemaPath);
     fs::rename(schemaPath, savedPath);
     assert(fs::create_directory(schemaPath));
-    fs::last_write_time(schemaPath, beforeConstraintTimestamp);
 
     assert(g_engine.alterTableSetConstraintDeferrability(
                db, "items", "items_id_positive", true, true) ==
@@ -90,6 +89,7 @@ int main() {
     fs::remove(schemaPath);
     fs::rename(savedPath, schemaPath);
     assert(readFile(schemaPath) == beforeConstraintBytes);
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
 
     dbms::StorageEngine constraintFailureReloaded;
     const auto afterConstraintFailure =
