@@ -9124,6 +9124,23 @@ bool DdlExecutor::executeCreateMaterializedView(const CreateViewStmt* stmt, Sess
         return true;
     }
 
+    try {
+        CatalogManager& catalog = g_engine.catalogService().get(s.currentDB);
+        const PgNamespaceRow* namespaceRow =
+            catalog.findNamespaceByName(schemaName);
+        if (namespaceRow && catalog.findClassByName(
+                                qualifiedName.name, namespaceRow->oid)) {
+            std::cout << "ERROR: relation \"" << viewname
+                      << "\" already exists (SQLSTATE 42P07)"
+                      << std::endl;
+            return true;
+        }
+    } catch (const std::exception& error) {
+        std::cout << "CREATE MATERIALIZED VIEW: catalog lookup failed: "
+                  << error.what() << " (SQLSTATE XX001)" << std::endl;
+        return true;
+    }
+
     std::vector<std::string> selectCols;
     std::string srcTable;
     std::vector<std::string> conditions;
