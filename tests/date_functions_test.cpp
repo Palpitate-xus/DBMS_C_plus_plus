@@ -444,7 +444,7 @@ static void test_date_trunc() {
     assert(callFn(eval, "date_trunc",
                   {F("decade"), longInterval}).value == "1230 years");
     assert(callFn(eval, "date_trunc",
-                  {F("quarter"), IV("-14 mons")}).value == "-1 year");
+                  {F("quarter"), IV("-14 mons")}).value == "-1 years");
     expectDateTruncError("week", interval, "0A000");
     expectDateTruncError("epoch", interval, "22023");
     assert(callFn(eval, "date_trunc", {F("quarter"), ts}).value == "2026-04-01 00:00:00");
