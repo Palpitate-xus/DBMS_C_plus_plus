@@ -6744,7 +6744,8 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
                       << std::endl;
             return true;
         }
-        std::cout << "Table " << tname << " not found" << std::endl;
+        std::cout << "ERROR: relation \"" << stmt->tableName
+                  << "\" does not exist (SQLSTATE 42P01)" << std::endl;
         return true;
     }
 
