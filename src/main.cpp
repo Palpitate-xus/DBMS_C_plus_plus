@@ -22639,7 +22639,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 if (!nullsSpecified) nullsFirst = !asc;
                 // Detect COLLATE
                 string collation;
-                size_t collatePos = sortItem.find("collate");
+                size_t collatePos = findTopLevelKeyword(sortItem, "collate");
                 if (collatePos != string::npos) {
                     string afterCollate = trim(sortItem.substr(collatePos + 7));
                     // Remove quotes if present
@@ -22684,6 +22684,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         spec.isExpression = true;
                         spec.exprFunc = func;
                         spec.exprArg = arg;
+                        spec.collation = collation;
                         if (func == "left") {
                             const size_t comma = arg.find(',');
                             if (comma == string::npos) {
@@ -22693,6 +22694,29 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             }
                             spec.exprArg = trim(arg.substr(0, comma));
                             spec.exprArg2 = trim(arg.substr(comma + 1));
+                            const size_t innerCollate = findTopLevelKeyword(
+                                spec.exprArg, "collate");
+                            if (innerCollate != string::npos) {
+                                string innerName = trim(spec.exprArg.substr(
+                                    innerCollate + 7));
+                                if (innerName.size() >= 2 &&
+                                    (innerName.front() == '"' ||
+                                     innerName.front() == '\'') &&
+                                    innerName.back() == innerName.front())
+                                    innerName = innerName.substr(
+                                        1, innerName.size() - 2);
+                                const string innerRule = resolveCollationForSort(
+                                    queryDb, innerName);
+                                if (!spec.collation.empty() &&
+                                    spec.collation != innerRule) {
+                                    cout << "ERROR: conflicting collations"
+                                         << " (SQLSTATE 42P21)" << endl;
+                                    return true;
+                                }
+                                spec.collation = innerRule;
+                                spec.exprArg = trim(spec.exprArg.substr(
+                                    0, innerCollate));
+                            }
                             try {
                                 size_t consumed = 0;
                                 const long long count = std::stoll(
@@ -22710,7 +22734,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         }
                         spec.ascending = asc;
                         spec.nullsFirst = nullsFirst;
-                        spec.collation = collation;
+                        if (spec.collation.empty()) spec.collation = collation;
                         exprOrderBySpecs.push_back(spec);
                         orderKeyRefs.emplace_back(true, exprOrderBySpecs.size() - 1);
                         continue;
