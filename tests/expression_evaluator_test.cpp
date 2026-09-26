@@ -376,6 +376,14 @@ static void test_explicit_collation_comparisons() {
     auto replacedC = evaluate(
         "SELECT replace('apple' COLLATE \"C\", 'p', 'p')");
     assert(replacedC.value == "apple" && replacedC.collation == "c");
+    auto unusedLowerC = evaluate(
+        "SELECT COALESCE('apple', lower('X' COLLATE \"C\")) < 'Zoo'");
+    assert(unusedLowerC.typeName == "boolean" && !unusedLowerC.asBool());
+    auto unusedReplaceC = evaluate(
+        "SELECT CASE WHEN true THEN 'apple' ELSE "
+        "replace('x' COLLATE \"C\", 'x', 'x') END < 'Zoo'");
+    assert(unusedReplaceC.typeName == "boolean" &&
+           !unusedReplaceC.asBool());
     bool conflict = false;
     try {
         (void)evaluate(
@@ -419,6 +427,8 @@ static void test_explicit_collation_comparisons() {
                 "'p' COLLATE \"default\")", "42P21");
     expectError("SELECT concat('a' COLLATE \"C\", "
                 "'b' COLLATE \"default\")", "42P21");
+    expectError("SELECT COALESCE('apple', replace('x' COLLATE "
+                "\"C\", 'x' COLLATE \"default\", 'x'))", "42P21");
 }
 
 static void test_logical() {

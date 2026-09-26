@@ -36,6 +36,7 @@
 #include <iterator>
 #include <limits>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <tuple>
 
@@ -80,6 +81,15 @@ static bool isCollatableCastTarget(std::string typeName) {
            std::isspace(static_cast<unsigned char>(typeName.back())))
         typeName.pop_back();
     return isCollatableExprType(typeName);
+}
+
+static bool isTextResultBuiltin(const std::string& name) {
+    static const std::set<std::string> textBuiltins = {
+        "lower", "upper", "substring", "substr", "ltrim", "rtrim",
+        "btrim", "replace", "left", "right", "repeat", "reverse",
+        "concat", "initcap", "translate", "overlay"
+    };
+    return textBuiltins.count(name) != 0;
 }
 
 static std::string mergeExplicitCollations(const std::string& left,
@@ -144,7 +154,10 @@ static std::string explicitResultCollation(const Expr* expression) {
             const auto* function = static_cast<const FunctionCallExpr*>(expression);
             const std::string name = toLower(function->funcName);
             if (name != "coalesce" && name != "greatest" &&
-                name != "least") return {};
+                name != "least" &&
+                !((function->schema.empty() ||
+                   toLower(function->schema) == "pg_catalog") &&
+                  isTextResultBuiltin(name))) return {};
             std::string result;
             for (const auto& argument : function->args)
                 result = mergeExplicitCollations(
