@@ -319,6 +319,14 @@ static void test_explicit_collation_comparisons() {
         "SELECT 'apple' COLLATE \"default\" < "
         "'Zoo' COLLATE \"default\"");
     assert(defaultOrder.typeName == "boolean" && defaultOrder.asBool());
+    auto concatenatedC = evaluate(
+        "SELECT ('app' COLLATE \"C\" || 'le') < 'Zoo'");
+    assert(concatenatedC.typeName == "boolean" &&
+           !concatenatedC.asBool());
+    auto concatenatedDefault = evaluate(
+        "SELECT ('app' COLLATE \"default\" || 'le') < 'Zoo'");
+    assert(concatenatedDefault.typeName == "boolean" &&
+           concatenatedDefault.asBool());
     bool conflict = false;
     try {
         (void)evaluate(
@@ -340,6 +348,10 @@ static void test_explicit_collation_comparisons() {
     };
     expectError("SELECT 1 COLLATE \"C\"", "42804");
     expectError("SELECT 'apple' COLLATE \"missing_collation\"", "42704");
+    expectError("SELECT 'a' COLLATE \"C\" || 'b' COLLATE \"default\"",
+                "42P21");
+    expectError("SELECT NULL::text COLLATE \"C\" || "
+                "'b' COLLATE \"default\"", "42P21");
 }
 
 static void test_logical() {

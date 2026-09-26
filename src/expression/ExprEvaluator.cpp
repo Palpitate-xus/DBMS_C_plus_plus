@@ -2906,8 +2906,25 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         }
         const bool byteaResult = isCanonicalByteaType(l.typeName) &&
                                  isCanonicalByteaType(r.typeName);
-        if (l.isNull || r.isNull)
-            return ExprValue(byteaResult ? "bytea" : "text", "", true);
+        std::string resultCollation;
+        if (!byteaResult) {
+            const std::string leftCollation =
+                collation::normalizeName(l.collation);
+            const std::string rightCollation =
+                collation::normalizeName(r.collation);
+            if (!leftCollation.empty() && !rightCollation.empty() &&
+                leftCollation != rightCollation) {
+                throw DbError("42P21",
+                              "collation mismatch between explicit collations");
+            }
+            resultCollation = leftCollation.empty()
+                ? rightCollation : leftCollation;
+        }
+        if (l.isNull || r.isNull) {
+            ExprValue result(byteaResult ? "bytea" : "text", "", true);
+            result.collation = std::move(resultCollation);
+            return result;
+        }
         if (byteaResult) {
             std::string joined = parseByteaOrThrow(l).bytes();
             joined += parseByteaOrThrow(r).bytes();
@@ -2925,15 +2942,21 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
             std::string add = b.substr(1, b.size() - 2);
             std::string out = inner;
             if (!add.empty()) out += (inner.empty() ? "" : ",") + add;
-            return ExprValue("text", std::string(1, 0x7B) + out + std::string(1, 0x7D), false);
+            ExprValue result(
+                "text", std::string(1, 0x7B) + out + std::string(1, 0x7D),
+                false);
+            result.collation = std::move(resultCollation);
+            return result;
         }
         // The text concatenation operator casts bpchar operands to text.
         // That cast discards the blank padding, unlike concat(), which
         // preserves the original character datum's visible spaces.
-        return ExprValue("text",
-                         l.value.substr(0, logicalCharacterByteLength(l)) +
-                             r.value.substr(0, logicalCharacterByteLength(r)),
-                         false);
+        ExprValue result(
+            "text", l.value.substr(0, logicalCharacterByteLength(l)) +
+                        r.value.substr(0, logicalCharacterByteLength(r)),
+            false);
+        result.collation = std::move(resultCollation);
+        return result;
     }
 
     // JSON access operators (PostgreSQL):
