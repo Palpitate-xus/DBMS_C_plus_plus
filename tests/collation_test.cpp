@@ -279,6 +279,30 @@ static void test_collate_binary_collations() {
     std::cout << "[COLLATION] binary collations OK" << std::endl;
 }
 
+static void test_default_sql_sort_uses_locale() {
+    std::string db = testDbPath("collation_default_sort");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE t (v TEXT)", s));
+    // The low-level insert API treats the sentinel "NULL" as SQL NULL, so
+    // use ordinary mixed-case text to isolate collation ordering here.
+    for (const char* value : {"Zoo", "apple", ""}) {
+        assert(g_engine.insert(db, "t", {{"v", value}}) ==
+               dbms::DBStatus::OK);
+    }
+    dbms::StorageEngine::OrderBySpec order;
+    order.colName = "v";
+    auto rows = g_engine.query(db, "t", {}, {"v"}, {order});
+    assert((rows == std::vector<std::string>{" ", "apple ", "Zoo "}));
+    order.collation = "C";
+    rows = g_engine.query(db, "t", {}, {"v"}, {order});
+    assert((rows == std::vector<std::string>{" ", "Zoo ", "apple "}));
+    cleanup(db);
+}
+
 static void test_collate_with_index() {
     std::string db = testDbPath("collation_t5");
     cleanup(db);
@@ -800,6 +824,7 @@ int main() {
     test_collate_all_operators();
     test_collate_mixed_columns();
     test_collate_binary_collations();
+    test_default_sql_sort_uses_locale();
     test_collate_with_index();
     test_collate_schema_persistence();
     test_collation_metadata_is_atomic_and_backward_compatible();

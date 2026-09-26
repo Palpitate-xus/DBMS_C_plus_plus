@@ -28924,6 +28924,13 @@ std::vector<std::string> StorageEngine::query(
             }
             if (sortColumnIndices[orderIndex] >= tbl.len ||
                 spec.collation.empty()) {
+                // The SQL-facing default ordering follows the en_US locale
+                // used by the other SELECT sort paths.  An empty column
+                // collation is a storage detail, not a request for C order.
+                if (sortColumnIndices[orderIndex] < tbl.len &&
+                    sortComparisonColumns[orderIndex].collation.empty()) {
+                    sortComparisonColumns[orderIndex].collation = "en_US.utf8";
+                }
                 continue;
             }
             Column& comparisonColumn = sortComparisonColumns[orderIndex];
