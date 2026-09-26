@@ -28806,6 +28806,37 @@ static bool isEvaluatedNumericSort(
            functions.count(spec.exprFunc) != 0;
 }
 
+static bool isEvaluatedPolymorphicSort(
+    const StorageEngine::OrderBySpec& spec) {
+    static const std::set<std::string> functions = {
+        "least", "greatest", "coalesce", "nullif"
+    };
+    return !spec.expressionSql.empty() &&
+           functions.count(spec.exprFunc) != 0;
+}
+
+static void setPolymorphicSortType(Column& column,
+                                   const std::string& resultType) {
+    if (resultType == "smallint" || resultType == "integer" ||
+        resultType == "bigint") {
+        column.dataType = "int";
+        column.isVariableLength = false;
+    } else if (resultType == "real") {
+        column.dataType = "float";
+        column.isVariableLength = false;
+    } else if (resultType == "double precision") {
+        column.dataType = "double";
+        column.isVariableLength = false;
+    } else if (resultType == "numeric") {
+        column.dataType = "numeric";
+        column.isVariableLength = true;
+    } else if (resultType == "date" || resultType == "timestamp" ||
+               resultType == "timestamptz") {
+        column.dataType = resultType;
+        column.isVariableLength = false;
+    }
+}
+
 std::vector<std::string> StorageEngine::query(const std::string& dbname,
                                                const std::string& tablename,
                                                const std::vector<std::string>& conditions,
@@ -29228,6 +29259,13 @@ std::vector<std::string> StorageEngine::query(
                      resultType == "smallint") ? "int" : "numeric";
                 comparisonColumn.isVariableLength =
                     comparisonColumn.dataType == "numeric";
+            } else if (isEvaluatedPolymorphicSort(spec)) {
+                std::map<std::string, std::string> typeHints;
+                for (size_t ci = 0; ci < tbl.len; ++ci)
+                    typeHints[tbl.cols[ci].dataName] = tbl.cols[ci].dataType;
+                setPolymorphicSortType(
+                    comparisonColumn,
+                    ExprHelper::inferResultType(spec.expressionSql, typeHints));
             } else if (!spec.expressionSql.empty() &&
                        (spec.exprFunc == "date_trunc" ||
                         spec.exprFunc == "to_date" ||
@@ -35555,6 +35593,11 @@ std::vector<std::string> StorageEngine::sortByExpression(
                  resultType == "smallint") ? "int" : "numeric";
             comparisonColumn.isVariableLength =
                 comparisonColumn.dataType == "numeric";
+        } else if (isEvaluatedPolymorphicSort(spec)) {
+            setPolymorphicSortType(
+                comparisonColumn,
+                ExprHelper::inferResultType(spec.expressionSql,
+                                            expressionTypeHints));
         } else if (!spec.expressionSql.empty() &&
                    (spec.exprFunc == "date_trunc" ||
                     spec.exprFunc == "to_date" ||

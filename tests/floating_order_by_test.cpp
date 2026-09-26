@@ -253,6 +253,32 @@ int main() {
                                      ids({"10", "2"}), {functionSort}) ==
            ids({"2", "10"}));
 
+    for (const auto& expression : {
+             "least(v, 6)", "greatest(v, 6)",
+             "coalesce(v, 0)", "nullif(v, 9)"}) {
+        functionSort.expressionSql = expression;
+        functionSort.exprFunc = std::string(expression).substr(
+            0, std::string(expression).find('('));
+        assert(g_engine.query(database, "integer_function_order", {}, {"v"},
+                              {functionSort}) == ids({"4", "9"}));
+        assert(g_engine.sortByExpression(
+                   database, "integer_function_order", ids({"9", "4"}),
+                   {functionSort}) == ids({"4", "9"}));
+    }
+    dbms::TableSchema polymorphicTextSchema;
+    polymorphicTextSchema.tablename = "polymorphic_text_order";
+    polymorphicTextSchema.formatVersion = 2;
+    polymorphicTextSchema.append(dbms::makeTextColumn("v", false));
+    assert(g_engine.createTable(database, polymorphicTextSchema) ==
+           dbms::DBStatus::OK);
+    for (const auto& value : {"b", "a"})
+        assert(g_engine.insert(database, "polymorphic_text_order",
+                               {{"v", value}}) == dbms::DBStatus::OK);
+    functionSort.exprFunc = "least";
+    functionSort.expressionSql = "least(v, 'z')";
+    assert(g_engine.query(database, "polymorphic_text_order", {}, {"v"},
+                          {functionSort}) == ids({"a", "b"}));
+
     cleanupTestDb(testName);
     finalCleanupTestData();
     std::cout << "[FLOATING ORDER BY] numeric/NaN/null ordering OK"
