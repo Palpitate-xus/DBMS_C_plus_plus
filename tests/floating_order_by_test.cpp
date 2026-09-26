@@ -183,6 +183,28 @@ int main() {
                ids({"2.2", "10.2"}));
     }
 
+    dbms::TableSchema trigSchema;
+    trigSchema.tablename = "trig_function_order";
+    trigSchema.formatVersion = 2;
+    trigSchema.append(dbms::makeDecimalColumn("v", false, 20, 4));
+    assert(g_engine.createTable(database, trigSchema) ==
+           dbms::DBStatus::OK);
+    for (const auto& value : {"1.5", "4.5"})
+        assert(g_engine.insert(database, "trig_function_order",
+                               {{"v", value}}) == dbms::DBStatus::OK);
+    for (const auto& name : {"sin", "cos", "tan"}) {
+        functionSort.exprFunc = name;
+        functionSort.expressionSql = std::string(name) + "(v)";
+        assert(g_engine.query(database, "trig_function_order", {},
+                              {"v"}, {functionSort}) ==
+               ids({"4.5", "1.5"}));
+    }
+    functionSort.exprFunc = "sin";
+    functionSort.expressionSql = "sin(v)";
+    assert(g_engine.sortByExpression(
+               database, "trig_function_order", ids({"1.5", "4.5"}),
+               {functionSort}) == ids({"4.5", "1.5"}));
+
     cleanupTestDb(testName);
     finalCleanupTestData();
     std::cout << "[FLOATING ORDER BY] numeric/NaN/null ordering OK"
