@@ -22694,6 +22694,23 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             }
                             spec.exprArg = trim(arg.substr(0, comma));
                             spec.exprArg2 = trim(arg.substr(comma + 1));
+                            try {
+                                size_t consumed = 0;
+                                const long long count = std::stoll(
+                                    spec.exprArg2, &consumed);
+                                if (consumed != spec.exprArg2.size() ||
+                                    count < std::numeric_limits<int32_t>::min() ||
+                                    count > std::numeric_limits<int32_t>::max())
+                                    throw std::out_of_range("left count");
+                            } catch (const std::exception&) {
+                                cout << "ERROR: non-constant left() count in ORDER BY"
+                                     << " is not supported (SQLSTATE 0A000)"
+                                     << endl;
+                                return true;
+                            }
+                        }
+                        if (func == "left" || func == "lower" ||
+                            func == "upper") {
                             const size_t innerCollate = findTopLevelKeyword(
                                 spec.exprArg, "collate");
                             if (innerCollate != string::npos) {
@@ -22717,24 +22734,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 spec.exprArg = trim(spec.exprArg.substr(
                                     0, innerCollate));
                             }
-                            try {
-                                size_t consumed = 0;
-                                const long long count = std::stoll(
-                                    spec.exprArg2, &consumed);
-                                if (consumed != spec.exprArg2.size() ||
-                                    count < std::numeric_limits<int32_t>::min() ||
-                                    count > std::numeric_limits<int32_t>::max())
-                                    throw std::out_of_range("left count");
-                            } catch (const std::exception&) {
-                                cout << "ERROR: non-constant left() count in ORDER BY"
-                                     << " is not supported (SQLSTATE 0A000)"
-                                     << endl;
-                                return true;
-                            }
                         }
                         spec.ascending = asc;
                         spec.nullsFirst = nullsFirst;
-                        if (spec.collation.empty()) spec.collation = collation;
                         exprOrderBySpecs.push_back(spec);
                         orderKeyRefs.emplace_back(true, exprOrderBySpecs.size() - 1);
                         continue;
