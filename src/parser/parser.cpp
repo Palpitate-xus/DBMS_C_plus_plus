@@ -1821,7 +1821,7 @@ static ExprPtr parseCastExpr(const std::vector<std::string>& tokens, size_t& pos
             if (isAtTimeZone(tokens, pos)) break; // postfix AT TIME ZONE
             std::string w = SQLParser::toLower(tokens[pos]);
             if (w == "and" || w == "or" || w == "then" || w == "else" || w == "end"
-                || w == "is" || w == "not"
+                || w == "is" || w == "not" || w == "collate"
                 || w == "when" || w == "from" || w == "where" || w == "group"
                 || w == "order" || w == "having" || w == "limit" || w == "offset"
                 || w == "union" || w == "intersect" || w == "except" || w == "for"
@@ -1883,6 +1883,15 @@ static ExprPtr parseCastExpr(const std::vector<std::string>& tokens, size_t& pos
                 left = std::move(unary);
             }
         }
+    }
+    while (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "collate") {
+        ++pos;
+        if (pos >= tokens.size() || tokens[pos] == ")" || tokens[pos] == ",")
+            return nullptr;
+        auto collated = std::make_unique<UnaryOpExpr>();
+        collated->op = "COLLATE " + tokens[pos++];
+        collated->operand = std::move(left);
+        left = std::move(collated);
     }
     return left;
 }

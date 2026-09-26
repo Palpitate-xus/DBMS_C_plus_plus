@@ -1,6 +1,8 @@
 // test_sources: src/expression/ExprEvaluator.cpp src/parser/parser.cpp src/catalog/type_registry.cpp src/common/Config.cpp src/types/numeric.cpp
 #include "expression/ExprEvaluator.h"
 #include "parser/ast.h"
+#include "parser/parser.h"
+#include "common/DbError.h"
 #include "catalog/type_registry.h"
 #include <cassert>
 #include <iostream>
@@ -297,6 +299,47 @@ static void test_comparisons() {
                         "timestamptz", "2023-12-31 23:00:00.7+00"));
 
     std::cout << "[EXPR] comparisons OK" << std::endl;
+}
+
+static void test_explicit_collation_comparisons() {
+    SQLParser parser;
+    ExprEvaluator evaluator;
+    auto evaluate = [&](const std::string& sql) {
+        auto parsed = parser.parse(sql);
+        assert(parsed.success && parsed.stmt);
+        auto* select = dynamic_cast<SelectStmt*>(parsed.stmt.get());
+        assert(select && select->selectList.size() == 1);
+        assert(select->selectList.front().expr);
+        return evaluator.eval(select->selectList.front().expr.get(), {});
+    };
+    auto cOrder = evaluate(
+        "SELECT 'apple' COLLATE \"C\" < 'Zoo' COLLATE \"C\"");
+    assert(cOrder.typeName == "boolean" && !cOrder.asBool());
+    auto defaultOrder = evaluate(
+        "SELECT 'apple' COLLATE \"default\" < "
+        "'Zoo' COLLATE \"default\"");
+    assert(defaultOrder.typeName == "boolean" && defaultOrder.asBool());
+    bool conflict = false;
+    try {
+        (void)evaluate(
+            "SELECT 'apple' COLLATE \"C\" < "
+            "'Zoo' COLLATE \"default\"");
+    } catch (const DbError& error) {
+        conflict = error.sqlState() == "42P21";
+    }
+    assert(conflict);
+    auto expectError = [&](const std::string& sql,
+                           const std::string& expectedState) {
+        try {
+            (void)evaluate(sql);
+        } catch (const DbError& error) {
+            assert(error.sqlState() == expectedState);
+            return;
+        }
+        assert(false);
+    };
+    expectError("SELECT 1 COLLATE \"C\"", "42804");
+    expectError("SELECT 'apple' COLLATE \"missing_collation\"", "42704");
 }
 
 static void test_logical() {
@@ -1003,6 +1046,7 @@ int main() {
     test_column_refs();
     test_arithmetic();
     test_comparisons();
+    test_explicit_collation_comparisons();
     test_logical();
     test_null();
     test_like();

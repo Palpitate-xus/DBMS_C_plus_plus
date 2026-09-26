@@ -53,12 +53,23 @@ static std::string toLower(std::string s) {
     return s;
 }
 
-static int compareDefaultText(const std::string& left,
-                              const std::string& right) {
-    const int compared = collation::compare(left, right, "en_US.utf8");
+static int compareTextWithCollation(const std::string& left,
+                                    const std::string& right,
+                                    const std::string& requested) {
+    const std::string effective = requested.empty()
+        ? "en_US.utf8" : requested;
+    const int compared = collation::compare(left, right, effective);
+    if (effective == "nocase") return compared;
     // PostgreSQL's deterministic libc collation distinguishes byte-distinct
     // strings even when the locale reports equal collation weights.
     return compared == 0 ? left.compare(right) : compared;
+}
+
+static bool isCollatableExprType(const std::string& typeName) {
+    const std::string type = toLower(typeName);
+    return type == "text" || type == "unknown" || type == "varchar" ||
+           type == "character varying" || type == "char" ||
+           type == "character" || type == "bpchar";
 }
 
 static std::string formatUtcClock(std::time_t value, const char* format) {
@@ -1557,6 +1568,18 @@ ExprValue ExprEvaluator::evalUnaryOp(const UnaryOpExpr* e, const RowContext& ctx
     ExprValue v = eval(e->operand.get(), ctx);
     std::string op = toLower(e->op);
 
+    if (op.rfind("collate ", 0) == 0) {
+        const std::string name = collation::normalizeName(
+            trimStr(e->op.substr(std::string("COLLATE ").size())));
+        if (!collation::isValid(name))
+            throw DbError("42704", "collation does not exist: " + name);
+        if (!isCollatableExprType(v.typeName))
+            throw DbError("42804", "collations are not supported by type " +
+                                    v.typeName);
+        v.collation = name;
+        return v;
+    }
+
     if (op == "+") return v;
     if (op == "-") {
         if (v.isNull) return v;
@@ -1840,6 +1863,19 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
     const bool varyingB = isVaryingCharacter(tb);
     const bool textualA = blankPaddedA || varyingA || ta == "text";
     const bool textualB = blankPaddedB || varyingB || tb == "text";
+    std::string textCollation;
+    if (textualA && textualB) {
+        const std::string leftCollation =
+            collation::normalizeName(a.collation);
+        const std::string rightCollation =
+            collation::normalizeName(b.collation);
+        if (!leftCollation.empty() && !rightCollation.empty() &&
+            leftCollation != rightCollation) {
+            throw DbError("42P21", "collation mismatch between explicit collations");
+        }
+        textCollation = leftCollation.empty()
+            ? rightCollation : leftCollation;
+    }
     if ((blankPaddedA || blankPaddedB) && textualA && textualB) {
         std::string left = a.value;
         std::string right = b.value;
@@ -1848,14 +1884,14 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
         };
         if (blankPaddedA || (blankPaddedB && varyingA)) trimPadding(left);
         if (blankPaddedB || (blankPaddedA && varyingB)) trimPadding(right);
-        return compareDefaultText(left, right);
+        return compareTextWithCollation(left, right, textCollation);
     }
 
     // A pair of text values stays textual even when both strings contain
     // digits. Numeric coercion here changes ORDER BY, comparisons and
     // GREATEST/LEAST (for example, text '10' must precede text '2').
     if (textualA && textualB) {
-        return compareDefaultText(a.value, b.value);
+        return compareTextWithCollation(a.value, b.value, textCollation);
     }
 
     if (ta == "money" || tb == "money") {

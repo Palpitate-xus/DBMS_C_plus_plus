@@ -36,6 +36,7 @@ struct ExprValue {
     std::string typeName;   // 规范类型名（如 "integer" / "character varying"）
     std::string value;      // 文本表示；空字符串与 NULL 用 isNull 区分
     bool isNull = false;
+    std::string collation;  // Explicit COLLATE on this expression, if any.
 
     ExprValue() = default;
     ExprValue(std::string typeName_, std::string value_, bool isNull_ = false)
