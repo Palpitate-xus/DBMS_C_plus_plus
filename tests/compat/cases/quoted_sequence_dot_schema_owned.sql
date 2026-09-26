@@ -1,0 +1,12 @@
+DROP SCHEMA IF EXISTS "Diff.Seq.Owned" CASCADE;
+CREATE SCHEMA "Diff.Seq.Owned";
+CREATE TABLE "Diff.Seq.Owned".owner_table (id bigint);
+CREATE SEQUENCE "Diff.Seq.Owned".owned_seq OWNED BY "Diff.Seq.Owned".owner_table.id;
+CREATE SEQUENCE "Diff.Seq.Owned".alter_owned_seq;
+ALTER SEQUENCE "Diff.Seq.Owned".alter_owned_seq OWNED BY "Diff.Seq.Owned".owner_table.id;
+SELECT nextval('"Diff.Seq.Owned".owned_seq');
+SELECT nextval('"Diff.Seq.Owned".alter_owned_seq');
+DROP TABLE "Diff.Seq.Owned".owner_table;
+SELECT nextval('"Diff.Seq.Owned".owned_seq');
+SELECT nextval('"Diff.Seq.Owned".alter_owned_seq');
+DROP SCHEMA "Diff.Seq.Owned";

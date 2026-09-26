@@ -4614,6 +4614,19 @@ static std::string quoteSqlIdentifierPart(
     return quoted;
 }
 
+static std::string storedOwnedTableReference(
+    const std::string& schema, const std::string& relation) {
+    if (schema == "public" && relation.find('.') == std::string::npos) {
+        return relation;
+    }
+    if (schema.find('.') == std::string::npos &&
+        relation.find('.') == std::string::npos) {
+        return schema + "." + relation;
+    }
+    return quoteSqlIdentifierPart(schema) + "." +
+           quoteSqlIdentifierPart(relation);
+}
+
 static std::vector<std::pair<std::string, std::string>> findDefaultNextvalDeps(
     const std::string& dbname, const std::string& seqname) {
     const std::string canonicalTarget =
@@ -7505,8 +7518,7 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
             CatalogManager::QualifiedName ownerName;
             if (!CatalogManager::parseQualifiedName(
                     info.ownedByTable, ownerName) ||
-                ownerName.name.empty() ||
-                ownerName.schema.find('.') != std::string::npos) {
+                ownerName.name.empty()) {
                 std::cout << "CREATE SEQUENCE OWNED BY target is invalid"
                           << std::endl;
                 return true;
@@ -7530,8 +7542,8 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
             }
             ownedTableOid = table->oid;
             ownedColumnNumber = column->attnum;
-            info.ownedByTable = sequenceSchema == "public"
-                ? ownerName.name : sequenceSchema + "." + ownerName.name;
+            info.ownedByTable = storedOwnedTableReference(
+                sequenceSchema, ownerName.name);
         }
     } catch (const std::exception& error) {
         std::cout << "CREATE SEQUENCE catalog preflight failed: "
@@ -7843,8 +7855,7 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
             CatalogManager::QualifiedName ownerName;
             if (!CatalogManager::parseQualifiedName(
                     info.ownedByTable, ownerName) ||
-                ownerName.name.empty() ||
-                ownerName.schema.find('.') != std::string::npos) {
+                ownerName.name.empty()) {
                 std::cout << "ALTER SEQUENCE OWNED BY target is invalid"
                           << std::endl;
                 return true;
@@ -7868,8 +7879,8 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
             }
             ownedTableOid = table->oid;
             ownedColumnNumber = column->attnum;
-            info.ownedByTable = sequenceSchema == "public"
-                ? ownerName.name : sequenceSchema + "." + ownerName.name;
+            info.ownedByTable = storedOwnedTableReference(
+                sequenceSchema, ownerName.name);
         }
     } catch (const std::exception& error) {
         std::cout << "ALTER SEQUENCE catalog preflight failed: "
