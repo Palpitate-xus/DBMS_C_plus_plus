@@ -606,7 +606,7 @@ public:
         std::string exprArg2 = "";   // second operand for arithmetic (e.g., "1" for age + 1)
         bool isExpression = false;
         bool nullsFirst = false;  // NULLS FIRST / NULLS LAST
-        std::string collation = "";    // e.g., "nocase", "binary" (default), "unicode"
+        std::string collation = "";    // explicit override; empty uses SQL default
     };
     std::vector<std::string> query(const std::string& dbname, const std::string& tablename,
                                    const std::vector<std::string>& conditions,

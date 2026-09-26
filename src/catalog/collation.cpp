@@ -16,7 +16,7 @@ std::string toLower(std::string s) {
 }
 
 bool isBinaryCollation(const std::string& name) {
-    return name.empty() || name == "default" || name == "c" || name == "posix" ||
+    return name.empty() || name == "c" || name == "posix" ||
            name == "ucs_basic";
 }
 
@@ -101,7 +101,7 @@ int compare(const std::string& a, const std::string& b, const std::string& colla
         if (b > a) return 1;
         return 0;
     }
-    if (coll == "en_us" || coll == "en_us.utf8") {
+    if (coll == "default" || coll == "en_us" || coll == "en_us.utf8") {
         return localeCompare(a, b, "en_US.UTF-8");
     }
     // Unknown collation: treat as binary.

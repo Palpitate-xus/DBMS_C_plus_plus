@@ -111,6 +111,7 @@ static void test_collation_provider() {
     assert(compare("abd", "abc", "C") > 0);
     // binary: 'B' < 'a'
     assert(compare("B", "a", "C") < 0);
+    assert(compare("apple", "Zoo", "default") < 0);
     // nocase: 'B' == 'b'
     assert(compare("B", "b", "nocase") == 0);
     assert(compare("Apple", "apricot", "nocase") < 0);
@@ -234,7 +235,7 @@ static void test_collate_mixed_columns() {
 static void test_collate_binary_collations() {
     using namespace dbms::collation;
     assert(isBinary(""));
-    assert(isBinary("default"));
+    assert(!isBinary("default"));
     assert(isBinary("C"));
     assert(isBinary("POSIX"));
     assert(isBinary("ucs_basic"));
@@ -256,7 +257,8 @@ static void test_collate_binary_collations() {
     dbms::TableSchema schema = g_engine.getTableSchema(db, "t");
     assert(schema.len == 4);
 
-    // No explicit collation -> empty string -> binary.
+    // No explicit collation remains an empty schema marker; SQL uses the
+    // database default locale for comparisons and ordering.
     assert(schema.cols[0].collation.empty());
     assert(schema.cols[1].collation == "C");
     assert(schema.cols[2].collation == "POSIX" || schema.cols[2].collation == "posix");
@@ -265,7 +267,8 @@ static void test_collate_binary_collations() {
     assert(g_engine.insert(db, "t", {{"c_default", "x"}, {"c_c", "x"}, {"c_posix", "x"}, {"c_ucs", "x"}}) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "t", {{"c_default", "X"}, {"c_c", "X"}, {"c_posix", "X"}, {"c_ucs", "X"}}) == dbms::DBStatus::OK);
 
-    // All binary collations: lowercase 'x' is not uppercase 'X'.
+    // Both the deterministic default and explicit binary collations keep
+    // lowercase 'x' distinct from uppercase 'X'.
     auto rows = g_engine.query(db, "t", {"=c_default x"}, {"c_default"});
     assert(rows.size() == 1);
     rows = g_engine.query(db, "t", {"=c_c x"}, {"c_c"});
@@ -296,6 +299,9 @@ static void test_default_sql_sort_uses_locale() {
     dbms::StorageEngine::OrderBySpec order;
     order.colName = "v";
     auto rows = g_engine.query(db, "t", {}, {"v"}, {order});
+    assert((rows == std::vector<std::string>{" ", "apple ", "Zoo "}));
+    order.collation = "default";
+    rows = g_engine.query(db, "t", {}, {"v"}, {order});
     assert((rows == std::vector<std::string>{" ", "apple ", "Zoo "}));
     order.collation = "C";
     rows = g_engine.query(db, "t", {}, {"v"}, {order});
