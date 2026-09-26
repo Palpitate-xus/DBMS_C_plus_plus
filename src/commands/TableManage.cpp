@@ -28766,6 +28766,23 @@ static std::string rightSortTextValue(const std::string& value,
     return value.substr(boundaries[skip]);
 }
 
+static std::string reverseSortTextValue(const std::string& value) {
+    std::vector<size_t> boundaries{0};
+    for (size_t offset = 0; offset < value.size();) {
+        ++offset;
+        while (offset < value.size() &&
+               (static_cast<unsigned char>(value[offset]) & 0xc0) == 0x80)
+            ++offset;
+        boundaries.push_back(offset);
+    }
+    std::string reversed;
+    reversed.reserve(value.size());
+    for (size_t i = boundaries.size() - 1; i > 0; --i)
+        reversed.append(value, boundaries[i - 1],
+                        boundaries[i] - boundaries[i - 1]);
+    return reversed;
+}
+
 static bool parseTextSortCount(const std::string& text, int64_t& count) {
     const char* begin = text.data();
     if (begin != text.data() + text.size() && *begin == '+') ++begin;
@@ -29258,6 +29275,8 @@ std::vector<std::string> StorageEngine::query(
                     ev = leftSortTextValue(argVal, sliceCounts[keyIndex]);
                 } else if (spec.exprFunc == "right") {
                     ev = rightSortTextValue(argVal, sliceCounts[keyIndex]);
+                } else if (spec.exprFunc == "reverse") {
+                    ev = reverseSortTextValue(argVal);
                 } else if (spec.exprFunc == "abs") {
                     try { ev = std::to_string(std::llabs(std::stoll(argVal))); } catch (...) { ev = "0"; }
                 } else if (spec.exprFunc == "add") {
@@ -35467,6 +35486,8 @@ std::vector<std::string> StorageEngine::sortByExpression(
                 ev = leftSortTextValue(argVal, sliceCounts[keyIndex]);
             } else if (spec.exprFunc == "right") {
                 ev = rightSortTextValue(argVal, sliceCounts[keyIndex]);
+            } else if (spec.exprFunc == "reverse") {
+                ev = reverseSortTextValue(argVal);
             } else if (spec.exprFunc == "abs") {
                 try { ev = std::to_string(std::llabs(std::stoll(argVal))); } catch (...) { ev = "0"; }
             } else if (spec.exprFunc == "add") {
@@ -35502,6 +35523,7 @@ std::vector<std::string> StorageEngine::sortByExpression(
                 if (bNull) return !spec.nullsFirst;
                 bool less = false, greater = false;
                 if (spec.exprFunc == "left" || spec.exprFunc == "right" ||
+                    spec.exprFunc == "reverse" ||
                     !comparisonColumns[i].collation.empty()) {
                     const int comparison = compareTextValues(
                         comparisonColumns[i], av, bv);

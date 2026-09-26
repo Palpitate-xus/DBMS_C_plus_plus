@@ -22712,7 +22712,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             }
                         }
                         if (func == "left" || func == "right" || func == "lower" ||
-                            func == "upper") {
+                            func == "upper" || func == "reverse") {
                             const size_t innerCollate = findTopLevelKeyword(
                                 spec.exprArg, "collate");
                             if (innerCollate != string::npos) {
