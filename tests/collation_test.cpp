@@ -303,6 +303,28 @@ static void test_default_sql_sort_uses_locale() {
     cleanup(db);
 }
 
+static void test_default_text_predicate_with_index() {
+    std::string db = testDbPath("collation_default_predicate");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE t (v TEXT)", s));
+    assert(g_engine.insert(db, "t", {{"v", "Zoo"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "t", {{"v", "apple"}}) == dbms::DBStatus::OK);
+    auto checkPredicates = [&] {
+        auto rows = g_engine.query(db, "t", {"<v Zoo"}, {"v"});
+        assert((rows == std::vector<std::string>{"apple "}));
+        rows = g_engine.query(db, "t", {">v apple"}, {"v"});
+        assert((rows == std::vector<std::string>{"Zoo "}));
+    };
+    checkPredicates();
+    assert(!ddl.executeSql("CREATE INDEX t_v_idx ON t(v)", s));
+    checkPredicates();
+    cleanup(db);
+}
+
 static void test_collate_with_index() {
     std::string db = testDbPath("collation_t5");
     cleanup(db);
@@ -825,6 +847,7 @@ int main() {
     test_collate_mixed_columns();
     test_collate_binary_collations();
     test_default_sql_sort_uses_locale();
+    test_default_text_predicate_with_index();
     test_collate_with_index();
     test_collate_schema_persistence();
     test_collation_metadata_is_atomic_and_backward_compatible();

@@ -3674,6 +3674,15 @@ DBStatus resolveTableCollations(const StorageEngine& engine,
     return DBStatus::OK;
 }
 
+bool usesDefaultTextLocale(const Column& column) {
+    if (!column.collation.empty() || column.isArray) return false;
+    const std::string& type = column.dataType;
+    return type == "text" || type == "varchar" ||
+           type == "character varying" || type == "char" ||
+           type == "character" || type == "bpchar" ||
+           type == "name" || type == "nchar" || type == "nvarchar";
+}
+
 int compareTextValues(const Column& column, const std::string& left,
                       const std::string& right) {
     if (!column.enumValues.empty()) {
@@ -3699,7 +3708,17 @@ int compareTextValues(const Column& column, const std::string& left,
         ? canonicalColumnKeyValue(column, left) : left;
     const std::string comparisonRight = blankPadded
         ? canonicalColumnKeyValue(column, right) : right;
-    if (column.collation.empty()) return comparisonLeft.compare(comparisonRight);
+    if (column.collation.empty()) {
+        if (!usesDefaultTextLocale(column))
+            return comparisonLeft.compare(comparisonRight);
+        // A physical index stores bytewise keys.  SQL predicates must use
+        // the same database-default locale as ORDER BY; equal collation
+        // weights retain bytewise distinction for deterministic equality.
+        const int compared = collation::compare(
+            comparisonLeft, comparisonRight, "en_US.utf8");
+        return compared == 0
+            ? comparisonLeft.compare(comparisonRight) : compared;
+    }
     const std::string& effective = column.resolvedCollation.empty()
         ? column.collation : column.resolvedCollation;
     if (column.resolvedCollationUsesLocale) {
@@ -3709,7 +3728,7 @@ int compareTextValues(const Column& column, const std::string& left,
 }
 
 bool columnUsesBinaryCollation(const Column& column) {
-    if (column.collation.empty()) return true;
+    if (column.collation.empty()) return !usesDefaultTextLocale(column);
     if (!column.resolvedCollation.empty()) {
         return column.resolvedCollationIsBinary;
     }
