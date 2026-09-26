@@ -650,8 +650,11 @@
 | 671 | SQL-05 / CAT-10 / P0-03 / P0-16 | `DROP TABLE` 的前置 relation-kind 检查能找到 quoted 含点号 schema 中的表，但后续 catalog drop plan 又从物理名拼无引号的 `schema.name`，解析失败后仍删物理表并声称成功，留下孤儿 `pg_class`；随后 `DROP SCHEMA` 报 `2BP01`。现沿用前置检查得到的 catalog OID，并为退路查找安全引用标识符，不从物理名猜 SQL token 边界 | 新增 `quoted_drop_table_dot_schema` 与 `quoted_sequence_dot_schema_default`，覆盖带点号 schema/表名的显式删除，以及序列改名、默认值使用、表和序列删除后的 RESTRICT schema 清理；修复前后者真实 18.6 差分失败，修复后两组定向 `failed=0`，3 组 DROP TABLE 相邻差分、既有 `quoted_schema_dot_name`、`sequence_full_test`、`ddl_transaction_skeleton_test` 和完整协议回归通过。其他 catalog 物理名歧义和事务并发仍为 partial | `bf3fb086` |
 | 672 | SQL-02 / CAT-15 / P0-03 / P0-16 | 当时复现：旧式一层点号物理键同时代表 `public."diff_legacy_collision.seq"` 和 `diff_legacy_collision.seq`，两个 PostgreSQL 合法序列不能共存；第 670 项只编码旧式无法表示的名称，未解决既有格式歧义 | 真实 PostgreSQL 18.6 对照下第二个 CREATE 本地报 `XX000`，随后 nextval 和 DROP 失败；该案例后由第 673 项修复并移入正式差分集。CAT-15 整体仍为 partial | 见第 673 项 |
 | 673 | SQL-02 / CAT-15 / P0-03 / P0-16 | public 中名字含点号的 quoted 序列统一使用 `seqv2..` 可逆键，与 schema-qualified 序列分离；旧 `sequencePath` 还会剥掉字面 `public.` 前缀，迁移时按旧规则定位文件。启动时先加载 catalog，按序列 OID 所属 namespace 搬迁旧文件并 fsync 目录；若同一旧文件有冲突 catalog 归属则拒绝猜测 | `sequence_legacy_name_collision` 从 known_gaps 移入正式差分，覆盖跨 schema 与字面 `public.` 前缀两种碰撞；真实 PostgreSQL 18.6 定向 `failed=0`，6 组相邻序列差分 `failed=0`。`sequence_full_test` 模拟两种旧文件，重启后值分别延续并可创建撞名对象；正式构建、数据目录 E2E、完整协议回归通过。CAT-15 全族及所有历史目录组合仍需继续审计 | `68a44e79` |
+| 674 | CAT-15 / P0-03 / P0-16 | 第 673 项迁移冲突预检原先把 `a.b` 形态的非 public 普通表 `a.b` 也当作旧序列文件共同所有者，可能让本来可迁移的 public quoted 序列阻止数据库启动；普通表的自动计数侧车实际使用 `a__b.seq`。现只让同路径序列，或确实可能使用该路径的 public 表触发保守拒绝 | 在 `sequence_full_test` 中新增 schema 内同名普通表与 public quoted 序列并存、模拟旧文件、重启迁移与值延续的断言；当前源码重编、完整序列 C++ 测试通过。未宣称所有历史 catalog/sidecar 组合已验证 | `fa764855` |
 
-2026-09-26 最新已完成全量复验：第 670 项修复后的固定本地二进制运行真实 PostgreSQL 18.6 差分 298 组，`failed=0`；同一二进制的完整 PostgreSQL 协议回归通过（120 秒启动/关闭超时）。第 671 项新增的两组 quoted catalog 清理用例在新二进制上定向通过，300 组全量复验正在执行，尚不能称已通过。差分用例数不是总清单完成数，不能因有限差分通过而称总清单完成。总账仍为 24 complete、121 partial、113 unverified、15 deferred_by_user；用户延期的安全/TDE 项未触碰。
+2026-09-26 最新已完成全量复验：第 671 项修复后的固定本地二进制运行真实 PostgreSQL 18.6 差分 300 组，`failed=0`；同一二进制的完整 PostgreSQL 协议回归通过（120 秒启动/关闭超时）。第 673 项新增的序列碰撞用例在新二进制上定向通过，301 组全量复验正在执行，尚不能称已通过。差分用例数不是总清单完成数，不能因有限差分通过而称总清单完成。总账仍为 24 complete、121 partial、113 unverified、15 deferred_by_user；用户延期的安全/TDE 项未触碰。
+
+2026-09-26 较早全量复验：第 670 项修复后的固定本地二进制运行真实 PostgreSQL 18.6 差分 298 组，`failed=0`；同一二进制的完整 PostgreSQL 协议回归通过（120 秒启动/关闭超时）。
 
 2026-09-25 较早全量复验：第 669 项修复后的固定本地二进制运行真实 PostgreSQL 18.6 差分 297 组，`failed=0`；同一二进制的完整 PostgreSQL 协议回归通过（120 秒启动/关闭超时）。
 
