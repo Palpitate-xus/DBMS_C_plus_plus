@@ -29229,6 +29229,10 @@ std::vector<std::string> StorageEngine::query(
         };
         std::vector<ExprKey> ekeys;
         ekeys.reserve(matchRows.size());
+        std::map<std::string, std::string> expressionTypeHints;
+        for (size_t ci = 0; ci < tbl.len; ++ci)
+            expressionTypeHints[tbl.cols[ci].dataName] =
+                tbl.cols[ci].dataType;
         for (size_t ri = 0; ri < matchRows.size(); ++ri) {
             ExprKey ek{ri, {}, {}};
             NullRowBinding nullBinding(
@@ -29258,12 +29262,48 @@ std::vector<std::string> StorageEngine::query(
                 }
                 std::string ev;
                 bool expressionIsNull = false;
+                bool evaluatedGeneralExpression = false;
                 auto getCol = [&](const std::string& name) -> std::string {
                     auto it = rowData.find(name);
                     return (it != rowData.end()) ? it->second : "";
                 };
                 std::string argVal = getCol(spec.exprArg);
-                if (spec.exprFunc == "length") {
+                if (!spec.expressionSql.empty()) {
+                    std::set<std::string> nullColumns;
+                    for (const auto& [name, isNull] : rowNulls)
+                        if (isNull) nullColumns.insert(name);
+                    const auto evaluated = ExprHelper::evalStringWithNulls(
+                        spec.expressionSql, rowData, nullColumns,
+                        expressionTypeHints, dbname);
+                    if (!evaluated.ok) {
+                        lockManager_.unlock(tablename);
+                        throw DbError("0A000", "cannot evaluate ORDER BY expression: " +
+                                             evaluated.error);
+                    }
+                    ev = evaluated.value;
+                    expressionIsNull = evaluated.isNull;
+                    evaluatedGeneralExpression = true;
+                    if (spec.collation.empty() &&
+                        !evaluated.collation.empty()) {
+                        auto& comparisonColumn =
+                            expressionComparisonColumns[keyIndex];
+                        if (comparisonColumn.collation.empty()) {
+                            comparisonColumn.collation =
+                                evaluated.collation;
+                            TableSchema collationProbe;
+                            collationProbe.len = 1;
+                            collationProbe.cols[0] = comparisonColumn;
+                            if (resolveTableCollations(
+                                    *this, dbname, collationProbe) !=
+                                DBStatus::OK) {
+                                lockManager_.unlock(tablename);
+                                return result;
+                            }
+                            comparisonColumn =
+                                std::move(collationProbe.cols[0]);
+                        }
+                    }
+                } else if (spec.exprFunc == "length") {
                     ev = std::to_string(argVal.size());
                 } else if (spec.exprFunc == "upper") {
                     ev = argVal;
@@ -29288,7 +29328,7 @@ std::vector<std::string> StorageEngine::query(
                 }
                 ek.exprVals.push_back(ev);
                 const auto nullIt = rowNulls.find(spec.exprArg);
-                if (nullIt != rowNulls.end())
+                if (!evaluatedGeneralExpression && nullIt != rowNulls.end())
                     expressionIsNull = nullIt->second;
                 ek.exprNulls.push_back(expressionIsNull);
             }
@@ -35411,6 +35451,9 @@ std::vector<std::string> StorageEngine::sortByExpression(
     const std::vector<OrderBySpec>& exprSpecs) const {
     if (rows.empty() || exprSpecs.empty()) return rows;
     TableSchema tbl = getTableSchema(dbname, tablename);
+    std::map<std::string, std::string> expressionTypeHints;
+    for (size_t ci = 0; ci < tbl.len; ++ci)
+        expressionTypeHints[tbl.cols[ci].dataName] = tbl.cols[ci].dataType;
     std::vector<int64_t> sliceCounts(exprSpecs.size(), 0);
     for (size_t i = 0; i < exprSpecs.size(); ++i) {
         if (exprSpecs[i].isExpression &&
@@ -35454,6 +35497,7 @@ std::vector<std::string> StorageEngine::sortByExpression(
     struct SortRow {
         std::string rowStr;
         std::vector<std::string> exprVals;
+        std::vector<bool> exprNulls;
     };
     std::vector<SortRow> sortRows;
     for (const auto& rowStr : rows) {
@@ -35469,12 +35513,38 @@ std::vector<std::string> StorageEngine::sortByExpression(
         for (size_t keyIndex = 0; keyIndex < exprSpecs.size(); ++keyIndex) {
             const auto& spec = exprSpecs[keyIndex];
             std::string ev;
+            bool expressionIsNull = false;
             auto getCol = [&](const std::string& name) -> std::string {
                 auto it = rowData.find(name);
                 return (it != rowData.end()) ? it->second : "";
             };
             std::string argVal = getCol(spec.exprArg);
-            if (spec.exprFunc == "length") {
+            if (!spec.expressionSql.empty()) {
+                const auto evaluated = ExprHelper::evalStringWithNulls(
+                    spec.expressionSql, rowData, {}, expressionTypeHints,
+                    dbname);
+                if (!evaluated.ok)
+                    throw DbError("0A000", "cannot evaluate ORDER BY expression: " +
+                                         evaluated.error);
+                ev = evaluated.value;
+                expressionIsNull = evaluated.isNull;
+                if (spec.collation.empty() &&
+                    !evaluated.collation.empty()) {
+                    auto& comparisonColumn = comparisonColumns[keyIndex];
+                    if (comparisonColumn.collation.empty()) {
+                        comparisonColumn.collation = evaluated.collation;
+                        TableSchema collationProbe;
+                        collationProbe.len = 1;
+                        collationProbe.cols[0] = comparisonColumn;
+                        if (resolveTableCollations(
+                                *this, dbname, collationProbe) !=
+                            DBStatus::OK)
+                            return rows;
+                        comparisonColumn =
+                            std::move(collationProbe.cols[0]);
+                    }
+                }
+            } else if (spec.exprFunc == "length") {
                 ev = std::to_string(argVal.size());
             } else if (spec.exprFunc == "upper") {
                 ev = argVal;
@@ -35506,6 +35576,8 @@ std::vector<std::string> StorageEngine::sortByExpression(
                 ev = argVal;
             }
             sr.exprVals.push_back(ev);
+            sr.exprNulls.push_back(spec.expressionSql.empty()
+                                       ? ev.empty() : expressionIsNull);
         }
         sortRows.push_back(std::move(sr));
     }
@@ -35516,13 +35588,14 @@ std::vector<std::string> StorageEngine::sortByExpression(
                 const auto& spec = exprSpecs[i];
                 const std::string& av = a.exprVals[i];
                 const std::string& bv = b.exprVals[i];
-                bool aNull = av.empty();
-                bool bNull = bv.empty();
+                bool aNull = a.exprNulls[i];
+                bool bNull = b.exprNulls[i];
                 if (aNull && bNull) continue;
                 if (aNull) return spec.nullsFirst;
                 if (bNull) return !spec.nullsFirst;
                 bool less = false, greater = false;
-                if (spec.exprFunc == "left" || spec.exprFunc == "right" ||
+                if (!spec.expressionSql.empty() ||
+                    spec.exprFunc == "left" || spec.exprFunc == "right" ||
                     spec.exprFunc == "reverse" ||
                     !comparisonColumns[i].collation.empty()) {
                     const int comparison = compareTextValues(

@@ -1533,6 +1533,7 @@ static ExprEvalResult evalStringImpl(
     res.isNull = v.isNull;
     res.value = v.value;
     res.typeName = v.typeName;
+    res.collation = v.collation;
     return res;
 }
 

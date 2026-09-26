@@ -647,6 +647,35 @@ static void test_custom_collation_runtime_resolution() {
     rows = g_engine.query(db, "unicode_right", {}, {"v"}, {byReverse});
     assert((rows == std::vector<std::string>{"aÿ ", "a€ "}));
 
+    assert(!ddl.executeSql(
+        "CREATE TABLE evaluated_order (v VARCHAR(50) COLLATE C)", s));
+    assert(g_engine.insert(db, "evaluated_order", {{"v", "aa"}}) ==
+           DBStatus::OK);
+    assert(g_engine.insert(db, "evaluated_order", {{"v", "ba"}}) ==
+           DBStatus::OK);
+    dbms::StorageEngine::OrderBySpec byReplace;
+    byReplace.isExpression = true;
+    byReplace.exprFunc = "replace";
+    byReplace.expressionSql = "replace(v, 'a', 'z')";
+    byReplace.collation = "C";
+    rows = g_engine.query(db, "evaluated_order", {}, {"v"}, {byReplace});
+    assert((rows == std::vector<std::string>{"ba ", "aa "}));
+    rows = g_engine.sortByExpression(
+        db, "evaluated_order", {"aa ", "ba "}, {byReplace});
+    assert((rows == std::vector<std::string>{"ba ", "aa "}));
+    byReplace.collation.clear();
+    byReplace.expressionSql = "replace(v COLLATE \"C\", 'a', 'z')";
+    rows = g_engine.query(db, "evaluated_order", {}, {"v"}, {byReplace});
+    assert((rows == std::vector<std::string>{"ba ", "aa "}));
+    dbms::StorageEngine::OrderBySpec byLtrim;
+    byLtrim.isExpression = true;
+    byLtrim.exprFunc = "ltrim";
+    byLtrim.expressionSql = "ltrim(v, 'a')";
+    byLtrim.collation = "C";
+    rows = g_engine.sortByExpression(
+        db, "evaluated_order", {"ba ", "aa "}, {byLtrim});
+    assert((rows == std::vector<std::string>{"aa ", "ba "}));
+
     assert(!ddl.executeSql("CREATE TABLE alter_target (id INT)", s));
     assert(!ddl.executeSql(
         "ALTER TABLE alter_target ADD COLUMN "

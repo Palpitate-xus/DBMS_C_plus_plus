@@ -19,6 +19,7 @@ namespace dbms {
 struct ExprEvalResult {
     std::string value;   // textual result; meaningful only when ok && !isNull
     std::string typeName; // evaluator result type, for structured metadata
+    std::string collation; // Explicit collation propagated by expression evaluation
     bool isNull = false; // true if expression evaluated to NULL
     bool ok = false;     // true if parse + eval succeeded
     std::string error;   // set when ok == false

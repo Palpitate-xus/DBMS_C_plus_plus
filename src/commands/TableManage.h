@@ -604,6 +604,7 @@ public:
         std::string exprFunc = "";   // e.g., "length", "add", "sub"
         std::string exprArg = "";    // e.g., "name"
         std::string exprArg2 = "";   // second operand for arithmetic (e.g., "1" for age + 1)
+        std::string expressionSql; // Parsed SQL for supported general scalar sort keys
         bool isExpression = false;
         bool nullsFirst = false;  // NULLS FIRST / NULLS LAST
         std::string collation = "";    // explicit override; empty uses SQL default
