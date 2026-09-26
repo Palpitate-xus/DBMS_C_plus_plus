@@ -6977,7 +6977,8 @@ static std::string inferSubQueryResultType(
 static bool validateFromlessColumnBindings(const string& expression,
                                            string& error, string& sqlState,
                                            const string& visibleQualifier = "",
-                                           const set<string>* visibleColumns = nullptr) {
+                                           const set<string>* visibleColumns = nullptr,
+                                           string* unboundColumn = nullptr) {
     dbms::SQLParser parser;
     const auto parsed = parser.parse("SELECT " + expression);
     const auto* select = parsed.success
@@ -7091,6 +7092,7 @@ static bool validateFromlessColumnBindings(const string& expression,
         };
     inspect(select->selectList.front().expr.get());
     if (!unbound) return true;
+    if (unboundColumn) *unboundColumn = unbound->column;
     if (!unbound->table.empty() &&
         (visibleQualifier.empty() || !unbound->schema.empty() ||
          toLower(unbound->table) != toLower(visibleQualifier))) {
@@ -7199,11 +7201,13 @@ static string ungroupedProjectionColumn(
 
 static bool evaluateQueryRowCount(const string& expression, Session& s,
                                   size_t& value, bool& isNull,
-                                  string& error, string& sqlState) {
+                                  string& error, string& sqlState,
+                                  string* unboundColumn = nullptr) {
     const string text = trim(expression);
     if (text.empty()) return false;
     if (!validateFromlessColumnBindings(
-            text, error, sqlState)) return false;
+            text, error, sqlState, "", nullptr,
+            unboundColumn)) return false;
     if (toLower(text) == "null") {
         value = 0;
         isNull = true;
@@ -19873,6 +19877,39 @@ static bool executeInternal(const string& rawSql, Session& s) {
         if (windowPos != string::npos && orderPos != string::npos && windowPos > orderPos) windowPos = string::npos;
         if (windowPos != string::npos && limitPos != string::npos && windowPos > limitPos) windowPos = string::npos;
 
+        const auto isCurrentInputColumn = [&](const string& column) {
+            size_t begin = fromPos + 4;
+            while (begin < sql.size() &&
+                   isspace(static_cast<unsigned char>(sql[begin]))) ++begin;
+            size_t end = begin;
+            bool quoted = false;
+            for (; end < sql.size(); ++end) {
+                const char ch = sql[end];
+                if (ch == '"') {
+                    if (quoted && end + 1 < sql.size() &&
+                        sql[end + 1] == '"') {
+                        ++end;
+                    } else {
+                        quoted = !quoted;
+                    }
+                } else if (!quoted &&
+                           (isspace(static_cast<unsigned char>(ch)) ||
+                            ch == ',' || ch == '(')) {
+                    break;
+                }
+            }
+            if (quoted || begin == end) return false;
+            const string relation = sql.substr(begin, end - begin);
+            const string physical = resolveTableName(s, relation, true);
+            if (!g_engine.tableExists(s.currentDB, physical)) return false;
+            const TableSchema schema = g_engine.getTableSchema(
+                s.currentDB, physical);
+            for (size_t index = 0; index < schema.len; ++index) {
+                if (schema.cols[index].dataName == column) return true;
+            }
+            return false;
+        };
+
         size_t parsedLimit = 0, parsedOffset = 0;
         bool finiteParsedLimit = false;
         if (limitPos != string::npos) {
@@ -19883,9 +19920,15 @@ static bool executeInternal(const string& rawSql, Session& s) {
             if (toLower(expression) != "all") {
                 bool isNull = false;
                 string error, sqlState;
+                string unboundColumn;
                 if (!evaluateQueryRowCount(
                         expression, s, parsedLimit, isNull,
-                        error, sqlState)) {
+                        error, sqlState, &unboundColumn)) {
+                    if (sqlState == "42703" &&
+                        isCurrentInputColumn(unboundColumn)) {
+                        error = "argument of LIMIT must not contain variables";
+                        sqlState = "42P10";
+                    }
                     if (!error.empty()) {
                         cout << "ERROR: " << error << " (SQLSTATE "
                              << sqlState << ")" << endl;
@@ -19913,9 +19956,15 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
             bool isNull = false;
             string error, sqlState;
+            string unboundColumn;
             if (!evaluateQueryRowCount(
                     expression, s, parsedOffset, isNull,
-                    error, sqlState)) {
+                    error, sqlState, &unboundColumn)) {
+                if (sqlState == "42703" &&
+                    isCurrentInputColumn(unboundColumn)) {
+                    error = "argument of OFFSET must not contain variables";
+                    sqlState = "42P10";
+                }
                 if (!error.empty()) {
                     cout << "ERROR: " << error << " (SQLSTATE "
                          << sqlState << ")" << endl;
