@@ -4627,10 +4627,15 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     // Built-in fallback for common functions even if not registered
     if (name == "nullif") {
         if (args.size() < 2) return ExprValue("unknown", "", true);
-        if (args[0].isNull || args[1].isNull) return args[0];
-        return compareValues(args[0], args[1]) == 0
-                   ? ExprValue(args[0].typeName, "", true)
-                   : args[0];
+        ExprValue first = args[0];
+        first.collation = mergeExplicitCollations(first.collation,
+                                                   args[1].collation);
+        if (first.isNull || args[1].isNull) return first;
+        if (compareValues(first, args[1]) == 0) {
+            first.value.clear();
+            first.isNull = true;
+        }
+        return first;
     }
     if (name == "greatest") {
         const std::string resultCollation = explicitResultCollation(e);

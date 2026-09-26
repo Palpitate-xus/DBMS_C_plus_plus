@@ -350,6 +350,9 @@ static void test_explicit_collation_comparisons() {
     auto leastC = evaluate(
         "SELECT LEAST('apple', 'x' COLLATE \"C\") < 'Zoo'");
     assert(leastC.typeName == "boolean" && !leastC.asBool());
+    auto nullifC = evaluate(
+        "SELECT NULLIF('apple', 'x' COLLATE \"C\") < 'Zoo'");
+    assert(nullifC.typeName == "boolean" && !nullifC.asBool());
     bool conflict = false;
     try {
         (void)evaluate(
@@ -384,6 +387,8 @@ static void test_explicit_collation_comparisons() {
     expectError("SELECT GREATEST('apple' COLLATE \"C\", "
                 "NULL::text COLLATE \"default\")", "42P21");
     expectError("SELECT LEAST('apple' COLLATE \"C\", "
+                "NULL::text COLLATE \"default\")", "42P21");
+    expectError("SELECT NULLIF('apple' COLLATE \"C\", "
                 "NULL::text COLLATE \"default\")", "42P21");
 }
 
