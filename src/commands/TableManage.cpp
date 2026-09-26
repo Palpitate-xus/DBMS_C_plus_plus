@@ -28799,7 +28799,7 @@ static bool isEvaluatedNumericSort(
     const StorageEngine::OrderBySpec& spec) {
     static const std::set<std::string> functions = {
         "abs", "round", "power", "floor", "ceil", "trunc", "sign",
-        "mod", "gcd", "lcm", "div"
+        "mod", "gcd", "lcm", "div", "sqrt", "ln", "log", "exp"
     };
     return !spec.expressionSql.empty() &&
            functions.count(spec.exprFunc) != 0;

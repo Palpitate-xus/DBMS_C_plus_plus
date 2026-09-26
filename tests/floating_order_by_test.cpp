@@ -175,6 +175,13 @@ int main() {
                    database, "integer_function_order", ids({"9", "4"}),
                    {functionSort}) == ids({"4", "9"}));
     }
+    for (const auto& name : {"sqrt", "ln", "log", "exp"}) {
+        functionSort.exprFunc = name;
+        functionSort.expressionSql = std::string(name) + "(v)";
+        assert(g_engine.query(database, "rounding_function_order", {},
+                              {"v"}, {functionSort}) ==
+               ids({"2.2", "10.2"}));
+    }
 
     cleanupTestDb(testName);
     finalCleanupTestData();
