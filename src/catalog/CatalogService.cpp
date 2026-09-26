@@ -67,9 +67,18 @@ static void migrateLegacyPublicDottedSequences(
         const size_t dot = relation.relname.find('.');
         const PgNamespaceRow* conflictingNamespace =
             catalog.findNamespaceByName(relation.relname.substr(0, dot));
-        if (conflictingNamespace &&
-            catalog.findClassByName(relation.relname.substr(dot + 1),
-                                    conflictingNamespace->oid)) {
+        const PgClassRow* conflictingRelation = conflictingNamespace
+            ? catalog.findClassByName(relation.relname.substr(dot + 1),
+                                      conflictingNamespace->oid)
+            : nullptr;
+        // A non-public table uses <schema>__<table>.seq, not the joined
+        // sequence key. A public table does use <table>.seq for identity
+        // counters, so keep that case fail-closed when names overlap.
+        if (conflictingRelation &&
+            (conflictingRelation->relkind == 'S' ||
+             (conflictingNamespace->nspname == "public" &&
+              (conflictingRelation->relkind == 'r' ||
+               conflictingRelation->relkind == 'p')))) {
             throw std::runtime_error(
                 "ambiguous legacy sequence file ownership: " +
                 legacyPath.string());

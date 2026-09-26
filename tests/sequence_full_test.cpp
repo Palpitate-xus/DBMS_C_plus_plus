@@ -1241,6 +1241,27 @@ static void test_public_dotted_sequence_storage_migration() {
     assert(g_engine.nextval(db, "public.special") == 41);
     assert(g_engine.nextval(db, "public.\"public.special\"") == 33);
 
+    assert(!ddl.executeSql("CREATE SCHEMA diff_legacy_table", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE diff_legacy_table.item (id integer)", s));
+    assert(!ddl.executeSql(
+        "CREATE SEQUENCE public.\"diff_legacy_table.item\" START 51", s));
+    const fs::path tableNameUpgradedPath = fs::path(db) /
+        (dbms::sequenceStorageName("public", "diff_legacy_table.item") +
+         ".seqv2");
+    const fs::path tableNameLegacyPath =
+        fs::path(db) / "diff_legacy_table.item.seq";
+    assert(g_engine.nextval(
+        db, "public.\"diff_legacy_table.item\"") == 51);
+    fs::rename(tableNameUpgradedPath, tableNameLegacyPath);
+    {
+        dbms::StorageEngine restarted;
+        assert(fs::exists(tableNameUpgradedPath));
+        assert(!fs::exists(tableNameLegacyPath));
+        assert(restarted.nextval(
+            db, "public.\"diff_legacy_table.item\"") == 52);
+    }
+
     cleanup(db);
     std::cout << "[SEQUENCE] public dotted-name migration/collision OK"
               << std::endl;
