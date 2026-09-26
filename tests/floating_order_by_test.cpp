@@ -157,6 +157,25 @@ int main() {
                ids({"2.2", "10.2"}), {functionSort}) ==
            ids({"10.2", "2.2"}));
 
+    dbms::TableSchema integerSchema;
+    integerSchema.tablename = "integer_function_order";
+    integerSchema.formatVersion = 2;
+    integerSchema.append(dbms::makeIntColumn("v", false, 4));
+    assert(g_engine.createTable(database, integerSchema) ==
+           dbms::DBStatus::OK);
+    for (const auto& value : {"9", "4"})
+        assert(g_engine.insert(database, "integer_function_order",
+                               {{"v", value}}) == dbms::DBStatus::OK);
+    for (const auto& name : {"gcd", "lcm", "div"}) {
+        functionSort.exprFunc = name;
+        functionSort.expressionSql = std::string(name) + "(v, 6)";
+        assert(g_engine.query(database, "integer_function_order", {},
+                              {"v"}, {functionSort}) == ids({"4", "9"}));
+        assert(g_engine.sortByExpression(
+                   database, "integer_function_order", ids({"9", "4"}),
+                   {functionSort}) == ids({"4", "9"}));
+    }
+
     cleanupTestDb(testName);
     finalCleanupTestData();
     std::cout << "[FLOATING ORDER BY] numeric/NaN/null ordering OK"
