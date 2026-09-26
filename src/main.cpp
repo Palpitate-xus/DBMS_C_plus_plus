@@ -7934,6 +7934,14 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                     }
                 }
             }
+            // A nested CAST does not name the surrounding expression.  In
+            // particular, CAST(value AS text) < other is a boolean column,
+            // not a column named after the CAST target or the function.
+            if (low2.compare(0, 5, "cast(") == 0 &&
+                findMatchingParen(expr, 4) != expr.size() - 1) {
+                headers.push_back("?column?");
+                goto headerDone;
+            }
             if (low2.compare(0, 5, "cast(") == 0) {
                 size_t asPos = low2.rfind(" as ");
                 if (asPos != string::npos) {
