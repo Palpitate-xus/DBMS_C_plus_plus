@@ -365,6 +365,12 @@ static void test_explicit_collation_comparisons() {
     assert(castIntegerCoalesce.typeName == "integer" &&
            castIntegerCoalesce.value == "1" &&
            castIntegerCoalesce.collation.empty());
+    auto loweredC = evaluate("SELECT lower('APPLE' COLLATE \"C\")");
+    assert(loweredC.typeName == "text" && loweredC.value == "apple" &&
+           loweredC.collation == "c");
+    auto upperedC = evaluate("SELECT upper('apple' COLLATE \"C\")");
+    assert(upperedC.typeName == "text" && upperedC.value == "APPLE" &&
+           upperedC.collation == "c");
     bool conflict = false;
     try {
         (void)evaluate(

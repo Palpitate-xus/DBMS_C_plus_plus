@@ -7232,8 +7232,10 @@ void ExprEvaluator::registerBuiltins() {
                 return ExprValue(boundType, "", true);
             return ExprValue(boundType, r.lo, false);
         }
-        if (a[0].isNull) return ExprValue("text", "", true);
-        return ExprValue("text", toLower(textArgumentValue(a[0])), false);
+        ExprValue result("text", a[0].isNull
+            ? "" : toLower(textArgumentValue(a[0])), a[0].isNull);
+        result.collation = a[0].collation;
+        return result;
     };
     functions_["upper"] = [](const std::vector<ExprValue>& a) {
         if (a.empty()) return ExprValue("text", "", true);
@@ -7246,10 +7248,11 @@ void ExprEvaluator::registerBuiltins() {
                 return ExprValue(boundType, "", true);
             return ExprValue(boundType, r.hi, false);
         }
-        if (a[0].isNull) return ExprValue("text", "", true);
-        std::string s = textArgumentValue(a[0]);
+        std::string s = a[0].isNull ? "" : textArgumentValue(a[0]);
         for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-        return ExprValue("text", s, false);
+        ExprValue result("text", std::move(s), a[0].isNull);
+        result.collation = a[0].collation;
+        return result;
     };
     functions_["substring"] = evaluateTextSubstring;
     auto scaleFloatingDecimal = [](double value, int scale,
