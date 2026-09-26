@@ -287,6 +287,8 @@ static void test_comparisons() {
     assert(compareTyped("character", "ab  ", "=", "text", "ab"));
     assert(!compareTyped("character", "ab  ", "=", "text", "ab  "));
     assert(compareTyped("character", "ab  ", "<", "bpchar", "abx   "));
+    assert(compareTyped("text", "apple", "<", "text", "Zoo"));
+    assert(compareTyped("text", "Zoo", ">", "text", "apple"));
     assert(compareTyped("timestamp", "2024-01-01 00:00:00.7", ">",
                         "timestamp", "2024-01-01 00:00:00.6"));
     assert(!compareTyped("timestamp", "2024-01-01 00:00:00.7", "=",

@@ -1,6 +1,7 @@
 #include "ExprEvaluator.h"
 #include "expr_helper.h"
 #include "commands/TableManage.h"
+#include "catalog/collation.h"
 #include "common/DateType.h"
 #include "common/BooleanCodec.h"
 #include "common/NetworkValue.h"
@@ -50,6 +51,14 @@ namespace dbms {
 static std::string toLower(std::string s) {
     for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return s;
+}
+
+static int compareDefaultText(const std::string& left,
+                              const std::string& right) {
+    const int compared = collation::compare(left, right, "en_US.utf8");
+    // PostgreSQL's deterministic libc collation distinguishes byte-distinct
+    // strings even when the locale reports equal collation weights.
+    return compared == 0 ? left.compare(right) : compared;
 }
 
 static std::string formatUtcClock(std::time_t value, const char* format) {
@@ -1839,14 +1848,14 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
         };
         if (blankPaddedA || (blankPaddedB && varyingA)) trimPadding(left);
         if (blankPaddedB || (blankPaddedA && varyingB)) trimPadding(right);
-        return left < right ? -1 : (left > right ? 1 : 0);
+        return compareDefaultText(left, right);
     }
 
     // A pair of text values stays textual even when both strings contain
     // digits. Numeric coercion here changes ORDER BY, comparisons and
     // GREATEST/LEAST (for example, text '10' must precede text '2').
     if (textualA && textualB) {
-        return a.value < b.value ? -1 : (a.value > b.value ? 1 : 0);
+        return compareDefaultText(a.value, b.value);
     }
 
     if (ta == "money" || tb == "money") {
