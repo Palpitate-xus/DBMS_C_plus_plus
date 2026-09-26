@@ -22685,10 +22685,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         spec.exprFunc = func;
                         spec.exprArg = arg;
                         spec.collation = collation;
-                        if (func == "left") {
+                        if (func == "left" || func == "right") {
                             const size_t comma = arg.find(',');
                             if (comma == string::npos) {
-                                cout << "ERROR: left() in ORDER BY requires two arguments"
+                                cout << "ERROR: " << func
+                                     << "() in ORDER BY requires two arguments"
                                      << " (SQLSTATE 0A000)" << endl;
                                 return true;
                             }
@@ -22701,15 +22702,16 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 if (consumed != spec.exprArg2.size() ||
                                     count < std::numeric_limits<int32_t>::min() ||
                                     count > std::numeric_limits<int32_t>::max())
-                                    throw std::out_of_range("left count");
+                                    throw std::out_of_range("text slice count");
                             } catch (const std::exception&) {
-                                cout << "ERROR: non-constant left() count in ORDER BY"
+                                cout << "ERROR: non-constant " << func
+                                     << "() count in ORDER BY"
                                      << " is not supported (SQLSTATE 0A000)"
                                      << endl;
                                 return true;
                             }
                         }
-                        if (func == "left" || func == "lower" ||
+                        if (func == "left" || func == "right" || func == "lower" ||
                             func == "upper") {
                             const size_t innerCollate = findTopLevelKeyword(
                                 spec.exprArg, "collate");
