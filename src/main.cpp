@@ -22692,7 +22692,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             "overlay", "trim", "abs", "round", "power",
                             "floor", "ceil", "trunc", "sign", "mod",
                             "gcd", "lcm", "div", "sqrt", "ln", "log",
-                            "exp", "sin", "cos", "tan", "date_trunc",
+                            "exp", "sin", "cos", "tan", "width_bucket", "date_trunc",
                             "extract", "date_part"
                         };
                         if (evaluatedSortFuncs.count(func))

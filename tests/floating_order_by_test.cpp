@@ -205,6 +205,22 @@ int main() {
                database, "trig_function_order", ids({"1.5", "4.5"}),
                {functionSort}) == ids({"4.5", "1.5"}));
 
+    dbms::TableSchema bucketSchema;
+    bucketSchema.tablename = "bucket_function_order";
+    bucketSchema.formatVersion = 2;
+    bucketSchema.append(dbms::makeIntColumn("v", false, 4));
+    assert(g_engine.createTable(database, bucketSchema) == dbms::DBStatus::OK);
+    for (const auto& value : {"6", "1"})
+        assert(g_engine.insert(database, "bucket_function_order",
+                               {{"v", value}}) == dbms::DBStatus::OK);
+    functionSort.exprFunc = "width_bucket";
+    functionSort.expressionSql = "width_bucket(v, 0, 10, 2)";
+    assert(g_engine.query(database, "bucket_function_order", {}, {"v"},
+                          {functionSort}) == ids({"1", "6"}));
+    assert(g_engine.sortByExpression(database, "bucket_function_order",
+                                     ids({"6", "1"}), {functionSort}) ==
+           ids({"1", "6"}));
+
     cleanupTestDb(testName);
     finalCleanupTestData();
     std::cout << "[FLOATING ORDER BY] numeric/NaN/null ordering OK"
