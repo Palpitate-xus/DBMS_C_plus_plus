@@ -29204,6 +29204,22 @@ std::vector<std::string> StorageEngine::query(
                 comparisonColumn.dataType = "numeric";
                 comparisonColumn.isVariableLength = true;
             }
+            if (!spec.expressionSql.empty() &&
+                (spec.exprFunc == "abs" || spec.exprFunc == "round" ||
+                 spec.exprFunc == "power")) {
+                std::map<std::string, std::string> typeHints;
+                for (size_t ci = 0; ci < tbl.len; ++ci)
+                    typeHints[tbl.cols[ci].dataName] = tbl.cols[ci].dataType;
+                const std::string resultType = ExprHelper::inferResultType(
+                    spec.expressionSql, typeHints);
+                comparisonColumn.dataType =
+                    resultType == "double precision" ? "double" :
+                    resultType == "real" ? "float" :
+                    (resultType == "integer" || resultType == "bigint" ||
+                     resultType == "smallint") ? "int" : "numeric";
+                comparisonColumn.isVariableLength =
+                    comparisonColumn.dataType == "numeric";
+            }
             if (!spec.collation.empty()) {
                 comparisonColumn.collation =
                     collation::normalizeName(spec.collation) == "binary"
@@ -35505,6 +35521,19 @@ std::vector<std::string> StorageEngine::sortByExpression(
                 }
             }
         }
+        if (!spec.expressionSql.empty() &&
+            (spec.exprFunc == "abs" || spec.exprFunc == "round" ||
+             spec.exprFunc == "power")) {
+            const std::string resultType = ExprHelper::inferResultType(
+                spec.expressionSql, expressionTypeHints);
+            comparisonColumn.dataType =
+                resultType == "double precision" ? "double" :
+                resultType == "real" ? "float" :
+                (resultType == "integer" || resultType == "bigint" ||
+                 resultType == "smallint") ? "int" : "numeric";
+            comparisonColumn.isVariableLength =
+                comparisonColumn.dataType == "numeric";
+        }
         if (!spec.collation.empty()) {
             comparisonColumn.collation =
                 collation::normalizeName(spec.collation) == "binary"
@@ -35621,7 +35650,14 @@ std::vector<std::string> StorageEngine::sortByExpression(
                 if (aNull) return spec.nullsFirst;
                 if (bNull) return !spec.nullsFirst;
                 bool less = false, greater = false;
-                if (!spec.expressionSql.empty() ||
+                if (!spec.expressionSql.empty()) {
+                    less = compareValues(comparisonColumns[i], av, false,
+                                         bv, false, "<") ==
+                           PredicateTruth::True;
+                    greater = compareValues(comparisonColumns[i], av, false,
+                                            bv, false, ">") ==
+                              PredicateTruth::True;
+                } else if (
                     spec.exprFunc == "left" || spec.exprFunc == "right" ||
                     spec.exprFunc == "reverse" ||
                     !comparisonColumns[i].collation.empty()) {

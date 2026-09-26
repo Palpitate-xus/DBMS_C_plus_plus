@@ -92,6 +92,46 @@ int main() {
                           {descending}) ==
            ids({"6", "4", "1", "3", "2", "5", "7"}));
 
+    dbms::TableSchema numericSchema;
+    numericSchema.tablename = "numeric_function_order";
+    numericSchema.formatVersion = 2;
+    numericSchema.append(dbms::makeDecimalColumn("v", false, 20, 4));
+    assert(g_engine.createTable(database, numericSchema) ==
+           dbms::DBStatus::OK);
+    for (const auto& value : {"-1.4", "-1.6"})
+        assert(g_engine.insert(database, "numeric_function_order",
+                               {{"v", value}}) == dbms::DBStatus::OK);
+    dbms::StorageEngine::OrderBySpec functionSort;
+    functionSort.isExpression = true;
+    functionSort.exprFunc = "round";
+    functionSort.expressionSql = "round(v)";
+    assert(g_engine.query(database, "numeric_function_order", {}, {"v"},
+                          {functionSort}) == ids({"-1.6", "-1.4"}));
+    assert(g_engine.sortByExpression(
+               database, "numeric_function_order",
+               ids({"-1.4", "-1.6"}), {functionSort}) ==
+           ids({"-1.6", "-1.4"}));
+    functionSort.exprFunc = "abs";
+    functionSort.expressionSql = "abs(v)";
+    functionSort.ascending = false;
+    assert(g_engine.query(database, "numeric_function_order", {}, {"v"},
+                          {functionSort}) == ids({"-1.6", "-1.4"}));
+
+    dbms::TableSchema powerSchema;
+    powerSchema.tablename = "power_function_order";
+    powerSchema.formatVersion = 2;
+    powerSchema.append(dbms::makeIntColumn("v", false, 4));
+    assert(g_engine.createTable(database, powerSchema) ==
+           dbms::DBStatus::OK);
+    for (const auto& value : {"-2", "-1"})
+        assert(g_engine.insert(database, "power_function_order",
+                               {{"v", value}}) == dbms::DBStatus::OK);
+    functionSort.exprFunc = "power";
+    functionSort.expressionSql = "power(v, 2)";
+    functionSort.ascending = true;
+    assert(g_engine.query(database, "power_function_order", {}, {"v"},
+                          {functionSort}) == ids({"-1", "-2"}));
+
     cleanupTestDb(testName);
     finalCleanupTestData();
     std::cout << "[FLOATING ORDER BY] numeric/NaN/null ordering OK"

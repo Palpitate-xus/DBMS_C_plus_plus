@@ -22685,13 +22685,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         spec.exprFunc = func;
                         spec.exprArg = arg;
                         spec.collation = collation;
-                        static const set<string> evaluatedTextSortFuncs = {
+                        static const set<string> evaluatedSortFuncs = {
                             "replace", "translate", "concat", "concat_ws",
                             "initcap", "lpad", "rpad", "repeat", "btrim",
                             "ltrim", "rtrim", "split_part", "substring",
-                            "overlay", "trim"
+                            "overlay", "trim", "abs", "round", "power"
                         };
-                        if (evaluatedTextSortFuncs.count(func))
+                        if (evaluatedSortFuncs.count(func))
                             spec.expressionSql = sortItem;
                         if (func == "left" || func == "right") {
                             const size_t comma = arg.find(',');
