@@ -237,6 +237,22 @@ int main() {
                                      ids({"2", "10"}), {functionSort}) ==
            ids({"10", "2"}));
 
+    dbms::TableSchema parseSchema;
+    parseSchema.tablename = "parse_function_order";
+    parseSchema.formatVersion = 2;
+    parseSchema.append(dbms::makeTextColumn("v", false));
+    assert(g_engine.createTable(database, parseSchema) == dbms::DBStatus::OK);
+    for (const auto& value : {"10", "2"})
+        assert(g_engine.insert(database, "parse_function_order",
+                               {{"v", value}}) == dbms::DBStatus::OK);
+    functionSort.exprFunc = "to_number";
+    functionSort.expressionSql = "to_number(v, '999')";
+    assert(g_engine.query(database, "parse_function_order", {}, {"v"},
+                          {functionSort}) == ids({"2", "10"}));
+    assert(g_engine.sortByExpression(database, "parse_function_order",
+                                     ids({"10", "2"}), {functionSort}) ==
+           ids({"2", "10"}));
+
     cleanupTestDb(testName);
     finalCleanupTestData();
     std::cout << "[FLOATING ORDER BY] numeric/NaN/null ordering OK"
