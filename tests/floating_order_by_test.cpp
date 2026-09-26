@@ -221,6 +221,22 @@ int main() {
                                      ids({"6", "1"}), {functionSort}) ==
            ids({"1", "6"}));
 
+    dbms::TableSchema formatSchema;
+    formatSchema.tablename = "format_function_order";
+    formatSchema.formatVersion = 2;
+    formatSchema.append(dbms::makeIntColumn("v", false, 4));
+    assert(g_engine.createTable(database, formatSchema) == dbms::DBStatus::OK);
+    for (const auto& value : {"2", "10"})
+        assert(g_engine.insert(database, "format_function_order",
+                               {{"v", value}}) == dbms::DBStatus::OK);
+    functionSort.exprFunc = "to_char";
+    functionSort.expressionSql = "to_char(v, 'FM99')";
+    assert(g_engine.query(database, "format_function_order", {}, {"v"},
+                          {functionSort}) == ids({"10", "2"}));
+    assert(g_engine.sortByExpression(database, "format_function_order",
+                                     ids({"2", "10"}), {functionSort}) ==
+           ids({"10", "2"}));
+
     cleanupTestDb(testName);
     finalCleanupTestData();
     std::cout << "[FLOATING ORDER BY] numeric/NaN/null ordering OK"
