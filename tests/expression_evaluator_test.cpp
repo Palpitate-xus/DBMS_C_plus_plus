@@ -371,6 +371,11 @@ static void test_explicit_collation_comparisons() {
     auto upperedC = evaluate("SELECT upper('apple' COLLATE \"C\")");
     assert(upperedC.typeName == "text" && upperedC.value == "APPLE" &&
            upperedC.collation == "c");
+    auto trimmedC = evaluate("SELECT ltrim('  apple' COLLATE \"C\")");
+    assert(trimmedC.value == "apple" && trimmedC.collation == "c");
+    auto replacedC = evaluate(
+        "SELECT replace('apple' COLLATE \"C\", 'p', 'p')");
+    assert(replacedC.value == "apple" && replacedC.collation == "c");
     bool conflict = false;
     try {
         (void)evaluate(
@@ -408,6 +413,12 @@ static void test_explicit_collation_comparisons() {
                 "NULL::text COLLATE \"default\")", "42P21");
     expectError("SELECT NULLIF('apple' COLLATE \"C\", "
                 "NULL::text COLLATE \"default\")", "42P21");
+    expectError("SELECT replace('apple' COLLATE \"C\", "
+                "'p' COLLATE \"default\", 'p')", "42P21");
+    expectError("SELECT strpos('apple' COLLATE \"C\", "
+                "'p' COLLATE \"default\")", "42P21");
+    expectError("SELECT concat('a' COLLATE \"C\", "
+                "'b' COLLATE \"default\")", "42P21");
 }
 
 static void test_logical() {

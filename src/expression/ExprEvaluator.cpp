@@ -4639,7 +4639,19 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         return ExprValue("interval", intervalToText(mi_months, mi_days, mi_micros), false);
     }
     auto it = functions_.find(name);
-    if (it != functions_.end()) return it->second(args);
+    if (it != functions_.end()) {
+        std::string argumentCollation;
+        for (const ExprValue& argument : args) {
+            if (isCollatableExprType(argument.typeName))
+                argumentCollation = mergeExplicitCollations(
+                    argumentCollation, argument.collation);
+        }
+        ExprValue result = it->second(args);
+        if (isCollatableExprType(result.typeName))
+            result.collation = mergeExplicitCollations(
+                result.collation, argumentCollation);
+        return result;
+    }
 
     // Built-in fallback for common functions even if not registered
     if (name == "nullif") {
