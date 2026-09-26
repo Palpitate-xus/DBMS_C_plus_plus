@@ -4282,7 +4282,6 @@ static ExprValue castToBitString(const ExprValue& value,
 // Helper overload used by BinaryOpExpr "::"
 ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
                                   const ExprValue& v, const std::string& targetTypeName) const {
-    if (v.isNull) return ExprValue(targetTypeName, "", true);
     std::string target = toLower(targetTypeName);
     {
         // :: type modifier lists arrive space-joined without an opening
@@ -4307,6 +4306,12 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
                 target = base + "(" + modifiers + ")";
             }
         }
+    }
+    if (v.isNull) {
+        ExprValue result(targetTypeName, "", true);
+        if (parseCharacterCastSpec(target).kind != CharacterCastKind::None)
+            result.collation = v.collation;
+        return result;
     }
 
     if (target == "boolean" || target == "bool") return castToBoolean(v);
@@ -4359,8 +4364,11 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
     const BitCastSpec bitSpec = parseBitCastSpec(target);
     if (bitSpec.matches) return castToBitString(v, bitSpec);
     const CharacterCastSpec characterSpec = parseCharacterCastSpec(target);
-    if (characterSpec.kind != CharacterCastKind::None)
-        return castToCharacter(v, characterSpec);
+    if (characterSpec.kind != CharacterCastKind::None) {
+        ExprValue result = castToCharacter(v, characterSpec);
+        result.collation = v.collation;
+        return result;
+    }
     if (target == "date") return castToDate(v);
     if (target == "timestamp" || target == "timestamp without time zone")
         return castToTimestamp(v, "timestamp");

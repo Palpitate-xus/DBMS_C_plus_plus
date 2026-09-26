@@ -327,6 +327,16 @@ static void test_explicit_collation_comparisons() {
         "SELECT ('app' COLLATE \"default\" || 'le') < 'Zoo'");
     assert(concatenatedDefault.typeName == "boolean" &&
            concatenatedDefault.asBool());
+    auto castC = evaluate(
+        "SELECT CAST(('apple' COLLATE \"C\") AS text) < 'Zoo'");
+    assert(castC.typeName == "boolean" && !castC.asBool());
+    auto postgresCastC = evaluate(
+        "SELECT ('apple' COLLATE \"C\")::text < 'Zoo'");
+    assert(postgresCastC.typeName == "boolean" &&
+           !postgresCastC.asBool());
+    auto castNull = evaluate(
+        "SELECT CAST((NULL::text COLLATE \"C\") AS text)");
+    assert(castNull.isNull && castNull.collation == "c");
     bool conflict = false;
     try {
         (void)evaluate(
