@@ -7198,9 +7198,12 @@ static string ungroupedProjectionColumn(
 }
 
 static bool evaluateQueryRowCount(const string& expression, Session& s,
-                                  size_t& value, bool& isNull) {
+                                  size_t& value, bool& isNull,
+                                  string& error, string& sqlState) {
     const string text = trim(expression);
     if (text.empty()) return false;
+    if (!validateFromlessColumnBindings(
+            text, error, sqlState)) return false;
     if (toLower(text) == "null") {
         value = 0;
         isNull = true;
@@ -7247,10 +7250,17 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                 cols.substr(limitAt + 5, end - limitAt - 5));
             if (toLower(expression) != "all") {
                 bool isNull = false;
+                string error, sqlState;
                 if (!evaluateQueryRowCount(
-                        expression, s, queryLimit, isNull)) {
-                    cout << "ERROR: unsupported LIMIT expression "
-                            "(SQLSTATE 0A000)" << endl;
+                        expression, s, queryLimit, isNull,
+                        error, sqlState)) {
+                    if (!error.empty()) {
+                        cout << "ERROR: " << error << " (SQLSTATE "
+                             << sqlState << ")" << endl;
+                    } else {
+                        cout << "ERROR: unsupported LIMIT expression "
+                                "(SQLSTATE 0A000)" << endl;
+                    }
                     return true;
                 }
                 finiteQueryLimit = !isNull;
@@ -7270,10 +7280,17 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                 expression = trim(expression.substr(0, expression.size() - 4));
             }
             bool isNull = false;
+            string error, sqlState;
             if (!evaluateQueryRowCount(
-                    expression, s, queryOffset, isNull)) {
-                cout << "ERROR: unsupported OFFSET expression "
-                        "(SQLSTATE 0A000)" << endl;
+                    expression, s, queryOffset, isNull,
+                    error, sqlState)) {
+                if (!error.empty()) {
+                    cout << "ERROR: " << error << " (SQLSTATE "
+                         << sqlState << ")" << endl;
+                } else {
+                    cout << "ERROR: unsupported OFFSET expression "
+                            "(SQLSTATE 0A000)" << endl;
+                }
                 return true;
             }
             if (isNull) queryOffset = 0;
@@ -19865,10 +19882,17 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 sql.substr(limitPos + 5, end - limitPos - 5));
             if (toLower(expression) != "all") {
                 bool isNull = false;
+                string error, sqlState;
                 if (!evaluateQueryRowCount(
-                        expression, s, parsedLimit, isNull)) {
-                    cout << "ERROR: unsupported LIMIT expression "
-                            "(SQLSTATE 0A000)" << endl;
+                        expression, s, parsedLimit, isNull,
+                        error, sqlState)) {
+                    if (!error.empty()) {
+                        cout << "ERROR: " << error << " (SQLSTATE "
+                             << sqlState << ")" << endl;
+                    } else {
+                        cout << "ERROR: unsupported LIMIT expression "
+                                "(SQLSTATE 0A000)" << endl;
+                    }
                     return true;
                 }
                 finiteParsedLimit = !isNull;
@@ -19888,10 +19912,17 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 expression = trim(expression.substr(0, expression.size() - 4));
             }
             bool isNull = false;
+            string error, sqlState;
             if (!evaluateQueryRowCount(
-                    expression, s, parsedOffset, isNull)) {
-                cout << "ERROR: unsupported OFFSET expression "
-                        "(SQLSTATE 0A000)" << endl;
+                    expression, s, parsedOffset, isNull,
+                    error, sqlState)) {
+                if (!error.empty()) {
+                    cout << "ERROR: " << error << " (SQLSTATE "
+                         << sqlState << ")" << endl;
+                } else {
+                    cout << "ERROR: unsupported OFFSET expression "
+                            "(SQLSTATE 0A000)" << endl;
+                }
                 return true;
             }
             if (isNull) parsedOffset = 0;
