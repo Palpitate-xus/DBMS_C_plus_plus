@@ -102,6 +102,10 @@ int main() {
     byMonth.expressionSql = "extract(year from timestamp_value)";
     assert(g_engine.query(database, "events", {}, {"id"}, {byMonth}) ==
            ids({"3", "1", "2", "4"}));
+    byMonth.exprFunc = "date_part";
+    byMonth.expressionSql = "date_part('year', timestamp_value)";
+    assert(g_engine.query(database, "events", {}, {"id"}, {byMonth}) ==
+           ids({"3", "1", "2", "4"}));
 
     cleanupTestDb(testName);
     finalCleanupTestData();

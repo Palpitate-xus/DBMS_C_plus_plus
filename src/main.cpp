@@ -1114,7 +1114,7 @@ static string preprocessCaseWhen(string s) {
 static bool isScalarFunc(const string& name) {
     static const set<string> scalars = {"length", "char_length", "character_length", "upper", "lower", "trim", "substring", "concat",
                                          "abs", "round", "trunc", "ceil", "floor",
-                                         "now", "current_timestamp", "extract", "timezone",
+                                         "now", "current_timestamp", "extract", "date_part", "timezone",
                                          "year", "month", "day",
                                          "hour", "minute", "second",
                                          "case_when", "cast", "convert",
@@ -22693,7 +22693,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             "floor", "ceil", "trunc", "sign", "mod",
                             "gcd", "lcm", "div", "sqrt", "ln", "log",
                             "exp", "sin", "cos", "tan", "date_trunc",
-                            "extract"
+                            "extract", "date_part"
                         };
                         if (evaluatedSortFuncs.count(func))
                             spec.expressionSql = sortItem;
