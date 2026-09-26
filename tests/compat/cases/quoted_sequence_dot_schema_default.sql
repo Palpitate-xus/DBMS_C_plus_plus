@@ -1,0 +1,12 @@
+DROP SCHEMA IF EXISTS "Diff.Seq.Default" CASCADE;
+CREATE SCHEMA "Diff.Seq.Default";
+CREATE SEQUENCE "Diff.Seq.Default".seq_one START 21;
+CREATE TABLE "Diff.Seq.Default".t_default (id bigint DEFAULT nextval('"Diff.Seq.Default".seq_one'));
+INSERT INTO "Diff.Seq.Default".t_default (id) VALUES (DEFAULT);
+SELECT id FROM "Diff.Seq.Default".t_default ORDER BY id;
+ALTER SEQUENCE "Diff.Seq.Default".seq_one RENAME TO seq_two;
+INSERT INTO "Diff.Seq.Default".t_default (id) VALUES (DEFAULT);
+SELECT id FROM "Diff.Seq.Default".t_default ORDER BY id;
+DROP TABLE "Diff.Seq.Default".t_default;
+DROP SEQUENCE "Diff.Seq.Default".seq_two;
+DROP SCHEMA "Diff.Seq.Default";

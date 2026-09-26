@@ -4603,7 +4603,7 @@ static std::string canonicalSequenceReferenceName(
     return name;
 }
 
-static std::string quoteSequenceReferencePart(
+static std::string quoteSqlIdentifierPart(
     const std::string& part) {
     std::string quoted = "\"";
     for (char ch : part) {
@@ -6363,6 +6363,7 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
         return true;
     }
     std::string tname = resolveTableName(s, logicalName);
+    Oid resolvedCatalogOid = INVALID_OID;
     // Relation kinds share a namespace. Check the catalog before looking for
     // the heap file: a view has no table schema file, while a materialized
     // view may have a backing heap that must not be removed by DROP TABLE.
@@ -6387,6 +6388,7 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
             const PgClassRow* relation =
                 g_engine.catalogService().get(s.currentDB).resolveRelation(
                     logicalName, catalogSearchPath);
+            if (relation) resolvedCatalogOid = relation->oid;
             if (relation && relation->relkind != 'r' &&
                 relation->relkind != 'p') {
                 std::cout << "ERROR: \"" << logicalName
@@ -6501,10 +6503,16 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
     const std::string catalogLogicalName = catalogQualifiedName.schema.empty()
         ? catalogQualifiedName.name
         : (catalogQualifiedName.schema + "." + catalogQualifiedName.name);
+    const std::string catalogLookupName = catalogQualifiedName.schema.empty()
+        ? quoteSqlIdentifierPart(catalogQualifiedName.name)
+        : quoteSqlIdentifierPart(catalogQualifiedName.schema) + "." +
+              quoteSqlIdentifierPart(catalogQualifiedName.name);
     try {
         CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
         catalogManager = &cat;
-        const PgClassRow* cls = cat.resolveRelation(catalogLogicalName, {"public"});
+        const PgClassRow* cls = resolvedCatalogOid != INVALID_OID
+            ? cat.findClass(resolvedCatalogOid)
+            : cat.resolveRelation(catalogLookupName, {"public"});
         if (cls) {
             catalogRootOid = cls->oid;
             // Releases before this fix recorded an ordinary DEFAULT
@@ -7874,8 +7882,8 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
             sequenceSchema, newName);
         const std::string newReferenceName =
             newStorageName.rfind("seqv2..", 0) == 0
-                ? quoteSequenceReferencePart(sequenceSchema) + "." +
-                      quoteSequenceReferencePart(newName)
+                ? quoteSqlIdentifierPart(sequenceSchema) + "." +
+                      quoteSqlIdentifierPart(newName)
                 : newStorageName;
         const auto dependencies =
             findDefaultNextvalDeps(s.currentDB, seqname);
