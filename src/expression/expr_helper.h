@@ -34,6 +34,11 @@ public:
         const std::string& exprSql,
         const std::map<std::string, std::string>& typeHints = {});
 
+    // Parse-only collation analysis; does not evaluate row-dependent or
+    // volatile functions. Raises DbError for syntax/collation errors.
+    static std::string analyzeExplicitResultCollation(
+        const std::string& exprSql);
+
     // VALUES analysis shared by execution and protocol Describe.  The first
     // helper preserves PostgreSQL integer literal widths and unknown string
     // literals; the second chooses one common type for a VALUES column.

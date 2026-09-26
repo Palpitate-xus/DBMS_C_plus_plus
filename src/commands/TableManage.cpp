@@ -29233,6 +29233,33 @@ std::vector<std::string> StorageEngine::query(
         for (size_t ci = 0; ci < tbl.len; ++ci)
             expressionTypeHints[tbl.cols[ci].dataName] =
                 tbl.cols[ci].dataType;
+        // PostgreSQL resolves explicit collation conflicts during analysis,
+        // including when the input relation contains no rows. Do not execute
+        // the expression merely to inspect its collation.
+        for (size_t keyIndex = 0; keyIndex < orderBy.size(); ++keyIndex) {
+            const auto& spec = orderBy[keyIndex];
+            if (spec.expressionSql.empty()) continue;
+            std::string resultCollation;
+            try {
+                resultCollation = ExprHelper::analyzeExplicitResultCollation(
+                    spec.expressionSql);
+            } catch (...) {
+                lockManager_.unlock(tablename);
+                throw;
+            }
+            if (!spec.collation.empty() || resultCollation.empty()) continue;
+            auto& comparisonColumn = expressionComparisonColumns[keyIndex];
+            comparisonColumn.collation = resultCollation;
+            TableSchema collationProbe;
+            collationProbe.len = 1;
+            collationProbe.cols[0] = comparisonColumn;
+            if (resolveTableCollations(*this, dbname, collationProbe) !=
+                DBStatus::OK) {
+                lockManager_.unlock(tablename);
+                return result;
+            }
+            comparisonColumn = std::move(collationProbe.cols[0]);
+        }
         for (size_t ri = 0; ri < matchRows.size(); ++ri) {
             ExprKey ek{ri, {}, {}};
             NullRowBinding nullBinding(

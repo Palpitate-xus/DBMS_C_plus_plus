@@ -86,6 +86,10 @@ public:
         return expr ? eval(expr.get(), ctx) : ExprValue{};
     }
 
+    // Analyze collation-bearing result arms without executing the expression.
+    // Conflicting explicit collations raise SQLSTATE 42P21 even for zero rows.
+    static std::string analyzeExplicitResultCollation(const Expr* expr);
+
     // 注册 / 查找标量函数
     void registerFunction(const std::string& name, ScalarFunction fn);
     void registerFunction(const std::string& name, ScalarFunction fn, char volatility);

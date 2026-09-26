@@ -3,6 +3,7 @@
 #include "parser/parser.h"
 #include "parser/ast.h"
 #include "catalog/type_registry.h"
+#include "common/DbError.h"
 
 #include <algorithm>
 #include <cctype>
@@ -940,6 +941,21 @@ bool ExprHelper::resolveValuesResultType(
         return false;
     }
     return true;
+}
+
+std::string ExprHelper::analyzeExplicitResultCollation(
+    const std::string& exprSql) {
+    SQLParser parser;
+    ParseResult parsed = parser.parse("SELECT " + exprSql);
+    if (!parsed.success || !parsed.stmt)
+        throw DbError("42601", parsed.error.empty()
+            ? "invalid ORDER BY expression" : parsed.error);
+    const auto* select = dynamic_cast<SelectStmt*>(parsed.stmt.get());
+    if (!select || select->selectList.empty() ||
+        !select->selectList[0].expr)
+        throw DbError("42601", "invalid ORDER BY expression");
+    return ExprEvaluator::analyzeExplicitResultCollation(
+        select->selectList[0].expr.get());
 }
 
 std::string ExprHelper::inferResultType(

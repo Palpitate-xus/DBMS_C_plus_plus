@@ -3,6 +3,7 @@
 #include "commands/TableManage.h"
 #include "Session.h"
 #include "catalog/type_registry.h"
+#include "common/DbError.h"
 #include <cassert>
 #include <filesystem>
 #include <fstream>
@@ -675,6 +676,19 @@ static void test_custom_collation_runtime_resolution() {
     rows = g_engine.sortByExpression(
         db, "evaluated_order", {"ba ", "aa "}, {byLtrim});
     assert((rows == std::vector<std::string>{"aa ", "ba "}));
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE empty_collation_order (v TEXT)", s));
+    byReplace.expressionSql =
+        "replace(v COLLATE \"C\", 'a' COLLATE \"default\", 'z')";
+    bool emptyOrderConflict = false;
+    try {
+        (void)g_engine.query(
+            db, "empty_collation_order", {}, {"v"}, {byReplace});
+    } catch (const dbms::DbError& error) {
+        emptyOrderConflict = error.sqlState() == "42P21";
+    }
+    assert(emptyOrderConflict);
 
     assert(!ddl.executeSql("CREATE TABLE alter_target (id INT)", s));
     assert(!ddl.executeSql(

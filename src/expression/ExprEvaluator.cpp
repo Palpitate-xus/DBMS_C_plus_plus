@@ -87,7 +87,8 @@ static bool isTextResultBuiltin(const std::string& name) {
     static const std::set<std::string> textBuiltins = {
         "lower", "upper", "substring", "substr", "ltrim", "rtrim",
         "btrim", "replace", "left", "right", "repeat", "reverse",
-        "concat", "initcap", "translate", "overlay"
+        "concat", "concat_ws", "initcap", "translate", "overlay",
+        "lpad", "rpad", "split_part"
     };
     return textBuiltins.count(name) != 0;
 }
@@ -105,7 +106,8 @@ static std::string mergeExplicitCollations(const std::string& left,
 // result collation from every result arm before executing any arm.  Inspect
 // only the result-bearing AST nodes here; evaluating an unused arm would
 // violate their short-circuit and side-effect behavior.
-static std::string explicitResultCollation(const Expr* expression) {
+static std::string explicitResultCollation(const Expr* expression,
+                                           bool validateName = true) {
     if (!expression) return {};
     switch (expression->type) {
         case ExprType::UnaryOp: {
@@ -113,7 +115,7 @@ static std::string explicitResultCollation(const Expr* expression) {
             if (toLower(unary->op).rfind("collate ", 0) == 0) {
                 const std::string name =
                     collation::normalizeName(unary->op.substr(8));
-                if (!collation::isValid(name))
+                if (validateName && !collation::isValid(name))
                     throw DbError("42704", "collation does not exist: " + name);
                 return name;
             }
@@ -122,21 +124,22 @@ static std::string explicitResultCollation(const Expr* expression) {
         case ExprType::CastExpr: {
             const auto* cast = static_cast<const CastExpr*>(expression);
             return isCollatableCastTarget(cast->typeName)
-                ? explicitResultCollation(cast->operand.get()) : std::string{};
+                ? explicitResultCollation(cast->operand.get(), validateName)
+                : std::string{};
         }
         case ExprType::BinaryOp: {
             const auto* binary = static_cast<const BinaryOpExpr*>(expression);
             if (binary->op == "||")
                 return mergeExplicitCollations(
-                    explicitResultCollation(binary->left.get()),
-                    explicitResultCollation(binary->right.get()));
+                    explicitResultCollation(binary->left.get(), validateName),
+                    explicitResultCollation(binary->right.get(), validateName));
             if (binary->op == "::") {
                 const auto* target = binary->right &&
                     binary->right->type == ExprType::Literal
                     ? static_cast<const LiteralExpr*>(binary->right.get())
                     : nullptr;
                 return target && isCollatableCastTarget(target->value)
-                    ? explicitResultCollation(binary->left.get())
+                    ? explicitResultCollation(binary->left.get(), validateName)
                     : std::string{};
             }
             return {};
@@ -146,9 +149,11 @@ static std::string explicitResultCollation(const Expr* expression) {
             std::string result;
             for (const auto& arm : conditional->whenClauses)
                 result = mergeExplicitCollations(
-                    result, explicitResultCollation(arm.second.get()));
+                    result, explicitResultCollation(arm.second.get(),
+                                                    validateName));
             return mergeExplicitCollations(
-                result, explicitResultCollation(conditional->elseExpr.get()));
+                result, explicitResultCollation(
+                    conditional->elseExpr.get(), validateName));
         }
         case ExprType::FunctionCall: {
             const auto* function = static_cast<const FunctionCallExpr*>(expression);
@@ -161,12 +166,19 @@ static std::string explicitResultCollation(const Expr* expression) {
             std::string result;
             for (const auto& argument : function->args)
                 result = mergeExplicitCollations(
-                    result, explicitResultCollation(argument.get()));
+                    result, explicitResultCollation(argument.get(),
+                                                    validateName));
             return result;
         }
         default:
             return {};
     }
+}
+
+std::string ExprEvaluator::analyzeExplicitResultCollation(const Expr* expr) {
+    // The storage layer resolves built-in and user-defined collation names
+    // against the current database after this syntax-only conflict analysis.
+    return explicitResultCollation(expr, false);
 }
 
 static std::string formatUtcClock(std::time_t value, const char* format) {
