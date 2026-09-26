@@ -91,6 +91,14 @@ int main() {
     assertQueryOrder(database, "time_value",
                      ids({"4", "3", "2", "1"}), true);
 
+    dbms::StorageEngine::OrderBySpec byMonth;
+    byMonth.isExpression = true;
+    byMonth.exprFunc = "date_trunc";
+    byMonth.expressionSql =
+        "date_trunc('month', timestamp_value)";
+    assert(g_engine.query(database, "events", {}, {"id"}, {byMonth}) ==
+           ids({"3", "1", "2", "4"}));
+
     cleanupTestDb(testName);
     finalCleanupTestData();
     std::cout << "[TEMPORAL ORDER BY] chronological/timezone/null ordering OK"
