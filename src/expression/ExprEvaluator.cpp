@@ -72,6 +72,71 @@ static bool isCollatableExprType(const std::string& typeName) {
            type == "character" || type == "bpchar";
 }
 
+static std::string mergeExplicitCollations(const std::string& left,
+                                           const std::string& right) {
+    const std::string a = collation::normalizeName(left);
+    const std::string b = collation::normalizeName(right);
+    if (!a.empty() && !b.empty() && a != b)
+        throw DbError("42P21", "collation mismatch between explicit collations");
+    return a.empty() ? b : a;
+}
+
+// CASE and COALESCE choose a value lazily, but PostgreSQL resolves their
+// result collation from every result arm before executing any arm.  Inspect
+// only the result-bearing AST nodes here; evaluating an unused arm would
+// violate their short-circuit and side-effect behavior.
+static std::string explicitResultCollation(const Expr* expression) {
+    if (!expression) return {};
+    switch (expression->type) {
+        case ExprType::UnaryOp: {
+            const auto* unary = static_cast<const UnaryOpExpr*>(expression);
+            if (toLower(unary->op).rfind("collate ", 0) == 0) {
+                const std::string name =
+                    collation::normalizeName(unary->op.substr(8));
+                if (!collation::isValid(name))
+                    throw DbError("42704", "collation does not exist: " + name);
+                return name;
+            }
+            return {};
+        }
+        case ExprType::CastExpr: {
+            const auto* cast = static_cast<const CastExpr*>(expression);
+            return isCollatableExprType(cast->typeName)
+                ? explicitResultCollation(cast->operand.get()) : std::string{};
+        }
+        case ExprType::BinaryOp: {
+            const auto* binary = static_cast<const BinaryOpExpr*>(expression);
+            if (binary->op == "||")
+                return mergeExplicitCollations(
+                    explicitResultCollation(binary->left.get()),
+                    explicitResultCollation(binary->right.get()));
+            if (binary->op == "::")
+                return explicitResultCollation(binary->left.get());
+            return {};
+        }
+        case ExprType::CaseExpr: {
+            const auto* conditional = static_cast<const CaseExpr*>(expression);
+            std::string result;
+            for (const auto& arm : conditional->whenClauses)
+                result = mergeExplicitCollations(
+                    result, explicitResultCollation(arm.second.get()));
+            return mergeExplicitCollations(
+                result, explicitResultCollation(conditional->elseExpr.get()));
+        }
+        case ExprType::FunctionCall: {
+            const auto* function = static_cast<const FunctionCallExpr*>(expression);
+            if (toLower(function->funcName) != "coalesce") return {};
+            std::string result;
+            for (const auto& argument : function->args)
+                result = mergeExplicitCollations(
+                    result, explicitResultCollation(argument.get()));
+            return result;
+        }
+        default:
+            return {};
+    }
+}
+
 static std::string formatUtcClock(std::time_t value, const char* format) {
     std::tm utc{};
     if (::gmtime_r(&value, &utc) == nullptr) return "";
@@ -3299,6 +3364,12 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
 
 ExprValue ExprEvaluator::evalCase(const CaseExpr* e, const RowContext& ctx) const {
     if (!e) return ExprValue{};
+    const std::string resultCollation = explicitResultCollation(e);
+    auto withResultCollation = [&](ExprValue value) {
+        value.collation = mergeExplicitCollations(value.collation,
+                                                    resultCollation);
+        return value;
+    };
     const bool simpleCase = static_cast<bool>(e->switchExpr);
     const ExprValue switchValue = simpleCase
         ? eval(e->switchExpr.get(), ctx) : ExprValue{};
@@ -3312,10 +3383,11 @@ ExprValue ExprEvaluator::evalCase(const CaseExpr* e, const RowContext& ctx) cons
         } else {
             match = eval(wc.first.get(), ctx).asBool();
         }
-        if (match) return eval(wc.second.get(), ctx);
+        if (match) return withResultCollation(eval(wc.second.get(), ctx));
     }
-    if (e->elseExpr) return eval(e->elseExpr.get(), ctx);
-    return ExprValue("unknown", "", true);
+    if (e->elseExpr)
+        return withResultCollation(eval(e->elseExpr.get(), ctx));
+    return withResultCollation(ExprValue("unknown", "", true));
 }
 
 // ----------------------------------------------------------------------------
@@ -4417,11 +4489,18 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     // COALESCE is syntax-like in SQL: stop as soon as the first non-NULL
     // argument is found, so unused arguments are never evaluated.
     if (name == "coalesce") {
+        const std::string resultCollation = explicitResultCollation(e);
         for (const auto& argument : e->args) {
             ExprValue value = eval(argument.get(), ctx);
-            if (!value.isNull) return value;
+            if (!value.isNull) {
+                value.collation = mergeExplicitCollations(
+                    value.collation, resultCollation);
+                return value;
+            }
         }
-        return ExprValue("unknown", "", true);
+        ExprValue result("unknown", "", true);
+        result.collation = resultCollation;
+        return result;
     }
 
     std::vector<ExprValue> args;

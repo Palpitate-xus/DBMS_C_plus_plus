@@ -337,6 +337,13 @@ static void test_explicit_collation_comparisons() {
     auto castNull = evaluate(
         "SELECT CAST((NULL::text COLLATE \"C\") AS text)");
     assert(castNull.isNull && castNull.collation == "c");
+    auto coalesceC = evaluate(
+        "SELECT COALESCE('apple', 'x' COLLATE \"C\") < 'Zoo'");
+    assert(coalesceC.typeName == "boolean" && !coalesceC.asBool());
+    auto caseC = evaluate(
+        "SELECT CASE WHEN true THEN 'apple' ELSE 'x' COLLATE \"C\" "
+        "END < 'Zoo'");
+    assert(caseC.typeName == "boolean" && !caseC.asBool());
     bool conflict = false;
     try {
         (void)evaluate(
@@ -362,6 +369,12 @@ static void test_explicit_collation_comparisons() {
                 "42P21");
     expectError("SELECT NULL::text COLLATE \"C\" || "
                 "'b' COLLATE \"default\"", "42P21");
+    expectError("SELECT COALESCE('apple' COLLATE \"C\", "
+                "'x' COLLATE \"default\")", "42P21");
+    expectError("SELECT CASE WHEN true THEN 'apple' COLLATE \"C\" "
+                "ELSE 'x' COLLATE \"default\" END", "42P21");
+    expectError("SELECT COALESCE('apple', 'x' COLLATE "
+                "\"missing_collation\")", "42704");
 }
 
 static void test_logical() {
