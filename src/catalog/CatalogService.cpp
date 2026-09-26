@@ -1,6 +1,10 @@
 #include "catalog/CatalogService.h"
 #include "commands/TableManage.h"
+#include "commands/SequenceStorageName.h"
 #include <filesystem>
+#include <stdexcept>
+#include <fcntl.h>
+#include <unistd.h>
 
 namespace dbms {
 
@@ -16,6 +20,81 @@ static fs::path catalogDirForDb(const StorageEngine& engine, const std::string& 
     return engine.dbPath(dbname) / "pg_catalog";
 }
 
+static void migrateLegacyPublicDottedSequences(
+    const StorageEngine& engine, const std::string& dbname,
+    const CatalogManager& catalog) {
+    const fs::path directory = engine.dbPath(dbname);
+    for (const auto& relation : catalog.listClasses()) {
+        if (relation.relkind != 'S' ||
+            relation.relname.find('.') == std::string::npos) {
+            continue;
+        }
+        const PgNamespaceRow* nameSpace =
+            catalog.findNamespace(relation.relnamespace);
+        if (!nameSpace || nameSpace->nspname != "public") continue;
+
+        const std::string encoded =
+            sequenceStorageName("public", relation.relname);
+        const fs::path upgradedPath = directory / (encoded + ".seqv2");
+        if (fs::exists(upgradedPath)) continue;
+
+        // The old sequencePath helper also stripped a leading "public."
+        // from the joined key, even when it was part of a quoted relation
+        // name rather than a namespace qualifier.
+        const std::string legacyStorageName =
+            relation.relname.rfind("public.", 0) == 0
+                ? relation.relname.substr(7) : relation.relname;
+        const fs::path legacyPath =
+            directory / (legacyStorageName + ".seq");
+        std::error_code error;
+        const fs::file_status legacyStatus =
+            fs::symlink_status(legacyPath, error);
+        if (error) {
+            throw std::runtime_error(
+                "cannot inspect legacy sequence file " +
+                legacyPath.string() + ": " + error.message());
+        }
+        if (!fs::exists(legacyStatus)) continue;
+        if (!fs::is_regular_file(legacyStatus)) {
+            throw std::runtime_error(
+                "legacy sequence path is not a regular file: " +
+                legacyPath.string());
+        }
+
+        // An old catalog should never contain both relations: they used the
+        // same file and the second CREATE was rejected. If it does, do not
+        // guess which sequence owns the bytes.
+        const size_t dot = relation.relname.find('.');
+        const PgNamespaceRow* conflictingNamespace =
+            catalog.findNamespaceByName(relation.relname.substr(0, dot));
+        if (conflictingNamespace &&
+            catalog.findClassByName(relation.relname.substr(dot + 1),
+                                    conflictingNamespace->oid)) {
+            throw std::runtime_error(
+                "ambiguous legacy sequence file ownership: " +
+                legacyPath.string());
+        }
+
+        fs::rename(legacyPath, upgradedPath, error);
+        if (error) {
+            throw std::runtime_error(
+                "cannot migrate legacy sequence file " +
+                legacyPath.string() + ": " + error.message());
+        }
+        const int dirFd = ::open(directory.c_str(),
+                                 O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        const bool durable = dirFd >= 0 && ::fsync(dirFd) == 0;
+        if (dirFd >= 0) ::close(dirFd);
+        if (!durable) {
+            std::error_code rollbackError;
+            fs::rename(upgradedPath, legacyPath, rollbackError);
+            throw std::runtime_error(
+                "cannot durably migrate legacy sequence file " +
+                legacyPath.string());
+        }
+    }
+}
+
 CatalogManager& CatalogService::get(const std::string& dbname) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = cache_.find(dbname);
@@ -26,6 +105,7 @@ CatalogManager& CatalogService::get(const std::string& dbname) {
     auto cat = std::make_unique<CatalogManager>(catalogDirForDb(engine_, dbname).string());
     cat->bootstrapSystemNamespaces();
     cat->bootstrapSystemTypes();
+    migrateLegacyPublicDottedSequences(engine_, dbname, *cat);
 
     CatalogManager& ref = *cat;
     cache_.emplace(dbname, std::move(cat));

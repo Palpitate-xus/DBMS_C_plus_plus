@@ -4,20 +4,23 @@
 
 namespace dbms {
 
-// Keep every pre-existing, unambiguous sequence filename unchanged. Names
-// that cannot be represented by the legacy one-dot format use a reserved
-// two-dot prefix, which no legacy sequence filename could have passed the
-// old validator. The payload is schema + NUL + relation in base64url; it is
-// reversible and cannot contain a path separator.
+// Keep pre-existing, unambiguous sequence filenames unchanged. A dotted
+// public relation can collide with a schema-qualified relation, so it also
+// uses the reserved two-dot prefix; CatalogService migrates its old file on
+// startup. The payload is schema + NUL + relation in base64url and cannot
+// contain a path separator.
 inline std::string sequenceStorageName(const std::string& schema,
                                        const std::string& relation) {
     const std::string effectiveSchema = schema.empty() ? "public" : schema;
     const std::string legacy = effectiveSchema == "public"
         ? relation : effectiveSchema + "." + relation;
     const auto firstDot = legacy.find('.');
-    const bool legacyFormat = firstDot == std::string::npos ||
+    const bool legacyFormat =
+        !(effectiveSchema == "public" &&
+          relation.find('.') != std::string::npos) &&
+        (firstDot == std::string::npos ||
         (firstDot != 0 && firstDot + 1 < legacy.size() &&
-         legacy.find('.', firstDot + 1) == std::string::npos);
+         legacy.find('.', firstDot + 1) == std::string::npos));
     if (legacyFormat) return legacy;
 
     const std::string bytes = effectiveSchema + '\0' + relation;

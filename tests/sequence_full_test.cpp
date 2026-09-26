@@ -2,6 +2,7 @@
 #include "commands/TableManage.h"
 #include "Session.h"
 #include "catalog/CatalogService.h"
+#include "commands/SequenceStorageName.h"
 #include "common/DbError.h"
 #include "parser/parser.h"
 #include "catalog/type_registry.h"
@@ -1184,6 +1185,67 @@ static void test_sequence_integer_boundaries() {
     std::cout << "[SEQUENCE] integer boundaries OK" << std::endl;
 }
 
+static void test_public_dotted_sequence_storage_migration() {
+    const std::string db = testDbPath("seq_legacy_collision");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE SEQUENCE public.\"diff_legacy_collision.seq\" START 7", s));
+    const std::string encoded = dbms::sequenceStorageName(
+        "public", "diff_legacy_collision.seq");
+    const fs::path upgradedPath = fs::path(db) / (encoded + ".seqv2");
+    const fs::path legacyPath =
+        fs::path(db) / "diff_legacy_collision.seq.seq";
+    assert(fs::exists(upgradedPath));
+    assert(g_engine.nextval(
+        db, "public.\"diff_legacy_collision.seq\"") == 7);
+
+    // Emulate a pre-upgrade directory. Reopening the engine must use the
+    // catalog owner to move the old file without resetting its value.
+    fs::rename(upgradedPath, legacyPath);
+    {
+        dbms::StorageEngine restarted;
+        assert(fs::exists(upgradedPath));
+        assert(!fs::exists(legacyPath));
+        assert(restarted.nextval(
+            db, "public.\"diff_legacy_collision.seq\"") == 8);
+    }
+
+    assert(!ddl.executeSql("CREATE SCHEMA diff_legacy_collision", s));
+    assert(!ddl.executeSql(
+        "CREATE SEQUENCE diff_legacy_collision.seq START 11", s));
+    assert(g_engine.nextval(db, "diff_legacy_collision.seq") == 11);
+    assert(g_engine.nextval(
+        db, "public.\"diff_legacy_collision.seq\"") == 9);
+
+    assert(!ddl.executeSql(
+        "CREATE SEQUENCE public.\"public.special\" START 31", s));
+    const fs::path prefixedUpgradedPath = fs::path(db) /
+        (dbms::sequenceStorageName("public", "public.special") +
+         ".seqv2");
+    const fs::path prefixedLegacyPath = fs::path(db) / "special.seq";
+    assert(g_engine.nextval(db, "public.\"public.special\"") == 31);
+    fs::rename(prefixedUpgradedPath, prefixedLegacyPath);
+    {
+        dbms::StorageEngine restarted;
+        assert(fs::exists(prefixedUpgradedPath));
+        assert(!fs::exists(prefixedLegacyPath));
+        assert(restarted.nextval(
+            db, "public.\"public.special\"") == 32);
+    }
+    assert(!ddl.executeSql("CREATE SEQUENCE public.special START 41", s));
+    assert(g_engine.nextval(db, "public.special") == 41);
+    assert(g_engine.nextval(db, "public.\"public.special\"") == 33);
+
+    cleanup(db);
+    std::cout << "[SEQUENCE] public dotted-name migration/collision OK"
+              << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_sequence_basic();
@@ -1202,6 +1264,7 @@ int main() {
     test_schema_qualified_sequence_drop();
     test_sequence_bound_defaults_and_file_upgrade();
     test_sequence_integer_boundaries();
+    test_public_dotted_sequence_storage_migration();
     std::cout << "[SEQUENCE_FULL] all passed" << std::endl;
     return 0;
 }

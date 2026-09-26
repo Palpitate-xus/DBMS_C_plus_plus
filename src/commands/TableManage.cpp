@@ -1928,6 +1928,10 @@ StorageEngine::StorageEngine()
     cleanupStaleSessionTemporaryFiles();
     catalogService_ = std::make_unique<CatalogService>(*this);
     for (const auto& dbname : getDatabaseNames()) {
+        // Upgrade legacy public sequences whose quoted relation names contain
+        // a dot before any SQL statement can take a DDL snapshot or create
+        // the schema-qualified name that formerly shared their file.
+        (void)catalogService_->get(dbname);
         if (!loadRuntimeStats(dbname, dbPath(dbname) / ".runtime_stats")) {
             throw std::runtime_error(
                 "runtime statistics are corrupt or cannot be locked for database " + dbname);
