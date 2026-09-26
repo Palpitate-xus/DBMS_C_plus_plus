@@ -690,6 +690,31 @@ static void test_custom_collation_runtime_resolution() {
     }
     assert(emptyOrderConflict);
 
+    assert(!ddl.executeSql(
+        "CREATE TABLE other_text_order (v TEXT)", s));
+    assert(g_engine.insert(db, "other_text_order", {{"v", "ab"}}) ==
+           DBStatus::OK);
+    assert(g_engine.insert(db, "other_text_order", {{"v", "ba"}}) ==
+           DBStatus::OK);
+    dbms::StorageEngine::OrderBySpec byOtherText;
+    byOtherText.isExpression = true;
+    byOtherText.exprFunc = "substring";
+    byOtherText.expressionSql = "substring(v from 2 for 1)";
+    byOtherText.collation = "C";
+    rows = g_engine.query(db, "other_text_order", {}, {"v"},
+                          {byOtherText});
+    assert((rows == std::vector<std::string>{"ba ", "ab "}));
+    byOtherText.exprFunc = "overlay";
+    byOtherText.expressionSql = "overlay(v placing 'z' from 1 for 1)";
+    rows = g_engine.sortByExpression(
+        db, "other_text_order", {"ab ", "ba "}, {byOtherText});
+    assert((rows == std::vector<std::string>{"ba ", "ab "}));
+    byOtherText.exprFunc = "trim";
+    byOtherText.expressionSql = "trim(leading 'b' from v)";
+    rows = g_engine.query(db, "other_text_order", {}, {"v"},
+                          {byOtherText});
+    assert((rows == std::vector<std::string>{"ba ", "ab "}));
+
     assert(!ddl.executeSql("CREATE TABLE alter_target (id INT)", s));
     assert(!ddl.executeSql(
         "ALTER TABLE alter_target ADD COLUMN "

@@ -88,7 +88,7 @@ static bool isTextResultBuiltin(const std::string& name) {
         "lower", "upper", "substring", "substr", "ltrim", "rtrim",
         "btrim", "replace", "left", "right", "repeat", "reverse",
         "concat", "concat_ws", "initcap", "translate", "overlay",
-        "lpad", "rpad", "split_part"
+        "lpad", "rpad", "split_part", "trim"
     };
     return textBuiltins.count(name) != 0;
 }
