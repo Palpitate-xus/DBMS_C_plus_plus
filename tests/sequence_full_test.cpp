@@ -1267,6 +1267,68 @@ static void test_public_dotted_sequence_storage_migration() {
               << std::endl;
 }
 
+static void test_quoted_space_owner_metadata_roundtrip() {
+    const std::string db = testDbPath("seq_owned_space");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE SCHEMA \"Diff Seq Space\"", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE \"Diff Seq Space\".owner_table (id bigint)", s));
+    assert(!ddl.executeSql(
+        "CREATE SEQUENCE \"Diff Seq Space\".owned_seq "
+        "OWNED BY \"Diff Seq Space\".owner_table.id", s));
+
+    const std::string storageName = dbms::sequenceStorageName(
+        "Diff Seq Space", "owned_seq");
+    const fs::path path = fs::path(db) /
+        (storageName +
+         (storageName.rfind("seqv2..", 0) == 0 ? ".seqv2" : ".seq"));
+    std::ifstream file(path);
+    std::string version;
+    assert(file >> version);
+    assert(version == "DBMSSEQ4");
+    file.close();
+    dbms::SequenceInfo info;
+    assert(g_engine.getSequenceInfo(db, storageName, info) ==
+           dbms::DBStatus::OK);
+    assert(info.ownedByTable.find("Diff Seq Space") != std::string::npos);
+    assert(g_engine.nextval(db, "\"Diff Seq Space\".owned_seq") == 1);
+
+    {
+        dbms::StorageEngine restarted;
+        dbms::SequenceInfo reopened;
+        assert(restarted.getSequenceInfo(db, storageName, reopened) ==
+               dbms::DBStatus::OK);
+        assert(reopened.ownedByTable == info.ownedByTable);
+        assert(restarted.nextval(db, "\"Diff Seq Space\".owned_seq") == 2);
+    }
+    {
+        // An older binary could already have written this unescaped V3
+        // owner field. Its sequence state and ownership must remain readable.
+        std::ofstream legacy(path, std::ios::trunc);
+        legacy << "DBMSSEQ3 1 1 1 9223372036854775807 1 0 "
+                  "3 2 0 0 0 Diff Seq Space.owner_table id\n";
+        assert(legacy.good());
+    }
+    {
+        dbms::StorageEngine reopenedLegacy;
+        dbms::SequenceInfo recovered;
+        assert(reopenedLegacy.getSequenceInfo(db, storageName, recovered) ==
+               dbms::DBStatus::OK);
+        assert(recovered.ownedByTable == "Diff Seq Space.owner_table");
+        assert(recovered.ownedByColumn == "id");
+        assert(reopenedLegacy.nextval(
+            db, "\"Diff Seq Space\".owned_seq") == 3);
+    }
+    cleanup(db);
+    std::cout << "[SEQUENCE] quoted whitespace owner metadata OK"
+              << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_sequence_basic();
@@ -1286,6 +1348,7 @@ int main() {
     test_sequence_bound_defaults_and_file_upgrade();
     test_sequence_integer_boundaries();
     test_public_dotted_sequence_storage_migration();
+    test_quoted_space_owner_metadata_roundtrip();
     std::cout << "[SEQUENCE_FULL] all passed" << std::endl;
     return 0;
 }

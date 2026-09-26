@@ -4616,11 +4616,17 @@ static std::string quoteSqlIdentifierPart(
 
 static std::string storedOwnedTableReference(
     const std::string& schema, const std::string& relation) {
-    if (schema == "public" && relation.find('.') == std::string::npos) {
+    const auto needsQuoting = [](const std::string& part) {
+        return part.find('.') != std::string::npos ||
+            std::any_of(part.begin(), part.end(),
+                        [](unsigned char ch) {
+                            return std::isspace(ch) != 0;
+                        });
+    };
+    if (schema == "public" && !needsQuoting(relation)) {
         return relation;
     }
-    if (schema.find('.') == std::string::npos &&
-        relation.find('.') == std::string::npos) {
+    if (!needsQuoting(schema) && !needsQuoting(relation)) {
         return schema + "." + relation;
     }
     return quoteSqlIdentifierPart(schema) + "." +

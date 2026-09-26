@@ -19651,6 +19651,39 @@ static void sequencePredecessor(int64_t value, int64_t increment,
 
 static constexpr const char* SEQUENCE_FILE_V2 = "DBMSSEQ2";
 static constexpr const char* SEQUENCE_FILE_V3 = "DBMSSEQ3";
+static constexpr const char* SEQUENCE_FILE_V4 = "DBMSSEQ4";
+
+static std::string encodeSequenceOwnedField(const std::string& value) {
+    if (value.empty()) return "-";
+    constexpr char digits[] = "0123456789abcdef";
+    std::string encoded = "x";
+    encoded.reserve(1 + value.size() * 2);
+    for (unsigned char byte : value) {
+        encoded += digits[byte >> 4];
+        encoded += digits[byte & 0x0f];
+    }
+    return encoded;
+}
+
+static bool decodeSequenceOwnedField(const std::string& encoded,
+                                     std::string& value) {
+    value.clear();
+    if (encoded == "-") return true;
+    if (encoded.size() < 3 || encoded.front() != 'x' ||
+        encoded.size() % 2 == 0) return false;
+    const auto nibble = [](char ch) -> int {
+        if (ch >= '0' && ch <= '9') return ch - '0';
+        if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+        return -1;
+    };
+    for (size_t i = 1; i < encoded.size(); i += 2) {
+        const int high = nibble(encoded[i]);
+        const int low = nibble(encoded[i + 1]);
+        if (high < 0 || low < 0) return false;
+        value += static_cast<char>((high << 4) | low);
+    }
+    return true;
+}
 
 static bool parseSequenceInt64(const std::string& token, int64_t& value) {
     if (token.empty()) return false;
@@ -19667,7 +19700,8 @@ static bool parseSequenceInt64(const std::string& token, int64_t& value) {
 // V3 sequence file format adds an explicit exhausted bit.  Without it the
 // on-disk boundary value cannot distinguish "not returned yet" from "already
 // returned", which made non-cycling sequences repeat their final value.
-// V2 and legacy unversioned files remain readable and upgrade on next write.
+// V4 encodes ownership strings so quoted whitespace cannot shift token
+// boundaries. V2, V3, and legacy unversioned files remain readable.
 static bool readSequenceFile(const std::filesystem::path& path,
                              dbms::SequenceInfo& info,
                              int64_t& nextValue,
@@ -19678,6 +19712,7 @@ static bool readSequenceFile(const std::filesystem::path& path,
     std::string firstToken;
     if (!(ifs >> firstToken)) return false;
 
+    const bool version4 = firstToken == SEQUENCE_FILE_V4;
     const bool version3 = firstToken == SEQUENCE_FILE_V3;
     const bool version2 = firstToken == SEQUENCE_FILE_V2;
     int64_t start = 1;
@@ -19691,7 +19726,7 @@ static bool readSequenceFile(const std::filesystem::path& path,
     int64_t minExplicit = 0;
     int64_t maxExplicit = 0;
     int64_t exhaustedFlag = 0;
-    if (version3) {
+    if (version4 || version3) {
         if (!(ifs >> start >> increment >> minValue >> maxValue >> cache >>
               cycleFlag >> next >> last >> minExplicit >> maxExplicit >>
               exhaustedFlag)) {
@@ -19721,10 +19756,68 @@ static bool readSequenceFile(const std::filesystem::path& path,
 
     std::string ownedTable;
     std::string ownedColumn;
-    if (ifs >> ownedTable) {
-        if (!(ifs >> ownedColumn)) return false;
-    } else if (!ifs.eof()) {
-        return false;
+    if (version4) {
+        std::string tableToken;
+        std::string columnToken;
+        if (!(ifs >> tableToken >> columnToken) ||
+            !decodeSequenceOwnedField(tableToken, ownedTable) ||
+            !decodeSequenceOwnedField(columnToken, ownedColumn)) {
+            return false;
+        }
+    } else {
+        // Older writers did not escape ownership names. Read the entire
+        // remainder, using the final whitespace outside SQL quotes as the
+        // field separator. This also recovers files already written with a
+        // whitespace-bearing schema and a simple owning column.
+        std::string remainder;
+        if (!std::getline(ifs, remainder) && !ifs.eof()) return false;
+        const auto trim = [](std::string& value) {
+            size_t first = 0;
+            size_t last = value.size();
+            while (first < last && std::isspace(
+                       static_cast<unsigned char>(value[first]))) ++first;
+            while (last > first && std::isspace(
+                       static_cast<unsigned char>(value[last - 1]))) --last;
+            value = value.substr(first, last - first);
+        };
+        trim(remainder);
+        if (!remainder.empty()) {
+            bool quoted = false;
+            size_t separator = std::string::npos;
+            for (size_t i = 0; i < remainder.size(); ++i) {
+                if (remainder[i] == '"') {
+                    if (quoted && i + 1 < remainder.size() &&
+                        remainder[i + 1] == '"') {
+                        ++i;
+                    } else {
+                        quoted = !quoted;
+                    }
+                } else if (!quoted && std::isspace(
+                               static_cast<unsigned char>(remainder[i]))) {
+                    separator = i;
+                }
+            }
+            if (quoted || separator == std::string::npos) return false;
+            ownedTable = remainder.substr(0, separator);
+            ownedColumn = remainder.substr(separator + 1);
+            trim(ownedTable);
+            trim(ownedColumn);
+            if (ownedTable.empty() || ownedColumn.empty()) return false;
+            if (ownedTable.find_first_of(" \t\r\n") != std::string::npos &&
+                ownedTable.find('"') == std::string::npos) {
+                // The only safely recoverable unquoted V3 shape is a
+                // whitespace-bearing schema before the final dot. Reject
+                // arbitrary extra words instead of inventing an owner.
+                const size_t dot = ownedTable.rfind('.');
+                if (dot == std::string::npos ||
+                    ownedTable.substr(0, dot).find_first_of(" \t\r\n") ==
+                        std::string::npos ||
+                    ownedTable.substr(dot + 1).find_first_of(" \t\r\n") !=
+                        std::string::npos) {
+                    return false;
+                }
+            }
+        }
     }
     ifs.clear();
     std::string extra;
@@ -19744,7 +19837,7 @@ static bool readSequenceFile(const std::filesystem::path& path,
         if (last != initialPredecessor) return false;
     }
 
-    if (!version2 && !version3) {
+    if (!version2 && !version3 && !version4) {
         const int64_t defaultMinimum = increment > 0
             ? 1 : -std::numeric_limits<int64_t>::max();
         const int64_t defaultMaximum = increment > 0
@@ -19776,7 +19869,13 @@ static bool writeSequenceFile(const std::filesystem::path& path,
                               int64_t lastAllocated,
                               bool exhausted = false) {
     std::ostringstream serialized;
-    serialized << SEQUENCE_FILE_V3 << " "
+    const bool version4 = std::any_of(
+        info.ownedByTable.begin(), info.ownedByTable.end(),
+        [](unsigned char ch) { return std::isspace(ch) != 0; }) ||
+        std::any_of(
+            info.ownedByColumn.begin(), info.ownedByColumn.end(),
+            [](unsigned char ch) { return std::isspace(ch) != 0; });
+    serialized << (version4 ? SEQUENCE_FILE_V4 : SEQUENCE_FILE_V3) << " "
                << info.start << " "
                << info.increment << " "
                << info.minValue << " "
@@ -19788,8 +19887,10 @@ static bool writeSequenceFile(const std::filesystem::path& path,
                << (info.hasMinValue ? 1 : 0) << " "
                << (info.hasMaxValue ? 1 : 0) << " "
                << (exhausted ? 1 : 0) << " "
-               << info.ownedByTable << " "
-               << info.ownedByColumn << "\n";
+               << (version4 ? encodeSequenceOwnedField(info.ownedByTable)
+                            : info.ownedByTable) << " "
+               << (version4 ? encodeSequenceOwnedField(info.ownedByColumn)
+                            : info.ownedByColumn) << "\n";
     return index_file::writeAtomically(path, serialized.str());
 }
 
