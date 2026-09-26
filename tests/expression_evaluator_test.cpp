@@ -353,6 +353,18 @@ static void test_explicit_collation_comparisons() {
     auto nullifC = evaluate(
         "SELECT NULLIF('apple', 'x' COLLATE \"C\") < 'Zoo'");
     assert(nullifC.typeName == "boolean" && !nullifC.asBool());
+    auto castIntegerCase = evaluate(
+        "SELECT CASE WHEN true THEN ('1' COLLATE \"C\")::integer "
+        "ELSE ('2' COLLATE \"default\")::integer END");
+    assert(castIntegerCase.typeName == "integer" &&
+           castIntegerCase.value == "1" &&
+           castIntegerCase.collation.empty());
+    auto castIntegerCoalesce = evaluate(
+        "SELECT COALESCE(('1' COLLATE \"C\")::integer, "
+        "('2' COLLATE \"default\")::integer)");
+    assert(castIntegerCoalesce.typeName == "integer" &&
+           castIntegerCoalesce.value == "1" &&
+           castIntegerCoalesce.collation.empty());
     bool conflict = false;
     try {
         (void)evaluate(

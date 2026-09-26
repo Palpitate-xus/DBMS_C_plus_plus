@@ -72,6 +72,16 @@ static bool isCollatableExprType(const std::string& typeName) {
            type == "character" || type == "bpchar";
 }
 
+static bool isCollatableCastTarget(std::string typeName) {
+    typeName = toLower(std::move(typeName));
+    const size_t modifier = typeName.find('(');
+    if (modifier != std::string::npos) typeName.resize(modifier);
+    while (!typeName.empty() &&
+           std::isspace(static_cast<unsigned char>(typeName.back())))
+        typeName.pop_back();
+    return isCollatableExprType(typeName);
+}
+
 static std::string mergeExplicitCollations(const std::string& left,
                                            const std::string& right) {
     const std::string a = collation::normalizeName(left);
@@ -101,7 +111,7 @@ static std::string explicitResultCollation(const Expr* expression) {
         }
         case ExprType::CastExpr: {
             const auto* cast = static_cast<const CastExpr*>(expression);
-            return isCollatableExprType(cast->typeName)
+            return isCollatableCastTarget(cast->typeName)
                 ? explicitResultCollation(cast->operand.get()) : std::string{};
         }
         case ExprType::BinaryOp: {
@@ -110,8 +120,15 @@ static std::string explicitResultCollation(const Expr* expression) {
                 return mergeExplicitCollations(
                     explicitResultCollation(binary->left.get()),
                     explicitResultCollation(binary->right.get()));
-            if (binary->op == "::")
-                return explicitResultCollation(binary->left.get());
+            if (binary->op == "::") {
+                const auto* target = binary->right &&
+                    binary->right->type == ExprType::Literal
+                    ? static_cast<const LiteralExpr*>(binary->right.get())
+                    : nullptr;
+                return target && isCollatableCastTarget(target->value)
+                    ? explicitResultCollation(binary->left.get())
+                    : std::string{};
+            }
             return {};
         }
         case ExprType::CaseExpr: {
