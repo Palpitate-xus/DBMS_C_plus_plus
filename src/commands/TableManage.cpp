@@ -19869,12 +19869,15 @@ static bool writeSequenceFile(const std::filesystem::path& path,
                               int64_t lastAllocated,
                               bool exhausted = false) {
     std::ostringstream serialized;
+    const auto needsEncoding = [](unsigned char ch) {
+        return std::isspace(ch) != 0 || ch == '"';
+    };
     const bool version4 = std::any_of(
         info.ownedByTable.begin(), info.ownedByTable.end(),
-        [](unsigned char ch) { return std::isspace(ch) != 0; }) ||
+        needsEncoding) ||
         std::any_of(
             info.ownedByColumn.begin(), info.ownedByColumn.end(),
-            [](unsigned char ch) { return std::isspace(ch) != 0; });
+            needsEncoding);
     serialized << (version4 ? SEQUENCE_FILE_V4 : SEQUENCE_FILE_V3) << " "
                << info.start << " "
                << info.increment << " "

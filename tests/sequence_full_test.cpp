@@ -1329,6 +1329,48 @@ static void test_quoted_space_owner_metadata_roundtrip() {
               << std::endl;
 }
 
+static void test_escaped_quote_owner_metadata_roundtrip() {
+    const std::string db = testDbPath("seq_owned_escaped_quote");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE SCHEMA \"Diff\"\"Owned\"", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE \"Diff\"\"Owned\".owner_table (id bigint)", s));
+    assert(!ddl.executeSql(
+        "CREATE SEQUENCE \"Diff\"\"Owned\".owned_seq "
+        "OWNED BY \"Diff\"\"Owned\".owner_table.id", s));
+
+    const std::string storageName = dbms::sequenceStorageName(
+        "Diff\"Owned", "owned_seq");
+    const fs::path path = fs::path(db) /
+        (storageName +
+         (storageName.rfind("seqv2..", 0) == 0 ? ".seqv2" : ".seq"));
+    std::ifstream file(path);
+    std::string version;
+    assert(file >> version);
+    assert(version == "DBMSSEQ4");
+    dbms::SequenceInfo info;
+    assert(g_engine.getSequenceInfo(db, storageName, info) ==
+           dbms::DBStatus::OK);
+    assert(info.ownedByTable == "\"Diff\"\"Owned\".\"owner_table\"");
+    assert(g_engine.nextval(db, "\"Diff\"\"Owned\".owned_seq") == 1);
+    {
+        dbms::StorageEngine restarted;
+        dbms::SequenceInfo reopened;
+        assert(restarted.getSequenceInfo(db, storageName, reopened) ==
+               dbms::DBStatus::OK);
+        assert(reopened.ownedByTable == info.ownedByTable);
+        assert(restarted.nextval(db, "\"Diff\"\"Owned\".owned_seq") == 2);
+    }
+    cleanup(db);
+    std::cout << "[SEQUENCE] escaped quote owner metadata OK"
+              << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_sequence_basic();
@@ -1349,6 +1391,7 @@ int main() {
     test_sequence_integer_boundaries();
     test_public_dotted_sequence_storage_migration();
     test_quoted_space_owner_metadata_roundtrip();
+    test_escaped_quote_owner_metadata_roundtrip();
     std::cout << "[SEQUENCE_FULL] all passed" << std::endl;
     return 0;
 }

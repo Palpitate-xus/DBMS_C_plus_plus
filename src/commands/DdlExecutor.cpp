@@ -4618,6 +4618,7 @@ static std::string storedOwnedTableReference(
     const std::string& schema, const std::string& relation) {
     const auto needsQuoting = [](const std::string& part) {
         return part.find('.') != std::string::npos ||
+            part.find('"') != std::string::npos ||
             std::any_of(part.begin(), part.end(),
                         [](unsigned char ch) {
                             return std::isspace(ch) != 0;
