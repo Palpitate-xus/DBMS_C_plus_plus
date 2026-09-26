@@ -4634,6 +4634,41 @@ static std::string storedOwnedTableReference(
            quoteSqlIdentifierPart(relation);
 }
 
+static bool parseSequenceOwnedByReference(
+    const std::string& reference, std::string& tableReference,
+    std::string& columnName) {
+    bool quoted = false;
+    std::vector<size_t> dots;
+    for (size_t i = 0; i < reference.size(); ++i) {
+        if (reference[i] == '"') {
+            if (quoted && i + 1 < reference.size() &&
+                reference[i + 1] == '"') {
+                ++i;
+            } else {
+                quoted = !quoted;
+            }
+        } else if (reference[i] == '.' && !quoted) {
+            dots.push_back(i);
+        }
+    }
+    if (quoted || dots.empty() || dots.size() > 2) return false;
+    const size_t separator = dots.back();
+    const std::string tableToken = reference.substr(0, separator);
+    const std::string columnToken = reference.substr(separator + 1);
+    CatalogManager::QualifiedName table;
+    CatalogManager::QualifiedName column;
+    if (tableToken.empty() || columnToken.empty() ||
+        !CatalogManager::parseQualifiedName(tableToken, table, true) ||
+        !CatalogManager::parseQualifiedName(columnToken, column, true) ||
+        table.name.empty() || !column.schema.empty() ||
+        column.name.empty()) {
+        return false;
+    }
+    tableReference = tableToken;
+    columnName = column.name;
+    return true;
+}
+
 static std::vector<std::pair<std::string, std::string>> findDefaultNextvalDeps(
     const std::string& dbname, const std::string& seqname) {
     const std::string canonicalTarget =
@@ -7465,23 +7500,16 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
     opt = stmt->options.find("ownedby");
     if (opt != stmt->options.end()) {
         info.ownedBySpecified = true;
-        std::string owner = opt->second;
+        const std::string& owner = opt->second;
         if (owner == "none") {
             info.ownedByTable.clear();
             info.ownedByColumn.clear();
-        } else {
-            size_t first = owner.find('.');
-            size_t last = owner.rfind('.');
-            if (first != std::string::npos && last != first) {
-                // schema.table.column
-                info.ownedByTable = owner.substr(0, last);
-                info.ownedByColumn = owner.substr(last + 1);
-            } else if (first != std::string::npos) {
-                info.ownedByTable = owner.substr(0, first);
-                info.ownedByColumn = owner.substr(first + 1);
-            } else {
-                info.ownedByTable = owner;
-            }
+        } else if (!parseSequenceOwnedByReference(
+                       owner, info.ownedByTable,
+                       info.ownedByColumn)) {
+            std::cout << "CREATE SEQUENCE OWNED BY target is invalid"
+                      << std::endl;
+            return true;
         }
     }
 
@@ -7797,6 +7825,17 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
                           << tokens[i] << std::endl;
                 return true;
             }
+        }
+    }
+
+    if (info.ownedBySpecified && !info.ownedByTable.empty()) {
+        const std::string owner = info.ownedByTable + "." +
+            info.ownedByColumn;
+        if (!parseSequenceOwnedByReference(
+                owner, info.ownedByTable, info.ownedByColumn)) {
+            std::cout << "ALTER SEQUENCE OWNED BY target is invalid"
+                      << std::endl;
+            return true;
         }
     }
 

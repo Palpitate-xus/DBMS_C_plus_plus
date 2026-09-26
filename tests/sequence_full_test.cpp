@@ -1371,6 +1371,55 @@ static void test_escaped_quote_owner_metadata_roundtrip() {
               << std::endl;
 }
 
+static void test_quoted_owner_columns_roundtrip() {
+    const std::string db = testDbPath("seq_owned_quoted_column");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE SCHEMA seq_owner_cols", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE seq_owner_cols.owner_table "
+        "(\"id space\" bigint, \"id.dot\" bigint)", s));
+    assert(!ddl.executeSql(
+        "CREATE SEQUENCE seq_owner_cols.spaced_seq "
+        "OWNED BY seq_owner_cols.owner_table.\"id space\"", s));
+    assert(!ddl.executeSql("CREATE SEQUENCE seq_owner_cols.dotted_seq", s));
+    assert(!ddl.executeSql(
+        "ALTER SEQUENCE seq_owner_cols.dotted_seq "
+        "OWNED BY seq_owner_cols.owner_table.\"id.dot\"", s));
+
+    const std::string spaced = dbms::sequenceStorageName(
+        "seq_owner_cols", "spaced_seq");
+    const std::string dotted = dbms::sequenceStorageName(
+        "seq_owner_cols", "dotted_seq");
+    dbms::SequenceInfo spacedInfo;
+    dbms::SequenceInfo dottedInfo;
+    assert(g_engine.getSequenceInfo(db, spaced, spacedInfo) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.getSequenceInfo(db, dotted, dottedInfo) ==
+           dbms::DBStatus::OK);
+    assert(spacedInfo.ownedByColumn == "id space");
+    assert(dottedInfo.ownedByColumn == "id.dot");
+    {
+        dbms::StorageEngine restarted;
+        dbms::SequenceInfo reopenedSpace;
+        dbms::SequenceInfo reopenedDot;
+        assert(restarted.getSequenceInfo(db, spaced, reopenedSpace) ==
+               dbms::DBStatus::OK);
+        assert(restarted.getSequenceInfo(db, dotted, reopenedDot) ==
+               dbms::DBStatus::OK);
+        assert(reopenedSpace.ownedByColumn == "id space");
+        assert(reopenedDot.ownedByColumn == "id.dot");
+        assert(restarted.nextval(db, "seq_owner_cols.spaced_seq") == 1);
+        assert(restarted.nextval(db, "seq_owner_cols.dotted_seq") == 1);
+    }
+    cleanup(db);
+    std::cout << "[SEQUENCE] quoted owner columns OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_sequence_basic();
@@ -1392,6 +1441,7 @@ int main() {
     test_public_dotted_sequence_storage_migration();
     test_quoted_space_owner_metadata_roundtrip();
     test_escaped_quote_owner_metadata_roundtrip();
+    test_quoted_owner_columns_roundtrip();
     std::cout << "[SEQUENCE_FULL] all passed" << std::endl;
     return 0;
 }
