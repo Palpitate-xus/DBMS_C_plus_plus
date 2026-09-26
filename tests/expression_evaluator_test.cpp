@@ -344,6 +344,12 @@ static void test_explicit_collation_comparisons() {
         "SELECT CASE WHEN true THEN 'apple' ELSE 'x' COLLATE \"C\" "
         "END < 'Zoo'");
     assert(caseC.typeName == "boolean" && !caseC.asBool());
+    auto greatestC = evaluate(
+        "SELECT GREATEST('apple', 'A' COLLATE \"C\") < 'Zoo'");
+    assert(greatestC.typeName == "boolean" && !greatestC.asBool());
+    auto leastC = evaluate(
+        "SELECT LEAST('apple', 'x' COLLATE \"C\") < 'Zoo'");
+    assert(leastC.typeName == "boolean" && !leastC.asBool());
     bool conflict = false;
     try {
         (void)evaluate(
@@ -375,6 +381,10 @@ static void test_explicit_collation_comparisons() {
                 "ELSE 'x' COLLATE \"default\" END", "42P21");
     expectError("SELECT COALESCE('apple', 'x' COLLATE "
                 "\"missing_collation\")", "42704");
+    expectError("SELECT GREATEST('apple' COLLATE \"C\", "
+                "NULL::text COLLATE \"default\")", "42P21");
+    expectError("SELECT LEAST('apple' COLLATE \"C\", "
+                "NULL::text COLLATE \"default\")", "42P21");
 }
 
 static void test_logical() {

@@ -125,7 +125,9 @@ static std::string explicitResultCollation(const Expr* expression) {
         }
         case ExprType::FunctionCall: {
             const auto* function = static_cast<const FunctionCallExpr*>(expression);
-            if (toLower(function->funcName) != "coalesce") return {};
+            const std::string name = toLower(function->funcName);
+            if (name != "coalesce" && name != "greatest" &&
+                name != "least") return {};
             std::string result;
             for (const auto& argument : function->args)
                 result = mergeExplicitCollations(
@@ -4631,19 +4633,29 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
                    : args[0];
     }
     if (name == "greatest") {
+        const std::string resultCollation = explicitResultCollation(e);
         ExprValue best("unknown", "", true);
-        for (const auto& a : args) {
+        for (auto a : args) {
+            if (isCollatableExprType(a.typeName))
+                a.collation = mergeExplicitCollations(a.collation,
+                                                        resultCollation);
             if (a.isNull) continue;
             if (best.isNull || compareValues(a, best) > 0) best = a;
         }
+        if (best.isNull) best.collation = resultCollation;
         return best;
     }
     if (name == "least") {
+        const std::string resultCollation = explicitResultCollation(e);
         ExprValue best("unknown", "", true);
-        for (const auto& a : args) {
+        for (auto a : args) {
+            if (isCollatableExprType(a.typeName))
+                a.collation = mergeExplicitCollations(a.collation,
+                                                        resultCollation);
             if (a.isNull) continue;
             if (best.isNull || compareValues(a, best) < 0) best = a;
         }
+        if (best.isNull) best.collation = resultCollation;
         return best;
     }
     if (name == "between" || name == "not between") {
