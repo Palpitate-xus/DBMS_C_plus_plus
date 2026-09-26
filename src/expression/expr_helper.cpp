@@ -349,6 +349,7 @@ std::string inferAstResultType(
             return "double precision";
         if (name == "extract") return "numeric";
         if (name == "age") return "interval";
+        if (name == "to_date") return "date";
         if (name == "to_timestamp") return "timestamptz";
         if (name == "timezone")
             return argType(1) == "timestamp" ? "timestamptz" : "timestamp";

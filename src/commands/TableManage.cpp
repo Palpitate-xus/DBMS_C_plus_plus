@@ -29229,13 +29229,15 @@ std::vector<std::string> StorageEngine::query(
                 comparisonColumn.isVariableLength =
                     comparisonColumn.dataType == "numeric";
             } else if (!spec.expressionSql.empty() &&
-                       spec.exprFunc == "date_trunc") {
+                       (spec.exprFunc == "date_trunc" ||
+                        spec.exprFunc == "to_date")) {
                 std::map<std::string, std::string> typeHints;
                 for (size_t ci = 0; ci < tbl.len; ++ci)
                     typeHints[tbl.cols[ci].dataName] = tbl.cols[ci].dataType;
                 const std::string resultType = ExprHelper::inferResultType(
                     spec.expressionSql, typeHints);
-                if (resultType == "timestamp" ||
+                if (resultType == "date" ||
+                    resultType == "timestamp" ||
                     resultType == "timestamptz") {
                     comparisonColumn.dataType = resultType;
                     comparisonColumn.isVariableLength = false;
@@ -35553,10 +35555,12 @@ std::vector<std::string> StorageEngine::sortByExpression(
             comparisonColumn.isVariableLength =
                 comparisonColumn.dataType == "numeric";
         } else if (!spec.expressionSql.empty() &&
-                   spec.exprFunc == "date_trunc") {
+                   (spec.exprFunc == "date_trunc" ||
+                    spec.exprFunc == "to_date")) {
             const std::string resultType = ExprHelper::inferResultType(
                 spec.expressionSql, expressionTypeHints);
-            if (resultType == "timestamp" ||
+            if (resultType == "date" ||
+                resultType == "timestamp" ||
                 resultType == "timestamptz") {
                 comparisonColumn.dataType = resultType;
                 comparisonColumn.isVariableLength = false;

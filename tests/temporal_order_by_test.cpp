@@ -107,6 +107,24 @@ int main() {
     assert(g_engine.query(database, "events", {}, {"id"}, {byMonth}) ==
            ids({"3", "1", "2", "4"}));
 
+    dbms::TableSchema formattedSchema;
+    formattedSchema.tablename = "formatted_dates";
+    formattedSchema.formatVersion = 2;
+    formattedSchema.append(dbms::makeTextColumn("v", false));
+    assert(g_engine.createTable(database, formattedSchema) ==
+           dbms::DBStatus::OK);
+    for (const auto& value : {"01/01/2021", "01/12/2020"})
+        assert(g_engine.insert(database, "formatted_dates", {{"v", value}}) ==
+               dbms::DBStatus::OK);
+    byMonth.exprFunc = "to_date";
+    byMonth.expressionSql = "to_date(v, 'DD/MM/YYYY')";
+    assert(g_engine.query(database, "formatted_dates", {}, {"v"}, {byMonth}) ==
+           ids({"01/12/2020", "01/01/2021"}));
+    assert(g_engine.sortByExpression(
+               database, "formatted_dates",
+               ids({"01/01/2021", "01/12/2020"}), {byMonth}) ==
+           ids({"01/12/2020", "01/01/2021"}));
+
     cleanupTestDb(testName);
     finalCleanupTestData();
     std::cout << "[TEMPORAL ORDER BY] chronological/timezone/null ordering OK"
