@@ -7197,10 +7197,89 @@ static string ungroupedProjectionColumn(
     return missing;
 }
 
+static bool evaluateQueryRowCount(const string& expression, Session& s,
+                                  size_t& value, bool& isNull) {
+    const string text = trim(expression);
+    if (text.empty()) return false;
+    if (toLower(text) == "null") {
+        value = 0;
+        isNull = true;
+        return true;
+    }
+    const auto result = dbms::ExprHelper::evalStringWithNulls(
+        text, {}, {}, {}, s.currentDB, s.username);
+    if (!result.ok) return false;
+    if (result.isNull) {
+        value = 0;
+        isNull = true;
+        return true;
+    }
+    const string number = trim(result.value);
+    if (number.empty() || number.front() == '-') return false;
+    try {
+        size_t consumed = 0;
+        const auto parsed = std::stoull(number, &consumed);
+        if (consumed != number.size() ||
+            parsed > std::numeric_limits<size_t>::max()) return false;
+        value = static_cast<size_t>(parsed);
+        isNull = false;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 static bool handleFromlessSelect(const string& sql, Session& s) {
     string cols = trim(string(sql.substr(6)));
     if (!cols.empty() && cols.back() == ';') cols.pop_back();
     cols = trim(cols);
+    size_t queryOffset = 0;
+    size_t queryLimit = 0;
+    bool finiteQueryLimit = false;
+    const string loweredCols = toLower(cols);
+    const size_t limitAt = findTopLevelKeyword(loweredCols, "limit");
+    const size_t offsetAt = findTopLevelKeyword(loweredCols, "offset");
+    if (limitAt != string::npos || offsetAt != string::npos) {
+        if (limitAt != string::npos) {
+            const size_t end = offsetAt != string::npos && offsetAt > limitAt
+                ? offsetAt : cols.size();
+            const string expression = trim(
+                cols.substr(limitAt + 5, end - limitAt - 5));
+            if (toLower(expression) != "all") {
+                bool isNull = false;
+                if (!evaluateQueryRowCount(
+                        expression, s, queryLimit, isNull)) {
+                    cout << "ERROR: unsupported LIMIT expression "
+                            "(SQLSTATE 0A000)" << endl;
+                    return true;
+                }
+                finiteQueryLimit = !isNull;
+            }
+        }
+        if (offsetAt != string::npos) {
+            const size_t end = limitAt != string::npos && limitAt > offsetAt
+                ? limitAt : cols.size();
+            string expression = trim(
+                cols.substr(offsetAt + 6, end - offsetAt - 6));
+            const string lowered = toLower(expression);
+            if (lowered.size() >= 5 &&
+                lowered.compare(lowered.size() - 5, 5, " rows") == 0) {
+                expression = trim(expression.substr(0, expression.size() - 5));
+            } else if (lowered.size() >= 4 &&
+                       lowered.compare(lowered.size() - 4, 4, " row") == 0) {
+                expression = trim(expression.substr(0, expression.size() - 4));
+            }
+            bool isNull = false;
+            if (!evaluateQueryRowCount(
+                    expression, s, queryOffset, isNull)) {
+                cout << "ERROR: unsupported OFFSET expression "
+                        "(SQLSTATE 0A000)" << endl;
+                return true;
+            }
+            if (isNull) queryOffset = 0;
+        }
+        cols = trim(cols.substr(0, std::min(limitAt, offsetAt)));
+    }
     bool suppressDataRow = false;
     bool isDistinct = false;
     if (cols.size() >= 9 && cols.substr(0, 9) == "distinct ") {
@@ -8033,6 +8112,28 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             values = std::move(expanded);
             valueNulls = std::move(expandedNulls);
             multiRowWidth = width;
+        }
+    }
+
+    if (!suppressDataRow && (queryOffset > 0 || finiteQueryLimit)) {
+        const size_t width = multiRowWidth > 0
+            ? multiRowWidth : values.size();
+        const size_t rowCount = width == 0 ? 0 : values.size() / width;
+        const size_t first = std::min(queryOffset, rowCount);
+        const size_t remaining = rowCount - first;
+        const size_t kept = finiteQueryLimit
+            ? std::min(queryLimit, remaining) : remaining;
+        if (kept == 0) {
+            values.clear();
+            valueNulls.clear();
+            suppressDataRow = true;
+        } else if (first != 0 || kept != rowCount) {
+            const size_t begin = first * width;
+            const size_t end = (first + kept) * width;
+            values = vector<string>(values.begin() + begin,
+                                    values.begin() + end);
+            valueNulls = vector<bool>(valueNulls.begin() + begin,
+                                      valueNulls.begin() + end);
         }
     }
 
@@ -19755,23 +19856,50 @@ static bool executeInternal(const string& rawSql, Session& s) {
         if (windowPos != string::npos && orderPos != string::npos && windowPos > orderPos) windowPos = string::npos;
         if (windowPos != string::npos && limitPos != string::npos && windowPos > limitPos) windowPos = string::npos;
 
+        size_t parsedLimit = 0, parsedOffset = 0;
+        bool finiteParsedLimit = false;
+        if (limitPos != string::npos) {
+            const size_t end = offsetPos != string::npos &&
+                offsetPos > limitPos ? offsetPos : sql.size();
+            string expression = trim(
+                sql.substr(limitPos + 5, end - limitPos - 5));
+            if (toLower(expression) != "all") {
+                bool isNull = false;
+                if (!evaluateQueryRowCount(
+                        expression, s, parsedLimit, isNull)) {
+                    cout << "ERROR: unsupported LIMIT expression "
+                            "(SQLSTATE 0A000)" << endl;
+                    return true;
+                }
+                finiteParsedLimit = !isNull;
+            }
+        }
+        if (offsetPos != string::npos) {
+            const size_t end = limitPos != string::npos &&
+                limitPos > offsetPos ? limitPos : sql.size();
+            string expression = trim(
+                sql.substr(offsetPos + 6, end - offsetPos - 6));
+            const string lowered = toLower(expression);
+            if (lowered.size() >= 5 &&
+                lowered.compare(lowered.size() - 5, 5, " rows") == 0) {
+                expression = trim(expression.substr(0, expression.size() - 5));
+            } else if (lowered.size() >= 4 &&
+                       lowered.compare(lowered.size() - 4, 4, " row") == 0) {
+                expression = trim(expression.substr(0, expression.size() - 4));
+            }
+            bool isNull = false;
+            if (!evaluateQueryRowCount(
+                    expression, s, parsedOffset, isNull)) {
+                cout << "ERROR: unsupported OFFSET expression "
+                        "(SQLSTATE 0A000)" << endl;
+                return true;
+            }
+            if (isNull) parsedOffset = 0;
+        }
         auto parseLimitOffset = [&](size_t& limitVal, size_t& offsetVal) {
-            limitVal = 0; offsetVal = 0;
-            bool finiteLimit = false;
-            if (limitPos != string::npos) {
-                size_t limEnd = (offsetPos != string::npos) ? offsetPos
-                              : sql.size();
-                string lstr = trim(sql.substr(limitPos + 5, limEnd - limitPos - 5));
-                try {
-                    limitVal = static_cast<size_t>(std::stoull(lstr));
-                    finiteLimit = true;
-                } catch (...) {}
-            }
-            if (offsetPos != string::npos) {
-                string ostr = trim(sql.substr(offsetPos + 6));
-                try { offsetVal = static_cast<size_t>(std::stoull(ostr)); } catch (...) {}
-            }
-            return finiteLimit;
+            limitVal = parsedLimit;
+            offsetVal = parsedOffset;
+            return finiteParsedLimit;
         };
         auto applyLimitOffset = [&](vector<string>& rows) {
             size_t count = 0, offset = 0;

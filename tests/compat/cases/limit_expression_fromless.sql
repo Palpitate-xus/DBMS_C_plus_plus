@@ -1,0 +1,10 @@
+-- LIMIT/OFFSET accept scalar expressions without changing row order or types.
+SELECT 1 AS v LIMIT (1 + 1);
+SELECT 1 AS v LIMIT 0;
+SELECT 1 AS v OFFSET 1;
+SELECT 1 AS v LIMIT NULL;
+SELECT 1 AS v OFFSET NULL;
+SELECT x FROM (VALUES (1), (2), (3)) AS t(x) ORDER BY x LIMIT (1 + 1) OFFSET (1 - 1);
+SELECT x FROM (VALUES (1), (2), (3)) AS t(x) ORDER BY x LIMIT (2 * 1) OFFSET 1 ROWS;
+SELECT x FROM (VALUES (1), (2), (3)) AS t(x) ORDER BY x OFFSET (1 - 1) LIMIT (2 * 1);
+SELECT x FROM (VALUES (1), (2), (3)) AS t(x) ORDER BY x LIMIT NULL OFFSET 1;
