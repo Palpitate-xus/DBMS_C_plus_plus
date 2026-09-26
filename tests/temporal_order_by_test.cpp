@@ -124,6 +124,14 @@ int main() {
                database, "formatted_dates",
                ids({"01/01/2021", "01/12/2020"}), {byMonth}) ==
            ids({"01/12/2020", "01/01/2021"}));
+    byMonth.exprFunc = "to_timestamp";
+    byMonth.expressionSql = "to_timestamp(v, 'DD/MM/YYYY')";
+    assert(g_engine.query(database, "formatted_dates", {}, {"v"}, {byMonth}) ==
+           ids({"01/12/2020", "01/01/2021"}));
+    assert(g_engine.sortByExpression(
+               database, "formatted_dates",
+               ids({"01/01/2021", "01/12/2020"}), {byMonth}) ==
+           ids({"01/12/2020", "01/01/2021"}));
 
     cleanupTestDb(testName);
     finalCleanupTestData();

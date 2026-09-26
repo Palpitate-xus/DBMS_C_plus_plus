@@ -29230,7 +29230,8 @@ std::vector<std::string> StorageEngine::query(
                     comparisonColumn.dataType == "numeric";
             } else if (!spec.expressionSql.empty() &&
                        (spec.exprFunc == "date_trunc" ||
-                        spec.exprFunc == "to_date")) {
+                        spec.exprFunc == "to_date" ||
+                        spec.exprFunc == "to_timestamp")) {
                 std::map<std::string, std::string> typeHints;
                 for (size_t ci = 0; ci < tbl.len; ++ci)
                     typeHints[tbl.cols[ci].dataName] = tbl.cols[ci].dataType;
@@ -35556,7 +35557,8 @@ std::vector<std::string> StorageEngine::sortByExpression(
                 comparisonColumn.dataType == "numeric";
         } else if (!spec.expressionSql.empty() &&
                    (spec.exprFunc == "date_trunc" ||
-                    spec.exprFunc == "to_date")) {
+                    spec.exprFunc == "to_date" ||
+                    spec.exprFunc == "to_timestamp")) {
             const std::string resultType = ExprHelper::inferResultType(
                 spec.expressionSql, expressionTypeHints);
             if (resultType == "date" ||
