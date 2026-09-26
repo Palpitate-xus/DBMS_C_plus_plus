@@ -22684,6 +22684,30 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         spec.isExpression = true;
                         spec.exprFunc = func;
                         spec.exprArg = arg;
+                        if (func == "left") {
+                            const size_t comma = arg.find(',');
+                            if (comma == string::npos) {
+                                cout << "ERROR: left() in ORDER BY requires two arguments"
+                                     << " (SQLSTATE 0A000)" << endl;
+                                return true;
+                            }
+                            spec.exprArg = trim(arg.substr(0, comma));
+                            spec.exprArg2 = trim(arg.substr(comma + 1));
+                            try {
+                                size_t consumed = 0;
+                                const long long count = std::stoll(
+                                    spec.exprArg2, &consumed);
+                                if (consumed != spec.exprArg2.size() ||
+                                    count < std::numeric_limits<int32_t>::min() ||
+                                    count > std::numeric_limits<int32_t>::max())
+                                    throw std::out_of_range("left count");
+                            } catch (const std::exception&) {
+                                cout << "ERROR: non-constant left() count in ORDER BY"
+                                     << " is not supported (SQLSTATE 0A000)"
+                                     << endl;
+                                return true;
+                            }
+                        }
                         spec.ascending = asc;
                         spec.nullsFirst = nullsFirst;
                         spec.collation = collation;

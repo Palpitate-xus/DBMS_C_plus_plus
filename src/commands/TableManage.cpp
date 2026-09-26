@@ -28722,6 +28722,40 @@ std::vector<std::string> StorageEngine::queryPgCatalog(
     return result;
 }
 
+static std::string leftSortTextValue(const std::string& value,
+                                     int64_t count) {
+    std::vector<size_t> boundaries{0};
+    for (size_t offset = 0; offset < value.size();) {
+        ++offset;
+        while (offset < value.size() &&
+               (static_cast<unsigned char>(value[offset]) & 0xc0) == 0x80)
+            ++offset;
+        boundaries.push_back(offset);
+    }
+    const size_t characters = boundaries.size() - 1;
+    const uint64_t magnitude = count < 0
+        ? uint64_t{0} - static_cast<uint64_t>(count)
+        : static_cast<uint64_t>(count);
+    const size_t take = count < 0
+        ? (magnitude >= characters ? 0
+                                   : characters - static_cast<size_t>(magnitude))
+        : (magnitude >= characters ? characters
+                                   : static_cast<size_t>(magnitude));
+    return value.substr(0, boundaries[take]);
+}
+
+static bool parseLeftSortCount(const std::string& text, int64_t& count) {
+    const char* begin = text.data();
+    if (begin != text.data() + text.size() && *begin == '+') ++begin;
+    if (begin == text.data() + text.size()) return false;
+    const auto parsed = std::from_chars(
+        begin, text.data() + text.size(), count);
+    return parsed.ec == std::errc{} &&
+           parsed.ptr == text.data() + text.size() &&
+           count >= std::numeric_limits<int32_t>::min() &&
+           count <= std::numeric_limits<int32_t>::max();
+}
+
 std::vector<std::string> StorageEngine::query(const std::string& dbname,
                                                const std::string& tablename,
                                                const std::vector<std::string>& conditions,
@@ -29101,6 +29135,14 @@ std::vector<std::string> StorageEngine::query(
         if (spec.isExpression) { hasExprOrder = true; break; }
     }
     if (hasExprOrder) {
+        std::vector<int64_t> leftCounts(orderBy.size(), 0);
+        for (size_t i = 0; i < orderBy.size(); ++i) {
+            if (orderBy[i].isExpression && orderBy[i].exprFunc == "left" &&
+                !parseLeftSortCount(orderBy[i].exprArg2, leftCounts[i])) {
+                lockManager_.unlock(tablename);
+                throw DbError("0A000", "non-constant left() count in ORDER BY");
+            }
+        }
         std::vector<Column> expressionComparisonColumns;
         for (const auto& spec : orderBy) {
             Column comparisonColumn;
@@ -29163,7 +29205,9 @@ std::vector<std::string> StorageEngine::query(
                      isColumnNullByRid(
                          dbname, tbl.tablename, matchRows[ri].first, ci));
             }
+            size_t expressionIndex = 0;
             for (const auto& spec : orderBy) {
+                const size_t keyIndex = expressionIndex++;
                 if (!spec.isExpression) {
                     const auto value = rowData.find(spec.colName);
                     const auto isNull = rowNulls.find(spec.colName);
@@ -29186,6 +29230,8 @@ std::vector<std::string> StorageEngine::query(
                 } else if (spec.exprFunc == "lower") {
                     ev = argVal;
                     for (char& c : ev) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                } else if (spec.exprFunc == "left") {
+                    ev = leftSortTextValue(argVal, leftCounts[keyIndex]);
                 } else if (spec.exprFunc == "abs") {
                     try { ev = std::to_string(std::llabs(std::stoll(argVal))); } catch (...) { ev = "0"; }
                 } else if (spec.exprFunc == "add") {
@@ -35320,6 +35366,12 @@ std::vector<std::string> StorageEngine::sortByExpression(
     const std::vector<OrderBySpec>& exprSpecs) const {
     if (rows.empty() || exprSpecs.empty()) return rows;
     TableSchema tbl = getTableSchema(dbname, tablename);
+    std::vector<int64_t> leftCounts(exprSpecs.size(), 0);
+    for (size_t i = 0; i < exprSpecs.size(); ++i) {
+        if (exprSpecs[i].isExpression && exprSpecs[i].exprFunc == "left" &&
+            !parseLeftSortCount(exprSpecs[i].exprArg2, leftCounts[i]))
+            throw DbError("0A000", "non-constant left() count in ORDER BY");
+    }
     std::vector<Column> comparisonColumns;
     comparisonColumns.reserve(exprSpecs.size());
     for (const auto& spec : exprSpecs) {
@@ -35367,7 +35419,8 @@ std::vector<std::string> StorageEngine::sortByExpression(
         for (size_t i = 0; i < tbl.len && ss >> val; ++i) {
             rowData[tbl.cols[i].dataName] = val;
         }
-        for (const auto& spec : exprSpecs) {
+        for (size_t keyIndex = 0; keyIndex < exprSpecs.size(); ++keyIndex) {
+            const auto& spec = exprSpecs[keyIndex];
             std::string ev;
             auto getCol = [&](const std::string& name) -> std::string {
                 auto it = rowData.find(name);
@@ -35382,6 +35435,8 @@ std::vector<std::string> StorageEngine::sortByExpression(
             } else if (spec.exprFunc == "lower") {
                 ev = argVal;
                 for (char& c : ev) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            } else if (spec.exprFunc == "left") {
+                ev = leftSortTextValue(argVal, leftCounts[keyIndex]);
             } else if (spec.exprFunc == "abs") {
                 try { ev = std::to_string(std::llabs(std::stoll(argVal))); } catch (...) { ev = "0"; }
             } else if (spec.exprFunc == "add") {
@@ -35416,7 +35471,8 @@ std::vector<std::string> StorageEngine::sortByExpression(
                 if (aNull) return spec.nullsFirst;
                 if (bNull) return !spec.nullsFirst;
                 bool less = false, greater = false;
-                if (!comparisonColumns[i].collation.empty()) {
+                if (spec.exprFunc == "left" ||
+                    !comparisonColumns[i].collation.empty()) {
                     const int comparison = compareTextValues(
                         comparisonColumns[i], av, bv);
                     less = comparison < 0;

@@ -576,6 +576,39 @@ static void test_custom_collation_runtime_resolution() {
     assert((rows == std::vector<std::string>{
                         "apple ", "Banana ", "Zoo "}));
 
+    dbms::StorageEngine::OrderBySpec byLeft;
+    byLeft.isExpression = true;
+    byLeft.exprFunc = "left";
+    byLeft.exprArg = "v";
+    byLeft.exprArg2 = "2";
+    byLeft.collation = "C";
+    rows = g_engine.query(db, "explicit_order", {}, {"v"}, {byLeft});
+    assert((rows == std::vector<std::string>{
+                        "Banana ", "Zoo ", "apple "}));
+
+    rows = g_engine.sortByExpression(
+        db, "explicit_order", {"apple ", "Zoo ", "Banana "}, {byLeft});
+    assert((rows == std::vector<std::string>{
+                        "Banana ", "Zoo ", "apple "}));
+    byLeft.exprArg2 = "-1";
+    rows = g_engine.query(db, "explicit_order", {}, {"v"}, {byLeft});
+    assert((rows == std::vector<std::string>{
+                        "Banana ", "Zoo ", "apple "}));
+    byLeft.exprArg2 = "+2";
+    rows = g_engine.query(db, "explicit_order", {}, {"v"}, {byLeft});
+    assert((rows == std::vector<std::string>{
+                        "Banana ", "Zoo ", "apple "}));
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE unicode_left (v VARCHAR(50) COLLATE C)", s));
+    assert(g_engine.insert(db, "unicode_left", {{"v", "êclair"}}) ==
+           DBStatus::OK);
+    assert(g_engine.insert(db, "unicode_left", {{"v", "éclair"}}) ==
+           DBStatus::OK);
+    byLeft.exprArg2 = "1";
+    rows = g_engine.query(db, "unicode_left", {}, {"v"}, {byLeft});
+    assert((rows == std::vector<std::string>{"éclair ", "êclair "}));
+
     assert(!ddl.executeSql("CREATE TABLE alter_target (id INT)", s));
     assert(!ddl.executeSql(
         "ALTER TABLE alter_target ADD COLUMN "
