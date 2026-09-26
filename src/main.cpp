@@ -22652,13 +22652,22 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     collation = resolveCollationForSort(queryDb, trim(afterCollate));
                     sortItem = trim(sortItem.substr(0, collatePos));
                 }
+                // A bare ORDER BY name can refer to an output alias, but a
+                // decorated expression such as alias COLLATE "C" is bound to
+                // input columns in PostgreSQL.  Keep function expressions on
+                // their existing path; their inner COLLATE is not a bare name.
+                const bool collatedBareName = collatePos != string::npos &&
+                    !sortItem.empty() &&
+                    sortItem.find_first_of("()+-*/%, ") == string::npos;
                 {
                     string bindingError, bindingSqlState;
                     const string& visibleQualifier = tableAlias.empty()
                         ? tnameOrig : tableAlias;
                     if (!validateFromlessColumnBindings(
                             sortItem, bindingError, bindingSqlState,
-                            visibleQualifier, &orderVisibleColumns)) {
+                            visibleQualifier,
+                            collatedBareName ? &visibleColumns
+                                             : &orderVisibleColumns)) {
                         cout << "ERROR: " << bindingError << " (SQLSTATE "
                              << bindingSqlState << ")" << endl;
                         return true;
@@ -22709,8 +22718,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 // Simple column (resolve SELECT-list aliases first: PG
                 // allows ORDER BY to reference output aliases)
                 if (sortItem.find_first_of("()+-*/%") == string::npos) {
-                    auto amIt = selectAliasMap.find(sortItem);
-                    if (amIt != selectAliasMap.end()) sortItem = amIt->second;
+                    if (!collatedBareName) {
+                        auto amIt = selectAliasMap.find(sortItem);
+                        if (amIt != selectAliasMap.end()) sortItem = amIt->second;
+                    }
                     const string& visibleQualifier = tableAlias.empty()
                         ? tnameOrig : tableAlias;
                     const string prefix = visibleQualifier + ".";
