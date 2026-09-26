@@ -132,6 +132,31 @@ int main() {
     assert(g_engine.query(database, "power_function_order", {}, {"v"},
                           {functionSort}) == ids({"-1", "-2"}));
 
+    dbms::TableSchema roundingSchema;
+    roundingSchema.tablename = "rounding_function_order";
+    roundingSchema.formatVersion = 2;
+    roundingSchema.append(dbms::makeDecimalColumn("v", false, 20, 4));
+    assert(g_engine.createTable(database, roundingSchema) ==
+           dbms::DBStatus::OK);
+    for (const auto& value : {"2.2", "10.2"})
+        assert(g_engine.insert(database, "rounding_function_order",
+                               {{"v", value}}) == dbms::DBStatus::OK);
+    for (const auto& name : {"floor", "ceil", "trunc", "sign"}) {
+        functionSort.exprFunc = name;
+        functionSort.expressionSql = std::string(name) + "(v)";
+        assert(g_engine.query(database, "rounding_function_order", {},
+                              {"v"}, {functionSort}) ==
+               ids({"2.2", "10.2"}));
+    }
+    functionSort.exprFunc = "mod";
+    functionSort.expressionSql = "mod(v, 3)";
+    assert(g_engine.query(database, "rounding_function_order", {}, {"v"},
+                          {functionSort}) == ids({"10.2", "2.2"}));
+    assert(g_engine.sortByExpression(
+               database, "rounding_function_order",
+               ids({"2.2", "10.2"}), {functionSort}) ==
+           ids({"10.2", "2.2"}));
+
     cleanupTestDb(testName);
     finalCleanupTestData();
     std::cout << "[FLOATING ORDER BY] numeric/NaN/null ordering OK"

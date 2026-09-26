@@ -22689,7 +22689,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             "replace", "translate", "concat", "concat_ws",
                             "initcap", "lpad", "rpad", "repeat", "btrim",
                             "ltrim", "rtrim", "split_part", "substring",
-                            "overlay", "trim", "abs", "round", "power"
+                            "overlay", "trim", "abs", "round", "power",
+                            "floor", "ceil", "trunc", "sign", "mod"
                         };
                         if (evaluatedSortFuncs.count(func))
                             spec.expressionSql = sortItem;

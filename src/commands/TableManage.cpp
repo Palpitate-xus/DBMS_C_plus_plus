@@ -28795,6 +28795,15 @@ static bool parseTextSortCount(const std::string& text, int64_t& count) {
            count <= std::numeric_limits<int32_t>::max();
 }
 
+static bool isEvaluatedNumericSort(
+    const StorageEngine::OrderBySpec& spec) {
+    static const std::set<std::string> functions = {
+        "abs", "round", "power", "floor", "ceil", "trunc", "sign", "mod"
+    };
+    return !spec.expressionSql.empty() &&
+           functions.count(spec.exprFunc) != 0;
+}
+
 std::vector<std::string> StorageEngine::query(const std::string& dbname,
                                                const std::string& tablename,
                                                const std::vector<std::string>& conditions,
@@ -29204,9 +29213,7 @@ std::vector<std::string> StorageEngine::query(
                 comparisonColumn.dataType = "numeric";
                 comparisonColumn.isVariableLength = true;
             }
-            if (!spec.expressionSql.empty() &&
-                (spec.exprFunc == "abs" || spec.exprFunc == "round" ||
-                 spec.exprFunc == "power")) {
+            if (isEvaluatedNumericSort(spec)) {
                 std::map<std::string, std::string> typeHints;
                 for (size_t ci = 0; ci < tbl.len; ++ci)
                     typeHints[tbl.cols[ci].dataName] = tbl.cols[ci].dataType;
@@ -35521,9 +35528,7 @@ std::vector<std::string> StorageEngine::sortByExpression(
                 }
             }
         }
-        if (!spec.expressionSql.empty() &&
-            (spec.exprFunc == "abs" || spec.exprFunc == "round" ||
-             spec.exprFunc == "power")) {
+        if (isEvaluatedNumericSort(spec)) {
             const std::string resultType = ExprHelper::inferResultType(
                 spec.expressionSql, expressionTypeHints);
             comparisonColumn.dataType =
