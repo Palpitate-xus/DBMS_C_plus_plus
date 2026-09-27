@@ -42009,11 +42009,8 @@ bool StorageEngine::createTransactionBackup() {
     // SQL ROLLBACK must restore UNLOGGED rows and indexes too. A process
     // crash is different: recovery restores this transaction image first,
     // then resets UNLOGGED storage using the unclean lifecycle marker.
-    if (!writePhysicalBackupManifest(backup, dbname) ||
-        !syncPhysicalBackupTree(backup)) {
-        std::filesystem::remove_all(backup, ec);
-        return false;
-    }
+    // physicalBackupLocked already publishes and syncs the exact-file
+    // manifest. The transaction image has not been modified since then.
     context.txnBackupPath = backup.string();
     context.transactionBackupDirty = false;
     context.txnLogSizeAtBackup = context.txnLog.size();
