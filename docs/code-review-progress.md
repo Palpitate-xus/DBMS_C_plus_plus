@@ -703,6 +703,7 @@
 | 724 | P0-04 / CAT-17 / P0-16 | 补查物化视图两次 `REFRESH` 跨 savepoint 和外层事务回滚的结果保真 | `materialized_view_refresh_rollback_probe` 在第 722 项生产二进制上与 PostgreSQL 18.6 定向差分 `cases=1 failed=0`；savepoint 回滚恢复第一次刷新的两行，外层回滚恢复刷新前的一行；相邻 `matview_test` C++ 与 `matview_refresh_protocol_e2e_test.py` 均通过。此用例晚于 350 组全量启动，不能计入该轮；完整物化视图/事务化 DDL 仍为 partial | `c61b83e8` |
 | 725 | P0-04 / CAT-17 / P0-16 | 补查 `REFRESH MATERIALIZED VIEW ... WITH NO DATA` 之后回滚是否恢复填充标志及旧数据 | `materialized_view_no_data_rollback_probe` 在第 722 项生产二进制上与 PostgreSQL 18.6 定向差分 `cases=1 failed=0`；分别验证 savepoint 和外层 `ROLLBACK` 后视图仍可读取原行。此用例晚于 350 组全量启动，不能计入该轮；完整物化视图/事务化 DDL 仍为 partial | `eaffa4b0` |
 | 726 | P0-04 / CAT-17 / P0-16 | 补查物化视图在 savepoint 和外层事务分别执行 `DROP` 后回滚的对象与数据保真 | `materialized_view_drop_rollback_probe` 在第 722 项生产二进制上与 PostgreSQL 18.6 定向差分 `cases=1 failed=0`；两次回滚后均可读取原行。此用例晚于 353 组全量启动，不计入该轮；完整物化视图/事务化 DDL 仍为 partial | `97a005f7` |
+| 727 | P0-04 / CAT-17 / P0-16 | 补查源表 `DROP ... CASCADE` 后事务回滚时，源表及依赖物化视图能否同时恢复 | `materialized_view_source_cascade_rollback_probe` 在第 722 项生产二进制上与 PostgreSQL 18.6 定向差分 `cases=1 failed=0`，回滚后两张关系的原行均可读取。此用例晚于 353 组全量启动，不计入该轮；依赖系统与事务化 DDL 仍为 partial | `86579260` |
 
 2026-09-27 当前复验：第 721 项后的固定本地二进制运行真实 PostgreSQL 18.6 差分 350 组，`failed=0`，包括后来新增的 UNLOGGED TRUNCATE/savepoint 两条用例。随后第 722 项的优化重新正式构建；新二进制的完整 PostgreSQL 协议回归与 6 条 UNLOGGED 定向差分均通过。第 723–725 项新增的 UNLOGGED 大字段/唯一索引和物化视图回滚共 3 条用例已分别定向通过；因晚于 350 组全量运行启动，不计入该轮，当前用例目录共 353 条。差分用例数不是总清单完成数。总账为 24 complete、122 partial、112 unverified、15 deferred_by_user；用户延期的安全/TDE 项未触碰。
 
