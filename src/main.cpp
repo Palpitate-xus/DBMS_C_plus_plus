@@ -7543,7 +7543,6 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
     vector<bool> valueNulls;
     vector<string> columnTypes;
     vector<size_t> listeningChannelSrfIndices;
-    bool hasLegacyScalarSubquery = false;
     auto appendValue = [&](string value, bool isNull = false,
                            string typeName = "text") {
         const string loweredType = toLower(trim(typeName));
@@ -7797,56 +7796,40 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             string innerLow;
             for (char c : inner) innerLow += static_cast<char>(tolower(static_cast<unsigned char>(c)));
             if (innerLow.compare(0, 7, "select ") == 0) {
-                // A FROM-less inner SELECT already produces typed rows. Do
-                // not round-trip its value through runSubQuery's rendered
-                // text: that path collapses SQL NULL, empty text and the
-                // literal text "NULL" into the same protocol value.
-                if (findTopLevelKeyword(inner, "from", 0) == string::npos) {
-                    dbms::DmlResult nested;
-                    if (!captureSetOperand(inner, s, nested)) return true;
-                    if (nested.available && nested.columns.size() != 1) {
-                        cout << "ERROR: subquery must return only one column "
-                                "(SQLSTATE 42601)" << endl;
-                        return true;
-                    }
-                    if (nested.rows.size() > 1) {
-                        cout << "ERROR: more than one row returned by a "
-                                "subquery used as an expression "
-                                "(SQLSTATE 21000)" << endl;
-                        return true;
-                    }
-                    if (!nested.available || nested.metadataOnly ||
-                        nested.nulls.size() != nested.rows.size() ||
-                        (!nested.rows.empty() &&
-                         (nested.rows.front().size() != 1 ||
-                          nested.nulls.front().size() != 1))) {
-                        cout << "ERROR: scalar subquery has no single structured "
-                                "column (SQLSTATE 0A000)" << endl;
-                        return true;
-                    }
-                    const bool isNull = nested.rows.empty() ||
-                        nested.nulls.front().front();
-                    const string cell = nested.rows.empty() ? string{} :
-                        nested.rows.front().front();
-                    const string resultType = nested.columnTypes.empty() ?
-                        inferSubQueryResultType(inner, s) :
-                        nested.columnTypes.front();
-                    headers.push_back(disp == item ? "?column?" : disp);
-                    appendValue(cell, isNull, resultType);
-                    continue;
+                // The nested SELECT has its own structured-result boundary.
+                // Never reconstruct a scalar value from rendered text: NULL,
+                // empty text, literal "NULL" and values with spaces differ.
+                dbms::DmlResult nested;
+                if (!captureSetOperand(inner, s, nested)) return true;
+                if (nested.available && nested.columns.size() != 1) {
+                    cout << "ERROR: subquery must return only one column "
+                            "(SQLSTATE 42601)" << endl;
+                    return true;
                 }
-                hasLegacyScalarSubquery = true;
-                const string resultType = inferSubQueryResultType(inner, s);
-                auto rows = runSubQuery(inner, s);
-                string cell = "NULL";
-                if (!rows.empty()) {
-                    stringstream rs(rows.front());
-                    string first;
-                    rs >> first;
-                    if (!first.empty()) cell = first;
+                if (nested.rows.size() > 1) {
+                    cout << "ERROR: more than one row returned by a "
+                            "subquery used as an expression "
+                            "(SQLSTATE 21000)" << endl;
+                    return true;
                 }
+                if (!nested.available || nested.metadataOnly ||
+                    nested.nulls.size() != nested.rows.size() ||
+                    (!nested.rows.empty() &&
+                     (nested.rows.front().size() != 1 ||
+                      nested.nulls.front().size() != 1))) {
+                    cout << "ERROR: scalar subquery has no single structured "
+                            "column (SQLSTATE 0A000)" << endl;
+                    return true;
+                }
+                const bool isNull = nested.rows.empty() ||
+                    nested.nulls.front().front();
+                const string cell = nested.rows.empty() ? string{} :
+                    nested.rows.front().front();
+                const string resultType = nested.columnTypes.empty() ?
+                    inferSubQueryResultType(inner, s) :
+                    nested.columnTypes.front();
                 headers.push_back(disp == item ? "?column?" : disp);
-                appendValue(cell, cell == "NULL", resultType);
+                appendValue(cell, isNull, resultType);
                 continue;
             }
         }
@@ -8216,8 +8199,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
         queryResult.available = true;
         queryResult.columns = headers;
         queryResult.columnTypes = columnTypes;
-        queryResult.metadataOnly = hasLegacyScalarSubquery;
-        if (!hasLegacyScalarSubquery && !suppressDataRow) {
+        if (!suppressDataRow) {
             const size_t width = multiRowWidth > 0 ? multiRowWidth : values.size();
             if (width > 0) {
                 for (size_t offset = 0; offset + width <= values.size();
@@ -8230,13 +8212,8 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                 }
             }
         }
-        // Legacy scalar subqueries still publish their rows via CLI output.
-        // Do not derive a zero-row command tag from metadata-only rows; the
-        // protocol layer counts the parsed result rows after execution.
-        if (!queryResult.metadataOnly) {
-            queryResult.commandTag = "SELECT " +
-                std::to_string(queryResult.rows.size());
-        }
+        queryResult.commandTag = "SELECT " +
+            std::to_string(queryResult.rows.size());
         dbms::publishLastDmlResult(std::move(queryResult));
     }
 
