@@ -696,6 +696,7 @@
 | 717 | QRY-10 / P0-16 | `ORDER BY to_number(v, format)` 原不计算解析后的数值，`10` 与 `2` 错排；现以 numeric 结果比较 | `order_by_to_number` 在旧二进制与 PostgreSQL 18.6 对照错序；`floating_order_by_test`、正式生产构建、定向差分、完整协议回归及固定二进制 343 组全量差分 `failed=0`。完整表达式排序仍为 partial | `4306fe54`, `b2b10226`, `ba439911` |
 | 718 | QRY-10 / P0-16 | `ORDER BY to_date(v, format)` 原忽略解析出的日期，按插入顺序输出；现推导 date 结果并按日期比较 | `order_by_to_date` 在旧二进制与 PostgreSQL 18.6 对照错序；`temporal_order_by_test` 通过。新生产构建及差分待运行；完整日期表达式排序仍为 partial | `314d4d9d`, `9b4a92b9` |
 | 719 | QRY-10 / P0-16 | `ORDER BY to_timestamp(v, format)` 原忽略解析出的时间戳，按插入顺序输出；现推导 timestamptz 结果并按时间比较 | `order_by_to_timestamp` 在旧二进制与 PostgreSQL 18.6 对照错序；`temporal_order_by_test` 通过。新生产构建及差分待运行；完整时间表达式排序仍为 partial | `beb48101`, `580c9fea` |
+| 720 | QRY-10 / P0-16 | `ORDER BY least/greatest/coalesce/nullif(...)` 原不按函数结果排序；整数、文本、NULL 和首参数为 NULL 的 numeric 表达式均错序。现求值并依据结果类型比较，且为多参数函数合并类型 | `order_by_polymorphic_functions` 在旧二进制与 PostgreSQL 18.6 对照的八条查询均错序；`floating_order_by_test` 验证整数、文本及首参数 NULL 的 decimal 路径。新生产构建与差分待运行；完整多态表达式排序仍为 partial | `f9f97dc3`, `39efb09e`, `f4436b47`, `bfb1b695` |
 
 2026-09-26 当前复验：第 717 项后的固定本地二进制运行真实 PostgreSQL 18.6 差分 343 组，`failed=0`，完整 PostgreSQL 协议回归通过。第 718–719 项的日期解析排序已在旧二进制上复现并在 C++ 回归中通过；新生产二进制构建与差分待完成。差分用例数不是总清单完成数。总账为 24 complete、122 partial、112 unverified、15 deferred_by_user；用户延期的安全/TDE 项未触碰。
 
