@@ -10,6 +10,7 @@
 #include "catalog/type_registry.h"
 #include "catalog/CatalogService.h"
 #include "catalog/systables.h"
+#include "access/BPTree.h"
 #include "storage/WAL.h"
 #include <cassert>
 #include <filesystem>
@@ -166,6 +167,8 @@ static void test_unlogged_drop_rollback_preserves_rows() {
     table.append(dbms::makeIntColumn("v", false, 4));
     table.append(dbms::makeTextColumn("payload", false));
     assert(g_engine.createTable(db, table) == dbms::DBStatus::OK);
+    assert(g_engine.createIndex(db, "unlogged_rollback", "v") ==
+           dbms::DBStatus::OK);
     const std::string committedPayload(5000, 'x');
     const std::string rolledBackPayload(5000, 'y');
     assert(g_engine.insert(db, "unlogged_rollback",
@@ -187,6 +190,10 @@ static void test_unlogged_drop_rollback_preserves_rows() {
            std::vector<std::string>{"7 "});
     assert(g_engine.query(db, "unlogged_rollback", {"=v 7"}, {"payload"}) ==
            std::vector<std::string>{committedPayload + " "});
+    dbms::BPTree* index = g_engine.getSecondaryIndex(
+        db, "unlogged_rollback", "v");
+    assert(index && index->searchMulti("7").size() == 1);
+    assert(index->searchMulti("8").empty());
 
     cleanup(db);
     std::cout << "[DDL-TXN] unlogged DROP rollback keeps rows OK" << std::endl;
