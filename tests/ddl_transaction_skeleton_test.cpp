@@ -164,15 +164,20 @@ static void test_unlogged_drop_rollback_preserves_rows() {
     table.formatVersion = 2;
     table.isUnlogged = true;
     table.append(dbms::makeIntColumn("v", false, 4));
+    table.append(dbms::makeTextColumn("payload", false));
     assert(g_engine.createTable(db, table) == dbms::DBStatus::OK);
-    assert(g_engine.insert(db, "unlogged_rollback", {{"v", "7"}}) ==
+    const std::string committedPayload(5000, 'x');
+    const std::string rolledBackPayload(5000, 'y');
+    assert(g_engine.insert(db, "unlogged_rollback",
+                           {{"v", "7"}, {"payload", committedPayload}}) ==
            dbms::DBStatus::OK);
 
     Session session;
     setupSession(session, db);
     dbms::DdlExecutor ddl;
     assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
-    assert(g_engine.insert(db, "unlogged_rollback", {{"v", "8"}}) ==
+    assert(g_engine.insert(db, "unlogged_rollback",
+                           {{"v", "8"}, {"payload", rolledBackPayload}}) ==
            dbms::DBStatus::OK);
     assert(!ddl.executeSql("DROP TABLE unlogged_rollback", session));
     assert(!g_engine.tableExists(db, "unlogged_rollback"));
@@ -180,6 +185,8 @@ static void test_unlogged_drop_rollback_preserves_rows() {
     assert(g_engine.tableExists(db, "unlogged_rollback"));
     assert(g_engine.query(db, "unlogged_rollback", {}, {"v"}) ==
            std::vector<std::string>{"7 "});
+    assert(g_engine.query(db, "unlogged_rollback", {"=v 7"}, {"payload"}) ==
+           std::vector<std::string>{committedPayload + " "});
 
     cleanup(db);
     std::cout << "[DDL-TXN] unlogged DROP rollback keeps rows OK" << std::endl;
