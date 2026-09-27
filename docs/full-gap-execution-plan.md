@@ -17,7 +17,7 @@
 
 ## 后续优先队列
 
-1. P0-02：继续迁移 SELECT 的结构化结果输出。quoted alias、无 FROM 普通投影、有限 scalar SQL/PLpgSQL UDF、独立 `VALUES` 和普通标量子查询投影已迁移；CTE / set operation、相关及 legacy scalar subquery、SRF、完整 SQL function query body 和剩余 utility/function 分支仍需统一 typed rows / NULL bitmap，不能靠显示文本反推数据。
+1. P0-02：继续迁移 SELECT 的结构化结果输出。quoted alias、无 FROM 普通投影、有限 scalar SQL/PLpgSQL UDF、独立 `VALUES` 和已验证的无相关标量子查询投影已迁移；第 728–729 项修复了标量子查询中 NULL、空串、字面量 `NULL` 和带空格文本的线协议失真。CTE / set operation、相关与复杂标量子查询、SRF、完整 SQL function query body 和剩余 utility/function 分支仍需统一 typed rows / NULL bitmap，不能靠显示文本反推数据。
 2. P0-01 / SQL-01 / QRY-10：删除剩余改变语义的字符串路径；第 679 项只覆盖已验证的 LIMIT/OFFSET 常量整数表达式，仍需处理无 FROM 查询其他形态、顶层 WITH TIES、复杂表达式与执行短路，不能用部分行切片测试关闭整项。
 3. P0-16：参考端已通过 PostgreSQL wire protocol 在同一 session 无损读取 rows / NULL / headers / type OID / SQLSTATE / command tag，并要求精确 PostgreSQL 18.6 版本。已在临时目录从官方源码构建 18.6 实例并校准 `en_US.utf8` 排序/货币区域设置。第 721 项固定本地二进制的 350 组全量差分 `failed=0`，包含 UNLOGGED TRUNCATE/savepoint 用例；随后第 722 项优化重建的生产二进制完整协议回归及 6 条 UNLOGGED 定向差分通过。第 723–725 项新增的 UNLOGGED 大字段/唯一索引及两条物化视图回滚用例晚于全量启动，已分别定向通过，但不计入 350 组；当前目录共 353 条。差分用例数不是总清单完成数。本地端按 case 重建 session。下一步仍需扩充 SQL、并发 schedule、catalog、crash point 和零 allowlist 发布门；这些用例不能替代总清单验收。
 4. 然后按 B2–B5 推进 catalog / 事务化 DDL、持久性、资源治理及剩余功能族，逐项补实测证据。用户跳过的安全 / TDE 专项仍不计完成。
