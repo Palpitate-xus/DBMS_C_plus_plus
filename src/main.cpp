@@ -7797,6 +7797,44 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             string innerLow;
             for (char c : inner) innerLow += static_cast<char>(tolower(static_cast<unsigned char>(c)));
             if (innerLow.compare(0, 7, "select ") == 0) {
+                // A FROM-less inner SELECT already produces typed rows. Do
+                // not round-trip its value through runSubQuery's rendered
+                // text: that path collapses SQL NULL, empty text and the
+                // literal text "NULL" into the same protocol value.
+                if (findTopLevelKeyword(inner, "from", 0) == string::npos) {
+                    dbms::DmlResult nested;
+                    if (!captureSetOperand(inner, s, nested)) return true;
+                    if (nested.available && nested.columns.size() != 1) {
+                        cout << "ERROR: subquery must return only one column "
+                                "(SQLSTATE 42601)" << endl;
+                        return true;
+                    }
+                    if (nested.rows.size() > 1) {
+                        cout << "ERROR: more than one row returned by a "
+                                "subquery used as an expression "
+                                "(SQLSTATE 21000)" << endl;
+                        return true;
+                    }
+                    if (!nested.available || nested.metadataOnly ||
+                        nested.nulls.size() != nested.rows.size() ||
+                        (!nested.rows.empty() &&
+                         (nested.rows.front().size() != 1 ||
+                          nested.nulls.front().size() != 1))) {
+                        cout << "ERROR: scalar subquery has no single structured "
+                                "column (SQLSTATE 0A000)" << endl;
+                        return true;
+                    }
+                    const bool isNull = nested.rows.empty() ||
+                        nested.nulls.front().front();
+                    const string cell = nested.rows.empty() ? string{} :
+                        nested.rows.front().front();
+                    const string resultType = nested.columnTypes.empty() ?
+                        inferSubQueryResultType(inner, s) :
+                        nested.columnTypes.front();
+                    headers.push_back(disp == item ? "?column?" : disp);
+                    appendValue(cell, isNull, resultType);
+                    continue;
+                }
                 hasLegacyScalarSubquery = true;
                 const string resultType = inferSubQueryResultType(inner, s);
                 auto rows = runSubQuery(inner, s);
