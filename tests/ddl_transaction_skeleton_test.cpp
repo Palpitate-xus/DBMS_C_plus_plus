@@ -154,6 +154,37 @@ static void test_engine_transaction_backup_lifecycle() {
     std::cout << "[DDL-TXN] engine backup lifecycle OK" << std::endl;
 }
 
+static void test_unlogged_drop_rollback_preserves_rows() {
+    const std::string db = testDbPath("ddl_txn_unlogged_drop_rollback");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    dbms::TableSchema table;
+    table.tablename = "unlogged_rollback";
+    table.formatVersion = 2;
+    table.isUnlogged = true;
+    table.append(dbms::makeIntColumn("v", false, 4));
+    assert(g_engine.createTable(db, table) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "unlogged_rollback", {{"v", "7"}}) ==
+           dbms::DBStatus::OK);
+
+    Session session;
+    setupSession(session, db);
+    dbms::DdlExecutor ddl;
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "unlogged_rollback", {{"v", "8"}}) ==
+           dbms::DBStatus::OK);
+    assert(!ddl.executeSql("DROP TABLE unlogged_rollback", session));
+    assert(!g_engine.tableExists(db, "unlogged_rollback"));
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+    assert(g_engine.tableExists(db, "unlogged_rollback"));
+    assert(g_engine.query(db, "unlogged_rollback", {}, {"v"}) ==
+           std::vector<std::string>{"7 "});
+
+    cleanup(db);
+    std::cout << "[DDL-TXN] unlogged DROP rollback keeps rows OK" << std::endl;
+}
+
 static void test_nested_begin_preserves_active_transaction() {
     std::string db = testDbPath("ddl_txn_t_nested_begin");
     std::string otherDb = testDbPath("ddl_txn_t_nested_begin_other");
@@ -804,6 +835,7 @@ int main() {
     test_commit_survives();
     test_commit_failure_is_propagated_and_restored();
     test_engine_transaction_backup_lifecycle();
+    test_unlogged_drop_rollback_preserves_rows();
     test_nested_begin_preserves_active_transaction();
     test_snapshot_ddl_serializes_database_backends();
     test_unfinished_snapshot_recovers_on_restart();

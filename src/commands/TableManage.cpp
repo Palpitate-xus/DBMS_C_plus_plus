@@ -41994,46 +41994,21 @@ bool StorageEngine::createTransactionBackup() {
     // The exclusive database lock is acquired by beginTransaction(..., true)
     // before this copy starts. This prevents a physical restore from erasing
     // another backend's committed changes.
-    const auto tables = getTableNames(dbname);
     if (!flushDatabaseCaches(dbname)) return false;
 
     const auto backup = transactionBackupPath(dbname, context.currentTxnId);
     std::error_code ec;
     std::filesystem::remove_all(backup, ec);
-    if (!physicalBackupLocked(dbname, backup.string())) {
+    // Transaction rollback needs an exact image, including UNLOGGED main
+    // forks. Physical base backups intentionally omit those forks instead.
+    if (!physicalBackupLocked(dbname, backup.string(), {}, true)) {
         std::filesystem::remove_all(backup, ec);
         return false;
     }
 
-    // UNLOGGED relations are intentionally empty after crash recovery. Remove
-    // every physical fork/index/TOAST file from the snapshot while retaining
-    // their schema and catalog metadata.
-    for (const auto& tn : tables) {
-        TableSchema ts = getTableSchema(dbname, tn);
-        if (!ts.isUnlogged) continue;
-        std::filesystem::path relationBackup = backup;
-        if (!ts.tablespace.empty() && ts.tablespace != "pg_default") {
-            relationBackup /= "tablespaces";
-            relationBackup /= ts.tablespace;
-        }
-        if (!std::filesystem::exists(relationBackup)) continue;
-        for (const auto& entry : std::filesystem::directory_iterator(relationBackup)) {
-            const std::string filename = entry.path().filename().string();
-            const bool initFork = filename.size() > 5 &&
-                filename.compare(filename.size() - 5, 5, ".init") == 0;
-            if (isRelationPhysicalFileName(filename, tn) && !initFork &&
-                !isDefinitionBearingSpecializedIndexFileName(filename, tn)) {
-                std::filesystem::remove_all(entry.path(), ec);
-                if (ec) {
-                    std::filesystem::remove_all(backup, ec);
-                    return false;
-                }
-            }
-        }
-    }
-    // Removing UNLOGGED forks changes the snapshot's exact file set. Rebuild
-    // and durably publish its manifest so crash rollback does not reject the
-    // intentionally filtered transaction snapshot as corrupt.
+    // SQL ROLLBACK must restore UNLOGGED rows and indexes too. A process
+    // crash is different: recovery restores this transaction image first,
+    // then resets UNLOGGED storage using the unclean lifecycle marker.
     if (!writePhysicalBackupManifest(backup, dbname) ||
         !syncPhysicalBackupTree(backup)) {
         std::filesystem::remove_all(backup, ec);
