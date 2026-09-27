@@ -265,6 +265,19 @@ int main() {
                    database, "integer_function_order", ids({"9", "4"}),
                    {functionSort}) == ids({"4", "9"}));
     }
+    for (const auto& expression : {
+             "coalesce(NULL, v)", "least(NULL, v)",
+             "greatest(NULL, v)"}) {
+        functionSort.expressionSql = expression;
+        functionSort.exprFunc = std::string(expression).substr(
+            0, std::string(expression).find('('));
+        assert(g_engine.query(database, "rounding_function_order", {}, {"v"},
+                              {functionSort}) == ids({"2.2", "10.2"}));
+        assert(g_engine.sortByExpression(
+                   database, "rounding_function_order",
+                   ids({"2.2", "10.2"}), {functionSort}) ==
+               ids({"2.2", "10.2"}));
+    }
     dbms::TableSchema polymorphicTextSchema;
     polymorphicTextSchema.tablename = "polymorphic_text_order";
     polymorphicTextSchema.formatVersion = 2;

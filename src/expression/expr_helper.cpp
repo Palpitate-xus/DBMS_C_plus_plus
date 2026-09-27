@@ -393,10 +393,15 @@ std::string inferAstResultType(
             const std::string input = argType(0);
             return input == "numeric" ? "numeric" : "double precision";
         }
+        if (name == "coalesce" || name == "greatest" || name == "least") {
+            std::string result = "unknown";
+            for (size_t i = 0; i < call->args.size(); ++i)
+                result = mergeProtocolTypes(result, argType(i));
+            return result == "unknown" ? "text" : result;
+        }
         if (name == "min" || name == "max" || name == "lag" ||
             name == "lead" || name == "first_value" || name == "last_value" ||
-            name == "nth_value" || name == "coalesce" || name == "nullif" ||
-            name == "greatest" || name == "least" || name == "abs" ||
+            name == "nth_value" || name == "nullif" || name == "abs" ||
             name == "round" || name == "trunc" || name == "ceil" ||
             name == "ceiling" || name == "floor" || name == "mod")
             return argType(0);
