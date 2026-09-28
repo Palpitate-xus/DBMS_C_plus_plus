@@ -7795,7 +7795,11 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             string inner = trim(expr.substr(1, expr.size() - 2));
             string innerLow;
             for (char c : inner) innerLow += static_cast<char>(tolower(static_cast<unsigned char>(c)));
-            if (innerLow.compare(0, 7, "select ") == 0) {
+            const bool selectKeyword = innerLow.compare(0, 6, "select") == 0 &&
+                (innerLow.size() == 6 ||
+                 (!isalnum(static_cast<unsigned char>(innerLow[6])) &&
+                  innerLow[6] != '_' && innerLow[6] != '$'));
+            if (selectKeyword) {
                 // The nested SELECT has its own structured-result boundary.
                 // Never reconstruct a scalar value from rendered text: NULL,
                 // empty text, literal "NULL" and values with spaces differ.
