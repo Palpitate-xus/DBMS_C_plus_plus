@@ -6176,6 +6176,12 @@ static bool executeSetOperation(const string& sql, Session& s, bool& handled) {
             size_t lp = findTopLevelKeyword(text, "limit");
             if (lp == string::npos) return true;
             string num = trim(text.substr(lp + 5));
+            const string loweredNum = toLower(num);
+            if (loweredNum == "all" || loweredNum == "null") {
+                tailHasLimit = false;
+                text = trim(text.substr(0, lp));
+                return true;
+            }
             try {
                 size_t parsed = 0;
                 size_t v = static_cast<size_t>(stoull(num, &parsed));
