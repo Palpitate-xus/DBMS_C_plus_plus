@@ -1,5 +1,6 @@
 #include "commands/DdlExecutor.h"
 #include "commands/TableManage.h"
+#include "common/DbError.h"
 #include "Session.h"
 #include "storage/CommitLog.h"
 #include "storage/WAL.h"
@@ -476,8 +477,16 @@ int runPreparedRestartVerifier() {
     assert(!restarted.getLockManager().rowLockShared("restart_rows", 7));
     assert(!restarted.getLockManager().pageLockShared(db, "restart_rows", 1));
     assert(!restarted.getLockManager().lockGap("restart_rows", "", "~"));
-    assert(restarted.query(db, "restart_rows", {}, {"id"}).empty());
-    assert(restarted.query(db, "restart_rows", {"=id 7"}, {"id"}).empty());
+    const auto expectLockedQuery = [&](const std::vector<std::string>& conditions) {
+        try {
+            (void)restarted.query(db, "restart_rows", conditions, {"id"});
+            assert(false && "prepared relation lock must reject the query");
+        } catch (const dbms::DbError& error) {
+            assert(error.sqlState() == "55P03");
+        }
+    };
+    expectLockedQuery({});
+    expectLockedQuery({"=id 7"});
     assert(restarted.commitPrepared("prepared_restart_commit") == dbms::DBStatus::OK);
     assert(restarted.getLockManager().lockExclusive("restart_rows"));
     restarted.getLockManager().unlock("restart_rows");
