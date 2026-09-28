@@ -996,6 +996,7 @@ bool LockManager::rowLockShared(const std::string& table, int64_t rid) {
         {
             std::lock_guard<std::mutex> guard(rowMutex_);
             auto& current = rowLocks_[key];
+            removeWaitEdges(self);
             // Already holding shared or exclusive lock on this row.
             if (std::find(current.holders.begin(), current.holders.end(), self) !=
                 current.holders.end()) return true;
@@ -1004,10 +1005,12 @@ bool LockManager::rowLockShared(const std::string& table, int64_t rid) {
                     current, threadSettings().resourceNamespace, "row", key, LockMode::Shared);
                 if (processResult == ProcessLockResult::Error) return false;
                 if (processResult == ProcessLockResult::Acquired) {
-                    current.mtx.lock_shared();
-                    ++current.sharedCount;
-                    current.holders.push_back(self);
-                    return true;
+                    if (current.mtx.try_lock_shared()) {
+                        ++current.sharedCount;
+                        current.holders.push_back(self);
+                        return true;
+                    }
+                    if (current.holders.empty()) releaseProcessLock(current);
                 }
             }
             if (current.exclusive) {
@@ -1026,6 +1029,13 @@ bool LockManager::rowLockShared(const std::string& table, int64_t rid) {
             {
                 std::lock_guard<std::mutex> guard(rowMutex_);
                 --state->waiters;
+            }
+            if (threadSettings().lockTimeoutMs > 0 &&
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - started).count() >=
+                    threadSettings().lockTimeoutMs) {
+                removeWaitEdges(self);
+                return false;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
@@ -1073,6 +1083,7 @@ bool LockManager::rowLockExclusive(const std::string& table, int64_t rid) {
         {
             std::lock_guard<std::mutex> guard(rowMutex_);
             auto& current = rowLocks_[key];
+            removeWaitEdges(self);
             if (current.exclusive && current.holders.size() == 1 && current.holders[0] == self) {
                 return true;
             }
@@ -1090,11 +1101,13 @@ bool LockManager::rowLockExclusive(const std::string& table, int64_t rid) {
                     current, threadSettings().resourceNamespace, "row", key, LockMode::Exclusive);
                 if (processResult == ProcessLockResult::Error) return false;
                 if (processResult == ProcessLockResult::Acquired) {
-                    current.mtx.lock();
-                    current.exclusive = true;
-                    current.holders.push_back(self);
-                    removeWaitEdges(self);
-                    return true;
+                    if (current.mtx.try_lock()) {
+                        current.exclusive = true;
+                        current.holders.push_back(self);
+                        removeWaitEdges(self);
+                        return true;
+                    }
+                    if (current.holders.empty()) releaseProcessLock(current);
                 }
             }
             for (const auto& holder : current.holders) {
@@ -1111,6 +1124,13 @@ bool LockManager::rowLockExclusive(const std::string& table, int64_t rid) {
             {
                 std::lock_guard<std::mutex> guard(rowMutex_);
                 --state->waiters;
+            }
+            if (threadSettings().lockTimeoutMs > 0 &&
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - started).count() >=
+                    threadSettings().lockTimeoutMs) {
+                removeWaitEdges(self);
+                return false;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;

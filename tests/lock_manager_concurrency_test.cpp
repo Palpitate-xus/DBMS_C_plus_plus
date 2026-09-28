@@ -10,6 +10,7 @@
 #include <iostream>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 using namespace dbms;
 
@@ -128,6 +129,46 @@ int main() {
     manager.pageUnlockAll();
     manager.unlockAll();
     std::cout << "[LOCK] row token ownership and cleanup OK\n";
+
+    // A waiter can hold the physical row mutex while publishing ownership.
+    // Competing fast-path acquisitions must never block under rowMutex_ or
+    // accumulate obsolete wait-for edges across handoffs.
+    manager.clearDeadlockLog();
+    constexpr int handoffWorkers = 12;
+    constexpr int handoffIterations = 50;
+    std::atomic<int> handoffReady{0};
+    std::atomic<bool> handoffStart{false};
+    std::atomic<bool> handoffFailed{false};
+    std::vector<std::thread> handoffThreads;
+    for (int worker = 0; worker < handoffWorkers; ++worker) {
+        handoffThreads.emplace_back([&, worker] {
+            manager.setLockTimeout(3000);
+            handoffReady.fetch_add(1, std::memory_order_release);
+            while (!handoffStart.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            for (int iteration = 0; iteration < handoffIterations; ++iteration) {
+                const bool shared = (iteration + worker) % 4 == 0;
+                const bool acquired = shared
+                    ? manager.rowLockShared("handoff_rows", 1)
+                    : manager.rowLockExclusive("handoff_rows", 1);
+                if (!acquired) {
+                    handoffFailed.store(true, std::memory_order_release);
+                    return;
+                }
+                manager.rowUnlock("handoff_rows", 1);
+            }
+        });
+    }
+    while (handoffReady.load(std::memory_order_acquire) != handoffWorkers) {
+        std::this_thread::yield();
+    }
+    handoffStart.store(true, std::memory_order_release);
+    for (auto& worker : handoffThreads) worker.join();
+    assert(!handoffFailed.load(std::memory_order_acquire));
+    assert(manager.getDeadlockLog().empty());
+    assert(manager.lockedRows("handoff_rows").empty());
+    std::cout << "[LOCK] row handoff contention OK\n";
 
     // Savepoint-style lock checkpoints retain pre-savepoint locks but release
     // every table/row/page/gap token acquired afterward.
