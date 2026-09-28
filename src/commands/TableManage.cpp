@@ -28981,12 +28981,8 @@ std::vector<std::string> StorageEngine::query(
                 if (skipLocked) {
                     continue; // skip locked rows
                 }
-                if (noWait) {
-                    throw DbError("55P03", "could not obtain lock on row in relation \"" +
-                        tablename + "\"");
-                }
-                rollbackTransaction();
-                return result;
+                throw DbError("55P03", "could not obtain lock on row in relation \"" +
+                    tablename + "\"");
             }
             lockedRows.push_back(std::move(mr));
         }
