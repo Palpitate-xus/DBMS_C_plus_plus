@@ -41911,12 +41911,36 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
     }
 
     context.databaseTxnMutex = databaseTxnLockFor(dbname);
+    const int lockTimeoutMs = lockManager_.getLockTimeout();
+    const auto acquireDatabaseLock = [lockTimeoutMs](auto& lock) {
+        if (lockTimeoutMs <= 0) {
+            lock.lock();
+            return true;
+        }
+        const auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::milliseconds(lockTimeoutMs);
+        do {
+            if (lock.try_lock()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        } while (std::chrono::steady_clock::now() < deadline);
+        return false;
+    };
     if (ddlSnapshot) {
-        context.databaseExclusiveLock = std::make_unique<std::unique_lock<std::shared_mutex>>(
-            *context.databaseTxnMutex);
+        auto lock = std::make_unique<std::unique_lock<std::shared_mutex>>(
+            *context.databaseTxnMutex, std::defer_lock);
+        if (!acquireDatabaseLock(*lock)) {
+            context.databaseTxnMutex.reset();
+            return DBStatus::LOCK_CONFLICT;
+        }
+        context.databaseExclusiveLock = std::move(lock);
     } else {
-        context.databaseSharedLock = std::make_unique<std::shared_lock<std::shared_mutex>>(
-            *context.databaseTxnMutex);
+        auto lock = std::make_unique<std::shared_lock<std::shared_mutex>>(
+            *context.databaseTxnMutex, std::defer_lock);
+        if (!acquireDatabaseLock(*lock)) {
+            context.databaseTxnMutex.reset();
+            return DBStatus::LOCK_CONFLICT;
+        }
+        context.databaseSharedLock = std::move(lock);
     }
 
     // CatalogManager is lazily persisted and may contain the latest DDL

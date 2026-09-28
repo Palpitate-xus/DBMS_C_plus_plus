@@ -457,6 +457,10 @@ void LockManager::setLockTimeout(int ms) {
     threadSettings().lockTimeoutMs = ms > 0 ? ms : 0;
 }
 
+int LockManager::getLockTimeout() const {
+    return threadSettings().lockTimeoutMs;
+}
+
 void LockManager::setDeadlockTimeout(int ms) {
     threadSettings().deadlockTimeoutMs = ms > 0 ? ms : 0;
 }

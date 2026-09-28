@@ -3,6 +3,7 @@
 // ============================================================================
 
 #include "commands/DdlTransaction.h"
+#include "common/DbError.h"
 #include "common/NotificationManager.h"
 #include "catalog/CatalogService.h"
 #include "catalog/systables.h"
@@ -150,6 +151,9 @@ bool DdlTransaction::begin() {
         return true;
     }
     DBStatus st = engine_.beginTransaction(session_.currentDB, snapshotRollbackEnabled_);
+    if (st == DBStatus::LOCK_CONFLICT) {
+        throw DbError("55P03", "could not obtain database transaction lock");
+    }
     active_ = (st == DBStatus::OK);
     startedByUs_ = active_;
     if (startedByUs_) {

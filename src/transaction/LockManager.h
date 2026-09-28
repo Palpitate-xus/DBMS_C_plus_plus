@@ -56,6 +56,7 @@ public:
 
     // Set lock timeout (0 = no timeout)
     void setLockTimeout(int ms);
+    int getLockTimeout() const;
     // Set deadlock detection timeout (0 = immediate check)
     void setDeadlockTimeout(int ms);
     // Called from cooperative wait loops. The handler may throw a typed
