@@ -70,7 +70,7 @@
     {"id":"TYPE-15","status":"partial","evidence":["docs/code-review-progress.md","src/commands/TableManage.cpp","src/expression/ExprEvaluator.cpp"],"tests":["tests/json_type_test.cpp","tests/json_ops_test.cpp","tests/json_functions_test.cpp","tests/jsonpath_test.cpp","tests/json_path_test.cpp","tests/compat/cases/json_ops.sql"],"commits":["d0e54d1c","eb98dc35","5a523477","611ca0fc"]},
     {"id":"TYPE-16","status":"partial","evidence":["docs/code-review-progress.md","src/catalog/systables.cpp"],"tests":["tests/compat/pg_diff_runner.py"],"commits":["8b6b5e4"]},
     {"id":"TYPE-17","status":"partial","evidence":["docs/code-review-progress.md","src/commands/TableManage.cpp","src/commands/DdlExecutor.cpp"],"tests":["tests/composite_test.cpp"],"commits":["f9f05f22"]},
-    {"id":"TYPE-18","status":"unverified","evidence":[]},
+    {"id":"TYPE-18","status":"partial","evidence":["docs/code-review-progress.md","src/commands/TableManage.cpp","src/expression/ExprEvaluator.cpp"],"tests":["tests/range_test.cpp","tests/range_functions_test.cpp","tests/range_bound_projection_test.cpp","tests/gist_range_search_test.cpp"],"commits":["e2266db7","e2a62615","91348835","b4dd7cf2"]},
     {"id":"TYPE-19","status":"partial","evidence":["docs/code-review-progress.md","src/commands/TableManage.cpp"],"tests":["tests/domain_full_test.cpp","tests/domain_multi_check_test.cpp"],"commits":["591a35bb"]},
     {"id":"TYPE-20","status":"partial","evidence":["docs/code-review-progress.md"],"tests":["tests/fromless_structured_protocol_e2e_test.py"],"commits":["655fdeb"]},
     {"id":"TYPE-21","status":"partial","evidence":["docs/code-review-progress.md"],"tests":["tests/fromless_structured_protocol_e2e_test.py"],"commits":["655fdeb"]},
