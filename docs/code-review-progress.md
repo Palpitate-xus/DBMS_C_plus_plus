@@ -716,6 +716,23 @@
 | 737 | QRY-06 / QRY-10 / P0-16 | 集合运算尾部 `LIMIT ALL`、`LIMIT NULL` 原报 `42601`；PostgreSQL 将两者视为不设行数上限。现单独识别这两种形式并保留尾部 `ORDER BY` | `setop_limit_unbounded_probe` 在旧二进制上与 PostgreSQL 18.6 四条均失败；修复后正式生产构建、定向差分 `cases=1 failed=0`，相邻负 LIMIT、排序规则冲突、完整协议回归及固定二进制 365 组全量差分 `failed=0`。完整 LIMIT 表达式仍为 partial | `94dc462d`, `c7929d4e` |
 | 738 | QRY-06 / QRY-10 / P0-16 | 集合运算尾部原完全不识别 `OFFSET`，合法分页报 `42601`；现按查询结果顺序执行 `ORDER BY`、`OFFSET`、`LIMIT`，接受两种 LIMIT/OFFSET 顺序、NULL 与无上限形式，负 OFFSET 报 `2201X` | `setop_offset_probe` 在旧生产二进制上与 PostgreSQL 18.6 四条基础写法均失败；修复后正式生产构建、10 条变体定向差分 `cases=1 failed=0`、相邻五条集合差分、正式对象链接的隔离 C++ 测试、完整协议回归及固定二进制 367 组全量差分 `failed=0`。完整分页表达式仍为 partial | `f5e0ab81`, `f4615f81` |
 | 739 | QRY-06 / TYPE-02 / P0-16 | 集合运算原按数值显示字符串构造去重/交差键，把 `1.0` 和 `1.00` 当成不同值，导致 `UNION`、`INTERSECT`、`EXCEPT` 行数及 command tag 错误；现对 `numeric` 列按数值规范键比较，同时保留原行的显示精度 | `setop_numeric_equivalence_probe` 在旧生产二进制与 PostgreSQL 18.6 对照前三种运算失败；修复后正式生产构建、定向差分 `cases=1 failed=0`、正式对象链接的隔离 `structured_set_result_test` 退出码 0、相邻五条集合差分、完整协议回归及固定二进制 367 组全量差分 `failed=0`。完整类型/排序规则相等语义仍为 partial | `55da63db`, `df196c77` |
+| 740 | P0-04 / P0-05 | `ALTER TABLE ONLY` 回归旧断言要求事务回滚删除 UNLOGGED 行，与当前回滚语义不符 | 校正 `alter_table_only_test` 的事务回滚断言；定向通过。完整事务化 DDL 仍为 partial | `eeed1a8d` |
+| 741 | CONS-01 | 同一回归旧断言把 CHECK 失败认作通用 `INVALID_VALUE` | 校正 `alter_table_only_test` 的专用状态码；定向通过 | `a4298779` |
+| 742 | CONS-01 / TYPE-08 | 域多重 CHECK 回归沿用通用错误状态，掩盖专用约束错误 | 校正 `domain_multi_check_test` 七处断言；定向通过，域完整语义仍为 partial | `591a35bb` |
+| 743 | CONS-01 / CAT-02 | 删除无关列后的 CHECK 失败断言沿用通用错误状态 | 校正 `drop_column_expression_dependency_test`；定向通过，依赖族仍为 partial | `86d166fe` |
+| 744 | IDX-12 / P0-09 | EXCLUDE 改名回归在同一数据目录交错使用两个可写 `StorageEngine`，导致测试自身触发 I/O 冲突 | 将第二实例的只读持久化检查移到主实例写入结束后；`exclude_test` 定向通过，多进程共享目录仍不支持 | `f8f9561c` |
+| 745 | TYPE-06 | 非法时区位移现在返回表达式错误，旧回归仍期待 SQL NULL | 校正 `interval_arith_test` 的错误断言；定向通过 | `c22f9292` |
+| 746 | CONS-01 / CAT-02 | 改列名后的 CHECK 失败断言沿用通用错误状态 | 校正 `rename_column_expression_dependency_test` 三处断言；定向通过 | `153fd978` |
+| 747 | TYPE-06 | `timestamptz` UTC 规范输出包含 `+00`，旧回归遗漏后缀 | 校正 `update_type_validation_test`；定向通过 | `c409e903` |
+| 748 | CAT-07 / TYPE-08 | 旧类型回归允许删除仍被表列引用的枚举类型 | 校正 `create_type_shell_test`：先验证依赖拒绝，再删表/删类型；定向通过，类型依赖完整性仍为 partial | `c87d8f45` |
+| 749 | P0-04 / P0-05 | 物理恢复交换成功后，旧数据库目录若为只读，退休代无法清理，残留 `.restore_staging` 并使下次启动拒绝恢复 | 只调整退休代目录权限后重试删除；新增无残留断言，`create_type_shell_test` 使用正式生产对象隔离通过；完整 crash recovery 仍为 partial | `2b67d26c` |
+| 750 | DML-01 / CONS-01 | `INSERT DEFAULT VALUES` 直接传入默认表达式文本，并为无默认值的 NOT NULL 列伪造值，合法时间默认值可失败、非法行可写入 | 改由普通 INSERT 的省略列路径求值与校验；`phase5_new_features_test` 新增值和非空约束断言、隔离通过 | `4c70c55f` |
+| 751 | P0-05 / CAT-02 | schema 格式回归仍按旧的唯一尾部扩展裁剪，误把当前 identity 扩展残片当成文件损坏 | 分别验证无 identity 扩展与无两种扩展的兼容读；`schema_format_test` 隔离通过，格式升级全族仍为 partial | `fda3b684` |
+| 752 | EXT-04 / SQL-10 | 过程 E2E 的排序预期与参考 PostgreSQL 默认 locale 不符 | 按真实 PostgreSQL 查询结果调整 `?ArgValue` 与 `a;b` 的顺序；过程线协议 E2E 通过，过程族仍为 partial | `0c8fec47` |
+| 753 | SQL-02 / DDL-01 | 手册验证测试通过 SQL 创建未引用标识符，却用大写存储键访问；还沿用旧的 REFRESH 拒绝与通用 CHECK 状态预期 | 对齐规范化列名和现行 DDL/状态接口；`manual_verification_test` 全章节隔离通过 | `86231f1f` |
+| 754 | P0-07 / P0-09 / P0-05 | 页锁等待线程可持有物理锁后等待全局页互斥，而另一线程在全局互斥内阻塞获取同一物理锁；等待图还累积过期边，导致并发 TOAST 写入死锁或误报冲突 | 页锁快路径改为非阻塞物理锁、轮询刷新等待边并检查超时；12 线程 TOAST 全测试连续四次通过。更广泛的并发/SSI 仍为 partial | `acca9f45` |
+| 755 | CONS-01 | TOAST 回归两处 CHECK 失败仍期待通用错误状态 | 对齐 `CHECK_VIOLATION`；TOAST 全测试通过 | `27d6071f` |
+| 756 | TYPE-01 | TOAST 回归对超出 VARCHAR 长度的写入仍期待通用错误状态 | 对齐 `STRING_DATA_RIGHT_TRUNCATION`；TOAST 全测试通过 | `34a9cfab` |
 
 2026-09-28 当前复验：第 738–739 项分页与数值等价修复后的固定生产二进制运行真实 PostgreSQL 18.6 差分 367 组，`failed=0`，完整协议回归及正式对象链接的隔离集合 C++ 测试通过。差分用例数不是总清单完成数。总账为 24 complete、122 partial、112 unverified、15 deferred_by_user；用户延期的安全/TDE 项未触碰。
 
