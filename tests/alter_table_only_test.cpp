@@ -264,7 +264,7 @@ static void test_add_column_preserves_modifiers() {
     assert(schema.cols[1].checkConstraintName == "score_positive");
     assert(g_engine.insert(db, "modifier_target",
                            {{"id", "2"}, {"score", "0"}}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::CHECK_VIOLATION);
     assert(g_engine.insert(db, "modifier_target", {{"id", "2"}}) ==
            dbms::DBStatus::OK);
 
