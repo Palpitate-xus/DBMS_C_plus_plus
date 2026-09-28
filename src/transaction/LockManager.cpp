@@ -1171,7 +1171,10 @@ bool LockManager::rowLockSharedNoWait(const std::string& table, int64_t rid) {
         const auto processResult = tryAcquireProcessLock(
             state, threadSettings().resourceNamespace, "row", key, LockMode::Shared);
         if (processResult != ProcessLockResult::Acquired) return false;
-        state.mtx.lock_shared();
+        if (!state.mtx.try_lock_shared()) {
+            releaseProcessLock(state);
+            return false;
+        }
         state.sharedCount++;
         state.holders.push_back(self);
         return true;
@@ -1199,7 +1202,10 @@ bool LockManager::rowLockExclusiveNoWait(const std::string& table, int64_t rid) 
         const auto processResult = tryAcquireProcessLock(
             state, threadSettings().resourceNamespace, "row", key, LockMode::Exclusive);
         if (processResult != ProcessLockResult::Acquired) return false;
-        state.mtx.lock();
+        if (!state.mtx.try_lock()) {
+            releaseProcessLock(state);
+            return false;
+        }
         state.exclusive = true;
         state.holders.push_back(self);
         return true;
@@ -1208,7 +1214,10 @@ bool LockManager::rowLockExclusiveNoWait(const std::string& table, int64_t rid) 
         const auto processResult = tryAcquireProcessLock(
             state, threadSettings().resourceNamespace, "row", key, LockMode::Exclusive);
         if (processResult != ProcessLockResult::Acquired) return false;
-        state.mtx.lock();
+        if (!state.mtx.try_lock()) {
+            releaseProcessLock(state);
+            return false;
+        }
         state.exclusive = true;
         state.holders.push_back(self);
         return true;

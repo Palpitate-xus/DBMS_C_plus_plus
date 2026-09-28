@@ -170,6 +170,41 @@ int main() {
     assert(manager.lockedRows("handoff_rows").empty());
     std::cout << "[LOCK] row handoff contention OK\n";
 
+    std::mutex noWaitMutex;
+    std::condition_variable noWaitCv;
+    bool noWaitHeld = false;
+    bool noWaitRelease = false;
+    std::thread noWaitHolder([&] {
+        assert(manager.rowLockExclusive("no_wait_rows", 1));
+        {
+            std::lock_guard<std::mutex> lock(noWaitMutex);
+            noWaitHeld = true;
+        }
+        noWaitCv.notify_all();
+        std::unique_lock<std::mutex> lock(noWaitMutex);
+        noWaitCv.wait(lock, [&] { return noWaitRelease; });
+        manager.rowUnlock("no_wait_rows", 1);
+    });
+    {
+        std::unique_lock<std::mutex> lock(noWaitMutex);
+        noWaitCv.wait(lock, [&] { return noWaitHeld; });
+    }
+    const auto noWaitStart = std::chrono::steady_clock::now();
+    assert(!manager.rowLockSharedNoWait("no_wait_rows", 1));
+    assert(!manager.rowLockExclusiveNoWait("no_wait_rows", 1));
+    assert(std::chrono::steady_clock::now() - noWaitStart <
+           std::chrono::seconds(1));
+    {
+        std::lock_guard<std::mutex> lock(noWaitMutex);
+        noWaitRelease = true;
+    }
+    noWaitCv.notify_all();
+    noWaitHolder.join();
+    assert(manager.rowLockExclusiveNoWait("no_wait_rows", 1));
+    manager.rowUnlock("no_wait_rows", 1);
+    assert(manager.lockedRows("no_wait_rows").empty());
+    std::cout << "[LOCK] row no-wait contract OK\n";
+
     // Savepoint-style lock checkpoints retain pre-savepoint locks but release
     // every table/row/page/gap token acquired afterward.
     std::filesystem::create_directories("checkpoint_db");
