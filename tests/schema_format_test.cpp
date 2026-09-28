@@ -43,12 +43,29 @@ int main() {
     // The additional-CHECK extension is optional so databases written by the
     // immediately preceding schema format remain readable.  A schema with no
     // additional checks ends with the extension magic and a zero count.
-    assert(validSchema.size() >= sizeof(uint32_t) + sizeof(int32_t));
+    // The current writer also appends one identity-kind byte per column.
+    constexpr size_t identityExtensionSize =
+        sizeof(uint32_t) + sizeof(uint16_t) + 1;
+    constexpr size_t checkExtensionSize =
+        sizeof(uint32_t) + sizeof(int32_t);
+    assert(validSchema.size() >= identityExtensionSize + checkExtensionSize);
     {
         std::ofstream out(schemaPath, std::ios::binary | std::ios::trunc);
         out.write(validSchema.data(), static_cast<std::streamsize>(
                                           validSchema.size() -
-                                          sizeof(uint32_t) - sizeof(int32_t)));
+                                          identityExtensionSize));
+        assert(out);
+    }
+    {
+        StorageEngine engine;
+        assert(engine.getTableSchema(dbname, "t").len == 1);
+    }
+    {
+        std::ofstream out(schemaPath, std::ios::binary | std::ios::trunc);
+        out.write(validSchema.data(), static_cast<std::streamsize>(
+                                          validSchema.size() -
+                                          identityExtensionSize -
+                                          checkExtensionSize));
         assert(out);
     }
     {
