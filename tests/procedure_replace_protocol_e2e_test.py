@@ -78,7 +78,7 @@ def main():
             "SELECT value FROM procedure_text ORDER BY value")
         assert state is None, (state, message)
         assert rows == [
-            ["?ArgValue"], ["a;b"], ["bound"], ["c"], ["paren"],
+            ["a;b"], ["?ArgValue"], ["bound"], ["c"], ["paren"],
             ["quoted"]
         ], rows
 
