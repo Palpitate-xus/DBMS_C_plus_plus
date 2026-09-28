@@ -715,8 +715,9 @@
 | 736 | QRY-06 / QRY-10 / P0-16 | 集合运算尾部 `LIMIT -1` 原经 `stoull` 转成极大无符号数，错误返回所有行；现保留 `LIMIT -0` 的零语义，并对负值报告 `2201W` | `setop_limit_negative_probe` 在旧二进制上与 PostgreSQL 18.6 的 `UNION ALL`、`INTERSECT`、`EXCEPT` 三条均失败；修复后正式生产构建、定向差分 `cases=1 failed=0`，相邻集合排序规则和 `set_ops` 用例通过。独立二进制完整协议回归通过；固定生产二进制 365 组全量运行中。完整 LIMIT 表达式仍为 partial | `d8ff0501`, `ec909d27` |
 | 737 | QRY-06 / QRY-10 / P0-16 | 集合运算尾部 `LIMIT ALL`、`LIMIT NULL` 原报 `42601`；PostgreSQL 将两者视为不设行数上限。现单独识别这两种形式并保留尾部 `ORDER BY` | `setop_limit_unbounded_probe` 在旧二进制上与 PostgreSQL 18.6 四条均失败；修复后正式生产构建、定向差分 `cases=1 failed=0`，相邻负 LIMIT、排序规则冲突、NULL/空串和 `set_ops` 用例通过。独立二进制完整协议回归通过；固定生产二进制 365 组全量运行中。完整 LIMIT 表达式仍为 partial | `94dc462d`, `c7929d4e` |
 | 738 | QRY-06 / QRY-10 / P0-16 | 集合运算尾部原完全不识别 `OFFSET`，合法分页报 `42601`；现按查询结果顺序执行 `ORDER BY`、`OFFSET`、`LIMIT`，接受两种 LIMIT/OFFSET 顺序、NULL 与无上限形式，负 OFFSET 报 `2201X` | `setop_offset_probe` 在旧生产二进制上与 PostgreSQL 18.6 四条基础写法均失败；修复后独立二进制 10 条变体定向差分 `cases=1 failed=0`，相邻负/无上限 LIMIT、排序规则与 `set_ops` 通过。正式生产构建及并入全量待跑；完整分页表达式仍为 partial | `f5e0ab81`, `f4615f81` |
+| 739 | QRY-06 / TYPE-02 / P0-16 | 集合运算原按数值显示字符串构造去重/交差键，把 `1.0` 和 `1.00` 当成不同值，导致 `UNION`、`INTERSECT`、`EXCEPT` 行数及 command tag 错误；现对 `numeric` 列按数值规范键比较，同时保留原行的显示精度 | `setop_numeric_equivalence_probe` 在旧生产二进制与 PostgreSQL 18.6 对照前三种运算失败，修复后独立二进制定向差分 `cases=1 failed=0`；隔离 `structured_set_result_test` 完整退出码 0，相邻分页/集合差分通过。正式生产构建及并入全量待跑；完整类型/排序规则相等语义仍为 partial | `55da63db`, `df196c77` |
 
-2026-09-28 当前复验：第 735–737 项修复后的固定生产二进制正式构建、定向差分和完整协议回归通过；365 组真实 PostgreSQL 18.6 全量差分运行中。第 738 项 `OFFSET` 修复后独立二进制定向与相邻差分通过，其用例晚于 365 组全量启动、不计入该轮，正式生产构建及新全量待跑。此前第 733–734 项固定二进制 362 组全量差分 `failed=0`，完整协议回归通过。差分用例数不是总清单完成数。总账为 24 complete、122 partial、112 unverified、15 deferred_by_user；用户延期的安全/TDE 项未触碰。
+2026-09-28 当前复验：第 735–737 项修复后的固定生产二进制正式构建、定向差分和完整协议回归通过；365 组真实 PostgreSQL 18.6 全量差分运行中。第 738–739 项分页与数值等价修复后独立二进制定向及相邻差分通过，隔离集合 C++ 单元测试通过；两项用例晚于 365 组全量启动、不计入该轮，正式生产构建及新全量待跑。此前第 733–734 项固定二进制 362 组全量差分 `failed=0`，完整协议回归通过。差分用例数不是总清单完成数。总账为 24 complete、122 partial、112 unverified、15 deferred_by_user；用户延期的安全/TDE 项未触碰。
 
 2026-09-28 较早复验：第 731 项后的固定生产二进制运行真实 PostgreSQL 18.6 差分 359 组，`failed=0`，完整协议回归通过。
 
