@@ -112,16 +112,16 @@ int main() {
     assert(updated.size() == 1);
     assert(trimRight(updated[0]) == "7 10 15");
     assert(g_engine.update(database, "abs", {{"amount", "-1"}},
-                           {"=id 2"}) == dbms::DBStatus::INVALID_VALUE);
+                           {"=id 2"}) == dbms::DBStatus::CHECK_VIOLATION);
 
     assert(g_engine.insert(database, "abs",
                            {{"id", "3"}, {"amount", "-1"},
                             {"checked", "1"}}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::CHECK_VIOLATION);
     assert(g_engine.insert(database, "abs",
                            {{"id", "4"}, {"amount", "10"},
                             {"checked", "1"}}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::CHECK_VIOLATION);
 
     assert(g_engine.dropDatabase(database) == dbms::DBStatus::OK);
     finalCleanupTestData();
