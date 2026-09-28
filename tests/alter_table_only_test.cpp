@@ -112,7 +112,8 @@ static void test_set_tablespace() {
     g_engine.forEachRow(db, "t", [&](uint32_t, uint16_t, const char*, size_t) { ++rows; });
     assert(rows == 1);
 
-    // UNLOGGED relation files are intentionally absent from crash snapshots.
+    // SQL transaction rollback restores UNLOGGED rows. Crash recovery is a
+    // separate path that resets those rows after an unclean shutdown.
     assert(!ddl.executeSql(
         "CREATE TABLE u (id INT) TABLESPACE my_space", s));
     assert(g_engine.insert(db, "u", {{"id", "9"}}) == dbms::DBStatus::OK);
@@ -126,7 +127,7 @@ static void test_set_tablespace() {
     assert(unloggedSchema.isUnlogged && unloggedSchema.tablespace == "my_space");
     rows = 0;
     g_engine.forEachRow(db, "u", [&](uint32_t, uint16_t, const char*, size_t) { ++rows; });
-    assert(rows == 0);
+    assert(rows == 1);
     assert(g_engine.dropTable(db, "u") == dbms::DBStatus::OK);
 
     const std::string backup = db + "_backup";
