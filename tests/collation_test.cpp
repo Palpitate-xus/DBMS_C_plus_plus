@@ -438,7 +438,6 @@ static void test_collation_metadata_is_atomic_and_backward_compatible() {
     assert((afterDrop.getCollationNames(db) ==
             std::vector<std::string>{"neighbor", "special"}));
 
-    cleanup(db);
     std::cout << "[COLLATION] metadata atomicity OK" << std::endl;
 }
 
@@ -996,6 +995,10 @@ int main() {
     test_collate_with_index();
     test_collate_schema_persistence();
     test_collation_metadata_is_atomic_and_backward_compatible();
+    // Let the local StorageEngine instances stop their background workers
+    // before the owning engine removes the database and its cached files.
+    assert(g_engine.dropDatabase(testDbPath("collation_metadata_atomicity")) ==
+           dbms::DBStatus::OK);
     test_collation_ddl_preserves_options_and_namespace();
     test_custom_collation_runtime_resolution();
     test_collation_aware_unique_constraints();
