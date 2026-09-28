@@ -16940,9 +16940,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 TableSchema tbl = g_engine.getTableSchema(s.currentDB, resolvedName);
                 auto res = g_engine.insertDefaultValues(s.currentDB, resolvedName, tbl);
                 if (res == dbms::DBStatus::OK)
-                    cout << "INSERT 0 1 (DEFAULT VALUES)" << endl;
+                    cout << "INSERT 0 1" << endl;
                 else
-                    cout << "INSERT DEFAULT VALUES failed" << endl;
+                    cout << "INSERT DEFAULT VALUES failed (SQLSTATE "
+                         << dbms::sqlstateForDBStatus(res) << ")" << endl;
                 return res == dbms::DBStatus::OK ? false : true;
             }
             cout << "SQL syntax error" << endl;

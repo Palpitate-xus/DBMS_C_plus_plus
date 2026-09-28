@@ -2888,10 +2888,11 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
             return false;
         }
         if (status != DBStatus::OK) {
-            std::cout << "INSERT DEFAULT VALUES failed" << std::endl;
+            std::cout << "INSERT DEFAULT VALUES failed (SQLSTATE "
+                      << sqlstateForDBStatus(status) << ")" << std::endl;
             return true;
         }
-        std::cout << "INSERT 0 1 (DEFAULT VALUES)" << std::endl;
+        std::cout << "INSERT 0 1" << std::endl;
         if (!stmt.returning.empty()) {
             if (!publishReturning(
                     returningProjections, table, insertReturningBinding,
