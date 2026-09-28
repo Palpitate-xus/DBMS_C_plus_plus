@@ -59,6 +59,7 @@ std::string dbms::sqlstateForDBStatus(DBStatus res) {
         case DBStatus::OK: return "00000";
         case DBStatus::TABLE_NOT_FOUND: return "42P01";
         case DBStatus::DATABASE_NOT_FOUND: return "3D000";
+        case DBStatus::DATABASE_IN_USE: return "55006";
         case DBStatus::TABLE_ALREADY_EXISTS: return "42P07";
         case DBStatus::INVALID_VALUE: return "22023";
         case DBStatus::STRING_DATA_RIGHT_TRUNCATION: return "22001";
@@ -207,6 +208,11 @@ static constexpr const char* kPhysicalBackupManifest = ".dbms_backup_manifest";
 #include <zlib.h>
 
 namespace dbms {
+
+namespace {
+std::shared_ptr<std::shared_mutex> databaseTxnLockFor(
+    const std::string& dbname);
+}
 
 // Forward declarations for row-header helpers used by TableSchema::rowSize().
 static bool usesHeapTupleHeader(uint32_t formatVersion);
@@ -13522,10 +13528,21 @@ std::string StorageEngine::getDatabaseCharset(const std::string& dbname) const {
 }
 
 DBStatus StorageEngine::dropDatabase(const std::string& dbname) {
-    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (dbname.empty() || !validStoredIdentifier(dbname, MAX_TABLE_NAME_LEN)) {
         return DBStatus::INVALID_ARGUMENT;
     }
+    const auto& context = transactionContext();
+    if (context.inTransaction && context.txnDB == dbname) {
+        return DBStatus::DATABASE_IN_USE;
+    }
+    // BEGIN holds this mutex until commit/rollback completes. Take it before
+    // cacheMutex_ so DROP cannot remove files under an active transaction or
+    // race with a newly starting one. A busy database is not dropped.
+    const auto databaseMutex = databaseTxnLockFor(dbname);
+    std::unique_lock<std::shared_mutex> databaseLock(
+        *databaseMutex, std::try_to_lock);
+    if (!databaseLock.owns_lock()) return DBStatus::DATABASE_IN_USE;
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
 
     // Release database-owned caches before removing the directory. This

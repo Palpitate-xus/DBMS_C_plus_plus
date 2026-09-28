@@ -3219,11 +3219,6 @@ bool DdlExecutor::executeDropDatabase(const DropStmt* stmt, Session& s) {
         return true;
     }
     std::string dbname = stmt->objectNames.front();
-    if (dbname == s.currentDB) s.currentDB.clear();
-
-    // Persist and drop the in-memory catalog before removing the directory.
-    g_engine.catalogService().evict(dbname);
-
     DBStatus res = g_engine.dropDatabase(dbname);
     if (res == DBStatus::NOT_FOUND || res == DBStatus::DATABASE_NOT_FOUND) {
         std::cout << "Database not found" << std::endl;
@@ -3234,6 +3229,7 @@ bool DdlExecutor::executeDropDatabase(const DropStmt* stmt, Session& s) {
                   << sqlstateForDBStatus(res) << ")" << std::endl;
         return true;
     }
+    if (dbname == s.currentDB) s.currentDB.clear();
     std::cout << "DROP DATABASE succeeded" << std::endl;
     return false;
 }
