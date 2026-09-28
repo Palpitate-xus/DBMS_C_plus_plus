@@ -41814,8 +41814,34 @@ void StorageEngine::preserveTransactionBackupOnRollback(bool preserve) {
     // exclusive begin overload and therefore does not need an upgrade.
     context.databaseSharedLock.reset();
     if (!context.databaseExclusiveLock) {
-        context.databaseExclusiveLock = std::make_unique<std::unique_lock<std::shared_mutex>>(
-            *context.databaseTxnMutex);
+        auto exclusive = std::make_unique<std::unique_lock<std::shared_mutex>>(
+            *context.databaseTxnMutex, std::defer_lock);
+        const int timeoutMs = lockManager_.getLockTimeout();
+        bool acquired = false;
+        if (timeoutMs <= 0) {
+            exclusive->lock();
+            acquired = true;
+        } else {
+            const auto deadline = std::chrono::steady_clock::now() +
+                std::chrono::milliseconds(timeoutMs);
+            do {
+                if (exclusive->try_lock()) {
+                    acquired = true;
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            } while (std::chrono::steady_clock::now() < deadline);
+        }
+        if (!acquired) {
+            // The caller's transaction is still live. Restore its original
+            // shared database ownership before propagating the lock error.
+            context.databaseSharedLock =
+                std::make_unique<std::shared_lock<std::shared_mutex>>(
+                    *context.databaseTxnMutex);
+            context.preserveBackupOnRollback = false;
+            throw DbError("55P03", "could not upgrade database transaction lock");
+        }
+        context.databaseExclusiveLock = std::move(exclusive);
     }
     if (!createTransactionBackup()) {
         context.preserveBackupOnRollback = false;

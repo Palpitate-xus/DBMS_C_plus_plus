@@ -137,9 +137,16 @@ bool DdlTransaction::begin() {
         }
         active_ = true;
         startedByUs_ = false;
-        if (snapshotRollbackEnabled_ && !enableSnapshotRollback()) {
+        try {
+            if (snapshotRollbackEnabled_ && !enableSnapshotRollback()) {
+                active_ = false;
+                return false;
+            }
+        } catch (...) {
+            // A lock-timeout error belongs to the surrounding SQL
+            // transaction. Do not let this statement wrapper roll it back.
             active_ = false;
-            return false;
+            throw;
         }
         return true;
     }
