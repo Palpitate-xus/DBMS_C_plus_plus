@@ -6170,6 +6170,7 @@ static bool executeSetOperation(const string& sql, Session& s, bool& handled) {
     bool tailHasNullOrder = false;
     size_t tailLimit = 0;
     bool tailHasLimit = false;
+    bool tailNegativeLimit = false;
     {
         auto stripLimit = [&](string& text) -> bool {
             size_t lp = findTopLevelKeyword(text, "limit");
@@ -6179,6 +6180,10 @@ static bool executeSetOperation(const string& sql, Session& s, bool& handled) {
                 size_t parsed = 0;
                 size_t v = static_cast<size_t>(stoull(num, &parsed));
                 if (parsed == num.size()) {
+                    if (!num.empty() && num.front() == '-' && v != 0) {
+                        tailNegativeLimit = true;
+                        return false;
+                    }
                     tailLimit = v;
                     tailHasLimit = true;
                     text = trim(text.substr(0, lp));
@@ -6188,8 +6193,12 @@ static bool executeSetOperation(const string& sql, Session& s, bool& handled) {
             return false;
         };
         if (!stripLimit(rightSql)) {
-            cout << "ERROR: invalid LIMIT in set operation (SQLSTATE 42601)"
-                 << endl;
+            if (tailNegativeLimit)
+                cout << "ERROR: LIMIT must not be negative (SQLSTATE 2201W)"
+                     << endl;
+            else
+                cout << "ERROR: invalid LIMIT in set operation (SQLSTATE 42601)"
+                     << endl;
             return true;
         }
         size_t op = findTopLevelKeyword(rightSql, "order by");
