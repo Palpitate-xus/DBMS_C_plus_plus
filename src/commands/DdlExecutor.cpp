@@ -3219,6 +3219,11 @@ bool DdlExecutor::executeDropDatabase(const DropStmt* stmt, Session& s) {
         return true;
     }
     std::string dbname = stmt->objectNames.front();
+    if (dbname == s.currentDB) {
+        std::cout << "ERROR: cannot drop the currently open database "
+                     "(SQLSTATE 55006)" << std::endl;
+        return true;
+    }
     DBStatus res = g_engine.dropDatabase(dbname);
     if (res == DBStatus::NOT_FOUND || res == DBStatus::DATABASE_NOT_FOUND) {
         std::cout << "Database not found" << std::endl;
@@ -3229,7 +3234,6 @@ bool DdlExecutor::executeDropDatabase(const DropStmt* stmt, Session& s) {
                   << sqlstateForDBStatus(res) << ")" << std::endl;
         return true;
     }
-    if (dbname == s.currentDB) s.currentDB.clear();
     std::cout << "DROP DATABASE succeeded" << std::endl;
     return false;
 }

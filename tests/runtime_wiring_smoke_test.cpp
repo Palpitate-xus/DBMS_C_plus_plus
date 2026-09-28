@@ -63,6 +63,7 @@ static void test_runtime_wiring_smoke() {
     assert(!hasClass(cat, "t"));
     assert(!hasClass(cat, "i"));
 
+    s.currentDB = "info";
     err = ddl.executeSql("DROP DATABASE " + db, s);
     assert(!err);
     assert(!g_engine.catalogService().has(db));
