@@ -753,7 +753,9 @@
 | 774 | P0-02 / P0-07 / P0-09 | 阻塞式 `SELECT ... FOR SHARE` 在行锁等待超时后回滚并返回空结果，线协议错误报告成功 | 双连接新用例修复前得到无 SQLSTATE 的空结果；失败路径现抛 `55P03`，事务内下一命令为 `25P02`，`ROLLBACK` 后可再次查询。正式生产构建、定向回归及相邻 NOWAIT/事务隔离协议测试通过；后续第 775 项又区分了本进程死锁，完整错误分类和行锁语义仍为 partial | `a4df300f` |
 | 775 | P0-02 / P0-07 / P0-09 | 行锁等待环被检测到后与普通等待超时共用布尔失败值，上一项的 `SELECT` 错误路径将死锁误报为 `55P03` | 锁管理器在 backend 线程局部状态标记等待环，查询层映射为 `40P01`；双连接交叉持锁用例修复前得到 `55P03`，修复后连续 5 次通过，且失败事务继续报 `25P02`、释放另一会话后等待方可完成。正式生产构建、超时/NOWAIT/事务隔离相邻测试通过。跨进程死锁检测及全部行锁模式仍为 partial | `d20048ab` |
 
-2026-09-28 当前复验：第 769 项 CLI 修复后的固定生产二进制运行真实 PostgreSQL 18.6 差分 370 组，`failed=0`，包含带锁 SELECT 新用例；同一最终源码运行 `scripts/build_tests.sh` 全套 C++ 与协议/E2E 测试退出码 0，包含 `for_share_nowait_protocol_e2e_test.py` 和新 `cli_error_recovery_e2e_test.py`。总账为 24 complete、128 partial、106 unverified、15 deferred_by_user；差分用例数不是总清单完成数，用户延期的安全/TDE 项未触碰。
+2026-09-28 最新复验：第 774 项锁超时修复后的固定生产二进制运行真实 PostgreSQL 18.6 差分 370 组，`failed=0`；随后第 775 项本进程死锁 `40P01` 分类修复正式构建成功，交叉持锁 E2E 连续 5 次通过，超时/NOWAIT/事务隔离相邻测试通过。第 775 项最终源码的第一次 `scripts/build_tests.sh` 中只有 `alter_inherit_test` 一项失败；该测试随后隔离复跑 12 次全部通过，第二次完整 C++ 与协议/E2E 脚本退出码 0，包含新增锁超时、死锁及 CLI 用例。首次间歇失败未定位，不能记作从未发生；第 775 项后的完整 370 组差分未重跑，其改动仅触及行锁等待环错误分类。总账为 24 complete、128 partial、106 unverified、15 deferred_by_user；差分用例数不是总清单完成数，用户延期的安全/TDE 项未触碰。
+
+2026-09-28 较早复验：第 769 项 CLI 修复后的固定生产二进制运行真实 PostgreSQL 18.6 差分 370 组，`failed=0`，包含带锁 SELECT 新用例；同一源码运行 `scripts/build_tests.sh` 全套 C++ 与协议/E2E 测试退出码 0，包含 `for_share_nowait_protocol_e2e_test.py` 和新 `cli_error_recovery_e2e_test.py`。
 
 2026-09-28 较早复验：第 738–739 项分页与数值等价修复后的固定生产二进制运行真实 PostgreSQL 18.6 差分 367 组，`failed=0`，完整协议回归及正式对象链接的隔离集合 C++ 测试通过。差分用例数不是总清单完成数。当时总账为 24 complete、122 partial、112 unverified、15 deferred_by_user。
 
