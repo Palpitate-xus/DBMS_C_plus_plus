@@ -739,10 +739,12 @@
 | 760 | SQL-10 / PROTO-08 | 结构化协议回归用 Python 字节序构造文本排序预期，与参考 PostgreSQL 默认 `en_US` 排序规则不一致，致别名、表达式和 DISTINCT 断言误报 | 以真实 PostgreSQL 查询核对顺序，校正三处断言；`table_structured_protocol_e2e_test.py` 定向通过，完整排序规则族仍为 partial | `a17cf0c6` |
 | 761 | P0-05 / CAT-20 / BACKUP-02 | 表空间协议测试在服务端持有数据目录独占锁时另起校验进程，错误期待在线 `--verify-data-checksums` 成功 | 测试显式停服，在离线状态校验正常和损坏标记，恢复标记后重启继续 DDL；`tablespace_protocol_e2e_test.py` 定向通过，完整备份校验链仍为 partial | `30c3b443` |
 | 762 | DIV-02 / P0-07 | extended `REPLACE INTO` 同一语句删除复合主键和另一 UNIQUE 键的冲突行后，不推进命令可见性，重插仍把自己的删除当存活旧键并报 `23505` | 在冲突删除与重插间推进命令 ID；新增存储级可见性回归，`div14_feature_gate_test.py` 的多冲突替换及失败回滚全部定向通过。MySQL 兼容扩展全族仍为 partial | `245fd0ee` |
-| 763 | DML-01 / P0-02 / P0-16 | `INSERT DEFAULT VALUES` 成功命令标签附加非标准后缀，NOT NULL 失败丢失专用 SQLSTATE，线协议分别与 PostgreSQL 18 不一致 | typed 与 legacy 两路径统一返回 `INSERT 0 1` 和存储状态映射 SQLSTATE；`insert_default_values_boundary` 修复前差分两处失败、修复后 `cases=1 failed=0`，正式生产构建通过。完整 DML/协议仍为 partial | `2112d3fb`, `5213e25f` |
+| 763 | DML-01 / P0-02 / P0-16 | `INSERT DEFAULT VALUES` 成功命令标签附加非标准后缀，NOT NULL 失败丢失专用 SQLSTATE，线协议分别与 PostgreSQL 18 不一致 | typed 与 legacy 两路径统一返回 `INSERT 0 1` 和存储状态映射 SQLSTATE；`insert_default_values_boundary` 修复前差分两处失败、修复后 `cases=1 failed=0`，正式生产构建及固定二进制 369 组全量差分 `failed=0`。完整 DML/协议仍为 partial | `2112d3fb`, `5213e25f` |
 | 764 | P0-04 / P0-16 | 补充显式事务中先删两条冲突旧行，再复用复合主键和 UNIQUE 键的参考差分边界，以区分普通跨命令可见性与第 762 项同命令 REPLACE 错误 | `delete_reinsert_unique_probe` 在修复前、修复后生产二进制上均与 PostgreSQL 18.6 定向 `cases=1 failed=0`；事务/约束族仍为 partial | `55df5794` |
 
-2026-09-28 当前复验：第 738–739 项分页与数值等价修复后的固定生产二进制运行真实 PostgreSQL 18.6 差分 367 组，`failed=0`，完整协议回归及正式对象链接的隔离集合 C++ 测试通过。差分用例数不是总清单完成数。总账为 24 complete、122 partial、112 unverified、15 deferred_by_user；用户延期的安全/TDE 项未触碰。
+2026-09-28 当前复验：截至第 764 项的固定生产二进制运行真实 PostgreSQL 18.6 差分 369 组，`failed=0`，包括默认值命令标签/错误码与显式事务键复用两条新增探针。此前一轮全量测试 4 项失败已分别处理或标记为间歇性待复验；当前新源码全量回归正在运行，尚不能宣称全套通过。总账为 24 complete、124 partial、110 unverified、15 deferred_by_user；差分用例数不是总清单完成数，用户延期的安全/TDE 项未触碰。
+
+2026-09-28 较早复验：第 738–739 项分页与数值等价修复后的固定生产二进制运行真实 PostgreSQL 18.6 差分 367 组，`failed=0`，完整协议回归及正式对象链接的隔离集合 C++ 测试通过。差分用例数不是总清单完成数。当时总账为 24 complete、122 partial、112 unverified、15 deferred_by_user。
 
 2026-09-28 较早复验：第 735–737 项修复后的固定生产二进制运行真实 PostgreSQL 18.6 差分 365 组，`failed=0`，完整协议回归通过。
 
