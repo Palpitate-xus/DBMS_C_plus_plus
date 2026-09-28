@@ -28570,6 +28570,13 @@ bool isTopLevelDml(const std::string& rawSql) {
     return false;
 }
 
+bool isTopLevelLockingSelect(const std::string& rawSql) {
+    const std::string normalized = toLowerSql(trim(rawSql));
+    return startsWithKeyword(normalized, "select") &&
+        (containsSqlKeyword(normalized, "for update") ||
+         containsSqlKeyword(normalized, "for share"));
+}
+
 bool managesNotificationTransaction(const std::string& sql) {
     switch (dbms::SQLParser::classify(sql)) {
         case dbms::SqlCommand::Begin:
@@ -28593,15 +28600,15 @@ bool managesNotificationTransaction(const std::string& sql) {
 } // namespace
 
 // PostgreSQL statements are atomic even outside an explicit BEGIN block.  The
-// storage engine's undo log is transaction-scoped, so give each top-level DML
-// statement an internal transaction. Recursive execution used by triggers,
-// view rewrites and compatibility helpers stays inside the same boundary.
+// storage engine's undo log and row locks are transaction-scoped, so give
+// each top-level DML or locking SELECT statement an internal transaction.
+// Recursive execution stays inside the same boundary.
 bool execute(const std::string& rawSql, Session& s) {
     const bool outermost = executeDepth == 0;
     const bool statementTransaction = outermost &&
         !g_engine.inTransaction() &&
         g_engine.databaseExists(s.currentDB) &&
-        isTopLevelDml(rawSql);
+        (isTopLevelDml(rawSql) || isTopLevelLockingSelect(rawSql));
     const bool notificationStatementTransaction = outermost &&
         !statementTransaction && !g_engine.inTransaction() &&
         !dbms::notificationManager().inTransaction(s.pid) &&

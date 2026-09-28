@@ -49,6 +49,19 @@ def main():
         assert state == "25P02", (state, message)
         query(second, "ROLLBACK;")
         query(first, "ROLLBACK;")
+
+        # A standalone locking SELECT is an implicit transaction too. It
+        # must check an already-held row lock before returning a row.
+        query(first, "BEGIN;")
+        assert query(first, "SELECT id FROM row_share_nowait FOR UPDATE;") == [["1"]]
+        _, state, message, _, _, _ = wire_query(
+            second, "SELECT id FROM row_share_nowait FOR SHARE NOWAIT;")
+        assert state == "55P03", (state, message)
+        query(first, "ROLLBACK;")
+        assert query(second, "SELECT id FROM row_share_nowait FOR SHARE NOWAIT;") == [["1"]]
+        query(first, "BEGIN;")
+        assert query(first, "SELECT id FROM row_share_nowait FOR UPDATE NOWAIT;") == [["1"]]
+        query(first, "ROLLBACK;")
         print("[FOR SHARE NOWAIT PROTOCOL E2E] passed")
     finally:
         if second is not None:
