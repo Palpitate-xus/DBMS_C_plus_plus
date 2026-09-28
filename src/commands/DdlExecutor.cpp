@@ -3226,7 +3226,13 @@ bool DdlExecutor::executeDropDatabase(const DropStmt* stmt, Session& s) {
     }
     DBStatus res = g_engine.dropDatabase(dbname);
     if (res == DBStatus::NOT_FOUND || res == DBStatus::DATABASE_NOT_FOUND) {
-        std::cout << "Database not found" << std::endl;
+        if (stmt->ifExists) {
+            std::cout << "NOTICE: database \"" << dbname
+                      << "\" does not exist, skipping" << std::endl;
+            return false;
+        }
+        std::cout << "ERROR: database \"" << dbname
+                  << "\" does not exist (SQLSTATE 3D000)" << std::endl;
         return true;
     }
     if (res != DBStatus::OK) {

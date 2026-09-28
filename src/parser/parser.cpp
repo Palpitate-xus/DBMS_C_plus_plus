@@ -8054,7 +8054,16 @@ StmtPtr SQLParser::parseDropMaterializedView(const std::vector<std::string>& tok
 StmtPtr SQLParser::parseDropDatabase(const std::vector<std::string>& tokens, size_t& pos) {
     auto stmt = std::make_unique<DropStmt>(SqlCommand::DropDatabase);
     stmt->objectType = "DATABASE";
-    if (pos < tokens.size()) stmt->objectNames.push_back(tokens[pos++]);
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") &&
+        match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true;
+        pos += 2;
+    }
+    if (pos >= tokens.size() || tokens[pos] == ";") return nullptr;
+    stmt->objectNames.push_back(tokens[pos++]);
+    if (pos < tokens.size() && tokens[pos] == ";") ++pos;
+    // Unsupported options must not be silently discarded after the target.
+    if (pos != tokens.size()) return nullptr;
     return stmt;
 }
 
