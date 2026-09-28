@@ -119,15 +119,6 @@ static void test_exclude_survives_table_rename() {
 
     // The renamed metadata is durable and the abandoned name is safe to
     // reuse without inheriting the old table's constraint.
-    {
-        dbms::StorageEngine restarted;
-        const auto persisted =
-            restarted.getExclusionConstraints(db, "renamed_t");
-        assert(persisted.size() == 1 && persisted[0].name == "no_dup_room");
-        assert(restarted.insert(
-                   db, "renamed_t", {{"id", "3"}, {"room", "101"}}) ==
-               dbms::DBStatus::INVALID_VALUE);
-    }
     assert(!ddl.executeSql(
         "CREATE TABLE t (id INT PRIMARY KEY, room VARCHAR(10))", s));
     assert(g_engine.insert(
@@ -136,6 +127,15 @@ static void test_exclude_survives_table_rename() {
     assert(g_engine.insert(
                db, "t", {{"id", "2"}, {"room", "101"}}) ==
            dbms::DBStatus::OK);
+
+    // Read persisted metadata only after the original engine has finished
+    // writing. Two live StorageEngine instances must not write one directory.
+    {
+        dbms::StorageEngine restarted;
+        const auto persisted =
+            restarted.getExclusionConstraints(db, "renamed_t");
+        assert(persisted.size() == 1 && persisted[0].name == "no_dup_room");
+    }
 
     g_engine.catalogService().evict(db);
     cleanup(db);
