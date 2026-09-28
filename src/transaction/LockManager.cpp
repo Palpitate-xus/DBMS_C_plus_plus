@@ -1756,6 +1756,7 @@ bool LockManager::pageLockShared(const std::string& dbname, const std::string& t
         {
             std::lock_guard<std::mutex> guard(pageMutex_);
             auto& current = const_cast<LockManager*>(this)->pageLocks_[key];
+            const_cast<LockManager*>(this)->removeWaitEdges(self);
             if (std::find(current.holders.begin(), current.holders.end(), self) !=
                 current.holders.end()) return true;
             if (!current.exclusive) {
@@ -1763,10 +1764,17 @@ bool LockManager::pageLockShared(const std::string& dbname, const std::string& t
                     current, dbname, "page", key, LockMode::Shared);
                 if (processResult == ProcessLockResult::Error) return false;
                 if (processResult == ProcessLockResult::Acquired) {
-                    current.mtx.lock_shared();
-                    ++current.sharedCount;
-                    current.holders.push_back(self);
-                    return true;
+                    // Never block on the physical mutex while holding
+                    // pageMutex_: a waiter may own it while trying to enter
+                    // the same critical section to publish its ownership.
+                    if (current.mtx.try_lock_shared()) {
+                        ++current.sharedCount;
+                        current.holders.push_back(self);
+                        return true;
+                    }
+                    if (current.holders.empty()) {
+                        const_cast<LockManager*>(this)->releaseProcessLock(current);
+                    }
                 }
             }
             for (const auto& holder : current.holders) {
@@ -1783,6 +1791,12 @@ bool LockManager::pageLockShared(const std::string& dbname, const std::string& t
             {
                 std::lock_guard<std::mutex> guard(pageMutex_);
                 --state->waiters;
+            }
+            const auto timeout = const_cast<LockManager*>(this)->threadSettings().lockTimeoutMs;
+            if (timeout > 0 && std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started).count() >= timeout) {
+                const_cast<LockManager*>(this)->removeWaitEdges(self);
+                return false;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
@@ -1830,6 +1844,7 @@ bool LockManager::pageLockExclusive(const std::string& dbname, const std::string
         {
             std::lock_guard<std::mutex> guard(pageMutex_);
             auto& current = const_cast<LockManager*>(this)->pageLocks_[key];
+            const_cast<LockManager*>(this)->removeWaitEdges(self);
             if (current.exclusive && current.holders.size() == 1 && current.holders[0] == self) return true;
             auto selfHolder = std::find(current.holders.begin(), current.holders.end(), self);
             if (!current.exclusive && selfHolder != current.holders.end()) {
@@ -1843,11 +1858,15 @@ bool LockManager::pageLockExclusive(const std::string& dbname, const std::string
                     current, dbname, "page", key, LockMode::Exclusive);
                 if (processResult == ProcessLockResult::Error) return false;
                 if (processResult == ProcessLockResult::Acquired) {
-                    current.mtx.lock();
-                    current.exclusive = true;
-                    current.holders.push_back(self);
-                    const_cast<LockManager*>(this)->removeWaitEdges(self);
-                    return true;
+                    if (current.mtx.try_lock()) {
+                        current.exclusive = true;
+                        current.holders.push_back(self);
+                        const_cast<LockManager*>(this)->removeWaitEdges(self);
+                        return true;
+                    }
+                    if (current.holders.empty()) {
+                        const_cast<LockManager*>(this)->releaseProcessLock(current);
+                    }
                 }
             }
             for (const auto& holder : current.holders) {
@@ -1864,6 +1883,12 @@ bool LockManager::pageLockExclusive(const std::string& dbname, const std::string
             {
                 std::lock_guard<std::mutex> guard(pageMutex_);
                 --state->waiters;
+            }
+            const auto timeout = const_cast<LockManager*>(this)->threadSettings().lockTimeoutMs;
+            if (timeout > 0 && std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started).count() >= timeout) {
+                const_cast<LockManager*>(this)->removeWaitEdges(self);
+                return false;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;

@@ -1,6 +1,7 @@
 // TOAST chunked relation test.
 
 #include "TableManage.h"
+#include "LockManager.h"
 #include "Config.h"
 #include "BPTree.h"
 #include "HashIndex.h"
@@ -231,14 +232,25 @@ int main() {
                     payload[i] = static_cast<char>('!' + ((i * 17 + worker * 29) % 90));
                 ready.fetch_add(1, std::memory_order_release);
                 while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
-                if (engine.insert(dbname, "tc", {{"payload", payload}}) != DBStatus::OK)
+                const DBStatus insertStatus =
+                    engine.insert(dbname, "tc", {{"payload", payload}});
+                if (insertStatus != DBStatus::OK) {
+                    std::cerr << "[TOAST] worker " << worker
+                              << " insert status "
+                              << static_cast<int>(insertStatus) << '\n';
                     failed.store(true, std::memory_order_release);
+                }
             });
         }
         while (ready.load(std::memory_order_acquire) != workerCount)
             std::this_thread::yield();
         start.store(true, std::memory_order_release);
         for (auto& worker : workers) worker.join();
+        if (failed.load(std::memory_order_acquire)) {
+            for (const auto& entry : LockManager::global().getDeadlockLog()) {
+                std::cerr << "[TOAST] deadlock " << entry.description << '\n';
+            }
+        }
         assert(!failed.load(std::memory_order_acquire));
         assert(engine.query(dbname, "tc", {}, {"payload"}).size() == workerCount);
         std::cout << "[TOAST] concurrent ID allocation unique OK\n";
