@@ -6051,7 +6051,8 @@ static optional<string> explicitSetOperandCollation(
 static bool applySetOperationTail(
     dbms::DmlResult& result, bool hasOrder, const string& orderColumn,
     bool asc, bool explicitNullsFirst, bool hasExplicitNullOrder,
-    size_t limitN, bool hasLimit, const string& leftSql,
+    size_t limitN, bool hasLimit, size_t offsetN, bool hasOffset,
+    const string& leftSql,
     const string& rightSql, string& error, string& sqlState) {
     if (hasOrder) {
         size_t orderIndex = result.columns.size();
@@ -6139,6 +6140,11 @@ static bool applySetOperationTail(
         result.rows = std::move(sortedRows);
         result.nulls = std::move(sortedNulls);
     }
+    if (hasOffset) {
+        const size_t skip = min(offsetN, result.rows.size());
+        result.rows.erase(result.rows.begin(), result.rows.begin() + skip);
+        result.nulls.erase(result.nulls.begin(), result.nulls.begin() + skip);
+    }
     if (hasLimit && result.rows.size() > limitN) {
         result.rows.resize(limitN);
         result.nulls.resize(limitN);
@@ -6160,7 +6166,7 @@ static bool executeSetOperation(const string& sql, Session& s, bool& handled) {
         return true;
     }
 
-    // A trailing ORDER BY / LIMIT belongs to the WHOLE set operation (PG
+    // A trailing ORDER BY / LIMIT / OFFSET belongs to the WHOLE set operation (PG
     // applies it to the final result), not to the right operand.  Strip
     // it and apply after combining.
     string tailOrderCol;
@@ -6170,16 +6176,17 @@ static bool executeSetOperation(const string& sql, Session& s, bool& handled) {
     bool tailHasNullOrder = false;
     size_t tailLimit = 0;
     bool tailHasLimit = false;
-    bool tailNegativeLimit = false;
+    size_t tailOffset = 0;
+    bool tailHasOffset = false;
     {
-        auto stripLimit = [&](string& text) -> bool {
-            size_t lp = findTopLevelKeyword(text, "limit");
-            if (lp == string::npos) return true;
-            string num = trim(text.substr(lp + 5));
+        string tailCountError;
+        string tailCountState;
+        auto parseCount = [&](const string& num, bool isLimit) -> bool {
             const string loweredNum = toLower(num);
-            if (loweredNum == "all" || loweredNum == "null") {
-                tailHasLimit = false;
-                text = trim(text.substr(0, lp));
+            if (loweredNum == "null" ||
+                (isLimit && loweredNum == "all")) {
+                if (isLimit) tailHasLimit = false;
+                else tailHasOffset = false;
                 return true;
             }
             try {
@@ -6187,26 +6194,47 @@ static bool executeSetOperation(const string& sql, Session& s, bool& handled) {
                 size_t v = static_cast<size_t>(stoull(num, &parsed));
                 if (parsed == num.size()) {
                     if (!num.empty() && num.front() == '-' && v != 0) {
-                        tailNegativeLimit = true;
+                        tailCountError = isLimit ? "LIMIT must not be negative"
+                                                 : "OFFSET must not be negative";
+                        tailCountState = isLimit ? "2201W" : "2201X";
                         return false;
                     }
-                    tailLimit = v;
-                    tailHasLimit = true;
-                    text = trim(text.substr(0, lp));
+                    if (isLimit) {
+                        tailLimit = v;
+                        tailHasLimit = true;
+                    } else {
+                        tailOffset = v;
+                        tailHasOffset = true;
+                    }
                     return true;
                 }
             } catch (...) {}
+            tailCountError = isLimit ? "invalid LIMIT in set operation"
+                                     : "invalid OFFSET in set operation";
+            tailCountState = "42601";
             return false;
         };
-        if (!stripLimit(rightSql)) {
-            if (tailNegativeLimit)
-                cout << "ERROR: LIMIT must not be negative (SQLSTATE 2201W)"
-                     << endl;
-            else
-                cout << "ERROR: invalid LIMIT in set operation (SQLSTATE 42601)"
-                     << endl;
-            return true;
+        const size_t limitPos = findTopLevelKeyword(rightSql, "limit");
+        const size_t offsetPos = findTopLevelKeyword(rightSql, "offset");
+        vector<pair<size_t, bool>> clauses;
+        if (limitPos != string::npos) clauses.emplace_back(limitPos, true);
+        if (offsetPos != string::npos) clauses.emplace_back(offsetPos, false);
+        sort(clauses.begin(), clauses.end());
+        for (size_t i = 0; i < clauses.size(); ++i) {
+            const size_t at = clauses[i].first;
+            const bool isLimit = clauses[i].second;
+            const size_t end = i + 1 < clauses.size()
+                ? clauses[i + 1].first : rightSql.size();
+            const string num = trim(rightSql.substr(
+                at + (isLimit ? 5 : 6), end - at - (isLimit ? 5 : 6)));
+            if (!parseCount(num, isLimit)) {
+                cout << "ERROR: " << tailCountError << " (SQLSTATE "
+                     << tailCountState << ")" << endl;
+                return true;
+            }
         }
+        if (!clauses.empty())
+            rightSql = trim(rightSql.substr(0, clauses.front().first));
         size_t op = findTopLevelKeyword(rightSql, "order by");
         if (op != string::npos) {
             string spec = trim(rightSql.substr(op + 8));
@@ -6290,6 +6318,7 @@ static bool executeSetOperation(const string& sql, Session& s, bool& handled) {
     if (!applySetOperationTail(
             result, tailHasOrder, tailOrderCol, tailOrderAsc,
             tailNullsFirst, tailHasNullOrder, tailLimit, tailHasLimit,
+            tailOffset, tailHasOffset,
             leftSql, rightSql, tailError, tailSqlState)) {
         cout << "ERROR: " << tailError << " (SQLSTATE "
              << tailSqlState << ")" << endl;
