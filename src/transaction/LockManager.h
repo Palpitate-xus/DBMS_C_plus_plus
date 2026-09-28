@@ -141,6 +141,9 @@ public:
     // ========================================================================
     [[nodiscard]] bool rowLockShared(const std::string& table, int64_t rid);
     [[nodiscard]] bool rowLockExclusive(const std::string& table, int64_t rid);
+    // The blocking variants can fail for either a wait cycle or a timeout.
+    // Read on the same backend thread immediately after a failed attempt.
+    [[nodiscard]] bool lastRowLockWasDeadlock() const;
     // Non-blocking variants: return false immediately if lock cannot be acquired
     [[nodiscard]] bool rowLockSharedNoWait(const std::string& table, int64_t rid);
     [[nodiscard]] bool rowLockExclusiveNoWait(const std::string& table, int64_t rid);
@@ -179,6 +182,7 @@ private:
         std::string resourceNamespace;
         int lockTimeoutMs = 0;
         int deadlockTimeoutMs = 0;
+        bool lastRowLockDeadlock = false;
         std::function<void()> interruptHandler;
     };
 

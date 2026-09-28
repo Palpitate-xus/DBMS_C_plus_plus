@@ -978,6 +978,7 @@ std::vector<std::string> LockManager::lockedTables() const {
 // ========================================================================
 
 bool LockManager::rowLockShared(const std::string& table, int64_t rid) {
+    threadSettings().lastRowLockDeadlock = false;
     std::thread::id self = std::this_thread::get_id();
     const auto checkInterrupt = [&]() {
         if (!threadSettings().interruptHandler) return;
@@ -1018,6 +1019,7 @@ bool LockManager::rowLockShared(const std::string& table, int64_t rid) {
                     if (holder != self) addWaitEdge(self, holder);
                 }
                 if (hasCycle(self)) {
+                    threadSettings().lastRowLockDeadlock = true;
                     removeWaitEdges(self);
                     return false;
                 }
@@ -1065,6 +1067,7 @@ bool LockManager::rowLockShared(const std::string& table, int64_t rid) {
 }
 
 bool LockManager::rowLockExclusive(const std::string& table, int64_t rid) {
+    threadSettings().lastRowLockDeadlock = false;
     std::thread::id self = std::this_thread::get_id();
     const auto checkInterrupt = [&]() {
         if (!threadSettings().interruptHandler) return;
@@ -1114,6 +1117,7 @@ bool LockManager::rowLockExclusive(const std::string& table, int64_t rid) {
                 if (holder != self) addWaitEdge(self, holder);
             }
             if (hasCycle(self)) {
+                threadSettings().lastRowLockDeadlock = true;
                 removeWaitEdges(self);
                 return false;
             }
@@ -1157,6 +1161,10 @@ bool LockManager::rowLockExclusive(const std::string& table, int64_t rid) {
                 threadSettings().lockTimeoutMs) return false;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+}
+
+bool LockManager::lastRowLockWasDeadlock() const {
+    return threadSettings().lastRowLockDeadlock;
 }
 
 bool LockManager::rowLockSharedNoWait(const std::string& table, int64_t rid) {
