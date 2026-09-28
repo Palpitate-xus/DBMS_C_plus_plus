@@ -741,10 +741,10 @@
 | 762 | DIV-02 / P0-07 | extended `REPLACE INTO` 同一语句删除复合主键和另一 UNIQUE 键的冲突行后，不推进命令可见性，重插仍把自己的删除当存活旧键并报 `23505` | 在冲突删除与重插间推进命令 ID；新增存储级可见性回归，`div14_feature_gate_test.py` 的多冲突替换及失败回滚全部定向通过。MySQL 兼容扩展全族仍为 partial | `245fd0ee` |
 | 763 | DML-01 / P0-02 / P0-16 | `INSERT DEFAULT VALUES` 成功命令标签附加非标准后缀，NOT NULL 失败丢失专用 SQLSTATE，线协议分别与 PostgreSQL 18 不一致 | typed 与 legacy 两路径统一返回 `INSERT 0 1` 和存储状态映射 SQLSTATE；`insert_default_values_boundary` 修复前差分两处失败、修复后 `cases=1 failed=0`，正式生产构建及固定二进制 369 组全量差分 `failed=0`。完整 DML/协议仍为 partial | `2112d3fb`, `5213e25f` |
 | 764 | P0-04 / P0-16 | 补充显式事务中先删两条冲突旧行，再复用复合主键和 UNIQUE 键的参考差分边界，以区分普通跨命令可见性与第 762 项同命令 REPLACE 错误 | `delete_reinsert_unique_probe` 在修复前、修复后生产二进制上均与 PostgreSQL 18.6 定向 `cases=1 failed=0`；事务/约束族仍为 partial | `55df5794` |
-| 765 | P0-07 / P0-09 | `FOR SHARE NOWAIT` 的行锁实现要求没有任何现有持有者，错误拒绝第二个兼容共享读者 | 移除空持有者限制，但仅在本线程是临时文件锁唯一持有者时释放文件锁；新增第二读者成功、独占 NOWAIT 仍拒绝的并发回归，修复前断言失败，修复后隔离连续 5 次通过；双连接真实线协议 `FOR SHARE NOWAIT` 回归、生产构建及事务隔离协议测试通过。完整行锁/SSI 仍为 partial | `715eeebd` |
+| 765 | P0-07 / P0-09 | `FOR SHARE NOWAIT` 的行锁实现要求没有任何现有持有者，错误拒绝第二个兼容共享读者 | 移除空持有者限制，但仅在本线程是临时文件锁唯一持有者时释放文件锁；新增第二读者成功、独占 NOWAIT 仍拒绝的并发回归，修复前断言失败，修复后隔离连续 5 次通过；双连接真实线协议 `FOR SHARE NOWAIT` 回归、生产构建及事务隔离协议测试通过。完整行锁/SSI 仍为 partial | `715eeebd`, `c27cc514` |
 | 766 | P0-07 / P0-09 | 共享行锁升级为独占 NOWAIT 失败时先丢弃原共享锁；另一进程持有共享锁时可导致事务原有锁保护消失 | 对跨进程文件锁或已有本地等待者保守拒绝非原子升级，保留原共享锁；无文件锁的单进程独占读者仍能升级。新增跨进程逻辑/物理保留断言，修复前失败、修复后三次隔离通过；生产构建及事务隔离协议测试通过。跨进程无冲突升级仍待完善，不能把完整行锁语义记为完成 | `ab386e79` |
 
-2026-09-28 当前复验：截至第 764 项的固定生产二进制运行真实 PostgreSQL 18.6 差分 369 组，`failed=0`，包括默认值命令标签/错误码与显式事务键复用两条新增探针。随后同一版源码的 `scripts/build_tests.sh` 全套 C++ 与协议/E2E 测试退出码 0，前轮 4 个失败项均通过；这轮全套尚未覆盖第 765–766 项新锁修复，新版已做上述定向复验。总账为 24 complete、124 partial、110 unverified、15 deferred_by_user；差分用例数不是总清单完成数，用户延期的安全/TDE 项未触碰。
+2026-09-28 当前复验：截至第 764 项的固定生产二进制运行真实 PostgreSQL 18.6 差分 369 组，`failed=0`，包括默认值命令标签/错误码与显式事务键复用两条新增探针。第 765–766 项锁修复后的 `scripts/build_tests.sh` 全套 C++ 与协议/E2E 测试也以退出码 0 结束，含 `cross_backend_lock_test` 和 `lock_manager_concurrency_test`；后加入 manifest 的双连接 `for_share_nowait_protocol_e2e_test.py` 单独通过，尚未包含在这轮全套脚本内。总账为 24 complete、124 partial、110 unverified、15 deferred_by_user；差分用例数不是总清单完成数，用户延期的安全/TDE 项未触碰。
 
 2026-09-28 较早复验：第 738–739 项分页与数值等价修复后的固定生产二进制运行真实 PostgreSQL 18.6 差分 367 组，`failed=0`，完整协议回归及正式对象链接的隔离集合 C++ 测试通过。差分用例数不是总清单完成数。当时总账为 24 complete、122 partial、112 unverified、15 deferred_by_user。
 
