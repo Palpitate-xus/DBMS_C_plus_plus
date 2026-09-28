@@ -46,6 +46,7 @@
 #include "commands/DdlExecutor.h"
 #include "commands/DmlExecutor.h"
 #include "catalog/CatalogService.h"
+#include "catalog/collation.h"
 #include "catalog/systables.h"
 #include "catalog/type_registry.h"
 #include "process/SqlStats.h"
@@ -6014,10 +6015,44 @@ static bool captureSetOperand(const string& sql, Session& s,
     return true;
 }
 
+static optional<string> explicitSetOperandCollation(
+    const string& operand, size_t columnIndex) {
+    const string lowered = toLower(operand);
+    if (lowered.compare(0, 6, "select") != 0) return nullopt;
+    const size_t from = findTopLevelKeyword(lowered, "from", 6);
+    const string projection = operand.substr(
+        6, from == string::npos ? string::npos : from - 6);
+    const vector<string> columns = splitTopLevelComma(projection);
+    if (columnIndex >= columns.size()) return nullopt;
+    const string& target = columns[columnIndex];
+    const size_t at = findTopLevelKeyword(toLower(target), "collate", 0);
+    if (at == string::npos) return nullopt;
+    const string rest = trim(target.substr(at + 7));
+    if (rest.empty()) return nullopt;
+    size_t end = 0;
+    if (rest.front() == '"') {
+        end = 1;
+        while (end < rest.size()) {
+            if (rest[end++] == '"') {
+                if (end < rest.size() && rest[end] == '"') {
+                    ++end;
+                } else {
+                    break;
+                }
+            }
+        }
+    } else {
+        while (end < rest.size() &&
+               !isspace(static_cast<unsigned char>(rest[end]))) ++end;
+    }
+    return dbms::collation::normalizeName(rest.substr(0, end));
+}
+
 static bool applySetOperationTail(
     dbms::DmlResult& result, bool hasOrder, const string& orderColumn,
     bool asc, bool explicitNullsFirst, bool hasExplicitNullOrder,
-    size_t limitN, bool hasLimit, string& error, string& sqlState) {
+    size_t limitN, bool hasLimit, const string& leftSql,
+    const string& rightSql, string& error, string& sqlState) {
     if (hasOrder) {
         size_t orderIndex = result.columns.size();
         try {
@@ -6053,6 +6088,22 @@ static bool applySetOperationTail(
             ? canonicalValuesType(result.columnTypes[orderIndex]) : "text";
         const auto* typeEntry =
             dbms::TypeRegistry::instance().findType(type);
+        string textCollation = "default";
+        if (typeEntry &&
+            typeEntry->category == dbms::TypeCategory::String) {
+            const optional<string> leftCollation =
+                explicitSetOperandCollation(leftSql, orderIndex);
+            const optional<string> rightCollation =
+                explicitSetOperandCollation(rightSql, orderIndex);
+            if (leftCollation && rightCollation &&
+                *leftCollation != *rightCollation) {
+                error = "collation mismatch between set-operation operands";
+                sqlState = "42P21";
+                return false;
+            }
+            if (leftCollation) textCollation = *leftCollation;
+            else if (rightCollation) textCollation = *rightCollation;
+        }
         stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
             const bool nullA = result.nulls[a][orderIndex];
             const bool nullB = result.nulls[b][orderIndex];
@@ -6068,6 +6119,12 @@ static bool applySetOperationTail(
                     const dbms::Numeric numericB(valueB);
                     return asc ? numericA < numericB : numericB < numericA;
                 } catch (...) {}
+            }
+            if (typeEntry &&
+                typeEntry->category == dbms::TypeCategory::String) {
+                const int compared = dbms::collation::compare(
+                    valueA, valueB, textCollation);
+                return asc ? compared < 0 : compared > 0;
             }
             return asc ? valueA < valueB : valueB < valueA;
         });
@@ -6198,7 +6255,7 @@ static bool executeSetOperation(const string& sql, Session& s, bool& handled) {
     if (!applySetOperationTail(
             result, tailHasOrder, tailOrderCol, tailOrderAsc,
             tailNullsFirst, tailHasNullOrder, tailLimit, tailHasLimit,
-            tailError, tailSqlState)) {
+            leftSql, rightSql, tailError, tailSqlState)) {
         cout << "ERROR: " << tailError << " (SQLSTATE "
              << tailSqlState << ")" << endl;
         return true;
