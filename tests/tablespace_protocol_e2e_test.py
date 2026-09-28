@@ -3,7 +3,9 @@
 
 import importlib.util
 from pathlib import Path
+import socket
 import subprocess
+import time
 
 
 def main():
@@ -41,6 +43,13 @@ def main():
         selected = execute("SELECT id FROM external_items;")
         assert selected[1] is None and selected[0] == [["41"]], selected
         assert (location / "info" / "external_items.dt").is_file()
+        # Offline checksum verification must not bypass the running server's
+        # exclusive data-directory lock. Stop it without deleting the runner
+        # directory, then restart on the same port after restoring the marker.
+        server["sock"].close()
+        server["sock"] = None
+        server["process"].terminate()
+        server["process"].wait(timeout=10)
         checked = subprocess.run(
             [runner.DBMS_MAIN, "--data-dir", str(cluster),
              "--verify-data-checksums"],
@@ -57,6 +66,23 @@ def main():
         assert corrupt_check.returncode == 1, corrupt_check
         assert "invalid tablespace marker" in corrupt_check.stderr, corrupt_check
         marker.write_text(marker_contents, encoding="utf-8")
+
+        server["process"] = subprocess.Popen(
+            [runner.DBMS_MAIN, "--data-dir", str(cluster),
+             "--server", str(server["port"]), "--insecure"],
+            cwd=cluster, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.monotonic() + 20
+        while True:
+            try:
+                sock = socket.create_connection(
+                    ("127.0.0.1", server["port"]), timeout=runner.wire_timeout())
+                client.startup(sock, "alice", "info")
+                server["sock"] = sock
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
 
         busy = execute("DROP TABLESPACE fast_space;")
         assert busy[1] == "22023", busy
