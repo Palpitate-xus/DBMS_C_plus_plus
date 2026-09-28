@@ -1167,12 +1167,12 @@ bool LockManager::rowLockSharedNoWait(const std::string& table, int64_t rid) {
     if (std::find(state.holders.begin(), state.holders.end(), self) != state.holders.end()) {
         return true;
     }
-    if (!state.exclusive && state.holders.empty()) {
+    if (!state.exclusive) {
         const auto processResult = tryAcquireProcessLock(
             state, threadSettings().resourceNamespace, "row", key, LockMode::Shared);
         if (processResult != ProcessLockResult::Acquired) return false;
         if (!state.mtx.try_lock_shared()) {
-            releaseProcessLock(state);
+            if (state.holders.empty()) releaseProcessLock(state);
             return false;
         }
         state.sharedCount++;

@@ -205,6 +205,34 @@ int main() {
     assert(manager.lockedRows("no_wait_rows").empty());
     std::cout << "[LOCK] row no-wait contract OK\n";
 
+    // NOWAIT only rejects an incompatible holder: two FOR SHARE readers may
+    // hold the same row concurrently, including when the second uses NOWAIT.
+    assert(manager.rowLockShared("compatible_nowait_rows", 1));
+    std::atomic<bool> compatibleSharedAcquired{false};
+    std::atomic<bool> compatibleSharedAttempted{false};
+    std::atomic<bool> releaseCompatibleReader{false};
+    std::thread compatibleSharedReader([&] {
+        const bool acquired = manager.rowLockSharedNoWait("compatible_nowait_rows", 1);
+        compatibleSharedAcquired.store(acquired, std::memory_order_release);
+        compatibleSharedAttempted.store(true, std::memory_order_release);
+        if (acquired) {
+            while (!releaseCompatibleReader.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            manager.rowUnlock("compatible_nowait_rows", 1);
+        }
+    });
+    while (!compatibleSharedAttempted.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+    assert(compatibleSharedAcquired.load(std::memory_order_acquire));
+    assert(!manager.rowLockExclusiveNoWait("compatible_nowait_rows", 1));
+    releaseCompatibleReader.store(true, std::memory_order_release);
+    compatibleSharedReader.join();
+    manager.rowUnlock("compatible_nowait_rows", 1);
+    assert(manager.lockedRows("compatible_nowait_rows").empty());
+    std::cout << "[LOCK] compatible shared row NOWAIT OK\n";
+
     // Savepoint-style lock checkpoints retain pre-savepoint locks but release
     // every table/row/page/gap token acquired afterward.
     std::filesystem::create_directories("checkpoint_db");
