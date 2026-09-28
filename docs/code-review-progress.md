@@ -733,6 +733,8 @@
 | 754 | P0-07 / P0-09 / P0-05 | 页锁等待线程可持有物理锁后等待全局页互斥，而另一线程在全局互斥内阻塞获取同一物理锁；等待图还累积过期边，导致并发 TOAST 写入死锁或误报冲突 | 页锁快路径改为非阻塞物理锁、轮询刷新等待边并检查超时；12 线程 TOAST 全测试连续四次通过。更广泛的并发/SSI 仍为 partial | `acca9f45` |
 | 755 | CONS-01 | TOAST 回归两处 CHECK 失败仍期待通用错误状态 | 对齐 `CHECK_VIOLATION`；TOAST 全测试通过 | `27d6071f` |
 | 756 | TYPE-01 | TOAST 回归对超出 VARCHAR 长度的写入仍期待通用错误状态 | 对齐 `STRING_DATA_RIGHT_TRUNCATION`；TOAST 全测试通过 | `34a9cfab` |
+| 757 | P0-07 / P0-09 | 行锁与页锁存在同型的锁顺序倒置及等待边累积；高并发交接时可死锁、错误报冲突或无视锁超时 | 行锁共享/独占快路径改为非阻塞，轮询刷新等待边并覆盖物理锁等待的超时；`lock_manager_concurrency_test` 新增 12 线程混合读写交接，正式对象替换链接后连续六次通过。全量回归及生产构建仍待本项后复验；完整并发/SSI 仍为 partial | `919570e0` |
+| 758 | P0-07 / P0-09 | `rowLockSharedNoWait` / `rowLockExclusiveNoWait` 在行锁交接窗口仍使用阻塞的物理 mutex 获取，违背 NOWAIT 并可能与全局行锁互斥量形成死锁 | 改成 `try_lock`，失败时释放临时进程锁；新增被其他线程占用时立即失败、释放后可再取得的回归，正式对象替换链接的 `lock_manager_concurrency_test` 通过。完整锁语义仍为 partial | `625fe652` |
 
 2026-09-28 当前复验：第 738–739 项分页与数值等价修复后的固定生产二进制运行真实 PostgreSQL 18.6 差分 367 组，`failed=0`，完整协议回归及正式对象链接的隔离集合 C++ 测试通过。差分用例数不是总清单完成数。总账为 24 complete、122 partial、112 unverified、15 deferred_by_user；用户延期的安全/TDE 项未触碰。
 
