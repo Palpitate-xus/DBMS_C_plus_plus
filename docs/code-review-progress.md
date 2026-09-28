@@ -745,8 +745,9 @@
 | 766 | P0-07 / P0-09 | 共享行锁升级为独占 NOWAIT 失败时先丢弃原共享锁；另一进程持有共享锁时可导致事务原有锁保护消失 | 对跨进程文件锁或已有本地等待者保守拒绝非原子升级，保留原共享锁；无文件锁的单进程独占读者仍能升级。新增跨进程逻辑/物理保留断言，修复前失败、修复后三次隔离通过；生产构建及事务隔离协议测试通过。跨进程无冲突升级仍待完善，不能把完整行锁语义记为完成 | `ab386e79` |
 | 767 | P0-02 / P0-07 / P0-09 | 显式事务中 `FOR SHARE NOWAIT` 遇到别的事务独占行锁时，存储查询回滚并返回空结果，线协议错误地报告成功 | 冲突时抛出结构化 `55P03`，由协议层保留失败事务状态直至 `ROLLBACK`；双连接用例修复前返回成功、修复后生产构建返回 `55P03` 且后续查询返回 `25P02`；相邻事务协议回归通过。完整锁错误与协议语义仍为 partial | `23850200` |
 | 768 | P0-04 / P0-07 / P0-09 | 无显式事务的 `SELECT ... FOR SHARE/UPDATE NOWAIT` 未建立语句事务，直接跳过行锁阶段，冲突行仍被返回 | 顶层带锁 SELECT 建立语句级事务，错误时回滚、成功时提交释放锁；双连接用例修复前错误成功，修复后 NOWAIT 拒绝、SKIP LOCKED 过滤与后续释放在独立二进制连续三次及生产二进制通过；`locking_select_autocommit` 与 PostgreSQL 18.6 定向 `cases=1 failed=0`。完整事务/锁语义仍为 partial | `e758d318`, `36f3d341`, `1c4c8824` |
+| 769 | P0-02 | 交互式 CLI 对 `DbError` 没有异常边界；查询 `WITH NO DATA` 物化视图抛 `55000` 后进程退出，后续命令无法执行 | 交互循环捕获 SQL/标准/未知异常并显示 SQLSTATE 后继续服务；新增独立数据目录 CLI 回归，修复前退出码 `-6`、修复后生产构建通过且下一条 `SELECT 1` 执行；完整 PostgreSQL 协议及双连接行锁相邻测试通过。CLI 全部错误恢复语义仍为 partial | `39905aff` |
 
-2026-09-28 当前复验：第 765–766 项锁修复后的固定生产二进制运行真实 PostgreSQL 18.6 差分 369 组，`failed=0`；同版 `scripts/build_tests.sh` 全套 C++ 与协议/E2E 测试退出码 0，含 `cross_backend_lock_test` 和 `lock_manager_concurrency_test`。第 767–768 项在差分启动后新增，已通过正式生产构建、双连接协议、事务隔离及 SQL 字面量相邻测试，另新增 1 组带锁 SELECT 的 PostgreSQL 18.6 定向差分 `failed=0`；最新源码全套回归和含新用例的全量差分尚未完成。总账为 24 complete、124 partial、110 unverified、15 deferred_by_user；差分用例数不是总清单完成数，用户延期的安全/TDE 项未触碰。
+2026-09-28 当前复验：第 765–766 项锁修复后的固定生产二进制运行真实 PostgreSQL 18.6 差分 369 组，`failed=0`。第 767–768 项修复后的 `scripts/build_tests.sh` 全套 C++ 与协议/E2E 测试退出码 0，含新的双连接 `for_share_nowait_protocol_e2e_test.py`；同版生产二进制的新增 `locking_select_autocommit` PostgreSQL 18.6 定向差分 `cases=1 failed=0`，尚未跑 370 组全量。第 769 项 CLI 修复随后正式构建，CLI/完整 PostgreSQL 协议/双连接锁协议定向通过，尚未纳入这轮全量测试。总账为 24 complete、124 partial、110 unverified、15 deferred_by_user；差分用例数不是总清单完成数，用户延期的安全/TDE 项未触碰。
 
 2026-09-28 较早复验：第 738–739 项分页与数值等价修复后的固定生产二进制运行真实 PostgreSQL 18.6 差分 367 组，`failed=0`，完整协议回归及正式对象链接的隔离集合 C++ 测试通过。差分用例数不是总清单完成数。当时总账为 24 complete、122 partial、112 unverified、15 deferred_by_user。
 
