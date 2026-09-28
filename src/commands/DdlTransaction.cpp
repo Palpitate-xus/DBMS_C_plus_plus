@@ -142,7 +142,7 @@ bool DdlTransaction::begin() {
                 active_ = false;
                 return false;
             }
-        } catch (...) {
+        } catch (const DbError&) {
             // A lock-timeout error belongs to the surrounding SQL
             // transaction. Do not let this statement wrapper roll it back.
             active_ = false;
