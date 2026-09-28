@@ -57,6 +57,7 @@ def main():
         _, state, message, _, _, _ = wire_query(
             second, "SELECT id FROM row_share_nowait FOR SHARE NOWAIT;")
         assert state == "55P03", (state, message)
+        assert query(second, "SELECT id FROM row_share_nowait FOR SHARE SKIP LOCKED;") == []
         query(first, "ROLLBACK;")
         assert query(second, "SELECT id FROM row_share_nowait FOR SHARE NOWAIT;") == [["1"]]
         query(first, "BEGIN;")
