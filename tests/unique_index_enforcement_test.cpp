@@ -293,7 +293,11 @@ int main() {
     dbms::TypeRegistry::instance().bootstrap();
     const std::string testName = "unique_index_enforcement";
     const std::string database = testDbPath(testName);
-    cleanupTestDb(testName);
+    if (g_engine.databaseExists(database)) {
+        assert(g_engine.dropDatabase(database) == dbms::DBStatus::OK);
+    } else {
+        cleanupTestDb(testName);
+    }
     assert(g_engine.createDatabase(database, "utf8") == dbms::DBStatus::OK);
 
     Session session;
@@ -310,7 +314,7 @@ int main() {
     test_composite_lifecycle(ddl, session, database);
     test_unsupported_unique_shapes_fail_closed(ddl, session, database);
 
-    cleanupTestDb(testName);
+    assert(g_engine.dropDatabase(database) == dbms::DBStatus::OK);
     finalCleanupTestData();
     std::cout << "[UNIQUE INDEX] all passed" << std::endl;
     return 0;
