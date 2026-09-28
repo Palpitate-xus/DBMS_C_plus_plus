@@ -79,6 +79,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/compatibility_contract_test.py)
     DBMS_E2E_TESTS+=(tests/data_directory_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/advisory_lock_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/for_share_nowait_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/no_fake_compat_objects_test.py)
     DBMS_E2E_TESTS+=(tests/compat_fallback_registry_test.py)
     DBMS_CXXFLAGS=(-std=c++17 -O2 -pthread -Wall -Wextra)
