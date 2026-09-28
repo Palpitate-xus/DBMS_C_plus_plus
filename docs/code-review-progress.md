@@ -751,7 +751,7 @@
 | 772 | TYPE-17 | 总账原记 `unverified`，但用户定义 composite 列已有实际存取子集 | `CREATE TYPE ... AS (...)` 后的列类型识别、`(v1,v2,...)` 字段数量/基础数值校验和规范化、INSERT/UPDATE 在 `composite_test` 中通过；当前仍以文本行字面量处理，缺完整 row descriptor、匿名 record、字段访问/更新、比较和函数返回 record 推导，仅改为 partial，原清单未勾选 | `f9f05f22` |
 | 773 | TYPE-18 | 总账原记 `unverified`，但 range 类型已有可执行的文本规范化与运算子集 | `int4range`/`int8range`/`numrange`/`daterange`/`tsrange`/`tstzrange` 字面量、离散上下界规范化、部分 overlap/containment 和函数在 `range_test`、`range_functions_test`、`range_bound_projection_test`、`gist_range_search_test` 中通过。范围值仍以文本表示，缺完整 subtype diff/canonical、aggregate、GiST/SP-GiST opclass 与真实 multirange，仅改为 partial，原清单未勾选 | `e2266db7`, `e2a62615`, `91348835`, `b4dd7cf2` |
 
-2026-09-28 当前复验：第 769 项 CLI 修复后的固定生产二进制运行真实 PostgreSQL 18.6 差分 370 组，`failed=0`，包含带锁 SELECT 新用例；同一生产二进制上的 CLI 错误恢复、完整 PostgreSQL 协议与双连接行锁测试定向通过。上一轮在第 767–768 项源码上运行的 `scripts/build_tests.sh` 全套 C++ 与协议/E2E 测试退出码 0，含双连接 `for_share_nowait_protocol_e2e_test.py`；第 769 项后新增的 CLI 用例尚未纳入全量脚本，正在准备复跑。总账为 24 complete、128 partial、106 unverified、15 deferred_by_user；差分用例数不是总清单完成数，用户延期的安全/TDE 项未触碰。
+2026-09-28 当前复验：第 769 项 CLI 修复后的固定生产二进制运行真实 PostgreSQL 18.6 差分 370 组，`failed=0`，包含带锁 SELECT 新用例；同一最终源码运行 `scripts/build_tests.sh` 全套 C++ 与协议/E2E 测试退出码 0，包含 `for_share_nowait_protocol_e2e_test.py` 和新 `cli_error_recovery_e2e_test.py`。总账为 24 complete、128 partial、106 unverified、15 deferred_by_user；差分用例数不是总清单完成数，用户延期的安全/TDE 项未触碰。
 
 2026-09-28 较早复验：第 738–739 项分页与数值等价修复后的固定生产二进制运行真实 PostgreSQL 18.6 差分 367 组，`failed=0`，完整协议回归及正式对象链接的隔离集合 C++ 测试通过。差分用例数不是总清单完成数。当时总账为 24 complete、122 partial、112 unverified、15 deferred_by_user。
 
