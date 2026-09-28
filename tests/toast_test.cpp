@@ -160,7 +160,7 @@ int main() {
         const std::string rejectedLarge =
             makeIncompressiblePayload(9000, 0xabcdef01u);
         assert(engine.insert(dbname, "rejected", {{"payload", rejectedLarge}})
-               == DBStatus::INVALID_VALUE);
+               == DBStatus::CHECK_VIOLATION);
         BPTree rejectedToastIndex(
             std::filesystem::path(dbname) / "rejected.toast.idx");
         assert(rejectedToastIndex.open());
@@ -350,7 +350,7 @@ int main() {
                DBStatus::DUPLICATE_KEY);
         assert(engine.insert(dbname, "logical_index",
                              {{"id", "3"}, {"payload", "too short"},
-                              {"tag", "short"}}) == DBStatus::INVALID_VALUE);
+                              {"tag", "short"}}) == DBStatus::CHECK_VIOLATION);
 
         BPTree* payloadIndex =
             engine.getSecondaryIndex(dbname, "logical_index", "payload");
