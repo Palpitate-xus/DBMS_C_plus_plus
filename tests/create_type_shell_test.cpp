@@ -353,6 +353,16 @@ static bool executeWithDatabaseWritesBlocked(
     outer.rollback();
     assert(!g_engine.inTransaction());
     assert(!g_engine.hasTransactionBackup());
+    // The failed write triggers a physical restore while the retired database
+    // generation is read-only. It must not leave a staging directory that a
+    // later startup could mistake for an unfinished recovery operation.
+    const std::string stagingPrefix =
+        fs::path(db).filename().string() + ".restore_staging.";
+    const fs::path parent = fs::path(db).parent_path().empty()
+        ? fs::path(".") : fs::path(db).parent_path();
+    for (const auto& entry : fs::directory_iterator(parent)) {
+        assert(entry.path().filename().string().rfind(stagingPrefix, 0) != 0);
+    }
     return failed;
 }
 

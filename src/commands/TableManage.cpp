@@ -39347,6 +39347,38 @@ static bool publishDirectoryReplacement(
     return false;
 }
 
+static bool makeDiscardableDirectoryTree(
+    const std::filesystem::path& root) {
+    std::error_code error;
+    if (!std::filesystem::is_directory(
+            std::filesystem::symlink_status(root, error)) || error) {
+        return false;
+    }
+    // A successful exchange can leave the old database generation at the
+    // staging path with read-only directory permissions. Only this retired
+    // generation is made writable; never change the published target or a
+    // symlink that could point outside the data directory.
+    std::filesystem::permissions(
+        root, std::filesystem::perms::owner_all,
+        std::filesystem::perm_options::add, error);
+    if (error) return false;
+    std::filesystem::recursive_directory_iterator it(root, error), end;
+    if (error) return false;
+    while (it != end) {
+        const auto status = it->symlink_status(error);
+        if (error) return false;
+        if (std::filesystem::is_directory(status)) {
+            std::filesystem::permissions(
+                it->path(), std::filesystem::perms::owner_all,
+                std::filesystem::perm_options::add, error);
+            if (error) return false;
+        }
+        it.increment(error);
+        if (error) return false;
+    }
+    return true;
+}
+
 static bool discardDirectoryReplacement(
     DurableDirectoryReplacement& replacement) {
     if (replacement.staging.empty()) return true;
@@ -39356,6 +39388,11 @@ static bool discardDirectoryReplacement(
     if (error) return false;
     if (exists) {
         std::filesystem::remove_all(replacement.staging, error);
+        if (error == std::errc::permission_denied &&
+            makeDiscardableDirectoryTree(replacement.staging)) {
+            error.clear();
+            std::filesystem::remove_all(replacement.staging, error);
+        }
         if (error ||
             !index_file::syncDirectory(
                 directoryParent(replacement.staging))) {
