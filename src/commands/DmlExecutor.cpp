@@ -4539,7 +4539,8 @@ bool executeDelete(const DeleteStmt& stmt, Session& s, bool& fallback) {
         stmt.returning.empty() ? nullptr : &deletedRows,
         StorageEngine::SqlDeleteMatcher{}, &affectedRows);
     if (status != DBStatus::OK) {
-        std::cout << "Delete failed" << std::endl;
+        std::cout << "ERROR: DELETE failed (SQLSTATE "
+                  << sqlstateForDBStatus(status) << ")" << std::endl;
         return true;
     }
     if (!stmt.returning.empty()) {
