@@ -101,7 +101,7 @@ int main() {
     assert(rowCount(database, "checked_values") == 1);
     assert(g_engine.insert(database, "checked_values",
                            {{"id", "2"}, {"checked", "-1"}}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::CHECK_VIOLATION);
 
     // Identifier text inside a literal is not a column dependency.
     assert(!ddl.executeSql(
