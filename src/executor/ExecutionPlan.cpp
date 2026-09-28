@@ -99,6 +99,13 @@ TableScanOp::TableScanOp(StorageEngine* engine, const std::string& dbname,
     : engine_(engine), dbname_(dbname), tablename_(tablename) {}
 
 bool TableScanOp::open() {
+    auto& lockManager = engine_->getLockManager();
+    lockManager.setResourceNamespace(dbname_);
+    if (!lockManager.lockShared(tablename_)) {
+        throw DbError("55P03", "could not obtain lock on relation \"" +
+            tablename_ + "\"");
+    }
+    tableLockHeld_ = true;
     tbl_ = engine_->getTableSchema(dbname_, tablename_);
     rows_.clear();
     lastRid_ = 0;
@@ -242,6 +249,10 @@ void TableScanOp::close() {
     lastRid_ = 0;
     StorageEngine::unbindNullRow();
     statsRecorded_ = false;
+    if (tableLockHeld_) {
+        engine_->getLockManager().unlock(tablename_);
+        tableLockHeld_ = false;
+    }
 }
 
 // ========================================================================

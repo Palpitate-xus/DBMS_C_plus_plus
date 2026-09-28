@@ -180,6 +180,7 @@ private:
     size_t pos_ = 0;
     int64_t lastRid_ = 0;
     bool statsRecorded_ = false;
+    bool tableLockHeld_ = false;
 };
 
 // ParallelTableScan: partition a non-partitioned heap by page ranges.  It

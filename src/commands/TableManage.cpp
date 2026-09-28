@@ -16103,7 +16103,7 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
         }
     }
 
-    lockManager_.unlock(tablename);
+    if (!transactionContext().inTransaction) lockManager_.unlock(tablename);
 
     for (const auto& values : rows) {
         DBStatus status = insertRow(dbname, tablename, values);
@@ -28864,23 +28864,40 @@ std::vector<std::string> StorageEngine::query(
         return queryPgCatalog(tablename, conditions, selectCols, orderBy);
     }
 
-    if (!tableExists(dbname, tablename)) {
+    const bool existedBeforeLock = tableExists(dbname, tablename);
+    if (!existedBeforeLock) {
         // Unqualified pg_catalog names (FROM pg_views) resolve through the
         // same virtual catalog path as qualified pg_catalog.pg_views.
         if (tablename.size() > 3 && tablename.substr(0, 3) == "pg_") {
             auto rows = queryPgCatalog(tablename, conditions, selectCols, orderBy);
             if (!rows.empty()) return rows;
         }
-        return result;
+        if (dbname.empty() || !validStoredIdentifier(dbname, MAX_TABLE_NAME_LEN) ||
+            tablename.empty() || !validStoredIdentifier(tablename, MAX_TABLE_NAME_LEN)) {
+            return result;
+        }
     }
     if (transactionContext().inTransaction) {
         if (forUpdate) {
-            if (!lockManager_.lockIntentExclusive(tablename)) return result;
+            if (!lockManager_.lockIntentExclusive(tablename)) {
+                throw DbError("55P03", "could not obtain lock on relation \"" +
+                    tablename + "\"");
+            }
         } else {
-            if (!lockManager_.lockIntentShared(tablename)) return result;
+            if (!lockManager_.lockIntentShared(tablename)) {
+                throw DbError("55P03", "could not obtain lock on relation \"" +
+                    tablename + "\"");
+            }
         }
     } else {
-        if (!lockManager_.lockShared(tablename)) return result;
+        if (!lockManager_.lockShared(tablename)) {
+            throw DbError("55P03", "could not obtain lock on relation \"" +
+                tablename + "\"");
+        }
+    }
+    if (!tableExists(dbname, tablename)) {
+        lockManager_.unlock(tablename);
+        return result;
     }
 
     TableSchema tbl = getTableSchema(dbname, tablename);
