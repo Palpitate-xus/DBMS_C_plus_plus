@@ -69,6 +69,12 @@ struct BackendRegistration {
 BackendRegistration registerProcess(
     const std::string& user, const std::string& host, const std::string& db,
     const std::shared_ptr<SessionInterruptState>& interruptState = nullptr);
+// Reserve a database for removal only when no backend is connected to it.
+// Registration and database switches check the same reservation under the
+// process-list mutex, closing the startup/idle-session race with DROP.
+bool reserveDatabaseDrop(const std::string& db);
+void releaseDatabaseDrop(const std::string& db);
+bool trySwitchProcessDb(uint64_t pid, const std::string& db);
 void updateProcessInfo(uint64_t pid, const std::string& command,
                        const std::string& state, const std::string& info);
 void updateProcessDb(uint64_t pid, const std::string& db);

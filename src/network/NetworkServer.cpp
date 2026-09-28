@@ -77,6 +77,7 @@ static ServerStats g_stats;
 // Process list: active connections
 static std::mutex g_processMutex;
 static std::map<uint64_t, ProcessInfo> g_processList;
+static std::set<std::string> g_droppingDatabases;
 struct BackendKeyEntry {
     uint32_t secretKey = 0;
     std::weak_ptr<SessionInterruptState> interruptState;
@@ -157,6 +158,9 @@ BackendRegistration registerProcess(
     const std::string& user, const std::string& host, const std::string& db,
     const std::shared_ptr<SessionInterruptState>& interruptState) {
     std::lock_guard<std::mutex> lock(g_processMutex);
+    if (g_droppingDatabases.count(db) != 0 || !g_engine.databaseExists(db)) {
+        return {};
+    }
     uint64_t pid = g_nextProcessId++;
     ProcessInfo info;
     info.id = pid;
@@ -172,6 +176,33 @@ BackendRegistration registerProcess(
     const uint32_t secretKey = randomBackendSecret();
     g_backendKeys[pid] = BackendKeyEntry{secretKey, interruptState};
     return BackendRegistration{pid, secretKey};
+}
+
+bool reserveDatabaseDrop(const std::string& db) {
+    std::lock_guard<std::mutex> lock(g_processMutex);
+    if (g_droppingDatabases.count(db) != 0) return false;
+    for (const auto& [pid, process] : g_processList) {
+        (void)pid;
+        if (process.db == db) return false;
+    }
+    g_droppingDatabases.insert(db);
+    return true;
+}
+
+void releaseDatabaseDrop(const std::string& db) {
+    std::lock_guard<std::mutex> lock(g_processMutex);
+    g_droppingDatabases.erase(db);
+}
+
+bool trySwitchProcessDb(uint64_t pid, const std::string& db) {
+    std::lock_guard<std::mutex> lock(g_processMutex);
+    if (g_droppingDatabases.count(db) != 0 ||
+        (db != "information_schema" && !g_engine.databaseExists(db))) {
+        return false;
+    }
+    const auto it = g_processList.find(pid);
+    if (it != g_processList.end()) it->second.db = db;
+    return true;
 }
 
 bool isServerTransportAllowed(bool tlsEnabled, bool allowPlaintext) {
@@ -3745,6 +3776,14 @@ void handleClient(SecureSocket socket, std::string clientHost) {
 
     const BackendRegistration registration = registerProcess(
         username, clientHost, session.currentDB, session.interruptState);
+    if (registration.pid == 0) {
+        const bool exists = g_engine.databaseExists(session.currentDB);
+        protocol.sendErrorResponse(
+            "FATAL", exists ? "55006" : "3D000",
+            exists ? "database is being dropped"
+                   : "database \"" + session.currentDB + "\" does not exist");
+        return;
+    }
     const uint64_t pid = registration.pid;
     session.pid = pid;
     if (!protocol.sendParameterStatus(

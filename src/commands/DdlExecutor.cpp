@@ -15,6 +15,7 @@
 #include "common/FeatureGate.h"
 #include "common/GeometryValue.h"
 #include "common/scram_sha256.h"
+#include "network/NetworkServer.h"
 #include "permissions.h"
 #include <algorithm>
 #include <charconv>
@@ -3224,6 +3225,16 @@ bool DdlExecutor::executeDropDatabase(const DropStmt* stmt, Session& s) {
                      "(SQLSTATE 55006)" << std::endl;
         return true;
     }
+    if (!reserveDatabaseDrop(dbname)) {
+        std::cout << "ERROR: database \"" << dbname
+                  << "\" is being accessed by other users (SQLSTATE 55006)"
+                  << std::endl;
+        return true;
+    }
+    struct DropReservationGuard {
+        std::string db;
+        ~DropReservationGuard() { releaseDatabaseDrop(db); }
+    } reservation{dbname};
     DBStatus res = g_engine.dropDatabase(dbname);
     if (res == DBStatus::NOT_FOUND || res == DBStatus::DATABASE_NOT_FOUND) {
         if (stmt->ifExists) {

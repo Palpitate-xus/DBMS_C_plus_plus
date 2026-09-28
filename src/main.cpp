@@ -15700,6 +15700,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 log(s.username, "use database error", getTime());
                 return true;
             }
+            if (!dbms::trySwitchProcessDb(s.pid, dbname)) {
+                cout << "ERROR: database \"" << dbname
+                     << "\" is being dropped (SQLSTATE 55006)" << endl;
+                return true;
+            }
 
             // Clear all state whose meaning can depend on the old catalog.
             // The authenticated identity, compatibility mode and ordinary

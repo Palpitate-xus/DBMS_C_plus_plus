@@ -87,6 +87,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/table_lock_timeout_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/transaction_select_table_lock_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/transaction_ddl_upgrade_timeout_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/drop_database_idle_connection_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cli_error_recovery_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/no_fake_compat_objects_test.py)
     DBMS_E2E_TESTS+=(tests/compat_fallback_registry_test.py)
