@@ -266,6 +266,13 @@ ParallelTableScanOp::ParallelTableScanOp(StorageEngine* engine,
     : engine_(engine), dbname_(dbname), tablename_(tablename), workers_(workers) {}
 
 bool ParallelTableScanOp::open() {
+    auto& lockManager = engine_->getLockManager();
+    lockManager.setResourceNamespace(dbname_);
+    if (!lockManager.lockShared(tablename_)) {
+        throw DbError("55P03", "could not obtain lock on relation \"" +
+            tablename_ + "\"");
+    }
+    tableLockHeld_ = true;
     tbl_ = engine_->getTableSchema(dbname_, tablename_);
     rows_.clear();
     pos_ = 0;
@@ -402,6 +409,10 @@ void ParallelTableScanOp::close() {
     pos_ = 0;
     lastRid_ = 0;
     statsRecorded_ = false;
+    if (tableLockHeld_) {
+        engine_->getLockManager().unlock(tablename_);
+        tableLockHeld_ = false;
+    }
 }
 
 // ========================================================================

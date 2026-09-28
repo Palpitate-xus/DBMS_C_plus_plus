@@ -211,6 +211,7 @@ private:
     bool usedParallelWorkers_ = false;
     int64_t lastRid_ = 0;
     bool statsRecorded_ = false;
+    bool tableLockHeld_ = false;
 };
 
 // ========================================================================

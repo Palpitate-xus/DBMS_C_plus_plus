@@ -31,12 +31,18 @@ int main() {
     std::atomic<bool> leaked{false};
     std::thread reader([&] {
         locks.setLockTimeout(50);
-        for (int path = 0; path < 2; ++path) {
-            dbms::OpPtr plan = path == 0
-                ? dbms::OpPtr(std::make_unique<dbms::TableScanOp>(
-                      &g_engine, database, "items"))
-                : dbms::OpPtr(std::make_unique<dbms::IndexScanOp>(
-                      &g_engine, database, "items", "id", "1"));
+        for (int path = 0; path < 3; ++path) {
+            dbms::OpPtr plan;
+            if (path == 0) {
+                plan = std::make_unique<dbms::TableScanOp>(
+                    &g_engine, database, "items");
+            } else if (path == 1) {
+                plan = std::make_unique<dbms::IndexScanOp>(
+                    &g_engine, database, "items", "id", "1");
+            } else {
+                plan = std::make_unique<dbms::ParallelTableScanOp>(
+                    &g_engine, database, "items", 2);
+            }
             try {
                 const auto result = dbms::QueryPlanner::executePlanChecked(std::move(plan));
                 if (!result.ok && result.error.find("SQLSTATE 55P03") !=
@@ -49,7 +55,7 @@ int main() {
     });
     reader.join();
     locks.unlock("items");
-    assert(rejected == 2);
+    assert(rejected == 3);
     assert(!leaked);
 
     auto seq = dbms::QueryPlanner::executePlanChecked(
@@ -57,7 +63,11 @@ int main() {
     auto index = dbms::QueryPlanner::executePlanChecked(
         std::make_unique<dbms::IndexScanOp>(
             &g_engine, database, "items", "id", "1"));
+    auto parallel = dbms::QueryPlanner::executePlanChecked(
+        std::make_unique<dbms::ParallelTableScanOp>(
+            &g_engine, database, "items", 2));
     assert(seq.ok && seq.rows.size() == 1);
     assert(index.ok && index.rows.size() == 1);
+    assert(parallel.ok && parallel.rows.size() == 1);
     cleanupTestDb(testName);
 }
