@@ -310,11 +310,11 @@ int main() {
         const std::string atLimit = makeIncompressiblePayload(3000, 0x55667788u);
         const std::string aboveLimit = makeIncompressiblePayload(3001, 0x55667788u);
         assert(engine.insert(dbname, "bounded", {{"payload", aboveLimit}})
-               == DBStatus::INVALID_VALUE);
+               == DBStatus::STRING_DATA_RIGHT_TRUNCATION);
         assert(engine.insert(dbname, "bounded", {{"payload", atLimit}})
                == DBStatus::OK);
         assert(engine.update(dbname, "bounded", {{"payload", aboveLimit}}, {})
-               == DBStatus::INVALID_VALUE);
+               == DBStatus::STRING_DATA_RIGHT_TRUNCATION);
         rows = engine.query(dbname, "bounded", {}, {"payload"});
         assert(rows.size() == 1);
         assert(rows[0].find(atLimit) != std::string::npos);
