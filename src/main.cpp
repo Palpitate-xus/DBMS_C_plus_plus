@@ -17296,6 +17296,17 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             return true;
                         }
                     }
+                    // REPLACE is a project extension composed of deletes and
+                    // an insert inside one atomic statement transaction.
+                    // Advance the command ID so the re-insert sees our own
+                    // deleted tuples as gone when checking every UNIQUE key.
+                    if (g_engine.inTransaction() &&
+                        (!g_engine.finishSqlCommand() ||
+                         !g_engine.beginSqlCommand())) {
+                        cout << "REPLACE command visibility update failed"
+                             << endl;
+                        return true;
+                    }
                     // Re-insert after deletion
                     res = g_engine.insert(s.currentDB, resolvedName, values);
                     if (res == DBStatus::OK) {
