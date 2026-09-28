@@ -717,12 +717,12 @@
 | 738 | QRY-06 / QRY-10 / P0-16 | 集合运算尾部原完全不识别 `OFFSET`，合法分页报 `42601`；现按查询结果顺序执行 `ORDER BY`、`OFFSET`、`LIMIT`，接受两种 LIMIT/OFFSET 顺序、NULL 与无上限形式，负 OFFSET 报 `2201X` | `setop_offset_probe` 在旧生产二进制上与 PostgreSQL 18.6 四条基础写法均失败；修复后正式生产构建、10 条变体定向差分 `cases=1 failed=0`、相邻五条集合差分、正式对象链接的隔离 C++ 测试、完整协议回归及固定二进制 367 组全量差分 `failed=0`。完整分页表达式仍为 partial | `f5e0ab81`, `f4615f81` |
 | 739 | QRY-06 / TYPE-02 / P0-16 | 集合运算原按数值显示字符串构造去重/交差键，把 `1.0` 和 `1.00` 当成不同值，导致 `UNION`、`INTERSECT`、`EXCEPT` 行数及 command tag 错误；现对 `numeric` 列按数值规范键比较，同时保留原行的显示精度 | `setop_numeric_equivalence_probe` 在旧生产二进制与 PostgreSQL 18.6 对照前三种运算失败；修复后正式生产构建、定向差分 `cases=1 failed=0`、正式对象链接的隔离 `structured_set_result_test` 退出码 0、相邻五条集合差分、完整协议回归及固定二进制 367 组全量差分 `failed=0`。完整类型/排序规则相等语义仍为 partial | `55da63db`, `df196c77` |
 | 740 | P0-04 / P0-05 | `ALTER TABLE ONLY` 回归旧断言要求事务回滚删除 UNLOGGED 行，与当前回滚语义不符 | 校正 `alter_table_only_test` 的事务回滚断言；定向通过。完整事务化 DDL 仍为 partial | `eeed1a8d` |
-| 741 | CONS-01 | 同一回归旧断言把 CHECK 失败认作通用 `INVALID_VALUE` | 校正 `alter_table_only_test` 的专用状态码；定向通过 | `a4298779` |
-| 742 | CONS-01 / TYPE-08 | 域多重 CHECK 回归沿用通用错误状态，掩盖专用约束错误 | 校正 `domain_multi_check_test` 七处断言；定向通过，域完整语义仍为 partial | `591a35bb` |
-| 743 | CONS-01 / CAT-02 | 删除无关列后的 CHECK 失败断言沿用通用错误状态 | 校正 `drop_column_expression_dependency_test`；定向通过，依赖族仍为 partial | `86d166fe` |
+| 741 | CONS-03 | 同一回归旧断言把 CHECK 失败认作通用 `INVALID_VALUE` | 校正 `alter_table_only_test` 的专用状态码；定向通过 | `a4298779` |
+| 742 | CONS-03 / TYPE-19 | 域多重 CHECK 回归沿用通用错误状态，掩盖专用约束错误 | 校正 `domain_multi_check_test` 七处断言；定向通过，域完整语义仍为 partial | `591a35bb` |
+| 743 | CONS-03 / CAT-02 | 删除无关列后的 CHECK 失败断言沿用通用错误状态 | 校正 `drop_column_expression_dependency_test`；定向通过，依赖族仍为 partial | `86d166fe` |
 | 744 | IDX-12 / P0-09 | EXCLUDE 改名回归在同一数据目录交错使用两个可写 `StorageEngine`，导致测试自身触发 I/O 冲突 | 将第二实例的只读持久化检查移到主实例写入结束后；`exclude_test` 定向通过，多进程共享目录仍不支持 | `f8f9561c` |
 | 745 | TYPE-06 | 非法时区位移现在返回表达式错误，旧回归仍期待 SQL NULL | 校正 `interval_arith_test` 的错误断言；定向通过 | `c22f9292` |
-| 746 | CONS-01 / CAT-02 | 改列名后的 CHECK 失败断言沿用通用错误状态 | 校正 `rename_column_expression_dependency_test` 三处断言；定向通过 | `153fd978` |
+| 746 | CONS-03 / CAT-02 | 改列名后的 CHECK 失败断言沿用通用错误状态 | 校正 `rename_column_expression_dependency_test` 三处断言；定向通过 | `153fd978` |
 | 747 | TYPE-06 | `timestamptz` UTC 规范输出包含 `+00`，旧回归遗漏后缀 | 校正 `update_type_validation_test`；定向通过 | `c409e903` |
 | 748 | CAT-07 / TYPE-08 | 旧类型回归允许删除仍被表列引用的枚举类型 | 校正 `create_type_shell_test`：先验证依赖拒绝，再删表/删类型；定向通过，类型依赖完整性仍为 partial | `c87d8f45` |
 | 749 | P0-04 / P0-05 | 物理恢复交换成功后，旧数据库目录若为只读，退休代无法清理，残留 `.restore_staging` 并使下次启动拒绝恢复 | 只调整退休代目录权限后重试删除；新增无残留断言，`create_type_shell_test` 使用正式生产对象隔离通过；完整 crash recovery 仍为 partial | `2b67d26c` |
@@ -731,13 +731,13 @@
 | 752 | EXT-04 / SQL-10 | 过程 E2E 的排序预期与参考 PostgreSQL 默认 locale 不符 | 按真实 PostgreSQL 查询结果调整 `?ArgValue` 与 `a;b` 的顺序；过程线协议 E2E 通过，过程族仍为 partial | `0c8fec47` |
 | 753 | SQL-02 / DDL-01 | 手册验证测试通过 SQL 创建未引用标识符，却用大写存储键访问；还沿用旧的 REFRESH 拒绝与通用 CHECK 状态预期 | 对齐规范化列名和现行 DDL/状态接口；`manual_verification_test` 全章节隔离通过 | `86231f1f` |
 | 754 | P0-07 / P0-09 / P0-05 | 页锁等待线程可持有物理锁后等待全局页互斥，而另一线程在全局互斥内阻塞获取同一物理锁；等待图还累积过期边，导致并发 TOAST 写入死锁或误报冲突 | 页锁快路径改为非阻塞物理锁、轮询刷新等待边并检查超时；12 线程 TOAST 全测试连续四次通过。更广泛的并发/SSI 仍为 partial | `acca9f45` |
-| 755 | CONS-01 | TOAST 回归两处 CHECK 失败仍期待通用错误状态 | 对齐 `CHECK_VIOLATION`；TOAST 全测试通过 | `27d6071f` |
-| 756 | TYPE-01 | TOAST 回归对超出 VARCHAR 长度的写入仍期待通用错误状态 | 对齐 `STRING_DATA_RIGHT_TRUNCATION`；TOAST 全测试通过 | `34a9cfab` |
+| 755 | CONS-03 | TOAST 回归两处 CHECK 失败仍期待通用错误状态 | 对齐 `CHECK_VIOLATION`；TOAST 全测试通过 | `27d6071f` |
+| 756 | TYPE-04 | TOAST 回归对超出 VARCHAR 长度的写入仍期待通用错误状态 | 对齐 `STRING_DATA_RIGHT_TRUNCATION`；TOAST 全测试通过 | `34a9cfab` |
 | 757 | P0-07 / P0-09 | 行锁与页锁存在同型的锁顺序倒置及等待边累积；高并发交接时可死锁、错误报冲突或无视锁超时 | 行锁共享/独占快路径改为非阻塞，轮询刷新等待边并覆盖物理锁等待的超时；`lock_manager_concurrency_test` 新增 12 线程混合读写交接，正式对象替换链接后连续六次通过。全量回归及生产构建仍待本项后复验；完整并发/SSI 仍为 partial | `919570e0` |
 | 758 | P0-07 / P0-09 | `rowLockSharedNoWait` / `rowLockExclusiveNoWait` 在行锁交接窗口仍使用阻塞的物理 mutex 获取，违背 NOWAIT 并可能与全局行锁互斥量形成死锁 | 改成 `try_lock`，失败时释放临时进程锁；新增被其他线程占用时立即失败、释放后可再取得的回归，正式对象替换链接的 `lock_manager_concurrency_test` 通过。完整锁语义仍为 partial | `625fe652` |
-| 759 | P0-05 / IDX-11 | 全量回归中 `unique_index_enforcement_test` 出现一次失败，随后原二进制隔离重跑 11 次均通过；测试结尾原绕过仍存活的存储引擎直接删除数据库目录，存在后台写入/清理竞态 | 改由 `StorageEngine::dropDatabase` 完成生命周期关闭后再清理；修改后定向通过。单次全量失败根因尚未被证明，须以新一轮全量复验确认，不能把它记为已彻底消除 | `814e7115` |
+| 759 | P0-05 / IDX-15 | 全量回归中 `unique_index_enforcement_test` 出现一次失败，随后原二进制隔离重跑 11 次均通过；测试结尾原绕过仍存活的存储引擎直接删除数据库目录，存在后台写入/清理竞态 | 改由 `StorageEngine::dropDatabase` 完成生命周期关闭后再清理；修改后定向通过。单次全量失败根因尚未被证明，须以新一轮全量复验确认，不能把它记为已彻底消除 | `814e7115` |
 | 760 | SQL-10 / PROTO-08 | 结构化协议回归用 Python 字节序构造文本排序预期，与参考 PostgreSQL 默认 `en_US` 排序规则不一致，致别名、表达式和 DISTINCT 断言误报 | 以真实 PostgreSQL 查询核对顺序，校正三处断言；`table_structured_protocol_e2e_test.py` 定向通过，完整排序规则族仍为 partial | `a17cf0c6` |
-| 761 | P0-05 / CAT-19 | 表空间协议测试在服务端持有数据目录独占锁时另起校验进程，错误期待在线 `--verify-data-checksums` 成功 | 测试显式停服，在离线状态校验正常和损坏标记，恢复标记后重启继续 DDL；`tablespace_protocol_e2e_test.py` 定向通过，完整备份校验链仍为 partial | `30c3b443` |
+| 761 | P0-05 / CAT-20 / BACKUP-02 | 表空间协议测试在服务端持有数据目录独占锁时另起校验进程，错误期待在线 `--verify-data-checksums` 成功 | 测试显式停服，在离线状态校验正常和损坏标记，恢复标记后重启继续 DDL；`tablespace_protocol_e2e_test.py` 定向通过，完整备份校验链仍为 partial | `30c3b443` |
 | 762 | DIV-02 / P0-07 | extended `REPLACE INTO` 同一语句删除复合主键和另一 UNIQUE 键的冲突行后，不推进命令可见性，重插仍把自己的删除当存活旧键并报 `23505` | 在冲突删除与重插间推进命令 ID；新增存储级可见性回归，`div14_feature_gate_test.py` 的多冲突替换及失败回滚全部定向通过。MySQL 兼容扩展全族仍为 partial | `245fd0ee` |
 | 763 | DML-01 / P0-02 / P0-16 | `INSERT DEFAULT VALUES` 成功命令标签附加非标准后缀，NOT NULL 失败丢失专用 SQLSTATE，线协议分别与 PostgreSQL 18 不一致 | typed 与 legacy 两路径统一返回 `INSERT 0 1` 和存储状态映射 SQLSTATE；`insert_default_values_boundary` 修复前差分两处失败、修复后 `cases=1 failed=0`，正式生产构建通过。完整 DML/协议仍为 partial | `2112d3fb`, `5213e25f` |
 | 764 | P0-04 / P0-16 | 补充显式事务中先删两条冲突旧行，再复用复合主键和 UNIQUE 键的参考差分边界，以区分普通跨命令可见性与第 762 项同命令 REPLACE 错误 | `delete_reinsert_unique_probe` 在修复前、修复后生产二进制上均与 PostgreSQL 18.6 定向 `cases=1 failed=0`；事务/约束族仍为 partial | `55df5794` |
