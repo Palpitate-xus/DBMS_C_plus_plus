@@ -14,6 +14,7 @@
 #include "expression/expr_helper.h"
 #include "parser/parser.h"
 #include "permissions.h"
+#include "types/numeric.h"
 
 #include <algorithm>
 #include <atomic>
@@ -217,14 +218,31 @@ bool coerceSetRows(const DmlResult& input,
 }
 
 std::string structuredSetRowKey(const std::vector<std::string>& row,
-                                const std::vector<bool>& nulls) {
+                                const std::vector<bool>& nulls,
+                                const std::vector<std::string>& columnTypes) {
     std::string key;
     for (size_t column = 0; column < row.size(); ++column) {
         if (nulls[column]) {
             key += "N;";
         } else {
-            key += "V" + std::to_string(row[column].size()) + ":" +
-                   row[column] + ";";
+            std::string value = row[column];
+            if (columnTypes[column] == "numeric") {
+                // NUMERIC output retains its display scale, but set equality
+                // compares values: 1.0 and 1.00 must have the same key.
+                try {
+                    value = Numeric(value).toString();
+                    if (value.find('.') != std::string::npos) {
+                        while (!value.empty() && value.back() == '0')
+                            value.pop_back();
+                        if (!value.empty() && value.back() == '.')
+                            value.pop_back();
+                    }
+                } catch (const std::exception&) {
+                    // Keep the original value if a malformed typed row slips
+                    // through; this path must not change its displayed value.
+                }
+            }
+            key += "V" + std::to_string(value.size()) + ":" + value + ";";
         }
     }
     return key;
@@ -287,7 +305,8 @@ bool combineStructuredSetResults(
             auto appendDistinct = [&](std::vector<std::vector<std::string>>& rows,
                                       std::vector<std::vector<bool>>& nulls) {
                 for (size_t i = 0; i < rows.size(); ++i) {
-                    if (seen.insert(structuredSetRowKey(rows[i], nulls[i])).second)
+                    if (seen.insert(structuredSetRowKey(
+                            rows[i], nulls[i], output.columnTypes)).second)
                         append(std::move(rows[i]), std::move(nulls[i]));
                 }
             };
@@ -297,10 +316,12 @@ bool combineStructuredSetResults(
     } else {
         std::map<std::string, size_t> rightCounts;
         for (size_t i = 0; i < rightRows.size(); ++i)
-            ++rightCounts[structuredSetRowKey(rightRows[i], rightNulls[i])];
+            ++rightCounts[structuredSetRowKey(
+                rightRows[i], rightNulls[i], output.columnTypes)];
         std::set<std::string> emitted;
         for (size_t i = 0; i < leftRows.size(); ++i) {
-            const std::string key = structuredSetRowKey(leftRows[i], leftNulls[i]);
+            const std::string key = structuredSetRowKey(
+                leftRows[i], leftNulls[i], output.columnTypes);
             auto found = rightCounts.find(key);
             const size_t available = found == rightCounts.end() ? 0 : found->second;
             if (operation == StructuredSetOperation::Intersect) {

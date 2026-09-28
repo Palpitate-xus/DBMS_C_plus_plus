@@ -66,6 +66,34 @@ void testNullAwareMultiset() {
         {false}, {true}, {true}, {false}}));
 }
 
+void testNumericValueEqualityPreservesDisplayScale() {
+    const auto left = oneColumn("numeric", {"1.0"}, {false});
+    const auto right = oneColumn("numeric", {"1.00"}, {false});
+    dbms::DmlResult output;
+    dbms::StructuredSetError error;
+    assert(dbms::combineStructuredSetResults(
+        left, right, dbms::StructuredSetOperation::Union, false,
+        "", "", output, error));
+    assert(output.rows == std::vector<std::vector<std::string>>{{"1.0"}});
+    assert(output.commandTag == "SELECT 1");
+
+    assert(dbms::combineStructuredSetResults(
+        left, right, dbms::StructuredSetOperation::Intersect, false,
+        "", "", output, error));
+    assert(output.rows == std::vector<std::vector<std::string>>{{"1.0"}});
+
+    assert(dbms::combineStructuredSetResults(
+        left, right, dbms::StructuredSetOperation::Except, false,
+        "", "", output, error));
+    assert(output.rows.empty());
+
+    assert(dbms::combineStructuredSetResults(
+        left, right, dbms::StructuredSetOperation::Union, true,
+        "", "", output, error));
+    assert((output.rows == std::vector<std::vector<std::string>>{
+        {"1.0"}, {"1.00"}}));
+}
+
 void testCommonTypesAndFailures() {
     dbms::DmlResult output;
     dbms::StructuredSetError error;
@@ -117,6 +145,7 @@ int main() {
     dbms::TypeRegistry::instance().bootstrap();
     testLosslessUnion();
     testNullAwareMultiset();
+    testNumericValueEqualityPreservesDisplayScale();
     testCommonTypesAndFailures();
     std::cout << "[STRUCTURED SET RESULT] all passed" << std::endl;
     return 0;
