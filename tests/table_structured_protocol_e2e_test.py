@@ -258,11 +258,13 @@ def main():
             runner.ours_query(client, server["sock"], plain_alias_sql))
         assert plain_alias_state is None, (
             plain_alias_state, plain_alias_message)
+        # PostgreSQL's default en_US collation is not Python's bytewise
+        # string order (spaces and punctuation are not a leading sort tier).
         plain_alias_expected = [
-            [row[1], row[0]] for row in sorted(
-                (row for row in expected if row[1] is not None),
-                key=lambda row: row[1])
-        ] + [[None, "3"]]
+            ["", "2"], ["hello world", "1"], [" lead ", "7"],
+            ["line1\nline2", "5"], ["NULL", "4"],
+            ['say "hi"', "6"], [None, "3"],
+        ]
         assert plain_alias_rows == plain_alias_expected, (
             plain_alias_rows, plain_alias_expected)
 
@@ -274,7 +276,7 @@ def main():
         assert expression_order_state is None, (
             expression_order_state, expression_order_message)
         assert expression_order_rows == [
-            ["2"], ["7"], ["1"], ["5"], ["4"], ["6"], ["3"],
+            ["2"], ["1"], ["7"], ["5"], ["4"], ["6"], ["3"],
         ], expression_order_rows
 
         plain_distinct_sql = (
@@ -284,7 +286,7 @@ def main():
         assert plain_distinct_state is None, (
             plain_distinct_state, plain_distinct_message)
         assert plain_distinct_rows == [
-            ["NULL"], ["line\nbreak"], ["same"], [None],
+            ["line\nbreak"], ["NULL"], ["same"], [None],
         ], plain_distinct_rows
 
         distinct_on_sql = (
