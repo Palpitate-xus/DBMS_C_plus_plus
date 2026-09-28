@@ -16,9 +16,12 @@ def main():
     server = runner.start_ours(client)
     second = None
 
-    def query(sock, sql):
-        rows, state, message, _, _, _ = runner.decode_wire_result(
+    def wire_query(sock, sql):
+        return runner.decode_wire_result(
             client.simple_query(sock, sql), include_types=True)
+
+    def query(sock, sql):
+        rows, state, message, _, _, _ = wire_query(sock, sql)
         assert state is None, (sql, state, message)
         return rows
 
@@ -33,6 +36,17 @@ def main():
         query(second, "BEGIN;")
         assert query(first, "SELECT id FROM row_share_nowait FOR SHARE;") == [["1"]]
         assert query(second, "SELECT id FROM row_share_nowait FOR SHARE NOWAIT;") == [["1"]]
+        query(second, "ROLLBACK;")
+        query(first, "ROLLBACK;")
+
+        query(first, "BEGIN;")
+        query(second, "BEGIN;")
+        assert query(first, "SELECT id FROM row_share_nowait FOR UPDATE;") == [["1"]]
+        _, state, message, _, _, _ = wire_query(
+            second, "SELECT id FROM row_share_nowait FOR SHARE NOWAIT;")
+        assert state == "55P03", (state, message)
+        _, state, message, _, _, _ = wire_query(second, "SELECT 1;")
+        assert state == "25P02", (state, message)
         query(second, "ROLLBACK;")
         query(first, "ROLLBACK;")
         print("[FOR SHARE NOWAIT PROTOCOL E2E] passed")
