@@ -29005,17 +29005,29 @@ int main(int argc, char* argv[]) {
             auto start = std::chrono::steady_clock::now();
             bool ok = false;
             bool timedOut = false;
-            if (s.statementTimeoutMs > 0) {
-                auto future = std::async(std::launch::async, [&]() { return execute(sql, s); });
-                if (future.wait_for(std::chrono::milliseconds(s.statementTimeoutMs))
-                    == std::future_status::timeout) {
-                    timedOut = true;
-                    cout << "ERROR: statement timeout" << endl;
+            try {
+                if (s.statementTimeoutMs > 0) {
+                    auto future = std::async(std::launch::async, [&]() { return execute(sql, s); });
+                    if (future.wait_for(std::chrono::milliseconds(s.statementTimeoutMs))
+                        == std::future_status::timeout) {
+                        timedOut = true;
+                        cout << "ERROR: statement timeout" << endl;
+                    } else {
+                        ok = future.get();
+                    }
                 } else {
-                    ok = future.get();
+                    ok = execute(sql, s);
                 }
-            } else {
-                ok = execute(sql, s);
+            } catch (const dbms::DbError& error) {
+                cout << "ERROR: " << error.message() << " (SQLSTATE "
+                     << error.sqlState() << ")" << endl;
+                ok = true;
+            } catch (const std::exception& error) {
+                cout << "ERROR: " << error.what() << " (SQLSTATE XX000)" << endl;
+                ok = true;
+            } catch (...) {
+                cout << "ERROR: unhandled statement failure (SQLSTATE XX000)" << endl;
+                ok = true;
             }
             dbms::updateProcessDb(pid, s.currentDB);
             dbms::updateProcessInfo(pid, "Sleep", "", "");
