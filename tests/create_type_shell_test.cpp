@@ -150,8 +150,10 @@ static void test_drop_enum_type() {
     assert(!ddl.executeSql("CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')", s));
     // Use the enum in a table to ensure it is real.
     assert(!ddl.executeSql("CREATE TABLE t (id INT, m mood)", s));
-    // This used to print "DROP TYPE failed" because executeDropType only called
-    // dropCompositeType.
+    // RESTRICT must protect the table column that depends on this enum.
+    assert(ddl.executeSql("DROP TYPE mood", s));
+    assert(!ddl.executeSql("DROP TABLE t", s));
+    // With no dependents, enum DROP TYPE must work as well as composite DROP.
     assert(!ddl.executeSql("DROP TYPE mood", s));
 
     cleanup(db);
