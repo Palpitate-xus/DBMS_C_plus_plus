@@ -186,6 +186,63 @@ int main() {
     assert(WIFEXITED(childStatus) && WEXITSTATUS(childStatus) == 0);
     first.getLockManager().rowUnlock("items", 7);
 
+    // Failed NOWAIT upgrades must retain the caller's existing FOR SHARE
+    // lock. Another backend holding SHARE makes the upgrade impossible.
+    int sharedReady[2];
+    int releaseShared[2];
+    assert(::pipe(sharedReady) == 0);
+    assert(::pipe(releaseShared) == 0);
+    child = ::fork();
+    assert(child >= 0);
+    if (child == 0) {
+        ::close(sharedReady[0]);
+        ::close(releaseShared[1]);
+        dbms::LockManager childManager;
+        childManager.setResourceNamespace(dbA);
+        const bool acquired = childManager.rowLockShared("items", 8);
+        const char signal = acquired ? '1' : '0';
+        if (::write(sharedReady[1], &signal, 1) != 1) ::_exit(1);
+        char releaseSignal = 0;
+        if (::read(releaseShared[0], &releaseSignal, 1) != 1) ::_exit(1);
+        if (acquired) childManager.rowUnlock("items", 8);
+        ::_exit(acquired ? 0 : 1);
+    }
+    ::close(sharedReady[1]);
+    ::close(releaseShared[0]);
+    char sharedSignal = 0;
+    assert(::read(sharedReady[0], &sharedSignal, 1) == 1);
+    assert(sharedSignal == '1');
+    assert(first.getLockManager().rowLockShared("items", 8));
+    const bool upgradeBlocked = !first.getLockManager().rowLockExclusiveNoWait("items", 8);
+    const auto heldRows = first.getLockManager().lockedRows("items");
+    const bool retainedShared = heldRows.size() == 1 && heldRows.front() == 8;
+    const char releaseSignal = '1';
+    assert(::write(releaseShared[1], &releaseSignal, 1) == 1);
+    ::close(sharedReady[0]);
+    ::close(releaseShared[1]);
+    assert(::waitpid(child, &childStatus, 0) == child);
+    assert(WIFEXITED(childStatus) && WEXITSTATUS(childStatus) == 0);
+    child = ::fork();
+    assert(child >= 0);
+    if (child == 0) {
+        dbms::LockManager childManager;
+        childManager.setResourceNamespace(dbA);
+        const bool acquired = childManager.rowLockExclusiveNoWait("items", 8);
+        if (acquired) childManager.rowUnlock("items", 8);
+        ::_exit(acquired ? 1 : 0);
+    }
+    assert(::waitpid(child, &childStatus, 0) == child);
+    const bool retainedProcessLock = WIFEXITED(childStatus) && WEXITSTATUS(childStatus) == 0;
+    first.getLockManager().rowUnlock("items", 8);
+    assert(upgradeBlocked && retainedShared && retainedProcessLock);
+
+    // An isolated in-process sole reader can still upgrade without waiting.
+    dbms::LockManager localUpgradeManager;
+    assert(localUpgradeManager.rowLockShared("local_upgrade", 8));
+    assert(localUpgradeManager.rowLockExclusiveNoWait("local_upgrade", 8));
+    localUpgradeManager.rowUnlock("local_upgrade", 8);
+    assert(localUpgradeManager.lockedRows("local_upgrade").empty());
+
     assert(first.getLockManager().pageLockExclusive(dbA, "items", 3));
     child = ::fork();
     assert(child >= 0);

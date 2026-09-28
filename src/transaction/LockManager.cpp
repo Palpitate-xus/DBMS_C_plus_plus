@@ -1192,20 +1192,22 @@ bool LockManager::rowLockExclusiveNoWait(const std::string& table, int64_t rid) 
     }
     if (!state.exclusive && state.sharedCount > 0 &&
         state.holders.size() == 1 && state.holders[0] == self) {
+        // A failed NOWAIT upgrade must not surrender the existing shared
+        // token. flock's shared-to-exclusive conversion is not atomic: on
+        // failure another process may have taken the file lock before we can
+        // restore it. Also avoid racing a local waiter already outside the
+        // registry mutex while it acquires the physical mutex.
+        if (state.processLockFd >= 0 || !state.suspendedTransactions.empty() ||
+            state.waiters != 0) return false;
         state.mtx.unlock_shared();
-        state.sharedCount = 0;
-        state.holders.clear();
-        // The shared file lock must be replaced before publishing an
-        // exclusive row token; otherwise another process could still acquire
-        // a shared row lock during this in-place upgrade.
-        releaseProcessLock(state);
-        const auto processResult = tryAcquireProcessLock(
-            state, threadSettings().resourceNamespace, "row", key, LockMode::Exclusive);
-        if (processResult != ProcessLockResult::Acquired) return false;
         if (!state.mtx.try_lock()) {
-            releaseProcessLock(state);
+            // No registered waiter can enter while rowMutex_ is held, but
+            // preserve ownership even if a future lock path changes that.
+            state.mtx.lock_shared();
             return false;
         }
+        state.sharedCount = 0;
+        state.holders.clear();
         state.exclusive = true;
         state.holders.push_back(self);
         return true;
