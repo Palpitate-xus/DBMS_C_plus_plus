@@ -72,6 +72,7 @@ std::string dbms::sqlstateForDBStatus(DBStatus res) {
         case DBStatus::EXCLUSION_VIOLATION: return "23P01";
         case DBStatus::FEATURE_NOT_SUPPORTED: return "0A000";
         case DBStatus::LOCK_CONFLICT: return "55P03";
+        case DBStatus::DEADLOCK_DETECTED: return "40P01";
         case DBStatus::SERIALIZATION_FAILURE: return "40001";
         case DBStatus::IO_ERROR: return "58030";
         case DBStatus::CORRUPTED_DATA: return "XX001";
@@ -24517,13 +24518,15 @@ DBStatus StorageEngine::removeInternal(
     // Acquire row-level exclusive locks on rows to be deleted
     for (int64_t rid : toDelete) {
         if (!lockManager_.rowLockExclusive(tablename, rid)) {
+            const DBStatus lockFailure = lockManager_.lastRowLockWasDeadlock()
+                ? DBStatus::DEADLOCK_DETECTED : DBStatus::LOCK_CONFLICT;
             if (transactionContext().inTransaction) {
                 rollbackTransaction();
             } else {
                 lockManager_.unlockAll();
                 lockManager_.unlockAllGaps();
             }
-            return DBStatus::LOCK_CONFLICT;
+            return lockFailure;
         }
     }
 
@@ -25988,6 +25991,8 @@ DBStatus StorageEngine::updateInternal(
     // Acquire row-level exclusive locks on rows to be updated
     for (int64_t rid : matchIds) {
         if (!lockManager_.rowLockExclusive(tablename, rid)) {
+            const DBStatus lockFailure = lockManager_.lastRowLockWasDeadlock()
+                ? DBStatus::DEADLOCK_DETECTED : DBStatus::LOCK_CONFLICT;
             // A failed upgrade is a deadlock/lock-conflict boundary.  An
             // in-flight transaction must not continue with a partially
             // locked statement; abort it so all previously acquired row
@@ -25998,7 +26003,7 @@ DBStatus StorageEngine::updateInternal(
                 lockManager_.unlockAll();
                 lockManager_.unlockAllGaps();
             }
-            return DBStatus::LOCK_CONFLICT;
+            return lockFailure;
         }
     }
 
