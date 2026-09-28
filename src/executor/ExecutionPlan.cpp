@@ -571,6 +571,13 @@ BitmapHeapScanOp::BitmapHeapScanOp(
     : engine_(engine), dbname_(dbname), tablename_(tablename), conds_(conds) {}
 
 bool BitmapHeapScanOp::open() {
+    auto& lockManager = engine_->getLockManager();
+    lockManager.setResourceNamespace(dbname_);
+    if (!lockManager.lockShared(tablename_)) {
+        throw DbError("55P03", "could not obtain lock on relation \"" +
+            tablename_ + "\"");
+    }
+    tableLockHeld_ = true;
     tbl_ = engine_->getTableSchema(dbname_, tablename_);
     rids_.clear();
     rows_.clear();
@@ -667,6 +674,10 @@ void BitmapHeapScanOp::close() {
     lastRid_ = 0;
     StorageEngine::unbindNullRow();
     statsRecorded_ = false;
+    if (tableLockHeld_) {
+        engine_->getLockManager().unlock(tablename_);
+        tableLockHeld_ = false;
+    }
 }
 
 // ========================================================================
@@ -688,6 +699,13 @@ std::string GiSTScanOp::describeConds() const {
 }
 
 bool GiSTScanOp::open() {
+    auto& lockManager = engine_->getLockManager();
+    lockManager.setResourceNamespace(dbname_);
+    if (!lockManager.lockShared(tablename_)) {
+        throw DbError("55P03", "could not obtain lock on relation \"" +
+            tablename_ + "\"");
+    }
+    tableLockHeld_ = true;
     tbl_ = engine_->getTableSchema(dbname_, tablename_);
     rids_.clear();
     rows_.clear();
@@ -802,6 +820,10 @@ void GiSTScanOp::close() {
     lastRid_ = 0;
     StorageEngine::unbindNullRow();
     statsRecorded_ = false;
+    if (tableLockHeld_) {
+        engine_->getLockManager().unlock(tablename_);
+        tableLockHeld_ = false;
+    }
 }
 
 // ========================================================================
@@ -815,6 +837,13 @@ BitmapOrHeapScanOp::BitmapOrHeapScanOp(
     : engine_(engine), dbname_(dbname), tablename_(tablename), branches_(branches) {}
 
 bool BitmapOrHeapScanOp::open() {
+    auto& lockManager = engine_->getLockManager();
+    lockManager.setResourceNamespace(dbname_);
+    if (!lockManager.lockShared(tablename_)) {
+        throw DbError("55P03", "could not obtain lock on relation \"" +
+            tablename_ + "\"");
+    }
+    tableLockHeld_ = true;
     tbl_ = engine_->getTableSchema(dbname_, tablename_);
     rows_.clear();
     rids_.clear();
@@ -927,6 +956,10 @@ void BitmapOrHeapScanOp::close() {
     lastRid_ = 0;
     StorageEngine::unbindNullRow();
     statsRecorded_ = false;
+    if (tableLockHeld_) {
+        engine_->getLockManager().unlock(tablename_);
+        tableLockHeld_ = false;
+    }
 }
 
 // ========================================================================

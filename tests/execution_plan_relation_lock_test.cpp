@@ -31,7 +31,7 @@ int main() {
     std::atomic<bool> leaked{false};
     std::thread reader([&] {
         locks.setLockTimeout(50);
-        for (int path = 0; path < 3; ++path) {
+        for (int path = 0; path < 6; ++path) {
             dbms::OpPtr plan;
             if (path == 0) {
                 plan = std::make_unique<dbms::TableScanOp>(
@@ -39,9 +39,21 @@ int main() {
             } else if (path == 1) {
                 plan = std::make_unique<dbms::IndexScanOp>(
                     &g_engine, database, "items", "id", "1");
-            } else {
+            } else if (path == 2) {
                 plan = std::make_unique<dbms::ParallelTableScanOp>(
                     &g_engine, database, "items", 2);
+            } else if (path == 3) {
+                plan = std::make_unique<dbms::GiSTScanOp>(
+                    &g_engine, database, "items",
+                    std::vector<dbms::StorageEngine::Condition>{});
+            } else if (path == 4) {
+                plan = std::make_unique<dbms::BitmapHeapScanOp>(
+                    &g_engine, database, "items",
+                    std::vector<dbms::StorageEngine::Condition>{});
+            } else {
+                plan = std::make_unique<dbms::BitmapOrHeapScanOp>(
+                    &g_engine, database, "items",
+                    std::vector<std::vector<dbms::StorageEngine::Condition>>{{}, {}});
             }
             try {
                 const auto result = dbms::QueryPlanner::executePlanChecked(std::move(plan));
@@ -55,7 +67,7 @@ int main() {
     });
     reader.join();
     locks.unlock("items");
-    assert(rejected == 3);
+    assert(rejected == 6);
     assert(!leaked);
 
     auto seq = dbms::QueryPlanner::executePlanChecked(

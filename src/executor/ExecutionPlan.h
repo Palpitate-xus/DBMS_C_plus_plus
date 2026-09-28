@@ -294,6 +294,7 @@ private:
     size_t pos_ = 0;
     int64_t lastRid_ = 0;
     bool statsRecorded_ = false;
+    bool tableLockHeld_ = false;
 };
 
 // BitmapHeapScan: intersect candidate RIDs from multiple equality indexes,
@@ -329,6 +330,7 @@ private:
     size_t pos_ = 0;
     int64_t lastRid_ = 0;
     bool statsRecorded_ = false;
+    bool tableLockHeld_ = false;
 };
 
 // BitmapOrHeapScan: build one candidate RID set per AND branch, union the
@@ -367,6 +369,7 @@ private:
     size_t pos_ = 0;
     int64_t lastRid_ = 0;
     bool statsRecorded_ = false;
+    bool tableLockHeld_ = false;
 };
 
 // ========================================================================
