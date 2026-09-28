@@ -39,6 +39,9 @@ def main():
         rows, state, message, _, _, _ = wire_query(
             second, "SELECT id FROM table_lock_timeout;")
         assert state == "55P03", (rows, state, message)
+        rows, state, message, _, _, _ = wire_query(
+            second, "SELECT id FROM table_lock_timeout WHERE id = 1;")
+        assert state == "55P03", (rows, state, message)
         assert query(second, "SELECT 1;") == [["1"]]
         query(first, "ROLLBACK;")
         assert query(second, "SELECT id FROM table_lock_timeout;") == [["1"]]
