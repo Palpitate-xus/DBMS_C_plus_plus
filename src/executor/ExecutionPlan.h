@@ -250,6 +250,7 @@ private:
     int64_t lastRid_ = 0;
     bool isPK_ = false;
     bool statsRecorded_ = false;
+    bool tableLockHeld_ = false;
 };
 
 // GiSTScan: range/prefix predicate acceleration over the .gist sidecar.
