@@ -41,9 +41,9 @@ static void test_domain_multi_check() {
     assert(!ddl.executeSql("CREATE TABLE t (id INT PRIMARY KEY, p price_t)", s));
 
     assert(g_engine.insert(db, "t", {{"id", "1"}, {"p", "50"}}) == dbms::DBStatus::OK);
-    assert(g_engine.insert(db, "t", {{"id", "2"}, {"p", "0"}}) == dbms::DBStatus::INVALID_VALUE);
-    assert(g_engine.insert(db, "t", {{"id", "3"}, {"p", "-5"}}) == dbms::DBStatus::INVALID_VALUE);
-    assert(g_engine.insert(db, "t", {{"id", "4"}, {"p", "1000"}}) == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insert(db, "t", {{"id", "2"}, {"p", "0"}}) == dbms::DBStatus::CHECK_VIOLATION);
+    assert(g_engine.insert(db, "t", {{"id", "3"}, {"p", "-5"}}) == dbms::DBStatus::CHECK_VIOLATION);
+    assert(g_engine.insert(db, "t", {{"id", "4"}, {"p", "1000"}}) == dbms::DBStatus::CHECK_VIOLATION);
     assert(g_engine.insert(db, "t", {{"id", "5"}, {"p", "999"}}) == dbms::DBStatus::OK);
 
     auto rows = g_engine.query(db, "t", {}, {"id", "p"});
@@ -69,9 +69,9 @@ static void test_domain_three_checks() {
     assert(!ddl.executeSql("CREATE TABLE t (id INT PRIMARY KEY, r rating)", s));
 
     assert(g_engine.insert(db, "t", {{"id", "1"}, {"r", "3"}}) == dbms::DBStatus::OK);
-    assert(g_engine.insert(db, "t", {{"id", "2"}, {"r", "2"}}) == dbms::DBStatus::INVALID_VALUE);
-    assert(g_engine.insert(db, "t", {{"id", "3"}, {"r", "0"}}) == dbms::DBStatus::INVALID_VALUE);
-    assert(g_engine.insert(db, "t", {{"id", "4"}, {"r", "6"}}) == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insert(db, "t", {{"id", "2"}, {"r", "2"}}) == dbms::DBStatus::CHECK_VIOLATION);
+    assert(g_engine.insert(db, "t", {{"id", "3"}, {"r", "0"}}) == dbms::DBStatus::CHECK_VIOLATION);
+    assert(g_engine.insert(db, "t", {{"id", "4"}, {"r", "6"}}) == dbms::DBStatus::CHECK_VIOLATION);
     assert(g_engine.insert(db, "t", {{"id", "5"}, {"r", "5"}}) == dbms::DBStatus::OK);
 
     auto rows = g_engine.query(db, "t", {}, {"id", "r"});
@@ -95,7 +95,7 @@ static void test_domain_single_check() {
     assert(!ddl.executeSql("CREATE TABLE t (id INT PRIMARY KEY, x pos_int)", s));
 
     assert(g_engine.insert(db, "t", {{"id", "1"}, {"x", "10"}}) == dbms::DBStatus::OK);
-    assert(g_engine.insert(db, "t", {{"id", "2"}, {"x", "0"}}) == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insert(db, "t", {{"id", "2"}, {"x", "0"}}) == dbms::DBStatus::CHECK_VIOLATION);
 
     cleanup(db);
     std::cout << "[DOMAIN_MULTI] single CHECK regression OK" << std::endl;
