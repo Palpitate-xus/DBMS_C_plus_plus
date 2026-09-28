@@ -395,9 +395,9 @@ static void test_at_time_zone() {
         "timezone('UTC+05:60', '2024-06-01 10:00:00'::timestamp)");
     auto invalidShape = eval(
         "timezone('UTC+05:30:20', '2024-06-01 10:00:00'::timestamp)");
-    assert(invalidHour.ok && invalidHour.isNull);
-    assert(invalidMinute.ok && invalidMinute.isNull);
-    assert(invalidShape.ok && invalidShape.isNull);
+    assert(!invalidHour.ok);
+    assert(!invalidMinute.ok);
+    assert(!invalidShape.ok);
 
     std::cout << "[IV] AT TIME ZONE / timezone() OK" << std::endl;
 }
