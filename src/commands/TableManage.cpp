@@ -24259,43 +24259,13 @@ DBStatus StorageEngine::insertDefaultValues(const std::string& dbname,
                                              const std::string& tablename,
                                              const TableSchema& tbl,
                                              std::vector<std::map<std::string, std::string>>* insertedRows) {
-    if (transactionContext().readOnly &&
-        !isSessionTemporaryRelation(tablename)) {
-        return DBStatus::INVALID_VALUE;
-    }
-    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
-
-    // Build row with DEFAULT values or NULL for each column.
-    // Note: we do NOT take the lock here because insert() will do it.
-    std::map<std::string, std::string> actualValues;
-    for (size_t i = 0; i < tbl.len; ++i) {
-        const Column& col = tbl.cols[i];
-        if (!col.generatedExpr.empty()) {
-            continue;  // GENERATED ALWAYS columns are computed at insert time
-        }
-        if (col.isAutoIncrement) {
-            continue;  // omission invokes SERIAL/IDENTITY generation in insert()
-        } else if (!col.defaultValue.empty()) {
-            actualValues[col.dataName] = col.defaultValue;
-        } else if (!col.isNull) {
-            std::string t = toLowerUtf8(col.dataType);
-            if (t == "int4" || t == "int8" || t == "int2" || t == "float4" || t == "float8")
-                actualValues[col.dataName] = "0";
-            else if (t == "boolean")
-                actualValues[col.dataName] = "false";
-            else if (t == "date")
-                actualValues[col.dataName] = "1970-01-01";
-            else if (t == "time" || t == "timetz")
-                actualValues[col.dataName] = "00:00:00";
-            else if (t == "timestamp" || t == "timestamptz")
-                actualValues[col.dataName] = "1970-01-01 00:00:00";
-            else
-                actualValues[col.dataName] = "";
-        }
-        // nullable without default → stays NULL (omitted)
-    }
-
-    return insert(dbname, tablename, actualValues, insertedRows);
+    // Omission is the storage boundary's representation of DEFAULT. insert()
+    // evaluates default expressions, allocates identity values, and checks
+    // NOT NULL against columns without defaults. Supplying raw default text
+    // here bypasses expression evaluation and can reject valid timestamp
+    // literals; manufacturing values for NOT NULL columns is also invalid.
+    (void)tbl;
+    return insert(dbname, tablename, {}, insertedRows);
 }
 
 DBStatus StorageEngine::remove(

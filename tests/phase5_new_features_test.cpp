@@ -31,6 +31,13 @@ static void test_insert_default_values() {
     assert(res == dbms::DBStatus::OK);
     auto rows = g_engine.query(db, "t", {}, {"id", "name", "ts"});
     assert(rows.size() == 1);
+    assert(rows[0].find("42") != std::string::npos);
+    assert(rows[0].find("2020-01-01 00:00:00") != std::string::npos);
+    assert(!ddl.executeSql("CREATE TABLE required_value (id INT NOT NULL)", s));
+    assert(g_engine.insertDefaultValues(
+               db, "required_value",
+               g_engine.getTableSchema(db, "required_value")) ==
+           dbms::DBStatus::NULL_NOT_ALLOWED);
     cleanup(db);
     std::cout << "[P5] INSERT DEFAULT VALUES OK" << std::endl;
 }
