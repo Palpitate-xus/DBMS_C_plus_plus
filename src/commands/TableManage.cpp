@@ -46386,7 +46386,7 @@ DBStatus StorageEngine::dropEnumType(const std::string& dbname, const std::strin
 }
 
 DBStatus StorageEngine::updateEnumType(const std::string& dbname, const EnumType& et) {
-    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    std::unique_lock<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!validEnumTypeDefinition(et)) return DBStatus::INVALID_ARGUMENT;
     const auto path = enumPath(dbname);
@@ -46435,6 +46435,7 @@ DBStatus StorageEngine::updateEnumType(const std::string& dbname, const EnumType
         std::string updatedBytes;
     };
     std::vector<EnumSchemaRewrite> rewrites;
+    std::vector<std::pair<std::string, std::string>> observedSchemas;
     auto serializeSchema = [&](const TableSchema& schema,
                                std::string& bytes) {
         std::ostringstream output(std::ios::out | std::ios::binary);
@@ -46448,9 +46449,13 @@ DBStatus StorageEngine::updateEnumType(const std::string& dbname, const EnumType
     // declared type was replaced by varchar.  Migrate that old representation
     // only when the label list identifies exactly one enum; otherwise there is
     // no safe way to guess which same-shaped enum the column meant.
-    for (const auto& tableName : getTableNames(dbname)) {
+    const auto tableNames = getTableNames(dbname);
+    for (const auto& tableName : tableNames) {
         const TableSchema schema = getTableSchema(dbname, tableName);
         if (schema.len == 0) return DBStatus::CORRUPTED_DATA;
+        std::string originalSchemaBytes;
+        if (!serializeSchema(schema, originalSchemaBytes)) return DBStatus::IO_ERROR;
+        observedSchemas.emplace_back(tableName, std::move(originalSchemaBytes));
         EnumSchemaRewrite rewrite;
         rewrite.tableName = tableName;
         rewrite.original = schema;
@@ -46476,6 +46481,11 @@ DBStatus StorageEngine::updateEnumType(const std::string& dbname, const EnumType
         rewrites.push_back(std::move(rewrite));
     }
 
+    // Relation readers take the table lock before entering the storage
+    // cache. Waiting for a database/metadata lock while holding cacheMutex_
+    // would invert that order and block otherwise-compatible readers.
+    cacheLock.unlock();
+
     // A label rename must update the current text-backed heap representation
     // in the same engine transaction. Begin before taking table locks so the
     // database/table lock order matches normal DML. ADD VALUE and pure order
@@ -46489,6 +46499,7 @@ DBStatus StorageEngine::updateEnumType(const std::string& dbname, const EnumType
 
     // Lock every dependent relation in deterministic table-list order.
     std::vector<std::string> lockedTables;
+    lockManager_.setResourceNamespace(dbname);
     for (const auto& rewrite : rewrites) {
         if (!lockManager_.lockExclusive(rewrite.tableName)) {
             for (auto it = lockedTables.rbegin(); it != lockedTables.rend(); ++it)
@@ -46503,6 +46514,24 @@ DBStatus StorageEngine::updateEnumType(const std::string& dbname, const EnumType
             lockManager_.unlock(*it);
         lockedTables.clear();
     };
+    cacheLock.lock();
+    std::vector<EnumType> currentTypes;
+    bool unchanged = loadEnumTypes(path, currentTypes) &&
+        serializeEnumTypes(currentTypes) == serializeEnumTypes(originalTypes) &&
+        getTableNames(dbname) == tableNames;
+    for (const auto& [tableName, originalSchemaBytes] : observedSchemas) {
+        if (!unchanged) break;
+        const TableSchema currentSchema = getTableSchema(dbname, tableName);
+        std::string currentSchemaBytes;
+        unchanged = currentSchema.len != 0 &&
+            serializeSchema(currentSchema, currentSchemaBytes) &&
+            currentSchemaBytes == originalSchemaBytes;
+    }
+    if (!unchanged) {
+        if (ownsRenameTransaction) (void)rollbackTransaction();
+        unlockTables();
+        return DBStatus::LOCK_CONFLICT;
+    }
     const std::unordered_set<std::string> newLabels(et.labels.begin(),
                                                     et.labels.end());
     for (auto& rewrite : rewrites) {
