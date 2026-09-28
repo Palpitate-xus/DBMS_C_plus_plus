@@ -3360,9 +3360,9 @@ DBStatus StorageEngine::attachPartition(const std::string& dbname,
 DBStatus StorageEngine::detachPartition(const std::string& dbname,
                                           const std::string& tablename,
                                           const std::string& partitionName) {
-    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     if (tbl.partitionType == TableSchema::PartitionType::None) {
@@ -11315,9 +11315,9 @@ DBStatus StorageEngine::dropIndexByAccessMethod(
 
 DBStatus StorageEngine::dropIndex(const std::string& dbname, const std::string& tablename,
                                    const std::string& colname) {
-    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
 
     // Update metadata: remove lines matching this column/expression
     std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
@@ -15519,9 +15519,9 @@ private:
 
 DBStatus StorageEngine::dropTable(const std::string& dbname,
                                    const std::string& tablename) {
-    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
 
     std::vector<std::string> originalComments;
     DBStatus commentStatus = readCommentRecords(
@@ -15829,9 +15829,9 @@ DBStatus StorageEngine::truncateTable(const std::string& dbname,
         }
         transactionContext().hasWrite = true;
     }
-    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     const TableSchema table = getTableSchema(dbname, tablename);
 
     const auto finish = [&](DBStatus status) {
@@ -15891,10 +15891,10 @@ void StorageEngine::bufferLogicalTruncate(const std::string& dbname,
 DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
                                              const std::string& tablename,
                                              const Column& col) {
-    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockExclusive(tablename)) return DBStatus::LOCK_CONFLICT;
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     Column validatedCol = col;
@@ -16170,10 +16170,10 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
 DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
                                               const std::string& tablename,
                                               const std::string& colName) {
-    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockExclusive(tablename)) return DBStatus::LOCK_CONFLICT;
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t dropIdx = tbl.len;
@@ -16499,10 +16499,10 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
                                                   const std::string& tablename,
                                                   const std::string& colName,
                                                   const Column& newCol) {
-    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockExclusive(tablename)) return DBStatus::LOCK_CONFLICT;
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t colIdx = tbl.len;
@@ -16624,10 +16624,10 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
                                                 const std::string& tablename,
                                                 const std::string& oldName,
                                                 const std::string& newName) {
-    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!validStoredIdentifier(newName, MAX_COL_NAME_LEN)) return DBStatus::INVALID_VALUE;
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t colIdx = tbl.len;
@@ -16985,7 +16985,6 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
 DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
                                                const std::string& oldName,
                                                const std::string& newName) {
-    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, oldName)) return DBStatus::TABLE_NOT_FOUND;
     if (!validStoredIdentifier(newName, MAX_TABLE_NAME_LEN)) return DBStatus::INVALID_VALUE;
     if (tableExists(dbname, newName)) return DBStatus::TABLE_ALREADY_EXISTS;
@@ -16999,6 +16998,7 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
         lockManager_.unlock(firstLock);
         return DBStatus::LOCK_CONFLICT;
     }
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::vector<Trigger> renamedTriggers;
     if (!loadTriggers(dbname, renamedTriggers)) {
         lockManager_.unlock(oldName);
@@ -18336,10 +18336,10 @@ DBStatus StorageEngine::alterTableAddPrimaryKey(const std::string& dbname,
                                                 const std::string& tablename,
                                                 const std::string& name,
                                                 const std::vector<std::string>& colNames) {
-    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!validStoredIdentifier(name, MAX_TABLE_NAME_LEN)) return DBStatus::INVALID_VALUE;
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
 
@@ -18639,9 +18639,9 @@ DBStatus StorageEngine::alterTableAddFKConstraint(const std::string& dbname,
 DBStatus StorageEngine::alterTableDropConstraint(const std::string& dbname,
                                                   const std::string& tablename,
                                                   const std::string& name) {
-    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     bool found = false;
@@ -18838,10 +18838,10 @@ DBStatus StorageEngine::alterTableRenameConstraint(const std::string& dbname,
 DBStatus StorageEngine::alterTableTablespace(const std::string& dbname,
                                               const std::string& tablename,
                                               const std::string& tablespace) {
-    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     const std::string targetTablespace = tablespace.empty() ? "pg_default" : tablespace;
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     const std::string oldTablespace = tbl.tablespace.empty() ? "pg_default" : tbl.tablespace;
@@ -40755,7 +40755,6 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
 // ========================================================================
 size_t StorageEngine::vacuumFull(const std::string& dbname,
                                  const std::string& tablename) {
-    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname) || !tableExists(dbname, tablename)) return 0;
     // VACUUM is not transaction-safe and PostgreSQL rejects it inside an
     // explicit transaction.  Rewriting here would otherwise escape rollback.
@@ -40764,6 +40763,7 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
     std::unique_ptr<int, std::function<void(int*)>> tableLockGuard(
         reinterpret_cast<int*>(1),
         [&](int*) { lockManager_.unlock(tablename); });
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
 
     const TableSchema tbl = getTableSchema(dbname, tablename);
     const std::string tableKey = dbname + "/" + tablename;
