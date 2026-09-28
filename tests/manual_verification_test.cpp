@@ -45,7 +45,7 @@ static void test_ch3_database_ops() {
 
     // 基本建表 + 操作
     assert(!ddl.executeSql("CREATE TABLE t1 (ID INT PRIMARY KEY, NAME VARCHAR(50))", s));
-    assert(g_engine.insert(db, "t1", {{"ID", "1"}, {"NAME", "Alice"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "t1", {{"id", "1"}, {"name", "Alice"}}) == dbms::DBStatus::OK);
 
     // 删除数据库前需要先清理表
     g_engine.dropTable(db, "t1");
@@ -75,12 +75,12 @@ static void test_ch4_table_ops() {
 
     // Keep a live row while changing the heap layout.  ADD COLUMN must
     // preserve it through the page-format rewrite.
-    assert(g_engine.insert(db, "users", {{"ID", "1"}, {"NAME", "Alice"}, {"AGE", "25"}})
+    assert(g_engine.insert(db, "users", {{"id", "1"}, {"name", "Alice"}, {"age", "25"}})
            == dbms::DBStatus::OK);
 
     // 4.2 ALTER TABLE ADD COLUMN
     assert(!ddl.executeSql("ALTER TABLE users ADD COLUMN PHONE VARCHAR(20)", s));
-    auto migrated = g_engine.query(db, "users", {}, {"ID", "NAME", "PHONE"});
+    auto migrated = g_engine.query(db, "users", {}, {"id", "name", "phone"});
     assert(migrated.size() == 1);
     assert(migrated[0].find("1 Alice") != std::string::npos);
 
@@ -145,18 +145,18 @@ static void test_ch5_dml() {
     assert(!ddl.executeSql("CREATE TABLE users (ID INT PRIMARY KEY, NAME VARCHAR(50), AGE INT)", s));
 
     // 5.1 INSERT
-    assert(g_engine.insert(db, "users", {{"ID","1"},{"NAME","Alice"},{"AGE","25"}}) == dbms::DBStatus::OK);
-    assert(g_engine.insert(db, "users", {{"ID","2"},{"NAME","Bob"},{"AGE","30"}}) == dbms::DBStatus::OK);
-    assert(g_engine.insert(db, "users", {{"ID","3"},{"NAME","Charlie"},{"AGE","35"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "users", {{"id","1"},{"name","Alice"},{"age","25"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "users", {{"id","2"},{"name","Bob"},{"age","30"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "users", {{"id","3"},{"name","Charlie"},{"age","35"}}) == dbms::DBStatus::OK);
 
     // 5.2 UPDATE
-    assert(g_engine.update(db, "users", {{"AGE","26"}}, {"=ID 1"}) == dbms::DBStatus::OK);
+    assert(g_engine.update(db, "users", {{"age","26"}}, {"=id 1"}) == dbms::DBStatus::OK);
 
     // 5.3 DELETE
-    assert(g_engine.remove(db, "users", {"=ID 3"}) == dbms::DBStatus::OK);
+    assert(g_engine.remove(db, "users", {"=id 3"}) == dbms::DBStatus::OK);
 
     // 5.4 验证剩余行数
-    auto rows = g_engine.query(db, "users", {}, {"ID", "NAME", "AGE"});
+    auto rows = g_engine.query(db, "users", {}, {"id", "name", "age"});
     assert(rows.size() == 2);
 
     // 5.5 INSERT DEFAULT VALUES
@@ -183,21 +183,21 @@ static void test_ch6_dql() {
 
     assert(!ddl.executeSql("CREATE TABLE t (ID INT PRIMARY KEY, VAL INT, NAME VARCHAR(20))", s));
     for (int i = 1; i <= 10; ++i) {
-        g_engine.insert(db, "t", {{"ID", std::to_string(i)}, {"VAL", std::to_string(i*10)},
-                                  {"NAME", "user" + std::to_string(i)}});
+        g_engine.insert(db, "t", {{"id", std::to_string(i)}, {"val", std::to_string(i*10)},
+                                  {"name", "user" + std::to_string(i)}});
     }
 
     // 6.1 SELECT *
-    auto rows = g_engine.query(db, "t", {}, {"ID", "VAL", "NAME"});
+    auto rows = g_engine.query(db, "t", {}, {"id", "val", "name"});
     assert(rows.size() == 10);
 
     // 6.2 WHERE 条件
-    rows = g_engine.query(db, "t", {">VAL 50"}, {"ID", "VAL"});
+    rows = g_engine.query(db, "t", {">val 50"}, {"id", "val"});
     assert(rows.size() == 5);  // 60,70,80,90,100
 
     // 6.3 ORDER BY
-    rows = g_engine.query(db, "t", {}, {"ID", "VAL"},
-        {dbms::StorageEngine::OrderBySpec{"VAL", false}});
+    rows = g_engine.query(db, "t", {}, {"id", "val"},
+        {dbms::StorageEngine::OrderBySpec{"val", false}});
     assert(!rows.empty());
 
     // 6.4 聚合查询通过 DDL
@@ -214,17 +214,17 @@ static void test_ch6_dql() {
 
     // 6.7 JOIN
     assert(!ddl.executeSql("CREATE TABLE t2 (ID INT, REF_ID INT)", s));
-    g_engine.insert(db, "t2", {{"ID", "1"}, {"REF_ID", "1"}});
-    g_engine.insert(db, "t2", {{"ID", "2"}, {"REF_ID", "5"}});
+    g_engine.insert(db, "t2", {{"id", "1"}, {"ref_id", "1"}});
+    g_engine.insert(db, "t2", {{"id", "2"}, {"ref_id", "5"}});
     assert(!ddl.executeSql(
         "SELECT t.ID, t.NAME, t2.ID FROM t JOIN t2 ON t.ID = t2.REF_ID", s));
 
     // 6.8 INSERT ... SELECT
     assert(!ddl.executeSql("CREATE TABLE t_copy (ID INT, VAL INT)", s));
     for (int i = 6; i <= 10; ++i) {
-        g_engine.insert(db, "t_copy", {{"ID", std::to_string(i)}, {"VAL", std::to_string(i*10)}});
+        g_engine.insert(db, "t_copy", {{"id", std::to_string(i)}, {"val", std::to_string(i*10)}});
     }
-    rows = g_engine.query(db, "t_copy", {}, {"ID", "VAL"});
+    rows = g_engine.query(db, "t_copy", {}, {"id", "val"});
     assert(rows.size() == 5);
 
     // 6.9 Parser-only tests (no executor)
@@ -256,23 +256,23 @@ static void test_ch7_transaction() {
     assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
 
     // 插入
-    assert(g_engine.insert(db, "t", {{"ID","1"},{"VAL","100"}}) == dbms::DBStatus::OK);
-    assert(g_engine.insert(db, "t", {{"ID","2"},{"VAL","200"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "t", {{"id","1"},{"val","100"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "t", {{"id","2"},{"val","200"}}) == dbms::DBStatus::OK);
 
     // 提交
     assert(g_engine.commitTransaction() == dbms::DBStatus::OK);
 
     // 验证持久化
-    auto rows = g_engine.query(db, "t", {}, {"ID", "VAL"});
+    auto rows = g_engine.query(db, "t", {}, {"id", "val"});
     assert(rows.size() == 2);
 
     // Rollback 测试
     assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
-    assert(g_engine.insert(db, "t", {{"ID","3"},{"VAL","300"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "t", {{"id","3"},{"val","300"}}) == dbms::DBStatus::OK);
     assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
 
     // 验证回滚
-    rows = g_engine.query(db, "t", {}, {"ID"});
+    rows = g_engine.query(db, "t", {}, {"id"});
     assert(rows.size() == 2);  // 3 被回滚
 
     cleanup(db);
@@ -294,7 +294,7 @@ static void test_ch8_index() {
     assert(!ddl.executeSql("CREATE TABLE t (ID INT PRIMARY KEY, NAME VARCHAR(50), VAL INT)", s));
 
     // 创建二级索引
-    assert(g_engine.createIndex(db, "t", "NAME", true, {}, "", "", false) == dbms::DBStatus::OK);
+    assert(g_engine.createIndex(db, "t", "name", true, {}, "", "", false) == dbms::DBStatus::OK);
 
     // 验证索引被使用
     auto indexedCols = g_engine.getIndexedColumns(db, "t");
@@ -333,9 +333,8 @@ static void test_ch9_views() {
     // 物化视图
     assert(!ddl.executeSql("CREATE MATERIALIZED VIEW mv AS SELECT ID, VAL FROM base", s));
 
-    // REFRESH is a utility command owned by the main command router, not the
-    // DDL AST executor. The direct DdlExecutor API must reject it explicitly.
-    assert(ddl.executeSql("REFRESH MATERIALIZED VIEW mv", s));
+    // The DDL executor now routes REFRESH directly as well.
+    assert(!ddl.executeSql("REFRESH MATERIALIZED VIEW mv", s));
 
     // WITH NO DATA
     assert(!ddl.executeSql("CREATE MATERIALIZED VIEW mv_empty AS SELECT * FROM base WITH NO DATA", s));
@@ -364,10 +363,10 @@ static void test_ch10_constraints() {
         "CONSTRAINT MAX_PRICE CHECK (PRICE < 10000))", s));
 
     // 验证 CHECK 约束生效
-    assert(g_engine.insert(db, "products", {{"ID","1"},{"PRICE","-1"}}) == dbms::DBStatus::INVALID_VALUE);
-    assert(g_engine.insert(db, "products", {{"ID","1"},{"PRICE","10"}}) == dbms::DBStatus::OK);
-    assert(g_engine.insert(db, "products", {{"ID","2"},{"PRICE","9999"}}) == dbms::DBStatus::OK);
-    assert(g_engine.insert(db, "products", {{"ID","3"},{"PRICE","10000"}}) == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insert(db, "products", {{"id","1"},{"price","-1"}}) == dbms::DBStatus::CHECK_VIOLATION);
+    assert(g_engine.insert(db, "products", {{"id","1"},{"price","10"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "products", {{"id","2"},{"price","9999"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "products", {{"id","3"},{"price","10000"}}) == dbms::DBStatus::CHECK_VIOLATION);
 
     cleanup(db);
     std::cout << "[CH10] 约束 OK" << std::endl;
