@@ -79,7 +79,7 @@ int main() {
 
     expectValue(database, "date_value", "2025-02-03");
     expectValue(database, "timestamp_value", "2025-02-03 04:05:06");
-    expectValue(database, "timestamptz_value", "2025-02-03 04:05:06");
+    expectValue(database, "timestamptz_value", "2025-02-03 04:05:06+00");
     expectValue(database, "datetime_value", "2025-02-03 04:05:06");
     expectValue(database, "time_value", "04:05:06");
     expectValue(database, "float_value", "4.5");
