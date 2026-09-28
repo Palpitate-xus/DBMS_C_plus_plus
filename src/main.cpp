@@ -19902,6 +19902,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
         }
         map<string, string> selectAliasMap;
+        map<string, string> projectedColumnCollation;
         bool isDistinct = false;
         vector<string> distinctOnCols;
         if (columns.size() >= 12 && columns.substr(0, 12) == "distinct on(") {
@@ -19940,9 +19941,25 @@ static bool executeInternal(const string& rawSql, Session& s) {
         for (const auto& rawItem : splitSelectColumns(columns)) {
             const string item = trim(rawItem);
             const size_t asPos = findTopLevelKeyword(toLower(item), "as");
-            if (asPos == string::npos) continue;
-            const string expression = trim(item.substr(0, asPos));
-            const string alias = trim(item.substr(asPos + 2));
+            string expression = trim(item.substr(0, asPos));
+            const string alias = asPos == string::npos
+                ? string{} : trim(item.substr(asPos + 2));
+            const size_t collateAt = findTopLevelKeyword(
+                toLower(expression), "collate");
+            if (collateAt != string::npos) {
+                const string source = trim(expression.substr(0, collateAt));
+                string rule = trim(expression.substr(collateAt + 7));
+                if (rule.size() >= 2 && rule.front() == '"' &&
+                    rule.back() == '"') rule = rule.substr(1, rule.size() - 2);
+                if (!source.empty() &&
+                    source.find_first_of("()+-*/%, ") == string::npos &&
+                    !rule.empty()) {
+                    projectedColumnCollation[
+                        alias.empty() ? source : alias] =
+                        resolveCollationForSort(s.currentDB, rule);
+                    expression = source;
+                }
+            }
             if (!expression.empty() && !alias.empty() &&
                 alias.find_first_of(" ,()+-*/%") == string::npos) {
                 selectAliasMap[alias] = expression;
@@ -22728,6 +22745,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     collation = resolveCollationForSort(queryDb, trim(afterCollate));
                     sortItem = trim(sortItem.substr(0, collatePos));
                 }
+                if (collation.empty()) {
+                    const auto projected =
+                        projectedColumnCollation.find(sortItem);
+                    if (projected != projectedColumnCollation.end())
+                        collation = projected->second;
+                }
                 // A bare ORDER BY name can refer to an output alias, but a
                 // decorated expression such as alias COLLATE "C" is bound to
                 // input columns in PostgreSQL.  Keep function expressions on
@@ -23288,6 +23311,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     if (asPos != string::npos) {
                         item = trim(item.substr(0, asPos));
                     }
+                }
+                const size_t projectionCollate = findTopLevelKeyword(
+                    toLower(item), "collate");
+                if (projectionCollate != string::npos) {
+                    const string source = trim(item.substr(0, projectionCollate));
+                    if (!source.empty() &&
+                        source.find_first_of("()+-*/%, ") == string::npos)
+                        item = source;
                 }
                 bool quotedPlainColumn = false;
                 if (item.size() >= 2 && item.front() == '"' &&
