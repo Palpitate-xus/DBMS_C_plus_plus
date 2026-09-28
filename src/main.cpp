@@ -6250,6 +6250,26 @@ static bool executeSetOperation(const string& sql, Session& s, bool& handled) {
              << setError.sqlState << ")" << endl;
         return true;
     }
+    // Collation resolution belongs to the set expression itself.  Even
+    // UNION ALL, which does not compare rows, rejects conflicting explicit
+    // output collations before any optional ORDER BY is considered.
+    for (size_t column = 0; column < result.columns.size(); ++column) {
+        const string type = column < result.columnTypes.size()
+            ? canonicalValuesType(result.columnTypes[column]) : "text";
+        const auto* typeEntry = dbms::TypeRegistry::instance().findType(type);
+        if (!typeEntry || typeEntry->category != dbms::TypeCategory::String)
+            continue;
+        const optional<string> leftCollation =
+            explicitSetOperandCollation(leftSql, column);
+        const optional<string> rightCollation =
+            explicitSetOperandCollation(rightSql, column);
+        if (leftCollation && rightCollation &&
+            *leftCollation != *rightCollation) {
+            cout << "ERROR: collation mismatch between set-operation operands "
+                    "(SQLSTATE 42P21)" << endl;
+            return true;
+        }
+    }
     string tailError;
     string tailSqlState;
     if (!applySetOperationTail(
