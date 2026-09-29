@@ -13430,6 +13430,16 @@ bool StorageEngine::maintainSpecializedIndexesAfterMutation(
     return rebuildSpecializedIndexes(dbname, tablename);
 }
 
+static bool pathEntryExists(const std::filesystem::path& path,
+                            std::error_code& ec) {
+    const auto status = std::filesystem::symlink_status(path, ec);
+    if (ec == std::errc::no_such_file_or_directory) {
+        ec.clear();
+        return false;
+    }
+    return !ec && status.type() != std::filesystem::file_type::not_found;
+}
+
 bool StorageEngine::databaseExists(const std::string& dbname) const {
     if (dbname.empty() || !validStoredIdentifier(dbname, MAX_TABLE_NAME_LEN)) return false;
     const auto path = dbPath(dbname);
@@ -13492,7 +13502,7 @@ DBStatus StorageEngine::createDatabase(const std::string& dbname, const std::str
     // hold shared transaction locks. Recheck after taking the name lock to
     // close the concurrent CREATE/DROP race for absent names.
     std::error_code collisionEc;
-    if (std::filesystem::exists(dbPath(dbname), collisionEc)) {
+    if (pathEntryExists(dbPath(dbname), collisionEc)) {
         return DBStatus::TABLE_ALREADY_EXISTS;
     }
     if (collisionEc) return DBStatus::IO_ERROR;
@@ -13502,7 +13512,7 @@ DBStatus StorageEngine::createDatabase(const std::string& dbname, const std::str
     if (!databaseLock.owns_lock()) return DBStatus::DATABASE_IN_USE;
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     collisionEc.clear();
-    if (std::filesystem::exists(dbPath(dbname), collisionEc)) {
+    if (pathEntryExists(dbPath(dbname), collisionEc)) {
         return DBStatus::TABLE_ALREADY_EXISTS;
     }
     if (collisionEc) return DBStatus::IO_ERROR;
@@ -13617,7 +13627,11 @@ DBStatus StorageEngine::renameDatabase(const std::string& oldName,
     if (!secondLock.owns_lock()) return DBStatus::DATABASE_IN_USE;
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(oldName)) return DBStatus::DATABASE_NOT_FOUND;
-    if (databaseExists(newName)) return DBStatus::TABLE_ALREADY_EXISTS;
+    std::error_code targetEc;
+    if (pathEntryExists(dbPath(newName), targetEc)) {
+        return DBStatus::TABLE_ALREADY_EXISTS;
+    }
+    if (targetEc) return DBStatus::IO_ERROR;
     if (catalogService_ && !catalogService_->persistAll()) {
         return DBStatus::IO_ERROR;
     }
@@ -13636,8 +13650,12 @@ DBStatus StorageEngine::renameDatabase(const std::string& oldName,
     const auto newArchive = std::filesystem::path(
         dbPath(newName).string() + ".archive");
     const bool archiveExists = std::filesystem::exists(oldArchive);
-    if (archiveExists && std::filesystem::exists(newArchive)) {
-        return DBStatus::TABLE_ALREADY_EXISTS;
+    if (archiveExists) {
+        targetEc.clear();
+        if (pathEntryExists(newArchive, targetEc)) {
+            return DBStatus::TABLE_ALREADY_EXISTS;
+        }
+        if (targetEc) return DBStatus::IO_ERROR;
     }
     std::error_code ec;
     if (archiveExists) {
