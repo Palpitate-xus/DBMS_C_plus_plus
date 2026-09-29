@@ -2609,6 +2609,11 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 break;
             case AlterTableStmt::Action::SetSchema:
                 status = g_engine.alterTableSetSchema(s.currentDB, tableName, sub.newName);
+                if (status == DBStatus::FEATURE_NOT_SUPPORTED) {
+                    std::cout << "ERROR: ALTER TABLE SET SCHEMA is not supported "
+                              << "(SQLSTATE 0A000)" << std::endl;
+                    return true;
+                }
                 if (!alterStatusOk(status, "Schema")) return true;
                 break;
             case AlterTableStmt::Action::SetTablespace:

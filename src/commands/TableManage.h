@@ -277,9 +277,10 @@ public:
     // Sequence reset (for TRUNCATE RESTART IDENTITY)
     void resetSequence(const std::string& dbname, const std::string& tablename,
                        const std::string& colname, int64_t val = 1);
-    // Move table to another database/schema
+    // Schema relocation is unsupported until catalog and physical files can
+    // be moved transactionally within the same database.
     DBStatus alterTableSetSchema(const std::string& dbname, const std::string& tablename,
-                                 const std::string& targetDbname);
+                                 const std::string& targetSchema);
 
     // Domain support
     struct DomainInfo {
