@@ -118,6 +118,12 @@ public:
                                          const std::string& oldName, const std::string& newName);
     DBStatus alterTableTablespace(const std::string& dbname, const std::string& tablename,
                                    const std::string& tablespace);
+    // Deterministic collision seam used by the tablespace publication test;
+    // production callers use the three-argument overload above.
+    DBStatus alterTableTablespace(const std::string& dbname, const std::string& tablename,
+                                   const std::string& tablespace,
+                                   const std::function<void(const std::filesystem::path&,
+                                                            bool staged)>& beforeRenameForTesting);
     DBStatus alterTableSetDefault(const std::string& dbname, const std::string& tablename,
                                    const std::string& colName, const std::string& defaultValue);
     DBStatus alterTableDropDefault(const std::string& dbname, const std::string& tablename,

@@ -18835,9 +18835,38 @@ DBStatus StorageEngine::alterTableRenameConstraint(const std::string& dbname,
     return DBStatus::OK;
 }
 
+static bool renameTablespaceEntryNoReplace(
+    const std::filesystem::path& source,
+    const std::filesystem::path& destination,
+    std::error_code& error) {
+#ifdef SYS_renameat2
+    constexpr unsigned kRenameNoReplace = 1;
+    if (::syscall(SYS_renameat2, AT_FDCWD, source.c_str(), AT_FDCWD,
+                  destination.c_str(), kRenameNoReplace) == 0) {
+        error.clear();
+        return true;
+    }
+    error = std::error_code(errno, std::generic_category());
+#else
+    (void)source;
+    (void)destination;
+    error = std::make_error_code(std::errc::operation_not_supported);
+#endif
+    return false;
+}
+
 DBStatus StorageEngine::alterTableTablespace(const std::string& dbname,
                                               const std::string& tablename,
                                               const std::string& tablespace) {
+    return alterTableTablespace(dbname, tablename, tablespace, {});
+}
+
+DBStatus StorageEngine::alterTableTablespace(const std::string& dbname,
+                                              const std::string& tablename,
+                                              const std::string& tablespace,
+                                              const std::function<void(
+                                                  const std::filesystem::path&,
+                                                  bool)>& beforeRenameForTesting) {
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     const std::string targetTablespace = tablespace.empty() ? "pg_default" : tablespace;
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
@@ -18936,8 +18965,17 @@ DBStatus StorageEngine::alterTableTablespace(const std::string& dbname,
                                          : DBStatus::INVALID_VALUE;
                 }
                 std::error_code moveEc;
-                std::filesystem::rename(entry.path(), destination, moveEc);
-                if (moveEc) {
+                if (beforeRenameForTesting) {
+                    beforeRenameForTesting(destination, false);
+                }
+                if (!renameTablespaceEntryNoReplace(
+                        entry.path(), destination, moveEc)) {
+                    if (moveEc != std::errc::cross_device_link) {
+                        rollbackMove();
+                        lockManager_.unlock(tablename);
+                        return moveEc == std::errc::file_exists
+                            ? DBStatus::INVALID_VALUE : DBStatus::IO_ERROR;
+                    }
                     const auto staging = std::filesystem::path(
                         destination.string() + ".tablespace_move." +
                         std::to_string(::getpid()) + "." +
@@ -18964,11 +19002,17 @@ DBStatus StorageEngine::alterTableTablespace(const std::string& dbname,
                         return DBStatus::IO_ERROR;
                     }
                     moveEc.clear();
-                    std::filesystem::rename(staging, destination, moveEc);
-                    if (moveEc || !index_file::syncDirectory(newDir)) {
+                    if (beforeRenameForTesting) {
+                        beforeRenameForTesting(destination, true);
+                    }
+                    const bool published = renameTablespaceEntryNoReplace(
+                        staging, destination, moveEc);
+                    if (!published || !index_file::syncDirectory(newDir)) {
                         std::error_code ignored;
                         std::filesystem::remove_all(staging, ignored);
-                        std::filesystem::remove_all(destination, ignored);
+                        if (published) {
+                            std::filesystem::remove_all(destination, ignored);
+                        }
                         (void)index_file::syncDirectory(newDir);
                         rollbackMove();
                         lockManager_.unlock(tablename);
