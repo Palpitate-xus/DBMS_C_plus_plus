@@ -4,12 +4,17 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <algorithm>
+#include <array>
+#include <cerrno>
+#include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <limits>
 #include <map>
 #include <mutex>
 #include <system_error>
+#include <vector>
 
 namespace dbms {
 
@@ -96,14 +101,72 @@ bool writeEmptyFileAtomically(const std::filesystem::path& target) {
     return syncDirectory(target.parent_path());
 }
 
+bool sameRegularFileContents(const std::filesystem::path& first,
+                             const std::filesystem::path& second) {
+    const int firstFd = ::open(first.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (firstFd < 0) return false;
+    const int secondFd = ::open(second.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (secondFd < 0) {
+        ::close(firstFd);
+        return false;
+    }
+    struct stat firstStat{};
+    struct stat secondStat{};
+    bool same = ::fstat(firstFd, &firstStat) == 0 &&
+                ::fstat(secondFd, &secondStat) == 0 &&
+                S_ISREG(firstStat.st_mode) && S_ISREG(secondStat.st_mode) &&
+                firstStat.st_size == secondStat.st_size &&
+                firstStat.st_size >= 0;
+    std::array<char, 64 * 1024> firstBytes{};
+    std::array<char, 64 * 1024> secondBytes{};
+    const auto readExactly = [](int fd, char* bytes, size_t size, off_t offset) {
+        size_t readTotal = 0;
+        while (readTotal < size) {
+            const ssize_t count = ::pread(fd, bytes + readTotal,
+                                          size - readTotal,
+                                          offset + static_cast<off_t>(readTotal));
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) return false;
+            readTotal += static_cast<size_t>(count);
+        }
+        return true;
+    };
+    for (off_t offset = 0; same && offset < firstStat.st_size;) {
+        const auto count = static_cast<size_t>(std::min<off_t>(
+            static_cast<off_t>(firstBytes.size()), firstStat.st_size - offset));
+        same = readExactly(firstFd, firstBytes.data(), count, offset) &&
+               readExactly(secondFd, secondBytes.data(), count, offset) &&
+               std::memcmp(firstBytes.data(), secondBytes.data(), count) == 0;
+        offset += static_cast<off_t>(count);
+    }
+    if (same) same = syncFileDescriptor(secondFd);
+    ::close(secondFd);
+    ::close(firstFd);
+    return same;
+}
+
 bool copyFileAtomically(const std::filesystem::path& source,
                         const std::filesystem::path& target) {
     const int sourceFd = ::open(source.c_str(), O_RDONLY | O_CLOEXEC);
     if (sourceFd < 0) return false;
-    const auto temp = temporaryPath(target);
-    const int targetFd = ::open(temp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    // A previous process can die between link(temp, target) and unlink(temp).
+    // Never truncate a predictable stale temporary name: it may be another
+    // hard link to an already-published archive segment.
+    const std::string tempPattern = target.string() + ".tmp.XXXXXX";
+    std::vector<char> tempName(tempPattern.begin(), tempPattern.end());
+    tempName.push_back('\0');
+    const int targetFd = ::mkstemp(tempName.data());
     if (targetFd < 0) {
         ::close(sourceFd);
+        return false;
+    }
+    const std::filesystem::path temp(tempName.data());
+    if (::fcntl(targetFd, F_SETFD, FD_CLOEXEC) != 0 ||
+        ::fchmod(targetFd, 0644) != 0) {
+        ::close(targetFd);
+        ::close(sourceFd);
+        std::error_code cleanupEc;
+        std::filesystem::remove(temp, cleanupEc);
         return false;
     }
 
@@ -136,12 +199,18 @@ bool copyFileAtomically(const std::filesystem::path& source,
         return false;
     }
 
-    std::error_code ec;
-    std::filesystem::rename(temp, target, ec);
-    if (ec) {
-        std::filesystem::remove(temp, ec);
+    // Publishing with rename would replace an existing WAL segment from a
+    // different database generation. A hard link is atomic and refuses to
+    // overwrite; an identical prior copy is safe to retry after a marker
+    // publication failure.
+    if (::link(temp.c_str(), target.c_str()) != 0 &&
+        (errno != EEXIST || !sameRegularFileContents(temp, target))) {
+        std::error_code cleanupEc;
+        std::filesystem::remove(temp, cleanupEc);
         return false;
     }
+    std::error_code ec;
+    if (!std::filesystem::remove(temp, ec) || ec) return false;
     return syncDirectory(target.parent_path());
 }
 
