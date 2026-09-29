@@ -4839,24 +4839,19 @@ DBStatus StorageEngine::dropSchema(const std::string& dbname,
     }
     auto path = schemaMarkerPath(dbname, schemaname);
     if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
-    if (cascade) {
-        std::string prefix = schemaname + "__";
-        auto dbPath = std::filesystem::path(dbname);
-        std::vector<std::string> tablesToDrop;
-        for (const auto& entry : std::filesystem::directory_iterator(dbPath)) {
-            if (!entry.is_regular_file()) continue;
-            std::string name = entry.path().filename().string();
-            if (name.size() > 3 && name.substr(name.size() - 3) == ".dt") {
-                std::string tname = name.substr(0, name.size() - 3);
-                if (tname.size() > prefix.size() && tname.substr(0, prefix.size()) == prefix) {
-                    tablesToDrop.push_back(std::move(tname));
-                }
-            }
+    const std::string prefix = schemaname + "__";
+    std::vector<std::string> tablesToDrop;
+    // The table list is authoritative for relations in external tablespaces
+    // and partitioned parents, neither of which needs a .dt in dbPath.
+    for (const auto& name : getTableNames(dbname)) {
+        if (name.size() > prefix.size() && name.rfind(prefix, 0) == 0) {
+            tablesToDrop.push_back(name);
         }
-        for (const auto& tname : tablesToDrop) {
-            if (dropTable(dbname, tname) != DBStatus::OK) {
-                return DBStatus::INVALID_VALUE;
-            }
+    }
+    if (!cascade && !tablesToDrop.empty()) return DBStatus::INVALID_VALUE;
+    for (const auto& tableName : tablesToDrop) {
+        if (dropTable(dbname, tableName) != DBStatus::OK) {
+            return DBStatus::INVALID_VALUE;
         }
     }
     std::error_code ec;
