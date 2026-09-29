@@ -39732,6 +39732,33 @@ static bool validPhysicalBackupSource(const std::filesystem::path& source,
            expectedFiles == actualFiles;
 }
 
+static bool replaceablePhysicalBackupDestination(
+    const std::filesystem::path& destination,
+    const std::string& expectedDatabase) {
+    // Rebuilding a damaged backup is valid, so its payload need not match
+    // the manifest. Its own marker and manifest must still identify it as a
+    // backup of this database before we replace the directory.
+    if (!std::filesystem::is_directory(destination) ||
+        std::filesystem::is_symlink(destination)) return false;
+    const auto marker = destination / kPhysicalBackupMarker;
+    const auto manifest = destination / kPhysicalBackupManifest;
+    if (std::filesystem::is_symlink(marker) ||
+        std::filesystem::is_symlink(manifest) ||
+        !std::filesystem::is_regular_file(marker)) return false;
+    std::ifstream input(marker, std::ios::binary);
+    if (!input) return false;
+    const std::string contents{
+        std::istreambuf_iterator<char>(input),
+        std::istreambuf_iterator<char>()};
+    if (contents != "DBMS_PHYSICAL_BACKUP_V3\n") return false;
+    std::string sourceDatabase;
+    PhysicalBackupDirectories directories;
+    PhysicalBackupFiles files;
+    return readPhysicalBackupManifest(
+               destination, sourceDatabase, directories, files) &&
+           sourceDatabase == expectedDatabase;
+}
+
 static uint64_t maintenancePathBytes(const std::filesystem::path& path) {
     std::error_code error;
     if (std::filesystem::is_regular_file(path, error)) {
@@ -39810,6 +39837,19 @@ bool StorageEngine::physicalBackupLocked(
             restorePathsOverlap(archiveDir, dst)) {
             return false;
         }
+        const auto validExistingDestination = [&]() {
+            std::error_code destinationError;
+            if (!pathEntryExists(dst, destinationError)) {
+                return !destinationError;
+            }
+            if (destinationError ||
+                std::filesystem::is_symlink(dst, destinationError) ||
+                destinationError) return false;
+            return replaceablePhysicalBackupDestination(dst, dbname);
+        };
+        // A backup path can spell another live database or unrelated user
+        // directory. Only a valid backup of this source may be replaced.
+        if (!validExistingDestination()) return false;
 
         static std::atomic<uint64_t> backupSequence{0};
         const auto siblingPath = [&](std::string_view purpose) {
@@ -40010,6 +40050,10 @@ bool StorageEngine::physicalBackupLocked(
         // Publish only after every copied file and directory is durable. If a
         // generation already exists, Linux rename-exchange keeps one complete
         // generation at the canonical path through the entire replacement.
+        if (!validExistingDestination()) {
+            discardStagedBackup();
+            return false;
+        }
         fileError.clear();
         const bool destinationExists = std::filesystem::exists(dst, fileError);
         if (fileError) {
@@ -42213,12 +42257,9 @@ bool StorageEngine::createTransactionBackup() {
     if (!flushDatabaseCaches(dbname)) return false;
 
     const auto backup = transactionBackupPath(dbname, context.currentTxnId);
-    std::error_code ec;
-    std::filesystem::remove_all(backup, ec);
     // Transaction rollback needs an exact image, including UNLOGGED main
     // forks. Physical base backups intentionally omit those forks instead.
     if (!physicalBackupLocked(dbname, backup.string(), {}, true)) {
-        std::filesystem::remove_all(backup, ec);
         return false;
     }
 
@@ -42248,8 +42289,6 @@ bool StorageEngine::createDdlStatementBackup(std::string& backupPath) {
     const auto backup = ddlStatementBackupPath(
         context.txnDB, context.currentTxnId);
     if (!physicalBackupLocked(context.txnDB, backup.string(), {}, true)) {
-        std::error_code error;
-        std::filesystem::remove_all(backup, error);
         return false;
     }
     backupPath = backup.string();
