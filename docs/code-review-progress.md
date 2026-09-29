@@ -795,7 +795,9 @@
 | 816 | P0-16 / 测试稳定性 | 最新源码完整脚本的 357 个 C++ 中 356 个通过、74 个协议/E2E 全通过，但 `ddl_ast_bridge_test` 在全局引擎仍可能写 extent marker 时直接对数据库目录 `remove_all`，临时文件恰好消失会抛 `ENOENT`；该轮退出码 1，不能记作全套通过 | 测试清理先走 `dropDatabase` 关闭数据库缓存和后台写入，再以错误码方式清理不完整目录，保留所有 SQL/目录断言。定向测试单次及隔离连续 10 次通过；最新源码完整脚本仍待复跑。此次为测试稳定性修复，不改变任何总清单功能族完成状态 | `be44dbc6` |
 | 817 | P0-03 / P0-04 / CAT-02 / CAT-20 | `dropSchema` 的 `RESTRICT` 不检查 schema 内现存表，直接移除 marker；`CASCADE` 只扫描数据库根目录 `.dt`，漏掉外部表空间表和无 heap 的分区父表，留下无 schema 的关系 | 改按持久表清单列出同 schema 关系：非级联且非空时拒绝，级联逐表调用 `dropTable` 并只在成功后删除 marker。新隔离 C++ 用例旧源码错误接受 `RESTRICT`，新源码保留原表且正确级联删除表空间关系；`ddl_ast_bridge_test`、`ddl_bridge_routing_test`、`tablespace_semantics_test` 与正式生产构建通过。视图、函数等其他对象依赖及崩溃原子性仍为 partial，完整脚本待复跑 | `227d0b16` |
 
-2026-09-29 最新复验：截至第 808 项，最终源码正式构建、351 个 C++ 加 72 个协议/E2E 完整脚本、真实 PostgreSQL 18.6 的 370 组差分均退出码 0，差分 `failed=0`。总清单仍为 273 项，24 complete、128 partial、106 unverified、15 deferred_by_user；本批修复不改变功能族完整性口径。工作区未 push，GitHub Actions 仍仅有 `ci.yml.disabled`。
+2026-09-29 最新复验：截至第 817 项，最新源码正式构建、完整脚本 358/358 个 C++ 与 74/74 个协议/E2E 均退出码 0；同一生产二进制对真实 PostgreSQL 18.6 的 370 组差分 `failed=0`、退出码 0。第 816 项之前的完整脚本曾因 `ddl_ast_bridge_test` 清理竞态以 356/357 C++、74/74 E2E 退出码 1，不记作通过；第 811 项之前的一轮也因序列快照回退以 352/353 C++、72/72 E2E 退出码 1，不记作通过。总清单仍为 273 项，24 complete、128 partial、106 unverified、15 deferred_by_user；这些回归不能证明 PostgreSQL 18 功能族完整。未 push，GitHub Actions 仍仅有 `ci.yml.disabled`。
+
+2026-09-29 此前复验：截至第 808 项，最终源码正式构建、351 个 C++ 加 72 个协议/E2E 完整脚本、真实 PostgreSQL 18.6 的 370 组差分均退出码 0，差分 `failed=0`。总清单仍为 273 项，24 complete、128 partial、106 unverified、15 deferred_by_user；本批修复不改变功能族完整性口径。工作区未 push，GitHub Actions 仍仅有 `ci.yml.disabled`。
 
 2026-09-28 最新复验：第 786 项清理用例和第 784 项精确异常边界后，最终源码正式 `scripts/build.sh` 退出码 0；完整 `scripts/build_tests.sh` 亦退出码 0，包含新增枚举锁顺序 C++ 回归、两条数据库级 DDL 锁超时协议回归及修订后的 `collation_test`。同一生产二进制的真实 PostgreSQL 18.6 全量差分 `cases=370 failed=0`，进程退出码 0。这次全套成功不抹除先前两轮失败记录；370 组用例也不能证明总清单完成。总清单仍为 273 项，24 complete、128 partial、106 unverified、15 deferred_by_user。
 
