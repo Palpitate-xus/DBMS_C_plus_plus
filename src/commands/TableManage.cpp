@@ -38342,7 +38342,14 @@ bool StorageEngine::recoverAllDatabases() {
             // name. Never delete or restore it based on its name alone.
             continue;
         }
-        if (committedXidsByDb[dbname].count(xid)) {
+        // An explicit ABORT record is written and flushed after undo is
+        // durable. A snapshot left behind after that terminal record is
+        // disposable too: restoring it on a later startup can erase newer
+        // non-transactional sequence advances. A commit excluded by PITR is
+        // different and still needs its pre-transaction image restored.
+        if (committedXidsByDb[dbname].count(xid) ||
+            (abortedXidsByDb[dbname].count(xid) &&
+             !pitrExcludedXidsByDb[dbname].count(xid))) {
             std::error_code ec;
             std::filesystem::remove_all(backup, ec);
             continue;
