@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cerrno>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fcntl.h>
 #include <string>
@@ -65,11 +66,23 @@ inline WriteResult writeAtomicallyImpl(const std::filesystem::path& target,
     static std::atomic<uint64_t> sequence{0};
     const auto parent = target.parent_path().empty()
         ? std::filesystem::path(".") : target.parent_path();
-    const auto temp = target.string() + ".tmp." + std::to_string(::getpid()) +
-                      "." + std::to_string(sequence.fetch_add(1, std::memory_order_relaxed));
-
-    const int fd = ::open(temp.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+    // Schema markers use this no-replace path.  An old PID/sequence-based
+    // temporary file must not prevent a later CREATE, and a live temporary
+    // name must not look like a ".schema_" marker to namespace enumeration.
+    std::string tempName;
+    int fd = -1;
+    if (noReplace) {
+        tempName = (parent / (".dbms_atomic_" +
+            target.filename().string() + ".XXXXXX")).string();
+        fd = ::mkstemp(tempName.data());
+    } else {
+        tempName = target.string() + ".tmp." + std::to_string(::getpid()) +
+                   "." + std::to_string(sequence.fetch_add(
+                       1, std::memory_order_relaxed));
+        fd = ::open(tempName.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+    }
     if (fd < 0) return WriteResult::IO_ERROR;
+    const std::filesystem::path temp(tempName);
 
     bool ok = true;
     size_t written = 0;
