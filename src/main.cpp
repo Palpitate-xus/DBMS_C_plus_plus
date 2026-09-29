@@ -13122,17 +13122,38 @@ static bool handleAlterDatabase(const string& sql, Session& s) {
 
     if (tokens.size() >= 4 && tokens[1] == "rename" && tokens[2] == "to") {
         string newName = tokens[3];
-        if (g_engine.databaseExists(newName)) {
-            cout << "Database " << newName << " already exists" << endl;
+        if (s.currentDB == dbname) {
+            cout << "ERROR: cannot rename the currently open database "
+                    "(SQLSTATE 55006)" << endl;
             return true;
         }
-        try {
-            auto oldArchive = std::filesystem::path(g_engine.dbPath(dbname).string() + ".archive");
-            auto newArchive = std::filesystem::path(g_engine.dbPath(newName).string() + ".archive");
-            std::filesystem::rename(g_engine.dbPath(dbname), g_engine.dbPath(newName));
-            if (std::filesystem::exists(oldArchive)) std::filesystem::rename(oldArchive, newArchive);
-        } catch (...) {
-            cout << "Rename database failed" << endl;
+        if (g_engine.databaseExists(newName)) {
+            cout << "ERROR: database \"" << newName
+                 << "\" already exists (SQLSTATE 42P04)" << endl;
+            return true;
+        }
+        if (!dbms::reserveDatabaseDrop(dbname)) {
+            cout << "ERROR: database \"" << dbname
+                 << "\" is being accessed by other users (SQLSTATE 55006)"
+                 << endl;
+            return true;
+        }
+        struct RenameReservationGuard {
+            string name;
+            ~RenameReservationGuard() { dbms::releaseDatabaseDrop(name); }
+        } oldReservation{dbname};
+        if (!dbms::reserveDatabaseDrop(newName)) {
+            cout << "ERROR: target database name is in use (SQLSTATE 55006)"
+                 << endl;
+            return true;
+        }
+        RenameReservationGuard newReservation{newName};
+        const auto status = g_engine.renameDatabase(dbname, newName);
+        if (status != DBStatus::OK) {
+            cout << "ERROR: cannot rename database (SQLSTATE "
+                 << (status == DBStatus::TABLE_ALREADY_EXISTS
+                         ? "42P04" : dbms::sqlstateForDBStatus(status))
+                 << ")" << endl;
             return true;
         }
         auto it = dbOptions.find(dbname);
@@ -13142,9 +13163,11 @@ static bool handleAlterDatabase(const string& sql, Session& s) {
             info.name = newName;
             info.definition = sql;
             dbOptions[newName] = info;
-            saveDatabaseOptions(dbOptions);
+            if (!saveDatabaseOptions(dbOptions)) {
+                cout << "WARNING: database options metadata could not be "
+                        "updated after rename" << endl;
+            }
         }
-        if (s.currentDB == dbname) s.currentDB = newName;
         cout << "Database " << dbname << " renamed to " << newName << endl;
         return false;
     }

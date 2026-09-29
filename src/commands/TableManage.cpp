@@ -13480,6 +13480,15 @@ DBStatus StorageEngine::createDatabase(const std::string& dbname, const std::str
     if (normalizedCharset != "utf8" && normalizedCharset != "unicode") {
         return DBStatus::INVALID_VALUE;
     }
+    // An already-existing name is a duplicate even if its current users
+    // hold shared transaction locks. Recheck after taking the name lock to
+    // close the concurrent CREATE/DROP race for absent names.
+    if (databaseExists(dbname)) return DBStatus::TABLE_ALREADY_EXISTS;
+    const auto databaseMutex = databaseTxnLockFor(dbname);
+    std::unique_lock<std::shared_mutex> databaseLock(
+        *databaseMutex, std::try_to_lock);
+    if (!databaseLock.owns_lock()) return DBStatus::DATABASE_IN_USE;
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (databaseExists(dbname)) return DBStatus::TABLE_ALREADY_EXISTS;
     // Embedded callers and tests may remove a database directory directly.
     // Drop every file-backed cache before reusing the name; otherwise the
@@ -13566,6 +13575,68 @@ DBStatus StorageEngine::dropDatabase(const std::string& dbname) {
     std::error_code removeEc;
     std::filesystem::remove_all(dbPath(dbname), removeEc);
     return cleanupOk && !removeEc ? DBStatus::OK : DBStatus::IO_ERROR;
+}
+
+DBStatus StorageEngine::renameDatabase(const std::string& oldName,
+                                       const std::string& newName) {
+    if (oldName.empty() || newName.empty() ||
+        !validStoredIdentifier(oldName, MAX_TABLE_NAME_LEN) ||
+        !validStoredIdentifier(newName, MAX_TABLE_NAME_LEN)) {
+        return DBStatus::INVALID_ARGUMENT;
+    }
+    if (oldName == newName) return DBStatus::TABLE_ALREADY_EXISTS;
+    const auto& context = transactionContext();
+    if (context.inTransaction &&
+        (context.txnDB == oldName || context.txnDB == newName)) {
+        return DBStatus::DATABASE_IN_USE;
+    }
+
+    // Rename owns both names. Acquire them in a stable order before the
+    // cache lock so CREATE/DROP/BEGIN cannot observe a half-moved database.
+    const auto first = databaseTxnLockFor(std::min(oldName, newName));
+    const auto second = databaseTxnLockFor(std::max(oldName, newName));
+    std::unique_lock<std::shared_mutex> firstLock(*first, std::try_to_lock);
+    if (!firstLock.owns_lock()) return DBStatus::DATABASE_IN_USE;
+    std::unique_lock<std::shared_mutex> secondLock(*second, std::try_to_lock);
+    if (!secondLock.owns_lock()) return DBStatus::DATABASE_IN_USE;
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    if (!databaseExists(oldName)) return DBStatus::DATABASE_NOT_FOUND;
+    if (databaseExists(newName)) return DBStatus::TABLE_ALREADY_EXISTS;
+    if (catalogService_ && !catalogService_->persistAll()) {
+        return DBStatus::IO_ERROR;
+    }
+    if (!flushDatabaseCaches(oldName)) return DBStatus::IO_ERROR;
+    if (catalogService_) {
+        catalogService_->evict(oldName);
+        catalogService_->evict(newName);
+    }
+    closeDatabaseCaches(oldName);
+    closeDatabaseCaches(newName);
+    resetRuntimeDatabaseStats(oldName);
+    resetSqlDatabaseStats(oldName);
+
+    const auto oldArchive = std::filesystem::path(
+        dbPath(oldName).string() + ".archive");
+    const auto newArchive = std::filesystem::path(
+        dbPath(newName).string() + ".archive");
+    const bool archiveExists = std::filesystem::exists(oldArchive);
+    if (archiveExists && std::filesystem::exists(newArchive)) {
+        return DBStatus::TABLE_ALREADY_EXISTS;
+    }
+    std::error_code ec;
+    if (archiveExists) {
+        std::filesystem::rename(oldArchive, newArchive, ec);
+        if (ec) return DBStatus::IO_ERROR;
+    }
+    std::filesystem::rename(dbPath(oldName), dbPath(newName), ec);
+    if (ec) {
+        if (archiveExists) {
+            std::error_code rollbackEc;
+            std::filesystem::rename(newArchive, oldArchive, rollbackEc);
+        }
+        return DBStatus::IO_ERROR;
+    }
+    return DBStatus::OK;
 }
 
 constexpr int32_t SCHEMA_FORMAT_VERSION = 0x44420009;  // "DB" + 64-byte identifier fields

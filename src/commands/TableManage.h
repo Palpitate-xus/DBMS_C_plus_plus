@@ -92,6 +92,8 @@ public:
     DBStatus createDatabase(const std::string& dbname, const std::string& charset = "utf8");
     std::string getDatabaseCharset(const std::string& dbname) const;
     DBStatus dropDatabase(const std::string& dbname);
+    DBStatus renameDatabase(const std::string& oldName,
+                            const std::string& newName);
     bool databaseExists(const std::string& dbname) const;
     std::vector<std::string> getDatabaseNames() const;
 
