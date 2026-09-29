@@ -4826,8 +4826,15 @@ DBStatus StorageEngine::createSchema(const std::string& dbname,
         return DBStatus::INVALID_ARGUMENT;
     }
     auto path = schemaMarkerPath(dbname, schemaname);
-    if (std::filesystem::exists(path)) return DBStatus::TABLE_ALREADY_EXISTS;
-    return index_file::writeAtomically(path, "") ? DBStatus::OK : DBStatus::IO_ERROR;
+    switch (index_file::writeAtomicallyNoReplace(path, "")) {
+        case index_file::WriteResult::OK:
+            return DBStatus::OK;
+        case index_file::WriteResult::ALREADY_EXISTS:
+            return DBStatus::TABLE_ALREADY_EXISTS;
+        case index_file::WriteResult::IO_ERROR:
+            return DBStatus::IO_ERROR;
+    }
+    return DBStatus::IO_ERROR;
 }
 
 DBStatus StorageEngine::dropSchema(const std::string& dbname,
