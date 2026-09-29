@@ -13632,6 +13632,20 @@ DBStatus StorageEngine::renameDatabase(const std::string& oldName,
         return DBStatus::TABLE_ALREADY_EXISTS;
     }
     if (targetEc) return DBStatus::IO_ERROR;
+    const auto oldArchive = std::filesystem::path(
+        dbPath(oldName).string() + ".archive");
+    const auto newArchive = std::filesystem::path(
+        dbPath(newName).string() + ".archive");
+    targetEc.clear();
+    const bool archiveExists = pathEntryExists(oldArchive, targetEc);
+    if (targetEc) return DBStatus::IO_ERROR;
+    // The target archive name is reserved even if the source has no archive.
+    // Otherwise the renamed database silently inherits unrelated WAL files.
+    targetEc.clear();
+    if (pathEntryExists(newArchive, targetEc)) {
+        return DBStatus::TABLE_ALREADY_EXISTS;
+    }
+    if (targetEc) return DBStatus::IO_ERROR;
     if (catalogService_ && !catalogService_->persistAll()) {
         return DBStatus::IO_ERROR;
     }
@@ -13645,18 +13659,6 @@ DBStatus StorageEngine::renameDatabase(const std::string& oldName,
     resetRuntimeDatabaseStats(oldName);
     resetSqlDatabaseStats(oldName);
 
-    const auto oldArchive = std::filesystem::path(
-        dbPath(oldName).string() + ".archive");
-    const auto newArchive = std::filesystem::path(
-        dbPath(newName).string() + ".archive");
-    const bool archiveExists = std::filesystem::exists(oldArchive);
-    if (archiveExists) {
-        targetEc.clear();
-        if (pathEntryExists(newArchive, targetEc)) {
-            return DBStatus::TABLE_ALREADY_EXISTS;
-        }
-        if (targetEc) return DBStatus::IO_ERROR;
-    }
     std::error_code ec;
     if (archiveExists) {
         std::filesystem::rename(oldArchive, newArchive, ec);

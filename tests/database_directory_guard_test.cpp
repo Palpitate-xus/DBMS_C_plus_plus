@@ -101,6 +101,18 @@ int main() {
     fs::remove(dangling);
     fs::remove(targetArchive);
     fs::remove_all(oldArchive);
+
+    // A target archive belongs to the target name even when the source
+    // database has never produced an archive. Do not inherit its WAL files.
+    fs::create_directory(targetArchive);
+    std::ofstream(targetArchive + "/keep.wal") << "unrelated archived WAL";
+    assert(engine.renameDatabase(valid, ordinaryTarget) ==
+           dbms::DBStatus::TABLE_ALREADY_EXISTS);
+    assert(engine.databaseExists(valid));
+    assert(!engine.databaseExists(ordinaryTarget));
+    assert(fs::exists(targetArchive + "/keep.wal"));
+    fs::remove_all(targetArchive);
+
     assert(engine.dropDatabase(valid) == dbms::DBStatus::OK);
     fs::remove_all(ordinary);
     fs::remove(regularFile);

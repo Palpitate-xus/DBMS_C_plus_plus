@@ -18,6 +18,7 @@ def main():
     ordinary = "path_guard_ordinary"
     alias = "path_guard_alias"
     occupied = "path_guard_occupied"
+    archive_target = "path_guard_archive_target"
     valid = "path_guard_valid"
 
     def query(sql):
@@ -47,6 +48,15 @@ def main():
         expect(f"ALTER DATABASE {valid} RENAME TO {occupied};", "42P04")
         assert (data_dir / valid).is_dir()
         assert (data_dir / occupied).is_dir()
+
+        archive = data_dir / (archive_target + ".archive")
+        archive.mkdir()
+        archived_wal = archive / "keep.wal"
+        archived_wal.write_text("unrelated archive")
+        expect(f"ALTER DATABASE {valid} RENAME TO {archive_target};", "42P04")
+        assert (data_dir / valid).is_dir()
+        assert not (data_dir / archive_target).exists()
+        assert archived_wal.read_text() == "unrelated archive"
         expect("DROP DATABASE " + valid + ";", None)
         print("[DATABASE DIRECTORY GUARD PROTOCOL E2E] passed")
     finally:
