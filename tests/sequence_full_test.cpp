@@ -662,6 +662,10 @@ static void test_sequence_numeric_input_fails_closed() {
     assert(!parser.parse(
         "CREATE SEQUENCE overflow START -9223372036854775809").success);
 
+    for (const auto& entry : std::filesystem::directory_iterator(".")) {
+        const auto name = entry.path().filename().string();
+        assert(name.rfind(db + ".txn_backup.", 0) != 0);
+    }
     dbms::StorageEngine restarted;
     assert(restarted.nextval(db, "good") == 2);
     assert(restarted.nextval(db, "descending") == -6);

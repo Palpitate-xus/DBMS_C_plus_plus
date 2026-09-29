@@ -44054,8 +44054,19 @@ void StorageEngine::discardTransactionBackup(const std::string& dbname) {
     if (!context.txnBackupPath.empty()) {
         const auto expected = transactionBackupPath(
             dbname, context.currentTxnId);
-        if (std::filesystem::path(context.txnBackupPath) == expected) {
-            (void)discardOwnedPhysicalBackup(expected, dbname);
+        const std::filesystem::path backup(context.txnBackupPath);
+        const std::string prefix = dbname + ".txn_backup.";
+        const std::string name = backup.filename().string();
+        const bool ownedBackupName = backup.parent_path().empty() &&
+            name.rfind(prefix, 0) == 0 && name.size() > prefix.size() &&
+            std::all_of(name.begin() + prefix.size(), name.end(),
+                        [](unsigned char ch) { return std::isdigit(ch) != 0; });
+        // An auto-DDL error can clear currentTxnId before terminal cleanup.
+        // The saved exact path remains authoritative in that case; validate
+        // its generated name and physical-backup identity before removal.
+        if (ownedBackupName &&
+            (context.currentTxnId == 0 || backup == expected)) {
+            (void)discardOwnedPhysicalBackup(backup, dbname);
         }
         context.txnBackupPath.clear();
     }
