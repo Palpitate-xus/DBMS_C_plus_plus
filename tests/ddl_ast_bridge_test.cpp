@@ -20,7 +20,23 @@ extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
+static void cleanup(const std::string& db) {
+    if (g_engine.databaseExists(db)) {
+        const auto status = g_engine.dropDatabase(db);
+        assert(status == dbms::DBStatus::OK ||
+               (status == dbms::DBStatus::IO_ERROR && !fs::exists(db)));
+    }
+    // Remove a possible incomplete non-database directory without racing a
+    // live allocator's extent-marker temporary files. A missing child after
+    // the storage engine has closed its caches is harmless.
+    std::error_code error;
+    fs::remove_all(db, error);
+    if (error == std::errc::no_such_file_or_directory) {
+        error.clear();
+        fs::remove_all(db, error);
+    }
+    assert(!error && !fs::exists(db));
+}
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
