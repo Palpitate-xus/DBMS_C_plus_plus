@@ -13086,8 +13086,7 @@ static map<string, DatabaseOptionInfo> loadDatabaseOptions() {
 }
 
 static bool saveDatabaseOptions(const map<string, DatabaseOptionInfo>& options) {
-    ofstream out(databaseOptionsPath(), ios::trunc);
-    if (!out) return false;
+    ostringstream out;
     for (const auto& kv : options) {
         const auto& info = kv.second;
         out << catalogEscape(info.name) << "|"
@@ -13095,7 +13094,7 @@ static bool saveDatabaseOptions(const map<string, DatabaseOptionInfo>& options) 
             << catalogEscape(info.options) << "|"
             << catalogEscape(info.definition) << "\n";
     }
-    return true;
+    return dbms::index_file::writeAtomically(databaseOptionsPath(), out.str());
 }
 
 static bool handleAlterDatabase(const string& sql, Session& s) {
@@ -13156,17 +13155,19 @@ static bool handleAlterDatabase(const string& sql, Session& s) {
                  << ")" << endl;
             return true;
         }
-        auto it = dbOptions.find(dbname);
-        if (it != dbOptions.end()) {
-            auto info = it->second;
-            dbOptions.erase(it);
-            info.name = newName;
-            info.definition = sql;
-            dbOptions[newName] = info;
-            if (!saveDatabaseOptions(dbOptions)) {
-                cout << "WARNING: database options metadata could not be "
-                        "updated after rename" << endl;
+        auto info = ensureInfo();
+        dbOptions.erase(dbname);
+        info.name = newName;
+        info.definition = sql;
+        dbOptions[newName] = info;
+        if (!saveDatabaseOptions(dbOptions)) {
+            if (g_engine.renameDatabase(newName, dbname) != DBStatus::OK) {
+                cout << "ERROR: database rename metadata failed and physical "
+                        "rollback failed (SQLSTATE 58030)" << endl;
+                return true;
             }
+            cout << "ERROR: ALTER DATABASE failed (SQLSTATE 58030)" << endl;
+            return true;
         }
         cout << "Database " << dbname << " renamed to " << newName << endl;
         return false;
@@ -13177,7 +13178,7 @@ static bool handleAlterDatabase(const string& sql, Session& s) {
     if (tokens.size() >= 4 && tokens[1] == "owner" && tokens[2] == "to") {
         info.owner = tokens[3];
         if (!saveDatabaseOptions(dbOptions)) {
-            cout << "Alter database failed" << endl;
+            cout << "ERROR: ALTER DATABASE failed (SQLSTATE 58030)" << endl;
             return true;
         }
         cout << "Database " << dbname << " owner changed" << endl;
@@ -13187,7 +13188,7 @@ static bool handleAlterDatabase(const string& sql, Session& s) {
         size_t actionPos = findTopLevelKeyword(rest, tokens[1]);
         info.options = (actionPos == string::npos) ? tokens[1] : trim(rest.substr(actionPos));
         if (!saveDatabaseOptions(dbOptions)) {
-            cout << "Alter database failed" << endl;
+            cout << "ERROR: ALTER DATABASE failed (SQLSTATE 58030)" << endl;
             return true;
         }
         cout << "Database " << dbname << " options updated" << endl;
