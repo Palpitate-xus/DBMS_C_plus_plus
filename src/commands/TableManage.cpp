@@ -23975,22 +23975,30 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
 bool StorageEngine::anyRowMatches(const std::string& dbname,
                                   const std::string& tablename,
                                   const std::vector<Condition>& conds,
-                                  bool* scanFailed) {
-    return !filterRows(dbname, tablename, conds, nullptr, scanFailed).empty();
+                                  bool* scanFailed,
+                                  bool* indexReadFailed) {
+    return !filterRows(dbname, tablename, conds, nullptr, scanFailed,
+                      indexReadFailed).empty();
 }
 
 std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                                              const std::string& tablename,
                                              const std::vector<Condition>& conds,
                                              bool* usedIndex,
-                                             bool* scanFailed) {
+                                             bool* scanFailed,
+                                             bool* indexReadFailed) {
     std::set<int64_t> ids;
     if (usedIndex) *usedIndex = false;
     if (scanFailed) *scanFailed = false;
+    if (indexReadFailed) *indexReadFailed = false;
     auto failScan = [&]() {
         ids.clear();
         if (scanFailed) *scanFailed = true;
         return ids;
+    };
+    auto failIndexScan = [&]() {
+        if (indexReadFailed) *indexReadFailed = true;
+        return failScan();
     };
     TableSchema tbl = getTableSchema(dbname, tablename);
     const auto secondaryMetadata = getIndexMetadata(dbname, tablename);
@@ -24120,10 +24128,11 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                 : c.value;
             if (hasPK) {
                 BPTree* idx = getPKIndex(dbname, tablename);
-                if (idx) {
-                    int64_t val = -1;
-                    if (idx->search(searchValue, val)) ids.insert(val);
-                }
+                if (!idx) return failIndexScan();
+                int64_t val = -1;
+                const auto status = idx->searchChecked(searchValue, val);
+                if (status == BPTree::SearchResult::Error) return failIndexScan();
+                if (status == BPTree::SearchResult::Found) ids.insert(val);
             } else {
                 // Try hash index first (O(1) equality lookup)
                 HashIndex* hidx = getHashIndex(dbname, tablename, c.colName);
@@ -24134,10 +24143,11 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                 // Fallback to B+ tree secondary index
                 if (ids.empty() && hasCompleteSecondaryIndex(c.colName)) {
                     BPTree* secIdx = getSecondaryIndex(dbname, tablename, c.colName);
-                    if (secIdx) {
-                        auto vals = secIdx->searchMulti(searchValue);
-                        for (int64_t v : vals) ids.insert(v);
-                    }
+                    if (!secIdx) return failIndexScan();
+                    std::vector<int64_t> vals;
+                    if (!secIdx->searchMultiChecked(searchValue, vals))
+                        return failIndexScan();
+                    for (int64_t v : vals) ids.insert(v);
                 }
                 // Try expression index (e.g. UPPER(name) = 'FOO')
                 if (ids.empty()) {
@@ -24171,8 +24181,12 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                                         } else if (meta.exprFunc == "LOWER") {
                                             for (char& ch : searchVal) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
                                         }
-                                        auto vals = exprIdx->searchMulti(searchVal);
+                                        std::vector<int64_t> vals;
+                                        if (!exprIdx->searchMultiChecked(searchVal, vals))
+                                            return failIndexScan();
                                         for (int64_t v : vals) ids.insert(v);
+                                    } else {
+                                        return failIndexScan();
                                     }
                                     break;
                                 }
@@ -28997,6 +29011,7 @@ std::vector<std::string> StorageEngine::query(
     std::vector<std::pair<int64_t, std::string>> matchRows;
     bool usedIndex = false;
     bool scanFailed = false;
+    bool indexReadFailed = false;
     if (enforceRls) {
         const auto targetParts = tbl.partitionType == TableSchema::PartitionType::None
             ? std::vector<std::string>{}
@@ -29027,7 +29042,8 @@ std::vector<std::string> StorageEngine::query(
             if (match) matchRows.emplace_back(encodeRid(pid, sid), std::move(row));
         }, queryView, targetParts)) scanFailed = true;
     } else {
-        auto ids = filterRows(dbname, tablename, conds, &usedIndex, &scanFailed);
+        auto ids = filterRows(dbname, tablename, conds, &usedIndex, &scanFailed,
+                              &indexReadFailed);
         for (int64_t rid : ids) {
             std::string row;
             if (readVisibleRowByRid(dbname, pa, rid, row, tbl, queryView)) {
@@ -29037,6 +29053,10 @@ std::vector<std::string> StorageEngine::query(
     }
     if (scanFailed) {
         lockManager_.unlock(tablename);
+        if (indexReadFailed) {
+            throw DbError("XX001", "B-tree index read failed for relation \"" +
+                tablename + "\"");
+        }
         return result;
     }
 
@@ -33489,12 +33509,14 @@ std::vector<std::string> StorageEngine::queryExpr(
     auto conds = parseConditions(conditions);
     std::vector<std::pair<int64_t, std::string>> matchRows;
     bool scanFailed = false;
+    bool indexReadFailed = false;
     if (conds.empty()) {
         if (!forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
             matchRows.emplace_back(encodeRid(pid, sid), std::string(data, len));
         })) scanFailed = true;
     } else {
-        auto ids = filterRows(dbname, tablename, conds, nullptr, &scanFailed);
+        auto ids = filterRows(dbname, tablename, conds, nullptr, &scanFailed,
+                              &indexReadFailed);
         for (int64_t rid : ids) {
             std::string row;
             if (readRowByRid(pa, rid, row, tbl)) {
@@ -33503,6 +33525,10 @@ std::vector<std::string> StorageEngine::queryExpr(
         }
     }
     if (scanFailed) {
+        if (indexReadFailed) {
+            throw DbError("XX001", "B-tree index read failed for relation \"" +
+                tablename + "\"");
+        }
         return result;
     }
 
@@ -34000,9 +34026,15 @@ std::vector<std::string> StorageEngine::aggregate(
 
     auto conds = parseConditions(conditions);
     bool scanFailed = false;
-    auto ids = filterRows(dbname, tablename, conds, nullptr, &scanFailed);
+    bool indexReadFailed = false;
+    auto ids = filterRows(dbname, tablename, conds, nullptr, &scanFailed,
+                          &indexReadFailed);
     if (scanFailed) {
         lockManager_.unlock(tablename);
+        if (indexReadFailed) {
+            throw DbError("XX001", "B-tree index read failed for relation \"" +
+                tablename + "\"");
+        }
         return result;
     }
     std::vector<int64_t> matchIds(ids.begin(), ids.end());
@@ -34625,16 +34657,22 @@ std::vector<std::string> StorageEngine::groupAggregate(
     auto conds = parseConditions(conditions);
     std::vector<int64_t> matchIds;
     bool scanFailed = false;
+    bool indexReadFailed = false;
     if (conds.empty()) {
         if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId, [[maybe_unused]] const char* data, [[maybe_unused]] size_t len) {
             matchIds.push_back(encodeRid(pageId, slotId));
         })) scanFailed = true;
     } else {
-        auto ids = filterRows(dbname, tablename, conds, nullptr, &scanFailed);
+        auto ids = filterRows(dbname, tablename, conds, nullptr, &scanFailed,
+                              &indexReadFailed);
         matchIds.assign(ids.begin(), ids.end());
     }
     if (scanFailed) {
         lockManager_.unlock(tablename);
+        if (indexReadFailed) {
+            throw DbError("XX001", "B-tree index read failed for relation \"" +
+                tablename + "\"");
+        }
         return result;
     }
 
@@ -35180,16 +35218,22 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
     auto conds = parseConditions(conditions);
     std::vector<int64_t> matchIds;
     bool scanFailed = false;
+    bool indexReadFailed = false;
     if (conds.empty()) {
         if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId, [[maybe_unused]] const char* data, [[maybe_unused]] size_t len) {
             matchIds.push_back(encodeRid(pageId, slotId));
         })) scanFailed = true;
     } else {
-        auto ids = filterRows(dbname, tablename, conds, nullptr, &scanFailed);
+        auto ids = filterRows(dbname, tablename, conds, nullptr, &scanFailed,
+                              &indexReadFailed);
         matchIds.assign(ids.begin(), ids.end());
     }
     if (scanFailed) {
         lockManager_.unlock(tablename);
+        if (indexReadFailed) {
+            throw DbError("XX001", "B-tree index read failed for relation \"" +
+                tablename + "\"");
+        }
         return result;
     }
 

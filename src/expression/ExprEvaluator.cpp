@@ -10823,7 +10823,13 @@ void ExprEvaluator::registerBuiltins() {
 
         auto conds = dbms::StorageEngine::parseConditions(condTexts);
         bool scanFailed = false;
-        bool any = g_engine.anyRowMatches(currentDB_, table, conds, &scanFailed);
+        bool indexReadFailed = false;
+        bool any = g_engine.anyRowMatches(
+            currentDB_, table, conds, &scanFailed, &indexReadFailed);
+        if (indexReadFailed) {
+            throw DbError("XX001", "B-tree index read failed for relation \"" +
+                table + "\"");
+        }
         (void)scanFailed;
         return ExprValue("boolean", any ? "t" : "f", false);
     };

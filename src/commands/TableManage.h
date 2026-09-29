@@ -1815,7 +1815,8 @@ public:
     // EXISTS(subquery) support: does any row of the table satisfy
     // the parsed conditions?  Delegates to filterRows.
     bool anyRowMatches(const std::string& dbname, const std::string& tablename,
-                       const std::vector<Condition>& conds, bool* scanFailed = nullptr);
+                       const std::vector<Condition>& conds, bool* scanFailed = nullptr,
+                       bool* indexReadFailed = nullptr);
 
 private:
     // Copy a physical generation after the caller has acquired the database
@@ -1834,7 +1835,8 @@ private:
     std::set<int64_t> filterRows(const std::string& dbname, const std::string& tablename,
                                  const std::vector<Condition>& conds,
                                  bool* usedIndex = nullptr,
-                                 bool* scanFailed = nullptr);
+                                 bool* scanFailed = nullptr,
+                                 bool* indexReadFailed = nullptr);
 
     // Referential actions already know the physical rows selected while the
     // referenced relation is locked. Keep that identity inside the storage

@@ -419,6 +419,26 @@ void ParallelTableScanOp::close() {
 // IndexScanOp
 // ========================================================================
 
+static bool lookupBtreeKeyChecked(BPTree* index, const std::string& key,
+                                  int64_t& rid) {
+    const auto status = index->searchChecked(key, rid);
+    if (status == BPTree::SearchResult::Error) {
+        throw DbError("XX001", "invalid B-tree traversal in index \"" +
+            index->filePath().filename().string() + "\"");
+    }
+    return status == BPTree::SearchResult::Found;
+}
+
+static std::vector<int64_t> lookupBtreeMultiChecked(
+        BPTree* index, const std::string& key) {
+    std::vector<int64_t> rids;
+    if (!index->searchMultiChecked(key, rids)) {
+        throw DbError("XX001", "invalid B-tree traversal in index \"" +
+            index->filePath().filename().string() + "\"");
+    }
+    return rids;
+}
+
 IndexScanOp::IndexScanOp(StorageEngine* engine, const std::string& dbname,
                           const std::string& tablename, const std::string& colname,
                           const std::string& value)
@@ -445,17 +465,18 @@ bool IndexScanOp::open() {
     }
     isPK_ = (pkIdx < tbl_.len);
 
+    BPTree* idx = isPK_
+        ? engine_->getPKIndex(dbname_, tablename_)
+        : engine_->getSecondaryIndex(dbname_, tablename_, colname_);
+    if (!idx || !idx->isOpen()) {
+        throw DbError("XX001", "could not open B-tree index for relation \"" +
+            tablename_ + "\"");
+    }
     if (isPK_) {
-        BPTree* idx = engine_->getPKIndex(dbname_, tablename_);
-        if (idx) {
-            int64_t rid = 0;
-            if (idx->search(value_, rid)) rids_.push_back(rid);
-        }
+        int64_t rid = 0;
+        if (lookupBtreeKeyChecked(idx, value_, rid)) rids_.push_back(rid);
     } else {
-        BPTree* idx = engine_->getSecondaryIndex(dbname_, tablename_, colname_);
-        if (idx) {
-            rids_ = idx->searchMulti(value_);
-        }
+        rids_ = lookupBtreeMultiChecked(idx, value_);
     }
     pos_ = 0;
     if (!statsRecorded_) {
@@ -533,7 +554,7 @@ static bool collectEqualityIndexCandidates(
         auto* index = engine->getPKIndex(dbname, tablename);
         if (!index) return false;
         int64_t rid = 0;
-        if (index->search(condition.value, rid)) candidates.insert(rid);
+        if (lookupBtreeKeyChecked(index, condition.value, rid)) candidates.insert(rid);
         return true;
     }
 
@@ -556,7 +577,8 @@ static bool collectEqualityIndexCandidates(
 
     auto* index = engine->getSecondaryIndex(dbname, tablename, condition.colName);
     if (!index) return false;
-    for (int64_t rid : index->searchMulti(condition.value)) candidates.insert(rid);
+    for (int64_t rid : lookupBtreeMultiChecked(index, condition.value))
+        candidates.insert(rid);
     return true;
 }
 

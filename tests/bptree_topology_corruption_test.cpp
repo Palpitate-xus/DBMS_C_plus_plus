@@ -67,6 +67,29 @@ void cleanup(const std::string& path) {
     std::filesystem::remove(path + ".tde", ec);
 }
 
+void test_checked_lookup_distinguishes_absence() {
+    const std::string path = "bptree_checked_empty.idx";
+    cleanup(path);
+    dbms::BPTree tree(path);
+    assert(tree.open());
+    int64_t value = 0;
+    std::vector<int64_t> values{99};
+    assert(tree.searchChecked("missing", value) ==
+           dbms::BPTree::SearchResult::NotFound);
+    assert(tree.searchMultiChecked("missing", values) && values.empty());
+    assert(tree.rangeScanChecked("a", "z", values) && values.empty());
+    assert(tree.allValuesChecked(values) && values.empty());
+    assert(tree.insert("key", 11));
+    assert(tree.searchChecked("key", value) == dbms::BPTree::SearchResult::Found);
+    assert(value == 11);
+    assert(tree.searchChecked("missing", value) ==
+           dbms::BPTree::SearchResult::NotFound);
+    tree.close();
+    assert(tree.searchChecked("key", value) == dbms::BPTree::SearchResult::Error);
+    assert(!tree.searchMultiChecked("key", values));
+    cleanup(path);
+}
+
 void test_internal_page_cycle_fails_closed() {
     const std::string path = "/tmp/bptree_internal_cycle.idx";
     cleanup(path);
@@ -83,6 +106,13 @@ void test_internal_page_cycle_fails_closed() {
     assert(tree.searchMulti("key").empty());
     assert(tree.rangeScan("a", "z").empty());
     assert(tree.allValues().empty());
+    assert(tree.searchChecked("key", value) == dbms::BPTree::SearchResult::Error);
+    std::vector<int64_t> values{99};
+    assert(!tree.searchMultiChecked("key", values) && values.empty());
+    values = {99};
+    assert(!tree.rangeScanChecked("a", "z", values) && values.empty());
+    values = {99};
+    assert(!tree.allValuesChecked(values) && values.empty());
     assert(!tree.insert("key", 1));
     assert(!tree.insertMulti("key", 1));
     assert(!tree.remove("key"));
@@ -103,6 +133,8 @@ void test_leaf_chain_cycle_and_type_confusion_fail_closed() {
         dbms::BPTree tree(path);
         assert(tree.open());
         assert(tree.searchMulti("key").empty());
+        std::vector<int64_t> values{99};
+        assert(!tree.searchMultiChecked("key", values) && values.empty());
         tree.close();
     }
 
@@ -115,6 +147,8 @@ void test_leaf_chain_cycle_and_type_confusion_fail_closed() {
         dbms::BPTree tree(path);
         assert(tree.open());
         assert(tree.searchMulti("key").empty());
+        std::vector<int64_t> values{99};
+        assert(!tree.searchMultiChecked("key", values) && values.empty());
         tree.close();
     }
     cleanup(path);
@@ -123,6 +157,7 @@ void test_leaf_chain_cycle_and_type_confusion_fail_closed() {
 }  // namespace
 
 int main() {
+    test_checked_lookup_distinguishes_absence();
     test_internal_page_cycle_fails_closed();
     test_leaf_chain_cycle_and_type_confusion_fail_closed();
     std::cout << "[BPTREE TOPOLOGY] cycles and invalid leaf links rejected OK\n";

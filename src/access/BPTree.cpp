@@ -383,11 +383,16 @@ size_t upperBoundIdx(const std::vector<std::string>& keys, size_t count,
 } // namespace
 
 bool BPTree::search(const std::string& key, int64_t& value) const {
+    return searchChecked(key, value) == SearchResult::Found;
+}
+
+BPTree::SearchResult BPTree::searchChecked(
+        const std::string& key, int64_t& value) const {
     std::shared_lock<std::shared_mutex> treeLock(treeMutex_);
-    if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return false;
+    if (!bp_ || !bp_->isOpen()) return SearchResult::Error;
+    if (header_.rootPage == 0) return SearchResult::NotFound;
     TraversalPath visited;
-    return searchNode(header_.rootPage, normalizeKey(key), value, visited) ==
-           SearchResult::Found;
+    return searchNode(header_.rootPage, normalizeKey(key), value, visited);
 }
 
 BPTree::SearchResult BPTree::searchNode(
@@ -470,13 +475,22 @@ bool BPTree::insert(const std::string& key, int64_t value) {
 // Multi-value search (for secondary indexes with duplicate keys)
 // ========================================================================
 std::vector<int64_t> BPTree::searchMulti(const std::string& key) const {
-    std::shared_lock<std::shared_mutex> treeLock(treeMutex_);
     std::vector<int64_t> results;
-    if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return results;
+    if (!searchMultiChecked(key, results)) return {};
+    return results;
+}
+
+bool BPTree::searchMultiChecked(const std::string& key,
+                               std::vector<int64_t>& values) const {
+    std::shared_lock<std::shared_mutex> treeLock(treeMutex_);
+    values.clear();
+    std::vector<int64_t> results;
+    if (!bp_ || !bp_->isOpen()) return false;
+    if (header_.rootPage == 0) return true;
     const std::string normalizedKey = normalizeKey(key);
     std::unordered_set<uint32_t> visited;
     auto nodeOpt = readNode(header_.rootPage);
-    if (!nodeOpt) return results;
+    if (!nodeOpt) return false;
     visited.insert(header_.rootPage);
     Node node = std::move(*nodeOpt);
     while (!node.isLeaf) {
@@ -484,11 +498,11 @@ std::vector<int64_t> BPTree::searchMulti(const std::string& key) const {
         // may span multiple leaves after a split; using >= here would start
         // at the rightmost equal separator and silently miss earlier rows.
         const size_t i = lowerBoundIdx(node.keys, node.numKeys, normalizedKey);
-        if (i >= node.children.size()) return results;
+        if (i >= node.children.size()) return false;
         const uint32_t nextPage = node.children[i];
-        if (!visited.insert(nextPage).second) return {};
+        if (!visited.insert(nextPage).second) return false;
         auto next = readNode(nextPage);
-        if (!next) return {};
+        if (!next) return false;
         node = std::move(*next);
     }
     // Scan leaf for matching keys (including duplicates)
@@ -499,12 +513,13 @@ std::vector<int64_t> BPTree::searchMulti(const std::string& key) const {
             }
         }
         if (node.nextLeaf == 0) break;
-        if (!visited.insert(node.nextLeaf).second) return {};
+        if (!visited.insert(node.nextLeaf).second) return false;
         auto next = readNode(node.nextLeaf);
-        if (!next || !next->isLeaf) return {};
+        if (!next || !next->isLeaf) return false;
         node = std::move(*next);
     }
-    return results;
+    values = std::move(results);
+    return true;
 }
 
 bool BPTree::insertMulti(const std::string& key, int64_t value) {
@@ -698,15 +713,26 @@ BPTree::RemoveResult BPTree::removeFromNode(
 // Range scan
 // ========================================================================
 std::vector<int64_t> BPTree::rangeScan(const std::string& startKey, const std::string& endKey) const {
-    std::shared_lock<std::shared_mutex> treeLock(treeMutex_);
     std::vector<int64_t> result;
-    if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return result;
+    if (!rangeScanChecked(startKey, endKey, result)) return {};
+    return result;
+}
+
+bool BPTree::rangeScanChecked(const std::string& startKey,
+                             const std::string& endKey,
+                             std::vector<int64_t>& values) const {
+    std::shared_lock<std::shared_mutex> treeLock(treeMutex_);
+    values.clear();
+    std::vector<int64_t> result;
+    if (!bp_ || !bp_->isOpen()) return false;
+    if (header_.rootPage == 0) return true;
     const std::string normalizedStart = normalizeKey(startKey);
     const std::string normalizedEnd = normalizeKey(endKey);
     std::unordered_set<uint32_t> visited;
     if (!collectRange(header_.rootPage, normalizedStart, normalizedEnd, result,
-                      visited)) return {};
-    return result;
+                      visited)) return false;
+    values = std::move(result);
+    return true;
 }
 
 bool BPTree::collectRange(uint32_t pageNum, const std::string& startKey,
@@ -733,15 +759,13 @@ bool BPTree::collectRange(uint32_t pageNum, const std::string& startKey,
 }
 
 std::vector<int64_t> BPTree::allValues() const {
-    std::shared_lock<std::shared_mutex> treeLock(treeMutex_);
     std::vector<int64_t> result;
-    if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return result;
-    std::unordered_set<uint32_t> visited;
-    if (!collectRange(header_.rootPage, normalizeKey(""),
-                      std::string(BP_KEY_LEN, '\xFF'), result, visited)) {
-        return {};
-    }
+    if (!allValuesChecked(result)) return {};
     return result;
+}
+
+bool BPTree::allValuesChecked(std::vector<int64_t>& values) const {
+    return rangeScanChecked("", std::string(BP_KEY_LEN, '\xFF'), values);
 }
 
 } // namespace dbms

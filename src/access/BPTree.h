@@ -49,6 +49,17 @@ public:
     // Returns true if found, sets value.
     bool search(const std::string& key, int64_t& value) const;
 
+    // Checked reads distinguish a valid empty lookup from a failed traversal.
+    // The legacy bool/vector APIs remain available to mutation code that
+    // reports failures through DBStatus and statement rollback.
+    enum class SearchResult { Found, NotFound, Error };
+    SearchResult searchChecked(const std::string& key, int64_t& value) const;
+    bool searchMultiChecked(const std::string& key,
+                            std::vector<int64_t>& values) const;
+    bool rangeScanChecked(const std::string& startKey, const std::string& endKey,
+                          std::vector<int64_t>& values) const;
+    bool allValuesChecked(std::vector<int64_t>& values) const;
+
     // Multi-value search: returns all values for a key (allows duplicates)
     std::vector<int64_t> searchMulti(const std::string& key) const;
 
@@ -152,7 +163,6 @@ private:
 
     uint32_t allocPage();
 
-    enum class SearchResult { Found, NotFound, Error };
     enum class RemoveResult { Removed, NotFound, Error };
 
     // A valid order>=2 B+ tree backed by 32-bit page numbers cannot approach
