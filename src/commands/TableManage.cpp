@@ -39812,6 +39812,25 @@ bool StorageEngine::physicalBackup(const std::string& dbname,
 bool StorageEngine::physicalBackupLocked(
     const std::string& dbname, const std::string& backupPath,
     const MaintenanceProgress& progress, bool includeUnloggedMain) {
+    const auto destination = std::filesystem::path(backupPath);
+    const auto destinationParent = destination.parent_path().empty()
+        ? std::filesystem::path(".") : destination.parent_path();
+    std::error_code clusterPathError;
+    const bool clusterName = std::filesystem::equivalent(
+        destinationParent, std::filesystem::path("."), clusterPathError);
+    std::shared_ptr<std::shared_mutex> destinationNameMutex;
+    std::unique_lock<std::shared_mutex> destinationNameLock;
+    if (clusterName && destination.filename().string() != dbname) {
+        // CREATE/DROP/RENAME DATABASE use this process-wide name lock. Hold
+        // it from the first destination check through backup publication, so
+        // another StorageEngine cannot claim the name during the copy. Use a
+        // nonblocking attempt because the source name lock is already held.
+        destinationNameMutex = databaseTxnLockFor(
+            destination.filename().string());
+        destinationNameLock = std::unique_lock<std::shared_mutex>(
+            *destinationNameMutex, std::try_to_lock);
+        if (!destinationNameLock.owns_lock()) return false;
+    }
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname)) return false;
     // The lock lives outside the replaceable database generation, so marker
