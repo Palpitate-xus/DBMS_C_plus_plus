@@ -13063,6 +13063,11 @@ struct DatabaseOptionInfo {
     string definition;
 };
 
+// The options file is a single read-modify-write catalog for every database.
+// An atomic replacement protects readers from partial files, but concurrent
+// ALTER DATABASE commands must also serialize their entire update.
+static std::mutex g_databaseOptionsMutex;
+
 static std::filesystem::path databaseOptionsPath() {
     return ".pg_database_options";
 }
@@ -13099,6 +13104,7 @@ static bool saveDatabaseOptions(const map<string, DatabaseOptionInfo>& options) 
 
 static bool handleAlterDatabase(const string& sql, Session& s) {
     if (!checkAdmin(s)) return true;
+    const std::lock_guard<std::mutex> optionsLock(g_databaseOptionsMutex);
     string rest = trim(sql.substr(14)); // after "alter database"
     vector<string> tokens = tokenize(rest);
     if (tokens.size() < 2) {
