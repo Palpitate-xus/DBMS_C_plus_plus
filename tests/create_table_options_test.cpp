@@ -18,7 +18,14 @@ extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
+static void cleanup(const std::string& path, bool database = true) {
+    if (!fs::exists(path)) return;
+    if (database) {
+        assert(g_engine.dropDatabase(path) == dbms::DBStatus::OK);
+    } else {
+        fs::remove_all(path);
+    }
+}
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -374,7 +381,7 @@ static void test_tablespace_option() {
     std::string db = testDbPath("opts_ts");
     std::string location = db + "_location";
     cleanup(db);
-    cleanup(location);
+    cleanup(location, false);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
     dbms::DdlExecutor ddl;
@@ -392,14 +399,16 @@ static void test_tablespace_option() {
     assert(fs::exists(fs::path(location) / db / "custom_t.dt"));
     assert(!fs::exists(fs::path(db) / "custom_t.dt"));
     assert(g_engine.insert(db, "custom_t", {{"id", "7"}}) == dbms::DBStatus::OK);
-    dbms::StorageEngine restarted;
-    size_t rows = 0;
-    restarted.forEachRow(db, "custom_t", [&](uint32_t, uint16_t, const char*, size_t) {
-        ++rows;
-    });
-    assert(rows == 1);
+    {
+        dbms::StorageEngine restarted;
+        size_t rows = 0;
+        restarted.forEachRow(db, "custom_t", [&](uint32_t, uint16_t, const char*, size_t) {
+            ++rows;
+        });
+        assert(rows == 1);
+    }
     cleanup(db);
-    cleanup(location);
+    cleanup(location, false);
     std::cout << "[OPTS] TABLESPACE stored in schema OK" << std::endl;
 }
 
