@@ -13125,7 +13125,12 @@ static bool handleAlterDatabase(const string& sql, Session& s) {
         return info;
     };
 
-    if (tokens.size() >= 4 && tokens[1] == "rename" && tokens[2] == "to") {
+    if (tokens.size() >= 3 && tokens[1] == "rename" && tokens[2] == "to") {
+        if (tokens.size() != 4) {
+            cout << "ERROR: invalid ALTER DATABASE RENAME TO syntax "
+                    "(SQLSTATE 42601)" << endl;
+            return true;
+        }
         string newName = tokens[3];
         if (s.currentDB == dbname) {
             cout << "ERROR: cannot rename the currently open database "
