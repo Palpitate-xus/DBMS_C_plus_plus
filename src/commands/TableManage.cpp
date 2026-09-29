@@ -18981,6 +18981,14 @@ DBStatus StorageEngine::alterTableTablespace(const std::string& dbname,
                         std::to_string(::getpid()) + "." +
                         std::to_string(moveSequence.fetch_add(
                             1, std::memory_order_relaxed)));
+                    std::error_code stagingEntryEc;
+                    if (pathEntryExists(staging, stagingEntryEc) ||
+                        stagingEntryEc) {
+                        rollbackMove();
+                        lockManager_.unlock(tablename);
+                        return stagingEntryEc ? DBStatus::IO_ERROR
+                                              : DBStatus::INVALID_VALUE;
+                    }
                     moveEc.clear();
                     if (sourceIsDirectory) {
                         std::filesystem::copy(entry.path(), staging,
@@ -18996,7 +19004,13 @@ DBStatus StorageEngine::alterTableTablespace(const std::string& dbname,
                              : syncRegularFileDurably(staging));
                     if (!stagedDurably) {
                         std::error_code ignored;
-                        std::filesystem::remove_all(staging, ignored);
+                        // If another actor occupied the path after the
+                        // precheck, copy did not create it. Never erase that
+                        // unrelated entry while handling the failed copy.
+                        if (moveEc != std::errc::file_exists &&
+                            moveEc != std::errc::is_a_directory) {
+                            std::filesystem::remove_all(staging, ignored);
+                        }
                         rollbackMove();
                         lockManager_.unlock(tablename);
                         return DBStatus::IO_ERROR;

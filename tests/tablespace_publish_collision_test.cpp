@@ -83,6 +83,32 @@ int main() {
         assert(engine.createTable(crossDatabase, simpleTable()) == DBStatus::OK);
         assert(engine.insert(crossDatabase, "items", {{"id", "9"}}) ==
                DBStatus::OK);
+        bool staleStagingCreated = false;
+        fs::path staleStaging;
+        const auto staleResult = engine.alterTableTablespace(
+            crossDatabase, "items", "cross",
+            [&](const fs::path& destination, bool staged) {
+                if (staged || staleStagingCreated) return;
+                // This is the first cross-device move in this isolated
+                // process, so the generated sequence suffix is zero.
+                staleStaging = fs::path(
+                    destination.string() + ".tablespace_move." +
+                    std::to_string(::getpid()) + ".0");
+                assert(fs::create_directory(staleStaging));
+                std::ofstream output(staleStaging / "keep", std::ios::binary);
+                output << "preexisting-staging";
+                assert(output.good());
+                staleStagingCreated = true;
+            });
+        assert(staleStagingCreated);
+        assert(staleResult != DBStatus::OK);
+        std::ifstream staleInput(staleStaging / "keep", std::ios::binary);
+        std::string staleBytes;
+        std::getline(staleInput, staleBytes);
+        assert(staleBytes == "preexisting-staging");
+        assertSourceIntact(engine, crossDatabase);
+        fs::remove_all(staleStaging);
+
         bool stagedCollision = false;
         const auto stagedResult = engine.alterTableTablespace(
             crossDatabase, "items", "cross",
