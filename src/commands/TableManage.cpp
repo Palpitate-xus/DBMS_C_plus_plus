@@ -18968,10 +18968,13 @@ DBStatus StorageEngine::alterTableTablespace(const std::string& dbname,
                 }
                 const bool sourceIsDirectory = entry.is_directory();
                 const auto destination = newDir / name;
-                if (std::filesystem::exists(destination)) {
+                std::error_code destinationEc;
+                if (pathEntryExists(destination, destinationEc) ||
+                    destinationEc) {
                     rollbackMove();
                     lockManager_.unlock(tablename);
-                    return DBStatus::INVALID_VALUE;
+                    return destinationEc ? DBStatus::IO_ERROR
+                                         : DBStatus::INVALID_VALUE;
                 }
                 std::error_code moveEc;
                 std::filesystem::rename(entry.path(), destination, moveEc);
