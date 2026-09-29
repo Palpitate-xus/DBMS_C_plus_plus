@@ -39239,7 +39239,16 @@ bool StorageEngine::archiveWal(const std::string& dbname) {
     WALManager* wal = getWAL(dbname);
     if (!wal) return false;
     auto archiveDir = walArchiveDir(dbname);
+    // An archive sidecar name is also a legal quoted database name. Serialize
+    // against CREATE of that name, then refuse any directory with a table
+    // list instead of placing WAL segments inside a live database.
+    const auto archiveNameMutex = databaseTxnLockFor(
+        archiveDir.filename().string());
+    std::unique_lock<std::shared_mutex> archiveNameLock(
+        *archiveNameMutex, std::try_to_lock);
+    if (!archiveNameLock.owns_lock()) return false;
     std::error_code ec;
+    if (pathEntryExists(archiveDir / "tlist.lst", ec) || ec) return false;
     std::filesystem::create_directories(archiveDir, ec);
     if (ec) return false;
     // Archive all segments that are marked .ready but not yet .done.
