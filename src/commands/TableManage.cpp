@@ -13465,9 +13465,8 @@ std::vector<std::string> StorageEngine::getDatabaseNames() const {
         } catch (...) { continue; }
         std::string dbname;
         try { dbname = entry.path().filename().string(); } catch (...) { continue; }
-        if (dbname.empty() || dbname[0] == '.' ||
-            dbname.find(".txn_backup") != std::string::npos ||
-            dbname.find(".archive") != std::string::npos) continue;
+        // Physical snapshots carry a backup marker; WAL archives have no
+        // table list. Name substrings alone also reject valid quoted names.
         if (!databaseExists(dbname)) continue;
         result.push_back(dbname);
     }
@@ -37971,17 +37970,11 @@ bool StorageEngine::recoverAllDatabases() {
     std::map<std::pair<std::string, uint64_t>, std::filesystem::path> preparedFiles;
     std::map<std::pair<std::string, uint64_t>,
              std::vector<LockManager::PreparedLockInfo>> preparedLocksByTxn;
+    // Use the same structural database check as DDL and enumeration. Backup
+    // images have a physical-backup marker, whereas a quoted database name
+    // may legitimately contain ".archive", ".txn_backup" or start with '.'.
     auto isDatabaseDirectory = [this](const std::string& name) {
-        if (name.empty() || name[0] == '.' ||
-            name.find(".txn_backup") != std::string::npos ||
-            name.find(".archive") != std::string::npos) return false;
-        try {
-            if (std::filesystem::exists(dbPath(name) / kPhysicalBackupMarker)) {
-                return false;
-            }
-            return std::filesystem::exists(tableListPath(name));
-        }
-        catch (...) { return false; }
+        return databaseExists(name);
     };
 
     for (const auto& entry : std::filesystem::directory_iterator(
@@ -38424,6 +38417,13 @@ bool StorageEngine::recoverAllDatabases() {
         if (inDoubtPreparedXids.count({dbname, xid})) continue;
 
         const auto backup = entry.path();
+        std::string backupDatabase;
+        if (!validPhysicalBackupSource(backup, backupDatabase) ||
+            backupDatabase != dbname) {
+            // A user database can legitimately have a backup-shaped quoted
+            // name. Never delete or restore it based on its name alone.
+            continue;
+        }
         if (committedXidsByDb[dbname].count(xid)) {
             std::error_code ec;
             std::filesystem::remove_all(backup, ec);
