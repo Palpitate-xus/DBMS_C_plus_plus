@@ -16705,6 +16705,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 cout << "Schema " << oldName << " not exist" << endl;
                 return true;
             }
+            if (res == DBStatus::FEATURE_NOT_SUPPORTED) {
+                cout << "ERROR: ALTER SCHEMA RENAME is not supported "
+                     << "(SQLSTATE 0A000)" << endl;
+                return true;
+            }
             if (res != DBStatus::OK) {
                 cout << "Rename schema failed" << endl;
                 return true;

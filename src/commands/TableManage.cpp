@@ -4874,47 +4874,11 @@ DBStatus StorageEngine::renameSchema(const std::string& dbname,
         return DBStatus::INVALID_ARGUMENT;
     }
     auto oldPath = schemaMarkerPath(dbname, oldname);
-    auto newPath = schemaMarkerPath(dbname, newname);
     if (!std::filesystem::exists(oldPath)) return DBStatus::TABLE_NOT_FOUND;
-    if (std::filesystem::exists(newPath)) return DBStatus::INVALID_VALUE;
-    std::filesystem::rename(oldPath, newPath);
-    // Rename all tables in the old schema
-    std::string oldPrefix = oldname + "__";
-    std::string newPrefix = newname + "__";
-    auto dbPath = std::filesystem::path(dbname);
-    for (const auto& entry : std::filesystem::directory_iterator(dbPath)) {
-        if (!entry.is_regular_file()) continue;
-        std::string name = entry.path().filename().string();
-        if (name.size() > 3 && name.substr(name.size() - 3) == ".dt") {
-            std::string tname = name.substr(0, name.size() - 3);
-            if (tname.size() > oldPrefix.size() && tname.substr(0, oldPrefix.size()) == oldPrefix) {
-                std::string rest = tname.substr(oldPrefix.size());
-                std::string newTname = newPrefix + rest;
-                // Rename .dt, .stc, .idx files
-                for (const char* ext : {".dt", ".stc", ".idx"}) {
-                    auto oldFile = dbPath / (tname + ext);
-                    auto newFile = dbPath / (newTname + ext);
-                    if (std::filesystem::exists(oldFile)) {
-                        std::filesystem::rename(oldFile, newFile);
-                    }
-                }
-                // Update tlist.lst
-                auto tlistPath = dbPath / "tlist.lst";
-                if (std::filesystem::exists(tlistPath)) {
-                    std::ifstream ifs(tlistPath);
-                    std::vector<std::string> lines;
-                    std::string line;
-                    while (std::getline(ifs, line)) lines.push_back(line);
-                    std::ofstream ofs(tlistPath);
-                    for (const auto& l : lines) {
-                        if (l == tname) ofs << newTname << '\n';
-                        else ofs << l << '\n';
-                    }
-                }
-            }
-        }
-    }
-    return DBStatus::OK;
+    // A namespace rename changes catalog identities, relation sidecars,
+    // dependencies and tablespace paths together. The former file-only move
+    // could overwrite an unrelated relation with the target physical prefix.
+    return DBStatus::FEATURE_NOT_SUPPORTED;
 }
 
 DBStatus StorageEngine::alterTableSetSchema(const std::string& dbname,
