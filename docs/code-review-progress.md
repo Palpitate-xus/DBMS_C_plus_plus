@@ -796,7 +796,9 @@
 | 817 | P0-03 / P0-04 / CAT-02 / CAT-20 | `dropSchema` 的 `RESTRICT` 不检查 schema 内现存表，直接移除 marker；`CASCADE` 只扫描数据库根目录 `.dt`，漏掉外部表空间表和无 heap 的分区父表，留下无 schema 的关系 | 改按持久表清单列出同 schema 关系：非级联且非空时拒绝，级联逐表调用 `dropTable` 并只在成功后删除 marker。新隔离 C++ 用例旧源码错误接受 `RESTRICT`，新源码保留原表且正确级联删除表空间关系；`ddl_ast_bridge_test`、`ddl_bridge_routing_test`、`tablespace_semantics_test` 与正式生产构建通过。视图、函数等其他对象依赖及崩溃原子性仍为 partial，完整脚本待复跑 | `227d0b16` |
 | 818 | P0-03 / P0-05 / CAT-20 | 第 814 项只堵住检查时已存在的表空间目标；检查后到 rename 之间仍可出现目标，同设备 `rename` 覆盖它；跨设备 staging 发布失败分支还无条件 `remove_all(destination)`，可删除并非本次创建的目标 | 直接移动与 staged 发布均改用 Linux 原子无覆盖 rename；只有真正发布成功而随后目录同步失败时才清理目标，非支持平台 fail-closed。新增发布点回调使同设备旧对象覆盖哨兵文件并失败，新对象返回冲突保留原表；跨设备注入非空目标目录验证发布失败不删除哨兵。两路径及既有表空间相邻测试通过，隔离连续 10 轮和正式生产构建通过。跨进程数据目录共享仍不支持，完整表空间崩溃原子性保持 partial；最新源码完整脚本和差分待复跑 | `8446ff9c` |
 
-2026-09-29 最新复验：截至第 817 项，最新源码正式构建、完整脚本 358/358 个 C++ 与 74/74 个协议/E2E 均退出码 0；同一生产二进制对真实 PostgreSQL 18.6 的 370 组差分 `failed=0`、退出码 0。第 816 项之前的完整脚本曾因 `ddl_ast_bridge_test` 清理竞态以 356/357 C++、74/74 E2E 退出码 1，不记作通过；第 811 项之前的一轮也因序列快照回退以 352/353 C++、72/72 E2E 退出码 1，不记作通过。总清单仍为 273 项，24 complete、128 partial、106 unverified、15 deferred_by_user；这些回归不能证明 PostgreSQL 18 功能族完整。未 push，GitHub Actions 仍仅有 `ci.yml.disabled`。
+2026-09-29 最新复验：截至第 818 项，最新源码正式构建、完整脚本 359/359 个 C++ 与 74/74 个协议/E2E 均退出码 0；同一生产二进制对真实 PostgreSQL 18.6 的 370 组差分 `failed=0`、退出码 0。总清单仍为 273 项，24 complete、128 partial、106 unverified、15 deferred_by_user；这些回归不能证明 PostgreSQL 18 功能族完整。未 push，GitHub Actions 仍仅有 `ci.yml.disabled`。
+
+2026-09-29 此前复验：截至第 817 项，最新源码正式构建、完整脚本 358/358 个 C++ 与 74/74 个协议/E2E 均退出码 0；同一生产二进制对真实 PostgreSQL 18.6 的 370 组差分 `failed=0`、退出码 0。第 816 项之前的完整脚本曾因 `ddl_ast_bridge_test` 清理竞态以 356/357 C++、74/74 E2E 退出码 1，不记作通过；第 811 项之前的一轮也因序列快照回退以 352/353 C++、72/72 E2E 退出码 1，不记作通过。
 
 2026-09-29 此前复验：截至第 808 项，最终源码正式构建、351 个 C++ 加 72 个协议/E2E 完整脚本、真实 PostgreSQL 18.6 的 370 组差分均退出码 0，差分 `failed=0`。总清单仍为 273 项，24 complete、128 partial、106 unverified、15 deferred_by_user；本批修复不改变功能族完整性口径。工作区未 push，GitHub Actions 仍仅有 `ci.yml.disabled`。
 
