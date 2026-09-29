@@ -13072,22 +13072,28 @@ static std::filesystem::path databaseOptionsPath() {
     return ".pg_database_options";
 }
 
-static map<string, DatabaseOptionInfo> loadDatabaseOptions() {
-    map<string, DatabaseOptionInfo> result;
-    ifstream in(databaseOptionsPath());
+static bool loadDatabaseOptions(map<string, DatabaseOptionInfo>& result) {
+    const auto path = databaseOptionsPath();
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec)) return !ec;
+    if (ec || !std::filesystem::is_regular_file(path, ec) || ec) return false;
+    ifstream in(path);
+    if (!in) return false;
     string line;
     while (getline(in, line)) {
         if (trim(line).empty()) continue;
         auto parts = splitByDelimiter(line, '|');
-        if (parts.size() < 4) continue;
+        if (parts.size() != 4) return false;
         DatabaseOptionInfo info;
         info.name = catalogUnescape(parts[0]);
         info.owner = catalogUnescape(parts[1]);
         info.options = catalogUnescape(parts[2]);
         info.definition = catalogUnescape(parts[3]);
-        if (!info.name.empty()) result[info.name] = info;
+        if (info.name.empty() || !result.emplace(info.name, info).second) {
+            return false;
+        }
     }
-    return result;
+    return !in.bad();
 }
 
 static bool saveDatabaseOptions(const map<string, DatabaseOptionInfo>& options) {
@@ -13117,7 +13123,11 @@ static bool handleAlterDatabase(const string& sql, Session& s) {
         return true;
     }
 
-    auto dbOptions = loadDatabaseOptions();
+    map<string, DatabaseOptionInfo> dbOptions;
+    if (!loadDatabaseOptions(dbOptions)) {
+        cout << "ERROR: cannot read database options (SQLSTATE 58030)" << endl;
+        return true;
+    }
     auto ensureInfo = [&]() -> DatabaseOptionInfo& {
         auto& info = dbOptions[dbname];
         if (info.name.empty()) info.name = dbname;

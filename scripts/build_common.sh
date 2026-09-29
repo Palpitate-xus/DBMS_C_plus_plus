@@ -92,6 +92,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/alter_database_rename_trailing_tokens_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/database_options_atomic_write_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/database_options_concurrent_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/database_options_read_failure_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cli_error_recovery_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/no_fake_compat_objects_test.py)
     DBMS_E2E_TESTS+=(tests/compat_fallback_registry_test.py)
