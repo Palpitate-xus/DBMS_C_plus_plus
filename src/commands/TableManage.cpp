@@ -39768,6 +39768,24 @@ static bool replaceablePhysicalBackupDestination(
            sourceDatabase == expectedDatabase;
 }
 
+static bool discardOwnedPhysicalBackup(
+    const std::filesystem::path& backup,
+    const std::string& database) {
+    if (backup.empty() || backup.parent_path() != std::filesystem::path{}) {
+        return false;
+    }
+    const auto nameMutex = databaseTxnLockFor(backup.filename().string());
+    std::unique_lock<std::shared_mutex> nameLock(
+        *nameMutex, std::try_to_lock);
+    if (!nameLock.owns_lock() ||
+        !replaceablePhysicalBackupDestination(backup, database)) {
+        return false;
+    }
+    std::error_code error;
+    std::filesystem::remove_all(backup, error);
+    return !error;
+}
+
 static uint64_t maintenancePathBytes(const std::filesystem::path& path) {
     std::error_code error;
     if (std::filesystem::is_regular_file(path, error)) {
@@ -42347,14 +42365,13 @@ bool StorageEngine::restoreDdlStatementBackup(
         physicalRestoreLocked(context.txnDB, backupPath);
     if (!restored) return false;
 
-    std::error_code error;
-    std::filesystem::remove_all(backup, error);
+    const bool discarded = discardOwnedPhysicalBackup(backup, context.txnDB);
     context.readView.commitLog = getCommitLog(context.txnDB);
     clearCatalogSnapshot();
     captureCatalogSnapshot();
-    if (error) {
+    if (!discarded) {
         std::cerr << "[ddl] restored statement snapshot but could not remove "
-                  << backup << ": " << error.message() << std::endl;
+                  << backup << std::endl;
     }
     return true;
 }
@@ -42371,8 +42388,7 @@ void StorageEngine::discardDdlStatementBackup(
         backup.filename().string().rfind(prefix, 0) != 0) {
         return;
     }
-    std::error_code error;
-    std::filesystem::remove_all(backup, error);
+    (void)discardOwnedPhysicalBackup(backup, context.txnDB);
 }
 
 DBStatus StorageEngine::commitTransaction() {
@@ -44019,8 +44035,7 @@ bool StorageEngine::restoreTransactionBackup(const std::string& dbname) {
     closeDatabaseCaches(dbname);
     const bool restored = physicalRestoreLocked(dbname, backup.string());
     if (restored) {
-        std::error_code ec;
-        std::filesystem::remove_all(backup, ec);
+        (void)discardOwnedPhysicalBackup(backup, dbname);
         context.txnBackupPath.clear();
         context.transactionBackupDirty = false;
         context.restoreBackupBeforeRowUndo = false;
@@ -44036,9 +44051,12 @@ bool StorageEngine::restoreTransactionBackup(const std::string& dbname) {
 void StorageEngine::discardTransactionBackup(const std::string& dbname) {
     if (dbname.empty()) return;
     auto& context = transactionContext();
-    std::error_code ec;
     if (!context.txnBackupPath.empty()) {
-        std::filesystem::remove_all(context.txnBackupPath, ec);
+        const auto expected = transactionBackupPath(
+            dbname, context.currentTxnId);
+        if (std::filesystem::path(context.txnBackupPath) == expected) {
+            (void)discardOwnedPhysicalBackup(expected, dbname);
+        }
         context.txnBackupPath.clear();
     }
     context.transactionBackupDirty = false;
@@ -44737,8 +44755,8 @@ DBStatus StorageEngine::commitPrepared(const std::string& xid) {
     transactionContext().txnLog.clear();
     transactionContext().specializedIndexTables.clear();
     transactionContext().savepoints.clear();
-    std::error_code backupEc;
-    std::filesystem::remove_all(transactionBackupPath(savedDB, savedTxnId), backupEc);
+    (void)discardOwnedPhysicalBackup(
+        transactionBackupPath(savedDB, savedTxnId), savedDB);
     lockManager_.unlockAll();
     lockManager_.releasePreparedLocks(savedTxnId);
     transactionContext().currentTxnId = 0;
@@ -44811,7 +44829,10 @@ DBStatus StorageEngine::rollbackPrepared(const std::string& xid) {
     // Temporarily restore state and use normal rollback
     transactionContext().currentTxnId = savedTxnId;
     transactionContext().txnDB = savedDB;
-    transactionContext().txnBackupPath = transactionBackupPath(savedDB, savedTxnId).string();
+    const auto preparedBackup = transactionBackupPath(savedDB, savedTxnId);
+    transactionContext().txnBackupPath =
+        replaceablePhysicalBackupDestination(preparedBackup, savedDB)
+            ? preparedBackup.string() : std::string{};
     transactionContext().txnIsolationLevel = record.isolation;
     transactionContext().inTransaction = true;
     transactionContext().txnLog.clear();
