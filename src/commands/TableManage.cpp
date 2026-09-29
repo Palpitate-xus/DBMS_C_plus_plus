@@ -13432,7 +13432,18 @@ bool StorageEngine::maintainSpecializedIndexesAfterMutation(
 
 bool StorageEngine::databaseExists(const std::string& dbname) const {
     if (dbname.empty() || !validStoredIdentifier(dbname, MAX_TABLE_NAME_LEN)) return false;
-    return std::filesystem::exists(dbPath(dbname));
+    const auto path = dbPath(dbname);
+    std::error_code ec;
+    if (std::filesystem::is_symlink(path, ec) || ec ||
+        !std::filesystem::is_directory(path, ec) || ec) {
+        return false;
+    }
+    const auto list = tableListPath(dbname);
+    if (std::filesystem::is_symlink(list, ec) || ec ||
+        !std::filesystem::is_regular_file(list, ec) || ec) {
+        return false;
+    }
+    return !std::filesystem::exists(path / kPhysicalBackupMarker, ec) && !ec;
 }
 
 std::vector<std::string> StorageEngine::getDatabaseNames() const {
@@ -13447,10 +13458,7 @@ std::vector<std::string> StorageEngine::getDatabaseNames() const {
         if (dbname.empty() || dbname[0] == '.' ||
             dbname.find(".txn_backup") != std::string::npos ||
             dbname.find(".archive") != std::string::npos) continue;
-        try {
-            if (std::filesystem::exists(dbPath(dbname) / kPhysicalBackupMarker) ||
-                !std::filesystem::exists(tableListPath(dbname))) continue;
-        } catch (...) { continue; }
+        if (!databaseExists(dbname)) continue;
         result.push_back(dbname);
     }
     return result;
@@ -13483,13 +13491,21 @@ DBStatus StorageEngine::createDatabase(const std::string& dbname, const std::str
     // An already-existing name is a duplicate even if its current users
     // hold shared transaction locks. Recheck after taking the name lock to
     // close the concurrent CREATE/DROP race for absent names.
-    if (databaseExists(dbname)) return DBStatus::TABLE_ALREADY_EXISTS;
+    std::error_code collisionEc;
+    if (std::filesystem::exists(dbPath(dbname), collisionEc)) {
+        return DBStatus::TABLE_ALREADY_EXISTS;
+    }
+    if (collisionEc) return DBStatus::IO_ERROR;
     const auto databaseMutex = databaseTxnLockFor(dbname);
     std::unique_lock<std::shared_mutex> databaseLock(
         *databaseMutex, std::try_to_lock);
     if (!databaseLock.owns_lock()) return DBStatus::DATABASE_IN_USE;
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
-    if (databaseExists(dbname)) return DBStatus::TABLE_ALREADY_EXISTS;
+    collisionEc.clear();
+    if (std::filesystem::exists(dbPath(dbname), collisionEc)) {
+        return DBStatus::TABLE_ALREADY_EXISTS;
+    }
+    if (collisionEc) return DBStatus::IO_ERROR;
     // Embedded callers and tests may remove a database directory directly.
     // Drop every file-backed cache before reusing the name; otherwise the
     // background WAL writer keeps stale descriptors and the new database can
