@@ -42047,17 +42047,6 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
         return DBStatus::OK;
     }
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    if (Session* session = currentSession();
-        session && session->currentDB == dbname) {
-        context.tempNamespaceAtTransactionStart =
-            session->tempNamespaceCreated;
-        context.tempTablesAtTransactionStart = session->tempTables;
-        context.tempTableOnCommitAtTransactionStart =
-            session->tempTableOnCommit;
-        context.tempTablesCreatedAtTransactionStart =
-            session->tempTablesCreatedInTransaction;
-    }
-
     context.databaseTxnMutex = databaseTxnLockFor(dbname);
     const int lockTimeoutMs = lockManager_.getLockTimeout();
     const auto acquireDatabaseLock = [lockTimeoutMs](auto& lock) {
@@ -42089,6 +42078,26 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
             return DBStatus::LOCK_CONFLICT;
         }
         context.databaseSharedLock = std::move(lock);
+    }
+
+    // DROP/RENAME can acquire the exclusive name lock after the fast
+    // existence check and finish while BEGIN waits for that lock. Never
+    // start WAL/CLOG or publish a transaction for a disappeared generation.
+    if (!databaseExists(dbname)) {
+        context.databaseExclusiveLock.reset();
+        context.databaseSharedLock.reset();
+        context.databaseTxnMutex.reset();
+        return DBStatus::DATABASE_NOT_FOUND;
+    }
+    if (Session* session = currentSession();
+        session && session->currentDB == dbname) {
+        context.tempNamespaceAtTransactionStart =
+            session->tempNamespaceCreated;
+        context.tempTablesAtTransactionStart = session->tempTables;
+        context.tempTableOnCommitAtTransactionStart =
+            session->tempTableOnCommit;
+        context.tempTablesCreatedAtTransactionStart =
+            session->tempTablesCreatedInTransaction;
     }
 
     // CatalogManager is lazily persisted and may contain the latest DDL
