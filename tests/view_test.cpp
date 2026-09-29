@@ -14,7 +14,13 @@ extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
+static void cleanup(const std::string& db) {
+    if (g_engine.databaseExists(db)) {
+        // Close the engine's WAL, catalog and page caches before removing the
+        // directory. A raw remove_all races their background writeback.
+        assert(g_engine.dropDatabase(db) == dbms::DBStatus::OK);
+    }
+}
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
