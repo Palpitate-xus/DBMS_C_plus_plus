@@ -17,6 +17,8 @@
 
 ## 后续优先队列
 
+2026-09-30 第 850 项进展：NUMERIC 索引／约束尺度等价已独立提交，最终 10 个 C++、新重链／正式协议、8 组相邻协议、完整协议、正式构建与专项真实 PostgreSQL 18.6 差分 cases=1 failed=0 均退出码 0；旧差分 failed=1 保留。独立实测 B-tree 超过 20 字节键被截断而误报重复、负零显示尺度差异、SQL COUNT(DISTINCT)／GROUP BY 等价仍未修，旧索引／重复 heap 不擅自迁移或删除。根冻结 c1409254 正式全脚本已结束退出码 1：378/378 C++、95/96 E2E，唯一 EXPLAIN ANALYZE JOIN 报 0A000；继承清理已通过，原失败记录保留。同一二进制真实 PostgreSQL 18.6 全差分 374/374、failed=0、退出码 0，不含隔离第 847–850 项。接着修复真实 JOIN 计划／执行，不削弱原断言；总账仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
+
 2026-09-30 第 849 项进展：ANALYZE distinct／MCV 的 SQL 列类型等价和 equality MCV 匹配已独立提交，最终 8 个 C++、新重链／正式协议、8 组相邻协议、完整协议、正式构建均退出码 0；numeric 0.50／0.500 合为 cardinality=2、hot count=35，三个等价数值字面量与浮点尾零的 Filter 估算均为 35。参考 PostgreSQL 18.6 TEMP 表 count distinct=2、matching=35、MCV 频率 0.875，仅数据／频率校准。真实 SQL COUNT(DISTINCT) 和 GROUP BY 却仍将两种显示尺度分开，另实测 NUMERIC PRIMARY KEY 接受相等值；这些已列未修，先修数值键，再修聚合和分组，不用统计通过关闭 TYPE／IDX／QRY 族。根冻结 c1409254 的正式 378 C++／96 E2E 与同一二进制真实 374 差分仍运行，不含第 847–849 项；仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
 
 2026-09-30 第 848 项进展：pg_stats 直方图 final upper bound 已独立提交，旧 C++／协议末端 19.25 失败，新目标／正式专项、5 个 C++、6 组相邻协议、完整协议和正式构建均退出码 0，20.25 上界与空 histogram 分支通过。参考 PostgreSQL 18.6 自销毁 TEMP 表边界为 1.25／20.25，只是端点校准，不宣称项目 10 桶／8 列 view 完全兼容 PG。第 849 项类型 MCV／distinct 已通过新定向及相邻验收，正式专项待最终确认；另实测 numeric PRIMARY KEY 接受相等的 0.50／0.500，以及 SQL COUNT(DISTINCT)／GROUP BY 分开相等值，继续独立修复。根冻结 HEAD c1409254 正式全脚本与 374 组真实差分仍运行（本次 alter_inherit_test 已通过，但不替代整套退出码），不含第 847–849 项；总账仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
