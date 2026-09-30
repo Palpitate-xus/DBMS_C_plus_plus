@@ -8317,7 +8317,8 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                     ? dynamic_cast<const dbms::FunctionCallExpr*>(unary->operand.get()) : nullptr;
                 const bool notExists = op == "not" && operandFunction &&
                     toLower(operandFunction->funcName) == "exists";
-                if ((binary && op != "at time zone" && op != "overlaps") ||
+                // This parser represents postfix :: casts as BinaryOpExpr.
+                if ((binary && op != "::" && op != "at time zone" && op != "overlaps") ||
                     (unary && !notExists)) {
                     headers.push_back("?column?");
                     goto headerDone;
