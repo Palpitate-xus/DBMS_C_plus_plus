@@ -4987,9 +4987,15 @@ static void appendActuals(std::string& out, const IOperator* op,
     if (out.empty() || out.back() != '\n') return;
     out.pop_back();
     char buf[96];
-    std::snprintf(buf, sizeof(buf), "  (actual time=%.3f rows=%llu loops=%llu)",
-                  op->runtimeMs(), (unsigned long long)op->runtimeRows(),
-                  (unsigned long long)op->runtimeLoops());
+    if (opts.timing) {
+        std::snprintf(buf, sizeof(buf), "  (actual time=%.3f rows=%llu loops=%llu)",
+                      op->runtimeMs(), (unsigned long long)op->runtimeRows(),
+                      (unsigned long long)op->runtimeLoops());
+    } else {
+        std::snprintf(buf, sizeof(buf), "  (actual rows=%llu loops=%llu)",
+                      (unsigned long long)op->runtimeRows(),
+                      (unsigned long long)op->runtimeLoops());
+    }
     out += buf;
     out += "\n";
 }
