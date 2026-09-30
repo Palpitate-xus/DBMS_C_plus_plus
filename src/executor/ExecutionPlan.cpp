@@ -458,6 +458,15 @@ static std::string integerEqualityValue(const TableSchema& table,
     return value;
 }
 
+static bool equalityIndexKeyIsEmpty(const TableSchema& table,
+                                    const StorageEngine::Condition& condition) {
+    if (condition.op != "=") return false;
+    const auto value = integerEqualityValue(table, condition.colName, condition.value);
+    return isSingleColumnPrimaryKey(table, condition.colName)
+        ? table.buildPKValue({{condition.colName, value}}).empty()
+        : table.columnIndexKey(condition.colName, value).empty();
+}
+
 static bool lookupBtreeKeyChecked(BPTree* index, const std::string& key,
                                   int64_t& rid) {
     const auto status = index->searchChecked(key, rid);
@@ -512,6 +521,31 @@ bool IndexScanOp::open() {
         }
     }
 
+    const std::string key = isPK_
+        ? tbl_.buildPKValue({{colname_, integerEqualityValue(tbl_, colname_, value_)}})
+        : tbl_.columnIndexKey(colname_, integerEqualityValue(tbl_, colname_, value_));
+    if (key.empty()) {
+        // Historical build/write paths omit empty keys. Direct callers need
+        // the same complete heap fallback as the planner, with next() still
+        // doing the typed equality and NULL recheck.
+        const auto append = [&](uint32_t page, uint16_t slot, const char*, size_t) {
+            rids_.push_back(StorageEngine::encodeRid(page, slot));
+        };
+        const bool ok = engine_->rlsAppliesTo(dbname_, tablename_)
+            ? engine_->forEachVisibleRow(dbname_, tablename_, "SELECT", append)
+            : engine_->forEachRow(dbname_, tablename_, append);
+        if (!ok) {
+            rids_.clear();
+            setError("empty-key heap fallback failed");
+            return false;
+        }
+        pos_ = 0;
+        if (!statsRecorded_) {
+            recordTableScan(dbname_, tablename_, rids_.size(), false, true);
+            statsRecorded_ = true;
+        }
+        return true;
+    }
     BPTree* idx = isPK_
         ? engine_->getPKIndex(dbname_, tablename_)
         : engine_->getSecondaryIndex(dbname_, tablename_, colname_);
@@ -521,13 +555,9 @@ bool IndexScanOp::open() {
     }
     if (isPK_) {
         int64_t rid = 0;
-        const std::string key = tbl_.buildPKValue(
-            std::map<std::string, std::string>{{colname_,
-                integerEqualityValue(tbl_, colname_, value_)}});
         if (lookupBtreeKeyChecked(idx, key, rid)) rids_.push_back(rid);
     } else {
-        rids_ = lookupBtreeMultiChecked(idx,
-            tbl_.columnIndexKey(colname_, integerEqualityValue(tbl_, colname_, value_)));
+        rids_ = lookupBtreeMultiChecked(idx, key);
     }
     pos_ = 0;
     if (!statsRecorded_) {
@@ -612,7 +642,7 @@ static bool collectEqualityIndexCandidates(
     const std::vector<std::string>& hashIndexedColumns,
     const StorageEngine::Condition& condition,
     std::set<int64_t>& candidates) {
-    if (condition.op != "=") return false;
+    if (condition.op != "=" || equalityIndexKeyIsEmpty(tbl, condition)) return false;
     const std::string value = integerEqualityValue(
         tbl, condition.colName, condition.value);
 
@@ -4224,6 +4254,7 @@ static bool hasEqualityIndex(StorageEngine* engine, const PlanContext& ctx,
                              const StorageEngine::Condition& condition) {
     if (condition.op != "=") return false;
     const TableSchema table = engine->getTableSchema(ctx.dbname, ctx.tablename);
+    if (equalityIndexKeyIsEmpty(table, condition)) return false;
     if (isSingleColumnPrimaryKey(table, condition.colName)) return true;
     const auto btreeColumns = engine->getIndexedColumns(ctx.dbname, ctx.tablename);
     if (std::find(btreeColumns.begin(), btreeColumns.end(), condition.colName) != btreeColumns.end())
@@ -4318,7 +4349,8 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
             engine, ctx.dbname, ctx.tablename, ctx.conds);
     } else if (!rlsApplies && !remainingConds.empty()) {
         for (const auto& c : remainingConds) {
-            if (c.op == "=") {
+            if (c.op == "=" && !equalityIndexKeyIsEmpty(
+                    engine->getTableSchema(ctx.dbname, ctx.tablename), c)) {
                 // Check if column has primary key index
                 TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
                 const bool isPK = isSingleColumnPrimaryKey(tbl, c.colName);
