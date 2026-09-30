@@ -101,6 +101,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/primary_key_plan_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/plan_cache_invalidation_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/missing_memory_index_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/bitmap_explain_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cli_error_recovery_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/no_fake_compat_objects_test.py)
     DBMS_E2E_TESTS+=(tests/compat_fallback_registry_test.py)

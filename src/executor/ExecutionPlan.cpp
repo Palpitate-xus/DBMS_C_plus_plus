@@ -4965,6 +4965,19 @@ static void appendActuals(std::string& out, const IOperator* op,
     out += "\n";
 }
 
+// Bitmap operators collect their index RID sets internally rather than
+// exposing child plan operators. Until AM-specific bitmap selectivity/cost
+// callbacks exist, retain the full relation as a conservative candidate bound
+// and use the existing index-access cost model; never substitute Unknown/zero.
+static CostEstimate bitmapExplainEstimate(StorageEngine* engine,
+                                           const std::string& dbname,
+                                           const std::string& table) {
+    CostEstimate estimate;
+    estimate.rows = static_cast<double>(plannerRowEstimate(engine, dbname, table));
+    estimate.cost = QueryPlanner::costScan("index_scan", estimate.rows, 0.0);
+    return estimate;
+}
+
 static CostEstimate explainOp(Operator* op, int indent,
                               StorageEngine* engine,
                               const std::string& dbname,
@@ -5049,6 +5062,18 @@ static CostEstimate explainOp(Operator* op, int indent,
                ", col=" + idx->colName() + ", val=" + idx->value() + ")" +
                costRowsStr(est, opts) + "\n";
 
+    } else if (auto* bitmap = dynamic_cast<BitmapHeapScanOp*>(op)) {
+        const auto table = bitmap->scanOrigin().tablename;
+        est = bitmapExplainEstimate(engine, dbname, table);
+        out += prefix + "BitmapHeapScan(table=" + table + ")" +
+               costRowsStr(est, opts) + "\n";
+
+    } else if (auto* bitmapOr = dynamic_cast<BitmapOrHeapScanOp*>(op)) {
+        const auto table = bitmapOr->scanOrigin().tablename;
+        est = bitmapExplainEstimate(engine, dbname, table);
+        out += prefix + "BitmapOrHeapScan(table=" + table + ")" +
+               costRowsStr(est, opts) + "\n";
+
     } else if (auto* gist = dynamic_cast<GiSTScanOp*>(op)) {
         // The sidecar overlap returns candidates, not final rows; the
         // table row count is the safest upper bound without bucket stats.
@@ -5071,6 +5096,10 @@ static CostEstimate explainOp(Operator* op, int indent,
                 tblName = pts->tableName();
             } else if (auto* is = dynamic_cast<IndexScanOp*>(filt->child())) {
                 tblName = is->tableName();
+            } else if (auto* bitmap = dynamic_cast<BitmapHeapScanOp*>(filt->child())) {
+                tblName = bitmap->scanOrigin().tablename;
+            } else if (auto* bitmapOr = dynamic_cast<BitmapOrHeapScanOp*>(filt->child())) {
+                tblName = bitmapOr->scanOrigin().tablename;
             }
             sel *= estimateSelectivity(c, engine, dbname, tblName);
         }
@@ -5336,6 +5365,22 @@ static std::pair<std::string, CostEstimate> explainOpJson(Operator* op,
         json += jsonCostRows(est, opts);
         json += "\"children\":[]";
 
+    } else if (auto* bitmap = dynamic_cast<BitmapHeapScanOp*>(op)) {
+        const auto table = bitmap->scanOrigin().tablename;
+        est = bitmapExplainEstimate(engine, dbname, table);
+        json += "\"nodeType\":\"BitmapHeapScan\",";
+        json += "\"table\":\"" + jsonEscape(table) + "\",";
+        json += jsonCostRows(est, opts);
+        json += "\"children\":[]";
+
+    } else if (auto* bitmapOr = dynamic_cast<BitmapOrHeapScanOp*>(op)) {
+        const auto table = bitmapOr->scanOrigin().tablename;
+        est = bitmapExplainEstimate(engine, dbname, table);
+        json += "\"nodeType\":\"BitmapOrHeapScan\",";
+        json += "\"table\":\"" + jsonEscape(table) + "\",";
+        json += jsonCostRows(est, opts);
+        json += "\"children\":[]";
+
     } else if (auto* filt = dynamic_cast<FilterOp*>(op)) {
         auto [childJson, child] = explainOpJson(filt->child(), engine, dbname, opts);
         double sel = 1.0;
@@ -5347,6 +5392,10 @@ static std::pair<std::string, CostEstimate> explainOpJson(Operator* op,
                 tblName = pts->tableName();
             } else if (auto* is = dynamic_cast<IndexScanOp*>(filt->child())) {
                 tblName = is->tableName();
+            } else if (auto* bitmap = dynamic_cast<BitmapHeapScanOp*>(filt->child())) {
+                tblName = bitmap->scanOrigin().tablename;
+            } else if (auto* bitmapOr = dynamic_cast<BitmapOrHeapScanOp*>(filt->child())) {
+                tblName = bitmapOr->scanOrigin().tablename;
             }
             sel *= estimateSelectivity(c, engine, dbname, tblName);
         }
