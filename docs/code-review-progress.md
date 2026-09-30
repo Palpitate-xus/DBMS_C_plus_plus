@@ -818,6 +818,10 @@
 
 | 837 | OPT-16 / QRY-01 | EXPLAIN 将 BETWEEN 内的 AND 当合取连接符拆开，两个碎片都被丢弃，普通 SELECT 返回两行而 JSON ANALYZE 实际扫描六行；字符串字面量内的 and 也被错误拆分 | EXPLAIN 专用词法合取分隔器保留 BETWEEN 的边界 AND、引号及括号内内容；每条完整谓词复用普通条件 merger，保留 NOT BETWEEN。新增 C++ 检查多范围、大小写、引号转义、标识符边界及嵌套表达式不被拆开；退出码 0。新增真实协议在旧正式二进制第一条 BETWEEN 上 actualRows=6 而失败，新重链二进制对九组条件分别两次 JSON ANALYZE 和文本 ANALYZE 均检查实际行数，含小数 BIGINT 范围、索引等值与 BETWEEN 混合、多个范围和含 and 的转义字符串；退出码 0。当前为新 main 单元与第 836 项正式其他对象重链；10 组相邻协议、完整协议和隔离正式构建运行中。本项仅修复合取谓词分隔，不等于统一 AST、完整 OR/括号 lowering、所有 EXPLAIN 语法或 PostgreSQL schema，不关闭功能族 | `d91cf1d8` |
 
+| 838 | P0-16 | 完整脚本设置协议超时为 120 秒时，差分 session 测试仍断言连接 timeout=15，两个 mock 失败，阻断整套验收；生产工具实际遵守配置 | 两条固定 15 秒的 session 契约测试显式限定自己的环境；另加未设置时默认 15 秒断言及 reference socket 使用 37 秒的断言，保留现有本地 socket 37 秒测试。不改实际网络超时、启动／关闭策略或失败处理。旧单测在 120 秒复现 36 项中两项失败，修复后 38 项在未设置和 15／37／120 秒四种环境均退出码 0。新增 reference mock 第一次错误要求额外 settimeout 而失败，核实 create_connection 已接收 timeout 后删除该不符合代码契约的 mock 要求；最终四轮均通过。第 831 项冻结全脚本退出码仍为 1（368/368 C++、82/83 E2E），须在最新源码重跑，不用单测重跑抹掉历史失败 | `f072409e` |
+
+2026-09-30 第 838 项进展：差分工具超时单测已独立修复并提交，38 项在默认／15／37／120 秒四种环境均退出码 0。第 837 项的新协议及 10 组相邻协议均退出码 0，完整协议和隔离正式构建仍运行。根第 831 项旧整套失败记录保持，准备快进最新修复后正式重跑；总账仍 24 complete、134 partial、100 unverified、15 deferred_by_user，273 项未完成，未 push，Actions 禁用。
+
 2026-09-30 第 837 项进展：EXPLAIN 的 BETWEEN／NOT BETWEEN 与字面量 and 分隔修复已提交，新 C++ 和真实协议退出码 0，相邻／完整协议及隔离正式构建进行中。第 836 项正式生产构建及正式专项协议均已退出码 0。第 831 项 HEAD 7f34371f 的完整脚本已结束，退出码 1：368/368 C++、82/83 协议/E2E 通过；pg_diff_runner_test 的两个 mock 断言写死 timeout=15，而实际遵守 DBMS_PROTOCOL_TEST_TIMEOUT=120，单独修正测试隔离后再验。该轮真实 PostgreSQL 18.6 差分 371/371、failed=0、退出码 0；不把后续隔离修复计入该轮。主分支已快进至第 836 项，旧错误索引迁移、REAL/numeric 类型提升、EXPLAIN 其余 lowering 及其他总清单仍未完成；未 push，Actions 禁用。
 
 2026-09-30 第 836 项进展：整数索引写入规范化已独立提交，10 个 C++、新增及 8 组相邻协议、完整 PostgreSQL 协议和专项真实 PostgreSQL 18.6 差分均退出码 0；隔离正式构建运行中。第 835 项相邻／完整协议、正式生产构建与正式专项协议均已退出码 0。根冻结第 831 项的真实差分已确认 371/371、failed=0、退出码 0；其完整脚本仍运行，后续隔离修复不计入该轮。SQL EXPLAIN 丢弃 BETWEEN、旧错误索引迁移、REAL/numeric 类型提升及其他未完成条目继续处理。总账仍 273 项：24 complete、134 partial、100 unverified、15 deferred_by_user；未 push，GitHub Actions 禁用。
