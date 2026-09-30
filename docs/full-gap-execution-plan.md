@@ -17,6 +17,8 @@
 
 ## 后续优先队列
 
+2026-09-30 第 866 项验收：表达式根列名修复和 postfix cast 更正已分别提交；最终协议／真实 PG18.6 failed=0、9 组相邻协议与另行完整协议退出码 0，中间全 ?column? 与不含 867 的整数相邻失败均保留。5dc053fd 已合入三个新专项，根正式全套编译中，尚不报告后续 393／117／390 全通过。新发现 868 引号表名的内部空格被误作 alias 分界，旧 wire 已真实 42P01 复现，隔离修复中。总账仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
+
 2026-09-30 第 865 项验收：零 numeric display scale 修复、负零和舍入回归已独立提交，最终专项／真实差分通过；第 867 项修复后组合的 15 个 C++、14 组专项协议和完整协议退出码 0，保留先前整数索引邻居失败。根冻结 5dc053fd 已启动正式 build_tests；该轮包含 858–867，结果尚未确认，不能用早前 7a6ded99 的 385／107／381 全套冒充。第 866 项最终专项与真实差分通过，但未含 867 的相邻二进制仍在整数 1.0 失败，组合验收由新正式全套承担。总账仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
 
 2026-09-30 第 864 项进展：expression／virtual NULL predicates 已独立提交，最终新专项、10 个 C++、10 组相邻协议、完整协议和真实 PostgreSQL 18.6 cases=1 failed=0 退出码 0，旧 failed=1 与两次中间 native／virtual 失败保留。第 865 项 numeric 零显示尺度定向与真实差分已通过，但邻居复现独立第 860 项 IndexScan 重检对整数 1.0 丢行；已用未含 numeric 新修复的旧二进制确认同样失败，作为第 867 项独立修复。第 866 项未别名表达式误用内层 cast／function 列名已真实 failed=1 复现，AST root 识别验收中。根已快进 3337d36d 至第 863 项，最新组合正式整套待冻结；较早 7a6ded99 的 385/385 C++、107/107 E2E、真实 381/381 failed=0 均退出码 0，不能冒充后续组合验收。总账仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
