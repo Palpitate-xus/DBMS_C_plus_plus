@@ -17,6 +17,8 @@
 
 ## 后续优先队列
 
+2026-09-30 第 859 项进展：native plain 结果元数据接收与 physical/output sort key 分工已分别本地提交，最终新协议、11 组相邻协议／CLI、完整协议及顺序旧／新真实 PG18.6 专项 failed=1／0 均已确认；旧 literal NULL 错误、无序比较假差异和 deterministic ordinal fixture 后暴露的真实丢 NULL 失败都保留。第 860 项完整索引值 recheck 已定向、9 个 C++ 与真实专项通过，最终相邻／完整验证运行；超长主键插入仍未修。又真实复现 COALESCE 被误用 strict NULL gate，缓冲 aggregate FILTER 1 而非 2、空串／文本 NULL 查询缺行，作为第 861 项继续独立修复。根冻结 7a6ded99 正式全脚本与同一正式二进制 381 组差分仍运行，不包含隔离 858–861；总账仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
+
 2026-09-30 第 858 项进展：原生 projection／DISTINCT 的 typed keys 和真实 NULL 位透传已独立提交，最终正式生产构建、正式新协议、11 个 C++、13 组相邻协议与完整协议退出码 0；旧 C++／真实协议错误和首轮构建输入变化退出码 1 保留，参考 PG18.6 TEMP 数量 3/4/4 校准一致。第 859 项 native plain frontend 元数据遗漏已重链通过无序 bag 协议，但首版差分因无 ORDER 比较不确定顺序而失败，补 deterministic ordinal ORDER 后又复现非法物理 sort key 丢 NULL，正在独立完成；不虚报专项通过。第 860 项长公共前缀索引候选未重检已真实复现，旧 PG failed=1、新定向 failed=0，相邻验收中；PK 超长有效不同值插入仍未修。根冻结 7a6ded99 至 853／854／855／856／857 的正式全脚本与同一正式二进制 381 组差分运行，不计隔离 858–860；总账仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
 
 2026-09-30 第 855 项进展：typed SELECT DISTINCT／DISTINCT ON 已独立提交，最终 8 个 C++、新协议、新 CLI、8 组相邻协议、完整协议和真实 PostgreSQL 18.6 专项 cases=1 failed=0 均退出码 0，旧三类失败／failed=1 和中间倒序投影失败保留。原生 DistinctOp 新 C++ 又在 numeric distinct=3 失败，已另列第 858 项继续修复。根冻结 e339160e 至第 852 项的正式全脚本已确认退出码 0：382/382 C++、102/102 E2E；同一正式二进制真实 377/377 差分 failed=0、退出码 0。此轮不包含隔离第 853／854／855／856／857 项，不能用较早完整成功冒充最新主分支验收；旧 c1409254 JOIN 失败仍保留。准备快进这些已提交修复并冻结再跑完整脚本；总账仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
