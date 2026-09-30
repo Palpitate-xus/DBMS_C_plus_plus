@@ -2847,7 +2847,6 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
                     "INSERT")) return true;
             printReturningRows(g_lastDmlResult);
         }
-        if (inserted > 0) g_engine.analyzeTable(s.currentDB, resolvedTable);
         if (!statementScope.finish()) {
             std::cout << "Could not finish INSERT statement transaction"
                       << std::endl;
@@ -2900,7 +2899,6 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
                     "INSERT")) return true;
             printReturningRows(g_lastDmlResult);
         }
-        g_engine.analyzeTable(s.currentDB, resolvedTable);
         if (!statementScope.finish()) {
             std::cout << "Could not finish INSERT statement transaction"
                       << std::endl;
@@ -3127,7 +3125,6 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
                 s.currentDB, returningImages, "INSERT")) return true;
         printReturningRows(g_lastDmlResult);
     }
-    if (inserted > 0) g_engine.analyzeTable(s.currentDB, resolvedTable);
     if (!statementScope.finish()) {
         std::cout << "Could not finish INSERT statement transaction"
                   << std::endl;
@@ -3322,7 +3319,6 @@ bool executeUpdateFromJoin(const UpdateStmt& stmt, Session& s, bool& fallback) {
                      "(SQLSTATE 58030)" << std::endl;
         return true;
     }
-    if (affectedRows > 0) g_engine.analyzeTable(s.currentDB, resolvedTable);
     std::cout << "Update done" << std::endl;
     if (!stmt.returning.empty()) printReturningRows(g_lastDmlResult);
     else publishMutationCount("UPDATE", affectedRows);
@@ -3534,7 +3530,6 @@ bool executeUpdateFrom(const UpdateStmt& stmt, Session& s, bool& fallback) {
                      "(SQLSTATE 58030)" << std::endl;
         return true;
     }
-    if (affectedRows > 0) g_engine.analyzeTable(s.currentDB, resolvedTable);
     std::cout << "Update done" << std::endl;
     if (!stmt.returning.empty()) printReturningRows(g_lastDmlResult);
     else publishMutationCount("UPDATE", affectedRows);
@@ -3671,7 +3666,6 @@ bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
                      "(SQLSTATE 58030)" << std::endl;
         return true;
     }
-    g_engine.analyzeTable(s.currentDB, resolvedTable);
     std::cout << "Update done" << std::endl;
     if (!stmt.returning.empty()) printReturningRows(g_lastDmlResult);
     else publishMutationCount("UPDATE", affectedRows);
@@ -4197,7 +4191,6 @@ bool executeMerge(const MergeStmt& stmt, Session& s, bool& fallback) {
 
     const size_t inserted = insertedRows.size();
     const size_t affected = deleted + updated + inserted;
-    if (affected > 0) g_engine.analyzeTable(s.currentDB, targetTable);
     if (!stmt.returning.empty()) {
         printReturningRows(g_lastDmlResult);
     } else {
@@ -4328,7 +4321,6 @@ bool executeDeleteUsingJoin(const DeleteStmt& stmt, Session& s, bool& fallback) 
                      "(SQLSTATE 58030)" << std::endl;
         return true;
     }
-    if (affectedRows > 0) g_engine.analyzeTable(s.currentDB, resolvedTable);
     std::cout << "Delete done" << std::endl;
     if (!stmt.returning.empty()) printReturningRows(g_lastDmlResult);
     else publishMutationCount("DELETE", affectedRows);
@@ -4480,7 +4472,6 @@ bool executeDeleteUsing(const DeleteStmt& stmt, Session& s, bool& fallback) {
                      "(SQLSTATE 58030)" << std::endl;
         return true;
     }
-    if (affectedRows > 0) g_engine.analyzeTable(s.currentDB, resolvedTable);
     std::cout << "Delete done" << std::endl;
     if (!stmt.returning.empty()) printReturningRows(g_lastDmlResult);
     else publishMutationCount("DELETE", affectedRows);
@@ -4555,7 +4546,6 @@ bool executeDelete(const DeleteStmt& stmt, Session& s, bool& fallback) {
                      "(SQLSTATE 58030)" << std::endl;
         return true;
     }
-    g_engine.analyzeTable(s.currentDB, resolvedTable);
     std::cout << "Delete done" << std::endl;
     if (!stmt.returning.empty()) printReturningRows(g_lastDmlResult);
     else publishMutationCount("DELETE", affectedRows);

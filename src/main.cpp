@@ -17592,7 +17592,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
             log(s.username, to_string(inserted) + " row(s) inserted", getTime());
         }
         for (auto& row : returnedRows) cout << row << endl;
-        if (inserted > 0) g_engine.analyzeTable(s.currentDB, resolvedName);
+        // StorageEngine owns configured auto-analyze thresholds. Forcing a
+        // scan here ignores auto_analyze=off and sees this command's old
+        // visibility boundary, persisting an incorrect zero/stale count.
         return false;
     }
 
@@ -17845,7 +17847,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
         }
         for (auto& row : returnedRows) cout << row << endl;
         log(s.username, "delete done", getTime());
-        g_engine.analyzeTable(s.currentDB, resolvedName);
         return false;
     }
 
@@ -18163,7 +18164,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
         }
         for (auto& row : returnedRows) cout << row << endl;
         log(s.username, "update done", getTime());
-        g_engine.analyzeTable(s.currentDB, resolvedName);
         return false;
     }
 

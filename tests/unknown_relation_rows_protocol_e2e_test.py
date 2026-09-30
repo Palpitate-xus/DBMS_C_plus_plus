@@ -33,14 +33,13 @@ def main():
         query("CREATE TABLE unknown_rows (id INT PRIMARY KEY,v INT);")
         query("INSERT INTO unknown_rows VALUES (1,7),(2,7),(3,8);")
         query("CREATE INDEX unknown_rows_v ON unknown_rows USING hash (v);")
-        # Legacy SQL currently auto-ANALYZEs inside the write statement and
-        # persists a zero count before its rows become visible. That separate
-        # reproduced bug is not fixed by the unknown-count fallback. Remove
-        # only this isolated server's statistics fixture to exercise missing
-        # evidence, rather than treat its incorrect stored zero as unknown.
+        # Earlier legacy SQL auto-ANALYZEd inside the write statement and
+        # persisted zero before its rows were visible. If a statistics file
+        # exists, remove only this isolated fixture to exercise missing
+        # evidence; newer writes may already leave statistics absent.
         stats_file = Path(server["dir"]) / "info" / ".stats"
-        assert stats_file.is_file(), stats_file
-        stats_file.unlink()
+        if stats_file.is_file():
+            stats_file.unlink()
         for sql, kind in (("SELECT id FROM unknown_rows;", "TableScan"),
                           ("SELECT id FROM unknown_rows WHERE id=1 AND v=7;", "BitmapHeapScan")):
             for _ in range(2):
