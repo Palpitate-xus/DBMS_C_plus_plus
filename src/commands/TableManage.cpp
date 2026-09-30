@@ -30782,6 +30782,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 throw std::runtime_error(r2.error);
             return "";
         }
+        if (knownNull) *knownNull = r2.isNull;
         return r2.isNull ? "NULL" : r2.value;
     }
     // Aggregate-call operands inside arithmetic items
@@ -30831,6 +30832,38 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 }
             }
             return applyScalarFunc(fixed, rowBuffer, tbl, engine, dbname);
+        }
+    }
+
+    if (expr.funcName == "arith") {
+        bool hasOperandCast = false;
+        for (const auto& argument : expr.funcArgs) {
+            SQLParser parser;
+            const auto parsed = parser.parse("SELECT " + argument);
+            const auto* select = parsed.success
+                ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
+            if (!select || select->selectList.size() != 1) continue;
+            const auto* operand = select->selectList.front().expr.get();
+            const auto* binary = dynamic_cast<const BinaryOpExpr*>(operand);
+            if (dynamic_cast<const CastExpr*>(operand) ||
+                (binary && binary->op == "::")) {
+                hasOperandCast = true;
+                break;
+            }
+        }
+        if (hasOperandCast) {
+            // Integer-shaped cast results do not make numeric arithmetic
+            // integer arithmetic. Keep the actual cast type and let the
+            // typed evaluator choose division/coercion before any shortcut.
+            StorageEngine::SelectExpr typed = expr;
+            typed.funcName = "expreval";
+            std::string expression;
+            for (const auto& argument : expr.funcArgs) {
+                if (!expression.empty()) expression += ' ';
+                expression += argument;
+            }
+            typed.funcArgs = {std::move(expression)};
+            return applyScalarFunc(typed, rowBuffer, tbl, engine, dbname, knownNull);
         }
     }
 
