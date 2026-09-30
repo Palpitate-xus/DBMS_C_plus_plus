@@ -17,6 +17,8 @@
 
 ## 后续优先队列
 
+当前冻结轮次为第 831 项 HEAD `7f34371f`：正式生产构建已退出码 0，全脚本和同一正式二进制的 371 组真实 PostgreSQL 18.6 差分运行中，不计入第 832 项以后的隔离修复。第 832 项整数键的 6 个 C++／新增和 8 组相邻协议通过，隔离正式构建运行中；第 833 项文本 TIMING FALSE 的 5 个 C++／新增协议通过，相邻协议及正式整套待结束／复验。已确认浮点二级索引 query key 不规范使 EXPLAIN ANALYZE 漏行，接着统一现有存储键的类型转换；原整数列与 decimal literal 比较、缺失 ANALYZE 默认基数、Hash/Bloom loader／恢复和其他未完成清单仍在队列中。
+
 最新整套验收（2026-09-30）：第 823–824 项冻结 HEAD `56782f45` 的正式生产构建和 371/371 真实 PostgreSQL 18.6 差分退出码 0，但完整脚本退出码 1，363/364 C++、75/77 协议/E2E 通过。第 831 项修复 VACUUM FULL 无主键夹具，定向完整用例退出码 0；两项超时在原二进制提高有界等待时间后复跑通过，但不抹去原整套失败或宣称定位根因。第 830 项 5 个 C++、新增 JSON ANALYZE 协议、9 组相邻协议、完整 PostgreSQL 协议、隔离正式构建／正式专项协议均退出码 0。主分支冻结第 831 项 HEAD `7f34371f` 重跑 build_tests（预计 368 C++／83 协议/E2E）。隔离第 832 项整数键归一化的新增协议与 6 个 C++ 已退出码 0，相邻／正式构建运行中，不属于冻结轮次。总清单尚未完成；接着处理文本 TIMING FALSE、其他类型索引键、缺失 ANALYZE 默认基数、整数与 decimal literal 比较。
 
 1. P0-02：继续迁移 SELECT 的结构化结果输出。quoted alias、无 FROM 普通投影、有限 scalar SQL/PLpgSQL UDF、独立 `VALUES` 和已验证的无相关标量子查询投影已迁移；第 728–729 项修复了标量子查询中 NULL、空串、字面量 `NULL` 和带空格文本的线协议失真。CTE / set operation、相关与复杂标量子查询、SRF、完整 SQL function query body 和剩余 utility/function 分支仍需统一 typed rows / NULL bitmap，不能靠显示文本反推数据。
