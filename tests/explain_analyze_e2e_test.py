@@ -130,6 +130,8 @@ def main():
         ana = section(out, "ANALYZE")
         n_actual = ana.count("actual time=")
         check("join plan has >=2 instrumented nodes", n_actual >= 2, out)
+        check("join plan contains a real join", "Join(" in ana, out)
+        check("join reports three matching rows", "Actual rows: 3" in out, out)
 
         print(f"[EXPLAIN-ANALYZE] passed={passed} failed={failed}")
         return 0 if failed == 0 else 1

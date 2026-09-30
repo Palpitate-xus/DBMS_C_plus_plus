@@ -4797,31 +4797,141 @@ static bool handleExplain(const string& sql, Session& s) {
     // QualifiedName also accepts decoded internal names containing spaces.
     // Reject unsupported alias/join syntax before passing raw SQL to it,
     // while allowing quoted spaces and whitespace around qualification dots.
-    bool relationQuoted = false;
-    string normalizedRelation;
-    for (size_t i = 0; i < tname.size(); ++i) {
-        if (tname[i] == '"') {
-            normalizedRelation += tname[i];
-            if (relationQuoted && i + 1 < tname.size() && tname[i + 1] == '"')
-                normalizedRelation += tname[++i];
-            else relationQuoted = !relationQuoted;
-        } else if (!relationQuoted && isspace(static_cast<unsigned char>(tname[i]))) {
-            size_t after = i + 1;
-            while (after < tname.size() && isspace(static_cast<unsigned char>(tname[after]))) ++after;
-            if (i > 0 && after < tname.size() && tname[i - 1] != '.' && tname[after] != '.')
-                throw dbms::DbError("0A000", "unsupported EXPLAIN alias or table reference");
-            i = after - 1;
-        } else {
-            normalizedRelation += tname[i];
+    const auto bindExplainRelation = [&](const string& raw) {
+        bool relationQuoted = false;
+        string normalizedRelation;
+        for (size_t i = 0; i < raw.size(); ++i) {
+            if (raw[i] == '"') {
+                normalizedRelation += raw[i];
+                if (relationQuoted && i + 1 < raw.size() && raw[i + 1] == '"')
+                    normalizedRelation += raw[++i];
+                else relationQuoted = !relationQuoted;
+            } else if (!relationQuoted && isspace(static_cast<unsigned char>(raw[i]))) {
+                size_t after = i + 1;
+                while (after < raw.size() && isspace(static_cast<unsigned char>(raw[after]))) ++after;
+                if (i > 0 && after < raw.size() && raw[i - 1] != '.' && raw[after] != '.')
+                    throw dbms::DbError("0A000", "unsupported EXPLAIN alias or table reference");
+                i = after - 1;
+            } else {
+                normalizedRelation += raw[i];
+            }
         }
+        dbms::CatalogManager::QualifiedName relation;
+        if (!dbms::CatalogManager::parseQualifiedName(normalizedRelation, relation))
+            throw dbms::DbError("0A000", "unsupported EXPLAIN table reference");
+        string bound = resolveTableName(s, normalizedRelation);
+        if (!g_engine.tableExists(s.currentDB, bound))
+            throw dbms::DbError("42P01", "relation \"" + bound + "\" does not exist");
+        return bound;
+    };
+    const bool explainJoin = findTopLevelKeyword(tname, "join", 0) != string::npos;
+    string joinLeftTable, joinRightTable, joinLeftColumn, joinRightColumn;
+    if (explainJoin) {
+        dbms::SQLParser parser;
+        auto parsed = parser.parse(inner);
+        auto* select = parsed.success ? dynamic_cast<dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
+        auto* join = select ? select->fromClause.get() : nullptr;
+        if (!join || join->type != dbms::FromItem::Type::Join ||
+            join->joinType != "INNER" || !join->left || !join->right ||
+            join->left->type != dbms::FromItem::Type::Table ||
+            join->right->type != dbms::FromItem::Type::Table || columns != "*" ||
+            select->distinct || select->whereClause || !select->groupBy.empty() ||
+            !select->groupByElems.empty() || select->having || !select->orderBy.empty() ||
+            select->limit || select->offset || select->setOp != dbms::SetOp::None ||
+            !select->locking.empty() || !select->windowDefs.empty())
+            throw dbms::DbError("0A000", "unsupported EXPLAIN join query shape");
+        auto* equality = dynamic_cast<dbms::BinaryOpExpr*>(join->joinCondition.get());
+        auto* first = equality ? dynamic_cast<dbms::ColumnRefExpr*>(equality->left.get()) : nullptr;
+        auto* second = equality ? dynamic_cast<dbms::ColumnRefExpr*>(equality->right.get()) : nullptr;
+        if (!equality || equality->op != "=" || !first || !second ||
+            first->table.empty() || second->table.empty() || !join->usingCols.empty())
+            throw dbms::DbError("0A000", "EXPLAIN join requires qualified equality keys");
+
+        // parseSelect currently permits trailing unconsumed tokens. Check
+        // this bounded grammar in full so clauses cannot silently disappear.
+        const auto tokens = dbms::SQLParser::tokenize(inner);
+        size_t token = 0;
+        const auto accept = [&](const string& expected) {
+            if (token == tokens.size() || tokens[token] != expected) return false;
+            ++token;
+            return true;
+        };
+        const auto acceptTokens = [&](const string& text) {
+            for (const auto& part : dbms::SQLParser::tokenize(text))
+                if (!accept(part)) return false;
+            return true;
+        };
+        const auto acceptAlias = [&](const dbms::FromItem& item) {
+            if (item.alias.empty()) return true;
+            if (token < tokens.size() && tokens[token] == "as") ++token;
+            return accept(item.alias);
+        };
+        const auto acceptQualifiedColumn = [&]() {
+            if (token == tokens.size()) return false;
+            ++token;
+            if (!accept(".") || token == tokens.size()) return false;
+            ++token;
+            if (token < tokens.size() && tokens[token] == ".") {
+                ++token;
+                if (token == tokens.size()) return false;
+                ++token;
+            }
+            return true;
+        };
+        bool complete = acceptTokens("select * from " + join->left->tableName) &&
+                        acceptAlias(*join->left);
+        if (token < tokens.size() && tokens[token] == "inner") ++token;
+        complete = complete && accept("join") && acceptTokens(join->right->tableName) &&
+                   acceptAlias(*join->right) && accept("on") &&
+                   acceptQualifiedColumn() && accept("=") && acceptQualifiedColumn();
+        if (token < tokens.size() && tokens[token] == ";") ++token;
+        if (!complete || token != tokens.size())
+            throw dbms::DbError("0A000", "unsupported EXPLAIN join query shape");
+
+        joinLeftTable = bindExplainRelation(join->left->tableName);
+        joinRightTable = bindExplainRelation(join->right->tableName);
+        dbms::CatalogManager::QualifiedName leftName, rightName;
+        dbms::CatalogManager::parseQualifiedName(join->left->tableName, leftName);
+        dbms::CatalogManager::parseQualifiedName(join->right->tableName, rightName);
+        const string leftAlias = join->left->alias.empty() ? leftName.name : decodeQuotedIdentifier(join->left->alias);
+        const string rightAlias = join->right->alias.empty() ? rightName.name : decodeQuotedIdentifier(join->right->alias);
+        if (leftAlias == rightAlias)
+            throw dbms::DbError("42712", "table name \"" + leftAlias + "\" specified more than once");
+        const auto belongsTo = [&](const dbms::ColumnRefExpr& col,
+                                   const dbms::FromItem& item,
+                                   const dbms::CatalogManager::QualifiedName& name,
+                                   const string& alias, const string& bound) {
+            if (col.table != alias) return false;
+            if (col.schema.empty()) return true;
+            if (!item.alias.empty()) return false;
+            dbms::CatalogManager::QualifiedName boundName;
+            dbms::CatalogManager::parseQualifiedName(bound, boundName);
+            const string schema = !name.schema.empty() ? name.schema :
+                (boundName.schema.empty() ? "public" : boundName.schema);
+            return col.schema == schema;
+        };
+        const auto side = [&](const dbms::ColumnRefExpr& col) {
+            const bool left = belongsTo(col, *join->left, leftName, leftAlias, joinLeftTable);
+            const bool right = belongsTo(col, *join->right, rightName, rightAlias, joinRightTable);
+            if (!left && !right)
+                throw dbms::DbError("42P01", "missing FROM-clause entry for table \"" + col.table + "\"");
+            const auto schema = g_engine.getTableSchema(s.currentDB, left ? joinLeftTable : joinRightTable);
+            bool found = false;
+            for (size_t i = 0; i < schema.len; ++i)
+                found = found || schema.cols[i].dataName == col.column;
+            if (!found)
+                throw dbms::DbError("42703", "column \"" + col.toString() + "\" does not exist");
+            return left;
+        };
+        const bool firstIsLeft = side(*first);
+        if (firstIsLeft == side(*second))
+            throw dbms::DbError("0A000", "EXPLAIN join keys must reference opposite relations");
+        joinLeftColumn = firstIsLeft ? first->column : second->column;
+        joinRightColumn = firstIsLeft ? second->column : first->column;
+        tname = joinLeftTable;
+    } else {
+        tname = bindExplainRelation(tname);
     }
-    tname = std::move(normalizedRelation);
-    dbms::CatalogManager::QualifiedName explainRelation;
-    if (!dbms::CatalogManager::parseQualifiedName(tname, explainRelation))
-        throw dbms::DbError("0A000", "unsupported EXPLAIN table reference");
-    tname = resolveTableName(s, tname);
-    if (!g_engine.tableExists(s.currentDB, tname))
-        throw dbms::DbError("42P01", "relation \"" + tname + "\" does not exist");
     vector<string> conds;
     vector<vector<dbms::StorageEngine::Condition>> explainConditionGroups;
     dbms::QuantifiedSubquerySpec quantifiedSubquery;
@@ -5045,12 +5155,22 @@ static bool handleExplain(const string& sql, Session& s) {
     ctx.havingConds = havingConds;
     if (structuredQuantified) ctx.quantifiedSubqueries.push_back(std::move(quantifiedSubquery));
 
+    const auto buildExplainPlan = [&]() -> dbms::OpPtr {
+        if (explainJoin)
+            return dbms::QueryPlanner::buildJoinPlan(&g_engine, s.currentDB,
+                joinLeftTable, joinRightTable, joinLeftColumn, joinRightColumn, {}, {});
+        return dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
+    };
+
     const bool jsonAnalyze = isJson && opts.analyze;
     // Executed JSON contains this run's counters and cannot be cached as
     // display text. Build and emit it only after execution has succeeded.
     const bool usePlanCache = !jsonAnalyze && g_config.enableQueryPlanCache &&
                               g_config.queryPlanCacheSize > 0;
     string cacheKey = s.currentDB + "::" + inner;
+    if (explainJoin)
+        cacheKey += ":JL" + std::to_string(joinLeftTable.size()) + ":" + joinLeftTable +
+                    ":JR" + std::to_string(joinRightTable.size()) + ":" + joinRightTable;
     if (opts.buffers) cacheKey += ":B";
     if (opts.verbose) cacheKey += ":V";
     if (isJson) cacheKey += ":J";
@@ -5079,7 +5199,7 @@ static bool handleExplain(const string& sql, Session& s) {
     }
 
     if (!cacheHit && !jsonAnalyze) {
-        auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
+        auto plan = buildExplainPlan();
         if (isJson) {
             planOutput = dbms::QueryPlanner::explainJson(plan, &g_engine, s.currentDB, opts);
         } else {
@@ -5109,7 +5229,7 @@ static bool handleExplain(const string& sql, Session& s) {
     if (opts.analyze) {
         // Rebuild plan for actual execution (the cached one was used for
         // display) and run it with per-node instrumentation.
-        auto execPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
+        auto execPlan = buildExplainPlan();
         // Buffer deltas: compare shared-buffer counters across the query.
         const auto bufBefore = g_engine.getBufferPoolStats();
         auto execStart = std::chrono::steady_clock::now();
