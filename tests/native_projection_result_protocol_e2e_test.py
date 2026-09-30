@@ -15,11 +15,14 @@ def main():
     client = runner.load_protocol_client()
     server = runner.start_ours(client)
 
-    def query(sql):
+    def rows(sql):
         rows, state, message, _, _ = runner.decode_wire_result(
             client.simple_query(server["sock"], sql))
         assert state is None, (sql, state, message)
-        return Counter(tuple(row) for row in rows)
+        return rows
+
+    def query(sql):
+        return Counter(tuple(row) for row in rows(sql))
 
     try:
         query("CREATE TABLE native_result(v NUMERIC,t TEXT,k INT);")
@@ -32,6 +35,8 @@ def main():
             sql = "SELECT t FROM native_result WHERE " + predicate + ";"
             expected = Counter({("same",): 2, ("",): 1, ("NULL",): 1, (None,): 1})
             assert query(sql) == expected, (sql, query(sql), expected)
+            assert rows("SELECT DISTINCT t FROM native_result WHERE " + predicate +
+                        " ORDER BY 1;") == [[""], ["NULL"], ["same"], [None]]
             sql = "SELECT DISTINCT t FROM native_result WHERE " + predicate + ";"
             expected = Counter({("same",): 1, ("",): 1, ("NULL",): 1, (None,): 1})
             assert query(sql) == expected, (sql, query(sql), expected)

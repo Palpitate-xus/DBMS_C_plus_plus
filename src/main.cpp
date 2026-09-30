@@ -24854,8 +24854,17 @@ static bool executeInternal(const string& rawSql, Session& s) {
             ctx.tablename = tblName;
             ctx.selectCols = projCols;
             if (orderBy) {
-                ctx.orderByCol = orderBy->colName;
-                ctx.orderByAsc = orderBy->ascending;
+                // SortOp consumes physical input columns. Output aliases and
+                // ordinals belong to the structured post-projection sorter;
+                // passing them down creates an invalid physical sort key.
+                const auto orderTable = g_engine.getTableSchema(ctx.dbname, tblName);
+                for (size_t i = 0; i < orderTable.len; ++i) {
+                    if (orderTable.cols[i].dataName == orderBy->colName) {
+                        ctx.orderByCol = orderBy->colName;
+                        ctx.orderByAsc = orderBy->ascending;
+                        break;
+                    }
+                }
             }
             ctx.distinct = distinct;
             ctx.semiJoins = subqueryJoins;
