@@ -28004,6 +28004,22 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 quantifiedSubqueries.clear();
             }
 
+            if (volcanoUsed && !corrAggHandled && volcanoStructuredAvailable) {
+                size_t width = 0;
+                for (size_t i = 0; i < tbl.len; ++i)
+                    if (selectCols.empty() || selectCols.count(tbl.cols[i].dataName)) ++width;
+                bool exact = volcanoStructuredRows.size() == answers.size() &&
+                    volcanoStructuredNulls.size() == answers.size();
+                for (size_t i = 0; exact && i < answers.size(); ++i)
+                    exact = volcanoStructuredRows[i].size() == width &&
+                        volcanoStructuredNulls[i].size() == width;
+                if (!exact)
+                    throw dbms::DbError("XX000", "native plain projection lost structured result metadata");
+                structuredPlainResult.rows = std::move(volcanoStructuredRows);
+                structuredPlainResult.nulls = std::move(volcanoStructuredNulls);
+                structuredPlainRows = true;
+            }
+
             if (!volcanoUsed) {
                 // Fallback: use StorageEngine::query directly.
                 answers.clear();
