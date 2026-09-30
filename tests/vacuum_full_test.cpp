@@ -181,7 +181,10 @@ static void testBackupFailureIsNonDestructive(StorageEngine& engine,
 
     const auto unexpectedIndex =
         std::filesystem::path(database) / "guarded.idx";
-    assert(std::filesystem::remove(unexpectedIndex));
+    // This table has no primary key, so there is no primary index to remove.
+    // Inject a directory at the discovered index path directly; the backup
+    // must reject it without replacing or losing the existing heap.
+    assert(!std::filesystem::exists(unexpectedIndex));
     assert(std::filesystem::create_directory(unexpectedIndex));
     assert(engine.vacuumFull(database, "guarded") == 0);
     assert(rowCount(engine, database, "guarded") == 1);
