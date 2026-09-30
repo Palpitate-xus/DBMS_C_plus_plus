@@ -17,6 +17,8 @@
 
 ## 后续优先队列
 
+2026-09-30 第 868 项验收：引号表名 whitespace／alias 的两处路径已独立提交，11 组协议回归、完整协议和真实 PG18.6 cases=1 failed=0 退出码 0，旧 failed=1 与只修后期 lookup 的中间 qualifier 失败保留。第 869 项 numeric quotient 使用 normalized input group 选择尺度，15 个 C++、13 组协议、完整协议及真实专项已通过；第 870 项 CAST operand 的整数捷径误分类又真实复现为 0／截断商，单独修复中。根正式 5dc053fd 全套及同一正式二进制 390 组差分仍进行，不包含隔离 868–870。总账仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
+
 2026-09-30 第 867 项验收：索引完整值重检保留精确整数等价 probe 已独立提交，组合源码 1d658318 的 15 个 C++、14 组专项协议、完整协议、本项和 numeric 零尺度真实差分全部退出码 0；旧 failed=1 与 865／866 的整数相邻失败均保留。根冻结 5dc053fd 包含 858–867，正式 production build／完整 C++／E2E 正在进行，随后对同一正式二进制跑全部 PG18.6 差分。隔离 868 已真实复现引号表名内部空格误拆 alias，修复不改根冻结源。总账仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
 
 2026-09-30 第 866 项验收：表达式根列名修复和 postfix cast 更正已分别提交；最终协议／真实 PG18.6 failed=0、9 组相邻协议与另行完整协议退出码 0，中间全 ?column? 与不含 867 的整数相邻失败均保留。5dc053fd 已合入三个新专项，根正式全套编译中，尚不报告后续 393／117／390 全通过。新发现 868 引号表名的内部空格被误作 alias 分界，旧 wire 已真实 42P01 复现，隔离修复中。总账仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。

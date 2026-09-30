@@ -629,6 +629,20 @@ static string preprocessCaseWhen(string s);
 // ========================================================================
 // SQL preprocessing
 // ========================================================================
+static size_t findUnquotedIdentifierWhitespace(const string& text,
+                                               size_t start = 0) {
+    bool quoted = false;
+    for (size_t i = start; i < text.size(); ++i) {
+        if (text[i] == '"') {
+            if (quoted && i + 1 < text.size() && text[i + 1] == '"') ++i;
+            else quoted = !quoted;
+        } else if (!quoted && isspace(static_cast<unsigned char>(text[i]))) {
+            return i;
+        }
+    }
+    return string::npos;
+}
+
 static string foldConstants(const string& s);
 static size_t findTopLevelKeyword(const string& sql, const string& kw, size_t startPos);
 static size_t findTextOutsideQuotes(const string& sql, const string& text,
@@ -20344,11 +20358,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                               "order", "limit", "offset", "fetch"};
             size_t fEnd = sql.size();
             for (const char* kw : clauseKws) {
-                size_t p = sql.find(string(" ") + kw, fromPos + 4);
+                size_t p = findTopLevelKeyword(sql, kw, fromPos + 4);
                 if (p != string::npos && p < fEnd) fEnd = p;
             }
             string fromText = trim(sql.substr(fromPos + 4, fEnd - fromPos - 4));
-            size_t sp = fromText.find(' ');
+            size_t sp = findUnquotedIdentifierWhitespace(fromText);
             if (sp != string::npos) {
                 string second = trim(fromText.substr(sp + 1));
                 if (second.size() > 3 && second.substr(0, 3) == "as ")
@@ -20361,14 +20375,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
         {
             // An alias hides the underlying relation name in PostgreSQL.
             // Strip only the qualifier visible to this SELECT scope.
-            // The table name is the first whitespace-delimited token in
-            // the FROM region (before any alias).
+            // Delimited names are one relation token, even with whitespace.
             size_t fromTokStart = fromPos + 4;
             while (fromTokStart < sql.size() &&
                    isspace(static_cast<unsigned char>(sql[fromTokStart]))) ++fromTokStart;
-            size_t fromTokEnd = fromTokStart;
-            while (fromTokEnd < sql.size() &&
-                   !isspace(static_cast<unsigned char>(sql[fromTokEnd]))) ++fromTokEnd;
+            size_t fromTokEnd = findUnquotedIdentifierWhitespace(sql, fromTokStart);
+            if (fromTokEnd == string::npos) fromTokEnd = sql.size();
             string tableName = trim(sql.substr(fromTokStart, fromTokEnd - fromTokStart));
             // A JOIN needs both qualifiers to bind duplicate column names.
             // Stripping the first relation here turned `left.x` into bare
@@ -22594,7 +22606,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
         string tableAlias;
         {
             string rest = tnameOrig;
-            size_t sp = rest.find(' ');
+            // Only whitespace outside delimited identifiers separates a
+            // relation from its alias. A doubled quote stays inside the
+            // identifier, and neither its whitespace nor commas are syntax.
+            size_t sp = findUnquotedIdentifierWhitespace(rest);
             if (sp != string::npos) {
                 string second = trim(rest.substr(sp + 1));
                 rest = trim(rest.substr(0, sp));
