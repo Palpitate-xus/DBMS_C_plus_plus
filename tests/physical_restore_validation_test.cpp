@@ -244,6 +244,50 @@ int main() {
         assertNoRestoreStaging(tablespaceLocation);
     }
 
+    // Missing UNLOGGED indexes are an intentional backup representation.
+    // Fail their explicit post-publication rebuild and require the complete
+    // live database/archive generation and its cached indexes to survive.
+    {
+        const std::string unloggedDatabase = testDbPath("restore_unlogged_db");
+        const std::string unloggedBackup = testDbPath("restore_unlogged_backup");
+        dbms::StorageEngine engine;
+        assert(engine.createDatabase(unloggedDatabase, "utf8") == dbms::DBStatus::OK);
+        dbms::TableSchema table;
+        table.tablename = "t";
+        table.formatVersion = dbms::DATA_FILE_FORMAT_VERSION;
+        table.isUnlogged = true;
+        table.append(dbms::makeIntColumn("id", false, 4, true));
+        table.append(dbms::makeIntColumn("value", false, 4));
+        assert(engine.createTable(unloggedDatabase, table) == dbms::DBStatus::OK);
+        assert(engine.createIndex(unloggedDatabase, "t", "value") == dbms::DBStatus::OK);
+        assert(engine.insert(unloggedDatabase, "t", {{"id", "1"}, {"value", "7"}}) ==
+               dbms::DBStatus::OK);
+        const auto archive = std::filesystem::path(unloggedDatabase + ".archive");
+        std::filesystem::create_directories(archive);
+        writeText(archive / "generation", "backup\n");
+        assert(engine.physicalBackup(unloggedDatabase, unloggedBackup));
+        assert(engine.insert(unloggedDatabase, "t", {{"id", "2"}, {"value", "8"}}) ==
+               dbms::DBStatus::OK);
+        writeText(archive / "generation", "live\n");
+
+        const unsigned successfulSyncs = mainRestoreDirectoryCount(unloggedBackup) +
+            directoryCount(std::filesystem::path(unloggedBackup) / "wal_archive") + 2;
+        dbms::index_file::failDirectorySyncAfterForTesting(successfulSyncs);
+        assert(!engine.physicalRestore(unloggedDatabase, unloggedBackup));
+        assert(rowCount(engine, unloggedDatabase) == 2);
+        assert(engine.query(unloggedDatabase, "t", {"=id 2"}, {"value"}).size() == 1);
+        assert(engine.query(unloggedDatabase, "t", {"=value 8"}, {"id"}).size() == 1);
+        assert(readText(archive / "generation") == "live\n");
+        assertNoRestoreStaging(".");
+        assert(engine.physicalRestore(unloggedDatabase, unloggedBackup));
+        assert(rowCount(engine, unloggedDatabase) == 0);
+        assert(std::filesystem::is_regular_file(
+            std::filesystem::path(unloggedDatabase) / "t.idx"));
+        assert(std::filesystem::is_regular_file(
+            std::filesystem::path(unloggedDatabase) / "t_value.idx"));
+        assert(readText(archive / "generation") == "backup\n");
+    }
+
     finalCleanupTestData();
     std::cout << "[PHYSICAL RESTORE VALIDATION] all passed" << std::endl;
     return 0;

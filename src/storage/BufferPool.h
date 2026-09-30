@@ -47,6 +47,8 @@ public:
     ~BufferPool();
 
     bool open();
+    // Runtime readers must not create an empty relation when its file is lost.
+    bool openExisting();
     // close(false) discards cached frames without another writeback attempt.
     // PageAllocator uses it after its marker-protected flush succeeds or
     // fails, so close cannot bypass that recovery protocol.
@@ -136,6 +138,7 @@ public:
     std::vector<FrameInfo> getFrameInfo() const;
 
 private:
+    bool openInternal(bool createIfMissing);
     struct Frame {
         uint32_t pageId = static_cast<uint32_t>(-1);
         bool dirty = false;

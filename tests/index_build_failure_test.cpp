@@ -12,6 +12,14 @@ extern dbms::StorageEngine g_engine;
 
 namespace {
 
+// Failure injection creates its physical fixture explicitly; a runtime
+// lookup must not create an undeclared empty tree as a side effect.
+void createEmptyTree(const std::filesystem::path& path) {
+    dbms::BPTree tree(path);
+    assert(tree.open() && tree.flush());
+    tree.close();
+}
+
 dbms::TableSchema makeTable(const std::string& name) {
     dbms::TableSchema table;
     table.tablename = name;
@@ -32,6 +40,8 @@ void test_single_column_insert_failure(const std::string& database) {
                {{"id", "1"}, {"left_value", "alpha"},
                 {"right_value", "one"}}) == DBStatus::OK);
 
+    createEmptyTree(std::filesystem::path(database) /
+                    "single_failure_left_value.idx");
     dbms::BPTree* index = g_engine.getSecondaryIndex(
         database, "single_failure", "left_value");
     assert(index != nullptr);
@@ -59,6 +69,8 @@ void test_single_column_flush_failure(const std::string& database) {
 
     assert(g_engine.createTable(database, makeTable("flush_failure")) ==
            DBStatus::OK);
+    createEmptyTree(std::filesystem::path(database) /
+                    "flush_failure_left_value.idx");
     dbms::BPTree* index = g_engine.getSecondaryIndex(
         database, "flush_failure", "left_value");
     assert(index != nullptr);
@@ -87,6 +99,8 @@ void test_composite_insert_failure(const std::string& database) {
                {{"id", "1"}, {"left_value", "alpha"},
                 {"right_value", "one"}}) == DBStatus::OK);
 
+    createEmptyTree(std::filesystem::path(database) /
+                    "composite_failure.idx_pair_idx");
     dbms::BPTree* index = g_engine.getCompositeIndexTree(
         database, "composite_failure", "pair_idx");
     assert(index != nullptr);

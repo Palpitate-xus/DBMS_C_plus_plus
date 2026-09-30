@@ -34,13 +34,21 @@ BufferPool::~BufferPool() {
 }
 
 bool BufferPool::open() {
+    return openInternal(true);
+}
+
+bool BufferPool::openExisting() {
+    return openInternal(false);
+}
+
+bool BufferPool::openInternal(bool createIfMissing) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (fd_ >= 0) return true;
     // close() intentionally releases the potentially large frame storage.
     // A PageAllocator is nevertheless reusable, so rebuild that storage
     // before any fetch indexes it by the configured frame count.
     if (frames_.size() != numFrames_) initializeFramesUnlocked();
-    fd_ = ::open(filename_.c_str(), O_RDWR | O_CREAT, 0644);
+    fd_ = ::open(filename_.c_str(), O_RDWR | (createIfMissing ? O_CREAT : 0), 0644);
     if (fd_ < 0) return false;
     // TDE sidecar for the page envelopes.  Absent sidecar = database not
     // (yet) encrypted; it is created lazily on the first sealed write.

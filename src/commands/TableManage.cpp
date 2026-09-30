@@ -7532,24 +7532,31 @@ std::string StorageEngine::extractPKValue(const std::string& rowBuffer,
     return tbl.buildPKValue(values);
 }
 
-BPTree* StorageEngine::getPKIndex(const std::string& dbname, const std::string& tablename) const {
+BPTree* StorageEngine::loadBtreeIndex(
+        std::map<std::string, std::unique_ptr<BPTree>>& cache,
+        const std::string& key, const std::filesystem::path& path,
+        bool createIfMissing) const {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
-    std::string key = dbname + "/" + tablename;
-    auto it = pkIndexCache_.find(key);
-    if (it != pkIndexCache_.end()) {
+    auto it = cache.find(key);
+    if (it != cache.end()) {
         if (it->second && !it->second->hasStaleFileGeneration()) {
             return it->second.get();
         }
-        pkIndexCache_.erase(it);
+        cache.erase(it);
     }
 
-    auto tree = std::make_unique<BPTree>(indexPath(dbname, tablename));
-    if (tree->open()) {
+    auto tree = std::make_unique<BPTree>(path);
+    if (createIfMissing ? tree->open() : tree->openExisting()) {
         BPTree* ptr = tree.get();
-        pkIndexCache_[key] = std::move(tree);
+        cache[key] = std::move(tree);
         return ptr;
     }
     return nullptr;
+}
+
+BPTree* StorageEngine::getPKIndex(const std::string& dbname, const std::string& tablename) const {
+    return loadBtreeIndex(pkIndexCache_, dbname + "/" + tablename,
+                          indexPath(dbname, tablename), false);
 }
 
 void StorageEngine::closeAllIndexes() {
@@ -8202,46 +8209,18 @@ std::vector<StorageEngine::CompositeIndexInfo> StorageEngine::getCompositeIndexe
 BPTree* StorageEngine::getSecondaryIndex(const std::string& dbname,
                                           const std::string& tablename,
                                           const std::string& colname) const {
-    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
-    std::string key = dbname + "/" + tablename + "/" + colname;
-    auto it = secondaryIndexCache_.find(key);
-    if (it != secondaryIndexCache_.end()) {
-        if (it->second && !it->second->hasStaleFileGeneration()) {
-            return it->second.get();
-        }
-        secondaryIndexCache_.erase(it);
-    }
-
-    auto tree = std::make_unique<BPTree>(secondaryIndexPath(dbname, tablename, colname));
-    if (tree->open()) {
-        BPTree* ptr = tree.get();
-        secondaryIndexCache_[key] = std::move(tree);
-        return ptr;
-    }
-    return nullptr;
+    return loadBtreeIndex(secondaryIndexCache_,
+                          dbname + "/" + tablename + "/" + colname,
+                          secondaryIndexPath(dbname, tablename, colname), false);
 }
 
 BPTree* StorageEngine::getCompositeIndexTree(const std::string& dbname,
                                               const std::string& tablename,
                                               const std::string& indexName) const {
-    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
-    std::string key = dbname + "/" + tablename + "/C/" + indexName;
-    auto it = secondaryIndexCache_.find(key);
-    if (it != secondaryIndexCache_.end()) {
-        if (it->second && !it->second->hasStaleFileGeneration()) {
-            return it->second.get();
-        }
-        secondaryIndexCache_.erase(it);
-    }
-
-    std::filesystem::path p = relationDir(dbname, tablename) / (tablename + ".idx_" + indexName);
-    auto tree = std::make_unique<BPTree>(p);
-    if (tree->open()) {
-        BPTree* ptr = tree.get();
-        secondaryIndexCache_[key] = std::move(tree);
-        return ptr;
-    }
-    return nullptr;
+    return loadBtreeIndex(secondaryIndexCache_,
+                          dbname + "/" + tablename + "/C/" + indexName,
+                          relationDir(dbname, tablename) /
+                              (tablename + ".idx_" + indexName), false);
 }
 
 // ========================================================================
@@ -11067,13 +11046,14 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
     }
 
     // Build index from existing data using page-based iteration
-    BPTree* idx = getSecondaryIndex(dbname, tablename,
-        isExpression ? expression : actualColname);
+    const std::string physicalIndexKey = isExpression ? expression : actualColname;
+    BPTree* idx = loadBtreeIndex(
+        secondaryIndexCache_, dbname + "/" + tablename + "/" + physicalIndexKey,
+        secondaryIndexPath(dbname, tablename, physicalIndexKey), true);
     if (!idx) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
-    const std::string physicalIndexKey = isExpression ? expression : actualColname;
     const auto discardPhysicalIndex = [&]() {
         idx->close();
         {
@@ -11355,7 +11335,9 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
     }
 
     // Build index from existing data
-    BPTree* idx = getCompositeIndexTree(dbname, tablename, indexName);
+    BPTree* idx = loadBtreeIndex(
+        secondaryIndexCache_, dbname + "/" + tablename + "/C/" + indexName,
+        relationDir(dbname, tablename) / (tablename + ".idx_" + indexName), true);
     if (!idx) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
@@ -14363,20 +14345,8 @@ PageAllocator* StorageEngine::getToastPageAllocator(const std::string& dbname,
 
 BPTree* StorageEngine::getToastIndex(const std::string& dbname,
                                      const std::string& tablename) const {
-    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
-    std::string key = dbname + ":" + tablename;
-    auto it = toastIndexes_.find(key);
-    if (it != toastIndexes_.end()) {
-        if (it->second && !it->second->hasStaleFileGeneration()) {
-            return it->second.get();
-        }
-        toastIndexes_.erase(it);
-    }
-    auto idx = std::make_unique<BPTree>(toastIndexPath(dbname, tablename).string());
-    if (!idx->open()) return nullptr;
-    BPTree* ptr = idx.get();
-    toastIndexes_[key] = std::move(idx);
-    return ptr;
+    return loadBtreeIndex(toastIndexes_, dbname + ":" + tablename,
+                          toastIndexPath(dbname, tablename), false);
 }
 
 void StorageEngine::closeAllToast() {
@@ -16110,6 +16080,14 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
         }
     }
 
+    // This DDL path deliberately removed the physical trees. Runtime getters
+    // only open existing relations, so build their empty replacements before
+    // re-inserting the captured heap rows.
+    const DBStatus emptyIndexStatus = reindex(dbname, tablename);
+    if (emptyIndexStatus != DBStatus::OK) {
+        lockManager_.unlock(tablename);
+        return emptyIndexStatus;
+    }
     if (!transactionContext().inTransaction) lockManager_.unlock(tablename);
 
     for (const auto& values : rows) {
@@ -16417,6 +16395,11 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
         }
     }
 
+    const DBStatus emptyIndexStatus = reindex(dbname, tablename);
+    if (emptyIndexStatus != DBStatus::OK) {
+        lockManager_.unlock(tablename);
+        return emptyIndexStatus;
+    }
     lockManager_.unlock(tablename);
 
     for (const auto& values : rows) {
@@ -16555,6 +16538,9 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
     }
 
     // 3. Swap the column's type fields; preserve its name + constraints.
+    const bool hadVariableLength = std::any_of(
+        tbl.cols, tbl.cols + tbl.len,
+        [](const Column& column) { return column.isVariableLength; });
     Column updated = tbl.cols[colIdx];
     updated.dataType = newCol.dataType;
     updated.dsize = newCol.dsize;
@@ -16615,6 +16601,23 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
         pageAllocators_[key] = std::move(pa);
     }
 
+    if (!hadVariableLength && updated.isVariableLength) {
+        PageAllocator toastPages(
+            toastDataPath(dbname, tablename).string(), 0, 8192,
+            DATA_FILE_FORMAT_VERSION);
+        BPTree toastIndex(toastIndexPath(dbname, tablename));
+        if (!toastPages.open() || !toastPages.flush() ||
+            !toastIndex.open() || !toastIndex.flush() ||
+            !persistToastCounter(toastMetaPath(dbname, tablename), 1)) {
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
+        }
+    }
+    const DBStatus emptyIndexStatus = reindex(dbname, tablename);
+    if (emptyIndexStatus != DBStatus::OK) {
+        lockManager_.unlock(tablename);
+        return emptyIndexStatus;
+    }
     lockManager_.unlock(tablename);
 
     // 6. Re-insert all rows: re-encodes the target column under its new type and
@@ -18458,7 +18461,8 @@ DBStatus StorageEngine::alterTableAddPrimaryKey(const std::string& dbname,
         auto cit = pkIndexCache_.find(pkKey);
         if (cit != pkIndexCache_.end()) { cit->second->close(); pkIndexCache_.erase(cit); }
         std::filesystem::remove(indexPath(dbname, tablename));
-        BPTree* pkIdx = getPKIndex(dbname, tablename);
+        BPTree* pkIdx = loadBtreeIndex(pkIndexCache_, pkKey,
+                                      indexPath(dbname, tablename), true);
         if (!pkIdx) {
             lockManager_.unlock(tablename);
             return DBStatus::IO_ERROR;
@@ -37685,7 +37689,8 @@ bool StorageEngine::rebuildIndexesAfterRecovery(
             if (fileError) return false;
 
             PageAllocator* pages = getToastPageAllocator(dbname, tableName);
-            BPTree* index = getToastIndex(dbname, tableName);
+            BPTree* index = loadBtreeIndex(
+                toastIndexes_, toastKey, toastIndexPath(dbname, tableName), true);
             if (!pages || !index) return false;
 
             bool valid = true;
@@ -40189,6 +40194,7 @@ bool StorageEngine::physicalRestoreLocked(
     auto dst = dbPath(dbname);
     std::filesystem::path stagedDatabase;
     std::vector<DurableDirectoryReplacement> restoreReplacements;
+    bool restoredCachesOpened = false;
     try {
         // Validate the complete source and every destructive destination
         // before removing the current database. In particular, aliases and
@@ -40332,6 +40338,11 @@ bool StorageEngine::physicalRestoreLocked(
             }
         };
         const auto rollbackPublished = [&]() {
+            if (restoredCachesOpened) {
+                closeDatabaseCaches(dbname);
+                if (catalogService_) catalogService_->evict(dbname);
+                restoredCachesOpened = false;
+            }
             bool ok = true;
             for (auto it = restoreReplacements.rbegin();
                  it != restoreReplacements.rend(); ++it) {
@@ -40410,6 +40421,33 @@ bool StorageEngine::physicalRestoreLocked(
             }
         }
 
+        // The backup intentionally contains only empty init/definition state
+        // for UNLOGGED relations, not their mutable B-tree files. This is an
+        // explicit restore operation, so construct those derived relations
+        // before reporting success rather than relying on runtime lookups to
+        // create an empty tree. Keep the displaced generations until this
+        // work succeeds so a rebuild failure can still roll the restore back.
+        restoredCachesOpened = true;
+        for (const auto& tableName : getTableNames(dbname)) {
+            const TableSchema table = getTableSchema(dbname, tableName);
+            if (!table.isUnlogged) continue;
+            bool initialized = reindex(dbname, tableName) == DBStatus::OK;
+            if (initialized && std::any_of(
+                    table.cols, table.cols + table.len,
+                    [](const Column& column) { return column.isVariableLength; })) {
+                BPTree toastIndex(toastIndexPath(dbname, tableName));
+                initialized = toastIndex.open() && toastIndex.flush();
+            }
+            if (!initialized) {
+                if (!rollbackPublished()) {
+                    std::cerr << "[storage] restore index initialization rollback "
+                                 "incomplete; retained recovery generations"
+                              << std::endl;
+                }
+                return false;
+            }
+        }
+
         for (auto& replacement : restoreReplacements) {
             if (!discardDirectoryReplacement(replacement)) {
                 std::cerr << "[storage] restore completed but an old generation "
@@ -40419,6 +40457,10 @@ bool StorageEngine::physicalRestoreLocked(
         }
         return true;
     } catch (...) {
+        if (restoredCachesOpened) {
+            closeDatabaseCaches(dbname);
+            if (catalogService_) catalogService_->evict(dbname);
+        }
         bool rollbackOk = true;
         for (auto it = restoreReplacements.rbegin();
              it != restoreReplacements.rend(); ++it) {

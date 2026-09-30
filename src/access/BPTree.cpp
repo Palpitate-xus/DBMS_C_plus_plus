@@ -130,6 +130,14 @@ BPTree::~BPTree() {
 }
 
 bool BPTree::open() {
+    return openInternal(true);
+}
+
+bool BPTree::openExisting() {
+    return openInternal(false);
+}
+
+bool BPTree::openInternal(bool createIfMissing) {
     std::unique_lock<std::shared_mutex> treeLock(treeMutex_);
     if (bp_ && bp_->isOpen()) return true;
     if (!bp_) bp_ = std::make_unique<BufferPool>(filePath_.string(), indexBufferFrameCount());
@@ -143,7 +151,8 @@ bool BPTree::open() {
 
     // Check existence BEFORE opening (O_CREAT would create the file)
     bool exists = std::filesystem::exists(filePath_);
-    if (!bp_->open()) return false;
+    if (!createIfMissing && !exists) return false;
+    if (!(createIfMissing ? bp_->open() : bp_->openExisting())) return false;
 
     if (exists) {
         if (!readHeader()) {

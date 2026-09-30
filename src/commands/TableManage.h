@@ -1658,6 +1658,10 @@ private:
                                          const std::string& tablename,
                                          const std::string& colname) const;
     mutable std::map<std::string, std::unique_ptr<BPTree>> pkIndexCache_;
+    BPTree* loadBtreeIndex(
+        std::map<std::string, std::unique_ptr<BPTree>>& cache,
+        const std::string& key, const std::filesystem::path& path,
+        bool createIfMissing) const;
     void closeAllIndexes();
 
     // TOAST relation + index caches

@@ -552,7 +552,10 @@ static bool collectEqualityIndexCandidates(
     }
     if (isPrimaryKey && tbl.pkColIndices.size() == 1) {
         auto* index = engine->getPKIndex(dbname, tablename);
-        if (!index) return false;
+        if (!index) {
+            throw DbError("XX001", "could not open B-tree index for relation \"" +
+                tablename + "\"");
+        }
         int64_t rid = 0;
         if (lookupBtreeKeyChecked(index, condition.value, rid)) candidates.insert(rid);
         return true;
@@ -576,7 +579,15 @@ static bool collectEqualityIndexCandidates(
     }
 
     auto* index = engine->getSecondaryIndex(dbname, tablename, condition.colName);
-    if (!index) return false;
+    if (!index) {
+        const auto indexedColumns = engine->getIndexedColumns(dbname, tablename);
+        if (std::find(indexedColumns.begin(), indexedColumns.end(),
+                      condition.colName) != indexedColumns.end()) {
+            throw DbError("XX001", "could not open B-tree index for relation \"" +
+                tablename + "\"");
+        }
+        return false;
+    }
     for (int64_t rid : lookupBtreeMultiChecked(index, condition.value))
         candidates.insert(rid);
     return true;

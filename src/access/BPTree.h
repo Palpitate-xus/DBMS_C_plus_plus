@@ -30,6 +30,8 @@ public:
 
     // Open or create index file
     bool open();
+    // Open an existing index without allowing the buffer pool to create it.
+    bool openExisting();
     void close();
     // Flush all dirty index pages and fsync the index file.
     bool flush();
@@ -114,6 +116,7 @@ public:
     }
 
 private:
+    bool openInternal(bool createIfMissing);
     std::filesystem::path filePath_;
     std::unique_ptr<BufferPool> bp_;
 
