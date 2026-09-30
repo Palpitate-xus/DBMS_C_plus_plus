@@ -5567,6 +5567,13 @@ static std::pair<std::string, CostEstimate> explainOpJson(Operator* op,
         json += "\"children\":[]";
     }
 
+    if (opts.analyze && op && op->runtimeLoops() != 0) {
+        json += ",\"actualRows\":" + std::to_string(op->runtimeRows());
+        json += ",\"actualLoops\":" + std::to_string(op->runtimeLoops());
+        if (opts.timing) {
+            json += ",\"actualTimeMs\":" + std::to_string(op->runtimeMs());
+        }
+    }
     json += "}";
     return {json, est};
 }
@@ -5577,10 +5584,11 @@ std::string QueryPlanner::explainJson(OpPtr& plan, StorageEngine* engine,
     return explainJson(plan, engine, dbname, opts);
 }
 
-std::string QueryPlanner::explainJson(OpPtr& plan, StorageEngine* engine,
-                                      const std::string& dbname,
-                                      const ExplainOptions& opts) {
-    auto [planJson, total] = explainOpJson(plan.get(), engine, dbname, opts);
+static std::string explainJsonDocument(Operator* plan, StorageEngine* engine,
+                                       const std::string& dbname,
+                                       const QueryPlanner::ExplainOptions& opts,
+                                       const QueryPlanner::ExplainExecutionStats* execution) {
+    auto [planJson, total] = explainOpJson(plan, engine, dbname, opts);
     std::string result = "{\n";
     result += "  \"plan\": " + planJson;
     if (opts.costs) {
@@ -5599,8 +5607,24 @@ std::string QueryPlanner::explainJson(OpPtr& plan, StorageEngine* engine,
         result += "    \"checkpointInterval\": " + std::to_string(cfg.checkpointInterval) + "\n";
         result += "  }";
     }
+    if (opts.analyze && execution) {
+        result += ",\n  \"actualRows\": " + std::to_string(execution->actualRows);
+        if (opts.timing) {
+            result += ",\n  \"executionTimeMs\": " + std::to_string(execution->executionTimeMs);
+        }
+    }
     if (opts.buffers) {
-        auto bpStats = engine->getBufferPoolStats();
+        StorageEngine::BufferPoolStats bpStats;
+        if (opts.analyze && execution) {
+            bpStats.totalHits = execution->sharedHits;
+            bpStats.totalMisses = execution->sharedReads;
+            const double totalAccesses = static_cast<double>(bpStats.totalHits) +
+                                         static_cast<double>(bpStats.totalMisses);
+            bpStats.hitRate = totalAccesses == 0.0 ? 0.0 :
+                100.0 * static_cast<double>(bpStats.totalHits) / totalAccesses;
+        } else {
+            bpStats = engine->getBufferPoolStats();
+        }
         result += ",\n  \"buffers\": {\n";
         result += "    \"sharedHit\": " + std::to_string(bpStats.totalHits) + ",\n";
         result += "    \"sharedRead\": " + std::to_string(bpStats.totalMisses) + ",\n";
@@ -5609,6 +5633,19 @@ std::string QueryPlanner::explainJson(OpPtr& plan, StorageEngine* engine,
     }
     result += "\n}\n";
     return result;
+}
+
+std::string QueryPlanner::explainJson(OpPtr& plan, StorageEngine* engine,
+                                      const std::string& dbname,
+                                      const ExplainOptions& opts) {
+    return explainJsonDocument(plan.get(), engine, dbname, opts, nullptr);
+}
+
+std::string QueryPlanner::explainJson(OpPtr& plan, StorageEngine* engine,
+                                      const std::string& dbname,
+                                      const ExplainOptions& opts,
+                                      const ExplainExecutionStats& execution) {
+    return explainJsonDocument(plan.get(), engine, dbname, opts, &execution);
 }
 
 PlanExecutionResult QueryPlanner::executePlanChecked(OpPtr plan) {

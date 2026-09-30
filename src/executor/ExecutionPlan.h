@@ -1192,6 +1192,14 @@ public:
         bool settings = false;
     };
 
+    // Statistics for this execution, not the lifetime of the buffer pools.
+    struct ExplainExecutionStats {
+        size_t actualRows = 0;
+        double executionTimeMs = 0.0;
+        size_t sharedHits = 0;
+        size_t sharedReads = 0;
+    };
+
     static std::string explain(OpPtr& plan, StorageEngine* engine,
                                const std::string& dbname);
     static std::string explain(OpPtr& plan, StorageEngine* engine,
@@ -1203,6 +1211,10 @@ public:
     static std::string explainJson(OpPtr& plan, StorageEngine* engine,
                                    const std::string& dbname,
                                    const ExplainOptions& opts);
+    static std::string explainJson(OpPtr& plan, StorageEngine* engine,
+                                   const std::string& dbname,
+                                   const ExplainOptions& opts,
+                                   const ExplainExecutionStats& execution);
 
     // Checked production entry point: EOF and execution failure are distinct.
     static PlanExecutionResult executePlanChecked(OpPtr plan);

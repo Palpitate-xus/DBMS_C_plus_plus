@@ -4960,7 +4960,10 @@ static bool handleExplain(const string& sql, Session& s) {
     ctx.havingConds = havingConds;
     if (structuredQuantified) ctx.quantifiedSubqueries.push_back(std::move(quantifiedSubquery));
 
-    const bool usePlanCache = g_config.enableQueryPlanCache &&
+    const bool jsonAnalyze = isJson && opts.analyze;
+    // Executed JSON contains this run's counters and cannot be cached as
+    // display text. Build and emit it only after execution has succeeded.
+    const bool usePlanCache = !jsonAnalyze && g_config.enableQueryPlanCache &&
                               g_config.queryPlanCacheSize > 0;
     string cacheKey = s.currentDB + "::" + inner;
     if (opts.buffers) cacheKey += ":B";
@@ -4990,7 +4993,7 @@ static bool handleExplain(const string& sql, Session& s) {
         }
     }
 
-    if (!cacheHit) {
+    if (!cacheHit && !jsonAnalyze) {
         auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
         if (isJson) {
             planOutput = dbms::QueryPlanner::explainJson(plan, &g_engine, s.currentDB, opts);
@@ -5013,7 +5016,7 @@ static bool handleExplain(const string& sql, Session& s) {
         }
     }
 
-    cout << planOutput;
+    if (!jsonAnalyze) cout << planOutput;
     // A FORMAT JSON result is one JSON document, including cache hits. The
     // text-mode diagnostic is not a JSON field and would corrupt its framing.
     if (cacheHit && !isJson) cout << "\n[plan cache hit]";
@@ -5027,13 +5030,38 @@ static bool handleExplain(const string& sql, Session& s) {
         auto execStart = std::chrono::steady_clock::now();
         size_t actualRows = 0;
         std::string row;
-        if (execPlan->open()) {
+        try {
+            if (!execPlan->open()) {
+                throw dbms::DbError("XX000", execPlan->errorMessage().empty() ?
+                    "executor failed to open analyzed plan" : execPlan->errorMessage());
+            }
             while (execPlan->next(row)) ++actualRows;
+            if (execPlan->hasError()) {
+                throw dbms::DbError("XX000", execPlan->errorMessage().empty() ?
+                    "executor failed while reading analyzed plan" : execPlan->errorMessage());
+            }
+        } catch (...) {
             execPlan->close();
+            throw;
         }
+        execPlan->close();
         auto execEnd = std::chrono::steady_clock::now();
         double execMs = std::chrono::duration<double, std::milli>(execEnd - execStart).count();
         const auto bufAfter = g_engine.getBufferPoolStats();
+        if (jsonAnalyze) {
+            dbms::QueryPlanner::ExplainExecutionStats execution;
+            execution.actualRows = actualRows;
+            execution.executionTimeMs = execMs;
+            // The counters are global and cache eviction can decrease them.
+            // Do not turn such a reset into an unsigned, enormous delta.
+            execution.sharedHits = bufAfter.totalHits >= bufBefore.totalHits ?
+                bufAfter.totalHits - bufBefore.totalHits : 0;
+            execution.sharedReads = bufAfter.totalMisses >= bufBefore.totalMisses ?
+                bufAfter.totalMisses - bufBefore.totalMisses : 0;
+            cout << dbms::QueryPlanner::explainJson(execPlan, &g_engine,
+                                                   s.currentDB, opts, execution);
+            return false;
+        }
         // Re-explain the executed tree: instrumented nodes now carry their
         // actual time/loops/rows and print PG-style per-node actuals.
         cout << "\n--- ANALYZE ---\n";
