@@ -5456,7 +5456,6 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
     stats.rowCount = 0;
     std::map<std::string, std::set<std::string>> distinctVals;
     std::map<std::string, std::vector<std::string>> allVals;
-    std::map<std::string, std::string> minVals, maxVals;
     std::map<std::string, size_t> nullCounts;
 
     if (!forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
@@ -5471,12 +5470,6 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
             std::string val = extractColumnValue(row, tbl, i);
             distinctVals[tbl.cols[i].dataName].insert(val);
             allVals[tbl.cols[i].dataName].push_back(val);
-            if (minVals.find(tbl.cols[i].dataName) == minVals.end() || val < minVals[tbl.cols[i].dataName]) {
-                minVals[tbl.cols[i].dataName] = val;
-            }
-            if (maxVals.find(tbl.cols[i].dataName) == maxVals.end() || val > maxVals[tbl.cols[i].dataName]) {
-                maxVals[tbl.cols[i].dataName] = val;
-            }
         }
     })) return false;
 
@@ -5487,36 +5480,33 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
         StorageEngine::ColumnStats cs;
         cs.cardinality = distinctVals[cname].size();
         cs.nullCount = nullCounts[cname];
-        cs.minVal = minVals[cname];
-        cs.maxVal = maxVals[cname];
         auto& vals = allVals[cname];
+        const Column& column = tbl.cols[i];
+        auto lessValue = [&column](const std::string& left, const std::string& right) {
+            // Partition non-orderable values from valid typed values before
+            // comparing. A per-pair lexical fallback would break transitivity.
+            const bool leftComparable = compareValues(column, left, false, left, false, "=")
+                != PredicateTruth::Unknown;
+            const bool rightComparable = compareValues(column, right, false, right, false, "=")
+                != PredicateTruth::Unknown;
+            if (leftComparable != rightComparable) return leftComparable;
+            if (!leftComparable) return left < right;
+            return compareValues(column, left, false, right, false, "<") == PredicateTruth::True;
+        };
+        std::sort(vals.begin(), vals.end(), lessValue);
+        if (!vals.empty()) {
+            cs.minVal = vals.front();
+            cs.maxVal = vals.back();
+        }
         // Build equi-depth histogram
         if (vals.size() >= HIST_BUCKETS * 2) {
-            bool isNumeric = (!tbl.cols[i].isVariableLength &&
-                              (tbl.cols[i].dataType == "int" || tbl.cols[i].dataType == "long" ||
-                               tbl.cols[i].dataType == "tinyint" || tbl.cols[i].dataType == "float" ||
-                               tbl.cols[i].dataType == "double" || tbl.cols[i].dataType == "decimal"));
-            if (isNumeric) {
-                std::vector<long long> nums;
-                nums.reserve(vals.size());
-                for (const auto& v : vals) {
-                    try { nums.push_back(std::stoll(v)); } catch (...) { nums.push_back(0); }
-                }
-                std::sort(nums.begin(), nums.end());
-                size_t perBucket = nums.size() / HIST_BUCKETS;
-                for (size_t b = 0; b < HIST_BUCKETS; ++b) {
-                    size_t start = b * perBucket;
-                    size_t end = (b == HIST_BUCKETS - 1) ? nums.size() - 1 : (b + 1) * perBucket;
-                    cs.histogram.push_back({std::to_string(nums[start]), std::to_string(nums[end])});
-                }
-            } else {
-                std::sort(vals.begin(), vals.end());
-                size_t perBucket = vals.size() / HIST_BUCKETS;
-                for (size_t b = 0; b < HIST_BUCKETS; ++b) {
-                    size_t start = b * perBucket;
-                    size_t end = (b == HIST_BUCKETS - 1) ? vals.size() - 1 : (b + 1) * perBucket;
-                    cs.histogram.push_back({vals[start], vals[end]});
-                }
+            const size_t perBucket = vals.size() / HIST_BUCKETS;
+            for (size_t b = 0; b < HIST_BUCKETS; ++b) {
+                const size_t start = b * perBucket;
+                const size_t end = (b == HIST_BUCKETS - 1) ? vals.size() - 1 : (b + 1) * perBucket;
+                // Keep the original decoded value, including exact numeric
+                // precision and floating-point fractions; never stoll/round it.
+                cs.histogram.push_back({vals[start], vals[end]});
             }
         }
         // Compute MCV
