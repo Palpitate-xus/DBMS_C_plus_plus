@@ -5582,15 +5582,14 @@ std::string QueryPlanner::explainJson(OpPtr& plan, StorageEngine* engine,
                                       const ExplainOptions& opts) {
     auto [planJson, total] = explainOpJson(plan.get(), engine, dbname, opts);
     std::string result = "{\n";
-    result += "  \"plan\": " + planJson + ",\n";
+    result += "  \"plan\": " + planJson;
     if (opts.costs) {
-        result += "  \"totalCost\": " + std::to_string(static_cast<int>(total.cost)) + ",\n";
+        result += ",\n  \"totalCost\": " + std::to_string(static_cast<int>(total.cost)) + ",\n";
         result += "  \"totalRows\": " + std::to_string(static_cast<int>(total.rows));
     }
     if (opts.settings) {
         auto cfg = g_config;
-        if (opts.costs) result += ",";
-        result += "\n  \"settings\": {\n";
+        result += ",\n  \"settings\": {\n";
         result += "    \"workMemKb\": " + std::to_string(cfg.workMemKb) + ",\n";
         result += "    \"enableSeqScan\": " + std::string(cfg.enableSeqScan ? "true" : "false") + ",\n";
         result += "    \"enableHashJoin\": " + std::string(cfg.enableHashJoin ? "true" : "false") + ",\n";
