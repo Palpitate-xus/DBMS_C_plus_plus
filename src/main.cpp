@@ -20096,10 +20096,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 std::string region = sql.substr(fp + 4, fEnd - fp - 4);
                 bool hasTopComma = false;
                 {
-                    int depth = 0; bool inQ = false;
+                    int depth = 0; char quote = 0;
                     for (char ch : region) {
-                        if (inQ) { if (ch == '\'') inQ = false; continue; }
-                        if (ch == '\'') { inQ = true; continue; }
+                        if (quote) { if (ch == quote) quote = 0; continue; }
+                        if (ch == '\'' || ch == '"') { quote = ch; continue; }
                         if (ch == '(') ++depth;
                         else if (ch == ')') --depth;
                         else if (ch == ',' && depth == 0) { hasTopComma = true; break; }
@@ -20107,10 +20107,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
                 if (hasTopComma) {
                     std::string out;
-                    int depth = 0; bool inQ = false;
+                    int depth = 0; char quote = 0;
                     for (char ch : region) {
-                        if (inQ) { out += ch; if (ch == '\'') inQ = false; continue; }
-                        if (ch == '\'') { inQ = true; out += ch; continue; }
+                        if (quote) { out += ch; if (ch == quote) quote = 0; continue; }
+                        if (ch == '\'' || ch == '"') { quote = ch; out += ch; continue; }
                         if (ch == '(') ++depth;
                         else if (ch == ')') --depth;
                         else if (ch == ',' && depth == 0) { out += " cross join "; continue; }

@@ -1,0 +1,11 @@
+CREATE TABLE "DiffFrom,Rows" (id INT PRIMARY KEY,v TEXT);
+INSERT INTO "DiffFrom,Rows" VALUES (1,'NULL'),(2,'');
+SELECT id,v FROM "DiffFrom,Rows" ORDER BY id;
+SELECT q.id FROM "DiffFrom,Rows" AS q WHERE q.id=2;
+SELECT id FROM public."DiffFrom,Rows" ORDER BY id;
+CREATE TABLE "DiffFrom""Quoted,Rows" (id INT);
+INSERT INTO "DiffFrom""Quoted,Rows" VALUES (3);
+SELECT id FROM "DiffFrom""Quoted,Rows";
+SELECT id FROM "DiffFrom,Rows" WHERE id IN (1,2) ORDER BY id;
+DROP TABLE "DiffFrom,Rows";
+DROP TABLE "DiffFrom""Quoted,Rows";
