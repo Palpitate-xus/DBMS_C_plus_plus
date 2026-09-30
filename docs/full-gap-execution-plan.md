@@ -17,6 +17,8 @@
 
 ## 后续优先队列
 
+2026-09-30 第 836 项进展：整数索引写入规范化已独立提交，10 个 C++、新增及 8 组相邻协议、完整 PostgreSQL 协议和专项真实 PostgreSQL 18.6 差分均退出码 0；隔离正式构建运行中。第 835 项相邻／完整协议、正式生产构建与正式专项协议均已退出码 0。根冻结第 831 项的真实差分已确认 371/371、failed=0、退出码 0；其完整脚本仍运行，后续隔离修复不计入该轮。SQL EXPLAIN 丢弃 BETWEEN、旧错误索引迁移、REAL/numeric 类型提升及其他未完成条目继续处理。总账仍 273 项：24 complete、134 partial、100 unverified、15 deferred_by_user；未 push，GitHub Actions 禁用。
+
 第 835 项已修复整数与有限 numeric 的精确比较及 BIGINT 小数 BETWEEN 精度丢失；6 个 C++、新增协议及新增真实 PostgreSQL 18.6 差分 cases=1 failed=0 均退出码 0，相邻／完整协议和隔离正式构建运行中。第 834 项正式构建／正式类型键协议及完整／8 组相邻协议均通过。新的隔离实测表明写入端 id=0001 与 id=1 被当作不同主键，heap 可出现重复数值，优先修复整数写入键及旧索引一致性；SQL EXPLAIN 的 WHERE parser 丢弃 BETWEEN、REAL/numeric 类型提升也仍在队列中。根冻结第 831 项整套／371 组真实差分尚未结束，总清单未完成。
 
 第 834 项复用存储端的类型索引键，修复二级 IndexScan／Bitmap/DNF 按原始浮点、money、UUID、char 字面量漏行；9 个 C++／新增真实协议退出码 0，相邻／完整协议与隔离正式构建运行中。第 832 项正式构建／正式整数协议已退出码 0；第 833 项 8 组相邻协议通过。参考 PostgreSQL 18.6 又确认本地 REAL 与 numeric 的混合比较不兼容，不把该差异算通过；继续类型提升、整数与 decimal literal 比较、缺失统计估算及 Hash/Bloom 加载／恢复。根冻结轮次仍仅到第 831 项，整套尚未结束。
