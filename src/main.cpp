@@ -30,6 +30,7 @@
 #include "common/version.h"
 #include "common/DataDirectory.h"
 #include "common/DbError.h"
+#include "common/SqlConjunction.h"
 #include "common/FeatureGate.h"
 #include "common/NotificationManager.h"
 #include "replication/ReplicationManager.h"
@@ -4852,9 +4853,12 @@ static bool handleExplain(const string& sql, Session& s) {
         if (!structuredQuantified) {
             string condStr = normalizeConditionStr(rawWhere);
             if (!condStr.empty()) {
-                vector<string> rawConds = splitConds(condStr);
+                vector<string> rawConds = dbms::splitSqlConjunction(condStr);
                 for (auto& c : rawConds) {
-                    string mc = modifyLogic(c);
+                    // BETWEEN's AND belongs to one predicate. Reuse the
+                    // ordinary predicate merger so NOT BETWEEN is kept too.
+                    const auto merged = mergeNegPredTokens(tokenize(c));
+                    string mc = modifyLogic(merged.size() == 1 ? merged.front() : c);
                     if (!mc.empty()) conds.push_back(mc);
                 }
             }
