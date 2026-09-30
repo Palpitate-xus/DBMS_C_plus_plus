@@ -30995,6 +30995,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     }
     if (expr.funcName == "arith") {
         bool moneyExpression = false;
+        bool numericExpression = false;
         bool concatExpression = false;
         for (const auto& argument : expr.funcArgs) {
             if (argument == "||") concatExpression = true;
@@ -31005,7 +31006,11 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 if (tbl.cols[columnIndex].dataName == operand &&
                     tbl.cols[columnIndex].dataType == "money") {
                     moneyExpression = true;
-                    break;
+                }
+                if (tbl.cols[columnIndex].dataName == operand &&
+                    (tbl.cols[columnIndex].dataType == "numeric" ||
+                     tbl.cols[columnIndex].dataType == "decimal")) {
+                    numericExpression = true;
                 }
             }
             std::string lowered = argument;
@@ -31015,8 +31020,17 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             }
             if (lowered.find("::money") != std::string::npos)
                 moneyExpression = true;
+            const auto castAt = lowered.find("::");
+            if (castAt != std::string::npos &&
+                (lowered.empty() || lowered.front() != '\'')) {
+                const auto castType = trim(lowered.substr(castAt + 2));
+                if (castType == "numeric" || castType == "decimal" ||
+                    castType.rfind("numeric(", 0) == 0 ||
+                    castType.rfind("decimal(", 0) == 0)
+                    numericExpression = true;
+            }
         }
-        if (moneyExpression || concatExpression) {
+        if (moneyExpression || numericExpression || concatExpression) {
             std::map<std::string, std::string> rowContext;
             std::map<std::string, std::string> typeHints;
             std::set<std::string> nullColumns;
@@ -31046,6 +31060,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                         ? "failed to evaluate typed expression"
                         : evaluated.error);
             }
+            if (knownNull) *knownNull = evaluated.isNull;
             return evaluated.isNull ? "NULL" : evaluated.value;
         }
         double acc = 0.0;

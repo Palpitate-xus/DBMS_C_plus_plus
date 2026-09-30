@@ -1,0 +1,17 @@
+SELECT 0::numeric/1::numeric AS q;
+SELECT 0.00::numeric/10000::numeric AS q;
+SELECT 0::numeric/0.0001::numeric AS q;
+SELECT 1::numeric/10000::numeric AS q;
+SELECT 1::numeric/1.000000000000000000000001::numeric AS q;
+SELECT 100000000000000000000::numeric/3::numeric AS q;
+SELECT 1::numeric/0.00000001::numeric AS q;
+SELECT -1::numeric/100000000::numeric AS q;
+SELECT 0.00000001::numeric/3::numeric AS q;
+SELECT 100000000::numeric/7::numeric AS q;
+SELECT 9999999999999999::numeric/7::numeric AS q;
+SELECT 123.45::numeric/0.001::numeric AS q;
+SELECT 1.2345678901234567890123456789::numeric/1::numeric AS q;
+CREATE TABLE diff_division_scale_rows(id INT PRIMARY KEY,n NUMERIC);
+INSERT INTO diff_division_scale_rows VALUES (1,0.00),(2,100000000);
+SELECT id,n/7::numeric AS q FROM diff_division_scale_rows ORDER BY id;
+DROP TABLE diff_division_scale_rows;

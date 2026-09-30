@@ -459,58 +459,32 @@ Numeric Numeric::operator/(const Numeric& rhs) const {
         if (sign() == 0) return nan();
         return infinity(sign_ * rhs.sign_);
     }
-    if (sign() == 0) return Numeric(0);
-    // PostgreSQL select_div_scale(): the quotient keeps at least
-    // NUMERIC_MIN_SIG_DIGITS (16) significant digits; small or sub-unit
-    // quotients carry 20.  Reproduce PG output by computing at 20
-    // fractional digits, then narrowing to 16 when the quotient is >= 1
-    // and either inexact or its dividend has more than two significant
-    // digits.  divideMagnitudes rounds half-up and keeps trailing zeros,
-    // so exact quotients stay zero-padded exactly like PG.
-    int nd = static_cast<int>(digits_.size());
-    int minFrac = std::max(scale_, rhs.scale_);
-    int wide = std::max(20, minFrac);
-    int extraWide = wide - scale_ + rhs.scale_;
-    if (extraWide < 0) extraWide = 0;
-    Numeric r = divideMagnitudes(*this, rhs, extraWide);
-    r.sign_ = sign_ * rhs.sign_;
-    int intDigits = static_cast<int>(r.digits_.size()) - r.scale_;
-    bool belowOne = intDigits < 1;
-    bool exact = true;
-    {
-        // exact when every fractional digit beyond the 16th (counted from
-        // the decimal point, left to right) is zero.  Fractional digit p
-        // (1-based) is digits[intDigits + p - 1].
-        int intDig = static_cast<int>(r.digits_.size()) - r.scale_;
-        if (intDig < 0) intDig = 0;
-        for (size_t idx = intDig + 16; idx < r.digits_.size(); ++idx) {
-            if (r.digits_[idx] != 0) { exact = false; break; }
+    // Recover the normalized base-10000 leading group from our decimal
+    // digits. PG18 select_div_scale chooses scale from these input groups,
+    // not from a rounded quotient or a 16-versus-20 digit heuristic.
+    struct LeadingGroup { int weight; int digit; };
+    const auto leadingGroup = [](const Numeric& value) {
+        if (value.sign() == 0) return LeadingGroup{0, 0};
+        const int exponent = static_cast<int>(value.digits_.size()) -
+                             value.scale_ - 1;
+        const int weight = exponent >= 0 ? exponent / 4 : (exponent - 3) / 4;
+        const int width = exponent - weight * 4 + 1;
+        int digit = 0;
+        for (int i = 0; i < width; ++i) {
+            digit = digit * 10 +
+                (i < static_cast<int>(value.digits_.size()) ? value.digits_[i] : 0);
         }
-    }
-    // PG select_div_scale keeps the wide (20-digit) result when the
-    // quotient is sub-unit, or when it is exact and the leading-digit
-    // estimate of the quotient is 1 (e.g. 7.0/7 -> 1.00000000000000000000,
-    // 13.0/13 -> 1.000..., but 15.0/3 -> 5.0000000000000000 and
-    // 7::numeric/1 -> 7.0000000000000000 narrow to 16).  Weight (integer
-    // digit count) decides how many leading dividend digits enter the
-    // estimate: equal weights compare first digits; a heavier dividend
-    // compares its first two digits against the divisor's first.
-    bool keepWide = belowOne;
-    if (!keepWide && exact) {
-        const int w1 = static_cast<int>(digits_.size()) - scale_;
-        const int w2 = static_cast<int>(rhs.digits_.size()) - rhs.scale_;
-        const int d1 = digits_.empty() ? 0 : digits_[0];
-        const int d2 = rhs.digits_.empty() ? 0 : rhs.digits_[0];
-        if (w1 < w2) keepWide = true;             // sub-unit quotient
-        else if (w1 == w2) keepWide = (d1 / std::max(1, d2)) == 1;
-        else {
-            const int d1b = digits_.size() > 1 ? digits_[0] * 10 + digits_[1] : d1 * 10;
-            keepWide = (d1b / std::max(1, d2)) == 1;
-        }
-    }
-    if (!keepWide && r.scale_ > 16) {
-        r = r.withScale(16);
-    }
+        return LeadingGroup{weight, digit};
+    };
+    const auto left = leadingGroup(*this);
+    const auto right = leadingGroup(rhs);
+    const int quotientWeight = left.weight - right.weight -
+                               (left.digit <= right.digit ? 1 : 0);
+    const int resultScale = std::min(kMaxPrecision,
+        std::max({0, 16 - quotientWeight * 4, scale_, rhs.scale_}));
+    const int extraScale = resultScale - scale_ + rhs.scale_;
+    Numeric r = divideMagnitudes(*this, rhs, extraScale);
+    r.sign_ = r.sign() == 0 ? 1 : sign_ * rhs.sign_;
     return r;
 }
 
@@ -560,16 +534,17 @@ Numeric Numeric::multiplyMagnitudes(const Numeric& a, const Numeric& b) {
 }
 
 Numeric Numeric::divideMagnitudes(const Numeric& a, const Numeric& b, int extraScale) {
-    // Scale dividend up by extraScale.
+    // Scale either magnitude before a single rounded integer division.
+    // A negative extraScale shifts the divisor; truncating the dividend
+    // first would lose the remainder needed for correct final rounding.
     std::vector<uint8_t> D = a.digits_;
-    D.insert(D.end(), extraScale, 0);
+    std::vector<uint8_t> V = b.digits_;
+    if (extraScale >= 0) D.insert(D.end(), extraScale, 0);
+    else V.insert(V.end(), -extraScale, 0);
     std::vector<uint8_t> Q, R;
-    divDigitVectors(D, b.digits_, Q, R);
+    divDigitVectors(D, V, Q, R);
 
-    // Round half-up using remainder.
-    std::vector<uint8_t> twoR = R;
-    incrementDigitVector(twoR); // actually R*2 would require digit vector *2; use R*2 >= b
-    // Simpler: compare 2*R with b.
+    // Round half-up using the full remainder and the scaled divisor.
     int carry = 0;
     for (int i = static_cast<int>(R.size()) - 1; i >= 0; --i) {
         int v = R[i] * 2 + carry;
@@ -577,7 +552,7 @@ Numeric Numeric::divideMagnitudes(const Numeric& a, const Numeric& b, int extraS
         carry = v / 10;
     }
     if (carry) R.insert(R.begin(), 1);
-    if (cmpDigitVectors(R, b.digits_) >= 0) {
+    if (cmpDigitVectors(R, V) >= 0) {
         incrementDigitVector(Q);
     }
 
