@@ -20951,6 +20951,30 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
             } else if (argRaw[i] == '(') ++depth;
             else if (argRaw[i] == ')') --depth;
         }
+        if (expr.funcName == "coalesce") {
+            // COALESCE is non-strict: NULL arguments select a later value,
+            // and an empty string or the text "NULL" is a valid result.
+            std::map<std::string, std::string> rowValues;
+            std::set<std::string> nullColumns;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                bool isNull = false;
+                std::string value = extractValue(i, &isNull);
+                if (!buffered && !valueEngine && !tbl.cols[i].isVariableLength &&
+                    tbl.cols[i].isNull && value.empty()) isNull = true;
+                rowValues[tbl.cols[i].dataName] = std::move(value);
+                if (isNull) nullColumns.insert(tbl.cols[i].dataName);
+            }
+            const auto evaluated = ExprHelper::evalStringWithNulls(
+                fnText + " " + cond.value, rowValues, nullColumns,
+                buildTypeHints(tbl), valueDb);
+            if (!evaluated.ok)
+                throw std::runtime_error(evaluated.error.empty()
+                    ? "failed to evaluate COALESCE predicate" : evaluated.error);
+            if (evaluated.isNull) return false;
+            if (evaluated.typeName != "boolean")
+                throw std::runtime_error("COALESCE predicate did not return boolean");
+            return ExprValue("boolean", evaluated.value, false).asBool();
+        }
         // Strict-gate replication: a column argument that is physically
         // NULL makes the function result NULL (three-valued Unknown).
         if (buffered) {
