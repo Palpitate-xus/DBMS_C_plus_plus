@@ -17,6 +17,8 @@
 
 ## 后续优先队列
 
+2026-09-30 第 839 项进展：EXPLAIN 的有界 OR／AND／括号分组已独立提交，新 C++、ASan+UBSan、新／11 组相邻协议、隔离正式生产构建及正式专项协议均退出码 0，最终完整协议仍运行。第 837 项完整协议、正式构建及正式 BETWEEN 专项协议均已退出码 0。根主分支冻结第 838 项 HEAD 2c6d4f70 重跑正式全脚本（374 C++／89 E2E）和同一正式二进制真实 PostgreSQL 18.6 差分（373 cases），仍运行，不含隔离第 839 项。接着处理未 ANALYZE 的零行估算、旧索引迁移、REAL/numeric 混合语义等未完成总清单；仍 24 complete、134 partial、100 unverified、15 deferred_by_user，未 push，Actions 禁用。
+
 2026-09-30 第 838 项进展：差分工具超时单测已独立修复并提交，38 项在默认／15／37／120 秒四种环境均退出码 0。第 837 项的新协议及 10 组相邻协议均退出码 0，完整协议和隔离正式构建仍运行。根第 831 项旧整套失败记录保持，准备快进最新修复后正式重跑；总账仍 24 complete、134 partial、100 unverified、15 deferred_by_user，273 项未完成，未 push，Actions 禁用。
 
 2026-09-30 第 837 项进展：EXPLAIN 的 BETWEEN／NOT BETWEEN 与字面量 and 分隔修复已提交，新 C++ 和真实协议退出码 0，相邻／完整协议及隔离正式构建进行中。第 836 项正式生产构建及正式专项协议均已退出码 0。第 831 项 HEAD 7f34371f 的完整脚本已结束，退出码 1：368/368 C++、82/83 协议/E2E 通过；pg_diff_runner_test 的两个 mock 断言写死 timeout=15，而实际遵守 DBMS_PROTOCOL_TEST_TIMEOUT=120，单独修正测试隔离后再验。该轮真实 PostgreSQL 18.6 差分 371/371、failed=0、退出码 0；不把后续隔离修复计入该轮。主分支已快进至第 836 项，旧错误索引迁移、REAL/numeric 类型提升、EXPLAIN 其余 lowering 及其他总清单仍未完成；未 push，Actions 禁用。
