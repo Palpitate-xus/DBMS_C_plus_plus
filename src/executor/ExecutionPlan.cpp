@@ -612,7 +612,8 @@ bool IndexScanOp::next(std::string& outRow) {
             (tbl_.cols[columnIndex].generatedKind != 'v' &&
              engine_->isColumnNullByRid(dbname_, tablename_, rid, columnIndex));
         if (StorageEngine::compareValues(tbl_.cols[columnIndex], actual,
-                valueIsNull, value_, false, "=") != StorageEngine::PredicateTruth::True)
+                valueIsNull, integerEqualityValue(tbl_, colname_, value_),
+                false, "=") != StorageEngine::PredicateTruth::True)
             continue;
         rtInstr_.emitted = true;
         return true;

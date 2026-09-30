@@ -1,0 +1,12 @@
+DROP TABLE IF EXISTS diff_integer_recheck;
+DROP TABLE IF EXISTS diff_bigint_recheck;
+CREATE TABLE diff_integer_recheck(id INT PRIMARY KEY);
+INSERT INTO diff_integer_recheck VALUES (0),(1);
+SELECT id FROM diff_integer_recheck WHERE id=1.0 AND abs(id)>0;
+SELECT id FROM diff_integer_recheck WHERE id=1e0 AND abs(id)>0;
+SELECT id FROM diff_integer_recheck WHERE id=1.5 AND abs(id)>0;
+CREATE TABLE diff_bigint_recheck(id BIGINT PRIMARY KEY);
+INSERT INTO diff_bigint_recheck VALUES (9007199254740992),(9007199254740993);
+SELECT id FROM diff_bigint_recheck WHERE id=9007199254740993.0 AND abs(id)>0;
+DROP TABLE diff_integer_recheck;
+DROP TABLE diff_bigint_recheck;
