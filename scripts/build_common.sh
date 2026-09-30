@@ -132,6 +132,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/native_distinct_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/native_projection_result_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/index_scan_full_value_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/empty_index_equality_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cli_error_recovery_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/no_fake_compat_objects_test.py)
     DBMS_E2E_TESTS+=(tests/compat_fallback_registry_test.py)

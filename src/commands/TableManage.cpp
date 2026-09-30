@@ -24251,6 +24251,9 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
             const std::string searchValue = searchColumn
                 ? canonicalColumnKeyValue(*searchColumn, c.value)
                 : c.value;
+            // Old index builds and writes can omit non-NULL empty keys.
+            // Even a nonempty candidate set would therefore be incomplete.
+            if (searchValue.empty()) continue;
             if (hasPK) {
                 BPTree* idx = getPKIndex(dbname, tablename);
                 if (!idx) return failIndexScan();
