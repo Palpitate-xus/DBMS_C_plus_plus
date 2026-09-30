@@ -17,6 +17,8 @@
 
 ## 后续优先队列
 
+2026-09-30 第 837 项进展：EXPLAIN 的 BETWEEN／NOT BETWEEN 与字面量 and 分隔修复已提交，新 C++ 和真实协议退出码 0，相邻／完整协议及隔离正式构建进行中。第 836 项正式生产构建及正式专项协议均已退出码 0。第 831 项 HEAD 7f34371f 的完整脚本已结束，退出码 1：368/368 C++、82/83 协议/E2E 通过；pg_diff_runner_test 的两个 mock 断言写死 timeout=15，而实际遵守 DBMS_PROTOCOL_TEST_TIMEOUT=120，单独修正测试隔离后再验。该轮真实 PostgreSQL 18.6 差分 371/371、failed=0、退出码 0；不把后续隔离修复计入该轮。主分支已快进至第 836 项，旧错误索引迁移、REAL/numeric 类型提升、EXPLAIN 其余 lowering 及其他总清单仍未完成；未 push，Actions 禁用。
+
 2026-09-30 第 836 项进展：整数索引写入规范化已独立提交，10 个 C++、新增及 8 组相邻协议、完整 PostgreSQL 协议和专项真实 PostgreSQL 18.6 差分均退出码 0；隔离正式构建运行中。第 835 项相邻／完整协议、正式生产构建与正式专项协议均已退出码 0。根冻结第 831 项的真实差分已确认 371/371、failed=0、退出码 0；其完整脚本仍运行，后续隔离修复不计入该轮。SQL EXPLAIN 丢弃 BETWEEN、旧错误索引迁移、REAL/numeric 类型提升及其他未完成条目继续处理。总账仍 273 项：24 complete、134 partial、100 unverified、15 deferred_by_user；未 push，GitHub Actions 禁用。
 
 第 835 项已修复整数与有限 numeric 的精确比较及 BIGINT 小数 BETWEEN 精度丢失；6 个 C++、新增协议及新增真实 PostgreSQL 18.6 差分 cases=1 failed=0 均退出码 0，相邻／完整协议和隔离正式构建运行中。第 834 项正式构建／正式类型键协议及完整／8 组相邻协议均通过。新的隔离实测表明写入端 id=0001 与 id=1 被当作不同主键，heap 可出现重复数值，优先修复整数写入键及旧索引一致性；SQL EXPLAIN 的 WHERE parser 丢弃 BETWEEN、REAL/numeric 类型提升也仍在队列中。根冻结第 831 项整套／371 组真实差分尚未结束，总清单未完成。
