@@ -17,6 +17,8 @@
 
 ## 后续优先队列
 
+2026-09-30 第 855 项进展：typed SELECT DISTINCT／DISTINCT ON 已独立提交，最终 8 个 C++、新协议、新 CLI、8 组相邻协议、完整协议和真实 PostgreSQL 18.6 专项 cases=1 failed=0 均退出码 0，旧三类失败／failed=1 和中间倒序投影失败保留。原生 DistinctOp 新 C++ 又在 numeric distinct=3 失败，已另列第 858 项继续修复。根冻结 e339160e 至第 852 项的正式全脚本已确认退出码 0：382/382 C++、102/102 E2E；同一正式二进制真实 377/377 差分 failed=0、退出码 0。此轮不包含隔离第 853／854／855／856／857 项，不能用较早完整成功冒充最新主分支验收；旧 c1409254 JOIN 失败仍保留。准备快进这些已提交修复并冻结再跑完整脚本；总账仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
+
 2026-09-30 第 857 项进展：aggregate FILTER 的 postfix NULL tests、嵌套括号及引号空格保真已独立修复，最终新协议、真实 PostgreSQL 18.6 专项 cases=1 failed=0、7 个 C++、7 组相邻协议和完整协议均退出码 0，旧 failed=1 保留。第 855 项 SELECT DISTINCT 已初步定向通过，但扩展倒序投影验收又发现 key 类型仍误用 wire 列序，已保留中间失败并继续修复，不记最终通过。根冻结 e339160e（至 852）正式生产构建成功、真实 377/377 差分 failed=0 已确认退出码 0；382 个 C++ 已通过，整套 102 组 E2E 仍运行，尚无整套成功退出码。隔离第 853／854／856／857 项不计根这轮；总账仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
 
 2026-09-30 第 856 项进展：缓冲聚合 FILTER 的真实 NULL 位传播已独立提交，最终新协议、真实 PostgreSQL 18.6 专项 cases=1 failed=0、7 个 C++、6 组相邻协议和完整协议均退出码 0；旧协议／真实 failed=1 与旧直接 API 测试未复现的事实均保留。IS NULL 与 abs(f)=0 的独立 frontend FILTER 漏条件问题已另复现，作为第 857 项继续修复；SELECT DISTINCT 数值尺度亦未修。根冻结 e339160e 的正式全脚本和 377 组差分仍运行，不含第 853／854／856 项重链验收；总清单仍 24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
