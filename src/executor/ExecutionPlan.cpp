@@ -437,6 +437,31 @@ static bool isSingleColumnPrimaryKey(const TableSchema& table,
     return primaryColumns == 1 && matches;
 }
 
+static std::string equalityIndexValue(const TableSchema& table,
+                                       const std::string& column,
+                                       const std::string& value) {
+    for (size_t i = 0; i < table.len; ++i) {
+        if (table.cols[i].dataName != column) continue;
+        const auto& type = table.cols[i].dataType;
+        const bool integer = type == "tinyint" || type == "smallint" ||
+            type == "int" || type == "integer" || type == "bigint" ||
+            type == "long" || type == "int2" || type == "int4" ||
+            type == "int8" || type == "tinyint unsigned" ||
+            type == "smallint unsigned" || type == "int unsigned" ||
+            type == "integer unsigned" || type == "bigint unsigned";
+        if (integer && !table.cols[i].isArray) {
+            // Heap extraction emits canonical integer text. A raw bound
+            // literal (+0001/-0) must use that same key, without converting
+            // through double and losing BIGINT precision. Leave other types
+            // and unsupported literals to their existing comparison path.
+            const int64_t parsed = StorageEngine::parseInt(value);
+            if (parsed != INF) return std::to_string(parsed);
+        }
+        break;
+    }
+    return value;
+}
+
 static bool lookupBtreeKeyChecked(BPTree* index, const std::string& key,
                                   int64_t& rid) {
     const auto status = index->searchChecked(key, rid);
@@ -501,10 +526,12 @@ bool IndexScanOp::open() {
     if (isPK_) {
         int64_t rid = 0;
         const std::string key = tbl_.buildPKValue(
-            std::map<std::string, std::string>{{colname_, value_}});
+            std::map<std::string, std::string>{{colname_,
+                equalityIndexValue(tbl_, colname_, value_)}});
         if (lookupBtreeKeyChecked(idx, key, rid)) rids_.push_back(rid);
     } else {
-        rids_ = lookupBtreeMultiChecked(idx, value_);
+        rids_ = lookupBtreeMultiChecked(idx,
+            equalityIndexValue(tbl_, colname_, value_));
     }
     pos_ = 0;
     if (!statsRecorded_) {
@@ -570,6 +597,8 @@ static bool collectEqualityIndexCandidates(
     const StorageEngine::Condition& condition,
     std::set<int64_t>& candidates) {
     if (condition.op != "=") return false;
+    const std::string value = equalityIndexValue(
+        tbl, condition.colName, condition.value);
 
     if (isSingleColumnPrimaryKey(tbl, condition.colName)) {
         auto* index = engine->getPKIndex(dbname, tablename);
@@ -579,7 +608,7 @@ static bool collectEqualityIndexCandidates(
         }
         int64_t rid = 0;
         const std::string key = tbl.buildPKValue(
-            std::map<std::string, std::string>{{condition.colName, condition.value}});
+            std::map<std::string, std::string>{{condition.colName, value}});
         if (lookupBtreeKeyChecked(index, key, rid)) candidates.insert(rid);
         return true;
     }
@@ -598,7 +627,7 @@ static bool collectEqualityIndexCandidates(
             throw DbError("XX001", "could not read Hash index for relation \"" +
                 tablename + "\"");
         }
-        for (int64_t rid : hash->search(condition.value)) candidates.insert(rid);
+        for (int64_t rid : hash->search(value)) candidates.insert(rid);
         return true;
     }
 
@@ -613,7 +642,7 @@ static bool collectEqualityIndexCandidates(
             throw DbError("XX001", "could not read Bloom index for relation \"" +
                 tablename + "\"");
         }
-        for (int64_t rid : bloom->search(condition.value)) candidates.insert(rid);
+        for (int64_t rid : bloom->search(value)) candidates.insert(rid);
         return true;
     }
 
@@ -627,7 +656,7 @@ static bool collectEqualityIndexCandidates(
         }
         return false;
     }
-    for (int64_t rid : lookupBtreeMultiChecked(index, condition.value))
+    for (int64_t rid : lookupBtreeMultiChecked(index, value))
         candidates.insert(rid);
     return true;
 }
