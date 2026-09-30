@@ -17,6 +17,8 @@
 
 ## 后续优先队列
 
+2026-09-30 第 864 项进展：expression／virtual NULL predicates 已独立提交，最终新专项、10 个 C++、10 组相邻协议、完整协议和真实 PostgreSQL 18.6 cases=1 failed=0 退出码 0，旧 failed=1 与两次中间 native／virtual 失败保留。第 865 项 numeric 零显示尺度定向与真实差分已通过，但邻居复现独立第 860 项 IndexScan 重检对整数 1.0 丢行；已用未含 numeric 新修复的旧二进制确认同样失败，作为第 867 项独立修复。第 866 项未别名表达式误用内层 cast／function 列名已真实 failed=1 复现，AST root 识别验收中。根已快进 3337d36d 至第 863 项，最新组合正式整套待冻结；较早 7a6ded99 的 385/385 C++、107/107 E2E、真实 381/381 failed=0 均退出码 0，不能冒充后续组合验收。总账仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
+
 2026-09-30 第 863 项进展：NULLIF／GREATEST／LEAST predicate 已独立提交，最终新专项、9 个 C++、9 组相邻协议、完整协议及真实 PostgreSQL 18.6 cases=1 failed=0 退出码 0；旧 failed=1 保留。第 864 项 expression NULL 处理中间版本虽通过 buffered C++／FILTER，却仍在真实 WHERE 漏行，已定位 FilterOp 把非列 expression 当 physical column NULL test，扩充原生／virtual 回归后继续修复。根冻结 7a6ded99 的正式整套 385/385 C++、107/107 E2E 与同一二进制真实 381/381 差分 failed=0 均已确认退出码 0，不包含隔离 858–864；最新组合正式整套待冻结复跑。总账仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
 
 2026-09-30 第 862 项进展：empty-key equality 的安全 heap fallback 已独立提交，10 个 C++、新及 10 组相邻协议、完整协议和真实 PostgreSQL 18.6 专项 cases=1 failed=0 退出码 0，旧 failed=1 保留。合并 861 时只解决测试注册冲突并保留两项，组合源码待正式整套；未修改用户旧索引／数据。第 863 项 NULLIF／GREATEST／LEAST 定向 C++／协议／真实差分已通过，相邻验收中；第 864 项表达式 IS NULL 常量改写已旧 C++／协议／真实 failed=1 复现，正在修复。根冻结 7a6ded99 正式 build_tests 已退出码 0：385/385 C++、107/107 E2E；同一正式二进制 381 组差分仍运行，不含隔离 858–864。总账仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
