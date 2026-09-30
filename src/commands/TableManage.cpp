@@ -724,9 +724,25 @@ static std::string formatPointCoordinate(double value) {
     return formatFloatingValue(value);
 }
 
+static bool isIntegerStorageType(const std::string& type) {
+    return type == "tinyint" || type == "smallint" || type == "int" ||
+           type == "integer" || type == "bigint" || type == "long" ||
+           type == "int2" || type == "int4" || type == "int8" ||
+           type == "tinyint unsigned" || type == "smallint unsigned" ||
+           type == "int unsigned" || type == "integer unsigned" ||
+           type == "bigint unsigned";
+}
+
 static std::string canonicalColumnKeyValue(const Column& column,
                                            const std::string& value) {
     if (value.empty()) return {};
+    if (!column.isArray && isIntegerStorageType(column.dataType)) {
+        // Heap encoding parses the integer datum, so index writes and unique
+        // checks must not preserve alternate lexical spellings of that datum.
+        const int64_t integer = StorageEngine::parseInt(value);
+        if (integer != INF) return std::to_string(integer);
+        return value;
+    }
     if (column.dataType == "char" || column.dataType == "character") {
         const size_t end = value.find_last_not_of(' ');
         return end == std::string::npos ? std::string() : value.substr(0, end + 1);
@@ -20685,15 +20701,6 @@ static bool integerValueFitsColumn(const Column& column, int64_t value) {
     const int64_t minimum = -(int64_t{1} << (bits - 1));
     const int64_t maximum = (int64_t{1} << (bits - 1)) - 1;
     return value >= minimum && value <= maximum;
-}
-
-static bool isIntegerStorageType(const std::string& type) {
-    return type == "tinyint" || type == "smallint" || type == "int" ||
-           type == "integer" || type == "bigint" || type == "long" ||
-           type == "int2" || type == "int4" || type == "int8" ||
-           type == "tinyint unsigned" || type == "smallint unsigned" ||
-           type == "int unsigned" || type == "integer unsigned" ||
-           type == "bigint unsigned";
 }
 
 bool StorageEngine::stringToBuffer(const std::string& src, char* dst, size_t len) {
