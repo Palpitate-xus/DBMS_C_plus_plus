@@ -437,7 +437,7 @@ static bool isSingleColumnPrimaryKey(const TableSchema& table,
     return primaryColumns == 1 && matches;
 }
 
-static std::string equalityIndexValue(const TableSchema& table,
+static std::string integerEqualityValue(const TableSchema& table,
                                        const std::string& column,
                                        const std::string& value) {
     for (size_t i = 0; i < table.len; ++i) {
@@ -527,11 +527,11 @@ bool IndexScanOp::open() {
         int64_t rid = 0;
         const std::string key = tbl_.buildPKValue(
             std::map<std::string, std::string>{{colname_,
-                equalityIndexValue(tbl_, colname_, value_)}});
+                integerEqualityValue(tbl_, colname_, value_)}});
         if (lookupBtreeKeyChecked(idx, key, rid)) rids_.push_back(rid);
     } else {
         rids_ = lookupBtreeMultiChecked(idx,
-            equalityIndexValue(tbl_, colname_, value_));
+            tbl_.columnIndexKey(colname_, integerEqualityValue(tbl_, colname_, value_)));
     }
     pos_ = 0;
     if (!statsRecorded_) {
@@ -597,7 +597,7 @@ static bool collectEqualityIndexCandidates(
     const StorageEngine::Condition& condition,
     std::set<int64_t>& candidates) {
     if (condition.op != "=") return false;
-    const std::string value = equalityIndexValue(
+    const std::string value = integerEqualityValue(
         tbl, condition.colName, condition.value);
 
     if (isSingleColumnPrimaryKey(tbl, condition.colName)) {
@@ -613,6 +613,11 @@ static bool collectEqualityIndexCandidates(
         return true;
     }
 
+    // A primary key encodes the logical value exactly once above. Secondary
+    // AMs store type-specific column keys (including money's biased hex),
+    // not the original SQL spelling or display text.
+    const std::string indexValue = tbl.columnIndexKey(condition.colName, value);
+
     if (std::find(hashIndexedColumns.begin(), hashIndexedColumns.end(),
                   condition.colName) != hashIndexedColumns.end()) {
         auto* hash = engine->getHashIndex(dbname, tablename, condition.colName);
@@ -627,7 +632,7 @@ static bool collectEqualityIndexCandidates(
             throw DbError("XX001", "could not read Hash index for relation \"" +
                 tablename + "\"");
         }
-        for (int64_t rid : hash->search(value)) candidates.insert(rid);
+        for (int64_t rid : hash->search(indexValue)) candidates.insert(rid);
         return true;
     }
 
@@ -642,7 +647,7 @@ static bool collectEqualityIndexCandidates(
             throw DbError("XX001", "could not read Bloom index for relation \"" +
                 tablename + "\"");
         }
-        for (int64_t rid : bloom->search(value)) candidates.insert(rid);
+        for (int64_t rid : bloom->search(indexValue)) candidates.insert(rid);
         return true;
     }
 
@@ -656,7 +661,7 @@ static bool collectEqualityIndexCandidates(
         }
         return false;
     }
-    for (int64_t rid : lookupBtreeMultiChecked(index, value))
+    for (int64_t rid : lookupBtreeMultiChecked(index, indexValue))
         candidates.insert(rid);
     return true;
 }

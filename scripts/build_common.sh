@@ -107,6 +107,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/explain_json_analyze_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/integer_index_plan_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/explain_timing_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/typed_index_plan_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cli_error_recovery_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/no_fake_compat_objects_test.py)
     DBMS_E2E_TESTS+=(tests/compat_fallback_registry_test.py)

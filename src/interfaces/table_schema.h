@@ -163,6 +163,10 @@ struct TableSchema {
     bool hasPrimaryKey() const;
     std::string buildPKValue(const std::string& rowBuffer) const;
     std::string buildPKValue(const std::map<std::string, std::string>& values) const;
+    // Convert a logical column value using the same representation as
+    // secondary index maintenance. Primary keys use buildPKValue instead.
+    std::string columnIndexKey(const std::string& column,
+                               const std::string& value) const;
 
     // Variable-length helpers
     bool hasVariableLength() const;

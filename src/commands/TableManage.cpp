@@ -10686,6 +10686,16 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
 }
 
 // TableSchema PK helpers (defined here because they use StorageEngine::extractColumnValue)
+std::string TableSchema::columnIndexKey(const std::string& column,
+                                        const std::string& value) const {
+    for (size_t i = 0; i < len; ++i) {
+        if (cols[i].dataName == column) {
+            return canonicalColumnKeyValue(cols[i], value);
+        }
+    }
+    return value;
+}
+
 bool TableSchema::hasPrimaryKey() const {
     if (!pkColIndices.empty()) return true;
     for (size_t i = 0; i < len; ++i) if (cols[i].isPrimaryKey) return true;
