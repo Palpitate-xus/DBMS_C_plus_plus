@@ -29713,7 +29713,8 @@ std::vector<std::string> StorageEngine::query(
                          isColumnNullByRid(
                              dbname, tbl.tablename, mr.first, idx));
                     keyValues.push_back(
-                        resultIsNull ? std::string{} : std::move(value));
+                        resultIsNull ? std::string{} :
+                            canonicalColumnKeyValue(tbl.cols[idx], value));
                     keyNulls.push_back(resultIsNull);
                 }
                 if (seen.emplace(

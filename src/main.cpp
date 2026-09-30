@@ -499,6 +499,27 @@ static string decodeQuotedIdentifier(const string& token) {
     return decoded;
 }
 
+// Row identity uses SQL output types and NULL bits, never rendered text.
+// Keep the first original tuple as the display representative of each key.
+static string typedDistinctResultKey(const dbms::DmlResult& result, size_t rowIndex,
+                                    const vector<string>& columnTypes) {
+    const auto& row = result.rows.at(rowIndex);
+    const auto& nulls = result.nulls.at(rowIndex);
+    if (nulls.size() != row.size())
+        throw dbms::DbError("XX000", "DISTINCT result has an invalid NULL bitmap");
+    string key;
+    for (size_t i = 0; i < row.size(); ++i) {
+        Column column;
+        column.dataType = i < columnTypes.size() ? columnTypes[i] : "text";
+        for (auto& ch : column.dataType)
+            ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
+        if (column.dataType == "double precision") column.dataType = "double";
+        else if (column.dataType == "real") column.dataType = "float";
+        key += StorageEngine::groupingValueKey(column, row[i], nulls[i]);
+    }
+    return key;
+}
+
 // Legacy SELECT still renders through a text sink. Quote one header cell so
 // the protocol adapter can preserve spaces and embedded double quotes.
 static string renderLegacyHeader(const string& header) {
@@ -27865,6 +27886,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
             }
             cout << '\n';
+            structuredPlainResult.columns = protocolColumns;
+            structuredPlainResult.columnTypes = protocolTypes;
             if (shouldPublishQueryMetadata() && !protocolColumns.empty()) {
                 dbms::DmlResult metadata;
                 metadata.available = true;
@@ -27872,8 +27895,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 metadata.columns = protocolColumns;
                 metadata.columnTypes = protocolTypes;
                 dbms::publishLastDmlResult(std::move(metadata));
-                structuredPlainResult.columns = std::move(protocolColumns);
-                structuredPlainResult.columnTypes = std::move(protocolTypes);
             }
 
             // A display row cannot distinguish SQL NULL from text "NULL" or
@@ -27895,7 +27916,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 rawWhereClause.find_first_of("()") == string::npos ||
                 hasBooleanGroupParenthesis;
             const bool captureStructuredPlain =
-                shouldPublishQueryMetadata() &&
+                (shouldPublishQueryMetadata() || (isDistinct && distinctOnCols.empty())) &&
                 simpleStructuredPlainPredicate &&
                 semiJoins.empty() && existenceFilters.empty() &&
                 quantifiedSubqueries.empty() &&
@@ -28462,14 +28483,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 structuredAggregateResult.rows.size() == answers.size() &&
                 structuredAggregateResult.nulls.size() == answers.size();
             if (canDeduplicateStructuredAggregate) {
-                set<pair<vector<string>, vector<bool>>> seen;
+                set<string> seen;
                 vector<string> dedupedAnswers;
                 vector<vector<string>> dedupedRows;
                 vector<vector<bool>> dedupedNulls;
                 for (size_t i = 0; i < answers.size(); ++i) {
-                    const auto key = make_pair(
-                        structuredAggregateResult.rows[i],
-                        structuredAggregateResult.nulls[i]);
+                    const auto key = typedDistinctResultKey(
+                        structuredAggregateResult, i, structuredAggregateResult.columnTypes);
                     if (!seen.insert(key).second) continue;
                     dedupedAnswers.push_back(std::move(answers[i]));
                     dedupedRows.push_back(
@@ -28481,14 +28501,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 structuredAggregateResult.rows = std::move(dedupedRows);
                 structuredAggregateResult.nulls = std::move(dedupedNulls);
             } else if (canDeduplicateStructuredScalar) {
-                set<pair<vector<string>, vector<bool>>> seen;
+                set<string> seen;
                 vector<string> dedupedAnswers;
                 vector<vector<string>> dedupedRows;
                 vector<vector<bool>> dedupedNulls;
                 for (size_t i = 0; i < answers.size(); ++i) {
-                    const auto key = make_pair(
-                        structuredScalarResult.rows[i],
-                        structuredScalarResult.nulls[i]);
+                    const auto key = typedDistinctResultKey(
+                        structuredScalarResult, i, structuredScalarResult.columnTypes);
                     if (!seen.insert(key).second) continue;
                     dedupedAnswers.push_back(std::move(answers[i]));
                     dedupedRows.push_back(
@@ -28502,14 +28521,20 @@ static bool executeInternal(const string& rawSql, Session& s) {
             } else if (structuredPlainRows &&
                        structuredPlainResult.rows.size() == answers.size() &&
                        structuredPlainResult.nulls.size() == answers.size()) {
-                set<pair<vector<string>, vector<bool>>> seen;
+                // StorageEngine still emits plain cells in table order here.
+                // SELECT-list permutation occurs below, after DISTINCT and
+                // LIMIT/OFFSET; its wire metadata cannot type these cells yet.
+                vector<string> plainKeyTypes;
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (selectCols.empty() || selectCols.count(tbl.cols[i].dataName))
+                        plainKeyTypes.push_back(tbl.cols[i].dataType);
+                }
+                set<string> seen;
                 vector<string> dedupedAnswers;
                 vector<vector<string>> dedupedRows;
                 vector<vector<bool>> dedupedNulls;
                 for (size_t i = 0; i < answers.size(); ++i) {
-                    const auto key = make_pair(
-                        structuredPlainResult.rows[i],
-                        structuredPlainResult.nulls[i]);
+                    const auto key = typedDistinctResultKey(structuredPlainResult, i, plainKeyTypes);
                     if (!seen.insert(key).second) continue;
                     dedupedAnswers.push_back(std::move(answers[i]));
                     dedupedRows.push_back(

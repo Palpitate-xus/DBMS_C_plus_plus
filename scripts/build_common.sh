@@ -127,6 +127,8 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/typed_group_key_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/group_distinct_filter_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/aggregate_filter_clause_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/typed_select_distinct_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/typed_select_distinct_cli_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cli_error_recovery_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/no_fake_compat_objects_test.py)
     DBMS_E2E_TESTS+=(tests/compat_fallback_registry_test.py)
