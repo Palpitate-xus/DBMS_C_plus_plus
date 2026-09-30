@@ -17,6 +17,8 @@
 
 ## 后续优先队列
 
+2026-09-30 第 847 项进展：普通 SELECT 的 quoted comma FROM 改写已独立修复，旧正式二进制协议失败且真实差分 cases=1 failed=1，新重链／正式专项、8 组相邻协议、完整协议、正式构建和新真实 PostgreSQL 18.6 差分 cases=1 failed=0 均退出码 0。根冻结第 845/846 项 HEAD c1409254 的正式全脚本（预计 378 C++／96 E2E）与同一已正式构建二进制的真实差分（374 cases）仍运行，不含本项新增第 375 组。第 848 项 catalog histogram 丢 final upper bound 已复现并隔离修复，尚待正式／相邻验收；pg_stats 投影／WHERE、SQL-type MCV／distinct、quoted 空白 alias、阈值事务时机及其余总清单继续未完成。仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
+
 2026-09-30 第 845 项进展：类型化 ANALYZE extrema／histogram 已独立提交，最终 8 个 C++、新重链／正式专项、10 组相邻协议、完整协议、正式构建和 5 组逐一真实 PostgreSQL 18.6 差分均退出码 0；1.25…20.25 不再 lex max=9.25／边界截整数，超 2^53 BIGINT 与 30 位整数部分 numeric 保留原值。继承 fixture 12 次完整复验亦通过，原第 842 项全脚本失败保留。准备主分支冻结最新合并后重跑预计 378 C++／96 E2E 与 374 组真实差分；不包含仍隔离的第 847 项 quoted comma FROM。SQL-type distinct／MCV、虚拟列／TOAST、pg_stats 投影／WHERE／边界字段、统计编码／失效／采样／correlation 和其他总清单仍未完成；总账仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
 
 2026-09-30 第 846 项进展：继承测试清理竞态已独立提交，先调用 dropDatabase 关闭 catalog／allocator／extent worker，再清理残留，保留全部原继承断言与清理错误断言；第 844 项正式生产对象重链的新完整用例在 12 个独立目录连续退出码 0。第 842 项冻结脚本原失败（375/376 C++、93/93 E2E、退出码 1）保留，真实差分 374/374 通过也不冒充整套通过。第 845 项类型统计最终 8 个 C++、新重链／正式协议、10 组相邻协议、完整协议、正式构建及 5 组逐一真实 PostgreSQL 18.6 差分均已退出码 0，详细证据另记；第 847 项 quoted comma FROM 修复仍隔离进行，不包含在上述轮次。准备快进最新主分支再全量验收；总清单仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
