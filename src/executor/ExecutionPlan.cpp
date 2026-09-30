@@ -1144,11 +1144,12 @@ bool FilterOp::next(std::string& outRow) {
                     break;
                 }
             }
-            const bool isNull =
-                colIdx < tbl_.len && child_->lastColumnIsNull(colIdx);
+            const bool physicalColumn = colIdx < tbl_.len &&
+                tbl_.cols[colIdx].generatedKind != 'v';
+            const bool isNull = physicalColumn && child_->lastColumnIsNull(colIdx);
             const bool conditionMatches =
-                (c.op == "isnull") ? isNull :
-                (c.op == "isnotnull") ? !isNull :
+                (physicalColumn && c.op == "isnull") ? isNull :
+                (physicalColumn && c.op == "isnotnull") ? !isNull :
                 !isNull && StorageEngine::evalConditionOnRow(c, outRow, tbl_);
             if (!conditionMatches) return false;
         }

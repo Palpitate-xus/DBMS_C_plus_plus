@@ -20901,7 +20901,8 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         Condition scalarCondition;
         scalarCondition.op = "scalarexpr";
         scalarCondition.colName = cond.colName;
-        scalarCondition.value = cond.op + " " + cond.value;
+        scalarCondition.value = cond.op == "isnull" ? "IS NULL" :
+            cond.op == "isnotnull" ? "IS NOT NULL" : cond.op + " " + cond.value;
         return evalConditionOnRow(scalarCondition, rowBuffer, tbl);
     }
 
@@ -20952,7 +20953,8 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
             else if (argRaw[i] == ')') --depth;
         }
         if (expr.funcName == "coalesce" || expr.funcName == "nullif" ||
-            expr.funcName == "greatest" || expr.funcName == "least") {
+            expr.funcName == "greatest" || expr.funcName == "least" ||
+            cond.value == "IS NULL" || cond.value == "IS NOT NULL") {
             // These functions have their own NULL rules, not an all-args
             // strict gate. Keep empty strings and NULL-looking text as data.
             std::map<std::string, std::string> rowValues;
