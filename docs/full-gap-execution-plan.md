@@ -17,6 +17,8 @@
 
 ## 后续优先队列
 
+2026-09-30 第 861 项进展：COALESCE predicate 的 typed NULL-aware 完整表达式比较已独立提交，最终新专项、9 个 C++、9 组相邻协议、完整协议与真实 PostgreSQL 18.6 cases=1 failed=0 退出码 0；旧 failed=1、空串中间 patch 失败与脚本错误均保留。第 862 项空值索引遗漏已旧 C++／协议／真实 failed=1 复现，堆扫描安全回退验收中；不重建／删除用户旧数据。根冻结 7a6ded99 的 C++ 回归已跑完，完整 E2E 和同一正式二进制 381 组差分仍运行，不包含隔离 858–862。总账仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
+
 2026-09-30 第 860 项进展：原生 IndexScan 完整 SQL 值／NULL 重检已独立提交，最终新协议、9 个 C++、10 组相邻协议、完整协议与真实 PostgreSQL 18.6 专项 cases=1 failed=0 退出码 0，旧 C++／协议及 failed=1 保留。不同有效超长 PK 插入碰撞仍未修，不改用户旧索引或丢数据。第 861 项 COALESCE 的非 strict NULL、空串／文本 NULL 及结果类型比较已旧 C++／协议／真实 failed=1 复现，隔离修复编译中；父函数组／任意 typed truth 与其他总清单继续未完成。根冻结 7a6ded99 正式全脚本与同一正式二进制 381 组差分仍运行，不包含隔离 858–861；仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
 
 2026-09-30 第 859 项进展：native plain 结果元数据接收与 physical/output sort key 分工已分别本地提交，最终新协议、11 组相邻协议／CLI、完整协议及顺序旧／新真实 PG18.6 专项 failed=1／0 均已确认；旧 literal NULL 错误、无序比较假差异和 deterministic ordinal fixture 后暴露的真实丢 NULL 失败都保留。第 860 项完整索引值 recheck 已定向、9 个 C++ 与真实专项通过，最终相邻／完整验证运行；超长主键插入仍未修。又真实复现 COALESCE 被误用 strict NULL gate，缓冲 aggregate FILTER 1 而非 2、空串／文本 NULL 查询缺行，作为第 861 项继续独立修复。根冻结 7a6ded99 正式全脚本与同一正式二进制 381 组差分仍运行，不包含隔离 858–861；总账仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
