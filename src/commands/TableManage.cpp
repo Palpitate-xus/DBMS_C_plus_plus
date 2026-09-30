@@ -5323,13 +5323,24 @@ std::filesystem::path StorageEngine::statsPath(const std::string& dbname) const 
     return dbPath(dbname) / ".stats";
 }
 
-// Helper: compute MCV (Most Common Values) from a list of values
-static std::vector<std::pair<std::string, size_t>> computeMCV(
-    const std::vector<std::string>& vals, size_t topN = 10) {
-    std::map<std::string, size_t> freq;
-    for (const auto& v : vals) freq[v]++;
-    std::vector<std::pair<std::string, size_t>> result(freq.begin(), freq.end());
-    std::sort(result.begin(), result.end(),
+// The input is already ordered by the column's SQL comparison semantics.
+// Coalesce equal values without losing their original display precision.
+static std::vector<std::pair<std::string, size_t>> computeTypedMCV(
+    const Column& column, const std::vector<std::string>& vals,
+    size_t& cardinality, size_t topN = 10) {
+    std::vector<std::pair<std::string, size_t>> result;
+    for (const auto& value : vals) {
+        if (!result.empty() &&
+            (result.back().first == value || StorageEngine::compareValues(
+                column, result.back().first, false, value, false, "=")
+                == StorageEngine::PredicateTruth::True)) {
+            ++result.back().second;
+        } else {
+            result.push_back({value, 1});
+        }
+    }
+    cardinality = result.size();
+    std::stable_sort(result.begin(), result.end(),
               [](const auto& a, const auto& b) { return a.second > b.second; });
     if (result.size() > topN) result.resize(topN);
     return result;
@@ -5454,7 +5465,6 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
 
     TableStats stats;
     stats.rowCount = 0;
-    std::map<std::string, std::set<std::string>> distinctVals;
     std::map<std::string, std::vector<std::string>> allVals;
     std::map<std::string, size_t> nullCounts;
 
@@ -5468,7 +5478,6 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
                 continue;
             }
             std::string val = extractColumnValue(row, tbl, i);
-            distinctVals[tbl.cols[i].dataName].insert(val);
             allVals[tbl.cols[i].dataName].push_back(val);
         }
     })) return false;
@@ -5478,7 +5487,6 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
     for (size_t i = 0; i < tbl.len; ++i) {
         const std::string& cname = tbl.cols[i].dataName;
         StorageEngine::ColumnStats cs;
-        cs.cardinality = distinctVals[cname].size();
         cs.nullCount = nullCounts[cname];
         auto& vals = allVals[cname];
         const Column& column = tbl.cols[i];
@@ -5510,7 +5518,7 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
             }
         }
         // Compute MCV
-        cs.mcv = computeMCV(vals, MCV_TOP_N);
+        cs.mcv = computeTypedMCV(column, vals, cs.cardinality, MCV_TOP_N);
         stats.colStats[cname] = cs;
     }
 

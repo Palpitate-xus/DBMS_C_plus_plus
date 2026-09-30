@@ -4859,8 +4859,18 @@ static double estimateSelectivity(const StorageEngine::Condition& cond,
         // the selectivity of a hot value is count / table rows — exact.
         // NULLs never satisfy equality; the count already excludes them.
         double rows = totalRows;
+        const auto schema = engine->getTableSchema(dbname, tablename);
+        const Column* column = nullptr;
+        for (size_t i = 0; i < schema.len; ++i) {
+            if (schema.cols[i].dataName == cond.colName) {
+                column = &schema.cols[i];
+                break;
+            }
+        }
         for (const auto& m : stats.mcv) {
-            if (m.first == cond.value) {
+            if (m.first == cond.value || (column && StorageEngine::compareValues(
+                    *column, m.first, false, cond.value, false, "=")
+                    == StorageEngine::PredicateTruth::True)) {
                 if (rows > 0) return static_cast<double>(m.second) / rows;
                 return 1.0 / static_cast<double>(stats.cardinality);
             }
