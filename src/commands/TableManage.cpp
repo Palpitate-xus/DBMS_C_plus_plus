@@ -792,6 +792,14 @@ static std::string canonicalColumnKeyValue(const Column& column,
     return value;
 }
 
+std::string StorageEngine::groupingValueKey(const Column& column,
+                                            const std::string& value,
+                                            bool valueIsNull) {
+    if (valueIsNull) return "N;";
+    const std::string key = canonicalColumnKeyValue(column, value);
+    return "V" + std::to_string(key.size()) + ":" + key;
+}
+
 template <typename Floating>
 static int compareFloatingValues(Floating left, Floating right) {
     const bool leftNaN = std::isnan(left);
@@ -34773,8 +34781,9 @@ std::vector<std::string> StorageEngine::groupAggregate(
         NullRowBinding nbk(this, dbname, tablename, rid, tbl.len);
         std::string key;
         for (size_t idx : groupIdxs) {
-            if (!key.empty()) key += "\x01";
-            key += logicalValue(row, idx);
+            bool isNull = false;
+            const std::string value = logicalValue(row, idx, &isNull);
+            key += groupingValueKey(tbl.cols[idx], value, isNull);
         }
         return key;
     };
@@ -35221,7 +35230,6 @@ std::unordered_set<std::string> arraySeen;
 
     // Build result rows
     for (const auto& kv : groups) {
-        const std::string& gkey = kv.first;
         const auto& gids = kv.second;
 
         // Apply HAVING
@@ -35252,14 +35260,18 @@ std::unordered_set<std::string> arraySeen;
         if (!pass) continue;
 
         std::string row;
-        size_t kp = 0;
-        while (kp < gkey.size()) {
-            size_t sep = gkey.find('\x01', kp);
-            std::string part = (sep == std::string::npos) ? gkey.substr(kp) : gkey.substr(kp, sep - kp);
-            if (!row.empty()) row += ' ';
-            row += part;
-            if (sep == std::string::npos) break;
-            kp = sep + 1;
+        // Keys are not display values. Read the first member to preserve its
+        // original scale, physical NULL bit, and empty composite cells.
+        if (!groupIdxs.empty()) {
+            std::string sourceRow;
+            if (gids.empty() || !readRowByRid(pa, gids.front(), sourceRow, tbl)) continue;
+            NullRowBinding binding(this, dbname, tablename, gids.front(), tbl.len);
+            for (size_t i = 0; i < groupIdxs.size(); ++i) {
+                if (i > 0) row += ' ';
+                bool isNull = false;
+                const std::string value = logicalValue(sourceRow, groupIdxs[i], &isNull);
+                row += isNull ? "NULL" : value;
+            }
         }
         row += ' ';
         for (const auto& item : items) {
@@ -35659,8 +35671,9 @@ std::unordered_set<std::string> arraySeen;
                 this, dbname, tablename, rid, tbl.len);
             std::string key;
             for (size_t idx : setIdxs) {
-                if (!key.empty()) key += "\x01";
-                key += logicalValue(row, idx);
+                bool isNull = false;
+                const std::string value = logicalValue(row, idx, &isNull);
+                key += groupingValueKey(tbl.cols[idx], value, isNull);
             }
             return key;
         };
@@ -35678,18 +35691,17 @@ std::unordered_set<std::string> arraySeen;
             }
             if (!pass) continue;
 
-            // Build a map from column name to its value in this group key
+            // Recover representative cells, never decode the equality key.
             std::map<std::string, std::string> colValues;
-            const std::string& gkey = kv.first;
-            size_t p = 0;
-            size_t partIdx = 0;
-            while (p < gkey.size()) {
-                size_t sep = gkey.find('\x01', p);
-                std::string part = (sep == std::string::npos) ? gkey.substr(p) : gkey.substr(p, sep - p);
-                if (partIdx < gset.size()) colValues[gset[partIdx]] = part;
-                if (sep == std::string::npos) break;
-                p = sep + 1;
-                ++partIdx;
+            if (!setIdxs.empty()) {
+                std::string sourceRow;
+                if (gids.empty() || !readRowByRid(pa, gids.front(), sourceRow, tbl)) continue;
+                NullRowBinding binding(this, dbname, tablename, gids.front(), tbl.len);
+                for (size_t idx : setIdxs) {
+                    bool isNull = false;
+                    const std::string value = logicalValue(sourceRow, idx, &isNull);
+                    colValues[tbl.cols[idx].dataName] = isNull ? "NULL" : value;
+                }
             }
 
             std::string row;

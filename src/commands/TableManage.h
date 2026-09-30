@@ -1102,6 +1102,11 @@ public:
                                         const std::string& right,
                                         bool rightIsNull,
                                         const std::string& op);
+    // Collision-free grouping identity, distinct from a representative's
+    // display spelling. SQL NULL has a separate tag from an empty value.
+    static std::string groupingValueKey(const Column& col,
+                                        const std::string& value,
+                                        bool valueIsNull);
     static std::vector<Condition> parseConditions(const std::vector<std::string>& cstr);
     static bool evalConditionOnRow(const Condition& cond, const std::string& rowBuffer, const TableSchema& tbl);
     static int64_t parseInt(const std::string& s);

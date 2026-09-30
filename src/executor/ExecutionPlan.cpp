@@ -2981,7 +2981,11 @@ static std::vector<std::vector<ExprValue>> materializeGroupingKeys(
 }
 
 static std::string encodeGroupingKey(const ExprValue& value) {
-    return value.isNull ? "N;" : "V" + std::to_string(value.value.size()) + ":" + value.value;
+    Column column;
+    column.dataType = SQLParser::toLower(value.typeName);
+    if (column.dataType == "double precision") column.dataType = "double";
+    if (column.dataType == "real") column.dataType = "float";
+    return StorageEngine::groupingValueKey(column, value.value, value.isNull);
 }
 
 // ========================================================================
