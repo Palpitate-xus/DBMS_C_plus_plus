@@ -43,29 +43,6 @@ static std::string trimExec(const std::string& value) {
 // ========================================================================
 // Helper: format a raw row buffer into display string
 // ========================================================================
-static std::string formatRow(const std::string& rowBuffer, const TableSchema& tbl,
-                              const std::set<std::string>& selectCols,
-                              const Operator* nullMeta = nullptr) {
-    std::string rowStr;
-    for (size_t i = 0; i < tbl.len; ++i) {
-        const Column& col = tbl.cols[i];
-        if (!selectCols.empty() && selectCols.find(col.dataName) == selectCols.end())
-            continue;
-        std::string val = StorageEngine::extractColumnValueStatic(rowBuffer, tbl, i);
-        // Stored-null bit wins when the producing scan exposes NULL metadata:
-        // the cell renders as the NULL token, which the wire layer maps to a
-        // true -1 null (PG distinguishes NULL from empty string on the wire).
-        const bool physicallyNull =
-            nullMeta && nullMeta->lastColumnIsNull(i) &&
-            (val.empty() || !tbl.cols[i].isVariableLength);
-        if (physicallyNull) rowStr += "NULL ";
-        else if (val.find(' ') != std::string::npos && selectCols.size() != 1)
-            rowStr += "\"" + val + "\" ";
-        else rowStr += val + ' ';
-    }
-    return rowStr;
-}
-
 static bool rawColumnIsNull(const std::string& row, const TableSchema& tbl,
                             size_t colIdx) {
     // TableScanOp deliberately strips the MVCC/null bitmap header before
@@ -1617,6 +1594,10 @@ ProjectOp::ProjectOp(OpPtr child, const TableSchema& tbl,
     : child_(std::move(child)), tbl_(tbl), selectCols_(selectCols) {}
 
 bool ProjectOp::open() {
+    clearError();
+    lastCells_.clear();
+    lastNulls_.clear();
+    lastRowAvailable_ = false;
     return child_->open();
 }
 
@@ -1627,13 +1608,62 @@ bool ProjectOp::next(std::string& outRow) {
         if (child_->hasError()) return propagateChildError(child_.get(), "projection child failed");
         return false;
     }
-    outRow = formatRow(raw, tbl_, selectCols_, child_.get());
+    lastCells_.clear();
+    lastNulls_.clear();
+    const auto origin = child_->scanOrigin();
+    if (origin.engine && origin.rid > 0)
+        StorageEngine::bindNullRow(origin.engine, origin.dbname, origin.tablename,
+                                  origin.rid, tbl_.len);
+    outRow.clear();
+    for (size_t i = 0; i < tbl_.len; ++i) {
+        if (!selectCols_.empty() && !selectCols_.count(tbl_.cols[i].dataName))
+            continue;
+        bool computedNull = false;
+        std::string value = origin.engine
+            ? origin.engine->extractColumnValue(raw, tbl_, i, origin.dbname,
+                                                 true, &computedNull)
+            : StorageEngine::extractColumnValueStatic(raw, tbl_, i);
+        const bool isNull = computedNull ||
+            (tbl_.cols[i].generatedKind != 'v' && child_->lastColumnIsNull(i));
+        lastCells_.push_back(isNull ? std::string{} : value);
+        lastNulls_.push_back(isNull);
+        if (isNull) outRow += "NULL ";
+        else if (value.find(' ') != std::string::npos && selectCols_.size() != 1)
+            outRow += "\"" + value + "\" ";
+        else outRow += value + ' ';
+    }
+    lastRowAvailable_ = true;
     rtInstr_.emitted = true;
     return true;
 }
 
+bool ProjectOp::lastStructuredRow(std::vector<std::string>& cells,
+                                  std::vector<bool>& nulls) const {
+    if (!lastRowAvailable_ || lastCells_.size() != lastNulls_.size()) return false;
+    cells = lastCells_;
+    nulls = lastNulls_;
+    return true;
+}
+
+bool ProjectOp::lastTypedRowKey(std::string& key) const {
+    if (!lastRowAvailable_ || lastCells_.size() != lastNulls_.size()) return false;
+    key.clear();
+    size_t projected = 0;
+    for (size_t i = 0; i < tbl_.len; ++i) {
+        if (!selectCols_.empty() && !selectCols_.count(tbl_.cols[i].dataName)) continue;
+        if (projected >= lastCells_.size()) return false;
+        key += StorageEngine::groupingValueKey(
+            tbl_.cols[i], lastCells_[projected], lastNulls_[projected]);
+        ++projected;
+    }
+    return projected == lastCells_.size();
+}
+
 void ProjectOp::close() {
     child_->close();
+    lastCells_.clear();
+    lastNulls_.clear();
+    lastRowAvailable_ = false;
 }
 
 // ========================================================================
@@ -2547,6 +2577,7 @@ void OffsetOp::close() {
 DistinctOp::DistinctOp(OpPtr child) : child_(std::move(child)) {}
 
 bool DistinctOp::open() {
+    clearError();
     seen_.clear();
     return child_->open();
 }
@@ -2554,7 +2585,26 @@ bool DistinctOp::open() {
 bool DistinctOp::next(std::string& outRow) {
     NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     while (child_->next(outRow)) {
-        if (seen_.insert(outRow).second) { rtInstr_.emitted = true; return true; }
+        std::string key = outRow;
+        if (const auto* project = dynamic_cast<const ProjectOp*>(child_.get())) {
+            if (!project->lastTypedRowKey(key)) {
+                setError("DISTINCT projection lost typed row metadata");
+                return false;
+            }
+        } else if (child_->supportsStructuredRows()) {
+            std::vector<std::string> cells;
+            std::vector<bool> nulls;
+            if (!child_->lastStructuredRow(cells, nulls) || cells.size() != nulls.size()) {
+                setError("DISTINCT child lost structured row metadata");
+                return false;
+            }
+            key.clear();
+            Column text;
+            text.dataType = "text";
+            for (size_t i = 0; i < cells.size(); ++i)
+                key += StorageEngine::groupingValueKey(text, cells[i], nulls[i]);
+        }
+        if (seen_.insert(key).second) { rtInstr_.emitted = true; return true; }
     }
     if (child_->hasError()) return propagateChildError(child_.get(), "distinct child failed");
     return false;

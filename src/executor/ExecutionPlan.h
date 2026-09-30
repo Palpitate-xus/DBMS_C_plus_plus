@@ -199,6 +199,14 @@ public:
     const std::string& tableName() const { return tablename_; }
     int workers() const { return workers_; }
     bool usedParallelWorkers() const { return usedParallelWorkers_; }
+    ScanOrigin scanOrigin() const override {
+        ScanOrigin origin;
+        origin.engine = engine_;
+        origin.dbname = dbname_;
+        origin.tablename = tablename_;
+        origin.rid = lastRid_;
+        return origin;
+    }
 
 private:
     StorageEngine* engine_;
@@ -602,6 +610,10 @@ public:
 
     bool open() override;
     bool next(std::string& outRow) override;
+    bool supportsStructuredRows() const override { return true; }
+    bool lastStructuredRow(std::vector<std::string>& cells,
+                           std::vector<bool>& nulls) const override;
+    bool lastTypedRowKey(std::string& key) const;
     void close() override;
     Operator* child() const { return child_.get(); }
 
@@ -609,6 +621,9 @@ private:
     OpPtr child_;
     TableSchema tbl_;
     std::set<std::string> selectCols_;
+    std::vector<std::string> lastCells_;
+    std::vector<bool> lastNulls_;
+    bool lastRowAvailable_ = false;
 };
 
 // A deliberately narrow, structured window specification.  The legacy SQL
@@ -691,6 +706,10 @@ public:
     // Stored-NULL bit of the most recently re-emitted row, from the sort's
     // own origin tracking (the child scan is drained and its lastRid_ stale).
     bool lastColumnIsNull(size_t colIdx) const override;
+    ScanOrigin scanOrigin() const override {
+        return pos_ > 0 && pos_ - 1 < sortedOrigins_.size()
+            ? sortedOrigins_[pos_ - 1] : ScanOrigin{};
+    }
 
 private:
     OpPtr child_;
@@ -765,6 +784,13 @@ public:
 
     bool open() override;
     bool next(std::string& outRow) override;
+    bool supportsStructuredRows() const override {
+        return child_->supportsStructuredRows();
+    }
+    bool lastStructuredRow(std::vector<std::string>& cells,
+                           std::vector<bool>& nulls) const override {
+        return child_->lastStructuredRow(cells, nulls);
+    }
     void close() override;
     Operator* child() const { return child_.get(); }
 
