@@ -23932,30 +23932,26 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     // Detect FILTER (WHERE condition) after aggregate function
                     vector<string> filterConds;
                     string itemBase = item;
-                    size_t filterPos = item.find("filter (where ");
-                    if (filterPos == string::npos) filterPos = item.find("filter(where ");
+                    size_t filterPos = findTextOutsideQuotes(item, "filter (where ");
+                    if (filterPos == string::npos)
+                        filterPos = findTextOutsideQuotes(item, "filter(where ");
                     if (filterPos != string::npos) {
                         size_t filterStart = item.find("where ", filterPos);
                         if (filterStart != string::npos) {
-                            // Find the closing ')' of FILTER clause
-                            size_t filterEnd = item.find(')', filterStart);
-                            if (filterEnd == string::npos) filterEnd = item.size();
+                            // The first ')' can close a function inside WHERE,
+                            // not the FILTER itself. Keep nested calls and
+                            // quoted parentheses as part of the predicate.
+                            const size_t filterOpen = item.find('(', filterPos);
+                            const size_t filterEnd = findMatchingParen(item, filterOpen);
+                            if (filterEnd == string::npos)
+                                throw dbms::DbError("42601", "unterminated aggregate FILTER clause");
                             string filterStr = trim(item.substr(filterStart + 6, filterEnd - filterStart - 6));
-                            string ms = modifyLogic(filterStr);
-                            string parseStr = ms.empty() ? filterStr : ms;
-                            // Normalize spaces: replace multiple spaces with single space
-                            {
-                                string normalized;
-                                bool inSpace = false;
-                                for (char c : parseStr) {
-                                    if (isspace(static_cast<unsigned char>(c))) {
-                                        if (!inSpace) { normalized += ' '; inSpace = true; }
-                                    } else {
-                                        normalized += c; inSpace = false;
-                                    }
-                                }
-                                parseStr = trim(normalized);
-                            }
+                            // Normalize IS [NOT] NULL before converting to the
+                            // legacy predicate form, as in WHERE. Whitespace
+                            // inside quoted SQL literals must remain intact.
+                            string parseStr = modifyLogic(normalizeConditionStr(filterStr));
+                            if (parseStr.empty() || StorageEngine::parseConditions({parseStr}).empty())
+                                throw dbms::DbError("0A000", "unsupported aggregate FILTER predicate");
                             filterConds.push_back(parseStr);
                         }
                         itemBase = trim(item.substr(0, filterPos));
