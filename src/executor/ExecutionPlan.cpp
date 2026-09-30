@@ -456,6 +456,25 @@ static std::string integerEqualityValue(const TableSchema& table,
             // and unsupported literals to their existing comparison path.
             const int64_t parsed = StorageEngine::parseInt(value);
             if (parsed != INF) return std::to_string(parsed);
+            try {
+                const Numeric numeric(value);
+                if (numeric.isFinite()) {
+                    std::string canonical = numeric.toString();
+                    const auto dot = canonical.find('.');
+                    // Numeric preserves display scale, so 1.0 has scale 1
+                    // despite being integral. Discard only an all-zero
+                    // fraction; never round or truncate a non-integral key.
+                    if (dot != std::string::npos) {
+                        if (canonical.find_first_not_of('0', dot + 1) != std::string::npos)
+                            return value;
+                        canonical.resize(dot);
+                    }
+                    const int64_t exact = StorageEngine::parseInt(canonical);
+                    if (exact != INF) return std::to_string(exact);
+                }
+            } catch (const std::invalid_argument&) {
+                // Invalid or unsupported literals keep their existing path.
+            }
         }
         break;
     }

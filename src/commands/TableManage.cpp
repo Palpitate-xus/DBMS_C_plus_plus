@@ -21385,9 +21385,20 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         if (cond.op == "between" || cond.op == "notbetween") {
             size_t sp = cond.value.find(' ');
             if (sp == std::string::npos) return false;
-            // Decimal bounds compare numerically against the integer
-            // column value ("id between 1.1 and 2.9" in PostgreSQL matches
-            // ids 1 and 2); fall back to integer parsing when not decimal.
+            if (isIntegerStorageType(col.dataType)) {
+                if (num == INF) return false;
+                try {
+                    const Numeric lower(cond.value.substr(0, sp));
+                    const Numeric upper(cond.value.substr(sp + 1));
+                    if (!lower.isFinite() || !upper.isFinite()) return false;
+                    const Numeric integer(num);
+                    const bool inRange = integer >= lower && integer <= upper;
+                    return cond.op == "between" ? inRange : !inRange;
+                } catch (const std::invalid_argument&) {
+                    return false;
+                }
+            }
+            // Retain the legacy fallback for non-integer storage types.
             double loD = 0.0;
             double hiD = 0.0;
             if (parseDoubleLiteral(cond.value.substr(0, sp), loD) &&
@@ -21413,13 +21424,28 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
             return true;
         }
         int64_t cmp = StorageEngine::parseInt(cond.value);
+        if (cmp == INF && isIntegerStorageType(col.dataType) && num != INF) {
+            // SQL promotes an integer compared with a finite decimal literal
+            // to an exact numeric comparison; neither truncation nor double
+            // conversion preserves fractional bounds or BIGINT precision.
+            try {
+                const Numeric numeric(cond.value);
+                if (!numeric.isFinite()) return false;
+                const Numeric integer(num);
+                const int comparison = integer < numeric ? -1 :
+                    (integer > numeric ? 1 : 0);
+                return floatingPredicateMatches(cond.op, comparison);
+            } catch (const std::invalid_argument&) {
+                return false;
+            }
+        }
         if (cmp == INF) return false;  // Invalid comparison value → UNKNOWN → FALSE in WHERE
         if (cond.op == "<"  && !(num < cmp)) return false;
         if (cond.op == ">"  && !(num > cmp)) return false;
         if (cond.op == "="  && num != cmp)   return false;
         if (cond.op == "<=" && (num > cmp))  return false;
         if (cond.op == ">=" && (num < cmp))  return false;
-        if (cond.op == "!=" && num == cmp)   return false;
+        if ((cond.op == "!=" || cond.op == "<>") && num == cmp) return false;
     }
     return true;
 }
