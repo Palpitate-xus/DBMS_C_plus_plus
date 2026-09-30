@@ -20951,9 +20951,10 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
             } else if (argRaw[i] == '(') ++depth;
             else if (argRaw[i] == ')') --depth;
         }
-        if (expr.funcName == "coalesce") {
-            // COALESCE is non-strict: NULL arguments select a later value,
-            // and an empty string or the text "NULL" is a valid result.
+        if (expr.funcName == "coalesce" || expr.funcName == "nullif" ||
+            expr.funcName == "greatest" || expr.funcName == "least") {
+            // These functions have their own NULL rules, not an all-args
+            // strict gate. Keep empty strings and NULL-looking text as data.
             std::map<std::string, std::string> rowValues;
             std::set<std::string> nullColumns;
             for (size_t i = 0; i < tbl.len; ++i) {
@@ -20969,10 +20970,10 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
                 buildTypeHints(tbl), valueDb);
             if (!evaluated.ok)
                 throw std::runtime_error(evaluated.error.empty()
-                    ? "failed to evaluate COALESCE predicate" : evaluated.error);
+                    ? "failed to evaluate non-strict predicate" : evaluated.error);
             if (evaluated.isNull) return false;
             if (evaluated.typeName != "boolean")
-                throw std::runtime_error("COALESCE predicate did not return boolean");
+                throw std::runtime_error("non-strict predicate did not return boolean");
             return ExprValue("boolean", evaluated.value, false).asBool();
         }
         // Strict-gate replication: a column argument that is physically

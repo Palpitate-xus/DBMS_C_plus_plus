@@ -1,0 +1,11 @@
+DROP TABLE IF EXISTS diff_nonstrict_values;
+CREATE TABLE diff_nonstrict_values(id INT,f INT,g INT,t TEXT,u TEXT);
+INSERT INTO diff_nonstrict_values VALUES (1,0,NULL,'',NULL),(2,NULL,2,NULL,'NULL'),(3,1,0,'x','');
+SELECT count(*) FILTER (WHERE nullif(f,g)=0) FROM diff_nonstrict_values;
+SELECT count(*) FILTER (WHERE greatest(f,g)=0) FROM diff_nonstrict_values;
+SELECT count(*) FILTER (WHERE least(f,g)=0) FROM diff_nonstrict_values;
+SELECT id,t,u FROM diff_nonstrict_values WHERE nullif(t,u)='' ORDER BY id;
+SELECT id,t,u FROM diff_nonstrict_values WHERE greatest(t,u)='' ORDER BY id;
+SELECT id,t,u FROM diff_nonstrict_values WHERE least(t,u)='' ORDER BY id;
+SELECT id,t,u FROM diff_nonstrict_values WHERE greatest(t,u)='NULL' ORDER BY id;
+DROP TABLE diff_nonstrict_values;
