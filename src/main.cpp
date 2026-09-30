@@ -4763,6 +4763,7 @@ static bool handleExplain(const string& sql, Session& s) {
     }
     string tname = trim(inner.substr(fromPos + 4, tableEnd - fromPos - 4));
     vector<string> conds;
+    vector<vector<dbms::StorageEngine::Condition>> explainConditionGroups;
     dbms::QuantifiedSubquerySpec quantifiedSubquery;
     bool structuredQuantified = false;
     if (wherePos != string::npos) {
@@ -4853,13 +4854,27 @@ static bool handleExplain(const string& sql, Session& s) {
         if (!structuredQuantified) {
             string condStr = normalizeConditionStr(rawWhere);
             if (!condStr.empty()) {
-                vector<string> rawConds = dbms::splitSqlConjunction(condStr);
-                for (auto& c : rawConds) {
-                    // BETWEEN's AND belongs to one predicate. Reuse the
-                    // ordinary predicate merger so NOT BETWEEN is kept too.
-                    const auto merged = mergeNegPredTokens(tokenize(c));
-                    string mc = modifyLogic(merged.size() == 1 ? merged.front() : c);
-                    if (!mc.empty()) conds.push_back(mc);
+                vector<vector<string>> groups;
+                try {
+                    groups = dbms::sqlBooleanGroups(condStr);
+                } catch (const std::length_error& error) {
+                    throw dbms::DbError("54000", error.what());
+                } catch (const std::invalid_argument& error) {
+                    throw dbms::DbError("42601", error.what());
+                }
+                for (const auto& group : groups) {
+                    vector<dbms::StorageEngine::Condition> conditions;
+                    for (const auto& atom : group) {
+                        if (atom.compare(0, 4, "not ") == 0)
+                            throw dbms::DbError("0A000", "unsupported EXPLAIN unary NOT predicate");
+                        const auto merged = mergeNegPredTokens(tokenize(atom));
+                        const string mc = modifyLogic(merged.size() == 1 ? merged.front() : atom);
+                        const auto parsed = dbms::StorageEngine::parseConditions({mc});
+                        if (parsed.size() != 1 || parsed.front().colName.empty())
+                            throw dbms::DbError("0A000", "unsupported EXPLAIN predicate: " + atom);
+                        conditions.push_back(parsed.front());
+                    }
+                    explainConditionGroups.push_back(std::move(conditions));
                 }
             }
         }
@@ -4953,6 +4968,10 @@ static bool handleExplain(const string& sql, Session& s) {
     ctx.dbname = s.currentDB;
     ctx.tablename = tname;
     ctx.conds = dbms::StorageEngine::parseConditions(conds);
+    if (explainConditionGroups.size() == 1)
+        ctx.conds = std::move(explainConditionGroups.front());
+    else if (!explainConditionGroups.empty())
+        ctx.disjunctiveConds = std::move(explainConditionGroups);
     ctx.selectCols = selectCols;
     ctx.orderByCol = orderByCol;
     ctx.orderByAsc = orderByAsc;
