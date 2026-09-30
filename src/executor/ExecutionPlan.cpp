@@ -587,7 +587,17 @@ static bool collectEqualityIndexCandidates(
     if (std::find(hashIndexedColumns.begin(), hashIndexedColumns.end(),
                   condition.colName) != hashIndexedColumns.end()) {
         auto* hash = engine->getHashIndex(dbname, tablename, condition.colName);
-        if (!hash) return false;
+        std::error_code fileError;
+        // Hash/Bloom's legacy open() treats absence as an empty creation
+        // mapping. Here metadata already declares a live index: absence (or
+        // failed loading) is not an empty candidate set and must not make a
+        // Bitmap/DNF branch silently discard matching heap rows.
+        if (!hash || !hash->isOpen() ||
+            !std::filesystem::is_regular_file(hash->filePath(), fileError) ||
+            fileError) {
+            throw DbError("XX001", "could not read Hash index for relation \"" +
+                tablename + "\"");
+        }
         for (int64_t rid : hash->search(condition.value)) candidates.insert(rid);
         return true;
     }
@@ -596,7 +606,13 @@ static bool collectEqualityIndexCandidates(
     if (std::find(bloomIndexedColumns.begin(), bloomIndexedColumns.end(),
                   condition.colName) != bloomIndexedColumns.end()) {
         auto* bloom = engine->getBloomIndex(dbname, tablename, condition.colName);
-        if (!bloom) return false;
+        std::error_code fileError;
+        if (!bloom || !bloom->isOpen() ||
+            !std::filesystem::is_regular_file(bloom->filePath(), fileError) ||
+            fileError) {
+            throw DbError("XX001", "could not read Bloom index for relation \"" +
+                tablename + "\"");
+        }
         for (int64_t rid : bloom->search(condition.value)) candidates.insert(rid);
         return true;
     }
