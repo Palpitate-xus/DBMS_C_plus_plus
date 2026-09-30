@@ -5014,7 +5014,9 @@ static bool handleExplain(const string& sql, Session& s) {
     }
 
     cout << planOutput;
-    if (cacheHit) cout << "\n[plan cache hit]";
+    // A FORMAT JSON result is one JSON document, including cache hits. The
+    // text-mode diagnostic is not a JSON field and would corrupt its framing.
+    if (cacheHit && !isJson) cout << "\n[plan cache hit]";
 
     if (opts.analyze) {
         // Rebuild plan for actual execution (the cached one was used for
