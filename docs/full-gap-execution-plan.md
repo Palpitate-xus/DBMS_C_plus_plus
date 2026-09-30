@@ -17,6 +17,8 @@
 
 ## 后续优先队列
 
+2026-09-30 第 845 项进展：类型化 ANALYZE extrema／histogram 已独立提交，最终 8 个 C++、新重链／正式专项、10 组相邻协议、完整协议、正式构建和 5 组逐一真实 PostgreSQL 18.6 差分均退出码 0；1.25…20.25 不再 lex max=9.25／边界截整数，超 2^53 BIGINT 与 30 位整数部分 numeric 保留原值。继承 fixture 12 次完整复验亦通过，原第 842 项全脚本失败保留。准备主分支冻结最新合并后重跑预计 378 C++／96 E2E 与 374 组真实差分；不包含仍隔离的第 847 项 quoted comma FROM。SQL-type distinct／MCV、虚拟列／TOAST、pg_stats 投影／WHERE／边界字段、统计编码／失效／采样／correlation 和其他总清单仍未完成；总账仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
+
 2026-09-30 第 846 项进展：继承测试清理竞态已独立提交，先调用 dropDatabase 关闭 catalog／allocator／extent worker，再清理残留，保留全部原继承断言与清理错误断言；第 844 项正式生产对象重链的新完整用例在 12 个独立目录连续退出码 0。第 842 项冻结脚本原失败（375/376 C++、93/93 E2E、退出码 1）保留，真实差分 374/374 通过也不冒充整套通过。第 845 项类型统计最终 8 个 C++、新重链／正式协议、10 组相邻协议、完整协议、正式构建及 5 组逐一真实 PostgreSQL 18.6 差分均已退出码 0，详细证据另记；第 847 项 quoted comma FROM 修复仍隔离进行，不包含在上述轮次。准备快进最新主分支再全量验收；总清单仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
 
 2026-09-30 第 844 项进展：ANALYZE 的真实 NULL／空串统计已独立提交，8 个 C++、重链／正式专项协议、8 组相邻协议、完整协议及正式构建均退出码 0；真实 PostgreSQL 18.6 临时表核对 NULL fraction 和 MCV 频率一致，但非全差分验收。根冻结第 842 项 HEAD 88358d80 全脚本已退出码 1：375/376 C++、93/93 E2E；唯一失败是 alter_inherit_test 在活跃存储仍写 extent 临时文件时直接 remove_all 清理，已有具体异常路径，待独立修复，不抹去本轮失败。该轮同一正式二进制真实 PostgreSQL 18.6 差分 374/374、failed=0、退出码 0，不含第 843–844 项。继续浮点／精确 numeric 统计边界、pg_stats 投影／WHERE、阈值事务时机及其余总清单；仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
