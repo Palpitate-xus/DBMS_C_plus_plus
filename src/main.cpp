@@ -21,6 +21,7 @@
 
 #include "TableManage.h"
 #include "utils/prepared_stmts.h"
+#include "utils/PlanCacheEpoch.h"
 #include "ExecutionPlan.h"
 #include "NetworkServer.h"
 #include "network/ConnectionPool.h"
@@ -269,12 +270,78 @@ static std::map<std::string, CachedPlanEntry> g_queryPlanCache;
 static std::mutex g_planCacheMutex;
 static size_t g_planCacheHits = 0;
 static size_t g_planCacheMisses = 0;
+static dbms::PlanCacheEpoch g_planCacheEpoch;
 
-static void clearPlanCache() {
-    std::lock_guard<std::mutex> lock(g_planCacheMutex);
+static void clearPlanCacheLocked() {
     g_queryPlanCache.clear();
     g_planCacheHits = 0;
     g_planCacheMisses = 0;
+    g_planCacheEpoch.invalidate();
+}
+
+static void clearPlanCache() {
+    std::lock_guard<std::mutex> lock(g_planCacheMutex);
+    clearPlanCacheLocked();
+}
+
+// Keep derived plan text out of cache while a catalog/statistics mutation or
+// transactional undo is in progress. Invalidate at both boundaries: clearing
+// only after DDL lets a concurrent planner publish its pre-DDL plan afterwards.
+class PlanCacheChangeGuard {
+public:
+    explicit PlanCacheChangeGuard(bool active) : active_(active) {
+        if (!active_) return;
+        std::lock_guard<std::mutex> lock(g_planCacheMutex);
+        clearPlanCacheLocked();
+        g_planCacheEpoch.beginMutation();
+    }
+    ~PlanCacheChangeGuard() {
+        if (!active_) return;
+        std::lock_guard<std::mutex> lock(g_planCacheMutex);
+        clearPlanCacheLocked();
+        g_planCacheEpoch.endMutation();
+    }
+    PlanCacheChangeGuard(const PlanCacheChangeGuard&) = delete;
+    PlanCacheChangeGuard& operator=(const PlanCacheChangeGuard&) = delete;
+
+private:
+    bool active_;
+};
+
+static bool changesPlanCache(dbms::SqlCommand command) {
+    // CREATE/DROP/ALTER/TRUNCATE/RENAME are the contiguous DDL section of
+    // SqlCommand. ALTER SYSTEM persists config; only its eventual reload
+    // changes the active planner settings and invalidates their plans.
+    if (command >= dbms::SqlCommand::CreateTable &&
+        command <= dbms::SqlCommand::Rename &&
+        command != dbms::SqlCommand::AlterSystem) return true;
+    switch (command) {
+        case dbms::SqlCommand::Insert:
+        case dbms::SqlCommand::Update:
+        case dbms::SqlCommand::Delete:
+        case dbms::SqlCommand::Merge:
+        case dbms::SqlCommand::Copy:
+        case dbms::SqlCommand::Call:
+        case dbms::SqlCommand::Do:
+        case dbms::SqlCommand::Execute:
+        case dbms::SqlCommand::Commit:
+        case dbms::SqlCommand::Rollback:
+        case dbms::SqlCommand::Abort:
+        case dbms::SqlCommand::End:
+        case dbms::SqlCommand::RollbackToSavepoint:
+        case dbms::SqlCommand::PrepareTransaction:
+        case dbms::SqlCommand::CommitPrepared:
+        case dbms::SqlCommand::RollbackPrepared:
+        case dbms::SqlCommand::Analyze:
+        case dbms::SqlCommand::Vacuum:
+        case dbms::SqlCommand::Reindex:
+        case dbms::SqlCommand::RefreshMaterializedView:
+        case dbms::SqlCommand::Cluster:
+        case dbms::SqlCommand::ImportForeignSchema:
+            return true;
+        default:
+            return false;
+    }
 }
 
 static void trimPlanCacheLocked() {
@@ -4907,10 +4974,13 @@ static bool handleExplain(const string& sql, Session& s) {
     cacheKey += planCacheSettingsKey();
     string planOutput;
     bool cacheHit = false;
+    dbms::PlanCacheEpoch::Token cacheEpoch = 0;
     if (usePlanCache) {
         std::lock_guard<std::mutex> lock(g_planCacheMutex);
+        cacheEpoch = g_planCacheEpoch.token();
         auto it = g_queryPlanCache.find(cacheKey);
-        if (it != g_queryPlanCache.end() && it->second.dbname == s.currentDB) {
+        if (g_planCacheEpoch.stable() &&
+            it != g_queryPlanCache.end() && it->second.dbname == s.currentDB) {
             planOutput = it->second.planText;
             it->second.cachedAt = std::chrono::steady_clock::now();
             cacheHit = true;
@@ -4929,15 +4999,17 @@ static bool handleExplain(const string& sql, Session& s) {
         }
         if (usePlanCache) {
             std::lock_guard<std::mutex> lock(g_planCacheMutex);
-            trimPlanCacheLocked();
-            if (g_queryPlanCache.size() >= g_config.queryPlanCacheSize) {
-                auto oldest = g_queryPlanCache.begin();
-                for (auto it = g_queryPlanCache.begin(); it != g_queryPlanCache.end(); ++it) {
-                    if (it->second.cachedAt < oldest->second.cachedAt) oldest = it;
+            if (g_planCacheEpoch.accepts(cacheEpoch)) {
+                trimPlanCacheLocked();
+                if (g_queryPlanCache.size() >= g_config.queryPlanCacheSize) {
+                    auto oldest = g_queryPlanCache.begin();
+                    for (auto it = g_queryPlanCache.begin(); it != g_queryPlanCache.end(); ++it) {
+                        if (it->second.cachedAt < oldest->second.cachedAt) oldest = it;
+                    }
+                    g_queryPlanCache.erase(oldest);
                 }
-                g_queryPlanCache.erase(oldest);
+                g_queryPlanCache[cacheKey] = {planOutput, s.currentDB, std::chrono::steady_clock::now()};
             }
-            g_queryPlanCache[cacheKey] = {planOutput, s.currentDB, std::chrono::steady_clock::now()};
         }
     }
 
@@ -28659,6 +28731,12 @@ bool managesNotificationTransaction(const std::string& sql) {
 // each top-level DML or locking SELECT statement an internal transaction.
 // Recursive execution stays inside the same boundary.
 bool execute(const std::string& rawSql, Session& s) {
+    // This scope includes statement commit/rollback and exceptions, not just
+    // executeInternal's DDL dispatch. Recursive SQL inherits an outer writer
+    // scope or registers its own, so an inner command cannot reenable cache
+    // while an enclosing mutation is still active.
+    PlanCacheChangeGuard planCacheChange(
+        changesPlanCache(dbms::SQLParser::classify(rawSql)));
     const bool outermost = executeDepth == 0;
     const bool statementTransaction = outermost &&
         !g_engine.inTransaction() &&

@@ -39,10 +39,11 @@ def main():
         assert "TableScan" in str(plan) and "IndexScan" not in str(plan), plan
         expect("CREATE INDEX pair_a_idx ON pair_pk(a);")
         expect(query, [["1", "2"], ["1", "3"]])
-        # Use a fresh explanation key: CREATE INDEX invalidation of an already
-        # cached EXPLAIN is a separate outstanding catalog/cache issue.
-        plan = expect("EXPLAIN SELECT b,a FROM pair_pk WHERE a=1 ORDER BY b;")
+        # Reuse the exact key cached before DDL; the new standalone secondary
+        # index must also invalidate the composite-key table's old plan.
+        plan = expect("EXPLAIN " + query)
         assert "IndexScan" in str(plan), plan
+        assert "[plan cache hit]" not in str(plan), plan
         expect("SELECT a,b FROM pair_pk WHERE a=1 AND b=2;", [["1", "2"]])
         print("[PRIMARY KEY PLAN PROTOCOL E2E] passed")
     finally:
