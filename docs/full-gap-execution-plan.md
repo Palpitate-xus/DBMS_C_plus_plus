@@ -17,6 +17,8 @@
 
 ## 后续优先队列
 
+2026-09-30 第 856 项进展：缓冲聚合 FILTER 的真实 NULL 位传播已独立提交，最终新协议、真实 PostgreSQL 18.6 专项 cases=1 failed=0、7 个 C++、6 组相邻协议和完整协议均退出码 0；旧协议／真实 failed=1 与旧直接 API 测试未复现的事实均保留。IS NULL 与 abs(f)=0 的独立 frontend FILTER 漏条件问题已另复现，作为第 857 项继续修复；SELECT DISTINCT 数值尺度亦未修。根冻结 e339160e 的正式全脚本和 377 组差分仍运行，不含第 853／854／856 项重链验收；总清单仍 24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
+
 2026-09-30 第 854 项进展：legacy grouped COUNT DISTINCT 遗漏 FILTER 已独立提交，旧 C++ 失败、新定向及 7 个相邻 C++、6 组相邻协议和完整协议退出码 0；新增 SQL 专项真实复现另一个缓冲 NULL 被当零问题，保持失败并拆为第 856 项，不以 API 用例通过冒充 SQL 专项通过。根冻结 e339160e 的正式全脚本和 377 组真实 PG18.6 差分仍运行；此轮不包含隔离第 853／854／856 项。总账仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
 
 2026-09-30 第 853 项进展：GROUP BY 的数值类型等价、物理 NULL、空串及复合键碰撞已独立提交，最终 8 个 C++、新协议、7 组相邻协议、完整协议和真实 PostgreSQL 18.6 专项 cases=1 failed=0 均退出码 0；旧专项 failed=1 保留。新 helper 与显示代表值分离，512 行实测使用多 worker；旧 legacy 返回字符串的全部类型保真与其他 grouping 语义仍未完成。根冻结 e339160e（至第 852 项）正式生产构建已成功，完整正式脚本和同一二进制 377 组真实差分进行中，不含隔离第 853 项；旧 c1409254 的唯一 JOIN 失败不能抹去。接着处理 DISTINCT／group FILTER／固定长索引键等其余总清单；仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
