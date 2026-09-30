@@ -1,0 +1,12 @@
+CREATE TABLE "Diff From Rows" (id INT PRIMARY KEY,v TEXT);
+INSERT INTO "Diff From Rows" VALUES (1,'NULL'),(2,''),(3,NULL);
+SELECT id,v FROM "Diff From Rows" ORDER BY id;
+SELECT q.id FROM "Diff From Rows" AS q WHERE q.id=2;
+SELECT q.id FROM "Diff From Rows" q WHERE q.id=1;
+SELECT id FROM public."Diff From Rows" ORDER BY id;
+CREATE TABLE "Diff From  ""Quoted, Rows" (id INT);
+INSERT INTO "Diff From  ""Quoted, Rows" VALUES (4);
+SELECT id FROM "Diff From  ""Quoted, Rows";
+SELECT q.id FROM "Diff From  ""Quoted, Rows" AS q WHERE q.id=4;
+DROP TABLE "Diff From Rows";
+DROP TABLE "Diff From  ""Quoted, Rows";

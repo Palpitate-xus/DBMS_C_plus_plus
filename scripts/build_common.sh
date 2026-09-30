@@ -139,6 +139,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/integer_index_recheck_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/expression_null_predicate_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/fromless_expression_header_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/quoted_from_whitespace_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cli_error_recovery_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/no_fake_compat_objects_test.py)
     DBMS_E2E_TESTS+=(tests/compat_fallback_registry_test.py)
