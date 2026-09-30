@@ -4773,7 +4773,7 @@ static bool handleExplain(const string& sql, Session& s) {
         cout << "EXPLAIN only supports SELECT" << endl;
         return true;
     }
-    size_t fromPos = inner.find("from");
+    size_t fromPos = findTopLevelKeyword(inner, "from", 6);
     if (fromPos == string::npos) {
         cout << "SQL syntax error" << endl;
         return true;
@@ -4784,24 +4784,54 @@ static bool handleExplain(const string& sql, Session& s) {
         isDistinct = true;
         columns = trim(columns.substr(9));
     }
-    size_t wherePos = inner.find("where", fromPos);
-    size_t groupPos = inner.find("group by", fromPos);
-    size_t havingPos = inner.find("having", fromPos);
-    size_t orderPos = inner.find("order by", fromPos);
-    size_t limitPos = inner.find("limit", fromPos);
+    size_t wherePos = findTopLevelKeyword(inner, "where", fromPos + 4);
+    size_t groupPos = findTopLevelKeyword(inner, "group by", fromPos + 4);
+    size_t havingPos = findTopLevelKeyword(inner, "having", fromPos + 4);
+    size_t orderPos = findTopLevelKeyword(inner, "order by", fromPos + 4);
+    size_t limitPos = findTopLevelKeyword(inner, "limit", fromPos + 4);
     size_t tableEnd = inner.size();
     for (size_t clause : {wherePos, groupPos, havingPos, orderPos, limitPos}) {
         if (clause != string::npos && clause > fromPos) tableEnd = min(tableEnd, clause);
     }
     string tname = trim(inner.substr(fromPos + 4, tableEnd - fromPos - 4));
+    // QualifiedName also accepts decoded internal names containing spaces.
+    // Reject unsupported alias/join syntax before passing raw SQL to it,
+    // while allowing quoted spaces and whitespace around qualification dots.
+    bool relationQuoted = false;
+    string normalizedRelation;
+    for (size_t i = 0; i < tname.size(); ++i) {
+        if (tname[i] == '"') {
+            normalizedRelation += tname[i];
+            if (relationQuoted && i + 1 < tname.size() && tname[i + 1] == '"')
+                normalizedRelation += tname[++i];
+            else relationQuoted = !relationQuoted;
+        } else if (!relationQuoted && isspace(static_cast<unsigned char>(tname[i]))) {
+            size_t after = i + 1;
+            while (after < tname.size() && isspace(static_cast<unsigned char>(tname[after]))) ++after;
+            if (i > 0 && after < tname.size() && tname[i - 1] != '.' && tname[after] != '.')
+                throw dbms::DbError("0A000", "unsupported EXPLAIN alias or table reference");
+            i = after - 1;
+        } else {
+            normalizedRelation += tname[i];
+        }
+    }
+    tname = std::move(normalizedRelation);
+    dbms::CatalogManager::QualifiedName explainRelation;
+    if (!dbms::CatalogManager::parseQualifiedName(tname, explainRelation))
+        throw dbms::DbError("0A000", "unsupported EXPLAIN table reference");
+    tname = resolveTableName(s, tname);
+    if (!g_engine.tableExists(s.currentDB, tname))
+        throw dbms::DbError("42P01", "relation \"" + tname + "\" does not exist");
     vector<string> conds;
     vector<vector<dbms::StorageEngine::Condition>> explainConditionGroups;
     dbms::QuantifiedSubquerySpec quantifiedSubquery;
     bool structuredQuantified = false;
     if (wherePos != string::npos) {
-        size_t condEnd = (orderPos != string::npos) ? orderPos
-                       : (limitPos != string::npos) ? limitPos
-                       : inner.size();
+        size_t condEnd = inner.size();
+        for (size_t clause : {groupPos, havingPos, orderPos, limitPos}) {
+            if (clause != string::npos && clause > wherePos)
+                condEnd = min(condEnd, clause);
+        }
         string rawWhere = trim(inner.substr(wherePos + 5, condEnd - wherePos - 5));
         // "<col> <op> ANY/ALL (SELECT unnest(ARRAY[e1,...]))" flattens to an
         // IN / NOT IN literal list with PG NULL semantics (the structured
