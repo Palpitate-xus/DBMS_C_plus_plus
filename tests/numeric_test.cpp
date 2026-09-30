@@ -24,7 +24,7 @@ static void test_basic_io() {
     assert(Numeric(".5e+2").toString() == "50");
     assert(Numeric("5.e1").toString() == "50");
     assert((-Numeric(0)).toString() == "0");
-    assert((-Numeric("0.000")).toString() == "0");
+    assert((-Numeric("0.000")).toString() == "0.000");
     assert(Numeric("NaN").toString() == "NaN");
     assert(Numeric("NAN").toString() == "NaN");
     assert(Numeric("Infinity").toString() == "Infinity");

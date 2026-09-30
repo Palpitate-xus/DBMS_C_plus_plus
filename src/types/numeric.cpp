@@ -267,7 +267,6 @@ Numeric Numeric::fromString(const std::string& s) {
     for (char ch : intPart) n.digits_.push_back(static_cast<uint8_t>(ch - '0'));
     for (char ch : fracPart) n.digits_.push_back(static_cast<uint8_t>(ch - '0'));
 
-    if (isAllZero(n.digits_)) return Numeric(0);
     stripLeadingZeros(n.digits_);
 
     if (fracPart.size() > static_cast<size_t>(
@@ -277,6 +276,12 @@ Numeric Numeric::fromString(const std::string& s) {
     }
     const int64_t fractionalScale =
         static_cast<int64_t>(fracPart.size());
+    if (isAllZero(n.digits_) && exponent >= fractionalScale) {
+        // Positive exponents cannot allocate significant digits for zero.
+        n.scale_ = 0;
+        n.normalize();
+        return n;
+    }
     if (exponent > fractionalScale + kMaxPrecision ||
         exponent < fractionalScale - kMaxPrecision) {
         throw std::invalid_argument("numeric exponent out of range");
@@ -319,7 +324,6 @@ void Numeric::normalize() {
 
     if (digits_.empty() || isAllZero(digits_)) {
         digits_ = {0};
-        scale_ = 0;
         sign_ = 1;
     }
     precision_ = static_cast<int>(digits_.size());
@@ -400,15 +404,17 @@ Numeric Numeric::operator+(const Numeric& rhs) const {
         }
         return inf_ ? *this : rhs;
     }
-    if (sign() == 0) return rhs;
-    if (rhs.sign() == 0) return *this;
     if (sign_ == rhs.sign_) {
         Numeric r = addMagnitudes(*this, rhs);
         r.sign_ = sign_;
         return r;
     }
     int cm = compareMagnitudes(*this, rhs);
-    if (cm == 0) return Numeric(0);
+    if (cm == 0) {
+        Numeric result(0);
+        result.scale_ = std::max(scale_, rhs.scale_);
+        return result;
+    }
     if (cm > 0) {
         Numeric r = subMagnitudes(*this, rhs);
         r.sign_ = sign_;
@@ -433,9 +439,8 @@ Numeric Numeric::operator*(const Numeric& rhs) const {
         if (o->sign() == 0) return nan();
         return infinity(sign_ * rhs.sign_);
     }
-    if (sign() == 0 || rhs.sign() == 0) return Numeric(0);
     Numeric r = multiplyMagnitudes(*this, rhs);
-    r.sign_ = sign_ * rhs.sign_;
+    r.sign_ = r.sign() == 0 ? 1 : sign_ * rhs.sign_;
     return r;
 }
 
@@ -607,8 +612,11 @@ Numeric Numeric::withScale(int newScale, RoundingMode mode) const {
     } else {
         const int64_t droppedDigits =
             static_cast<int64_t>(scale_) - newScale;
-        if (droppedDigits > static_cast<int64_t>(digits_.size()))
-            return Numeric(0);
+        if (droppedDigits > static_cast<int64_t>(digits_.size())) {
+            Numeric zero(0);
+            zero.scale_ = std::max(0, newScale);
+            return zero;
+        }
         r.digits_ = divideByPowerOf10(
             digits_, static_cast<int>(droppedDigits));
         if (newScale < 0 && !isAllZero(r.digits_)) {
