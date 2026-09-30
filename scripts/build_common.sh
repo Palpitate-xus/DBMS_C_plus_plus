@@ -121,6 +121,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/quoted_from_comma_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/pg_stats_histogram_extent_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/typed_statistics_mcv_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/numeric_index_key_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cli_error_recovery_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/no_fake_compat_objects_test.py)
     DBMS_E2E_TESTS+=(tests/compat_fallback_registry_test.py)

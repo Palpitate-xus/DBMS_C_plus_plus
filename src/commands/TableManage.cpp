@@ -772,6 +772,23 @@ static std::string canonicalColumnKeyValue(const Column& column,
         if (!UuidValue::parse(value, uuid)) return value;
         return uuid.indexKey();
     }
+    if (!column.isArray && column.dataType == "numeric") {
+        try {
+            std::string key = Numeric(value).toString();
+            // Numeric preserves display scale; keys must instead identify the
+            // exact SQL value. Strip only fractional zeros, never integer zeros
+            // or significant digits, and never round through float/double.
+            if (key.find('.') != std::string::npos) {
+                while (!key.empty() && key.back() == '0') key.pop_back();
+                if (!key.empty() && key.back() == '.') key.pop_back();
+            }
+            return key;
+        } catch (const std::invalid_argument&) {
+            return value; // The mutation's value validator reports invalid input.
+        } catch (const std::out_of_range&) {
+            return value;
+        }
+    }
     return value;
 }
 
