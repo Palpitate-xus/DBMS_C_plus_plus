@@ -557,12 +557,35 @@ static pair<set<string>, bool> parseReturningClause(const string& sql, size_t se
     return {cols, false};
 }
 
+static size_t findMatchingParen(const string& sql, size_t start);
 static vector<string> tokenize(const string& sql) {
     vector<string> tokens;
     size_t i = 0;
     while (i < sql.size()) {
         while (i < sql.size() && isspace(static_cast<unsigned char>(sql[i]))) ++i;
         if (i >= sql.size()) break;
+        if (sql[i] == '(') {
+            size_t headEnd = i;
+            while (headEnd > 0 && isspace(static_cast<unsigned char>(sql[headEnd - 1])))
+                --headEnd;
+            const bool functionParen = headEnd > 0 &&
+                (isalnum(static_cast<unsigned char>(sql[headEnd - 1])) ||
+                 sql[headEnd - 1] == '_' || sql[headEnd - 1] == '"');
+            const auto close = functionParen ? string::npos : findMatchingParen(sql, i);
+            if (close != string::npos) {
+                for (const string suffix : {string("isnotnull"), string("isnull")}) {
+                    const size_t after = close + 1 + suffix.size();
+                    if (sql.compare(close + 1, suffix.size(), suffix) == 0 &&
+                        (after == sql.size() ||
+                         !isalnum(static_cast<unsigned char>(sql[after])))) {
+                        tokens.push_back(sql.substr(i, after - i));
+                        i = after;
+                        break;
+                    }
+                }
+                if (i > close) continue;
+            }
+        }
         if (sql[i] == '(' || sql[i] == ')') {
             tokens.emplace_back(1, sql[i]);
             ++i;
@@ -8928,30 +8951,6 @@ static string normalizeConditionStr(string s) {
             pos += 8;
         }
     }
-    // Parenthesized-expression IS [NOT] NULL: with no physical NULL
-    // storage, a comparison expression never evaluates to NULL, so
-    // "(expr) is null" is constant-false and "(expr) is not null" is
-    // constant-true (matches PostgreSQL's result for non-NULL operands).
-    {
-        const char* pats[2] = {" is not null", " is null"};
-        for (int pi = 0; pi < 2; ++pi) {
-            size_t plen = strlen(pats[pi]);
-            size_t p2 = 0;
-            while ((p2 = findTextOutsideQuotes(s, pats[pi], p2)) != string::npos) {
-                size_t opEnd = p2;
-                if (opEnd == 0 || s[opEnd - 1] != ')') { p2 += plen; continue; }
-                int depth3 = 0; size_t open = string::npos;
-                for (size_t k = opEnd; k > 0; --k) {
-                    if (s[k - 1] == ')') ++depth3;
-                    else if (s[k - 1] == '(') { --depth3; if (depth3 == 0) { open = k - 1; break; } }
-                }
-                if (open == string::npos) { p2 += plen; continue; }
-                const char* repl = (pi == 0) ? "1 = 1" : "1 = 2";
-                s = s.substr(0, open) + repl + s.substr(opEnd);
-                p2 = open + strlen(repl);
-            }
-        }
-    }
     // Normalize IS NOT NULL (before IS NULL to avoid partial match).  Like
     // IS NULL below, a following and/or connective must stay a separate
     // token ("a is not null and ..." must not glue into "aisnotnulland").
@@ -9236,6 +9235,9 @@ static vector<string> mergeNegPredTokens(const vector<string>& toks) {
                  toks[j][0] == '<' || toks[j][0] == '>')) {
                 fn += " " + toks[j];
                 ++j;
+            } else if (j < toks.size() &&
+                       (toks[j] == "isnull" || toks[j] == "isnotnull")) {
+                fn += toks[j++];
             }
             out.push_back(fn);
             i = j;
@@ -9301,6 +9303,13 @@ static vector<string> mergeNegPredTokens(const vector<string>& toks) {
 
 static string modifyLogic(const string& logic) {
     if (logic == "(" || logic == ")" || logic == "and" || logic == "or") return logic;
+    // Evaluate expression NULL tests, rather than replacing them with a
+    // constant or leaving a function token without its postfix predicate.
+    for (const string suffix : {string("isnotnull"), string("isnull")}) {
+        const auto at = findTextOutsideQuotes(logic, suffix);
+        if (at != string::npos && at + suffix.size() == logic.size())
+            return suffix + " " + logic.substr(0, at);
+    }
     // Glued scalar-function call ("length(v)") from mergeNegPredTokens: no
     // operator of its own; the companion "=0" token carries the predicate.
     // The generic tail below returns "" for operator-less tokens, which
