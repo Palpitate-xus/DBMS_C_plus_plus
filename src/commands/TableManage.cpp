@@ -221,6 +221,9 @@ static bool usesHeapTupleHeader(uint32_t formatVersion);
 // so condition evaluation can consult the stored null bitmap WITHOUT
 // altering extractColumnValueStatic int-sentinel behavior.
 static thread_local const StorageEngine* g_condNullEngine = nullptr;
+// The current physical scan tuple, valid only during a forEachRow callback.
+// Unlike a table/page RID lookup, this also identifies partition-leaf NULLs.
+static thread_local const HeapTupleHeaderData* g_scanHeapTuple = nullptr;
 static thread_local int64_t g_condNullRid = -1;
 static thread_local std::string g_condNullTable;
 static thread_local std::string g_condNullDb;
@@ -5460,8 +5463,12 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
         stats.rowCount++;
         std::string row(data, len);
         for (size_t i = 0; i < tbl.len; ++i) {
+            const std::string& cname = tbl.cols[i].dataName;
+            if (g_scanHeapTuple && dbms::isNull(g_scanHeapTuple, static_cast<int>(i))) {
+                ++nullCounts[cname];
+                continue;
+            }
             std::string val = extractColumnValue(row, tbl, i);
-            if (val.empty()) ++nullCounts[tbl.cols[i].dataName];
             distinctVals[tbl.cols[i].dataName].insert(val);
             allVals[tbl.cols[i].dataName].push_back(val);
             if (minVals.find(tbl.cols[i].dataName) == minVals.end() || val < minVals[tbl.cols[i].dataName]) {
@@ -7092,6 +7099,11 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
         const int64_t condRid = this->encodeRid(pid, sid);
         g_condNullEngine = this; g_condNullRid = condRid;
         g_condNullTable = tablename; g_condNullDb = dbname;
+        struct RestoreScanTuple {
+            const HeapTupleHeaderData* previous;
+            ~RestoreScanTuple() { g_scanHeapTuple = previous; }
+        } restoreScanTuple{g_scanHeapTuple};
+        g_scanHeapTuple = usesHeapTupleHeader(fmtVer) ? castHeapHeader(data) : nullptr;
         callback(pid, sid, data + off, len - off);
         g_condNullEngine = nullptr; g_condNullRid = -1;
         g_condNullTable.clear(); g_condNullDb.clear();
@@ -28645,8 +28657,11 @@ std::vector<std::string> StorageEngine::getPgStatsRows(
                     if (i > 0) hist << ",";
                     hist << "{" << cv.second.histogram[i].first << "}";
                 }
+                const double nullFraction = rowCount > 0
+                    ? static_cast<double>(cv.second.nullCount) / static_cast<double>(rowCount)
+                    : 0.0;
                 result.push_back(dbname + " " + currentTable + " " + cv.first +
-                                 " " + std::to_string(0.0) + " " +
+                                 " " + std::to_string(nullFraction) + " " +
                                  std::to_string(nDist) + " " + mcv.str() + " " +
                                  freqs.str() + " " + hist.str() + " ");
             }

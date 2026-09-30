@@ -151,13 +151,14 @@ int main() {
     //     IS NULL estimates 0.3 exactly; IS NOT NULL ~0.7; the cold-value
     //     equality scales by the non-null fraction.
     // ------------------------------------------------------------------
-    // VARCHAR column: zero-length is the engine's NULL encoding, so
-    // "" inserts real NULLs the isnull evaluator agrees with.
+    // NULL is a physical bitmap value, distinct from zero-length text.
     assert(!ddl.executeSql("CREATE TABLE nz (id INT, v VARCHAR(16))", s));
     for (int i = 0; i < 100; ++i) {
-        std::string v = (i < 30) ? "" : ("v" + std::to_string(i));
-        assert(g_engine.insert(db, "nz",
-                               {{"id", std::to_string(i)}, {"v", v}})
+        const dbms::StorageEngine::SqlRow row{
+            {"id", std::to_string(i)},
+            {"v", i < 30 ? std::nullopt
+                : std::optional<std::string>("v" + std::to_string(i))}};
+        assert(g_engine.insertRow(db, "nz", row)
                    == dbms::DBStatus::OK);
     }
     assert(g_engine.analyzeTable(db, "nz"));
