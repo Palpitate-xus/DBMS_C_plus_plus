@@ -10,10 +10,27 @@ extern dbms::StorageEngine g_engine;
 
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
+    dbms::TableSchema bitmapTable;
+    bitmapTable.tablename = "buffered";
+    bitmapTable.append(dbms::makeIntColumn("f", true, 2));
+    const std::string zeroDatum(4, '\0');
+    const dbms::StorageEngine::Condition zero{"=", "f", "0"};
+    // A SQL-written NULL fixed-width datum may contain zero bytes. Its
+    // materialized bitmap, not the payload or a stale scan RID, is truth.
+    assert(dbms::StorageEngine::evalConditionOnRow(zero, zeroDatum, bitmapTable));
+    assert(!dbms::StorageEngine::evalConditionOnRow(zero, zeroDatum, bitmapTable, {true}));
+    assert(dbms::StorageEngine::evalConditionOnRow(zero, zeroDatum, bitmapTable, {false}));
+    assert(dbms::StorageEngine::evalConditionOnRow({"isnull", "f", ""}, zeroDatum, bitmapTable, {true}));
+    assert(!dbms::StorageEngine::evalConditionOnRow({"isnotnull", "f", ""}, zeroDatum, bitmapTable, {true}));
+    assert(!dbms::StorageEngine::evalConditionOnRow({"scalarexpr", "abs(f)", "= 0"}, zeroDatum, bitmapTable, {true}));
+    // Scope must restore after each call, including recursive IN evaluation.
+    assert(!dbms::StorageEngine::evalConditionOnRow({"in", "f", "0 1"}, zeroDatum, bitmapTable, {true}));
+    assert(dbms::StorageEngine::evalConditionOnRow(zero, zeroDatum, bitmapTable));
     const auto db = testDbPath("group_distinct_filter");
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     dbms::TableSchema table;
     table.tablename = "items";
+    table.formatVersion = dbms::DATA_FILE_FORMAT_VERSION;
     table.append(dbms::makeIntColumn("g", false, 4));
     table.append(dbms::makeDecimalColumn("v", true, 20, 5));
     table.append(dbms::makeIntColumn("f", true, 4));

@@ -3209,7 +3209,7 @@ bool ParallelGroupAggregateOp::open() try {
             const auto& row = input[rowId];
             bool passes = true;
             for (const auto& filter : filters) {
-                if (!StorageEngine::evalConditionOnRow(filter, row.raw, tbl_)) {
+                if (!StorageEngine::evalConditionOnRow(filter, row.raw, tbl_, row.nulls)) {
                     passes = false; break;
                 }
             }
@@ -3898,7 +3898,7 @@ bool GroupAggregateOp::open() try {
             const auto& row = input[rowId];
             bool passes = true;
             for (const auto& filter : filters) {
-                if (!StorageEngine::evalConditionOnRow(filter, row.raw, tbl_)) {
+                if (!StorageEngine::evalConditionOnRow(filter, row.raw, tbl_, row.nulls)) {
                     passes = false;
                     break;
                 }

@@ -227,6 +227,8 @@ static thread_local const HeapTupleHeaderData* g_scanHeapTuple = nullptr;
 static thread_local int64_t g_condNullRid = -1;
 static thread_local std::string g_condNullTable;
 static thread_local std::string g_condNullDb;
+static thread_local const TableSchema* g_bufferedConditionSchema = nullptr;
+static thread_local const std::vector<bool>* g_bufferedConditionNulls = nullptr;
 static size_t rowHeaderSize(uint32_t formatVersion, size_t natts);
 static void setPageLsnAndChecksum(char* buf, Lsn lsn);
 
@@ -9332,7 +9334,10 @@ std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer
 
     // Stored-NULL visibility (see NullRowBinding above): when a scan
     // loop bound the current row, physically-NULL columns read as "".
-    if (g_nullRowEngine && g_nullRowRid >= 0 && colIdx < g_nullRowNatts &&
+    if (g_bufferedConditionSchema == &tbl && g_bufferedConditionNulls) {
+        if (colIdx < g_bufferedConditionNulls->size() &&
+            (*g_bufferedConditionNulls)[colIdx]) return "";
+    } else if (g_nullRowEngine && g_nullRowRid >= 0 && colIdx < g_nullRowNatts &&
         tbl.tablename == g_nullRowTable) {
         if (g_nullRowEngine->isColumnNullByRid(g_nullRowDb, tbl.tablename,
                                                g_nullRowRid, colIdx)) {
@@ -20864,6 +20869,25 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                                     const std::string& dbname,
                                     std::optional<bool>* knownNull = nullptr);
 bool StorageEngine::evalConditionOnRow(const Condition& cond,
+                                      const std::string& rowBuffer,
+                                      const TableSchema& tbl,
+                                      const std::vector<bool>& nulls) {
+    if (nulls.size() != tbl.len)
+        throw DbError("XX000", "materialized predicate NULL bitmap width mismatch");
+    struct Binding {
+        const TableSchema* schema;
+        const std::vector<bool>* bitmap;
+        ~Binding() {
+            g_bufferedConditionSchema = schema;
+            g_bufferedConditionNulls = bitmap;
+        }
+    } binding{g_bufferedConditionSchema, g_bufferedConditionNulls};
+    g_bufferedConditionSchema = &tbl;
+    g_bufferedConditionNulls = &nulls;
+    return evalConditionOnRow(cond, rowBuffer, tbl);
+}
+
+bool StorageEngine::evalConditionOnRow(const Condition& cond,
                                         const std::string& rowBuffer, const TableSchema& tbl) {
     if (cond.colName == "__true__") return true;
     if (cond.colName == "__false__") return false;
@@ -20883,15 +20907,19 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
 
     StorageEngine* valueEngine = nullptr;
     std::string valueDb;
-    if (g_condNullEngine && tbl.tablename == g_condNullTable) {
+    const bool buffered = g_bufferedConditionSchema == &tbl && g_bufferedConditionNulls;
+    if (!buffered && g_condNullEngine && tbl.tablename == g_condNullTable) {
         valueEngine = const_cast<StorageEngine*>(g_condNullEngine);
         valueDb = g_condNullDb;
-    } else if (g_nullRowEngine && tbl.tablename == g_nullRowTable) {
+    } else if (!buffered && g_nullRowEngine && tbl.tablename == g_nullRowTable) {
         valueEngine = const_cast<StorageEngine*>(g_nullRowEngine);
         valueDb = g_nullRowDb;
     }
     const auto extractValue = [&](size_t columnIndex,
                                   bool* valueIsNull = nullptr) {
+        if (buffered && valueIsNull)
+            *valueIsNull = columnIndex < g_bufferedConditionNulls->size() &&
+                           (*g_bufferedConditionNulls)[columnIndex];
         return valueEngine
             ? valueEngine->extractColumnValue(
                   rowBuffer, tbl, columnIndex, valueDb, true, valueIsNull)
@@ -20925,7 +20953,15 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         }
         // Strict-gate replication: a column argument that is physically
         // NULL makes the function result NULL (three-valued Unknown).
-        if (g_condNullEngine && g_condNullRid >= 0 &&
+        if (buffered) {
+            for (const auto& arg : expr.funcArgs) {
+                if (arg.empty() || arg.front() == 0x27) continue;
+                for (size_t i = 0; i < tbl.len; ++i)
+                    if (tbl.cols[i].dataName == arg &&
+                        (*g_bufferedConditionNulls)[i]) return false;
+            }
+        }
+        if (!buffered && g_condNullEngine && g_condNullRid >= 0 &&
             tbl.tablename == g_condNullTable) {
             for (const auto& arg : expr.funcArgs) {
                 if (arg.empty() || arg.front() == 0x27) continue;
@@ -20942,7 +20978,7 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         // Extraction-scope NullRowBinding (rid-keyed loops in queryExpr): the
         // condition runs after the scan, so the scan-time g_condNull* context
         // is gone but the binding still carries the null bitmap.
-        if (g_nullRowEngine && g_nullRowRid >= 0 &&
+        if (!buffered && g_nullRowEngine && g_nullRowRid >= 0 &&
             tbl.tablename == g_nullRowTable) {
             for (const auto& arg : expr.funcArgs) {
                 if (arg.empty() || arg.front() == 0x27) continue;
@@ -21039,8 +21075,8 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
     const Column& col = tbl.cols[ci];
     // Stored-NULL truth: prefer the bound scan row null bitmap (see
     // NullRowBinding), which distinguishes NULL from a stored empty string.
-    bool physNull = col.generatedKind == 'v' && computedNull;
-    if (col.generatedKind != 'v' &&
+    bool physNull = buffered ? (*g_bufferedConditionNulls)[ci] : computedNull;
+    if (!buffered && col.generatedKind != 'v' &&
         g_condNullEngine && g_condNullRid >= 0 &&
         tbl.tablename == g_condNullTable &&
         g_condNullEngine->isColumnNullByRid(g_condNullDb, tbl.tablename,
@@ -21060,8 +21096,8 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         size_t rci = 0;
         for (; rci < tbl.len && tbl.cols[rci].dataName != cond.value; ++rci) {}
         if (rci < tbl.len) {
-            bool rNull = false;
-            if (tbl.cols[rci].generatedKind != 'v' &&
+            bool rNull = buffered && (*g_bufferedConditionNulls)[rci];
+            if (!buffered && tbl.cols[rci].generatedKind != 'v' &&
                 g_condNullEngine && g_condNullRid >= 0 &&
                 tbl.tablename == g_condNullTable &&
                 g_condNullEngine->isColumnNullByRid(g_condNullDb, tbl.tablename,
@@ -21071,7 +21107,7 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
             if (rNull) return false;
             bool rightComputedNull = false;
             std::string rval = extractValue(rci, &rightComputedNull);
-            if (tbl.cols[rci].generatedKind == 'v' && rightComputedNull) {
+            if (rightComputedNull) {
                 return false;
             }
             bool num = true;

@@ -1109,6 +1109,12 @@ public:
                                         bool valueIsNull);
     static std::vector<Condition> parseConditions(const std::vector<std::string>& cstr);
     static bool evalConditionOnRow(const Condition& cond, const std::string& rowBuffer, const TableSchema& tbl);
+    // Materialized executor rows must carry their own NULL bitmap: the
+    // originating scan's RID binding is no longer active after buffering.
+    static bool evalConditionOnRow(const Condition& cond,
+                                   const std::string& rowBuffer,
+                                   const TableSchema& tbl,
+                                   const std::vector<bool>& nulls);
     static int64_t parseInt(const std::string& s);
     static bool stringToBuffer(const std::string& src, char* dst, size_t len);
     // extractColumnValue with optional dbname for TOAST resolution
