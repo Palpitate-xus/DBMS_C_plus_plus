@@ -219,6 +219,7 @@ private:
 // ========================================================================
 class IndexScanOp : public Operator {
 public:
+    // value is a logical column value, not an encoded physical primary key.
     IndexScanOp(StorageEngine* engine, const std::string& dbname,
                 const std::string& tablename, const std::string& colname,
                 const std::string& value);

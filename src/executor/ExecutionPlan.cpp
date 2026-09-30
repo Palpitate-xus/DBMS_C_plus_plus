@@ -419,6 +419,24 @@ void ParallelTableScanOp::close() {
 // IndexScanOp
 // ========================================================================
 
+static bool isSingleColumnPrimaryKey(const TableSchema& table,
+                                     const std::string& column) {
+    if (!table.pkColIndices.empty()) {
+        return table.pkColIndices.size() == 1 &&
+               table.pkColIndices.front() < table.len &&
+               table.cols[table.pkColIndices.front()].dataName == column;
+    }
+    size_t primaryColumns = 0;
+    bool matches = false;
+    for (size_t i = 0; i < table.len; ++i) {
+        if (table.cols[i].isPrimaryKey) {
+            ++primaryColumns;
+            matches = table.cols[i].dataName == column;
+        }
+    }
+    return primaryColumns == 1 && matches;
+}
+
 static bool lookupBtreeKeyChecked(BPTree* index, const std::string& key,
                                   int64_t& rid) {
     const auto status = index->searchChecked(key, rid);
@@ -463,7 +481,15 @@ bool IndexScanOp::open() {
             pkIdx = i; break;
         }
     }
-    isPK_ = (pkIdx < tbl_.len);
+    isPK_ = isSingleColumnPrimaryKey(tbl_, colname_);
+    if (pkIdx < tbl_.len && !isPK_) {
+        const auto indexedColumns = engine_->getIndexedColumns(dbname_, tablename_);
+        if (std::find(indexedColumns.begin(), indexedColumns.end(), colname_) ==
+            indexedColumns.end()) {
+            throw DbError("0A000", "single-column index scan cannot use a "
+                "composite primary key");
+        }
+    }
 
     BPTree* idx = isPK_
         ? engine_->getPKIndex(dbname_, tablename_)
@@ -474,7 +500,9 @@ bool IndexScanOp::open() {
     }
     if (isPK_) {
         int64_t rid = 0;
-        if (lookupBtreeKeyChecked(idx, value_, rid)) rids_.push_back(rid);
+        const std::string key = tbl_.buildPKValue(
+            std::map<std::string, std::string>{{colname_, value_}});
+        if (lookupBtreeKeyChecked(idx, key, rid)) rids_.push_back(rid);
     } else {
         rids_ = lookupBtreeMultiChecked(idx, value_);
     }
@@ -543,21 +571,16 @@ static bool collectEqualityIndexCandidates(
     std::set<int64_t>& candidates) {
     if (condition.op != "=") return false;
 
-    bool isPrimaryKey = false;
-    for (size_t i = 0; i < tbl.len; ++i) {
-        if (tbl.cols[i].dataName == condition.colName && tbl.cols[i].isPrimaryKey) {
-            isPrimaryKey = true;
-            break;
-        }
-    }
-    if (isPrimaryKey && tbl.pkColIndices.size() == 1) {
+    if (isSingleColumnPrimaryKey(tbl, condition.colName)) {
         auto* index = engine->getPKIndex(dbname, tablename);
         if (!index) {
             throw DbError("XX001", "could not open B-tree index for relation \"" +
                 tablename + "\"");
         }
         int64_t rid = 0;
-        if (lookupBtreeKeyChecked(index, condition.value, rid)) candidates.insert(rid);
+        const std::string key = tbl.buildPKValue(
+            std::map<std::string, std::string>{{condition.colName, condition.value}});
+        if (lookupBtreeKeyChecked(index, key, rid)) candidates.insert(rid);
         return true;
     }
 
@@ -4051,11 +4074,7 @@ static bool hasEqualityIndex(StorageEngine* engine, const PlanContext& ctx,
                              const StorageEngine::Condition& condition) {
     if (condition.op != "=") return false;
     const TableSchema table = engine->getTableSchema(ctx.dbname, ctx.tablename);
-    for (size_t i = 0; i < table.len; ++i) {
-        if (table.cols[i].dataName == condition.colName && table.cols[i].isPrimaryKey &&
-            table.pkColIndices.size() == 1)
-            return true;
-    }
+    if (isSingleColumnPrimaryKey(table, condition.colName)) return true;
     const auto btreeColumns = engine->getIndexedColumns(ctx.dbname, ctx.tablename);
     if (std::find(btreeColumns.begin(), btreeColumns.end(), condition.colName) != btreeColumns.end())
         return true;
@@ -4152,12 +4171,7 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
             if (c.op == "=") {
                 // Check if column has primary key index
                 TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
-                bool isPK = false;
-                for (size_t i = 0; i < tbl.len; ++i) {
-                    if (tbl.cols[i].dataName == c.colName && tbl.cols[i].isPrimaryKey) {
-                        isPK = true; break;
-                    }
-                }
+                const bool isPK = isSingleColumnPrimaryKey(tbl, c.colName);
                 bool hasSecIdx = false;
                 if (!isPK) {
                     auto indexedCols = engine->getIndexedColumns(ctx.dbname, ctx.tablename);

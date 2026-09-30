@@ -79,8 +79,7 @@ int main() {
     assert(g_engine.alterTableDropColumn(database, "items", "extra") ==
            dbms::DBStatus::OK);
 
-    const std::string primaryKey = table.buildPKValue(
-        std::map<std::string, std::string>{{"id", "1"}, {"value", "7"}});
+    const std::string primaryKey = "1";
     const auto healthy = dbms::QueryPlanner::executePlanChecked(
         std::make_unique<dbms::IndexScanOp>(
             &g_engine, database, "items", "id", primaryKey));

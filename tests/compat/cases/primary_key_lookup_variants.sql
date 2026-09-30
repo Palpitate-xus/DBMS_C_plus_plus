@@ -1,0 +1,17 @@
+CREATE TABLE pk_shape_single (id INT,value INT,PRIMARY KEY(id));
+INSERT INTO pk_shape_single VALUES (1,7),(2,8);
+CREATE INDEX pk_shape_value ON pk_shape_single(value);
+SELECT id,value FROM pk_shape_single WHERE id=1;
+SELECT id,value FROM pk_shape_single WHERE id=1 AND value=7;
+CREATE TABLE pk_shape_empty (id VARCHAR(20) PRIMARY KEY);
+INSERT INTO pk_shape_empty VALUES ('');
+SELECT id FROM pk_shape_empty WHERE id='';
+CREATE TABLE pk_shape_pair (a INT,b INT,PRIMARY KEY(a,b));
+INSERT INTO pk_shape_pair VALUES (1,2),(1,3);
+SELECT a,b FROM pk_shape_pair WHERE a=1 ORDER BY b;
+SELECT a,b FROM pk_shape_pair WHERE a=1 AND b=2;
+CREATE INDEX pk_shape_a ON pk_shape_pair(a);
+SELECT a,b FROM pk_shape_pair WHERE a=1 ORDER BY b;
+DROP TABLE pk_shape_single;
+DROP TABLE pk_shape_empty;
+DROP TABLE pk_shape_pair;
