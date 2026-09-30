@@ -34872,11 +34872,20 @@ std::unordered_set<std::string> arraySeen;
         // jsonAggFirst is not needed; JSON aggregation uses jsonAggVals directly.
 
         if (isDistinctCount) {
+            const auto parsedFilters = parseConditions(filterConds);
             std::set<std::string> distinctVals;
             for (int64_t rid : gids) {
                 std::string row;
                 if (!readRowByRid(pa, rid, row, tbl)) continue;
                 NullRowBinding nbD(this, dbname, tablename, rid, tbl.len);
+                bool passes = true;
+                for (const auto& filter : parsedFilters) {
+                    if (!evalConditionOnRow(filter, row, tbl)) {
+                        passes = false;
+                        break;
+                    }
+                }
+                if (!passes) continue;
                 if (colIdx >= tbl.len) continue;
                 bool valueIsNull = false;
                 std::string val = logicalValue(
@@ -35416,11 +35425,20 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
 std::unordered_set<std::string> arraySeen;
 
         if (isDistinctCount) {
+            const auto parsedFilters = parseConditions(filterConds);
             std::set<std::string> distinctVals;
             for (int64_t rid : gids) {
                 std::string row;
                 if (!readRowByRid(pa, rid, row, tbl)) continue;
                 NullRowBinding nbD(this, dbname, tablename, rid, tbl.len);
+                bool passes = true;
+                for (const auto& filter : parsedFilters) {
+                    if (!evalConditionOnRow(filter, row, tbl)) {
+                        passes = false;
+                        break;
+                    }
+                }
+                if (!passes) continue;
                 if (colIdx >= tbl.len) continue;
                 bool valueIsNull = false;
                 std::string val = logicalValue(
