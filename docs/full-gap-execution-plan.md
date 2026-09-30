@@ -17,6 +17,8 @@
 
 ## 后续优先队列
 
+2026-09-30 第 842 项进展：typed／legacy DML 十三处强制 ANALYZE 旁路已独立修复，8 个 C++、新重链／正式协议、14 组正式相邻协议、完整正式协议与最终正式构建均退出码 0；第 841 项正式原生 ANALYZE 协议亦通过。根冻结第 838 项 HEAD 2c6d4f70 的完整正式脚本 374/374 C++、89/89 E2E 和同一二进制真实 PostgreSQL 18.6 差分 373/373、failed=0，均已确认退出码 0。该轮不含第 839–842 项；原第 831 项脚本退出码 1 记录不抹去。准备主分支快进最新修复再全量验收，继续处理 EXPLAIN／普通 FROM quoted 名称、阈值自动分析事务时机、浮点／NULL 统计、旧索引迁移等。总账仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
+
 2026-09-30 第 841 项进展：原生 ANALYZE 目标列表已独立提交，新协议、10 组相邻协议及专项真实 PostgreSQL 18.6 差分 cases=1 failed=0 均退出码 0；隔离正式构建／完整协议运行中。根第 838 项的 374 个 C++ 已全部通过，89 组 E2E 和 373 组真实差分仍运行，不含隔离第 839–841 项。继续处理写语句内强制 ANALYZE 的错误时机与配置旁路、EXPLAIN／普通 FROM 的 quoted relation 解析、浮点直方图截断，以及旧索引迁移等未完成条目。总账仍 24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
 
 2026-09-30 第 840 项进展：未知与已分析零行基数已独立修复，7 个 C++、新增重链／正式协议、10 组相邻协议、完整协议、隔离正式构建均退出码 0；第 839 项最终完整协议亦已退出码 0。统计／成本现有子集实测后 OPT-04／05 改为 partial，总账 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user。新发现 legacy 写语句内自动 ANALYZE 得零，以及原生 ANALYZE relation 被拒绝，继续独立修复；未据此降低成功期望。根冻结第 838 项正式全脚本和 373 组真实 PostgreSQL 18.6 差分仍运行，后续隔离修复不计该轮；未 push，Actions 禁用。
