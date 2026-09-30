@@ -17,6 +17,8 @@
 
 ## 后续优先队列
 
+2026-09-30 第 852 项进展：COUNT(DISTINCT column) 类型等价已独立提交，最终 7 个 C++、新协议、7 组相邻协议、完整协议及真实 PostgreSQL 18.6 专项差分 cases=1 failed=0 均退出码 0；旧版三类失败保留。本项为新生产对象重链验收，尚非最新主分支正式全量验收。顺便纠正自有账目 ID：第 850 项 numeric 属 TYPE-01，第 851 项 JOIN 属 QRY-03，不将修复映射成 integer/float 或 aggregate 的完成。第 853 项 GROUP BY 类型／NULL／复合键问题已复现，旧真实专项 failed=1，继续修复；其他总清单不变，仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
+
 2026-09-30 第 851 项进展：EXPLAIN 的单 INNER 等值 JOIN 真实计划／执行已独立提交，新增重链／正式协议、原 CLI 加强后的 8/8 断言、6 个 C++、8 组相邻协议、重链／正式完整协议及正式构建均退出码 0；bag、NULL、quoted／schema／alias、self join、空表与绑定错误已覆盖。旧 c1409254 全脚本唯一 JOIN 失败记录保留，真实 374 差分通过不替代整套。第 852 项 COUNT(DISTINCT) 类型等价已定向通过新 C++／协议和真实专项差分，尚待相邻验收记录；第 853 项 GROUP BY 类型／NULL／复合键问题已复现，继续独立修复。总账仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
 
 2026-09-30 第 850 项进展：NUMERIC 索引／约束尺度等价已独立提交，最终 10 个 C++、新重链／正式协议、8 组相邻协议、完整协议、正式构建与专项真实 PostgreSQL 18.6 差分 cases=1 failed=0 均退出码 0；旧差分 failed=1 保留。独立实测 B-tree 超过 20 字节键被截断而误报重复、负零显示尺度差异、SQL COUNT(DISTINCT)／GROUP BY 等价仍未修，旧索引／重复 heap 不擅自迁移或删除。根冻结 c1409254 正式全脚本已结束退出码 1：378/378 C++、95/96 E2E，唯一 EXPLAIN ANALYZE JOIN 报 0A000；继承清理已通过，原失败记录保留。同一二进制真实 PostgreSQL 18.6 全差分 374/374、failed=0、退出码 0，不含隔离第 847–850 项。接着修复真实 JOIN 计划／执行，不削弱原断言；总账仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
