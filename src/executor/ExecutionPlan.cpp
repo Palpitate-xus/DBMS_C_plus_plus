@@ -564,6 +564,26 @@ bool IndexScanOp::next(std::string& outRow) {
         lastRid_ = rid;
         StorageEngine::bindNullRow(
             engine_, dbname_, tablename_, lastRid_, tbl_.len);
+        // Fixed-width B-tree keys can share a truncated prefix. The heap
+        // tuple is only a candidate until the complete SQL value matches.
+        // Keep the recheck inside IndexScan: the planner consumes its indexed
+        // equality condition and does not retain a Filter above this node.
+        size_t columnIndex = tbl_.len;
+        for (size_t i = 0; i < tbl_.len; ++i)
+            if (tbl_.cols[i].dataName == colname_) { columnIndex = i; break; }
+        if (columnIndex == tbl_.len) {
+            setError("indexed column does not exist");
+            return false;
+        }
+        bool valueIsNull = false;
+        const std::string actual = engine_->extractColumnValue(
+            outRow, tbl_, columnIndex, dbname_, true, &valueIsNull);
+        valueIsNull = valueIsNull ||
+            (tbl_.cols[columnIndex].generatedKind != 'v' &&
+             engine_->isColumnNullByRid(dbname_, tablename_, rid, columnIndex));
+        if (StorageEngine::compareValues(tbl_.cols[columnIndex], actual,
+                valueIsNull, value_, false, "=") != StorageEngine::PredicateTruth::True)
+            continue;
         rtInstr_.emitted = true;
         return true;
     }
