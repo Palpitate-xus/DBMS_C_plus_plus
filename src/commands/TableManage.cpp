@@ -28647,6 +28647,11 @@ std::vector<std::string> StorageEngine::getPgStatsRows(
                     if (i > 0) hist << ",";
                     hist << "{" << cv.second.histogram[i].first << "}";
                 }
+                if (!cv.second.histogram.empty()) {
+                    // N bucket intervals have N+1 boundaries. Include the
+                    // final upper bound so the catalog spans the full range.
+                    hist << ",{" << cv.second.histogram.back().second << "}";
+                }
                 const double nullFraction = rowCount > 0
                     ? static_cast<double>(cv.second.nullCount) / static_cast<double>(rowCount)
                     : 0.0;
