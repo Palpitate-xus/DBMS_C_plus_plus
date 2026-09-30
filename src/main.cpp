@@ -3500,9 +3500,41 @@ static bool handleAnalyze(const string& sql, Session& s) {
         }
         return false;
     }
-    if (rest.substr(0, 5) != "table") {
-        cout << "SQL syntax error" << endl;
-        return true;
+    if (rest != "table" && rest.compare(0, 6, "table ") != 0) {
+        // PostgreSQL spells the basic command ANALYZE relation[,relation].
+        // Keep the project TABLE/COLUMNS extension separate from native
+        // relation names (including names starting with 'table').
+        vector<string> relationNames;
+        size_t start = 0;
+        bool quoted = false;
+        for (size_t i = 0; i < rest.size(); ++i) {
+            if (rest[i] == '"') {
+                if (quoted && i + 1 < rest.size() && rest[i + 1] == '"') ++i;
+                else quoted = !quoted;
+            } else if (!quoted && (rest[i] == '(' || rest[i] == ')')) {
+                throw dbms::DbError("0A000", "ANALYZE options and column lists are not supported");
+            } else if (!quoted && rest[i] == ',') {
+                relationNames.push_back(trim(rest.substr(start, i - start)));
+                start = i + 1;
+            }
+        }
+        relationNames.push_back(trim(rest.substr(start)));
+        vector<string> tables;
+        for (const auto& name : relationNames) {
+            dbms::CatalogManager::QualifiedName qualified;
+            if (!dbms::CatalogManager::parseQualifiedName(name, qualified))
+                throw dbms::DbError("42601", "invalid ANALYZE relation name");
+            const string table = resolveTableName(s, name);
+            if (!g_engine.tableExists(s.currentDB, table))
+                throw dbms::DbError("42P01", "relation \"" + name + "\" does not exist");
+            tables.push_back(table);
+        }
+        for (const auto& table : tables) {
+            if (!g_engine.analyzeTable(s.currentDB, table))
+                throw dbms::DbError("XX000", "ANALYZE failed for relation " + table);
+            cout << "Table " << table << " analyzed" << endl;
+        }
+        return false;
     }
     string afterTable = trim(rest.substr(5));
     size_t colsPos = afterTable.find(" columns ");

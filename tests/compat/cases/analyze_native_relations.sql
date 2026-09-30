@@ -1,0 +1,18 @@
+CREATE TABLE analyze_native_rows (id INT);
+INSERT INTO analyze_native_rows VALUES (1),(2),(3);
+ANALYZE analyze_native_rows;
+CREATE TABLE "AnalyzeNative,Rows" (id INT);
+INSERT INTO "AnalyzeNative,Rows" VALUES (4),(5);
+ANALYZE analyze_native_rows,"AnalyzeNative,Rows";
+CREATE SCHEMA analyze_native_stats;
+CREATE TABLE analyze_native_stats.items (id INT);
+INSERT INTO analyze_native_stats.items VALUES (6);
+ANALYZE analyze_native_stats.items;
+SET search_path TO analyze_native_stats,public;
+ANALYZE items;
+SET search_path TO public;
+SELECT id FROM analyze_native_rows ORDER BY id;
+DROP TABLE analyze_native_rows;
+DROP TABLE "AnalyzeNative,Rows";
+DROP TABLE analyze_native_stats.items;
+DROP SCHEMA analyze_native_stats;
