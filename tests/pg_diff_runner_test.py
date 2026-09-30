@@ -161,6 +161,10 @@ class DifferentialErrorsTest(unittest.TestCase):
 
 
 class DifferentialSessionTest(unittest.TestCase):
+    def test_wire_timeout_defaults_without_an_inherited_setting(self):
+        with mock.patch.dict(RUNNER.os.environ, {}, clear=True):
+            self.assertEqual(RUNNER.wire_timeout(), 15.0)
+
     def test_local_socket_honors_protocol_timeout(self):
         client = mock.Mock()
         server = {"sock": mock.Mock(), "port": 54321}
@@ -171,6 +175,7 @@ class DifferentialSessionTest(unittest.TestCase):
             RUNNER.reconnect_ours(server, client)
         connect.assert_called_once_with(("127.0.0.1", 54321), timeout=37.0)
 
+    @mock.patch.dict(RUNNER.os.environ, {"DBMS_PROTOCOL_TEST_TIMEOUT": "15"})
     def test_local_cases_get_fresh_sessions(self):
         first = mock.Mock()
         second = mock.Mock()
@@ -298,6 +303,7 @@ class DifferentialSessionTest(unittest.TestCase):
             [[None, "", "NULLMARK", "a\nb", "a\x1fb"]],
             None, "", ["n", "e", "m", "l", "s"], "SELECT 1"))
 
+    @mock.patch.dict(RUNNER.os.environ, {"DBMS_PROTOCOL_TEST_TIMEOUT": "15"})
     def test_wire_reference_reuses_one_connection(self):
         class FakeClient:
             def __init__(self):
@@ -329,6 +335,22 @@ class DifferentialSessionTest(unittest.TestCase):
                          ["BEGIN", "SELECT 1"])
         self.assertEqual([result[5] for result in results], [[], []])
         verify.assert_called_once_with(client, sock)
+        sock.close.assert_called_once()
+
+    def test_wire_reference_honors_protocol_timeout(self):
+        client = mock.Mock()
+        client.simple_query.return_value = [(b"C", b"SELECT 0\0")]
+        sock = mock.Mock()
+        settings = ("127.0.0.1", 55432, "postgres", "postgres", "secret")
+        with mock.patch.dict(RUNNER.os.environ,
+                             {"DBMS_PROTOCOL_TEST_TIMEOUT": "37"}), \
+             mock.patch.object(RUNNER, "_reference_connection_settings",
+                               return_value=settings), \
+             mock.patch.object(RUNNER.socket, "create_connection",
+                               return_value=sock) as connect, \
+             mock.patch.object(RUNNER, "verify_reference_version"):
+            RUNNER.reference_multi(["SELECT 1 WHERE false"], client)
+        connect.assert_called_once_with(("127.0.0.1", 55432), timeout=37.0)
         sock.close.assert_called_once()
 
     def test_wire_reference_uses_reference_startup_policy(self):
