@@ -8300,6 +8300,29 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
         // single-token name like "1").  Header cells must stay single
         // tokens: the tabular cout format is space-separated.
         if (disp == item) {
+            // Name the SELECT expression's root, not its last ::type or
+            // its first function call. Operator operands do not donate a
+            // column name to the surrounding arithmetic/boolean expression.
+            dbms::SQLParser headerParser;
+            const auto parsedHeader = headerParser.parse("SELECT " + expr);
+            const auto* headerSelect = parsedHeader.success
+                ? dynamic_cast<const dbms::SelectStmt*>(parsedHeader.stmt.get()) : nullptr;
+            if (headerSelect && headerSelect->selectList.size() == 1) {
+                const auto* rootExpression = headerSelect->selectList.front().expr.get();
+                const auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(rootExpression);
+                const auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(rootExpression);
+                const string op = binary ? toLower(binary->op) :
+                    unary ? toLower(unary->op) : string{};
+                const auto* operandFunction = unary
+                    ? dynamic_cast<const dbms::FunctionCallExpr*>(unary->operand.get()) : nullptr;
+                const bool notExists = op == "not" && operandFunction &&
+                    toLower(operandFunction->funcName) == "exists";
+                if ((binary && op != "at time zone" && op != "overlaps") ||
+                    (unary && !notExists)) {
+                    headers.push_back("?column?");
+                    goto headerDone;
+                }
+            }
             // EXISTS / NOT EXISTS subqueries name the column
             // "exists" in PG (figure_colname for SubLink).
             string lowE;
