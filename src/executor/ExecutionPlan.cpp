@@ -3221,7 +3221,10 @@ bool ParallelGroupAggregateOp::open() try {
                 : (argIndex < row.nulls.size() && row.nulls[argIndex]);
             if (func == "count") {
                 if (distinct) {
-                    if (!valueIsNull) distinctValues.insert(value);
+                    if (!valueIsNull)
+                        distinctValues.insert(argIndex < tbl_.len
+                            ? tbl_.columnIndexKey(tbl_.cols[argIndex].dataName, value)
+                            : value);
                 } else if (arg == "*" || !valueIsNull) {
                     ++count;
                 }
@@ -3931,7 +3934,10 @@ bool GroupAggregateOp::open() try {
                 : value.empty();
             if (func == "count") {
                 if (distinct) {
-                    if (!valueIsNull) distinctValues.insert(value);
+                    if (!valueIsNull)
+                        distinctValues.insert(argIndex < tbl_.len
+                            ? tbl_.columnIndexKey(tbl_.cols[argIndex].dataName, value)
+                            : value);
                 } else if (arg == "*") {
                     ++count;
                 } else if (!valueIsNull) {

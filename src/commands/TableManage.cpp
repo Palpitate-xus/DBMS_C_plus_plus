@@ -34255,7 +34255,8 @@ std::unordered_set<std::string> arraySeen;
                 bool valueIsNull = false;
                 std::string val = logicalValue(
                     row, colIdx, &valueIsNull);
-                if (!valueIsNull) distinctVals.insert(val);
+                if (!valueIsNull)
+                    distinctVals.insert(canonicalColumnKeyValue(tbl.cols[colIdx], val));
             }
             count = static_cast<int64_t>(distinctVals.size());
         } else {
@@ -34871,7 +34872,8 @@ std::unordered_set<std::string> arraySeen;
                 bool valueIsNull = false;
                 std::string val = logicalValue(
                     row, colIdx, &valueIsNull);
-                if (!valueIsNull) distinctVals.insert(val);
+                if (!valueIsNull)
+                    distinctVals.insert(canonicalColumnKeyValue(tbl.cols[colIdx], val));
             }
             count = static_cast<int64_t>(distinctVals.size());
         } else {
@@ -35411,7 +35413,8 @@ std::unordered_set<std::string> arraySeen;
                 bool valueIsNull = false;
                 std::string val = logicalValue(
                     row, colIdx, &valueIsNull);
-                if (!valueIsNull) distinctVals.insert(val);
+                if (!valueIsNull)
+                    distinctVals.insert(canonicalColumnKeyValue(tbl.cols[colIdx], val));
             }
             count = static_cast<int64_t>(distinctVals.size());
         } else {
