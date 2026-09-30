@@ -5858,8 +5858,15 @@ uint32_t StorageEngine::tableNumPages(const std::string& dbname,
 
 size_t StorageEngine::getTableRowCount(const std::string& dbname,
                                         const std::string& tablename) const {
+    size_t rows = 0;
+    return tryGetTableRowCount(dbname, tablename, rows) ? rows : 0;
+}
+
+bool StorageEngine::tryGetTableRowCount(const std::string& dbname,
+                                        const std::string& tablename,
+                                        size_t& rows) const {
     auto spath = statsPath(dbname);
-    if (!std::filesystem::exists(spath)) return 0;
+    if (!std::filesystem::exists(spath)) return false;
     std::ifstream ifs(spath);
     std::string line;
     while (std::getline(ifs, line)) {
@@ -5870,10 +5877,10 @@ size_t StorageEngine::getTableRowCount(const std::string& dbname,
         if (tname == tablename && cname == "__rows__") {
             std::string rest;
             std::getline(ss, rest);
-            try { return std::stoull(rest); } catch (...) { return 0; }
+            try { rows = std::stoull(rest); return true; } catch (...) { return false; }
         }
     }
-    return 0;
+    return false;
 }
 
 StorageEngine::ColumnStats StorageEngine::getColumnStats(

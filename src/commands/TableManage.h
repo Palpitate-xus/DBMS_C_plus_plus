@@ -491,6 +491,9 @@ public:
         const std::string& dbname, const std::string& tablename,
         const std::vector<std::string>& colnames, size_t topN) const;
     size_t getTableRowCount(const std::string& dbname, const std::string& tablename) const;
+    // Distinguish missing ANALYZE evidence from a stored count of zero.
+    bool tryGetTableRowCount(const std::string& dbname, const std::string& tablename,
+                             size_t& rows) const;
     ColumnStats getColumnStats(const std::string& dbname, const std::string& tablename,
                                 const std::string& colname) const;
     ColumnStats getMultiColumnStats(const std::string& dbname, const std::string& tablename,

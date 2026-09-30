@@ -4655,8 +4655,9 @@ double QueryPlanner::costScan(const std::string& strategy,
 
 // Runtime statistics are useful only after an exact complete scan (and are
 // invalidated when a relation is recreated/truncated).  Keep the durable
-// storage count as the authoritative fallback so a partial/index scan can
-// never make the planner choose a path from a lower-bound estimate.
+// ANALYZE count as the fallback so a partial/index scan cannot supply a
+// lower-bound estimate. No evidence is distinct from an analyzed empty
+// relation: use a nonzero project heuristic rather than assert zero rows.
 static size_t plannerRowEstimate(StorageEngine* engine,
                                  const std::string& dbname,
                                  const std::string& tablename) {
@@ -4664,7 +4665,9 @@ static size_t plannerRowEstimate(StorageEngine* engine,
     if (getRuntimeLiveRowEstimate(dbname, tablename, rows)) {
         return static_cast<size_t>(rows);
     }
-    return engine->getTableRowCount(dbname, tablename);
+    size_t analyzedRows = 0;
+    if (engine->tryGetTableRowCount(dbname, tablename, analyzedRows)) return analyzedRows;
+    return 1000;
 }
 
 OpPtr QueryPlanner::buildJoinPlan(StorageEngine* engine, const std::string& dbname,
@@ -5137,7 +5140,7 @@ static CostEstimate explainOp(Operator* op, int indent,
         // The sidecar overlap returns candidates, not final rows; the
         // table row count is the safest upper bound without bucket stats.
         double rows = static_cast<double>(
-            engine->getTableRowCount(dbname, gist->tableName()));
+            plannerRowEstimate(engine, dbname, gist->tableName()));
         if (rows < 1.0) rows = 1.0;
         est.rows = rows;
         est.cost = rows * 3.0;   // random-ish heap fetches, heavier than seq
