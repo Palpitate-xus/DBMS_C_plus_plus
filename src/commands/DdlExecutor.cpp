@@ -3598,6 +3598,45 @@ bool DdlExecutor::executeTruncate(const TruncateStmt* stmt, Session& s) {
         }
     }
 
+    std::vector<std::pair<std::string, int64_t>> ownedSequencesToRestart;
+    if (stmt->restartIdentity) {
+        try {
+            CatalogManager& catalog = g_engine.catalogService().get(s.currentDB);
+            std::set<std::string> plannedSequences;
+            for (const auto& name : targets) {
+                const auto tableName = CatalogService::logicalName(name);
+                const std::string schema = tableName.schema.empty() ? "public" : tableName.schema;
+                const auto* ns = catalog.findNamespaceByName(schema);
+                const auto* table = ns ? catalog.findClassByName(tableName.name, ns->oid) : nullptr;
+                if (!table) continue; // Legacy anonymous identities remain below.
+                for (const auto& dependency : catalog.findRefs(PgClassOid_Class, table->oid, -1)) {
+                    if (dependency.classid != PgClassOid_Class || dependency.objsubid != 0 ||
+                        dependency.refobjsubid <= 0 ||
+                        (dependency.deptype != 'a' && dependency.deptype != 'i')) continue;
+                    const auto* sequence = catalog.findClass(dependency.objid);
+                    if (!sequence || sequence->relkind != 'S') continue;
+                    const auto* sequenceNamespace = catalog.findNamespace(sequence->relnamespace);
+                    if (!sequenceNamespace) {
+                        std::cout << "ERROR: owned sequence namespace is missing (SQLSTATE XX001)" << std::endl;
+                        return true;
+                    }
+                    const std::string storageName = sequenceStorageName(sequenceNamespace->nspname, sequence->relname);
+                    if (!plannedSequences.insert(storageName).second) continue;
+                    SequenceInfo info;
+                    if (g_engine.getSequenceInfo(s.currentDB, storageName, info) != DBStatus::OK) {
+                        std::cout << "ERROR: cannot read owned sequence (SQLSTATE XX001)" << std::endl;
+                        return true;
+                    }
+                    ownedSequencesToRestart.emplace_back(storageName, info.start);
+                }
+            }
+        } catch (const std::exception& error) {
+            std::cout << "ERROR: cannot plan owned sequence restart: " << error.what()
+                      << " (SQLSTATE XX001)" << std::endl;
+            return true;
+        }
+    }
+
     DdlTransaction txn(s);
     txn.enableSnapshotRollback();
     if (!txn.begin()) {
@@ -3624,6 +3663,14 @@ bool DdlExecutor::executeTruncate(const TruncateStmt* stmt, Session& s) {
             }
         }
         g_engine.bufferLogicalTruncate(s.currentDB, name);
+    }
+    for (const auto& [sequenceName, start] : ownedSequencesToRestart) {
+        const DBStatus status = g_engine.alterSequence(s.currentDB, sequenceName, true, start, false, 0);
+        if (status != DBStatus::OK) {
+            std::cout << "ERROR: cannot restart owned sequence (SQLSTATE "
+                      << sqlstateForDBStatus(status) << ")" << std::endl;
+            return true;
+        }
     }
     if (!txn.commit()) {
         std::cout << "TRUNCATE commit failed" << std::endl;
