@@ -539,7 +539,7 @@ static void test_multi_schema_drop_fails_before_mutation() {
               << std::endl;
 }
 
-static void test_multi_table_drop_fails_before_mutation() {
+static void test_multi_table_drop_is_atomic() {
     const std::string db = testDbPath("drop_multiple_preflight");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
@@ -549,14 +549,20 @@ static void test_multi_table_drop_fails_before_mutation() {
     dbms::DdlExecutor ddl;
     assert(!ddl.executeSql("CREATE TABLE first_table (id INT)", s));
     assert(!ddl.executeSql("CREATE TABLE second_table (id INT)", s));
-    assert(ddl.executeSql(
-        "DROP TABLE first_table, second_table", s));
+    assert(g_engine.insert(db, "first_table", {{"id", "1"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "second_table", {{"id", "2"}}) == dbms::DBStatus::OK);
+    assert(ddl.executeSql("DROP TABLE first_table, missing_table", s));
     assert(g_engine.tableExists(db, "first_table"));
     assert(g_engine.tableExists(db, "second_table"));
+    assert(g_engine.query(db, "first_table", {}, {"id"}) == std::vector<std::string>{"1 "});
+    assert(g_engine.query(db, "second_table", {}, {"id"}) == std::vector<std::string>{"2 "});
+    assert(!ddl.executeSql("DROP TABLE first_table, second_table", s));
+    assert(!g_engine.tableExists(db, "first_table"));
+    assert(!g_engine.tableExists(db, "second_table"));
 
     g_engine.catalogService().evict(db);
     cleanup(db);
-    std::cout << "[DROP-CASCADE] multi-target DROP fails before mutation OK"
+    std::cout << "[DROP-CASCADE] multi-target DROP is atomic OK"
               << std::endl;
 }
 
@@ -688,7 +694,7 @@ int main() {
     test_drop_schema_handles_auxiliary_objects();
     test_drop_schema_validates_both_catalogs();
     test_multi_schema_drop_fails_before_mutation();
-    test_multi_table_drop_fails_before_mutation();
+    test_multi_table_drop_is_atomic();
     test_drop_removes_named_table_sidecars();
     test_drop_purges_authorization_state();
     std::cout << "[DROP-CASCADE] all passed" << std::endl;

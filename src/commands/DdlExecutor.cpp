@@ -25,6 +25,7 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <memory>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -6393,7 +6394,7 @@ static bool dropOwnedSequencesForColumn(
     return true;
 }
 
-bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
+static bool executeDropTableSingle(const DropStmt* stmt, Session& s) {
     if (!stmt) return rejectMalformedDdlAst();
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
@@ -6804,6 +6805,64 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
         s.tempTablesCreatedInTransaction.erase(tempLogicalName);
     }
     std::cout << "DROP TABLE succeeded" << std::endl;
+    return false;
+}
+
+bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
+    if (!stmt || stmt->objectNames.size() <= 1)
+        return executeDropTableSingle(stmt, s);
+    if (!checkAdmin(s) || !checkDB(s)) return true;
+
+    DdlTransaction txn(s);
+    txn.enableSnapshotRollback();
+    if (!txn.begin()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
+    auto tempTables = s.tempTables;
+    auto tempTableOnCommit = s.tempTableOnCommit;
+    auto createdTempTables = s.tempTablesCreatedInTransaction;
+    auto sequenceValues = s.sequenceLastValues;
+    bool keepSessionChanges = false;
+    const auto restoreSession = [&](Session*) {
+        if (!keepSessionChanges) {
+            s.tempTables = std::move(tempTables);
+            s.tempTableOnCommit = std::move(tempTableOnCommit);
+            s.tempTablesCreatedInTransaction = std::move(createdTempTables);
+            s.sequenceLastValues = std::move(sequenceValues);
+        }
+    };
+    std::unique_ptr<Session, decltype(restoreSession)> sessionGuard(&s, restoreSession);
+
+    struct Target {
+        std::string logical;
+        std::string physical;
+        bool initiallyPresent;
+    };
+    std::vector<Target> targets;
+    std::set<std::string> seen;
+    for (const auto& logical : stmt->objectNames) {
+        const std::string physical = resolveTableName(s, logical);
+        if (seen.insert(physical).second)
+            targets.push_back({logical, physical,
+                g_engine.tableExists(s.currentDB, physical)});
+    }
+    // A later target failure must restore the whole list, including session
+    // temporary-name and sequence state changed by an earlier successful drop.
+    txn.markSnapshotDirty();
+    for (const auto& target : targets) {
+        // CASCADE can already have removed another explicitly listed table.
+        if (target.initiallyPresent &&
+            !g_engine.tableExists(s.currentDB, target.physical)) continue;
+        DropStmt single(SqlCommand::DropTable);
+        single.objectType = "TABLE";
+        single.objectNames = {target.logical};
+        single.ifExists = stmt->ifExists;
+        single.cascade = stmt->cascade;
+        if (executeDropTableSingle(&single, s)) return true;
+    }
+    if (!txn.commit()) return true;
+    keepSessionChanges = true;
     return false;
 }
 
