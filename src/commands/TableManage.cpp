@@ -29546,29 +29546,9 @@ std::vector<std::string> StorageEngine::query(
             lockedRows.push_back(std::move(mr));
         }
         matchRows = std::move(lockedRows);
-        // Gap locking for FOR UPDATE (simplified: lock gaps between matching rows)
-        if (forUpdate && !matchRows.empty()) {
-            std::vector<std::string> pkVals;
-            for (auto& mr : matchRows) {
-                std::string pk = extractPKValue(mr.second, tbl);
-                if (!pk.empty()) pkVals.push_back(pk);
-            }
-            std::sort(pkVals.begin(), pkVals.end());
-            for (size_t i = 1; i < pkVals.size(); ++i) {
-                if (!lockManager_.lockGap(tablename, pkVals[i-1], pkVals[i])) {
-                    rollbackTransaction();
-                    return result;
-                }
-            }
-            if (!pkVals.empty()) {
-                // Lock gap before first and after last
-                if (!lockManager_.lockGap(tablename, "", pkVals.front()) ||
-                    !lockManager_.lockGap(tablename, pkVals.back(), "~")) {
-                    rollbackTransaction();
-                    return result;
-                }
-            }
-        }
+        // PostgreSQL FOR UPDATE locks the selected tuples, not next-key
+        // gaps. SSI read dependencies are tracked separately and must not
+        // become blocking gap locks, even at SERIALIZABLE isolation.
     }
 
     // ORDER BY (multi-column)
