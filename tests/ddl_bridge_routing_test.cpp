@@ -166,14 +166,23 @@ static void test_supported_serial_type_mapping() {
 
     const auto schema = g_engine.getTableSchema(db, "serial_t");
     assert(schema.len == 3);
-    assert(schema.cols[0].isAutoIncrement);
+    // SERIAL is now an owned named sequence and a nextval DEFAULT, not the
+    // legacy anonymous auto-increment counter (nor an IDENTITY column).
+    assert(!schema.cols[0].isAutoIncrement);
+    assert(!schema.cols[0].isNull && schema.cols[0].identityKind == 0);
+    assert(!schema.cols[0].defaultValue.empty());
+    dbms::SequenceInfo sequence;
+    assert(g_engine.getSequenceInfo(db, "serial_t_id_seq", sequence) == dbms::DBStatus::OK);
+    assert(sequence.ownedByTable == "serial_t" && sequence.ownedByColumn == "id");
     assert(schema.cols[1].dataType == "char");
     assert(schema.cols[2].dataType == "binary");
     assert(g_engine.insert(db, "serial_t", {{"label", "a"}, {"raw", "0102"}}) ==
            dbms::DBStatus::OK);
     assert(g_engine.insert(db, "serial_t", {{"label", "b"}, {"raw", "0304"}}) ==
            dbms::DBStatus::OK);
-    assert(g_engine.query(db, "serial_t", {}, {"id"}).size() == 2);
+    assert(g_engine.query(db, "serial_t", {}, {"id"}) ==
+           (std::vector<std::string>{"1 ", "2 "}));
+    assert(g_engine.currval(db, "serial_t_id_seq") == 2);
 
     cleanup(db);
     std::cout << "[DDL-ROUTE] supported SERIAL/type mappings OK" << std::endl;
