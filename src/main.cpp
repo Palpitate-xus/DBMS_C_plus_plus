@@ -2643,6 +2643,7 @@ static bool handleCloseCursor(const string& sql, Session& s) {
 // ========================================================================
 static bool handleBeginTransaction(const string& sql, Session& s) {
     if (!checkDB(s)) return true;
+    const bool hadTransaction = g_engine.inTransaction();
     dbms::SQLParser parser;
     auto parsed = parser.parse(sql);
     auto* txn = dynamic_cast<dbms::TransactionStmt*>(parsed.stmt.get());
@@ -2663,6 +2664,10 @@ static bool handleBeginTransaction(const string& sql, Session& s) {
     if (res != DBStatus::OK) {
         cout << "Begin transaction failed" << endl;
         return true;
+    }
+    if (!hadTransaction) {
+        s.transactionChainOrigin = false;
+        s.transactionChainReadOnly = false;
     }
     dbms::advisoryLockManager().beginTransaction(advisoryOwner(s));
     beginNotificationTransaction(s);
@@ -2720,7 +2725,8 @@ static std::optional<bool> transactionChainOption(const string& sql) {
 
 static bool handleCommitTransaction(const string& sql, Session& s) {
     const bool hadTransaction = g_engine.inTransaction();
-    const bool wasReadOnly = g_engine.isReadOnly();
+    const bool wasReadOnly = !hadTransaction && s.failedTransactionBlock &&
+        s.transactionChainOrigin ? s.transactionChainReadOnly : g_engine.isReadOnly();
     const auto chain = transactionChainOption(sql);
     if (chain.value_or(false) && !hadTransaction && !s.failedTransactionBlock) {
         throw dbms::DbError("25P01", "COMMIT AND CHAIN can only be used in transaction blocks");
@@ -2744,6 +2750,8 @@ static bool handleCommitTransaction(const string& sql, Session& s) {
     if (hadTransaction)
         dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
     if (hadTransaction && !commitNotificationTransaction(s)) return true;
+    s.transactionChainOrigin = false;
+    s.transactionChainReadOnly = false;
     // COMMIT AND [NO] CHAIN: if AND CHAIN, immediately start a new transaction.
     if (chain.value_or(false)) {
         if (g_engine.beginTransaction(s.currentDB) != DBStatus::OK) {
@@ -2756,6 +2764,8 @@ static bool handleCommitTransaction(const string& sql, Session& s) {
         // inherits the ending transaction's mode rather than that cleared
         // default, including a mode established with SET TRANSACTION.
         g_engine.setReadOnly(wasReadOnly);
+        s.transactionChainOrigin = true;
+        s.transactionChainReadOnly = wasReadOnly;
         cout << "Transaction committed (and chain)" << endl;
         log(s.username, "commit and chain", getTime());
     } else if (chain.has_value()) {
@@ -2791,7 +2801,8 @@ static bool handleCommitPrepared(const string& sql, Session& s) {
 
 static bool handleRollbackTransaction(const string& sql, Session& s) {
     const bool hadTransaction = g_engine.inTransaction();
-    const bool wasReadOnly = g_engine.isReadOnly();
+    const bool wasReadOnly = !hadTransaction && s.failedTransactionBlock &&
+        s.transactionChainOrigin ? s.transactionChainReadOnly : g_engine.isReadOnly();
     const auto chain = transactionChainOption(sql);
     if (chain.value_or(false) && !hadTransaction && !s.failedTransactionBlock) {
         throw dbms::DbError("25P01", "ROLLBACK AND CHAIN can only be used in transaction blocks");
@@ -2805,6 +2816,8 @@ static bool handleRollbackTransaction(const string& sql, Session& s) {
         rollbackNotificationTransaction(s);
         dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
     }
+    s.transactionChainOrigin = false;
+    s.transactionChainReadOnly = false;
     // ROLLBACK AND [NO] CHAIN
     if (chain.has_value() && !*chain) {
         cout << "Transaction rolled back (and no chain)" << endl;
@@ -2816,10 +2829,12 @@ static bool handleRollbackTransaction(const string& sql, Session& s) {
         }
         dbms::advisoryLockManager().beginTransaction(advisoryOwner(s));
         beginNotificationTransaction(s);
-        // Capture before rollback clears the old transaction's mode. A
-        // previously aborted top-level transaction has already reset it;
-        // a failed user subtransaction still retains its parent's mode.
+        // A live parent supplies its current mode. After top-level abort,
+        // only CHAIN-origin blocks restore an inherited baseline; ordinary
+        // BEGIN blocks still use the engine's reset session default.
         g_engine.setReadOnly(wasReadOnly);
+        s.transactionChainOrigin = true;
+        s.transactionChainReadOnly = wasReadOnly;
         cout << "Transaction rolled back (and chain)" << endl;
         log(s.username, "rollback and chain", getTime());
     } else {
