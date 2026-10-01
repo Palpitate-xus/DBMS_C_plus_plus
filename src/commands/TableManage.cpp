@@ -24148,7 +24148,7 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
         c.colName = s.substr(opEnd, sp - opEnd);
         // Computed operands are not physical column names. Preserve the
         // original RHS before literal decoding for typed comparison/coercion.
-        const auto computedOperand = [](const std::string& operand) {
+        const auto computedOperand = [](const std::string& operand, bool constantOnly) {
             SQLParser parser;
             const auto parsed = parser.parse("SELECT " + operand);
             const auto* select = parsed.success
@@ -24159,12 +24159,43 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
                 if ((unary->op == "+" || unary->op == "-") &&
                     dynamic_cast<const LiteralExpr*>(unary->operand.get())) return false;
             }
+            if (constantOnly) {
+                // Compact API RHS tokens also carry decoded text values.
+                // A hyphenated value is not a row-dependent subtraction.
+                std::function<bool(const Expr*)> hasRowReference =
+                    [&](const Expr* node) -> bool {
+                    if (!node) return false;
+                    if (node->type == ExprType::ColumnRef ||
+                        node->type == ExprType::Subquery ||
+                        node->type == ExprType::Parameter ||
+                        node->type == ExprType::A_Star) return true;
+                    if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(node))
+                        return hasRowReference(binary->left.get()) ||
+                            (binary->op != "::" && hasRowReference(binary->right.get()));
+                    if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(node))
+                        return hasRowReference(unary->operand.get());
+                    if (const auto* cast = dynamic_cast<const CastExpr*>(node))
+                        return hasRowReference(cast->operand.get());
+                    if (const auto* function = dynamic_cast<const FunctionCallExpr*>(node)) {
+                        for (const auto& arg : function->args)
+                            if (hasRowReference(arg.get())) return true;
+                    } else if (const auto* conditional = dynamic_cast<const CaseExpr*>(node)) {
+                        if (hasRowReference(conditional->switchExpr.get()) ||
+                            hasRowReference(conditional->elseExpr.get())) return true;
+                        for (const auto& clause : conditional->whenClauses)
+                            if (hasRowReference(clause.first.get()) ||
+                                hasRowReference(clause.second.get())) return true;
+                    }
+                    return false;
+                };
+                if (hasRowReference(expression)) return false;
+            }
             return dynamic_cast<const BinaryOpExpr*>(expression) ||
                    dynamic_cast<const UnaryOpExpr*>(expression) ||
                    dynamic_cast<const CastExpr*>(expression);
         };
         const std::string rawRight = s.substr(sp + 1);
-        if (computedOperand(c.colName) || computedOperand(rawRight)) {
+        if (computedOperand(c.colName, false) || computedOperand(rawRight, true)) {
             c.value = c.colName + " " + c.op + " " + rawRight;
             c.colName.clear();
             c.op = "typedexpr";
