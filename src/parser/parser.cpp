@@ -1081,9 +1081,15 @@ SqlCommand SQLParser::classify(const std::string& sql) {
     // Otherwise ROLLBACK TO/PREPARED and COMMIT PREPARED are unreachable.
     if (lsql.substr(0, 15) == "commit prepared") return SqlCommand::CommitPrepared;
     if (lsql.substr(0, 17) == "rollback prepared") return SqlCommand::RollbackPrepared;
-    if (lsql.substr(0, 11) == "rollback to" &&
-        (lsql.size() == 11 || std::isspace(static_cast<unsigned char>(lsql[11]))))
-        return SqlCommand::RollbackToSavepoint;
+    if (lsql.substr(0, 8) == "rollback") {
+        const auto tokens = tokenize(sql);
+        size_t pos = 1;
+        if (pos < tokens.size() &&
+            (toLower(tokens[pos]) == "work" || toLower(tokens[pos]) == "transaction"))
+            ++pos;
+        if (pos < tokens.size() && toLower(tokens[pos]) == "to")
+            return SqlCommand::RollbackToSavepoint;
+    }
     if (lsql.substr(0, 6) == "commit") return SqlCommand::Commit;
     if (lsql.substr(0, 8) == "rollback") return SqlCommand::Rollback;
     if (lsql.substr(0, 5) == "abort") return SqlCommand::Abort;
@@ -4550,11 +4556,18 @@ ParseResult SQLParser::parseCommit(const std::string& sql) {
         stmt->gid = tokens[pos++];
     }
     if (stmt->kind == TransactionStmt::Kind::Commit && pos < tokens.size() &&
+        (toLower(tokens[pos]) == "work" || toLower(tokens[pos]) == "transaction")) {
+        ++pos;
+    }
+    if (stmt->kind == TransactionStmt::Kind::Commit && pos < tokens.size() &&
         toLower(tokens[pos]) == "and") {
         if (pos + 1 < tokens.size() && toLower(tokens[pos + 1]) == "chain") {
+            stmt->chainSpecified = true;
+            stmt->chain = true;
             pos += 2;
         } else if (pos + 2 < tokens.size() && toLower(tokens[pos + 1]) == "no" &&
                    toLower(tokens[pos + 2]) == "chain") {
+            stmt->chainSpecified = true;
             pos += 3;
         } else {
             r.error = "invalid COMMIT chain option";
@@ -4599,6 +4612,12 @@ ParseResult SQLParser::parseRollback(const std::string& sql) {
         stmt = std::make_unique<TransactionStmt>(TransactionStmt::Kind::RollbackPrepared);
         stmt->gid = tokens[pos++];
     }
+    if ((kind == TransactionStmt::Kind::Rollback ||
+         kind == TransactionStmt::Kind::Abort || kind == TransactionStmt::Kind::End) &&
+        stmt->kind != TransactionStmt::Kind::RollbackPrepared && pos < tokens.size() &&
+        (toLower(tokens[pos]) == "work" || toLower(tokens[pos]) == "transaction")) {
+        ++pos;
+    }
     if (first == "rollback" && pos < tokens.size() && toLower(tokens[pos]) == "to") {
         ++pos;
         if (pos < tokens.size() && toLower(tokens[pos]) == "savepoint") ++pos;
@@ -4611,14 +4630,19 @@ ParseResult SQLParser::parseRollback(const std::string& sql) {
         stmt->savepointName = tokens[pos++];
     }
     if (pos < tokens.size() && toLower(tokens[pos]) == "and") {
-        if (stmt->kind != TransactionStmt::Kind::Rollback) {
+        if (stmt->kind != TransactionStmt::Kind::Rollback &&
+            stmt->kind != TransactionStmt::Kind::Abort &&
+            stmt->kind != TransactionStmt::Kind::End) {
             r.error = "ROLLBACK TO cannot use AND CHAIN";
             return r;
         }
         if (pos + 1 < tokens.size() && toLower(tokens[pos + 1]) == "chain") {
+            stmt->chainSpecified = true;
+            stmt->chain = true;
             pos += 2;
         } else if (pos + 2 < tokens.size() && toLower(tokens[pos + 1]) == "no" &&
                    toLower(tokens[pos + 2]) == "chain") {
+            stmt->chainSpecified = true;
             pos += 3;
         } else {
             r.error = "invalid ROLLBACK chain option";
@@ -10569,13 +10593,17 @@ StmtPtr SQLParser::parseAlterLargeObject(const std::vector<std::string>& tokens,
 // ============================================================================
 
 std::string TransactionStmt::toString() const {
+    const auto ending = [&](const std::string& command) {
+        return command + (chainSpecified
+            ? (chain ? " AND CHAIN" : " AND NO CHAIN") : "");
+    };
     switch (kind) {
         case Kind::Begin: return "BEGIN";
         case Kind::Start: return "START TRANSACTION";
-        case Kind::Commit: return "COMMIT";
-        case Kind::Rollback: return "ROLLBACK";
-        case Kind::Abort: return "ABORT";
-        case Kind::End: return "END";
+        case Kind::Commit: return ending("COMMIT");
+        case Kind::Rollback: return ending("ROLLBACK");
+        case Kind::Abort: return ending("ABORT");
+        case Kind::End: return ending("END");
         case Kind::Savepoint: return "SAVEPOINT";
         case Kind::Release: return "RELEASE SAVEPOINT";
         case Kind::RollbackTo: return "ROLLBACK TO SAVEPOINT";

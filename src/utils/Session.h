@@ -179,6 +179,10 @@ struct Session {
     // their count here while executing a statement so project commands that
     // replace the database session context can fail closed.
     uint64_t openProtocolPortals = 0;
+    // Physical top-level abort can release the engine transaction before the
+    // client ends its SQL block. NetworkServer mirrors that failed block here
+    // while executing recovery commands such as ROLLBACK AND CHAIN.
+    bool failedTransactionBlock = false;
     uint64_t pid = 0; // process id for pg_cancel_backend / pg_terminate_backend
     uint64_t advisoryOwnerId = 0; // stable owner for session/xact advisory locks
 

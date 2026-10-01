@@ -1245,18 +1245,6 @@ bool startsWithSqlPhrase(const std::string& sql, const std::string& phrase) {
              (sql[position] == '/' && sql[position + 1] == '*')));
 }
 
-std::vector<std::string> leadingSqlKeywords(const std::string& sql,
-                                            size_t maximum) {
-    std::vector<std::string> keywords;
-    size_t position = 0;
-    while (keywords.size() < maximum) {
-        std::string keyword;
-        if (!readSqlKeyword(sql, position, keyword)) break;
-        keywords.push_back(std::move(keyword));
-    }
-    return keywords;
-}
-
 std::string protocolRelationFromQuery(const std::string& sql) {
     const std::string lower = lowerProtocolText(sql);
     size_t from = lower.find(" from ");
@@ -1823,7 +1811,7 @@ std::string commandTagFor(const std::string& sql, const std::vector<std::string>
     }
     if (keyword == "begin" || keyword == "start") return "BEGIN";
     if (keyword == "commit" || keyword == "end") return "COMMIT";
-    if (keyword == "rollback") return "ROLLBACK";
+    if (keyword == "rollback" || keyword == "abort") return "ROLLBACK";
     if (keyword == "set") return "SET";
     if (keyword == "truncate") return "TRUNCATE TABLE";
     if (keyword == "create" || keyword == "alter" || keyword == "drop" ||
@@ -3357,29 +3345,21 @@ bool isTransactionRecoveryCommand(const std::string& sql) {
 // session-local objects, undo records, WAL and locks are all cleaned up by one
 // transaction boundary.
 std::string rollbackCommandForAbortedTransaction(const std::string& sql) {
-    const std::vector<std::string> keywords = leadingSqlKeywords(sql, 5);
-    if (keywords.empty() ||
-        (keywords.front() != "commit" && keywords.front() != "end")) {
-        const size_t start = sqlCommandOffset(sql);
-        return start == std::string::npos ? sql : sql.substr(start);
+    const size_t start = sqlCommandOffset(sql);
+    const std::string statementSql = start == std::string::npos ? sql : sql.substr(start);
+    SQLParser parser;
+    auto parsed = parser.parse(statementSql);
+    const auto* transaction = parsed.success
+        ? dynamic_cast<const TransactionStmt*>(parsed.stmt.get()) : nullptr;
+    // Parse the complete command before rewriting it. Keyword-prefix
+    // matching must not erase an invalid suffix or accept COMMIT PREPARED
+    // as an ordinary ending while the connection is failed.
+    if (!transaction || (transaction->kind != TransactionStmt::Kind::Commit &&
+                         transaction->kind != TransactionStmt::Kind::End)) {
+        return statementSql;
     }
-    size_t option = 1;
-    if (option < keywords.size() &&
-        (keywords[option] == "work" || keywords[option] == "transaction")) {
-        ++option;
-    }
-    if (option < keywords.size() && keywords[option] == "and") {
-        ++option;
-        bool noChain = false;
-        if (option < keywords.size() && keywords[option] == "no") {
-            noChain = true;
-            ++option;
-        }
-        if (option < keywords.size() && keywords[option] == "chain") {
-            return noChain ? "ROLLBACK AND NO CHAIN" : "ROLLBACK AND CHAIN";
-        }
-    }
-    return "ROLLBACK";
+    if (!transaction->chainSpecified) return "ROLLBACK";
+    return transaction->chain ? "ROLLBACK AND CHAIN" : "ROLLBACK AND NO CHAIN";
 }
 
 QueryResult transactionAbortedResult() {
@@ -3953,10 +3933,26 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         // Mirror their count while a command executes so a database-context
         // replacement cannot leave a portal bound to the previous database.
         session.openProtocolPortals = portals.size();
+        session.failedTransactionBlock = transactionFailed;
         if (transactionFailed && !isTransactionRecoveryCommand(sql)) {
             return transactionAbortedResult();
         }
         const bool wasInTransaction = g_engine.inTransaction();
+        if (isTransactionRecoveryCommand(sql)) {
+            SQLParser parser;
+            auto parsed = parser.parse(sql);
+            const auto* transaction = parsed.success
+                ? dynamic_cast<const TransactionStmt*>(parsed.stmt.get()) : nullptr;
+            if (transaction && transaction->chain &&
+                !transactionFailed && (!wasInTransaction || extendedImplicitTransaction)) {
+                if (wasInTransaction) (void)abortActiveTransaction();
+                QueryResult error;
+                error.error = true;
+                error.sqlState = "25P01";
+                error.errorMessage = "AND CHAIN can only be used in transaction blocks";
+                return error;
+            }
+        }
         const std::string effectiveSql = transactionFailed
                                              ? rollbackCommandForAbortedTransaction(sql)
                                              : sql;
@@ -4000,6 +3996,13 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             transactionFailed = !transactionEnding || g_engine.inTransaction();
         } else if (!result.error && isTransactionRecoveryCommand(sql)) {
             transactionFailed = false;
+        }
+        session.failedTransactionBlock = transactionFailed;
+        if (!result.error && (firstSqlKeyword(sql) == "begin" ||
+                              startsWithSqlPhrase(sql, "start transaction"))) {
+            // A user BEGIN inside an extended-query implicit transaction
+            // promotes the block; Sync must no longer end it automatically.
+            extendedImplicitTransaction = false;
         }
         return result;
     };
