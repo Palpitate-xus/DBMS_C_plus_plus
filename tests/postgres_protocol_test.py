@@ -1255,10 +1255,11 @@ def prepared_transaction_error_boundaries(sock):
     check_commit = simple_query(sock, "COMMIT")
     check_error = next(body for kind, body in check_commit if kind == b"E")
     assert b"C23514\0" in check_error, check_commit
-    assert check_commit[-1] == (b"Z", b"E"), check_commit
-    assert simple_query(sock, "ROLLBACK")[-1] == (b"Z", b"I")
-    assert data_row_values(simple_query(
-        sock, "SELECT id FROM deferred_check")) == []
+    assert check_commit[-1] == (b"Z", b"I"), check_commit
+    after_failed_commit = simple_query(sock, "SELECT id FROM deferred_check")
+    assert not any(kind == b"E" for kind, _ in after_failed_commit), after_failed_commit
+    assert after_failed_commit[-1] == (b"Z", b"I"), after_failed_commit
+    assert data_row_values(after_failed_commit) == []
 
     assert simple_query(sock, "BEGIN")[-1] == (b"Z", b"T")
     assert any(kind == b"C" for kind, _ in simple_query(
