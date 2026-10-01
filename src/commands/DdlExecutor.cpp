@@ -4062,9 +4062,13 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
                 "(SQLSTATE 42601)";
         return false;
     }
-    if (serialType && std::find(cd.constraints.begin(), cd.constraints.end(),
-                                "NULL") != cd.constraints.end()) {
-        error = "conflicting NULL/NOT NULL declarations for serial column "
+    const bool explicitNull = std::find(
+        cd.constraints.begin(), cd.constraints.end(), "NULL") != cd.constraints.end();
+    const bool explicitNotNull = std::find(
+        cd.constraints.begin(), cd.constraints.end(), "NOT NULL") != cd.constraints.end();
+    if (explicitNull && (serialType || explicitNotNull ||
+                         cd.isPrimaryKey || cd.isGeneratedIdentity)) {
+        error = "conflicting NULL/NOT NULL declarations for column "
                 "(SQLSTATE 42601)";
         return false;
     }
