@@ -212,6 +212,26 @@ static std::optional<Numeric> tryParseNumeric(const std::string& s) {
     }
 }
 
+static Numeric numericTruncatedQuotient(const Numeric& dividend,
+                                        const Numeric& divisor) {
+    const Numeric rounded = dividend / divisor;
+    if (!rounded.isFinite()) return rounded;
+    std::string integral = rounded.toString();
+    const size_t point = integral.find('.');
+    if (point != std::string::npos) integral.resize(point);
+    if (integral.empty() || integral == "-") integral += '0';
+    Numeric quotient(integral);
+    // Division rounds at its selected scale, possibly all the way to the
+    // next integer. Dropping fractional digits alone cannot undo that carry.
+    // Correct the at-most-one-unit overshoot using exact decimal products.
+    const Numeric product = quotient * divisor;
+    const Numeric productMagnitude = product.sign() < 0 ? -product : product;
+    const Numeric dividendMagnitude = dividend.sign() < 0 ? -dividend : dividend;
+    if (productMagnitude > dividendMagnitude)
+        quotient -= Numeric(static_cast<int64_t>(quotient.sign()));
+    return quotient;
+}
+
 static std::optional<Money> tryParseMoney(const std::string& value,
                                           bool decimalInput = false) {
     Money money;
@@ -2508,14 +2528,7 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
                 } else if (nr->isInfinite()) {
                     res = *nl;
                 } else {
-                    const Numeric quotient = *nl / *nr;
-                    std::string integralQuotient = quotient.toString();
-                    const size_t decimalPoint = integralQuotient.find('.');
-                    if (decimalPoint != std::string::npos)
-                        integralQuotient.resize(decimalPoint);
-                    if (integralQuotient.empty() || integralQuotient == "-")
-                        integralQuotient += "0";
-                    res = *nl - Numeric(integralQuotient) * *nr;
+                    res = *nl - numericTruncatedQuotient(*nl, *nr) * *nr;
                 }
             }
             else return ExprValue("numeric", "", true);
@@ -7802,15 +7815,8 @@ void ExprEvaluator::registerBuiltins() {
                 } else if (right->isInfinite()) {
                     remainder = *left;
                 } else {
-                    const Numeric quotient = *left / *right;
-                    std::string integralQuotient = quotient.toString();
-                    const size_t decimalPoint = integralQuotient.find('.');
-                    if (decimalPoint != std::string::npos)
-                        integralQuotient.resize(decimalPoint);
-                    if (integralQuotient.empty() || integralQuotient == "-")
-                        integralQuotient += '0';
-                    remainder =
-                        *left - Numeric(integralQuotient) * *right;
+                    remainder = *left -
+                        numericTruncatedQuotient(*left, *right) * *right;
                 }
                 auto textScale = [](const std::string& value) {
                     const size_t point = value.find('.');
@@ -8115,15 +8121,8 @@ void ExprEvaluator::registerBuiltins() {
             throw std::runtime_error(
                 "division by zero (SQLSTATE 22012)");
 
-        const Numeric quotient = *dividend / *divisor;
-        std::string result = quotient.toString();
-        if (quotient.isFinite()) {
-            const size_t decimalPoint = result.find('.');
-            if (decimalPoint != std::string::npos)
-                result.resize(decimalPoint);
-            if (result.empty() || result == "-") result += "0";
-        }
-        return ExprValue("numeric", result, false);
+        return ExprValue("numeric",
+            numericTruncatedQuotient(*dividend, *divisor).toString(), false);
     };
     // factorial(n) — n! for small non-negative n
     functions_["factorial"] = [](const std::vector<ExprValue>& a) {
