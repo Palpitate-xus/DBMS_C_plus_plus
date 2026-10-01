@@ -159,6 +159,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/alter_sequence_quoted_options_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/truncate_owned_sequence_restart_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/long_default_expression_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/serial_owned_sequence_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cli_error_recovery_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/no_fake_compat_objects_test.py)
     DBMS_E2E_TESTS+=(tests/compat_fallback_registry_test.py)

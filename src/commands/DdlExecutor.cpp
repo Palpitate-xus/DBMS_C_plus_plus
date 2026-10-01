@@ -4050,6 +4050,18 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
     col.generatedKind = cd.generatedKind;
 
     std::string baseType = toLower(cd.typeName);
+    const bool serialType = baseType == "smallserial" || baseType == "serial2" ||
+        baseType == "serial" || baseType == "serial4" ||
+        baseType == "bigserial" || baseType == "serial8";
+    if (serialType && cd.isArray) {
+        error = "array of serial is not implemented (SQLSTATE 0A000)";
+        return false;
+    }
+    if (serialType && cd.defaultValue) {
+        error = "multiple default values specified for serial column "
+                "(SQLSTATE 42601)";
+        return false;
+    }
     if (cd.hasIdentityOptions) {
         error = "identity sequence options are not supported (SQLSTATE 0A000)";
         return false;
@@ -4203,13 +4215,13 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
     }
 
     bool knownType = true;
-    if (baseType == "smallserial") {
+    if (baseType == "smallserial" || baseType == "serial2") {
         col = makeIntColumn(cd.name, cd.isNull, 0, cd.isPrimaryKey);
         col.isAutoIncrement = true;
-    } else if (baseType == "serial") {
+    } else if (baseType == "serial" || baseType == "serial4") {
         col = makeIntColumn(cd.name, cd.isNull, 2, cd.isPrimaryKey);
         col.isAutoIncrement = true;
-    } else if (baseType == "bigserial") {
+    } else if (baseType == "bigserial" || baseType == "serial8") {
         col = makeIntColumn(cd.name, cd.isNull, 3, cd.isPrimaryKey);
         col.isAutoIncrement = true;
     } else if (baseType == "int2" || baseType == "smallint") {
@@ -4784,14 +4796,59 @@ static std::string renameNextvalSequenceReference(const std::string& expression,
            expression.substr(literalEnd);
 }
 
+// PostgreSQL's generated relation names share the 63-byte identifier budget
+// between the table/column prefixes, retaining the full collision suffix.
+static std::string serialSequenceRelationName(const std::string& table,
+                                             const std::string& column,
+                                             uint64_t suffix) {
+    const std::string label = "seq" + (suffix == 0 ? "" : std::to_string(suffix));
+    const size_t available = 63 - label.size() - 2;
+    size_t tableBytes = table.size();
+    size_t columnBytes = column.size();
+    while (tableBytes + columnBytes > available) {
+        if (tableBytes > columnBytes) --tableBytes;
+        else --columnBytes;
+    }
+    const auto clipUtf8 = [](const std::string& text, size_t length) {
+        while (length != 0 && length < text.size() &&
+               (static_cast<unsigned char>(text[length]) & 0xc0) == 0x80)
+            --length;
+        return length;
+    };
+    tableBytes = clipUtf8(table, tableBytes);
+    columnBytes = clipUtf8(column, columnBytes);
+    return table.substr(0, tableBytes) + "_" + column.substr(0, columnBytes) + "_" + label;
+}
+
+static std::string serialNextvalDefault(const std::string& schema,
+                                        const std::string& sequence) {
+    const std::string reference = quoteSqlIdentifierPart(schema) + "." +
+        quoteSqlIdentifierPart(sequence);
+    std::string literal = "'";
+    for (char ch : reference) {
+        literal += ch;
+        if (ch == '\'') literal += '\'';
+    }
+    return "nextval(" + literal + "')";
+}
+
 bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     if (!stmt) return rejectMalformedDdlAst();
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
     const bool outerTransaction = g_engine.inTransaction();
+    const bool createsSerialSequence = std::any_of(
+        stmt->columns.begin(), stmt->columns.end(), [](const ColumnDef& column) {
+            const std::string type = toLower(column.typeName);
+            return type == "smallserial" || type == "serial2" ||
+                type == "serial" || type == "serial4" ||
+                type == "bigserial" || type == "serial8";
+        });
     DdlTransaction txn(s);
-    if (!outerTransaction) txn.enableSnapshotRollback();
+    // A nested CREATE SEQUENCE needs a physical snapshot. Capture it before
+    // creating the table, not between table creation and sequence creation.
+    if (!outerTransaction || createsSerialSequence) txn.enableSnapshotRollback();
     if (!txn.begin()) {
         std::cout << "DDL transaction begin failed" << std::endl;
         return true;
@@ -5684,6 +5741,47 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         }
     }
 
+    std::vector<CreateObjectStmt> serialSequences;
+    if (!temporary) {
+        const auto* tableNamespace = tableCatalog->findNamespaceByName(targetSchema);
+        std::set<std::string> reservedSequenceNames;
+        for (const auto& definition : stmt->columns) {
+            const std::string type = toLower(definition.typeName);
+            if (type != "smallserial" && type != "serial2" &&
+                type != "serial" && type != "serial4" &&
+                type != "bigserial" && type != "serial8") continue;
+            std::string sequenceName;
+            for (uint64_t suffix = 0;; ++suffix) {
+                sequenceName = serialSequenceRelationName(targetName.name, definition.name, suffix);
+                if (!tableCatalog->findClassByName(sequenceName, tableNamespace->oid) &&
+                    reservedSequenceNames.count(sequenceName) == 0 &&
+                    !g_engine.sequenceExists(s.currentDB, sequenceStorageName(targetSchema, sequenceName)))
+                    break;
+                if (suffix == std::numeric_limits<uint64_t>::max()) {
+                    std::cout << "ERROR: cannot choose serial sequence name (SQLSTATE 54000)" << std::endl;
+                    return true;
+                }
+            }
+            reservedSequenceNames.insert(sequenceName);
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].dataName != definition.name) continue;
+                tbl.cols[i].isNull = false;
+                tbl.cols[i].isAutoIncrement = false;
+                tbl.cols[i].defaultValue = serialNextvalDefault(targetSchema, sequenceName);
+                break;
+            }
+            CreateObjectStmt sequence(SqlCommand::CreateSequence);
+            sequence.objectType = "SEQUENCE";
+            sequence.objectName = quoteSqlIdentifierPart(targetSchema) + "." + quoteSqlIdentifierPart(sequenceName);
+            sequence.options["ownedby"] = quoteSqlIdentifierPart(targetSchema) + "." +
+                quoteSqlIdentifierPart(targetName.name) + "." + quoteSqlIdentifierPart(definition.name);
+            sequence.options["maxvalue"] = (type == "smallserial" || type == "serial2")
+                ? "32767" : ((type == "serial" || type == "serial4")
+                    ? "2147483647" : "9223372036854775807");
+            serialSequences.push_back(std::move(sequence));
+        }
+    }
+
     txn.markSnapshotDirty();
     DBStatus res = g_engine.createTable(s.currentDB, tbl);
     if (res != DBStatus::OK) {
@@ -5809,6 +5907,11 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         }
     }
 
+    // Ownership requires the real table/attribute catalog entries above.
+    // Nested sequence creates belong to this enclosing DDL transaction.
+    for (const auto& sequence : serialSequences) {
+        if (executeCreateSequence(&sequence, s)) return true;
+    }
     registerTemporaryTable();
     if (!txn.commit()) return true;
     std::cout << "CREATE TABLE succeeded" << std::endl;
