@@ -24408,15 +24408,19 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                 }
             }
             if (!ids.empty()) {
-                if (conds.size() > 1) {
+                // Fixed-width index equality only proves prefix equality at
+                // this boundary. Recheck the indexed atom itself as well.
+                const bool needsKeyRecheck = searchValue.size() >= BP_KEY_LEN;
+                if (conds.size() > 1 || needsKeyRecheck) {
                     PageAllocator* pa = getPageAllocator(dbname, tablename);
                     std::set<int64_t> toRemove;
                     for (int64_t rid : ids) {
                         std::string row;
                         if (!readRowByRid(pa, rid, row, tbl)) { toRemove.insert(rid); continue; }
+                        NullRowBinding rowBinding(this, dbname, tablename, rid, tbl.len);
                         bool match = true;
                         for (const auto& cond : conds) {
-                            if (cond.op == "=" && cond.colName == c.colName) continue;
+                            if (!needsKeyRecheck && cond.op == "=" && cond.colName == c.colName) continue;
                             if (!evalConditionOnRow(cond, row, tbl)) { match = false; break; }
                         }
                         if (!match) toRemove.insert(rid);

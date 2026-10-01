@@ -1,0 +1,17 @@
+DROP TABLE IF EXISTS diff_legacy_index_prefix;
+DROP TABLE IF EXISTS diff_legacy_primary_prefix;
+CREATE TABLE diff_legacy_index_prefix(id INT PRIMARY KEY,k TEXT COLLATE "C");
+INSERT INTO diff_legacy_index_prefix VALUES(1,'12345678901234567890-alpha'),(2,'12345678901234567890-beta'),(3,'12345678901234567890');
+CREATE INDEX diff_legacy_index_prefix_k ON diff_legacy_index_prefix(k);
+SELECT id,k FROM diff_legacy_index_prefix WHERE k='12345678901234567890-alpha' ORDER BY id;
+SELECT id,k FROM diff_legacy_index_prefix WHERE k='12345678901234567890-beta' ORDER BY id;
+SELECT id,k FROM diff_legacy_index_prefix WHERE k='12345678901234567890' ORDER BY id;
+SELECT id,k FROM diff_legacy_index_prefix WHERE k='12345678901234567890-missing' ORDER BY id;
+SELECT id FROM diff_legacy_index_prefix WHERE k='12345678901234567890-alpha' AND id=2;
+CREATE TABLE diff_legacy_primary_prefix(id INT,k TEXT COLLATE "C" PRIMARY KEY);
+INSERT INTO diff_legacy_primary_prefix VALUES(1,'12345678901234567890-alpha');
+SELECT id FROM diff_legacy_primary_prefix WHERE k='12345678901234567890-alpha';
+SELECT id FROM diff_legacy_primary_prefix WHERE k='12345678901234567890-missing';
+SELECT id FROM diff_legacy_primary_prefix WHERE k='12345678901234567890';
+DROP TABLE diff_legacy_index_prefix;
+DROP TABLE diff_legacy_primary_prefix;
