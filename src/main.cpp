@@ -18068,6 +18068,21 @@ static bool executeInternal(const string& rawSql, Session& s) {
         auto [returningCols, returningAll] = parseReturningClause(sql, 12);
 
         tokens.erase(tokens.begin());
+        bool computedDeleteWhere = false;
+        const string rawDeleteScan = toLower(effectiveRawSql);
+        const size_t rawWherePos = findTopLevelKeyword(rawDeleteScan, "where", 0);
+        if (rawWherePos != string::npos) {
+            const size_t returningPos = findTopLevelKeyword(rawDeleteScan, "returning", rawWherePos + 5);
+            const string predicate = trim(effectiveRawSql.substr(rawWherePos + 5,
+                returningPos == string::npos ? string::npos : returningPos - rawWherePos - 5));
+            if (hasComputedPredicate(predicate)) {
+                // CAST/arithmetic/CASE predicates must survive legacy fallback
+                // intact. Per-token normalization can discard their comparison
+                // and turn a conditional DELETE into an unconditional one.
+                tokens = {"typedexpr " + predicate};
+                computedDeleteWhere = true;
+            }
+        }
         if (tokens.empty()) {
             // No WHERE clause
             // RETURNING: query all rows before delete
@@ -18097,7 +18112,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             log(s.username, "delete done", getTime());
             return false;
         }
-        if (tokens.size() == 1) {
+        if (tokens.size() == 1 && !computedDeleteWhere) {
             cout << "SQL syntax error" << endl;
             return true;
         }
