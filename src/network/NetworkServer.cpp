@@ -16,6 +16,7 @@
 #include "catalog/systables.h"
 #include "common/DateType.h"
 #include "common/BooleanCodec.h"
+#include "common/IntegerTextCodec.h"
 #include "common/NetworkValue.h"
 #include "common/GeometryValue.h"
 #include "PostgresNumeric.h"
@@ -2793,8 +2794,24 @@ CopyStreamResult receiveCopyIn(PostgresProtocol& protocol,
             }
             StorageEngine::SqlRow values;
             for (size_t field = 0; field < fields.size(); ++field) {
-                values[table.cols[plan.columnIndexes[field]].dataName] =
-                    std::move(fields[field]);
+                const Column& column = table.cols[plan.columnIndexes[field]];
+                auto value = std::move(fields[field]);
+                const uint32_t typeOid = mapBuiltinTypeNameToOid(column.dataType);
+                if (value && !column.isArray &&
+                    (typeOid == 21 || typeOid == 23 || typeOid == 20)) {
+                    const unsigned bits = typeOid == 21 ? 16 : typeOid == 23 ? 32 : 64;
+                    const auto parsed = parsePostgresIntegerText(*value, bits);
+                    if (parsed.error == IntegerTextError::InvalidSyntax) {
+                        throw DbError("22P02", "invalid input syntax for type " +
+                            column.dataType + ": \"" + *value + "\"");
+                    }
+                    if (parsed.error == IntegerTextError::OutOfRange) {
+                        throw DbError("22003", "value out of range for type " +
+                            column.dataType + ": \"" + *value + "\"");
+                    }
+                    *value = std::to_string(parsed.value);
+                }
+                values[column.dataName] = std::move(value);
             }
             const DBStatus status = g_engine.insertRow(
                 session.currentDB, plan.physicalTable, values);
