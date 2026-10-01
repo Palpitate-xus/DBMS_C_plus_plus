@@ -40,6 +40,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -2754,7 +2755,8 @@ private:
 
 CopyStreamResult receiveCopyIn(PostgresProtocol& protocol,
                                const CopyWirePlan& plan,
-                               Session& session) {
+                               Session& session,
+                               const std::function<bool()>& abortBeforeError) {
     CopyStreamResult result;
     std::string pending;
     const TableSchema table =
@@ -2765,6 +2767,14 @@ CopyStreamResult receiveCopyIn(PostgresProtocol& protocol,
         if (!result.error.empty()) return;
         result.sqlState = std::move(state);
         result.error = std::move(message);
+        // The frontend may stop sending CopyData as soon as it sees this
+        // error. Release aborted transaction resources before responding,
+        // not after waiting for CopyDone or Sync from that frontend.
+        if (!abortBeforeError()) {
+            protocol.sendNoticeResponse(
+                "COPY transaction cleanup could not be completed",
+                "WARNING", "XX000");
+        }
         result.errorSent = protocol.sendErrorResponse(
             "ERROR", result.sqlState, result.error);
         if (!result.errorSent) result.transportOk = false;
@@ -3895,6 +3905,32 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         if (transactionFailed) return 'E';
         return g_engine.inTransaction() ? 'T' : 'I';
     };
+    const auto abortActiveTransaction = [&]() -> bool {
+        // Short-rent pooling may have executed on a now-returned Session.
+        // Snapshot restoration must use this connection's live state.
+        dbms::setCurrentSession(&session);
+        const auto recovery = g_engine.latestUserSavepoint();
+        if (recovery) {
+            if (g_engine.rollbackToSavepoint(*recovery) != DBStatus::OK)
+                return false;
+            (void)notificationManager().rollbackToSavepoint(
+                session.pid, *recovery);
+            if (session.advisoryOwnerId != 0) {
+                advisoryLockManager().rollbackToSavepoint(
+                    session.advisoryOwnerId, *recovery);
+            }
+            return true;
+        }
+        if (g_engine.inTransaction()) {
+            (void)g_engine.rollbackTransaction();
+        }
+        if (g_engine.inTransaction()) return false;
+        notificationManager().rollbackTransaction(session.pid);
+        if (session.advisoryOwnerId != 0) {
+            advisoryLockManager().releaseTransaction(session.advisoryOwnerId);
+        }
+        return true;
+    };
     const auto executeForProtocol = [&](const std::string& sql) -> QueryResult {
         // Portal objects live in this connection loop rather than Session.
         // Mirror their count while a command executes so a database-context
@@ -3942,31 +3978,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 // ErrorResponse. Its locks must not block other backends
                 // while this connection waits for an explicit ROLLBACK TO.
                 // Keep the recovery point and the protocol's failed state.
-                const auto recovery = g_engine.latestUserSavepoint();
-                if (recovery &&
-                    g_engine.rollbackToSavepoint(*recovery) == DBStatus::OK) {
-                    (void)notificationManager().rollbackToSavepoint(
-                        session.pid, *recovery);
-                    if (session.advisoryOwnerId != 0) {
-                        advisoryLockManager().rollbackToSavepoint(
-                            session.advisoryOwnerId, *recovery);
-                    }
-                } else if (!recovery) {
-                    // Some storage paths already abort the engine on lock
-                    // failure; others leave cleanup to the SQL boundary.
-                    // In either case release transaction-scoped side effects,
-                    // never session-scoped advisory ownership.
-                    if (g_engine.inTransaction()) {
-                        (void)g_engine.rollbackTransaction();
-                    }
-                    if (!g_engine.inTransaction()) {
-                        notificationManager().rollbackTransaction(session.pid);
-                        if (session.advisoryOwnerId != 0) {
-                            advisoryLockManager().releaseTransaction(
-                                session.advisoryOwnerId);
-                        }
-                    }
-                }
+                (void)abortActiveTransaction();
             }
             transactionFailed = !transactionEnding || g_engine.inTransaction();
         } else if (!result.error && isTransactionRecoveryCommand(sql)) {
@@ -3995,16 +4007,40 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         boundary.savepoint = "__dbms_wire_copy_" +
             std::to_string(session.pid) + "_" +
             std::to_string(sequence.fetch_add(1));
-        QueryResult savepoint = executeForProtocol(
-            "SAVEPOINT " + boundary.savepoint);
-        if (savepoint.error) {
-            error = std::move(savepoint);
+        dbms::setCurrentSession(&session);
+        try {
+            const DBStatus status = g_engine.createStatementSavepoint(
+                boundary.savepoint);
+            if (status != DBStatus::OK) {
+                error.error = true;
+                error.sqlState = sqlstateForDBStatus(status);
+                error.errorMessage = "could not create COPY statement savepoint";
+            } else {
+                boundary.savepointCreated = true;
+                if (!notificationManager().savepoint(session.pid, boundary.savepoint)) {
+                    notificationManager().beginTransaction(session.pid);
+                    (void)notificationManager().savepoint(session.pid, boundary.savepoint);
+                }
+                if (session.advisoryOwnerId != 0) {
+                    advisoryLockManager().savepoint(
+                        session.advisoryOwnerId, boundary.savepoint);
+                }
+            }
+        } catch (const DbError& failure) {
+            error.error = true;
+            error.sqlState = failure.sqlState();
+            error.errorMessage = failure.message();
+        } catch (const std::exception& failure) {
+            error.error = true;
+            error.sqlState = "XX000";
+            error.errorMessage = failure.what();
+        }
+        if (error.error) {
             if (boundary.startedTransaction) {
                 (void)executeForProtocol("ROLLBACK");
             }
             return false;
         }
-        boundary.savepointCreated = true;
         return true;
     };
     const auto finishCopyBoundary = [&](CopyStatementBoundary& boundary,
@@ -4058,16 +4094,43 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         -> CopyExecutionOutcome {
         CopyExecutionOutcome outcome;
         outcome.failedInExistingTransaction = g_engine.inTransaction();
+        if (transactionFailed) {
+            const QueryResult error = transactionAbortedResult();
+            outcome.connectionOk = protocol.sendErrorResponse(
+                "ERROR", error.sqlState, trimText(error.errorMessage));
+            return outcome;
+        }
+        CopyStatementBoundary boundary;
+        boundary.originallyInTransaction = outcome.failedInExistingTransaction;
+        const auto abortCopyTransaction = [&]() -> bool {
+            if (boundary.originallyInTransaction) transactionFailed = true;
+            bool cleaned = false;
+            try {
+                cleaned = abortActiveTransaction();
+            } catch (...) {
+                // Preserve the original COPY error and let the statement
+                // boundary attempt its remaining cleanup after input drains.
+            }
+            if (cleaned) {
+                // User rollback or top-level abort removed the internal COPY
+                // guard. Do not issue recovery SQL for that vanished guard.
+                boundary.savepointCreated = false;
+                boundary.startedTransaction = false;
+            }
+            return cleaned;
+        };
         if (!validateCopyWirePlan(plan, session)) {
+            if (outcome.failedInExistingTransaction)
+                (void)abortCopyTransaction();
             outcome.connectionOk = protocol.sendErrorResponse(
                 "ERROR", plan.sqlState.empty() ? "XX000" : plan.sqlState,
                 plan.error);
             return outcome;
         }
 
-        CopyStatementBoundary boundary;
         QueryResult boundaryError;
         if (!beginCopyBoundary(boundary, boundaryError)) {
+            (void)abortCopyTransaction();
             outcome.connectionOk = protocol.sendErrorResponse(
                 "ERROR", boundaryError.sqlState,
                 trimText(boundaryError.errorMessage));
@@ -4084,7 +4147,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 outcome.connectionOk = false;
                 return outcome;
             }
-            CopyStreamResult stream = receiveCopyIn(protocol, plan, session);
+            CopyStreamResult stream = receiveCopyIn(
+                protocol, plan, session, abortCopyTransaction);
             outcome.connectionOk = stream.transportOk;
             outcome.syncConsumed = stream.syncConsumed;
             QueryResult finishError;
@@ -4093,6 +4157,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             if (!outcome.connectionOk) return outcome;
             if (!stream.success) {
                 if (!stream.errorSent) {
+                    (void)abortCopyTransaction();
                     outcome.connectionOk = protocol.sendErrorResponse(
                         "ERROR",
                         stream.sqlState.empty() ? "XX000" : stream.sqlState,
@@ -4108,6 +4173,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 return outcome;
             }
             if (!finished) {
+                (void)abortCopyTransaction();
                 outcome.connectionOk = protocol.sendErrorResponse(
                     "ERROR", finishError.sqlState,
                     trimText(finishError.errorMessage));
@@ -4132,12 +4198,14 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         outcome.connectionOk = stream.transportOk;
         if (!outcome.connectionOk) return outcome;
         if (!stream.success) {
+            (void)abortCopyTransaction();
             outcome.connectionOk = protocol.sendErrorResponse(
                 "ERROR", stream.sqlState.empty() ? "XX000" : stream.sqlState,
                 stream.error.empty() ? "COPY TO failed" : stream.error);
             return outcome;
         }
         if (!finished) {
+            (void)abortCopyTransaction();
             outcome.connectionOk = protocol.sendErrorResponse(
                 "ERROR", finishError.sqlState,
                 trimText(finishError.errorMessage));
@@ -4241,10 +4309,13 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             if (statements.size() > 1 &&
                 (hasWireCopy || hasCopyGateError)) {
                 const bool failedTransaction = g_engine.inTransaction();
+                if (failedTransaction) {
+                    (void)abortActiveTransaction();
+                    transactionFailed = true;
+                }
                 protocol.sendErrorResponse(
                     "ERROR", "0A000",
                     "wire COPY cannot be combined with other statements in one Query message");
-                if (failedTransaction) transactionFailed = true;
                 updateProcessInfo(pid, "Idle", "", "");
                 protocol.sendReadyForQuery(readyStatus());
                 continue;
@@ -4252,10 +4323,13 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             if (statements.size() == 1 && copyPlans.front().matched &&
                 !copyPlans.front().error.empty()) {
                 const bool failedTransaction = g_engine.inTransaction();
+                if (failedTransaction) {
+                    (void)abortActiveTransaction();
+                    transactionFailed = true;
+                }
                 protocol.sendErrorResponse(
                     "ERROR", copyPlans.front().sqlState,
                     copyPlans.front().error);
-                if (failedTransaction) transactionFailed = true;
                 updateProcessInfo(pid, "Idle", "", "");
                 protocol.sendReadyForQuery(readyStatus());
                 continue;
@@ -4624,36 +4698,45 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             if (!portalState.executed) {
                 CopyWirePlan copyPlan = parseCopyWirePlan(portalState.sql);
                 if (copyPlan.matched && !copyPlan.error.empty()) {
+                    if (g_engine.inTransaction()) {
+                        (void)abortActiveTransaction();
+                        transactionFailed = true;
+                    }
                     protocol.sendErrorResponse(
                         "ERROR", copyPlan.sqlState, copyPlan.error);
                     portalState.executed = true;
                     portalState.completed = true;
                     extendedQueryError = true;
-                    if (g_engine.inTransaction()) transactionFailed = true;
                     continue;
                 }
                 if (copyPlan.wire) {
                     if (maxRows != 0) {
+                        if (g_engine.inTransaction()) {
+                            (void)abortActiveTransaction();
+                            transactionFailed = true;
+                        }
                         protocol.sendErrorResponse(
                             "ERROR", "0A000",
                             "wire COPY does not support portal row limits");
                         portalState.executed = true;
                         portalState.completed = true;
                         extendedQueryError = true;
-                        if (g_engine.inTransaction()) transactionFailed = true;
                         continue;
                     }
                     if (std::any_of(
                             portalState.resultFormats.begin(),
                             portalState.resultFormats.end(),
                             [](uint16_t format) { return format != 0; })) {
+                        if (g_engine.inTransaction()) {
+                            (void)abortActiveTransaction();
+                            transactionFailed = true;
+                        }
                         protocol.sendErrorResponse(
                             "ERROR", "0A000",
                             "wire COPY binary result format is not supported");
                         portalState.executed = true;
                         portalState.completed = true;
                         extendedQueryError = true;
-                        if (g_engine.inTransaction()) transactionFailed = true;
                         continue;
                     }
                     if (!g_engine.inTransaction()) {
