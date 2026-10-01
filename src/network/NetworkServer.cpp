@@ -3909,7 +3909,10 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             rented.reset();
         }
         if (result.error && wasInTransaction) {
-            transactionFailed = true;
+            // A failed COMMIT can already have rolled back the engine (for
+            // example a deferred constraint or SSI failure). Do not invent
+            // an aborted transaction after its physical boundary ended.
+            transactionFailed = g_engine.inTransaction();
         } else if (!result.error && isTransactionRecoveryCommand(sql)) {
             transactionFailed = false;
         }

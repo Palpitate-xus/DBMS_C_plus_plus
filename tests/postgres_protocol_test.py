@@ -1217,10 +1217,13 @@ def prepared_transaction_error_boundaries(sock):
         sock, "PREPARE TRANSACTION 'deferred_fk_protocol'")
     fk_error = next(body for kind, body in fk_prepare if kind == b"E")
     assert b"C23503\0" in fk_error, fk_prepare
-    assert fk_prepare[-1] == (b"Z", b"E"), fk_prepare
-    assert simple_query(sock, "ROLLBACK")[-1] == (b"Z", b"I")
-    assert data_row_values(simple_query(
-        sock, "SELECT id FROM deferred_child")) == []
+    # Deferred validation aborts PREPARE itself and ends the transaction,
+    # just as a failed COMMIT does. Recovery must not need another ROLLBACK.
+    assert fk_prepare[-1] == (b"Z", b"I"), fk_prepare
+    after_failed_prepare = simple_query(sock, "SELECT id FROM deferred_child")
+    assert not any(kind == b"E" for kind, _ in after_failed_prepare), after_failed_prepare
+    assert after_failed_prepare[-1] == (b"Z", b"I"), after_failed_prepare
+    assert data_row_values(after_failed_prepare) == []
 
     # SET CONSTRAINTS ... IMMEDIATE is retroactive. The violation belongs to
     # this statement, and ROLLBACK TO must discard the queued event created
