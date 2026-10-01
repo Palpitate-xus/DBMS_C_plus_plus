@@ -22438,7 +22438,10 @@ DBStatus StorageEngine::insertInternal(
             // indexes because an empty index key also represented SQL NULL.
             // Use the heap for that value so both legacy and newly-written
             // rows participate in UNIQUE without changing on-disk keys.
+            // Keys at the fixed-width boundary also need a full-value check:
+            // an exact 20-byte value can collide with a longer value's prefix.
             if (columnUsesBinaryCollation(col) && !candidateKey.empty() &&
+                candidateKey.size() < BP_KEY_LEN &&
                 index && index->isOpen()) {
                 duplicate = !index->searchMulti(candidateKey).empty();
             } else if (!forEachRow(
