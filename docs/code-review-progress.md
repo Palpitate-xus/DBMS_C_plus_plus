@@ -28,6 +28,8 @@
 
 ## 总清单续做（未全部完成）
 
+2026-10-01 第 886 项复验：INSERT 的主键索引／非 PK UNIQUE／复合外键查不到引用值时，storage 返回 INVALID_VALUE 并误映射 22023；已独立提交 9e25273c，准确返回 FOREIGN_KEY_VIOLATION／23503。旧专项 C++ 134、wire 与正确 en_US 参考库实际差分 failed=1 保存；新专项检查 RETURNING、VALUES late failure、INSERT SELECT、NULL MATCH SIMPLE、SAVEPOINT 与 25P02，失败后原数据不变。16 个 C++、专项／8 组相邻／完整协议、与第 884 项组合的 15 个不同真实 PostgreSQL 18.6 case 全退出码 0、failed=0。六个既有 C++ 文件只加强相关 INSERT assertion 为具体 FK status，不改变 UPDATE／DELETE 或 ALTER definition 的既有边界；相邻初两轮漏更新旧 INSERT expectation 导致 134，日志保留，第三轮完整 16 个通过。Table 重编，与 884 Ddl、883 parser、880 main、881 Network、根 68c29b73 正式其余生产对象重链，无 header/layout/磁盘格式变化，不声称独立冷构建。根 68c29b73 正式全脚本已退出码 0：402/402 C++、129/129 E2E；正确 PGREF_DATABASE=pgdiff_en_us 的同一冻结二进制 402 组全量差分仍待结束，不包含隔离第 882–886 项。总清单仍未完成。
+
 | 编号 | 总清单 ID | 问题与修复 | 验证 | 本地提交 |
 | --- | --- | --- | --- | --- |
 | 197 | SQL-01 / QRY-04 | `FROM t FETCH` 在尝试解析 JOIN 时移走并丢弃表节点；无 FROM 的 FETCH 被当作投影项。补齐两处子句边界 | 原表节点断言修复前失败，修复后普通 / 省略 FETCH 数量、无 FROM 投影及 parser_phase1 回归通过 | `18c4e20` |
@@ -1088,6 +1090,8 @@
 - 实际参考 PostgreSQL 的错误码、CSV 列描述、带注释的终止符及命令样文本读取验证通过；未对参考库做持久化数据修改。
 - 总账完整覆盖 273 项；目前 complete = 0、partial = 77、unverified = 181、用户延期 = 15。`--require-complete` 正确返回非零。122 组差分归零不代表 273 项功能族完成。
 - 仓库只有 `ci.yml.disabled`，没有启用的 workflow；修复均为本地 commit，未 push。
+
+| 886 | P0-02 / SQL-11 / CONS-02 / P0-16 | INSERT 外键缺失引用值被误报为 generic invalid value（22023）；两处 storage lookup 失败改为 FOREIGN_KEY_VIOLATION，沿既有 SQLSTATE 通道发布 23503 | 旧新专项 C++／wire／正确参考数据库差分证明错误码修复；16 C++、8 相邻协议、完整协议与 15 组组合真实差分退出码 0，精确保持 late-row／INSERT SELECT／SAVEPOINT 原子性及真实 NULL。既有六文件仅相关 INSERT status 期望加强，初两轮旧期望 134 保存，最终第三轮全通过。完整 error diagnostics、其他 DML／DDL 外键失败与约束族仍 partial | `9e25273c` |
 
 ## 上批局部收尾验收（2026-09-08）
 
