@@ -2705,9 +2705,26 @@ static bool commitBeforeLegacyDdl(Session& s) {
     return true;
 }
 
+static std::optional<bool> transactionChainOption(const string& sql) {
+    dbms::SQLParser parser;
+    auto parsed = parser.parse(sql);
+    if (!parsed.success) throw dbms::DbError("42601", parsed.error);
+    const auto* statement = dynamic_cast<const dbms::TransactionStmt*>(parsed.stmt.get());
+    if (!statement || (statement->kind != dbms::TransactionStmt::Kind::Commit &&
+                       statement->kind != dbms::TransactionStmt::Kind::End &&
+                       statement->kind != dbms::TransactionStmt::Kind::Rollback &&
+                       statement->kind != dbms::TransactionStmt::Kind::Abort))
+        throw dbms::DbError("42601", "invalid transaction ending statement");
+    return statement->chainSpecified ? std::optional<bool>(statement->chain) : std::nullopt;
+}
+
 static bool handleCommitTransaction(const string& sql, Session& s) {
     const bool hadTransaction = g_engine.inTransaction();
     const bool wasReadOnly = g_engine.isReadOnly();
+    const auto chain = transactionChainOption(sql);
+    if (chain.value_or(false) && !hadTransaction && !s.failedTransactionBlock) {
+        throw dbms::DbError("25P01", "COMMIT AND CHAIN can only be used in transaction blocks");
+    }
     if (hadTransaction && !prepareNotificationTransactionCommit(s)) {
         (void)g_engine.rollbackTransaction();
         rollbackNotificationTransaction(s);
@@ -2728,8 +2745,7 @@ static bool handleCommitTransaction(const string& sql, Session& s) {
         dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
     if (hadTransaction && !commitNotificationTransaction(s)) return true;
     // COMMIT AND [NO] CHAIN: if AND CHAIN, immediately start a new transaction.
-    const string lowerSql = toLowerSql(trim(sql));
-    if (lowerSql.find("and chain") != string::npos) {
+    if (chain.value_or(false)) {
         if (g_engine.beginTransaction(s.currentDB) != DBStatus::OK) {
             cout << "ERROR: could not start chained transaction" << endl;
             return true;
@@ -2742,7 +2758,7 @@ static bool handleCommitTransaction(const string& sql, Session& s) {
         g_engine.setReadOnly(wasReadOnly);
         cout << "Transaction committed (and chain)" << endl;
         log(s.username, "commit and chain", getTime());
-    } else if (lowerSql.find("and no chain") != string::npos) {
+    } else if (chain.has_value()) {
         cout << "Transaction committed (and no chain)" << endl;
         log(s.username, "commit and no chain", getTime());
     } else {
@@ -2776,6 +2792,10 @@ static bool handleCommitPrepared(const string& sql, Session& s) {
 static bool handleRollbackTransaction(const string& sql, Session& s) {
     const bool hadTransaction = g_engine.inTransaction();
     const bool wasReadOnly = g_engine.isReadOnly();
+    const auto chain = transactionChainOption(sql);
+    if (chain.value_or(false) && !hadTransaction && !s.failedTransactionBlock) {
+        throw dbms::DbError("25P01", "ROLLBACK AND CHAIN can only be used in transaction blocks");
+    }
     auto res = g_engine.rollbackTransaction();
     if (res != DBStatus::OK) {
         cout << "Rollback failed" << endl;
@@ -2786,11 +2806,10 @@ static bool handleRollbackTransaction(const string& sql, Session& s) {
         dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
     }
     // ROLLBACK AND [NO] CHAIN
-    const string lowerSql = toLowerSql(trim(sql));
-    if (lowerSql.find("and no chain") != string::npos) {
+    if (chain.has_value() && !*chain) {
         cout << "Transaction rolled back (and no chain)" << endl;
         log(s.username, "rollback and no chain", getTime());
-    } else if (lowerSql.find("and chain") != string::npos) {
+    } else if (chain.value_or(false)) {
         if (g_engine.beginTransaction(s.currentDB) != DBStatus::OK) {
             cout << "Rollback chain failed" << endl;
             return true;

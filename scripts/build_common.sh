@@ -51,6 +51,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/dml_cte_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/transaction_isolation_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/transaction_chain_read_only_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/transaction_chain_block_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/table_structured_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/values_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/set_operation_structured_protocol_e2e_test.py)

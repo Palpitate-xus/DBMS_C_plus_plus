@@ -1087,6 +1087,8 @@ struct TransactionStmt : public Stmt {
     IsolationLevel isolation = IsolationLevel::READ_COMMITTED;
     bool readOnly = false;
     bool deferrable = false;
+    bool chainSpecified = false;
+    bool chain = false;
 
     TransactionStmt(Kind k) : Stmt(SqlCommand::Begin), kind(k) {
         switch (k) {
