@@ -10658,16 +10658,13 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
                 }
             }
             if (columnIndex >= localTbl.len) return false;
+            if (isColumnNullByRid(dc.dbname, dc.tablename, currentRid, columnIndex)) {
+                return true; // MATCH SIMPLE ignores real SQL NULL, not empty text.
+            }
             payloadValues.push_back(
                 const_cast<StorageEngine*>(this)->extractColumnValue(
                     currentRow, localTbl, columnIndex, dc.dbname));
         }
-        if (std::any_of(
-                payloadValues.begin(), payloadValues.end(),
-                [](const std::string& value) { return value.empty(); })) {
-            return true;
-        }
-
         // The referenced key must exist by commit time.
         if (!tableExists(dc.dbname, dc.refTable)) return false;
         const TableSchema refTbl = getTableSchema(dc.dbname, dc.refTable);
@@ -10688,11 +10685,15 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
         bool found = false;
         const bool scanOk = forEachRow(
             dc.dbname, dc.refTable,
-            [&](uint32_t, uint16_t, const char* data, size_t len) {
+            [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
                 if (found) return;
                 const std::string row(data, len);
                 for (size_t valueIndex = 0;
                      valueIndex < referencedColumns.size(); ++valueIndex) {
+                    if (isColumnNullByRid(dc.dbname, dc.refTable,
+                            encodeRid(pageId, slotId), referencedColumns[valueIndex])) {
+                        return;
+                    }
                     if (const_cast<StorageEngine*>(this)->extractColumnValue(
                             row, refTbl, referencedColumns[valueIndex],
                             dc.dbname) != payloadValues[valueIndex]) {
@@ -23309,11 +23310,15 @@ DBStatus StorageEngine::insertInternal(
             // Non-PK and composite references must compare the declared
             // referenced columns, never an unrelated physical index.
             bool found = false;
-            if (!forEachRow(dbname, fk.refTable, [&](uint32_t, uint16_t, const char* data, size_t len) {
+            if (!forEachRow(dbname, fk.refTable, [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
                 if (found) return;
                 std::string row(data, len);
                 for (size_t valueIndex = 0;
                      valueIndex < referencedColumns.size(); ++valueIndex) {
+                    if (isColumnNullByRid(dbname, fk.refTable,
+                            encodeRid(pageId, slotId), referencedColumns[valueIndex])) {
+                        return;
+                    }
                     const Column& referencedColumn =
                         refTbl.cols[referencedColumns[valueIndex]];
                     const std::string storedValue = canonicalColumnKeyValue(
@@ -27240,15 +27245,15 @@ DBStatus StorageEngine::updateInternal(
                 std::vector<std::string> localValues;
                 localValues.reserve(foreignKey.colNames.size());
                 for (const auto& columnName : foreignKey.colNames) {
-                    bool columnExists = false;
+                    size_t localColumnIndex = tbl.len;
                     for (size_t columnIndex = 0;
                          columnIndex < tbl.len; ++columnIndex) {
                         if (tbl.cols[columnIndex].dataName == columnName) {
-                            columnExists = true;
+                            localColumnIndex = columnIndex;
                             break;
                         }
                     }
-                    if (!columnExists) {
+                    if (localColumnIndex == tbl.len) {
                         lockManager_.unlock(tablename);
                         return DBStatus::CORRUPTED_DATA;
                     }
@@ -27256,8 +27261,11 @@ DBStatus StorageEngine::updateInternal(
                         valueFromRowMap(oldLogicalValues, columnName);
                     const std::string newValue =
                         valueFromRowMap(rowValues, columnName);
-                    changed = changed || oldValue != newValue;
-                    hasNull = hasNull || newValue.empty();
+                    const bool oldIsNull = localColumnIndex < oldNullColumns.size() &&
+                        oldNullColumns[localColumnIndex];
+                    const bool newIsNull = newColumnIsNull(localColumnIndex);
+                    changed = changed || oldValue != newValue || oldIsNull != newIsNull;
+                    hasNull = hasNull || newIsNull;
                     localValues.push_back(newValue);
                 }
                 if (!changed || hasNull) continue;
@@ -27317,7 +27325,8 @@ DBStatus StorageEngine::updateInternal(
                          valueIndex < referencedColumns.size(); ++valueIndex) {
                         const std::string& referencedName =
                             referenced.cols[referencedColumns[valueIndex]].dataName;
-                        if (valueFromRowMap(rowValues, referencedName) !=
+                        if (newColumnIsNull(referencedColumns[valueIndex]) ||
+                            valueFromRowMap(rowValues, referencedName) !=
                             localValues[valueIndex]) {
                             found = false;
                             break;
@@ -27327,11 +27336,15 @@ DBStatus StorageEngine::updateInternal(
 
                 const bool scanOk = found || forEachRow(
                     dbname, foreignKey.refTable,
-                    [&](uint32_t, uint16_t, const char* data, size_t length) {
+                    [&](uint32_t pageId, uint16_t slotId, const char* data, size_t length) {
                         if (found) return;
                         const std::string referencedRow(data, length);
                         for (size_t valueIndex = 0;
                              valueIndex < referencedColumns.size(); ++valueIndex) {
+                            if (isColumnNullByRid(dbname, foreignKey.refTable,
+                                    encodeRid(pageId, slotId), referencedColumns[valueIndex])) {
+                                return;
+                            }
                             if (extractColumnValue(
                                     referencedRow, referenced,
                                     referencedColumns[valueIndex], dbname) !=
