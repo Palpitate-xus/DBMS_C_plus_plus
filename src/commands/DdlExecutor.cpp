@@ -4062,6 +4062,12 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
                 "(SQLSTATE 42601)";
         return false;
     }
+    if (serialType && std::find(cd.constraints.begin(), cd.constraints.end(),
+                                "NULL") != cd.constraints.end()) {
+        error = "conflicting NULL/NOT NULL declarations for serial column "
+                "(SQLSTATE 42601)";
+        return false;
+    }
     if (cd.hasIdentityOptions) {
         error = "identity sequence options are not supported (SQLSTATE 0A000)";
         return false;
