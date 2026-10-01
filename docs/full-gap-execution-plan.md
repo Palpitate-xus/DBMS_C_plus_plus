@@ -17,6 +17,8 @@
 
 ## 后续优先队列
 
+2026-10-01 第 874 项进展：UNIQUE 的完整值／20-byte boundary 检查已独立提交 0d64c528。显式 C 列及 materialized index 的旧 C++ 退出码 134、旧 wire 错误 23505 与真实差分 failed=1；12 个 C++、10 组相邻协议、完整协议及本项真实差分 failed=0 退出码 0，覆盖长文本、恰好 20 字节、真正重复、NULL、删除重插和长 NUMERIC。单独新 wire 仍因旧 filterRows 把 prefix candidates 当完整等值而失败，保留失败并作为独立 875：未含 874 的旧 873 二进制也对非 UNIQUE 表返回 3 而非 1、缺失长 PK 返回错行；正在组合验收。默认 locale 的两次旧探针均通过，未假称复现。长 PRIMARY KEY 插入的固定键冲突仍未修，本次不改变磁盘格式或迁移用户数据；根 eb85bfeb 正式全量及 394 差分仍运行。总账仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
+
 2026-10-01 第 873 项验收：whole-expression cast 的强 child 命名已独立提交 a5cca001，新协议、15 组相邻协议、完整协议、本项真实 PostgreSQL 18.6 cases=1 failed=0 和 7 组相邻差分均退出码 0。旧版返回 numeric／text 而非 abs／coalesce／nullif／greatest／least 的 wire 失败及 failed=1 保留，实际 psql 与本地 parse_target.c 命名强度规则共同校准；弱 arithmetic／literal cast 仍用目标类型，显式 alias 保留。main 重编与 872 Table 及 eb85bfeb 正式其他对象重链，不称独立冷构建；合并 872 docs 后 b3c1ed8d 源码不变。根 eb85bfeb 最新全量及 394 组差分仍在运行，不能用专项覆盖正式全套；874 已在显式 C 排序规则及 materialized index 下真实复现 UNIQUE 长键／20-byte boundary 误判，隔离修复中。此前默认 locale 的两个探针均通过，未当作 bug 复现。仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
 
 2026-10-01 第 872 项验收：computed arithmetic predicate 已独立提交 adbf3b72，14 个 C++、新协议、16 组相邻协议与完整协议均退出码 0；本项真实 PostgreSQL 18.6 cases=1 failed=0，另 16 个不同相邻 case failed=0（含 9 个 HAVING，重复的两组不追加计数）。保留旧 0.5／lazy COALESCE 失败、旧 failed=1、初次 C++ 重链对象路径错误和相邻脚本复数 case 名错误；未改 oracle。除零交 typed 求值而非文本预扫描，完整 RHS、括号和 NULL 位保真，单独处理空扫描上的 immutable constant，并保持 signed literal 的原 index 条件。该项基于 eb85bfeb 正式对象重编 main／Table 后重链，不称独立冷构建；合并 871 仅 docs 为 c0e7a675。根 eb85bfeb 正式全量和 394 组差分仍运行，不含 872。873 cast child 列名已真实 failed=1 复现，隔离修复中。仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
