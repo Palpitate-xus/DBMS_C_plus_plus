@@ -785,7 +785,7 @@ public:
         // READ ONLY may tighten the transaction at any point. PostgreSQL only
         // permits the opposite transition before the first query or write.
         if (!readOnly && context.readOnly &&
-            (context.hasRead || context.hasWrite || !context.txnLog.empty() ||
+            (hasUserSavepoint() || context.hasRead || context.hasWrite || !context.txnLog.empty() ||
              !context.ddlUndoActions.empty() ||
              !context.txnBackupPath.empty())) {
             return false;
@@ -2099,6 +2099,7 @@ private:
             std::map<std::string, std::string> tempTableOnCommit;
             std::set<std::string> tempTablesCreatedInTransaction;
             bool internalStatement = false;
+            bool readOnly = false;
         };
         std::vector<SavepointState> savepoints;
         bool tempNamespaceAtTransactionStart = false;

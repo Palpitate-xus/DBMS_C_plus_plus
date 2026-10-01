@@ -45689,7 +45689,7 @@ DBStatus StorageEngine::createSavepoint(
         context.constraintMode,
         std::move(ddlBackupPath),
         lockManager_.captureCheckpoint(),
-        false, {}, {}, {}, internalStatement
+        false, {}, {}, {}, internalStatement, context.readOnly
     });
     if (Session* session = currentSession();
         session && session->currentDB == context.txnDB) {
@@ -46278,6 +46278,7 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
             transactionContext().currentTxnId);
     }
     transactionContext().constraintMode = target.constraintMode;
+    context.readOnly = target.readOnly;
     transactionContext().ddlUndoActions.resize(ddlSpIdx);
     lockManager_.rollbackToCheckpoint(target.lockCheckpoint);
 
@@ -46332,6 +46333,9 @@ DBStatus StorageEngine::releaseSavepoint(const std::string& name) {
         discardDdlStatementBackup(
             context.savepoints[i].ddlBackupPath);
     }
+    // Like PostgreSQL's prevXactReadOnly, the parent's mode is restored on
+    // successful subtransaction completion as well as abort.
+    context.readOnly = context.savepoints[savepointIndex].readOnly;
     // RELEASE destroys the named savepoint and every savepoint nested after
     // it. With duplicate names, reverse lookup releases only the newest one.
     context.savepoints.erase(
