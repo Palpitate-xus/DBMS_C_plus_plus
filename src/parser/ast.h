@@ -1092,6 +1092,15 @@ struct TransactionStmt : public Stmt {
     bool deferrableSpecified = false;
     bool chainSpecified = false;
     bool chain = false;
+    struct Mode {
+        enum class Kind { Isolation, ReadOnly, Deferrable };
+        Kind kind;
+        IsolationLevel isolation = IsolationLevel::READ_COMMITTED;
+        bool value = false;
+    };
+    // Final-value fields above remain useful to callers, but a repeated
+    // BEGIN must validate every supplied characteristic in source order.
+    std::vector<Mode> modes;
 
     TransactionStmt(Kind k) : Stmt(SqlCommand::Begin), kind(k) {
         switch (k) {

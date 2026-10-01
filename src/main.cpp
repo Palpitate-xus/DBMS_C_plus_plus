@@ -2661,14 +2661,18 @@ static bool handleBeginTransaction(const string& sql, Session& s) {
         // PostgreSQL warns on repeated BEGIN but applies only the options
         // that were actually supplied, under SET TRANSACTION's rules.
         // Do not reset locks, savepoints, notifications, or CHAIN origin.
-        if (txn->isolationSpecified) {
-            if (!g_engine.setIsolationLevel(txn->isolation)) {
-                throw dbms::DbError("25001", "transaction isolation must be set before any query");
+        for (const auto& mode : txn->modes) {
+            if (mode.kind == dbms::TransactionStmt::Mode::Kind::Isolation) {
+                if (!g_engine.setIsolationLevel(mode.isolation)) {
+                    throw dbms::DbError("25001", "transaction isolation must be set before any query");
+                }
+                s.isolationLevel = static_cast<int>(mode.isolation);
+            } else if (mode.kind == dbms::TransactionStmt::Mode::Kind::ReadOnly &&
+                       !g_engine.setReadOnly(mode.value)) {
+                throw dbms::DbError("25001", "transaction read-write mode must be set before any query");
             }
-            s.isolationLevel = static_cast<int>(txn->isolation);
-        }
-        if (txn->readOnlySpecified && !g_engine.setReadOnly(txn->readOnly)) {
-            throw dbms::DbError("25001", "transaction read-write mode must be set before any query");
+            // DEFERRABLE runtime support remains guarded above; retaining
+            // its AST order does not claim a serializable safe snapshot.
         }
         cout << "There is already a transaction in progress" << endl;
         return false;

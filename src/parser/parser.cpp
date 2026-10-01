@@ -4502,6 +4502,7 @@ ParseResult SQLParser::parseBegin(const std::string& sql) {
                 return r;
             }
             isolationSeen = true;
+            stmt->modes.push_back({TransactionStmt::Mode::Kind::Isolation, stmt->isolation, false});
             optionBeforeSeparator = true;
             continue;
         }
@@ -4510,6 +4511,8 @@ ParseResult SQLParser::parseBegin(const std::string& sql) {
             stmt->readOnly = toLower(tokens[pos + 1]) == "only";
             pos += 2;
             readModeSeen = true;
+            stmt->modes.push_back({TransactionStmt::Mode::Kind::ReadOnly,
+                                   IsolationLevel::READ_COMMITTED, stmt->readOnly});
             optionBeforeSeparator = true;
             continue;
         }
@@ -4518,6 +4521,8 @@ ParseResult SQLParser::parseBegin(const std::string& sql) {
             stmt->deferrable = word == "deferrable";
             pos += word == "deferrable" ? 1 : 2;
             deferrableSeen = true;
+            stmt->modes.push_back({TransactionStmt::Mode::Kind::Deferrable,
+                                   IsolationLevel::READ_COMMITTED, stmt->deferrable});
             optionBeforeSeparator = true;
             continue;
         }
@@ -10589,6 +10594,24 @@ StmtPtr SQLParser::parseAlterLargeObject(const std::vector<std::string>& tokens,
 
 std::string TransactionStmt::toString() const {
     const auto beginning = [&](std::string command) {
+        if (!modes.empty()) {
+            for (const auto& mode : modes) {
+                if (mode.kind == Mode::Kind::Isolation) {
+                    command += " ISOLATION LEVEL ";
+                    switch (mode.isolation) {
+                        case IsolationLevel::READ_UNCOMMITTED: command += "READ UNCOMMITTED"; break;
+                        case IsolationLevel::READ_COMMITTED: command += "READ COMMITTED"; break;
+                        case IsolationLevel::REPEATABLE_READ: command += "REPEATABLE READ"; break;
+                        case IsolationLevel::SERIALIZABLE: command += "SERIALIZABLE"; break;
+                    }
+                } else if (mode.kind == Mode::Kind::ReadOnly) {
+                    command += mode.value ? " READ ONLY" : " READ WRITE";
+                } else {
+                    command += mode.value ? " DEFERRABLE" : " NOT DEFERRABLE";
+                }
+            }
+            return command;
+        }
         if (isolationSpecified) {
             command += " ISOLATION LEVEL ";
             switch (isolation) {
