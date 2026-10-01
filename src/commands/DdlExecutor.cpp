@@ -7752,13 +7752,9 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
         sequenceSchema, sequenceName.name);
     dbms::SequenceInfo info;
 
-    std::string rest = stmt->subCommand;
-    std::vector<std::string> tokens;
-    {
-        std::istringstream iss(rest);
-        std::string tok;
-        while (iss >> tok) tokens.push_back(tok);
-    }
+    // Whitespace within a quoted option identifier is part of its name.
+    // Reuse SQL token boundaries instead of splitting the utility text.
+    const std::vector<std::string> tokens = SQLParser::tokenize(stmt->subCommand);
 
     if (tokens.empty()) {
         std::cout << "SQL syntax error: ALTER SEQUENCE requires an action"

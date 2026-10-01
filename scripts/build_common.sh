@@ -156,6 +156,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/drop_multiple_fk_group_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/foreign_key_insert_sqlstate_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/sequence_rollback_identity_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/alter_sequence_quoted_options_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cli_error_recovery_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/no_fake_compat_objects_test.py)
     DBMS_E2E_TESTS+=(tests/compat_fallback_registry_test.py)

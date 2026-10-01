@@ -1,0 +1,15 @@
+CREATE SCHEMA "diff alter space";
+CREATE TABLE "diff alter space"."table.dot"("id value" BIGINT,"id""quote" BIGINT);
+CREATE SEQUENCE "diff alter space"."seq.dot" START 19 INCREMENT 4;
+ALTER SEQUENCE "diff alter space"."seq.dot" OWNED BY "diff alter space"."table.dot"."id value";
+SELECT nextval('"diff alter space"."seq.dot"');
+ALTER SEQUENCE "diff alter space"."seq.dot" RENAME TO "renamed seq";
+SELECT currval('"diff alter space"."renamed seq"');
+ALTER SEQUENCE "diff alter space"."renamed seq" OWNED BY "diff alter space"."table.dot"."id""quote" RESTART WITH 23;
+SELECT nextval('"diff alter space"."renamed seq"');
+BEGIN;
+ALTER SEQUENCE "diff alter space"."renamed seq" OWNED BY NONE;
+ROLLBACK;
+DROP TABLE "diff alter space"."table.dot";
+SELECT nextval('"diff alter space"."renamed seq"');
+DROP SCHEMA "diff alter space";
