@@ -1032,6 +1032,35 @@ bool checkTablePrivilege(Session& s, const std::string& table,
 // accepts a conjunction of independent conditions; OR, subqueries, functions
 // and column-to-column comparisons remain on the legacy path until they have
 // a structured plan representation.
+void appendColumnCondition(const ColumnRefExpr& column,
+                           const std::string& sqlOperator,
+                           const std::string& storageOperator,
+                           const std::string& value,
+                           std::vector<std::string>& conditions) {
+    const std::string name = identifier(column.column);
+    const bool compactSafe = !name.empty() &&
+        (std::isalpha(static_cast<unsigned char>(name.front())) || name.front() == '_') &&
+        std::all_of(name.begin(), name.end(), [](unsigned char ch) {
+            return std::isalnum(ch) || ch == '_' || ch == '$';
+        });
+    if (compactSafe) {
+        conditions.push_back(storageOperator + name +
+                             (value.empty() ? "" : " " + value));
+        return;
+    }
+    // The compact condition format uses whitespace as its column delimiter.
+    // Preserve every byte of quoted/non-simple names via the existing typed
+    // predicate contract rather than silently splitting them into two fields.
+    std::string quoted = "\"";
+    for (const char ch : name) {
+        if (ch == '"') quoted += '"';
+        quoted += ch;
+    }
+    quoted += '"';
+    conditions.push_back("typedexpr " + quoted + " " + sqlOperator +
+                         (value.empty() ? "" : " " + value));
+}
+
 bool appendCondition(const Expr* expr, std::vector<std::string>& conditions) {
     if (!expr) return true;
     if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expr)) {
@@ -1050,7 +1079,7 @@ bool appendCondition(const Expr* expr, std::vector<std::string>& conditions) {
             return false;
         }
         if (lower(literal->value) == "null") return false;
-        conditions.push_back(op + identifier(column->column) + " " + literal->value);
+        appendColumnCondition(*column, op, op, literal->value, conditions);
         return true;
     }
     if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expr)) {
@@ -1058,11 +1087,11 @@ bool appendCondition(const Expr* expr, std::vector<std::string>& conditions) {
         if (!column || !column->schema.empty() || !column->table.empty()) return false;
         const std::string op = lower(unary->op);
         if (op == "is null") {
-            conditions.push_back("isnull" + identifier(column->column));
+            appendColumnCondition(*column, op, "isnull", "", conditions);
             return true;
         }
         if (op == "is not null") {
-            conditions.push_back("isnotnull" + identifier(column->column));
+            appendColumnCondition(*column, op, "isnotnull", "", conditions);
             return true;
         }
     }
