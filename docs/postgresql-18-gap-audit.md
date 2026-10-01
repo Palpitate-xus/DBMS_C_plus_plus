@@ -7,6 +7,8 @@
 
 > 2026-09-08 续做：总清单尚未完成。最新逐项状态见 [gap-progress.json](gap-progress.json)，执行顺序见 [总清单执行计划](full-gap-execution-plan.md)。原审计条目须按当前代码重新核实；局部 bug 修复不等于整个功能族完成。
 
+2026-10-01 第913项 source `8e985f7b`，D合并 `aba1ab67`：没有显式block的AND CHAIN及Extended Execute／Flush隐式block均须25P01；正常和logical failed block分别保留合法CHAIN语义。AST解析完整chain／no-chain选项、WORK／TRANSACTION／END／ABORT及注释分割，ending handler拒绝非ending AST；ROLLBACK WORK／TRANSACTION TO用结构性token分派到USER savepoint，Simple／Extended失败保存点恢复后保留之前write和T状态，不再误作整段rollback。failed COMMIT／END改写前解析完整命令，非法suffix保持42601／E／25P02，不丢尾部误启动新chain。旧915 idle CHAIN误成功及13中间版failed-invalid-ending误成功真实exit1保留，真实PG18.6最终同一强oracle全部exit0。AST／Session layout有新增字段，本worktree独立真实全source production构建后按实际修改main／parser／Network增量builder重编，最终统一自有headers／对象，无借用旧ABI缓存；最终10 C++、专项＋8wire邻居／完整协议及9不同actual全部exit0，原失败未放宽。应431 C++／160E2E／429actual；根／A仍冻结2d2db1d0，根正式production exit0，A429 C++已通过、158E2E继续，427全差分尚未启动，未混入917／913。918 CHAIN-origin top-abort READ ONLY baseline已真实PG核实Simple／Extended及SET两方向、正常结束、plain结束重置；旧13仍误接受INSERT，918隔离修复与全自有重编进行中，未宣告完成。总账273仍24 complete／138 partial／96 unverified／15 deferred_by_user；完整事务／协议、907temp SERIAL及其余总清单仍未完成，不push，Actions禁用。
+
 ## 1. 结论
 
 这个项目已经不是“玩具 SQL 解析器”：它有约 9.2 万行 C/C++ 核心代码、8 KiB 页式堆、Buffer Pool、FSM/VM、TOAST、WAL、CLOG、MVCC、锁管理器、B+Tree/Hash/GIN/BRIN/GiST/SP-GiST/Bloom 风格索引、Volcano 执行器、PostgreSQL v3 协议子集、SCRAM、PITR 子集，以及 158 个 C++ 测试文件和 7 个 Python 协议/E2E 测试文件。当前源码可成功编译。
