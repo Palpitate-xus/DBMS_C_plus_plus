@@ -88,7 +88,7 @@ int main() {
     const dbms::DBStatus missingReference = g_engine.insert(
         database, "child", {{"id", "2"}, {"parent_code", "7"}});
     assert(validReference == dbms::DBStatus::OK);
-    assert(missingReference == dbms::DBStatus::INVALID_VALUE);
+    assert(missingReference == dbms::DBStatus::FOREIGN_KEY_VIOLATION);
 
     // Referential actions must compare the declared UNIQUE target (code),
     // not the unrelated primary key (id).

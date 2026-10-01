@@ -64,7 +64,7 @@ int main() {
            dbms::DBStatus::OK);
     assert(g_engine.insert(database, "child",
                            {{"id", "4"}, {"parent_code", "77"}}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::FOREIGN_KEY_VIOLATION);
 
     dbms::TableSchema invalidChild = keyedTable("invalid_child");
     invalidChild.append(dbms::makeIntColumn("parent_value", false, 4, false));
@@ -107,7 +107,7 @@ int main() {
            dbms::DBStatus::OK);
     assert(g_engine.insert(database, "default_columns_child",
                            {{"id", "2"}, {"parent_id", "99"}}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::FOREIGN_KEY_VIOLATION);
 
     dbms::TableSchema node = keyedTable("node");
     node.append(dbms::makeIntColumn("parent_id", true, 4, false));

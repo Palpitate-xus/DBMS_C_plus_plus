@@ -112,7 +112,7 @@ int main() {
            dbms::DBStatus::OK);
     assert(g_engine.insert(database, "implicit_target",
                            {{"id", "2"}, {"parent_id", "999"}}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::FOREIGN_KEY_VIOLATION);
     assert(g_engine.insert(database, "unique_target",
                            {{"id", "1"}, {"parent_code", "10"}}) ==
            dbms::DBStatus::OK);

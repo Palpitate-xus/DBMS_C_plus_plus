@@ -374,7 +374,7 @@ static void test_set_constraints_immediate() {
     assert(g_engine.setConstraintMode({"all"}, false) == DBStatus::OK);
     // FK check is immediate again: missing parent must fail the insert.
     assert(g_engine.insert(db, "child", {{"id", "50"}, {"pid", "500"}})
-               == DBStatus::INVALID_VALUE);
+               == DBStatus::FOREIGN_KEY_VIOLATION);
     assert(g_engine.rollbackTransaction() == DBStatus::OK);
     std::cout << "[DEFER] SET CONSTRAINTS ALL IMMEDIATE restores checks OK" << std::endl;
 }

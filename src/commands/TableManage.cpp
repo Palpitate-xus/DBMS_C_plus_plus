@@ -23243,7 +23243,7 @@ DBStatus StorageEngine::insertInternal(
             if (!refIdx->search(
                     refTbl.buildPKValue(referencedKeyValues), dummy)) {
                 lockManager_.unlock(tablename);
-                return DBStatus::INVALID_VALUE;
+                return DBStatus::FOREIGN_KEY_VIOLATION;
             }
         } else {
             // Non-PK and composite references must compare the declared
@@ -23273,7 +23273,7 @@ DBStatus StorageEngine::insertInternal(
             }
             if (!found) {
                 lockManager_.unlock(tablename);
-                return DBStatus::INVALID_VALUE;  // referenced key not found
+                return DBStatus::FOREIGN_KEY_VIOLATION;
             }
         }
     }

@@ -337,7 +337,7 @@ void createRenameFixture(StorageEngine& engine) {
     assert(engine.insert(
                kRenameDatabase, "child",
                {{"id", "11"}, {"parent_id", "999"}}) ==
-           DBStatus::INVALID_VALUE);
+           DBStatus::FOREIGN_KEY_VIOLATION);
 
     assert(engine.remove(
                kRenameDatabase, "renamed_parent", {"=id 1"}) ==

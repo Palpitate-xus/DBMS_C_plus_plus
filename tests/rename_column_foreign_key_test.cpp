@@ -107,7 +107,7 @@ int main() {
            std::vector<std::string>{"parent_key"});
     assert(g_engine.insert(database, "local_child",
                            {{"id", "11"}, {"parent_key", "999"}}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::FOREIGN_KEY_VIOLATION);
     assert(g_engine.insert(database, "local_child",
                            {{"id", "12"}, {"parent_key", "1"}}) ==
            dbms::DBStatus::OK);
@@ -184,7 +184,7 @@ int main() {
     assert(g_engine.insert(database, "node",
                            {{"node_id", "3"},
                             {"parent_node_id", "999"}}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::FOREIGN_KEY_VIOLATION);
     assert(g_engine.update(database, "node", {{"node_id", "4"}},
                            {"=node_id 1"}) == dbms::DBStatus::OK);
     const ForeignKeyValue cascadedSelf = findForeignKeyValue(
