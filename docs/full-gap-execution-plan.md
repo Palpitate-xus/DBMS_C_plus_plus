@@ -17,6 +17,8 @@
 
 ## 后续优先队列
 
+2026-10-01：909普通／inline PK／identity的NULL声明冲突独立8acd10cd并合并sourceab14f0e2；7 C++／专项／6邻居／完整协议／专项＋9actual全exit0，旧failed=1保留。真实PG合法table-level PK/NULL不误拒，DEFAULT NULL／SP／earlier write保持。根494生产全重编exit0，隔离903的494正式Table重编＋两锁专项exit0；A494冻结424 C++／151 E2E仍运行，根423actual按计划在该正式E2E后启动，均不含909。含909未来全量425 C++／152E2E／424actual。907temp SERIAL已failed=1未修，完整subtransaction即时资源abort、长PK等其余族继续；24complete／138partial／96unverified／15deferred不变，不push，Actions禁用。
+
 2026-10-01：905 tuple-only FOR UPDATE已独立02f02ee1并合并sourcef5f9ce81，8 C++／强专项／7邻居／完整协议／8actual全exit0；PG三隔离级同并发schedule通过，旧wire55P03／native134保留。TXN-08经具体tuple lock证据unverified→partial，非完整MultiXact/EPQ族；总账24complete／138partial／96unverified／15deferred。根77正式421/421实际差分exit0；A77正式421/421 C++、146/148 E2E、exit1（原15s协议与30swindow超时保留，同binary按原默认单独两项再跑均exit0，不改写失败）。下一轮同源根/A正式production、424 C++／151E2E／423actual；完整差分在正式E2E后启动。907temp SERIAL旧actual failed=1已复现，完整subtransaction即时资源abort、普通NULL/NOTNULL冲突、长PK及其他族继续；不push，Actions禁用。
 
 2026-10-01：903 用户 SP 的 DML row-lock error 恢复、904 NULL self INSERT SELECT 集成回归、906 SERIAL 显式 NULL 冲突分别独立提交并合并 source80ef72db。903真实独立生产全重编／11 C++／7相邻wire／完整协议／8actual及真实PG两连接timeout＋deadlock oracle全部exit0；906重编重链／6 C++／6相邻wire／完整协议／专项＋9相邻actual全部exit0。组合正式增量build已成功，同binary两强专项／两case／两C++／完整协议全部exit0。根77与A77仍冻结421真实差分及421 C++／148E2E，尚未闭合；后续最新组合全量为423 C++／150E2E／423actual。优先905不同row INSERT被锁（PG三隔离级schedule通过、旧组合wire55P03已复现，正移除错误next-key阻塞）、907temp SERIAL、完整subtransaction-error即时锁与通知等恢复、普通NULL／NOT NULL冲突、长PK family及其余273条验收。状态24complete／137partial／97unverified／15deferred不变；不push、Actions禁用。
