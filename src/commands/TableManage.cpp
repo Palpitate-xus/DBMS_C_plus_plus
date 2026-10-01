@@ -20862,6 +20862,19 @@ StorageEngine::PredicateTruth StorageEngine::compareValues(
 // ========================================================================
 // Helper: evaluate a single condition against a row buffer (page-based)
 // ========================================================================
+static std::string decodeSqlLiteral(std::string value) {
+    if (value.size() < 2 || value.front() != '\'' || value.back() != '\'')
+        return value;
+    std::string decoded;
+    decoded.reserve(value.size() - 2);
+    for (size_t i = 1; i + 1 < value.size(); ++i) {
+        decoded.push_back(value[i]);
+        if (value[i] == '\'' && i + 2 < value.size() && value[i + 1] == '\'')
+            ++i;
+    }
+    return decoded;
+}
+
 static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                                     const std::string& rowBuffer,
                                     const TableSchema& tbl,
@@ -20891,6 +20904,42 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
                                         const std::string& rowBuffer, const TableSchema& tbl) {
     if (cond.colName == "__true__") return true;
     if (cond.colName == "__false__") return false;
+
+    if (cond.op.rfind("typedrhs ", 0) == 0) {
+        const Column* column = nullptr;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].dataName == cond.colName) {
+                column = &tbl.cols[i];
+                break;
+            }
+        }
+        const bool numericColumn = column && !column->isArray &&
+            (isIntegerStorageType(column->dataType) ||
+             column->dataType == "numeric" || column->dataType == "decimal" ||
+             column->dataType == "float" || column->dataType == "double");
+        Condition bound = cond;
+        const std::string comparison = cond.op.substr(9);
+        if (column && !numericColumn) {
+            // Compact API values have historically been decoded literals.
+            // Text "1+2" and date "2024-01-01" must not become arithmetic.
+            bound.op = comparison;
+            bound.value = decodeSqlLiteral(cond.value);
+        } else {
+            std::string left = cond.colName;
+            if (column) {
+                left = "\"";
+                for (const char ch : cond.colName) {
+                    if (ch == '"') left += '"';
+                    left += ch;
+                }
+                left += '"';
+            }
+            bound.op = "typedexpr";
+            bound.value = left + " " + comparison + " " + cond.value;
+            bound.colName.clear();
+        }
+        return evalConditionOnRow(bound, rowBuffer, tbl);
+    }
 
     // Compact execution conditions put the operator first
     // ("=UPPER(name) ALICE").  Preserve that representation for index
@@ -23923,22 +23972,6 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
         }
         return decoded;
     };
-    auto decodeSqlLiteral = [](std::string value) {
-        if (value.size() < 2 || value.front() != '\'' ||
-            value.back() != '\'') {
-            return value;
-        }
-        std::string decoded;
-        decoded.reserve(value.size() - 2);
-        for (size_t i = 1; i + 1 < value.size(); ++i) {
-            decoded.push_back(value[i]);
-            if (value[i] == '\'' && i + 2 < value.size() &&
-                value[i + 1] == '\'') {
-                ++i;
-            }
-        }
-        return decoded;
-    };
     // Strip one level of single quotes from every space-separated token:
     // "betweenid 'b' 'c'" -> value "b c" (comparisons must not see quotes).
     auto unquoteTokens = [&](const std::string& v) {
@@ -23954,7 +23987,9 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
         }
         return out;
     };
-    for (const auto& s : cstr) {
+    for (const auto& input : cstr) {
+        const bool apiCondition = input.rfind("apicond ", 0) == 0;
+        const std::string s = apiCondition ? input.substr(8) : input;
         if (s.empty()) continue;
         Condition c;
         if (s.rfind("typedexpr ", 0) == 0) {
@@ -24148,7 +24183,9 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
         c.colName = s.substr(opEnd, sp - opEnd);
         // Computed operands are not physical column names. Preserve the
         // original RHS before literal decoding for typed comparison/coercion.
-        const auto computedOperand = [](const std::string& operand, bool constantOnly) {
+        const auto computedOperand = [](const std::string& operand, bool constantOnly,
+                                        bool* numericArithmetic = nullptr) {
+            if (numericArithmetic) *numericArithmetic = false;
             SQLParser parser;
             const auto parsed = parser.parse("SELECT " + operand);
             const auto* select = parsed.success
@@ -24158,6 +24195,29 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
             if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expression)) {
                 if ((unary->op == "+" || unary->op == "-") &&
                     dynamic_cast<const LiteralExpr*>(unary->operand.get())) return false;
+            }
+            if (numericArithmetic) {
+                std::function<bool(const Expr*)> pureNumeric =
+                    [&](const Expr* node) -> bool {
+                    if (const auto* literal = dynamic_cast<const LiteralExpr*>(node)) {
+                        // The parser preserves untyped number tokens verbatim;
+                        // strings, typed literals and special constants are not numbers.
+                        return literal->typeName.empty() && !literal->value.empty() &&
+                            (std::isdigit(static_cast<unsigned char>(literal->value[0])) ||
+                             literal->value[0] == '.');
+                    }
+                    if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(node)) {
+                        const auto& op = binary->op;
+                        return (op == "+" || op == "-" || op == "*" || op == "/" ||
+                                op == "%" || op == "^") &&
+                            pureNumeric(binary->left.get()) && pureNumeric(binary->right.get());
+                    }
+                    if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(node))
+                        return (unary->op == "+" || unary->op == "-") &&
+                            pureNumeric(unary->operand.get());
+                    return false;
+                };
+                *numericArithmetic = pureNumeric(expression);
             }
             if (constantOnly) {
                 // Compact API RHS tokens also carry decoded text values.
@@ -24195,10 +24255,25 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
                    dynamic_cast<const CastExpr*>(expression);
         };
         const std::string rawRight = s.substr(sp + 1);
-        if (computedOperand(c.colName, false) || computedOperand(rawRight, true)) {
+        if (computedOperand(c.colName, false)) {
             c.value = c.colName + " " + c.op + " " + rawRight;
             c.colName.clear();
             c.op = "typedexpr";
+            conds.push_back(std::move(c));
+            continue;
+        }
+        bool numericArithmetic = false;
+        if (computedOperand(rawRight, true, &numericArithmetic)) {
+            if (apiCondition && numericArithmetic) {
+                // Only legacy read API values need schema-based disambiguation.
+                // SQL expressions and explicit casts retain expression semantics.
+                c.value = rawRight;
+                c.op = "typedrhs " + c.op;
+            } else {
+                c.value = c.colName + " " + c.op + " " + rawRight;
+                c.colName.clear();
+                c.op = "typedexpr";
+            }
             conds.push_back(std::move(c));
             continue;
         }
@@ -29159,7 +29234,12 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
                                                bool skipLocked,
                                                int timezoneOffsetMinutes,
                                                const std::vector<std::string>& distinctOnCols) {
-    return query(dbname, tablename, conditions, selectCols, orderBy,
+    std::vector<std::string> apiConditions;
+    apiConditions.reserve(conditions.size());
+    for (const auto& condition : conditions)
+        apiConditions.push_back(condition.rfind("apicond ", 0) == 0
+            ? condition : "apicond " + condition);
+    return query(dbname, tablename, apiConditions, selectCols, orderBy,
                  forUpdate, noWait, skipLocked, timezoneOffsetMinutes,
                  distinctOnCols, nullptr, nullptr, nullptr);
 }
