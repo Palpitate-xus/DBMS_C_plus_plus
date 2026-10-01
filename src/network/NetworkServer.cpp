@@ -1809,7 +1809,8 @@ std::string commandTagFor(const std::string& sql, const std::vector<std::string>
     if (keyword == "select" || keyword == "show" || keyword == "values" || keyword == "with") {
         return (keyword == "show") ? "SHOW" : "SELECT " + std::to_string(rowCount);
     }
-    if (keyword == "begin" || keyword == "start") return "BEGIN";
+    if (keyword == "begin") return "BEGIN";
+    if (keyword == "start") return "START TRANSACTION";
     if (keyword == "commit" || keyword == "end") return "COMMIT";
     if (keyword == "rollback" || keyword == "abort") return "ROLLBACK";
     if (keyword == "set") return "SET";
@@ -3938,6 +3939,18 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             return transactionAbortedResult();
         }
         const bool wasInTransaction = g_engine.inTransaction();
+        bool repeatedTransactionStart = false;
+        if (wasInTransaction && !extendedImplicitTransaction &&
+            (firstSqlKeyword(sql) == "begin" || startsWithSqlPhrase(sql, "start transaction"))) {
+            const size_t offset = sqlCommandOffset(sql);
+            SQLParser parser;
+            auto parsed = parser.parse(offset == std::string::npos ? sql : sql.substr(offset));
+            const auto* transaction = parsed.success
+                ? dynamic_cast<const TransactionStmt*>(parsed.stmt.get()) : nullptr;
+            repeatedTransactionStart = transaction &&
+                (transaction->kind == TransactionStmt::Kind::Begin ||
+                 transaction->kind == TransactionStmt::Kind::Start);
+        }
         if (isTransactionRecoveryCommand(sql)) {
             SQLParser parser;
             auto parsed = parser.parse(sql);
@@ -3969,6 +3982,12 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             }
         }
         QueryResult result = executeProtocolQuery(effectiveSql, *execSession);
+        if (repeatedTransactionStart) {
+            // This diagnostic derives from validated statement/block state,
+            // not captured output, and precedes a SET-option error as in PG.
+            result.notices.push_back(QueryNotice{
+                "WARNING", "25001", "there is already a transaction in progress"});
+        }
         if (!sessionMode && rented) {
             session = rented->session;      // carry back GUC/DB changes
             const bool statementEndsTran =
