@@ -4,6 +4,16 @@
 
 > 当前用户要求已扩展为总差距清单的全部问题。总任务仍未完成，按 [总清单执行计划](full-gap-execution-plan.md) 继续；下文“收尾验收”只表示上一批局部修复的历史验收。
 
+2026-10-01 第 903、904、906 项：分别 source commit `f63262a1`、`98a87187`、`6fe586d6`，隔离 D 已合并至 `80ef72db`。根与 A 仍冻结 `77f8f2f4`；其正式 production 已 exit 0，421 真实差分与 421 C++／148 E2E 尚未闭合，不能用旧 416 全通过代替最新验收。
+
+903：旧 902 与根 77 的锁超时都把事务物理整体回滚，`ROLLBACK TO SAVEPOINT` 因而 XX000，先前工作丢失；原失败日志保留。内部 statement savepoint 增加结构性标记，不能按名称前缀猜测用户保存点；内部名称遇冲突改名并回传给调用者。UPDATE／DELETE row-lock timeout/deadlock 在存在用户保存点时由内部语句边界撤销失败语句，不再先删掉整个事务；无用户保存点仍整体 abort 释放锁，原 deadlock survivor 测试保持。SavepointState 的内存元素布局变化，本项在独立目录真实全量重编所有生产单元，没有混用旧 header 对象；正式 build、11 C++、强专项／7 邻居／完整协议、8 不同实际 PG case 全 exit 0。同一强专项另以真实 PG18.6 两连接验证 4 次 timeout 与 2 次 deadlock：55P03／40P01→25P02／E→ROLLBACK TO／T，before-SP 写入保留、after-SP 写入撤销、内部样式用户名称合法、survivor 在恢复后继续。第一次 fixture 把 earlier INSERT 写进被另一连接锁定行所在表，先遇独立的不同 row INSERT 55P03（905 待核实），原日志未当作保存点证据；改用独立 earlier-work 表后才真实复现 SP 丢失。第一轮邻居命令拼错 case stem 被存在性 guard 拒绝 exit 1；第二轮八个实际文件全 exit 0。完整 PostgreSQL subtransaction-error 即时锁释放、portal／notification／advisory 与其余 TXN-05 状态仍待核实，不据此判整个事务族完成。
+
+904：895 与 899 合并后，原普通表 NULL self-FK INSERT SELECT 组合已用根 77 正式 binary 实际 PG18.6 `cases=1 failed=0` 验证，六行原强 fixture 原样独立提交；另在 903 正式 binary 的邻居差分通过。是跨修复集成回归，不是另造生产修复，也不把 NULL／FK 族整体标完成。
+
+906：六种 SERIAL alias、NULL 与 PRIMARY KEY／NOT NULL 的两种顺序、ALTER ADD COLUMN 的旧实际差分全把 PG 42601 错当成功；原 `cases=1 failed=1` 保存。CREATE／ALTER parser 在现有 constraints vector 保留显式 NULL，DDL 转换拒绝 SERIAL 的隐式 NOT NULL 冲突，DEFAULT NULL 不误判为声明；无新 header、内存或 disk layout。6 C++、强 wire／6 邻居／完整协议、强 actual 与另外 9 个不同 PG18.6 case 全 exit 0；显式事务失败 E／25P02、SP 恢复先前写入、无残留表／序列、普通 nullable/default NULL 与合法 SERIAL NOT NULL 保持。独立 parser／Ddl CPP 重编＋根 77 正式其余对象重链，不称冷构建。Temporary SERIAL 的 named sequence／生命周期（907）、普通类型的 NULL／NOT NULL 冲突、完整 sequence/catalog 并发 WAL 仍待处理。
+
+903 隔离目录保留原正式 binary `build/dbms_savepoint_formal_903`，快进合并 source 后正式增量脚本重编 parser／Ddl 并成功，组合源 `80ef72db`，不是手工改签名。同一组合正式 binary 的两强专项／两 case／两 C++／完整协议已全部 exit 0；后续全量应是 423 C++／150 E2E／423 实际差分。总账仍 273：24 complete、137 partial、97 unverified、15 deferred_by_user；未 push，Actions 禁用。
+
 2026-10-01 第 895、897–902 项：各项独立 source commit 见下表。旧冻结生产源码 `9ed86eef` 的真实 PostgreSQL 18.6 全量差分 `416/416 failed=0`、exit 0；同 payload 的 A `5885facd` 正式完整脚本却 exit 1：416/417 C++、141/143 E2E 通过。原日志 `/tmp/dbms-tests-self-fk-quoted-892-896.log` 保留。旧 SERIAL 内部标记断言由 901 根据真实 PG 加强；DML lock timeout/deadlock 后 SELECT 没有 25P02 的实质回归由 902 独立修复，不把这轮失败包装为成功。
 
 895 保留 UNIQUE 前行、PK 后行、composite 前行的原实际失败和旧 C++ 134；把 immediate INSERT self-FK 事件留到实际 SQL statement 边界、command ID 前进之后核验，不在 REPLACE 内部 advance 提前检查。PK 快路径使用 checked index、可见 heap recheck 和完整 canonical key 比较；不同 CHAR 宽度、长 PK 假 prefix 命中测试通过。新增非 virtual 方法不加 StorageEngine 字段、不改变磁盘。独立正式 production build exit 0；最终 13 C++、专项／7 相邻／完整协议、9 不同实际 case 全 exit 0；同一正式二进制扩充专项、35-line actual case 和完整协议亦 exit 0。不声称完整 RI actions、长 PK 存储或并发约束族完成。
@@ -964,6 +974,9 @@
 | 900 | P0-02 / PROTO-01 / PROTO-02 / CONS-02 / P0-16 | Simple deferred autocommit failure 丢已产生的 RETURNING；结构化错误阶段、rows 后 error | 898 binary 仍 actual/wire failed=1；7 C++、专项／6 邻居／完整协议、9 actual exit 0；primary PG packet 校准，不伪发 durable tag | `31c3bebc` |
 | 901 | SQL-01 / CONS-02 / P0-16 | SERIAL 路由测试仍要求旧 anonymous counter 标记；验证 owned sequence/default/非 identity/真实生成值 | 原正式失败保留；真实 PG metadata/id/currval oracle，4 C++ exit 0；只加强测试，不改生产实现 | `485cd0c8` |
 | 902 | P0-02 / PROTO-01 / TXN-05 / P0-16 | 普通 DML 内部 rollback 后 wire 误清 failed；限定 transaction-ending error 可回 I | 原两条正式 E2E 失败保留；7 C++、两条锁专项／COMMIT/PREPARE／6 邻居／完整协议 exit 0；primary PG 两连接 schedule 通过；SP 内核保真仍待核实 | `638b2dc3` |
+| 903 | P0-01 / P0-04 / TXN-05 / P0-16 | row-lock failure 整体 abort 销毁用户 SP／earlier writes；结构性区分 internal SP，保留 user recovery | 旧根77与902 wire失败；独立真实全量 production、11 C++、专项／7邻居／完整协议、8实际case exit0；同强PG两连接4timeout＋2deadlock通过；其余subtransaction状态仍partial | `f63262a1` |
+| 904 | P0-01 / P0-02 / SQL-12 / QRY-10 / CONS-02 / P0-16 | 原 NULL self INSERT SELECT 跨895／899组合强回归 | 根77正式binary及903正式binary实际PG case均failed=0，原六行fixture不减弱；仅独立test commit | `98a87187` |
+| 906 | P0-01 / P0-04 / SQL-01 / SQL-11 / CAT-15 / TXN-05 / P0-16 | SERIAL显式NULL冲突被静默接受；CREATE／ALTER AST保留声明，DDL42601拒绝 | 旧actual failed=1；6C++、专项／6邻居／完整协议、专项＋9不同actual全部exit0；六alias、顺序、SP保真、no residual、普通NULL不误伤；temp SERIAL907仍待做 | `6fe586d6` |
 
 2026-10-01 第 882 项验收与参考配置复核：basic multi-target DROP 已独立提交 2e8bcd78；9 个 C++、专项／8 个相邻／完整协议、expanded 专项与 8 个不同相邻实际 case 全退出码 0，并用正确 PGREF_DATABASE=en_US clone 额外重跑上述 9 个 case 全 failed=0。scalar、temporary mappings 与显式 owned sequence 的表数据、currval、下一 counter 都在 late failure／SAVEPOINT／ROLLBACK 后保持；旧保守 rejection 测试依据真实 PG 支持更新为原子性检查，首次 134 保留。SERIAL 标准隐式序列名不可访问（发生在 DROP 前）独立列 885、actual failed=1；组内 FK 的合法 parent-first list 仍 2BP01，884 在正确 en_US clone 再 failed=1，正在独立编译，均未记完成。根冻结 68c29b73 正式 C++ 已 402/402 通过、129 E2E 仍运行。该源码首次实际 402 差分 exit 1、failed=14，主要默认 collation／money locale：本轮命令误写 PGREF_DB（工具真正读取 PGREF_DATABASE），实际连到 postgres C.UTF-8／C money，而非原 pgdiff_en_us en_US.utf8／en_US money；psql 已核实两个数据库及 settings，原日志保留，不称代码 regression 已确认。已用正确 PGREF_DATABASE=pgdiff_en_us 重跑同一冻结正式二进制 402 差分，尚未闭合。此前本轮局部差分同一错变量实际连 postgres，不声称使用了隔离 clone；其具体 case 结果仍是真实 PG18.6，正确库的补跑结果单独列出。仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user；未 push，Actions 禁用。
 

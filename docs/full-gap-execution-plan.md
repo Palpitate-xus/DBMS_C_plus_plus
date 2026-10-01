@@ -17,6 +17,8 @@
 
 ## 后续优先队列
 
+2026-10-01：903 用户 SP 的 DML row-lock error 恢复、904 NULL self INSERT SELECT 集成回归、906 SERIAL 显式 NULL 冲突分别独立提交并合并 source80ef72db。903真实独立生产全重编／11 C++／7相邻wire／完整协议／8actual及真实PG两连接timeout＋deadlock oracle全部exit0；906重编重链／6 C++／6相邻wire／完整协议／专项＋9相邻actual全部exit0。组合正式增量build已成功，同binary两强专项／两case／两C++／完整协议全部exit0。根77与A77仍冻结421真实差分及421 C++／148E2E，尚未闭合；后续最新组合全量为423 C++／150E2E／423actual。优先905不同row INSERT被锁（PG三隔离级schedule通过、旧组合wire55P03已复现，正移除错误next-key阻塞）、907temp SERIAL、完整subtransaction-error即时锁与通知等恢复、普通NULL／NOT NULL冲突、长PK family及其余273条验收。状态24complete／137partial／97unverified／15deferred不变；不push、Actions禁用。
+
 2026-10-01：895、897–902 七项分别 source commit、定向／相邻验证后已合并至隔离 D。895 另有独立正式生产构建及同 binary 强专项／完整协议通过；其余为重编重链，不虚称冷构建。旧 9ed86eef 的正确参考库全量 416/416 failed=0 已闭合，但 A5885facd 正式脚本 416/417 C++、141/143 E2E、exit 1，原失败保留；901 加强 SERIAL 序列 oracle，902 修复 ordinary lock error 的 E 状态。最新组合需正式 production、421 C++／148 E2E、421 真实差分；原 NULL self INSERT SELECT 组合、内部全事务 rollback 的 SP 保真、temp SERIAL／NULL、长 PK family 及其余族继续。仍 24 complete、137 partial、97 unverified、15 deferred_by_user；未 push，Actions 禁用。
 
 2026-10-01：893 pending current-row self INSERT与896 quoted constraint AST各自独立source commit；14／8 C++、专项／相邻／完整协议及各9个不同真实PG18.6 case全退出码0。895同一语句另一行的FK visibility、897 quoted space column UPDATE／DELETE谓词均已旧binary实际failed=1，原失败保留，继续单独修复。ea35c0f4的正确参考库411/411 failed=0与45c07633的正式412/412 C++、137/137 E2E均exit0闭合；根5885facd正式production与同源隔离A417 C++／143 E2E新一轮运行，416全量差分待新binary，不把旧轮记作最新完成。总账24 complete、137 partial、97 unverified、15 deferred_by_user，未push，Actions禁用。
