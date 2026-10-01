@@ -4532,6 +4532,9 @@ ParseResult SQLParser::parseBegin(const std::string& sql) {
         r.error = "unsupported transaction option: " + tokens[pos];
         return r;
     }
+    stmt->isolationSpecified = isolationSeen;
+    stmt->readOnlySpecified = readModeSeen;
+    stmt->deferrableSpecified = deferrableSeen;
     r.stmt = std::move(stmt);
     r.success = true;
     return r;
@@ -10593,13 +10596,27 @@ StmtPtr SQLParser::parseAlterLargeObject(const std::vector<std::string>& tokens,
 // ============================================================================
 
 std::string TransactionStmt::toString() const {
+    const auto beginning = [&](std::string command) {
+        if (isolationSpecified) {
+            command += " ISOLATION LEVEL ";
+            switch (isolation) {
+                case IsolationLevel::READ_UNCOMMITTED: command += "READ UNCOMMITTED"; break;
+                case IsolationLevel::READ_COMMITTED: command += "READ COMMITTED"; break;
+                case IsolationLevel::REPEATABLE_READ: command += "REPEATABLE READ"; break;
+                case IsolationLevel::SERIALIZABLE: command += "SERIALIZABLE"; break;
+            }
+        }
+        if (readOnlySpecified) command += readOnly ? " READ ONLY" : " READ WRITE";
+        if (deferrableSpecified) command += deferrable ? " DEFERRABLE" : " NOT DEFERRABLE";
+        return command;
+    };
     const auto ending = [&](const std::string& command) {
         return command + (chainSpecified
             ? (chain ? " AND CHAIN" : " AND NO CHAIN") : "");
     };
     switch (kind) {
-        case Kind::Begin: return "BEGIN";
-        case Kind::Start: return "START TRANSACTION";
+        case Kind::Begin: return beginning("BEGIN");
+        case Kind::Start: return beginning("START TRANSACTION");
         case Kind::Commit: return ending("COMMIT");
         case Kind::Rollback: return ending("ROLLBACK");
         case Kind::Abort: return ending("ABORT");

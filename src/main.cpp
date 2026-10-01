@@ -2658,6 +2658,22 @@ static bool handleBeginTransaction(const string& sql, Session& s) {
         cout << "ERROR: DEFERRABLE transactions are not supported" << endl;
         return true;
     }
+    if (hadTransaction) {
+        // PostgreSQL warns on repeated BEGIN but applies only the options
+        // that were actually supplied, under SET TRANSACTION's rules.
+        // Do not reset locks, savepoints, notifications, or CHAIN origin.
+        if (txn->isolationSpecified) {
+            if (!g_engine.setIsolationLevel(txn->isolation)) {
+                throw dbms::DbError("25001", "transaction isolation must be set before any query");
+            }
+            s.isolationLevel = static_cast<int>(txn->isolation);
+        }
+        if (txn->readOnlySpecified && !g_engine.setReadOnly(txn->readOnly)) {
+            throw dbms::DbError("25001", "transaction read-write mode must be set before any query");
+        }
+        cout << "There is already a transaction in progress" << endl;
+        return false;
+    }
     g_engine.setIsolationLevel(txn->isolation);
     s.isolationLevel = static_cast<int>(txn->isolation);
     auto res = g_engine.beginTransaction(s.currentDB);

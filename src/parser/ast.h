@@ -1087,6 +1087,9 @@ struct TransactionStmt : public Stmt {
     IsolationLevel isolation = IsolationLevel::READ_COMMITTED;
     bool readOnly = false;
     bool deferrable = false;
+    bool isolationSpecified = false;
+    bool readOnlySpecified = false;
+    bool deferrableSpecified = false;
     bool chainSpecified = false;
     bool chain = false;
 
