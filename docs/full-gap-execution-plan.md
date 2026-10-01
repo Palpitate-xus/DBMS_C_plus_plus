@@ -1,5 +1,7 @@
 # 总差距清单执行计划
 
+2026-10-01 第922项 source `232f9d08`，D合并 `7cc1be3c`：BEGIN裸READ COMMITTED／缺LEVEL被误接受，合法comma transaction modes被拒且syntax误报XX000；旧完整921强wire误成功BEGIN／exit1保留。parser要求完整ISOLATION LEVEL，接受空白或合法comma分隔、拒绝leading／double／trailing comma，按PG接受初始block的重复mode；主入口报42601，failed block的非法BEGIN仍优先42601，有效BEGIN保持25P02，不误重启或发warning。真实PG18.6与本项目Simple／Extended、BEGIN／WORK／TRANSACTION／START、comments、合法／非法mode list、READ ONLY写限制、failed USER-SP恢复及rows／tag／Ready均exit0；本worktree全自有正式production build、12 C++、专项、11相邻wire加完整协议、9不同actual亦exit0。原presence和完整协议中的非法shorthand正控制改为完整LEVEL，并保留原输入42601反控制，不移除失败断言。组合应435 C++／165E2E／434actual。根／A仍冻结9f4033f6（source0c9908bb）434／164／433：根真实生产构建exit0，A全脚本仍运行，433同源全差分尚未开始，不混922／923或拿旧427冒充新source。923已核实Parse／Bind等错误未在ErrorResponse前abort导致锁保留、Sync错误T，独立修复已有PG oracle／组合／全自有production通过，正式专项和完整协议正在复验，不在922验收范围。另924真实PG确认已有query后BEGIN SERIALIZABLE再READ COMMITTED、READ ONLY再READ WRITE须在前序非法变更报25001；当前AST最终值折叠误忽略，继续保留有序options，不宣称完整重复mode／GUC族完成。907 TEMP SERIAL、SubXID／portal／snapshot／command-counter／SSI及其余总清单未完成。总账273仍24 complete／138 partial／96 unverified／15 deferred_by_user，不push，Actions仅本地disabled workflow。
+
 当前范围是 `postgresql-18-gap-audit.md` 全部 273 项，不再用局部收尾计划替代总任务。`review-closeout-plan.md` 仅记录上批第 191–196 项修复；它的完成不表示总清单完成。安全 / TDE 专项沿用用户先前的跳过要求，单独计为 deferred，不计完成。不 push，不启用 GitHub Actions。
 
 | 批次 | 工作 | 验收与状态 |
