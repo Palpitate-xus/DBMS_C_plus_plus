@@ -1,0 +1,12 @@
+CREATE TABLE diff_long_default(id INT,value TEXT DEFAULT 'abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz');
+INSERT INTO diff_long_default(id) VALUES(1) RETURNING value;
+ALTER TABLE diff_long_default ALTER COLUMN value SET DEFAULT 'another long literal abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz';
+INSERT INTO diff_long_default(id) VALUES(2) RETURNING value;
+ALTER TABLE diff_long_default RENAME COLUMN value TO renamed;
+INSERT INTO diff_long_default(id) VALUES(3) RETURNING renamed;
+BEGIN;
+ALTER TABLE diff_long_default ALTER COLUMN renamed SET DEFAULT 'temporary long literal abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz';
+ROLLBACK;
+INSERT INTO diff_long_default(id) VALUES(4) RETURNING renamed;
+SELECT id,renamed FROM diff_long_default ORDER BY id;
+DROP TABLE diff_long_default;

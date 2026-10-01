@@ -13617,10 +13617,24 @@ constexpr int32_t SCHEMA_FORMAT_VERSION = 0x44420009;  // "DB" + 64-byte identif
 constexpr int32_t MAX_PERSISTED_COLUMN_SIZE = 65535;
 constexpr uint32_t SCHEMA_ADDITIONAL_CHECK_MAGIC = 0x324B4843;  // "CHK2"
 constexpr uint32_t SCHEMA_IDENTITY_KIND_MAGIC = 0x314E4449;     // "IDN1"
+constexpr uint32_t SCHEMA_LONG_DEFAULT_MAGIC = 0x31544644;      // "DFT1"
 constexpr int32_t MAX_ADDITIONAL_CHECK_CONSTRAINTS = 1024;
 constexpr uint32_t MAX_PERSISTED_CHECK_EXPRESSION = 1024 * 1024;
+constexpr uint32_t MAX_PERSISTED_DEFAULT_EXPRESSION = 1024 * 1024;
 
 void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
+    if (tbl.len > MAX_COLUMNS) {
+        out.setstate(std::ios::failbit);
+        return;
+    }
+    for (size_t i = 0; i < tbl.len; ++i) {
+        const auto& expression = tbl.cols[i].defaultValue;
+        if (expression.size() > MAX_PERSISTED_DEFAULT_EXPRESSION ||
+            expression.find('\0') != std::string::npos) {
+            out.setstate(std::ios::failbit);
+            return;
+        }
+    }
     // Write format version marker
     out.write(reinterpret_cast<const char*>(&SCHEMA_FORMAT_VERSION), 4);
     int32_t len = static_cast<int32_t>(tbl.len);
@@ -13833,6 +13847,23 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     for (size_t columnIndex = 0; columnIndex < tbl.len; ++columnIndex) {
         const char kind = tbl.cols[columnIndex].identityKind;
         out.write(&kind, sizeof(kind));
+    }
+    // Keep the existing fixed-width payload and short-default files intact.
+    // An optional extension carries full SQL expressions that do not fit it.
+    uint16_t longDefaultCount = 0;
+    for (size_t i = 0; i < tbl.len; ++i)
+        if (tbl.cols[i].defaultValue.size() > MAX_COL_NAME_LEN) ++longDefaultCount;
+    if (longDefaultCount != 0) {
+        out.write(reinterpret_cast<const char*>(&SCHEMA_LONG_DEFAULT_MAGIC), sizeof(SCHEMA_LONG_DEFAULT_MAGIC));
+        out.write(reinterpret_cast<const char*>(&longDefaultCount), sizeof(longDefaultCount));
+        for (uint16_t i = 0; i < tbl.len; ++i) {
+            const auto& expression = tbl.cols[i].defaultValue;
+            if (expression.size() <= MAX_COL_NAME_LEN) continue;
+            const uint32_t length = static_cast<uint32_t>(expression.size());
+            out.write(reinterpret_cast<const char*>(&i), sizeof(i));
+            out.write(reinterpret_cast<const char*>(&length), sizeof(length));
+            out.write(expression.data(), length);
+        }
     }
 }
 
@@ -14208,6 +14239,35 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
         if (kind != 0 && !tbl.cols[columnIndex].isAutoIncrement) return {};
         tbl.cols[columnIndex].identityKind = kind;
     }
+    if (in.peek() == std::char_traits<char>::eof()) {
+        if (!in.eof()) return {};
+        in.clear();
+        return tbl;
+    }
+    uint32_t defaultMagic = 0;
+    uint16_t defaultCount = 0;
+    in.read(reinterpret_cast<char*>(&defaultMagic), sizeof(defaultMagic));
+    in.read(reinterpret_cast<char*>(&defaultCount), sizeof(defaultCount));
+    if (!in || defaultMagic != SCHEMA_LONG_DEFAULT_MAGIC ||
+        defaultCount == 0 || defaultCount > tbl.len) return {};
+    std::set<uint16_t> defaultColumns;
+    for (uint16_t i = 0; i < defaultCount; ++i) {
+        uint16_t column = 0;
+        uint32_t length = 0;
+        in.read(reinterpret_cast<char*>(&column), sizeof(column));
+        in.read(reinterpret_cast<char*>(&length), sizeof(length));
+        if (!in || column >= tbl.len || !defaultColumns.insert(column).second ||
+            length <= MAX_COL_NAME_LEN || length > MAX_PERSISTED_DEFAULT_EXPRESSION)
+            return {};
+        std::string expression(length, '\0');
+        in.read(expression.data(), length);
+        if (!in || expression.find('\0') != std::string::npos ||
+            expression.substr(0, MAX_COL_NAME_LEN) != tbl.cols[column].defaultValue)
+            return {};
+        tbl.cols[column].defaultValue = std::move(expression);
+    }
+    if (in.peek() != std::char_traits<char>::eof() || !in.eof()) return {};
+    in.clear();
     return tbl;
 }
 
@@ -16748,7 +16808,7 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
         if (!rewriteExpression(column.defaultValue) ||
             !rewriteExpression(column.checkExpr) ||
             !rewriteExpression(column.generatedExpr) ||
-            column.defaultValue.size() > MAX_COL_NAME_LEN ||
+            column.defaultValue.size() > MAX_PERSISTED_DEFAULT_EXPRESSION ||
             column.checkExpr.size() >
                 std::numeric_limits<uint16_t>::max() ||
             column.generatedExpr.size() >
