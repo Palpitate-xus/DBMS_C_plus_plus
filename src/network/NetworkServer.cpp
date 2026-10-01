@@ -2948,6 +2948,7 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
 
     bool executionError = false;
     bool structuredError = false;
+    bool statementCommitError = false;
     std::string outputText;
     // PG 42883: unknown function in WHERE fails before execution.
     {
@@ -2996,6 +2997,12 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
         dbms::ScopedOutputCapture capture(output);
         try {
             executionError = execute(sql, session);
+        } catch (const dbms::StatementCommitError& e) {
+            executionError = true;
+            structuredError = true;
+            statementCommitError = true;
+            result.sqlState = e.sqlState();
+            result.errorMessage = e.message();
         } catch (const dbms::DbError& e) {
             executionError = true;
             structuredError = true;
@@ -3201,7 +3208,21 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
         } else {
             result.sqlState = "XX000";
         }
-        dbms::recordQueryExecution(sql, elapsedMs, session.currentDB, false);
+        if (statementCommitError && structuredDml.available &&
+            !structuredDml.metadataOnly) {
+            // PostgreSQL already delivered RETURNING before the implicit
+            // commit recheck failed. Keep typed cells/NULLs, suppress the
+            // success tag, and emit the error after these rows.
+            result.resultSet = true;
+            result.columns = structuredDml.columns;
+            result.columnTypes = structuredDml.columnTypes;
+            result.rows = structuredDml.rows;
+            result.nulls = structuredDml.nulls;
+            result.columnDescriptions = describeProtocolColumns(result, sql, session);
+            result.commandTag.clear();
+        }
+        dbms::recordQueryExecution(sql, elapsedMs, session.currentDB, false,
+                                  result.rows.size());
         return result;
     }
 
@@ -3584,12 +3605,7 @@ void sendQueryResult(PostgresProtocol& protocol, const QueryResult& result,
         protocol.sendNoticeResponse(notice.message, notice.severity,
                                     notice.sqlState);
     }
-    if (result.error) {
-        protocol.sendErrorResponse("ERROR", result.sqlState, trimText(result.errorMessage));
-        if (sendReady) protocol.sendReadyForQuery(transactionStatus);
-        return;
-    }
-    if (result.commandTag.empty() && !result.resultSet) {
+    if (!result.error && result.commandTag.empty() && !result.resultSet) {
         protocol.sendEmptyQueryResponse();
         if (sendReady) protocol.sendReadyForQuery(transactionStatus);
         return;
@@ -3610,6 +3626,11 @@ void sendQueryResult(PostgresProtocol& protocol, const QueryResult& result,
                 ? result.nulls[rowIndex] : std::vector<bool>{};
             protocol.sendDataRow(normalized, columns, nulls);
         }
+    }
+    if (result.error) {
+        protocol.sendErrorResponse("ERROR", result.sqlState, trimText(result.errorMessage));
+        if (sendReady) protocol.sendReadyForQuery(transactionStatus);
+        return;
     }
     protocol.sendCommandComplete(result.commandTag);
     if (sendReady) protocol.sendReadyForQuery(transactionStatus);
