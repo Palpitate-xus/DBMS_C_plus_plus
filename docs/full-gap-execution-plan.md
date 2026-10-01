@@ -17,6 +17,8 @@
 
 ## 后续优先队列
 
+2026-10-01 第 871 项验收：AT TIME ZONE 的 Unary root 列名回归已独立提交，13 组协议、timestamptz E2E 五项、完整协议、新和原三组真实 PG18.6 差分全部退出码 0，旧 failed=1 与冻结 5dc053fd 全量 failed=3 保留。根已快进并冻结 eb85bfeb，最新正式全套正在真实编译／运行，设置本次协议 deadline=120 秒，不能称原始 10 秒全套已通过；旧正式二进制已有三个独立原始 10 秒完整协议成功复跑。第 872 项 decimal-zero 预抛异常、arithmetic predicate 漏行及 lazy branch 时机正在逐项复现，计划保持原 RHS 字面值／类型和真实 NULL，并移交完整 typed 求值，不以返回空集替代正确性。仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
+
 2026-10-01 第 870 项验收：显式 operand cast 的 typed division 已独立提交，16 个 C++、14 组协议、完整协议、新真实专项／numeric division 邻居以及 4266728a 的组合再验证均退出码 0。根冻结 5dc053fd 正式 full 已结束：393/393 C++，116/117 E2E，完整协议在 CREATE unicode VARCHAR 一次 10 秒 timeout；同一正式二进制单独 120 秒复跑与三个原始 10 秒连续复跑退出码 0，失败保留，未据此宣称性能或全套已修复。390 组真实 PG18.6 差分 failed=3，全部是 866 引入 AT TIME ZONE Unary op 被命名 ?column? 的回归；已独立列为 871，新专项及原三组差分通过，相邻验收中。隔离 872 又实际复现除以 0.5 被误报零除，以及不走该 guard 时 arithmetic predicate 漏行／lazy COALESCE 被抢先报错，继续修复，总清单仍未完成。仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
 
 2026-09-30 第 869 项验收：numeric division scale 和实际 numeric table arith 已独立提交，15 个 C++、13 组协议、完整协议、真实专项以及 numeric_division 邻居 2/2 failed=0 退出码 0；中间表内近似计算失败保留。与 868 合并为 94d2b04b 后 5 组组合专项和两组真实差分再通过。第 870 项 CAST operand 类型与整数捷径修复已新专项／真实差分通过，正在相邻验收；原 raw :: BIGINT C++ 控制夹具与前端 CAST 形状不一致，已改为实际 lowered operand 并重新确认旧 Numeric 断言退出码 134。根冻结 5dc053fd 正式完整 C++／E2E 和实际 390 组 PG18.6 差分仍运行，不包含 868–870。总账仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
