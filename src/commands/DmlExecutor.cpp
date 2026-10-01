@@ -1497,18 +1497,19 @@ bool isStarProjection(const Expr* expr) {
 }
 
 bool evaluateSourceExpression(const Expr* expr, const RowContext& context,
-                              ExprEvaluator& evaluator, std::string& value) {
+                              ExprEvaluator& evaluator, SqlCell& value) {
     const ExprValue result = evaluator.eval(expr, context);
-    if (result.isUnknown() || result.typeName == "unknown") return false;
     if (result.isNull) {
-        value.clear();
+        value = std::nullopt;
         return true;
     }
-    value = result.value;
+    if (result.isUnknown() || result.typeName == "unknown") return false;
+    std::string evaluated = result.value;
     if (result.typeName == "boolean") {
-        if (value == "t") value = "1";
-        else if (value == "f") value = "0";
+        if (evaluated == "t") evaluated = "1";
+        else if (evaluated == "f") evaluated = "0";
     }
+    value = std::move(evaluated);
     return true;
 }
 
@@ -1517,7 +1518,7 @@ enum class InsertSelectBuildResult { Success, Unsupported, Error };
 InsertSelectBuildResult buildInsertSelectRows(
     const SelectStmt& select, Session& s,
     const std::vector<std::string>& targetColumns,
-    std::vector<std::map<std::string, std::string>>& pendingRows) {
+    std::vector<SqlRow>& pendingRows) {
     if (!select.ctes.empty() || !select.groupBy.empty() ||
         !select.groupByElems.empty() || select.having || !select.orderBy.empty() ||
         select.limit || select.offset || select.withTies || select.fetchFirst ||
@@ -1612,9 +1613,9 @@ InsertSelectBuildResult buildInsertSelectRows(
         if (hasSource) {
             for (size_t i = 0; i < sourceTable.len; ++i) {
                 const auto& column = sourceTable.cols[i];
+                bool isNull = false;
                 const std::string value = g_engine.extractColumnValue(
-                    row, sourceTable, i, s.currentDB, true);
-                const bool isNull = value.empty() && column.isNull;
+                    row, sourceTable, i, s.currentDB, true, &isNull);
                 ExprValue expressionValue(column.dataType, value, isNull);
                 context.set(column.dataName, expressionValue);
                 if (!sourceAlias.empty()) {
@@ -1639,12 +1640,15 @@ InsertSelectBuildResult buildInsertSelectRows(
             if (!predicate.asBool()) return;
         }
 
-        std::map<std::string, std::string> values;
+        SqlRow values;
         for (size_t i = 0; i < projections.size(); ++i) {
-            std::string value;
+            SqlCell value;
             if (projections[i].expr == nullptr) {
-                value = g_engine.extractColumnValue(
-                    row, sourceTable, projections[i].sourceIndex, s.currentDB, true);
+                bool isNull = false;
+                std::string extracted = g_engine.extractColumnValue(
+                    row, sourceTable, projections[i].sourceIndex, s.currentDB, true,
+                    &isNull);
+                value = isNull ? SqlCell{} : SqlCell{std::move(extracted)};
             } else if (!evaluateSourceExpression(projections[i].expr, context,
                                                  evaluator, value)) {
                 evaluationFailed = true;
@@ -1734,6 +1738,16 @@ std::vector<ReturningRowImage> insertedReturningImages(
     for (const auto& row : rows) {
         images.push_back(
             {{}, returningSqlRow(row), ReturningProjection::Source::New, {}});
+    }
+    return images;
+}
+
+std::vector<ReturningRowImage> insertedReturningImages(
+    const std::vector<SqlRow>& rows) {
+    std::vector<ReturningRowImage> images;
+    images.reserve(rows.size());
+    for (const auto& row : rows) {
+        images.push_back({{}, row, ReturningProjection::Source::New, {}});
     }
     return images;
 }
@@ -2823,7 +2837,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
             fallback = true;
             return false;
         }
-        std::vector<std::map<std::string, std::string>> pendingRows;
+        std::vector<SqlRow> pendingRows;
         const InsertSelectBuildResult buildResult = buildInsertSelectRows(
             *select, s, columns, pendingRows);
         if (buildResult == InsertSelectBuildResult::Unsupported) {
@@ -2846,10 +2860,11 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
             return true;
         }
         int inserted = 0;
+        std::vector<SqlRow> selectInsertedRows;
         for (const auto& values : pendingRows) {
-            const DBStatus status = g_engine.insert(
+            const DBStatus status = g_engine.insertRow(
                 s.currentDB, resolvedTable, values,
-                stmt.returning.empty() ? nullptr : &insertedRows,
+                stmt.returning.empty() ? nullptr : &selectInsertedRows,
                 identityOverride);
             if (status == DBStatus::DUPLICATE_KEY) {
                 if (ignoreDuplicate) continue;
@@ -2872,7 +2887,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
         if (!stmt.returning.empty()) {
             if (!publishReturning(
                     returningProjections, table, insertReturningBinding,
-                    s.currentDB, insertedReturningImages(insertedRows),
+                    s.currentDB, insertedReturningImages(selectInsertedRows),
                     "INSERT")) return true;
             printReturningRows(g_lastDmlResult);
         }
