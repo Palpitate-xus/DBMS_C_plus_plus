@@ -151,6 +151,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/truncate_command_tag_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/compact_rhs_sql_boundary_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/update_computed_predicate_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/drop_table_list_syntax_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cli_error_recovery_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/no_fake_compat_objects_test.py)
     DBMS_E2E_TESTS+=(tests/compat_fallback_registry_test.py)

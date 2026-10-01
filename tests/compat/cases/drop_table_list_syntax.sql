@@ -1,0 +1,14 @@
+CREATE TABLE diff_drop_list_a(id INT);
+CREATE TABLE diff_drop_list_b(id INT);
+INSERT INTO diff_drop_list_a VALUES(1);
+INSERT INTO diff_drop_list_b VALUES(2);
+DROP TABLE diff_drop_list_a diff_drop_list_b;
+SELECT id FROM diff_drop_list_a;
+SELECT id FROM diff_drop_list_b;
+DROP TABLE diff_drop_list_a,;
+SELECT id FROM diff_drop_list_a;
+DROP TABLE diff_drop_list_a CASCADE diff_drop_list_b;
+SELECT id FROM diff_drop_list_a;
+SELECT id FROM diff_drop_list_b;
+DROP TABLE diff_drop_list_a;
+DROP TABLE diff_drop_list_b;

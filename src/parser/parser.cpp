@@ -7949,25 +7949,42 @@ StmtPtr SQLParser::parseCreateTextSearchTemplate(const std::vector<std::string>&
 StmtPtr SQLParser::parseDropTable(const std::vector<std::string>& tokens, size_t& pos) {
     auto stmt = std::make_unique<DropStmt>(SqlCommand::DropTable);
     stmt->objectType = "TABLE";
-    while (pos < tokens.size() && tokens[pos] != ";") {
-        const std::string word = toLower(tokens[pos]);
-        if (word == "cascade") {
-            stmt->cascade = true; ++pos; continue;
-        }
-        if (word == "restrict" || tokens[pos] == ",") {
-            ++pos; continue;
-        }
-        if (word == "if" && pos + 1 < tokens.size() &&
-            toLower(tokens[pos + 1]) == "exists") {
-            stmt->ifExists = true; pos += 2; continue;
-        }
+    if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "if" &&
+        toLower(tokens[pos + 1]) == "exists") {
+        stmt->ifExists = true;
+        pos += 2;
+    }
+    const auto identifierToken = [](const std::string& token) {
+        if (token.size() >= 2 && token.front() == '"' && token.back() == '"')
+            return true;
+        if (token.empty()) return false;
+        const auto first = static_cast<unsigned char>(token.front());
+        if (!(std::isalpha(first) || first == '_' || first >= 128)) return false;
+        for (const unsigned char ch : token)
+            if (!(std::isalnum(ch) || ch == '_' || ch == '$' || ch >= 128))
+                return false;
+        return true;
+    };
+    while (true) {
+        if (pos >= tokens.size() || !identifierToken(tokens[pos])) return nullptr;
         std::string name = tokens[pos++];
-        if (pos < tokens.size() && tokens[pos] == ".") {
+        while (pos < tokens.size() && tokens[pos] == ".") {
             ++pos;
-            if (pos >= tokens.size() || tokens[pos] == ";") return nullptr;
+            if (pos >= tokens.size() || !identifierToken(tokens[pos])) return nullptr;
             name += "." + tokens[pos++];
         }
         stmt->objectNames.push_back(std::move(name));
+        if (pos >= tokens.size() || tokens[pos] == ";") break;
+        if (tokens[pos] == ",") {
+            ++pos;
+            continue;
+        }
+        const std::string behavior = toLower(tokens[pos]);
+        if (behavior != "cascade" && behavior != "restrict") return nullptr;
+        stmt->cascade = behavior == "cascade";
+        ++pos;
+        if (pos < tokens.size() && tokens[pos] != ";") return nullptr;
+        break;
     }
     return stmt;
 }
