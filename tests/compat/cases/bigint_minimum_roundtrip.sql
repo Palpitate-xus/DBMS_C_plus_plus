@@ -1,0 +1,16 @@
+CREATE TABLE diff_bigint_minimum(id INT PRIMARY KEY,v BIGINT);
+INSERT INTO diff_bigint_minimum VALUES(1,-9223372036854775808);
+INSERT INTO diff_bigint_minimum VALUES(2,9223372036854775807),(3,NULL);
+SELECT id,v FROM diff_bigint_minimum ORDER BY id;
+SELECT id FROM diff_bigint_minimum WHERE v=-9223372036854775808;
+UPDATE diff_bigint_minimum SET v=-9223372036854775808 WHERE id=2;
+SELECT id,v FROM diff_bigint_minimum ORDER BY id;
+SELECT id FROM diff_bigint_minimum WHERE v IS NULL;
+UPDATE diff_bigint_minimum SET v=-9223372036854775808 WHERE v=-9223372036854775808 RETURNING id,v;
+UPDATE diff_bigint_minimum SET v=-9223372036854775808 WHERE id=3 RETURNING id,v;
+SELECT id FROM diff_bigint_minimum WHERE v IS NULL;
+UPDATE diff_bigint_minimum SET v=NULL WHERE id=3 RETURNING id,v;
+SELECT id FROM diff_bigint_minimum WHERE v IS NULL;
+DELETE FROM diff_bigint_minimum WHERE v=-9223372036854775808 RETURNING id,v;
+SELECT id,v FROM diff_bigint_minimum ORDER BY id;
+DROP TABLE diff_bigint_minimum;

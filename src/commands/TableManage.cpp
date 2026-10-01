@@ -738,14 +738,29 @@ static bool isIntegerStorageType(const std::string& type) {
            type == "bigint unsigned";
 }
 
+// Checked parsing must not use a valid datum (INT64_MIN) as its failure
+// sentinel. The legacy parseInt API remains for compatibility callers.
+static std::optional<int64_t> parseStoredInteger(const std::string& value) {
+    if (value.empty()) return std::nullopt;
+    const char* begin = value.data();
+    const char* end = begin + value.size();
+    if (*begin == '+') {
+        if (++begin == end) return std::nullopt;
+    }
+    int64_t result = 0;
+    const auto parsed = std::from_chars(begin, end, result, 10);
+    if (parsed.ec != std::errc{} || parsed.ptr != end) return std::nullopt;
+    return result;
+}
+
 static std::string canonicalColumnKeyValue(const Column& column,
                                            const std::string& value) {
     if (value.empty()) return {};
     if (!column.isArray && isIntegerStorageType(column.dataType)) {
         // Heap encoding parses the integer datum, so index writes and unique
         // checks must not preserve alternate lexical spellings of that datum.
-        const int64_t integer = StorageEngine::parseInt(value);
-        if (integer != INF) return std::to_string(integer);
+        const auto integer = parseStoredInteger(value);
+        if (integer) return std::to_string(*integer);
         return value;
     }
     if (column.dataType == "char" || column.dataType == "character") {
@@ -9326,6 +9341,36 @@ private:
     std::string oldDb_;
 };
 
+// Materialized OLD/NEW images have no live RID (DELETE can already have
+// removed the tuple). Keep their own v2 NULL bitmap attached while decoding,
+// rather than reusing another scan row's bitmap or the legacy int sentinel.
+class BufferedNullRowBinding {
+public:
+    BufferedNullRowBinding(const TableSchema& schema,
+                           const std::vector<bool>& nulls)
+        : oldSchema_(g_bufferedConditionSchema),
+          oldNulls_(g_bufferedConditionNulls),
+          active_(usesHeapTupleHeader(schema.formatVersion) &&
+                  nulls.size() == schema.len) {
+        if (active_) {
+            g_bufferedConditionSchema = &schema;
+            g_bufferedConditionNulls = &nulls;
+        }
+    }
+    ~BufferedNullRowBinding() {
+        if (active_) {
+            g_bufferedConditionSchema = oldSchema_;
+            g_bufferedConditionNulls = oldNulls_;
+        }
+    }
+    BufferedNullRowBinding(const BufferedNullRowBinding&) = delete;
+    BufferedNullRowBinding& operator=(const BufferedNullRowBinding&) = delete;
+private:
+    const TableSchema* oldSchema_;
+    const std::vector<bool>* oldNulls_;
+    bool active_;
+};
+
 
 std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer,
                                                      const TableSchema& tbl, size_t colIdx) {
@@ -9334,15 +9379,26 @@ std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer
 
     // Stored-NULL visibility (see NullRowBinding above): when a scan
     // loop bound the current row, physically-NULL columns read as "".
+    bool storedNullKnown = false;
     if (g_bufferedConditionSchema == &tbl && g_bufferedConditionNulls) {
-        if (colIdx < g_bufferedConditionNulls->size() &&
-            (*g_bufferedConditionNulls)[colIdx]) return "";
+        if (colIdx < g_bufferedConditionNulls->size()) {
+            storedNullKnown = true;
+            if ((*g_bufferedConditionNulls)[colIdx]) return "";
+        }
     } else if (g_nullRowEngine && g_nullRowRid >= 0 && colIdx < g_nullRowNatts &&
         tbl.tablename == g_nullRowTable) {
         if (g_nullRowEngine->isColumnNullByRid(g_nullRowDb, tbl.tablename,
                                                g_nullRowRid, colIdx)) {
             return "";
         }
+        storedNullKnown = usesHeapTupleHeader(tbl.formatVersion);
+    } else if (g_condNullEngine && g_condNullRid >= 0 &&
+               tbl.tablename == g_condNullTable) {
+        if (g_condNullEngine->isColumnNullByRid(
+                g_condNullDb, tbl.tablename, g_condNullRid, colIdx)) {
+            return "";
+        }
+        storedNullKnown = usesHeapTupleHeader(tbl.formatVersion);
     }
 
     if (col.isVariableLength) {
@@ -9470,7 +9526,9 @@ std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer
         if (n == 4 && (val & 0x80000000LL)) val |= 0xFFFFFFFF00000000LL;
         else if (n == 2 && (val & 0x8000LL)) val |= 0xFFFFFFFFFFFF0000LL;
         else if (n == 1 && (val & 0x80LL)) val |= 0xFFFFFFFFFFFFFF00LL;
-        return (val == INF) ? "" : transstr(val);
+        // The tuple bitmap, not the numeric payload, determines SQL NULL.
+        // Keep sentinel fallback for legacy nullable buffers without a bitmap.
+        return (val == INF && col.isNull && !storedNullKnown) ? "" : transstr(val);
     }
 }
 
@@ -9498,7 +9556,15 @@ std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
     // physically-NULL column reads as "" instead of its zero value.
     // Paths that don't bind a row (constant evaluation, index keys,
     // condition evaluation) keep the raw behavior.
-    if (g_nullRowEngine && g_nullRowRid >= 0 && colIdx < g_nullRowNatts &&
+    const bool bufferedNullKnown = g_bufferedConditionSchema == &tbl &&
+        g_bufferedConditionNulls && colIdx < g_bufferedConditionNulls->size() &&
+        (col.generatedKind != 'v' || !computeVirtual);
+    if (bufferedNullKnown) {
+        if ((*g_bufferedConditionNulls)[colIdx]) {
+            if (valueIsNull) *valueIsNull = true;
+            return "";
+        }
+    } else if (g_nullRowEngine && g_nullRowRid >= 0 && colIdx < g_nullRowNatts &&
         tbl.tablename == g_nullRowTable &&
         (col.generatedKind != 'v' || !computeVirtual)) {
         if (g_nullRowEngine->isColumnNullByRid(g_nullRowDb, tbl.tablename,
@@ -9507,7 +9573,7 @@ std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
             return "";
         }
     }
-    if (g_condNullEngine && g_condNullRid >= 0 &&
+    if (!bufferedNullKnown && g_condNullEngine && g_condNullRid >= 0 &&
         tbl.tablename == g_condNullTable &&
         (col.generatedKind != 'v' || !computeVirtual) &&
         g_condNullEngine->isColumnNullByRid(
@@ -20790,8 +20856,8 @@ int64_t StorageEngine::parseInt(const std::string& s) {
     }
     int64_t value = 0;
     const auto parsed = std::from_chars(begin, end, value, 10);
-    // INF is also the legacy fixed-width NULL/invalid sentinel and therefore
-    // cannot be represented as an integer value in the current heap format.
+    // This legacy API cannot distinguish INT64_MIN from a parsing failure.
+    // Full-range consumers use parseStoredInteger and the tuple NULL bitmap.
     if (parsed.ec != std::errc{} || parsed.ptr != end || value == INF) {
         return INF;
     }
@@ -21628,13 +21694,14 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
             return false;
         }
     } else {
-        int64_t num = val.empty() ? INF : parseInt(val);
+        const auto parsedNum = parseStoredInteger(val);
+        if (!parsedNum) return false;
+        const int64_t num = *parsedNum;
         // BETWEEN family: cond.value = "lo hi" (space-joined upstream).
         if (cond.op == "between" || cond.op == "notbetween") {
             size_t sp = cond.value.find(' ');
             if (sp == std::string::npos) return false;
             if (isIntegerStorageType(col.dataType)) {
-                if (num == INF) return false;
                 try {
                     const Numeric lower(cond.value.substr(0, sp));
                     const Numeric upper(cond.value.substr(sp + 1));
@@ -21651,16 +21718,15 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
             double hiD = 0.0;
             if (parseDoubleLiteral(cond.value.substr(0, sp), loD) &&
                 parseDoubleLiteral(cond.value.substr(sp + 1), hiD)) {
-                if (num == INF) return false;
                 bool inRange = static_cast<double>(num) >= loD && static_cast<double>(num) <= hiD;
                 if (cond.op == "between" && !inRange) return false;
                 if (cond.op == "notbetween" && inRange) return false;
                 return true;
             }
-            int64_t lo = StorageEngine::parseInt(cond.value.substr(0, sp));
-            int64_t hi = StorageEngine::parseInt(cond.value.substr(sp + 1));
-            if (num == INF || lo == INF || hi == INF) return false;
-            bool inRange = num >= lo && num <= hi;
+            const auto lo = parseStoredInteger(cond.value.substr(0, sp));
+            const auto hi = parseStoredInteger(cond.value.substr(sp + 1));
+            if (!lo || !hi) return false;
+            bool inRange = num >= *lo && num <= *hi;
             if (cond.op == "between" && !inRange) return false;
             if (cond.op == "notbetween" && inRange) return false;
             return true;
@@ -21671,8 +21737,8 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
             if (likeMatch(val, cond.value, cond.op == "notilike")) return false;
             return true;
         }
-        int64_t cmp = StorageEngine::parseInt(cond.value);
-        if (cmp == INF && isIntegerStorageType(col.dataType) && num != INF) {
+        const auto parsedCmp = parseStoredInteger(cond.value);
+        if (!parsedCmp && isIntegerStorageType(col.dataType)) {
             // SQL promotes an integer compared with a finite decimal literal
             // to an exact numeric comparison; neither truncation nor double
             // conversion preserves fractional bounds or BIGINT precision.
@@ -21687,7 +21753,8 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
                 return false;
             }
         }
-        if (cmp == INF) return false;  // Invalid comparison value → UNKNOWN → FALSE in WHERE
+        if (!parsedCmp) return false;  // Invalid comparison value → UNKNOWN → FALSE in WHERE
+        const int64_t cmp = *parsedCmp;
         if (cond.op == "<"  && !(num < cmp)) return false;
         if (cond.op == ">"  && !(num > cmp)) return false;
         if (cond.op == "="  && num != cmp)   return false;
@@ -22970,8 +23037,9 @@ DBStatus StorageEngine::insertInternal(
             }
         }
         if (!col.isVariableLength && col.dataType != "char" && col.dataType != "binary" && col.dataType != "date" && col.dataType != "timestamp" && col.dataType != "timestamptz" && col.dataType != "datetime" && col.dataType != "time" && col.dataType != "float" && col.dataType != "double" && col.dataType != "decimal" && col.dataType != "numeric" && col.dataType != "money" && col.dataType != "boolean" && col.dataType != "uuid" && col.dataType != "point" && col.dataType != "inet" && col.dataType != "cidr" && col.dataType != "macaddr" && col.dataType != "macaddr8" && !val.empty()) {
-            int64_t num = parseInt(val);
-            if (num == INF || !integerValueFitsColumn(col, num)) {
+            const auto num = parseStoredInteger(val);
+            if (!num || !integerValueFitsColumn(col, *num) ||
+                (*num == INF && col.isNull && !usesHeapTupleHeader(tbl.formatVersion))) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }
@@ -24976,10 +25044,12 @@ DBStatus StorageEngine::removeInternal(
         std::set<int64_t> filteredIds;
         for (int64_t rid : toDelete) {
             std::string row;
-            if (!readRowByRid(pa, rid, row, tbl)) {
+            std::vector<bool> nullColumns;
+            if (!readRowByRid(pa, rid, row, tbl, &nullColumns)) {
                 lockManager_.unlock(tablename);
                 return DBStatus::IO_ERROR;
             }
+            BufferedNullRowBinding nullBinding(tbl, nullColumns);
             SqlRow rowValues;
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (tbl.cols[i].isNull &&
@@ -25150,10 +25220,14 @@ DBStatus StorageEngine::removeInternal(
                                     const std::string referencedValue =
                                         canonicalColumnKeyValue(
                                             referencedColumn,
-                                            extractColumnValue(
-                                                deleted.row, tbl,
-                                                referencedColumnIndex,
-                                                dbname));
+                                            [&] {
+                                                BufferedNullRowBinding binding(
+                                                    tbl, deleted.nullColumns);
+                                                return extractColumnValue(
+                                                    deleted.row, tbl,
+                                                    referencedColumnIndex,
+                                                    dbname);
+                                            }());
                                     const std::string localValue =
                                         canonicalColumnKeyValue(
                                             referencedColumn,
@@ -25362,6 +25436,7 @@ DBStatus StorageEngine::removeInternal(
             nullColumnsToDelete[rowIndex][columnIndex]) {
             return std::string{};
         }
+        BufferedNullRowBinding binding(tbl, nullColumnsToDelete[rowIndex]);
         return extractColumnValue(logicalRowsToDelete[rowIndex], tbl,
                                   columnIndex, dbname, computeVirtual);
     };
@@ -26329,9 +26404,9 @@ DBStatus StorageEngine::updateInternal(
                         }
                     } else if (isIntegerStorageType(col.dataType)) {
                         if (!kv.second.empty()) {
-                            int64_t num = parseInt(kv.second);
-                            if (num == INF ||
-                                !integerValueFitsColumn(col, num)) {
+                            const auto num = parseStoredInteger(kv.second);
+                            if (!num || !integerValueFitsColumn(col, *num) ||
+                                (*num == INF && col.isNull && !usesHeapTupleHeader(tbl.formatVersion))) {
                                 return DBStatus::INVALID_VALUE;
                             }
                         }
@@ -26352,9 +26427,9 @@ DBStatus StorageEngine::updateInternal(
                         }
                     } else if (!col.isVariableLength && col.dataType != "char") {
                         if (!kv.second.empty()) {
-                            int64_t num = parseInt(kv.second);
-                            if (num == INF ||
-                                !integerValueFitsColumn(col, num)) {
+                            const auto num = parseStoredInteger(kv.second);
+                            if (!num || !integerValueFitsColumn(col, *num) ||
+                                (*num == INF && col.isNull && !usesHeapTupleHeader(tbl.formatVersion))) {
                                 return DBStatus::INVALID_VALUE;
                             }
                         }
@@ -26456,10 +26531,12 @@ DBStatus StorageEngine::updateInternal(
         std::set<int64_t> filteredIds;
         for (const int64_t rid : matchIds) {
             std::string row;
-            if (!readRowByRid(pa, rid, row, tbl)) {
+            std::vector<bool> nullColumns;
+            if (!readRowByRid(pa, rid, row, tbl, &nullColumns)) {
                 lockManager_.unlock(tablename);
                 return DBStatus::IO_ERROR;
             }
+            BufferedNullRowBinding nullBinding(tbl, nullColumns);
             SqlRow rowValues;
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (tbl.cols[i].isNull &&
@@ -26548,6 +26625,7 @@ DBStatus StorageEngine::updateInternal(
         }
         std::map<std::string, std::string> oldLogicalValues;
         for (size_t i = 0; i < tbl.len; ++i) {
+            BufferedNullRowBinding binding(tbl, oldNullColumns);
             if (tbl.cols[i].generatedKind != 'v' &&
                 i < oldNullColumns.size() && oldNullColumns[i]) {
                 oldLogicalValues[tbl.cols[i].dataName].clear();
@@ -27150,6 +27228,12 @@ DBStatus StorageEngine::updateInternal(
         std::string newRow = buildRowBuffer(
             tbl, rowValues, updateTxnId, &physicalNullColumns);
         std::string strippedNewRow = stripRowHeader(newRow, tbl.formatVersion, tbl.len);
+        std::vector<bool> newRowNulls(tbl.len, false);
+        for (const size_t index : physicalNullColumns) newRowNulls[index] = true;
+        const auto withNewRowNulls = [&](auto&& action) -> decltype(auto) {
+            BufferedNullRowBinding binding(tbl, newRowNulls);
+            return action();
+        };
 
         // Write back via PageAllocator
         uint32_t pageId; uint16_t slotId;
@@ -28466,7 +28550,9 @@ DBStatus StorageEngine::updateInternal(
         // logTxnUpdate; record the new key after the index maintenance so SSI
         // also detects a concurrent predicate that covers the new value.
         if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
-            recordSsiIndexKeys(dbname, tablename, strippedNewRow, tbl);
+            withNewRowNulls([&] {
+                recordSsiIndexKeys(dbname, tablename, strippedNewRow, tbl);
+            });
         }
 
         // Update composite indexes, including predicate-only transitions.
@@ -28607,8 +28693,10 @@ DBStatus StorageEngine::updateInternal(
                     if (i) { oldRendered += '|'; newRendered += '|'; }
                     oldRendered += oldLogicalValues[tbl.cols[i].dataName];
                     if (!newColumnIsNull(i)) {
-                        newRendered += extractColumnValue(
-                            strippedNewRow, tbl, i, dbname, true);
+                        newRendered += withNewRowNulls([&] {
+                            return extractColumnValue(
+                                strippedNewRow, tbl, i, dbname, true);
+                        });
                     }
                 }
                 txn.txnLogicalChanges.push_back(
@@ -28634,9 +28722,10 @@ DBStatus StorageEngine::updateInternal(
                 if (newColumnIsNull(i)) {
                     newValues[tbl.cols[i].dataName] = std::nullopt;
                 } else {
-                    newValues[tbl.cols[i].dataName] =
-                        extractColumnValue(
+                    newValues[tbl.cols[i].dataName] = withNewRowNulls([&] {
+                        return extractColumnValue(
                             strippedNewRow, tbl, i, dbname, true);
+                    });
                 }
             }
             if (updatedRows) updatedRows->push_back(newValues);
@@ -34773,8 +34862,9 @@ std::unordered_set<std::string> arraySeen;
                     continue;
                 }
                 if (isInt || aggArgExpr) {
-                    int64_t num = val.empty() ? INF : parseInt(val);
-                    if (num == INF) {
+                    const auto parsed = parseStoredInteger(val);
+                    const int64_t num = parsed.value_or(0);
+                    if (!parsed) {
                         // Fractional expression value: double fallback for
                         // sum/avg; min/max compare numerically as doubles.
                         double d = 0.0;
@@ -35399,8 +35489,9 @@ std::unordered_set<std::string> arraySeen;
                     continue;
                 }
                 if (isInt || aggArgExpr) {
-                    int64_t num = val.empty() ? INF : parseInt(val);
-                    if (num == INF) continue;
+                    const auto parsed = parseStoredInteger(val);
+                    if (!parsed) continue;
+                    const int64_t num = *parsed;
                     if (func == "sum") sum += num;
                     if (func == "avg") { sum += num; count++; }
                     if ((func == "sum" || func == "avg") && exactSumOk) {
@@ -35884,8 +35975,9 @@ std::unordered_set<std::string> arraySeen;
                         val = logicalValue(row, colIdx);
                     }
                     if (isInt || aggArgExpr) {
-                        int64_t num = val.empty() ? INF : parseInt(val);
-                        if (num == INF) continue;
+                        const auto parsed = parseStoredInteger(val);
+                        if (!parsed) continue;
+                        const int64_t num = *parsed;
                         if (func == "sum") sum += num;
                         if (func == "avg") { sum += num; count++; }
                         if ((func == "sum" || func == "avg") && exactSumOk) {
@@ -42268,6 +42360,11 @@ bool StorageEngine::restoreDeletedRowIndexes(
     const std::string& dbname, const std::string& tablename,
     const TableSchema& tbl, const std::string& rowData, int64_t rid,
     std::set<BloomIndex*>& bloomUndoIndexes) {
+    std::string heapRow;
+    std::vector<bool> nullColumns;
+    readRowByRid(getPageAllocator(dbname, tablename), rid,
+                 heapRow, tbl, &nullColumns);
+    BufferedNullRowBinding nullBinding(tbl, nullColumns);
     bool ok = true;
     const auto containsRid = [rid](const std::vector<int64_t>& values) {
         return std::find(values.begin(), values.end(), rid) != values.end();
@@ -43547,10 +43644,28 @@ bool StorageEngine::undoVersionedUpdate(const TxnLogEntry& entry) {
     bool indexesOk = true;
     std::string currentRow = entry.newRowData;
     std::string heapCurrentRow;
-    if (readRowByRid(pa, entry.rowIdx, heapCurrentRow, tbl)) {
+    std::vector<bool> currentNullColumns;
+    if (readRowByRid(pa, entry.rowIdx, heapCurrentRow, tbl,
+                     &currentNullColumns)) {
         currentRow = std::move(heapCurrentRow);
     }
     if (currentRow.empty() || entry.rowData.empty()) return false;
+    std::string heapPreviousRow;
+    std::vector<bool> previousNullColumns;
+    readRowByRid(pa, entry.previousRowIdx, heapPreviousRow, tbl,
+                 &previousNullColumns);
+    const auto withUndoRowNulls = [&](const std::vector<bool>& nulls,
+                                     auto&& action) -> decltype(auto) {
+        BufferedNullRowBinding binding(tbl, nulls);
+        return action();
+    };
+    const auto undoColumnValue = [&](const std::string& image,
+                                     const std::vector<bool>& nulls,
+                                     size_t columnIndex) {
+        return withUndoRowNulls(nulls, [&] {
+            return extractColumnValue(image, tbl, columnIndex, dbname, true);
+        });
+    };
 
     struct IndexUndoEntry {
         std::string name;
@@ -43561,11 +43676,13 @@ bool StorageEngine::undoVersionedUpdate(const TxnLogEntry& entry) {
     for (const auto& metadata : getIndexMetadata(dbname, tablename)) {
         IndexUndoEntry undo;
         undo.name = metadata.name;
-        if (!secondaryIndexEntryFromBuffer(
-                *this, metadata, tbl, currentRow, dbname, undo.current) ||
-            !secondaryIndexEntryFromBuffer(
-                *this, metadata, tbl, entry.rowData, dbname,
-                undo.previous)) {
+        if (!withUndoRowNulls(currentNullColumns, [&] {
+                return secondaryIndexEntryFromBuffer(
+                    *this, metadata, tbl, currentRow, dbname, undo.current);
+            }) || !withUndoRowNulls(previousNullColumns, [&] {
+                return secondaryIndexEntryFromBuffer(
+                    *this, metadata, tbl, entry.rowData, dbname, undo.previous);
+            })) {
             indexesOk = false;
             continue;
         }
@@ -43576,11 +43693,13 @@ bool StorageEngine::undoVersionedUpdate(const TxnLogEntry& entry) {
     for (const auto& metadata : getCompositeIndexes(dbname, tablename)) {
         IndexUndoEntry undo;
         undo.name = metadata.name;
-        if (!compositeIndexEntryFromBuffer(
-                *this, metadata, tbl, currentRow, dbname, undo.current) ||
-            !compositeIndexEntryFromBuffer(
-                *this, metadata, tbl, entry.rowData, dbname,
-                undo.previous)) {
+        if (!withUndoRowNulls(currentNullColumns, [&] {
+                return compositeIndexEntryFromBuffer(
+                    *this, metadata, tbl, currentRow, dbname, undo.current);
+            }) || !withUndoRowNulls(previousNullColumns, [&] {
+                return compositeIndexEntryFromBuffer(
+                    *this, metadata, tbl, entry.rowData, dbname, undo.previous);
+            })) {
             indexesOk = false;
             continue;
         }
@@ -43602,11 +43721,11 @@ bool StorageEngine::undoVersionedUpdate(const TxnLogEntry& entry) {
         }
         hashValues[columnName] = {
             canonicalColumnKeyValue(
-                tbl.cols[index], extractColumnValue(
-                    currentRow, tbl, index, dbname, true)),
+                tbl.cols[index], undoColumnValue(
+                    currentRow, currentNullColumns, index)),
             canonicalColumnKeyValue(
-                tbl.cols[index], extractColumnValue(
-                    entry.rowData, tbl, index, dbname, true))};
+                tbl.cols[index], undoColumnValue(
+                    entry.rowData, previousNullColumns, index))};
     }
     std::map<std::string, std::pair<std::string, std::string>> bloomValues;
     for (const auto& columnName : getBloomIndexedColumns(dbname, tablename)) {
@@ -43617,11 +43736,11 @@ bool StorageEngine::undoVersionedUpdate(const TxnLogEntry& entry) {
         }
         bloomValues[columnName] = {
             canonicalColumnKeyValue(
-                tbl.cols[index], extractColumnValue(
-                    currentRow, tbl, index, dbname, true)),
+                tbl.cols[index], undoColumnValue(
+                    currentRow, currentNullColumns, index)),
             canonicalColumnKeyValue(
-                tbl.cols[index], extractColumnValue(
-                    entry.rowData, tbl, index, dbname, true))};
+                tbl.cols[index], undoColumnValue(
+                    entry.rowData, previousNullColumns, index))};
     }
 
     uint32_t previousPageId = 0;
@@ -43968,6 +44087,10 @@ DBStatus StorageEngine::rollbackTransaction() {
             if (insertedRow.empty()) {
                 rowUndoOk = false;
             } else {
+                std::string heapRow;
+                std::vector<bool> nullColumns;
+                readRowByRid(pa, it->rowIdx, heapRow, tbl, &nullColumns);
+                BufferedNullRowBinding nullBinding(tbl, nullColumns);
                 pkVal = extractPKValue(
                     insertedRow, tbl, transactionContext().txnDB);
                 for (const auto& metadata : getIndexMetadata(
@@ -45701,11 +45824,13 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
             // failures; remove only exact mappings owned by this RID.
             std::string insertedRow = entry.rowData;
             std::string heapRow;
-            if (readRowByRid(pa, entry.rowIdx, heapRow, tbl)) {
+            std::vector<bool> nullColumns;
+            if (readRowByRid(pa, entry.rowIdx, heapRow, tbl, &nullColumns)) {
                 insertedRow = std::move(heapRow);
             } else {
                 rowUndoOk = false;
             }
+            BufferedNullRowBinding nullBinding(tbl, nullColumns);
             if (insertedRow.empty()) {
                 rowUndoOk = false;
             } else if (tbl.hasPrimaryKey()) {
