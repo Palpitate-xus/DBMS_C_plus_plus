@@ -8354,9 +8354,13 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                     ? dynamic_cast<const dbms::FunctionCallExpr*>(unary->operand.get()) : nullptr;
                 const bool notExists = op == "not" && operandFunction &&
                     toLower(operandFunction->funcName) == "exists";
+                // AT TIME ZONE is represented as a unary operator whose op
+                // includes the zone; its SQL result name is still timezone.
+                const bool timezoneOperator = op == "at time zone" ||
+                    op.rfind("at time zone ", 0) == 0;
                 // This parser represents postfix :: casts as BinaryOpExpr.
-                if ((binary && op != "::" && op != "at time zone" && op != "overlaps") ||
-                    (unary && !notExists)) {
+                if ((binary && op != "::" && !timezoneOperator && op != "overlaps") ||
+                    (unary && !notExists && !timezoneOperator)) {
                     headers.push_back("?column?");
                     goto headerDone;
                 }
