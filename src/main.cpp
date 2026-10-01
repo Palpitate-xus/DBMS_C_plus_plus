@@ -4170,11 +4170,11 @@ static bool handleCallProcedure(const string& sql, Session& s) {
     }
 
     static atomic<uint64_t> callSavepointSequence{0};
-    const string callSavepoint = "__dbms_call_statement_" +
+    string callSavepoint = "__dbms_call_statement_" +
         to_string(g_engine.currentTxnId()) + "_" +
         to_string(callSavepointSequence.fetch_add(1));
     if (!g_engine.inTransaction() ||
-        g_engine.savepoint(callSavepoint) != DBStatus::OK) {
+        g_engine.createStatementSavepoint(callSavepoint) != DBStatus::OK) {
         cout << "ERROR: CALL cannot establish an atomic statement boundary "
                 "(SQLSTATE 0A000)" << endl;
         return true;
@@ -4299,7 +4299,7 @@ static bool handleCopy(const string& sql, Session& s) {
             copySavepoint = "__dbms_copy_statement_" +
                 to_string(g_engine.currentTxnId()) + "_" +
                 to_string(copySavepointSequence.fetch_add(1));
-            if (g_engine.savepoint(copySavepoint) != DBStatus::OK) {
+            if (g_engine.createStatementSavepoint(copySavepoint) != DBStatus::OK) {
                 cout << "ERROR: COPY FROM cannot establish an atomic "
                         "statement boundary (SQLSTATE 0A000)" << endl;
                 return true;

@@ -382,7 +382,8 @@ public:
         static std::atomic<uint64_t> sequence{0};
         savepointName_ = "__dbms_dml_statement_" +
             std::to_string(sequence.fetch_add(1));
-        hasSavepoint_ = engine_.savepoint(savepointName_) == DBStatus::OK;
+        hasSavepoint_ =
+            engine_.createStatementSavepoint(savepointName_) == DBStatus::OK;
         // Snapshot-backed DDL cannot currently create a savepoint. DML may
         // still proceed, but a later error must roll back the transaction
         // rather than leave a partially applied statement.

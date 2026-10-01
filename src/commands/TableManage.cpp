@@ -22281,7 +22281,7 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
             std::to_string(statementSavepointSequence.fetch_add(1));
     } while (context.containsSavepoint(statementSavepoint));
     const bool hasStatementSavepoint =
-        savepoint(statementSavepoint) == DBStatus::OK;
+        createStatementSavepoint(statementSavepoint) == DBStatus::OK;
 
     const DBStatus insertStatus =
         insertInternal(dbname, tablename, values, nullColumns, insertedRows,
@@ -24848,7 +24848,7 @@ DBStatus StorageEngine::removeRows(
                 std::to_string(statementSavepointSequence.fetch_add(1));
         } while (context.containsSavepoint(statementSavepoint));
         hasStatementSavepoint =
-            savepoint(statementSavepoint) == DBStatus::OK;
+            createStatementSavepoint(statementSavepoint) == DBStatus::OK;
     }
 
     ReferentialActionContext referentialContext;
@@ -25023,7 +25023,11 @@ DBStatus StorageEngine::removeInternal(
             const DBStatus lockFailure = lockManager_.lastRowLockWasDeadlock()
                 ? DBStatus::DEADLOCK_DETECTED : DBStatus::LOCK_CONFLICT;
             if (transactionContext().inTransaction) {
-                rollbackTransaction();
+                // A user savepoint can recover this statement. Its public
+                // wrapper rolls back the internal boundary, including locks
+                // acquired here, without discarding earlier transaction work.
+                if (hasUserSavepoint()) lockManager_.unlock(tablename);
+                else rollbackTransaction();
             } else {
                 lockManager_.unlockAll();
                 lockManager_.unlockAllGaps();
@@ -26055,7 +26059,7 @@ DBStatus StorageEngine::updateRows(
                 std::to_string(statementSavepointSequence.fetch_add(1));
         } while (context.containsSavepoint(statementSavepoint));
         hasStatementSavepoint =
-            savepoint(statementSavepoint) == DBStatus::OK;
+            createStatementSavepoint(statementSavepoint) == DBStatus::OK;
     }
 
     ReferentialActionContext referentialContext;
@@ -26495,12 +26499,12 @@ DBStatus StorageEngine::updateInternal(
         if (!lockManager_.rowLockExclusive(tablename, rid)) {
             const DBStatus lockFailure = lockManager_.lastRowLockWasDeadlock()
                 ? DBStatus::DEADLOCK_DETECTED : DBStatus::LOCK_CONFLICT;
-            // A failed upgrade is a deadlock/lock-conflict boundary.  An
-            // in-flight transaction must not continue with a partially
-            // locked statement; abort it so all previously acquired row
-            // locks are released atomically.
+            // Preserve user recovery points. With no user savepoint, abort
+            // the whole transaction so a deadlock survivor can resume. An
+            // internal statement savepoint alone is not a user recovery point.
             if (transactionContext().inTransaction) {
-                rollbackTransaction();
+                if (hasUserSavepoint()) lockManager_.unlock(tablename);
+                else rollbackTransaction();
             } else {
                 lockManager_.unlockAll();
                 lockManager_.unlockAllGaps();
@@ -45534,6 +45538,30 @@ std::vector<std::string> StorageEngine::listPreparedTransactions() const {
 // ========================================================================
 
 DBStatus StorageEngine::savepoint(const std::string& name) {
+    return createSavepoint(name, false);
+}
+
+DBStatus StorageEngine::createStatementSavepoint(std::string& name) {
+    if (!transactionContext().inTransaction) return DBStatus::INVALID_VALUE;
+    static std::atomic<uint64_t> collisionSequence{0};
+    const std::string requestedName = name;
+    while (transactionContext().containsSavepoint(name)) {
+        name = requestedName + "_internal_" +
+            std::to_string(collisionSequence.fetch_add(1));
+    }
+    return createSavepoint(name, true);
+}
+
+bool StorageEngine::hasUserSavepoint() const {
+    const auto& savepoints = transactionContext().savepoints;
+    return std::any_of(savepoints.begin(), savepoints.end(),
+        [](const TransactionContext::SavepointState& savepoint) {
+            return !savepoint.internalStatement;
+        });
+}
+
+DBStatus StorageEngine::createSavepoint(
+    const std::string& name, bool internalStatement) {
     if (!transactionContext().inTransaction) return DBStatus::INVALID_VALUE;
     auto& context = transactionContext();
     std::string ddlBackupPath;
@@ -45554,7 +45582,7 @@ DBStatus StorageEngine::savepoint(const std::string& name) {
         context.constraintMode,
         std::move(ddlBackupPath),
         lockManager_.captureCheckpoint(),
-        false, {}, {}, {}
+        false, {}, {}, {}, internalStatement
     });
     if (Session* session = currentSession();
         session && session->currentDB == context.txnDB) {
