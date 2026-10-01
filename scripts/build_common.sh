@@ -56,6 +56,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/redundant_begin_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/savepoint_read_only_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/isolation_idempotent_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/extended_protocol_error_abort_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/table_structured_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/values_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/set_operation_structured_protocol_e2e_test.py)

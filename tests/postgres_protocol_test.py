@@ -1723,33 +1723,37 @@ def main():
             sock, "SELECT id FROM extended_sync_atomic")) == []
 
         # Named statements and portals cannot be silently replaced.  A
-        # duplicate Parse/Bind enters extended-query recovery, keeps the
-        # original object intact, and reports PostgreSQL's dedicated codes.
-        # Keep an explicit transaction open because Sync ends an implicit
-        # extended-query transaction and therefore destroys its portals.
+        # duplicate Parse/Bind aborts the current child transaction, keeps
+        # previously created objects intact, and reports dedicated codes.
+        # Recover at a user savepoint before reusing either object. Sync
+        # alone must not clear the failed transaction state.
         assert simple_query(sock, "BEGIN")[-1] == (b"Z", b"T")
         named_parse = (b"duplicate_stmt\0SELECT 21\0" +
                        struct.pack("!H", 0))
         sock.sendall(typed(b"P", named_parse))
         assert read_message(sock) == (b"1", b"")
+        assert simple_query(sock, "SAVEPOINT duplicate_parse_recover")[-1] == (b"Z", b"T")
         duplicate_parse = (b"duplicate_stmt\0SELECT 22\0" +
                            struct.pack("!H", 0))
         sock.sendall(typed(b"P", duplicate_parse))
         kind, body = read_message(sock)
         assert kind == b"E" and b"C42P05\0" in body, (kind, body)
         sock.sendall(typed(b"S"))
-        assert read_until_ready(sock)[-1] == (b"Z", b"T")
+        assert read_until_ready(sock)[-1] == (b"Z", b"E")
+        assert simple_query(sock, "ROLLBACK TO duplicate_parse_recover")[-1] == (b"Z", b"T")
 
         named_bind = (b"duplicate_portal\0duplicate_stmt\0" +
                       struct.pack("!H", 0) + struct.pack("!H", 0) +
                       struct.pack("!H", 0))
         sock.sendall(typed(b"B", named_bind))
         assert read_message(sock) == (b"2", b"")
+        assert simple_query(sock, "SAVEPOINT duplicate_bind_recover")[-1] == (b"Z", b"T")
         sock.sendall(typed(b"B", named_bind))
         kind, body = read_message(sock)
         assert kind == b"E" and b"C42P03\0" in body, (kind, body)
         sock.sendall(typed(b"S"))
-        assert read_until_ready(sock)[-1] == (b"Z", b"T")
+        assert read_until_ready(sock)[-1] == (b"Z", b"E")
+        assert simple_query(sock, "ROLLBACK TO duplicate_bind_recover")[-1] == (b"Z", b"T")
         sock.sendall(typed(
             b"E", b"duplicate_portal\0" + struct.pack("!I", 0)) +
             typed(b"S"))
