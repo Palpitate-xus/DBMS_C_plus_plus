@@ -3930,10 +3930,14 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             rented.reset();
         }
         if (result.error && wasInTransaction) {
-            // A failed COMMIT can already have rolled back the engine (for
-            // example a deferred constraint or SSI failure). Do not invent
-            // an aborted transaction after its physical boundary ended.
-            transactionFailed = g_engine.inTransaction();
+            // Only a transaction-ending command may return idle on error.
+            // Ordinary DML may internally roll back the engine after a lock
+            // failure, but the SQL connection must stay failed until ROLLBACK.
+            const std::string keyword = firstSqlKeyword(sql);
+            const bool transactionEnding =
+                (keyword == "commit" && !startsWithSqlPhrase(sql, "commit prepared")) ||
+                keyword == "end" || startsWithSqlPhrase(sql, "prepare transaction");
+            transactionFailed = !transactionEnding || g_engine.inTransaction();
         } else if (!result.error && isTransactionRecoveryCommand(sql)) {
             transactionFailed = false;
         }
