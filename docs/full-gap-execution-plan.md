@@ -17,6 +17,8 @@
 
 ## 后续优先队列
 
+2026-10-01 第 873 项验收：whole-expression cast 的强 child 命名已独立提交 a5cca001，新协议、15 组相邻协议、完整协议、本项真实 PostgreSQL 18.6 cases=1 failed=0 和 7 组相邻差分均退出码 0。旧版返回 numeric／text 而非 abs／coalesce／nullif／greatest／least 的 wire 失败及 failed=1 保留，实际 psql 与本地 parse_target.c 命名强度规则共同校准；弱 arithmetic／literal cast 仍用目标类型，显式 alias 保留。main 重编与 872 Table 及 eb85bfeb 正式其他对象重链，不称独立冷构建；合并 872 docs 后 b3c1ed8d 源码不变。根 eb85bfeb 最新全量及 394 组差分仍在运行，不能用专项覆盖正式全套；874 已在显式 C 排序规则及 materialized index 下真实复现 UNIQUE 长键／20-byte boundary 误判，隔离修复中。此前默认 locale 的两个探针均通过，未当作 bug 复现。仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
+
 2026-10-01 第 872 项验收：computed arithmetic predicate 已独立提交 adbf3b72，14 个 C++、新协议、16 组相邻协议与完整协议均退出码 0；本项真实 PostgreSQL 18.6 cases=1 failed=0，另 16 个不同相邻 case failed=0（含 9 个 HAVING，重复的两组不追加计数）。保留旧 0.5／lazy COALESCE 失败、旧 failed=1、初次 C++ 重链对象路径错误和相邻脚本复数 case 名错误；未改 oracle。除零交 typed 求值而非文本预扫描，完整 RHS、括号和 NULL 位保真，单独处理空扫描上的 immutable constant，并保持 signed literal 的原 index 条件。该项基于 eb85bfeb 正式对象重编 main／Table 后重链，不称独立冷构建；合并 871 仅 docs 为 c0e7a675。根 eb85bfeb 正式全量和 394 组差分仍运行，不含 872。873 cast child 列名已真实 failed=1 复现，隔离修复中。仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
 
 2026-10-01 第 871 项验收：AT TIME ZONE 的 Unary root 列名回归已独立提交，13 组协议、timestamptz E2E 五项、完整协议、新和原三组真实 PG18.6 差分全部退出码 0，旧 failed=1 与冻结 5dc053fd 全量 failed=3 保留。根已快进并冻结 eb85bfeb，最新正式全套正在真实编译／运行，设置本次协议 deadline=120 秒，不能称原始 10 秒全套已通过；旧正式二进制已有三个独立原始 10 秒完整协议成功复跑。第 872 项 decimal-zero 预抛异常、arithmetic predicate 漏行及 lazy branch 时机正在逐项复现，计划保持原 RHS 字面值／类型和真实 NULL，并移交完整 typed 求值，不以返回空集替代正确性。仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
