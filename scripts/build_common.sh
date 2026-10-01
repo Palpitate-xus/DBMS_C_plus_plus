@@ -64,6 +64,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/copy_error_lock_release_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/copy_integer_input_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/bigint_minimum_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/exact_sum_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/matview_refresh_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/create_database_options_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/tablespace_protocol_e2e_test.py)

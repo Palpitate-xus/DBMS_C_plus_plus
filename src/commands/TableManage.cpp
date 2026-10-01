@@ -34862,6 +34862,7 @@ std::unordered_set<std::string> arraySeen;
                     continue;
                 }
                 if (isInt || aggArgExpr) {
+                    if (val.empty()) continue;
                     const auto parsed = parseStoredInteger(val);
                     const int64_t num = parsed.value_or(0);
                     if (!parsed) {
@@ -34885,11 +34886,11 @@ std::unordered_set<std::string> arraySeen;
                             if (!hasMin || d < static_cast<double>(minInt)) { minInt = static_cast<int64_t>(d); hasMin = true; }
                         } else { continue; }
                     } else {
-                        if (func == "sum") { sum += num; sumFromDouble = false; }
-                        if (func == "avg") { sum += num; count++; }
-                        if ((func == "sum" || func == "avg") && exactSumOk) {
-                            try { exactSum = exactSum + dbms::Numeric(val); ++exactCount; }
-                            catch (...) { exactSumOk = false; }
+                        if (func == "sum") sumFromDouble = false;
+                        if (func == "sum" || func == "avg") {
+                            ++count;
+                            exactSum = exactSum + dbms::Numeric(val);
+                            ++exactCount;
                         }
                         if (func == "max") {
                             if (!hasMax || num > maxInt) { maxInt = num; hasMax = true; }
@@ -35492,11 +35493,10 @@ std::unordered_set<std::string> arraySeen;
                     const auto parsed = parseStoredInteger(val);
                     if (!parsed) continue;
                     const int64_t num = *parsed;
-                    if (func == "sum") sum += num;
-                    if (func == "avg") { sum += num; count++; }
-                    if ((func == "sum" || func == "avg") && exactSumOk) {
-                        try { exactSum = exactSum + dbms::Numeric(val); ++exactCount; }
-                        catch (...) { exactSumOk = false; }
+                    if (func == "sum" || func == "avg") {
+                        ++count;
+                        exactSum = exactSum + dbms::Numeric(val);
+                        ++exactCount;
                     }
                     if (func == "max") { if (!hasMax || num > maxInt) { maxInt = num; hasMax = true; } }
                     if (func == "min") { if (!hasMin || num < minInt) { minInt = num; hasMin = true; } }
@@ -35978,11 +35978,10 @@ std::unordered_set<std::string> arraySeen;
                         const auto parsed = parseStoredInteger(val);
                         if (!parsed) continue;
                         const int64_t num = *parsed;
-                        if (func == "sum") sum += num;
-                        if (func == "avg") { sum += num; count++; }
-                        if ((func == "sum" || func == "avg") && exactSumOk) {
-                            try { exactSum = exactSum + dbms::Numeric(val); ++exactCount; }
-                            catch (...) { exactSumOk = false; }
+                        if (func == "sum" || func == "avg") {
+                            ++count;
+                            exactSum = exactSum + dbms::Numeric(val);
+                            ++exactCount;
                         }
                         if (func == "max") { if (!hasMax || num > maxInt) { maxInt = num; hasMax = true; } }
                         if (func == "min") { if (!hasMin || num < minInt) { minInt = num; hasMin = true; } }
