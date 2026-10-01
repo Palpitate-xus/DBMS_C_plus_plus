@@ -4450,6 +4450,7 @@ ParseResult SQLParser::parseBegin(const std::string& sql) {
     bool isolationSeen = false;
     bool readModeSeen = false;
     bool deferrableSeen = false;
+    bool optionBeforeSeparator = false;
     while (pos < tokens.size()) {
         const std::string word = toLower(tokens[pos]);
         if (word == ";") {
@@ -4460,13 +4461,23 @@ ParseResult SQLParser::parseBegin(const std::string& sql) {
             }
             break;
         }
-        if (word == "isolation") {
-            if (isolationSeen) {
-                r.error = "transaction isolation specified more than once";
+        if (word == ",") {
+            if (!optionBeforeSeparator || pos + 1 >= tokens.size() ||
+                tokens[pos + 1] == ";") {
+                r.error = "transaction mode separator requires options on both sides";
                 return r;
             }
             ++pos;
-            if (pos < tokens.size() && toLower(tokens[pos]) == "level") ++pos;
+            optionBeforeSeparator = false;
+            continue;
+        }
+        if (word == "isolation") {
+            ++pos;
+            if (pos >= tokens.size() || toLower(tokens[pos]) != "level") {
+                r.error = "ISOLATION requires LEVEL";
+                return r;
+            }
+            ++pos;
             if (pos >= tokens.size()) {
                 r.error = "ISOLATION requires a level";
                 return r;
@@ -4491,42 +4502,23 @@ ParseResult SQLParser::parseBegin(const std::string& sql) {
                 return r;
             }
             isolationSeen = true;
-            continue;
-        }
-        if (word == "read" && pos + 1 < tokens.size() &&
-            (toLower(tokens[pos + 1]) == "committed" ||
-             toLower(tokens[pos + 1]) == "uncommitted")) {
-            if (isolationSeen) {
-                r.error = "transaction isolation specified more than once";
-                return r;
-            }
-            const std::string mode = toLower(tokens[pos + 1]);
-            stmt->isolation = mode == "committed"
-                ? IsolationLevel::READ_COMMITTED : IsolationLevel::READ_UNCOMMITTED;
-            pos += 2;
-            isolationSeen = true;
+            optionBeforeSeparator = true;
             continue;
         }
         if (word == "read" && pos + 1 < tokens.size() &&
             (toLower(tokens[pos + 1]) == "only" || toLower(tokens[pos + 1]) == "write")) {
-            if (readModeSeen) {
-                r.error = "transaction read mode specified more than once";
-                return r;
-            }
             stmt->readOnly = toLower(tokens[pos + 1]) == "only";
             pos += 2;
             readModeSeen = true;
+            optionBeforeSeparator = true;
             continue;
         }
         if (word == "deferrable" || (word == "not" && pos + 1 < tokens.size() &&
                                       toLower(tokens[pos + 1]) == "deferrable")) {
-            if (deferrableSeen) {
-                r.error = "transaction deferrability specified more than once";
-                return r;
-            }
             stmt->deferrable = word == "deferrable";
             pos += word == "deferrable" ? 1 : 2;
             deferrableSeen = true;
+            optionBeforeSeparator = true;
             continue;
         }
         r.error = "unsupported transaction option: " + tokens[pos];

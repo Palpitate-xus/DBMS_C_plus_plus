@@ -2650,9 +2650,8 @@ static bool handleBeginTransaction(const string& sql, Session& s) {
     if (!parsed.success || !txn ||
         (txn->kind != dbms::TransactionStmt::Kind::Begin &&
          txn->kind != dbms::TransactionStmt::Kind::Start)) {
-        cout << "SQL syntax error: "
-             << (parsed.error.empty() ? "invalid transaction start" : parsed.error) << endl;
-        return true;
+        throw dbms::DbError("42601",
+            parsed.error.empty() ? "invalid transaction start" : parsed.error);
     }
     if (txn->deferrable) {
         cout << "ERROR: DEFERRABLE transactions are not supported" << endl;
