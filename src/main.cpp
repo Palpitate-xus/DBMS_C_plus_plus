@@ -29213,6 +29213,7 @@ bool execute(const std::string& rawSql, Session& s) {
 
     bool error = false;
     DBStatus statementConstraintStatus = DBStatus::OK;
+    DBStatus statementCommitStatus = DBStatus::OK;
     const auto checkStatementConstraints = [&]() {
         if (error) return;
         try {
@@ -29265,6 +29266,7 @@ bool execute(const std::string& rawSql, Session& s) {
         if (!error) {
             const DBStatus commitStatus = g_engine.commitTransaction();
             if (commitStatus != dbms::DBStatus::OK) {
+                statementCommitStatus = commitStatus;
                 error = true;
                 g_engine.rollbackTransaction();
                 rollbackNotificationTransaction(s);
@@ -29301,6 +29303,10 @@ bool execute(const std::string& rawSql, Session& s) {
     if (statementConstraintStatus != DBStatus::OK) {
         throw dbms::DbError(dbms::sqlstateForDBStatus(statementConstraintStatus),
                            "statement foreign key validation failed");
+    }
+    if (statementCommitStatus != DBStatus::OK) {
+        throw dbms::DbError(dbms::sqlstateForDBStatus(statementCommitStatus),
+                           "statement transaction commit failed");
     }
     return error;
 }

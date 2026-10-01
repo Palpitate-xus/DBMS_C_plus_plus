@@ -1,0 +1,16 @@
+CREATE TABLE diff_auto_deferred_parent(id INT PRIMARY KEY);
+CREATE TABLE diff_auto_deferred_child(id INT PRIMARY KEY,pid INT,CONSTRAINT diff_auto_deferred_fk FOREIGN KEY(pid) REFERENCES diff_auto_deferred_parent(id) DEFERRABLE INITIALLY DEFERRED);
+INSERT INTO diff_auto_deferred_child VALUES(1,999);
+SELECT id,pid FROM diff_auto_deferred_child;
+INSERT INTO diff_auto_deferred_parent VALUES(1);
+INSERT INTO diff_auto_deferred_child VALUES(1,1);
+UPDATE diff_auto_deferred_child SET pid=999;
+INSERT INTO diff_auto_deferred_child VALUES(2,1),(3,999);
+SELECT id,pid FROM diff_auto_deferred_child;
+DROP TABLE diff_auto_deferred_child,diff_auto_deferred_parent;
+CREATE TABLE diff_auto_deferred_unique(id INT PRIMARY KEY,code INT,CONSTRAINT diff_auto_unique_key UNIQUE(code) DEFERRABLE INITIALLY DEFERRED);
+INSERT INTO diff_auto_deferred_unique VALUES(1,7);
+INSERT INTO diff_auto_deferred_unique VALUES(2,7);
+INSERT INTO diff_auto_deferred_unique VALUES(2,8),(3,8);
+SELECT id,code FROM diff_auto_deferred_unique;
+DROP TABLE diff_auto_deferred_unique;
