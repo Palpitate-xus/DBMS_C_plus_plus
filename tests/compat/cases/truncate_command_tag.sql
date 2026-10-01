@@ -1,0 +1,10 @@
+CREATE TABLE diff_truncate_tag_a(id INT);
+CREATE TABLE diff_truncate_tag_b(id INT);
+INSERT INTO diff_truncate_tag_a VALUES(1);
+TRUNCATE diff_truncate_tag_a;
+SELECT count(*) FROM diff_truncate_tag_a;
+TRUNCATE TABLE diff_truncate_tag_a;
+TRUNCATE diff_truncate_tag_a,diff_truncate_tag_b;
+TRUNCATE diff_truncate_tag_a RESTART IDENTITY;
+DROP TABLE diff_truncate_tag_a;
+DROP TABLE diff_truncate_tag_b;

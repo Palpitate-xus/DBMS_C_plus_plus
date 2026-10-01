@@ -1823,8 +1823,9 @@ std::string commandTagFor(const std::string& sql, const std::vector<std::string>
     if (keyword == "commit" || keyword == "end") return "COMMIT";
     if (keyword == "rollback") return "ROLLBACK";
     if (keyword == "set") return "SET";
+    if (keyword == "truncate") return "TRUNCATE TABLE";
     if (keyword == "create" || keyword == "alter" || keyword == "drop" ||
-        keyword == "truncate" || keyword == "grant" || keyword == "revoke") {
+        keyword == "grant" || keyword == "revoke") {
         std::vector<std::string> words = splitProtocolFields(trimText(sql));
         if (words.size() >= 2) {
             std::string tag = words[0] + " " + words[1];
