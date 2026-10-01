@@ -183,6 +183,11 @@ struct Session {
     // client ends its SQL block. NetworkServer mirrors that failed block here
     // while executing recovery commands such as ROLLBACK AND CHAIN.
     bool failedTransactionBlock = false;
+    // CHAIN restores transaction characteristics outside the new block's
+    // SET TRANSACTION scope. Top-level abort restores this inherited mode;
+    // an ordinary BEGIN instead restores the engine's session default.
+    bool transactionChainOrigin = false;
+    bool transactionChainReadOnly = false;
     uint64_t pid = 0; // process id for pg_cancel_backend / pg_terminate_backend
     uint64_t advisoryOwnerId = 0; // stable owner for session/xact advisory locks
 
