@@ -1,0 +1,11 @@
+CREATE TABLE diff_signed_dml(id INT PRIMARY KEY,v BIGINT,payload TEXT);
+INSERT INTO diff_signed_dml VALUES(1,-2,'old'),(2,-1,'old'),(3,0,'old'),(4,2,'old'),(5,NULL,NULL);
+UPDATE diff_signed_dml SET payload='changed' WHERE v=-1 RETURNING id,v;
+SELECT id,payload FROM diff_signed_dml ORDER BY id;
+UPDATE diff_signed_dml SET payload='plus' WHERE v>=+2 RETURNING id;
+SELECT id,payload FROM diff_signed_dml ORDER BY id;
+DELETE FROM diff_signed_dml WHERE v<-1 RETURNING id,v;
+DELETE FROM diff_signed_dml WHERE v=-1 RETURNING id,payload;
+SELECT id,payload FROM diff_signed_dml ORDER BY id;
+SELECT id FROM diff_signed_dml WHERE v IS NULL;
+DROP TABLE diff_signed_dml;
