@@ -17,8 +17,13 @@ def main():
     second = None
 
     def wire_query(sock, sql):
-        return runner.decode_wire_result(
-            client.simple_query(sock, sql), include_types=True)
+        messages = client.simple_query(sock, sql)
+        decoded = runner.decode_wire_result(messages, include_types=True)
+        if decoded[1] in ("55P03", "25P02"):
+            assert messages[-1] == (b"Z", b"E"), (sql, messages[-1])
+        if sql == "ROLLBACK;":
+            assert messages[-1] == (b"Z", b"I"), (sql, messages[-1])
+        return decoded
 
     def query(sock, sql):
         rows, state, message, _, _, _ = wire_query(sock, sql)
