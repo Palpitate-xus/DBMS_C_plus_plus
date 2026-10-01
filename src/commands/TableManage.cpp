@@ -23277,6 +23277,32 @@ DBStatus StorageEngine::insertInternal(
             referencedColumns.push_back(referencedColumn);
         }
 
+        // The new tuple is also a candidate referenced row for an immediate
+        // self-reference. It has not reached the heap/PK index yet, but all
+        // its defaults, generated values and SQL NULL bits are available.
+        bool referencesPendingRow = fk.refTable == tablename;
+        if (referencesPendingRow) {
+            for (size_t valueIndex = 0;
+                 valueIndex < referencedColumns.size(); ++valueIndex) {
+                const std::string& referencedName = fk.refCols[valueIndex];
+                const auto pendingValue = actualValues.find(referencedName);
+                if (pendingValue == actualValues.end() ||
+                    actualNullColumns.count(referencedName) != 0) {
+                    referencesPendingRow = false;
+                    break;
+                }
+                const Column& referencedColumn =
+                    refTbl.cols[referencedColumns[valueIndex]];
+                if (canonicalColumnKeyValue(referencedColumn, pendingValue->second) !=
+                    canonicalColumnKeyValue(referencedColumn,
+                        actualValues.at(fk.colNames[valueIndex]))) {
+                    referencesPendingRow = false;
+                    break;
+                }
+            }
+        }
+        if (referencesPendingRow) continue;
+
         std::vector<size_t> primaryColumns = refTbl.pkColIndices;
         if (primaryColumns.empty()) {
             for (size_t candidate = 0; candidate < refTbl.len; ++candidate) {
