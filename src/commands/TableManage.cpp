@@ -25161,7 +25161,7 @@ DBStatus StorageEngine::removeInternal(
                         lockManager_.unlock(acquired);
                     }
                     lockManager_.unlock(tablename);
-                    return DBStatus::INVALID_VALUE;
+                    return DBStatus::FOREIGN_KEY_VIOLATION;
                 }
 
                 // Publish every affected relation as unsafe before changing
@@ -26932,7 +26932,7 @@ DBStatus StorageEngine::updateInternal(
                 }
                 if (newRowStillReferencesOldKey) {
                     lockManager_.unlock(tablename);
-                    return DBStatus::INVALID_VALUE;
+                    return DBStatus::FOREIGN_KEY_VIOLATION;
                 }
             }
         }
@@ -27347,7 +27347,7 @@ DBStatus StorageEngine::updateInternal(
                 }
                 if (!found) {
                     lockManager_.unlock(tablename);
-                    return DBStatus::INVALID_VALUE;
+                    return DBStatus::FOREIGN_KEY_VIOLATION;
                 }
             }
         }
@@ -27821,7 +27821,7 @@ DBStatus StorageEngine::updateInternal(
                     lockManager_.unlock(acquired);
                 }
                 lockManager_.unlock(tablename);
-                return DBStatus::INVALID_VALUE;
+                return DBStatus::FOREIGN_KEY_VIOLATION;
             }
 
             bool cascadeMarkersOk =

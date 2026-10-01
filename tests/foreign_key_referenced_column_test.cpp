@@ -93,12 +93,12 @@ int main() {
     // Referential actions must compare the declared UNIQUE target (code),
     // not the unrelated primary key (id).
     assert(g_engine.update(database, "parent", {{"code", "10"}},
-                           {"=id 7"}) == dbms::DBStatus::INVALID_VALUE);
+                           {"=id 7"}) == dbms::DBStatus::FOREIGN_KEY_VIOLATION);
     const RowValue restrictedParent =
         valueById(database, "parent", "7", "code");
     assert(restrictedParent.found && restrictedParent.value == "9");
     assert(g_engine.remove(database, "parent", {"=id 7"}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::FOREIGN_KEY_VIOLATION);
     assert(valueById(database, "parent", "7", "code").found);
 
     dbms::TableSchema cascadeParent;

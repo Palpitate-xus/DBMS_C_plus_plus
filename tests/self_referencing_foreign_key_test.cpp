@@ -74,9 +74,9 @@ int main() {
                            {{"id", "2"}, {"parent_id", "1"}}) ==
            dbms::DBStatus::OK);
     assert(g_engine.update(database, "restrict_nodes", {{"id", "10"}},
-                           {"=id 1"}) == dbms::DBStatus::INVALID_VALUE);
+                           {"=id 1"}) == dbms::DBStatus::FOREIGN_KEY_VIOLATION);
     assert(g_engine.remove(database, "restrict_nodes", {"=id 1"}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::FOREIGN_KEY_VIOLATION);
     assert(nodeById(database, "restrict_nodes", "1").found);
     assert(nodeById(database, "restrict_nodes", "2").parentId == "1");
 
@@ -181,7 +181,7 @@ int main() {
            dbms::DBStatus::OK);
     assert(g_engine.update(database, "self_loop_restrict", {{"id", "401"}},
                            {"=id 400"}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::FOREIGN_KEY_VIOLATION);
     assert(g_engine.update(database, "self_loop_restrict",
                            {{"id", "401"}, {"parent_id", "401"}},
                            {"=id 400"}) == dbms::DBStatus::OK);

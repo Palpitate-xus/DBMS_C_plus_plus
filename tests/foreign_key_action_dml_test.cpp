@@ -226,7 +226,7 @@ void testAutocommitActions(StorageEngine& engine) {
 
     assert(engine.update(
                kDatabase, "cascade_child", {{"parent_id", "999"}},
-               {"=id 100"}) == DBStatus::INVALID_VALUE);
+               {"=id 100"}) == DBStatus::FOREIGN_KEY_VIOLATION);
     assert(rowById(engine, "cascade_child", "100").at("parent_id") == "1");
     assertIndexedParent(engine, "cascade_child", "100", "1");
     assert(engine.insert(kDatabase, "parent", {{"id", "3"}}) == DBStatus::OK);
@@ -246,7 +246,7 @@ void testAutocommitActions(StorageEngine& engine) {
            DBStatus::OK);
     assert(engine.update(
                kDatabase, "composite_child", {{"parent_b", "9"}},
-               {"=id 700"}) == DBStatus::INVALID_VALUE);
+               {"=id 700"}) == DBStatus::FOREIGN_KEY_VIOLATION);
     assert(rowById(engine, "composite_child", "700").at("parent_b") == "8");
     assert(engine.insert(
                kDatabase, "composite_parent", {{"a", "7"}, {"b", "9"}}) ==
