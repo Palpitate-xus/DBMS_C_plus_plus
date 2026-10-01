@@ -3534,7 +3534,11 @@ def main():
             sock, "BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY")[-1] == (b"Z", b"T")
         assert data_row_values(simple_query(sock, "SELECT id FROM t")) == [[b"1"], [b"3"]]
         assert simple_query(sock, "ROLLBACK")[-1] == (b"Z", b"I")
-        assert simple_query(sock, "START TRANSACTION READ COMMITTED READ WRITE")[-1] == (b"Z", b"T")
+        invalid_start = simple_query(sock, "START TRANSACTION READ COMMITTED READ WRITE")
+        assert invalid_start[-1] == (b"Z", b"I"), invalid_start
+        invalid_start_errors = [diagnostic_fields(body) for kind, body in invalid_start if kind == b"E"]
+        assert len(invalid_start_errors) == 1 and invalid_start_errors[0][b"C"] == b"42601", invalid_start
+        assert simple_query(sock, "START TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE")[-1] == (b"Z", b"T")
         assert any(kind == b"C" for kind, _ in simple_query(sock, "INSERT INTO t VALUES (20)"))
         assert any(kind == b"C" for kind, _ in simple_query(sock, "SAVEPOINT sp_tx"))
         assert any(kind == b"C" for kind, _ in simple_query(sock, "INSERT INTO t VALUES (21)"))

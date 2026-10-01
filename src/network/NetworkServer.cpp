@@ -3936,6 +3936,22 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         session.openProtocolPortals = portals.size();
         session.failedTransactionBlock = transactionFailed;
         if (transactionFailed && !isTransactionRecoveryCommand(sql)) {
+            // PostgreSQL reports raw syntax errors even in an aborted
+            // block. A valid BEGIN still receives 25P02, and must not
+            // restart the transaction or emit a nested-BEGIN warning.
+            const std::string keyword = firstSqlKeyword(sql);
+            if (keyword == "begin" || keyword == "start") {
+                const size_t offset = sqlCommandOffset(sql);
+                SQLParser parser;
+                auto parsed = parser.parse(offset == std::string::npos ? sql : sql.substr(offset));
+                if (!parsed.success) {
+                    QueryResult error;
+                    error.error = true;
+                    error.sqlState = "42601";
+                    error.errorMessage = parsed.error;
+                    return error;
+                }
+            }
             return transactionAbortedResult();
         }
         const bool wasInTransaction = g_engine.inTransaction();

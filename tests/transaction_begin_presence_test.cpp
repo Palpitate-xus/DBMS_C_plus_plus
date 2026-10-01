@@ -13,7 +13,7 @@ int main() {
         {"READ ONLY", false, true, false},
         {"READ WRITE", false, true, false},
         {"ISOLATION LEVEL READ UNCOMMITTED", true, false, false},
-        {"READ COMMITTED", true, false, false},
+        {"ISOLATION LEVEL READ COMMITTED", true, false, false},
         {"ISOLATION LEVEL REPEATABLE READ", true, false, false},
         {"ISOLATION LEVEL SERIALIZABLE READ ONLY", true, true, false},
         {"NOT DEFERRABLE", false, false, true},
@@ -39,7 +39,11 @@ int main() {
                    copy->deferrable == original->deferrable);
         }
     }
-    assert(!parser.parse("BEGIN READ ONLY READ WRITE;").success);
+    auto repeatedModes = parser.parse("BEGIN READ ONLY READ WRITE;");
+    assert(repeatedModes.success);
+    const auto* repeated = dynamic_cast<const dbms::TransactionStmt*>(repeatedModes.stmt.get());
+    assert(repeated && repeated->readOnlySpecified && !repeated->readOnly);
+    assert(!parser.parse("BEGIN READ COMMITTED;").success);
     assert(!parser.parse("START TRANSACTION ISOLATION LEVEL SERIALIZABLE READ COMMITTED;").success);
     std::cout << "[TRANSACTION BEGIN PRESENCE] passed\n";
 }
