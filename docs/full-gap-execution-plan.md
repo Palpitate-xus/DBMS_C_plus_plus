@@ -17,6 +17,8 @@
 
 ## 后续优先队列
 
+2026-10-01：895、897–902 七项分别 source commit、定向／相邻验证后已合并至隔离 D。895 另有独立正式生产构建及同 binary 强专项／完整协议通过；其余为重编重链，不虚称冷构建。旧 9ed86eef 的正确参考库全量 416/416 failed=0 已闭合，但 A5885facd 正式脚本 416/417 C++、141/143 E2E、exit 1，原失败保留；901 加强 SERIAL 序列 oracle，902 修复 ordinary lock error 的 E 状态。最新组合需正式 production、421 C++／148 E2E、421 真实差分；原 NULL self INSERT SELECT 组合、内部全事务 rollback 的 SP 保真、temp SERIAL／NULL、长 PK family 及其余族继续。仍 24 complete、137 partial、97 unverified、15 deferred_by_user；未 push，Actions 禁用。
+
 2026-10-01：893 pending current-row self INSERT与896 quoted constraint AST各自独立source commit；14／8 C++、专项／相邻／完整协议及各9个不同真实PG18.6 case全退出码0。895同一语句另一行的FK visibility、897 quoted space column UPDATE／DELETE谓词均已旧binary实际failed=1，原失败保留，继续单独修复。ea35c0f4的正确参考库411/411 failed=0与45c07633的正式412/412 C++、137/137 E2E均exit0闭合；根5885facd正式production与同源隔离A417 C++／143 E2E新一轮运行，416全量差分待新binary，不把旧轮记作最新完成。总账24 complete、137 partial、97 unverified、15 deferred_by_user，未push，Actions禁用。
 
 2026-10-01：892 空文本／NULL 外键和 894 已结束事务的 wire failed-state 各自独立 source commit；13／6 C++、专项／相邻／完整协议及10／8个不同真实PG18.6 case全退出码0。旧COMMIT/PREPARE失败及两次full错误状态oracle保持记录，详见code-review-progress。继续893 pending self INSERT、895 same-statement FK visibility、896 quoted self definition、temp SERIAL／NULL声明冲突、长PK前缀碰撞及其余功能族。根ea35c0f4冻结411真实全量差分、A45c07633正式412 C++／137 E2E仍运行，不含后续890／892／894；不冒充最新组合全量验收。总账仍24 complete、137 partial、97 unverified、15 deferred_by_user，未push，Actions禁用。
