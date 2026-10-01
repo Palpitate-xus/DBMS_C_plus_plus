@@ -18419,9 +18419,21 @@ static bool executeInternal(const string& rawSql, Session& s) {
         size_t updatedCount = 0;
         if (wherePos != std::string::npos) {
             string whereClause = trim(sql.substr(wherePos + 5));
-            whereClause = expandSubqueries(whereClause, s);
-            whereClause = normalizeConditionStr(whereClause);
-            vector<string> tokens = mergeNegPredTokens(tokenize(whereClause));
+            vector<string> tokens;
+            const string rawUpdateScan = toLower(effectiveRawSql);
+            const size_t rawWherePos = findTopLevelKeyword(rawUpdateScan, "where", 0);
+            if (rawWherePos != string::npos) {
+                const size_t returningPos = findTopLevelKeyword(rawUpdateScan, "returning", rawWherePos + 5);
+                const string predicate = trim(effectiveRawSql.substr(rawWherePos + 5,
+                    returningPos == string::npos ? string::npos : returningPos - rawWherePos - 5));
+                if (hasComputedPredicate(predicate))
+                    tokens = {"typedexpr " + predicate};
+            }
+            if (tokens.empty()) {
+                whereClause = expandSubqueries(whereClause, s);
+                whereClause = normalizeConditionStr(whereClause);
+                tokens = mergeNegPredTokens(tokenize(whereClause));
+            }
             tokens.insert(tokens.begin(), "(");
             tokens.push_back(")");
             for (auto& t : tokens) t = modifyLogic(t);
