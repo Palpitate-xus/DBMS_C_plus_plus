@@ -20927,6 +20927,29 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
             : extractColumnValueStatic(rowBuffer, tbl, columnIndex);
     };
 
+    if (cond.op == "typedexpr") {
+        std::map<std::string, std::string> rowValues;
+        std::set<std::string> nullColumns;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            bool isNull = false;
+            std::string value = extractValue(i, &isNull);
+            if (!buffered && !valueEngine && !tbl.cols[i].isVariableLength &&
+                tbl.cols[i].isNull && value.empty()) isNull = true;
+            rowValues[tbl.cols[i].dataName] = std::move(value);
+            if (isNull) nullColumns.insert(tbl.cols[i].dataName);
+        }
+        const auto evaluated = ExprHelper::evalStringWithNulls(
+            cond.value, rowValues, nullColumns, buildTypeHints(tbl), valueDb);
+        if (!evaluated.ok)
+            throw std::runtime_error(evaluated.error.empty()
+                ? "failed to evaluate typed predicate" : evaluated.error);
+        if (evaluated.isNull) return false;
+        if (evaluated.typeName != "boolean")
+            throw std::runtime_error(
+                "argument of WHERE must be type boolean (SQLSTATE 42804)");
+        return ExprValue("boolean", evaluated.value, false).asBool();
+    }
+
     // Function-left predicate ("length(v) = 0" captured by parseConditions
     // as op="scalarexpr"): evaluate the function on this row and compare.
     // A NULL result is Unknown in three-valued logic, so the row drops.
@@ -23931,6 +23954,12 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
     for (const auto& s : cstr) {
         if (s.empty()) continue;
         Condition c;
+        if (s.rfind("typedexpr ", 0) == 0) {
+            c.op = "typedexpr";
+            c.value = s.substr(10);
+            conds.push_back(std::move(c));
+            continue;
+        }
         // Handle LIKE operator
         // Accept both "notlike<col> <val>" (glued, from modifyLogic's
         // compact path) and "notlike <col> <val>" (spaced, from splitConds
@@ -24114,6 +24143,31 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
         size_t sp = s.find(' ', opEnd);
         if (sp == std::string::npos) continue;
         c.colName = s.substr(opEnd, sp - opEnd);
+        // Computed operands are not physical column names. Preserve the
+        // original RHS before literal decoding for typed comparison/coercion.
+        const auto computedOperand = [](const std::string& operand) {
+            SQLParser parser;
+            const auto parsed = parser.parse("SELECT " + operand);
+            const auto* select = parsed.success
+                ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
+            if (!select || select->selectList.size() != 1) return false;
+            const auto* expression = select->selectList.front().expr.get();
+            if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expression)) {
+                if ((unary->op == "+" || unary->op == "-") &&
+                    dynamic_cast<const LiteralExpr*>(unary->operand.get())) return false;
+            }
+            return dynamic_cast<const BinaryOpExpr*>(expression) ||
+                   dynamic_cast<const UnaryOpExpr*>(expression) ||
+                   dynamic_cast<const CastExpr*>(expression);
+        };
+        const std::string rawRight = s.substr(sp + 1);
+        if (computedOperand(c.colName) || computedOperand(rawRight)) {
+            c.value = c.colName + " " + c.op + " " + rawRight;
+            c.colName.clear();
+            c.op = "typedexpr";
+            conds.push_back(std::move(c));
+            continue;
+        }
         c.value = decodeSqlLiteral(s.substr(sp + 1));
         conds.push_back(c);
     }

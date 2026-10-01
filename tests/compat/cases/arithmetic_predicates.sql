@@ -1,0 +1,18 @@
+CREATE TABLE diff_arithmetic_predicates(id INT PRIMARY KEY,n NUMERIC);
+INSERT INTO diff_arithmetic_predicates VALUES(1,1),(2,2),(3,NULL);
+SELECT id FROM diff_arithmetic_predicates WHERE n/0.5>1 ORDER BY id;
+SELECT id FROM diff_arithmetic_predicates WHERE n/0.5>3 ORDER BY id;
+SELECT id FROM diff_arithmetic_predicates WHERE n/00.5>3 ORDER BY id;
+SELECT id FROM diff_arithmetic_predicates WHERE n/(0.25+0.25)>3 ORDER BY id;
+SELECT id FROM diff_arithmetic_predicates WHERE n/0.5>3 AND id=2 ORDER BY id;
+SELECT id,n FROM diff_arithmetic_predicates WHERE coalesce(1,1/0)=1 ORDER BY id;
+SELECT count(*) FILTER(WHERE n/0.5>1) FROM diff_arithmetic_predicates;
+SELECT id FROM diff_arithmetic_predicates WHERE n/0>1;
+DROP TABLE diff_arithmetic_predicates;
+DROP TABLE IF EXISTS diff_arithmetic_predicates_empty;
+CREATE TABLE diff_arithmetic_predicates_empty(id INT,n NUMERIC);
+SELECT id FROM diff_arithmetic_predicates_empty WHERE n/0>1;
+SELECT id FROM diff_arithmetic_predicates_empty WHERE coalesce(1,1/0)=1;
+SELECT id FROM diff_arithmetic_predicates_empty WHERE 1/0>1;
+SELECT id FROM diff_arithmetic_predicates_empty WHERE 1/0;
+DROP TABLE diff_arithmetic_predicates_empty;

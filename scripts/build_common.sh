@@ -143,6 +143,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/numeric_cast_division_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/quoted_from_whitespace_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/timezone_expression_header_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/arithmetic_predicate_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cli_error_recovery_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/no_fake_compat_objects_test.py)
     DBMS_E2E_TESTS+=(tests/compat_fallback_registry_test.py)

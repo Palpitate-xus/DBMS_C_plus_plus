@@ -8800,26 +8800,64 @@ static bool tableHasColumns(const string& dbname, const string& tablename, const
     return true;
 }
 
-static string normalizeConditionStr(string s) {
-    // PG 22012: division by a literal zero in a WHERE/HAVING/ON
-    // predicate is an immediate query error.  The raw text still
-    // carries "/ 0" here (later stages rewrite it away), so scan
-    // now: a '/' followed (after optional spaces) by a standalone
-    // '0'.  Throwing lets the wire turn this into SQLSTATE 22012
-    // with PG's exact message; // comment guards skip.
-    {
-        size_t p = 0;
-        while ((p = findTextOutsideQuotes(s, "/", p)) != string::npos) {
-            if (p > 0 && s[p - 1] == '/') { p += 2; continue; }
-            size_t a = p + 1;
-            while (a < s.size() && isspace(static_cast<unsigned char>(s[a]))) ++a;
-            bool zeroLit = a < s.size() && s[a] == '0' &&
-                           (a + 1 >= s.size() ||
-                            !isalnum(static_cast<unsigned char>(s[a + 1])));
-            if (zeroLit) throw std::runtime_error("division by zero");
-            ++p;
+static bool hasComputedPredicate(const string& sql, bool* immutableConstant = nullptr) {
+    if (immutableConstant) *immutableConstant = false;
+    dbms::SQLParser parser;
+    const auto parsed = parser.parse("SELECT " + sql);
+    const auto* select = parsed.success
+        ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
+    if (!select || select->selectList.size() != 1 || select->fromClause) return false;
+    bool computed = false;
+    bool subquery = false;
+    bool constant = true;
+    std::function<void(const dbms::Expr*)> inspect = [&](const dbms::Expr* node) {
+        if (!node) return;
+        if (node->type == dbms::ExprType::Subquery) { subquery = true; return; }
+        if (node->type == dbms::ExprType::ColumnRef ||
+            node->type == dbms::ExprType::Parameter ||
+            node->type == dbms::ExprType::A_Star ||
+            node->type == dbms::ExprType::ArrayExpr ||
+            node->type == dbms::ExprType::RowExpr) constant = false;
+        if (const auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(node)) {
+            if (binary->op == "+" || binary->op == "-" || binary->op == "*" ||
+                binary->op == "/" || binary->op == "%" || binary->op == "^" ||
+                binary->op == "||" || binary->op == "::") computed = true;
+            inspect(binary->left.get());
+            inspect(binary->right.get());
+        } else if (const auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(node)) {
+            if ((unary->op == "+" || unary->op == "-") &&
+                !dynamic_cast<const dbms::LiteralExpr*>(unary->operand.get()))
+                computed = true;
+            inspect(unary->operand.get());
+        } else if (const auto* cast = dynamic_cast<const dbms::CastExpr*>(node)) {
+            computed = true;
+            inspect(cast->operand.get());
+        } else if (const auto* function = dynamic_cast<const dbms::FunctionCallExpr*>(node)) {
+            // Only these built-in conditional forms are safe to fold here.
+            // Never execute sequences, volatile or user functions on an empty scan.
+            const string name = toLower(function->funcName);
+            if (!function->schema.empty() ||
+                (name != "coalesce" && name != "nullif" &&
+                 name != "greatest" && name != "least")) constant = false;
+            for (const auto& argument : function->args) inspect(argument.get());
+        } else if (const auto* conditional = dynamic_cast<const dbms::CaseExpr*>(node)) {
+            computed = true;
+            inspect(conditional->switchExpr.get());
+            for (const auto& clause : conditional->whenClauses) {
+                inspect(clause.first.get());
+                inspect(clause.second.get());
+            }
+            inspect(conditional->elseExpr.get());
         }
-    }
+    };
+    inspect(select->selectList.front().expr.get());
+    if (immutableConstant) *immutableConstant = constant && !subquery;
+    return computed && !subquery;
+}
+
+static string normalizeConditionStr(string s) {
+    // Errors belong to expression evaluation. Text scanning cannot distinguish
+    // zero from 0.5 or account for an unused COALESCE/CASE branch.
     // Typed literals (DATE 'x', TIME 'x', TIMESTAMP 'x') in predicates:
     // strip the storage-redundant keyword so the tokenizer sees the bare
     // quoted literal (the column side already declares the type).
@@ -9345,6 +9383,7 @@ static vector<string> mergeNegPredTokens(const vector<string>& toks) {
 
 static string modifyLogic(const string& logic) {
     if (logic == "(" || logic == ")" || logic == "and" || logic == "or") return logic;
+    if (logic.rfind("typedexpr ", 0) == 0) return logic;
     // Evaluate expression NULL tests, rather than replacing them with a
     // constant or leaving a function token without its postfix predicate.
     for (const string suffix : {string("isnotnull"), string("isnull")}) {
@@ -24858,11 +24897,29 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 quantifiedSubqueries.push_back(std::move(quantified));
             } else {
                 whereClause = expandSubqueries(whereClause, s);
-                string condStr = normalizeConditionStr(whereClause);
-                // Collapse IN lists into single tokens so the per-token
-                // modifyLogic below sees the whole predicate.
-                condStr = compactInLists(condStr);
-                condTokens = mergeNegPredTokens(tokenize(condStr));
+                bool immutableConstant = false;
+                if (hasComputedPredicate(whereClause, &immutableConstant)) {
+                    if (immutableConstant) {
+                        // PostgreSQL checks immutable constant expressions even
+                        // when no rows exist. Bind the boolean result first.
+                        if (dbms::ExprHelper::inferResultType(whereClause) != "boolean")
+                            throw std::runtime_error(
+                                "argument of WHERE must be type boolean (SQLSTATE 42804)");
+                        const auto result = dbms::ExprHelper::evalString(whereClause, {});
+                        if (!result.ok)
+                            throw std::runtime_error(result.error.empty()
+                                ? "failed to evaluate typed predicate" : result.error);
+                    }
+                    // Keep grouping, quoted RHS values and lazy branches as
+                    // one typed predicate instead of legacy per-token atoms.
+                    condTokens = {"typedexpr " + whereClause};
+                } else {
+                    string condStr = normalizeConditionStr(whereClause);
+                    // Collapse IN lists into single tokens so the per-token
+                    // modifyLogic below sees the whole predicate.
+                    condStr = compactInLists(condStr);
+                    condTokens = mergeNegPredTokens(tokenize(condStr));
+                }
             }
         }
 
