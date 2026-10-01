@@ -6394,7 +6394,8 @@ static bool dropOwnedSequencesForColumn(
     return true;
 }
 
-static bool executeDropTableSingle(const DropStmt* stmt, Session& s) {
+static bool executeDropTableSingle(const DropStmt* stmt, Session& s,
+                                  const std::set<std::string>& plannedTables = {}) {
     if (!stmt) return rejectMalformedDdlAst();
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
@@ -6519,6 +6520,9 @@ static bool executeDropTableSingle(const DropStmt* stmt, Session& s) {
     std::vector<std::pair<std::string, std::string>> foreignKeysToDrop;
     for (const auto& candidate : g_engine.getTableNames(s.currentDB)) {
         if (candidate == tname) continue;
+        // A foreign key in another explicitly dropped table is internal to
+        // this atomic target group; only surviving tables can block RESTRICT.
+        if (plannedTables.count(candidate) != 0) continue;
         const TableSchema child =
             g_engine.getTableSchema(s.currentDB, candidate);
         for (size_t i = 0; i < child.fkLen; ++i) {
@@ -6859,7 +6863,7 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
         single.objectNames = {target.logical};
         single.ifExists = stmt->ifExists;
         single.cascade = stmt->cascade;
-        if (executeDropTableSingle(&single, s)) return true;
+        if (executeDropTableSingle(&single, s, seen)) return true;
     }
     if (!txn.commit()) return true;
     keepSessionChanges = true;
