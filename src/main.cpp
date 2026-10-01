@@ -8348,6 +8348,38 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                 const auto* rootExpression = headerSelect->selectList.front().expr.get();
                 const auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(rootExpression);
                 const auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(rootExpression);
+                if (dynamic_cast<const dbms::CastExpr*>(rootExpression) ||
+                    (binary && binary->op == "::")) {
+                    // A cast replaces weak names (e.g. another cast's type),
+                    // but preserves a column/function/constructor child name.
+                    std::function<string(const dbms::Expr*)> strongName =
+                        [&](const dbms::Expr* node) -> string {
+                        if (const auto* cast = dynamic_cast<const dbms::CastExpr*>(node))
+                            return strongName(cast->operand.get());
+                        if (const auto* operation = dynamic_cast<const dbms::BinaryOpExpr*>(node))
+                            return operation->op == "::"
+                                ? strongName(operation->left.get()) : string{};
+                        if (const auto* column = dynamic_cast<const dbms::ColumnRefExpr*>(node))
+                            return column->column;
+                        if (const auto* function = dynamic_cast<const dbms::FunctionCallExpr*>(node)) {
+                            const string name = toLower(function->funcName);
+                            if (name == "case_when")
+                                return function->args.size() % 2 == 1
+                                    ? strongName(function->args.back().get()) : string{};
+                            return name;
+                        }
+                        if (const auto* conditional = dynamic_cast<const dbms::CaseExpr*>(node))
+                            return strongName(conditional->elseExpr.get());
+                        if (dynamic_cast<const dbms::ArrayExpr*>(node)) return "array";
+                        if (dynamic_cast<const dbms::RowExpr*>(node)) return "row";
+                        return {};
+                    };
+                    const string inheritedName = strongName(rootExpression);
+                    if (!inheritedName.empty()) {
+                        headers.push_back(inheritedName);
+                        goto headerDone;
+                    }
+                }
                 const string op = binary ? toLower(binary->op) :
                     unary ? toLower(unary->op) : string{};
                 const auto* operandFunction = unary
