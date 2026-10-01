@@ -219,9 +219,16 @@ static bool parseForeignKeyTarget(
     const size_t first = pos;
     std::string raw;
     if (!parseQualifiedObjectName(tokens, pos, raw)) return false;
-    name = parseRoutineIdentifier(tokens[first]);
+    // A relation spelling is resolved later, unlike a decoded column name.
+    // Preserve quoted component boundaries so embedded dots/spaces/quotes
+    // cannot become qualification separators, while folding unquoted names.
+    const auto relationPart = [](const std::string& token) {
+        return token.size() >= 2 && token.front() == '"' && token.back() == '"'
+            ? token : parseRoutineIdentifier(token);
+    };
+    name = relationPart(tokens[first]);
     if (pos > first + 1) {
-        name += "." + parseRoutineIdentifier(tokens[first + 2]);
+        name += "." + relationPart(tokens[first + 2]);
     }
     return true;
 }
@@ -5778,7 +5785,7 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                         tc.name = cname;
                         tc.type = "PRIMARY KEY";
                         for (const auto& c : cols) {
-                            if (c != ",") tc.columns.push_back(c);
+                            if (c != ",") tc.columns.push_back(parseRoutineIdentifier(c));
                         }
                         parseConstraintDeferrability(tokens, pos, tc);
                         stmt->constraints.push_back(std::move(tc));
@@ -5789,7 +5796,7 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                         tc.name = cname;
                         tc.type = "UNIQUE";
                         for (const auto& c : cols) {
-                            if (c != ",") tc.columns.push_back(c);
+                            if (c != ",") tc.columns.push_back(parseRoutineIdentifier(c));
                         }
                         parseConstraintDeferrability(tokens, pos, tc);
                         stmt->constraints.push_back(std::move(tc));
@@ -5800,7 +5807,7 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                         tc.name = cname;
                         tc.type = "FOREIGN KEY";
                         for (const auto& c : cols) {
-                            if (c != ",") tc.columns.push_back(c);
+                            if (c != ",") tc.columns.push_back(parseRoutineIdentifier(c));
                         }
                         if (pos < tokens.size() && toLower(tokens[pos]) == "references") {
                             ++pos;
@@ -5809,7 +5816,7 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                             if (pos < tokens.size() && tokens[pos] == "(") {
                                 auto refcols = collectParenthesized(tokens, pos);
                                 for (const auto& c : refcols) {
-                                    if (c != ",") tc.refColumns.push_back(c);
+                                    if (c != ",") tc.refColumns.push_back(parseRoutineIdentifier(c));
                                 }
                             }
                             parseReferentialActions(tokens, pos, tc);
@@ -5850,7 +5857,7 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                 TableConstraint tc;
                 tc.type = "PRIMARY KEY";
                 for (const auto& c : cols) {
-                    if (c != ",") tc.columns.push_back(c);
+                    if (c != ",") tc.columns.push_back(parseRoutineIdentifier(c));
                 }
                 parseConstraintDeferrability(tokens, pos, tc);
                 stmt->constraints.push_back(std::move(tc));
@@ -5860,7 +5867,7 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                 TableConstraint tc;
                 tc.type = "UNIQUE";
                 for (const auto& c : cols) {
-                    if (c != ",") tc.columns.push_back(c);
+                    if (c != ",") tc.columns.push_back(parseRoutineIdentifier(c));
                 }
                 parseConstraintDeferrability(tokens, pos, tc);
                 stmt->constraints.push_back(std::move(tc));
@@ -5870,7 +5877,7 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                 TableConstraint tc;
                 tc.type = "FOREIGN KEY";
                 for (const auto& c : cols) {
-                    if (c != ",") tc.columns.push_back(c);
+                    if (c != ",") tc.columns.push_back(parseRoutineIdentifier(c));
                 }
                 if (pos < tokens.size() && toLower(tokens[pos]) == "references") {
                     ++pos;
@@ -5879,7 +5886,7 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                     if (pos < tokens.size() && tokens[pos] == "(") {
                         auto refcols = collectParenthesized(tokens, pos);
                         for (const auto& c : refcols) {
-                            if (c != ",") tc.refColumns.push_back(c);
+                            if (c != ",") tc.refColumns.push_back(parseRoutineIdentifier(c));
                         }
                     }
                     parseReferentialActions(tokens, pos, tc);
@@ -6116,7 +6123,7 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                             std::string refCol;
                             if (pos < tokens.size() && tokens[pos] == "(") {
                                 auto refcols = collectParenthesized(tokens, pos);
-                                if (!refcols.empty()) refCol = refcols[0];
+                                if (!refcols.empty()) refCol = parseRoutineIdentifier(refcols[0]);
                             }
                             // Store as a simple foreign key constraint on this column
                             TableConstraint tc;
@@ -8998,7 +9005,7 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                     if (pos < tokens.size() && tokens[pos] == ")") ++pos;
                 } else {
                     auto cols = collectParenthesized(tokens, pos);
-                    for (const auto& c : cols) if (c != ",") sub.constraint.columns.push_back(c);
+                    for (const auto& c : cols) if (c != ",") sub.constraint.columns.push_back(parseRoutineIdentifier(c));
                 }
             }
             if (pos < tokens.size() && toLower(tokens[pos]) == "references") {
@@ -9007,7 +9014,7 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                         tokens, pos, sub.constraint.refTable)) return nullptr;
                 if (pos < tokens.size() && tokens[pos] == "(") {
                     auto refcols = collectParenthesized(tokens, pos);
-                    for (const auto& c : refcols) if (c != ",") sub.constraint.refColumns.push_back(c);
+                    for (const auto& c : refcols) if (c != ",") sub.constraint.refColumns.push_back(parseRoutineIdentifier(c));
                 }
             }
             while (pos < tokens.size() && tokens[pos] != "," && tokens[pos] != ";") {
