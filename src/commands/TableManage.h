@@ -1412,8 +1412,13 @@ public:
     // Transaction isolation levels (unified with dbms::IsolationLevel in dbms_defs.h)
     bool setIsolationLevel(IsolationLevel level) {
         auto& context = transactionContext();
+        // An idempotent request is legal even after snapshot use or within
+        // a user subtransaction. Do not invalidate its existing read view.
+        if (context.inTransaction && level == context.txnIsolationLevel) {
+            return true;
+        }
         if (context.inTransaction &&
-            (context.hasRead || context.hasWrite || !context.txnLog.empty() ||
+            (hasUserSavepoint() || context.hasRead || context.hasWrite || !context.txnLog.empty() ||
              !context.ddlUndoActions.empty() ||
              !context.txnBackupPath.empty())) {
             return false;
