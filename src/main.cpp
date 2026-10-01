@@ -2707,6 +2707,7 @@ static bool commitBeforeLegacyDdl(Session& s) {
 
 static bool handleCommitTransaction(const string& sql, Session& s) {
     const bool hadTransaction = g_engine.inTransaction();
+    const bool wasReadOnly = g_engine.isReadOnly();
     if (hadTransaction && !prepareNotificationTransactionCommit(s)) {
         (void)g_engine.rollbackTransaction();
         rollbackNotificationTransaction(s);
@@ -2735,6 +2736,10 @@ static bool handleCommitTransaction(const string& sql, Session& s) {
         }
         dbms::advisoryLockManager().beginTransaction(advisoryOwner(s));
         beginNotificationTransaction(s);
+        // commitTransaction clears per-transaction read-only state. CHAIN
+        // inherits the ending transaction's mode rather than that cleared
+        // default, including a mode established with SET TRANSACTION.
+        g_engine.setReadOnly(wasReadOnly);
         cout << "Transaction committed (and chain)" << endl;
         log(s.username, "commit and chain", getTime());
     } else if (lowerSql.find("and no chain") != string::npos) {
@@ -2770,6 +2775,7 @@ static bool handleCommitPrepared(const string& sql, Session& s) {
 
 static bool handleRollbackTransaction(const string& sql, Session& s) {
     const bool hadTransaction = g_engine.inTransaction();
+    const bool wasReadOnly = g_engine.isReadOnly();
     auto res = g_engine.rollbackTransaction();
     if (res != DBStatus::OK) {
         cout << "Rollback failed" << endl;
@@ -2791,6 +2797,10 @@ static bool handleRollbackTransaction(const string& sql, Session& s) {
         }
         dbms::advisoryLockManager().beginTransaction(advisoryOwner(s));
         beginNotificationTransaction(s);
+        // Capture before rollback clears the old transaction's mode. A
+        // previously aborted top-level transaction has already reset it;
+        // a failed user subtransaction still retains its parent's mode.
+        g_engine.setReadOnly(wasReadOnly);
         cout << "Transaction rolled back (and chain)" << endl;
         log(s.username, "rollback and chain", getTime());
     } else {
