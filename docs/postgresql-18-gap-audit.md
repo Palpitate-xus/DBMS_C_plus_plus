@@ -505,6 +505,10 @@
 
 ## 23. PostgreSQL 官方对标来源
 
+2026-10-01 第908项 source `19461193`，D合并 `7baa97e9`：三连接真实PG18.6 schedule确认错误必须在ErrorResponse之前释放active user savepoint之后的tuple／transaction advisory locks；没有user SP时必须立即释放全部transaction资源，而SESSION advisory lock不随abort释放。旧84强wire在未发送ROLLBACK TO时保留row2锁而exit1；初版只清理subtransaction的Top-level advisory断言亦exit1，原日志保留。新增latestUserSavepoint结构性查找，Network在普通SQL错误边界恢复最近USER SP或物理abort无SP事务，并同步notification／advisory transaction资源；协议仍E／25P02直至客户端恢复，先前用户SP工作和锁保持。最终独立真实production全重编＋Network增量、12 C++、最终三连接PG oracle／本项目强wire、8邻居／COPY／完整协议、9不同actual case均exit0。v1本地Table括号编译错误已修正且原失败日志保留；两个邻居选择脚本的不存在文件名错误亦保留，不算产品失败或成功用例，最终使用实际文件名重跑通过。非virtual方法无新增对象字段或磁盘格式更改。COPY wire内部SP仍是legacy USER分类，Parse/Bind等非SQL错误边界、真正SubXID/resource owner及其余savepoint族未完成，不勾整个TXN-05。
+
+正式冻结494基线：根production全header真实重编exit0；A完整脚本424/424 C++、151/151 E2E、exit0已闭合（`/tmp/dbms-tests-savepoint-gap-serial-null-903-906.log`）。随后根494同正式binary的423全量PG18.6差分已启动，尚在运行，不能声称全量结果；根/A仍冻结494，不含909／908。含两项下一轮应426 C++／153E2E／424actual。907temp SERIAL原failed=1尚未修；912正常AND CHAIN丢失READ ONLY已真实PG确认，接续独立修复。总账273：24 complete、138 partial、96 unverified、15 deferred_by_user；未push，Actions禁用。
+
 - [PostgreSQL 18.6 Documentation](https://www.postgresql.org/docs/18/)
 - [PostgreSQL 18 SQL Commands：183 条命令目录](https://www.postgresql.org/docs/18/sql-commands.html)
 - [The SQL Language](https://www.postgresql.org/docs/18/sql.html)
