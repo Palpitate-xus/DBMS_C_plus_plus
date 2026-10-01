@@ -3937,6 +3937,37 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             const bool transactionEnding =
                 (keyword == "commit" && !startsWithSqlPhrase(sql, "commit prepared")) ||
                 keyword == "end" || startsWithSqlPhrase(sql, "prepare transaction");
+            if (!transactionEnding) {
+                // Abort the active user subtransaction now, before sending
+                // ErrorResponse. Its locks must not block other backends
+                // while this connection waits for an explicit ROLLBACK TO.
+                // Keep the recovery point and the protocol's failed state.
+                const auto recovery = g_engine.latestUserSavepoint();
+                if (recovery &&
+                    g_engine.rollbackToSavepoint(*recovery) == DBStatus::OK) {
+                    (void)notificationManager().rollbackToSavepoint(
+                        session.pid, *recovery);
+                    if (session.advisoryOwnerId != 0) {
+                        advisoryLockManager().rollbackToSavepoint(
+                            session.advisoryOwnerId, *recovery);
+                    }
+                } else if (!recovery) {
+                    // Some storage paths already abort the engine on lock
+                    // failure; others leave cleanup to the SQL boundary.
+                    // In either case release transaction-scoped side effects,
+                    // never session-scoped advisory ownership.
+                    if (g_engine.inTransaction()) {
+                        (void)g_engine.rollbackTransaction();
+                    }
+                    if (!g_engine.inTransaction()) {
+                        notificationManager().rollbackTransaction(session.pid);
+                        if (session.advisoryOwnerId != 0) {
+                            advisoryLockManager().releaseTransaction(
+                                session.advisoryOwnerId);
+                        }
+                    }
+                }
+            }
             transactionFailed = !transactionEnding || g_engine.inTransaction();
         } else if (!result.error && isTransactionRecoveryCommand(sql)) {
             transactionFailed = false;

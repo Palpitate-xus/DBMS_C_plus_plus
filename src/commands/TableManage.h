@@ -859,6 +859,7 @@ public:
     // Internal statement boundaries must not masquerade as user recovery
     // points. May rename a colliding name; callers must use the returned name.
     DBStatus createStatementSavepoint(std::string& name);
+    std::optional<std::string> latestUserSavepoint() const;
     DBStatus rollbackToSavepoint(const std::string& name);
     DBStatus releaseSavepoint(const std::string& name);
 

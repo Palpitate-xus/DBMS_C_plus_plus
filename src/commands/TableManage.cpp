@@ -45532,12 +45532,17 @@ DBStatus StorageEngine::createStatementSavepoint(std::string& name) {
     return createSavepoint(name, true);
 }
 
-bool StorageEngine::hasUserSavepoint() const {
+std::optional<std::string> StorageEngine::latestUserSavepoint() const {
+    if (!transactionContext().inTransaction) return std::nullopt;
     const auto& savepoints = transactionContext().savepoints;
-    return std::any_of(savepoints.begin(), savepoints.end(),
-        [](const TransactionContext::SavepointState& savepoint) {
-            return !savepoint.internalStatement;
-        });
+    for (auto it = savepoints.rbegin(); it != savepoints.rend(); ++it) {
+        if (!it->internalStatement) return it->name;
+    }
+    return std::nullopt;
+}
+
+bool StorageEngine::hasUserSavepoint() const {
+    return latestUserSavepoint().has_value();
 }
 
 DBStatus StorageEngine::createSavepoint(
