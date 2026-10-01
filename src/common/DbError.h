@@ -23,4 +23,13 @@ private:
     std::string message_;
 };
 
+// The statement completed and its RETURNING rows are valid protocol output,
+// but the enclosing autocommit transaction failed afterwards. Distinguish
+// this phase structurally; neither an error message nor SQLSTATE alone says
+// whether rows were produced before the failure. DbError's layout is unchanged.
+class StatementCommitError final : public DbError {
+public:
+    using DbError::DbError;
+};
+
 }  // namespace dbms

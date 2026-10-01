@@ -29283,8 +29283,8 @@ bool execute(const std::string& rawSql, Session& s) {
     }
     --executeDepth;
     if (statementCommitStatus != DBStatus::OK) {
-        throw dbms::DbError(dbms::sqlstateForDBStatus(statementCommitStatus),
-                           "statement transaction commit failed");
+        throw dbms::StatementCommitError(dbms::sqlstateForDBStatus(statementCommitStatus),
+                                        "statement transaction commit failed");
     }
     return error;
 }
