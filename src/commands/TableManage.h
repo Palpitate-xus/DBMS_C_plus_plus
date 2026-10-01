@@ -856,6 +856,9 @@ public:
 
     // Savepoint support
     DBStatus savepoint(const std::string& name);
+    // Internal statement boundaries must not masquerade as user recovery
+    // points. May rename a colliding name; callers must use the returned name.
+    DBStatus createStatementSavepoint(std::string& name);
     DBStatus rollbackToSavepoint(const std::string& name);
     DBStatus releaseSavepoint(const std::string& name);
 
@@ -2094,6 +2097,7 @@ private:
             std::set<std::string> tempTables;
             std::map<std::string, std::string> tempTableOnCommit;
             std::set<std::string> tempTablesCreatedInTransaction;
+            bool internalStatement = false;
         };
         std::vector<SavepointState> savepoints;
         bool tempNamespaceAtTransactionStart = false;
@@ -2154,6 +2158,8 @@ private:
     mutable std::mutex transactionContextsMutex_;
     mutable std::map<std::thread::id, std::unique_ptr<TransactionContext>> transactionContexts_;
     TransactionContext& transactionContext() const;
+    DBStatus createSavepoint(const std::string& name, bool internalStatement);
+    bool hasUserSavepoint() const;
     void ensureTransactionSnapshot() const;
     bool markTupleDeletedByCurrentCommand(
         char* rowBuffer, size_t len, uint32_t formatVersion);
