@@ -10694,9 +10694,12 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
                             encodeRid(pageId, slotId), referencedColumns[valueIndex])) {
                         return;
                     }
-                    if (const_cast<StorageEngine*>(this)->extractColumnValue(
-                            row, refTbl, referencedColumns[valueIndex],
-                            dc.dbname) != payloadValues[valueIndex]) {
+                    const Column& referencedColumn =
+                        refTbl.cols[referencedColumns[valueIndex]];
+                    if (canonicalColumnKeyValue(referencedColumn,
+                            const_cast<StorageEngine*>(this)->extractColumnValue(
+                                row, refTbl, referencedColumns[valueIndex], dc.dbname)) !=
+                        canonicalColumnKeyValue(referencedColumn, payloadValues[valueIndex])) {
                         return;
                     }
                 }
@@ -23239,8 +23242,12 @@ DBStatus StorageEngine::insertInternal(
             }
         }
         if (hasNull) continue;
-        if (!fk.name.empty() && transactionContext().inTransaction &&
-            isConstraintCurrentlyDeferred(dbname, tablename, fk.name)) {
+        const bool statementSelfReference = transactionContext().inTransaction &&
+            transactionContext().readView.commandIdVisibility &&
+            fk.refTable == tablename;
+        if (statementSelfReference ||
+            (!fk.name.empty() && transactionContext().inTransaction &&
+             isConstraintCurrentlyDeferred(dbname, tablename, fk.name))) {
             DeferredFkEntry e;
             e.fkIndex = fi;
             for (const auto& columnName : fk.colNames) {
@@ -42657,6 +42664,88 @@ bool StorageEngine::finishSqlCommand() {
     ++context.currentCommandId;
     context.readView.currentCommandId = context.currentCommandId;
     return true;
+}
+
+DBStatus StorageEngine::validateImmediateForeignKeyChecks() {
+    auto& context = transactionContext();
+    if (!context.inTransaction) return DBStatus::OK;
+    auto queued = context.deferredChecks.find(context.currentTxnId);
+    if (queued == context.deferredChecks.end()) return DBStatus::OK;
+    const auto immediate = [&](const DeferredCheck& check) {
+        return check.kind == DeferredCheck::Kind::ForeignKey &&
+            !isConstraintCurrentlyDeferred(
+                check.dbname, check.tablename, check.constraintName);
+    };
+    for (const auto& check : queued->second) {
+        if (!immediate(check)) continue;
+        // Preserve logarithmic PK lookup for ordinary self hierarchies. The
+        // checked index read, MVCC heap recheck and complete logical key
+        // comparison cannot accept an invisible or merely prefix-equal row.
+        bool primaryLookup = false;
+        if (check.tablename == check.refTable &&
+            check.fkLocalCols.size() == 1 && check.fkRefCols.size() == 1 &&
+            tableExists(check.dbname, check.tablename)) {
+            const TableSchema table = getTableSchema(check.dbname, check.tablename);
+            std::vector<size_t> primary = table.pkColIndices;
+            if (primary.empty()) {
+                for (size_t i = 0; i < table.len; ++i) {
+                    if (table.cols[i].isPrimaryKey) primary.push_back(i);
+                }
+            }
+            if (primary.size() == 1 && primary.front() < table.len &&
+                table.cols[primary.front()].dataName == check.fkRefCols.front()) {
+                primaryLookup = true;
+                size_t localColumn = table.len;
+                for (size_t i = 0; i < table.len; ++i) {
+                    if (table.cols[i].dataName == check.fkLocalCols.front()) {
+                        localColumn = i;
+                        break;
+                    }
+                }
+                if (localColumn == table.len) return DBStatus::CORRUPTED_DATA;
+                int64_t localRid = check.rid;
+                std::string localRow;
+                bool readFailed = false;
+                if (!readCurrentRowByRid(check.dbname, check.tablename, check.rid,
+                        table, localRid, localRow, readFailed)) {
+                    if (readFailed) return DBStatus::IO_ERROR;
+                    continue; // Inserted and subsequently deleted in this statement.
+                }
+                if (isColumnNullByRid(check.dbname, check.tablename, localRid, localColumn)) {
+                    continue;
+                }
+                const std::string localValue = extractColumnValue(
+                    localRow, table, localColumn, check.dbname);
+                BPTree* index = getPKIndex(check.dbname, check.refTable);
+                if (!index) return DBStatus::IO_ERROR;
+                const std::map<std::string, std::string> key{
+                    {check.fkRefCols.front(), localValue}};
+                int64_t referencedRid = -1;
+                const auto lookup = index->searchChecked(table.buildPKValue(key), referencedRid);
+                if (lookup == BPTree::SearchResult::Error) return DBStatus::IO_ERROR;
+                if (lookup == BPTree::SearchResult::NotFound) return DBStatus::FOREIGN_KEY_VIOLATION;
+                std::string referencedRow;
+                if (!readIndexedRowByRid(check.dbname, check.refTable, referencedRid,
+                        referencedRow, table, &context.readView, &readFailed)) {
+                    return readFailed ? DBStatus::IO_ERROR : DBStatus::FOREIGN_KEY_VIOLATION;
+                }
+                const Column& referencedColumn = table.cols[primary.front()];
+                if (canonicalColumnKeyValue(referencedColumn, extractColumnValue(
+                        referencedRow, table, primary.front(), check.dbname)) !=
+                    canonicalColumnKeyValue(referencedColumn, localValue)) {
+                    return DBStatus::FOREIGN_KEY_VIOLATION;
+                }
+            }
+        }
+        if (!primaryLookup && !runDeferredCheck(check)) {
+            return DBStatus::FOREIGN_KEY_VIOLATION;
+        }
+    }
+    // Keep deferred checks in their original order and remove successful
+    // immediate events in one linear pass, not one erase per inserted row.
+    auto& checks = queued->second;
+    checks.erase(std::remove_if(checks.begin(), checks.end(), immediate), checks.end());
+    return DBStatus::OK;
 }
 
 void StorageEngine::registerSqlCommandInternalRelation(

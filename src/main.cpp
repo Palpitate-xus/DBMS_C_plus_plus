@@ -29212,6 +29212,22 @@ bool execute(const std::string& rawSql, Session& s) {
         g_engine.inTransaction() && g_engine.beginSqlCommand();
 
     bool error = false;
+    DBStatus statementConstraintStatus = DBStatus::OK;
+    const auto checkStatementConstraints = [&]() {
+        if (error) return;
+        try {
+            statementConstraintStatus = g_engine.validateImmediateForeignKeyChecks();
+        } catch (...) {
+            if (statementTransaction) {
+                g_engine.rollbackTransaction();
+                rollbackNotificationTransaction(s);
+                dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
+            }
+            --executeDepth;
+            throw;
+        }
+        if (statementConstraintStatus != DBStatus::OK) error = true;
+    };
     try {
         error = executeInternal(rawSql, s);
     } catch (...) {
@@ -29233,6 +29249,7 @@ bool execute(const std::string& rawSql, Session& s) {
         if (commandVisibilityActive && !g_engine.finishSqlCommand()) {
             error = true;
         }
+        checkStatementConstraints();
         if (error) {
             g_engine.rollbackTransaction();
             rollbackNotificationTransaction(s);
@@ -29265,6 +29282,7 @@ bool execute(const std::string& rawSql, Session& s) {
         // ordinary statement entered with command visibility already active.
         // Both consume one command ID before the next SQL statement.
         if (!g_engine.finishSqlCommand()) error = true;
+        checkStatementConstraints();
     }
     if (notificationStatementTransaction && !g_engine.inTransaction() &&
         dbms::notificationManager().inTransaction(s.pid)) {
@@ -29280,6 +29298,10 @@ bool execute(const std::string& rawSql, Session& s) {
         rollbackNotificationTransaction(s);
     }
     --executeDepth;
+    if (statementConstraintStatus != DBStatus::OK) {
+        throw dbms::DbError(dbms::sqlstateForDBStatus(statementConstraintStatus),
+                           "statement foreign key validation failed");
+    }
     return error;
 }
 

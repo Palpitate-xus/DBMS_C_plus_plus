@@ -811,6 +811,9 @@ public:
     // MVCC snapshot, then become visible after the command counter advances.
     bool beginSqlCommand();
     bool finishSqlCommand();
+    // Validate immediate self-FK events only at the actual statement boundary,
+    // not at internal command-counter advances (for example REPLACE).
+    DBStatus validateImmediateForeignKeyChecks();
     void registerSqlCommandInternalRelation(const std::string& tablename);
 
     // Register an undo action for DDL performed inside an already-open
