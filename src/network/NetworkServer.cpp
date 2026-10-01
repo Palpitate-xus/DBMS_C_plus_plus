@@ -3929,6 +3929,19 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         }
         return true;
     };
+    const auto sendExtendedProtocolError = [&](const std::string& sqlState,
+                                                const std::string& errorMessage) -> bool {
+        // Parse, Bind, Describe, and wire validation can fail before
+        // executeForProtocol runs. They must use the same abort boundary,
+        // before ErrorResponse, not defer lock/undo cleanup until Sync.
+        if (g_engine.inTransaction()) {
+            (void)abortActiveTransaction();
+            transactionFailed = true;
+        }
+        session.failedTransactionBlock = transactionFailed;
+        extendedQueryError = true;
+        return protocol.sendErrorResponse("ERROR", sqlState, errorMessage);
+    };
     const auto executeForProtocol = [&](const std::string& sql) -> QueryResult {
         // Portal objects live in this connection loop rather than Session.
         // Mirror their count while a command executes so a database-context
@@ -4465,7 +4478,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             if (!PostgresProtocol::readCString(message.payload, offset, statement) ||
                 !PostgresProtocol::readCString(message.payload, offset, sql) ||
                 offset + 2 > message.payload.size()) {
-                protocol.sendErrorResponse("ERROR", "08P01", "malformed Parse message");
+                sendExtendedProtocolError("08P01", "malformed Parse message");
                 extendedQueryError = true;
                 continue;
             }
@@ -4473,7 +4486,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             offset += 2;
             if (message.payload.size() - offset !=
                 static_cast<size_t>(parameterCount) * 4) {
-                protocol.sendErrorResponse("ERROR", "08P01", "malformed Parse parameter type list");
+                sendExtendedProtocolError("08P01", "malformed Parse parameter type list");
                 extendedQueryError = true;
                 continue;
             }
@@ -4494,16 +4507,14 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 }
             }
             if (unknownParameterType != 0) {
-                protocol.sendErrorResponse(
-                    "ERROR", "42704",
+                sendExtendedProtocolError("42704",
                     "type with OID " + std::to_string(unknownParameterType) +
                         " does not exist");
                 extendedQueryError = true;
                 continue;
             }
             if (splitSimpleQueryStatements(sql).size() > 1) {
-                protocol.sendErrorResponse(
-                    "ERROR", "42601",
+                sendExtendedProtocolError("42601",
                     "cannot insert multiple commands into a prepared statement");
                 extendedQueryError = true;
                 continue;
@@ -4512,14 +4523,13 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             std::string parameterError;
             if (!dbms::ps_analyzeDollarParams(
                     sql, inferredParameterCount, parameterError)) {
-                protocol.sendErrorResponse("ERROR", "42P02", parameterError);
+                sendExtendedProtocolError("42P02", parameterError);
                 extendedQueryError = true;
                 continue;
             }
             if (inferredParameterCount >
                 static_cast<size_t>(std::numeric_limits<uint16_t>::max())) {
-                protocol.sendErrorResponse(
-                    "ERROR", "54000", "too many prepared statement parameters");
+                sendExtendedProtocolError("54000", "too many prepared statement parameters");
                 extendedQueryError = true;
                 continue;
             }
@@ -4530,8 +4540,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 std::max(parameterTypes.size(), inferredParameterCount), 0);
             if (!statement.empty() &&
                 session.preparedStmts.count(statement) != 0) {
-                protocol.sendErrorResponse(
-                    "ERROR", "42P05",
+                sendExtendedProtocolError("42P05",
                     "prepared statement \"" + statement + "\" already exists");
                 extendedQueryError = true;
                 continue;
@@ -4559,7 +4568,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             std::string statement;
             if (!PostgresProtocol::readCString(message.payload, offset, portal) ||
                 !PostgresProtocol::readCString(message.payload, offset, statement)) {
-                protocol.sendErrorResponse("ERROR", "08P01", "malformed Bind message");
+                sendExtendedProtocolError("08P01", "malformed Bind message");
                 extendedQueryError = true;
                 continue;
             }
@@ -4567,7 +4576,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             const auto oidIt = session.preparedStmtParameterOids.find(statement);
             if (statementIt == session.preparedStmts.end() ||
                 oidIt == session.preparedStmtParameterOids.end()) {
-                protocol.sendErrorResponse("ERROR", "26000", "prepared statement does not exist");
+                sendExtendedProtocolError("26000", "prepared statement does not exist");
                 extendedQueryError = true;
                 continue;
             }
@@ -4575,7 +4584,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             const std::vector<uint32_t>& preparedParameterTypes = oidIt->second;
             const bool bareValues = firstSqlKeyword(preparedSql) == "values";
             if (offset + 2 > message.payload.size()) {
-                protocol.sendErrorResponse("ERROR", "08P01", "malformed Bind message");
+                sendExtendedProtocolError("08P01", "malformed Bind message");
                 extendedQueryError = true;
                 continue;
             }
@@ -4586,7 +4595,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             if (parameterFormatCount > 0) {
                 if (parameterFormatCount > message.payload.size() / 2 ||
                     offset + static_cast<size_t>(parameterFormatCount) * 2 > message.payload.size()) {
-                    protocol.sendErrorResponse("ERROR", "08P01", "malformed Bind format list");
+                    sendExtendedProtocolError("08P01", "malformed Bind format list");
                     extendedQueryError = true;
                     continue;
                 }
@@ -4598,20 +4607,20 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 }
             }
             if (offset + 2 > message.payload.size()) {
-                protocol.sendErrorResponse("ERROR", "08P01", "malformed Bind parameter count");
+                sendExtendedProtocolError("08P01", "malformed Bind parameter count");
                 extendedQueryError = true;
                 continue;
             }
             const uint16_t valueCount = PostgresProtocol::readUInt16(message.payload, offset);
             offset += 2;
             if (valueCount != preparedParameterTypes.size()) {
-                protocol.sendErrorResponse("ERROR", "08P01", "bind message supplies a different number of parameters");
+                sendExtendedProtocolError("08P01", "bind message supplies a different number of parameters");
                 extendedQueryError = true;
                 continue;
             }
             if (!parameterFormats.empty() && parameterFormats.size() != 1 &&
                 parameterFormats.size() != valueCount) {
-                protocol.sendErrorResponse("ERROR", "08P01", "bind message has an invalid parameter format count");
+                sendExtendedProtocolError("08P01", "bind message has an invalid parameter format count");
                 extendedQueryError = true;
                 continue;
             }
@@ -4672,20 +4681,19 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 }
             }
             if (bindError) {
-                protocol.sendErrorResponse(
-                    "ERROR", bindErrorSqlstate, bindErrorMessage);
+                sendExtendedProtocolError(bindErrorSqlstate, bindErrorMessage);
                 extendedQueryError = true;
                 continue;
             }
             if (offset + 2 > message.payload.size()) {
-                protocol.sendErrorResponse("ERROR", "08P01", "malformed Bind result format count");
+                sendExtendedProtocolError("08P01", "malformed Bind result format count");
                 extendedQueryError = true;
                 continue;
             }
             const uint16_t resultFormatCount = PostgresProtocol::readUInt16(message.payload, offset);
             offset += 2;
             if (offset + static_cast<size_t>(resultFormatCount) * 2 != message.payload.size()) {
-                protocol.sendErrorResponse("ERROR", "08P01", "malformed Bind result format list");
+                sendExtendedProtocolError("08P01", "malformed Bind result format list");
                 extendedQueryError = true;
                 continue;
             }
@@ -4695,7 +4703,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 const uint16_t format = PostgresProtocol::readUInt16(message.payload, offset);
                 offset += 2;
                 if (format > 1) {
-                    protocol.sendErrorResponse("ERROR", "08P01", "unsupported result format code");
+                    sendExtendedProtocolError("08P01", "unsupported result format code");
                     extendedQueryError = true;
                     resultFormats.clear();
                     break;
@@ -4707,13 +4715,12 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             std::string substitutionError;
             if (!dbms::ps_substituteDollarParams(
                     preparedSql, literals, expandedSql, substitutionError)) {
-                protocol.sendErrorResponse("ERROR", "42P02", substitutionError);
+                sendExtendedProtocolError("42P02", substitutionError);
                 extendedQueryError = true;
                 continue;
             }
             if (!portal.empty() && portals.count(portal) != 0) {
-                protocol.sendErrorResponse(
-                    "ERROR", "42P03",
+                sendExtendedProtocolError("42P03",
                     "portal \"" + portal + "\" already exists");
                 extendedQueryError = true;
                 continue;
@@ -4728,24 +4735,24 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             size_t offset = 0;
             std::string portal;
             if (!PostgresProtocol::readCString(message.payload, offset, portal)) {
-                protocol.sendErrorResponse("ERROR", "08P01", "malformed Execute message");
+                sendExtendedProtocolError("08P01", "malformed Execute message");
                 extendedQueryError = true;
                 continue;
             }
             if (offset + 4 != message.payload.size()) {
-                protocol.sendErrorResponse("ERROR", "08P01", "malformed Execute max-rows field");
+                sendExtendedProtocolError("08P01", "malformed Execute max-rows field");
                 extendedQueryError = true;
                 continue;
             }
             const int32_t maxRows = PostgresProtocol::readInt32(message.payload, offset);
             if (maxRows < 0) {
-                protocol.sendErrorResponse("ERROR", "08P01", "negative portal row limit");
+                sendExtendedProtocolError("08P01", "negative portal row limit");
                 extendedQueryError = true;
                 continue;
             }
             auto portalIt = portals.find(portal);
             if (portalIt == portals.end()) {
-                protocol.sendErrorResponse("ERROR", "34000", "portal does not exist");
+                sendExtendedProtocolError("34000", "portal does not exist");
                 extendedQueryError = true;
                 continue;
             }
@@ -4858,7 +4865,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 if (!portalState.resultFormats.empty() &&
                     portalState.resultFormats.size() != 1 &&
                     portalState.resultFormats.size() != columns.size()) {
-                    protocol.sendErrorResponse("ERROR", "08P01", "result format count does not match result columns");
+                    sendExtendedProtocolError("08P01", "result format count does not match result columns");
                     extendedQueryError = true;
                     continue;
                 }
@@ -4886,7 +4893,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                             ? result.nulls[rowIndex]
                             : std::vector<bool>{};
                     if (!protocol.sendDataRow(normalized, columns, nulls)) {
-                        protocol.sendErrorResponse("ERROR", "0A000", "binary result type is not supported");
+                        sendExtendedProtocolError("0A000", "binary result type is not supported");
                         extendedQueryError = true;
                         rowsSent = false;
                         break;
@@ -4912,7 +4919,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         }
         if (message.type == 'D') {
             if (message.payload.empty()) {
-                protocol.sendErrorResponse("ERROR", "08P01", "malformed Describe message");
+                sendExtendedProtocolError("08P01", "malformed Describe message");
                 extendedQueryError = true;
                 continue;
             }
@@ -4921,7 +4928,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             std::string name;
             if (!PostgresProtocol::readCString(message.payload, offset, name) ||
                 offset != message.payload.size()) {
-                protocol.sendErrorResponse("ERROR", "08P01", "malformed Describe message");
+                sendExtendedProtocolError("08P01", "malformed Describe message");
                 extendedQueryError = true;
                 continue;
             }
@@ -4930,7 +4937,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 const auto oidIt = session.preparedStmtParameterOids.find(name);
                 if (statementIt == session.preparedStmts.end() ||
                     oidIt == session.preparedStmtParameterOids.end()) {
-                    protocol.sendErrorResponse("ERROR", "26000", "prepared statement does not exist");
+                    sendExtendedProtocolError("26000", "prepared statement does not exist");
                     extendedQueryError = true;
                     continue;
                 }
@@ -4948,7 +4955,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             if (target == 'P') {
                 auto portalIt = portals.find(name);
                 if (portalIt == portals.end()) {
-                    protocol.sendErrorResponse("ERROR", "34000", "portal does not exist");
+                    sendExtendedProtocolError("34000", "portal does not exist");
                     extendedQueryError = true;
                     continue;
                 }
@@ -4962,8 +4969,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 const auto& formats = portalIt->second.resultFormats;
                 if (!formats.empty() && formats.size() != 1 &&
                     formats.size() != columns.size()) {
-                    protocol.sendErrorResponse(
-                        "ERROR", "08P01",
+                    sendExtendedProtocolError("08P01",
                         "result format count does not match result columns");
                     extendedQueryError = true;
                     continue;
@@ -4976,13 +4982,13 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 if (!protocol.sendRowDescription(columns)) extendedQueryError = true;
                 continue;
             }
-            protocol.sendErrorResponse("ERROR", "08P01", "invalid Describe target");
+            sendExtendedProtocolError("08P01", "invalid Describe target");
             extendedQueryError = true;
             continue;
         }
         if (message.type == 'C') {
             if (message.payload.empty()) {
-                protocol.sendErrorResponse("ERROR", "08P01", "malformed Close message");
+                sendExtendedProtocolError("08P01", "malformed Close message");
                 extendedQueryError = true;
                 continue;
             }
@@ -4991,7 +4997,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             std::string name;
             if (!PostgresProtocol::readCString(message.payload, offset, name) ||
                 offset != message.payload.size()) {
-                protocol.sendErrorResponse("ERROR", "08P01", "malformed Close message");
+                sendExtendedProtocolError("08P01", "malformed Close message");
                 extendedQueryError = true;
                 continue;
             }
@@ -5004,7 +5010,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             } else if (target == 'P') {
                 portals.erase(name);
             } else {
-                protocol.sendErrorResponse("ERROR", "08P01", "invalid Close target");
+                sendExtendedProtocolError("08P01", "invalid Close target");
                 extendedQueryError = true;
                 continue;
             }
@@ -5013,7 +5019,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         }
         if (message.type == 'S') {
             if (!message.payload.empty()) {
-                protocol.sendErrorResponse("ERROR", "08P01",
+                sendExtendedProtocolError("08P01",
                                            "malformed Sync message");
                 protocol.sendReadyForQuery(readyStatus());
                 extendedQueryError = false;
@@ -5024,13 +5030,13 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         }
         if (message.type == 'H') {
             if (!message.payload.empty()) {
-                protocol.sendErrorResponse("ERROR", "08P01",
+                sendExtendedProtocolError("08P01",
                                            "malformed Flush message");
                 extendedQueryError = true;
             }
             continue;
         }
-        protocol.sendErrorResponse("ERROR", "08P01", "unsupported frontend message");
+        sendExtendedProtocolError("08P01", "unsupported frontend message");
         extendedQueryError = true;
     }
 
