@@ -1076,11 +1076,33 @@ bool appendCondition(const Expr* expr, std::vector<std::string>& conditions) {
         if (!supported.count(op)) return false;
         const auto* column = dynamic_cast<const ColumnRefExpr*>(binary->left.get());
         const auto* literal = dynamic_cast<const LiteralExpr*>(binary->right.get());
-        if (!column || !literal || !column->schema.empty() || !column->table.empty()) {
+        if (!column || !column->schema.empty() || !column->table.empty()) {
             return false;
         }
-        if (lower(literal->value) == "null") return false;
-        appendColumnCondition(*column, op, op, literal->value, conditions);
+        std::string value;
+        if (literal) {
+            if (lower(literal->value) == "null") return false;
+            value = literal->value;
+        } else {
+            // The parser represents -1 and +1 as unary expressions, not
+            // LiteralExpr. Keep signed integer predicates on the same typed
+            // DML path, including INT64_MIN whose positive magnitude is too
+            // large for int64_t. Do not fold casts, text or other expressions.
+            const auto* unary =
+                dynamic_cast<const UnaryOpExpr*>(binary->right.get());
+            const auto* magnitude = unary
+                ? dynamic_cast<const LiteralExpr*>(unary->operand.get())
+                : nullptr;
+            if (!unary || (unary->op != "+" && unary->op != "-") ||
+                !magnitude || !magnitude->typeName.empty() ||
+                magnitude->value.empty() ||
+                !std::all_of(magnitude->value.begin(), magnitude->value.end(),
+                    [](unsigned char ch) { return ch >= '0' && ch <= '9'; })) {
+                return false;
+            }
+            value = unary->op + magnitude->value;
+        }
+        appendColumnCondition(*column, op, op, value, conditions);
         return true;
     }
     if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expr)) {
