@@ -1,0 +1,12 @@
+CREATE TABLE diff_exact_sum_bigint(grp INT,v BIGINT);
+INSERT INTO diff_exact_sum_bigint VALUES(1,9223372036854775807),(1,9223372036854775807),(1,NULL),(2,-9223372036854775808),(2,-9223372036854775808),(3,9223372036854775807),(3,-9223372036854775808),(4,NULL);
+SELECT SUM(v),AVG(v) FROM diff_exact_sum_bigint WHERE grp=1;
+SELECT SUM(v),AVG(v) FROM diff_exact_sum_bigint WHERE grp=2;
+SELECT SUM(v) FROM diff_exact_sum_bigint;
+SELECT grp,SUM(v),COUNT(v) FROM diff_exact_sum_bigint GROUP BY grp ORDER BY grp;
+SELECT SUM(v) FROM diff_exact_sum_bigint WHERE grp=99;
+DROP TABLE diff_exact_sum_bigint;
+CREATE TABLE diff_exact_sum_numeric(v NUMERIC);
+INSERT INTO diff_exact_sum_numeric VALUES(12345678901234567890.12345678901234567890),(12345678901234567890.12345678901234567890),(NULL);
+SELECT SUM(v) FROM diff_exact_sum_numeric;
+DROP TABLE diff_exact_sum_numeric;

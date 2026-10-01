@@ -3,6 +3,7 @@
 #include "access/BPTree.h"
 #include "access/HashIndex.h"
 #include "access/BloomIndex.h"
+#include "catalog/type_registry.h"
 #include "Config.h"
 #include "process/RuntimeStats.h"
 #include "types/numeric.h"
@@ -3093,6 +3094,15 @@ static std::string encodeGroupingKey(const ExprValue& value) {
 // ========================================================================
 // ParallelGroupAggregateOp
 // ========================================================================
+static bool exactAggregateColumn(const TableSchema& table, size_t index) {
+    if (index >= table.len || table.cols[index].isArray) return false;
+    const auto* type = TypeRegistry::instance().findType(table.cols[index].dataType);
+    if (!type) return false;
+    const std::string& name = type->canonicalName;
+    return name == "smallint" || name == "integer" ||
+           name == "bigint" || name == "numeric";
+}
+
 ParallelGroupAggregateOp::ParallelGroupAggregateOp(
     OpPtr child, const TableSchema& tbl,
     const std::vector<std::string>& groupByCols,
@@ -3303,6 +3313,7 @@ bool ParallelGroupAggregateOp::open() try {
         long double sum = 0;
         dbms::Numeric exactSum(0);
         bool exactSumOk = true;
+        const bool exactInput = !argIsExpr && exactAggregateColumn(tbl_, argIndex);
         bool hasValue = false;
         std::string selected;
         bool boolSeen = false;
@@ -3338,6 +3349,11 @@ bool ParallelGroupAggregateOp::open() try {
             }
             if (valueIsNull) continue;
             if (func == "sum" || func == "avg") {
+                if (exactInput) {
+                    exactSum = exactSum + dbms::Numeric(value);
+                    ++count;
+                    continue;
+                }
                 long double number = 0;
                 if (!parseNumber(value, number)) continue;
                 sum += number; ++count;
@@ -3369,7 +3385,8 @@ bool ParallelGroupAggregateOp::open() try {
         }
         if (func == "sum") {
             if (resultIsNull) *resultIsNull = count == 0;
-            return count == 0 ? "NULL" : formatNumber(sum);
+            if (count == 0) return "NULL";
+            return exactInput ? exactSum.toString() : formatNumber(sum);
         }
         if (func == "avg") {
             if (resultIsNull) *resultIsNull = count == 0;
@@ -3991,6 +4008,7 @@ bool GroupAggregateOp::open() try {
         long double sum = 0;
         dbms::Numeric exactSum(0);
         bool exactSumOk = true;
+        const bool exactInput = exactAggregateColumn(tbl_, argIndex);
         bool hasValue = false;
         std::string selected;
         bool boolSeen = false;
@@ -4053,6 +4071,11 @@ bool GroupAggregateOp::open() try {
             }
             if (valueIsNull) continue;
             if (func == "sum" || func == "avg") {
+                if (exactInput) {
+                    exactSum = exactSum + dbms::Numeric(value);
+                    ++count;
+                    continue;
+                }
                 long double number = 0;
                 if (!parseNumber(value, number)) continue;
                 sum += number;
@@ -4083,7 +4106,8 @@ bool GroupAggregateOp::open() try {
         }
         if (func == "sum") {
             if (resultIsNull) *resultIsNull = count == 0;
-            return count == 0 ? "NULL" : formatNumber(sum);
+            if (count == 0) return "NULL";
+            return exactInput ? exactSum.toString() : formatNumber(sum);
         }
         if (func == "avg") {
             if (resultIsNull) *resultIsNull = count == 0;
