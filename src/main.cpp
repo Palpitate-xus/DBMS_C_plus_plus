@@ -29212,6 +29212,7 @@ bool execute(const std::string& rawSql, Session& s) {
         g_engine.inTransaction() && g_engine.beginSqlCommand();
 
     bool error = false;
+    DBStatus statementCommitStatus = DBStatus::OK;
     try {
         error = executeInternal(rawSql, s);
     } catch (...) {
@@ -29248,6 +29249,7 @@ bool execute(const std::string& rawSql, Session& s) {
         if (!error) {
             const DBStatus commitStatus = g_engine.commitTransaction();
             if (commitStatus != dbms::DBStatus::OK) {
+                statementCommitStatus = commitStatus;
                 error = true;
                 g_engine.rollbackTransaction();
                 rollbackNotificationTransaction(s);
@@ -29280,6 +29282,10 @@ bool execute(const std::string& rawSql, Session& s) {
         rollbackNotificationTransaction(s);
     }
     --executeDepth;
+    if (statementCommitStatus != DBStatus::OK) {
+        throw dbms::DbError(dbms::sqlstateForDBStatus(statementCommitStatus),
+                           "statement transaction commit failed");
+    }
     return error;
 }
 
