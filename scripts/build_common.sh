@@ -162,6 +162,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/truncate_owned_sequence_restart_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/long_default_expression_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/serial_owned_sequence_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/serial_explicit_null_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/foreign_key_modify_sqlstate_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/commit_failure_recovery_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/autocommit_deferred_constraint_protocol_e2e_test.py)

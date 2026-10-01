@@ -5975,6 +5975,7 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                         pos += 2;
                     } else if (ckw == "null") {
                         col.isNull = true;
+                        col.constraints.push_back("NULL");
                         ++pos;
                     } else if (ckw == "primary") {
                         ++pos;
@@ -8853,6 +8854,7 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                     pos += 2;
                 } else if (modifier == "null") {
                     sub.colDef.isNull = true;
+                    sub.colDef.constraints.push_back("NULL");
                     ++pos;
                 } else if (modifier == "primary" && pos + 1 < tokens.size() &&
                            toLower(tokens[pos + 1]) == "key") {
