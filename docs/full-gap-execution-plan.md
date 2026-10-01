@@ -17,6 +17,8 @@
 
 ## 后续优先队列
 
+2026-10-01 第 872 项验收：computed arithmetic predicate 已独立提交 adbf3b72，14 个 C++、新协议、16 组相邻协议与完整协议均退出码 0；本项真实 PostgreSQL 18.6 cases=1 failed=0，另 16 个不同相邻 case failed=0（含 9 个 HAVING，重复的两组不追加计数）。保留旧 0.5／lazy COALESCE 失败、旧 failed=1、初次 C++ 重链对象路径错误和相邻脚本复数 case 名错误；未改 oracle。除零交 typed 求值而非文本预扫描，完整 RHS、括号和 NULL 位保真，单独处理空扫描上的 immutable constant，并保持 signed literal 的原 index 条件。该项基于 eb85bfeb 正式对象重编 main／Table 后重链，不称独立冷构建；合并 871 仅 docs 为 c0e7a675。根 eb85bfeb 正式全量和 394 组差分仍运行，不含 872。873 cast child 列名已真实 failed=1 复现，隔离修复中。仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
+
 2026-10-01 第 871 项验收：AT TIME ZONE 的 Unary root 列名回归已独立提交，13 组协议、timestamptz E2E 五项、完整协议、新和原三组真实 PG18.6 差分全部退出码 0，旧 failed=1 与冻结 5dc053fd 全量 failed=3 保留。根已快进并冻结 eb85bfeb，最新正式全套正在真实编译／运行，设置本次协议 deadline=120 秒，不能称原始 10 秒全套已通过；旧正式二进制已有三个独立原始 10 秒完整协议成功复跑。第 872 项 decimal-zero 预抛异常、arithmetic predicate 漏行及 lazy branch 时机正在逐项复现，计划保持原 RHS 字面值／类型和真实 NULL，并移交完整 typed 求值，不以返回空集替代正确性。仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
 
 2026-10-01 第 870 项验收：显式 operand cast 的 typed division 已独立提交，16 个 C++、14 组协议、完整协议、新真实专项／numeric division 邻居以及 4266728a 的组合再验证均退出码 0。根冻结 5dc053fd 正式 full 已结束：393/393 C++，116/117 E2E，完整协议在 CREATE unicode VARCHAR 一次 10 秒 timeout；同一正式二进制单独 120 秒复跑与三个原始 10 秒连续复跑退出码 0，失败保留，未据此宣称性能或全套已修复。390 组真实 PG18.6 差分 failed=3，全部是 866 引入 AT TIME ZONE Unary op 被命名 ?column? 的回归；已独立列为 871，新专项及原三组差分通过，相邻验收中。隔离 872 又实际复现除以 0.5 被误报零除，以及不走该 guard 时 arithmetic predicate 漏行／lazy COALESCE 被抢先报错，继续修复，总清单仍未完成。仍 273 项：24 complete、136 partial、98 unverified、15 deferred_by_user，未 push，Actions 禁用。
