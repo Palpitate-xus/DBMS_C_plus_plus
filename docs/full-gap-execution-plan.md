@@ -17,6 +17,8 @@
 
 ## 后续优先队列
 
+2026-10-01：905 tuple-only FOR UPDATE已独立02f02ee1并合并sourcef5f9ce81，8 C++／强专项／7邻居／完整协议／8actual全exit0；PG三隔离级同并发schedule通过，旧wire55P03／native134保留。TXN-08经具体tuple lock证据unverified→partial，非完整MultiXact/EPQ族；总账24complete／138partial／96unverified／15deferred。根77正式421/421实际差分exit0；A77正式421/421 C++、146/148 E2E、exit1（原15s协议与30swindow超时保留，同binary按原默认单独两项再跑均exit0，不改写失败）。下一轮同源根/A正式production、424 C++／151E2E／423actual；完整差分在正式E2E后启动。907temp SERIAL旧actual failed=1已复现，完整subtransaction即时资源abort、普通NULL/NOTNULL冲突、长PK及其他族继续；不push，Actions禁用。
+
 2026-10-01：903 用户 SP 的 DML row-lock error 恢复、904 NULL self INSERT SELECT 集成回归、906 SERIAL 显式 NULL 冲突分别独立提交并合并 source80ef72db。903真实独立生产全重编／11 C++／7相邻wire／完整协议／8actual及真实PG两连接timeout＋deadlock oracle全部exit0；906重编重链／6 C++／6相邻wire／完整协议／专项＋9相邻actual全部exit0。组合正式增量build已成功，同binary两强专项／两case／两C++／完整协议全部exit0。根77与A77仍冻结421真实差分及421 C++／148E2E，尚未闭合；后续最新组合全量为423 C++／150E2E／423actual。优先905不同row INSERT被锁（PG三隔离级schedule通过、旧组合wire55P03已复现，正移除错误next-key阻塞）、907temp SERIAL、完整subtransaction-error即时锁与通知等恢复、普通NULL／NOT NULL冲突、长PK family及其余273条验收。状态24complete／137partial／97unverified／15deferred不变；不push、Actions禁用。
 
 2026-10-01：895、897–902 七项分别 source commit、定向／相邻验证后已合并至隔离 D。895 另有独立正式生产构建及同 binary 强专项／完整协议通过；其余为重编重链，不虚称冷构建。旧 9ed86eef 的正确参考库全量 416/416 failed=0 已闭合，但 A5885facd 正式脚本 416/417 C++、141/143 E2E、exit 1，原失败保留；901 加强 SERIAL 序列 oracle，902 修复 ordinary lock error 的 E 状态。最新组合需正式 production、421 C++／148 E2E、421 真实差分；原 NULL self INSERT SELECT 组合、内部全事务 rollback 的 SP 保真、temp SERIAL／NULL、长 PK family 及其余族继续。仍 24 complete、137 partial、97 unverified、15 deferred_by_user；未 push，Actions 禁用。
