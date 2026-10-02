@@ -1062,6 +1062,22 @@ struct AlterTableStmt : public Stmt {
 // SET / SHOW / RESET 语句
 // ============================================================================
 
+struct DiscardStmt : public Stmt {
+    enum class Target { All, Plans, Sequences, Temp };
+    Target target = Target::All;
+
+    DiscardStmt() : Stmt(SqlCommand::Discard) {}
+    std::string toString() const override {
+        switch (target) {
+            case Target::All: return "DISCARD ALL";
+            case Target::Plans: return "DISCARD PLANS";
+            case Target::Sequences: return "DISCARD SEQUENCES";
+            case Target::Temp: return "DISCARD TEMP";
+        }
+        return "DISCARD";
+    }
+};
+
 struct SetStmt : public Stmt {
     std::string name;          // 参数名（如 "timezone", "search_path"）
     std::vector<std::string> values;
