@@ -507,6 +507,9 @@ std::vector<std::string> SQLParser::tokenizeImpl(const std::string& sql, std::st
     bool inEscapeString = false;
     char stringChar = 0;
     bool inIdentifier = false; // "quoted identifier"
+    const auto identifierContinuation = [](unsigned char c) {
+        return std::isalnum(c) || c == '_' || c == '$' || c >= 0x80;
+    };
 
     for (size_t i = 0; i < sql.size(); ++i) {
         char c = sql[i];
@@ -515,7 +518,8 @@ std::vector<std::string> SQLParser::tokenizeImpl(const std::string& sql, std::st
         // quotes/newlines/semicolons, so function bodies survive tokenization.
         // Token shape: $tag$<body>$tag$; stripQuotes()/body extraction can
         // split it because the delimiter is recorded verbatim at both ends.
-        if (!inString && !inIdentifier && c == '$') {
+        if (!inString && !inIdentifier && c == '$' &&
+            (i == 0 || !identifierContinuation(static_cast<unsigned char>(sql[i - 1])))) {
             // Parse $tag$ opener: '$', {alpha|_|digit}*, '$' (tag must not
             // start with a digit, matching PostgreSQL). Empty tag ($$) is the
             // common anonymous form.
@@ -555,35 +559,40 @@ std::vector<std::string> SQLParser::tokenizeImpl(const std::string& sql, std::st
                     i = close + delim.size() - 1; // continue after closer
                     continue;
                 }
-                // No closer: fall through, '$' is an ordinary character
-                // (e.g. operator or positional error), tokenized below.
+                if (error) {
+                    *error = "unterminated dollar-quoted string";
+                    return tokens;
+                }
+                // Unchecked token consumers retain their existing fallback;
+                // SQL execution validates the complete raw input first.
             }
         }
         if (inString) {
             cur += c;
             if (c == stringChar) {
-                // PostgreSQL escape: '' inside a string is a literal quote and
-                // the string continues. (Backslash is NOT special in standard
-                // SQL strings, but legacy input may carry \' — treat it as a
-                // closing quote only when not backslash-escaped, preserving
-                // the historical behavior below.)
+                // With standard_conforming_strings, only E strings treat
+                // backslashes as escapes. A plain trailing backslash must
+                // not hide the closing quote or a subsequent block comment.
+                size_t backslashCount = 0;
+                if (inEscapeString) {
+                    for (size_t j = cur.size() - 2; j + 1 > 0 && cur[j] == '\\'; --j) {
+                        ++backslashCount;
+                    }
+                }
+                if (backslashCount % 2 != 0) continue;
+                // An E-string escaped quote followed immediately by its
+                // closing quote is not a doubled-quote escape. Check the
+                // backslash first, then the ordinary doubled-quote rule.
                 if (i + 1 < sql.size() && sql[i + 1] == stringChar) {
-                    cur += sql[i + 1]; // keep both quotes in the token
-                    ++i;               // skip the second one
+                    cur += sql[i + 1];
+                    ++i;
                     continue;
                 }
-                // check backslash escape (legacy \' form)
-                size_t backslashCount = 0;
-                for (size_t j = cur.size() - 2; j + 1 > 0 && cur[j] == '\\'; --j) {
-                    ++backslashCount;
-                }
-                if (backslashCount % 2 == 0) {
-                    inString = false;
-                    tokens.push_back(inEscapeString
-                        ? normalizeEscapeStringToken(cur) : cur);
-                    cur.clear();
-                    inEscapeString = false;
-                }
+                inString = false;
+                tokens.push_back(inEscapeString
+                    ? normalizeEscapeStringToken(cur) : cur);
+                cur.clear();
+                inEscapeString = false;
             }
             continue;
         }
@@ -723,6 +732,10 @@ std::vector<std::string> SQLParser::tokenizeImpl(const std::string& sql, std::st
             continue;
         }
         cur += c;
+    }
+    if (error && (inString || inIdentifier)) {
+        *error = inIdentifier ? "unterminated quoted identifier" : "unterminated quoted string";
+        return tokens;
     }
     if (!cur.empty()) {
         tokens.push_back(cur);
