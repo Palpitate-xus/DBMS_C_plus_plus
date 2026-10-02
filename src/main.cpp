@@ -688,7 +688,24 @@ static string sqlProcessor(string raw, bool /*normalizeBooleanLiterals*/ = false
     size_t start = raw.find_first_not_of(' ');
     if (start == string::npos) raw.clear();
     else raw = raw.substr(start, raw.find_last_not_of(' ') - start + 1);
-    if (!raw.empty() && raw.back() == ';') raw.pop_back();
+    // A sole final terminator may be followed by comments.  This adapter
+    // trims only that legacy execution copy; original SQL remains available
+    // for parsing, metadata and diagnostics.  Never cut inside a datum/name.
+    const auto protectedBytes = dbms::sqlProtectedBytes(raw);
+    size_t terminatorDepth = 0;
+    for (size_t i = 0; i < raw.size(); ++i) {
+        if (protectedBytes[i]) continue;
+        if (raw[i] == '(' || raw[i] == '[') { ++terminatorDepth; continue; }
+        if (raw[i] == ')' || raw[i] == ']') {
+            if (terminatorDepth) --terminatorDepth;
+            continue;
+        }
+        if (!terminatorDepth && raw[i] == ';' &&
+            dbms::skipLeadingSqlTrivia(raw, i + 1) == raw.size()) {
+            raw = trim(raw.substr(0, i));
+            break;
+        }
+    }
     // JOIN projections are evaluated from the CASE AST.  The legacy
     // case_when rewrite encodes comparisons as evaluator-only pseudo-tokens
     // (for example >a.id 0), which are invalid column references to the
@@ -24362,10 +24379,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                // top-level operator (concat or arithmetic)
                                // outside quotes and parentheses; a leading
                                // sign is unary, not an operator.
-                               bool inQ = false; int depth = 0;
+                               const auto protectedItem = dbms::sqlProtectedBytes(item);
+                               int depth = 0;
                                for (size_t i = 0; i < item.size(); ++i) {
-                                   if (item[i] == 39) { inQ = !inQ; continue; }
-                                   if (inQ) continue;
+                                   if (protectedItem[i]) continue;
                                    if (item[i] == '(') ++depth;
                                    else if (item[i] == ')') --depth;
                                    if (depth != 0) continue;
@@ -24894,11 +24911,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         {
                             static const string ops = "+-*/%|";
                             size_t opCount = 0;
-                            bool inQuote3 = false;
+                            const auto protectedArithmetic = dbms::sqlProtectedBytes(arithItem);
                             for (size_t k = 1; k < arithItem.size(); ++k) {
                                 char ch = arithItem[k];
-                                if (ch == 39) { inQuote3 = !inQuote3; continue; }
-                                if (inQuote3) continue;  // % inside LIKE pattern
+                                if (protectedArithmetic[k]) continue;
                                 if (ops.find(ch) == string::npos) continue;
                                 if (ch == '|' &&
                                     (k + 1 >= arithItem.size() || arithItem[k+1] != '|'))
