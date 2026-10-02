@@ -6390,7 +6390,7 @@ struct StructuredSetOperand {
     return true;
 }
 
-static string stripFullyParenthesizedQuery(const string& sql) {
+static string unwrapParenthesizedQuery(const string& sql) {
     string query = trim(sql);
     while (!query.empty()) {
         const size_t opening = dbms::skipLeadingSqlTrivia(query);
@@ -6413,14 +6413,33 @@ static string stripFullyParenthesizedQuery(const string& sql) {
                 }
             }
         }
-        if (closing == string::npos ||
-            dbms::skipLeadingSqlTrivia(query, closing + 1) != query.size()) {
-            break;
-        }
-
+        if (closing == string::npos) break;
+        const size_t suffixOffset =
+            dbms::skipLeadingSqlTrivia(query, closing + 1);
+        if (suffixOffset == string::npos) break;
         string inner = trim(query.substr(opening + 1, closing - opening - 1));
         if (inner.empty() || dbms::skipLeadingSqlTrivia(inner) == inner.size()) break;
-        query = std::move(inner);
+        if (suffixOffset == query.size()) {
+            query = std::move(inner);
+            continue;
+        }
+
+        size_t keywordEnd = suffixOffset;
+        while (keywordEnd < query.size() &&
+               std::isalpha(static_cast<unsigned char>(query[keywordEnd]))) {
+            ++keywordEnd;
+        }
+        string suffixKeyword = query.substr(suffixOffset, keywordEnd - suffixOffset);
+        std::transform(suffixKeyword.begin(), suffixKeyword.end(),
+                       suffixKeyword.begin(), [](unsigned char c) {
+                           return static_cast<char>(std::tolower(c));
+                       });
+        if (suffixKeyword != "order" && suffixKeyword != "limit" &&
+            suffixKeyword != "offset" && suffixKeyword != "fetch" &&
+            suffixKeyword != "for") {
+            break;
+        }
+        query = std::move(inner) + " " + trim(query.substr(suffixOffset));
     }
     return query;
 }
@@ -6430,7 +6449,7 @@ static bool captureSetOperand(const string& sql, Session& s,
     // Execute recursively with the same structured-result capture boundary
     // used by derived tables. Rendered stdout is retained only for an error
     // diagnostic; successful operands are never reconstructed from it.
-    const string operandSql = stripFullyParenthesizedQuery(sql);
+    const string operandSql = unwrapParenthesizedQuery(sql);
     const unsigned previousCaptureDepth = metadataCaptureDepth;
     metadataCaptureDepth = executeDepth + 1;
     dbms::clearLastDmlResult();
@@ -16195,7 +16214,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
         bool setOperationHandled = false;
         if (executeSetOperation(sql, s, setOperationHandled)) return true;
         if (setOperationHandled) return false;
-        const string unwrappedQuery = stripFullyParenthesizedQuery(sql);
+        const string unwrappedQuery = unwrapParenthesizedQuery(sql);
         if (unwrappedQuery != trim(sql)) {
             const unsigned previousCaptureDepth = metadataCaptureDepth;
             metadataCaptureDepth = executeDepth + 1;
@@ -29576,7 +29595,7 @@ bool isTopLevelDml(const std::string& rawSql) {
 
 bool isTopLevelLockingSelect(const std::string& rawSql) {
     const std::string normalized = toLowerSql(
-        trim(stripFullyParenthesizedQuery(rawSql)));
+        trim(unwrapParenthesizedQuery(rawSql)));
     return startsWithKeyword(normalized, "select") &&
         (containsSqlKeyword(normalized, "for update") ||
          containsSqlKeyword(normalized, "for share"));

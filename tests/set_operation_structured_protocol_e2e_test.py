@@ -145,6 +145,18 @@ def main():
         assert type_oids == [23], type_oids
         assert command_tag == "SELECT 1", command_tag
 
+        parenthesized_order = runner.decode_wire_result(
+            client.simple_query(
+                server["sock"],
+                "((SELECT 2 AS n UNION ALL SELECT 1)) ORDER BY n LIMIT 1;"),
+            include_types=True)
+        rows, state, message, headers, command_tag, type_oids = parenthesized_order
+        assert state is None, (state, message)
+        assert rows == [["1"]], rows
+        assert headers == ["n"], headers
+        assert type_oids == [23], type_oids
+        assert command_tag == "SELECT 1", command_tag
+
         duplicate_all = runner.decode_wire_result(
             client.simple_query(
                 server["sock"],
