@@ -33,6 +33,7 @@ public:
     // Transaction controls and simple SHOW/SET utilities do not.
     static bool requiresQuerySnapshot(const std::string& sql);
     static bool isSetTransactionStatement(const std::string& sql);
+    static std::string lexicalError(const std::string& sql);
 
     // 工具函数
     static std::string toLower(const std::string& s);
@@ -41,6 +42,7 @@ public:
     static bool isKeyword(const std::string& s);
 
 private:
+    static std::vector<std::string> tokenizeImpl(const std::string& sql, std::string* error);
     // 各命令类型的解析实现
     ParseResult parseSelect(const std::string& sql);
     ParseResult parseInsert(const std::string& sql);

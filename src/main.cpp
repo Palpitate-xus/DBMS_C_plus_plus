@@ -29275,6 +29275,8 @@ bool execute(const std::string& inputSql, Session& s) {
         if (statementConstraintStatus != DBStatus::OK) error = true;
     };
     try {
+        const std::string lexicalError = dbms::SQLParser::lexicalError(rawSql);
+        if (!lexicalError.empty()) throw dbms::DbError("42601", lexicalError);
         if (dbms::SQLParser::requiresQuerySnapshot(rawSql)) {
             g_engine.noteQuerySnapshot();
         }

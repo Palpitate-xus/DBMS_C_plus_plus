@@ -491,6 +491,16 @@ std::string SQLParser::trim(const std::string& s) {
 }
 
 std::vector<std::string> SQLParser::tokenize(const std::string& sql) {
+    return tokenizeImpl(sql, nullptr);
+}
+
+std::string SQLParser::lexicalError(const std::string& sql) {
+    std::string error;
+    (void)tokenizeImpl(sql, &error);
+    return error;
+}
+
+std::vector<std::string> SQLParser::tokenizeImpl(const std::string& sql, std::string* error) {
     std::vector<std::string> tokens;
     std::string cur;
     bool inString = false;
@@ -701,9 +711,10 @@ std::vector<std::string> SQLParser::tokenize(const std::string& sql) {
                     // This branch is outside both literal and identifier
                     // quotes. Reuse nested-block and CR/LF trivia scanning.
                     const size_t after = skipLeadingSqlTrivia(sql, i);
-                    // Preserve the existing tokenizer EOF policy for an
-                    // unterminated interior block; strict rejection remains
-                    // a separate lexer validation gap.
+                    if (after == std::string::npos && error) {
+                        *error = "unterminated block comment";
+                        return tokens;
+                    }
                     i = after == std::string::npos ? sql.size() : after - 1;
                     continue;
                 }
@@ -1206,6 +1217,8 @@ ParseResult SQLParser::parse(const std::string& inputSql) {
         return result;
     }
     const std::string sql = inputSql.substr(offset);
+    result.error = lexicalError(sql);
+    if (!result.error.empty()) return result;
 
     std::string lsql = toLower(trim(sql));
     if (lsql.empty()) {

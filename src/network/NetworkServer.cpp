@@ -3918,6 +3918,19 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         // replacement cannot leave a portal bound to the previous database.
         session.openProtocolPortals = portals.size();
         session.failedTransactionBlock = transactionFailed;
+        const std::string lexicalError = SQLParser::lexicalError(sql);
+        if (!lexicalError.empty()) {
+            if (g_engine.inTransaction()) {
+                (void)abortActiveTransaction();
+                transactionFailed = true;
+                session.failedTransactionBlock = true;
+            }
+            QueryResult error;
+            error.error = true;
+            error.sqlState = "42601";
+            error.errorMessage = lexicalError;
+            return error;
+        }
         if (transactionFailed && !isTransactionRecoveryCommand(sql)) {
             // PostgreSQL reports raw syntax errors even in an aborted
             // block. A valid BEGIN still receives 25P02, and must not
@@ -4361,6 +4374,12 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             session.preparedStmtTypes.erase("");
             session.preparedStmtParameterOids.erase("");
             portals.erase("");
+            if (!SQLParser::lexicalError(sql).empty()) {
+                const QueryResult result = executeForProtocol(sql);
+                updateProcessInfo(pid, "Idle", "", "");
+                sendQueryResult(protocol, result, readyStatus());
+                continue;
+            }
             const std::vector<std::string> statements =
                 splitSimpleQueryStatements(sql);
             if (statements.empty()) {
@@ -4518,6 +4537,11 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     "type with OID " + std::to_string(unknownParameterType) +
                         " does not exist");
                 extendedQueryError = true;
+                continue;
+            }
+            const std::string lexicalError = SQLParser::lexicalError(sql);
+            if (!lexicalError.empty()) {
+                sendExtendedProtocolError("42601", lexicalError);
                 continue;
             }
             if (splitSimpleQueryStatements(sql).size() > 1) {
