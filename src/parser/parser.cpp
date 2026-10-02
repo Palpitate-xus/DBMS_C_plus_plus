@@ -2934,7 +2934,8 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
         while (pos < tokens.size()) {
             std::string w = toLower(tokens[pos]);
             if (w == "limit" || w == "offset" || w == "union"
-                || w == "intersect" || w == "except" || w == "for" || w == "fetch") break;
+                || w == "intersect" || w == "except" || w == "for" || w == "fetch"
+                || w == ";") break;
             auto expr = parseSimpleExpr(tokens, pos);
             bool asc = true;
             if (pos < tokens.size() && toLower(tokens[pos]) == "asc") { asc = true; ++pos; }
