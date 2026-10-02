@@ -68,6 +68,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/constant_boolean_predicate_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/unterminated_sql_literal_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/mixed_query_implicit_lifecycle_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/show_transaction_isolation_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/not_deferrable_characteristic_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/set_transaction_modes_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/table_structured_protocol_e2e_test.py)
