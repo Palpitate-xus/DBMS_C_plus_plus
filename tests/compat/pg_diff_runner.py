@@ -406,9 +406,12 @@ def reference_multi(statements, client=None):
         verify_reference_version(client, sock)
         results = []
         for sql in statements:
-            statement = describe_statement(sql)
+            # The wire protocol, unlike psql's \gdesc input, does not need
+            # terminator stripping or local lexical validation. Send the
+            # same bytes as our side, including deliberately invalid SQL,
+            # and let PostgreSQL supply the real syntax error and SQLSTATE.
             decoded = decode_wire_result(
-                client.simple_query(sock, statement), include_types=True)
+                client.simple_query(sock, sql), include_types=True)
             rows, state, message, headers, command_tag, type_oids = decoded
             results.append((rows, state, command_tag, message, headers,
                             type_oids))

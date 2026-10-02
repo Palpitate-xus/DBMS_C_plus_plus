@@ -353,6 +353,27 @@ class DifferentialSessionTest(unittest.TestCase):
         connect.assert_called_once_with(("127.0.0.1", 55432), timeout=37.0)
         sock.close.assert_called_once()
 
+    def test_wire_reference_preserves_raw_sql_and_server_syntax_errors(self):
+        statements = ["SELECT 1 /* open", "SELECT 'open",
+                      "SELECT $tag$open", "SELECT 1; -- trailing comment"]
+        client = mock.Mock()
+        client.simple_query.return_value = [
+            (b"E", b"SERROR\0C42601\0Msyntax error\0\0")]
+        sock = mock.Mock()
+        with mock.patch.object(
+                RUNNER, "_reference_connection_settings",
+                return_value=("127.0.0.1", 55432, "postgres", "postgres", "secret")), \
+             mock.patch.object(RUNNER.socket, "create_connection",
+                               return_value=sock), \
+             mock.patch.object(RUNNER, "verify_reference_version"), \
+             mock.patch.object(RUNNER, "describe_statement") as describe:
+            results = RUNNER.reference_multi(statements, client)
+        self.assertEqual(client.simple_query.call_args_list,
+                         [mock.call(sock, sql) for sql in statements])
+        self.assertEqual([result[1] for result in results], ["42601"] * 4)
+        describe.assert_not_called()
+        sock.close.assert_called_once()
+
     def test_wire_reference_uses_reference_startup_policy(self):
         class FakeClient:
             def __init__(self):
