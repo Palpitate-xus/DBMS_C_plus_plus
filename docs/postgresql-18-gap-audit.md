@@ -1,5 +1,7 @@
 # DBMS_C_plus_plus 对标 PostgreSQL 18.6：完整差距清单
 
+2026-10-02 第959项 `3df0fef7` 局部修复以括号开始的Simple Query、集合运算括号操作数和尾随注释；完整括号SELECT在wire上保留int4 OID，PostgreSQL 18.6七语句强差分通过。对应回归位于 `tests/set_operation_structured_protocol_e2e_test.py` 与 `tests/compat/cases/set_operation_precedence.sql`，细节见 `docs/issue-959-parenthesized-set-operations.md`。这只关闭QRY-06的一部分；复杂类型/collation、泛化排序分页与Extended Describe仍未完成。
+
 2026-10-02 第958项 source `3cfe28db` 已整合至D `70c5a116`：TEMP relation／sequence／DDL 创建访问在顶层事务记录sticky标记，空表、零行DML、只读和已回滚子事务均不能绕过PREPARE TRANSACTION；拒绝时整段rollback，报 `0A000`／Ready `I`。SQL PREPARE与协议Parse共用无执行副作用的catalog／AST walker，覆盖scalar／EXISTS／IN／derived／WITH／非递归CTE作用域／UNION／DML target，并避免执行nextval或把普通字符串误判为relation访问。真实PG18.6强oracle、本地强wire、18不同C++、19wire（含完整协议）、19不同actual均exit0；旧失败保留，详见 `docs/issue-958-temp-prepared-access.md`。整合后本地脚本460 C++／197 E2E全过；同一生产二进制的PG18.6差分以 `DBMS_PROTOCOL_TEST_TIMEOUT=120` 运行 `cases=461 failed=0`。默认15秒首轮在一条超20秒DROP上超时；保留失败日志，同case提高预算通过后才重跑全量，未修改源码隐藏差异。ACCESS SHARE、完整binder、TEMP对象族及2PC资源／恢复未完成，CAT-13／15、TXN-05／06、SQL-13、PROTO-01／02仍partial。
 
 2026-10-02 第956项 source `802344c6` 已整合至D `c6afebd1`：ALTER ADD CHECK 会检查既有行，拒绝false条件用23514／`CHECK_VIOLATION`，NULL通过；失败不发布constraint，多action失败与USER-SP回滚恢复行／列／metadata。PG18.6强oracle、Simple／Extended wire、20 C++、15wire（含完整协议）、15不同actual均exit0。发现并更新一项旧native测试仍期待 `INVALID_VALUE`，修正断言后定向重链测试exit0；最终组合460 C++／197 E2E脚本及PG18.6 461-case差分（120秒协议预算）全部通过。immutable依赖、NOT VALID／VALIDATE扫描、domain／partition约束证明及非法deferrable仍未实现，CONS-03继续partial。
@@ -293,7 +295,7 @@
 - [ ] **QRY-03** join 补 USING/NATURAL 的输出列合并、FULL/outer null extension、lateral/parameterized join 和任意嵌套语义。
 - [ ] **QRY-04** subquery 补 correlated scalar/EXISTS/IN/ANY/ALL、row comparison、decorrelation、parameter passing 和 NULL 三值逻辑。
 - [ ] **QRY-05** CTE 补 recursive evaluation、SEARCH/CYCLE、materialized/not materialized、data-modifying CTE snapshot 和 visibility。
-- [ ] **QRY-06** set operations 补任意 query expression、对应列类型/collation、嵌套 precedence、ALL duplicate count 和 ORDER/LIMIT scope。
+- [ ] **QRY-06** set operations 补任意 query expression、对应列类型/collation、嵌套 precedence、ALL duplicate count 和 ORDER/LIMIT scope。第959项已修复括号开头的statement路由、完整外围括号操作数、尾部注释和相应Simple/Extended执行；任意type/collation解析、通用表达式排序分页与Extended Describe仍未闭合。
 - [ ] **QRY-07** aggregate/grouping 补 grouping sets 的任意组合、GROUPING/GROUPING_ID、ordered/distinct aggregate 和 functional dependency。
 - [ ] **QRY-08** window 补多个 window specs、named/inherited window、所有 frame/exclusion/peer 边界、ordered-set interaction 和 spill。
 - [ ] **QRY-09** DISTINCT/DISTINCT ON 补 PostgreSQL ordering 约束、NULL/collation 和可 spill 实现。
