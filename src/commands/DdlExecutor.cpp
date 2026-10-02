@@ -1980,8 +1980,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 if (declaredVarcharTypeMod(sub.colDef, varcharModifier)) {
                     declaredVarcharMods[sub.colDef.name] = varcharModifier;
                 }
-                if (!tableIsTemporary &&
-                    !synchronizeTableAttributesInCatalog(
+                if (!synchronizeTableAttributesInCatalog(
                         s.currentDB, tableName, &declaredVarcharMods)) {
                     std::cout << "ALTER TABLE ADD COLUMN catalog update failed"
                               << std::endl;
@@ -2040,7 +2039,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     }
                 }
                 if (!alterStatusOk(status, "Column")) return true;
-                if (!tableIsTemporary) {
+                {
                     try {
                         CatalogManager& catalog =
                             g_engine.catalogService().get(s.currentDB);
@@ -2139,7 +2138,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     return true;
                 }
                 if (!alterStatusOk(status, "Column")) return true;
-                if (!tableIsTemporary) {
+                {
                     try {
                         dbms::CatalogManager& catalog =
                             g_engine.catalogService().get(s.currentDB);
