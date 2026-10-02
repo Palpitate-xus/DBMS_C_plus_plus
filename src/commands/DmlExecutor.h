@@ -56,6 +56,10 @@ void clearLastDmlResult();
 // e.g. INSTEAD OF view triggers emitting RETURNING rows).
 void publishLastDmlResult(DmlResult result);
 
+// Record real TEMP relation access during preparation, without executing any
+// expression or modifying rows. Shared by SQL PREPARE and wire Parse.
+void notePreparedTemporaryObjectAccess(const std::string& sql, Session& session);
+
 // DML AST bridge entry point.  The return value follows main.cpp::execute():
 // false means success, true means an error.  `handled` is true when this
 // executor owns the statement, including statements it rejects explicitly.

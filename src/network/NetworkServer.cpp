@@ -1855,6 +1855,7 @@ std::string commandTagFor(const std::string& sql, const std::vector<std::string>
     if (keyword == "rollback" || keyword == "abort") return "ROLLBACK";
     if (keyword == "set") return "SET";
     if (keyword == "truncate") return "TRUNCATE TABLE";
+    if (keyword == "lock") return "LOCK TABLE";
     if (keyword == "create" || keyword == "alter" || keyword == "drop" ||
         keyword == "grant" || keyword == "revoke") {
         std::vector<std::string> words = splitProtocolFields(trimText(sql));
@@ -4685,6 +4686,12 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             }
             if (SQLParser::requiresQuerySnapshot(sql) &&
                 !prepareExtendedQuerySnapshot()) {
+                continue;
+            }
+            try {
+                notePreparedTemporaryObjectAccess(sql, session);
+            } catch (const DbError& error) {
+                sendExtendedProtocolError(error.sqlState(), error.message());
                 continue;
             }
             if (statement.empty()) {

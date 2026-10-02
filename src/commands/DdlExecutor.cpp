@@ -4890,6 +4890,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         std::cout << "ERROR: ON COMMIT is only supported for valid temporary tables" << std::endl;
         return true;
     }
+    if (temporary) g_engine.noteTemporaryObjectAccess(s.currentDB);
     std::string targetSchema = targetName.schema;
     if (targetSchema.empty()) {
         std::vector<std::string> searchPath;

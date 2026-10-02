@@ -7,6 +7,7 @@
 #include "access/BPTree.h"
 #include "access/HashIndex.h"
 #include "catalog/catalog.h"
+#include "catalog/CatalogService.h"
 #include "catalog/type_registry.h"
 #include "commands/TableManage.h"
 #include "common/DbError.h"
@@ -486,6 +487,11 @@ bool checkDatabase(const Session& s) {
 
 std::string resolveTable(Session& s, const std::string& name,
                          bool foldUnquoted = false) {
+    const auto temporaryPhysicalName = [&](const std::string& table) {
+        const std::string physical = tempTablePrefix(s, table);
+        g_engine.noteTemporaryRelationAccess(s.currentDB, physical);
+        return physical;
+    };
     CatalogManager::QualifiedName qualified;
     if (!CatalogManager::parseQualifiedName(name, qualified,
                                             foldUnquoted)) return name;
@@ -494,7 +500,7 @@ std::string resolveTable(Session& s, const std::string& name,
         const std::string& table = qualified.name;
         if ((schema == "pg_temp" || schema.rfind("pg_temp_", 0) == 0) &&
             isTempTable(s, table)) {
-            return tempTablePrefix(s, table);
+            return temporaryPhysicalName(table);
         }
         if (g_engine.schemaExists(s.currentDB, schema)) {
             std::string physical = schema == "public"
@@ -526,7 +532,7 @@ std::string resolveTable(Session& s, const std::string& name,
         return name;
     }
     const std::string& table = qualified.name;
-    if (isTempTable(s, table)) return tempTablePrefix(s, table);
+    if (isTempTable(s, table)) return temporaryPhysicalName(table);
 
     std::vector<std::string> entries;
     std::string canonical;
@@ -4620,6 +4626,184 @@ bool executeDelete(const DeleteStmt& stmt, Session& s, bool& fallback) {
 }
 
 } // namespace
+
+void notePreparedTemporaryObjectAccess(const std::string& sql, Session& session) {
+    if (!g_engine.inTransaction()) return;
+    SQLParser parser;
+    const auto parsed = parser.parse(sql);
+    if (!parsed.isValid()) return;
+    using Names = std::set<std::string>;
+    std::function<void(const Stmt*, Names)> visitStatement;
+    std::function<void(const FromItem*, const Names&)> visitFrom;
+    std::function<void(const Expr*, const Names&)> visitExpression;
+    std::function<void(const WindowDef&, const Names&)> visitWindow;
+    std::vector<std::string> searchPath;
+    std::string canonical;
+    if (!parseSessionSearchPath(session.searchPath, searchPath, canonical))
+        searchPath = {"public"};
+    const std::string temporarySchema = sessionTempSchemaName(session);
+    for (auto& entry : searchPath) {
+        entry = expandSessionSearchPathEntry(entry, session.username);
+        if (entry == "pg_temp") entry = temporarySchema;
+    }
+    if (session.tempNamespaceCreated &&
+        std::find(searchPath.begin(), searchPath.end(), temporarySchema) == searchPath.end()) {
+        searchPath.insert(searchPath.begin(), temporarySchema);
+    }
+    auto& catalog = g_engine.catalogService().get(session.currentDB);
+    const auto visitRelation = [&](const std::string& name, const Names& ctes) {
+        CatalogManager::QualifiedName qualified;
+        if (name.empty() || !CatalogManager::parseQualifiedName(name, qualified, true)) return;
+        if (qualified.schema.empty() && ctes.count(qualified.name)) return;
+        const PgClassRow* relation = nullptr;
+        if (qualified.schema == "pg_temp") {
+            const auto* nameSpace = catalog.findTempNamespace(session.pid);
+            if (nameSpace) relation = catalog.findClassByName(qualified.name, nameSpace->oid);
+        } else {
+            relation = catalog.resolveRelation(name, searchPath);
+        }
+        // Looking at catalog identity must not open data or reject a permanent
+        // unpopulated materialized view during side-effect-free preparation.
+        if (relation && relation->relpersistence == 't')
+            g_engine.noteTemporaryObjectAccess(session.currentDB);
+    };
+    visitWindow = [&](const WindowDef& window, const Names& ctes) {
+        for (const auto& expression : window.partitionBy)
+            visitExpression(expression.get(), ctes);
+        for (const auto& order : window.orderBy)
+            visitExpression(order.first.get(), ctes);
+        visitExpression(window.frameStart.get(), ctes);
+        visitExpression(window.frameEnd.get(), ctes);
+    };
+    visitExpression = [&](const Expr* expression, const Names& ctes) {
+        if (!expression) return;
+        if (const auto* literal = dynamic_cast<const LiteralExpr*>(expression)) {
+            // The current parser's scalar/EXISTS/IN subquery adapter stores
+            // query text in an unquoted LiteralExpr. Decode only that adapter:
+            // quoted, E- and dollar data remain data, never SQL to execute.
+            std::string nested = literal->value;
+            if (nested.size() >= 2 && nested.front() == '(' && nested.back() == ')')
+                nested = nested.substr(1, nested.size() - 2);
+            const auto tokens = SQLParser::tokenize(nested);
+            if (tokens.empty()) return;
+            const std::string keyword = SQLParser::toLower(tokens.front());
+            if (keyword != "select" && keyword != "with" && keyword != "values") return;
+            const auto query = parser.parse(nested);
+            if (query.isValid()) visitStatement(query.stmt.get(), ctes);
+        } else if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expression)) {
+            visitExpression(unary->operand.get(), ctes);
+        } else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression)) {
+            visitExpression(binary->left.get(), ctes);
+            visitExpression(binary->right.get(), ctes);
+        } else if (const auto* function = dynamic_cast<const FunctionCallExpr*>(expression)) {
+            for (const auto& argument : function->args) visitExpression(argument.get(), ctes);
+            for (const auto& argument : function->namedArgs) visitExpression(argument.value.get(), ctes);
+            visitExpression(function->filter.get(), ctes);
+            if (function->hasOver) visitWindow(function->over, ctes);
+        } else if (const auto* cast = dynamic_cast<const CastExpr*>(expression)) {
+            visitExpression(cast->operand.get(), ctes);
+        } else if (const auto* conditional = dynamic_cast<const CaseExpr*>(expression)) {
+            visitExpression(conditional->switchExpr.get(), ctes);
+            for (const auto& branch : conditional->whenClauses) {
+                visitExpression(branch.first.get(), ctes);
+                visitExpression(branch.second.get(), ctes);
+            }
+            visitExpression(conditional->elseExpr.get(), ctes);
+        } else if (const auto* array = dynamic_cast<const ArrayExpr*>(expression)) {
+            for (const auto& element : array->elements) visitExpression(element.get(), ctes);
+        } else if (const auto* row = dynamic_cast<const RowExpr*>(expression)) {
+            for (const auto& element : row->elements) visitExpression(element.get(), ctes);
+        }
+    };
+    visitFrom = [&](const FromItem* from, const Names& ctes) {
+        if (!from) return;
+        switch (from->type) {
+            case FromItem::Type::Table:
+                visitRelation(from->tableName, ctes);
+                break;
+            case FromItem::Type::Subquery:
+                visitStatement(from->subquery.get(), ctes);
+                break;
+            case FromItem::Type::Join:
+                visitFrom(from->left.get(), ctes);
+                visitFrom(from->right.get(), ctes);
+                visitExpression(from->joinCondition.get(), ctes);
+                break;
+            case FromItem::Type::Function: {
+                const auto query = parser.parse("SELECT " + from->tableName);
+                const auto* select = query.isValid()
+                    ? dynamic_cast<const SelectStmt*>(query.stmt.get()) : nullptr;
+                if (select) for (const auto& item : select->selectList)
+                    visitExpression(item.expr.get(), ctes);
+                break;  // Visit arguments, never evaluate a volatile SRF.
+            }
+        }
+    };
+    visitStatement = [&](const Stmt* statement, Names ctes) {
+        if (!statement) return;
+        if (const auto* select = dynamic_cast<const SelectStmt*>(statement)) {
+            // Non-recursive CTEs see earlier CTEs, not their own new alias.
+            // WITH local AS (SELECT * FROM local) opens the real relation.
+            if (!select->ctes.empty() && select->ctes.front().recursive) {
+                for (const auto& cte : select->ctes) {
+                    CatalogManager::QualifiedName name;
+                    if (CatalogManager::parseQualifiedName(cte.name, name, true))
+                        ctes.insert(name.name);
+                }
+            }
+            for (const auto& cte : select->ctes) {
+                visitStatement(cte.query.get(), ctes);
+                CatalogManager::QualifiedName name;
+                if (CatalogManager::parseQualifiedName(cte.name, name, true))
+                    ctes.insert(name.name);
+            }
+            visitFrom(select->fromClause.get(), ctes);
+            visitStatement(select->setOpLhs.get(), ctes);
+            visitStatement(select->setOpRhs.get(), ctes);
+            for (const auto& item : select->selectList) visitExpression(item.expr.get(), ctes);
+            visitExpression(select->whereClause.get(), ctes);
+            visitExpression(select->having.get(), ctes);
+            for (const auto& expression : select->groupBy) visitExpression(expression.get(), ctes);
+            for (const auto& group : select->groupByElems)
+                for (const auto& expression : group.exprs) visitExpression(expression.get(), ctes);
+            for (const auto& order : select->orderBy) visitExpression(order.expr.get(), ctes);
+            for (const auto& expression : select->distinctOn) visitExpression(expression.get(), ctes);
+            for (const auto& row : select->valuesRows)
+                for (const auto& expression : row) visitExpression(expression.get(), ctes);
+            for (const auto& window : select->windowDefs) visitWindow(window, ctes);
+        } else if (const auto* insert = dynamic_cast<const InsertStmt*>(statement)) {
+            visitRelation(insert->tableName, {});
+            visitStatement(insert->selectSource.get(), ctes);
+            for (const auto& row : insert->values)
+                for (const auto& expression : row) visitExpression(expression.get(), ctes);
+            for (const auto& update : insert->conflictUpdateSet) visitExpression(update.second.get(), ctes);
+            visitExpression(insert->conflictWhere.get(), ctes);
+            for (const auto& item : insert->returning) visitExpression(item.expr.get(), ctes);
+        } else if (const auto* update = dynamic_cast<const UpdateStmt*>(statement)) {
+            visitRelation(update->tableName, {});
+            visitFrom(update->fromClause.get(), ctes);
+            for (const auto& assignment : update->setClauses) visitExpression(assignment.second.get(), ctes);
+            visitExpression(update->whereClause.get(), ctes);
+            for (const auto& item : update->returning) visitExpression(item.expr.get(), ctes);
+        } else if (const auto* deletion = dynamic_cast<const DeleteStmt*>(statement)) {
+            visitRelation(deletion->tableName, {});
+            visitFrom(deletion->usingClause.get(), ctes);
+            visitExpression(deletion->whereClause.get(), ctes);
+            for (const auto& item : deletion->returning) visitExpression(item.expr.get(), ctes);
+        } else if (const auto* merge = dynamic_cast<const MergeStmt*>(statement)) {
+            visitRelation(merge->targetTable, {});
+            visitFrom(merge->source.get(), ctes);
+            visitExpression(merge->joinCondition.get(), ctes);
+            for (const auto& branch : merge->whenClauses) {
+                visitExpression(branch.condition.get(), ctes);
+                for (const auto& assignment : branch.updateSet) visitExpression(assignment.second.get(), ctes);
+                for (const auto& value : branch.insertCols) visitExpression(value.second.get(), ctes);
+            }
+            for (const auto& item : merge->returning) visitExpression(item.expr.get(), ctes);
+        }
+    };
+    visitStatement(parsed.stmt.get(), {});
+}
 
 bool tryDmlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
                   Session& s, bool& handled, const std::string& rawSql) {

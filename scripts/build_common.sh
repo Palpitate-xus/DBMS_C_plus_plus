@@ -193,6 +193,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/long_default_expression_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/serial_owned_sequence_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/temp_serial_owned_sequence_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/temp_prepared_access_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/temp_alter_column_catalog_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/pg_temp_missing_index_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/discard_temp_protocol_e2e_test.py)

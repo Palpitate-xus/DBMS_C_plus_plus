@@ -916,6 +916,23 @@ SqlCommand SQLParser::classify(const std::string& sql) {
     // DQL
     if (lsql.substr(0, 6) == "select") return SqlCommand::Select;
     if (lsql.substr(0, 6) == "values") return SqlCommand::Values;
+    // WITH query bodies already have a typed SELECT parser. Classify only a
+    // top-level SELECT, not SELECT inside a CTE or an unsupported WITH DML.
+    if (lsql.compare(0, 4, "with") == 0) {
+        const auto queryTokens = tokenize(sql.substr(offset));
+        if (queryTokens.empty() || toLower(queryTokens.front()) != "with")
+            return SqlCommand::Unknown;
+        int depth = 0;
+        for (size_t index = 1; index < queryTokens.size(); ++index) {
+            if (queryTokens[index] == "(") { ++depth; continue; }
+            if (queryTokens[index] == ")") { --depth; continue; }
+            if (depth != 0) continue;
+            const std::string word = toLower(queryTokens[index]);
+            if (word == "select") return SqlCommand::Select;
+            if (word == "insert" || word == "update" || word == "delete" ||
+                word == "merge") break;
+        }
+    }
 
     // DML
     if (lsql.substr(0, 6) == "insert") return SqlCommand::Insert;
@@ -2559,13 +2576,23 @@ static bool parseReturningClause(const std::vector<std::string>& tokens,
     return true;
 }
 
-// 解析 FROM 项（简化版：支持表名、别名、JOIN）
-static std::unique_ptr<FromItem> parseFromItem(const std::vector<std::string>& tokens, size_t& pos) {
+// Parse one relation or derived query before composing JOINs. Never turn the
+// opening parenthesis into a physical relation name and lose its query tree.
+static std::unique_ptr<FromItem> parseFromAtom(const std::vector<std::string>& tokens, size_t& pos) {
     if (pos >= tokens.size()) return nullptr;
 
     auto item = std::make_unique<FromItem>();
-    item->type = FromItem::Type::Table;
-    if (!parseQualifiedObjectName(tokens, pos, item->tableName)) return nullptr;
+    if (tokens[pos] == "(") {
+        const auto nestedTokens = collectParenthesized(tokens, pos);
+        SQLParser parser;
+        auto nested = parser.parse(joinParserTokens(nestedTokens, 0, nestedTokens.size()));
+        if (!nested.isValid() || !dynamic_cast<SelectStmt*>(nested.stmt.get())) return nullptr;
+        item->type = FromItem::Type::Subquery;
+        item->subquery = std::move(nested.stmt);
+    } else {
+        item->type = FromItem::Type::Table;
+        if (!parseQualifiedObjectName(tokens, pos, item->tableName)) return nullptr;
+    }
 
     // AS alias or implicit alias
     if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "as") {
@@ -2576,6 +2603,13 @@ static std::unique_ptr<FromItem> parseFromItem(const std::vector<std::string>& t
         item->alias = tokens[pos++];
     }
 
+    return item;
+}
+
+// 解析 FROM 项（简化版：支持表名、别名、JOIN）
+static std::unique_ptr<FromItem> parseFromItem(const std::vector<std::string>& tokens, size_t& pos) {
+    auto item = parseFromAtom(tokens, pos);
+    if (!item) return nullptr;
     // JOIN handling (simplified)
     while (pos < tokens.size()) {
         std::string jkw = SQLParser::toLower(tokens[pos]);
@@ -2592,18 +2626,8 @@ static std::unique_ptr<FromItem> parseFromItem(const std::vector<std::string>& t
 
             if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "join") ++pos;
 
-            auto rightItem = std::make_unique<FromItem>();
-            rightItem->type = FromItem::Type::Table;
-            if (!parseQualifiedObjectName(tokens, pos, rightItem->tableName)) {
-                return nullptr;
-            }
-            if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "as") {
-                ++pos;
-                if (pos < tokens.size()) rightItem->alias = tokens[pos++];
-            } else if (pos < tokens.size() && !SQLParser::isKeyword(tokens[pos])
-                       && tokens[pos] != "," && tokens[pos] != ")") {
-                rightItem->alias = tokens[pos++];
-            }
+            auto rightItem = parseFromAtom(tokens, pos);
+            if (!rightItem) return nullptr;
 
             auto joinNode = std::make_unique<FromItem>();
             joinNode->type = FromItem::Type::Join;

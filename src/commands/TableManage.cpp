@@ -6992,12 +6992,43 @@ static std::string ssiPageKey(const std::string& dbname,
     return dbname + "\x1f" + tablename + "\x1fpage\x1f" + std::to_string(pageId);
 }
 
+void StorageEngine::noteTemporaryObjectAccess(const std::string& dbname) const {
+    auto& context = transactionContext();
+    if (context.inTransaction && context.txnDB == dbname) {
+        context.accessedTemporaryObjects = true;
+    }
+}
+
+void StorageEngine::noteTemporaryRelationAccess(
+    const std::string& dbname, const std::string& tablename) const {
+    const auto& context = transactionContext();
+    if (!context.inTransaction || context.txnDB != dbname ||
+        !isSessionTempPhysicalName(tablename)) return;
+    const size_t separator = tablename.find('_', 6);
+    uint64_t sessionId = 0;
+    const auto parsed = std::from_chars(
+        tablename.data() + 6, tablename.data() + separator, sessionId);
+    if (parsed.ec != std::errc{} ||
+        parsed.ptr != tablename.data() + separator) return;
+    auto& catalog = const_cast<StorageEngine*>(this)->catalogService().get(dbname);
+    const auto* nameSpace = catalog.findTempNamespace(sessionId);
+    if (!nameSpace) return;
+    const auto* relation = catalog.findClassByName(
+        tablename.substr(separator + 1), nameSpace->oid);
+    // Query-local CTE/derived/transition storage uses the same physical prefix
+    // but is not a user TEMP catalog object. Do not mistake it for one.
+    if (relation && relation->relpersistence == 't') {
+        noteTemporaryObjectAccess(dbname);
+    }
+}
+
 bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tablename,
                                 const std::function<void(uint32_t, uint16_t, const char*, size_t)>& callback,
                                 const ReadView* readView,
                                 const std::vector<std::string>& targetPartitions,
                                 bool registerSiread,
                                 bool indexMaintenanceView) const {
+    if (!indexMaintenanceView) noteTemporaryRelationAccess(dbname, tablename);
     if (!indexMaintenanceView && transactionContext().inTransaction &&
         dbname == transactionContext().txnDB) {
         if (!readView) {
@@ -15719,6 +15750,7 @@ private:
 DBStatus StorageEngine::dropTable(const std::string& dbname,
                                    const std::string& tablename) {
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
+    noteTemporaryRelationAccess(dbname, tablename);
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
 
@@ -16018,6 +16050,7 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
 
 DBStatus StorageEngine::truncateTable(const std::string& dbname,
                                        const std::string& tablename) {
+    noteTemporaryRelationAccess(dbname, tablename);
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
         if ((transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
              transactionContext().txnIsolationLevel == IsolationLevel::READ_UNCOMMITTED) &&
@@ -20537,6 +20570,7 @@ int64_t StorageEngine::nextval(const std::string& dbname,
                                 const std::string& seqname) {
     const ResolvedSequenceReference resolved =
         resolveSequenceReference(*this, dbname, seqname);
+    if (resolved.persistence == 't') noteTemporaryObjectAccess(dbname);
     if (transactionContext().inTransaction &&
         transactionContext().readOnly && resolved.persistence != 't') {
         throw DbError("25006",
@@ -20651,6 +20685,7 @@ int64_t StorageEngine::currval(const std::string& dbname,
                                const std::string& seqname) {
     const ResolvedSequenceReference resolved =
         resolveSequenceReference(*this, dbname, seqname);
+    if (resolved.persistence == 't') noteTemporaryObjectAccess(dbname);
     const auto path = sequencePath(dbname, resolved.storageName);
     std::lock_guard<std::mutex> lock(g_sequenceMutex);
     dbms::SequenceInfo info;
@@ -20696,6 +20731,9 @@ int64_t StorageEngine::lastval() const {
             throw DbError("55000",
                           "lastval is not yet defined in this session");
         }
+        if (relation->relpersistence == 't') {
+            noteTemporaryObjectAccess(g_currentSession->lastUsedSequenceDatabase);
+        }
         return value->second;
     }
     if (!transactionContext().lastvalDefined) {
@@ -20709,6 +20747,7 @@ int64_t StorageEngine::setval(const std::string& dbname,
                                int64_t value, bool isCalled) {
     const ResolvedSequenceReference resolved =
         resolveSequenceReference(*this, dbname, seqname);
+    if (resolved.persistence == 't') noteTemporaryObjectAccess(dbname);
     if (transactionContext().inTransaction &&
         transactionContext().readOnly && resolved.persistence != 't') {
         throw DbError("25006",
@@ -22511,6 +22550,7 @@ DBStatus StorageEngine::insertInternal(
                                 const std::set<std::string>& nullColumns,
                                 std::vector<SqlRow>* insertedRows,
                                 IdentityOverride identityOverride) {
+    noteTemporaryRelationAccess(dbname, tablename);
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
         if ((transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
              transactionContext().txnIsolationLevel == IsolationLevel::READ_UNCOMMITTED) &&
@@ -24595,6 +24635,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                                              bool* usedIndex,
                                              bool* scanFailed,
                                              bool* indexReadFailed) {
+    noteTemporaryRelationAccess(dbname, tablename);
     std::set<int64_t> ids;
     if (usedIndex) *usedIndex = false;
     if (scanFailed) *scanFailed = false;
@@ -29581,6 +29622,7 @@ std::vector<std::string> StorageEngine::query(
     std::vector<std::vector<std::string>>* structuredRows,
     std::vector<std::vector<bool>>* structuredNulls,
     std::vector<int64_t>* structuredRowIds) {
+    noteTemporaryRelationAccess(dbname, tablename);
     std::vector<std::string> result;
     if (structuredRows) structuredRows->clear();
     if (structuredNulls) structuredNulls->clear();
@@ -43125,6 +43167,7 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
     transactionContext().hasRead = false;
     transactionContext().hasWrite = false;
     transactionContext().ddlUndoActions.clear();
+    transactionContext().accessedTemporaryObjects = false;
     transactionContext().transactionBackupDirty = false;
     transactionContext().restoreBackupBeforeRowUndo = false;
     transactionContext().txnLogSizeAtBackup = 0;
@@ -45289,6 +45332,14 @@ static PreparedTerminalState preparedTerminalState(
 DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
     if (!transactionContext().inTransaction) return DBStatus::INVALID_VALUE;
     if (!validPreparedXid(xid)) return DBStatus::INVALID_VALUE;
+    if (transactionContext().accessedTemporaryObjects) {
+        // Like PG, a failed PREPARE at this boundary ends the whole top-level
+        // transaction. In particular no permanent writes or prepared locks
+        // can escape after a read-only or rolled-back-child TEMP access.
+        const DBStatus rollbackStatus = rollbackTransaction();
+        return rollbackStatus == DBStatus::OK
+            ? DBStatus::FEATURE_NOT_SUPPORTED : rollbackStatus;
+    }
     if (!transactionContext().ddlUndoActions.empty() ||
         transactionContext().transactionBackupDirty) {
         // DDL undo callbacks are backend-local closures, while a dirty

@@ -4555,6 +4555,9 @@ static bool handlePrepare(const string& sql, Session& s) {
             rollbackNotificationTransaction(s);
             cout << "PREPARE TRANSACTION " << xid << endl;
             log(s.username, "prepare transaction " + xid, getTime());
+        } else if (res == DBStatus::FEATURE_NOT_SUPPORTED) {
+            cout << "ERROR: cannot PREPARE a transaction that has operated on "
+                    "temporary objects (SQLSTATE 0A000)" << endl;
         } else if (res == DBStatus::INVALID_VALUE) {
             if (g_engine.inTransaction()) {
                 cout << "ERROR: transaction contains state that cannot be prepared "
@@ -4634,6 +4637,7 @@ static bool handlePrepare(const string& sql, Session& s) {
             }
             parameterOids.push_back(oid);
         }
+        dbms::notePreparedTemporaryObjectAccess(templateSql, s);
         s.preparedStmts[stmtName] = templateSql;
         s.preparedStmtTypes[stmtName] = paramTypes;
         s.preparedStmtParameterOids[stmtName] = std::move(parameterOids);
@@ -4663,6 +4667,7 @@ static bool handlePrepare(const string& sql, Session& s) {
              << "\" already exists (SQLSTATE 42P05)" << endl;
         return true;
     }
+    dbms::notePreparedTemporaryObjectAccess(templateSql, s);
     s.preparedStmts[stmtName] = templateSql;
     s.preparedStmtTypes[stmtName] = {};
     s.preparedStmtParameterOids[stmtName] = {};
@@ -5777,6 +5782,11 @@ void cleanupSessionTempTables(Session& s) {
 }
 
 string resolveTableName(Session& s, const string& name, bool foldUnquoted) {
+    const auto temporaryPhysicalName = [&](const string& table) {
+        const string physical = tempTablePrefix(s, table);
+        g_engine.noteTemporaryRelationAccess(s.currentDB, physical);
+        return physical;
+    };
     dbms::CatalogManager::QualifiedName qualified;
     if (!dbms::CatalogManager::parseQualifiedName(name, qualified,
                                                    foldUnquoted)) return name;
@@ -5787,7 +5797,7 @@ string resolveTableName(Session& s, const string& name, bool foldUnquoted) {
              schema == sessionTempSchemaName(s)) &&
             (s.tempTables.count(table) ||
              s.transientTempTables.count(table))) {
-            return tempTablePrefix(s, table);
+            return temporaryPhysicalName(table);
         }
         if (g_engine.schemaExists(s.currentDB, schema)) {
             string physical = schema == "public"
@@ -5829,8 +5839,8 @@ string resolveTableName(Session& s, const string& name, bool foldUnquoted) {
     // the explicit path unless pg_temp is listed later for function/operator
     // lookup. This resolver is relation-only, so temp relations always win.
     const string& table = qualified.name;
-    if (s.tempTables.count(table)) return tempTablePrefix(s, table);
-    if (s.transientTempTables.count(table)) return tempTablePrefix(s, table);
+    if (s.tempTables.count(table)) return temporaryPhysicalName(table);
+    if (s.transientTempTables.count(table)) return temporaryPhysicalName(table);
 
     std::vector<std::string> entries;
     std::string canonical;

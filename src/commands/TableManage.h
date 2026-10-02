@@ -798,6 +798,11 @@ public:
         ensureTransactionSnapshot();
         transactionContext().querySnapshotUsed = true;
     }
+    // TEMP namespace access survives subabort and prevents backend-independent
+    // PREPARE, even when the access produced no tuple undo record.
+    void noteTemporaryObjectAccess(const std::string& dbname) const;
+    void noteTemporaryRelationAccess(const std::string& dbname,
+                                     const std::string& tablename) const;
     // Unlike isolation/read-only, even an idempotent NOT DEFERRABLE is
     // forbidden after the first query snapshot or in a user subtransaction.
     bool canSetTransactionDeferrable() const {
@@ -2089,6 +2094,7 @@ private:
         // Like PostgreSQL's FirstSnapshotSet: once used, a user subabort
         // cannot make transaction characteristics configurable again.
         bool querySnapshotUsed = false;
+        bool accessedTemporaryObjects = false;
         bool hasRead = false;
         bool hasWrite = false;
         std::string txnBackupPath;

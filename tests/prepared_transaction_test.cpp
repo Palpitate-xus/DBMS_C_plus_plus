@@ -160,9 +160,8 @@ void test_prepare_rejects_temporary_relation_writes() {
     assert(g_engine.insert(db, physicalName, {{"id", "1"}}) ==
            dbms::DBStatus::OK);
     assert(g_engine.prepareTransaction("prepared_temporary_relation") ==
-           dbms::DBStatus::INVALID_VALUE);
-    assert(g_engine.inTransaction());
-    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+           dbms::DBStatus::FEATURE_NOT_SUPPORTED);
+    assert(!g_engine.inTransaction());
     assert(g_engine.query(db, physicalName, {}, {"id"}).empty());
     const auto prepared = g_engine.listPreparedTransactions();
     assert(std::find(prepared.begin(), prepared.end(),
