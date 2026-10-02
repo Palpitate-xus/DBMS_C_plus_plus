@@ -1,6 +1,7 @@
 #include "NetworkServer.h"
 #include "common/version.h"
 #include "common/DbError.h"
+#include "common/SqlTrivia.h"
 #include "commands/DmlExecutor.h"
 #include "TableManage.h"
 #include "permissions.h"
@@ -988,38 +989,7 @@ std::string trimText(const std::string& value) {
 }
 
 size_t skipSqlTrivia(const std::string& sql, size_t pos) {
-    while (true) {
-        while (pos < sql.size() &&
-               std::isspace(static_cast<unsigned char>(sql[pos]))) ++pos;
-        if (pos + 1 >= sql.size()) return pos;
-        if (sql[pos] == '-' && sql[pos + 1] == '-') {
-            pos += 2;
-            while (pos < sql.size() && sql[pos] != '\n' && sql[pos] != '\r') {
-                ++pos;
-            }
-            continue;
-        }
-        if (sql[pos] == '/' && sql[pos + 1] == '*') {
-            pos += 2;
-            size_t depth = 1;
-            while (pos < sql.size() && depth != 0) {
-                if (pos + 1 < sql.size() && sql[pos] == '/' &&
-                    sql[pos + 1] == '*') {
-                    ++depth;
-                    pos += 2;
-                } else if (pos + 1 < sql.size() && sql[pos] == '*' &&
-                           sql[pos + 1] == '/') {
-                    --depth;
-                    pos += 2;
-                } else {
-                    ++pos;
-                }
-            }
-            if (depth != 0) return std::string::npos;
-            continue;
-        }
-        return pos;
-    }
+    return dbms::skipLeadingSqlTrivia(sql, pos);
 }
 
 size_t sqlCommandOffset(const std::string& sql) {
