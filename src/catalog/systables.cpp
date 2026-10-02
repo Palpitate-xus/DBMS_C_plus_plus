@@ -9,6 +9,8 @@ static const std::unordered_map<std::string, Oid> kBuiltinTypeMap = {
     {"bool", 16}, {"boolean", 16},
     {"bytea", 17},
     {"bytea[]", 1001},
+    // PostgreSQL's quoted internal catalog type is not SQL CHAR/bpchar.
+    {"\"char\"", 18},
     {"name", 19},
     {"name[]", 1003},
     {"bigint", 20}, {"int8", 20},
