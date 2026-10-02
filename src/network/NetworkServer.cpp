@@ -1033,6 +1033,9 @@ std::vector<std::string> splitSimpleQueryStatements(const std::string& sql) {
     bool lineComment = false;
     int blockCommentDepth = 0;
     std::string dollarDelimiter;
+    const auto identifierContinuation = [](unsigned char c) {
+        return std::isalnum(c) || c == '_' || c == '$' || c >= 0x80;
+    };
 
     for (size_t i = 0; i < sql.size(); ++i) {
         const char c = sql[i];
@@ -1098,7 +1101,8 @@ std::vector<std::string> splitSimpleQueryStatements(const std::string& sql) {
             doubleQuoted = true;
             continue;
         }
-        if (c == '$') {
+        if (c == '$' &&
+            (i == 0 || !identifierContinuation(static_cast<unsigned char>(sql[i - 1])))) {
             size_t end = i + 1;
             if (end < sql.size() &&
                 (std::isalpha(static_cast<unsigned char>(sql[end])) ||
