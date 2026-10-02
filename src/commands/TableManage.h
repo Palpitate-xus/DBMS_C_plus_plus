@@ -785,13 +785,18 @@ public:
         // READ ONLY may tighten the transaction at any point. PostgreSQL only
         // permits the opposite transition before the first query or write.
         if (!readOnly && context.readOnly &&
-            (hasUserSavepoint() || context.hasRead || context.hasWrite || !context.txnLog.empty() ||
+            (hasUserSavepoint() || context.querySnapshotUsed || context.hasRead || context.hasWrite || !context.txnLog.empty() ||
              !context.ddlUndoActions.empty() ||
              !context.txnBackupPath.empty())) {
             return false;
         }
         context.readOnly = readOnly;
         return true;
+    }
+    void noteQuerySnapshot() const {
+        if (!transactionContext().inTransaction) return;
+        ensureTransactionSnapshot();
+        transactionContext().querySnapshotUsed = true;
     }
     // DDL transactions opt into a physical backup after acquiring the
     // database-level snapshot lock; ordinary row transactions do not create
@@ -1418,7 +1423,7 @@ public:
             return true;
         }
         if (context.inTransaction &&
-            (hasUserSavepoint() || context.hasRead || context.hasWrite || !context.txnLog.empty() ||
+            (hasUserSavepoint() || context.querySnapshotUsed || context.hasRead || context.hasWrite || !context.txnLog.empty() ||
              !context.ddlUndoActions.empty() ||
              !context.txnBackupPath.empty())) {
             return false;
@@ -2067,6 +2072,9 @@ private:
         std::string txnDB;
         bool snapshotImported = false;
         bool snapshotAcquired = false;
+        // Like PostgreSQL's FirstSnapshotSet: once used, a user subabort
+        // cannot make transaction characteristics configurable again.
+        bool querySnapshotUsed = false;
         bool hasRead = false;
         bool hasWrite = false;
         std::string txnBackupPath;

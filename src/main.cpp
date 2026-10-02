@@ -29289,6 +29289,9 @@ bool execute(const std::string& rawSql, Session& s) {
         if (statementConstraintStatus != DBStatus::OK) error = true;
     };
     try {
+        if (dbms::SQLParser::requiresQuerySnapshot(rawSql)) {
+            g_engine.noteQuerySnapshot();
+        }
         error = executeInternal(rawSql, s);
     } catch (...) {
         if (statementTransaction) {

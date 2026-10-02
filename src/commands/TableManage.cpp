@@ -6994,6 +6994,7 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
             }
         }
         transactionContext().hasRead = true;
+        transactionContext().querySnapshotUsed = true;
     }
     const ReadView* rv = readView;
     ReadView autocommitView;
@@ -7289,6 +7290,7 @@ bool StorageEngine::forEachRowPageRange(
             }
         }
         transactionContext().hasRead = true;
+        transactionContext().querySnapshotUsed = true;
     }
     TableSchema tbl = getTableSchema(dbname, tablename);
     if (tbl.partitionType != TableSchema::PartitionType::None || firstPage >= endPage)
@@ -7546,6 +7548,7 @@ bool StorageEngine::readIndexedRowByRid(const std::string& dbname,
         transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE &&
         dbname == transactionContext().txnDB) {
         transactionContext().hasRead = true;
+        transactionContext().querySnapshotUsed = true;
         const std::string key = ssiRidKey(dbname, tablename, rid);
         const std::string page = ssiPageKey(dbname, tablename, pageId);
         transactionContext().txnReadRids.insert(key);
@@ -29468,6 +29471,7 @@ std::vector<std::string> StorageEngine::query(
             ensureTransactionSnapshot();
         }
         transactionContext().hasRead = true;
+        transactionContext().querySnapshotUsed = true;
     }
 
     // information_schema virtual tables
@@ -34061,6 +34065,7 @@ std::vector<std::string> StorageEngine::queryExpr(
             ensureTransactionSnapshot();
         }
         transactionContext().hasRead = true;
+        transactionContext().querySnapshotUsed = true;
     }
     if (!tableExists(dbname, tablename)) return result;
     if (!lockManager_.lockShared(tablename)) return result;
@@ -39669,6 +39674,7 @@ bool StorageEngine::importSnapshot(const std::string& bytes) {
     context.readView.commitLog = getCommitLog(context.txnDB);
     context.snapshotImported = true;
     context.snapshotAcquired = true;
+    context.querySnapshotUsed = true;
     return true;
 }
 
@@ -42985,6 +42991,7 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
     transactionContext().deferredChecks.clear();
     transactionContext().snapshotImported = false;
     transactionContext().snapshotAcquired = false;
+    transactionContext().querySnapshotUsed = false;
     transactionContext().hasRead = false;
     transactionContext().hasWrite = false;
     transactionContext().ddlUndoActions.clear();
@@ -43612,6 +43619,7 @@ DBStatus StorageEngine::commitTransaction() {
     transactionContext().deferredChecks.erase(transactionContext().currentTxnId);
     transactionContext().currentTxnId = 0;
     transactionContext().inTransaction = false;
+    transactionContext().querySnapshotUsed = false;
     transactionContext().readOnly = false;
     transactionContext().preserveBackupOnRollback = false;
     transactionContext().txnDB.clear();
@@ -44651,6 +44659,7 @@ DBStatus StorageEngine::rollbackTransaction() {
     transactionContext().txnLogicalChanges.clear();
     transactionContext().snapshotImported = false;
     transactionContext().snapshotAcquired = false;
+    transactionContext().querySnapshotUsed = false;
     transactionContext().hasRead = false;
     transactionContext().hasWrite = false;
     for (const auto& savepoint : transactionContext().savepoints) {
@@ -45301,6 +45310,7 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
     transactionContext().specializedIndexTables.clear();
     transactionContext().snapshotImported = false;
     transactionContext().snapshotAcquired = false;
+    transactionContext().querySnapshotUsed = false;
     transactionContext().hasRead = false;
     transactionContext().hasWrite = false;
     transactionContext().savepoints.clear();

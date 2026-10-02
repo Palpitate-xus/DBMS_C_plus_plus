@@ -866,6 +866,15 @@ bool SQLParser::isKeyword(const std::string& s) {
 // classify：快速命令分类（替代 execute() 中的字符串前缀匹配）
 // ============================================================================
 
+bool SQLParser::requiresQuerySnapshot(const std::string& sql) {
+    const auto tokens = tokenize(sql);
+    if (tokens.empty()) return false;
+    const auto keyword = toLower(tokens.front());
+    return keyword == "select" || keyword == "values" || keyword == "with" ||
+           keyword == "table" || keyword == "insert" || keyword == "update" ||
+           keyword == "delete" || keyword == "merge";
+}
+
 SqlCommand SQLParser::classify(const std::string& sql) {
     std::string lsql = toLower(trim(sql));
     if (lsql.empty()) return SqlCommand::Unknown;
