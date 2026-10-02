@@ -1271,13 +1271,14 @@ static bool isScalarFunc(const string& name) {
 
 static vector<string> splitSelectColumns(const string& s) {
     vector<string> cols;
+    const auto protectedBytes = dbms::sqlProtectedBytes(s);
     size_t i = 0;
     int parenDepth = 0;
     string current;
     while (i < s.size()) {
-        if (s[i] == '(' || s[i] == '[') parenDepth++;
-        else if (s[i] == ')' || s[i] == ']') parenDepth--;
-        else if (s[i] == ',' && parenDepth == 0) {
+        if (!protectedBytes[i] && (s[i] == '(' || s[i] == '[')) parenDepth++;
+        else if (!protectedBytes[i] && (s[i] == ')' || s[i] == ']')) parenDepth--;
+        else if (!protectedBytes[i] && s[i] == ',' && parenDepth == 0) {
             cols.push_back(trim(current));
             current.clear();
             ++i;
@@ -1294,24 +1295,20 @@ static vector<string> splitSelectColumns(const string& s) {
 // Returns string::npos if not found. The match boundary is checked at word level.
 static size_t findTopLevelKeyword(const string& sql, const string& kw, size_t startPos = 0) {
     int depth = 0;
-    char quote = 0;
+    const auto protectedBytes = dbms::sqlProtectedBytes(sql);
     size_t klen = kw.size();
+    if (!klen) return string::npos;
     auto isIdentifierChar = [](unsigned char ch) {
         return isalnum(ch) || ch == '_' || ch == '$';
     };
     for (size_t i = startPos; i < sql.size(); ++i) {
         char c = sql[i];
-        if (quote != 0) {
-            if (c == quote) {
-                if (i + 1 < sql.size() && sql[i + 1] == quote) ++i;
-                else quote = 0;
-            }
-            continue;
-        }
-        if (c == '\'' || c == '"') { quote = c; continue; }
+        if (protectedBytes[i]) continue;
         if (c == '(') { depth++; continue; }
         if (c == ')') { depth--; continue; }
-        if (depth == 0 && i + klen <= sql.size() && sql.compare(i, klen, kw) == 0) {
+        if (depth == 0 && i + klen <= sql.size() && sql.compare(i, klen, kw) == 0 &&
+            none_of(protectedBytes.begin() + i, protectedBytes.begin() + i + klen,
+                    [](bool value) { return value; })) {
             bool leftOk = (i == 0) ||
                 !isIdentifierChar(static_cast<unsigned char>(sql[i - 1]));
             bool rightOk = (i + klen == sql.size()) ||
@@ -10832,21 +10829,14 @@ static size_t findMatchingParen(const std::string& s, size_t start) {
 static size_t findTextOutsideQuotes(const std::string& sql,
                                     const std::string& text,
                                     size_t from) {
-    char quote = '\0';
+    if (text.empty()) return std::string::npos;
+    const auto protectedBytes = dbms::sqlProtectedBytes(sql);
     for (size_t i = 0; i < sql.size(); ++i) {
-        if (quote != '\0') {
-            if (sql[i] == quote) {
-                if (i + 1 < sql.size() && sql[i + 1] == quote) ++i;
-                else quote = '\0';
-            }
-            continue;
-        }
-        if (sql[i] == '\'' || sql[i] == '"') {
-            quote = sql[i];
-            continue;
-        }
+        if (protectedBytes[i]) continue;
         if (i >= from && i + text.size() <= sql.size() &&
-            sql.compare(i, text.size(), text) == 0) {
+            sql.compare(i, text.size(), text) == 0 &&
+            none_of(protectedBytes.begin() + i, protectedBytes.begin() + i + text.size(),
+                    [](bool value) { return value; })) {
             return i;
         }
     }
@@ -24556,18 +24546,24 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             }
                         }
                     }
-                    size_t lp = itemBase.find('(');
+                    const auto protectedFunctionBytes =
+                        dbms::sqlProtectedBytes(itemBase);
+                    size_t lp = string::npos;
+                    for (size_t i = 0; i < itemBase.size(); ++i) {
+                        if (!protectedFunctionBytes[i] && itemBase[i] == '(') {
+                            lp = i;
+                            break;
+                        }
+                    }
                     // Balance parentheses so a nested call like
                     // "upper(substring(name, 1, 1))" keeps its full argument
                     // (find(')') would cut at the inner close).
                     size_t rp = string::npos;
                     if (lp != string::npos) {
                         int depth = 0;
-                        bool inQ = false;
                         for (size_t k = lp; k < itemBase.size(); ++k) {
+                            if (protectedFunctionBytes[k]) continue;
                             char ch = itemBase[k];
-                            if (inQ) { if (ch == '\'') inQ = false; continue; }
-                            if (ch == '\'') { inQ = true; continue; }
                             if (ch == '(') ++depth;
                             else if (ch == ')') {
                                 --depth;
