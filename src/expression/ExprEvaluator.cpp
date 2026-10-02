@@ -6306,7 +6306,8 @@ static std::string formatDateTime(const std::string& src, const std::string& fmt
 // placeholders, a '.' decimal point, and a leading 'FM' (fill mode: suppress
 // the leading sign-position blank). '0' placeholders zero-pad the integer part.
 // Grouping ('G'/','), currency, and sign templates are not implemented.
-static std::string formatNumeric(double val, const std::string& fmtIn) {
+static std::string formatNumeric(double val, const std::string& fmtIn,
+                                 const std::string& exactInput = std::string()) {
     std::string fmt = fmtIn;
     bool fm = false;
     if (fmt.size() >= 2 && (fmt[0] == 'F' || fmt[0] == 'f') &&
@@ -6373,12 +6374,14 @@ static std::string formatNumeric(double val, const std::string& fmtIn) {
         else mout = (fm ? "" : " ") + mant;
         return mout + "e" + xs + expt;
     }
+    int scaleShift = 0;
     if (hasV) {
         // V shifts the decimal point: digits after V are scale shifts.
         size_t vPos = fmt.find('V');
         int shift = 0;
         for (size_t i = vPos + 1; i < fmt.size(); ++i)
             if (fmt[i] == '9' || fmt[i] == '0') ++shift;
+        scaleShift = shift;
         double av2 = neg ? -val : val;
         for (int k2 = 0; k2 < shift; ++k2) av2 *= 10.0;
         val = av2; neg = false; fracDigits = 0; dot = std::string::npos;
@@ -6388,10 +6391,36 @@ static std::string formatNumeric(double val, const std::string& fmtIn) {
             if (fmt[i] == '9') ++intPlaces;
             else if (fmt[i] == '0') { ++intPlaces; zeroPad = true; }
     }
-    char numbuf[64];
-    std::snprintf(numbuf, sizeof numbuf, "%.*f", fracDigits, neg ? -val : val);
-    std::string s = numbuf, ip = s, fp;
-    // Sign follows the rounded displayed value, not the unrounded input.
+    std::string roundedText;
+    if (!exactInput.empty()) {
+        Numeric decimal(exactInput);
+        if (decimal.isFinite()) {
+            if (scaleShift > 0) {
+                decimal *= Numeric("1" + std::string(static_cast<size_t>(scaleShift), '0'));
+            }
+            decimal = decimal.withScale(fracDigits);
+            neg = decimal.sign() < 0;
+            roundedText = (neg ? -decimal : decimal).toString();
+            if (fracDigits > 0) {
+                size_t point = roundedText.find('.');
+                if (point == std::string::npos) {
+                    roundedText += '.';
+                    point = roundedText.size() - 1;
+                }
+                const size_t existing = roundedText.size() - point - 1;
+                if (existing < static_cast<size_t>(fracDigits)) {
+                    roundedText.append(static_cast<size_t>(fracDigits) - existing, '0');
+                }
+            }
+        }
+    }
+    if (roundedText.empty()) {
+        char numbuf[64];
+        std::snprintf(numbuf, sizeof numbuf, "%.*f", fracDigits, neg ? -val : val);
+        roundedText = numbuf;
+    }
+    std::string s = roundedText, ip = s, fp;
+    // This also covers rounded zero in the floating-point fallback.
     if (s.find_first_not_of("0.") == std::string::npos) neg = false;
     size_t sp = s.find('.');
     if (sp != std::string::npos) { ip = s.substr(0, sp); fp = s.substr(sp + 1); }
@@ -6419,6 +6448,7 @@ static std::string formatNumeric(double val, const std::string& fmtIn) {
     if (!ip.empty() && ip.find_first_not_of(" 0123456789") == std::string::npos &&
         static_cast<int>(ip.size()) > intPlaces) {
         ip = std::string(intPlaces, '#');
+        fp = std::string(fracDigits, '#');
     }
     if (hasG) {
         // Insert commas every three digits, leaving leading blanks in place.
@@ -10954,7 +10984,11 @@ void ExprEvaluator::registerBuiltins() {
             }
         }
         if (temporal) return ExprValue("text", formatDateTime(v, fmt), false);
-        return ExprValue("text", formatNumeric(a[0].asDouble(), fmt), false);
+        const bool exactNumeric = tn == "numeric" || tn == "decimal" ||
+            tn == "integer" || tn == "int" || tn == "smallint" ||
+            tn == "bigint" || tn == "int2" || tn == "int4" || tn == "int8";
+        return ExprValue("text", formatNumeric(a[0].asDouble(), fmt,
+            exactNumeric ? vval : std::string()), false);
     };
 
     // ------------------------------------------------------------------------
