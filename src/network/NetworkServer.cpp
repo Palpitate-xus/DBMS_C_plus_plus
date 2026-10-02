@@ -1575,14 +1575,38 @@ bool describePreparedResult(const std::string& sql, Session& session,
     std::string relation;
     TableSchema schema;
     std::map<std::string, std::string> typeHints;
+    bool virtualPgClass = false;
     if (!sourceName.empty()) {
         relation = resolveTableName(session, sourceName);
-        if (!g_engine.tableExists(session.currentDB, relation)) return false;
-        schema = g_engine.getTableSchema(session.currentDB, relation);
+        if (g_engine.tableExists(session.currentDB, relation)) {
+            schema = g_engine.getTableSchema(session.currentDB, relation);
+        } else {
+            CatalogManager::QualifiedName name;
+            virtualPgClass = select &&
+                CatalogManager::parseQualifiedName(sourceName, name, true) &&
+                name.name == "pg_class" &&
+                (name.schema.empty() || name.schema == "pg_catalog");
+            if (!virtualPgClass) return false;
+            // Match the virtual catalog's typed execution shape without
+            // executing SELECT (Describe must never acquire rows/side effects).
+            const std::vector<std::pair<std::string, std::string>> fields = {
+                {"oid", "oid"}, {"relname", "name"}, {"relnamespace", "oid"},
+                {"relkind", "\"char\""}, {"relnatts", "smallint"},
+                {"relpersistence", "\"char\""}, {"relowner", "oid"}};
+            for (const auto& field : fields) {
+                Column column;
+                column.dataName = field.first;
+                column.dataType = field.second;
+                schema.cols[schema.len++] = std::move(column);
+            }
+            relation = "pg_class";
+        }
         for (size_t i = 0; i < schema.len; ++i) {
             const Column& column = schema.cols[i];
             typeHints[column.dataName] = column.dataType;
             typeHints[relation + "." + column.dataName] = column.dataType;
+            if (virtualPgClass && sourceAlias.empty())
+                typeHints["pg_catalog.pg_class." + column.dataName] = column.dataType;
             if (!sourceAlias.empty()) {
                 typeHints[sourceAlias + "." + column.dataName] =
                     column.dataType;
@@ -1653,6 +1677,19 @@ bool describePreparedResult(const std::string& sql, Session& session,
                 : ExprHelper::inferResultType(expression, typeHints);
         shape.columnTypes.push_back(inferredType);
         std::string outputName = item.alias.empty() ? std::string{} : outputAlias(item.alias);
+        if (outputName.empty() && virtualPgClass) {
+            const Expr* operand = item.expr.get();
+            while (operand) {
+                if (const auto* cast = dynamic_cast<const CastExpr*>(operand)) {
+                    operand = cast->operand.get();
+                } else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(operand);
+                           binary && binary->op == "::") {
+                    operand = binary->left.get();
+                } else break;
+            }
+            if (const auto* column = dynamic_cast<const ColumnRefExpr*>(operand))
+                outputName = column->column;
+        }
         if (outputName.empty()) {
             const auto* call =
                 dynamic_cast<const FunctionCallExpr*>(item.expr.get());
