@@ -35,6 +35,7 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <locale>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -6333,7 +6334,8 @@ static std::string formatNumeric(double val, const std::string& fmtIn) {
     bool hasRN = fmt.find("RN") != std::string::npos || fmt.find("rn") != std::string::npos;
     bool hasS = false;    {
         size_t sp2 = fmt.find('S');        while (sp2 != std::string::npos) {            if (sp2 + 1 >= fmt.size() || fmt[sp2 + 1] != 'G') { hasS = true; break; }            sp2 = fmt.find('S', sp2 + 2);        }    }
-    bool hasL = fmt.find('L') != std::string::npos;
+    const size_t currencyPosition = fmt.find_first_of("Ll");
+    bool hasL = currencyPosition != std::string::npos;
     bool hasG = fmt.find('G') != std::string::npos;
     if (hasRN) {
         // Roman numerals, right-aligned to width 15 (FMRN unpads).
@@ -6416,6 +6418,7 @@ static std::string formatNumeric(double val, const std::string& fmtIn) {
         ip = lead + grouped;
     }
     std::string out;
+    std::string currencySuffix;
     if (hasPR && neg) {
         // PR: negatives in angle brackets occupying the sign + digit region.
         std::string trimIp = ip;
@@ -6469,12 +6472,27 @@ static std::string formatNumeric(double val, const std::string& fmtIn) {
             out = ip + sg2;
         }
     } else if (hasL) {
-        out = std::string("$") + (fm ? "" : " ") + ip;
+        // Numeric formatting uses the locale's literal currency symbol;
+        // unlike MONEY I/O it has no historical dollar fallback in C.
+        const std::locale locale(StorageEngine::getMoneyLocale().c_str());
+        std::string symbol = std::use_facet<std::moneypunct<char, false>>(
+            locale).curr_symbol();
+        if (symbol.empty()) symbol = " ";
+        if (neg) {
+            const size_t firstDigit = ip.find_first_not_of(' ');
+            const size_t signPosition = firstDigit == std::string::npos ? ip.size() : firstDigit;
+            out = ip.substr(0, signPosition) + "-" + ip.substr(signPosition);
+        } else {
+            out = (fm ? "" : " ") + ip;
+        }
+        if (currencyPosition < fmt.find_first_of("90")) out = symbol + out;
+        else currencySuffix = std::move(symbol);
     } else {
         out = neg ? "-" : (fm ? "" : " ");
         out += ip;
     }
     if (fracDigits > 0) out += "." + fp;
+    out += currencySuffix;
     if (hasTH) {
         long iv = (long)std::llround(valTH);
         long a11 = iv % 100; long d1 = iv % 10;

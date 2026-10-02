@@ -1,0 +1,15 @@
+SET lc_monetary='C';
+SELECT to_char(482,'L9999'),to_char(-482,'L9999');
+SELECT to_char(482,'9999L'),to_char(-482,'9999L');
+SELECT to_char(482,'FML9999'),to_char(-482,'FML9999');
+SELECT to_char(482,'FM9999L'),to_char(-482,'FM9999L');
+SELECT to_char(482,'9999.99L'),to_char(-482,'9999.99L');
+SET lc_monetary='en_US.utf8';
+SELECT to_char(482,'L9999'),to_char(-482,'L9999');
+SELECT to_char(482,'9999L'),to_char(-482,'9999L');
+SELECT to_char(482,'FML9999'),to_char(-482,'FML9999');
+SELECT to_char(482,'FM9999L'),to_char(-482,'FM9999L');
+SELECT to_char(482,'9999.99L'),to_char(-482,'9999.99L');
+SET lc_monetary='C.UTF-8';
+SELECT to_char(482,'L9999'),to_char(-482,'L9999');
+SET lc_monetary='C';

@@ -7,6 +7,7 @@
 // ============================================================================
 
 #include "expression/ExprEvaluator.h"
+#include "commands/TableManage.h"
 #include "parser/ast.h"
 #include <cassert>
 #include <iostream>
@@ -88,6 +89,36 @@ static void test_numeric() {
     std::cout << "[TOCHAR] numeric OK" << std::endl;
 }
 
+static void test_numeric_currency_locale() {
+    dbms::ExprEvaluator eval;
+    for (const auto& locale : {"C", "C.UTF-8", "en_US.utf8"}) {
+        dbms::StorageEngine::setMoneyLocale(locale);
+        const std::string symbol = std::string(locale) == "en_US.utf8" ? "$" : " ";
+        for (const auto& number : {"482", "-482"}) {
+            const std::string digits = number;
+            const std::string body = (digits.front() == '-' ? " " : "  ") + digits;
+            const auto check = [&](const std::string& format, const std::string& expected) {
+                const auto value = callFn(eval, "to_char", {N(digits), F(format)});
+                assert(!value.isNull && value.value == expected);
+                std::string lower = format;
+                for (char& letter : lower) {
+                    if (letter >= 'A' && letter <= 'Z') letter += 'a' - 'A';
+                }
+                const auto lowercase = callFn(eval, "to_char", {N(digits), F(lower)});
+                assert(!lowercase.isNull && lowercase.value == expected);
+            };
+            check("L9999", symbol + body);
+            check("9999L", body + symbol);
+            check("FML9999", symbol + digits);
+            check("FM9999L", digits + symbol);
+            check("L9999.99", symbol + body + ".00");
+            check("9999.99L", body + ".00" + symbol);
+        }
+    }
+    dbms::StorageEngine::setMoneyLocale("C");
+    std::cout << "[TOCHAR] currency locale OK" << std::endl;
+}
+
 static void test_interval() {
     dbms::ExprEvaluator eval;
     assert(callFn(eval, "to_char", {IV("3 days 2 hours"), F("HH24:MI")}).value == "02:00");
@@ -118,6 +149,7 @@ int main() {
     test_names_and_fields();
     test_quoting_and_date_time();
     test_numeric();
+    test_numeric_currency_locale();
     test_interval();
     test_null();
     std::cout << "[TOCHAR] all passed" << std::endl;
