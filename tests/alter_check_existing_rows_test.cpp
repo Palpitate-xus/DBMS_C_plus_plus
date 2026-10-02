@@ -30,7 +30,7 @@ int main() {
 
     assert(g_engine.alterTableAddCheckConstraint(
                database, "measurements", "measurements_value_check",
-               "value > 0") == dbms::DBStatus::INVALID_VALUE);
+               "value > 0") == dbms::DBStatus::CHECK_VIOLATION);
     const dbms::TableSchema rejected =
         g_engine.getTableSchema(database, "measurements");
     assert(rejected.cols[1].checkExpr.empty());
