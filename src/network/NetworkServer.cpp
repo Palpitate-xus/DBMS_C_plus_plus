@@ -4054,6 +4054,29 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         }
         return result;
     };
+    const auto prepareExtendedQuerySnapshot = [&]() -> bool {
+        // Parse analysis and Bind planning may take the first snapshot
+        // before Execute. Keep an implicit block alive until Sync.
+        // Existing failed blocks must not be silently restarted here.
+        if (transactionFailed) return true;
+        try {
+            if (!g_engine.inTransaction()) {
+                const QueryResult begin = executeForProtocol("BEGIN");
+                if (begin.error) {
+                    sendExtendedProtocolError(begin.sqlState, begin.errorMessage);
+                    return false;
+                }
+                extendedImplicitTransaction = true;
+            }
+            g_engine.noteQuerySnapshot();
+            return true;
+        } catch (const DbError& error) {
+            sendExtendedProtocolError(error.sqlState(), error.message());
+        } catch (const std::exception& error) {
+            sendExtendedProtocolError("XX000", error.what());
+        }
+        return false;
+    };
     struct CopyStatementBoundary {
         bool startedTransaction = false;
         bool savepointCreated = false;
@@ -4545,6 +4568,10 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 extendedQueryError = true;
                 continue;
             }
+            if (SQLParser::requiresQuerySnapshot(sql) &&
+                !prepareExtendedQuerySnapshot()) {
+                continue;
+            }
             if (statement.empty()) {
                 // A new unnamed statement replaces the old unnamed statement
                 // and invalidates the unnamed portal. Named portals retain
@@ -4622,6 +4649,10 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 parameterFormats.size() != valueCount) {
                 sendExtendedProtocolError("08P01", "bind message has an invalid parameter format count");
                 extendedQueryError = true;
+                continue;
+            }
+            if ((valueCount != 0 || SQLParser::requiresQuerySnapshot(preparedSql)) &&
+                !prepareExtendedQuerySnapshot()) {
                 continue;
             }
             std::vector<std::string> literals;

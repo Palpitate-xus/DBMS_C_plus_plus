@@ -29,6 +29,9 @@ public:
     // 快速命令分类（不构建完整 AST）
     // 用于 execute() 迁移期：先替换分类逻辑
     static SqlCommand classify(const std::string& sql);
+    // DML/query analysis needs a snapshot even without a physical table.
+    // Transaction controls and simple SHOW/SET utilities do not.
+    static bool requiresQuerySnapshot(const std::string& sql);
 
     // 工具函数
     static std::string toLower(const std::string& s);
