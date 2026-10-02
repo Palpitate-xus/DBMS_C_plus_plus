@@ -2653,10 +2653,6 @@ static bool handleBeginTransaction(const string& sql, Session& s) {
         throw dbms::DbError("42601",
             parsed.error.empty() ? "invalid transaction start" : parsed.error);
     }
-    if (txn->deferrable) {
-        cout << "ERROR: DEFERRABLE transactions are not supported" << endl;
-        return true;
-    }
     if (hadTransaction) {
         // PostgreSQL warns on repeated BEGIN but applies only the options
         // that were actually supplied, under SET TRANSACTION's rules.
@@ -2671,11 +2667,20 @@ static bool handleBeginTransaction(const string& sql, Session& s) {
                        !g_engine.setReadOnly(mode.value)) {
                 throw dbms::DbError("25001", "transaction read-write mode must be set before any query");
             }
-            // DEFERRABLE runtime support remains guarded above; retaining
-            // its AST order does not claim a serializable safe snapshot.
+            if (mode.kind == dbms::TransactionStmt::Mode::Kind::Deferrable) {
+                if (!g_engine.canSetTransactionDeferrable()) {
+                    throw dbms::DbError("25001", "transaction deferrability must be set before any query and outside a subtransaction");
+                }
+                if (mode.value) {
+                    throw dbms::DbError("0A000", "DEFERRABLE transactions are not supported");
+                }
+            }
         }
         cout << "There is already a transaction in progress" << endl;
         return false;
+    }
+    if (txn->deferrable) {
+        throw dbms::DbError("0A000", "DEFERRABLE transactions are not supported");
     }
     g_engine.setIsolationLevel(txn->isolation);
     s.isolationLevel = static_cast<int>(txn->isolation);

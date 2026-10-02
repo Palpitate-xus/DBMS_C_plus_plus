@@ -60,6 +60,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/extended_protocol_error_abort_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/ordered_begin_modes_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/query_snapshot_characteristics_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/not_deferrable_characteristic_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/table_structured_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/values_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/set_operation_structured_protocol_e2e_test.py)
