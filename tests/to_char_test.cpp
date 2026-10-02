@@ -77,8 +77,10 @@ static void test_quoting_and_date_time() {
 
 static void test_numeric() {
     dbms::ExprEvaluator eval;
-    // FM suppresses the leading sign blank; rounds to the fraction width.
-    assert(callFn(eval, "to_char", {N("1234.5"), F("FM9999.99")}).value == "1234.50");
+    // FM suppresses optional trailing 9-digits, not mandatory 0-digits.
+    // Keep the original SQL/input as the optional-digit control.
+    assert(callFn(eval, "to_char", {N("1234.5"), F("FM9999.99")}).value == "1234.5");
+    assert(callFn(eval, "to_char", {N("1234.5"), F("FM9999.00")}).value == "1234.50");
     // '0' zero-pads the integer part; non-FM keeps the leading sign blank.
     assert(callFn(eval, "to_char", {N("7"), F("000")}).value == " 007");
     // Non-FM keeps a leading blank in the sign position; unused leading
