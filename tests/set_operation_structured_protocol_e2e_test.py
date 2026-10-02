@@ -3,6 +3,7 @@
 
 import importlib.util
 from pathlib import Path
+import struct
 
 
 def main():
@@ -89,6 +90,102 @@ def main():
         assert rows == [[None], [""]], rows
         assert type_oids == [25], type_oids
         assert command_tag == "SELECT 2", command_tag
+
+        precedence = runner.decode_wire_result(
+            client.simple_query(
+                server["sock"],
+                "SELECT 1 UNION SELECT 2 INTERSECT SELECT 2;"),
+            include_types=True)
+        rows, state, message, headers, command_tag, type_oids = precedence
+        assert state is None, (state, message)
+        assert rows == [["1"], ["2"]], rows
+        assert type_oids == [23], type_oids
+        assert command_tag == "SELECT 2", command_tag
+
+        left_associative = runner.decode_wire_result(
+            client.simple_query(
+                server["sock"],
+                "SELECT 1 EXCEPT SELECT 1 UNION SELECT 2;"),
+            include_types=True)
+        rows, state, message, headers, command_tag, type_oids = left_associative
+        assert state is None, (state, message)
+        assert rows == [["2"]], rows
+        assert type_oids == [23], type_oids
+        assert command_tag == "SELECT 1", command_tag
+
+        parenthesized = runner.decode_wire_result(
+            client.simple_query(
+                server["sock"],
+                ("(SELECT 1 UNION SELECT 2) INTERSECT "
+                 "(SELECT 2 UNION SELECT 3);")),
+            include_types=True)
+        rows, state, message, headers, command_tag, type_oids = parenthesized
+        assert state is None, (state, message)
+        assert rows == [["2"]], rows
+        assert type_oids == [23], type_oids
+        assert command_tag == "SELECT 1", command_tag
+
+        parenthesized_leaf = runner.decode_wire_result(
+            client.simple_query(server["sock"], "(SELECT 1);"),
+            include_types=True)
+        rows, state, message, headers, command_tag, type_oids = parenthesized_leaf
+        assert state is None, (state, message)
+        assert rows == [["1"]], rows
+        assert type_oids == [23], type_oids
+        assert command_tag == "SELECT 1", command_tag
+
+        commented_operand = runner.decode_wire_result(
+            client.simple_query(
+                server["sock"],
+                "(SELECT 1 UNION SELECT 2) /* left operand */ INTERSECT SELECT 2;"),
+            include_types=True)
+        rows, state, message, headers, command_tag, type_oids = commented_operand
+        assert state is None, (state, message)
+        assert rows == [["2"]], rows
+        assert type_oids == [23], type_oids
+        assert command_tag == "SELECT 1", command_tag
+
+        duplicate_all = runner.decode_wire_result(
+            client.simple_query(
+                server["sock"],
+                "SELECT 1 UNION ALL SELECT 1 UNION ALL SELECT 2;"),
+            include_types=True)
+        rows, state, message, headers, command_tag, type_oids = duplicate_all
+        assert state is None, (state, message)
+        assert rows == [["1"], ["1"], ["2"]], rows
+        assert type_oids == [23], type_oids
+        assert command_tag == "SELECT 3", command_tag
+
+        branch_limit = runner.decode_wire_result(
+            client.simple_query(
+                server["sock"],
+                ("(SELECT 2 AS n UNION ALL SELECT 1 ORDER BY n LIMIT 1) "
+                 "UNION ALL SELECT 3 ORDER BY n;")),
+            include_types=True)
+        rows, state, message, headers, command_tag, type_oids = branch_limit
+        assert state is None, (state, message)
+        assert rows == [["1"], ["3"]], rows
+        assert headers == ["n"], headers
+        assert type_oids == [23], type_oids
+        assert command_tag == "SELECT 2", command_tag
+
+        parse = (b"setop_stmt\0(SELECT 1 UNION SELECT 2) INTERSECT "
+                 b"(SELECT 2 UNION SELECT 3)\0" + struct.pack("!H", 0))
+        bind = (b"setop_portal\0setop_stmt\0" + struct.pack("!H", 0) +
+                struct.pack("!H", 0) + struct.pack("!H", 0))
+        extended = client.typed(b"P", parse) + \
+            client.typed(b"B", bind) + \
+            client.typed(b"E", b"setop_portal\0" + struct.pack("!I", 0)) + \
+            client.typed(b"S")
+        server["sock"].sendall(extended)
+        messages = client.read_until_ready(server["sock"])
+        assert not any(kind == b"E" for kind, _ in messages), messages
+        assert client.data_row_values(messages) == [[b"2"]], messages
+        assert any(kind == b"1" for kind, _ in messages), messages
+        assert any(kind == b"2" for kind, _ in messages), messages
+        assert any(kind == b"C" and body == b"SELECT 1\0"
+                   for kind, body in messages), messages
+        assert messages[-1] == (b"Z", b"I"), messages
 
         error_cases = [
             ("SELECT 1 UNION SELECT 1, 2;", "42601"),

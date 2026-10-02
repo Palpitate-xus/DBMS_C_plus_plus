@@ -6390,11 +6390,47 @@ struct StructuredSetOperand {
     return true;
 }
 
+static string stripFullyParenthesizedQuery(const string& sql) {
+    string query = trim(sql);
+    while (!query.empty()) {
+        const size_t opening = dbms::skipLeadingSqlTrivia(query);
+        if (opening == string::npos || opening >= query.size() ||
+            query[opening] != '(') break;
+
+        const auto protectedBytes = dbms::sqlProtectedBytes(query);
+        size_t closing = string::npos;
+        size_t depth = 0;
+        for (size_t i = opening; i < query.size(); ++i) {
+            if (protectedBytes[i]) continue;
+            if (query[i] == '(') {
+                ++depth;
+            } else if (query[i] == ')') {
+                if (depth == 0) break;
+                --depth;
+                if (depth == 0) {
+                    closing = i;
+                    break;
+                }
+            }
+        }
+        if (closing == string::npos ||
+            dbms::skipLeadingSqlTrivia(query, closing + 1) != query.size()) {
+            break;
+        }
+
+        string inner = trim(query.substr(opening + 1, closing - opening - 1));
+        if (inner.empty() || dbms::skipLeadingSqlTrivia(inner) == inner.size()) break;
+        query = std::move(inner);
+    }
+    return query;
+}
+
 static bool captureSetOperand(const string& sql, Session& s,
                               dbms::DmlResult& result) {
     // Execute recursively with the same structured-result capture boundary
     // used by derived tables. Rendered stdout is retained only for an error
     // diagnostic; successful operands are never reconstructed from it.
+    const string operandSql = stripFullyParenthesizedQuery(sql);
     const unsigned previousCaptureDepth = metadataCaptureDepth;
     metadataCaptureDepth = executeDepth + 1;
     dbms::clearLastDmlResult();
@@ -6403,7 +6439,7 @@ static bool captureSetOperand(const string& sql, Session& s,
     {
         dbms::ScopedOutputCapture capture(captured);
         try {
-            failed = execute(sql, s);
+            failed = execute(operandSql, s);
         } catch (const dbms::DbError& e) {
             failed = true;
             captured << "ERROR: " << e.message() << " (SQLSTATE "
@@ -16149,6 +16185,31 @@ static bool executeInternal(const string& rawSql, Session& s) {
         return true;
     }
     string sql = sqlProcessor(effectiveRawSql);
+    // A query expression may legally start with a parenthesized SELECT. Route
+    // such set operations before legacy statement-prefix handlers can mistake
+    // the opening parenthesis for an unrecognized command. Ordinary SELECTs
+    // retain the established path below, including its compatibility rewrites.
+    const size_t leadingStatement = dbms::skipLeadingSqlTrivia(sql);
+    if (leadingStatement != string::npos &&
+        leadingStatement < sql.size() && sql[leadingStatement] == '(') {
+        bool setOperationHandled = false;
+        if (executeSetOperation(sql, s, setOperationHandled)) return true;
+        if (setOperationHandled) return false;
+        const string unwrappedQuery = stripFullyParenthesizedQuery(sql);
+        if (unwrappedQuery != trim(sql)) {
+            const unsigned previousCaptureDepth = metadataCaptureDepth;
+            metadataCaptureDepth = executeDepth + 1;
+            dbms::clearLastDmlResult();
+            try {
+                const bool failed = execute(unwrappedQuery, s);
+                metadataCaptureDepth = previousCaptureDepth;
+                return failed;
+            } catch (...) {
+                metadataCaptureDepth = previousCaptureDepth;
+                throw;
+            }
+        }
+    }
     // FROM generate_series(a, b[, step]) [AS alias[(col)]]: rewrite into a
     // UNION ALL derived table so the normal derived-table path serves it.
     {
@@ -29514,7 +29575,8 @@ bool isTopLevelDml(const std::string& rawSql) {
 }
 
 bool isTopLevelLockingSelect(const std::string& rawSql) {
-    const std::string normalized = toLowerSql(trim(rawSql));
+    const std::string normalized = toLowerSql(
+        trim(stripFullyParenthesizedQuery(rawSql)));
     return startsWithKeyword(normalized, "select") &&
         (containsSqlKeyword(normalized, "for update") ||
          containsSqlKeyword(normalized, "for share"));

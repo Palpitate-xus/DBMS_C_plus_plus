@@ -897,8 +897,10 @@ bool SQLParser::isSetTransactionStatement(const std::string& sql) {
 
 bool SQLParser::requiresQuerySnapshot(const std::string& sql) {
     const auto tokens = tokenize(sql);
-    if (tokens.empty()) return false;
-    const auto keyword = toLower(tokens.front());
+    size_t first = 0;
+    while (first < tokens.size() && tokens[first] == "(") ++first;
+    if (first == tokens.size()) return false;
+    const auto keyword = toLower(tokens[first]);
     return keyword == "select" || keyword == "values" || keyword == "with" ||
            keyword == "table" || keyword == "insert" || keyword == "update" ||
            keyword == "delete" || keyword == "merge";
@@ -912,6 +914,17 @@ SqlCommand SQLParser::classify(const std::string& sql) {
 
     // Remove trailing semicolon
     while (!lsql.empty() && lsql.back() == ';') lsql.pop_back();
+
+    // Parenthesized query expressions are complete SQL statements too. Keep
+    // the lightweight command classifier aligned with the parser and Simple
+    // Query splitter; query analysis still validates the closing parens.
+    size_t commandOffset = skipLeadingSqlTrivia(lsql);
+    while (commandOffset != std::string::npos && commandOffset < lsql.size() &&
+           lsql[commandOffset] == '(') {
+        commandOffset = skipLeadingSqlTrivia(lsql, commandOffset + 1);
+    }
+    if (commandOffset == std::string::npos) lsql.clear();
+    else lsql = trim(lsql.substr(commandOffset));
 
     // DQL
     if (lsql.substr(0, 6) == "select") return SqlCommand::Select;

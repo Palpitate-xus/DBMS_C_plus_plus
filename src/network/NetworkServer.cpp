@@ -1020,6 +1020,17 @@ bool readSqlKeyword(const std::string& sql, size_t& position,
 std::string firstSqlKeyword(const std::string& sql) {
     size_t position = 0;
     std::string keyword;
+    // PostgreSQL permits a parenthesized query expression as a complete
+    // statement (including operands with their own ORDER/LIMIT clauses).
+    // Such a statement has no lexical keyword at byte zero; skip its opening
+    // query-expression parentheses before deciding that a Simple Query is
+    // empty. The SQL parser remains responsible for validating the grammar.
+    while (true) {
+        position = skipSqlTrivia(sql, position);
+        if (position == std::string::npos || position >= sql.size() ||
+            sql[position] != '(') break;
+        ++position;
+    }
     if (!readSqlKeyword(sql, position, keyword)) return {};
     return keyword;
 }

@@ -108,6 +108,10 @@ int main() {
     assert(SQLParser::classify("RESET client_encoding") == SqlCommand::Reset);
     assert(SQLParser::classify("EXPLAIN SELECT 1") == SqlCommand::Explain);
     assert(SQLParser::classify("SELECT 1") == SqlCommand::Select);
+    assert(SQLParser::classify("(SELECT 1 UNION SELECT 2)") ==
+           SqlCommand::Select);
+    assert(SQLParser::requiresQuerySnapshot(
+        "((SELECT 1 UNION SELECT 2))"));
     assert(SQLParser::classify("CREATE INDEX idx ON t (a)") == SqlCommand::CreateIndex);
     assert(SQLParser::classify("REFRESH MATERIALIZED VIEW mv") ==
            SqlCommand::RefreshMaterializedView);
