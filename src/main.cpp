@@ -5766,21 +5766,29 @@ static bool convertToVolcanoWindowSpec(const WindowFunc& wf,
 // ========================================================================
 // Temporary table helpers
 // ========================================================================
-void cleanupSessionTempTables(Session& s) {
+bool cleanupSessionTempTables(Session& s, bool preserveNamespace) {
     if (s.tempNamespaceCreated) {
-        g_engine.dropSessionTemporaryObjects(s.currentDB, s.pid);
+        if (!g_engine.dropSessionTemporaryObjects(
+                s.currentDB, s.pid, preserveNamespace)) return false;
     }
     for (const auto& name : s.tempTables) {
-        g_engine.dropTable(s.currentDB, tempTablePrefix(s, name));
+        const auto status = g_engine.dropTable(s.currentDB, tempTablePrefix(s, name));
+        if (status != DBStatus::OK && status != DBStatus::TABLE_NOT_FOUND) return false;
     }
     for (const auto& name : s.transientTempTables) {
-        g_engine.dropTable(s.currentDB, tempTablePrefix(s, name));
+        const auto status = g_engine.dropTable(s.currentDB, tempTablePrefix(s, name));
+        if (status != DBStatus::OK && status != DBStatus::TABLE_NOT_FOUND) return false;
     }
     s.tempTables.clear();
     s.transientTempTables.clear();
     s.tempTableOnCommit.clear();
     s.tempTablesCreatedInTransaction.clear();
-    s.tempNamespaceCreated = false;
+    if (!preserveNamespace) s.tempNamespaceCreated = false;
+    return true;
+}
+
+void cleanupSessionTempTables(Session& s) {
+    (void)cleanupSessionTempTables(s, false);
 }
 
 string resolveTableName(Session& s, const string& name, bool foldUnquoted) {
@@ -20217,7 +20225,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
             return true;
         }
         // Drop all session-owned temporary tables.
-        cleanupSessionTempTables(s);
+        if (!cleanupSessionTempTables(s, true)) {
+            throw dbms::DbError("58030", "could not discard temporary relations");
+        }
         dbms::advisoryLockManager().releaseSession(advisoryOwner(s));
         // Clear prepared statements
         s.preparedStmts.clear();
