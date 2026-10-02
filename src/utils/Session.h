@@ -223,3 +223,7 @@ struct Session {
 inline std::string tempTablePrefix(const Session& session, const std::string& name) {
     return "__tmp_" + std::to_string(session.pid) + "_" + name;
 }
+
+inline std::string sessionTempSchemaName(const Session& session) {
+    return "pg_temp_" + std::to_string(session.pid);
+}

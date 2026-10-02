@@ -1074,7 +1074,7 @@ static void registerTableInCatalog(CatalogManager& cat, const TableSchema& tbl,
     cls.relchecks = tableCheckConstraintCount(tbl);
     cls.relhasindex = tableSchemaHasImplicitIndex(tbl);
     cls.relhassubclass = tableSchemaHasPartitionChildren(tbl);
-    cls.relpersistence = tbl.isUnlogged ? 'u' : 'p';
+    cls.relpersistence = tbl.isTemporary ? 't' : (tbl.isUnlogged ? 'u' : 'p');
     if (!tbl.owner.empty()) {
         const auto owner = authCatalog().getAuthIdByName(tbl.owner);
         if (owner) cls.relowner = owner->oid;
@@ -2219,8 +2219,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 }
                 const auto qualifiedName =
                     dbms::CatalogService::logicalName(tableName);
-                if (!tableIsTemporary &&
-                    sub.newName != qualifiedName.name) {
+                if (sub.newName != qualifiedName.name) {
                     try {
                         dbms::CatalogManager& catalog =
                             g_engine.catalogService().get(s.currentDB);
@@ -2256,7 +2255,8 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 if (!alterStatusOk(status, "Table")) return true;
                 if (tableIsTemporary) {
                     pendingTemporaryRename = sub.newName;
-                } else {
+                }
+                {
                     try {
                         dbms::CatalogManager& catalog =
                             g_engine.catalogService().get(s.currentDB);
@@ -4847,6 +4847,14 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
+    CatalogManager::QualifiedName targetName;
+    if (!CatalogManager::parseQualifiedName(stmt->tableName, targetName, true)) {
+        std::cout << "ERROR: invalid table name \"" << stmt->tableName << "\"" << std::endl;
+        return true;
+    }
+    const bool temporary = stmt->temp || stmt->localTemp ||
+        targetName.schema == "pg_temp";
+
     const bool outerTransaction = g_engine.inTransaction();
     const bool createsSerialSequence = std::any_of(
         stmt->columns.begin(), stmt->columns.end(), [](const ColumnDef& column) {
@@ -4858,19 +4866,11 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     DdlTransaction txn(s);
     // A nested CREATE SEQUENCE needs a physical snapshot. Capture it before
     // creating the table, not between table creation and sequence creation.
-    if (!outerTransaction || createsSerialSequence) txn.enableSnapshotRollback();
+    if (!outerTransaction || createsSerialSequence || temporary) txn.enableSnapshotRollback();
     if (!txn.begin()) {
         std::cout << "DDL transaction begin failed" << std::endl;
         return true;
     }
-    CatalogManager::QualifiedName targetName;
-    if (!CatalogManager::parseQualifiedName(stmt->tableName, targetName, true)) {
-        std::cout << "ERROR: invalid table name \"" << stmt->tableName
-                  << "\"" << std::endl;
-        return true;
-    }
-    const bool temporary = stmt->temp || stmt->localTemp ||
-        targetName.schema == "pg_temp";
     if (!stmt->onCommitValid || (stmt->onCommitSpecified && !temporary)) {
         std::cout << "ERROR: ON COMMIT is only supported for valid temporary tables" << std::endl;
         return true;
@@ -4914,15 +4914,20 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         }
         return true;
     }
+    if (temporary) targetSchema = sessionTempSchemaName(s);
     if (!temporary && !g_engine.schemaExists(s.currentDB, targetSchema)) {
         std::cout << "ERROR: schema \"" << targetSchema
                   << "\" does not exist (SQLSTATE 3F000)" << std::endl;
         return true;
     }
     CatalogManager* tableCatalog = nullptr;
-    if (!temporary) {
+    {
         try {
             tableCatalog = &g_engine.catalogService().get(s.currentDB);
+            if (temporary && !tableCatalog->findTempNamespace(s.pid)) {
+                txn.markSnapshotDirty();
+                tableCatalog->createTempNamespace(s.pid);
+            }
             const PgNamespaceRow* targetNamespace =
                 tableCatalog->findNamespaceByName(targetSchema);
             if (!targetNamespace) {
@@ -5057,7 +5062,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     // CREATE TABLE ... AS SELECT ...
     if (!stmt->asSelect.empty()) {
         if (executeCreateTableAs(stmt, s, tname, txn)) return true;
-        if (!temporary) {
+        {
             try {
                 CatalogManager& cat = *tableCatalog;
                 registerTableInCatalog(
@@ -5752,7 +5757,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     }
 
     std::vector<CreateObjectStmt> serialSequences;
-    if (!temporary) {
+    {
         const auto* tableNamespace = tableCatalog->findNamespaceByName(targetSchema);
         std::set<std::string> reservedSequenceNames;
         for (const auto& definition : stmt->columns) {
@@ -5874,7 +5879,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                                         effectiveSessionRole(s));
     }
 
-    if (!temporary) {
+    {
         try {
             CatalogManager& cat = *tableCatalog;
             std::map<std::string, int32_t> declaredVarcharMods;
@@ -6583,11 +6588,12 @@ static bool executeDropTableSingle(const DropStmt* stmt, Session& s,
     const std::string tempLogicalName = validLogicalName
         ? tableName.name : logicalName;
     const bool droppingTemp =
-        (tableName.schema.empty() || tableName.schema == "pg_temp") &&
+        (tableName.schema.empty() || tableName.schema == "pg_temp" ||
+         tableName.schema == sessionTempSchemaName(s)) &&
         s.tempTables.count(tempLogicalName) != 0;
     if (validLogicalName &&
         !tableName.schema.empty() &&
-        !(tableName.schema == "pg_temp" &&
+        !((tableName.schema == "pg_temp" || tableName.schema == sessionTempSchemaName(s)) &&
           (s.tempNamespaceCreated ||
            s.tempTables.count(tableName.name) != 0 ||
            s.transientTempTables.count(tableName.name) != 0)) &&
@@ -7648,6 +7654,11 @@ static std::vector<std::string> effectiveSequenceSearchPath(
     for (auto& schema : searchPath) {
         schema = dbms::expandSessionSearchPathEntry(
             schema, session.username);
+        if (schema == "pg_temp") schema = sessionTempSchemaName(session);
+    }
+    if (session.tempNamespaceCreated &&
+        std::find(searchPath.begin(), searchPath.end(), sessionTempSchemaName(session)) == searchPath.end()) {
+        searchPath.insert(searchPath.begin(), sessionTempSchemaName(session));
     }
     return searchPath.empty() ? std::vector<std::string>{"public"}
                               : searchPath;
@@ -7844,6 +7855,7 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
         sequence.relname = sequenceName.name;
         sequence.relnamespace = sequenceNamespaceOid;
         sequence.relkind = 'S';
+        sequence.relpersistence = sequenceSchema == sessionTempSchemaName(s) ? 't' : 'p';
         sequence.relnatts = 0;
         const Oid sequenceOid = sequenceCatalog->createClass(sequence);
 

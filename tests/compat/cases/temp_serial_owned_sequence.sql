@@ -1,0 +1,11 @@
+CREATE TEMP TABLE diff_temp_serial(id SERIAL PRIMARY KEY,v TEXT);
+INSERT INTO diff_temp_serial(v) VALUES('one') RETURNING id;
+SELECT currval('diff_temp_serial_id_seq');
+SELECT nextval('diff_temp_serial_id_seq');
+INSERT INTO diff_temp_serial(v) VALUES('three') RETURNING id;
+INSERT INTO diff_temp_serial VALUES(NULL,'bad');
+SELECT id,v FROM diff_temp_serial ORDER BY id;
+TRUNCATE diff_temp_serial RESTART IDENTITY;
+INSERT INTO diff_temp_serial(v) VALUES('restart') RETURNING id;
+DROP TABLE diff_temp_serial;
+SELECT nextval('diff_temp_serial_id_seq');
