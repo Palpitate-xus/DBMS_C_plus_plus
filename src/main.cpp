@@ -5796,6 +5796,9 @@ static bool convertToVolcanoWindowSpec(const WindowFunc& wf,
 // Temporary table helpers
 // ========================================================================
 void cleanupSessionTempTables(Session& s) {
+    if (s.tempNamespaceCreated) {
+        g_engine.dropSessionTemporaryObjects(s.currentDB, s.pid);
+    }
     for (const auto& name : s.tempTables) {
         g_engine.dropTable(s.currentDB, tempTablePrefix(s, name));
     }
@@ -5806,6 +5809,7 @@ void cleanupSessionTempTables(Session& s) {
     s.transientTempTables.clear();
     s.tempTableOnCommit.clear();
     s.tempTablesCreatedInTransaction.clear();
+    s.tempNamespaceCreated = false;
 }
 
 string resolveTableName(Session& s, const string& name, bool foldUnquoted) {
@@ -5816,7 +5820,7 @@ string resolveTableName(Session& s, const string& name, bool foldUnquoted) {
         const string& schema = qualified.schema;
         const string& table = qualified.name;
         if ((schema == "pg_temp" ||
-             schema.rfind("pg_temp_", 0) == 0) &&
+             schema == sessionTempSchemaName(s)) &&
             (s.tempTables.count(table) ||
              s.transientTempTables.count(table))) {
             return tempTablePrefix(s, table);

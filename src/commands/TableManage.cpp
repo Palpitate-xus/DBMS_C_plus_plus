@@ -19735,10 +19735,90 @@ void StorageEngine::cleanupStaleSessionTemporaryFiles() {
             // Startup cleanup is best effort; normal recovery must still be
             // able to bring the database online if a directory entry vanishes.
         }
+        // Session namespaces and sequences use real catalog identities.
+        // They must not survive restart after their temporary heaps vanish.
+        try {
+            auto& catalog = catalogService().get(dbname);
+            const auto relations = catalog.listClasses();
+            for (const auto& nameSpace : catalog.listNamespaces()) {
+                const std::string prefix = "pg_temp_";
+                if (nameSpace.nspname.rfind(prefix, 0) != 0) continue;
+                const std::string suffix = nameSpace.nspname.substr(prefix.size());
+                if (suffix.empty() || !std::all_of(suffix.begin(), suffix.end(),
+                        [](unsigned char c) { return std::isdigit(c); })) continue;
+                if (nameSpace.oid == 1213 && std::none_of(relations.begin(), relations.end(),
+                        [&](const PgClassRow& relation) {
+                            return relation.relnamespace == nameSpace.oid && relation.relpersistence == 't';
+                        })) continue; // Legacy empty bootstrap placeholder.
+                if (!dropSessionTemporaryObjects(dbname, std::stoull(suffix))) {
+                    std::cerr << "[TEMP] restart namespace cleanup failed for "
+                              << dbname << "/" << nameSpace.nspname << std::endl;
+                }
+            }
+        } catch (const std::exception& error) {
+            std::cerr << "[TEMP] restart catalog cleanup failed: " << error.what() << std::endl;
+        }
     }
 }
 
 static std::mutex g_sequenceMutex;
+
+bool StorageEngine::dropSessionTemporaryTable(const std::string& dbname,
+        uint64_t sessionId, const std::string& logicalName) {
+    if (!databaseExists(dbname)) return true;
+    try {
+        auto& catalog = catalogService().get(dbname);
+        const auto* nameSpace = catalog.findTempNamespace(sessionId);
+        const Oid namespaceOid = nameSpace ? nameSpace->oid : INVALID_OID;
+        const auto* table = nameSpace ? catalog.findClassByName(logicalName, namespaceOid) : nullptr;
+        const Oid tableOid = table ? table->oid : INVALID_OID;
+        if (table && (table->relkind != 'r' || table->relpersistence != 't')) return false;
+        if (tableOid != INVALID_OID) {
+            for (const auto& dependency : catalog.findRefs(PgClassOid_Class, tableOid, -1)) {
+                if (dependency.classid != PgClassOid_Class || dependency.objsubid != 0 ||
+                    dependency.refobjsubid <= 0 ||
+                    (dependency.deptype != 'a' && dependency.deptype != 'i')) continue;
+                const auto* sequence = catalog.findClass(dependency.objid);
+                if (!sequence || sequence->relkind != 'S') continue;
+                if (sequence->relnamespace != namespaceOid || sequence->relpersistence != 't') return false;
+                const std::string storageName = sequenceStorageName(
+                    "pg_temp_" + std::to_string(sessionId), sequence->relname);
+                const auto status = dropSequence(dbname, storageName);
+                if (status != DBStatus::OK && status != DBStatus::TABLE_NOT_FOUND) return false;
+                if (!catalog.dropClass(dependency.objid)) return false;
+            }
+        }
+        const auto status = dropTable(dbname, "__tmp_" + std::to_string(sessionId) + "_" + logicalName);
+        if (status != DBStatus::OK && status != DBStatus::TABLE_NOT_FOUND) return false;
+        if (tableOid != INVALID_OID && !catalog.dropClass(tableOid)) return false;
+        return catalog.persistAll();
+    } catch (...) {
+        return false;
+    }
+}
+
+bool StorageEngine::dropSessionTemporaryObjects(const std::string& dbname, uint64_t sessionId) {
+    if (!databaseExists(dbname)) return true;
+    try {
+        auto& catalog = catalogService().get(dbname);
+        const auto* nameSpace = catalog.findTempNamespace(sessionId);
+        if (!nameSpace) return true;
+        const Oid namespaceOid = nameSpace->oid;
+        for (const auto& relation : catalog.listClasses()) {
+            if (relation.relnamespace != namespaceOid) continue;
+            if (relation.relkind == 'r') {
+                if (!dropSessionTemporaryTable(dbname, sessionId, relation.relname)) return false;
+            } else if (relation.relkind == 'S' && catalog.findClass(relation.oid)) {
+                const auto status = dropSequence(dbname, sequenceStorageName(
+                    "pg_temp_" + std::to_string(sessionId), relation.relname));
+                if (status != DBStatus::OK && status != DBStatus::TABLE_NOT_FOUND) return false;
+            }
+        }
+        return catalog.dropTempNamespace(sessionId) && catalog.persistAll();
+    } catch (...) {
+        return false;
+    }
+}
 
 static bool validSequenceName(const std::string& seqname) {
     if (seqname.rfind("seqv2..", 0) == 0) {
@@ -19887,10 +19967,18 @@ static ResolvedSequenceReference resolveSequenceReference(
     }
     for (auto& entry : searchPath) {
         entry = expandSessionSearchPathEntry(entry, session->username);
+        if (entry == "pg_temp") entry = sessionTempSchemaName(*session);
     }
     CatalogManager& catalog = engine.catalogService().get(dbname);
+    if (session->tempNamespaceCreated && catalog.findTempNamespace(session->pid) &&
+        std::find(searchPath.begin(), searchPath.end(), sessionTempSchemaName(*session)) == searchPath.end()) {
+        searchPath.insert(searchPath.begin(), sessionTempSchemaName(*session));
+    }
+    const std::string lookup = qualified.schema == "pg_temp"
+        ? quoteRegclassPart(sessionTempSchemaName(*session)) + "." + quoteRegclassPart(qualified.name)
+        : *normalized;
     const PgClassRow* relation = catalog.resolveRelation(
-        *normalized, searchPath.empty() ? std::vector<std::string>{"public"}
+        lookup, searchPath.empty() ? std::vector<std::string>{"public"}
                                         : searchPath);
     if (!relation) {
         throw DbError("42P01",
@@ -42597,7 +42685,7 @@ static void applySessionTempTableCommitActions(StorageEngine& engine,
         if (actionIt->second == "delete") {
             engine.truncateTable(dbname, physicalName);
         } else if (actionIt->second == "drop") {
-            engine.dropTable(dbname, physicalName);
+            engine.dropSessionTemporaryTable(dbname, session.pid, logicalName);
             session.tempTables.erase(logicalName);
             session.tempTableOnCommit.erase(logicalName);
         }

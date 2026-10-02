@@ -3717,11 +3717,17 @@ void handleClient(SecureSocket socket, std::string clientHost) {
     struct BackendSessionGuard {
         Session* session;
         ~BackendSessionGuard() {
+            // Restore/abort the live transaction before removing session
+            // objects, so its undo cannot recreate already cleaned temp data.
+            g_engine.endBackendSession();
             if (session) {
                 if (session->advisoryOwnerId != 0)
                     advisoryLockManager().releaseAll(
                         session->advisoryOwnerId);
                 notificationManager().disconnect(session->pid);
+                if (session->tempNamespaceCreated) {
+                    g_engine.dropSessionTemporaryObjects(session->currentDB, session->pid);
+                }
                 for (const auto& name : session->tempTables) {
                     g_engine.dropTable(session->currentDB,
                                        tempTablePrefix(*session, name));
@@ -3733,7 +3739,6 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 session->tempTables.clear();
                 session->transientTempTables.clear();
             }
-            g_engine.endBackendSession();
         }
     } backendSessionGuard{&session};
     session.username = username;

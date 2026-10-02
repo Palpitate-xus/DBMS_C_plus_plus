@@ -1,6 +1,7 @@
 #include "catalog/CatalogService.h"
 #include "commands/TableManage.h"
 #include "commands/SequenceStorageName.h"
+#include "utils/Session.h"
 #include <filesystem>
 #include <stdexcept>
 #include <fcntl.h>
@@ -153,6 +154,18 @@ CatalogManager::QualifiedName CatalogService::logicalName(const std::string& phy
     CatalogManager::QualifiedName qn;
     qn.schema.clear();
     qn.name = physical;
+
+    if (const Session* session = currentSession()) {
+        const std::string prefix = tempTablePrefix(*session, "");
+        if (physical.rfind(prefix, 0) == 0) {
+            const std::string name = physical.substr(prefix.size());
+            if (session->tempTables.count(name) || session->transientTempTables.count(name)) {
+                qn.schema = sessionTempSchemaName(*session);
+                qn.name = name;
+                return qn;
+            }
+        }
+    }
 
     size_t pos = physical.find("__");
     if (pos != std::string::npos && pos > 0 && pos + 2 < physical.size()) {

@@ -811,6 +811,9 @@ public:
     // Abort any open transaction and discard backend-local state when a
     // protocol connection terminates.
     void endBackendSession();
+    bool dropSessionTemporaryTable(const std::string& dbname, uint64_t sessionId,
+                                   const std::string& logicalName);
+    bool dropSessionTemporaryObjects(const std::string& dbname, uint64_t sessionId);
     DBStatus beginTransaction(const std::string& dbname);
     // Start a transaction that will perform file-backed DDL and therefore
     // needs an exclusive database snapshot lock.
