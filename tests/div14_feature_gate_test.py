@@ -83,6 +83,7 @@ def expect_error(sock, sql, expected_state, label, message_fragment=None):
     if message_fragment is not None:
         assert message_fragment in message, \
             "%s: expected %r in %r" % (label, message_fragment, message)
+    return messages
 
 
 def expect_command_tag(sock, sql, label):
@@ -600,11 +601,37 @@ def main():
                        struct.pack("!H", 0) + struct.pack("!H", 0))
         sock.sendall(typed(b"B", portal_bind))
         assert read_message(sock) == (b"2", b"")
-        expect_error(sock, "USE DATABASE other_db", "55006", "portal USE")
+        # Parse/Bind now take a real query snapshot in an implicit engine
+        # transaction. USE's no-transaction guard runs before its portal
+        # guard, so this is 25001, not the old snapshot-less 55006 case.
+        rejected = expect_error(sock, "USE DATABASE other_db", "25001",
+                                "implicit transaction portal USE",
+                                "cannot run inside a transaction block")
+        assert rejected[-1] == (b"Z", b"I"), rejected
+        unchanged = simple_query(sock, "SELECT current_database()")
+        assert error_of(unchanged) is None, unchanged
+        assert data_row_values(unchanged) == [[b"info"]], unchanged
+        assert unchanged[-1] == (b"Z", b"I"), unchanged
+
+        # A Simple Query ends the pending implicit block even on error.
+        # Portals expire, but named prepared statements remain available.
+        sock.sendall(typed(b"D", b"Puse_portal\0") + typed(b"S"))
+        expired = read_until_ready(sock)
+        assert error_of(expired)[0] == "34000", expired
+        assert expired[-1] == (b"Z", b"I"), expired
+        sock.sendall(typed(b"D", b"Suse_stmt\0") + typed(b"S"))
+        described = read_until_ready(sock)
+        assert error_of(described) is None, described
+        assert [field[0] for field in row_description_fields(described)] \
+            == [b"?column?"], described
+        assert [field[3] for field in row_description_fields(described)] \
+            == [23], described
+        assert described[-1] == (b"Z", b"I"), described
         sock.sendall(typed(b"C", b"Puse_portal\0") +
                      typed(b"C", b"Suse_stmt\0") + typed(b"S"))
         closed = read_until_ready(sock)
         assert sum(kind == b"3" for kind, _ in closed) == 2, closed
+        assert closed[-1] == (b"Z", b"I"), closed
 
         # Catalog-dependent state must not cross a successful switch. A
         # currval/prepared name established in info is unavailable in other_db.
