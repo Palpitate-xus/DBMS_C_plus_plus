@@ -1449,6 +1449,15 @@ bool describePreparedResult(const std::string& sql, Session& session,
     SQLParser parser;
     ParseResult parsed = parser.parse(sql);
     if (!parsed.isValid()) return false;
+    if (const auto* shown = dynamic_cast<const SetStmt*>(parsed.stmt.get())) {
+        if (shown->isShow && shown->name == "transaction_isolation") {
+            QueryResult shape;
+            shape.columns = {"transaction_isolation"};
+            shape.columnTypes = {"text"};
+            columns = describeProtocolColumns(shape, sql, session);
+            return !columns.empty();
+        }
+    }
     const auto* select = dynamic_cast<const SelectStmt*>(parsed.stmt.get());
     if (select && select->command == SqlCommand::Values) {
         if (select->valuesRows.empty() ||

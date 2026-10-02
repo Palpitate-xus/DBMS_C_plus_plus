@@ -4830,6 +4830,26 @@ ParseResult SQLParser::parseShow(const std::string& sql) {
     } else if (pos < tokens.size()) {
         stmt->name = tokens[pos++];
     }
+    const std::string parameter = toLower(stmt->name);
+    const bool isolationName = parameter == "transaction_isolation" ||
+                               parameter == "\"transaction_isolation\"";
+    if (parameter == "transaction") {
+        if (pos + 1 >= tokens.size() ||
+            toLower(tokens[pos]) != "isolation" ||
+            toLower(tokens[pos + 1]) != "level") {
+            r.error = "expected ISOLATION LEVEL after SHOW TRANSACTION";
+            return r;
+        }
+        pos += 2;
+    }
+    if (isolationName || parameter == "transaction") {
+        stmt->name = "transaction_isolation";
+        if (pos < tokens.size() && tokens[pos] == ";") ++pos;
+        if (pos != tokens.size()) {
+            r.error = "unexpected input after SHOW transaction_isolation";
+            return r;
+        }
+    }
     r.success = true;
     r.stmt = std::move(stmt);
     return r;

@@ -19004,6 +19004,30 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
     // SHOW CONNECTIONS / SHOW STATUS
     if (sql.substr(0, 5) == "show ") {
+        dbms::SQLParser showParser;
+        auto showParsed = showParser.parse(sql);
+        if (!showParsed.success) {
+            throw dbms::DbError("42601", showParsed.error);
+        }
+        const auto* shown = dynamic_cast<const dbms::SetStmt*>(
+            showParsed.stmt.get());
+        if (shown && shown->isShow && shown->name == "transaction_isolation") {
+            // Outside a block, show the default used by a fresh SQL BEGIN,
+            // not the engine's retained characteristics of an ended block.
+            const auto isolation = g_engine.inTransaction()
+                ? g_engine.getIsolationLevel() : dbms::IsolationLevel::READ_COMMITTED;
+            std::string value;
+            switch (isolation) {
+                case dbms::IsolationLevel::READ_UNCOMMITTED: value = "read uncommitted"; break;
+                case dbms::IsolationLevel::READ_COMMITTED: value = "read committed"; break;
+                case dbms::IsolationLevel::REPEATABLE_READ: value = "repeatable read"; break;
+                case dbms::IsolationLevel::SERIALIZABLE: value = "serializable"; break;
+            }
+            publishStructuredUtilityResult(
+                {"transaction_isolation"}, {"text"}, {{value}}, {{false}}, "SHOW");
+            cout << "transaction_isolation" << endl << value << endl;
+            return false;
+        }
         string rest = trim(sql.substr(5));
         if (!rest.empty() && rest.back() == ';') rest.pop_back();
         rest = trim(rest);
