@@ -1,0 +1,17 @@
+CREATE TEMP TABLE diff_temp_alter_col(id SERIAL,v VARCHAR(10));
+INSERT INTO diff_temp_alter_col(v) VALUES('one') RETURNING id;
+ALTER TABLE diff_temp_alter_col ADD COLUMN note VARCHAR(5) DEFAULT 'kept';
+ALTER TABLE diff_temp_alter_col RENAME COLUMN id TO new_id;
+INSERT INTO diff_temp_alter_col(v) VALUES('two') RETURNING new_id;
+BEGIN;
+SAVEPOINT before_drop;
+ALTER TABLE diff_temp_alter_col DROP COLUMN new_id;
+SELECT nextval('diff_temp_alter_col_id_seq');
+ROLLBACK TO before_drop;
+SELECT new_id,v,note FROM diff_temp_alter_col ORDER BY new_id;
+SELECT nextval('diff_temp_alter_col_id_seq');
+ROLLBACK;
+ALTER TABLE diff_temp_alter_col DROP COLUMN new_id;
+SELECT nextval('diff_temp_alter_col_id_seq');
+SELECT v,note FROM diff_temp_alter_col ORDER BY v;
+DROP TABLE diff_temp_alter_col;
