@@ -8847,8 +8847,10 @@ static bool tableHasColumns(const string& dbname, const string& tablename, const
     return true;
 }
 
-static bool hasComputedPredicate(const string& sql, bool* immutableConstant = nullptr) {
+static bool hasComputedPredicate(const string& sql, bool* immutableConstant = nullptr,
+                                 bool* unknownNullPredicate = nullptr) {
     if (immutableConstant) *immutableConstant = false;
+    if (unknownNullPredicate) *unknownNullPredicate = false;
     dbms::SQLParser parser;
     const auto parsed = parser.parse("SELECT " + sql);
     const auto* select = parsed.success
@@ -8898,6 +8900,18 @@ static bool hasComputedPredicate(const string& sql, bool* immutableConstant = nu
         }
     };
     inspect(select->selectList.front().expr.get());
+    if (constant && !subquery) {
+        // Bare boolean/NULL and constant boolean combinations must not fall
+        // through the legacy condition parser as an empty (true) predicate.
+        const auto* literal = dynamic_cast<const dbms::LiteralExpr*>(
+            select->selectList.front().expr.get());
+        const string value = literal ? toLower(trim(literal->value)) : string{};
+        if (unknownNullPredicate && literal && literal->typeName.empty() && value == "null") {
+            *unknownNullPredicate = true;
+        }
+        if (value == "true" || value == "false" || value == "null" ||
+            dbms::ExprHelper::inferResultType(sql) == "boolean") computed = true;
+    }
     if (immutableConstant) *immutableConstant = constant && !subquery;
     return computed && !subquery;
 }
@@ -24972,17 +24986,23 @@ static bool executeInternal(const string& rawSql, Session& s) {
             } else {
                 whereClause = expandSubqueries(whereClause, s);
                 bool immutableConstant = false;
-                if (hasComputedPredicate(whereClause, &immutableConstant)) {
+                bool unknownNullPredicate = false;
+                if (hasComputedPredicate(whereClause, &immutableConstant, &unknownNullPredicate)) {
                     if (immutableConstant) {
                         // PostgreSQL checks immutable constant expressions even
                         // when no rows exist. Bind the boolean result first.
-                        if (dbms::ExprHelper::inferResultType(whereClause) != "boolean")
+                        const string predicateType =
+                            dbms::ExprHelper::inferResultType(whereClause);
+                        if (predicateType != "boolean" && !unknownNullPredicate)
                             throw std::runtime_error(
                                 "argument of WHERE must be type boolean (SQLSTATE 42804)");
                         const auto result = dbms::ExprHelper::evalString(whereClause, {});
                         if (!result.ok)
                             throw std::runtime_error(result.error.empty()
                                 ? "failed to evaluate typed predicate" : result.error);
+                        if (unknownNullPredicate && !result.isNull)
+                            throw std::runtime_error(
+                                "argument of WHERE must be type boolean (SQLSTATE 42804)");
                     }
                     // Keep grouping, quoted RHS values and lazy branches as
                     // one typed predicate instead of legacy per-token atoms.

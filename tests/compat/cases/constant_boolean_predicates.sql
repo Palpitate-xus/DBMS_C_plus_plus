@@ -1,0 +1,18 @@
+CREATE TABLE constant_boolean_rows(id INT PRIMARY KEY, v TEXT);
+INSERT INTO constant_boolean_rows VALUES(1, 'original'), (2, 'original');
+SELECT id FROM constant_boolean_rows WHERE FALSE;
+SELECT id FROM constant_boolean_rows WHERE NULL;
+SELECT id FROM constant_boolean_rows WHERE NOT TRUE;
+SELECT id FROM constant_boolean_rows WHERE FALSE OR NULL;
+UPDATE constant_boolean_rows SET v='changed' WHERE FALSE;
+UPDATE constant_boolean_rows SET v='changed' WHERE NULL;
+DELETE FROM constant_boolean_rows WHERE FALSE;
+DELETE FROM constant_boolean_rows WHERE NULL;
+SELECT id, v FROM constant_boolean_rows ORDER BY id;
+SELECT id FROM constant_boolean_rows WHERE TRUE ORDER BY id;
+UPDATE constant_boolean_rows SET v='true' WHERE TRUE;
+SELECT id, v FROM constant_boolean_rows ORDER BY id;
+DELETE FROM constant_boolean_rows WHERE TRUE;
+SELECT id FROM constant_boolean_rows WHERE FALSE;
+SELECT id FROM constant_boolean_rows WHERE NULL;
+DROP TABLE constant_boolean_rows;
