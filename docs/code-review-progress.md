@@ -1,5 +1,15 @@
 # 代码复查进度（续接第 178 项）
 
+2026-10-02 第943–947项独立source均已定向验收并整合到D `b4d5157e`：943 `38e697af`→`1c68b73b` transactional DISCARD TEMP；944 `d68b7781`→`0302afd4` planning-only pending P/B DISCARD ALL；945 `d1e571ce`／946 `b08ff199`／947 `b0bddd32`→`b4d5157e` backend currency、zero/FM/SG、exact decimal rounding。三次注册冲突均保留双方入口；源码实际453 C++／188E2E／452actual，新的统一自有headers/source production build仍在运行，尚未启动本source全量门禁，不借旧结果。旧D84b正式全量450 C++／182 E2E通过但完整protocol ALTER1197 timeout／整轮exit1；448 PG447OK／currency DIFF exit1保留。独立full protocol首次重跑在startup connect abort／exit1，第二次同source／same binary复跑exit0（/tmp/dbms-cache-discard-full-protocol-repeat-v2-939-942.log，socket120秒配置）；失败阶段不同、原因未定，不将旧整轮改称通过。948 TEMP index catalog已有旧native134及fixed19原生／13wire含完整协议／16不同actual均0，但新的强catalog查询必须结合949验收，尚未提交；949 typed pg_class SELECT强case已PG0／旧wire1，候选正确rows却cast alias metadata失败，950独立发现parser :: type吞AS alias，旧AST134／真实Parse-Describe wire1／PG0，独立生产构建中。总账273保持22 complete／140 partial／96 unverified／15 deferred_by_user，Root405暂未快进，不push、Actions仅本地disabled、跳过安全／TDE不重启。
+
+| 本地修复 | source commit | 最终定向验证 | D整合 |
+| --- | --- | --- | --- |
+| 943 transactional DISCARD TEMP | `38e697af` | PG强oracle0；17 C++／17wire／17actual均0 | `1c68b73b` |
+| 944 pending P/B DISCARD ALL | `d68b7781` | PG强oracle0；17 C++／22wire／17actual均0 | `0302afd4` |
+| 945 backend currency L/l | `d1e571ce` | PG强oracle0；14 C++／13wire／13actual均0 | `b4d5157e` |
+| 946 zero／FM／SG | `b08ff199` | PG强oracle0；15 C++／14wire／14actual均0 | `b4d5157e` |
+| 947 exact basic numeric rounding | `b0bddd32` | PG强oracle0；16 C++／15wire／15actual均0 | `b4d5157e` |
+
 2026-10-02 冻结D source `84b258de`（HEAD文档ce6c6d69）的正式全量已结束：450/450 C++、182/183 E2E；唯一失败是完整postgres_protocol_test.py在prepared_transaction_error_boundaries的ALTER TABLE ADD COLUMN（line1197）等待响应timeout／整轮exit1。与942早先Describe line931 timeout位置不同，原因尚未定位，不能称已修或通过；同source／同binary独立完整协议复跑正在运行。全448 PG18.6实际差分已结束447不同OK、to_char_numeric一DIFF／cases=448 failed=1／exit1，对照未改参考lc_monetary，差异由后续945 source d1e571ce修复。对应日志为/tmp/dbms-tests-cache-discard-combined-939-942.log及/tmp/dbms-pgdiff-cache-discard-combined-939-942.log，复跑日志/tmp/dbms-cache-discard-full-protocol-repeat-939-942.log。943 source38e697af／944 d68b7781／945 d1e571ce／946 b08ff199／947 b0bddd32各已独立定向验收及本地提交，但尚未合入此冻结D或Root405；948 TEMP index catalog修复仍待949结构化pg_class SELECT协同验收，保持原失败SQL及原生断言。当前总账273仍22 complete／140 partial／96 unverified／15 deferred_by_user，没有总清单完成声明，不push、Actions仅本地disabled、跳过安全／TDE不重开。
 
 2026-10-02 第942项 source `416d640f`、D整合 `84b258de`：DISCARD ALL保留已初始化的真实temp namespace身份，旧两参cleanup仍删除namespace用于断开及startup；清理失败明确58030，Standalone Extended ALL不创建假BEGIN，explicit block仍25001。正确PG强oracle exit0／旧213真实strong exit1；新API header全自有生产重编、专项、16原生、15不同actual全部exit0。12相邻wire通过但整轮末尾完整协议首次Describe超时exit1；同源不改输入的独立完整协议重跑exit0，失败记录保留、原因未定。初始错误oracle及guard候选、shell最后test掩盖前test失败的外层exit0均不算成功。新整合84b正在真实统一headers重建；943严格typed DISCARD TEMP及事务回滚实现、pending P/B utility和完整reset/TEMP index/文件故障继续待验。
