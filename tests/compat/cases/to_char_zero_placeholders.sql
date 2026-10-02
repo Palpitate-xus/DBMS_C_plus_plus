@@ -1,0 +1,13 @@
+SELECT to_char(0,'999'),to_char(0,'FM999'),to_char(0,'0999');
+SELECT to_char(0.004,'999'),to_char(-0.004,'999');
+SELECT to_char(0,'999.99'),to_char(-0.004,'999.99');
+SELECT to_char(0,'FM999.99'),to_char(-0.004,'FM999.99');
+SELECT to_char(0,'FM999.00'),to_char(0,'FM999.09'),to_char(0,'FM999.90');
+SELECT to_char(0.5,'999.99'),to_char(-0.5,'999.99');
+SELECT to_char(0.5,'FM999.99'),to_char(-0.5,'FM999.99');
+SELECT to_char(0.5,'FM999.00'),to_char(-0.5,'FM999.00');
+SELECT to_char(0,'FM0999.99'),to_char(0.5,'FM0999.99'),to_char(-0.5,'FM0999.99');
+SELECT to_char(3.1,'FM999.99'),to_char(3.1,'FM999.00'),to_char(-3.1,'999.99');
+SELECT to_char(482,'SG9999'),to_char(-482,'SG9999'),to_char(1234,'SG9999'),to_char(-1234,'SG9999');
+SELECT to_char(482,'9999SG'),to_char(-482,'9999SG'),to_char(482,'FMSG9999'),to_char(-482,'FM9999SG');
+SELECT to_char(482,'9999.00SG'),to_char(-482,'9999.00SG');

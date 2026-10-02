@@ -35,6 +35,7 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <locale>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -6305,7 +6306,8 @@ static std::string formatDateTime(const std::string& src, const std::string& fmt
 // placeholders, a '.' decimal point, and a leading 'FM' (fill mode: suppress
 // the leading sign-position blank). '0' placeholders zero-pad the integer part.
 // Grouping ('G'/','), currency, and sign templates are not implemented.
-static std::string formatNumeric(double val, const std::string& fmtIn) {
+static std::string formatNumeric(double val, const std::string& fmtIn,
+                                 const std::string& exactInput = std::string()) {
     std::string fmt = fmtIn;
     bool fm = false;
     if (fmt.size() >= 2 && (fmt[0] == 'F' || fmt[0] == 'f') &&
@@ -6333,8 +6335,12 @@ static std::string formatNumeric(double val, const std::string& fmtIn) {
     bool hasRN = fmt.find("RN") != std::string::npos || fmt.find("rn") != std::string::npos;
     bool hasS = false;    {
         size_t sp2 = fmt.find('S');        while (sp2 != std::string::npos) {            if (sp2 + 1 >= fmt.size() || fmt[sp2 + 1] != 'G') { hasS = true; break; }            sp2 = fmt.find('S', sp2 + 2);        }    }
-    bool hasL = fmt.find('L') != std::string::npos;
-    bool hasG = fmt.find('G') != std::string::npos;
+    const size_t currencyPosition = fmt.find_first_of("Ll");
+    bool hasL = currencyPosition != std::string::npos;
+    const size_t sgPosition = fmt.find("SG");
+    bool hasG = false;
+    for (size_t i = 0; i < fmt.size(); ++i)
+        if (fmt[i] == 'G' && (i == 0 || fmt[i - 1] != 'S')) hasG = true;
     if (hasRN) {
         // Roman numerals, right-aligned to width 15 (FMRN unpads).
         long n2 = (long)((val < 0) ? -val : val);
@@ -6368,12 +6374,14 @@ static std::string formatNumeric(double val, const std::string& fmtIn) {
         else mout = (fm ? "" : " ") + mant;
         return mout + "e" + xs + expt;
     }
+    int scaleShift = 0;
     if (hasV) {
         // V shifts the decimal point: digits after V are scale shifts.
         size_t vPos = fmt.find('V');
         int shift = 0;
         for (size_t i = vPos + 1; i < fmt.size(); ++i)
             if (fmt[i] == '9' || fmt[i] == '0') ++shift;
+        scaleShift = shift;
         double av2 = neg ? -val : val;
         for (int k2 = 0; k2 < shift; ++k2) av2 *= 10.0;
         val = av2; neg = false; fracDigits = 0; dot = std::string::npos;
@@ -6383,24 +6391,64 @@ static std::string formatNumeric(double val, const std::string& fmtIn) {
             if (fmt[i] == '9') ++intPlaces;
             else if (fmt[i] == '0') { ++intPlaces; zeroPad = true; }
     }
-    char numbuf[64];
-    std::snprintf(numbuf, sizeof numbuf, "%.*f", fracDigits, neg ? -val : val);
-    std::string s = numbuf, ip = s, fp;
+    std::string roundedText;
+    if (!exactInput.empty()) {
+        Numeric decimal(exactInput);
+        if (decimal.isFinite()) {
+            if (scaleShift > 0) {
+                decimal *= Numeric("1" + std::string(static_cast<size_t>(scaleShift), '0'));
+            }
+            decimal = decimal.withScale(fracDigits);
+            neg = decimal.sign() < 0;
+            roundedText = (neg ? -decimal : decimal).toString();
+            if (fracDigits > 0) {
+                size_t point = roundedText.find('.');
+                if (point == std::string::npos) {
+                    roundedText += '.';
+                    point = roundedText.size() - 1;
+                }
+                const size_t existing = roundedText.size() - point - 1;
+                if (existing < static_cast<size_t>(fracDigits)) {
+                    roundedText.append(static_cast<size_t>(fracDigits) - existing, '0');
+                }
+            }
+        }
+    }
+    if (roundedText.empty()) {
+        char numbuf[64];
+        std::snprintf(numbuf, sizeof numbuf, "%.*f", fracDigits, neg ? -val : val);
+        roundedText = numbuf;
+    }
+    std::string s = roundedText, ip = s, fp;
+    // This also covers rounded zero in the floating-point fallback.
+    if (s.find_first_not_of("0.") == std::string::npos) neg = false;
     size_t sp = s.find('.');
     if (sp != std::string::npos) { ip = s.substr(0, sp); fp = s.substr(sp + 1); }
+    if (fm && fracDigits > 0) {
+        size_t minimumFractionDigits = 0;
+        size_t digitPosition = 0;
+        for (size_t i = dot + 1; i < fmt.size(); ++i) {
+            if (fmt[i] != '9' && fmt[i] != '0') continue;
+            ++digitPosition;
+            if (fmt[i] == '0') minimumFractionDigits = digitPosition;
+        }
+        while (fp.size() > minimumFractionDigits && fp.back() == '0') fp.pop_back();
+    }
     if (zeroPad && static_cast<int>(ip.size()) < intPlaces)
         ip = std::string(intPlaces - ip.size(), '0') + ip;
     else if (!zeroPad && !fm) {
-        // PG: unused leading 9-positions render as blanks; an
-        // all-zero integer part with no 0-pattern renders blank.
-        if (ip == "0") ip = std::string(intPlaces, ' ');
+        // Optional integer zero disappears only before a fractional field;
+        // integer-only templates still emit the final zero digit.
+        if (ip == "0" && fracDigits > 0) ip = std::string(intPlaces, ' ');
         else if (static_cast<int>(ip.size()) < intPlaces)
             ip = std::string(intPlaces - ip.size(), ' ') + ip;
     }
+    if (fm && !zeroPad && ip == "0" && !fp.empty()) ip.clear();
     // PG overflow: more integer digits than 9/0 positions render #.
     if (!ip.empty() && ip.find_first_not_of(" 0123456789") == std::string::npos &&
         static_cast<int>(ip.size()) > intPlaces) {
         ip = std::string(intPlaces, '#');
+        fp = std::string(fracDigits, '#');
     }
     if (hasG) {
         // Insert commas every three digits, leaving leading blanks in place.
@@ -6416,6 +6464,8 @@ static std::string formatNumeric(double val, const std::string& fmtIn) {
         ip = lead + grouped;
     }
     std::string out;
+    std::string currencySuffix;
+    std::string signSuffix;
     if (hasPR && neg) {
         // PR: negatives in angle brackets occupying the sign + digit region.
         std::string trimIp = ip;
@@ -6453,6 +6503,15 @@ static std::string formatNumeric(double val, const std::string& fmtIn) {
         } else {
             out = ip + sgn;
         }
+    } else if (sgPosition != std::string::npos) {
+        // SG keeps its template position, including before integer padding;
+        // its G belongs to the sign token, not to a grouping directive.
+        const std::string sign = neg ? "-" : "+";
+        if (sgPosition < fmt.find_first_of("90")) out = sign + ip;
+        else {
+            out = ip;
+            signSuffix = sign;
+        }
     } else if (hasS) {
         // S: explicit sign (+/-) anchored at its position;
         // FM keeps the sign, only blanks are suppressed.
@@ -6469,12 +6528,34 @@ static std::string formatNumeric(double val, const std::string& fmtIn) {
             out = ip + sg2;
         }
     } else if (hasL) {
-        out = std::string("$") + (fm ? "" : " ") + ip;
+        // Numeric formatting uses the locale's literal currency symbol;
+        // unlike MONEY I/O it has no historical dollar fallback in C.
+        const std::locale locale(StorageEngine::getMoneyLocale().c_str());
+        std::string symbol = std::use_facet<std::moneypunct<char, false>>(
+            locale).curr_symbol();
+        if (symbol.empty()) symbol = " ";
+        if (neg) {
+            const size_t firstDigit = ip.find_first_not_of(' ');
+            const size_t signPosition = firstDigit == std::string::npos ? ip.size() : firstDigit;
+            out = ip.substr(0, signPosition) + "-" + ip.substr(signPosition);
+        } else {
+            out = (fm ? "" : " ") + ip;
+        }
+        if (currencyPosition < fmt.find_first_of("90")) out = symbol + out;
+        else currencySuffix = std::move(symbol);
     } else {
-        out = neg ? "-" : (fm ? "" : " ");
-        out += ip;
+        if (neg) {
+            const size_t firstDigit = ip.find_first_not_of(' ');
+            const size_t signPosition = firstDigit == std::string::npos
+                ? ip.size() : firstDigit;
+            out = ip.substr(0, signPosition) + "-" + ip.substr(signPosition);
+        } else {
+            out = (fm ? "" : " ") + ip;
+        }
     }
     if (fracDigits > 0) out += "." + fp;
+    out += signSuffix;
+    out += currencySuffix;
     if (hasTH) {
         long iv = (long)std::llround(valTH);
         long a11 = iv % 100; long d1 = iv % 10;
@@ -10903,7 +10984,11 @@ void ExprEvaluator::registerBuiltins() {
             }
         }
         if (temporal) return ExprValue("text", formatDateTime(v, fmt), false);
-        return ExprValue("text", formatNumeric(a[0].asDouble(), fmt), false);
+        const bool exactNumeric = tn == "numeric" || tn == "decimal" ||
+            tn == "integer" || tn == "int" || tn == "smallint" ||
+            tn == "bigint" || tn == "int2" || tn == "int4" || tn == "int8";
+        return ExprValue("text", formatNumeric(a[0].asDouble(), fmt,
+            exactNumeric ? vval : std::string()), false);
     };
 
     // ------------------------------------------------------------------------
