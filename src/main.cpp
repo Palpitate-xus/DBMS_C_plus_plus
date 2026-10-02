@@ -341,6 +341,7 @@ static bool changesPlanCache(dbms::SqlCommand command) {
         case dbms::SqlCommand::RefreshMaterializedView:
         case dbms::SqlCommand::Cluster:
         case dbms::SqlCommand::ImportForeignSchema:
+        case dbms::SqlCommand::Discard:
             return true;
         default:
             return false;
@@ -16173,6 +16174,39 @@ static bool executeInternal(const string& rawSql, Session& s) {
     // Complex commands (CREATE/DROP/ALTER/SELECT/INSERT/UPDATE/DELETE)
     // fall through to the legacy string-based dispatch below.
     switch (parsedCmd) {
+        case dbms::SqlCommand::Discard: {
+            dbms::SQLParser parser;
+            auto parsed = parser.parse(effectiveRawSql);
+            const auto* discard = dynamic_cast<const dbms::DiscardStmt*>(
+                parsed.stmt.get());
+            if (!parsed.success || !discard) {
+                throw dbms::DbError("42601", parsed.error.empty()
+                    ? "invalid DISCARD statement" : parsed.error);
+            }
+            if (discard->target == dbms::DiscardStmt::Target::Temp) {
+                // A destructive utility must share the same physical DDL
+                // rollback boundary as DROP TABLE, including USER savepoints.
+                dbms::DdlTransaction transaction(s);
+                transaction.enableSnapshotRollback();
+                if (!transaction.begin()) {
+                    throw dbms::DbError("58030", "could not begin temporary discard");
+                }
+                transaction.markSnapshotDirty();
+                if (!cleanupSessionTempTables(s, true) || !transaction.commit()) {
+                    throw dbms::DbError("58030", "could not discard temporary relations");
+                }
+                cout << "DISCARD TEMP" << endl;
+                return false;
+            }
+            // Existing ALL/SEQUENCES handlers receive a validated, canonical
+            // target; PLANS remains explicitly unsupported below.
+            if (discard->target == dbms::DiscardStmt::Target::Plans) {
+                cout << dbms::featureNotSupportedError("DISCARD PLANS") << endl;
+                return true;
+            }
+            sql = toLower(discard->toString());
+            break;
+        }
         case dbms::SqlCommand::Values:
             // VALUES owns its expression parsing. Preserve the original
             // spelling here: the legacy normalizer rewrites ARRAY[...] as

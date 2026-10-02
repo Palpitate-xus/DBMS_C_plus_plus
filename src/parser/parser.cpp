@@ -4897,10 +4897,28 @@ ParseResult SQLParser::parseUse(const std::string& sql) {
     return r;
 }
 
-ParseResult SQLParser::parseDiscard(const std::string&) {
+ParseResult SQLParser::parseDiscard(const std::string& sql) {
     ParseResult r;
+    const auto tokens = tokenize(sql);
+    if ((tokens.size() != 2 &&
+         !(tokens.size() == 3 && tokens.back() == ";")) ||
+        toLower(tokens[0]) != "discard") {
+        r.error = "DISCARD requires exactly one target";
+        return r;
+    }
+    auto stmt = std::make_unique<DiscardStmt>();
+    const auto target = toLower(tokens[1]);
+    if (target == "all") stmt->target = DiscardStmt::Target::All;
+    else if (target == "plans") stmt->target = DiscardStmt::Target::Plans;
+    else if (target == "sequences") stmt->target = DiscardStmt::Target::Sequences;
+    else if (target == "temp" || target == "temporary")
+        stmt->target = DiscardStmt::Target::Temp;
+    else {
+        r.error = "invalid DISCARD target";
+        return r;
+    }
     r.success = true;
-    r.stmt = std::make_unique<Stmt>(SqlCommand::Discard);
+    r.stmt = std::move(stmt);
     return r;
 }
 

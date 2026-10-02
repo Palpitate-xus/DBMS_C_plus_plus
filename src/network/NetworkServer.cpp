@@ -1732,6 +1732,10 @@ std::string commandTagFor(const std::string& sql, const std::vector<std::string>
     if (startsWithSqlPhrase(sql, "discard sequences")) {
         return "DISCARD SEQUENCES";
     }
+    if (startsWithSqlPhrase(sql, "discard temp") ||
+        startsWithSqlPhrase(sql, "discard temporary")) {
+        return "DISCARD TEMP";
+    }
     if (startsWithSqlPhrase(sql, "drop materialized view")) {
         return "DROP MATERIALIZED VIEW";
     }
