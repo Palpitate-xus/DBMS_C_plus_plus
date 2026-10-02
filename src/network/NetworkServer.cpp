@@ -1144,6 +1144,15 @@ bool isTransactionControlStatement(const std::string& sql) {
            keyword == "savepoint" || keyword == "release";
 }
 
+bool isStandaloneDiscardAllStatement(const std::string& sql) {
+    if (firstSqlKeyword(sql) != "discard") return false;
+    const auto tokens = SQLParser::tokenize(sql);
+    return (tokens.size() == 2 ||
+            (tokens.size() == 3 && tokens.back() == ";")) &&
+           firstSqlKeyword(tokens[0]) == "discard" &&
+           firstSqlKeyword(tokens[1]) == "all";
+}
+
 std::vector<std::string> splitProtocolFields(const std::string& line) {
     std::vector<std::string> fields;
     // Double-quoted segments are single fields (multi-word column headers
@@ -4908,7 +4917,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 }
                 if (!g_engine.inTransaction() &&
                     !isTransactionControlStatement(portalState.sql) &&
-                    !SQLParser::isSetTransactionStatement(portalState.sql)) {
+                    !SQLParser::isSetTransactionStatement(portalState.sql) &&
+                    !isStandaloneDiscardAllStatement(portalState.sql)) {
                     QueryResult beginResult = executeForProtocol("BEGIN");
                     if (beginResult.error) {
                         protocol.sendErrorResponse(

@@ -19814,6 +19814,11 @@ bool StorageEngine::dropSessionTemporaryTable(const std::string& dbname,
 }
 
 bool StorageEngine::dropSessionTemporaryObjects(const std::string& dbname, uint64_t sessionId) {
+    return dropSessionTemporaryObjects(dbname, sessionId, false);
+}
+
+bool StorageEngine::dropSessionTemporaryObjects(const std::string& dbname,
+        uint64_t sessionId, bool preserveNamespace) {
     if (!databaseExists(dbname)) return true;
     try {
         auto& catalog = catalogService().get(dbname);
@@ -19830,7 +19835,8 @@ bool StorageEngine::dropSessionTemporaryObjects(const std::string& dbname, uint6
                 if (status != DBStatus::OK && status != DBStatus::TABLE_NOT_FOUND) return false;
             }
         }
-        return catalog.dropTempNamespace(sessionId) && catalog.persistAll();
+        return (preserveNamespace || catalog.dropTempNamespace(sessionId)) &&
+               catalog.persistAll();
     } catch (...) {
         return false;
     }

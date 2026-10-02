@@ -1,0 +1,10 @@
+DROP INDEX pg_temp.diff_temp_missing_idx;
+DROP INDEX IF EXISTS pg_temp.diff_temp_missing_idx;
+DROP INDEX "pg_temp".diff_temp_missing_idx;
+DROP INDEX "PG_TEMP".diff_temp_missing_idx;
+DROP INDEX diff_temp_missing_schema.diff_temp_missing_idx;
+CREATE TEMP TABLE diff_temp_missing_owner(id INT);
+DISCARD ALL;
+DROP INDEX pg_temp.diff_temp_missing_idx;
+DROP INDEX IF EXISTS pg_temp.diff_temp_missing_idx;
+SELECT 11;

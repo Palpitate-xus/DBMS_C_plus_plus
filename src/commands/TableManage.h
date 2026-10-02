@@ -814,6 +814,8 @@ public:
     bool dropSessionTemporaryTable(const std::string& dbname, uint64_t sessionId,
                                    const std::string& logicalName);
     bool dropSessionTemporaryObjects(const std::string& dbname, uint64_t sessionId);
+    bool dropSessionTemporaryObjects(const std::string& dbname, uint64_t sessionId,
+                                     bool preserveNamespace);
     DBStatus beginTransaction(const std::string& dbname);
     // Start a transaction that will perform file-backed DDL and therefore
     // needs an exclusive database snapshot lock.
