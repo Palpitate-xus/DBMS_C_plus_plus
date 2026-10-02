@@ -24089,10 +24089,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                // top-level operator (concat or arithmetic)
                                // outside quotes and parentheses; a leading
                                // sign is unary, not an operator.
-                               bool inQ = false; int depth = 0;
+                               const auto protectedItem = dbms::sqlProtectedBytes(item);
+                               int depth = 0;
                                for (size_t i = 0; i < item.size(); ++i) {
-                                   if (item[i] == 39) { inQ = !inQ; continue; }
-                                   if (inQ) continue;
+                                   if (protectedItem[i]) continue;
                                    if (item[i] == '(') ++depth;
                                    else if (item[i] == ')') --depth;
                                    if (depth != 0) continue;
@@ -24621,11 +24621,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         {
                             static const string ops = "+-*/%|";
                             size_t opCount = 0;
-                            bool inQuote3 = false;
+                            const auto protectedArithmetic = dbms::sqlProtectedBytes(arithItem);
                             for (size_t k = 1; k < arithItem.size(); ++k) {
                                 char ch = arithItem[k];
-                                if (ch == 39) { inQuote3 = !inQuote3; continue; }
-                                if (inQuote3) continue;  // % inside LIKE pattern
+                                if (protectedArithmetic[k]) continue;
                                 if (ops.find(ch) == string::npos) continue;
                                 if (ch == '|' &&
                                     (k + 1 >= arithItem.size() || arithItem[k+1] != '|'))

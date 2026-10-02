@@ -1,0 +1,10 @@
+CREATE TABLE diff_literal_comment(id INT);
+INSERT INTO diff_literal_comment VALUES(1),(2);
+SELECT id,'/* literal */' AS data FROM diff_literal_comment ORDER BY id;
+SELECT id,'; /* literal */' AS data FROM diff_literal_comment ORDER BY id;
+SELECT id,'a + b - c * d / e % f || g' AS data FROM diff_literal_comment ORDER BY id;
+SELECT id,E'escaped; -- text' AS data FROM diff_literal_comment ORDER BY id;
+SELECT id,$body$dollar; /* text */$body$ AS data FROM diff_literal_comment ORDER BY id;
+SELECT id,'a''b * c' AS data FROM diff_literal_comment ORDER BY id;
+SELECT id,'' AS data FROM diff_literal_comment ORDER BY id;
+DROP TABLE diff_literal_comment;
