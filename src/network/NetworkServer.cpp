@@ -3923,7 +3923,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             // block. A valid BEGIN still receives 25P02, and must not
             // restart the transaction or emit a nested-BEGIN warning.
             const std::string keyword = firstSqlKeyword(sql);
-            if (keyword == "begin" || keyword == "start") {
+            if (keyword == "begin" || keyword == "start" ||
+                (keyword == "set" && SQLParser::isSetTransactionStatement(sql))) {
                 const size_t offset = sqlCommandOffset(sql);
                 SQLParser parser;
                 auto parsed = parser.parse(offset == std::string::npos ? sql : sql.substr(offset));
@@ -3981,6 +3982,19 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             }
         }
         QueryResult result = executeProtocolQuery(effectiveSql, *execSession);
+        if (!result.error && (!wasInTransaction || extendedImplicitTransaction) &&
+            SQLParser::isSetTransactionStatement(sql)) {
+            SQLParser parser;
+            const auto parsed = parser.parse(sql);
+            if (parsed.success) {
+                result.notices.erase(std::remove_if(result.notices.begin(), result.notices.end(),
+                    [](const QueryNotice& notice) {
+                        return notice.severity == "WARNING" && notice.sqlState == "01000";
+                    }), result.notices.end());
+                result.notices.push_back(QueryNotice{"WARNING", "25P01",
+                    "SET TRANSACTION can only be used in transaction blocks"});
+            }
+        }
         if (repeatedTransactionStart) {
             // This diagnostic derives from validated statement/block state,
             // not captured output, and precedes a SET-option error as in PG.
@@ -4830,7 +4844,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     continue;
                 }
                 if (!g_engine.inTransaction() &&
-                    !isTransactionControlStatement(portalState.sql)) {
+                    !isTransactionControlStatement(portalState.sql) &&
+                    !SQLParser::isSetTransactionStatement(portalState.sql)) {
                     QueryResult beginResult = executeForProtocol("BEGIN");
                     if (beginResult.error) {
                         protocol.sendErrorResponse(

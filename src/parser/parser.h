@@ -32,6 +32,7 @@ public:
     // DML/query analysis needs a snapshot even without a physical table.
     // Transaction controls and simple SHOW/SET utilities do not.
     static bool requiresQuerySnapshot(const std::string& sql);
+    static bool isSetTransactionStatement(const std::string& sql);
 
     // 工具函数
     static std::string toLower(const std::string& s);

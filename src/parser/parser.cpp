@@ -867,6 +867,12 @@ bool SQLParser::isKeyword(const std::string& s) {
 // classify：快速命令分类（替代 execute() 中的字符串前缀匹配）
 // ============================================================================
 
+bool SQLParser::isSetTransactionStatement(const std::string& sql) {
+    const auto tokens = tokenize(sql);
+    return tokens.size() >= 2 && toLower(tokens[0]) == "set" &&
+           toLower(tokens[1]) == "transaction";
+}
+
 bool SQLParser::requiresQuerySnapshot(const std::string& sql) {
     const auto tokens = tokenize(sql);
     if (tokens.empty()) return false;
@@ -4459,6 +4465,13 @@ ParseResult SQLParser::parseBegin(const std::string& sql) {
             return r;
         }
         ++pos;
+    } else if (first == "set" && tokens.size() >= 2 && toLower(tokens[1]) == "transaction") {
+        kind = TransactionStmt::Kind::SetCharacteristics;
+        pos = 2;
+        if (pos >= tokens.size() || tokens[pos] == ";") {
+            r.error = "SET TRANSACTION requires a transaction mode";
+            return r;
+        }
     } else {
         r.error = "invalid transaction start";
         return r;
@@ -4727,6 +4740,7 @@ ParseResult SQLParser::parseRelease(const std::string& sql) {
 // ------------------------------------------------------------------------
 
 ParseResult SQLParser::parseSet(const std::string& sql) {
+    if (isSetTransactionStatement(sql)) return parseBegin(sql);
     ParseResult r;
     auto tokens = tokenize(sql);
     if (tokens.size() < 2) {
@@ -10650,6 +10664,7 @@ std::string TransactionStmt::toString() const {
     switch (kind) {
         case Kind::Begin: return beginning("BEGIN");
         case Kind::Start: return beginning("START TRANSACTION");
+        case Kind::SetCharacteristics: return beginning("SET TRANSACTION");
         case Kind::Commit: return ending("COMMIT");
         case Kind::Rollback: return ending("ROLLBACK");
         case Kind::Abort: return ending("ABORT");

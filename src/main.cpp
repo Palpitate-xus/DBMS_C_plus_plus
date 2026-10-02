@@ -3244,71 +3244,41 @@ static bool handleSetCommand(const string& sql, Session& s) {
         return false;
     }
 
-    // SET TRANSACTION ISOLATION LEVEL (must come before generic SET)
-    if (sql.substr(0, 25) == "set transaction isolation" ||
-        sql.substr(0, 31) == "set transaction isolation level") {
-        string rawRest;
-        if (sql.substr(0, 31) == "set transaction isolation level") {
-            rawRest = sql.substr(31);
-        } else {
-            rawRest = sql.substr(25);
+    // Transaction modes share BEGIN's strict, source-ordered AST grammar.
+    if (dbms::SQLParser::isSetTransactionStatement(sql)) {
+        dbms::SQLParser parser;
+        auto parsed = parser.parse(sql);
+        const auto* txn = parsed.success
+            ? dynamic_cast<const dbms::TransactionStmt*>(parsed.stmt.get()) : nullptr;
+        if (!txn || txn->kind != dbms::TransactionStmt::Kind::SetCharacteristics) {
+            throw dbms::DbError("42601", parsed.error.empty()
+                ? "invalid SET TRANSACTION" : parsed.error);
         }
-        string rest = trim(rawRest);
-        dbms::IsolationLevel requested;
-        int requestedCode = 0;
-        string requestedName;
-        if (rest.find("read uncommitted") != string::npos) {
-            requested = dbms::IsolationLevel::READ_UNCOMMITTED;
-            requestedCode = 0;
-            requestedName = "READ UNCOMMITTED";
-        } else if (rest.find("read committed") != string::npos) {
-            requested = dbms::IsolationLevel::READ_COMMITTED;
-            requestedCode = 1;
-            requestedName = "READ COMMITTED";
-        } else if (rest.find("repeatable read") != string::npos) {
-            requested = dbms::IsolationLevel::REPEATABLE_READ;
-            requestedCode = 2;
-            requestedName = "REPEATABLE READ";
-        } else if (rest.find("serializable") != string::npos) {
-            requested = dbms::IsolationLevel::SERIALIZABLE;
-            requestedCode = 3;
-            requestedName = "SERIALIZABLE";
-        } else {
-            cout << "Unknown isolation level" << endl;
-            return true;
-        }
-        if (!g_engine.setIsolationLevel(requested)) {
-            cout << "ERROR: SET TRANSACTION ISOLATION LEVEL must be called "
-                    "before any query or data manipulation statement "
-                    "(SQLSTATE 25001)" << endl;
-            return true;
-        }
-        s.isolationLevel = requestedCode;
-        cout << "Isolation level set to " << requestedName << endl;
-        return false;
-    }
-
-    // SET TRANSACTION READ ONLY/WRITE changes transaction state; it must not
-    // fall through to the generic GUC parser. Tightening to READ ONLY is
-    // allowed after a query, but relaxing an already read-only transaction
-    // is only valid before its first query.
-    if (sql == "set transaction read only" ||
-        sql == "set transaction read only;" ||
-        sql == "set transaction read write" ||
-        sql == "set transaction read write;") {
         if (!g_engine.inTransaction()) {
-            cout << "WARNING: SET TRANSACTION can only be used in transaction blocks"
-                 << endl;
+            cout << "WARNING: SET TRANSACTION can only be used in transaction blocks" << endl;
+            cout << "SET" << endl;
             return false;
         }
-        const bool readOnly = sql.find("read only") != string::npos;
-        if (!g_engine.setReadOnly(readOnly)) {
-            cout << "ERROR: transaction read-write mode must be set before "
-                    "any query (SQLSTATE 25001)" << endl;
-            return true;
+        for (const auto& mode : txn->modes) {
+            if (mode.kind == dbms::TransactionStmt::Mode::Kind::Isolation) {
+                if (!g_engine.setIsolationLevel(mode.isolation)) {
+                    throw dbms::DbError("25001", "transaction isolation must be set before any query");
+                }
+                s.isolationLevel = static_cast<int>(mode.isolation);
+            } else if (mode.kind == dbms::TransactionStmt::Mode::Kind::ReadOnly) {
+                if (!g_engine.setReadOnly(mode.value)) {
+                    throw dbms::DbError("25001", "transaction read-write mode must be set before any query");
+                }
+            } else if (mode.kind == dbms::TransactionStmt::Mode::Kind::Deferrable) {
+                if (!g_engine.canSetTransactionDeferrable()) {
+                    throw dbms::DbError("25001", "transaction deferrability must be set before any query and outside a subtransaction");
+                }
+                if (mode.value) {
+                    throw dbms::DbError("0A000", "DEFERRABLE transactions are not supported");
+                }
+            }
         }
-        cout << "SET TRANSACTION " << (readOnly ? "READ ONLY" : "READ WRITE")
-             << endl;
+        cout << "SET" << endl;
         return false;
     }
 

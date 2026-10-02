@@ -1080,7 +1080,7 @@ struct SetStmt : public Stmt {
 struct TransactionStmt : public Stmt {
     enum class Kind { Begin, Start, Commit, Rollback, Abort, End,
                       Savepoint, Release, RollbackTo,
-                      Prepare, CommitPrepared, RollbackPrepared };
+                      Prepare, CommitPrepared, RollbackPrepared, SetCharacteristics };
     Kind kind;
     std::string savepointName;
     std::string gid;           // two-phase commit XID
@@ -1116,6 +1116,7 @@ struct TransactionStmt : public Stmt {
             case Kind::Prepare: command = SqlCommand::PrepareTransaction; break;
             case Kind::CommitPrepared: command = SqlCommand::CommitPrepared; break;
             case Kind::RollbackPrepared: command = SqlCommand::RollbackPrepared; break;
+            case Kind::SetCharacteristics: command = SqlCommand::Set; break;
         }
     }
     std::string toString() const override;
