@@ -4309,22 +4309,24 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         outcome.connectionOk = outcome.success;
         return outcome;
     };
-    const auto finishExtendedSync = [&]() -> bool {
+    const auto finishExtendedImplicitTransaction = [&](bool failed) -> QueryResult {
+        QueryResult endResult;
         if (extendedImplicitTransaction) {
-            QueryResult endResult = executeForProtocol(
-                extendedQueryError ? "ROLLBACK" : "COMMIT");
+            endResult = executeForProtocol(failed ? "ROLLBACK" : "COMMIT");
             extendedImplicitTransaction = false;
             portals.clear();
-            if (endResult.error) {
-                if (!protocol.sendErrorResponse(
-                        "ERROR", endResult.sqlState,
-                        trimText(endResult.errorMessage))) {
-                    return false;
-                }
-                if (transactionFailed || g_engine.inTransaction()) {
-                    (void)executeForProtocol("ROLLBACK");
-                }
+            if (endResult.error && (transactionFailed || g_engine.inTransaction())) {
+                (void)executeForProtocol("ROLLBACK");
             }
+        }
+        return endResult;
+    };
+    const auto finishExtendedSync = [&]() -> bool {
+        const QueryResult endResult = finishExtendedImplicitTransaction(extendedQueryError);
+        if (endResult.error) {
+            if (!protocol.sendErrorResponse(
+                    "ERROR", endResult.sqlState,
+                    trimText(endResult.errorMessage))) return false;
         } else if (!g_engine.inTransaction()) {
             portals.clear();
         }
@@ -4381,6 +4383,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             portals.erase("");
             if (!SQLParser::lexicalError(sql).empty()) {
                 const QueryResult result = executeForProtocol(sql);
+                (void)finishExtendedImplicitTransaction(true);
                 updateProcessInfo(pid, "Idle", "", "");
                 sendQueryResult(protocol, result, readyStatus());
                 continue;
@@ -4388,9 +4391,10 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             const std::vector<std::string> statements =
                 splitSimpleQueryStatements(sql);
             if (statements.empty()) {
+                const QueryResult completion = finishExtendedImplicitTransaction(false);
                 updateProcessInfo(pid, "Idle", "", "");
                 QueryResult empty;
-                sendQueryResult(protocol, empty, readyStatus());
+                sendQueryResult(protocol, completion.error ? completion : empty, readyStatus());
                 continue;
             }
 
@@ -4415,6 +4419,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 protocol.sendErrorResponse(
                     "ERROR", "0A000",
                     "wire COPY cannot be combined with other statements in one Query message");
+                (void)finishExtendedImplicitTransaction(true);
                 updateProcessInfo(pid, "Idle", "", "");
                 protocol.sendReadyForQuery(readyStatus());
                 continue;
@@ -4429,6 +4434,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 protocol.sendErrorResponse(
                     "ERROR", copyPlans.front().sqlState,
                     copyPlans.front().error);
+                (void)finishExtendedImplicitTransaction(true);
                 updateProcessInfo(pid, "Idle", "", "");
                 protocol.sendReadyForQuery(readyStatus());
                 continue;
@@ -4440,6 +4446,9 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 if (!copy.success && copy.failedInExistingTransaction) {
                     transactionFailed = true;
                 }
+                const QueryResult completion = finishExtendedImplicitTransaction(!copy.success);
+                if (completion.error && !protocol.sendErrorResponse(
+                        "ERROR", completion.sqlState, trimText(completion.errorMessage))) break;
                 if (!g_engine.inTransaction()) portals.clear();
                 updateProcessDb(pid, session.currentDB);
                 updateProcessInfo(pid, "Idle", "", "");
@@ -4487,6 +4496,11 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     }
                 }
             }
+            // Parse/Bind may have opened a physical transaction before this
+            // Simple Query. End it now, unless a user BEGIN promoted it to
+            // an explicit block. Its portals end with the transaction too.
+            QueryResult completion = finishExtendedImplicitTransaction(batchError);
+            if (completion.error) results.push_back(std::move(completion));
             if (!g_engine.inTransaction()) {
                 // Named portals are transaction-scoped even when COMMIT or
                 // ROLLBACK arrived through the Simple Query protocol.
