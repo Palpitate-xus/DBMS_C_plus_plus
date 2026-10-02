@@ -203,6 +203,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/pg_class_query_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/order_by_terminator_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/table_literal_comment_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/temp_index_catalog_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/serial_explicit_null_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/conflicting_nullability_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/foreign_key_modify_sqlstate_protocol_e2e_test.py)

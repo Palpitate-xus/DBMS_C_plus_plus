@@ -5952,6 +5952,15 @@ static bool catalogTableStorageName(const CatalogManager& catalog,
         error = "relation namespace is missing";
         return false;
     }
+    if (const Session* session = currentSession()) {
+        if (relation.relpersistence == 't' &&
+            relationNamespace->nspname == sessionTempSchemaName(*session) &&
+            (session->tempTables.count(relation.relname) ||
+             session->transientTempTables.count(relation.relname))) {
+            storageName = tempTablePrefix(*session, relation.relname);
+            return true;
+        }
+    }
     storageName = relationNamespace->nspname == "public"
         ? relation.relname
         : relationNamespace->nspname + "__" + relation.relname;
@@ -7291,13 +7300,13 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
         return true;
     }
 
-    // Session-local temp heaps are intentionally absent from the persistent
-    // catalog. Their named-index map and physical sidecar have the same
-    // session lifetime as the heap, so no persistent pg_class row is needed.
-    bool catalogRegistered = indexingSessionTemp;
+    // Temporary heaps have real session-namespace catalog identities too.
+    // Publish the same ownership edge so DROP/rollback/namespace cleanup can
+    // remove both the physical index and its catalog identity atomically.
+    bool catalogRegistered = false;
     Oid catalogIndexOid = INVALID_OID;
     CatalogManager* catalogForCleanup = nullptr;
-    if (!indexingSessionTemp) try {
+    try {
         dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
         catalogForCleanup = &cat;
         auto qn = CatalogService::logicalName(tname);
@@ -7318,6 +7327,7 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
             idx.relname = idxName;
             idx.relnamespace = ns->oid;
             idx.relkind = 'i';
+            idx.relpersistence = indexingSessionTemp ? 't' : tbl->relpersistence;
             idx.relnatts = static_cast<int16_t>(colnames.size());
             Oid idxOid = cat.createClass(idx);
             catalogIndexOid = idxOid;
@@ -7454,8 +7464,14 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
         } else {
             indexSearchPath.push_back(indexQn.schema);
         }
-        const PgClassRow* indexRel = tempIndexOwner.empty()
-            ? cat.resolveRelation(rawName, indexSearchPath) : nullptr;
+        const PgClassRow* indexRel = nullptr;
+        if (!tempIndexOwner.empty()) {
+            const auto* tempNamespace = cat.findTempNamespace(s.pid);
+            if (tempNamespace)
+                indexRel = cat.findClassByName(indexQn.name, tempNamespace->oid);
+        } else {
+            indexRel = cat.resolveRelation(rawName, indexSearchPath);
+        }
         if (indexRel && indexRel->relkind != 'i' &&
             indexRel->relkind != 'I') {
             std::cout << "ERROR: \"" << rawName
@@ -7482,9 +7498,11 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
                                   << std::endl;
                         return true;
                     }
-                    tableName = tableNamespace->nspname == "public"
-                        ? ref->relname
-                        : tableNamespace->nspname + "__" + ref->relname;
+                    tableName = !tempIndexOwner.empty()
+                        ? tempIndexOwner
+                        : (tableNamespace->nspname == "public"
+                            ? ref->relname
+                            : tableNamespace->nspname + "__" + ref->relname);
                     tableOid = ref->oid;
                     break;
                 }
