@@ -31,6 +31,7 @@
 #include "common/DataDirectory.h"
 #include "common/DbError.h"
 #include "common/SqlTrivia.h"
+#include "common/SqlSyntax.h"
 #include "common/SqlConjunction.h"
 #include "common/FeatureGate.h"
 #include "common/NotificationManager.h"
@@ -7772,9 +7773,8 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
     size_t queryOffset = 0;
     size_t queryLimit = 0;
     bool finiteQueryLimit = false;
-    const string loweredCols = toLower(cols);
-    const size_t limitAt = findTopLevelKeyword(loweredCols, "limit");
-    const size_t offsetAt = findTopLevelKeyword(loweredCols, "offset");
+    const size_t limitAt = dbms::findTopLevelSqlKeyword(cols, "limit");
+    const size_t offsetAt = dbms::findTopLevelSqlKeyword(cols, "offset");
     if (limitAt != string::npos || offsetAt != string::npos) {
         if (limitAt != string::npos) {
             const size_t end = offsetAt != string::npos && offsetAt > limitAt
@@ -7840,26 +7840,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
     // the single computed row and returns no row when UNKNOWN/FALSE.  Detect
     // a top-level " where " and evaluate the constant predicate here.
     {
-        bool inStr = false;
-        int depth = 0;
-        size_t whereAt = string::npos;
-        string colsLow;
-        for (char c : cols) colsLow += static_cast<char>(tolower(static_cast<unsigned char>(c)));
-        for (size_t i = 0; i < colsLow.size(); ++i) {
-            const char c = colsLow[i];
-            if (c == 0x27) inStr = !inStr;
-            if (!inStr) {
-                if (c == '(' || c == '[') ++depth;
-                else if (c == ')' || c == ']') --depth;
-                else if (depth == 0 && c == 'w' && i + 6 <= colsLow.size() &&
-                         colsLow.compare(i, 5, "where") == 0 &&
-                         (i == 0 || isspace(static_cast<unsigned char>(colsLow[i - 1]))) &&
-                         (i + 5 >= colsLow.size() || isspace(static_cast<unsigned char>(colsLow[i + 5])))) {
-                    whereAt = i;
-                    break;
-                }
-            }
-        }
+        const size_t whereAt = dbms::findTopLevelSqlKeyword(cols, "where");
         if (whereAt != string::npos) {
             const string proj = trim(cols.substr(0, whereAt));
             const string pred = trim(cols.substr(whereAt + 5));
@@ -8048,11 +8029,10 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
     {
         string cur;
         int depth = 0;
-        bool inStr = false;
+        const auto protectedBytes = dbms::sqlProtectedBytes(cols);
         for (size_t i = 0; i < cols.size(); ++i) {
             char c = cols[i];
-            if (c == '\'' ) inStr = !inStr;
-            if (!inStr) {
+            if (!protectedBytes[i]) {
                 if (c == '(' || c == '[') ++depth;
                 else if (c == ')' || c == ']') --depth;
                 else if (c == ',' && depth == 0) {
@@ -8134,18 +8114,11 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
         string expr = item;
         string disp;
         {
-            string low;
-            for (char c : item) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
-            int depth = 0;
-            bool inQuote = false;
-            for (size_t ai = 0; ai + 4 <= low.size(); ++ai) {
-                const char ch = item[ai];
-                if (inQuote) { if (ch == 39) inQuote = false; continue; }
-                if (ch == 39) { inQuote = true; continue; }
-                if (ch == '(') { ++depth; continue; }
-                if (ch == ')') { if (depth > 0) --depth; continue; }
-                if (depth == 0 && low.compare(ai, 4, " as ") == 0) {
-                    string tail = trim(item.substr(ai + 4));
+            const size_t ai = dbms::findTopLevelSqlKeyword(item, "as");
+            if (ai != string::npos) {
+                const auto aliasTokens = dbms::SQLParser::tokenize(item.substr(ai + 2));
+                if (aliasTokens.size() == 1) {
+                    const string& tail = aliasTokens.front();
                     // Quoted alias (AS "hello world"): legal with spaces;
                     // strip the double quotes for the header cell.
                     if (tail.size() >= 2 && tail.front() == 34 && tail.back() == 34) {
@@ -8156,7 +8129,6 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                         disp = tail;
                         expr = trim(item.substr(0, ai));
                     }
-                    break;
                 }
             }
         }

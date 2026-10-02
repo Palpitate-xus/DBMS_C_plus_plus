@@ -1,0 +1,10 @@
+SELECT E'it\'s' AS v;
+SELECT E'it\'s, AS WHERE LIMIT OFFSET' AS "E alias", 7 AS n;
+SELECT $Tag$comma, AS WHERE LIMIT OFFSET $tag$ quote ' inside$Tag$ AS "D alias", 8 AS n;
+SELECT 'it''s, AS WHERE LIMIT OFFSET' AS "S alias", 9 AS n;
+SELECT 1 AS "comma, quote"" name", 2 AS n;
+SELECT E'it\'s' AS v WHERE FALSE;
+SELECT E'it\'s, text' AS v WHERE TRUE LIMIT 1 OFFSET 0;
+SELECT $$where,as ' literal$$ AS v;
+SELECT E'it\'s' AS /* outer /* inner */ done */ v, 2 AS n;
+SELECT 42 AS answer, CAST(1 AS text) AS data;
