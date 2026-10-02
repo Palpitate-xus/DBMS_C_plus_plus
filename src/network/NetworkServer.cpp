@@ -3903,6 +3903,9 @@ void handleClient(SecureSocket socket, std::string clientHost) {
     bool transactionFailed = false;
     bool extendedQueryError = false;
     bool extendedImplicitTransaction = false;
+    // Parse/Bind can own a snapshot without having entered an implicit
+    // transaction block through Execute. DISCARD ALL distinguishes these.
+    bool extendedImplicitExecuted = false;
     // Connection-local extended-query state. In transaction/statement pool
     // modes these do not travel across backend rentals (PgBouncer has the
     // same restriction for session-level features).
@@ -4086,6 +4089,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             // A user BEGIN inside an extended-query implicit transaction
             // promotes the block; Sync must no longer end it automatically.
             extendedImplicitTransaction = false;
+            extendedImplicitExecuted = false;
         }
         return result;
     };
@@ -4102,6 +4106,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     return false;
                 }
                 extendedImplicitTransaction = true;
+                extendedImplicitExecuted = false;
             }
             g_engine.noteQuerySnapshot();
             return true;
@@ -4352,6 +4357,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 (void)executeForProtocol("ROLLBACK");
             }
         }
+        extendedImplicitExecuted = false;
         return endResult;
     };
     const auto finishExtendedSync = [&]() -> bool {
@@ -4429,6 +4435,18 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 QueryResult empty;
                 sendQueryResult(protocol, completion.error ? completion : empty, readyStatus());
                 continue;
+            }
+
+            if (statements.size() == 1 &&
+                isStandaloneDiscardAllStatement(statements.front()) &&
+                extendedImplicitTransaction && !extendedImplicitExecuted &&
+                !transactionFailed) {
+                const QueryResult completion = finishExtendedImplicitTransaction(false);
+                if (completion.error) {
+                    updateProcessInfo(pid, "Idle", "", "");
+                    sendQueryResult(protocol, completion, readyStatus());
+                    continue;
+                }
             }
 
             std::vector<CopyWirePlan> copyPlans;
@@ -4847,6 +4865,22 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 extendedQueryError = true;
                 continue;
             }
+            if (!portalIt->second.executed &&
+                isStandaloneDiscardAllStatement(portalIt->second.sql) &&
+                extendedImplicitTransaction && !extendedImplicitExecuted &&
+                !transactionFailed) {
+                // Finishing the planning transaction expires all its
+                // portals. Keep only this utility's value state, never a
+                // reference into the map that the completion clears.
+                ProtocolPortal utilityPortal = portalIt->second;
+                const QueryResult completion = finishExtendedImplicitTransaction(false);
+                if (completion.error) {
+                    sendExtendedProtocolError(completion.sqlState, completion.errorMessage);
+                    extendedQueryError = true;
+                    continue;
+                }
+                portalIt = portals.emplace(portal, std::move(utilityPortal)).first;
+            }
             auto& portalState = portalIt->second;
             if (!portalState.executed) {
                 CopyWirePlan copyPlan = parseCopyWirePlan(portalState.sql);
@@ -4904,7 +4938,9 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                             continue;
                         }
                         extendedImplicitTransaction = true;
+                        extendedImplicitExecuted = false;
                     }
+                    if (extendedImplicitTransaction) extendedImplicitExecuted = true;
                     CopyExecutionOutcome copy =
                         executeCopyWire(std::move(copyPlan));
                     portalState.executed = true;
@@ -4932,7 +4968,9 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                         continue;
                     }
                     extendedImplicitTransaction = true;
+                    extendedImplicitExecuted = false;
                 }
+                if (extendedImplicitTransaction) extendedImplicitExecuted = true;
                 portalState.result = executeForProtocol(portalState.sql);
                 portalState.executed = true;
             }
@@ -5007,6 +5045,12 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 } else {
                     protocol.sendCommandComplete(result.commandTag);
                 }
+            }
+            if (!result.error && isStandaloneDiscardAllStatement(portalState.sql)) {
+                // DISCARD ALL commits immediately, even before Sync/Flush.
+                portals.clear();
+                extendedImplicitTransaction = false;
+                extendedImplicitExecuted = false;
             }
             continue;
         }
