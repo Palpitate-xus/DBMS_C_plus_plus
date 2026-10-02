@@ -2,6 +2,40 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "958",
+      "gap_ids": ["P0-02", "P0-04", "P0-16", "SQL-13", "CAT-13", "CAT-15", "TXN-05", "TXN-06", "PROTO-01", "PROTO-02"],
+      "status": "partial",
+      "origin_source_commit": "3cfe28db",
+      "integrated_source_commit": "70c5a116",
+      "evidence": ["docs/code-review-progress.md", "docs/issue-958-temp-prepared-access.md", "src/commands/TableManage.cpp", "src/network/NetworkServer.cpp"],
+      "tests": ["tests/temp_prepared_access_test.cpp", "tests/temp_prepared_access_protocol_e2e_test.py", "tests/compat/cases/temp_prepared_access.sql"],
+      "verification": {
+        "pg18_oracle": "/tmp/dbms-temp-prepared-access-pg18-oracle-v11-958.log",
+        "strong_protocol": "/tmp/dbms-temp-prepared-access-lock-tag-final-protocol-v5-958.log",
+        "native_18": "/tmp/dbms-temp-prepared-access-lock-tag-final-native-18-958.log",
+        "wire_19_including_full_protocol": "/tmp/dbms-temp-prepared-access-lock-tag-final-wire-19-958.log",
+        "actual_19_distinct": "/tmp/dbms-temp-prepared-access-lock-tag-final-actual-19-958.log"
+      }
+    },
+    {
+      "issue": "956",
+      "gap_ids": ["P0-02", "P0-04", "P0-16", "SQL-11", "CAT-07", "CAT-10", "CONS-03", "CONS-08"],
+      "status": "partial",
+      "origin_source_commit": "802344c6",
+      "integrated_source_commit": "c6afebd1",
+      "evidence": ["docs/code-review-progress.md", "src/commands/TableManage.cpp", "src/commands/DdlExecutor.cpp"],
+      "tests": ["tests/check_add_validation_test.cpp", "tests/check_add_validation_protocol_e2e_test.py", "tests/compat/cases/check_add_validation.sql"],
+      "verification": {
+        "formal_build": "/tmp/dbms-check-add-validation-restore-watermark-formal-build-v4-956.log",
+        "pg18_oracle": "/tmp/dbms-check-add-validation-restore-watermark-pg18-oracle-v4-956.log",
+        "strong_protocol": "/tmp/dbms-check-add-validation-restore-watermark-fixed-protocol-v5-956.log",
+        "neighbors_cpp_20": "/tmp/dbms-check-add-validation-restore-watermark-neighbor-cpp-v4-956.log",
+        "neighbors_wire_15_including_full_protocol": "/tmp/dbms-check-add-validation-restore-watermark-neighbor-protocol-v4-956.log",
+        "neighbors_actual_15_distinct": "/tmp/dbms-check-add-validation-restore-watermark-neighbor-pgdiff-v4-956.log",
+        "integrated_full_suite_after_legacy_expectation_fix": "/tmp/dbms-final-post-fix-build-tests.log"
+      }
+    },
+    {
       "issue": "955",
       "gap_ids": ["P0-01", "P0-02", "SQL-02"],
       "status": "partial",
