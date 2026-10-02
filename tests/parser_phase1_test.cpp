@@ -873,7 +873,10 @@ int main() {
         assert(beginTxn->isolation == IsolationLevel::SERIALIZABLE);
         assert(beginTxn->readOnly && !beginTxn->deferrable);
 
-        auto start = parser.parse("START TRANSACTION READ COMMITTED READ WRITE NOT DEFERRABLE");
+        // PostgreSQL requires ISOLATION LEVEL, including after START.
+        auto invalidStart = parser.parse("START TRANSACTION READ COMMITTED READ WRITE NOT DEFERRABLE");
+        assert(!invalidStart.success);
+        auto start = parser.parse("START TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE NOT DEFERRABLE");
         assert(start.success);
         auto* startTxn = dynamic_cast<const TransactionStmt*>(start.stmt.get());
         assert(startTxn && startTxn->kind == TransactionStmt::Kind::Start);
