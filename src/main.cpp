@@ -30,6 +30,7 @@
 #include "common/version.h"
 #include "common/DataDirectory.h"
 #include "common/DbError.h"
+#include "common/SqlTrivia.h"
 #include "common/SqlConjunction.h"
 #include "common/FeatureGate.h"
 #include "common/NotificationManager.h"
@@ -29242,7 +29243,13 @@ bool managesNotificationTransaction(const std::string& sql) {
 // storage engine's undo log and row locks are transaction-scoped, so give
 // each top-level DML or locking SELECT statement an internal transaction.
 // Recursive execution stays inside the same boundary.
-bool execute(const std::string& rawSql, Session& s) {
+bool execute(const std::string& inputSql, Session& s) {
+    const size_t commandOffset = dbms::skipLeadingSqlTrivia(inputSql);
+    if (commandOffset == std::string::npos) {
+        throw dbms::DbError("42601", "unterminated block comment");
+    }
+    const std::string rawSql = inputSql.substr(commandOffset);
+    if (rawSql.empty()) return false;
     // This scope includes statement commit/rollback and exceptions, not just
     // executeInternal's DDL dispatch. Recursive SQL inherits an outer writer
     // scope or registers its own, so an inner command cannot reenable cache

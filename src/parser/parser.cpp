@@ -1,4 +1,5 @@
 #include "parser.h"
+#include "common/SqlTrivia.h"
 #include <charconv>
 #include <cctype>
 #include <algorithm>
@@ -876,7 +877,9 @@ bool SQLParser::requiresQuerySnapshot(const std::string& sql) {
 }
 
 SqlCommand SQLParser::classify(const std::string& sql) {
-    std::string lsql = toLower(trim(sql));
+    const size_t offset = skipLeadingSqlTrivia(sql);
+    if (offset == std::string::npos) return SqlCommand::Unknown;
+    std::string lsql = toLower(trim(sql.substr(offset)));
     if (lsql.empty()) return SqlCommand::Unknown;
 
     // Remove trailing semicolon
@@ -1190,9 +1193,15 @@ SqlCommand SQLParser::classify(const std::string& sql) {
 // parse：完整解析入口
 // ============================================================================
 
-ParseResult SQLParser::parse(const std::string& sql) {
+ParseResult SQLParser::parse(const std::string& inputSql) {
     ParseResult result;
-    result.originalSql = sql;
+    result.originalSql = inputSql;
+    const size_t offset = skipLeadingSqlTrivia(inputSql);
+    if (offset == std::string::npos) {
+        result.error = "unterminated block comment";
+        return result;
+    }
+    const std::string sql = inputSql.substr(offset);
 
     std::string lsql = toLower(trim(sql));
     if (lsql.empty()) {
