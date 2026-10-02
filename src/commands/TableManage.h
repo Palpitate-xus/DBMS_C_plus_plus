@@ -798,6 +798,12 @@ public:
         ensureTransactionSnapshot();
         transactionContext().querySnapshotUsed = true;
     }
+    // Unlike isolation/read-only, even an idempotent NOT DEFERRABLE is
+    // forbidden after the first query snapshot or in a user subtransaction.
+    bool canSetTransactionDeferrable() const {
+        return !inTransaction() ||
+            (!hasUserSavepoint() && !transactionContext().querySnapshotUsed);
+    }
     // DDL transactions opt into a physical backup after acquiring the
     // database-level snapshot lock; ordinary row transactions do not create
     // a full-database backup.
