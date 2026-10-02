@@ -199,6 +199,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/to_char_currency_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/to_char_zero_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/to_char_exact_rounding_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/cast_explicit_alias_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/serial_explicit_null_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/conflicting_nullability_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/foreign_key_modify_sqlstate_protocol_e2e_test.py)
