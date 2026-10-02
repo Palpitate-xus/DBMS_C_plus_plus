@@ -19789,12 +19789,18 @@ bool StorageEngine::dropSessionTemporaryTable(const std::string& dbname,
         const auto* table = nameSpace ? catalog.findClassByName(logicalName, namespaceOid) : nullptr;
         const Oid tableOid = table ? table->oid : INVALID_OID;
         if (table && (table->relkind != 'r' || table->relpersistence != 't')) return false;
+        std::vector<Oid> indexOids;
         if (tableOid != INVALID_OID) {
             for (const auto& dependency : catalog.findRefs(PgClassOid_Class, tableOid, -1)) {
                 if (dependency.classid != PgClassOid_Class || dependency.objsubid != 0 ||
-                    dependency.refobjsubid <= 0 ||
                     (dependency.deptype != 'a' && dependency.deptype != 'i')) continue;
                 const auto* sequence = catalog.findClass(dependency.objid);
+                if (sequence && sequence->relkind == 'i' && dependency.refobjsubid == 0) {
+                    if (sequence->relnamespace != namespaceOid || sequence->relpersistence != 't') return false;
+                    indexOids.push_back(sequence->oid);
+                    continue;
+                }
+                if (dependency.refobjsubid <= 0) continue;
                 if (!sequence || sequence->relkind != 'S') continue;
                 if (sequence->relnamespace != namespaceOid || sequence->relpersistence != 't') return false;
                 const std::string storageName = sequenceStorageName(
@@ -19806,6 +19812,10 @@ bool StorageEngine::dropSessionTemporaryTable(const std::string& dbname,
         }
         const auto status = dropTable(dbname, "__tmp_" + std::to_string(sessionId) + "_" + logicalName);
         if (status != DBStatus::OK && status != DBStatus::TABLE_NOT_FOUND) return false;
+        // dropTable removes the physical named indexes. Remove their catalog
+        // identities only after that succeeds, including preserved namespaces.
+        for (const Oid indexOid : indexOids)
+            if (!catalog.dropClass(indexOid)) return false;
         if (tableOid != INVALID_OID && !catalog.dropClass(tableOid)) return false;
         return catalog.persistAll();
     } catch (...) {
