@@ -446,33 +446,10 @@ static string toLower(string s) {
 // identifiers.  Lowercasing the complete SQL text makes `WHERE name = 'A'`
 // disagree with an AST insert that correctly stores 'A'.
 static string toLowerSql(string s) {
-    bool singleQuoted = false;
-    bool doubleQuoted = false;
+    const auto protectedBytes = dbms::sqlProtectedBytes(s);
     for (size_t i = 0; i < s.size(); ++i) {
-        char& c = s[i];
-        if (singleQuoted) {
-            if (c == '\'' && i + 1 < s.size() && s[i + 1] == '\'') {
-                ++i; // SQL escaped quote: ''
-            } else if (c == '\'') {
-                singleQuoted = false;
-            }
-            continue;
-        }
-        if (doubleQuoted) {
-            if (c == '"' && i + 1 < s.size() && s[i + 1] == '"') {
-                ++i; // SQL escaped identifier quote: ""
-            } else if (c == '"') {
-                doubleQuoted = false;
-            }
-            continue;
-        }
-        if (c == '\'') {
-            singleQuoted = true;
-        } else if (c == '"') {
-            doubleQuoted = true;
-        } else {
-            c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-        }
+        if (!protectedBytes[i])
+            s[i] = static_cast<char>(tolower(static_cast<unsigned char>(s[i])));
     }
     return s;
 }
@@ -663,18 +640,10 @@ static string sqlProcessor(string raw, bool /*normalizeBooleanLiterals*/ = false
     {
         string normalized;
         normalized.reserve(raw.size());
-        char quote = 0;
+        const auto protectedWhitespace = dbms::sqlProtectedBytes(raw);
         for (size_t i = 0; i < raw.size(); ++i) {
             const char c = raw[i];
-            if (quote != 0) {
-                normalized += c;
-                if (c == quote) {
-                    if (i + 1 < raw.size() && raw[i + 1] == quote)
-                        normalized += raw[++i];
-                    else quote = 0;
-                }
-            } else if (c == '\'' || c == '"') {
-                quote = c;
+            if (protectedWhitespace[i]) {
                 normalized += c;
             } else if (isspace(static_cast<unsigned char>(c))) {
                 if (normalized.empty() || normalized.back() != ' ') normalized += ' ';

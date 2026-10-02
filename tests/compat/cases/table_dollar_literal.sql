@@ -1,0 +1,10 @@
+CREATE TABLE diff_dollar_literal(id INT);
+INSERT INTO diff_dollar_literal VALUES(1),(2);
+SELECT id,$$MiXeD Text$$ AS data FROM diff_dollar_literal ORDER BY id;
+SELECT id,$body$MiXeD  two spaces$body$ AS data FROM diff_dollar_literal ORDER BY id;
+SELECT id,$BoDy$Upper CASE + /* DATA */$BoDy$ AS data FROM diff_dollar_literal ORDER BY id;
+SELECT id,E'MiXeD\'  Text\tEnd' AS data FROM diff_dollar_literal ORDER BY id;
+SELECT id,'Standard  Text' AS data FROM diff_dollar_literal ORDER BY id;
+SELECT id,'Quote''  MiXeD' AS data FROM diff_dollar_literal ORDER BY id;
+SELECT id,$$literal; -- data$$ AS data FROM diff_dollar_literal ORDER BY id;
+DROP TABLE diff_dollar_literal;
