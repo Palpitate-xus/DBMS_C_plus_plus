@@ -13,6 +13,7 @@
 #include "access/IndexFileUtil.h"
 #include "common/logs.h"
 #include "common/FeatureGate.h"
+#include "common/DbError.h"
 #include "common/GeometryValue.h"
 #include "common/scram_sha256.h"
 #include "network/NetworkServer.h"
@@ -2692,6 +2693,11 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     }
                     status = g_engine.alterTableAddCheckConstraint(
                         s.currentDB, tableName, constraintName, tc.checkExpr->toString());
+                    if (status == DBStatus::CHECK_VIOLATION) {
+                        throw DbError("23514", "check constraint \"" +
+                            constraintName + "\" of relation \"" +
+                            stmt->tableName + "\" is violated by some row");
+                    }
                 } else if (type == "primary key") {
                     status = g_engine.alterTableAddPrimaryKey(
                         s.currentDB, tableName, constraintName, tc.columns);
@@ -3054,6 +3060,16 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 break;
             default:
                 return true;
+        }
+        // File-rewriting actions insert replacement tuples with this SQL
+        // command's cmin.  A following CHECK validation (or another rewrite)
+        // must see that completed action, not an apparently empty relation.
+        // Advance only the command counter: refreshing the transaction's
+        // statement snapshot would expose concurrent commits mid-statement.
+        const auto* readView = g_engine.getCurrentReadView();
+        if (readView && readView->commandIdVisibility &&
+            !g_engine.advanceSqlCommandCounter()) {
+            throw DbError("54000", "SQL command counter limit exceeded");
         }
     }
     txn.recordUpdate(DdlObjectKind::Table, tableName);

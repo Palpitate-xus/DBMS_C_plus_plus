@@ -827,6 +827,9 @@ public:
     // MVCC snapshot, then become visible after the command counter advances.
     bool beginSqlCommand();
     bool finishSqlCommand();
+    // Make a completed internal DDL action visible to later actions without
+    // replacing the SQL statement's snapshot or ending its visibility scope.
+    bool advanceSqlCommandCounter();
     // Validate immediate self-FK events only at the actual statement boundary,
     // not at internal command-counter advances (for example REPLACE).
     DBStatus validateImmediateForeignKeyChecks();

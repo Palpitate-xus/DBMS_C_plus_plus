@@ -18400,11 +18400,11 @@ DBStatus StorageEngine::alterTableAddCheckConstraint(const std::string& dbname,
     // every visible row before publishing the expression so ALTER cannot
     // leave pre-existing rows that violate the newly advertised invariant.
     const auto typeHints = buildTypeHints(tbl);
-    bool violation = false;
+    DBStatus validationStatus = DBStatus::OK;
     const bool scanOk = forEachRow(
         dbname, tablename,
         [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
-            if (violation) return;
+            if (validationStatus != DBStatus::OK) return;
             const int64_t rid = encodeRid(pageId, slotId);
             const std::string row(data, len);
             std::map<std::string, std::string> rowValues;
@@ -18423,16 +18423,20 @@ DBStatus StorageEngine::alterTableAddCheckConstraint(const std::string& dbname,
             std::string evaluationError;
             if (!dbms::ExprHelper::evalCheck(
                     expr, rowValues, typeHints, &evaluationError, dbname)) {
-                violation = true;
+                // Distinguish a valid predicate that rejects an existing row
+                // from a malformed or otherwise unevaluable expression,
+                // just as the INSERT/UPDATE CHECK paths do.
+                validationStatus = evaluationError.empty()
+                    ? DBStatus::CHECK_VIOLATION : DBStatus::INVALID_VALUE;
             }
         });
     if (!scanOk) {
         lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
     }
-    if (violation) {
+    if (validationStatus != DBStatus::OK) {
         lockManager_.unlock(tablename);
-        return DBStatus::INVALID_VALUE;
+        return validationStatus;
     }
 
     if (tbl.cols[targetCol].checkExpr.empty()) {
@@ -42865,6 +42869,12 @@ bool StorageEngine::finishSqlCommand() {
     if (!context.inTransaction) return false;
     context.readView.commandIdVisibility = false;
     context.commandInternalRelations.clear();
+    return advanceSqlCommandCounter();
+}
+
+bool StorageEngine::advanceSqlCommandCounter() {
+    auto& context = transactionContext();
+    if (!context.inTransaction) return false;
     if (context.currentCommandId ==
         std::numeric_limits<uint32_t>::max()) return false;
     ++context.currentCommandId;
@@ -44884,6 +44894,11 @@ bool StorageEngine::restoreTransactionBackup(const std::string& dbname) {
     if (dbname.empty()) return false;
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     auto& context = transactionContext();
+    if (context.inTransaction &&
+        (context.txnLogSizeAtBackup > context.txnLog.size() ||
+         context.ddlUndoSizeAtBackup > context.ddlUndoActions.size())) {
+        return false;
+    }
     std::filesystem::path backup = context.txnBackupPath;
     if (backup.empty()) {
         // No legacy snapshot format is created anymore. This fallback keeps
@@ -44901,6 +44916,17 @@ bool StorageEngine::restoreTransactionBackup(const std::string& dbname) {
     closeDatabaseCaches(dbname);
     const bool restored = physicalRestoreLocked(dbname, backup.string());
     if (restored) {
+        if (context.inTransaction) {
+            // The image has already undone every physical change after its
+            // log boundary. Replaying those entries at a later SAVEPOINT or
+            // ROLLBACK would remove restored rows (or undo the same DDL twice).
+            // Keep the earlier prefix: it is still needed to roll back changes
+            // that were present when this mid-transaction image was captured.
+            context.txnLog.resize(context.txnLogSizeAtBackup);
+            context.ddlUndoActions.resize(context.ddlUndoSizeAtBackup);
+            clearCatalogSnapshot();
+            captureCatalogSnapshot();
+        }
         (void)discardOwnedPhysicalBackup(backup, dbname);
         context.txnBackupPath.clear();
         context.transactionBackupDirty = false;
