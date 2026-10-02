@@ -6870,7 +6870,23 @@ void StorageEngine::pruneMissingDatabaseCaches() {
     for (const auto& [key, _] : toastPageAllocators_) collectDatabase(key, ':');
     for (const auto& [key, _] : toastIndexes_) collectDatabase(key, ':');
     for (const auto& [key, _] : spGiSTCache_) collectDatabase(key, '/');
-    for (const auto& dbname : stale) closeDatabaseCaches(dbname);
+    const auto& localTransaction = transactionContext();
+    for (const auto& dbname : stale) {
+        // A renamed/missing directory does not invalidate pointers still
+        // owned by an active backend. In particular COMMIT retains its WAL
+        // manager until its database transaction lock is released.
+        if (localTransaction.inTransaction && localTransaction.txnDB == dbname) {
+            continue;
+        }
+        const auto databaseMutex = databaseTxnLockFor(dbname);
+        // The normal lock order is database lock -> cacheMutex_. We already
+        // hold cacheMutex_, so never wait for the database lock here.
+        std::unique_lock<std::shared_mutex> databaseLock(
+            *databaseMutex, std::try_to_lock);
+        if (!databaseLock.owns_lock()) continue;
+        // CREATE may have republished the name after stale collection.
+        if (!databaseExists(dbname)) closeDatabaseCaches(dbname);
+    }
 }
 
 FreeSpaceMap* StorageEngine::getFSM(const std::string& dbname,

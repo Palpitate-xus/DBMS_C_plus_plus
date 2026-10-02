@@ -6,14 +6,26 @@
 #include <chrono>
 #include <filesystem>
 #include <thread>
+#include <exception>
+#include <execinfo.h>
+#include <unistd.h>
 
 int main() {
+    // Keep a stack for otherwise opaque uncaught failures in the competing
+    // backend. No recovery or relaxed assertion is introduced here.
+    std::set_terminate([] {
+        void* frames[48];
+        const int count = ::backtrace(frames, 48);
+        ::backtrace_symbols_fd(frames, count, STDERR_FILENO);
+        std::abort();
+    });
     namespace fs = std::filesystem;
     const std::string db = testDbPath("begin_transaction_drop_race");
     const std::string moved = db + ".moved";
     fs::remove_all(db);
     fs::remove_all(moved);
     dbms::StorageEngine engine;
+    engine.setBackgroundIntervals(1, 300000);
     assert(engine.createDatabase(db) == dbms::DBStatus::OK);
     assert(engine.beginTransaction(db, true) == dbms::DBStatus::OK);
 
@@ -38,6 +50,9 @@ int main() {
     // reject that name as a different, invalid database generation.
     fs::rename(db, moved);
     fs::create_directory_symlink(moved, db);
+    // Give the real background pruner time to observe the replaced name
+    // while this transaction still owns its WAL/CLOG and exclusive lock.
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
     assert(engine.commitTransaction() == dbms::DBStatus::OK);
     starter.join();
     assert(result == dbms::DBStatus::DATABASE_NOT_FOUND);
