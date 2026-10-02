@@ -2734,7 +2734,7 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
 
     // Select list
     while (pos < tokens.size()) {
-        if (toLower(tokens[pos]) == "from" || toLower(tokens[pos]) == "where"
+        if (tokens[pos] == ";" || toLower(tokens[pos]) == "from" || toLower(tokens[pos]) == "where"
             || toLower(tokens[pos]) == "group" || toLower(tokens[pos]) == "having"
             || toLower(tokens[pos]) == "order" || toLower(tokens[pos]) == "limit"
             || toLower(tokens[pos]) == "offset" || toLower(tokens[pos]) == "union"
