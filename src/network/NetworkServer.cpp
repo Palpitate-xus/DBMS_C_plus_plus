@@ -1571,6 +1571,13 @@ bool describePreparedResult(const std::string& sql, Session& session,
     QueryResult shape;
     std::vector<std::string> outputNames;
     std::vector<uint32_t> directParameterOids;
+    const auto outputAlias = [](const std::string& token) {
+        CatalogManager::QualifiedName name;
+        if (CatalogManager::parseQualifiedName(token, name, true) && name.schema.empty()) {
+            return name.name;
+        }
+        return token;
+    };
     const auto appendPhysicalColumns = [&]() {
         for (size_t i = 0; i < schema.len; ++i) {
             shape.columns.push_back(schema.cols[i].dataName);
@@ -1604,7 +1611,7 @@ bool describePreparedResult(const std::string& sql, Session& session,
                 shape.columns.push_back(schema.cols[i].dataName);
                 shape.columnTypes.push_back(schema.cols[i].dataType);
                 outputNames.push_back(item.alias.empty() ? reference->column
-                                                          : item.alias);
+                                                          : outputAlias(item.alias));
                 directParameterOids.push_back(0);
                 found = true;
                 break;
@@ -1623,7 +1630,7 @@ bool describePreparedResult(const std::string& sql, Session& session,
                 ? ExprHelper::canonicalResultTypeName(literal->typeName)
                 : ExprHelper::inferResultType(expression, typeHints);
         shape.columnTypes.push_back(inferredType);
-        std::string outputName = item.alias;
+        std::string outputName = item.alias.empty() ? std::string{} : outputAlias(item.alias);
         if (outputName.empty()) {
             const auto* call =
                 dynamic_cast<const FunctionCallExpr*>(item.expr.get());
