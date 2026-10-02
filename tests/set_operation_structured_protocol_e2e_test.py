@@ -79,6 +79,24 @@ def main():
         assert type_oids == [23], type_oids
         assert command_tag == "SELECT 1", command_tag
 
+        ordered_by_multiple_keys = runner.decode_wire_result(
+            client.simple_query(
+                server["sock"],
+                ("SELECT 1 AS grp, 'b' AS label UNION ALL "
+                 "SELECT 1, 'a' UNION ALL SELECT 0, 'z' UNION ALL "
+                 "SELECT 1, NULL::text "
+                 "ORDER BY grp DESC, label ASC NULLS FIRST;")),
+            include_types=True)
+        rows, state, message, headers, command_tag, type_oids = \
+            ordered_by_multiple_keys
+        assert state is None, (state, message)
+        assert rows == [
+            ["1", None], ["1", "a"], ["1", "b"], ["0", "z"]
+        ], rows
+        assert headers == ["grp", "label"], headers
+        assert type_oids == [23, 25], type_oids
+        assert command_tag == "SELECT 4", command_tag
+
         null_ordered = runner.decode_wire_result(
             client.simple_query(
                 server["sock"],

@@ -6515,86 +6515,141 @@ static optional<string> explicitSetOperandCollation(
     return dbms::collation::normalizeName(rest.substr(0, end));
 }
 
+struct SetOperationOrderKey {
+    string column;
+    bool ascending = true;
+    bool nullsFirst = false;
+    bool hasExplicitNullOrder = false;
+};
+
+static vector<string> splitSetOperationOrderList(const string& orderSql) {
+    vector<string> items;
+    const vector<bool> protectedBytes = dbms::sqlProtectedBytes(orderSql);
+    size_t depth = 0;
+    size_t start = 0;
+    for (size_t i = 0; i < orderSql.size(); ++i) {
+        if (protectedBytes[i]) continue;
+        if (orderSql[i] == '(' || orderSql[i] == '[') {
+            ++depth;
+        } else if (orderSql[i] == ')' || orderSql[i] == ']') {
+            if (depth > 0) --depth;
+        } else if (orderSql[i] == ',' && depth == 0) {
+            items.push_back(trim(orderSql.substr(start, i - start)));
+            start = i + 1;
+        }
+    }
+    items.push_back(trim(orderSql.substr(start)));
+    return items;
+}
+
 static bool applySetOperationTail(
-    dbms::DmlResult& result, bool hasOrder, const string& orderColumn,
-    bool asc, bool explicitNullsFirst, bool hasExplicitNullOrder,
+    dbms::DmlResult& result,
+    const vector<SetOperationOrderKey>& orderBy,
     size_t limitN, bool hasLimit, size_t offsetN, bool hasOffset,
     const string& leftSql,
     const string& rightSql, string& error, string& sqlState) {
-    if (hasOrder) {
-        size_t orderIndex = result.columns.size();
-        try {
-            size_t parsed = 0;
-            const unsigned long long ordinal = stoull(orderColumn, &parsed);
-            if (parsed == orderColumn.size() && ordinal > 0 &&
-                ordinal <= result.columns.size()) {
-                orderIndex = static_cast<size_t>(ordinal - 1);
-            }
-        } catch (...) {}
-        if (orderIndex == result.columns.size()) {
-            string name = orderColumn;
-            if (name.size() >= 2 && name.front() == '"' && name.back() == '"')
-                name = name.substr(1, name.size() - 2);
-            for (size_t i = 0; i < result.columns.size(); ++i) {
-                if (result.columns[i] == name) {
-                    orderIndex = i;
-                    break;
+    if (!orderBy.empty()) {
+        vector<size_t> orderIndexes;
+        vector<bool> orderAscending;
+        vector<bool> nullsFirst;
+        vector<const dbms::TypeEntry*> typeEntries;
+        vector<string> textCollations;
+        orderIndexes.reserve(orderBy.size());
+        orderAscending.reserve(orderBy.size());
+        nullsFirst.reserve(orderBy.size());
+        typeEntries.reserve(orderBy.size());
+        textCollations.reserve(orderBy.size());
+
+        for (const SetOperationOrderKey& key : orderBy) {
+            size_t orderIndex = result.columns.size();
+            try {
+                size_t parsed = 0;
+                const unsigned long long ordinal =
+                    stoull(key.column, &parsed);
+                if (parsed == key.column.size() && ordinal > 0 &&
+                    ordinal <= result.columns.size()) {
+                    orderIndex = static_cast<size_t>(ordinal - 1);
+                }
+            } catch (...) {}
+            if (orderIndex == result.columns.size()) {
+                string name = key.column;
+                if (name.size() >= 2 && name.front() == '"' &&
+                    name.back() == '"')
+                    name = name.substr(1, name.size() - 2);
+                for (size_t i = 0; i < result.columns.size(); ++i) {
+                    if (result.columns[i] == name) {
+                        orderIndex = i;
+                        break;
+                    }
                 }
             }
-        }
-        if (orderIndex == result.columns.size()) {
-            error = "ORDER BY position or column is not in select list";
-            sqlState = "42P10";
-            return false;
+            if (orderIndex == result.columns.size()) {
+                error = "ORDER BY position or column is not in select list";
+                sqlState = "42P10";
+                return false;
+            }
+            const string type = orderIndex < result.columnTypes.size()
+                ? canonicalValuesType(result.columnTypes[orderIndex]) : "text";
+            const auto* typeEntry =
+                dbms::TypeRegistry::instance().findType(type);
+            string textCollation = "default";
+            if (typeEntry &&
+                typeEntry->category == dbms::TypeCategory::String) {
+                const optional<string> leftCollation =
+                    explicitSetOperandCollation(leftSql, orderIndex);
+                const optional<string> rightCollation =
+                    explicitSetOperandCollation(rightSql, orderIndex);
+                if (leftCollation && rightCollation &&
+                    *leftCollation != *rightCollation) {
+                    error = "collation mismatch between set-operation operands";
+                    sqlState = "42P21";
+                    return false;
+                }
+                if (leftCollation) textCollation = *leftCollation;
+                else if (rightCollation) textCollation = *rightCollation;
+            }
+            orderIndexes.push_back(orderIndex);
+            orderAscending.push_back(key.ascending);
+            nullsFirst.push_back(key.hasExplicitNullOrder
+                ? key.nullsFirst : !key.ascending);
+            typeEntries.push_back(typeEntry);
+            textCollations.push_back(std::move(textCollation));
         }
 
         vector<size_t> order(result.rows.size());
         iota(order.begin(), order.end(), 0);
-        const bool nullsFirst = hasExplicitNullOrder
-            ? explicitNullsFirst : !asc;
-        const string type = orderIndex < result.columnTypes.size()
-            ? canonicalValuesType(result.columnTypes[orderIndex]) : "text";
-        const auto* typeEntry =
-            dbms::TypeRegistry::instance().findType(type);
-        string textCollation = "default";
-        if (typeEntry &&
-            typeEntry->category == dbms::TypeCategory::String) {
-            const optional<string> leftCollation =
-                explicitSetOperandCollation(leftSql, orderIndex);
-            const optional<string> rightCollation =
-                explicitSetOperandCollation(rightSql, orderIndex);
-            if (leftCollation && rightCollation &&
-                *leftCollation != *rightCollation) {
-                error = "collation mismatch between set-operation operands";
-                sqlState = "42P21";
-                return false;
-            }
-            if (leftCollation) textCollation = *leftCollation;
-            else if (rightCollation) textCollation = *rightCollation;
-        }
         stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
-            const bool nullA = result.nulls[a][orderIndex];
-            const bool nullB = result.nulls[b][orderIndex];
-            if (nullA != nullB) return nullA == nullsFirst;
-            if (nullA) return false;
-            const string& valueA = result.rows[a][orderIndex];
-            const string& valueB = result.rows[b][orderIndex];
-            if (valueA == valueB) return false;
-            if (typeEntry &&
-                typeEntry->category == dbms::TypeCategory::Numeric) {
-                try {
-                    const dbms::Numeric numericA(valueA);
-                    const dbms::Numeric numericB(valueB);
-                    return asc ? numericA < numericB : numericB < numericA;
-                } catch (...) {}
+            for (size_t keyIndex = 0; keyIndex < orderIndexes.size(); ++keyIndex) {
+                const size_t orderIndex = orderIndexes[keyIndex];
+                const bool nullA = result.nulls[a][orderIndex];
+                const bool nullB = result.nulls[b][orderIndex];
+                if (nullA != nullB) return nullA == nullsFirst[keyIndex];
+                if (nullA) continue;
+                const string& valueA = result.rows[a][orderIndex];
+                const string& valueB = result.rows[b][orderIndex];
+                if (valueA == valueB) continue;
+                const bool asc = orderAscending[keyIndex];
+                const auto* typeEntry = typeEntries[keyIndex];
+                if (typeEntry &&
+                    typeEntry->category == dbms::TypeCategory::Numeric) {
+                    try {
+                        const dbms::Numeric numericA(valueA);
+                        const dbms::Numeric numericB(valueB);
+                        if (numericA < numericB) return asc;
+                        if (numericB < numericA) return !asc;
+                        continue;
+                    } catch (...) {}
+                }
+                if (typeEntry &&
+                    typeEntry->category == dbms::TypeCategory::String) {
+                    const int compared = dbms::collation::compare(
+                        valueA, valueB, textCollations[keyIndex]);
+                    if (compared != 0) return asc ? compared < 0 : compared > 0;
+                    continue;
+                }
+                return asc ? valueA < valueB : valueB < valueA;
             }
-            if (typeEntry &&
-                typeEntry->category == dbms::TypeCategory::String) {
-                const int compared = dbms::collation::compare(
-                    valueA, valueB, textCollation);
-                return asc ? compared < 0 : compared > 0;
-            }
-            return asc ? valueA < valueB : valueB < valueA;
+            return false;
         });
         vector<vector<string>> sortedRows;
         vector<vector<bool>> sortedNulls;
@@ -6636,11 +6691,7 @@ static bool executeSetOperation(const string& sql, Session& s, bool& handled) {
     // A trailing ORDER BY / LIMIT / OFFSET belongs to the WHOLE set operation (PG
     // applies it to the final result), not to the right operand.  Strip
     // it and apply after combining.
-    string tailOrderCol;
-    bool tailOrderAsc = true;
-    bool tailHasOrder = false;
-    bool tailNullsFirst = false;
-    bool tailHasNullOrder = false;
+    vector<SetOperationOrderKey> tailOrderBy;
     size_t tailLimit = 0;
     bool tailHasLimit = false;
     size_t tailOffset = 0;
@@ -6706,36 +6757,48 @@ static bool executeSetOperation(const string& sql, Session& s, bool& handled) {
         if (op != string::npos) {
             string spec = trim(rightSql.substr(op + 8));
             rightSql = trim(rightSql.substr(0, op));
-            vector<string> toks = tokenize(spec);
-            if (toks.empty() || toks.size() > 4) {
-                cout << "ERROR: unsupported ORDER BY in set operation "
-                        "(SQLSTATE 0A000)" << endl;
+            const vector<string> specs = splitSetOperationOrderList(spec);
+            if (specs.empty()) {
+                cout << "ERROR: invalid ORDER BY in set operation "
+                        "(SQLSTATE 42601)" << endl;
                 return true;
             }
-            tailOrderCol = toks[0];
-            tailHasOrder = true;
-            size_t index = 1;
-            if (index < toks.size() &&
-                (toks[index] == "asc" || toks[index] == "desc")) {
-                tailOrderAsc = toks[index] != "desc";
-                ++index;
-            }
-            if (index < toks.size()) {
-                if (index + 1 >= toks.size() || toks[index] != "nulls" ||
-                    (toks[index + 1] != "first" &&
-                     toks[index + 1] != "last")) {
+            for (const string& orderSpec : specs) {
+                const vector<string> toks = tokenize(orderSpec);
+                if (toks.empty() || toks.size() > 4) {
+                    cout << "ERROR: unsupported ORDER BY in set operation "
+                            "(SQLSTATE 0A000)" << endl;
+                    return true;
+                }
+                SetOperationOrderKey key;
+                key.column = toks[0];
+                size_t index = 1;
+                if (index < toks.size()) {
+                    const string modifier = toLower(toks[index]);
+                    if (modifier == "asc" || modifier == "desc") {
+                        key.ascending = modifier != "desc";
+                        ++index;
+                    }
+                }
+                if (index < toks.size()) {
+                    if (index + 1 >= toks.size() ||
+                        toLower(toks[index]) != "nulls" ||
+                        (toLower(toks[index + 1]) != "first" &&
+                         toLower(toks[index + 1]) != "last")) {
+                        cout << "ERROR: invalid ORDER BY in set operation "
+                                "(SQLSTATE 42601)" << endl;
+                        return true;
+                    }
+                    key.nullsFirst = toLower(toks[index + 1]) == "first";
+                    key.hasExplicitNullOrder = true;
+                    index += 2;
+                }
+                if (index != toks.size()) {
                     cout << "ERROR: invalid ORDER BY in set operation "
                             "(SQLSTATE 42601)" << endl;
                     return true;
                 }
-                tailNullsFirst = toks[index + 1] == "first";
-                tailHasNullOrder = true;
-                index += 2;
-            }
-            if (index != toks.size()) {
-                cout << "ERROR: invalid ORDER BY in set operation "
-                        "(SQLSTATE 42601)" << endl;
-                return true;
+                tailOrderBy.push_back(std::move(key));
             }
         }
     }
@@ -6783,8 +6846,7 @@ static bool executeSetOperation(const string& sql, Session& s, bool& handled) {
     string tailError;
     string tailSqlState;
     if (!applySetOperationTail(
-            result, tailHasOrder, tailOrderCol, tailOrderAsc,
-            tailNullsFirst, tailHasNullOrder, tailLimit, tailHasLimit,
+            result, tailOrderBy, tailLimit, tailHasLimit,
             tailOffset, tailHasOffset,
             leftSql, rightSql, tailError, tailSqlState)) {
         cout << "ERROR: " << tailError << " (SQLSTATE "
