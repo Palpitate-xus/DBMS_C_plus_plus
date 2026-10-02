@@ -697,16 +697,14 @@ std::vector<std::string> SQLParser::tokenize(const std::string& sql) {
                     ++i;
                     continue;
                 }
-                if (c == '-' && next == '-') {
-                    // skip comment to end of line
-                    while (i < sql.size() && sql[i] != '\n') ++i;
-                    continue;
-                }
-                if (c == '/' && next == '*') {
-                    // skip C-style comment
-                    i += 2;
-                    while (i + 1 < sql.size() && !(sql[i] == '*' && sql[i + 1] == '/')) ++i;
-                    ++i; // skip '/'
+                if ((c == '-' && next == '-') || (c == '/' && next == '*')) {
+                    // This branch is outside both literal and identifier
+                    // quotes. Reuse nested-block and CR/LF trivia scanning.
+                    const size_t after = skipLeadingSqlTrivia(sql, i);
+                    // Preserve the existing tokenizer EOF policy for an
+                    // unterminated interior block; strict rejection remains
+                    // a separate lexer validation gap.
+                    i = after == std::string::npos ? sql.size() : after - 1;
                     continue;
                 }
             }
