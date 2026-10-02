@@ -32,7 +32,10 @@
         "neighbors_cpp_20": "/tmp/dbms-check-add-validation-restore-watermark-neighbor-cpp-v4-956.log",
         "neighbors_wire_15_including_full_protocol": "/tmp/dbms-check-add-validation-restore-watermark-neighbor-protocol-v4-956.log",
         "neighbors_actual_15_distinct": "/tmp/dbms-check-add-validation-restore-watermark-neighbor-pgdiff-v4-956.log",
-        "integrated_full_suite_after_legacy_expectation_fix": "/tmp/dbms-final-post-fix-build-tests.log"
+        "integrated_full_suite_after_legacy_expectation_fix": "/tmp/dbms-final-post-fix-build-tests.log",
+        "integrated_pg18_full_actual_461_timeout120": "/tmp/dbms-final-post-fix-pgdiff-timeout120.log",
+        "default_timeout_first_attempt_preserved": "/tmp/dbms-final-post-fix-pgdiff.log",
+        "default_timeout_case_retry_timeout120": "/tmp/dbms-pgdiff-foreign-key-empty-text-retry-v2-958.log"
       }
     },
     {

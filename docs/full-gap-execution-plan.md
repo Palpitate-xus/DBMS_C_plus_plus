@@ -1,6 +1,6 @@
 # 总差距清单执行计划
 
-2026-10-02 最新局部整合：第958 source `3cfe28db`→D `70c5a116`，第956 source `802344c6`→D `c6afebd1`；958禁止TEMP对象访问事务PREPARE绕过并校正LOCK TABLE command tag，956校验ADD CHECK既有数据并修正错误状态。两项各自PG18.6强oracle及专项验收通过；956旧native状态断言已更新。整合源码 `scripts/build_tests.sh` 已通过460个C++及197个E2E／协议入口；同一生产二进制的完整PG18.6实际差分仍运行。全功能总账仍有partial/unverified/deferred，不作“全部完成”声明。
+2026-10-02 最新局部整合：第958 source `3cfe28db`→D `70c5a116`，第956 source `802344c6`→D `c6afebd1`；958禁止TEMP对象访问事务PREPARE绕过并校正LOCK TABLE command tag，956校验ADD CHECK既有数据并修正错误状态。两项各自PG18.6强oracle及专项验收通过；956旧native状态断言已更新。整合源码 `scripts/build_tests.sh` 通过460个C++及197个E2E／协议入口；同一生产二进制对PG18.6运行461个actual case、`failed=0`（协议预算120秒）。默认15秒的首次全量差分在一个20秒DROP上timeout，保留日志；单case提高预算通过后再启动全量，不隐藏源码差异。全功能总账仍有partial/unverified/deferred，不作“全部完成”声明。
 
 当前D整合代码同时包含948 cleanup identities的修复（`d1dee20b`）和954／955字面量保护；本地组合回归已通过。下方旧记录保留在各自冻结时点，出现“待集成／待验收”时以其当时状态为准，不代表当前工作树仍未合入。
 

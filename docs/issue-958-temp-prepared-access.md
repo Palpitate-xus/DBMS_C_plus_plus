@@ -16,7 +16,8 @@ SQL `PREPARE` 和协议 Parse 使用只读 catalog／AST walker 标记被分析�
 - 18 个不同 native C++：`/tmp/dbms-temp-prepared-access-lock-tag-final-native-18-958.log`
 - 19 个 wire（含完整 `postgres_protocol_test.py`）：`/tmp/dbms-temp-prepared-access-lock-tag-final-wire-19-958.log`
 - 19 个不同 PostgreSQL actual case：`/tmp/dbms-temp-prepared-access-lock-tag-final-actual-19-958.log`（20 次执行中有一次重复匹配，只计一次）
+- 整合D源码完整差分：`/tmp/dbms-final-post-fix-pgdiff-timeout120.log`，461 cases、`failed=0`，设置 `DBMS_PROTOCOL_TEST_TIMEOUT=120`
 
-旧生产错误允许 TEMP PREPARE、P-only 漏检、derived／CTE 漏检和错误 LOCK tag 均保留在原失败日志中；中间失败不以最终成功覆盖。D 集成后的完整 `scripts/build_tests.sh` 另在 `/tmp/dbms-final-post-fix-build-tests.log` 完成，含该项新增协议回归。
+旧生产错误允许 TEMP PREPARE、P-only 漏检、derived／CTE 漏检和错误 LOCK tag 均保留在原失败日志中；中间失败不以最终成功覆盖。D 集成后的完整 `scripts/build_tests.sh` 在 `/tmp/dbms-final-post-fix-build-tests.log` 完成，460个C++与197个E2E／协议入口全部通过，含该项新增协议回归。PG差分默认15秒首轮在 `foreign_key_update_empty_text` 的 `DROP TABLE diff_fk_empty_parent,diff_fk_empty_child` 处超时；日志 `/tmp/dbms-final-post-fix-pgdiff.log` 保留。该SQL单case在120秒预算下通过，之后才以同一预算重跑全量461 case并全部通过；未修改生产代码规避或吞掉错误。
 
 本修复只闭合受测 PREPARE 限制，不代表 PostgreSQL 全部 2PC 语义。CAT-13／CAT-15、TXN-05／TXN-06、SQL-13、PROTO-01／PROTO-02 继续为 partial；完整 TEMP namespace／对象族、2PC 全部 resource owner／subtransaction／invalidation／crash recovery、prepared type／plan 生命周期和完整 binder 尚未完成。
