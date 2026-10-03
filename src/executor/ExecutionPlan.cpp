@@ -1251,8 +1251,10 @@ bool SemiJoinOp::open() {
             std::vector<KeyValue> key;
             key.reserve(indexes.size());
             for (const size_t index : indexes) {
-                const bool isNull = source->lastColumnIsNull(index) ||
-                                    rawColumnIsNull(row, table, index);
+                // The child operator carries the authoritative SQL NULL
+                // bitmap. An empty text value is valid data and cannot be
+                // inferred to be NULL from its rendered payload.
+                const bool isNull = source->lastColumnIsNull(index);
                 key.push_back({StorageEngine::extractColumnValueStatic(
                                    row, table, index),
                                isNull});
@@ -1333,8 +1335,7 @@ bool SemiJoinOp::open() {
         innerHasRow = true;
         const std::string value =
             StorageEngine::extractColumnValueStatic(row, innerTbl_, innerIdx);
-        if (inner_->lastColumnIsNull(innerIdx) ||
-            rawColumnIsNull(row, innerTbl_, innerIdx)) {
+        if (inner_->lastColumnIsNull(innerIdx)) {
             innerHasNull = true;
         } else {
             innerKeys.insert(value);
@@ -1346,8 +1347,7 @@ bool SemiJoinOp::open() {
     while (outer_->next(row)) {
         const std::string value =
             StorageEngine::extractColumnValueStatic(row, outerTbl_, outerIdx);
-        const bool outerIsNull = outer_->lastColumnIsNull(outerIdx) ||
-                                 rawColumnIsNull(row, outerTbl_, outerIdx);
+        const bool outerIsNull = outer_->lastColumnIsNull(outerIdx);
         const bool found = !outerIsNull && innerKeys.find(value) != innerKeys.end();
 
         // SQL's three-valued logic matters for NOT IN: a NULL in the inner

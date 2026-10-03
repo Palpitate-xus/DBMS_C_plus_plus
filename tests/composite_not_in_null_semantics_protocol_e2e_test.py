@@ -63,6 +63,18 @@ def main():
             "WHERE (a,b) NOT IN (SELECT a,b FROM composite_not_in_inner) "
             "ORDER BY a;",
             [["1", "2"], ["3", None], ["4", "5"], [None, "3"]])
+
+        # Empty text is a value, not SQL NULL, for scalar IN/NOT IN as well.
+        query("CREATE TABLE semi_empty_outer(id INT PRIMARY KEY,k TEXT);", [])
+        query("INSERT INTO semi_empty_outer VALUES(1,NULL),(2,''),(3,'other');", [])
+        query("CREATE TABLE semi_empty_inner(k TEXT);", [])
+        query("INSERT INTO semi_empty_inner VALUES('');", [])
+        query("SELECT id FROM semi_empty_outer "
+              "WHERE k IN (SELECT k FROM semi_empty_inner) ORDER BY id;",
+              [["2"]])
+        query("SELECT id FROM semi_empty_outer "
+              "WHERE k NOT IN (SELECT k FROM semi_empty_inner) ORDER BY id;",
+              [["3"]])
         print("[COMPOSITE NOT IN NULL SEMANTICS E2E] passed")
     finally:
         runner.stop_ours(server)

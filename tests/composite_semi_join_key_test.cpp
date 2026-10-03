@@ -29,6 +29,10 @@ int main() {
         "b VARCHAR(40))", session));
     assert(!ddl.executeSql(
         "CREATE TABLE inner_keys (a VARCHAR(40), b VARCHAR(40))", session));
+    assert(!ddl.executeSql(
+        "CREATE TABLE scalar_outer_keys (id INT PRIMARY KEY, k TEXT)", session));
+    assert(!ddl.executeSql(
+        "CREATE TABLE scalar_inner_keys (k TEXT)", session));
 
     const std::string separator(1, '\x01');
     assert(g_engine.insert(
@@ -61,6 +65,18 @@ int main() {
                database, "outer_keys",
                {{"id", "4"}, {"a", ""}, {"b", "z"}}) ==
            dbms::DBStatus::OK);
+    assert(g_engine.insert(
+               database, "scalar_outer_keys",
+               {{"id", "1"}, {"k", "NULL"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(
+               database, "scalar_outer_keys",
+               {{"id", "2"}, {"k", ""}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(
+               database, "scalar_outer_keys",
+               {{"id", "3"}, {"k", "other"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(
+               database, "scalar_inner_keys", {{"k", ""}}) ==
+           dbms::DBStatus::OK);
 
     dbms::SemiJoinSpec semi;
     semi.dbname = database;
@@ -77,6 +93,39 @@ int main() {
         dbms::QueryPlanner::buildSelectPlan(&g_engine, context));
     assert(result.ok);
     assert(result.rows == (std::vector<std::string>{"1 ", "3 "}));
+
+    dbms::SemiJoinSpec scalarSemi;
+    scalarSemi.dbname = database;
+    scalarSemi.tablename = "scalar_inner_keys";
+    scalarSemi.outerColumn = "k";
+    scalarSemi.innerColumn = "k";
+    dbms::PlanContext scalarInContext;
+    scalarInContext.dbname = database;
+    scalarInContext.tablename = "scalar_outer_keys";
+    scalarInContext.selectCols = {"id"};
+    scalarInContext.orderByCol = "id";
+    scalarInContext.semiJoins.push_back(std::move(scalarSemi));
+    auto scalarInResult = dbms::QueryPlanner::executePlanChecked(
+        dbms::QueryPlanner::buildSelectPlan(&g_engine, scalarInContext));
+    assert(scalarInResult.ok);
+    assert(scalarInResult.rows == (std::vector<std::string>{"2 "}));
+
+    dbms::SemiJoinSpec scalarAnti;
+    scalarAnti.dbname = database;
+    scalarAnti.tablename = "scalar_inner_keys";
+    scalarAnti.outerColumn = "k";
+    scalarAnti.innerColumn = "k";
+    scalarAnti.anti = true;
+    dbms::PlanContext scalarNotInContext;
+    scalarNotInContext.dbname = database;
+    scalarNotInContext.tablename = "scalar_outer_keys";
+    scalarNotInContext.selectCols = {"id"};
+    scalarNotInContext.orderByCol = "id";
+    scalarNotInContext.semiJoins.push_back(std::move(scalarAnti));
+    auto scalarNotInResult = dbms::QueryPlanner::executePlanChecked(
+        dbms::QueryPlanner::buildSelectPlan(&g_engine, scalarNotInContext));
+    assert(scalarNotInResult.ok);
+    assert(scalarNotInResult.rows == (std::vector<std::string>{"3 "}));
 
     dbms::ExistenceSpec notExists;
     notExists.dbname = database;
