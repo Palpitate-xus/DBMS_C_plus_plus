@@ -1,5 +1,7 @@
 # DBMS_C_plus_plus 对标 PostgreSQL 18.6：完整差距清单
 
+2026-10-03 第974项 source/test commit `c18bd1bd`：确认 tuple header 的 `xmin/xmax` 仍为32位，而事务ID分配器是64位且没有epoch/freeze/wraparound机制；原逻辑超过 `UINT32_MAX` 后会继续分配并在tuple header写入时静默截断。现在在最后一个可表示的tuple XID后fail closed，拒绝后续事务ID分配，并增加边界、持久化高水位和重启回归。生产构建及完整注册套件 `DBMS_PROTOCOL_TEST_TIMEOUT=120 DBMS_PROTOCOL_STARTUP_TIMEOUT=120 DBMS_PROTOCOL_SHUTDOWN_TIMEOUT=120 bash scripts/build_tests.sh` 均通过（`All tests passed`）。这是避免静默事务可见性损坏的临时安全上限，不实现XID epoch、freeze、MultiXact或vacuum horizon；P0-08仍partial，未勾选。详情见 `docs/issue-974-xid-tuple-width-guard.md`。未push，GitHub Actions禁用，用户跳过的安全/TDE继续deferred。
+
 2026-10-03 第973项最终验收：修复SemiJoinOp把空文本误识别为NULL的标量／复合 `IN`／`NOT IN` 问题，source/test commit `d6ce9adf`。最终注册测试套件 exit 0（`All tests passed`）；同一源码对真实本地 PostgreSQL 18.6（180006、en_US.utf8）完整兼容差分 `cases=464 failed=0`。本次只确认这些已覆盖行为一致，不将 QRY-04／QRY-10 或任何更大功能族标为完成；273项总账仍22 complete、140 partial、96 unverified、15 deferred_by_user。未push，Actions禁用，用户跳过的安全/TDE继续deferred。详情见 `docs/issue-973-semi-join-empty-text-null.md`。
 
 2026-10-03 第965项 source `aa27818d` 改用列类型语义判断WITH TIES peers，修复CHAR尾随空格并让未知比较类型安全回0A000。生产build、定向结构化wire、FETCH boundary E2E及最终全量套件460 C++／197 E2E全部通过；fresh en_US.utf8 PG18.6 `set_operation_precedence` 差分 cases=1 failed=0。更大PG18差分在 `quoted_sequence_dot_schema_owned` 的DROP TABLE等待120秒超时；该三条sequence case family的fresh focused复跑均通过，未据此宣称全量差分通过。QRY-06仍partial，详见 `docs/issue-965-fetch-ties-column-equality.md`。

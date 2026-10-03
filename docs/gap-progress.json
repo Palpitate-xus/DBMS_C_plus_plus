@@ -2,6 +2,19 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "974",
+      "gap_ids": ["P0-08"],
+      "status": "partial",
+      "integrated_source_commit": "c18bd1bd",
+      "evidence": ["docs/code-review-progress.md", "docs/issue-974-xid-tuple-width-guard.md", "src/transaction/TxnIdGenerator.cpp", "src/transaction/TxnIdGenerator.h", "src/storage/HeapTupleHeader.h"],
+      "tests": ["tests/txnid_generator_test.cpp", "scripts/build_tests.sh"],
+      "verification": {
+        "focused_boundary_test": "bash scripts/build_one_test.sh txnid_generator_test src/transaction/TxnIdGenerator.cpp: passed; UINT32_MAX is allocated exactly once, the next allocation returns 0, persisted next/high-water remain correct, and restart continues to reject allocation",
+        "full_registered_suite": "DBMS_PROTOCOL_TEST_TIMEOUT=120 DBMS_PROTOCOL_STARTUP_TIMEOUT=120 DBMS_PROTOCOL_SHUTDOWN_TIMEOUT=120 bash scripts/build_tests.sh: exit 0; All tests passed",
+        "scope": "Fail-closed protection prevents 32-bit tuple XID truncation but does not implement epochs, freezing, MultiXact, or vacuum horizons; P0-08 remains partial"
+      }
+    },
+    {
       "issue": "973",
       "gap_ids": ["QRY-04", "P0-16"],
       "status": "partial",
@@ -318,7 +331,7 @@
     {"id":"P0-05","status":"partial","evidence":["docs/code-review-progress.md","src/access/IndexFileUtil.h","src/replication/LogicalDecoder.cpp","src/commands/TableManage.cpp","src/access/BPTree.cpp","src/storage/BufferPool.cpp","src/executor/ExecutionPlan.cpp"],"tests":["tests/logical_decoding_test.cpp","tests/txnid_generator_test.cpp","tests/large_object_reopen_test.cpp","tests/ddl_transaction_skeleton_test.cpp","tests/physical_backup_consistency_test.cpp","tests/physical_restore_consistency_test.cpp","tests/physical_backup_manifest_test.cpp","tests/physical_backup_replacement_test.cpp","tests/physical_restore_validation_test.cpp","tests/alter_table_only_test.cpp","tests/div14_feature_gate_test.py","tests/compat/pg_diff_runner.py","tests/compat/cases/sequence_owned_schema_space.sql","tests/sequence_full_test.cpp","tests/compat/cases/sequence_owned_escaped_schema.sql","tests/unlogged_recovery_test.cpp","tests/compat/cases/unlogged_table_drop_transaction_probe.sql","tests/compat/cases/unlogged_toast_drop_rollback.sql","tests/missing_btree_file_guard_test.cpp","tests/missing_index_protocol_e2e_test.py"],"commits":["da08f25","c7085b0","e6ed0a8","4b269c2","2ff499c","d28da5f","7cb852b","e1f48e5","ce7b149d","c8de14b3","12d83c49","901a683c","690d5af5","0ef89e99","f160a212","f13a7c0b","85d3bb5a","48e70ded","747ff8da"]},
     {"id":"P0-06","status":"partial","evidence":["src/storage/WAL.h","src/commands/TableManage.cpp","src/access/BPTree.cpp","src/access/HashIndex.cpp","docs/code-review-progress.md"],"tests":["tests/redo_crash_recovery_test.cpp","tests/reindex_atomicity_test.cpp"]},
     {"id":"P0-07","status":"partial","evidence":["docs/code-review-progress.md","src/commands/TableManage.h","src/commands/TableManage.cpp","src/main.cpp","src/transaction/LockManager.cpp","scripts/build_common.sh"],"tests":["tests/subxip_visibility_test.cpp","tests/dml_cte_protocol_e2e_test.py","tests/prepared_transaction_test.cpp","tests/cross_backend_lock_test.cpp","tests/lock_manager_concurrency_test.cpp","tests/for_share_nowait_protocol_e2e_test.py","tests/transaction_isolation_protocol_e2e_test.py","tests/mvcc_update_test.cpp","tests/snapshot_export_import_test.cpp","tests/compat/pg_diff_runner.py","tests/compat/cases/locking_select_autocommit.sql","tests/for_update_no_gap_lock_test.cpp","tests/for_update_insert_gap_protocol_e2e_test.py"],"commits":["9f1475f","f630ef5","ef96376","aaededf","715eeebd","ab386e79","c27cc514","23850200","e758d318","36f3d341","1c4c8824","02f02ee1"]},
-    {"id":"P0-08","status":"unverified","evidence":[]},
+    {"id":"P0-08","status":"partial","evidence":["docs/code-review-progress.md","docs/issue-974-xid-tuple-width-guard.md","src/transaction/TxnIdGenerator.cpp","src/transaction/TxnIdGenerator.h","src/storage/HeapTupleHeader.h"],"tests":["tests/txnid_generator_test.cpp","scripts/build_tests.sh"],"commits":["c18bd1bd"]},
     {"id":"P0-09","status":"partial","evidence":["docs/code-review-progress.md","src/common/DataDirectory.cpp","src/transaction/LockManager.cpp","src/main.cpp","src/commands/TableManage.cpp"],"tests":["tests/data_directory_e2e_test.py","tests/checksum_verification_e2e_test.py","tests/cross_backend_lock_test.cpp","tests/lock_manager_concurrency_test.cpp","tests/for_share_nowait_protocol_e2e_test.py","tests/compat/cases/locking_select_autocommit.sql"],"commits":["425b3f6","715eeebd","ab386e79","c27cc514","23850200","e758d318","36f3d341","1c4c8824"]},
     {"id":"P0-10","status":"partial","evidence":["docs/code-review-progress.md","src/commands/TableManage.cpp"],"tests":["tests/physical_backup_consistency_test.cpp","tests/physical_restore_consistency_test.cpp","tests/physical_backup_manifest_test.cpp","tests/physical_backup_replacement_test.cpp","tests/physical_restore_validation_test.cpp","tests/ddl_transaction_skeleton_test.cpp","tests/pitr_recovery_test.cpp"],"commits":["c7085b0","e6ed0a8","4b269c2","2ff499c","d28da5f","129d2ee","e1f48e5"]},
     {"id":"P0-11","status":"partial","evidence":["docs/code-review-progress.md","docs/implementation-plan.md","src/replication/ReplicationManager.h","src/replication/ReplicationManager.cpp"],"tests":["tests/replication_test.cpp","tests/phase8_10_test.cpp","tests/replication_concurrency_test.cpp"],"commits":["c1a8e6e"]},
