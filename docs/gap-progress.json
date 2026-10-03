@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "970",
+      "gap_ids": ["P0-16"],
+      "status": "partial",
+      "integrated_source_commit": "06c483a7",
+      "evidence": ["docs/code-review-progress.md", "docs/full-gap-execution-plan.md", "tests/compat/pg_diff_runner.py"],
+      "tests": ["DBMS_PROTOCOL_TEST_TIMEOUT=120 DBMS_PROTOCOL_STARTUP_TIMEOUT=120 DBMS_PROTOCOL_SHUTDOWN_TIMEOUT=120 bash scripts/build_tests.sh", "python3 tests/compat/pg_diff_runner.py"],
+      "verification": {
+        "full_cpp_protocol_e2e_suite": "final combined source exited 0 and reported All tests passed; all registered C++/protocol/E2E entries passed, including drop_multiple_fk_group_protocol_e2e_test.py",
+        "full_pg18_differential": "blocked before SQL cases: runner reference preflight closed while reading a PostgreSQL message; default pgref reports server_version_num=170002 (PG 17.2), and pulling postgres:18.6 failed on Docker Hub network timeout. No differential SQL cases were run; P0-16 remains partial"
+      }
+    },
+    {
       "issue": "969",
       "gap_ids": ["IDX-03", "IDX-14"],
       "status": "partial",
