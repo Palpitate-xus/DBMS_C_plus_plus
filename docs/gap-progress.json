@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "969",
+      "gap_ids": ["IDX-03", "IDX-14"],
+      "status": "partial",
+      "integrated_source_commit": "06c483a7",
+      "evidence": ["docs/code-review-progress.md", "docs/issue-969-reindex-closed-corrupt-index.md", "src/commands/TableManage.cpp"],
+      "tests": ["tests/index_scan_corruption_error_test.cpp", "tests/reindex_atomicity_test.cpp", "tests/index_corruption_protocol_e2e_test.py"],
+      "verification": {
+        "production_build": "bash scripts/build.sh: passed",
+        "focused_cpp": "index_scan_corruption_error_test and reindex_atomicity_test: passed",
+        "focused_protocol": "index_corruption_protocol_e2e_test.py: passed",
+        "full_suite": "not rerun after this change; issue-968 records the preceding full-suite run and its one server-start connection abort"
+      }
+    },
+    {
       "issue": "968",
       "gap_ids": ["IDX-05", "IDX-14"],
       "status": "partial",
