@@ -19,12 +19,98 @@ def main():
             "CREATE TABLE setop_edges (id INT, v TEXT);",
             ("INSERT INTO setop_edges VALUES "
              "(1, 'a b'), (2, ''), (3, 'NULL'), (4, NULL), "
-             "(5, 'line1\nline2'), (6, '  edge  ');")
+             "(5, 'line1\nline2'), (6, '  edge  ');"),
+            ("CREATE TABLE fetch_ties_plain "
+             "(id INT, score NUMERIC, label TEXT);"),
+            ("INSERT INTO fetch_ties_plain VALUES "
+             "(1, 10, 'z'), (2, 20, 'b'), (3, 20.00, 'a'), "
+             "(4, 20.0, 'a'), (5, 30, 'z'), "
+             "(6, NULL, 'null-a'), (6, NULL, 'null-a');")
         ]
         for sql in setup:
             _, state, message, _ = runner.ours_query(
                 client, server["sock"], sql)
             assert state is None, (sql, state, message)
+
+        plain_ties = runner.decode_wire_result(
+            client.simple_query(
+                server["sock"],
+                ("SELECT id, score FROM fetch_ties_plain ORDER BY score "
+                 "FETCH FIRST 2 ROWS WITH TIES;")),
+            include_types=True)
+        rows, state, message, headers, command_tag, type_oids = plain_ties
+        assert state is None, (state, message)
+        assert rows == [["1", "10"], ["2", "20"],
+                        ["3", "20.00"], ["4", "20.0"]], rows
+        assert headers == ["id", "score"], headers
+        assert type_oids == [23, 1700], type_oids
+        assert command_tag == "SELECT 4", command_tag
+
+        plain_alias_ties = runner.decode_wire_result(
+            client.simple_query(
+                server["sock"],
+                ("SELECT score AS amount, id FROM fetch_ties_plain "
+                 "ORDER BY amount FETCH FIRST 2 ROWS WITH TIES;")),
+            include_types=True)
+        rows, state, message, headers, command_tag, type_oids = \
+            plain_alias_ties
+        assert state is None, (state, message)
+        assert rows == [["10", "1"], ["20", "2"],
+                        ["20.00", "3"], ["20.0", "4"]], rows
+        assert headers == ["amount", "id"], headers
+        assert type_oids == [1700, 23], type_oids
+        assert command_tag == "SELECT 4", command_tag
+
+        plain_offset_ties = runner.decode_wire_result(
+            client.simple_query(
+                server["sock"],
+                ("SELECT id, score FROM fetch_ties_plain ORDER BY score "
+                 "OFFSET 1 ROW FETCH NEXT 1 ROW WITH TIES;")),
+            include_types=True)
+        rows, state, message, headers, command_tag, type_oids = \
+            plain_offset_ties
+        assert state is None, (state, message)
+        assert rows == [["2", "20"], ["3", "20.00"], ["4", "20.0"]], rows
+        assert type_oids == [23, 1700], type_oids
+        assert command_tag == "SELECT 3", command_tag
+
+        plain_multi_key_ties = runner.decode_wire_result(
+            client.simple_query(
+                server["sock"],
+                ("SELECT label, id, score FROM fetch_ties_plain "
+                 "ORDER BY score DESC NULLS LAST, label ASC "
+                 "FETCH FIRST 2 ROWS WITH TIES;")),
+            include_types=True)
+        rows, state, message, headers, command_tag, type_oids = \
+            plain_multi_key_ties
+        assert state is None, (state, message)
+        assert rows == [["z", "5", "30"], ["a", "3", "20.00"],
+                        ["a", "4", "20.0"]], rows
+        assert headers == ["label", "id", "score"], headers
+        assert type_oids == [25, 23, 1700], type_oids
+        assert command_tag == "SELECT 3", command_tag
+
+        plain_null_ties = runner.decode_wire_result(
+            client.simple_query(
+                server["sock"],
+                ("SELECT id, score FROM fetch_ties_plain "
+                 "ORDER BY score NULLS FIRST "
+                 "FETCH FIRST 1 ROW WITH TIES;")),
+            include_types=True)
+        rows, state, message, headers, command_tag, type_oids = plain_null_ties
+        assert state is None, (state, message)
+        assert rows == [["6", None], ["6", None]], rows
+        assert type_oids == [23, 1700], type_oids
+        assert command_tag == "SELECT 2", command_tag
+
+        hidden_order_key = runner.decode_wire_result(
+            client.simple_query(
+                server["sock"],
+                ("SELECT id FROM fetch_ties_plain ORDER BY score "
+                 "FETCH FIRST 1 ROW WITH TIES;")),
+            include_types=True)
+        _, state, message, _, _, _ = hidden_order_key
+        assert state == "0A000", (state, message)
 
         sql = ("SELECT upper(v) AS value FROM setop_edges "
                "UNION ALL SELECT 'tail'::text;")
@@ -314,6 +400,27 @@ def main():
                    for kind, body in messages), messages
         assert messages[-1] == (b"Z", b"I"), messages
 
+        parse = (b"plain_ties_stmt\0SELECT id, score FROM fetch_ties_plain "
+                 b"ORDER BY score FETCH FIRST 2 ROWS WITH TIES\0" +
+                 struct.pack("!H", 0))
+        bind = (b"plain_ties_portal\0plain_ties_stmt\0" +
+                struct.pack("!H", 0) + struct.pack("!H", 0) +
+                struct.pack("!H", 0))
+        extended = client.typed(b"P", parse) + \
+            client.typed(b"B", bind) + \
+            client.typed(b"E", b"plain_ties_portal\0" +
+                         struct.pack("!I", 0)) + client.typed(b"S")
+        server["sock"].sendall(extended)
+        messages = client.read_until_ready(server["sock"])
+        assert not any(kind == b"E" for kind, _ in messages), messages
+        assert client.data_row_values(messages) == [
+            [b"1", b"10"], [b"2", b"20"],
+            [b"3", b"20.00"], [b"4", b"20.0"]
+        ], messages
+        assert any(kind == b"C" and body == b"SELECT 4\0"
+                   for kind, body in messages), messages
+        assert messages[-1] == (b"Z", b"I"), messages
+
         error_cases = [
             ("SELECT 1 UNION SELECT 1, 2;", "42601"),
             ("SELECT 1 UNION SELECT DATE '2024-01-01';", "42804"),
@@ -322,6 +429,8 @@ def main():
              "42702"),
             ("SELECT 1 UNION ALL SELECT 1 FETCH FIRST 1 ROW WITH TIES;",
              "42601"),
+            ("SELECT id FROM fetch_ties_plain "
+             "FETCH FIRST 1 ROW WITH TIES;", "42601"),
         ]
         for sql, expected_state in error_cases:
             _, state, _, _ = runner.ours_query(

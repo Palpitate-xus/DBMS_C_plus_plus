@@ -626,7 +626,6 @@ static size_t findUnquotedIdentifierWhitespace(const string& text,
 
 static string foldConstants(const string& s);
 static size_t findTopLevelKeyword(const string& sql, const string& kw, size_t startPos);
-static bool hasTopLevelSetOperation(const string& sql);
 static string unwrapParenthesizedQuery(const string& sql);
 static size_t findTextOutsideQuotes(const string& sql, const string& text,
                                     size_t from = 0);
@@ -1057,13 +1056,10 @@ static string sqlProcessor(string raw, bool /*normalizeBooleanLiterals*/ = false
                             "FETCH WITH TIES requires ORDER BY "
                             "(SQLSTATE 42601)");
                     }
-                    if (!hasTopLevelSetOperation(raw)) {
-                        throw runtime_error(
-                            "feature not supported: outer FETCH WITH TIES "
-                            "(SQLSTATE 0A000)");
-                    }
-                    // Keep this tail intact so the set-operation result path
-                    // can extend FETCH to include peers of the boundary row.
+                    // Keep the tail intact here.  The set-operation executor
+                    // applies FETCH after combining its operands; ordinary
+                    // SELECT lowering handles its narrower structured subset
+                    // after statement dispatch.
                 } else {
                     const string count = fetchMatch[1].matched
                         ? fetchMatch[1].str() : "1";
@@ -6227,13 +6223,6 @@ static SetOperationSplit findTopLevelSetOperation(const string& sql) {
         i += length - 1;
     }
     return selected;
-}
-
-static bool hasTopLevelSetOperation(const string& sql) {
-    if (findTopLevelSetOperation(sql).position != string::npos) return true;
-    const string unwrapped = unwrapParenthesizedQuery(sql);
-    return unwrapped != trim(sql) &&
-        findTopLevelSetOperation(unwrapped).position != string::npos;
 }
 
 struct StructuredSetOperand {
@@ -16412,6 +16401,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
     g_engine.setMoneyLocale(s.lcMonetary);
     dbms::setCurrentSession(&s);
     bool sawUserVariable = false;
+    bool queryFetchWithTies = false;
+    size_t queryFetchWithTiesCount = 0;
+    struct FetchTieKey {
+        size_t rowColumn = 0;
+        std::string type;
+        std::string collation;
+    };
+    std::vector<FetchTieKey> queryFetchTieKeys;
     const string effectiveRawSql =
         expandSessionUserVariables(rawSql, s, sawUserVariable);
     if (sawUserVariable &&
@@ -19610,6 +19607,157 @@ static bool executeInternal(const string& rawSql, Session& s) {
     bool setOperationHandled = false;
     if (executeSetOperation(sql, s, setOperationHandled)) return true;
     if (setOperationHandled) return false;
+
+    // Lower ordinary SELECT FETCH WITH TIES only after set operations have had
+    // a chance to claim their complete result.  The legacy SELECT executor
+    // slices after ordering, so retain a small sideband to include rows whose
+    // projected plain-column ordering keys equal the boundary row.
+    {
+        const size_t fetchPos = findTopLevelKeyword(sql, "fetch");
+        if (fetchPos != string::npos) {
+            const std::vector<std::string> tokens = tokenize(
+                trim(sql.substr(fetchPos + 5)));
+            if (tokens.size() >= 4) {
+                const std::string direction = toLower(tokens[0]);
+                const bool hasCount = toLower(tokens[1]) != "row" &&
+                    toLower(tokens[1]) != "rows";
+                const size_t rowIndex = hasCount ? 2 : 1;
+                const size_t modeIndex = rowIndex + 1;
+                const bool withTies =
+                    (direction == "first" || direction == "next") &&
+                    rowIndex < tokens.size() &&
+                    (toLower(tokens[rowIndex]) == "row" ||
+                     toLower(tokens[rowIndex]) == "rows") &&
+                    modeIndex + 1 < tokens.size() &&
+                    toLower(tokens[modeIndex]) == "with" &&
+                    toLower(tokens[modeIndex + 1]) == "ties";
+                if (withTies) {
+                    if (tokens.size() != modeIndex + 2) {
+                        throw dbms::DbError(
+                            "42601", "invalid FETCH WITH TIES clause");
+                    }
+                    if (findTopLevelKeyword(
+                            sql.substr(0, fetchPos), "limit") !=
+                        string::npos) {
+                        throw dbms::DbError(
+                            "42601", "LIMIT and FETCH cannot both be specified");
+                    }
+                    const std::string count = hasCount ? tokens[1] : "1";
+                    size_t parsedCount = 0;
+                    try {
+                        size_t consumed = 0;
+                        const unsigned long long value =
+                            std::stoull(count, &consumed);
+                        if (consumed != count.size() ||
+                            value > std::numeric_limits<size_t>::max())
+                            throw std::out_of_range("FETCH count");
+                        parsedCount = static_cast<size_t>(value);
+                    } catch (const std::exception&) {
+                        throw dbms::DbError(
+                            "42601", "invalid FETCH count in WITH TIES");
+                    }
+
+                    dbms::SQLParser parser;
+                    const auto parsed = parser.parse(sql);
+                    const auto* select = parsed.success
+                        ? dynamic_cast<const dbms::SelectStmt*>(
+                              parsed.stmt.get())
+                        : nullptr;
+                    if (!select || !select->withTies ||
+                        select->orderBy.empty()) {
+                        throw dbms::DbError(
+                            "42601", "invalid FETCH WITH TIES query");
+                    }
+                    if (!select->fromClause ||
+                        select->fromClause->type !=
+                            dbms::FromItem::Type::Table ||
+                        select->fromClause->left ||
+                        select->fromClause->right ||
+                        !select->ctes.empty() || !select->groupBy.empty() ||
+                        !select->groupByElems.empty() || select->having ||
+                        select->distinct || !select->distinctOn.empty() ||
+                        !select->locking.empty() ||
+                        !select->windowDefs.empty() ||
+                        select->setOp != dbms::SetOp::None ||
+                        select->setOpLhs || select->setOpRhs) {
+                        throw dbms::DbError(
+                            "0A000", "FETCH WITH TIES currently requires a "
+                                     "plain single-table SELECT");
+                    }
+                    dbms::CatalogManager::QualifiedName relation;
+                    const bool validRelation =
+                        dbms::CatalogManager::parseQualifiedName(
+                            select->fromClause->tableName, relation, true);
+                    if (!validRelation ||
+                        relation.schema == "pg_catalog" ||
+                        relation.schema == "information_schema" ||
+                        (relation.schema.empty() &&
+                         relation.name.rfind("pg_", 0) == 0)) {
+                        throw dbms::DbError(
+                            "0A000", "FETCH WITH TIES is not supported for "
+                                     "virtual catalog relations");
+                    }
+                    bool wildcard = false;
+                    std::set<std::string> projectedColumns;
+                    for (const auto& item : select->selectList) {
+                        const auto* column = item.expr
+                            ? dynamic_cast<const dbms::ColumnRefExpr*>(
+                                  item.expr.get())
+                            : nullptr;
+                        if (!column) {
+                            throw dbms::DbError(
+                                "0A000", "FETCH WITH TIES currently requires "
+                                         "plain-column projections");
+                        }
+                        if (column->column == "*") {
+                            wildcard = true;
+                            continue;
+                        }
+                        projectedColumns.insert(column->column);
+                        if (!item.alias.empty())
+                            projectedColumns.insert(item.alias);
+                    }
+                    for (const auto& order : select->orderBy) {
+                        const auto* column = order.expr
+                            ? dynamic_cast<const dbms::ColumnRefExpr*>(
+                                  order.expr.get())
+                            : nullptr;
+                        if (!column || !order.usingOp.empty() ||
+                            (!wildcard &&
+                             !projectedColumns.count(column->column))) {
+                            throw dbms::DbError(
+                                "0A000", "FETCH WITH TIES currently requires "
+                                         "projected plain-column ORDER BY keys");
+                        }
+                    }
+
+                    static const std::regex fetchClause(
+                        R"(^fetch\s+(?:first|next)(?:\s+([0-9]+))?\s+rows?\s+with\s+ties\b)");
+                    std::smatch match;
+                    const std::string tail = sql.substr(fetchPos);
+                    if (!std::regex_search(tail, match, fetchClause)) {
+                        throw dbms::DbError(
+                            "42601", "invalid FETCH WITH TIES clause");
+                    }
+                    size_t replacePos = fetchPos;
+                    size_t replaceEnd = fetchPos + match.length();
+                    std::string replacement = "limit " + count;
+                    const size_t offsetPos =
+                        findTopLevelKeyword(sql, "offset");
+                    if (offsetPos != string::npos && offsetPos < fetchPos) {
+                        const std::string offset = trim(sql.substr(
+                            offsetPos + 6, fetchPos - offsetPos - 6));
+                        replacement += " offset " + offset;
+                        replacePos = offsetPos;
+                    }
+                    sql.replace(replacePos, replaceEnd - replacePos,
+                                replacement);
+                    queryFetchWithTies = true;
+                    queryFetchWithTiesCount = parsedCount;
+                }
+            }
+        }
+    }
 
     // SHOW CONNECTIONS / SHOW STATUS
     if (sql.substr(0, 5) == "show ") {
@@ -23984,9 +24132,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     nullsSpecified = true;
                     sortItem = trim(sortItem.substr(0, nullsPos));
                 }
-                if (sortItem.size() >= 5 && sortItem.substr(sortItem.size() - 4) == "desc") {
-                    asc = false;
-                    sortItem = trim(sortItem.substr(0, sortItem.size() - 4));
+                const size_t directionStart = sortItem.find_last_of(" \t\r\n");
+                const string direction = toLower(trim(directionStart == string::npos
+                    ? string() : sortItem.substr(directionStart + 1)));
+                if (direction == "desc" || direction == "asc") {
+                    asc = direction != "desc";
+                    sortItem = trim(sortItem.substr(0, directionStart));
                 }
                 // PostgreSQL defaults NULLS LAST for ASC and NULLS FIRST for
                 // DESC.  An explicit NULLS clause always wins.
@@ -28756,7 +28907,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 rawWhereClause.find_first_of("()") == string::npos ||
                 hasBooleanGroupParenthesis;
             const bool captureStructuredPlain =
-                (shouldPublishQueryMetadata() || (isDistinct && distinctOnCols.empty())) &&
+                (shouldPublishQueryMetadata() ||
+                 (isDistinct && distinctOnCols.empty()) ||
+                 queryFetchWithTies) &&
                 simpleStructuredPlainPredicate &&
                 semiJoins.empty() && existenceFilters.empty() &&
                 quantifiedSubqueries.empty() &&
@@ -28764,6 +28917,51 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 queryDb != "information_schema" && queryDb != "pg_catalog" &&
                 (s.onlyNext ||
                  g_engine.getInheritedChildren(queryDb, tname).empty());
+            if (queryFetchWithTies) {
+                if (!captureStructuredPlain || orderKeyRefs.empty() ||
+                    orderKeyRefs.size() != orderBySpecs.size() ||
+                    any_of(orderKeyRefs.begin(), orderKeyRefs.end(),
+                           [](const auto& key) { return key.first; })) {
+                    throw dbms::DbError(
+                        "0A000", "FETCH WITH TIES requires structured "
+                                 "plain-column ordering");
+                }
+                vector<size_t> selectedSchemaColumns;
+                for (size_t column = 0; column < tbl.len; ++column) {
+                    if (selectAll || selectCols.count(tbl.cols[column].dataName))
+                        selectedSchemaColumns.push_back(column);
+                }
+                for (const auto& order : orderBySpecs) {
+                    size_t schemaColumn = tbl.len;
+                    for (size_t column = 0; column < tbl.len; ++column) {
+                        if (tbl.cols[column].dataName == order.colName) {
+                            schemaColumn = column;
+                            break;
+                        }
+                    }
+                    if (order.isExpression || schemaColumn == tbl.len) {
+                        throw dbms::DbError(
+                            "0A000", "FETCH WITH TIES ORDER BY keys must be "
+                                     "plain projected columns");
+                    }
+                    const auto position = find(selectedSchemaColumns.begin(),
+                                               selectedSchemaColumns.end(),
+                                               schemaColumn);
+                    if (position == selectedSchemaColumns.end()) {
+                        throw dbms::DbError(
+                            "0A000", "FETCH WITH TIES ORDER BY keys must be "
+                                     "present in the SELECT list");
+                    }
+                    const Column& column = tbl.cols[schemaColumn];
+                    queryFetchTieKeys.push_back({
+                        static_cast<size_t>(position - selectedSchemaColumns.begin()),
+                        column.dataType,
+                        !order.collation.empty() ? order.collation
+                            : (!column.resolvedCollation.empty()
+                                   ? column.resolvedCollation
+                                   : column.collation)});
+                }
+            }
             vector<StorageEngine::OrderBySpec> structuredPlainOrderSpecs;
             structuredPlainOrderSpecs.reserve(orderKeyRefs.size());
             for (const auto& [isExpression, keyIndex] : orderKeyRefs)
@@ -29437,6 +29635,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
         if (slicedRows && slicedNulls) {
             size_t count = 0, offset = 0;
             const bool finiteLimit = parseLimitOffset(count, offset);
+            if (queryFetchWithTies && !canSliceStructuredPlain) {
+                throw dbms::DbError(
+                    "0A000", "FETCH WITH TIES requires structured plain rows");
+            }
             if (offset >= answers.size()) {
                 answers.clear();
                 slicedRows->clear();
@@ -29448,12 +29650,84 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 slicedNulls->erase(
                     slicedNulls->begin(), slicedNulls->begin() + offset);
                 if (finiteLimit && count < answers.size()) {
-                    answers.resize(count);
-                    slicedRows->resize(count);
-                    slicedNulls->resize(count);
+                    size_t retained = count;
+                    if (queryFetchWithTies &&
+                        queryFetchTieKeys.size() != orderBySpecs.size()) {
+                        throw dbms::DbError(
+                            "XX000", "FETCH WITH TIES lost its ordering keys");
+                    }
+                    if (queryFetchWithTies && count > 0 &&
+                        queryFetchWithTiesCount != count) {
+                        throw dbms::DbError(
+                            "XX000", "FETCH WITH TIES count changed during lowering");
+                    }
+                    if (queryFetchWithTies && count > 0) {
+                        const size_t boundary = count - 1;
+                        const auto samePeer = [&](size_t left, size_t right) {
+                            for (const auto& key : queryFetchTieKeys) {
+                                const bool leftNull =
+                                    key.rowColumn >= slicedNulls->at(left).size() ||
+                                    slicedNulls->at(left)[key.rowColumn];
+                                const bool rightNull =
+                                    key.rowColumn >= slicedNulls->at(right).size() ||
+                                    slicedNulls->at(right)[key.rowColumn];
+                                if (leftNull != rightNull) return false;
+                                if (leftNull) continue;
+                                const std::string& leftValue =
+                                    slicedRows->at(left).at(key.rowColumn);
+                                const std::string& rightValue =
+                                    slicedRows->at(right).at(key.rowColumn);
+                                const std::string type = toLower(key.type);
+                                const bool numericType =
+                                    type == "smallint" || type == "int2" ||
+                                    type == "int" || type == "integer" ||
+                                    type == "int4" || type == "bigint" ||
+                                    type == "int8" || type == "numeric" ||
+                                    type == "decimal" || type == "real" ||
+                                    type == "float" || type == "float4" ||
+                                    type == "double" ||
+                                    type == "double precision" ||
+                                    type == "float8";
+                                int comparison = 0;
+                                if (numericType) {
+                                    try {
+                                        const dbms::Numeric leftNumber(leftValue);
+                                        const dbms::Numeric rightNumber(rightValue);
+                                        comparison = leftNumber < rightNumber
+                                            ? -1 : (rightNumber < leftNumber ? 1 : 0);
+                                    } catch (const std::exception&) {
+                                        comparison = leftValue.compare(rightValue);
+                                    }
+                                } else {
+                                    const std::string collation =
+                                        key.collation.empty()
+                                            ? "en_US.utf8" : key.collation;
+                                    comparison = dbms::collation::compare(
+                                        leftValue, rightValue, collation);
+                                    if (comparison == 0 &&
+                                        key.collation.empty()) {
+                                        comparison = leftValue.compare(rightValue);
+                                    }
+                                }
+                                if (comparison != 0) return false;
+                            }
+                            return true;
+                        };
+                        while (retained < answers.size() &&
+                               samePeer(boundary, retained)) {
+                            ++retained;
+                        }
+                    }
+                    answers.resize(retained);
+                    slicedRows->resize(retained);
+                    slicedNulls->resize(retained);
                 }
             }
         } else {
+            if (queryFetchWithTies) {
+                throw dbms::DbError(
+                    "0A000", "FETCH WITH TIES requires structured plain rows");
+            }
             applyLimitOffset(answers);
         }
         // Volcano emits UTC values; StorageEngine::query may already have
