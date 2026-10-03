@@ -1,5 +1,7 @@
 # 总差距清单执行计划
 
+2026-10-03 第961项 `9d095496` 本地提交后，重复set-operation输出名上的 `ORDER BY name` 不再错误绑定首列，而是按PG返回42702；有效序号仍不歧义。生产构建、结构化wire专项与PG18.6 direct oracle通过。全量门禁未跑，QRY-06仍partial，详见 `docs/issue-961-ambiguous-set-order-name.md`。不push。
+
 2026-10-03 第960项 `439a8ef7` 已本地提交：集合运算整体ORDER BY现按多个输出列名／序号稳定逐键排序，保持各键ASC/DESC、collation和NULL顺序；`bash scripts/build.sh`、结构化wire回归及PostgreSQL 18.6 direct read-only oracle通过。通用pg_diff预检拒绝配置的17.2 Docker实例，未计为PG18差分；最终源码未跑全套门禁。QRY-06仍partial，详见 `docs/issue-960-set-operation-multi-key-order.md`。不push。
 
 2026-10-02 第959项 `3df0fef7`／`fbd99ad3` 已本地提交：修复括号开头query expression的statement分流、完整操作数、尾部注释及括号表达式后的ORDER/LIMIT tail，保留递归查询typed metadata和locking statement事务边界。最终bash scripts/build.sh、结构化set-operation E2E、完整协议回归和PG18.6 `set_operation_precedence` 八语句case通过；早先同整合树的460 C++／197 E2E与462实际case全量通过发生在最后共享unwrap helper和三条专项SQL加入之前，因此最终源码只把helper后的定向结果记为复验，不冒充新全量。QRY-06仍partial，边界记录于 `docs/issue-959-parenthesized-set-operations.md`。不push。
