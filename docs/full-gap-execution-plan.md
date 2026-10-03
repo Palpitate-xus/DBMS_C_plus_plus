@@ -1,5 +1,7 @@
 # 总差距清单执行计划
 
+2026-10-03 第972项 `e5cc492b` 已本地提交：单表semi/anti-join计划此前仅传递排序列与方向，显式 `NULLS FIRST/LAST` 在QueryPlanner上下文中丢失，SortOp错误应用默认Null顺序；同时sorter无法区分空文本和SQL NULL。现保留显式Null放置并从行来源读取实际NULL状态；显式Null排序暂不走尚不携带该排序属性的并行GatherMerge路径。旧E2E明确复现FIRST变LAST，修复后通过；稳定生产build、排序terminator与结构化表wire回归通过，本机PG18.6只读oracle确认行序。QRY-10仍partial，详情见 `docs/issue-972-order-by-null-semantics-after-subquery.md`。全量suite与冻结组合差分待最后验收。不push。
+
 2026-10-03 第971项 `f0317ce6` 已本地提交：修复多列 `IN`／`NOT IN` 的SQL行比较三值逻辑。旧二进制在内层含 `(3,NULL)` 时把外层四行全部保留，错误地忽略“其他字段已确定不等”；PG18.6 row-comparison oracle确认应区分TRUE／UNKNOWN，空右侧仍令NOT IN为真。新增的协议E2E及相关subquery／外键可见性／完整协议回归通过；生产build已通过。QRY-04保持partial，相关子查询表达式、类型转换、ANY/ALL及完整语义仍待审；本轮全套测试待合并独立排序修复后再跑。详情见 `docs/issue-971-composite-not-in-null-semantics.md`。不push。
 
 2026-10-03 最终组合源码全量本地回归已通过：执行 `DBMS_PROTOCOL_TEST_TIMEOUT=120 DBMS_PROTOCOL_STARTUP_TIMEOUT=120 DBMS_PROTOCOL_SHUTDOWN_TIMEOUT=120 bash scripts/build_tests.sh`，exit 0，输出 `All tests passed`；覆盖全部已登记 C++、协议与 E2E 入口。上一轮 #968 的 `drop_multiple_fk_group_protocol_e2e_test.py` 服务启动断连仍保留为历史失败，本轮完整脚本中该用例通过。该结果验收了 #968/#969 的组合源码，不代表 PostgreSQL 18 功能差距清单已完成。独立的全量PG18.6实际差分未能开始：运行器reference preflight连接关闭；本机默认 `pgref` 为 PG 17.2 (`server_version_num=170002`)，拉取临时 `postgres:18.6` 镜像因 Docker Hub 网络超时失败，因此未对较旧版本冒充oracle或运行case，P0-16仍partial。总账仍273项：22 complete、140 partial、96 unverified、15 deferred_by_user；不push，Actions禁用，用户要求跳过的安全/TDE专项继续deferred。
