@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "967",
+      "gap_ids": ["P0-16"],
+      "status": "partial",
+      "integrated_test_commit": "fb5cb77e",
+      "evidence": ["docs/code-review-progress.md", "docs/issue-967-tochar-currency-fixture-locale.md", "tests/compat/cases/to_char_numeric.sql"],
+      "tests": ["tests/compat/cases/to_char_numeric.sql", "tests/compat/pg_diff_runner.py"],
+      "verification": {
+        "focused_pg18_differential": "PostgreSQL 18.6 to_char_numeric: cases=1 failed=0 after explicitly setting lc_monetary on both endpoints",
+        "full_pg18_differential": "not rerun after the fixture correction; issue 966 records the preceding 462-case run and mismatch"
+      }
+    },
+    {
       "issue": "966",
       "gap_ids": ["P0-02", "P0-16", "QRY-06"],
       "status": "partial",
