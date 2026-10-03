@@ -13,7 +13,8 @@
         "focused_wire": "DBMS_PROTOCOL_TEST_TIMEOUT=120 python3 tests/set_operation_structured_protocol_e2e_test.py: passed for UNION ALL ties, parentheses, OFFSET, NUMERIC equality, NULL peers and error boundary",
         "pg18_direct_oracle": "PostgreSQL 18.6 server_version_num=180006; exact result rows and SQLSTATE 42601 without ORDER BY matched",
         "pgdiff_runner_preflight": "not counted: configured Docker pgref is PostgreSQL 17.2 and strict PG18.6 preflight rejected it",
-        "full_suites": "not rerun after this change"
+        "full_suites": "scripts/build_tests.sh passed after this change: 460 C++ tests and 197 E2E/protocol entries, exit 0",
+        "full_pg18_differential": "not run; configured Docker reference is PostgreSQL 17.2 and strict PostgreSQL 18.6 preflight rejects it"
       }
     },
     {
