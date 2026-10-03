@@ -1049,6 +1049,12 @@ static string sqlProcessor(string raw, bool /*normalizeBooleanLiterals*/ = false
             smatch fetchMatch;
             if (regex_search(tail, fetchMatch, fetchClause)) {
                 if (fetchMatch[2].str() != "only") {
+                    if (findTopLevelKeyword(raw, "order by", 0) ==
+                        string::npos) {
+                        throw runtime_error(
+                            "FETCH WITH TIES requires ORDER BY "
+                            "(SQLSTATE 42601)");
+                    }
                     throw runtime_error("feature not supported: outer FETCH WITH TIES (SQLSTATE 0A000)");
                 }
                 const string count = fetchMatch[1].matched ? fetchMatch[1].str() : "1";

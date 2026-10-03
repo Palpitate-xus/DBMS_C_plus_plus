@@ -97,6 +97,33 @@ def main():
         assert type_oids == [23, 25], type_oids
         assert command_tag == "SELECT 4", command_tag
 
+        fetch_ordered = runner.decode_wire_result(
+            client.simple_query(
+                server["sock"],
+                ("SELECT 1 AS n UNION ALL SELECT 2 ORDER BY n "
+                 "FETCH NEXT 1 ROWS ONLY;")),
+            include_types=True)
+        rows, state, message, headers, command_tag, type_oids = fetch_ordered
+        assert state is None, (state, message)
+        assert rows == [["1"]], rows
+        assert headers == ["n"], headers
+        assert type_oids == [23], type_oids
+        assert command_tag == "SELECT 1", command_tag
+
+        offset_fetch_ordered = runner.decode_wire_result(
+            client.simple_query(
+                server["sock"],
+                ("SELECT 1 AS n UNION ALL SELECT 2 ORDER BY n "
+                 "OFFSET 1 ROWS FETCH FIRST ROW ONLY;")),
+            include_types=True)
+        rows, state, message, headers, command_tag, type_oids = \
+            offset_fetch_ordered
+        assert state is None, (state, message)
+        assert rows == [["2"]], rows
+        assert headers == ["n"], headers
+        assert type_oids == [23], type_oids
+        assert command_tag == "SELECT 1", command_tag
+
         null_ordered = runner.decode_wire_result(
             client.simple_query(
                 server["sock"],
@@ -223,6 +250,10 @@ def main():
             ("SELECT 1 AS n UNION SELECT 2 ORDER BY missing;", "42P10"),
             ("SELECT 1 AS x, 2 AS x UNION ALL SELECT 3, 4 ORDER BY x;",
              "42702"),
+            ("SELECT 1 UNION ALL SELECT 1 FETCH FIRST 1 ROW WITH TIES;",
+             "42601"),
+            ("SELECT 1 UNION ALL SELECT 1 ORDER BY 1 "
+             "FETCH FIRST 1 ROW WITH TIES;", "0A000"),
         ]
         for sql, expected_state in error_cases:
             _, state, _, _ = runner.ours_query(
