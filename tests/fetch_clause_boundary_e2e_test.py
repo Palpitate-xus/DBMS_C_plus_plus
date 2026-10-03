@@ -32,10 +32,11 @@ def main():
             rows, state, message, _ = runner.ours_query(client, server["sock"], sql)
             assert state is None, (sql, state, message)
             assert rows == expected, (sql, rows, expected)
-        _, state, message, _ = runner.ours_query(
+        rows, state, message, _ = runner.ours_query(
             client, server["sock"],
             "SELECT id FROM fetch_boundary_rows ORDER BY id FETCH FIRST 1 ROWS WITH TIES;")
-        assert state == "0A000", (state, message)
+        assert state is None, (state, message)
+        assert rows == [["1"]], rows
         print("[FETCH CLAUSE BOUNDARY E2E] passed")
     finally:
         runner.stop_ours(server)

@@ -16405,8 +16405,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
     size_t queryFetchWithTiesCount = 0;
     struct FetchTieKey {
         size_t rowColumn = 0;
-        std::string type;
-        std::string collation;
+        Column comparisonColumn;
     };
     std::vector<FetchTieKey> queryFetchTieKeys;
     const string effectiveRawSql =
@@ -28953,13 +28952,16 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                      "present in the SELECT list");
                     }
                     const Column& column = tbl.cols[schemaColumn];
+                    Column comparisonColumn = column;
+                    if (!order.collation.empty()) {
+                        comparisonColumn.collation = order.collation;
+                        comparisonColumn.resolvedCollation.clear();
+                        comparisonColumn.resolvedCollationUsesLocale = false;
+                        comparisonColumn.resolvedCollationIsBinary = true;
+                    }
                     queryFetchTieKeys.push_back({
                         static_cast<size_t>(position - selectedSchemaColumns.begin()),
-                        column.dataType,
-                        !order.collation.empty() ? order.collation
-                            : (!column.resolvedCollation.empty()
-                                   ? column.resolvedCollation
-                                   : column.collation)});
+                        std::move(comparisonColumn)});
                 }
             }
             vector<StorageEngine::OrderBySpec> structuredPlainOrderSpecs;
@@ -29677,39 +29679,23 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                     slicedRows->at(left).at(key.rowColumn);
                                 const std::string& rightValue =
                                     slicedRows->at(right).at(key.rowColumn);
-                                const std::string type = toLower(key.type);
-                                const bool numericType =
-                                    type == "smallint" || type == "int2" ||
-                                    type == "int" || type == "integer" ||
-                                    type == "int4" || type == "bigint" ||
-                                    type == "int8" || type == "numeric" ||
-                                    type == "decimal" || type == "real" ||
-                                    type == "float" || type == "float4" ||
-                                    type == "double" ||
-                                    type == "double precision" ||
-                                    type == "float8";
-                                int comparison = 0;
-                                if (numericType) {
-                                    try {
-                                        const dbms::Numeric leftNumber(leftValue);
-                                        const dbms::Numeric rightNumber(rightValue);
-                                        comparison = leftNumber < rightNumber
-                                            ? -1 : (rightNumber < leftNumber ? 1 : 0);
-                                    } catch (const std::exception&) {
-                                        comparison = leftValue.compare(rightValue);
-                                    }
-                                } else {
-                                    const std::string collation =
-                                        key.collation.empty()
-                                            ? "en_US.utf8" : key.collation;
-                                    comparison = dbms::collation::compare(
-                                        leftValue, rightValue, collation);
-                                    if (comparison == 0 &&
-                                        key.collation.empty()) {
-                                        comparison = leftValue.compare(rightValue);
-                                    }
+                                if (!key.comparisonColumn.enumValues.empty()) {
+                                    if (leftValue != rightValue) return false;
+                                    continue;
                                 }
-                                if (comparison != 0) return false;
+                                const auto equality =
+                                    dbms::StorageEngine::compareValues(
+                                        key.comparisonColumn, leftValue, false,
+                                        rightValue, false, "=");
+                                if (equality ==
+                                    dbms::StorageEngine::PredicateTruth::Unknown) {
+                                    throw dbms::DbError(
+                                        "0A000", "FETCH WITH TIES cannot compare "
+                                                 "this ORDER BY type safely");
+                                }
+                                if (equality !=
+                                    dbms::StorageEngine::PredicateTruth::True)
+                                    return false;
                             }
                             return true;
                         };

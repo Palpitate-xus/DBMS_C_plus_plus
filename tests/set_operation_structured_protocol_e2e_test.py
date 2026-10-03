@@ -23,9 +23,12 @@ def main():
             ("CREATE TABLE fetch_ties_plain "
              "(id INT, score NUMERIC, label TEXT);"),
             ("INSERT INTO fetch_ties_plain VALUES "
-             "(1, 10, 'z'), (2, 20, 'b'), (3, 20.00, 'a'), "
-             "(4, 20.0, 'a'), (5, 30, 'z'), "
-             "(6, NULL, 'null-a'), (6, NULL, 'null-a');")
+            "(1, 10, 'z'), (2, 20, 'b'), (3, 20.00, 'a'), "
+            "(4, 20.0, 'a'), (5, 30, 'z'), "
+            "(6, NULL, 'null-a'), (6, NULL, 'null-a');"),
+            "CREATE TABLE fetch_ties_char (id INT, code CHAR(3));",
+            ("INSERT INTO fetch_ties_char VALUES "
+             "(1, 'a'), (2, 'a '), (3, 'b');")
         ]
         for sql in setup:
             _, state, message, _ = runner.ours_query(
@@ -101,6 +104,17 @@ def main():
         assert state is None, (state, message)
         assert rows == [["6", None], ["6", None]], rows
         assert type_oids == [23, 1700], type_oids
+        assert command_tag == "SELECT 2", command_tag
+
+        char_ties = runner.decode_wire_result(
+            client.simple_query(
+                server["sock"],
+                ("SELECT id, code FROM fetch_ties_char ORDER BY code "
+                 "FETCH FIRST 1 ROW WITH TIES;")),
+            include_types=True)
+        rows, state, message, _, command_tag, _ = char_ties
+        assert state is None, (state, message)
+        assert [row[0] for row in rows] == ["1", "2"], rows
         assert command_tag == "SELECT 2", command_tag
 
         hidden_order_key = runner.decode_wire_result(
