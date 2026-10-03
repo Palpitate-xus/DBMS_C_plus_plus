@@ -15,4 +15,6 @@ SELECT to_char(482, 'PL9999')
 SELECT to_char(-482, 'PL9999')
 SELECT to_char(-482, 'SG9999')
 SELECT to_char(-482, '9999PR')
+SET lc_monetary='en_US.utf8'
 SELECT to_char(482, 'L9999')
+SET lc_monetary='C'
