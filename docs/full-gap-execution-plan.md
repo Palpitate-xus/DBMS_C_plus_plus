@@ -1,5 +1,7 @@
 # 总差距清单执行计划
 
+2026-10-03 第968项 `e1ef1122` 已本地提交：Hash/Bloom严格区分运行时已有侧车与显式构建；缓存识别文件代际变化，缺失／原子替换／原位截断时fail-closed并丢弃旧映射，避免析构写回复活。UNLOGGED物理备份遗漏heap forks时由init storage重置并重建派生索引，含完整fork的事务快照保留行并reindex，部分fork集合回滚拒绝。`scripts/build.sh`和5个定向C++通过。全量`build_tests.sh`唯一失败为`drop_multiple_fk_group_protocol_e2e_test.py`服务启动连接abort；其余C++／协议／E2E通过，失败用例单跑＋10次连续复跑通过，但本轮全套仍记exit 1。IDX-05／IDX-14保持partial，原始损坏索引rollback incomplete待查。详见`docs/issue-968-hash-bloom-sidecar-generations.md`。不push。
+
 2026-10-03 第967项 `fb5cb77e`：全量差分唯一的`to_char_numeric`差异是测试未固定`lc_monetary`，PG参考端en_US.utf8与本地默认C不一致，不能当作产品错误。用例在`L9999`断言前显式SET en_US.utf8并在后恢复C，PostgreSQL 18.6 focused case `cases=1 failed=0`。全462 case的重跑留待后续冻结验收；P0-16保持partial。详见 `docs/issue-967-tochar-currency-fixture-locale.md`。不push。
 
 2026-10-03 第966项 `9d07b4e7`：`FETCH ... WITH TIES`现接受`+n`和`-0`，对负非零数返回PG18 SQLSTATE 2201W；parser的LIMIT／OFFSET／FETCH同步识别被tokenizer拆开的符号。生产build、修正后的parser_phase1_test、FETCH boundary E2E和PG18.6 `set_operation_precedence`定向差分通过。首轮全套460 C++／197 E2E仅parser_phase1_test失败，原因是第一版遗漏独立sign token；修复后该测试单独重跑通过，但未把两轮包装成一次全套绿色。完整PG18.6差分462 cases中461项相同，唯一无关差异为`to_char_numeric`本地缺少locale货币符号，保留待修，不宣称全差分通过。QRY-06仍partial，见 `docs/issue-966-fetch-signed-counts.md`。不push。
@@ -75,7 +77,7 @@
 | B0 | 273 项与代码、测试、提交建立映射，纠正文档完成口径 | 已建立 `gap-progress.json`；未逐项核实的保留 unverified，局部修复仅为 partial |
 | B1 | SQL 结果正确性与类型 / NULL 保真；推进 P0-01/02、QRY-01/04/07/10、FUNC-02 | 进行中；先复现具体错误，再修复并增加 C++ / 完整 SQL 回归 |
 | B2 | catalog / 事务化 DDL / 依赖与回滚 | 未完成；新增 UNLOGGED 表 DROP 回滚数据保真回归，并修复 13 个表级 DDL／维护入口及枚举更新的缓存锁与表锁顺序、自动及显式事务的数据库级 DDL 等待忽略 `lock_timeout`、活动事务与空闲连接期间误删数据库、连接占用期间重命名数据库、选项 sidecar 原地截断及数据库名与快照／归档路径碰撞；同进程 CREATE/DROP/RENAME 名字锁及选项 read-modify-write 已串行化，跨进程、多个嵌入式存储引擎实例及双目录移动的崩溃原子性仍待处理，继续按蓝图拆成可复现的原子子任务 |
-| B3 | 存储 / WAL / MVCC / 索引 / 资源治理 | 未完成；已补单目录跨进程互斥、一处排序平方复杂度，以及归档段不覆盖发布／幂等重试。第 822 项让查询消费 B-tree 的明确读取失败状态；第 823 项拆开运行时已有树加载与 CREATE／DDL 重写／恢复的显式建索引，缺失文件不再补为空树。P0-06 已核实仍为整文件镜像与恢复重建；下一步核实 Hash/Bloom 相邻加载与原始索引损坏时的 rollback incomplete，再推进 page/logical WAL、故障注入、多 backend 隔离和持久化验证 |
+| B3 | 存储 / WAL / MVCC / 索引 / 资源治理 | 未完成；已补单目录跨进程互斥、一处排序平方复杂度，以及归档段不覆盖发布／幂等重试。第 822–823 项处理 B-tree 的显式失败与加载／建树分离；第 968 项进一步分离 Hash/Bloom 运行时已有侧车与显式构建，并处理缓存文件代际变化及 UNLOGGED 物理恢复的派生索引。P0-06 仍为整文件镜像与恢复重建；下一步核实原始索引损坏时的 rollback incomplete，再推进 page/logical WAL、故障注入、多 backend 隔离和持久化验证 |
 | B4 | 其余类型 / 函数 / 查询 / 优化器 / 监控 / 工具兼容 | 未完成；不能将语法支持当作运行时完成 |
 | B5 | 备份 / 复制 / 恢复 / 扩展生态 / 升级 | 未完成；需要端到端验收，外部环境或破坏性迁移另行说明 |
 

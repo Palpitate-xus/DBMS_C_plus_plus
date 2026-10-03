@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "968",
+      "gap_ids": ["IDX-05", "IDX-14"],
+      "status": "partial",
+      "integrated_source_commit": "e1ef1122",
+      "evidence": ["docs/code-review-progress.md", "docs/issue-968-hash-bloom-sidecar-generations.md", "src/access/HashIndex.cpp", "src/access/BloomIndex.cpp", "src/commands/TableManage.cpp"],
+      "tests": ["tests/missing_memory_index_guard_test.cpp", "tests/insert_bloom_cleanup_test.cpp", "tests/unlogged_recovery_test.cpp", "tests/physical_restore_consistency_test.cpp"],
+      "verification": {
+        "production_build": "bash scripts/build.sh: passed",
+        "focused_cpp": "unlogged_recovery_test, alter_table_only_test, ddl_transaction_skeleton_test, missing_memory_index_guard_test, and insert_bloom_cleanup_test: passed",
+        "full_suite": "build_tests.sh exited 1 after all C++ and all but one protocol/E2E entry passed; drop_multiple_fk_group_protocol_e2e_test.py saw ConnectionAbortedError while connecting during server startup, before SQL assertions",
+        "isolated_recheck": "The failed E2E passed once and in 10 consecutive additional runs; this does not convert the full-suite run to a pass"
+      }
+    },
+    {
       "issue": "967",
       "gap_ids": ["P0-16"],
       "status": "partial",
