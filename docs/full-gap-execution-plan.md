@@ -1,6 +1,8 @@
 # 总差距清单执行计划
 
-2026-10-03 第969项 `06c483a7` 已本地提交：损坏的主键／二级B-tree触发DML fail-closed并准确报rollback incomplete后，REINDEX原先因缓存对象已关闭仍无条件flush而无法用健康heap修复。现仅flush打开的缓存；durable swap会保留旧磁盘代，显式REINDEX恢复PK／secondary读取和后续UPDATE。正式build、`index_scan_corruption_error_test`、`reindex_atomicity_test`及`index_corruption_protocol_e2e_test.py`通过。本项后全量测试未重跑。IDX-03／IDX-14保持partial；heap/WAL损坏和完整崩溃恢复仍待做。详见`docs/issue-969-reindex-closed-corrupt-index.md`。不push。
+2026-10-03 最终组合源码全量回归已通过：执行 `DBMS_PROTOCOL_TEST_TIMEOUT=120 DBMS_PROTOCOL_STARTUP_TIMEOUT=120 DBMS_PROTOCOL_SHUTDOWN_TIMEOUT=120 bash scripts/build_tests.sh`，exit 0，输出 `All tests passed`；覆盖全部已登记 C++、协议与 E2E 入口。上一轮 #968 的 `drop_multiple_fk_group_protocol_e2e_test.py` 服务启动断连仍保留为历史失败，本轮完整脚本中该用例通过。该结果验收了 #968/#969 的组合源码，不代表 PostgreSQL 18 功能差距清单已完成。总账仍273项：22 complete、140 partial、96 unverified、15 deferred_by_user；不push，Actions禁用，用户要求跳过的安全/TDE专项继续deferred。
+
+2026-10-03 第969项 `06c483a7` 已本地提交：损坏的主键／二级B-tree触发DML fail-closed并准确报rollback incomplete后，REINDEX原先因缓存对象已关闭仍无条件flush而无法用健康heap修复。现仅flush打开的缓存；durable swap会保留旧磁盘代，显式REINDEX恢复PK／secondary读取和后续UPDATE。正式build、`index_scan_corruption_error_test`、`reindex_atomicity_test`及`index_corruption_protocol_e2e_test.py`通过；最终组合源码的完整原生／协议／E2E验证见第970项。IDX-03／IDX-14保持partial；heap/WAL损坏和完整崩溃恢复仍待做。详见`docs/issue-969-reindex-closed-corrupt-index.md`。不push。
 
 2026-10-03 第968项 `e1ef1122` 已本地提交：Hash/Bloom严格区分运行时已有侧车与显式构建；缓存识别文件代际变化，缺失／原子替换／原位截断时fail-closed并丢弃旧映射，避免析构写回复活。UNLOGGED物理备份遗漏heap forks时由init storage重置并重建派生索引，含完整fork的事务快照保留行并reindex，部分fork集合回滚拒绝。`scripts/build.sh`和5个定向C++通过。全量`build_tests.sh`唯一失败为`drop_multiple_fk_group_protocol_e2e_test.py`服务启动连接abort；其余C++／协议／E2E通过，失败用例单跑＋10次连续复跑通过，但本轮全套仍记exit 1。IDX-05／IDX-14保持partial，原始损坏索引rollback incomplete待查。详见`docs/issue-968-hash-bloom-sidecar-generations.md`。不push。
 

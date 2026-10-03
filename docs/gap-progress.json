@@ -12,7 +12,7 @@
         "production_build": "bash scripts/build.sh: passed",
         "focused_cpp": "index_scan_corruption_error_test and reindex_atomicity_test: passed",
         "focused_protocol": "index_corruption_protocol_e2e_test.py: passed",
-        "full_suite": "not rerun after this change; issue-968 records the preceding full-suite run and its one server-start connection abort"
+        "full_suite": "final combined source: DBMS_PROTOCOL_TEST_TIMEOUT=120 DBMS_PROTOCOL_STARTUP_TIMEOUT=120 DBMS_PROTOCOL_SHUTDOWN_TIMEOUT=120 bash scripts/build_tests.sh exited 0 and reported All tests passed; all registered C++/protocol/E2E entries passed, including drop_multiple_fk_group_protocol_e2e_test.py. The prior issue-968 exit-1 run remains historical and is not overwritten"
       }
     },
     {
